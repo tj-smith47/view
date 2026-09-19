@@ -7,8 +7,8 @@ floating window actually carries when it draws over a surface view owns: its
 selection is expressed, which autocmds fire, and what the window does per
 keystroke while a hide is standing on it.
 
-Four subjects, three of which claim something view draws and one of which
-claims nothing: nvim-cmp's cmdline completion menu, nvim-notify's toast,
+Four subjects, three of which take something view draws and one of which
+takes nothing: nvim-cmp's cmdline completion menu, nvim-notify's toast,
 noice's error float, and telescope's picker. The picker is the negative
 control. A detector that flags it is a detector that flags every float.
 
@@ -44,8 +44,8 @@ Native features: every one of them on. The state runs with `native = {}`, which
 materializes view's own defaults, and sets aside the heavy fixture's
 `view.toml` (which turns the takeovers off so unrelated scenarios measure one
 thing at a time). That matters here and nowhere else: view has to own the
-cmdline, the popupmenu and the messages for a float over them to be a claim at
-all.
+cmdline, the popupmenu and the messages for a float over them to be a
+takeover at all.
 
 ## Capture method
 
@@ -444,7 +444,7 @@ sits. nvim-cmp registers every event it listens on without `nested`
 those callbacks (`lua/cmp/init.lua:403-405`, subscribing
 `InsertLeave`/`CmdlineLeave`/`CmdwinEnter` to `cmp.core.view:close()`), so the
 close is non-nested and the event is dropped. nvim-notify, noice and telescope
-close theirs from timers and scheduled callbacks, which is why theirs fire.
+close theirs from timers and scheduled callbacks, and theirs fire.
 
 That generalizes past cmp: **any plugin that closes a float from inside its own
 non-nested autocmd is invisible at teardown**, and view cannot make another
@@ -513,11 +513,11 @@ Two warnings for anything built on this, both of them geometric:
   `share(100, 70) = 70`, height `share(29, 50) = 14`, at terminal row
   `(29 - 14) / 2 + 1 = 8`, column `(100 - 70) / 2 = 15`: terminal rows 8..21,
   columns 15..84, which is nvim-grid rows 7..20 (the grid starts one terminal
-  row down, which is why the session reports `lines=29` on a 30-row pty). Read
+  row down, and the session reports `lines=29` on a 30-row pty). Read
   against that box, cmp's menu (grid rows 26..27) does not intersect the
   palette at all, while telescope's picker (grid rows 1..26, columns 10..89)
   covers it entirely. Overlap with the drawn palette is therefore evidence of
-  nothing: the claim cmp makes is on the *completion surface* view owns (the
+  nothing: what cmp takes is the *completion surface* view owns (the
   externalized popupmenu that feeds that palette), distinct from the palette's
   cells. These rows are computed from the source constants, and not captured,
   and they are the only figures in this document that are.

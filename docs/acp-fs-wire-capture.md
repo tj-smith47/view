@@ -7,11 +7,11 @@ run of the pinned binary. Source of truth for `AI_FS_READ_CHUNK` and
 `RpcCall::AiFsRead`/`RpcCall::AiFsWrite`; the calls that answer an agent's
 `fs/read_text_file` and `fs/write_text_file`.
 
-The path-to-buffer half of both round trips is `RpcCall::LoadHidden`'s, not
-this document's: see `docs/hidden-buffer-wire-capture.md` for how a path
-resolves onto an existing buffer or a freshly `bufadd` -ed hidden one, and for
-the refcounted release that deletes it again. Every capture below starts from a
-buffer that resolve already produced.
+The path-to-buffer half of both round trips is `RpcCall::LoadHidden`'s: see
+`docs/hidden-buffer-wire-capture.md` for how a path resolves onto an existing
+buffer or a freshly `bufadd` -ed hidden one, and for the refcounted release
+that deletes it again. Every capture below starts from a buffer that resolve
+already produced.
 
 ## Engine identity
 
@@ -103,8 +103,8 @@ AI_FS_READ_CHUNK(3, 1, 2)     -> { ok = true, lines = ['alpha', 'bravo'],   eol 
 
 Both are reads of `noeol.txt`. The first window reaches the file's last line,
 so the file's own missing trailing newline is what the window ends with
-(`eol = false`). The second stops before it, so the window ends mid-file, where
-a newline genuinely does follow (`eol = true`). A chunk that returned
+(`eol = false`). The second stops before it, so the window ends mid-file,
+where a newline does follow (`eol = true`). A chunk that returned
 `vim.bo[buf].endofline` unconditionally would strip the newline after `bravo`
 in the second case.
 
@@ -348,7 +348,7 @@ returns for a `dos` buffer and `:write` puts them back, so a read-modify-write
 of a CRLF file preserves every terminator without the agent knowing the file
 has them. This is the one behaviour in this document that neither chunk
 implements; it rides entirely on `fileformat`, which `bufload` detects from the
-file and which the write chunk deliberately does not set.
+file and which the write chunk does not set.
 
 That silence is the contract: setting `fileformat` would mean deciding a file's
 line terminators from a `content` string that cannot express them, and the only

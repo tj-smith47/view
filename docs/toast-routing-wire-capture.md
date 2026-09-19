@@ -77,7 +77,7 @@ translation needed); today's wiring does not add those `UiEvent` variants or
 decode those wire events at all, since nothing routes through them yet (no
 statusline surface exists to consume `Route::Statusline`).
 
-## Finding: `search_count` is a genuine `msg_show` kind
+## Finding: `search_count` is a `msg_show` kind
 
 Unlike the three above, `search_count` is documented (line 863 of the same doc)
 as one of the enumerated `kind` values carried inside `msg_show` itself:
@@ -140,8 +140,7 @@ Three consequences, each acted on directly:
 
 - The startup hold catches nothing on this path. Its closing sentence
   (`Startup messages from other plugins are in the message history.`) is
-  therefore conditional on something actually having been parked, distinct from
-  a claim the notice always makes.
+  therefore conditional on something actually having been parked.
 - The deliverable that turns the row green is the claimant probe below plus the
   composition suppression; the hold plays no part in it.
 - A discriminating kind does exist on the *other* path; a plugin calling

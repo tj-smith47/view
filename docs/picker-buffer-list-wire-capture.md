@@ -22,7 +22,7 @@ A standalone Python msgpack-rpc client (`pynvim` absent from the environment)
 spawns `nvim --clean --headless --listen <socket>` with the same hermetic
 `XDG_*`/`HOME` isolation `EngineConfig::isolated()` uses, connects over the
 unix socket, and issues `nvim_exec_lua` as a **request** (this call, unlike
-`nvim_input`, genuinely needs its reply; there is nothing to stream and nothing
+`nvim_input`, needs its reply; there is nothing to stream and nothing
 nvim is blocked inside). No UI attach is needed: the buffer list is not
 redraw-derived state.
 

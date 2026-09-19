@@ -50,10 +50,10 @@ Plugin-free, the same worst keystroke is 0.73 ms against 0.67 ms.
 view does not have to wait for the engine to answer before it draws. It puts the
 character it expects on screen and corrects it the moment the engine's redraw
 arrives, so under your config the glyph is there in 0.32 ms at the worst of a
-thousand keystrokes, where the Neovim it is paired against takes 1.25 ms to
-paint the same character. A prediction answered 99.9% of the keystrokes
-measured. That is the reading, not a network; the network case is the acceptance
-leg below (`scripts/acceptance/remote-rtt.sh`).
+thousand keystrokes, beside Neovim's 1.25 ms to paint the same character.
+A prediction answered 99.9% of the keystrokes measured. That is the reading,
+not a network; the network case is the acceptance leg below, measured by
+`scripts/acceptance/remote-rtt.sh`.
 
 The network is what the prediction is for, and it is measured on its own:
 an acceptance leg puts 0, 25, 100 and 300 ms of round trip in front of
@@ -81,12 +81,12 @@ staleness is 1.07 ms.
 A plugin storm or a `:terminal` flood pouring output into the screen is the
 same moment under load. Under your config, measured 2026-09-06, the screen
 answers on a 16.9 ms cadence, just past one frame, so this too is a bar
-view has not met, and the Neovim it is paired against answers on a 17.5 ms
-one. On that same login-shaped run view drains the flood to within 2% of
-the pace Neovim holds, and the longest it goes without painting is 48.9 ms.
-Plugin-free the cadence is 16.1 ms, recorded 2026-09-15, so it sits past the
-frame as well. Neovim refreshes a terminal buffer on a fixed 10 ms timer,
-and neither side can paint more often than that timer plus one redraw.
+view has not met, and Neovim answers on a 17.5 ms one. On that same login-shaped
+run view drains the flood to within 2% of the pace Neovim holds, and the longest
+it goes without painting is 48.9 ms. Plugin-free the cadence is 16.1 ms,
+recorded 2026-09-15, so it sits past the frame as well. Neovim refreshes a
+terminal buffer on a fixed 10 ms timer, and neither side can paint more often
+than that timer plus one redraw.
 
 ## You search a huge tree
 

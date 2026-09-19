@@ -61,11 +61,10 @@ made.
 
 ## 3. The existing-buffer lookup, scanned before `nvim_create_buf`
 
-Superseded by case 10 for the creation mechanism (`bufadd`, not
-`nvim_create_buf`) and by case 13 for the idempotency claim (`bufadd` itself is
-idempotent by name; the scan below no longer needs to lean on
-`nvim_buf_set_name` for it). Kept for the "scan before creating" ordering,
-which the shipped chunk still preserves.
+Superseded by case 10 for the creation mechanism (`bufadd`) and by case 13
+for idempotency (`bufadd` itself is idempotent by name; the scan below no longer
+needs to lean on `nvim_buf_set_name` for it). Kept for the "scan before
+creating" ordering, which the shipped chunk still preserves.
 
 Reusing `PREVIEW_CHUNK`'s own canonicalized name-match scan over
 `nvim_list_bufs()` (symlink-safe, `loaded buffer wins over disk`):
@@ -245,7 +244,7 @@ is read correctly at load time (the old chunk hardcoded `fileformat=unix`
 regardless of source, corrupting every line ending on the next save). The
 no-EOL case's write gaining a trailing newline traces to nvim's own default,
 and is no regression this chunk introduces; `fixendofline` defaults to on and
-applies identically to a buffer opened by a genuine `:edit`; what matters is
+applies identically to a buffer opened by `:edit`; what matters is
 that `endofline` is read correctly (`false`), where the old chunk left it
 hardcoded to `true`, since that is the flag other code (and nvim's own write
 path) actually consults. Neither fixture's content changes at all through a
@@ -352,9 +351,9 @@ Case 15's divergence reaches beyond a Rust-side key problem:
 a `load_hidden` call is a reuse or a fresh create. Two spellings through a
 symlinked directory, no `.`/`..` component, no fixture that exists yet; the
 same shape as case 15; make that scan miss a buffer it should have found, and
-the fallthrough branch's `created = true` is unconditional, so a genuine
-*reuse* (`bufadd` still resolves onto the identical buffer either way) gets
-reported as a *create*:
+the fallthrough branch's `created = true` is unconditional, so a *reuse*
+(`bufadd` still resolves onto the identical buffer either way) gets reported
+as a *create*:
 
 ```
 -- old canon(): fs_realpath(p) or fnamemodify(p, ':p')
@@ -368,8 +367,8 @@ load via_link: buf=3 created=false   -- same buffer, correctly reported as a reu
 
 A wrongly- `true` `created` is not cosmetic: `RpcCall::ReleaseHidden`'s delete
 is gated on `HiddenHold::owned`, which is OR'd from every reply's `created`
-flag for that path. Whenever the *first* reply for a path is a genuine create,
-the wrong flag from a later reused-spelling reply is harmless (owned is already
+flag for that path. Whenever the *first* reply for a path is a create, the
+wrong flag from a later reused-spelling reply is harmless (owned is already
 `true`). But had the *first* connection to see this path been a real window's
 own `:edit`, or a different connection's `load_hidden`; both cases this scan
 exists to catch, per case 15's own `docs/hidden-buffer-wire-capture.md` context

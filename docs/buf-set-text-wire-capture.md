@@ -47,7 +47,7 @@ nvim_buf_set_text(0, 0, 0, 0, 5, ["Y"])   -- character length of "héllo"
 Confirms: `end_col`/`start_col` are byte offsets. A caller passing character
 counts corrupts any line containing a multi-byte character, silently.
 
-## 2. `undojoin` genuinely links two calls into one undo step
+## 2. `undojoin` links two calls into one undo step
 
 Buffer reset to `["line1", "line2"]`.
 
@@ -107,8 +107,8 @@ crosses back as `EngineError::Remote`, live-verified by
 
 ## 5. `undojoin: true` throws `E790` after ANY undo, even with something to join onto
 
-Corrected claim (fix round 1): an earlier version of this doc claimed `E790`
-was specific to "no prior undoable change to join onto" and effectively "never
+Correction (fix round 1): an earlier version of this doc said `E790` was
+specific to "no prior undoable change to join onto" and effectively "never
 happens" against production usage. That was wrong. `:help undojoin` documents
 `E790` ("undojoin is not allowed after undo") for the case where the
 immediately preceding action was itself an `undo`; which is exactly what

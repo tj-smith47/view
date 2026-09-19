@@ -27,8 +27,8 @@ A standalone Python msgpack-rpc client, the same shape
 Every `msg_*` event in each redraw batch is drained between calls, so each
 block below is the whole message traffic one `vim.notify` call produced.
 
-Two axes are walked on both sides of the takeover, because a reproduction is
-only proven over what was varied: **level**, all five `vim.log.levels` values,
+Two axes are walked on both sides of the takeover, because a reproduction
+only covers what was varied: **level**, all five `vim.log.levels` values,
 and **opts**, the four shapes the pinned default distinguishes
 (`{ _truncate = true }`, `{ _truncate = false }`, no opts at all, and an opts
 table carrying something the default ignores).
@@ -183,8 +183,8 @@ vim.api.nvim_create_autocmd('SafeState', {
 The global is the hold's own function published under a name every reading of
 `vim.notify` can compare against by identity. Without it the readings fall back
 to comparing `debug.getinfo(...).source` against `vim.notify_once`'s, and
-view's hold, which stands apart from the engine's default and makes no claim to
-be it, reads as a plugin's notifier in the session that installed it.
+view's hold, which stands apart from the engine's default, reads as a
+plugin's notifier in the session that installed it.
 
 Run in the same session, immediately after the block above, then one
 `vim.notify('held-<level>', …)` per level:
@@ -218,7 +218,7 @@ and the same opts axis, run against the held function in the same session:
 Kind, attr id and hl id match the default's row for row on both axes; the
 lengths differ by exactly the three characters between the `default-` and
 `held-` tags. Only the message text and the monotonically increasing message id
-differ. That is the whole claim behind "re-pointed at the engine default": a
+differ. That is the whole of "re-pointed at the engine default": a
 consumer reading `msg_show` cannot tell the two apart.
 
 One divergence sits in the error text alone; the message traffic matches: a

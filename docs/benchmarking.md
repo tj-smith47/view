@@ -21,9 +21,8 @@ felt     = "launch -> the screen you can start working in (tree, tabline, status
 config   = "real"            # real (a plugin config a person runs) | fixture
 ```
 
-- **felt** is a moment somebody lives through. It is measured under a real
-  config (the login-shaped `user` fixture) paired against bare Neovim in
-  the same run, and `bench.rs`'s
+- **felt** is a moment somebody lives through. It runs on the login-shaped
+  `user` fixture, alternating with bare Neovim, and `bench.rs`'s
   `every_felt_bound_is_seated_on_the_config_it_claims` fails the build if the
   matrix seats it anywhere else. The exceptions are the rows with no
   bare-Neovim counterpart to pair against (view's own picker, the engine-wedge
@@ -43,10 +42,10 @@ millisecond"); identifiers live here.
 
 ## How we measure
 
-Every latency comparison is *paired*: view and bare Neovim run in the same
-invocation, on the same host, with the same config, and their samples are
-interleaved. 1000 samples per cell. `task perf-audit` reproduces the full
-matrix; `task bench` runs the gated subset CI uses.
+Every latency comparison is *paired*: one invocation launches view and bare
+Neovim alternately under the same config, and interleaves their samples.
+1000 samples per cell. `task perf-audit` reproduces the full matrix;
+`task bench` runs the gated subset CI uses.
 
 On macOS every timed target holds a power assertion for the length of its
 run (`scripts/hold-awake.sh`, fronting each harness in `Taskfile.yml`): the
@@ -205,9 +204,9 @@ column reads `n/a`.
 
 ### The real-config legs, and which classes still owe them
 
-Every felt row is stated under a real config, and the matrix seats five
-cells on the `user` fixture: `echo.user`, `echo_speculated.user`,
-`scroll.user`, `flood.user` and `startup.user`. dev-linux records all five.
+Every felt row is recorded on the `user` fixture, and the matrix seats five
+cells there: `echo.user`, `echo_speculated.user`, `scroll.user`,
+`flood.user` and `startup.user`. dev-linux records all five.
 Four were taken 2026-09-06 in two quiet windows; `startup.user` was
 re-recorded 2026-09-15 in a quiet window of its own. The conditions those
 two runs were taken under, which no cell records and which a record run

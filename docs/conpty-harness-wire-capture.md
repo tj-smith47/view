@@ -85,7 +85,7 @@ nothing answering it that is also the last thing it sees. From
     1b 5b 36 6e
 ```
 
-Everything downstream of that in the same run is empty: the replayed script
+Everything downstream of that in the run is empty: the replayed script
 produces 0 bytes, the resize produces 0 bytes, the parsed screen has 0 lines,
 `:cq 3` never exits, `:terminal` never spawns anything. The run spends every
 deadline it has and reports nothing.
@@ -278,7 +278,7 @@ arms:
 | ConPTY window report | `\x1b[8;30;100t` | `\x1b[8;36;120t` |
 | unix contents lines after the script | 24 | 30 |
 
-One figure deliberately absent from that table: the ConPTY startup byte count
+One figure absent from that table: the ConPTY startup byte count
 does not move with the size, because it does not hold still at all. Across runs
 of one configuration it read 5690 and 5690 at 80x24 and 7880 and 4865 at
 100x30, since what conhost has flushed by the time the settle window closes
@@ -286,7 +286,7 @@ varies. A byte-count assertion over a ConPTY startup stream carries no
 stability; the resize and redraw segments, provoked and bounded by the capture,
 hold steady.
 
-And the central claim has its own control: the same ConPTY capture with the
+And the central result has its own control: the same ConPTY capture with the
 cursor-position request left unanswered reports zeros everywhere (section 1),
 while the same unix capture with the request left unanswered is byte-identical
 to the answering run. A capture that reported the same result either way would

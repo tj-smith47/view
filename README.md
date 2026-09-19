@@ -65,11 +65,11 @@ login-shaped config, view's worst keystroke in a thousand takes 1.58 ms
 against Neovim's 1.43 ms, and at the median view is 11% behind against a bar
 of 10%, a second bar missed, by 1% of the round trip. view can also draw the
 character it expects before the engine confirms it: under that same config
-the predicted glyph is on screen in 0.32 ms at that same worst case, where
-the Neovim it is paired against takes 1.25 ms, and the glyph is corrected the
-moment the engine answers. What the prediction is for is an engine a network
-away, which a separate acceptance leg measures by injecting the round trip at
-four tiers (`scripts/acceptance/remote-rtt.sh`).
+the predicted glyph is on screen in 0.32 ms at that same worst case, beside
+Neovim's 1.25 ms, and the glyph is corrected the moment the engine answers.
+What the prediction is for is an engine a network away, which a separate
+acceptance leg measures by injecting the round trip at four tiers
+(`scripts/acceptance/remote-rtt.sh`).
 
 Scrolling, the picker, what happens when the engine hangs, memory, and what
 contributes to each of the numbers above:

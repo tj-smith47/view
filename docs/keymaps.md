@@ -128,7 +128,7 @@ verb with no key, so it is asked for by name.
 
 Every verb is also a `:View` form, which is what to map if you want the
 review on keys of your own. A global mapping of yours is never touched, and
-a buffer-local one on a key the table above claims (gitsigns puts one on
+a buffer-local one on a key the table above takes (gitsigns puts one on
 `]c`, `[c` and `<leader>hR` in every file it attaches to) is given back when
 the review ends:
 

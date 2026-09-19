@@ -127,7 +127,7 @@ Read as:
 
 tmux declines the truecolor readback whether or not it is told the outer
 terminal is RGB-capable. Inside tmux the probe cannot establish truecolor and
-`COLORTERM` is the only signal left, which is why `0$r` is read as *no answer*
+`COLORTERM` is the only signal left, and `0$r` is read as *no answer*
 , distinct from an answer of "no": the hint decides only where the probe was
 silent, and a declined request is silence about the color. An explicit answer;
 `1$r` echoing a quantized setting; is a different fact and outranks the hint.
@@ -157,16 +157,16 @@ column it reports says so. This is the discrimination the box-glyph probe
 exists for, and it is the only signal in this whole matrix that separates E
 from D; `TERM`, `COLORTERM` and every other reply are identical between them.
 
-### What D and E prove, and what they do not
+### What D and E show, and what they do not
 
-The box-glyph probe is proven here on **one axis only: the locale**. E is a
+The box-glyph probe is captured here on **one axis only: the locale**. E is a
 terminal taken out of UTF-8 mode, and that is the whole of the difference
 between the two captures. Every other emulator in this matrix, on all three
 operating systems, advanced `╭` by exactly one cell while in UTF-8 mode, so the
 population contains exactly one positive and one negative and they differ by
 `defutf8`/`LANG` alone.
 
-Unobserved, and beyond what this evidence can claim:
+Unobserved, and beyond what this evidence covers:
 
 - a UTF-8 terminal whose **font** lacks the glyph. None was captured; a tofu
   box or a fallback glyph may still advance one cell, in which case the CPR
@@ -177,10 +177,10 @@ Unobserved, and beyond what this evidence can claim:
   Termius), none of which contributed a box-glyph column.
 
 So the probe discriminates, and answers vary by terminal; what it is *shown* to
-detect is a terminal failing to decode UTF-8, a narrower claim than the general
-question "can this terminal draw a rounded border." A consumer that treats a
-column of 2 as proof the border will render is extrapolating past this capture
-set.
+detect is a terminal failing to decode UTF-8, which is narrower than the
+general question "can this terminal draw a rounded border." A consumer that
+treats a column of 2 as proof the border will render is extrapolating past
+this capture set.
 
 ## F. mbp over ssh, terminal is kitty on dev-linux
 
@@ -202,7 +202,7 @@ received: \x1bP0$r\x1b\\\x1b[1;2R\x1b[?1;2;4c
 Byte-identical to B, and the mirror image of F: here `COLORTERM=truecolor` is
 set (tmux inherits the login environment) while the terminal answers that it
 did *not* keep the 24-bit background. Environment and readback disagree in
-opposite directions on the same machine, one hop apart.
+opposite directions on this machine, one hop apart.
 
 ## H. Windows ConPTY over OpenSSH, winserver
 
@@ -262,10 +262,9 @@ interchangeable:
 
 The probe discriminates in this population: A/F answer DECRQSS affirmatively
 with the triple intact, B/C/G answer it negatively, D/E ignore it, and the
-box-glyph column separates E from D where nothing else does. A capture set in
-which every terminal answered alike would not be evidence, and this one is not
-that. The box-glyph half of that claim is bounded to the locale axis; see
-"What D and E prove, and what they do not" above for what stays unobserved.
+box-glyph column separates E from D where nothing else does. The box-glyph
+half of that is bounded to the locale axis; see "What D and E show, and what
+they do not" above for what stays unobserved.
 
 ## The DA1 fence answers last
 
@@ -303,10 +302,10 @@ bound the ambiguity:
   so the collision is a property of the terminal's key encoding, distinct from
   CPR.
 
-The honest reading for anything decoding this: a `\x1b[1;PcR` arriving inside a
+The reading for anything decoding this: a `\x1b[1;PcR` arriving inside a
 probe window that asked a CPR question is the CPR answer; the same bytes
-outside that window are a keypress. An absolute claim that a keyboard cannot
-produce this shape is false, and these captures are why.
+outside that window are a keypress. A keyboard can produce this shape, and
+these captures show it.
 
 ## What the captures oblige
 

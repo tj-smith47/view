@@ -73,7 +73,7 @@ CHUNK(paths={"case1_no_buffer.txt"}, force=false)
 Nothing else runs; `:checktime` itself is never issued. This is the "nothing to
 conflict with" case: no UI.
 
-## 2. Loaded, UNMODIFIED buffer, a genuine external change
+## 2. Loaded, UNMODIFIED buffer, an external change
 
 Buffer opened unmodified; the file is overwritten on disk from outside.
 
@@ -84,14 +84,14 @@ CHUNK(paths={"case2_unmodified.txt"}, force=false)
 ```
 
 `fired = false` but the buffer's own text visibly changed to the new disk
-content: `:checktime` on an unmodified buffer with a genuine external change
+content: `:checktime` on an unmodified buffer with an external change
 reloads it SILENTLY, without ever invoking `FileChangedShell`; regardless of
 the `'autoread'` option (default off in `--clean`, and left unset anywhere in
 this capture). This is nvim's own unconditional behavior for the unmodified
 case; `'autoread'` gates none of it. Confirms the "silent reload" leg of the
 brief's falsifiable check needs no extra logic beyond calling `:checktime`.
 
-## 3. Loaded, MODIFIED buffer, a genuine external change; the conflict case
+## 3. Loaded, MODIFIED buffer, an external change; the conflict case
 
 Buffer opened, edited (`modified = true`), then the file changes on disk.
 
@@ -101,8 +101,8 @@ CHUNK(paths={"case3_modified.txt"}, force=false)
   lines after -> ["originallocal-edit"]
 ```
 
-`fired = true`: `FileChangedShell` DOES trigger for a modified buffer facing a
-genuine external change (the case case 0 shows would otherwise block). The
+`fired = true`: `FileChangedShell` DOES trigger for a modified buffer facing
+an external change (the case case 0 shows would otherwise block). The
 chunk's handler sets `v:fcs_choice = ''` (do nothing) because
 `vim.bo[bufnr].modified` was true when it ran, so nvim neither reloads nor
 touches the buffer; `lines` is exactly the local edit, untouched. This is the
@@ -126,8 +126,8 @@ CHUNK(paths={"case4_self_write.txt"}, force=false)
 `fired = false` and the content is untouched: nvim's own `:checktime` compares
 the file's current mtime against the mtime IT recorded at its own last write, a
 stricter test than "did the buffer's file change since it was *loaded*"; since
-nothing has touched the file since nvim's own write, there is genuinely nothing
-to notice. This is nvim's *own* mtime bookkeeping doing the self-write
+nothing has touched the file since nvim's own write, there is nothing to
+notice. This is nvim's *own* mtime bookkeeping doing the self-write
 suppression; `CHECKTIME_CHUNK` computes none of it itself.
 
 ## 5. Self-write, THEN a local edit; still a no-op, no false conflict
@@ -248,9 +248,9 @@ the external content:
 
 `:edit!` clears the buffer before it reads, so a raise earlier in the re-read
 leaves an empty buffer in place of the local edit. Every shape answers
-`ok = false` with `modified = false`, so nothing on the wire separates them;
-which is why the notice `update/watch.rs` records tells the user to check the
-buffer, making no claim that either side survived.
+`ok = false` with `modified = false`, so nothing on the wire separates them.
+The notice `update/watch.rs` records tells the user to check the buffer and
+says nothing about which side survived.
 
 ## 7e. `gone = true`: the path fails to be a readable file the reload could read
 
@@ -332,7 +332,7 @@ the connection; reachable from a prompt the user is invited to answer, since
 An unreadable regular file (mode `000`) is absent from the table: this host
 runs as root, where the mode bits do not apply. It stays on the reloading path
 by design; it is a file, `:edit!` fails on it without blocking, and
-`ok = false` is the honest answer for a re-read that was refused.
+`ok = false` is the answer for a re-read that was refused.
 
 ### The stat is taken twice
 
@@ -362,10 +362,10 @@ discard they asked for, reported with silence.
 
 The second `fs_stat`, after the reload, is what closes that: `ok` is `false`
 unless the reload ran *and* the path is still a regular file, which turns the
-raced case into "the reload did not finish, check the buffer"; true, and the
-only honest thing left to say. It is deliberately not folded into `gone`, whose
-own notice promises the buffer still holds the user's edits: by then `:edit!`
-has already run, and that promise would be the lie this case makes.
+raced case into "the reload did not finish, check the buffer". It is not
+folded into `gone`, whose own notice promises the buffer still holds the
+user's edits: by then `:edit!` has already run, and that promise would be the
+lie this case makes.
 
 ## 8. One batched call over several paths at once
 
@@ -454,7 +454,7 @@ set `fcs_choice = 'reload'` on some later, unrelated change:
 ```
 
 And because the chunk is batched (case 8), one odd path costs every sibling in
-the same call its answer; including a genuine conflict, which the caller's own
+the same call its answer; including a conflict, which the caller's own
 error handling degrades to `NoBuffer`, so the user never sees the prompt:
 
 ```
@@ -582,8 +582,8 @@ CHUNK err=[0, 'Lua: ... Vim(checktime):E321: Could not reload ".../unreadable.tx
 
 Both losses of case 10b, reproduced from a path the stat cannot reject: the
 whole batch's answer, and the one-shot autocmd still armed. `HandledSilently`
-is the honest reading of the caught raise; nothing was read, and nothing about
-the buffer changed for the user to be told about.
+is the reading of the caught raise; nothing was read, and nothing about the
+buffer changed for the user to be told about.
 
 ### 10e. What the `pcall` does not catch
 
@@ -652,12 +652,12 @@ Two consequences the tests are built on:
   `an_atomic_save_over_a_watched_file_reloads_rather_than_reporting_it_gone`
   cannot be the falsifiable half of "forwarding removals does not cry wolf".
   `a_save_that_unlinks_before_rewriting_reloads_rather_than_reporting_it_gone`
-  is: it takes the nomination while the path is genuinely absent, which only
-  arrives when `is_remove()` is forwarded.
+  is: it takes the nomination while the path is absent, which only arrives
+  when `is_remove()` is forwarded.
 - The unlink-then-rewrite is the one save shape whose nomination can reach the
   probe while the path is still missing. The probe answers `gone` for it
-  correctly; the file *was* gone; which is why that answer never reaches the
-  user: the fold confirms it with a second probe one grace period later
+  correctly; the file *was* gone; and that answer never reaches the user:
+  the fold confirms it with a second probe one grace period later
   (`view_ai::FILE_GONE_GRACE`, two coalesce windows), and a save that finishes
   inside that grace is readable again by then, so nothing is said. A path still
   unreadable at the second probe is announced; including a build that clears
@@ -757,5 +757,5 @@ identical terms.
 `force = true` is issued only in answer to the user's own "reload, discard
 local edits" choice on an already-open conflict prompt, standing apart from the
 watcher's own probe; so a forced call always carries exactly one path. `gone`
-is the one outcome a probe and a forced call share, which is why the stat that
-decides it is taken once, above the split, and never twice.
+is the one outcome a probe and a forced call share, and the stat that decides
+it is taken once, above the split.

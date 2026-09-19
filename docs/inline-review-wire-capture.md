@@ -10,9 +10,8 @@ Both are notifications, distinct from requests: nothing view holds depends on
 an answer, and the loop that emits them is the loop that paints. What is
 recorded here is therefore a description with no reply shape behind it, since
 there is none. What matters is what the editor holds afterwards: which extmarks
-landed on which rows, which mappings the buffer answers, and (the claim the
-whole design rests on) that the buffer's own text and its `changedtick` did not
-move.
+landed on which rows, which mappings the buffer answers, and that the buffer's
+own text and its `changedtick` did not move.
 
 ## Engine identity
 
@@ -35,7 +34,7 @@ themselves. **Not `--headless -l` **, for the reason
 issuing any RPC call, and the difference is material. Here it is the whole
 point; a screenless capture can only echo extmark *attributes* back, and the
 first version of this capture did exactly that while the deletion highlight was
-painting one row too far. Every claim below about what the user sees is a
+painting one row too far. Every statement below about what the user sees is a
 `screenattr`/`screenstring` read of a rendered screen.
 
 The editor is read back through `nvim_buf_get_extmarks(details = true)`,
@@ -144,8 +143,8 @@ The range mark's `end_row` is one *below* the hunk's own `old_range` end: the
 range is half-open and nvim's `end_row` is inclusive for `line_hl_group`, so
 `end_row = m.end_row - 1`. Passing the range end through paints the untouched
 row after every hunk as deleted; invisible in this section (the stored
-attribute reads plausible either way) and obvious in the rendered screen below,
-which is why that block exists.
+attribute reads plausible either way) and obvious in the rendered screen
+below.
 
 `sign_text` reads back as `"▶ "`; nvim pads a one-cell sign to the two cells
 the sign column is wide. `virt_lines_above` reads back as `nil`, distinct from
@@ -260,7 +259,7 @@ second clear over an already-clear buffer answers without error:
 without first proving a show ever landed.
 
 The empty message history is worth reading precisely: it says the `pcall`
-absorbed the delete; a raise being visible is a different claim entirely.
+absorbed the delete; a raise being visible is a different matter entirely.
 Measured on this same session, a notification whose chunk raises reaches nvim's
 log and nothing else, bypassing `:messages`, `v:errmsg`, and the connection
 that sent it. That is what the `nvim_buf_is_valid` guard at the head of each

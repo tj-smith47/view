@@ -104,20 +104,20 @@ accelerator letters.
 ## 3. The swapfile ATTENTION dialog
 
 **Empirical finding, load-bearing:** on this pinned build, reopening a file
-whose swapfile is owned by a **verifiably dead** process on the same host fires
+whose swapfile is owned by a **verifiably dead** process on this host fires
 **no `SwapExists` autocommand at all**, confirmed with a custom marker-writing
 autocmd (fires when the owner is alive; does not fire when the owner was
 `SIGKILL`'d moments earlier, same host, same hermetic `XDG_STATE_HOME`). Nvim
 silently reclaims the swapfile; no dialog, no `W325`, nothing on the wire. This
-is a genuinely different, more recent core behavior than the "ATTENTION always
+is a different, more recent core behavior than the "ATTENTION always
 fires on a stale swapfile" assumption the original capture instructions were
 written against; reality corrected that assumption here.
 
 **The dialog *is* reachable when the owner is still alive** (or, by the same
-code path, whenever nvim cannot immediately prove the owner dead), and when
+code path, whenever nvim cannot immediately confirm the owner dead), and when
 reached, it captures as **the exact same wire shape as `:confirm()` ** --
-`msg_show` kind `"confirm"` paired with a `cmdline_show` choice prompt; which
-is why `PromptState` needs no separate ATTENTION-specific code path. Captured
+`msg_show` kind `"confirm"` paired with a `cmdline_show` choice prompt, and
+`PromptState` needs no separate ATTENTION-specific code path. Captured
 with the default `nvim.swapfile` augroup removed so the dialog free-form
 autoconfirms (`autocmd nvim.swapfile SwapExists set-vars` otherwise resolves it
 silently before it reaches the wire):
@@ -195,8 +195,8 @@ Driving the classic triggers (`:!echo hi`, and
 multi-line hit-enter prompt) with `ext_messages` attached produced **no
 `return_prompt` -kind `msg_show` at all**, and the session was never actually
 blocked waiting for acknowledgement (a follow-up `nvim_eval` succeeded
-immediately, with no key sent). This is a documented, deliberate removal, found
-directly in the pinned build's own changelog:
+immediately, with no key sent). This is a documented removal, found directly
+in the pinned build's own changelog:
 
 ```
 $ grep -n -B5 -A15 return_prompt \
@@ -235,7 +235,7 @@ and free-text.
   captured resolving the dialog, none re-arming it.
 - `accepts()` on a free-text prompt: a digit, `<BS>`, `<CR>`, `<Esc>`, and `q`;
   exactly what the prompt's own text documents as accepted.
-- No timeout: the engine is genuinely blocked in its own input loop on this
-  path; no RPC request view is waiting on is involved, and every capture above
+- No timeout: the engine is blocked in its own input loop on this path; no
+  RPC request view is waiting on is involved, and every capture above
   shows the session staying alive and responsive indefinitely until an accepted
   key resolves it.

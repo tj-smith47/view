@@ -57,8 +57,8 @@ Captured via `nvim --headless -c "help -" -c "write! <out>" -c "qa!"`.
 ## Empirical resolution (spawned pinned nvim via `Engine::spawn`)
 
 The doc text names the mechanism (a real fd, 3 or higher, named through
-`stdin_fd`); the exact wiring was proven against the pinned binary and stopped
-short of assumed, in `crates/view/tests/cli_live.rs`'s
+`stdin_fd`); the exact wiring was captured against the pinned binary in
+`crates/view/tests/cli_live.rs`'s
 `piped_stdin_lands_in_the_first_buffer_via_the_relay_fd`:
 
 1. A readable fd (a regular file opened over known content, standing in for the
@@ -79,7 +79,7 @@ getline(1) = "hello from the pipe"
 The mandated source for API metadata, captured directly against the pinned
 binary: `nvim --api-info` writes the same `nvim_get_api_info` metadata
 `Engine::spawn`'s handshake decodes, as msgpack on stdout. Decoded here with
-`python3 -m msgpack` for a readable diff against the two claims below; the
+`python3 -m msgpack` for a readable diff against the two statements below; the
 bytes themselves are exactly what `EngineHandle`'s own msgpack-rpc reader
 parses at spawn time.
 
@@ -117,10 +117,10 @@ Engine identity from the same capture (`meta["version"]`), matching
 {"major": 0, "minor": 12, "patch": 4, "prerelease": false, "api_level": 14, "api_compatible": 0, "api_prerelease": false, "build": null}
 ```
 
-Backs the two claims this project makes elsewhere without their own committed
-capture:
+Backs the two statements this project makes elsewhere without their own
+committed capture:
 
-- `nvim_api.rs`'s `command`/`request_timeout` doc comment claims
+- `nvim_api.rs`'s `command`/`request_timeout` doc comment says
   `nvim_command(String command) -> nil` was "verified against the pinned
   engine's own `api_info`": the capture above confirms the parameter list
   (`String cmd`), and `"return_type": "void"` is the msgpack-RPC metadata's own
@@ -147,8 +147,8 @@ capture:
   `stdin_fd` option alone does not imply `-` was given, and `-` alone with no
   `stdin_fd` set makes nvim read its own fd 0, which is the RPC channel here.
 - `stdin_fd` is accepted only on the same `nvim_ui_attach` call that performs
-  startup UI attach ("Only from `--embed` UI on startup"), which is why the CLI
-  adds a second attach method (`ui_attach_with_stdin_relay`); a follow-up call
+  startup UI attach ("Only from `--embed` UI on startup"); the CLI adds a
+  second attach method (`ui_attach_with_stdin_relay`), and a follow-up call
   after the ordinary `ui_attach` cannot carry it.
 - The relay is Unix-only (`std::os::unix::process::CommandExt::pre_exec`);
   `EngineConfig::stdin_relay_requested` returns `false` unconditionally off

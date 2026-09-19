@@ -50,7 +50,7 @@ nvim_buf_attach(0, true, {}) -> true
   notification: nvim_buf_lines_event(buf=Ext(0,[1]), 4, 0, -1, ["a", "b", "c"], false)
 ```
 
-Confirms the brief's latency claim: `send_buffer: false` is what keeps attach
+Confirms the brief on latency: `send_buffer: false` is what keeps attach
 itself from streaming the whole buffer; `RpcCall::BufAttach` must pass `false`;
 using the default-looking `true` instead costs every attach an event
 proportional to buffer size before a single keystroke has happened.
@@ -143,7 +143,7 @@ Exactly one notification for the whole substitution,
 `firstline: 0, lastline: 200` bounding the entire replaced range in one shot,
 `more: false`. This directly contradicts an earlier draft of this document,
 which attributed `more: true` to `:%s` -style batching without having captured
-it live; that claim was never observed and is retracted. If `nvim_buf_attach`
+it live; it was never observed and is retracted. If `nvim_buf_attach`
 consumers ever need to fold `more: true` continuations, that behavior remains
 undemonstrated by this document; treat it as an open question, short of an
 implemented-and-verified case.
@@ -216,7 +216,7 @@ performs (section 5).
 
 Same session, same 200-line buffer and `:%s/row/ROW/` from section 4 above (one
 event, `tick=4`, `firstline=0, lastline=200, more=false`; reproduced
-identically here, confirming section 4's claim still holds). The follow-up `u`
+identically here, confirming section 4's reading still holds). The follow-up `u`
 (`nvim_command("undo")`) that reverts it is the burst:
 
 ```

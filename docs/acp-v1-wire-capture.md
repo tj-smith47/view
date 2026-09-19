@@ -460,9 +460,9 @@ Raw output (the true, unedited result of the command above):
 Pinned facts this settles, both load-bearing in `view-ai`'s
 `Driver::on_permission_request`:
 - `toolCall` is `ToolCallUpdate`, distinct from `ToolCall`; only `toolCallId`
-  is required (every other field, including `title`, is nullable/optional),
-  which is why the driver falls back to the id itself when `title` is absent,
-  and treats an absent title as valid input.
+  is required (every other field, including `title`, is nullable/optional).
+  The driver falls back to the id itself when `title` is absent, and treats
+  an absent title as valid input.
 - `options` is a required array of `PermissionOption` (never omitted, though it
   may be empty; see the driver's own empty-options handling, which settles the
   request `cancelled`, closing it so it never sits open on a request no user
@@ -1057,16 +1057,16 @@ independent agent-initiated event. The following annotation, "4. Agent cascades
 cancellation internally," shows `$/cancel_request` as downstream of, and part
 of the same flow as, that `session/cancel`; the example does not depict the
 agent cancelling on its own initiative (that is `cancellation.mdx`'s separate
-"Internal Cancellation" section, e.g. "LLM context limit reached", which
-genuinely is independent of any client trigger, a case this worked example does
-not show). Yet for that one client-initiated-whole-turn-cancel case, applied to
+"Internal Cancellation" section, e.g. "LLM context limit reached", which is
+independent of any client trigger, a case this worked example does not show).
+Yet for that one client-initiated-whole-turn-cancel case, applied to
 the identical kind of pending request (`session/request_permission`, labeled
 "[permission request]" in the diagram): `prompt-turn.mdx` mandates a
 `RequestPermissionOutcome` `"cancelled"` result, while `cancellation.mdx`'s own
 worked example for the same trigger shows a raw JSON-RPC `-32800` error
 instead.
 
-**This is a genuine contradiction in the upstream ACP v1 docs. The two rules
+**This is a contradiction in the upstream ACP v1 docs. The two rules
 conflict regardless of who initiated cancellation.** Both quotes are byte-exact
 above; no interpretation reconciles them for the client-cancels-the-whole-turn
 case. What this does establish without ambiguity: a raw JSON-RPC error is

@@ -100,7 +100,7 @@ res: {'loaded': True, 'lines': ['modified line one', 'modified line two', 'modif
 ```
 
 The reply reflects the in-memory buffer content; the still-unmodified file on
-disk plays no part. **This is the load-bearing case**: it proves the Lua
+disk plays no part. **This is the load-bearing case**: it records the Lua
 chunk's `nvim_buf_get_lines` call reads nvim's authoritative text, and it is
 the shape the falsifiable preview test asserts against; a disk-read
 implementation would return `['disk line one', 'disk line two']` here instead,

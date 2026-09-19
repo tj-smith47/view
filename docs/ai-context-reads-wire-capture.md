@@ -401,15 +401,14 @@ getregtype('"') -> "\x164"
 Live-verified by
 `read_cursor_context_with_a_blockwise_selection_over_a_partially_covered_tab`.
 
-Left-edge partial coverage (confirms the padding rule is symmetric, not
-right-edge-only): buffer `["abcd", "xy\xe5\xa5\xbdz", "ABCD"]` (`"xy好z"`, `好` a
-3-byte UTF-8 character spanning screen columns 3-4), both endpoints on the
-single-cell `'d'`/`'D'` at column 4 (`gg0lll<C-v>jj`; move to column 4 in
-Normal mode first, THEN enter blockwise Visual, so `curswant` carries a real
-column in place of nvim's `$` -motion `MAXCOL` sentinel). Row 2 is never
-touched by cursor movement at all; it is a plain interior row of the three-row
-block; so the shared column 4 lands on `好`'s own RIGHT (second) cell there,
-stopping short of its start:
+Left-edge partial coverage (confirms the padding rule is symmetric): buffer
+`["abcd", "xy\xe5\xa5\xbdz", "ABCD"]` (`"xy好z"`, `好` a 3-byte UTF-8 character
+spanning screen columns 3-4), both endpoints on the single-cell `'d'`/`'D'` at
+column 4 (`gg0lll<C-v>jj`; move to column 4 in Normal mode first, THEN enter
+blockwise Visual, so `curswant` carries a real column in place of nvim's `$`
+-motion `MAXCOL` sentinel). Row 2 is never touched by cursor movement at all; it
+is a plain interior row of the three-row block; so the shared column 4 lands on
+`好`'s own RIGHT (second) cell there, stopping short of its start:
 
 ```
 virtcol('v', 1) -> [4, 4]      -- 'd', single-cell
@@ -707,10 +706,10 @@ an item originally `setqflist`'d with a `filename` field (nvim resolves it to a
 string, standing apart from an omitted field" convention `PREVIEW_CHUNK` and
 `CURRENT_BUFFER_TEXT_CHUNK` already use. `lnum`/`col` are `getqflist`'s own
 1-indexed values, unmodified by this chunk. (Fix round 1 correction: an earlier
-version of this note claimed each chunk deliberately keeps its own source's
-indexing all the way out to `EngineReadSnapshot`. That was wrong for
-`QuickfixEntry` and `DiagnosticEntry` alike; see "Fix round 1: one shared
-1-indexed convention" below for the corrected, actual contract.)
+version of this note said each chunk keeps its own source's indexing all the way
+out to `EngineReadSnapshot`. That was wrong for `QuickfixEntry` and
+`DiagnosticEntry` alike; see "Fix round 1: one shared 1-indexed convention"
+below for the corrected, actual contract.)
 
 ## Current buffer text: same "no name is an empty string" convention
 
@@ -725,7 +724,7 @@ indexing all the way out to `EngineReadSnapshot`. That was wrong for
 
 Confirms nvim's own in-memory (possibly unsaved) buffer content is what crosses
 back, and stops short of a re-read of the file on disk; the same contract the
-picker preview pane's `PREVIEW_CHUNK` already proves for `PreviewBuffer`.
+picker preview pane's `PREVIEW_CHUNK` already records for `PreviewBuffer`.
 
 ## Fix round 1 (review-driven): one shared 1-indexed convention across all three reads
 
