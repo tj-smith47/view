@@ -19,6 +19,10 @@ const INTERMEDIATE: &str = "VIEW_ENGINE_ORPHAN_INTERMEDIATE";
 /// The line the intermediate writes to stderr once its engine is wedged.
 const PID_MARKER: &str = "orphan-reaping engine pid ";
 
+/// The line the intermediate writes for the child it spawns *without* a
+/// tie, which must outlive it exactly as an untied child always has.
+const UNTIED_MARKER: &str = "orphan-reaping untied pid ";
+
 /// How long the wedged engine keeps spinning if nothing kills it.
 ///
 /// A bound rather than a wait: the assertions below are decided inside
@@ -53,6 +57,13 @@ fn the_intermediate_parent() {
         .handle
         .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
         .unwrap();
+    // an ordinary spawn, deliberately not view-proc's: an editor runs a git,
+    // a clipboard helper and a language server this way, and none of them is
+    // the child the tie was given
+    // never waited on, deliberately: this child has to outlive the process
+    // that spawned it, which is the whole of what the driver checks about it
+    #[allow(clippy::zombie_processes)]
+    let untied = long_running().spawn().unwrap();
     // typed rather than requested: a blocking request for work that never
     // returns could not be waited on and then reported
     engine
@@ -73,6 +84,7 @@ fn the_intermediate_parent() {
     }
     let mut stderr = std::io::stderr();
     writeln!(stderr, "{PID_MARKER}{}", engine.pid()).unwrap();
+    writeln!(stderr, "{UNTIED_MARKER}{}", untied.id()).unwrap();
     stderr.flush().unwrap();
     let mut byte = [0_u8; 1];
     let _ = std::io::stdin().read(&mut byte);
@@ -98,15 +110,20 @@ fn a_wedged_engine_is_ended_by(end: fn(&mut std::process::Child), ending: &str) 
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let reader = std::io::BufReader::new(parent.stderr.take().unwrap());
-    let engine_pid = reader
+    let mut reported = std::io::BufReader::new(parent.stderr.take().unwrap())
         .lines()
-        .map_while(Result::ok)
-        .find_map(|line| {
-            line.strip_prefix(PID_MARKER)
-                .and_then(|pid| pid.trim().parse::<u32>().ok())
-        })
-        .expect("the intermediate must report the pid of the engine it wedged");
+        .map_while(Result::ok);
+    let mut pid_after = |marker: &str| {
+        reported
+            .by_ref()
+            .find_map(|line| {
+                line.strip_prefix(marker)
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+            })
+            .unwrap_or_else(|| panic!("the intermediate must report {marker}"))
+    };
+    let engine_pid = pid_after(PID_MARKER);
+    let untied_pid = pid_after(UNTIED_MARKER);
     assert!(
         common::pid_in_process_table(engine_pid),
         "the engine was already gone before its parent was \
@@ -127,6 +144,48 @@ fn a_wedged_engine_is_ended_by(end: fn(&mut std::process::Child), ending: &str) 
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    let untied_alive = common::pid_in_process_table(untied_pid);
+    end_pid(untied_pid);
+    assert!(
+        untied_alive,
+        "a child the parent spawned without a tie went with it ({ending}): \
+         the tie reaches the one child it was given, and a mechanism that \
+         takes the whole process instead takes every git, clipboard helper \
+         and language server the editor ever ran"
+    );
+}
+
+/// A child that runs long enough to be asked about after the case has ended
+/// whatever spawned it.
+fn long_running() -> std::process::Command {
+    #[cfg(unix)]
+    let mut command = std::process::Command::new("sleep");
+    #[cfg(unix)]
+    command.arg("300");
+    #[cfg(windows)]
+    let mut command = std::process::Command::new("ping");
+    #[cfg(windows)]
+    command.args(["-n", "300", "127.0.0.1"]);
+    command.stdout(std::process::Stdio::null());
+    command.stderr(std::process::Stdio::null());
+    command
+}
+
+/// Ends a process this case started through one it started, by pid: nothing
+/// in the case owns a handle to it, and it outlives the parent that did.
+fn end_pid(pid: u32) {
+    #[cfg(unix)]
+    let mut ended = std::process::Command::new("kill");
+    #[cfg(unix)]
+    ended.args(["-KILL", &pid.to_string()]);
+    #[cfg(windows)]
+    let mut ended = std::process::Command::new("taskkill");
+    #[cfg(windows)]
+    ended.args(["/PID", &pid.to_string(), "/F"]);
+    let _ = ended
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// A wedged engine dies with the parent that owns it, even when that parent

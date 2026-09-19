@@ -618,26 +618,31 @@ pub fn pid_in_process_table(pid: u32) -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        // a `ps` that could not run must not report "no entry": that reads
-        // as a successfully reaped child and turns a broken probe into a
-        // silent pass. Only an empty listing from a `ps` that did run is
-        // the real negative (`ps` also exits nonzero for an unknown pid, so
-        // its status is not the signal)
-        let listing = std::process::Command::new("/bin/ps")
+        // a `ps` that could not run reports an entry, never a reaping: the
+        // negative reads as a successfully reaped child and turns a broken
+        // probe into a silent pass. Only an empty listing from a `ps` that
+        // did run is the real negative (`ps` also exits nonzero for an
+        // unknown pid, so its status is not the signal)
+        match std::process::Command::new("/bin/ps")
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .output()
-            .expect("/bin/ps must run for the process table to be observable at all");
-        !listing.stdout.is_empty()
+        {
+            Ok(listing) => !listing.stdout.is_empty(),
+            Err(_) => true,
+        }
     }
     #[cfg(windows)]
     {
-        let listing = std::process::Command::new("tasklist")
+        match std::process::Command::new("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
             .output()
-            .expect("tasklist must run for the process table to be observable at all");
-        // the no-match case is an INFO line on stdout rather than a nonzero
-        // exit, so the pid's own presence is the only usable signal
-        String::from_utf8_lossy(&listing.stdout).contains(&format!("\"{pid}\""))
+        {
+            // the no-match case is an INFO line on stdout rather than a
+            // nonzero exit, so the pid's own presence is the only usable
+            // signal
+            Ok(listing) => String::from_utf8_lossy(&listing.stdout).contains(&format!("\"{pid}\"")),
+            Err(_) => true,
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {

@@ -20,9 +20,9 @@ use crate::{AgentLaunch, AiError};
 /// outright does not leave the agent running with nothing to answer to; the
 /// parent-death signal is armed on a thread of that crate's own, which a
 /// `tokio::process` spawn (forking inline on whichever thread called
-/// `AiSession::spawn`) cannot be. Windows keeps the tokio child and is tied
-/// by the job object instead, which holds every descendant of this process
-/// however the child was spawned.
+/// `AiSession::spawn`) cannot be. Windows keeps the tokio child and puts it
+/// in the job object once it is running, which ties a child by its handle
+/// rather than by how it was spawned.
 #[cfg(unix)]
 pub(crate) type AgentChild = std::process::Child;
 #[cfg(not(unix))]
@@ -353,10 +353,9 @@ fn spawn_agent(cfg: &AgentLaunch) -> Result<AgentChild, AiError> {
     #[cfg(not(unix))]
     {
         // tokio owns this child's pipes, so it cannot go through view-proc's
-        // own spawn; the job object ties descendants rather than the
-        // children view-proc was handed, so joining it here covers this one
-        view_proc::tie_descendants_of_this_process();
-        tokio::process::Command::new(&cfg.command)
+        // own spawn; the job object takes a child that is already running,
+        // which is the one way in for a spawn this crate does not make
+        let child = tokio::process::Command::new(&cfg.command)
             .args(&cfg.args)
             .current_dir(&cfg.cwd)
             .stdin(Stdio::piped())
@@ -364,7 +363,12 @@ fn spawn_agent(cfg: &AgentLaunch) -> Result<AgentChild, AiError> {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .map_err(failed)
+            .map_err(failed)?;
+        #[cfg(windows)]
+        if let Some(pid) = child.id() {
+            view_proc::tie_spawned_child(pid);
+        }
+        Ok(child)
     }
 }
 

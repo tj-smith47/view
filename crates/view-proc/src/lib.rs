@@ -22,7 +22,11 @@ use std::process::{Child, Command};
 /// |---|---|---|
 /// | Linux | yes | `PR_SET_PDEATHSIG`, armed in the child between fork and exec |
 /// | macOS, and every other unix | yes | a watcher process reading a pipe only this process holds the other end of; the pipe closes when this process does, however it ended |
-/// | Windows | yes | a job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` that this process joins, so every descendant is in it |
+/// | Windows | yes | a job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` that each tied child is put in, and `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK` so the children *it* starts are not |
+///
+/// Every arm ties the one child it was handed and nothing below it. An
+/// engine that runs `jobstart`, `:terminal` or `:!start` owns what it
+/// starts exactly as bare nvim does, on every platform.
 ///
 /// A spawn rather than a step a caller applies to its own [`Command`]: the
 /// parent-death signal names the *thread* that forked the child, so arming
@@ -64,8 +68,9 @@ pub fn spawn_tied_with(
     }
     #[cfg(windows)]
     {
-        join_killing_job();
-        spawn(&mut command)
+        let child = spawn(&mut command)?;
+        tie_spawned_child(child.id());
+        Ok(child)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -86,18 +91,82 @@ pub fn spawn_tied_with(
     }
 }
 
-/// Ties every descendant of this process to its own lifetime, for a caller
-/// whose child cannot go through [`spawn_tied_to_this_process`] -- a
-/// `tokio::process` spawn, which builds and owns its own pipes.
+/// Builds what a tied spawn needs, so that the first spawn does not.
 ///
-/// Windows only in effect. The job object there holds descendants rather
-/// than named children, so joining it once covers a child this crate never
-/// saw. Every other platform ties a child by its pid and has none to tie
-/// here, which is why this is a call a caller makes *before* its own spawn
-/// rather than after it.
-pub fn tie_descendants_of_this_process() {
+/// Optional, and idempotent. A process that never calls it gets the same
+/// machinery from its first tied spawn, built on that spawn's own thread.
+///
+/// Call it from `main`, before the process starts any thread that spawns.
+/// Off Linux the tie is a watcher process, so the first tied spawn forks a
+/// `/bin/sh` -- and the first tied spawn is the engine, whose own cost is
+/// the one the startup budget measures. The pipe handed to that watcher is
+/// also two syscalls where there is no `pipe2`, and a fork landing between
+/// them inherits the write end and holds it open forever; no other thread
+/// spawning yet is what makes that unrepresentable rather than unlikely.
+pub fn prepare_to_tie_children() {
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // on a thread because the fork is the cost being moved, not deleted
+        let _ = std::thread::Builder::new()
+            .name(String::from("view-proc-watcher"))
+            .spawn(watcher);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = anchor();
+    }
     #[cfg(windows)]
-    join_killing_job();
+    {
+        let _ = killing_job();
+    }
+}
+
+/// Puts an already-running child in the job object that ends what it holds
+/// when this process ends, for a caller whose child cannot go through
+/// [`spawn_tied_to_this_process`] -- a `tokio::process` spawn, which builds
+/// and owns its own pipes.
+///
+/// `false` where the job could not be made, the child could not be opened,
+/// or it could not be put in the job (a nested job an older Windows
+/// refuses), which leaves that one child untied rather than unspawned.
+///
+/// A pid and not a handle, as on every other platform. Windows recycles a
+/// pid only once the last handle to the process has closed, and the caller
+/// is holding one -- it is the child it just spawned -- so the pid names
+/// that child and no other for as long as the caller can make this call.
+///
+/// Windows has no stable way to hand a job to a child at creation on this
+/// toolchain -- `CommandExt::raw_attribute`, which carries
+/// `PROC_THREAD_ATTRIBUTE_JOB_LIST`, is unstable, and `CREATE_SUSPENDED`
+/// needs the initial thread handle `std` does not return -- so the child is
+/// assigned once it is running. What that leaves open is the window the
+/// unix arms leave too: a kill landing between the spawn and the tie leaves
+/// this one child loose.
+#[cfg(windows)]
+pub fn tie_spawned_child(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    let Some(job) = killing_job() else {
+        return false;
+    };
+    // SAFETY: `job` is a job handle this process created and never closed,
+    // and the handle opened below is checked before it is passed on and
+    // closed on both paths out. The two rights asked for are the two
+    // `AssignProcessToJobObject` documents needing.
+    #[allow(unsafe_code)]
+    unsafe {
+        let child = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+        if child.is_null() {
+            return false;
+        }
+        let tied = AssignProcessToJobObject(std::ptr::with_exposed_provenance_mut(job), child) != 0;
+        CloseHandle(child);
+        tied
+    }
 }
 
 /// What one spawn hands to the thread below, and where the answer goes.
@@ -186,17 +255,31 @@ fn arm_parent_death(expected: rustix::process::RawPid) -> std::io::Result<()> {
 
 /// The program the watcher process runs.
 ///
-/// It reads pids, one per line, and records the start time the process
-/// table reports for each. When the pipe it reads closes -- which is what
-/// this process ending does, whatever ended it, `SIGKILL` included -- it
-/// kills whichever of them are still there.
+/// It reads pids, one per line, and records the identity the process table
+/// reports for each. When the pipe it reads closes -- which is what this
+/// process ending does, whatever ended it, `SIGKILL` included -- it kills
+/// whichever of them are still there.
 ///
-/// The start time is what makes that safe. A pid this process has already
+/// The identity is what makes that safe. A pid this process has already
 /// waited on is free for the kernel to hand to somebody else, and a session
 /// that restarts its engine frees one such pid per restart; killing the
-/// list blind would eventually kill a stranger. `ps` reports the second a
-/// process started, so a pid whose start time still matches the one
-/// recorded is the same process and no other.
+/// list blind would eventually kill a stranger. Two fields answer that, and
+/// they answer different halves of it:
+///
+/// - the parent, read while the process that wrote the line is still alive.
+///   A pid already recycled by the time this reads it belongs to somebody
+///   whose parent is not `$PPID`, and the line is dropped. Once `$PPID` is
+///   gone the check is dropped instead of failed: a tied child outlives its
+///   parent by exactly the moment this exists for, and by then it has been
+///   reparented.
+/// - the start time, compared again before the kill. `ps` reports the second
+///   a process started, so a pid whose start time still matches the one
+///   recorded is the same process and no other.
+///
+/// The window neither closes: a pid recycled *after* this read and before
+/// the kill, into a process that started in the same second the recorded
+/// one did. Reaching it takes a reaped child, a full turn of the pid space
+/// and a one-second collision, in that order.
 ///
 /// It ignores the signals a terminal sends its foreground group: a Ctrl-C
 /// reaches this process and the editor above it at once, and a watcher that
@@ -209,17 +292,21 @@ while IFS= read -r pid; do
   case $pid in
     (''|*[!0-9]*) continue ;;
   esac
-  started=$(ps -o lstart= -p "$pid" 2>/dev/null)
-  [ -n "$started" ] || continue
+  set -- $(ps -o ppid=,lstart= -p "$pid" 2>/dev/null)
+  [ "$#" -gt 1 ] || continue
+  if [ "$1" != "$PPID" ] && kill -0 "$PPID" 2>/dev/null; then
+    continue
+  fi
+  shift
   count=$((count + 1))
-  eval "pid$count=\$pid; started$count=\$started"
+  eval "pid$count=\$pid; started$count=\"\$*\""
 done
 seen=0
 while [ "$seen" -lt "$count" ]; do
   seen=$((seen + 1))
   eval "pid=\$pid$seen; started=\$started$seen"
-  now=$(ps -o lstart= -p "$pid" 2>/dev/null)
-  if [ -n "$now" ] && [ "$now" = "$started" ]; then
+  set -- $(ps -o lstart= -p "$pid" 2>/dev/null)
+  if [ "$#" -gt 0 ] && [ "$*" = "$started" ]; then
     kill -9 "$pid" 2>/dev/null
   fi
 done
@@ -282,53 +369,64 @@ fn start_watcher() -> Option<std::sync::Mutex<std::io::PipeWriter>> {
     Some(std::sync::Mutex::new(writer))
 }
 
-/// Puts this process in a job object Windows empties when the last handle
-/// to it closes, which every child then joins by being a descendant.
-///
-/// Once per process, and before the first tied spawn rather than per child:
-/// a process joins a job, and what puts the children in it is that a child
-/// of a job member is a member.
-#[cfg(windows)]
-fn join_killing_job() {
-    static JOINED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    JOINED.get_or_init(create_killing_job);
-}
-
-/// Creates the job, sets it to kill what it holds when it closes, and puts
-/// this process in it. `false` where any of the three was refused, which
-/// leaves the children untied rather than unspawned.
+/// The job object every tied child is put in, created on the first tie and
+/// never closed.
 ///
 /// The handle is deliberately never closed. It is the only handle to the
 /// job, so the job stays open exactly as long as this process does and
 /// closes when the kernel closes what the process held -- whether the
 /// process left by its own exit or by a `TerminateProcess` that ran no
-/// code at all.
+/// code at all. Closing it is what kills what it holds.
+///
+/// Carried as a `usize` because a raw handle is a pointer, which a static
+/// may not hold across threads, and this one is read from every thread that
+/// spawns.
 #[cfg(windows)]
-fn create_killing_job() -> bool {
+fn killing_job() -> Option<usize> {
+    static JOB: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *JOB.get_or_init(create_killing_job)
+}
+
+/// Creates the job and sets it to kill what it holds when it closes, and to
+/// let what its members spawn out of it. `None` where either was refused,
+/// which leaves the children untied rather than unspawned.
+///
+/// This process is *not* a member. A job holding the editor holds every
+/// child of it that ever runs -- a `git`, a clipboard helper, and every
+/// process the engine starts for `jobstart`, `:terminal` or `:!start` --
+/// which is a scope no other platform's arm has and which bare nvim does
+/// not have either. `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK` says the same
+/// thing one level down, for what a tied child starts itself: the engine's
+/// own children are its business, exactly as they are under
+/// `PR_SET_PDEATHSIG`. That half is not observable through nvim, which puts
+/// every child it spawns in a job of libuv's own that closes with it -- a
+/// `jobstart` child goes with a terminated bare nvim on Windows too -- so
+/// the flag states the scope rather than changing what nvim does.
+#[cfg(windows)]
+fn create_killing_job() -> Option<usize> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
     };
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
     let Ok(size) = u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()) else {
-        return false;
+        return None;
     };
-    // SAFETY: every call below is made with the arguments its documented
-    // contract asks for -- a zeroed limit structure of the size passed
-    // beside it, a handle this function created, and the pseudo-handle for
-    // the current process -- and each result is checked before the next
-    // call reads it.
+    // SAFETY: both calls are made with the arguments their documented
+    // contracts ask for -- a zeroed limit structure of the size passed
+    // beside it, and a handle this function created -- and the first result
+    // is checked before the second call reads it.
     #[allow(unsafe_code)]
     unsafe {
         let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if job.is_null() {
-            return false;
+            return None;
         }
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
         if SetInformationJobObject(
             job,
             JobObjectExtendedLimitInformation,
@@ -337,12 +435,8 @@ fn create_killing_job() -> bool {
         ) == 0
         {
             CloseHandle(job);
-            return false;
+            return None;
         }
-        if AssignProcessToJobObject(job, GetCurrentProcess()) == 0 {
-            CloseHandle(job);
-            return false;
-        }
-        true
+        Some(job.expose_provenance())
     }
 }

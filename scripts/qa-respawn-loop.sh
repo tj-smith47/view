@@ -330,13 +330,13 @@ EOF
     fi
 
     view_pid=$(view_pid_of "$session")
-    engine_pids=$(engine_children "$view_pid")
     if [ -z "$view_pid" ]; then
         tmux kill-session -t "$session" 2>/dev/null || true
         NO_SETTLE=$((NO_SETTLE + 1))
         printf 'run %-3s no-view\n' "$idx"
         return 0
     fi
+    engine_pids=$(engine_children "$view_pid")
 
     if [ "$SHAPE" = modified ]; then
         tmux send-keys -t "$session" -l "i$DIRTY"

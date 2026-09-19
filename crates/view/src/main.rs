@@ -952,6 +952,10 @@ fn main() -> Result<()> {
     // work the design spec's 50ms target is meant to cover
     let process_start = Instant::now();
     vlog::init(process_start);
+    // before any other thread exists, and as far from the engine spawn as
+    // the body allows: off Linux the tie is a watcher process, and this is
+    // what keeps forking it out of the spawn the startup budget measures
+    view_proc::prepare_to_tie_children();
     let cli = Cli::parse();
     if let Some(register) = cli.print_clipboard {
         return print_clipboard(register);
@@ -1952,6 +1956,15 @@ mod tests {
     /// runs here: the notice the user reads is raised with the other
     /// startup notices, below the spawn, where a model and an executor
     /// exist to carry it.
+    ///
+    /// The tie is the sixth, and it is here to keep a cost *off* the spawn
+    /// rather than to take one: off Linux a tied child is tied by a watcher
+    /// process, and the first tied spawn is the one that forks it -- which
+    /// is the engine spawn below. Built here it is built by a thread while
+    /// the config chain runs, and it has to be here rather than lower
+    /// because the pipe that watcher reads is two syscalls where there is
+    /// no `pipe2`: a fork on another thread landing between them inherits
+    /// the write end and holds it open for the life of the session.
     #[test]
     fn only_the_config_prologue_runs_before_the_engine_spawn() {
         assert_eq!(
@@ -1959,6 +1972,7 @@ mod tests {
             vec![
                 "Instant::now",
                 "vlog::init",
+                "view_proc::prepare_to_tie_children",
                 "Cli::parse",
                 "Some",
                 "print_clipboard",

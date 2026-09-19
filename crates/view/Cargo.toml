@@ -58,6 +58,7 @@ view-ai = { version = "0.0.1", path = "../view-ai" }
 view-core = { version = "0.0.1", path = "../view-core" }
 view-engine = { version = "0.0.1", path = "../view-engine" }
 view-native = { version = "0.0.1", path = "../view-native" }
+view-proc = { version = "0.0.1", path = "../view-proc" }
 view-surface = { version = "0.0.1", path = "../view-surface" }
 view-tui = { version = "0.0.1", path = "../view-tui" }
 

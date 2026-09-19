@@ -107,74 +107,72 @@ fn next_event(rx: &Receiver<Msg>, what: &str) -> AiEvent {
 ///
 /// Three mechanisms, one claim: `PR_SET_PDEATHSIG` on Linux, the watcher
 /// process off it, and the job object on Windows -- the adapter reaches the
-/// last of those by being a descendant rather than by how it was spawned
-/// (see `view_proc::spawn_tied_to_this_process`).
+/// last of those by being put in the job once it is running, since tokio
+/// owns its spawn (see `view_proc::tie_spawned_child`).
 #[test]
 fn a_deaf_adapter_dies_with_an_owner_that_was_killed_outright() {
-    {
-        use std::io::BufRead;
+    use std::io::BufRead;
 
-        let dir = view_test_support::ScratchDir::new("ai-orphan-reaping").unwrap();
-        let resume = dir.join("release-the-stall");
-        let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["the_intermediate_parent", "--exact", "--nocapture"])
-            .env(INTERMEDIATE, "1")
-            .env(RESUME, &resume)
-            // held open for the whole case: the intermediate parks on a read of
-            // this pipe, so the only thing that ends it is the kill below
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("re-exec this test binary as the intermediate owner");
-        let reader = std::io::BufReader::new(owner.stderr.take().unwrap());
-        let agent = reader
-            .lines()
-            .map_while(Result::ok)
-            .find_map(|line| {
-                line.strip_prefix(PID_MARKER)
-                    .and_then(|pid| pid.trim().parse::<u32>().ok())
-            })
-            .unwrap_or_else(|| {
-                // the intermediate parks on a pipe this process holds, so it
-                // would leave once the panic drops it; killed here anyway, so a
-                // case failing before its own kill does not depend on the drop
-                // order for that
-                let _ = owner.kill();
-                let _ = owner.wait();
-                panic!("the intermediate owner must report the pid of the adapter it stalled")
-            });
-        assert!(
-            live(agent),
-            "the adapter was already gone before its owner was killed, so nothing below is \
-         evidence about the kill"
-        );
+    let dir = view_test_support::ScratchDir::new("ai-orphan-reaping").unwrap();
+    let resume = dir.join("release-the-stall");
+    let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["the_intermediate_parent", "--exact", "--nocapture"])
+        .env(INTERMEDIATE, "1")
+        .env(RESUME, &resume)
+        // held open for the whole case: the intermediate parks on a read of
+        // this pipe, so the only thing that ends it is the kill below
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("re-exec this test binary as the intermediate owner");
+    let reader = std::io::BufReader::new(owner.stderr.take().unwrap());
+    let agent = reader
+        .lines()
+        .map_while(Result::ok)
+        .find_map(|line| {
+            line.strip_prefix(PID_MARKER)
+                .and_then(|pid| pid.trim().parse::<u32>().ok())
+        })
+        .unwrap_or_else(|| {
+            // the intermediate parks on a pipe this process holds, so it
+            // would leave once the panic drops it; killed here anyway, so a
+            // case failing before its own kill does not depend on the drop
+            // order for that
+            let _ = owner.kill();
+            let _ = owner.wait();
+            panic!("the intermediate owner must report the pid of the adapter it stalled")
+        });
+    assert!(
+        live(agent),
+        "the adapter was already gone before its owner was killed, so nothing below is \
+     evidence about the kill"
+    );
 
-        owner.kill().expect("kill the intermediate owner outright");
-        owner.wait().expect("reap the intermediate owner");
+    owner.kill().expect("kill the intermediate owner outright");
+    owner.wait().expect("reap the intermediate owner");
 
-        let deadline = Instant::now() + view_test_support::host_deadline(REAPED);
-        while live(agent) {
-            if Instant::now() >= deadline {
-                // releases the stall so the stray ends itself: it reads its
-                // stdin again, finds the owner's end of the pipe closed, and
-                // exits. Killing it here would be this test signalling a
-                // process it can no longer prove it owns. Waited out before the
-                // panic, because the scratch directory holding the release is
-                // removed by its own guard on the way out.
-                std::fs::write(&resume, b"").unwrap();
-                let released = Instant::now() + view_test_support::host_deadline(REAPED);
-                while live(agent) && Instant::now() < released {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                panic!(
-                    "the adapter {agent} outlived the owner that spawned it: an agent that has \
-                 stopped reading its stdin sees no closed pipe, so without a parent-death \
-                 signal it runs until something kills it"
-                );
+    let deadline = Instant::now() + view_test_support::host_deadline(REAPED);
+    while live(agent) {
+        if Instant::now() >= deadline {
+            // releases the stall so the stray ends itself: it reads its
+            // stdin again, finds the owner's end of the pipe closed, and
+            // exits. Killing it here would be this test signalling a
+            // process it can no longer prove it owns. Waited out before the
+            // panic, because the scratch directory holding the release is
+            // removed by its own guard on the way out.
+            std::fs::write(&resume, b"").unwrap();
+            let released = Instant::now() + view_test_support::host_deadline(REAPED);
+            while live(agent) && Instant::now() < released {
+                std::thread::sleep(Duration::from_millis(10));
             }
-            std::thread::sleep(Duration::from_millis(10));
+            panic!(
+                "the adapter {agent} outlived the owner that spawned it: an agent that has \
+             stopped reading its stdin sees no closed pipe, so without a parent-death \
+             signal it runs until something kills it"
+            );
         }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

@@ -448,7 +448,11 @@ written-programs" \
 # that starts one -- with a doc comment quoting the same call to prove the
 # classifier drops it.
 #
-# The rows mirror the checker's own TIED_SPAWN_SITES.
+# The population is read off the checker rather than restated here: an empty
+# root makes it print its own pinned listing beside the finding, which is
+# the same listing expect_tied already parses below. Two copies of twenty-two
+# path-and-count pairs is a second place to forget, and forgetting it reddens
+# five cases at once with a message about the tree.
 # ---------------------------------------------------------------------------
 plant_spawns() {
   mkdir -p "$(dirname "$CASE/$1")"
@@ -465,6 +469,24 @@ plant_spawns() {
   done
 }
 
+# The checker's own pinned listing, as path-and-count pairs. Harvested once:
+# a case tree is built per case, and the checker is a whole tree walk. The
+# seed file is what the listing costs: the walk refuses a root with no
+# tracked crate source rather than printing a listing about nothing.
+mkdir -p "$WORK/seed/crates/seed/src"
+git -C "$WORK/seed" init -q
+printf 'pub fn nothing() {}\n' > "$WORK/seed/crates/seed/src/lib.rs"
+git -C "$WORK/seed" add -A
+TIED_POPULATION=$(bash "$CHECKER" --tied-spawns "$WORK/seed" 2>&1 | awk '
+  /^pinned:$/ { on = 1; next }
+  /^found:$/ { exit }
+  on && NF >= 2 { print $1, $2 }
+')
+if [ -z "$TIED_POPULATION" ]; then
+  printf 'TIED-SELF-FAIL: the checker printed no pinned listing to plant from\n'
+  exit 2
+fi
+
 new_tied_case() {
   n=$((n + 1))
   CASE="$WORK/case$n"
@@ -473,28 +495,9 @@ new_tied_case() {
   # scanner reads tracked files: a scratch root has to be a repository for
   # the classifier to see anything at all
   git -C "$CASE" init -q
-  plant_spawns 'crates/view-ai/src/acp/session.rs' 5
-  plant_spawns 'crates/view-ai/src/provision.rs' 3
-  plant_spawns 'crates/view-ai/src/watch.rs' 5
-  plant_spawns 'crates/view-bench/src/remote_ui.rs' 1
-  plant_spawns 'crates/view-bench/src/scenarios/echo_speculated_rtt.rs' 3
-  plant_spawns 'crates/view-bench/src/session.rs' 1
-  plant_spawns 'crates/view-engine/src/process.rs' 4
-  plant_spawns 'crates/view-harness/src/bin/bench.rs' 1
-  plant_spawns 'crates/view-harness/src/bin/bench/replicates.rs' 1
-  plant_spawns 'crates/view-harness/src/bin/oracle/compat.rs' 3
-  plant_spawns 'crates/view-harness/src/fixture.rs' 1
-  plant_spawns 'crates/view-native/src/tree/git.rs' 2
-  plant_spawns 'crates/view-oracle/src/compat.rs' 4
-  plant_spawns 'crates/view-oracle/src/hang.rs' 1
-  plant_spawns 'crates/view-oracle/src/pty.rs' 2
-  plant_spawns 'crates/view-oracle/src/remote.rs' 1
-  plant_spawns 'crates/view-proc/src/lib.rs' 3
-  plant_spawns 'crates/view-test-support/src/lib.rs' 3
-  plant_spawns 'crates/view/src/ai_context_worker.rs' 1
-  plant_spawns 'crates/view/src/clipboard.rs' 2
-  plant_spawns 'crates/view/src/remote_guard.rs' 2
-  plant_spawns 'crates/view/src/runtime.rs' 1
+  printf '%s\n' "$TIED_POPULATION" | while read -r tied_path tied_count; do
+    plant_spawns "$tied_path" "$tied_count"
+  done
 }
 
 # The pinned population is long, so a failing case is graded on the rows that

@@ -26,9 +26,10 @@ rustix = { version = "1", default-features = false, features = [
 windows-sys = { version = "0.61", features = [
     # CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject
     "Win32_System_JobObjects",
-    # GetCurrentProcess, whose pseudo-handle names this process to the job
+    # OpenProcess and the two rights a job assignment needs, plus
+    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION, which windows-sys gates here
     "Win32_System_Threading",
-    # CloseHandle, for a job this process could not join
+    # CloseHandle, for a job whose limits could not be set
     "Win32_Foundation",
     # SECURITY_ATTRIBUTES, which CreateJobObjectW takes a pointer to and
     # which this call passes as null

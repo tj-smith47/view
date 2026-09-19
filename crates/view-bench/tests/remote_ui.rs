@@ -183,63 +183,61 @@ fn the_intermediate_parent() {
 /// `view_proc::spawn_tied_to_this_process`).
 #[test]
 fn a_control_server_dies_with_a_harness_that_was_killed_outright() {
-    {
-        use std::io::BufRead;
+    use std::io::BufRead;
 
-        if nvim_bin().is_none() {
-            view_test_support::announce_skip(
-                "a_control_server_dies_with_a_harness_that_was_killed_outright",
-                "no nvim on PATH or at $VIEW_NVIM_BIN",
-            );
-            return;
-        }
-        let mut harness = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["the_intermediate_parent", "--exact", "--nocapture"])
-            .env(INTERMEDIATE, "1")
-            // the park above reads this, so it stays open rather than
-            // answering EOF the moment the case starts
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("re-exec this test binary as the intermediate harness");
-        let reader = std::io::BufReader::new(harness.stderr.take().unwrap());
-        let server = reader
-            .lines()
-            .map_while(Result::ok)
-            .find_map(|line| {
-                line.strip_prefix(PID_MARKER)
-                    .and_then(|pid| pid.trim().parse::<u32>().ok())
-            })
-            .unwrap_or_else(|| {
-                // the intermediate parked on a pipe this process holds, so it
-                // would leave on its own once the panic drops it; killed here
-                // anyway, because a case that failed before the kill it exists
-                // to perform should not also be the one leaving a live server
-                let _ = harness.kill();
-                let _ = harness.wait();
-                panic!("the intermediate harness must report the pid of the server it started")
-            });
-        assert!(
-            live(server),
-            "the server was already gone before its harness was killed, so nothing below is \
-             evidence about the kill"
+    if nvim_bin().is_none() {
+        view_test_support::announce_skip(
+            "a_control_server_dies_with_a_harness_that_was_killed_outright",
+            "no nvim on PATH or at $VIEW_NVIM_BIN",
         );
+        return;
+    }
+    let mut harness = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["the_intermediate_parent", "--exact", "--nocapture"])
+        .env(INTERMEDIATE, "1")
+        // the park above reads this, so it stays open rather than
+        // answering EOF the moment the case starts
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("re-exec this test binary as the intermediate harness");
+    let reader = std::io::BufReader::new(harness.stderr.take().unwrap());
+    let server = reader
+        .lines()
+        .map_while(Result::ok)
+        .find_map(|line| {
+            line.strip_prefix(PID_MARKER)
+                .and_then(|pid| pid.trim().parse::<u32>().ok())
+        })
+        .unwrap_or_else(|| {
+            // the intermediate parked on a pipe this process holds, so it
+            // would leave on its own once the panic drops it; killed here
+            // anyway, because a case that failed before the kill it exists
+            // to perform should not also be the one leaving a live server
+            let _ = harness.kill();
+            let _ = harness.wait();
+            panic!("the intermediate harness must report the pid of the server it started")
+        });
+    assert!(
+        live(server),
+        "the server was already gone before its harness was killed, so nothing below is \
+         evidence about the kill"
+    );
 
-        harness
-            .kill()
-            .expect("kill the intermediate harness outright");
-        harness.wait().expect("reap the intermediate harness");
+    harness
+        .kill()
+        .expect("kill the intermediate harness outright");
+    harness.wait().expect("reap the intermediate harness");
 
-        let deadline = std::time::Instant::now() + view_test_support::host_deadline(REAPED);
-        while live(server) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the control server {server} outlived the harness that started it, with no \
-                 terminal and no socket peer left to end it"
-            );
-            std::thread::sleep(POLL);
-        }
+    let deadline = std::time::Instant::now() + view_test_support::host_deadline(REAPED);
+    while live(server) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the control server {server} outlived the harness that started it, with no \
+             terminal and no socket peer left to end it"
+        );
+        std::thread::sleep(POLL);
     }
 }
 

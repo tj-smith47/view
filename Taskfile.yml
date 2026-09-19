@@ -70,9 +70,11 @@ tasks:
       # fails on Windows. This is that arm's mirror image, and the reason
       # it is three named libs rather than the workspace: view-ai's ureq
       # pulls ring, whose build refuses windows-msvc without `lib.exe`,
-      # and the crates carrying the unix fences are these
+      # and the crates carrying the unix fences are these. view-proc and
+      # view-test-support are on it because each carries a Windows arm no
+      # other leg compiles: the job object, and the process-table probe
       - rustup target add x86_64-pc-windows-msvc
-      - cargo clippy -p view-core -p view-engine -p view-tui --lib --target x86_64-pc-windows-msvc -- -D warnings
+      - cargo clippy -p view-core -p view-engine -p view-tui -p view-proc -p view-test-support --lib --target x86_64-pc-windows-msvc -- -D warnings
 
   test:
     desc: Run the full test suite (requires nvim >= 0.11 on PATH)

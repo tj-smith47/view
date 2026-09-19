@@ -2674,6 +2674,7 @@ dependencies = [
  "view-engine",
  "view-native",
  "view-oracle",
+ "view-proc",
  "view-surface",
  "view-test-support",
  "view-tui",

@@ -518,7 +518,7 @@ crates/view-oracle/src/compat.rs 4 probe subprocesses and the plugin-cache boots
 crates/view-oracle/src/hang.rs 1 a taskkill, waited on to completion
 crates/view-oracle/src/pty.rs 2 the pty funnel: setsid and TIOCSCTTY make the child a session leader, so the master closing delivers SIGHUP
 crates/view-oracle/src/remote.rs 1 a stub ssh client, waited on to completion
-crates/view-proc/src/lib.rs 3 the anchor thread every tied spawn forks from, which lives as long as the process does, and the watcher off Linux, which is the tie itself and ends on the pipe this process closes by ending
+crates/view-proc/src/lib.rs 4 the anchor thread every tied spawn forks from, which lives as long as the process does, and the watcher off Linux, which is the tie itself and ends on the pipe this process closes by ending, plus the thread that builds it ahead of the first spawn
 crates/view-test-support/src/lib.rs 3 a sysctl read and the two process-table probes off Linux, each waited on to completion
 crates/view/src/ai_context_worker.rs 1 a worker thread, not a process
 crates/view/src/clipboard.rs 2 worker threads, not processes
