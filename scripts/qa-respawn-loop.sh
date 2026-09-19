@@ -27,7 +27,18 @@
 #                     than the half-second shutdown backstop and view has to
 #                     kill a process whose leave nvim already announced
 #
-# Usage: scripts/qa-respawn-loop.sh [--runs N] [--shape SHAPE]
+# Three more shapes end the session from outside instead of from the command
+# line, which is the other half of the question: a `:qa!` runs view's own
+# teardown, and a signal is the ending that may not. Each takes `--signal`,
+# so the pair TERM (view's own fatal-signal path) and KILL (no teardown at
+# all, the parent-death tie alone) is measured at the same three points:
+#
+#   --shape signal-preattach  signalled as soon as the engine child exists,
+#                             before the screen has settled
+#   --shape signal-settled    signalled at the settled screen
+#   --shape signal-editing    signalled with an `:e` in flight
+#
+# Usage: scripts/qa-respawn-loop.sh [--runs N] [--shape SHAPE] [--signal SIG]
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -45,12 +56,18 @@ KEEP=${KEEP:-0}
 
 RUNS=30
 SHAPE=plain
+SIGNAL=TERM
 SEED='qa-respawn seed line'
 DIRTY='one more line'
 COLS=120
 ROWS=40
 SETTLE_BOUND=45
 EXIT_BOUND=25
+# What a signalled run asserts: the engine child is out of the process table
+# this long after the process that owns it went away. An engine wedged past
+# noticing its closed pipe never leaves on its own, so a bound here is the
+# whole assertion rather than a convenience.
+REAP_BOUND=5
 POLL=0.2
 EXITED=0
 RESPAWNED=0
@@ -102,6 +119,26 @@ still_running() {
     printf '%s' "$live"
 }
 
+# The view a pane is running, or nothing. The pane runs the wrapper shell,
+# so view is its child rather than the pane process itself.
+view_pid_of() {
+    local run_pid
+    run_pid=$(tmux list-panes -t "$1" -F '#{pane_pid}' 2>/dev/null | head -1 || true)
+    [ -n "$run_pid" ] || return 0
+    pgrep -P "$run_pid" -x view 2>/dev/null | head -1 || true
+}
+
+# Whether the session has an engine child yet. The pre-attach shape signals
+# on this rather than on the settled screen: the child exists within
+# milliseconds of launch and the screen settles seconds later, so this is
+# the point where view owns a process it has not finished attaching to.
+engine_appeared() {
+    local view_pid
+    view_pid=$(view_pid_of "$1")
+    [ -n "$view_pid" ] || return 1
+    [ -n "$(engine_children "$view_pid")" ]
+}
+
 pane_holds() {
     local text
     text=$(tmux capture-pane -p -t "$1" 2>/dev/null || true)
@@ -135,6 +172,25 @@ await() {
     return 0
 }
 
+# Waits for every pid named to leave the process table, or for `bound`
+# seconds to pass; 1 on the bound, with the survivors on stdout. This is the
+# signal shapes' assertion: the tie is what the bound is measuring.
+await_reaped() {
+    local bound="$1" start=$SECONDS left
+    shift
+    while :; do
+        left=$(still_running "$@")
+        if [ -z "$left" ]; then
+            return 0
+        fi
+        if [ $((SECONDS - start)) -ge "$bound" ]; then
+            printf '%s' "$left"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+}
+
 # The case runner needs the functions above and none of the session below.
 if [ "${QA_RESPAWN_SOURCED:-0}" = 1 ]; then
     return 0
@@ -144,6 +200,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         (--runs) RUNS=$2; shift 2 ;;
         (--shape) SHAPE=$2; shift 2 ;;
+        (--signal) SIGNAL=$2; shift 2 ;;
         (*) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -153,6 +210,11 @@ done
 LEAVE_EVENT=''
 BURN_NS=0
 PRE_BURN=''
+# Which ending a run takes, and where. `quit` is the command line; `signal`
+# is the ending view does not choose, and the columns a quit reads off the
+# log say nothing about it.
+ENDING=quit
+KILL_AT=''
 case "$SHAPE" in
     (plain|modified) ;;
     (leavepre) LEAVE_EVENT=VimLeavePre; BURN_NS=1000000000 ;;
@@ -164,7 +226,17 @@ case "$SHAPE" in
         BURN_NS=2000000000
         PRE_BURN='pcall(vim.fn.chanclose, 1)'
         ;;
+    (signal-preattach) ENDING=signal; KILL_AT=preattach ;;
+    (signal-settled) ENDING=signal; KILL_AT=settled ;;
+    (signal-editing) ENDING=signal; KILL_AT=editing ;;
     (*) printf 'unknown shape: %s\n' "$SHAPE" >&2; exit 2 ;;
+esac
+# A signal nobody sends used to be accepted and then refused by `kill` once
+# per run, which reads as thirty failures of the loop rather than one bad
+# argument.
+case "$SIGNAL" in
+    (TERM|KILL) ;;
+    (*) printf 'unknown signal: %s\n' "$SIGNAL" >&2; exit 2 ;;
 esac
 EXIT_BOUND=$((EXIT_BOUND + BURN_NS / 1000000000))
 
@@ -226,12 +298,13 @@ LUA
 fi
 
 one_run() {
-    local idx="$1" root session run_pid view_pid engine_pids after_pids left verdict
+    local idx="$1" root session ready view_pid engine_pids after_pids left verdict
     session="view-qa-$$-$idx"
     root=$(mktemp -d "$SCRATCH/view-qa-XXXXXX")
     ROOTS="$ROOTS $root"
     SESSIONS="$SESSIONS $session"
     printf '%s\n' "$SEED" >"$root/scratch.txt"
+    printf '%s\n' "$SEED" >"$root/other.txt"
 
     cat >"$root/run.sh" <<EOF
 env VIEW_LOG=$root/view.log XDG_CONFIG_HOME=$CONFIG_HOME \\
@@ -244,7 +317,11 @@ EOF
     tmux kill-session -t "$session" 2>/dev/null || true
     tmux new-session -d -s "$session" -x "$COLS" -y "$ROWS" -c "$root" "sh $root/run.sh"
 
-    if ! await pane_settled "$session" "$SETTLE_BOUND"; then
+    # the pre-attach shape ends the run before there is a screen to read, so
+    # what it waits for is the child itself
+    ready=pane_settled
+    [ "$KILL_AT" = preattach ] && ready=engine_appeared
+    if ! await "$ready" "$session" "$SETTLE_BOUND"; then
         tmux capture-pane -p -t "$session" >"$EVIDENCE/no-settle-$SHAPE-$idx.screen" 2>/dev/null || true
         tmux kill-session -t "$session" 2>/dev/null || true
         NO_SETTLE=$((NO_SETTLE + 1))
@@ -252,11 +329,14 @@ EOF
         return 0
     fi
 
-    # the pane runs the shell above, so view is its child rather than the
-    # pane process itself
-    run_pid=$(tmux list-panes -t "$session" -F '#{pane_pid}' | head -1 || true)
-    view_pid=$(pgrep -P "$run_pid" -x view | head -1 || true)
+    view_pid=$(view_pid_of "$session")
     engine_pids=$(engine_children "$view_pid")
+    if [ -z "$view_pid" ]; then
+        tmux kill-session -t "$session" 2>/dev/null || true
+        NO_SETTLE=$((NO_SETTLE + 1))
+        printf 'run %-3s no-view\n' "$idx"
+        return 0
+    fi
 
     if [ "$SHAPE" = modified ]; then
         tmux send-keys -t "$session" -l "i$DIRTY"
@@ -264,12 +344,31 @@ EOF
         await pane_dirty "$session" 10 || true
     fi
 
-    tmux send-keys -t "$session" -l ':qa!'
-    tmux send-keys -t "$session" Enter
+    case "$ENDING" in
+        (quit)
+            tmux send-keys -t "$session" -l ':qa!'
+            tmux send-keys -t "$session" Enter
+            ;;
+        (signal)
+            # sent and not awaited: the point of this shape is an ending
+            # that lands while view is answering something else
+            if [ "$KILL_AT" = editing ]; then
+                tmux send-keys -t "$session" -l ":e $root/other.txt"
+                tmux send-keys -t "$session" Enter
+            fi
+            kill -"$SIGNAL" "$view_pid" 2>/dev/null || true
+            ;;
+    esac
 
     await exit_recorded "$root/exit.code" "$EXIT_BOUND" || true
 
-    if grep -q 'restarted pid=' "$root/view.log" 2>/dev/null; then
+    if [ "$ENDING" = signal ]; then
+        if [ -f "$root/exit.code" ]; then
+            verdict=exited
+        else
+            verdict=still-running
+        fi
+    elif grep -q 'restarted pid=' "$root/view.log" 2>/dev/null; then
         verdict=respawned
     elif [ -f "$root/exit.code" ]; then
         verdict=exited
@@ -297,26 +396,34 @@ EOF
         cp "$root/view.log" "$EVIDENCE/run-$SHAPE-$idx.log" 2>/dev/null || true
     fi
 
-    # whether supervision reached a verdict at all: the shape that burns
-    # past the wedge threshold is only measuring what it claims to when
-    # this column moves
-    if grep -q 'supervision verdict' "$root/view.log" 2>/dev/null; then
-        WEDGED=$((WEDGED + 1))
-    fi
+    # The three columns below read a quit out of the log, and a signalled
+    # run writes none of them: an engine whose owner was killed outright
+    # announces no leave and nothing in view is left to force a shutdown or
+    # to reach a verdict. Counted there, every signalled run would report an
+    # unannounced quit it never attempted.
+    if [ "$ENDING" = quit ]; then
+        # whether supervision reached a verdict at all: the shape that burns
+        # past the wedge threshold is only measuring what it claims to when
+        # this column moves
+        if grep -q 'supervision verdict' "$root/view.log" 2>/dev/null; then
+            WEDGED=$((WEDGED + 1))
+        fi
 
-    # whether view had to kill the child: the shape that makes an engine
-    # outlive its own channel is only measuring what it claims to when this
-    # column moves, and every other shape should leave it at zero
-    if grep -q 'shutdown forced' "$root/view.log" 2>/dev/null; then
-        FORCED=$((FORCED + 1))
-        cp "$root/view.log" "$EVIDENCE/forced-$SHAPE-$idx.log" 2>/dev/null || true
-    fi
+        # whether view had to kill the child: the shape that makes an engine
+        # outlive its own channel is only measuring what it claims to when
+        # this column moves, and every other shape should leave it at zero
+        if grep -q 'shutdown forced' "$root/view.log" 2>/dev/null; then
+            FORCED=$((FORCED + 1))
+            cp "$root/view.log" "$EVIDENCE/forced-$SHAPE-$idx.log" 2>/dev/null || true
+        fi
 
-    # the announcement the whole predicate rests on, as its own column: a
-    # run that exits without one exits for a reason nothing here recorded
-    if ! grep -q 'announced: nvim is leaving' "$root/view.log" 2>/dev/null; then
-        UNANNOUNCED=$((UNANNOUNCED + 1))
-        cp "$root/view.log" "$EVIDENCE/unannounced-$SHAPE-$idx.log" 2>/dev/null || true
+        # the announcement the whole predicate rests on, as its own column:
+        # a run that exits without one exits for a reason nothing here
+        # recorded
+        if ! grep -q 'announced: nvim is leaving' "$root/view.log" 2>/dev/null; then
+            UNANNOUNCED=$((UNANNOUNCED + 1))
+            cp "$root/view.log" "$EVIDENCE/unannounced-$SHAPE-$idx.log" 2>/dev/null || true
+        fi
     fi
 
     # sampled again here, not only before the quit: a respawn's engine is a
@@ -324,8 +431,17 @@ EOF
     # every process this run is answerable for except the one a respawn
     # leaves behind -- which is the process the column exists to find
     after_pids=$(engine_children "$view_pid")
-    # shellcheck disable=SC2086
-    left=$(still_running "$view_pid" $engine_pids $after_pids)
+    # A signalled run is given the reaping bound before its survivors are
+    # counted, because that bound is what the shape asserts; a quit is read
+    # at the instant its exit was recorded, which is what it has always
+    # asserted.
+    if [ "$ENDING" = signal ]; then
+        # shellcheck disable=SC2086
+        left=$(await_reaped "$REAP_BOUND" "$view_pid" $engine_pids $after_pids) || true
+    else
+        # shellcheck disable=SC2086
+        left=$(still_running "$view_pid" $engine_pids $after_pids)
+    fi
     if [ -n "${left# }" ]; then
         STRAYS=$((STRAYS + 1))
         printf 'run %-3s %-13s strays:%s\n' "$idx" "$verdict" "$left"
@@ -339,7 +455,8 @@ EOF
     rm -rf "$root"
 }
 
-printf 'shape=%s runs=%s config=%s bin=%s\n' "$SHAPE" "$RUNS" "$CONFIG_HOME" "$VIEW_BIN"
+printf 'shape=%s signal=%s runs=%s config=%s bin=%s\n' \
+    "$SHAPE" "$SIGNAL" "$RUNS" "$CONFIG_HOME" "$VIEW_BIN"
 i=1
 while [ "$i" -le "$RUNS" ]; do
     one_run "$i"

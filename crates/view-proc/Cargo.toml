@@ -19,3 +19,18 @@ rustix = { version = "1", default-features = false, features = [
     # race, both raw syscalls a pre_exec closure may make
     "process",
 ] }
+
+# The job object the children are tied by. Scoped to Windows for the reason
+# rustix is scoped to Linux: no other target calls any of it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    # CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject
+    "Win32_System_JobObjects",
+    # GetCurrentProcess, whose pseudo-handle names this process to the job
+    "Win32_System_Threading",
+    # CloseHandle, for a job this process could not join
+    "Win32_Foundation",
+    # SECURITY_ATTRIBUTES, which CreateJobObjectW takes a pointer to and
+    # which this call passes as null
+    "Win32_Security",
+] }

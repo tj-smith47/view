@@ -30,7 +30,6 @@ const BUSY_NANOS: u64 = 30_000_000_000;
 
 /// How long the orphan is given to leave the process table once its parent
 /// is gone.
-#[cfg(target_os = "linux")]
 const REAPED: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The parent half of the pin, run in a re-executed copy of this binary so
@@ -79,64 +78,97 @@ fn the_intermediate_parent() {
     let _ = std::io::stdin().read(&mut byte);
 }
 
+/// Starts the intermediate, waits for the engine it wedges, ends it with
+/// `end`, and asserts the orphan leaves the process table inside [`REAPED`].
+///
+/// One driver for both endings below: what differs between them is a single
+/// call, and the half that decides whether the pin proves anything -- the
+/// engine live before the ending, the deadline after it -- is the same
+/// either way.
+fn a_wedged_engine_is_ended_by(end: fn(&mut std::process::Child), ending: &str) {
+    use std::io::BufRead;
+
+    let mut parent = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["the_intermediate_parent", "--exact", "--nocapture"])
+        .env(INTERMEDIATE, "1")
+        // held open for the whole test: the intermediate parks on a read of
+        // this pipe, so the only thing that ends it is the ending below
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let reader = std::io::BufReader::new(parent.stderr.take().unwrap());
+    let engine_pid = reader
+        .lines()
+        .map_while(Result::ok)
+        .find_map(|line| {
+            line.strip_prefix(PID_MARKER)
+                .and_then(|pid| pid.trim().parse::<u32>().ok())
+        })
+        .expect("the intermediate must report the pid of the engine it wedged");
+    assert!(
+        common::pid_in_process_table(engine_pid),
+        "the engine was already gone before its parent was \
+         ended, so nothing below is evidence about the ending"
+    );
+
+    end(&mut parent);
+    parent.wait().unwrap();
+
+    let deadline = std::time::Instant::now() + view_test_support::host_deadline(REAPED);
+    while common::pid_in_process_table(engine_pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the engine outlived the parent that owned it ({ending}): a \
+             child wedged in synchronous Lua reads no closed pipe and \
+             ignores SIGTERM, so without a tie it spins until something \
+             kills it"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// A wedged engine dies with the parent that owns it, even when that parent
 /// dies by `SIGKILL` and runs no destructor at all.
 ///
-/// Linux only: `PR_SET_PDEATHSIG` is what covers this, and no equivalent is
-/// armed on the other two platforms (see `arm_parent_death`).
+/// Three mechanisms, one claim: `PR_SET_PDEATHSIG` on Linux, the watcher
+/// process off it, and the job object on Windows (see
+/// `view_proc::spawn_tied_to_this_process`). The case is the same on all of
+/// them because what it asserts is the claim and not the mechanism.
 #[test]
 fn a_wedged_engine_dies_with_a_parent_that_was_killed_outright() {
-    #[cfg(not(target_os = "linux"))]
-    {
-        view_test_support::announce_skip(
-            "a_wedged_engine_dies_with_a_parent_that_was_killed_outright",
-            "no parent-death signal is armed off Linux",
-        );
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::io::BufRead;
+    a_wedged_engine_is_ended_by(
+        |parent| {
+            parent.kill().unwrap();
+        },
+        "killed outright",
+    );
+}
 
-        let mut parent = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["the_intermediate_parent", "--exact", "--nocapture"])
-            .env(INTERMEDIATE, "1")
-            // held open for the whole test: the intermediate parks on a read of
-            // this pipe, so the only thing that ends it is the kill below
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let reader = std::io::BufReader::new(parent.stderr.take().unwrap());
-        let engine_pid = reader
-            .lines()
-            .map_while(Result::ok)
-            .find_map(|line| {
-                line.strip_prefix(PID_MARKER)
-                    .and_then(|pid| pid.trim().parse::<u32>().ok())
-            })
-            .expect("the intermediate must report the pid of the engine it wedged");
-        assert!(
-            common::pid_in_process_table(engine_pid),
-            "the engine was already gone before its parent was \
-         killed, so nothing below is evidence about the kill"
-        );
-
-        parent.kill().unwrap();
-        parent.wait().unwrap();
-
-        let deadline = std::time::Instant::now() + view_test_support::host_deadline(REAPED);
-        while common::pid_in_process_table(engine_pid) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the engine outlived the parent that owned it: a child \
-             wedged in synchronous Lua reads no closed pipe and ignores \
-             SIGTERM, so without a parent-death signal it spins until \
-             something kills it"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    }
+/// The same, for the ending a terminal or a service manager actually sends.
+///
+/// A `view README.md` asked to stop this way left its engine alive and
+/// reparented to init once (ledger, 2026-09-04). `SIGKILL` and `SIGTERM`
+/// reach the tie differently -- the first runs no code of the process at
+/// all, the second runs its teardown first and then ends every thread it
+/// had, including the one the parent-death signal is named against -- so a
+/// pin on one is no evidence about the other.
+#[cfg(unix)]
+#[test]
+fn a_wedged_engine_dies_with_a_parent_that_was_asked_to_stop() {
+    a_wedged_engine_is_ended_by(
+        |parent| {
+            // the signal through `kill(1)`: `Child::kill` sends SIGKILL and
+            // nothing in std sends any other signal
+            let sent = std::process::Command::new("kill")
+                .args(["-TERM", &parent.id().to_string()])
+                .status()
+                .expect("kill must run");
+            assert!(sent.success(), "the intermediate must take the signal");
+        },
+        "asked to stop",
+    );
 }
 
 /// An engine spawned from a thread that then exits keeps running.

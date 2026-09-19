@@ -82,6 +82,51 @@ case "$said" in
     (*) report fail 'an unknown shape is refused by name' "said:$said" ;;
 esac
 
+# Graded the same way and for the same reason: a signal name `kill` refuses
+# is refused once here, where an unvalidated one is refused once per run and
+# reads as thirty failures of the measurement.
+said=$("$LOOP" --shape signal-settled --signal NOPE --runs 1 2>&1 >/dev/null || true)
+case "$said" in
+    (*"unknown signal: NOPE"*) report ok 'an unknown signal is refused by name' ;;
+    (*) report fail 'an unknown signal is refused by name' "said:$said" ;;
+esac
+
+# `await_reaped` is the signal shapes' whole assertion, so both of its
+# answers are graded: a pid that never leaves has to come back on the bound
+# naming itself, and one already gone has to come back at once saying
+# nothing. A wait that returned 0 on the bound would report every stray as
+# a clean reaping.
+sleep 30 &
+FIXTURE=$!
+if left=$(await_reaped 1 "$FIXTURE"); then
+    report fail 'a pid that never leaves is reported on the bound' "left:$left"
+else
+    case " $left " in
+        (*" $FIXTURE "*) report ok 'a pid that never leaves is reported on the bound' ;;
+        (*) report fail 'a pid that never leaves is reported on the bound' "left:$left" ;;
+    esac
+fi
+kill "$FIXTURE" 2>/dev/null || true
+wait "$FIXTURE" 2>/dev/null || true
+if left=$(await_reaped 1 "$FIXTURE"); then
+    if [ -z "$left" ]; then
+        report ok 'a reaped pid ends the wait saying nothing'
+    else
+        report fail 'a reaped pid ends the wait saying nothing' "left:$left"
+    fi
+else
+    report fail 'a reaped pid ends the wait saying nothing' "left:$left"
+fi
+
+# The pre-attach shape waits on this rather than on a screen, and a session
+# name nobody started has to answer no: answering yes would signal a pid the
+# loop never watched start.
+if engine_appeared 'view-qa-no-such-session'; then
+    report fail 'a session that does not exist has no engine' 'said yes'
+else
+    report ok 'a session that does not exist has no engine'
+fi
+
 if [ "$FAILED" -eq 0 ]; then
     printf 'qa-respawn-loop cases: ok\n'
     exit 0

@@ -32,11 +32,9 @@ const INTERMEDIATE: &str = "VIEW_BENCH_REMOTE_UI_INTERMEDIATE";
 /// How long the server is given to leave once its harness has been killed.
 ///
 /// The discriminator, not slack: an unreaped server does not leave at all.
-#[cfg(target_os = "linux")]
 const REAPED: Duration = Duration::from_secs(3);
 
 /// The step between two looks at the process table.
-#[cfg(target_os = "linux")]
 const POLL: Duration = Duration::from_millis(10);
 
 /// How long a keystroke is given to come back on the client's screen,
@@ -180,18 +178,11 @@ fn the_intermediate_parent() {
 /// about a dead harness reaches it on its own: a headless nvim left holding
 /// its socket is a stray that lives until the host is rebooted.
 ///
-/// Linux only: `PR_SET_PDEATHSIG` is what covers this, and the other two
-/// platforms have nothing armed for it (see `view_proc::spawn_tied_to_this_process`).
+/// Three mechanisms, one claim: `PR_SET_PDEATHSIG` on Linux, the watcher
+/// process off it, and the job object on Windows (see
+/// `view_proc::spawn_tied_to_this_process`).
 #[test]
 fn a_control_server_dies_with_a_harness_that_was_killed_outright() {
-    #[cfg(not(target_os = "linux"))]
-    {
-        view_test_support::announce_skip(
-            "a_control_server_dies_with_a_harness_that_was_killed_outright",
-            "no parent-death signal is armed off Linux",
-        );
-    }
-    #[cfg(target_os = "linux")]
     {
         use std::io::BufRead;
 
@@ -253,7 +244,6 @@ fn a_control_server_dies_with_a_harness_that_was_killed_outright() {
 }
 
 /// Whether the operating system still holds a process-table entry for `pid`.
-#[cfg(target_os = "linux")]
 fn live(pid: u32) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
+    view_test_support::pid_in_process_table(pid)
 }

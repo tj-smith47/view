@@ -489,8 +489,8 @@ new_tied_case() {
   plant_spawns 'crates/view-oracle/src/hang.rs' 1
   plant_spawns 'crates/view-oracle/src/pty.rs' 2
   plant_spawns 'crates/view-oracle/src/remote.rs' 1
-  plant_spawns 'crates/view-proc/src/lib.rs' 1
-  plant_spawns 'crates/view-test-support/src/lib.rs' 1
+  plant_spawns 'crates/view-proc/src/lib.rs' 3
+  plant_spawns 'crates/view-test-support/src/lib.rs' 3
   plant_spawns 'crates/view/src/ai_context_worker.rs' 1
   plant_spawns 'crates/view/src/clipboard.rs' 2
   plant_spawns 'crates/view/src/remote_guard.rs' 2

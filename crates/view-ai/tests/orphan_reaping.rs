@@ -12,7 +12,6 @@
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::Duration;
-#[cfg(target_os = "linux")]
 use std::time::Instant;
 
 use view_ai::{AgentLaunch, AiSession};
@@ -37,7 +36,6 @@ const WAIT: Duration = Duration::from_secs(10);
 
 /// How long the orphan is given to leave the process table once its owner
 /// is gone.
-#[cfg(target_os = "linux")]
 const REAPED: Duration = Duration::from_secs(3);
 
 /// The owner half of the pin, run in a re-executed copy of this binary so
@@ -107,18 +105,12 @@ fn next_event(rx: &Receiver<Msg>, what: &str) -> AiEvent {
 /// A deaf adapter dies with the editor that owns it, even when that editor
 /// dies by `SIGKILL` and runs no destructor at all.
 ///
-/// Linux only: `PR_SET_PDEATHSIG` is what covers this, and no equivalent is
-/// armed on the other two platforms (see `view_proc::spawn_tied_to_this_process`).
+/// Three mechanisms, one claim: `PR_SET_PDEATHSIG` on Linux, the watcher
+/// process off it, and the job object on Windows -- the adapter reaches the
+/// last of those by being a descendant rather than by how it was spawned
+/// (see `view_proc::spawn_tied_to_this_process`).
 #[test]
 fn a_deaf_adapter_dies_with_an_owner_that_was_killed_outright() {
-    #[cfg(not(target_os = "linux"))]
-    {
-        view_test_support::announce_skip(
-            "a_deaf_adapter_dies_with_an_owner_that_was_killed_outright",
-            "no parent-death signal is armed off Linux",
-        );
-    }
-    #[cfg(target_os = "linux")]
     {
         use std::io::BufRead;
 
@@ -344,7 +336,6 @@ fn a_dropped_session_collects_the_adapter_it_signalled() {
 }
 
 /// Whether the operating system still holds a process-table entry for `pid`.
-#[cfg(target_os = "linux")]
 fn live(pid: u32) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
+    view_test_support::pid_in_process_table(pid)
 }

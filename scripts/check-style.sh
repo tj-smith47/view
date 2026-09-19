@@ -502,7 +502,7 @@ crates/view-oracle/tests/smoke.rs 2 a --nvim-bin wrapper spawned through that re
 # Each row is a path, its pinned number of sites, and how those sites cannot
 # leave a stray.
 TIED_SPAWN_SITES='
-crates/view-ai/src/acp/session.rs 5 the agent adapter, tied on unix; the windows arm keeps tokio own spawn, which no parent-death signal covers there; plus the thread that waits out a signalled adapter and the task that drives one
+crates/view-ai/src/acp/session.rs 5 the agent adapter, tied through view-proc on unix and by the job object it joins on windows, where tokio owns the pipes and the spawn; plus the thread that waits out a signalled adapter and the task that drives one
 crates/view-ai/src/provision.rs 3 an npm install, bounded by its own deadline and killed on it, and the thread that reads it out
 crates/view-ai/src/watch.rs 5 a git ls-files, waited on with a deadline and killed on it, and the watcher threads around it
 crates/view-bench/src/remote_ui.rs 1 the headless control server, tied: it has no pty to hang up and no controlling terminal
@@ -518,8 +518,8 @@ crates/view-oracle/src/compat.rs 4 probe subprocesses and the plugin-cache boots
 crates/view-oracle/src/hang.rs 1 a taskkill, waited on to completion
 crates/view-oracle/src/pty.rs 2 the pty funnel: setsid and TIOCSCTTY make the child a session leader, so the master closing delivers SIGHUP
 crates/view-oracle/src/remote.rs 1 a stub ssh client, waited on to completion
-crates/view-proc/src/lib.rs 1 the anchor thread every tied spawn forks from, which lives as long as the process does
-crates/view-test-support/src/lib.rs 1 a sysctl read, waited on to completion
+crates/view-proc/src/lib.rs 3 the anchor thread every tied spawn forks from, which lives as long as the process does, and the watcher off Linux, which is the tie itself and ends on the pipe this process closes by ending
+crates/view-test-support/src/lib.rs 3 a sysctl read and the two process-table probes off Linux, each waited on to completion
 crates/view/src/ai_context_worker.rs 1 a worker thread, not a process
 crates/view/src/clipboard.rs 2 worker threads, not processes
 crates/view/src/remote_guard.rs 2 an ssh probe, bounded by its own deadline and killed on it
