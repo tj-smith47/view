@@ -789,9 +789,11 @@ fn intake(
             // `qa!` send is a harmless no-op and the first `try_wait`
             // typically finds the child already exited.
             let exit = engine.wait_exit();
-            let recoverable = model
-                .supervision
-                .note_engine_stop(exit, engine.handle.announced_exit());
+            let announced = engine.handle.announced_exit();
+            let recoverable = model.supervision.note_engine_stop(exit, announced);
+            crate::vlog::log_with("engine", || {
+                format!("stop from the reader announced={announced} recoverable={recoverable}")
+            });
             // stashed on the model rather than reported here: this loop
             // runs behind the terminal's raw-mode alternate screen, so
             // `main` reports it only after `run` returns and the

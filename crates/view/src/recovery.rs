@@ -485,6 +485,9 @@ pub(crate) fn resolve<E: EngineOps>(
                 state.write_lost = true;
                 return None;
             };
+            crate::vlog::log_with("engine", || {
+                format!("stop from a failed write announced={announced_exit}")
+            });
             if model.supervision.note_engine_stop(exit, announced_exit) {
                 state.connection_lost = true;
                 None

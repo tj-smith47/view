@@ -1467,8 +1467,10 @@ impl Engine {
     /// it, waiting out the reader's own publish first (see
     /// [`EngineHandle::wait_until_settled`](crate::handle::EngineHandle::wait_until_settled)).
     fn settled_report(&mut self, exit: ExitInfo) -> (ExitInfo, bool) {
-        self.handle.wait_until_settled(Self::READER_SETTLE);
-        (exit, self.handle.announced_exit())
+        let settled = self.handle.wait_until_settled(Self::READER_SETTLE);
+        let announced = self.handle.announced_exit();
+        crate::diagnose(|| format!("stop resolved settled={settled} announced={announced}"));
+        (exit, announced)
     }
 
     /// Resolves the engine's exit status into an [`ExitInfo`], for the
@@ -2941,6 +2943,7 @@ fn graceful_kill(
             status,
         });
     }
+    crate::diagnose(|| "shutdown forced: the child outlasted the timeout".to_string());
     child.kill()?;
     Ok(ShutdownOutcome {
         path: ShutdownPath::Forced,

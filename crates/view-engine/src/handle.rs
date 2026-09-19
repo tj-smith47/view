@@ -235,6 +235,18 @@ enum Waiter {
 /// never be resolved (the original hang this type exists to close).
 struct PendingState {
     waiters: HashMap<u32, Waiter>,
+    /// Whether the reader thread has finished with the stream: every byte
+    /// the peer wrote is decoded and every finding it carried is published.
+    ///
+    /// A flag of its own rather than the `closed` one below, because the
+    /// two answer different questions and only this one answers the
+    /// question [`EngineHandle::wait_until_settled`] is asked. `closed` is
+    /// set by whichever thread discovers the connection is gone, and the
+    /// writer is as often that thread as the reader: a write that lost its
+    /// pipe sets it while the reader is still working through the bytes
+    /// that say why the pipe went. A wait that ended there reported the
+    /// reader settled when it had published nothing.
+    reader_done: Arc<AtomicBool>,
     /// Shared with [`EngineHandle::is_closed`] rather than owned outright,
     /// so an observer that must not wait on this lock -- a paint loop
     /// asking whether the connection is still there is asking precisely
@@ -323,10 +335,11 @@ pub struct EngineHandle {
     next_msgid: Arc<AtomicU32>,
     pending: Pending,
     closed: Arc<AtomicBool>,
+    reader_done: Arc<AtomicBool>,
     announced_exit: Arc<AtomicBool>,
-    /// Signalled once by whichever of the two threads discovers the
-    /// connection is gone, right after it publishes `closed`. What a caller
-    /// resolving a stop waits on when it needs the reader's own findings
+    /// Signalled when the reader thread finishes with the stream, and again
+    /// by whichever thread publishes `closed`. What a caller resolving a
+    /// stop waits on when it needs the reader's own findings
     /// (`announced_exit`) and not merely the child's exit status.
     settled: Arc<Condvar>,
     outbox: Arc<crate::outbox::Outbox>,
@@ -380,6 +393,7 @@ impl Clone for EngineHandle {
             next_msgid: Arc::clone(&self.next_msgid),
             pending: Arc::clone(&self.pending),
             closed: Arc::clone(&self.closed),
+            reader_done: Arc::clone(&self.reader_done),
             announced_exit: Arc::clone(&self.announced_exit),
             settled: Arc::clone(&self.settled),
             outbox: Arc::clone(&self.outbox),
@@ -501,6 +515,7 @@ impl EngineHandle {
         #[cfg(any(unix, windows))] pipe: Option<crate::outbox::PipeHandle>,
     ) -> Self {
         let closed = Arc::new(AtomicBool::new(false));
+        let reader_done = Arc::new(AtomicBool::new(false));
         let announced_exit = Arc::new(AtomicBool::new(false));
         let settled = Arc::new(Condvar::new());
         let attached_bufs: Arc<Mutex<HashMap<u64, AttachedBuf>>> =
@@ -509,6 +524,7 @@ impl EngineHandle {
             Arc::new(Mutex::new(HashMap::new()));
         let pending: Pending = Arc::new(Mutex::new(PendingState {
             waiters: HashMap::new(),
+            reader_done: Arc::clone(&reader_done),
             closed: Arc::clone(&closed),
         }));
         let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>();
@@ -529,6 +545,7 @@ impl EngineHandle {
                     // recovery): fail every pending waiter instead of
                     // leaving them to hang on a response that can never
                     // arrive, and reject every future request up front
+                    crate::diagnose(|| "closed by the writer: the pipe is gone".to_string());
                     close_and_drain(&writer_pending, &writer_settled);
                     break;
                 }
@@ -541,6 +558,7 @@ impl EngineHandle {
         let reader_hidden_bufs = Arc::clone(&hidden_bufs);
         let reader_pump = pump;
         let reader_announced_exit = Arc::clone(&announced_exit);
+        let reader_done_flag = Arc::clone(&reader_done);
         let reader_settled = Arc::clone(&settled);
         std::thread::spawn(move || {
             let mut r = std::io::BufReader::new(reader);
@@ -1101,6 +1119,7 @@ impl EngineHandle {
                             // is wedged, or gone, must not be able to hold an
                             // exiting editor inside `VimLeavePre`.
                             reader_announced_exit.store(true, Ordering::Release);
+                            crate::diagnose(|| "announced: nvim is leaving".to_string());
                             let resp = RpcMessage::Response {
                                 msgid,
                                 error: Value::Nil,
@@ -1174,6 +1193,12 @@ impl EngineHandle {
                     }
                 }
             }
+            // published before the stop is routed and before the drain
+            // below: every finding this thread had to make is made by here,
+            // and the route is a blocking send whose channel a stalled loop
+            // can leave full -- a waiter held behind that would be waiting
+            // on the loop rather than on the reader
+            publish_reader_done(&reader_pending, &reader_settled, &reader_done_flag);
             if let Some(pump) = &reader_pump {
                 // blocking send: the reader is already exiting either way,
                 // and a dropped EngineStopped is unrecoverable, not merely
@@ -1182,6 +1207,7 @@ impl EngineHandle {
                 pump.route_engine_stopped(fatal_reason);
             }
             // engine is gone: fail every in-flight request instead of hanging
+            crate::diagnose(|| "closed by the reader: the stream ended".to_string());
             close_and_drain(&reader_pending, &reader_settled);
         });
         Self {
@@ -1189,6 +1215,7 @@ impl EngineHandle {
             next_msgid: Arc::new(AtomicU32::new(1)),
             pending,
             closed,
+            reader_done,
             announced_exit,
             settled,
             outbox,
@@ -1209,18 +1236,27 @@ impl EngineHandle {
     /// bytes that say why -- and reading the finding then would call an
     /// engine that announced its exit a death and respawn it.
     ///
+    /// What it waits on is the reader thread's own finish, never
+    /// [`is_closed`](Self::is_closed): the closed flag is set by whichever
+    /// thread discovers the connection is gone, and on a failed write that
+    /// thread is the writer. Resting the wait on it answered the one caller
+    /// this exists for with the evidence of the other side of the
+    /// connection, and the wait returned before the reader had decoded
+    /// anything -- which is the exact reading the doc above says it must
+    /// not give.
+    ///
     /// Bounded rather than unbounded: the caller reaches here having already
     /// reaped the child, so the reader is at EOF and its remaining work is a
     /// drain, but a loop that could block forever on a thread that never
     /// wakes is not a trade a paint loop can make.
     pub fn wait_until_settled(&self, timeout: std::time::Duration) -> bool {
-        if self.is_closed() {
+        if self.reader_done.load(Ordering::Acquire) {
             return true;
         }
         let guard = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let (_guard, outcome) = self
             .settled
-            .wait_timeout_while(guard, timeout, |p| !p.closed.load(Ordering::Acquire))
+            .wait_timeout_while(guard, timeout, |p| !p.reader_done.load(Ordering::Acquire))
             .unwrap_or_else(PoisonError::into_inner);
         !outcome.timed_out()
     }
@@ -1917,6 +1953,23 @@ pub(crate) fn saturate_u32(v: u64) -> u32 {
     u32::try_from(v).unwrap_or(u32::MAX)
 }
 
+/// Publishes that the reader thread is done with the stream and wakes
+/// everyone waiting on that fact.
+///
+/// The flag is stored under the same lock a waiter holds while it tests
+/// the predicate, so a waiter that has just found it unset is either still
+/// inside that critical section -- and so has not begun waiting yet -- or
+/// already parked on the condvar and reached by the notification below. A
+/// store outside the lock can land between those two moments, and the
+/// waiter then sleeps out its whole timeout on a condition that already
+/// holds.
+fn publish_reader_done(pending: &Pending, settled: &Condvar, done: &AtomicBool) {
+    let guard = pending.lock().unwrap_or_else(PoisonError::into_inner);
+    done.store(true, Ordering::Release);
+    drop(guard);
+    settled.notify_all();
+}
+
 /// Marks the connection closed and drains every pending waiter with
 /// [`EngineError::Closed`] in one critical section, so a `send_request`
 /// racing this call either lands before that section (and gets drained
@@ -2147,6 +2200,55 @@ mod tests {
             h.announced_exit(),
             "the stop arrived without the announcement that preceded it on \
              the same thread"
+        );
+    }
+
+    /// The stop the failed-write arm resolves: the writer has lost its pipe
+    /// and the reader has published nothing yet. The wait exists for this
+    /// exact ordering, so the writer's own discovery must not answer it --
+    /// and while the reader is held on a stream nobody has written to, the
+    /// announcement it would carry cannot have been decoded yet.
+    #[test]
+    fn a_writer_that_lost_its_pipe_does_not_settle_the_reader() {
+        let (h, _pump, peer_read, mut peer_write) = pumped_peer();
+        // the peer's read end goes, so the very next write this connection
+        // makes fails and the writer thread marks the connection closed
+        drop(peer_read);
+
+        let err = h
+            .request("nvim_get_mode", vec![])
+            .expect_err("a request down a pipe with no reader cannot be answered");
+        assert!(
+            matches!(err, EngineError::Closed),
+            "expected the writer's own close to fail this waiter, got {err:?}"
+        );
+        assert!(
+            h.is_closed(),
+            "the writer had not published the close this test is built on"
+        );
+
+        assert!(
+            !h.wait_until_settled(Duration::from_millis(150)),
+            "the writer's close answered a wait that exists for the reader, \
+             which is still parked on a stream carrying no bytes at all"
+        );
+        assert!(
+            !h.announced_exit(),
+            "nothing had announced anything on this connection"
+        );
+
+        // and the announcement the reader was going to find still settles
+        // it, which is the half that makes the wait worth taking
+        write_request(&mut peer_write, 13, "view_leaving");
+        drop(peer_write);
+        assert!(
+            h.wait_until_settled(view_test_support::host_deadline(Duration::from_secs(2))),
+            "the reader finished and nothing woke the wait"
+        );
+        assert!(
+            h.announced_exit(),
+            "the reader decoded the announcement and the wait still reported \
+             a connection with no finding on it"
         );
     }
 

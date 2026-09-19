@@ -760,18 +760,26 @@ impl SupervisionState {
     /// predicate resting on it leaves supervision inert on Windows -- no
     /// process death there could ever read as a death, and the
     /// `[supervision]` switch would document behavior that platform cannot
-    /// reach. `by_signal` stays as corroboration for the case nvim is denied
-    /// the chance to announce anything at all, which is exactly what a
-    /// `SIGKILL` is.
+    /// reach.
     ///
     /// It also closes the case an exit status never could: nvim ending with
     /// `exit(1)` because its own config threw is announced (`VimLeavePre`
     /// runs) and reads as the exit it is, where a status-based reading had
     /// to guess between that and `:cq 1`.
+    ///
+    /// The announcement outranks the signal, rather than standing beside
+    /// it: a signal death nvim was never able to announce is already caught
+    /// by the announcement's absence, so the only stop the two readings
+    /// disagree about is one nvim announced *and then* died to a signal for
+    /// -- and the one thing that sends a signal to an engine mid-exit is
+    /// view's own shutdown backstop, expiring on a leave the config made
+    /// slow. Reading view's own kill as the engine's death respawns the
+    /// editor the user just closed, on top of a swap file the announced
+    /// exit had already cleaned up.
     #[must_use]
     pub fn note_engine_stop(&mut self, exit: ExitInfo, announced_exit: bool) -> bool {
         self.exit_code = exit.code;
-        exit.by_signal || !announced_exit
+        !announced_exit
     }
 
     /// The reconnect sequence currently scheduled for this connection, if
@@ -1077,6 +1085,21 @@ mod tests {
             !state.note_engine_stop(stop(Some(1), false), ANNOUNCED),
             "an engine that said it was leaving ended the session, whatever \
              status it chose"
+        );
+    }
+
+    /// The stop view's own shutdown backstop produces: nvim said it was
+    /// leaving, spent longer than the backstop allows finishing the leave,
+    /// and was killed for it. The signal is view's, not the engine's, and
+    /// restarting on it brings back the editor the user closed -- on top of
+    /// a swap file the announced exit had already removed.
+    #[test]
+    fn an_announced_exit_that_view_had_to_kill_is_still_the_session_ending() {
+        let mut state = SupervisionState::default();
+        assert!(
+            !state.note_engine_stop(stop(Some(137), true), ANNOUNCED),
+            "an exit nvim announced is never a fault, whatever ended the \
+             process afterwards"
         );
     }
 
