@@ -42,7 +42,7 @@ Live capture matches exactly:
 `view-engine`'s existing `decode_content_chunks` (used today for `msg_show` and
 `cmdline_show`) already discards the third field and returns
 `Vec<(u64, String)>`; `(attr_id, text)`. This is reused verbatim for the three
-new decode functions; no new chunk-decoding logic is needed.
+new decode functions.
 
 ## Finding: `msg_showmode` carries `recording @q` verbatim (spec §9 MUST)
 
@@ -148,7 +148,7 @@ Triggering `search_count` requires a buffer populated via `i...<Esc>` insert;
 `search_count`'s content is plain text (`/cat [N/M]` or `/cat W [N/M]` when the
 search wrapped) already routed through `Route::Statusline` in `toast.rs`'s
 `route()`. It arrives through the existing `UiEvent::MsgShow` path (today's
-decoder); no new event is needed. `StatuslineState` consumes it via the same
+decoder). `StatuslineState` consumes it via the same
 `MsgShow{kind: "search_count", ..}` case, no new `UiEvent` variant.
 
 ## Conclusion for the implementation

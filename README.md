@@ -24,20 +24,19 @@ An agentic, Rust-fast terminal editor with a modern UI and Neovim mechanics.
 
 ## What is view?
 
-view is a terminal editor that embeds a real Neovim as its engine, so your
-existing config, plugins, LSP servers, and treesitter setup work on day one.
-Around that engine, view draws its own UI in native Rust: one design system
-for the whole editor chrome, a process that paints before your config has
-finished loading, and AI agents as a first-class part of the editor. An
-agent panel (`<leader>ai`) speaks [ACP](https://agentclientprotocol.com) to
-real agents, with in-editor review of every proposed change. See
+view is a terminal editor written in Rust with a modern, cohesive UI and
+AI agents as a first-class part of the editor. One design system covers the
+whole editor chrome, the screen is painted before your config has finished
+loading, and an agent panel (`<leader>ai`) speaks
+[ACP](https://agentclientprotocol.com) to real agents, with in-editor review
+of every proposed change. view embeds Neovim as its engine, so your existing
+config, plugins, LSP servers and treesitter setup run unchanged. See
 [docs/ai.md](docs/ai.md).
 
 ## Features
 
-- **Bring your whole config.** Real Neovim is the engine, so your setup
-  runs as it is: telescope, lualine, noice, nvim-cmp, treesitter, mini.nvim
-  and the rest load on day one.
+- **Bring your whole config.** telescope, lualine, noice, nvim-cmp,
+  treesitter, mini.nvim and the rest load on day one, unchanged.
 - **Fast where you feel it.** Launch, keypress and scroll are measured with
   your config loaded. See [Performance](#performance).
 - **Modern out of the box.** The surfaces view owns (statusline, picker,
@@ -79,8 +78,7 @@ contributes to each of the numbers above:
 ## Roadmap
 
 The goal is one terminal binary for anything you can view: a file, another
-machine's tree, an image, a website, a video. Rows marked ★ need code
-outside the Neovim process.
+machine's tree, an image, a website, a video.
 
 view is the product of bringing together the best features and ideas
 throughout the open-source community: [Omarchy](https://omarchy.org) and
@@ -103,9 +101,9 @@ the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
       `ls | view -`)
 - [x] **AI**: agent panel, ACP client, context providers, diff review in
       the file itself
-- [x] ★ **Engine supervision.** A hung or crashed Neovim is interrupted or
-      restarted with buffers rehydrated from swap; the UI never blanks.
-- [x] ★ **Remote editing.** `view --remote host:path`: engine over SSH,
+- [x] **Engine supervision.** A hung or crashed engine is interrupted or
+      restarted with your buffers restored, and the screen never blanks.
+- [x] **Remote editing.** `view --remote host:path`: engine over SSH,
       paint and input local, keystrokes echoed without waiting for the round
       trip, OSC 52 clipboard.
 - [x] **Your plugins keep working.** view knows which plugin still owns
@@ -119,15 +117,14 @@ the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
 
 - [ ] **Tiled UI.** Framed panes with gaps and an active accent, status
       segments in the frame edge, a tabpage pill, the tree and the agent
-      panel as overlays or sidebars per surface; `[ui] panes` keeps
-      Neovim's own separators and statusline for anyone who wants them.
-- [ ] ★ **Session DVR.** Scrub, branch, and export the session's keystream
+      panel as overlays or sidebars per surface.
+- [ ] **Session DVR.** Scrub, branch, and export the session's keystream
       and frames.
-- [ ] ★ **Key introspector.** `:View keys`: which mapping fired, whose it
+- [ ] **Key introspector.** `:View keys`: which mapping fired, whose it
       was, what it displaced.
-- [ ] ★ **Image viewing.** Kitty graphics on capable terminals, half-block
+- [ ] **Image viewing.** Kitty graphics on capable terminals, half-block
       cells elsewhere; picker preview and tree hover included.
-- [ ] ★ **Media handoff.** `view talk.mp4`, or a video picked in the tree,
+- [ ] **Media handoff.** `view talk.mp4`, or a video picked in the tree,
       hands the terminal to `mpv` and takes it back on exit.
 - [ ] **`view doctor`.** Terminal, tier and why, tmux passthrough, `mpv`
       on the path, a repro invocation to paste into an issue.
@@ -135,12 +132,10 @@ the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
 - [ ] **Workspace arc.** Tiles for N content surfaces: an image, a media
       player, a remote tree, a qutebrowser-style browser over CDP, mpv
       composited in a pane.
-- [ ] ★ **Agent-fleet attention.** Agent tabs with status (working,
+- [ ] **Agent-fleet attention.** Agent tabs with status (working,
       blocked on you, done) as an attention queue inside the editor.
 - [ ] **Detach and reconnect.** tmux-style persistence for the remote
       engine: drop the link, reattach where you left off.
-- [ ] **Theme-switcher interop.** An Omarchy-style switcher that retargets
-      your colorscheme carries view with it; no view config to rewrite.
 
 Beyond the feature list there is one standing direction: viewport
 highlighting and LSP UI move to view's side one subsystem at a time.
@@ -149,8 +144,7 @@ highlighting and LSP UI move to view's side one subsystem at a time.
 
 Every release ships a bundle per platform: the `view` binary and the exact
 Neovim the release was tested against, together in one archive. Nothing else
-is needed on the machine, and the bundled engine is used in preference to any
-`nvim` already on your `PATH`.
+is needed on the machine. view runs the bundled engine.
 
 ```bash
 # pick your platform from https://github.com/tj-smith47/view/releases/latest

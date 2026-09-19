@@ -78,9 +78,9 @@ LOAD_HIDDEN_CHUNK(path) -> { buf = 2, created = false, changedtick = 2 }
 ```
 
 The second call's scan finds the buffer the first call named via
-`nvim_buf_set_name` and returns it unchanged; no second `nvim_create_buf`, no
-second read of the file. `created` tells only which call made the buffer; both
-calls return the identical handle.
+`nvim_buf_set_name` and returns it unchanged. There is no second
+`nvim_create_buf` and no second read of the file. `created` tells only which
+call made the buffer; both calls return the identical handle.
 
 ## 4. A path with no file on disk yet resolves to an empty, unmodified buffer
 
@@ -470,13 +470,12 @@ bufadd('rel.rs')                             -> 6      -- a new buffer, not the 
 ```
 
 Two authorities for one identity, diverging the moment the user runs `:cd`.
-`docs/acp-v1-wire-capture.md`'s `Diff` schema settles it; no normalization is
-needed to: `path` is documented as "The absolute file path being modified," so
-a relative path is off-contract, `diff_proposal` drops the proposal, and
-`EngineHandle::load_hidden` refuses it as `EngineError::UnusablePath` before
-taking a hold or touching the wire. The Lua side carries no such check: nvim's
-cwd is the *correct* authority for a relative spelling, and the divergence is
-entirely on the view-process side.
+`docs/acp-v1-wire-capture.md`'s `Diff` schema settles it: `path` is documented
+as "The absolute file path being modified," so a relative path is off-contract,
+`diff_proposal` drops the proposal, and `EngineHandle::load_hidden` refuses it
+as `EngineError::UnusablePath` before taking a hold or touching the wire. The
+Lua side carries no such check: nvim's cwd is the *correct* authority for a
+relative spelling, and the divergence is entirely on the view-process side.
 
 ## 20. `canon()`'s parent-fallback join doubles the separator at root
 

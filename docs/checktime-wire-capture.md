@@ -582,7 +582,7 @@ CHUNK err=[0, 'Lua: ... Vim(checktime):E321: Could not reload ".../unreadable.tx
 
 Both losses of case 10b, reproduced from a path the stat cannot reject: the
 whole batch's answer, and the one-shot autocmd still armed. `HandledSilently`
-is the reading of the caught raise; nothing was read, and nothing about the
+is the reading of the caught raise. Nothing was read, and nothing about the
 buffer changed for the user to be told about.
 
 ### 10e. What the `pcall` does not catch

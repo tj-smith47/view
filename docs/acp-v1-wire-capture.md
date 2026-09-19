@@ -1068,8 +1068,7 @@ instead.
 
 **This is a contradiction in the upstream ACP v1 docs. The two rules
 conflict regardless of who initiated cancellation.** Both quotes are byte-exact
-above; no interpretation reconciles them for the client-cancels-the-whole-turn
-case. What this does establish without ambiguity: a raw JSON-RPC error is
+above. What this does establish without ambiguity: a raw JSON-RPC error is
 shown, in the spec's own worked example, as a body the agent must be prepared
 to receive in place of a `RequestPermissionOutcome` for a pending
 `session/request_permission` (matching the brief's option (a), at minimum for
@@ -1091,10 +1090,9 @@ call, and this capture pins no fact settling it.
 
 **Reference/example agent implementation:** not discoverable. The
 `agentclientprotocol/agent-client-protocol` repository ships only the schema
-crate, the schema generator, and the docs site; no reference or example agent
-implementation exists in this repo to cross-check error handling against
-(`agent-client-protocol-schema/`, `schema-generator/`, `schema/`, `docs/`,
-`scripts/` are the only source directories at the repo root).
+crate, the schema generator, and the docs site (`agent-client-protocol-schema/`,
+`schema-generator/`, `schema/`, `docs/`, `scripts/` are the only source
+directories at the repo root).
 
 ## `RequestId`
 
@@ -1313,7 +1311,7 @@ required: ['sessionId', 'path'] | x-method: fs/read_text_file | x-side: client
 
 Three facts a handler cannot recall its way to. `line` and `limit` each admit
 an explicit JSON `null` as well as being absent, and the two mean the same
-thing; no window was asked for; so a client that distinguishes "absent" from
+thing. No window was asked for, so a client that distinguishes "absent" from
 "null" would refuse a request a conforming agent may send. `line` is documented
 1-based while the schema's own `minimum` is `0`, so `line: 0` is a value that
 validates and has no 1-based meaning; it is treated as "from the first line,"

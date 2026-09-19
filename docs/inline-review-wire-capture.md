@@ -45,7 +45,7 @@ and the session shape the assertions run in cannot drift apart.
 
 The channel id in the capture is `1`; this embedded connection's own, learned
 at the `nvim_get_api_info` handshake and carried on `EngineHandle`. A real
-session's differs; nothing in the chunk hard-codes it.
+session's differs.
 
 ## 1. A three-hunk review, shown
 

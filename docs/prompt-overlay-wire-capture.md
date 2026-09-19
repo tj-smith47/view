@@ -108,7 +108,7 @@ whose swapfile is owned by a **verifiably dead** process on this host fires
 **no `SwapExists` autocommand at all**, confirmed with a custom marker-writing
 autocmd (fires when the owner is alive; does not fire when the owner was
 `SIGKILL`'d moments earlier, same host, same hermetic `XDG_STATE_HOME`). Nvim
-silently reclaims the swapfile; no dialog, no `W325`, nothing on the wire. This
+silently reclaims the swapfile. No dialog, no `W325`, nothing on the wire. This
 is a different, more recent core behavior than the "ATTENTION always
 fires on a stale swapfile" assumption the original capture instructions were
 written against; reality corrected that assumption here.
@@ -235,7 +235,6 @@ and free-text.
   captured resolving the dialog, none re-arming it.
 - `accepts()` on a free-text prompt: a digit, `<BS>`, `<CR>`, `<Esc>`, and `q`;
   exactly what the prompt's own text documents as accepted.
-- No timeout: the engine is blocked in its own input loop on this path; no
-  RPC request view is waiting on is involved, and every capture above
-  shows the session staying alive and responsive indefinitely until an accepted
-  key resolves it.
+- No timeout: the engine is blocked in its own input loop on this path, and
+  every capture above shows the session staying alive and responsive
+  indefinitely until an accepted key resolves it.

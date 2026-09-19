@@ -289,12 +289,11 @@ An agent can touch a file two ways, and view treats them differently:
   the same way you see any other buffer change.
 - **Out-of-band**: an agent's own shell tool (`sed`, `cat >`, a build
   script, `git checkout`) writing or removing a file directly. No ACP
-  message describes this; no client, view included, can see it as it
-  happens. view catches it a different way: while an agent session is
-  running, a filesystem watcher over the trusted project root notices the
-  write, or the removal, and drives nvim's own `:checktime` for it, the
-  same mechanism that already runs when you switch back to view after
-  editing a file in another terminal.
+  message describes this, and no client can see it as it happens. While
+  an agent session is running, a filesystem watcher over the trusted
+  project root notices the write, or the removal, and drives nvim's own
+  `:checktime` for it, the same mechanism that already runs when you
+  switch back to view after editing a file in another terminal.
 
 ### When the watcher is running, and what it covers
 

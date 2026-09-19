@@ -88,8 +88,7 @@ in `crates/view-engine/tests/tree_file_ops_live.rs`'s
 
 - All three chunks arrive as exactly the `kind = "confirm"` `MsgShow` +
   `CmdlineShow` pair `PromptState`'s `is_prompt` (`kind == "confirm"` check)
-  and `Answer::Choices` parsing were already built to handle; no new
-  redraw-event branch is needed for any of the three tree prompts.
+  and `Answer::Choices` parsing were already built to handle.
 - The *returned value* each blocked call replies with once answered
   (`vim.fn.input`'s typed string; `vim.fn.confirm`'s 1-based choice index, or
   `TREE_DELETE_CONFIRM_CHUNK`'s own `{ buffer_open = true }` short circuit) is

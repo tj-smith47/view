@@ -148,7 +148,7 @@ consumers ever need to fold `more: true` continuations, that behavior remains
 undemonstrated by this document; treat it as an open question, short of an
 implemented-and-verified case.
 
-## 5. `nvim_buf_detach_event` on detach; no further events reach a detached buffer
+## 5. `nvim_buf_detach_event` on detach, and no further events reach a detached buffer
 
 Same session, buffer reset to `["one", "two"]`, attached with
 `send_buffer: false`:
@@ -182,7 +182,7 @@ nvim_buf_set_lines(<buf2>, 0, 1, false, ["b2-EDITED"])
   -> nvim_buf_lines_event(buf=Ext(0,[2]), 3, 0, 1, ["b2-EDITED"], false)
 ```
 
-Exactly one notification, naming buffer 2's own `Ext` handle; nothing arrives
+Exactly one notification, naming buffer 2's own `Ext` handle. Nothing arrives
 referencing buffer 1. `buf` is nvim's own disambiguator on the wire; the
 generation-stamping this task adds on top (`Msg::BufTextChanged`'s `generation`
 field) is client-side bookkeeping for which rebase state machine a `buf` maps

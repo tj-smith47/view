@@ -506,7 +506,7 @@ flush                []
 ```
 
 `nvim_ui_try_resize_grid` remains available for a UI that wants a window grid
-larger than its on-screen box; nothing view does today needs it.
+larger than its on-screen box. view does not call it.
 
 ## Side-by-side delta
 
@@ -535,10 +535,9 @@ arm: `grid_destroy`, `win_close`, `win_float_pos`, `win_hide`, `win_pos`,
 ## What view's decoder has no variant for
 
 `view_engine::ui_events::decode_redraw` answers `UiEvent::Unknown` for every
-name below, and that is what the capture test asserts on; no one maintains a
-list by hand. All five (`chdir`, `option_set`, `set_icon`, `set_title`,
-`update_menu`) are already unknown under single-grid and are unrelated to this
-work.
+name below, and that is what the capture test asserts on. All five (`chdir`,
+`option_set`, `set_icon`, `set_title`, `update_menu`) are already unknown under
+single-grid and are unrelated to this work.
 
 Every name that is the multigrid delta now decodes: the placement vocabulary
 the pane registry applies (`grid_destroy`, `win_close`, `win_float_pos`,
