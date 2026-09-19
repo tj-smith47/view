@@ -1,13 +1,14 @@
 # Wire capture: ACP v1 protocol shapes
 
-Captured live against the ACP v1 schema per "capture, never recall." Source
-of truth for `PermissionOption`, `RequestPermissionOutcome`, `SessionUpdate`,
-`ToolCallContent`'s diff shape, and the `initialize` handshake. No later
-implementation may hand-write an enum string this document has not pinned.
+Captured live against the ACP v1 schema: every value below reflects an actual
+run of the schema. Source of truth for `PermissionOption`,
+`RequestPermissionOutcome`, `SessionUpdate`, `ToolCallContent`'s diff shape,
+and the `initialize` handshake. No later implementation may hand-write an enum
+string this document has not pinned.
 
-Captured 2026-08-18 against `agentclientprotocol/agent-client-protocol`
-(GitHub org `agentclientprotocol`, formerly under `zed-industries`), default
-branch `main`.
+Captured 2026-08-18 against `agentclientprotocol/agent-client-protocol` (GitHub
+org `agentclientprotocol`, formerly under `zed-industries`), default branch
+`main`.
 
 ## Source identity and staleness anchor
 
@@ -43,11 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(unstable)* add tool call name ([#1752](https://github.com/agentclientprotocol/agent-client-protocol/pull/1752))
 ```
 
-**Re-verify staleness of this capture** by re-running the two commands
-above: if the commit SHA for `schema/v1/schema.json` differs from
-`ccff4e7d2e431880225804a8c136c2ccfcb313d0`, or the top changelog entry is
-newer than `1.20.0` / `2026-07-21`, this document may have drifted and must
-be re-captured before being cited.
+**Re-verify staleness of this capture** by re-running the two commands above:
+if the commit SHA for `schema/v1/schema.json` differs from
+`ccff4e7d2e431880225804a8c136c2ccfcb313d0`, or the top changelog entry is newer
+than `1.20.0`/`2026-07-21`, this document may have drifted and must be
+re-captured before being cited.
 
 The `schema.json` file fetched below:
 
@@ -99,9 +100,9 @@ $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-p
 ```
 
 `meta.json`'s top-level `"version": 1` is the protocol's own self-report,
-independent of the `schema-v1.20.0` package/crate version above; the two
-are pinned separately because a package bump can land without a wire
-protocol version bump (non-breaking changes ship via capabilities, not a
+independent of the `schema-v1.20.0` package/crate version above; the two are
+pinned separately because a package bump can land without a wire protocol
+version bump (non-breaking changes ship via capabilities, distinct from a
 `protocolVersion` bump; see the `initialize` section below).
 
 ## `protocolVersion` and the `initialize` handshake
@@ -185,8 +186,8 @@ Response:
 }
 ```
 
-`protocolVersion` is a bare integer, not a string: the wire value pinned for
-view's `initialize` call is the JSON integer `1`.
+`protocolVersion` is a bare integer, distinct from a string: the wire value
+pinned for view's `initialize` call is the JSON integer `1`.
 
 Version negotiation, verbatim from the same page:
 
@@ -201,10 +202,10 @@ If the Agent supports the requested version, it **MUST** respond with the same v
 If the Client does not support the version specified by the Agent in the `initialize` response, the Client **SHOULD** close the connection and inform the user about it.
 ```
 
-The response `protocolVersion` is therefore the agent's counter-offer, not an
-echo, and a client that ignores it will speak a dialect the agent never
-agreed to. view supports exactly version `1`, so any other answer closes the
-session and reports both versions to the user.
+The response `protocolVersion` is therefore the agent's counter-offer, and a
+client that ignores it will speak a dialect the agent never agreed to. view
+supports exactly version `1`, so any other answer closes the session and
+reports both versions to the user.
 
 ## `PermissionOption`
 
@@ -262,7 +263,7 @@ Raw output (the true, unedited result of the command above):
 }
 ```
 
-`PermissionOptionKind`'s enum strings (`oneOf` of string `const`s), verbatim,
+`PermissionOptionKind`'s enum strings (`oneOf` of string `const` s), verbatim,
 all four:
 
 Raw output:
@@ -296,7 +297,7 @@ Raw output:
 ```
 
 Pinned `PermissionOptionKind` wire strings: `"allow_once"`, `"allow_always"`,
-`"reject_once"`, `"reject_always"`. These are `snake_case`, not
+`"reject_once"`, `"reject_always"`. These are `snake_case`, distinct from
 `kebab-case` or `camelCase`; the research pass's uncertainty is resolved.
 
 ## `RequestPermissionRequest`
@@ -360,8 +361,8 @@ Raw output (the true, unedited result of the command above):
 }
 ```
 
-`ToolCallUpdate`'s raw output (same command form, second `$defs` key --
-what `toolCall` actually `$ref`s, not `ToolCall`):
+`ToolCallUpdate`'s raw output (same command form, second `$defs` key; what
+`toolCall` actually `$ref` s, distinct from `ToolCall`):
 
 ```json
 {
@@ -458,14 +459,14 @@ what `toolCall` actually `$ref`s, not `ToolCall`):
 
 Pinned facts this settles, both load-bearing in `view-ai`'s
 `Driver::on_permission_request`:
-- `toolCall` is `ToolCallUpdate`, not `ToolCall` -- only `toolCallId` is
-  required (every other field, including `title`, is nullable/optional),
-  which is why the driver falls back to the id itself when `title` is
-  absent rather than treating an absent title as malformed input.
-- `options` is a required array of `PermissionOption` (never omitted,
-  though it may be empty -- see the driver's own empty-options handling,
-  which settles the request `cancelled` rather than leaving it open on a
-  request no user interface could ever answer).
+- `toolCall` is `ToolCallUpdate`, distinct from `ToolCall`; only `toolCallId`
+  is required (every other field, including `title`, is nullable/optional),
+  which is why the driver falls back to the id itself when `title` is absent,
+  and treats an absent title as valid input.
+- `options` is a required array of `PermissionOption` (never omitted, though it
+  may be empty; see the driver's own empty-options handling, which settles the
+  request `cancelled`, closing it so it never sits open on a request no user
+  interface could ever answer).
 - `x-method` pins the wire method name verbatim: `session/request_permission`.
 
 ## `RequestPermissionOutcome`
@@ -523,8 +524,8 @@ Raw output:
 }
 ```
 
-`SelectedPermissionOutcome`'s raw output (same command form, second
-`$defs` key):
+`SelectedPermissionOutcome`'s raw output (same command form, second `$defs`
+key):
 
 ```json
 {
@@ -555,8 +556,8 @@ Raw output:
 }
 ```
 
-`SelectedPermissionOutcome` (merged into the `"selected"` variant via
-`allOf`): one required field, `optionId` (`PermissionOptionId`, a string).
+`SelectedPermissionOutcome` (merged into the `"selected"` variant via `allOf`):
+one required field, `optionId` (`PermissionOptionId`, a string).
 
 Pinned `RequestPermissionOutcome` variant shapes:
 - `{"outcome": "cancelled"}`, no other fields.
@@ -564,7 +565,7 @@ Pinned `RequestPermissionOutcome` variant shapes:
 
 Two variants total, discriminated on the `outcome` string field. The
 `Cancelled` variant's own schema description states the normative trigger
-verbatim: a client-received `session/cancel` "MUST respond to all pending
+verbatim: a client-received `session/cancel`"MUST respond to all pending
 `session/request_permission` requests with this `Cancelled` outcome."
 
 Worked example, `docs/protocol/v1/tool-calls.mdx` (`## Requesting Permission`):
@@ -624,7 +625,7 @@ $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-p
 }
 ```
 
-## `SessionUpdate` discriminant list: SURPRISE, 11 variants, not 5
+## `SessionUpdate` discriminant list: SURPRISE, 11 variants, well beyond 5
 
 ```
 $ python3 -c "
@@ -647,11 +648,10 @@ session_info_update
 usage_update
 ```
 
-**Flag: the schema pins 11 `sessionUpdate` discriminants, six beyond the
-five the research pass confirmed (`plan`, `agent_message_chunk`,
-`tool_call`, `tool_call_update`, `usage_update`).** The six additional
-discriminants, each with its own required companion payload merged via
-`allOf`:
+**Flag: the schema pins 11 `sessionUpdate` discriminants, six beyond the five
+the research pass confirmed (`plan`, `agent_message_chunk`, `tool_call`,
+`tool_call_update`, `usage_update`).** The six additional discriminants, each
+with its own required companion payload merged via `allOf`:
 
 | `sessionUpdate` const | payload `$ref` | description (verbatim) |
 |---|---|---|
@@ -680,10 +680,10 @@ print(json.dumps(d['\$defs']['Diff'], indent=2))
 "
 ```
 
-`ToolCallContent` is a three-way `oneOf` discriminated on `type`:
-`"content"` (merges `Content`), `"diff"` (merges `Diff`), `"terminal"`
-(merges `Terminal`). Its raw `$defs` output (`ToolCallContent`, then
-`Diff`, the two keys the command above prints):
+`ToolCallContent` is a three-way `oneOf` discriminated on `type`: `"content"`
+(merges `Content`), `"diff"` (merges `Diff`), `"terminal"` (merges `Terminal`).
+Its raw `$defs` output (`ToolCallContent`, then `Diff`, the two keys the
+command above prints):
 
 ```json
 {
@@ -796,16 +796,15 @@ required; `path` and `newText` are required.
 
 ## `Content`, `Terminal`, `Plan`, and `UsageUpdate`
 
-Re-verified staleness ahead of this capture, same two commands as
-"Source identity and staleness anchor" above: commit SHA for
-`schema/v1/schema.json` is still `ccff4e7d2e431880225804a8c136c2ccfcb313d0`,
-and `schema-v1.json` re-fetched to the same byte count, `242013`. No drift.
+Re-verified staleness ahead of this capture, same two commands as "Source
+identity and staleness anchor" above: commit SHA for `schema/v1/schema.json` is
+still `ccff4e7d2e431880225804a8c136c2ccfcb313d0`, and `schema-v1.json`
+re-fetched to the same byte count, `242013`. No drift.
 
-`ToolCallContent`'s `"content"` variant merges `Content`, and its
-`"terminal"` variant merges `Terminal` (see the `oneOf` dump above); neither
-had been dumped until now. `SessionUpdate`'s `plan` and `usage_update`
-discriminants (see the 11-variant list above) merge `Plan` and
-`UsageUpdate` respectively.
+`ToolCallContent`'s `"content"` variant merges `Content`, and its `"terminal"`
+variant merges `Terminal` (see the `oneOf` dump above); neither had been dumped
+until now. `SessionUpdate`'s `plan` and `usage_update` discriminants (see the
+11-variant list above) merge `Plan` and `UsageUpdate` respectively.
 
 ```
 $ python3 -c "
@@ -931,42 +930,42 @@ Raw output:
 
 Pinned facts:
 
-- `Content` (the `ToolCallContent` `"content"` variant's merged payload):
-  one required field, `content`, itself a nested `ContentBlock` (the same
-  five-way `text`/`image`/`audio`/`resource_link`/`resource` union pinned above
-  under "`ContentBlock` and the chunk payload"). So a full text-content item on
-  the wire is `{"type": "content", "content": {"type": "text", "text": "..."}}`.
-- `Terminal` (the `ToolCallContent` `"terminal"` variant's merged
-  payload): one required field, `terminalId` (a string).
-- `Plan`: one required field, `entries`, an array of `PlanEntry`. The
-  schema's own description is explicit that an update is a full replace,
-  not a delta: "the agent must send a complete list of all entries with
-  their current status. The client replaces the entire plan with each
+- `Content` (the `ToolCallContent` `"content"` variant's merged payload): one
+  required field, `content`, itself a nested `ContentBlock` (the same five-way
+  `text`/`image`/`audio`/`resource_link`/`resource` union pinned above under "
+  `ContentBlock` and the chunk payload"). So a full text-content item on the
+  wire is `{"type": "content", "content": {"type": "text", "text": "..."}}`.
+- `Terminal` (the `ToolCallContent` `"terminal"` variant's merged payload): one
+  required field, `terminalId` (a string).
+- `Plan`: one required field, `entries`, an array of `PlanEntry`. The schema's
+  own description is explicit that every update replaces the whole list in
+  full, with no delta sent: "the agent must send a complete list of all entries
+  with their current status. The client replaces the entire plan with each
   update."
 - `PlanEntry`: all three of `content` (string), `priority`
   (`PlanEntryPriority`), `status` (`PlanEntryStatus`) are required.
 - `PlanEntryPriority` is a three-way closed string enum: `high`, `medium`,
   `low`.
 - `PlanEntryStatus` is a three-way closed string enum: `pending`,
-  `in_progress`, `completed` -- only three, unlike `ToolCallStatus`'s four
-  (no `failed` counterpart for a plan entry).
-- `UsageUpdate`: `used` and `size` (both `uint64`) are required; `cost` is
-  an optional, nullable `Cost`.
+  `in_progress`, `completed`; only three, unlike `ToolCallStatus`'s four (no
+  `failed` counterpart for a plan entry).
+- `UsageUpdate`: `used` and `size` (both `uint64`) are required; `cost` is an
+  optional, nullable `Cost`.
 - `Cost`: both `amount` (a double) and `currency` (a string) are required
   whenever `cost` itself is present.
 
 ## Permission-overlap reply legitimacy (the pending-permission-request degrade path)
 
-Question: for a second `session/request_permission` arriving while a first
-is still unanswered, is a raw JSON-RPC error a conformant reply to
+Question: for a second `session/request_permission` arriving while a first is
+still unanswered, is a raw JSON-RPC error a conformant reply to
 `session/request_permission`, or is only a `RequestPermissionOutcome` value
 legal?
 
-`RequestPermissionResponse`'s schema only defines the success (`result`)
-shape; it says nothing about error legality one way or the other, because
-that is true of every JSON-RPC method's response schema (errors are a
-transport-level JSON-RPC concept, never encoded in a method's `result`
-schema regardless of method):
+`RequestPermissionResponse`'s schema only defines the success (`result`) shape;
+it says nothing about error legality one way or the other, because that is true
+of every JSON-RPC method's response schema (errors are a transport-level
+JSON-RPC concept, and never encoded in a method's `result` schema regardless of
+method):
 
 ```
 $ python3 -c "
@@ -1009,9 +1008,9 @@ Raw output:
 }
 ```
 
-Two prose sources bear on the question, and a careful read of both against
-the *same* triggering scenario finds that they contradict each other,
-not that they cleanly divide the space by who initiated cancellation.
+Two prose sources bear on the question, and a careful read of both against the
+*same* triggering scenario finds that they contradict each other, well short of
+cleanly dividing the space by who initiated cancellation.
 
 **Source 1, `docs/protocol/v1/prompt-turn.mdx`, its Cancellation section:**
 
@@ -1022,21 +1021,21 @@ $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-p
 > "The Client **MUST** respond to all pending `session/request_permission`
 > requests with the `cancelled` outcome."
 
-This is a **`RequestPermissionOutcome` value**
-(`{"outcome": {"outcome": "cancelled"}}`), a valid JSON-RPC *result*, not an
-error. The trigger this prose names is the client sending `session/cancel` to
-cancel the whole prompt turn.
+This is a ** `RequestPermissionOutcome` value**
+(`{"outcome": {"outcome": "cancelled"}}`), a valid JSON-RPC *result*, distinct
+from an error. The trigger this prose names is the client sending
+`session/cancel` to cancel the whole prompt turn.
 
-**Source 2, `docs/protocol/v1/cancellation.mdx`, its Cascading
-Cancellation Flow worked example:**
+**Source 2, `docs/protocol/v1/cancellation.mdx`, its Cascading Cancellation
+Flow worked example:**
 
 ```
 $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/main/docs/protocol/v1/cancellation.mdx" | sed -n '10,68p'
 ```
 
 > "**MUST** send one of these responses for the original request: A valid
-> response with appropriate data ... OR An error response with code
-> `-32800` (Request Cancelled)"
+> response with appropriate data ... OR An error response with code `-32800`
+> (Request Cancelled)"
 
 and the cascading example's mermaid diagram, numbered steps verbatim:
 
@@ -1050,45 +1049,45 @@ and the cascading example's mermaid diagram, numbered steps verbatim:
 > `Client->>Agent: response to id=3 (error -32800 "Cancelled")`
 
 **These two sources are describing the identical trigger and the identical
-pending-request type, and they prescribe two different response bodies for it.**
-The cascading example's own annotation "3. Client cancels the prompt turn" is a
-client-initiated `session/cancel` of the whole prompt turn, the exact same
-trigger Source 1's MUST governs, not an independent agent-initiated event. The
-following annotation, "4. Agent cascades cancellation internally," shows
-`$/cancel_request` as downstream of, and part of the same flow as, that
-`session/cancel`; the example does not depict the agent cancelling on its own
-initiative (that is `cancellation.mdx`'s separate "Internal Cancellation"
-section, e.g. "LLM context limit reached", which genuinely is independent of any
-client trigger and is not what this worked example shows). Yet for that one
-client-initiated-whole-turn-cancel case, applied to the identical kind of
-pending request (`session/request_permission`, labeled "[permission request]" in
-the diagram): `prompt-turn.mdx` mandates a `RequestPermissionOutcome`
-`"cancelled"` result, while `cancellation.mdx`'s own worked example for the same
-trigger shows a raw JSON-RPC `-32800` error instead.
+pending-request type, and they prescribe two different response bodies for
+it.** The cascading example's own annotation "3. Client cancels the prompt
+turn" is a client-initiated `session/cancel` of the whole prompt turn, the
+exact same trigger Source 1's MUST governs, and stands apart from an
+independent agent-initiated event. The following annotation, "4. Agent cascades
+cancellation internally," shows `$/cancel_request` as downstream of, and part
+of the same flow as, that `session/cancel`; the example does not depict the
+agent cancelling on its own initiative (that is `cancellation.mdx`'s separate
+"Internal Cancellation" section, e.g. "LLM context limit reached", which
+genuinely is independent of any client trigger, a case this worked example does
+not show). Yet for that one client-initiated-whole-turn-cancel case, applied to
+the identical kind of pending request (`session/request_permission`, labeled
+"[permission request]" in the diagram): `prompt-turn.mdx` mandates a
+`RequestPermissionOutcome` `"cancelled"` result, while `cancellation.mdx`'s own
+worked example for the same trigger shows a raw JSON-RPC `-32800` error
+instead.
 
-**This is a genuine contradiction in the upstream ACP v1 docs, not two
-non-competing rules keyed on who initiated cancellation.** Both quotes are
-byte-exact above; no interpretation reconciles them for the
-client-cancels-the-whole-turn case. What this does establish without
-ambiguity: a raw JSON-RPC error is shown, in the spec's own worked example,
-as a body the agent must be prepared to receive in place of a
-`RequestPermissionOutcome` for a pending `session/request_permission`
-(matching the brief's option (a), at minimum for this triggering path).
-What it does not establish: the spec does not consistently say
-error-vs-outcome is determined by who initiated cancellation; its own two
-pages disagree with each other on that same case.
+**This is a genuine contradiction in the upstream ACP v1 docs. The two rules
+conflict regardless of who initiated cancellation.** Both quotes are byte-exact
+above; no interpretation reconciles them for the client-cancels-the-whole-turn
+case. What this does establish without ambiguity: a raw JSON-RPC error is
+shown, in the spec's own worked example, as a body the agent must be prepared
+to receive in place of a `RequestPermissionOutcome` for a pending
+`session/request_permission` (matching the brief's option (a), at minimum for
+this triggering path). What it does not establish: the spec does not
+consistently say error-vs-outcome is determined by who initiated cancellation;
+its own two pages disagree with each other on that same case.
 
-Neither source directly discusses the exact overlap scenario the degrade
-path handles ("a second `session/request_permission` arrives while a first
-is unanswered," with no cancellation in play at all): that is not a
-cancellation scenario in either source's terms, and no ACP doc page or
-schema field addresses concurrent/overlapping permission requests
-specifically. The overlap degrade path is therefore a view-side policy
-choice, not one dictated by the wire spec, and it inherits an upstream spec
+Neither source directly discusses the exact overlap scenario the degrade path
+handles ("a second `session/request_permission` arrives while a first is
+unanswered," with no cancellation in play at all): that scenario sits outside a
+cancellation scenario in either source's terms, and no ACP doc page or schema
+field addresses concurrent/overlapping permission requests specifically. The
+overlap degrade path is therefore a view-side policy choice, one view itself
+makes because the wire spec leaves it open, and it inherits an upstream spec
 that disagrees with itself on the closest analogous case (whole-turn
-cancellation) rather than a clean, resolvable rule. Deciding how the
+cancellation), which is anything but a clean, resolvable rule. Deciding how the
 degrade path should behave given that inconsistency is a downstream design
-call, not a fact this capture pins.
+call, and this capture pins no fact settling it.
 
 **Reference/example agent implementation:** not discoverable. The
 `agentclientprotocol/agent-client-protocol` repository ships only the schema
@@ -1099,9 +1098,9 @@ implementation exists in this repo to cross-check error handling against
 
 ## `RequestId`
 
-The id member is a three-way union, not an integer. An implementation that
-types it as an integer fails to decode the first frame any string-id agent
-sends, and misreads a null-id request as a notification.
+The id member is a three-way union, distinct from a plain integer. An
+implementation that types it as an integer fails to decode the first frame any
+string-id agent sends, and misreads a null-id request as a notification.
 
 ```
 $ python3 -c "
@@ -1136,15 +1135,14 @@ Three consequences the schema text pins directly:
 
 - present-but-null and absent are different frames. Only the absent case is a
   notification, so a decoder cannot collapse both onto `None`.
-- the number arm is `int64`, signed, and fractional parts are discouraged
-  rather than forbidden, so a `u64` field rejects ids the schema permits.
+- the number arm is `int64`, signed, and fractional parts are discouraged and
+  stop short of forbidden, so a `u64` field rejects ids the schema permits.
 - correlation is by equality of the whole value ("the Server MUST reply with
-  the same value"), which means the id a peer chose must be stored and
-  echoed unchanged rather than re-derived.
+  the same value"), which means the id a peer chose must be stored and echoed
+  unchanged, with no re-derivation.
 
-view allocates only numeric ids for the requests it originates. The string
-and null arms exist so that ids chosen by the agent survive the round trip
-intact.
+view allocates only numeric ids for the requests it originates. The string and
+null arms exist so that ids chosen by the agent survive the round trip intact.
 
 ## stdio framing
 
@@ -1155,8 +1153,8 @@ The framing rule the transport layer is built on, verbatim from
 $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/main/docs/protocol/v1/transports.mdx" | sed -n '6,27p'
 ```
 
-> ACP uses JSON-RPC to encode messages. JSON-RPC messages **MUST** be
-> UTF-8 encoded.
+> ACP uses JSON-RPC to encode messages. JSON-RPC messages **MUST** be UTF-8
+> encoded.
 >
 > In the **stdio** transport:
 >
@@ -1174,14 +1172,14 @@ $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-p
 > - The client **MUST NOT** write anything to the agent's `stdin` that is
 >   not a valid ACP message.
 
-Pinned: newline-delimited JSON-RPC 2.0, UTF-8, no embedded newline, no
-length header. `stderr` carries agent logging only and never a frame.
+Pinned: newline-delimited JSON-RPC 2.0, UTF-8, no embedded newline, no length
+header. `stderr` carries agent logging only; a frame never arrives there.
 
 ## `ToolCallStatus` and `StopReason`
 
 Re-verified against the same staleness anchor recorded above (schema commit
 `ccff4e7d2e431880225804a8c136c2ccfcb313d0`, changelog top entry
-`1.20.0` / `2026-07-21`, both unchanged on re-check).
+`1.20.0`/`2026-07-21`, both unchanged on re-check).
 
 ```
 $ python3 -c "
@@ -1211,12 +1209,12 @@ cancelled
 ```
 
 Pinned `ToolCallStatus` wire strings: `"pending"`, `"in_progress"`,
-`"completed"`, `"failed"` -- four, `snake_case`. Pinned `StopReason` wire
+`"completed"`, `"failed"`; four, `snake_case`. Pinned `StopReason` wire
 strings: `"end_turn"`, `"max_tokens"`, `"max_turn_requests"`, `"refusal"`,
-`"cancelled"` -- five, `snake_case`. `StopReason`'s `"cancelled"` carries a
-normative note verbatim in its own description: it "MUST be returned when
-the client sends a `session/cancel` notification, even if the cancellation
-causes exceptions in underlying operations."
+`"cancelled"`; five, `snake_case`. `StopReason`'s `"cancelled"` carries a
+normative note verbatim in its own description: it "MUST be returned when the
+client sends a `session/cancel` notification, even if the cancellation causes
+exceptions in underlying operations."
 
 ## `ContentBlock` and the chunk payload
 
@@ -1247,13 +1245,13 @@ ResourceLink required: ['name', 'uri']
 ```
 
 Pinned: `ContentBlock` is a five-way `oneOf` discriminated on `type`, whose
-`const`s are `"text"`, `"image"`, `"audio"`, `"resource_link"`,
-`"resource"`. `TextContent`'s payload member is `text` (a string).
-`ResourceLink` requires `name` and `uri`. `ContentChunk` (the payload of
-every `*_chunk` `sessionUpdate`) requires `content` and carries an optional
-nullable `messageId`, described verbatim: "All chunks belonging to the same
-message share the same `messageId`. A change in `messageId` indicates a new
-message has started."
+`const` s are `"text"`, `"image"`, `"audio"`, `"resource_link"`, `"resource"`.
+`TextContent`'s payload member is `text` (a string). `ResourceLink` requires
+`name` and `uri`. `ContentChunk` (the payload of every `*_chunk`
+`sessionUpdate`) requires `content` and carries an optional nullable
+`messageId`, described verbatim: "All chunks belonging to the same message
+share the same `messageId`. A change in `messageId` indicates a new message has
+started."
 
 ## Method payload members
 
@@ -1282,20 +1280,20 @@ WriteTextFileRequest | required: ['sessionId', 'path', 'content'] | properties: 
 WriteTextFileResponse | required: [] | properties: ['_meta']
 ```
 
-The asymmetry that matters for any client rendering tool calls: `ToolCall`
-(the `tool_call` discriminant) requires `title`, while `ToolCallUpdate` (the
-`tool_call_update` discriminant) requires only `toolCallId`. An update
-carries only what changed, so a client holding a whole-call view must
-remember the announcement's `title` and `status` rather than treat their
-absence as a value.
+The asymmetry that matters for any client rendering tool calls: `ToolCall` (the
+`tool_call` discriminant) requires `title`, while `ToolCallUpdate` (the
+`tool_call_update` discriminant) requires only `toolCallId`. An update carries
+only what changed, so a client holding a whole-call view must remember the
+announcement's `title` and `status`; treating their absence as a value would be
+wrong.
 
 ## `fs/read_text_file` and `fs/write_text_file`
 
 Captured for the client-side handlers that answer these two Agent->Client
 requests. Re-fetched at the same pinned commit
-(`ccff4e7d2e431880225804a8c136c2ccfcb313d0`, `schema-v1.json` still
-242013 bytes), so every shape below is this document's own capture, not a
-recollection of one.
+(`ccff4e7d2e431880225804a8c136c2ccfcb313d0`, `schema-v1.json` still 242013
+bytes), so every shape below is this document's own fresh capture, taken live
+in this pass.
 
 ### 1. `ReadTextFileRequest`: `line` and `limit` are nullable, `line` is 1-based
 
@@ -1313,15 +1311,15 @@ path | {"description": "Absolute path to the file to read.", "type": "string"}
 required: ['sessionId', 'path'] | x-method: fs/read_text_file | x-side: client
 ```
 
-Three facts a handler cannot recall its way to. `line` and `limit` each
-admit an explicit JSON `null` as well as being absent, and the two mean the
-same thing -- no window was asked for -- so a client that distinguishes
-"absent" from "null" would refuse a request a conforming agent may send.
-`line` is documented 1-based while the schema's own `minimum` is `0`, so
-`line: 0` is a value that validates and has no 1-based meaning; it is
-treated as "from the first line," never as an error and never as an
-off-by-one into line 2. `path` is contractually absolute, the same
-contract the `Diff` shape states for its own `path`.
+Three facts a handler cannot recall its way to. `line` and `limit` each admit
+an explicit JSON `null` as well as being absent, and the two mean the same
+thing; no window was asked for; so a client that distinguishes "absent" from
+"null" would refuse a request a conforming agent may send. `line` is documented
+1-based while the schema's own `minimum` is `0`, so `line: 0` is a value that
+validates and has no 1-based meaning; it is treated as "from the first line,"
+never as an error and never as an off-by-one into line 2. `path` is
+contractually absolute, the same contract the `Diff` shape states for its own
+`path`.
 
 ### 2. `ReadTextFileResponse` carries exactly one field, and it is required
 
@@ -1339,11 +1337,11 @@ write response: [] ['_meta']
 ```
 
 `content` is required on the read response, which is what makes a refusal a
-JSON-RPC *error* rather than a success carrying an empty string: there is no
-shape in which a successful read reply omits content, so a client that
-refused a path by answering `{"content": ""}` would be telling the agent the
-file is empty. The write response has no required member at all -- `{}` is
-the whole success reply.
+JSON-RPC *error*, distinct from a success carrying an empty string: there is no
+shape in which a successful read reply omits content, so a client that refused
+a path by answering `{"content": ""}` would be telling the agent the file is
+empty. The write response has no required member at all; `{}` is the whole
+success reply.
 
 ### 3. The worked request/response pairs, verbatim from the protocol docs
 
@@ -1392,10 +1390,10 @@ Write:
 }
 ```
 
-The same document's success reply for the write is `"result": null`, while
-the schema's `WriteTextFileResponse` is an object whose members are all
-optional. `{}` satisfies both readings and `null` satisfies only the prose,
-so `{}` is what this client sends.
+The same document's success reply for the write is `"result": null`, while the
+schema's `WriteTextFileResponse` is an object whose members are all optional.
+`{}` satisfies both readings and `null` satisfies only the prose, so `{}` is
+what this client sends.
 
 ### 4. Two normative sentences the handlers implement
 
@@ -1403,18 +1401,17 @@ Verbatim from the same `file-system.mdx`:
 
 - "These methods enable Agents to access **unsaved editor state** and allow
   Clients to track file modifications made during agent execution."
-- "The `fs/read_text_file` method allows Agents to read text file contents
-  from the Client's filesystem, **including unsaved changes in the
-  editor**."
-- On `fs/write_text_file`'s `path`: "The Client **MUST** create the file if
-  it doesn't exist."
+- "The `fs/read_text_file` method allows Agents to read text file contents from
+  the Client's filesystem, **including unsaved changes in the editor**."
+- On `fs/write_text_file`'s `path`: "The Client **MUST** create the file if it
+  doesn't exist."
 
-The first two are the wire's own statement of the buffer-truth requirement:
-a read that answered from disk while nvim held a modified buffer for the
-same path would return the one thing this method exists not to return. The
-third is why the write path cannot stop at setting buffer text -- a write to
-a path no window has open must leave the file on disk, or the agent's write
-is silently discarded when the hidden buffer is released.
+The first two are the wire's own statement of the buffer-truth requirement: a
+read that answered from disk while nvim held a modified buffer for the same
+path would return the one thing this method exists to withhold. The third is
+why the write path cannot stop at setting buffer text; a write to a path no
+window has open must leave the file on disk, or the agent's write is silently
+discarded when the hidden buffer is released.
 
 ### 5. Capability gating, verbatim
 
@@ -1422,16 +1419,15 @@ is silently discarded when the hidden buffer is released.
 $ curl -sL ".../docs/protocol/v1/file-system.mdx" | sed -n '9,29p'
 ```
 
-> Before attempting to use filesystem methods, Agents **MUST** verify that
-> the Client supports these capabilities by checking the Client Capabilities
-> field in the `initialize` response [...] If `readTextFile` or
-> `writeTextFile` is `false` or not present, the Agent **MUST NOT** attempt
-> to call the corresponding filesystem method.
+> Before attempting to use filesystem methods, Agents **MUST** verify that the
+> Client supports these capabilities by checking the Client Capabilities field
+> in the `initialize` response [...] If `readTextFile` or `writeTextFile` is
+> `false` or not present, the Agent **MUST NOT** attempt to call the
+> corresponding filesystem method.
 
 Read the other way round, this is the client's obligation: the flag and the
-handler are one fact, and a `true` with nothing behind it is a lie a
-conforming agent will act on. That is why the flip and the handlers land in
-one commit.
+handler are one fact, and a `true` with nothing behind it is a lie a conforming
+agent will act on. That is why the flip and the handlers land in one commit.
 
 ### 6. The refusal code: the error-code table has no "forbidden"
 
@@ -1452,21 +1448,21 @@ for m in json.load(open('schema-v1.json'))['\$defs']['ErrorCode']['anyOf']:
 (any other integer) | Other
 ```
 
-Eight named codes and no authorization refusal among them. A path outside
-the session's trusted project root is therefore answered with `-32602`
-(Invalid params): the request was well-formed JSON-RPC naming a method this
-client implements, and the one thing wrong with it is the `path` parameter
-itself. `-32603` (Internal error) would misreport a policy decision as a
-client fault and invite the agent to retry the identical call, and `-32002`
-(Resource not found) would leak whether the refused path exists.
+Eight named codes and no authorization refusal among them. A path outside the
+session's trusted project root is therefore answered with `-32602` (Invalid
+params): the request was well-formed JSON-RPC naming a method this client
+implements, and the one thing wrong with it is the `path` parameter itself.
+`-32603` (Internal error) would misreport a policy decision as a client fault
+and invite the agent to retry the identical call, and `-32002` (Resource not
+found) would leak whether the refused path exists.
 
 The `Error` object's own shape (`required: ['code', 'message']`, optional
 `data`) is pinned in the `Error` `$defs` entry; a refusal carries `code` and
-`message` and no `data`, so no byte of the refused file's content can ride
-back on the reply.
+`message` and no `data`, so no byte of the refused file's content can ride back
+on the reply.
 
-A failure *inside* the boundary is a different question from a refusal *at*
-it, and the two members that matter for it, verbatim:
+A failure *inside* the boundary is a different question from a refusal *at* it,
+and the two members that matter for it, verbatim:
 
 ```
 $ python3 -c "
@@ -1498,8 +1494,8 @@ for m in d['\$defs']['ErrorCode']['anyOf']:
 "A given resource, such as a file, was not found" is the case exactly, so a
 path *inside* the session directory that names nothing answers `-32002`. The
 leak argument above does not apply there and inverts: inside the boundary,
-whether the file exists is not a secret the client is keeping, it is the
-answer the agent asked for. The mapping this client uses:
+whether the file exists is no secret the client is keeping; it is the answer
+the agent asked for. The mapping this client uses:
 
 | Condition | Code | Why |
 |---|---|---|
@@ -1576,11 +1572,11 @@ name = "schemars"
 name = "schemars"
 ```
 
-Pinned facts: the crate exists, is Apache-2.0, is actively maintained, and
-its runtime is the `async-io`/`async-process`/`blocking` reactor, with
-`tokio` present only as a dev-dependency. Its resolved graph is 145 crates.
-Its release cadence went `1.0.0` (2026-06-24) to `2.0.0` (2026-07-23), a
-major version inside one month.
+Pinned facts: the crate exists, is Apache-2.0, is actively maintained, and its
+runtime is the `async-io`/`async-process`/`blocking` reactor, with `tokio`
+present only as a dev-dependency. Its resolved graph is 145 crates. Its release
+cadence went `1.0.0` (2026-06-24) to `2.0.0` (2026-07-23), a major version
+inside one month.
 
 ## `authenticate` and the `auth_required` error code
 
@@ -1611,9 +1607,8 @@ Raw output, the `-32000` member (verbatim, unedited):
 }
 ```
 
-`docs/protocol/v1/schema.mdx` documents the same code at the same value,
-under the heading `ErrorCode`, confirming the schema and the rendered docs
-agree.
+`docs/protocol/v1/schema.mdx` documents the same code at the same value, under
+the heading `ErrorCode`, confirming the schema and the rendered docs agree.
 
 `docs/protocol/v1/authentication.mdx`, verbatim, on when it is sent:
 
@@ -1651,12 +1646,12 @@ On success, the Agent returns an empty result:
 ```
 
 The schema's `session_new` method description, verbatim: "May return an
-`auth_required` error if the agent requires authentication." The
-`authenticate` method's own description also mentions the error, describing
-what a successful call clears: "the client can proceed to create sessions
-with `new_session` without receiving an `auth_required` error." Between the
-two, only `session/new` is the request that can itself fail with the code,
-so the guard belongs there specifically, not on every outgoing request.
+`auth_required` error if the agent requires authentication." The `authenticate`
+method's own description also mentions the error, describing what a successful
+call clears: "the client can proceed to create sessions with `new_session`
+without receiving an `auth_required` error." Between the two, only
+`session/new` is the request that can itself fail with the code, so the guard
+belongs there specifically, and skips every other outgoing request.
 
 Pinned `authMethods` entry shape, from `authentication.mdx`'s advertising
 example (`docs/protocol/v1/authentication.mdx` lines 41-61, same commit):
@@ -1670,15 +1665,14 @@ example (`docs/protocol/v1/authentication.mdx` lines 41-61, same commit):
 ```
 
 The schema defines `AuthMethod` itself as an `anyOf` union carrying a `type`
-field that acts as the discriminator between its members, with an absent
-`type` treated as `agent`. Today the union has exactly one member,
-`AuthMethodAgent`, which is the flattened `{id, name, description}` shape
-pinned above -- but the discriminator field means a second variant can be
-added to the union later without changing this shape's own fields.
+field that acts as the discriminator between its members, with an absent `type`
+treated as `agent`. Today the union has exactly one member, `AuthMethodAgent`,
+which is the flattened `{id, name, description}` shape pinned above; but the
+discriminator field means a second variant can be added to the union later
+without changing this shape's own fields.
 
-Pinned facts for the session-lifecycle client: `authenticate`'s request
-carries exactly one field, `methodId` (a string, one of the ids in the
-`initialize` response's `authMethods`); its success reply is `{}`, no
-fields; a `session/new` failing with JSON-RPC error code `-32000` is the
-wire's own signal to call `authenticate` and retry, not a terminal
-failure.
+Pinned facts for the session-lifecycle client: `authenticate`'s request carries
+exactly one field, `methodId` (a string, one of the ids in the `initialize`
+response's `authMethods`); its success reply is `{}`, no fields; a
+`session/new` failing with JSON-RPC error code `-32000` is the wire's own
+signal to call `authenticate` and retry, and stops short of a terminal failure.

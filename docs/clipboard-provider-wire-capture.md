@@ -1,7 +1,8 @@
 # Wire capture: `g:clipboard` provider contract
 
-Captured live against the pinned engine per "capture, never recall." Source
-of truth for the clipboard provider implementation.
+Captured live against the pinned engine: every value below reflects an actual
+run of the pinned binary. Source of truth for the clipboard provider
+implementation.
 
 ## Engine identity
 
@@ -91,22 +92,22 @@ support detection.
 
 ## Reference implementation cross-check: `lua/vim/ui/clipboard/osc52.lua` (bundled)
 
-Read directly from the pinned install (`$(brew
---prefix)/Cellar/neovim/0.12.4/share/nvim/runtime/lua/vim/ui/clipboard/osc52.lua`).
+Read directly from the pinned install
+(`$(brew --prefix)/Cellar/neovim/0.12.4/share/nvim/runtime/lua/vim/ui/clipboard/osc52.lua`).
 `M.paste(reg)` returns a *bare* list of lines (`vim.split(contents, '\n')`),
 **not** a `[lines, regtype]` pair: narrower than the documented contract.
 
 ## Reference implementation cross-check: `autoload/provider/clipboard.vim` (bundled)
 
 `s:clipboard.get(a:reg)` invokes the `paste` Funcref and passes its return
-value straight through as `clipboard_data` with no repackaging, so both
-shapes reach the C-level register setter unmodified, whichever the paste
-Funcref chooses to return.
+value straight through as `clipboard_data` with no repackaging, so both shapes
+reach the C-level register setter unmodified, whichever the paste Funcref
+chooses to return.
 
 ## Empirical resolution (headless pinned nvim, `nvim --headless --clean -l <script>.lua`)
 
-The doc text and the bundled OSC52 example disagree on the paste return
-shape. Resolved empirically against the pinned binary rather than guessed:
+The doc text and the bundled OSC52 example disagree on the paste return shape.
+Resolved empirically against the pinned binary:
 
 **1. Bare list of lines (no regtype) is accepted:**
 
@@ -155,11 +156,11 @@ star-without-key ok=false res="Vim:clipboard: provider returned invalid data"
   (regtype defaults to charwise `v`) or a `[lines, regtype]` pair. view's
   injected paste closure uses the `[lines, regtype]` pair form so
   linewise/charwise fidelity round-trips through `"+yy`/`"+p`.
-- `copy`/`paste` dicts must define **both** `'+'` and `'*'` keys or the
-  omitted register errors on every access. view wires both registers to the
-  same clipboard backend (arboard has one system clipboard; there is no
-  macOS/Windows equivalent of the X11 primary selection, and wiring both to
-  the same store matches the bundled OSC52 provider's own behavior).
-- `cache_enabled = 0` is required. Option B (read-at-paste-time, never
+- `copy`/`paste` dicts must define **both** `'+'` and `'*'` keys or the omitted
+  register errors on every access. view wires both registers to the same
+  clipboard backend (arboard has one system clipboard; there is no
+  macOS/Windows equivalent of the X11 primary selection, and wiring both to the
+  same store matches the bundled OSC52 provider's own behavior).
+- `cache_enabled = 0` is required. Option B (read-at-paste-time, with nothing
   cached) is the chosen design; caching would reintroduce the stale-read bug
   Option A was rejected for.

@@ -1,16 +1,18 @@
 # Wire capture: drawing an agent's proposed diff inside the file it edits
 
-Captured live against the pinned engine per "capture, never recall." Source of
-truth for `REVIEW_SHOW_CHUNK` and `REVIEW_CLEAR_CHUNK`, the two `nvim_exec_lua`
-chunks `RpcCall::ReviewShow` and `RpcCall::ReviewClear` issue to put a whole
-open review into the buffer it proposes to change, and to take it back off.
+Captured live against the pinned engine: every value below reflects an actual
+run of the pinned binary. Source of truth for `REVIEW_SHOW_CHUNK` and
+`REVIEW_CLEAR_CHUNK`, the two `nvim_exec_lua` chunks `RpcCall::ReviewShow` and
+`RpcCall::ReviewClear` issue to put a whole open review into the buffer it
+proposes to change, and to take it back off.
 
-Both are notifications, not requests: nothing view holds depends on an answer,
-and the loop that emits them is the loop that paints. What is recorded here is
-therefore not a reply shape -- there is none -- but what the editor holds
-afterwards: which extmarks landed on which rows, which mappings the buffer
-answers, and (the claim the whole design rests on) that the buffer's own text
-and its `changedtick` did not move.
+Both are notifications, distinct from requests: nothing view holds depends on
+an answer, and the loop that emits them is the loop that paints. What is
+recorded here is therefore a description with no reply shape behind it, since
+there is none. What matters is what the editor holds afterwards: which extmarks
+landed on which rows, which mappings the buffer answers, and (the claim the
+whole design rests on) that the buffer's own text and its `changedtick` did not
+move.
 
 ## Engine identity
 
@@ -25,14 +27,14 @@ Matches `.engine-pin` (`v0.12.4`).
 
 ## Capture method
 
-`Engine::spawn(EngineConfig::isolated())` -- `nvim --embed` under the hermetic
-`HOME`/`XDG_*` isolation a real session gets -- followed by
-`nvim_ui_attach(80, 24)`, then `EngineHandle::review_show` / `review_clear`
-themselves. **Not `--headless -l`**, for the reason
-`docs/checktime-wire-capture.md` gives: view always attaches a UI before issuing
-any RPC call, and the difference is material. Here it is the whole point -- a
-screenless capture can only echo extmark *attributes* back, and the first
-version of this capture did exactly that while the deletion highlight was
+`Engine::spawn(EngineConfig::isolated())`; `nvim --embed` under the hermetic
+`HOME`/`XDG_*` isolation a real session gets; followed by
+`nvim_ui_attach(80, 24)`, then `EngineHandle::review_show`/`review_clear`
+themselves. **Not `--headless -l` **, for the reason
+`docs/checktime-wire-capture.md` gives: view always attaches a UI before
+issuing any RPC call, and the difference is material. Here it is the whole
+point; a screenless capture can only echo extmark *attributes* back, and the
+first version of this capture did exactly that while the deletion highlight was
 painting one row too far. Every claim below about what the user sees is a
 `screenattr`/`screenstring` read of a rendered screen.
 
@@ -42,7 +44,7 @@ The editor is read back through `nvim_buf_get_extmarks(details = true)`,
 (`crates/view-engine/tests/inline_review_live.rs`), so the session shape here
 and the session shape the assertions run in cannot drift apart.
 
-The channel id in the capture is `1` -- this embedded connection's own, learned
+The channel id in the capture is `1`; this embedded connection's own, learned
 at the `nvim_get_api_info` handshake and carried on `EngineHandle`. A real
 session's differs; nothing in the chunk hard-codes it.
 
@@ -63,23 +65,23 @@ MARK 5:5:ViewReviewStale:nil:nil:
 ```
 
 Four extmarks for three hunks. A hunk that replaces rows gets a range mark
-carrying the row highlight -- `ViewReviewRemoved`, or `ViewReviewStale` once
-the buffer has moved under it (mark 4) -- and a hunk with anything to propose
-gets a second mark carrying the virtual lines. The pure insertion (mark 3) has
-only the second kind, and it is the one mark with `virt_lines_above = true`:
-it replaces no row, so its lines are drawn above the row it inserts before
-rather than under the rows it would replace. The header and the `▶` sign
-appear on the current hunk alone, which is what makes "which hunk am I about
-to accept" answerable without the panel. The header is two virtual lines, not
-one: nvim's grid keeps its full width under view's panel, so a hint on a
-single line loses its tail -- `<leader>hq leave` first -- at the widths a
-laptop opens.
+carrying the row highlight; `ViewReviewRemoved`, or `ViewReviewStale` once the
+buffer has moved under it (mark 4); and a hunk with anything to propose gets a
+second mark carrying the virtual lines. The pure insertion (mark 3) has only
+the second kind, and it is the one mark with `virt_lines_above = true`: it
+replaces no row, so its lines are drawn above the row it inserts before,
+distinct from under the rows it would replace. The header and the `▶` sign
+appear on the current hunk alone, which is what makes "which hunk am I about to
+accept" answerable without the panel. The header spans two virtual lines, well
+beyond one: nvim's grid keeps its full width under view's panel, so a hint on a
+single line loses its tail; `<leader>hq leave` first; at the widths a laptop
+opens.
 
 The groups are the review's own, derived from the colorscheme's
-`DiffDelete`/`DiffChange`/`DiffAdd`/`DiffText` rather than being them -- once,
+`DiffDelete`/`DiffChange`/`DiffAdd`/`DiffText`, distinct from being them; once,
 the first time a review shows, and again on every `ColorScheme`, so the
-per-keystroke redraws a review does between those events derive nothing.
-Under this session's default scheme:
+per-keystroke redraws a review does between those events derive nothing. Under
+this session's default scheme:
 
 ```
 Normal            bg=14161b fg=e0e2ea
@@ -101,38 +103,39 @@ it stands, because that background is what the author drew for a diffed row.
 `DiffDelete` here has only a `guifg`, so that foreground is laid a fifth of the
 way over `Normal`'s background instead: `#ffc0b9` a fifth over `#14161b` is the
 `43383b` above. A `reverse` group (dracula's `DiffDelete`, and the
-`quiet`/`sorbet`/`zaibatsu` schemes nvim itself ships) is the case where the two
-fields swap -- nvim fills such a row from the *foreground* -- so the fill is
-read off `guifg` there and blended the same way; reading `guibg` under `reverse`
-collapsed all four review states into the one background those schemes share.
-Text is the first color that reads at WCAG 3:1 or better on the fill it lands
-on: the group's own non-fill color -- its `guifg`, or its `guibg` under
-`reverse` -- then `Normal`'s foreground, then plain black or white. The `eef1f8`
-rows above are the first of those, `DiffAdd` and `DiffText`'s own paired
-foreground. Neither of the simpler rules survives the population: a diff group's
-own foreground is the row's background under `reverse`, and `Normal`'s
+`quiet`/`sorbet`/`zaibatsu` schemes nvim itself ships) is the case where the
+two fields swap; nvim fills such a row from the *foreground*; so the fill is
+read off `guifg` there and blended the same way; reading `guibg` under
+`reverse` collapsed all four review states into the one background those
+schemes share. Text is the first color that reads at WCAG 3:1 or better on the
+fill it lands on: the group's own non-fill color; its `guifg`, or its `guibg`
+under `reverse`; then `Normal`'s foreground, then plain black or white. The
+`eef1f8` rows above are the first of those, `DiffAdd` and `DiffText`'s own
+paired foreground. Neither of the simpler rules survives the population: a diff
+group's own foreground is the row's background under `reverse`, and `Normal`'s
 foreground alone is light on a dark scheme while nvim's legacy diff palette
 hands `DiffText` a `#c6c6c6` fill over verbatim, which is 12 of the 28 schemes
 the pinned nvim ships reading between 1.06:1 and 1.71:1. 3:1 is the floor view
-holds rather than a standard it quotes: it is the point past which the scheme's
-own paired color still survives, and a stricter number would trade the author's
-palette for plain black or white on schemes that read perfectly well.
-`ViewReviewSign` carries `ViewReviewHeader`'s fill -- both name the same hunk --
-and runs the ladder against that, so the marker never depends on what the gutter
-under it happens to be. It cannot: the `▶` sits on the hunk the cursor is on,
-whose sign cell nvim fills from `CursorLineSign` while the cursor is on that row
-and from `SignColumn` the moment it moves off or `'cursorline'` is cleared
-(`:h hl-CursorLineSign`), 18 of the 28 schemes the pinned nvim ships give those
-two different backgrounds, and moving the cursor one row raises no event a
-re-derive could hang off. nvim pads the sign to the width of the column it draws
-in, and the fill covers all of it. Nothing else crosses: `ViewReviewRemoved` and
-`ViewReviewStale` carry a background alone, so a reviewed row keeps whatever
-foreground its own syntax gave it, and no `reverse` or `bold` follows the color
-across. A colorscheme designs its diff groups for diff mode, where they color
-cells inside a diffed line; a `line_hl_group` paints a whole row with them, and
-dracula's foreground-only `reverse` `DiffDelete` fills that row with a solid
-block of `#FF5555`. The derived group is a fifth of that same red instead, under
-the row's own text (`crates/view-engine/tests/inline_review_live.rs`'s
+holds on its own, distinct from a standard it quotes: it is the point past
+which the scheme's own paired color still survives, and a stricter number would
+trade the author's palette for plain black or white on schemes that read
+perfectly well. `ViewReviewSign` carries `ViewReviewHeader`'s fill; both name
+the same hunk; and runs the ladder against that, so the marker never depends
+on what the gutter under it happens to be. It cannot: the `▶` sits on the hunk
+the cursor is on, whose sign cell nvim fills from `CursorLineSign` while the
+cursor is on that row and from `SignColumn` the moment it moves off or
+`'cursorline'` is cleared (`:h hl-CursorLineSign`), 18 of the 28 schemes the
+pinned nvim ships give those two different backgrounds, and moving the cursor
+one row raises no event a re-derive could hang off. nvim pads the sign to the
+width of the column it draws in, and the fill covers all of it. Nothing else
+crosses: `ViewReviewRemoved` and `ViewReviewStale` carry a background alone, so
+a reviewed row keeps whatever foreground its own syntax gave it, and no
+`reverse` or `bold` follows the color across. A colorscheme designs its diff
+groups for diff mode, where they color cells inside a diffed line; a
+`line_hl_group` paints a whole row with them, and dracula's foreground-only
+`reverse` `DiffDelete` fills that row with a solid block of `#FF5555`. The
+derived group is a fifth of that same red instead, under the row's own text
+(`crates/view-engine/tests/inline_review_live.rs`'s
 `a_reverse_video_diff_group_becomes_a_subtle_background_not_a_solid_block` pins
 both halves against a dracula-shaped scheme, and
 `a_background_defined_diff_group_is_taken_verbatim` pins the other side).
@@ -140,13 +143,13 @@ both halves against a dracula-shaped scheme, and
 The range mark's `end_row` is one *below* the hunk's own `old_range` end: the
 range is half-open and nvim's `end_row` is inclusive for `line_hl_group`, so
 `end_row = m.end_row - 1`. Passing the range end through paints the untouched
-row after every hunk as deleted -- invisible in this section (the stored
+row after every hunk as deleted; invisible in this section (the stored
 attribute reads plausible either way) and obvious in the rendered screen below,
 which is why that block exists.
 
-`sign_text` reads back as `"▶ "` -- nvim pads a one-cell sign to the two cells
-the sign column is wide. `virt_lines_above` reads back as `nil`, not `false`,
-on a mark that set no `virt_lines`.
+`sign_text` reads back as `"▶ "`; nvim pads a one-cell sign to the two cells
+the sign column is wide. `virt_lines_above` reads back as `nil`, distinct from
+`false`, on a mark that set no `virt_lines`.
 
 ```
 KEYMAP [c -> <Cmd>call rpcnotify(1, 'view_invoke', 'review', 'prev')<CR>
@@ -159,13 +162,13 @@ KEYMAP ]c -> <Cmd>call rpcnotify(1, 'view_invoke', 'review', 'next')<CR>
 GLOBAL n-maps after show: 55
 ```
 
-Seven mappings, read out of `nvim_buf_get_keymap(buf, 'n')` -- the reviewed
-buffer's own list, and no other buffer's -- and the global map count is
+Seven mappings, read out of `nvim_buf_get_keymap(buf, 'n')`; the reviewed
+buffer's own list, and no other buffer's; and the global map count is
 untouched. `<leader>` is nvim's default `\` here, expanded by `vim.keymap.set`
-when the map is set, so the review's keys follow whatever `mapleader` the user's
-own config chose. The right-hand side is literal `rpcnotify` text rather than an
-opaque Lua callback, which is what lets `:map`, `maparg()` and any plugin that
-introspects mappings show exactly what view installed and why.
+when the map is set, so the review's keys follow whatever `mapleader` the
+user's own config chose. The right-hand side is literal `rpcnotify` text,
+distinct from an opaque Lua callback, which is what lets `:map`, `maparg()` and
+any plugin that introspects mappings show exactly what view installed and why.
 
 ```
 TEXT unchanged=true state [changedtick 2, modified true] -> [changedtick 2, modified true]
@@ -173,15 +176,15 @@ CURSOR row=2 (focus=true, cursor_row=1)
 ```
 
 The text is byte-identical across the draw and `changedtick` did not move: an
-extmark is not an edit. That is the whole reason the decoration can be view's
-while the text stays nvim's, and it is why a proposal can be displayed over a
-file the user is still editing without a merge to undo later. (`modified=true`
-is the capture fixture's own doing -- it built the buffer with
-`nvim_buf_set_lines` -- and is unchanged by the draw; the live test asserts the
-flag across the call rather than its absolute value.) The cursor lands on row
-2, 1-indexed, for the 0-indexed `cursor_row = 1` the payload named.
+extmark carries no edit of its own. That is the whole reason the decoration can
+be view's while the text stays nvim's, and it is why a proposal can be
+displayed over a file the user is still editing without a merge to undo later.
+(`modified=true` is the capture fixture's own doing; it built the buffer with
+`nvim_buf_set_lines`; and is unchanged by the draw; the live test asserts the
+flag across the call, distinct from its absolute value.) The cursor lands on
+row 2, 1-indexed, for the 0-indexed `cursor_row = 1` the payload named.
 
-The same review as the user's screen holds it -- `screenattr` at column 3 and
+The same review as the user's screen holds it; `screenattr` at column 3 and
 `screenstring` across the row, after a `redraw`:
 
 ```
@@ -200,11 +203,11 @@ row  attr  screen
 
 `ViewReviewStale` reads at attribute 32, which is `DiffChange`'s own: a
 background taken verbatim with no other attribute makes the two groups
-identical to nvim's attribute cache. A shared id there is the rule working,
-not a bug.
+identical to nvim's attribute cache. A shared id there is the rule working as
+intended, and no bug.
 
 Row 6 is the assertion that matters: the row after a hunk carries the same
-attribute as an untouched row. Nothing but a rendered read answers it -- this is
+attribute as an untouched row. Nothing but a rendered read answers it; this is
 the exact cell the half-open/inclusive mismatch paints, and the extmark
 attributes above look correct in both versions.
 
@@ -232,12 +235,12 @@ MARK 1:40:ViewReviewRemoved:nil:nil:
 MARK 1:nil:nil:▶ :false:hunk 1/1/ViewReviewHeader|+late/ViewReviewAdded
 ```
 
-`strict = false` is load-bearing rather than defensive: the row is clamped and
-nothing raises. Under the default `strict = true` this call raises, and a raise
-here abandons the rest of the chunk -- including the seven `vim.keymap.set`
-calls -- leaving a buffer decorated with a review no key could answer. The race
-is ordinary: the user deletes lines while a notify carrying rows computed
-against the older buffer is still in flight.
+`strict = false` does load-bearing work, beyond mere defense: the row is
+clamped and nothing raises. Under the default `strict = true` this call raises,
+and a raise here abandons the rest of the chunk; including the seven
+`vim.keymap.set` calls; leaving a buffer decorated with a review no key could
+answer. The race is ordinary: the user deletes lines while a notify carrying
+rows computed against the older buffer is still in flight.
 
 ## 4. `review_clear`, twice
 
@@ -249,20 +252,20 @@ derive flag=nil  view_review augroup=gone
 
 The namespace is emptied and every mapping is gone. So are the derived groups'
 one-shot flag and the `ColorScheme` autocmd that keeps them current: the next
-review derives against whatever colorscheme is loaded then, rather than against
-a session-old answer, and no autocmd outlives the review that installed it. A
+review derives against whatever colorscheme is loaded then, and never against a
+session-old answer, and no autocmd outlives the review that installed it. A
 second clear over an already-clear buffer answers without error:
 `vim.keymap.del` raises for a mapping that does not exist, which is what the
 `pcall` around it absorbs. Idempotence is what lets a review's teardown run
 without first proving a show ever landed.
 
 The empty message history is worth reading precisely: it says the `pcall`
-absorbed the delete, not that a raise would have been visible. Measured on
-this same session, a notification whose chunk raises reaches nvim's log and
-nothing else -- not `:messages`, not `v:errmsg`, and not the connection that
-sent it. That is what the `nvim_buf_is_valid` guard at the head of each chunk
-exists for, and also why no test can observe its absence: the cost of dropping
-it is noise in a log file, paid by whoever debugs the session later.
+absorbed the delete; a raise being visible is a different claim entirely.
+Measured on this same session, a notification whose chunk raises reaches nvim's
+log and nothing else, bypassing `:messages`, `v:errmsg`, and the connection
+that sent it. That is what the `nvim_buf_is_valid` guard at the head of each
+chunk exists for, and also why no test can observe its absence: the cost of
+dropping it is noise in a log file, paid by whoever debugs the session later.
 
 ## 5. Where a file no window shows lands
 
@@ -272,12 +275,12 @@ split: wins=2 current_buf_is_proposal=true other_still_visible=true
 ```
 
 With `ai.review.open_target = current` the proposal takes the window the user
-is in and the layout is untouched -- the same "show me this file" move the
-picker and the file tree already make. With `split` the proposal gets a new
-window and whatever was being read stays on screen beside it. Either way the
-cursor ends in the proposal, which is what `focus = true` asked for. A file
-some window already shows is drawn where it already is: neither target moves it
-or splits anything.
+is in and the layout is untouched; the same "show me this file" move the picker
+and the file tree already make. With `split` the proposal gets a new window and
+whatever was being read stays on screen beside it. Either way the cursor ends
+in the proposal, which is what `focus = true` asked for. A file some window
+already shows is drawn where it already is: neither target moves it or splits
+anything.
 
 ## Production chunk shape: review_show
 
@@ -431,9 +434,10 @@ if focus then
 end
 ```
 
-`m.header` is omitted from the payload rather than sent as nil for a hunk that
-carries no header: msgpack nil decodes to `vim.NIL`, which `ipairs` cannot walk,
-so a present-but-nil key would throw inside the loop that draws every hunk.
+`m.header` is omitted from the payload entirely, distinct from being sent as
+nil, for a hunk that carries no header: msgpack nil decodes to `vim.NIL`, which
+`ipairs` cannot walk, so a present-but-nil key would throw inside the loop that
+draws every hunk.
 
 ## Production chunk shape: review_clear
 

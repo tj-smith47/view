@@ -1,9 +1,10 @@
 # Wire capture: hidden-buffer creation, reuse, and deletion
 
-Captured live against the pinned engine per "capture, never recall." Source
-of truth for `LOAD_HIDDEN_CHUNK`, the `nvim_exec_lua` chunk
-`EngineHandle::load_hidden` issues for `RpcCall::LoadHidden`, and for
-`EngineHandle::release_hidden`'s `nvim_buf_delete` call.
+Captured live against the pinned engine: every value below reflects an actual
+run of the pinned binary. Source of truth for `LOAD_HIDDEN_CHUNK`, the
+`nvim_exec_lua` chunk `EngineHandle::load_hidden` issues for
+`RpcCall::LoadHidden`, and for `EngineHandle::release_hidden`'s
+`nvim_buf_delete` call.
 
 ## Engine identity
 
@@ -18,18 +19,18 @@ Matches `.engine-pin` (`v0.12.4`).
 
 ## Capture method
 
-A standalone Python msgpack-rpc client (no `pynvim`; not installed) spawns
-`nvim --clean --headless --listen <socket>` with the same hermetic
+A standalone Python msgpack-rpc client (`pynvim` absent from the environment)
+spawns `nvim --clean --headless --listen <socket>` with the same hermetic
 `HOME`/`XDG_*` isolation `EngineConfig::isolated()` uses, connects over the
-unix socket, and issues raw msgpack-RPC requests -- both bare API calls
+unix socket, and issues raw msgpack-RPC requests; both bare API calls
 (`nvim_create_buf`, `nvim_buf_delete`) and `nvim_exec_lua` running the exact
 chunk text `LOAD_HIDDEN_CHUNK` embeds.
 
 ## 1. `nvim_create_buf(false, false)` never lists the buffer
 
 Superseded by case 10: the shipped `LOAD_HIDDEN_CHUNK` no longer calls
-`nvim_create_buf` at all. Kept for the unlisted-by-default fact this case
-still establishes, which case 10 confirms `bufadd` shares.
+`nvim_create_buf` at all. Kept for the unlisted-by-default fact this case still
+establishes, which case 10 confirms `bufadd` shares.
 
 ```
 nvim_create_buf(false, false) -> buf=2
@@ -38,30 +39,31 @@ nvim_get_option_value('buflisted', {buf=2}) -> false
 
 A buflisted-filtered scan (the same filter `BUFFER_LIST_CHUNK` uses for the
 picker's `Source::Buffers`) over `nvim_list_bufs()` right after creating and
-naming the buffer never includes it -- only nvim's own default buffer (`1`)
-shows up. Confirms the falsifiable check: a hidden buffer never reaches
+naming the buffer never includes it; only nvim's own default buffer (`1`) shows
+up. Confirms the falsifiable check: a hidden buffer never reaches
 `Msg::PickerBufferList`.
 
-## 2. `nvim_buf_set_lines` marks the buffer modified -- `bufload` does not
+## 2. `nvim_buf_set_lines` marks the buffer modified; `bufload` does not
 
 Superseded by case 10: the shipped chunk populates through `bufload`, which
 never marks the buffer modified in the first place, so the reset this case
-describes no longer exists in the code. Kept as the reason `bufload`
-replaced this mechanism at all.
+describes no longer exists in the code. Kept as the reason `bufload` replaced
+this mechanism at all.
 
 Loading a file's content into a freshly created buffer via
 `vim.api.nvim_buf_set_lines` (the only way to populate a buffer whose content
 this chunk itself reads through `vim.fn.readfile`, since `nvim_create_buf`
 starts the buffer empty) sets `modified = true`, unlike `vim.fn.bufload`, which
 does not. The chunk resets `vim.bo[buf].modified = false` immediately after the
-initial load specifically to undo this side effect: a buffer that merely mirrors
-what is already on disk must not read as having unsaved changes nobody made.
+initial load specifically to undo this side effect: a buffer that merely
+mirrors what is already on disk must not read as having unsaved changes nobody
+made.
 
 ## 3. The existing-buffer lookup, scanned before `nvim_create_buf`
 
 Superseded by case 10 for the creation mechanism (`bufadd`, not
-`nvim_create_buf`) and by case 13 for the idempotency claim (`bufadd` itself
-is idempotent by name; the scan below no longer needs to lean on
+`nvim_create_buf`) and by case 13 for the idempotency claim (`bufadd` itself is
+idempotent by name; the scan below no longer needs to lean on
 `nvim_buf_set_name` for it). Kept for the "scan before creating" ordering,
 which the shipped chunk still preserves.
 
@@ -77,17 +79,17 @@ LOAD_HIDDEN_CHUNK(path) -> { buf = 2, created = false, changedtick = 2 }
 ```
 
 The second call's scan finds the buffer the first call named via
-`nvim_buf_set_name` and returns it unchanged -- no second `nvim_create_buf`,
-no second read of the file. `created` tells only which call made the
-buffer; both calls return the identical handle.
+`nvim_buf_set_name` and returns it unchanged; no second `nvim_create_buf`, no
+second read of the file. `created` tells only which call made the buffer; both
+calls return the identical handle.
 
 ## 4. A path with no file on disk yet resolves to an empty, unmodified buffer
 
-Superseded by case 10: the shipped chunk reaches this outcome through
-`bufadd` resolving the nonexistent path directly, not through a
-`vim.fn.readfile` call caught by `pcall` -- that call no longer exists in
-the chunk at all. Kept for the outcome itself (empty, unmodified buffer for
-a not-yet-existing path), which still holds under `bufadd`+`bufload`.
+Superseded by case 10: the shipped chunk reaches this outcome through `bufadd`
+resolving the nonexistent path directly, bypassing a `vim.fn.readfile` call
+caught by `pcall`; that call no longer exists in the chunk at all. Kept for the
+outcome itself (empty, unmodified buffer for a not-yet-existing path), which
+still holds under `bufadd` + `bufload`.
 
 ```
 LOAD_HIDDEN_CHUNK(new_file_path) -> { buf = 3, created = true, changedtick = 2 }
@@ -95,10 +97,9 @@ nvim_buf_get_lines(3, 0, -1, false) -> ['']
 nvim_get_option_value('modified', {buf=3}) -> false
 ```
 
-`vim.fn.readfile` on a nonexistent path fails; the chunk's `pcall` catches
-that and falls back to an empty `lines` table, which is what the file will
-be created as once something writes to it -- the new-file proposal's own
-case.
+`vim.fn.readfile` on a nonexistent path fails; the chunk's `pcall` catches that
+and falls back to an empty `lines` table, which is what the file will be
+created as once something writes to it; the new-file proposal's own case.
 
 ## 5. The existing-buffer lookup finds a buffer regardless of its modified state
 
@@ -108,10 +109,10 @@ nvim_get_option_value('modified', {buf=2}) -> true
 LOAD_HIDDEN_CHUNK(path) -> { buf = 2, created = false, changedtick = 3 }
 ```
 
-A second `load_hidden` for the same path after edits have already landed in
-the buffer still resolves to the same buffer, never a fresh reload from
-disk that would discard those edits -- the scan matches on buffer identity
-(name), not on modified state.
+A second `load_hidden` for the same path after edits have already landed in the
+buffer still resolves to the same buffer, with no fresh reload from disk that
+would discard those edits; the scan matches on buffer identity (name) alone,
+leaving modified state out of it.
 
 ## 6. `nvim_buf_delete` on an unmodified, window-invisible buffer succeeds silently
 
@@ -126,22 +127,21 @@ nvim_buf_delete(buf, {}) -> error: 'Failed to unload buffer.'
 nvim_buf_get_lines(buf, 0, -1, false) -> unchanged, still ['EDITED', ...]
 ```
 
-No `force` is ever passed. This is the safety net `release_hidden` relies
-on rather than reimplementing: a hold whose buffer has unsaved accepted
-edits when the refcount reaches zero is not deleted -- nvim's own default
+No `force` is ever passed. This is the safety net `release_hidden` relies on
+directly, and not reimplemented: a hold whose buffer has unsaved accepted edits
+when the refcount reaches zero is not deleted; nvim's own default
 `force: false` refuses it, and the edits survive as an orphaned, still-loaded,
 unlisted buffer nvim will hand back to whatever next names this path (a
-`load_hidden` retry, or a real `:edit`), rather than being silently
-discarded.
+`load_hidden` retry, or a real `:edit`), and never silently discarded.
 
 ## 8. `nvim_buf_delete` does NOT refuse a buffer that is visible in a window
 
 `nvim_buf_delete` does not refuse a window-visible buffer, contrary to an
 earlier reading of this case that assumed it mirrored case 7's modified-buffer
 refusal. Re-captured against the same pinned engine, in the exact shape
-`release_hidden` actually faces -- a buffer opened normally via `:edit` (this
-crate's own `OPEN_FILE_CHUNK`, not a bare `nvim_win_set_buf`), the sole window
-showing it, ui-attached:
+`release_hidden` actually faces; a buffer opened normally via `:edit` (this
+crate's own `OPEN_FILE_CHUNK`, distinct from a bare `nvim_win_set_buf`), the
+sole window showing it, ui-attached:
 
 ```
 :edit path -> current buffer = 1, win_findbuf(1) = [win] -- confirms visible
@@ -152,14 +152,14 @@ nvim_get_current_buf() -> 2 -- ...but it is a fresh empty buffer, not the
 ```
 
 The same result holds with a second, unrelated buffer already open (deleting
-the window's current buffer just switches the window to that other buffer
-instead of a fresh one). Deleting a buffer nvim itself has no window context
-for (the API caller passes no window) does not raise "Failed to unload
-buffer." here -- nvim substitutes a replacement into every window that was
-showing it and proceeds. `release_hidden` cannot rely on nvim refusing this
-the way it reliably refuses a modified buffer (case 7): it must check
-`vim.fn.win_findbuf` itself and skip the delete outright when the list is
-non-empty, never attempting it and hoping for a refusal.
+the window's current buffer just switches the window to that other buffer in
+place of a fresh one). Deleting a buffer nvim itself has no window context for
+(the API caller passes no window) does not raise "Failed to unload buffer."
+here; nvim substitutes a replacement into every window that was showing it and
+proceeds. `release_hidden` cannot rely on nvim refusing this the way it
+reliably refuses a modified buffer (case 7): it must check `vim.fn.win_findbuf`
+itself and skip the delete outright when the list is non-empty; the delete is
+never even attempted, so there is no refusal to hope for.
 
 ## 9. `RELEASE_HIDDEN_CHUNK`'s own `win_findbuf` guard, verified against both refusal shapes
 
@@ -181,17 +181,17 @@ win_findbuf(buf) -> []
 RELEASE_HIDDEN_CHUNK(buf) -> buffer gone from nvim_list_bufs()
 ```
 
-The window-visibility check runs in Lua, before ever calling
-`nvim_buf_delete`, rather than trusting nvim to refuse on its own (case 8
-disproved that trust) -- the modified-buffer case still relies on nvim's own
-refusal (case 7), which held up under this same re-capture.
+The window-visibility check runs in Lua, before ever calling `nvim_buf_delete`,
+and does not trust nvim to refuse on its own (case 8 disproved that trust); the
+modified-buffer case still relies on nvim's own refusal (case 7), which held up
+under this same re-capture.
 
 ## 10. `vim.fn.bufadd` + `vim.fn.bufload` populate through nvim's real read pipeline
 
-`nvim_create_buf` + `readfile` + `nvim_buf_set_lines` (the mechanism cases
-1-9 above capture) never runs `BufReadPre`/`BufReadPost`, so filetype
-detection, indent/editorconfig settings and the file's own fileformat/EOL
-never happen. `bufadd`+`bufload` is nvim's own file-open path minus the
+`nvim_create_buf` + `readfile` + `nvim_buf_set_lines` (the mechanism cases 1-9
+above capture) never runs `BufReadPre`/`BufReadPost`, so filetype detection,
+indent/editorconfig settings and the file's own fileformat/EOL never happen.
+`bufadd` + `bufload` is nvim's own file-open path minus the
 window/current-buffer switch:
 
 ```
@@ -204,8 +204,8 @@ nvim_buf_get_lines(buf, 0, -1, false) -> ['fn main() {}']
 ```
 
 Unlisted exactly like the `nvim_create_buf(false, false)` path (case 1) --
-`bufadd` never lists the buffer it creates -- but with filetype detection
-and every other `:edit`-triggered autocommand intact.
+`bufadd` never lists the buffer it creates; but with filetype detection and
+every other `:edit` -triggered autocommand intact.
 
 ## 11. `bufload`'s own read is the undo baseline; `nvim_buf_set_lines` is not
 
@@ -219,13 +219,12 @@ vim.fn.undotree().seq_cur -> 1
 :undo                      -> lines become [''], the buffer's own content is gone
 ```
 
-`nvim_buf_set_lines` on a freshly created empty buffer is itself an
-undoable edit (from empty to the file's content); the very first `u` the
-user presses after the file is later opened normally in that same buffer
-reverts back to empty, and a save after that truncates the file on disk.
-`bufload` reads the file as nvim's own initial buffer state, the same as
-opening the file fresh with `:edit` -- there is no "from empty" edit on the
-undo tree to revert to.
+`nvim_buf_set_lines` on a freshly created empty buffer is itself an undoable
+edit (from empty to the file's content); the very first `u` the user presses
+after the file is later opened normally in that same buffer reverts back to
+empty, and a save after that truncates the file on disk. `bufload` reads the
+file as nvim's own initial buffer state, the same as opening the file fresh
+with `:edit`; there is no "from empty" edit on the undo tree to revert to.
 
 ## 12. `bufload` preserves `fileformat` and `endofline`; the write-back correctly reproduces CRLF
 
@@ -241,20 +240,19 @@ bufload -> getbufvar(buf, '&endofline')    -> 0   (correctly recorded: source ha
 :write -> disk bytes become "a\nb\n"              -- fixendofline adds it back
 ```
 
-The CRLF case round-trips byte-identical through a write because
-`fileformat` is read correctly at load time (the old chunk hardcoded
-`fileformat=unix` regardless of source, corrupting every line ending on the
-next save). The no-EOL case's write gaining a trailing newline is not a
-regression this chunk introduces -- `fixendofline` defaults to on and
-applies identically to a buffer opened by a genuine `:edit`; what matters
-is that `endofline` is read correctly (`false`) rather than hardcoded to
-`true` the way the old chunk left it, since that is the flag other code
-(and nvim's own write path) actually consults. Neither fixture's content
-changes at all through a `load_hidden` -> `release_hidden` cycle with no
-write in between -- `release_hidden` never touches the wire in a way that
-writes to disk.
+The CRLF case round-trips byte-identical through a write because `fileformat`
+is read correctly at load time (the old chunk hardcoded `fileformat=unix`
+regardless of source, corrupting every line ending on the next save). The
+no-EOL case's write gaining a trailing newline traces to nvim's own default,
+and is no regression this chunk introduces; `fixendofline` defaults to on and
+applies identically to a buffer opened by a genuine `:edit`; what matters is
+that `endofline` is read correctly (`false`), where the old chunk left it
+hardcoded to `true`, since that is the flag other code (and nvim's own write
+path) actually consults. Neither fixture's content changes at all through a
+`load_hidden` -> `release_hidden` cycle with no write in between;
+`release_hidden` never touches the wire in a way that writes to disk.
 
-## 13. `bufadd` finds a pre-existing UNLOADED buffer by name rather than creating a second one
+## 13. `bufadd` finds a pre-existing UNLOADED buffer by name, and creates no second one
 
 ```
 bufadd(path)              -> buf=5  (buflisted=0, loaded=0 -- an unloaded entry, no bufload call yet)
@@ -262,23 +260,23 @@ bufadd(path)  -- again    -> buf=5  (same handle, still unloaded until something
 ```
 
 `buflisted=0` here, matching case 10 and `:help bufadd`: `bufadd` alone never
-lists a buffer regardless of whether it created it fresh or found an
-existing unloaded one. This matters beyond a typo now that `buflisted` is a
-guard input to `RELEASE_HIDDEN_CHUNK`'s belt-and-braces check (case 14) --
-every `bufadd`ed buffer starts unprotected by that check, listed only once
-something else (a real `:edit`) chooses to list it.
+lists a buffer regardless of whether it created it fresh or found an existing
+unloaded one. This matters beyond a typo now that `buflisted` is a guard input
+to `RELEASE_HIDDEN_CHUNK`'s belt-and-braces check (case 14); every `bufadd`
+ed buffer starts unprotected by that check, listed only once something else (a
+real `:edit`) chooses to list it.
 
-`bufadd` is idempotent on the buffer's name whether or not the existing
-entry is loaded -- unlike the old chunk's own `nvim_buf_set_name`, which
-(Minor 1's own capture) silently orphaned a same-named unloaded buffer
-instead of finding it. This matters for `created`'s ownership meaning: an
-unloaded buffer that already existed for this path (the user's own prior
-session state, not anything `load_hidden` made) must never be reported as
-newly created, or the refcount's "may I delete this" bit would be wrong for
-a buffer view never made. `LOAD_HIDDEN_CHUNK`'s own scan is extended to
-match on name alone (loaded or not) rather than only loaded buffers, so
-this case is caught by the scan and reported `created = false` before
-`bufadd` is ever reached.
+`bufadd` is idempotent on the buffer's name whether or not the existing entry
+is loaded, distinct from the old chunk's own `nvim_buf_set_name`, which (Minor
+1's own capture) silently orphaned a same-named unloaded buffer in place of
+finding it. This matters for `created`'s ownership meaning: an unloaded buffer
+that already existed for this path (the user's own prior session state,
+distinct from anything `load_hidden` made) must never be reported as newly
+created, or the refcount's "may I delete this" bit would be wrong for a buffer
+view never made. `LOAD_HIDDEN_CHUNK`'s own scan is extended to match on name
+alone (loaded or not), reaching past only loaded buffers, so this case is
+caught by the scan and reported `created = false` before `bufadd` is ever
+reached.
 
 ## 14. `:edit`-ing a hidden buffer's own path adopts it: `buflisted` flips to 1
 
@@ -289,24 +287,24 @@ bufadd(path); bufload(buf) -> buf=2, buflisted=0
                                 win_findbuf(2) -> non-empty
 ```
 
-A buffer `load_hidden` created can become a real, listed, user-owned buffer
-the moment the user opens the same path normally, without ever becoming a
-*new* buffer number. `win_findbuf` alone catches this while the window
-stays open; `RELEASE_HIDDEN_CHUNK`'s `buflisted` check is the belt to that
-brace for the case where the user has since navigated away from the window
-(buffer hidden again, `win_findbuf` empty) but the buffer is now theirs, not
-ours, and must survive a release exactly like any other buffer nvim itself
-lists.
+A buffer `load_hidden` created can become a real, listed, user-owned buffer the
+moment the user opens the same path normally, without ever becoming a *new*
+buffer number. `win_findbuf` alone catches this while the window stays open;
+`RELEASE_HIDDEN_CHUNK`'s `buflisted` check is the belt to that brace for the
+case where the user has since navigated away from the window (buffer hidden
+again, `win_findbuf` empty) but the buffer is now theirs, standing apart
+from ours, and must survive a release exactly like any other buffer nvim
+itself lists.
 
 ## 15. `bufadd`'s own identity resolution for a not-yet-existing path is a different, stronger mechanism than `fnamemodify(p, ':p')`
 
-`canonical_hidden_key`'s job is to key `EngineHandle::hidden_bufs` in
-agreement with whatever buffer `bufadd` actually resolves a `load_hidden`
-call onto -- not to reproduce `fnamemodify(p, ':p')`, which is a different,
-weaker function `LOAD_HIDDEN_CHUNK`'s own `canon()` also happens to fall
-back to (its scan loop, not `bufadd` itself). The two disagree on exactly
-the case that matters here: a symlinked directory, no `.`/`..` component
-anywhere in the path, and a leaf that does not exist yet.
+`canonical_hidden_key`'s job is to key `EngineHandle::hidden_bufs` in agreement
+with whatever buffer `bufadd` actually resolves a `load_hidden` call onto,
+distinct from reproducing `fnamemodify(p, ':p')`, which is a different, weaker
+function `LOAD_HIDDEN_CHUNK`'s own `canon()` also happens to fall back to (its
+scan loop, distinct from `bufadd` itself). The two disagree on exactly the case
+that matters here: a symlinked directory, no `.`/`..` component anywhere in the
+path, and a leaf that does not exist yet.
 
 ```
 -- fnamemodify(':p') never resolves a symlink unless a '.'/'..' component
@@ -323,9 +321,9 @@ nvim_buf_get_name(2)      -> .../real/brand-new.rs        -- stored in resolved 
 
 `bufadd`'s resolution is whole-parent-or-nothing: it succeeds only when the
 *entire* immediate parent directory exists (equivalent to a `chdir` into it
-succeeding, symlinks resolved as a side effect), and otherwise leaves the
-path completely unresolved -- it does not fall back to a shallower existing
-ancestor when the immediate parent itself does not fully exist:
+succeeding, symlinks resolved as a side effect), and otherwise leaves the path
+completely unresolved; it does not fall back to a shallower existing ancestor
+when the immediate parent itself does not fully exist:
 
 ```
 bufadd(real/brand-new4.rs)         -> 3
@@ -338,22 +336,22 @@ nvim_buf_get_name(4) -> link/sub2/../brand-new4.rs   -- left completely as given
 
 `canonical_hidden_key`'s fallback (for a path `std::fs::canonicalize` cannot
 resolve outright) mirrors exactly this: canonicalize the path's immediate
-parent as a whole, and only that -- succeed and join the file name, or fail
-and leave the path exactly as given. No lexical collapsing of `.`/`..` (the
-resolved cases above never have any left over -- canonicalizing the parent
-removes them as an intrinsic part of resolving it, not a separate textual
-pass) and no multi-level ancestor fallback (the `sub2`-missing case above
-shows `bufadd` itself has none either -- it does not fall back to resolving
+parent as a whole, and only that; succeed and join the file name, or fail and
+leave the path exactly as given. No lexical collapsing of `.`/`..` (the
+resolved cases above never have any left over; canonicalizing the parent
+removes them as an intrinsic part of resolving it, and no separate textual pass
+does that work) and no multi-level ancestor fallback (the `sub2` -missing case
+above shows `bufadd` itself has none either; it does not fall back to resolving
 through `link` alone once the deeper component fails).
 
 ## 16. `LOAD_HIDDEN_CHUNK`'s own `canon()` must mirror `bufadd`'s resolution too, or its `created` flag lies
 
-Case 15's divergence is not only a Rust-side key problem: `LOAD_HIDDEN_CHUNK`
-runs the identical `fnamemodify(p, ':p')`-falling-back `canon()` in its own
-existing-buffer scan, on the nvim side, to decide whether a `load_hidden`
-call is a reuse or a fresh create. Two spellings through a symlinked
-directory, no `.`/`..` component, no fixture that exists yet -- the same
-shape as case 15 -- make that scan miss a buffer it should have found, and
+Case 15's divergence reaches beyond a Rust-side key problem:
+`LOAD_HIDDEN_CHUNK` runs the identical `fnamemodify(p, ':p')` -falling-back
+`canon()` in its own existing-buffer scan, on the nvim side, to decide whether
+a `load_hidden` call is a reuse or a fresh create. Two spellings through a
+symlinked directory, no `.`/`..` component, no fixture that exists yet; the
+same shape as case 15; make that scan miss a buffer it should have found, and
 the fallthrough branch's `created = true` is unconditional, so a genuine
 *reuse* (`bufadd` still resolves onto the identical buffer either way) gets
 reported as a *create*:
@@ -368,29 +366,28 @@ load via_real: buf=3 created=true
 load via_link: buf=3 created=false   -- same buffer, correctly reported as a reuse
 ```
 
-A wrongly-`true` `created` is not cosmetic: `RpcCall::ReleaseHidden`'s
-delete is gated on `HiddenHold::owned`, which is OR'd from every reply's
-`created` flag for that path. Whenever the *first* reply for a path is a
-genuine create, the wrong flag from a later reused-spelling reply is
-harmless (owned is already `true`). But had the *first* connection to see
-this path been a real window's own `:edit`, or a different connection's
-`load_hidden` -- both cases this scan exists to catch, per case 15's own
-`docs/hidden-buffer-wire-capture.md` context above -- this connection's own
-`load_hidden` would still report `created = true` for a buffer it did not
-create, and its `release_hidden` would delete a buffer someone else still
-has open. Matching `canon()` to `bufadd`'s own parent-realpath resolution
-closes this at the scan itself: the match is found directly, and the
-fallthrough `bufadd` branch (whose `created = true` is only ever correct
-because nothing already matched) is never reached for a path some earlier
-call, or a real window, already resolved under a different spelling.
+A wrongly- `true` `created` is not cosmetic: `RpcCall::ReleaseHidden`'s delete
+is gated on `HiddenHold::owned`, which is OR'd from every reply's `created`
+flag for that path. Whenever the *first* reply for a path is a genuine create,
+the wrong flag from a later reused-spelling reply is harmless (owned is already
+`true`). But had the *first* connection to see this path been a real window's
+own `:edit`, or a different connection's `load_hidden`; both cases this scan
+exists to catch, per case 15's own `docs/hidden-buffer-wire-capture.md` context
+above; this connection's own `load_hidden` would still report `created = true`
+for a buffer it did not create, and its `release_hidden` would delete a buffer
+someone else still has open. Matching `canon()` to `bufadd`'s own
+parent-realpath resolution closes this at the scan itself: the match is found
+directly, and the fallthrough `bufadd` branch (whose `created = true` is only
+ever correct because nothing already matched) is never reached for a path some
+earlier call, or a real window, already resolved under a different spelling.
 
 ## 17. An empty path resolves onto nvim's own `[No Name]` buffer
 
-`canon('')` returns `''` unchanged (its own early return, which exists so
-every unnamed buffer does not canonicalize onto the process cwd), and nvim's
-startup buffer is itself unnamed -- so the scan's `wanted` matches it and the
-chunk answers with the user's own scratch buffer, which a review would then
-attach to and write its hunks into:
+`canon('')` returns `''` unchanged (its own early return, which exists so every
+unnamed buffer does not canonicalize onto the process cwd), and nvim's startup
+buffer is itself unnamed; so the scan's `wanted` matches it and the chunk
+answers with the user's own scratch buffer, which a review would then attach to
+and write its hunks into:
 
 ```
 canon('')                  -> ''
@@ -400,19 +397,19 @@ LOAD_HIDDEN_CHUNK('')      -> {buf = 1, created = false, changedtick = 2}
 ```
 
 The chunk refuses a blank path outright now, before the `fs_stat` check, and
-the scan additionally skips every buffer whose name is `''` -- so a
-name-less resolution can never be returned as a hidden-buffer hit no matter
-what `wanted` holds:
+the scan additionally skips every buffer whose name is `''`; so a name-less
+resolution can never be returned as a hidden-buffer hit no matter what `wanted`
+holds:
 
 ```
 LOAD_HIDDEN_CHUNK('')      -> {buf = 0, created = false, changedtick = 0}
 LOAD_HIDDEN_CHUNK('   ')   -> {buf = 0, created = false, changedtick = 0}
 ```
 
-`docs/acp-v1-wire-capture.md`'s `Diff` schema names `path` "The absolute
-file path being modified," so a blank path is off-contract at the ACP
-boundary too, and `diff_proposal` drops the proposal there rather than
-carrying it this far.
+`docs/acp-v1-wire-capture.md`'s `Diff` schema names `path`"The absolute file
+path being modified," so a blank path is off-contract at the ACP boundary too,
+and `diff_proposal` drops the proposal there; it carries the proposal no
+further.
 
 ## 18. A trailing separator is a second, distinct buffer over the same file
 
@@ -432,19 +429,17 @@ vim.uv.fs_stat('real/exists.rs/')      -> nil      -- true for an existing file 
 vim.uv.fs_stat('real/').type           -> 'directory'
 ```
 
-Only the last line is caught by the existing directory refusal, so a
-trailing separator on a leaf that does not exist (or on a regular file)
-walked straight through to `bufadd` and produced the second buffer above.
-Since the Rust-side hold key drops the separator and nvim keeps it, the two
-spellings shared one hold over two buffers: the refcount reaches zero once,
-deletes whichever buffer resolved last, and leaks the other -- and a
-collision pairing a create with a foreign reuse would OR `owned = true` over
-a buffer this connection never made.
+Only the last line is caught by the existing directory refusal, so a trailing
+separator on a leaf that does not exist (or on a regular file) walked straight
+through to `bufadd` and produced the second buffer above. Since the Rust-side
+hold key drops the separator and nvim keeps it, the two spellings shared one
+hold over two buffers: the refcount reaches zero once, deletes whichever buffer
+resolved last, and leaks the other; and a collision pairing a create with a
+foreign reuse would OR `owned = true` over a buffer this connection never made.
 
-A trailing separator names a directory, and directories are already refused,
-so both ends refuse the spelling outright rather than normalizing it away --
-one authority, and no spelling left that the key and `bufadd` can disagree
-about:
+A trailing separator names a directory, and directories are already refused, so
+both ends refuse the spelling outright, and neither normalizes it away: one
+authority, and no spelling left that the key and `bufadd` can disagree about:
 
 ```
 LOAD_HIDDEN_CHUNK(real/nope.rs/) -> {buf = 0, created = false, changedtick = 0}
@@ -462,10 +457,9 @@ LOAD_HIDDEN_CHUNK(link/brand-new.rs)  -> {buf = 3, created = false, changedtick 
 
 ## 19. A relative path resolves against nvim's cwd, which view's process cwd does not track
 
-`canonical_hidden_key` joins a relative path onto `std::env::current_dir()`
--- the *view process's* cwd. nvim resolves the same spelling against its own
-cwd, which the user moves with `:cd` at any time and which view never
-observes:
+`canonical_hidden_key` joins a relative path onto `std::env::current_dir()` --
+the *view process's* cwd. nvim resolves the same spelling against its own cwd,
+which the user moves with `:cd` at any time and which view never observes:
 
 ```
 getcwd()                                     -> .../work/real
@@ -477,22 +471,22 @@ bufadd('rel.rs')                             -> 6      -- a new buffer, not the 
 ```
 
 Two authorities for one identity, diverging the moment the user runs `:cd`.
-`docs/acp-v1-wire-capture.md`'s `Diff` schema settles it rather than any
-normalization would: `path` is documented as "The absolute file path being
-modified," so a relative path is off-contract, `diff_proposal` drops the
-proposal, and `EngineHandle::load_hidden` refuses it as
-`EngineError::UnusablePath` before taking a hold or touching the wire. The
-Lua side carries no such check: nvim's cwd is the *correct* authority for a
-relative spelling, and the divergence is entirely on the view-process side.
+`docs/acp-v1-wire-capture.md`'s `Diff` schema settles it; no normalization is
+needed to: `path` is documented as "The absolute file path being modified," so
+a relative path is off-contract, `diff_proposal` drops the proposal, and
+`EngineHandle::load_hidden` refuses it as `EngineError::UnusablePath` before
+taking a hold or touching the wire. The Lua side carries no such check: nvim's
+cwd is the *correct* authority for a relative spelling, and the divergence is
+entirely on the view-process side.
 
 ## 20. `canon()`'s parent-fallback join doubles the separator at root
 
 The remaining spelling where `canon()` and `canonical_hidden_key` still
-answered differently, and the only one where `canon()` also disagreed with
-the name nvim itself stores: joining a resolved parent of `/` onto a tail
-produced `//a`, where `Path::join` produces `/a` and `bufadd` names the
-buffer `/a`. Measured across the whole divergent set, old and new `canon()`
-back to back in one session, against `bufadd`'s own answer:
+answered differently, and the only one where `canon()` also disagreed with the
+name nvim itself stores: joining a resolved parent of `/` onto a tail produced
+`//a`, where `Path::join` produces `/a` and `bufadd` names the buffer `/a`.
+Measured across the whole divergent set, old and new `canon()` back to back in
+one session, against `bufadd`'s own answer:
 
 ```
 spelling                  old canon()              new canon()              bufadd
@@ -511,22 +505,21 @@ buffers: 1=            2=$R/real/nope.rs   3=$R/link/sub/../nope.rs
          4=$R/real/exists.rs               5=/a
 ```
 
-`canon()` now skips the separator when the resolved parent already ends in
-one, so every row agrees with `canonical_hidden_key` and the last row agrees
-with `nvim_buf_get_name` as well. The doubled form was harmless while it
-lasted (`canon()` is applied to both sides of the scan's comparison, so a
-buffer named `/a` canonicalized to `//a` too and still matched), but it was
-the last spelling on which the two implementations of one algorithm could be
-observed to disagree -- and a live test now pins the whole table rather than
-prose.
+`canon()` now skips the separator when the resolved parent already ends in one,
+so every row agrees with `canonical_hidden_key` and the last row agrees with
+`nvim_buf_get_name` as well. The doubled form was harmless while it lasted
+(`canon()` is applied to both sides of the scan's comparison, so a buffer named
+`/a` canonicalized to `//a` too and still matched), but it was the last
+spelling on which the two implementations of one algorithm could be observed to
+disagree; a live test now pins the whole table, in place of prose.
 
 ## 21. A trailing backslash is a real Linux filename, and the Lua chunk refuses it anyway
 
 `LOAD_HIDDEN_CHUNK` refuses both separator characters unconditionally
-(`tail == '/' or tail == '\\'`) because Lua has no portable separator
-predicate to consult. Rust's `std::path::is_separator` is platform-defined
-and answers `false` for `\` on Unix, so the two ends disagreed about exactly
-one spelling -- and on Linux that spelling names a perfectly ordinary file:
+(`tail == '/' or tail == '\\'`) because Lua has no portable separator predicate
+to consult. Rust's `std::path::is_separator` is platform-defined and answers
+`false` for `\` on Unix, so the two ends disagreed about exactly one spelling;
+and on Linux that spelling names a perfectly ordinary file:
 
 ```
 ls real/                               -> b.rs   'b.rs\'      -- two distinct files
@@ -539,13 +532,13 @@ bufadd(real/b.rs/)                     -> 4      name .../real/b.rs/
 
 nvim would bind buffer 3 happily; only the chunk's own guard stops it. That
 left `/path/b.rs\` passing every Rust gate, taking a hold, reaching nvim, and
-coming back `buf = 0` -- a hold with no buffer behind it, answered as
-unbindable one round-trip later than it should have been.
+coming back `buf = 0`; a hold with no buffer behind it, answered as unbindable
+one round-trip later than it should have been.
 
 `hidden_path_refusal` now refuses both characters unconditionally too, so the
-refused set is identical on both ends and on every platform. The cost is
-real and accepted: a Linux file whose name ends in a backslash cannot be
-reviewed in a hidden buffer. It buys a refusal set that does not vary by
-which host the agent runs on -- an ACP `path` string crosses process (and
-potentially machine) boundaries, so a rule keyed to *this* build's separator
-would refuse different spellings on either side of the wire.
+refused set is identical on both ends and on every platform. The cost is real
+and accepted: a Linux file whose name ends in a backslash cannot be reviewed in
+a hidden buffer. It buys a refusal set that does not vary by which host the
+agent runs on; an ACP `path` string crosses process (and potentially machine)
+boundaries, so a rule keyed to *this* build's separator would refuse different
+spellings on either side of the wire.

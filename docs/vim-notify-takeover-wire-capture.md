@@ -1,8 +1,9 @@
 # Wire capture: the `vim.notify` takeover (`HOLD_NOTIFY_CHUNK`)
 
-Captured live against the pinned engine per "capture, never recall." Source of
-truth for what "re-pointed at the engine default" (spec §5.5) means on the
-wire, and for what `view_engine::nvim_api::HOLD_NOTIFY_CHUNK` reproduces.
+Captured live against the pinned engine: every value below reflects an actual
+run of the pinned binary. Source of truth for what "re-pointed at the engine
+default" (spec §5.5) means on the wire, and for what
+`view_engine::nvim_api::HOLD_NOTIFY_CHUNK` reproduces.
 
 ## Engine identity
 
@@ -51,13 +52,13 @@ after patch: vim.notify == orig   false
 m.notify == orig                  false
 ```
 
-There is no second reference to restore from. A takeover therefore either
-saves the function standing when it runs, or reproduces the default's
-behaviour. Saving is wrong here: nvim-notify's own documented setup is
+There is no second reference to restore from. A takeover therefore either saves
+the function standing when it runs, or reproduces the default's behaviour.
+Saving is wrong here: nvim-notify's own documented setup is
 `vim.notify = require('notify')` in `init.lua`, and the plan is applied at
-`VimEnter`, so the saved function is very often the plugin's -- the exact
-inverse of the takeover. `HOLD_NOTIFY_CHUNK` reproduces, and this capture is
-what it reproduces from.
+`VimEnter`, so the saved function is very often the plugin's; the exact inverse
+of the takeover. `HOLD_NOTIFY_CHUNK` reproduces, and this capture is what it
+reproduces from.
 
 ## Finding: the default's wire output, one call per `vim.log.levels` value
 
@@ -70,8 +71,8 @@ what it reproduces from.
 `debug.getinfo(vim.notify)` → `source = 'vim/_core/editor'`,
 `linedefined = 548`, `nparams = 3`.
 
-Each call below is `vim.notify('default-<level>', vim.log.levels.<LEVEL>)`,
-and the line under it is the entire `msg_*` traffic it produced:
+Each call below is `vim.notify('default-<level>', vim.log.levels.<LEVEL>)`, and
+the line under it is the entire `msg_*` traffic it produced:
 
 ```
 === default vim.notify @ TRACE ===
@@ -86,10 +87,10 @@ and the line under it is the entire `msg_*` traffic it produced:
   ['msg_show', ['echoerr', [[25, 'default-error', 6]], False, True, False, 5, '']]
 ```
 
-Three distinct shapes, not five: `TRACE`/`DEBUG`/`INFO` are one unhighlighted
-`echomsg`, `WARN` is an `echomsg` under `WarningMsg` (hl id 26), and `ERROR` is
-a `msg_show` of kind `echoerr` under hl id 6. A call passing no level at all
-takes the unhighlighted arm:
+Three distinct shapes cover all five levels: `TRACE`/`DEBUG`/`INFO` are one
+unhighlighted `echomsg`, `WARN` is an `echomsg` under `WarningMsg` (hl id 26),
+and `ERROR` is a `msg_show` of kind `echoerr` under hl id 6. A call passing no
+level at all takes the unhighlighted arm:
 
 ```
 vim.notify('no-level')                                   -> [True]
@@ -107,12 +108,12 @@ vim.notify({ 1, 2 })
 ```
 
 `HOLD_NOTIFY_CHUNK` passes `msg` through unconverted for that reason: a
-takeover that stringified would hand nvim a message the caller never wrote,
-and would accept a call the engine rejects.
+takeover that stringified would hand nvim a message the caller never wrote, and
+would accept a call the engine rejects.
 
-## Finding: `opts` is not ignored -- `_truncate` reaches `nvim_echo`
+## Finding: `opts` is not ignored; `_truncate` reaches `nvim_echo`
 
-The reproduction target, read from the pinned tree rather than recalled:
+The reproduction target, read directly from the pinned tree:
 
 ```
 $ sed -n '548,555p' \
@@ -129,7 +130,7 @@ end
 
 `opts` carries one term the default forwards, `_truncate`, so a reproduction
 that took `(msg, level, _)` would be a partial one. The opts axis, walked
-against the default before the takeover is installed (200 `T`s, wider than the
+against the default before the takeover is installed (200 `T` s, wider than the
 80-column capture UI, so a truncation would be visible in the echoed length):
 
 ```
@@ -143,13 +144,13 @@ against the default before the takeover is installed (200 `T`s, wider than the
   ['msg_show', kind='echomsg', attr=0, hl=0, len=14, head='default-titled']
 ```
 
-`_truncate` is **inert on this pin over `ext_messages`**: the flag shortens
+`_truncate` is **inert on this pin over `ext_messages` **: the flag shortens
 what nvim itself draws in the message area, and an externalized consumer
-receives the whole text either way, so all three long-message rows are the
-same 208 characters. That is a measured result, not a reason to drop the term
--- `HOLD_NOTIFY_CHUNK` forwards it anyway, so the reproduction stays true term
-for term if a later pin gives the flag an observable effect. Nothing else in
-this repo would catch that change.
+receives the whole text either way, so all three long-message rows are the same
+208 characters. That is a measured result on this pin, and `HOLD_NOTIFY_CHUNK`
+forwards the flag anyway, so the reproduction stays true term for term if a
+later pin gives the flag an observable effect. Nothing else in this repo would
+catch that change.
 
 ## The chunk, and its output beside the default's
 
@@ -181,9 +182,9 @@ vim.api.nvim_create_autocmd('SafeState', {
 
 The global is the hold's own function published under a name every reading of
 `vim.notify` can compare against by identity. Without it the readings fall back
-to comparing `debug.getinfo(...).source` against `vim.notify_once`'s, and view's
-hold -- which is not the engine's default and never claimed to be -- reads as a
-plugin's notifier in the session that installed it.
+to comparing `debug.getinfo(...).source` against `vim.notify_once`'s, and
+view's hold, which stands apart from the engine's default and makes no claim to
+be it, reads as a plugin's notifier in the session that installed it.
 
 Run in the same session, immediately after the block above, then one
 `vim.notify('held-<level>', …)` per level:
@@ -216,26 +217,25 @@ and the same opts axis, run against the held function in the same session:
 
 Kind, attr id and hl id match the default's row for row on both axes; the
 lengths differ by exactly the three characters between the `default-` and
-`held-` tags. Only the message text and the monotonically increasing message
-id differ. That is the whole claim behind "re-pointed at the engine default":
-a consumer reading `msg_show` cannot tell the two apart.
+`held-` tags. Only the message text and the monotonically increasing message id
+differ. That is the whole claim behind "re-pointed at the engine default": a
+consumer reading `msg_show` cannot tell the two apart.
 
-One divergence, in the error text and not in the message traffic: a non-string
-`msg` is refused by `nvim_echo` from inside the held function too, with the
-same message, but the location names the takeover's own chunk rather than the
-runtime file.
+One divergence sits in the error text alone; the message traffic matches: a
+non-string `msg` is refused by `nvim_echo` from inside the held function too,
+with the same message, but the location names the takeover's own chunk where
+the default names the runtime file.
 
 ```
 held      -> [0, 'Lua: [string "<nvim>"]:4: Invalid chunk: expected Array with 1 or 2 Strings ...']
 default   -> [False, '[string "vim/_core/editor"]:550: Invalid chunk: expected Array with 1 or 2 Strings']
 ```
 
-Unavoidable for any reproduction -- a Lua function knows where it was
-compiled -- and it reaches only a caller that already passed an argument the
-API rejects.
+Unavoidable for any reproduction; a Lua function knows where it was compiled;
+and it reaches only a caller that already passed an argument the API rejects.
 
-`vim.notify_once` routes through the held function too -- it calls `vim.notify`
-by name rather than holding its own reference:
+`vim.notify_once` routes through the held function too; it calls `vim.notify`
+by name and holds no reference of its own:
 
 ```
 notify_once -> ['msg_show', ['echomsg', [[0, 'once-routed', 0]], False, True, False, 1, '']]
@@ -243,8 +243,8 @@ notify_once -> ['msg_show', ['echomsg', [[0, 'once-routed', 0]], False, True, Fa
 
 ## Finding: the guard holds, and a plain assignment does not
 
-With the chunk above installed, a plugin patches the function and nvim is
-given one turn on its main loop:
+With the chunk above installed, a plugin patches the function and nvim is given
+one turn on its main loop:
 
 ```
 ### a plugin re-patches vim.notify after the takeover
@@ -256,7 +256,7 @@ the plugin function saw: nil
 ```
 
 The same session driven from a chunk whose last line is a plain
-`vim.notify = notify` with no autocmd -- the falsifiable control:
+`vim.notify = notify` with no autocmd; the falsifiable control:
 
 ```
 ### a plugin re-patches vim.notify after the takeover
@@ -267,11 +267,11 @@ after SafeState, vim.notify is the plugin's: true
 the plugin function saw: after-repatch
 ```
 
-Nothing reaches `ext_messages` at all: the message goes to the plugin, which
-is where a one-shot takeover leaves it.
+Nothing reaches `ext_messages` at all: the message goes to the plugin, which is
+where a one-shot takeover leaves it.
 
-Re-applying the chunk replaces its guard rather than stacking a second one
-(`clear = true` on the augroup), and an idle transition that changed nothing
+Re-applying the chunk replaces its guard (`clear = true` on the augroup) in
+place, so a second one never stacks. An idle transition that changed nothing
 writes nothing:
 
 ```

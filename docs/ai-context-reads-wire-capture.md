@@ -1,9 +1,10 @@
 # Wire capture: the four context-read executors
 
-Captured live against the pinned engine per "capture, never recall." Source of
-truth for `CURRENT_BUFFER_TEXT_CHUNK`, `CURSOR_CONTEXT_CHUNK`,
-`DIAGNOSTIC_ENTRIES_CHUNK`, and `QUICKFIX_ENTRIES_CHUNK` -- the `nvim_exec_lua`
-chunks `EngineHandle::read_current_buffer_text`, `read_cursor_context`,
+Captured live against the pinned engine: every value below reflects an actual
+run of the pinned binary. Source of truth for `CURRENT_BUFFER_TEXT_CHUNK`,
+`CURSOR_CONTEXT_CHUNK`, `DIAGNOSTIC_ENTRIES_CHUNK`, and
+`QUICKFIX_ENTRIES_CHUNK`; the `nvim_exec_lua` chunks
+`EngineHandle::read_current_buffer_text`, `read_cursor_context`,
 `read_diagnostic_entries`, and `read_quickfix_entries` issue for
 `RpcCall::ReadCurrentBufferText`, `ReadCursorContext`, `ReadDiagnosticEntries`,
 and `ReadQuickfixEntries` respectively (declared by an earlier task; this task
@@ -24,9 +25,9 @@ Matches `.engine-pin` (`v0.12.4`).
 
 A standalone Python msgpack-rpc client spawns
 `nvim --clean --headless --listen <socket>` with the same hermetic
-`HOME`/`XDG_*` isolation `EngineConfig::isolated()` uses, connects over the unix
-socket, and issues `nvim_exec_lua` requests running the exact chunk text each
-`nvim_api.rs` constant embeds.
+`HOME`/`XDG_*` isolation `EngineConfig::isolated()` uses, connects over the
+unix socket, and issues `nvim_exec_lua` requests running the exact chunk text
+each `nvim_api.rs` constant embeds.
 
 ## `nvim_win_get_cursor` and `getpos`: nvim's own mixed indexing, verbatim
 
@@ -34,14 +35,14 @@ socket, and issues `nvim_exec_lua` requests running the exact chunk text each
 nvim_win_get_cursor(0) -> [1, 0]
 ```
 
-Row is 1-indexed, column is 0-indexed BYTE -- nvim's own documented mixed
-convention (`:help nvim_win_get_cursor`). `CursorRead.line`/`.col` carry
-these through verbatim, not renormalized.
+Row is 1-indexed, column is 0-indexed BYTE; nvim's own documented mixed
+convention (`:help nvim_win_get_cursor`). `CursorRead.line`/`.col` carry these
+through verbatim, with no renormalization.
 
-## Selection: `mode()` decides "active", not stale `'<`/`'>` marks
+## Selection: `mode()` decides "active", ignoring stale `'<`/`'>` marks
 
-With a UI attached, `gg0v` then `llll` (select the first 5 columns of line
-1, char-wise):
+With a UI attached, `gg0v` then `llll` (select the first 5 columns of line 1,
+char-wise):
 
 ```
 mode() -> "v"
@@ -59,27 +60,27 @@ getpos("'>") -> [0, 1, 5, 0]
 ```
 
 Because the marks persist after the mode that set them ends, the executor
-checks `vim.api.nvim_get_mode().mode` (`"v"`, `"V"`, or blockwise `"\22"`)
-at read time and only reads `getpos('v')`/`getpos('.')` while one of those
-modes is current -- reading `'<`/`'>` unconditionally would report a
-selection as "active" long after the user left it, live-confirmed by the
-mark values above still being populated post-`<Esc>`.
+checks `vim.api.nvim_get_mode().mode` (`"v"`, `"V"`, or blockwise `"\22"`) at
+read time and only reads `getpos('v')`/`getpos('.')` while one of those modes
+is current; reading `'<`/`'>` unconditionally would report a selection as
+"active" long after the user left it, live-confirmed by the mark values above
+still being populated post- `<Esc>`.
 
 A backward selection (`gg$v` then `0`, selecting right-to-left) reports the
-anchor after the cursor in raw `getpos` terms; the chunk reorders the pair
-so `selection_start <= selection_end` and reads the text forward regardless
-of selection direction -- both directions produce the same `(1, 1)` range
-and forward-ordered text (`"hello world"`) in the captures backing
+anchor after the cursor in raw `getpos` terms; the chunk reorders the pair so
+`selection_start <= selection_end` and reads the text forward regardless of
+selection direction; both directions produce the same `(1, 1)` range and
+forward-ordered text (`"hello world"`) in the captures backing
 `read_cursor_context_with_an_active_backward_selection`.
 
 ## Fix round 1 (review-driven): a charwise selection ending on a multi-byte character
 
 `getpos('.')`'s own byte column is the byte offset of the FIRST byte of the
-character under the cursor, 1-indexed -- not an exclusive end. The original
-chunk passed that raw column straight through as `nvim_buf_get_text`'s exclusive
-end column, which truncates mid-character whenever the selection ends on a
-multi-byte one. Buffer `["a\xe9 bc"]` (`"aé bc"`, `é` a 2-byte UTF-8 sequence),
-`gg0v` then `l` (select `a` and extend one char onto `é`):
+character under the cursor, 1-indexed, and stops short of an exclusive end. The
+original chunk passed that raw column straight through as `nvim_buf_get_text`'s
+exclusive end column, which truncates mid-character whenever the selection ends
+on a multi-byte one. Buffer `["a\xe9 bc"]` (`"aé bc"`, `é` a 2-byte UTF-8
+sequence), `gg0v` then `l` (select `a` and extend one char onto `é`):
 
 ```
 mode() -> "v"
@@ -91,11 +92,11 @@ nvim_buf_get_text(0, 0, 0, 0, 2, {}) -> ["a\xc3"]   -- INVALID UTF-8, truncated
                                                         mid-character
 ```
 
-That invalid byte sequence is exactly what made the bug silent rather than
-loud: `Value::as_str` on the reply fails UTF-8 validation, and
+That invalid byte sequence is exactly what made the bug silent and never loud:
+`Value::as_str` on the reply fails UTF-8 validation, and
 `decode_cursor_context_reply`'s `_ => None` fallback for a malformed
-`selection_*` triple turned a real, active selection into "no selection at
-all" with no error anywhere.
+`selection_*` triple turned a real, active selection into "no selection at all"
+with no error anywhere.
 
 The fix computes the char-index at that byte offset (`vim.fn.charidx`) and the
 byte offset one character further (`vim.fn.byteidx(line, charidx + 1)`), and
@@ -108,17 +109,17 @@ byteidx(line, 2) -> 3          -- start of char index 2 (the space), 0-indexed
 nvim_buf_get_text(0, 0, 0, 0, 3, {}) -> ["a\xc3\xa9"]   -- "aé", correct
 ```
 
-Live-verified end to end through the actual (fixed) `CURSOR_CONTEXT_CHUNK`
-by `ai_context_reads_live.rs`'s
+Live-verified end to end through the actual (fixed) `CURSOR_CONTEXT_CHUNK` by
+`ai_context_reads_live.rs`'s
 `read_cursor_context_selection_ending_on_a_multibyte_character_reads_the_full_character`.
 
 ## Fix round 1 (review-driven): linewise and blockwise selections were computed as charwise spans
 
 The original chunk read every visual submode (`v`, `V`, blockwise `\22`)
 through the same charwise `nvim_buf_get_text(srow-1, scol-1, erow-1, ecol)`
-call, which is wrong for the other two: linewise has no meaningful columns,
-and blockwise's rectangle is not the same span as the charwise text between
-its two corners.
+call, which is wrong for the other two: linewise has no meaningful columns, and
+blockwise's rectangle differs in span from the charwise text between its two
+corners.
 
 Linewise (`V`), buffer `["alpha", "beta", "gamma"]`, `gg0V` then `j`:
 
@@ -142,33 +143,33 @@ row 2 "beta"[1:2]  -> "be"
 -> "al\nbe"
 ```
 
-The charwise interpretation the original chunk would have produced for
-either case is visibly wrong by comparison: linewise as charwise stops
-mid-line (`getpos('.')`'s column is 1, so a charwise read would truncate
-`"beta"` to its first byte), and blockwise as charwise pulls in the entire
-first line's tail plus the second line's head rather than the rectangle.
+The charwise interpretation the original chunk would have produced for either
+case is visibly wrong by comparison: linewise as charwise stops mid-line
+(`getpos('.')`'s column is 1, so a charwise read would truncate `"beta"` to its
+first byte), and blockwise as charwise pulls in the entire first line's tail
+plus the second line's head, well beyond the rectangle.
 
 Live-verified through the fixed `CURSOR_CONTEXT_CHUNK` by
 `ai_context_reads_live.rs`'s
 `read_cursor_context_with_a_linewise_selection_reads_whole_lines` and
 `read_cursor_context_with_a_blockwise_selection_reads_the_rectangle`.
 
-## Fix round 2 (review-driven): blockwise is a SCREEN-column rectangle, not a byte-column one
+## Fix round 2 (review-driven): blockwise is a SCREEN-column rectangle, standing apart from a byte-column one
 
 Round 1's blockwise fix above clamped `getpos`'s raw BYTE columns per line --
 correct only because its own capture buffer (`"alpha"`/`"beta"`/`"gamma"`) is
-ASCII, where byte column and screen column never diverge. Any line containing
-a character whose BYTE width isn't 1 (any multi-byte UTF-8 sequence, `é`
+ASCII, where byte column and screen column never diverge. Any line containing a
+character whose BYTE width isn't 1 (any multi-byte UTF-8 sequence, `é`
 included) exposes the gap: nvim's real blockwise rectangle is defined in
 `virtcol()` (screen-column) terms, held constant across every row, and each
-row's own byte offset for a given screen column depends on how many
-multi-byte characters precede it on THAT line. This is a byte-width-vs-
-screen-column divergence -- a separate axis from a character's own CELL
-width (how many screen columns ONE character occupies: tabs and East-Asian-
-wide characters can occupy several), which is what "Fix round 3" below
-addresses. `é` is multi-byte (2 bytes) yet single-cell (1 screen column),
-so it exercises this round's fix but not round 3's -- the two bugs are
-independent and a fix for one does not imply the other.
+row's own byte offset for a given screen column depends on how many multi-byte
+characters precede it on THAT line. This is a byte-width-vs- screen-column
+divergence; a separate axis from a character's own CELL width (how many screen
+columns ONE character occupies: tabs and East-Asian- wide characters can occupy
+several), which is what "Fix round 3" below addresses. `é` is multi-byte (2
+bytes) yet single-cell (1 screen column), so it exercises this round's fix and
+leaves round 3's untouched; the two bugs are independent and a fix for one does
+not imply the other.
 
 Buffer `["\xe9xyz", "abcd"]` (`"éxyz"`, `é` a 2-byte UTF-8 sequence),
 `gg0<C-v>` then `jl`:
@@ -190,15 +191,15 @@ getreg('"') -> "\xe9x\nab"    ("éx\nab")
 getregtype('"') -> "\x162"    (blockwise, width 2)
 ```
 
-nvim's own yank keeps the SCREEN-column bound (2) fixed across both rows:
-row 1's screen columns 1-2 are the single character `é` (screen-width 1) plus
-`x` (screen-width 1), i.e. the substring `"éx"`; row 2's screen columns 1-2
-are the bytes `"ab"`. Round 1's byte-column rectangle instead sliced row 1 at
-byte offset 2, landing mid-character inside `é`.
+nvim's own yank keeps the SCREEN-column bound (2) fixed across both rows: row
+1's screen columns 1-2 are the single character `é` (screen-width 1) plus `x`
+(screen-width 1), i.e. the substring `"éx"`; row 2's screen columns 1-2 are the
+bytes `"ab"`. Round 1's byte-column rectangle instead sliced row 1 at byte
+offset 2, landing mid-character inside `é`.
 
 The fix reads `virtcol('v')`/`virtcol('.')` for the shared screen-column bounds
-(not `getpos`'s byte columns) and converts each row's own low/high screen column
-to that row's own byte column via `vim.fn.virtcol2col(win, lnum, vcol)`:
+(not `getpos`'s byte columns) and converts each row's own low/high screen
+column to that row's own byte column via `vim.fn.virtcol2col(win, lnum, vcol)`:
 
 ```lua
 local win = vim.api.nvim_get_current_win()
@@ -220,7 +221,7 @@ virtcol2col(win, 2, 10) -> 4  -- line 2 "abcd" is 4 bytes long
 ```
 
 A second, wider case confirms the same conversion holds for the anchor's own
-column, not just the cursor's: buffer `["a\xe9bc", "wxyz"]` (`"aébc"`),
+column, well beyond just the cursor's: buffer `["a\xe9bc", "wxyz"]` (`"aébc"`),
 `gg0<C-v>` then `jll` (screen columns 1-3):
 
 ```
@@ -238,11 +239,11 @@ end through the fixed `CURSOR_CONTEXT_CHUNK` by
 
 ### The `$`-block case: `curswant == MAXCOL` extends every row to its own end
 
-Pressing `$` while in blockwise Visual (a "`$`-block") is a distinct nvim
-mode where every row extends to its own actual end, not to the shared
-screen-column upper bound -- the block's right edge becomes ragged, tracking
-each line's own length. `getcurpos()` (`getcurpos()[5]` in Lua's 1-indexed
-list access; `getcurpos()[4]` in VimL's 0-indexed one) carries this as its
+Pressing `$` while in blockwise Visual (a " `$` -block") is a distinct nvim
+mode where every row extends to its own actual end, ignoring the shared
+screen-column upper bound; the block's right edge becomes ragged, tracking each
+line's own length. `getcurpos()` (`getcurpos()[5]` in Lua's 1-indexed list
+access; `getcurpos()[4]` in VimL's 0-indexed one) carries this as its
 `curswant` field, set to nvim's `MAXCOL` sentinel (`2147483647`) exactly when
 `$` was the last motion:
 
@@ -258,19 +259,18 @@ getregtype('"') -> "\x165"
 ```
 
 Without the `curswant` check, the naive screen-column rectangle (cols 1-3)
-would clamp row 1 to `"alp"` -- visibly wrong against the oracle, which
-extends row 1 to its actual end (`"alpha"`) exactly as it does row 2.
-Live-verified by
+would clamp row 1 to `"alp"`; visibly wrong against the oracle, which extends
+row 1 to its actual end (`"alpha"`) exactly as it does row 2. Live-verified by
 `read_cursor_context_with_a_dollar_blockwise_selection_reads_every_line_to_its_own_end`.
 
 ### An ordinary (non-`$`) block still clamps a short row to its own end
 
-Distinct from the `$`-block case above but easy to conflate with it: even a
+Distinct from the `$` -block case above but easy to conflate with it: even a
 plain blockwise selection whose shared screen-column upper bound exceeds one
-row's own length still yanks that row in full, from the low column to its
-own end, rather than nothing or a padded/truncated slice. Buffer
-`["alphabet", "be", "gammaxyz"]`, `gg0<C-v>` then `jjllll` (screen columns
-1-5, spanning three rows where the middle one is only two columns wide):
+row's own length still yanks that row in full, from the low column to its own
+end, in place of nothing or a padded/truncated slice. Buffer
+`["alphabet", "be", "gammaxyz"]`, `gg0<C-v>` then `jjllll` (screen columns 1-5,
+spanning three rows where the middle one is only two columns wide):
 
 ```
 virtcol('v') -> 1, virtcol('.') -> 5
@@ -280,34 +280,34 @@ getregtype('"') -> "\x165"
 ```
 
 Row 2 (`"be"`, 2 bytes) contributes its entire content (`"be"`) despite the
-block's screen-column bound reaching 5 -- the same `math.min(hi0, #line)`
-clamp round 1 already applied to byte columns carries over unchanged once
-`hi0` is derived from `virtcol2col` instead, so no new clamping logic beyond
-round 1's was needed for this case. Live-verified by
+block's screen-column bound reaching 5; the same `math.min(hi0, #line)` clamp
+round 1 already applied to byte columns carries over unchanged once `hi0` is
+derived from `virtcol2col` instead, so no new clamping logic beyond round 1's
+was needed for this case. Live-verified by
 `read_cursor_context_with_a_blockwise_selection_where_a_row_is_shorter_than_the_rectangle`.
 
 The existing ASCII-uniform-width regression case
 (`read_cursor_context_with_a_blockwise_selection_reads_the_rectangle`,
 `["alpha","beta","gamma"]`, `gg0<C-v>jl` -> `"al\nbe"`) is unchanged by this
-fix -- re-verified against the same oracle, `virtcol` and byte column agree
-on every row when no row contains a multi-byte character, which is exactly
-why an ASCII-only capture was insufficient to catch the original bug.
+fix; re-verified against the same oracle, `virtcol` and byte column agree on
+every row when no row contains a multi-byte character, which is exactly why an
+ASCII-only capture was insufficient to catch the original bug.
 
-## Fix round 3 (review-driven): `virtcol()`'s SCALAR form is a character's END cell, not its START -- wrong for the LOW bound on any multi-CELL character
+## Fix round 3 (review-driven): `virtcol()`'s SCALAR form is a character's END cell, distinct from its START; wrong for the LOW bound on any multi-CELL character
 
-Round 2's fix above is byte-width-correct but still screen-column-wrong on
-its own terms for the LOW bound: `vim.fn.virtcol('v')`/`vim.fn.virtcol('.')`
-(no second argument) return the SCALAR form, which `:help virtcol()`
-documents as the RIGHTMOST (end) screen column a multi-cell character
-occupies, never its start. Round 2's fixtures (`é`, byte-width 2) are all
-CELL-width 1 -- a single-cell character's start and end column are the same
-number, so the scalar form happened to be indistinguishable from the start
-there. A character whose CELL width exceeds 1 (a tab, or an East-Asian-wide
-character like `你`/`好`) exposes the gap: the scalar form overshoots the
-true low bound by however many cells that character spans.
+Round 2's fix above is byte-width-correct but still screen-column-wrong on its
+own terms for the LOW bound: `vim.fn.virtcol('v')`/`vim.fn.virtcol('.')` (no
+second argument) return the SCALAR form, which `:help virtcol()` documents as
+the RIGHTMOST (end) screen column a multi-cell character occupies, and stops
+short of its start. Round 2's fixtures (`é`, byte-width 2) are all CELL-width
+1; a single-cell character's start and end column are the same number, so the
+scalar form happened to be indistinguishable from the start there. A character
+whose CELL width exceeds 1 (a tab, or an East-Asian-wide character like
+`你`/`好`) exposes the gap: the scalar form overshoots the true low bound by
+however many cells that character spans.
 
-Severe case, buffer `["\tabc", "wxyzefgh"]`, `gg$<C-v>` then `j` (anchor on
-the leading tab, cursor moves down one row):
+Severe case, buffer `["\tabc", "wxyzefgh"]`, `gg$<C-v>` then `j` (anchor on the
+leading tab, cursor moves down one row):
 
 ```
 mode() -> "\x16"
@@ -332,13 +332,13 @@ getreg('"') -> "\ta\nwxyzefgh"
 getregtype('"') -> "\x169"    (blockwise, width 9)
 ```
 
-This is exactly the shape of bug the review flagged: a rectangle's low bound
-is one shared screen column applied to every row, and a multi-cell
-character's scalar (end-cell) virtcol is the wrong number to share -- it
-overshoots on every OTHER row that doesn't happen to contain that same
-character at that position. The fix is the list form's START element for
-the low bound specifically; the high bound's existing use of the scalar
-(end cell) form was already correct, unchanged:
+This is exactly the shape of bug the review flagged: a rectangle's low bound is
+one shared screen column applied to every row, and a multi-cell character's
+scalar (end-cell) virtcol is the wrong number to share; it overshoots on every
+OTHER row that doesn't happen to contain that same character at that position.
+The fix is the list form's START element for the low bound specifically; the
+high bound's existing use of the scalar (end cell) form was already correct,
+unchanged:
 
 ```lua
 local lo_vcol = math.min(vim.fn.virtcol('v', 1)[1],
@@ -346,28 +346,28 @@ local lo_vcol = math.min(vim.fn.virtcol('v', 1)[1],
 local hi_vcol = math.max(vim.fn.virtcol('v'), vim.fn.virtcol('.'))
 ```
 
-With `lo_vcol = min(1, 9) = 1` (the tab's own start, not its end), row 1
-(the tab's own row) still yields `"\ta"` (screen cols 1-9: the whole tab,
+With `lo_vcol = min(1, 9) = 1` (the tab's own start, distinct from its end),
+row 1 (the tab's own row) still yields `"\ta"` (screen cols 1-9: the whole tab,
 cols 1-8, plus `'a'` at col 9), and row 2 now correctly starts from its own
-column 1, yielding the full `"wxyzefgh"` (only 8 columns exist; the request
-for column 9 simply runs off the end of the row, the same "short row
-contributes its own end" behavior "Fix round 2" already established, not a
-new case). Live-verified by
+column 1, yielding the full `"wxyzefgh"` (only 8 columns exist; the request for
+column 9 simply runs off the end of the row, the same "short row contributes
+its own end" behavior "Fix round 2" already established, and is no new case).
+Live-verified by
 `read_cursor_context_with_a_blockwise_selection_anchored_on_a_leading_tab`.
 
-### Sub-case, same fix: nvim pads a partially-covered multi-cell character with spaces, never raw bytes
+### Sub-case, same fix: nvim pads a partially-covered multi-cell character with spaces, and stops short of raw bytes
 
 Closing the low-bound bug alone is not sufficient: whenever the shared
-rectangle's low or high screen-column bound lands INSIDE a multi-cell
-character (covering only some of its cells, not all), nvim does not emit
-that character's raw bytes -- there is no such thing as "half a tab" or
-"half of `你`" in a text buffer. Instead it pads the row with one space per
-covered screen cell, keeping the block visually rectangular. This is
-distinct from -- and layered on top of -- the low-bound fix above.
+rectangle's low or high screen-column bound lands INSIDE a multi-cell character
+(covering only some of its cells, short of all), nvim does not emit that
+character's raw bytes; there is no such thing as "half a tab" or "half of `你`"
+in a text buffer. Instead it pads the row with one space per covered screen
+cell, keeping the block visually rectangular. This is distinct from; and
+layered on top of; the low-bound fix above.
 
-Right-edge partial coverage, buffer `["你好xy", "abcdef"]`, `gg0<C-v>` then
-`jll` (screen columns 1-3; `好` spans columns 3-4, so column 3 covers only
-its LEFT half):
+Right-edge partial coverage, buffer `["你好xy", "abcdef"]`, `gg0<C-v>` then `jll`
+(screen columns 1-3; `好` spans columns 3-4, so column 3 covers only its LEFT
+half):
 
 ```
 mode() -> "\x16"
@@ -380,12 +380,11 @@ getreg('"') -> "\xe4\xbd\xa0 \nabc"   ("你 \nabc")
 getregtype('"') -> "\x163"
 ```
 
-Row 1 (`"你好xy"`) covers screen columns 1-3: `你` (cols 1-2) is fully
-covered and copied raw; `好` (cols 3-4) has only its column 3 (its left
-half) inside the rectangle -- covered cell count 1 -- so it contributes ONE
-pad space, not any raw byte of `好`. Row 2 (`"abcdef"`) covers columns 1-3
-with no multi-cell character present, so it copies raw: `"abc"`.
-Live-verified by
+Row 1 (`"你好xy"`) covers screen columns 1-3: `你` (cols 1-2) is fully covered and
+copied raw; `好` (cols 3-4) has only its column 3 (its left half) inside the
+rectangle; covered cell count 1; so it contributes ONE pad space, standing in
+for any raw byte of `好`. Row 2 (`"abcdef"`) covers columns 1-3 with no
+multi-cell character present, so it copies raw: `"abc"`. Live-verified by
 `read_cursor_context_with_a_blockwise_selection_over_a_wide_character`.
 
 Right-edge partial coverage on a tab, buffer `["a\tbcd", "wxyzefgh"]`,
@@ -403,14 +402,14 @@ Live-verified by
 `read_cursor_context_with_a_blockwise_selection_over_a_partially_covered_tab`.
 
 Left-edge partial coverage (confirms the padding rule is symmetric, not
-right-edge-only): buffer `["abcd", "xy\xe5\xa5\xbdz", "ABCD"]` (`"xy好z"`,
-`好` a 3-byte UTF-8 character spanning screen columns 3-4), both endpoints
-on the single-cell `'d'`/`'D'` at column 4 (`gg0lll<C-v>jj` -- move to
-column 4 in Normal mode first, THEN enter blockwise Visual, so `curswant`
-carries a real column rather than nvim's `$`-motion `MAXCOL` sentinel).
-Row 2 is never touched by cursor movement at all -- it is a plain interior
-row of the three-row block -- so the shared column 4 lands on `好`'s own
-RIGHT (second) cell there, never its start:
+right-edge-only): buffer `["abcd", "xy\xe5\xa5\xbdz", "ABCD"]` (`"xy好z"`, `好` a
+3-byte UTF-8 character spanning screen columns 3-4), both endpoints on the
+single-cell `'d'`/`'D'` at column 4 (`gg0lll<C-v>jj`; move to column 4 in
+Normal mode first, THEN enter blockwise Visual, so `curswant` carries a real
+column in place of nvim's `$` -motion `MAXCOL` sentinel). Row 2 is never
+touched by cursor movement at all; it is a plain interior row of the three-row
+block; so the shared column 4 lands on `好`'s own RIGHT (second) cell there,
+stopping short of its start:
 
 ```
 virtcol('v', 1) -> [4, 4]      -- 'd', single-cell
@@ -422,32 +421,32 @@ getreg('"') -> "d\n \nD"     -- row 2: 1 pad space (好's single covered
 getregtype('"') -> "\x161"
 ```
 
-(A first attempt at this capture used `gg$<C-v>j` to land on row 1's `'d'`
-by way of `$`, expecting an ordinary 2-cell-wide rectangle -- but `$`
-unconditionally sets `curswant` to nvim's `MAXCOL` sentinel even when
-pressed before entering Visual mode, silently turning the whole selection
-into a `$`-block. That capture is not reused here; this section's numbers
-come from the corrected key sequence above, live-verified through the
-actual `EngineConfig::isolated()` test harness, not the standalone capture
-client.)
+(A first attempt at this capture used `gg$<C-v>j` to land on row 1's `'d'` by
+way of `$`, expecting an ordinary 2-cell-wide rectangle; but `$`
+unconditionally sets `curswant` to nvim's `MAXCOL` sentinel even when pressed
+before entering Visual mode, silently turning the whole selection into a `$`
+-block. That capture is not reused here; this section's numbers come from the
+corrected key sequence above, live-verified through the actual
+`EngineConfig::isolated()` test harness, standing apart from the standalone
+capture client.)
 
 Confirmed via a direct `virtcol2col`/`virtcol({lnum,col},1)` probe against
-`"xy好z"`: every byte column of `好` (its own 3 UTF-8 bytes) reports the
-SAME `[3, 4]` span regardless of which of those bytes -- or which of its two
-screen cells -- is queried, which is what lets a single "does this
-character's own span fall entirely inside `[lo_vcol, hi_vcol]`?" check
-(rather than separate left/right-edge special cases) decide raw-copy versus
-pad uniformly for both edges. `vim.fn.virtcol({row, '$'})` (one past a
-line's own last real column, confirmed `9` for an 8-column line and `1` for
-an empty one) is what bounds the per-row scan so it stops at the row's own
-end rather than looping on `virtcol2col`'s past-end-of-line clamp.
+`"xy好z"`: every byte column of `好` (its own 3 UTF-8 bytes) reports the SAME
+`[3, 4]` span regardless of which of those bytes; or which of its two screen
+cells; is queried, which is what lets a single "does this character's own span
+fall entirely inside `[lo_vcol, hi_vcol]` ?" check (in place of separate
+left/right-edge special cases) decide raw-copy versus pad uniformly for both
+edges. `vim.fn.virtcol({row, '$'})` (one past a line's own last real column,
+confirmed `9` for an 8-column line and `1` for an empty one) is what bounds the
+per-row scan so it stops at the row's own end, so it never loops on
+`virtcol2col`'s past-end-of-line clamp.
 
 The mixed-length-rows short-row case from "Fix round 2"
 (`["alphabet","be","gammaxyz"]`, columns 1-5, `"be"` contributing its full 2
 columns) is unaffected by this padding rule: running out of row PART WAY
-THROUGH the rectangle is not the same as a character being partially
-covered, and still contributes nothing extra, not padding -- re-verified
-against the same oracle, unchanged:
+THROUGH the rectangle differs from a character being partially covered, and
+still contributes nothing extra, no padding included; re-verified against the
+same oracle, unchanged:
 
 ```
 lo_vcol = 1, hi_vcol = 5
@@ -455,10 +454,10 @@ getreg('"') -> "alpha\nbe\ngamma"     -- row 2 contributes 2 columns, not 5
 getregtype('"') -> "\x165"
 ```
 
-That result was originally read here as the general rule for every short
-row, which it is not: it holds only for a row that reaches INTO the
-rectangle. A row ending before the rectangle begins is a different case
-with a different answer, captured in "Fix round 4" below.
+That result was originally read here as the general rule for every short row,
+which it is not: it holds only for a row that reaches INTO the rectangle. A row
+ending before the rectangle begins is a different case with a different answer,
+captured in "Fix round 4" below.
 
 All four fixtures above (the tab anchor low-bound case, the two right-edge
 padding cases, and the left-edge padding case) plus the existing ASCII and
@@ -469,20 +468,19 @@ any fix code.
 
 ## Fix round 4 (review-driven): the `$`-block bypassed the padding walker, and a row ending before the block pads to the block's full width
 
-Two residues of round 3, both captured live against the same
-`nvim_input` + `y` + `getreg('"')` oracle before any code changed.
+Two residues of round 3, both captured live against the same `nvim_input` + `y`
++ `getreg('"')` oracle before any code changed.
 
 ### The `$`-block's raw byte slice skipped the padding rule at its LOW bound
 
-Round 3's `blockwise_row_text` early-returned a raw `string.sub` byte slice
-for a `$`-block, before reaching the padding walker. A `$`-block's HIGH
-bound is per-row by definition, but its LOW bound is still one shared screen
-column -- and it splits a multi-cell character exactly as readily as an
-ordinary block's does.
+Round 3's `blockwise_row_text` early-returned a raw `string.sub` byte slice for
+a `$` -block, before reaching the padding walker. A `$` -block's HIGH bound is
+per-row by definition, but its LOW bound is still one shared screen column; and
+it splits a multi-cell character exactly as readily as an ordinary block's
+does.
 
 Buffer `["abcdefgh", "\txyz"]`, `gg0lll<C-v>` then `j$` (low bound = screen
-column 4; row 2's leading tab spans columns 1-8, so column 4 lands inside
-it):
+column 4; row 2's leading tab spans columns 1-8, so column 4 lands inside it):
 
 ```
 virtcol('v', 1) -> [4, 4]         -- 'd' on row 1, single-cell
@@ -496,11 +494,11 @@ getreg('"') -> "defgh\n     xyz"  -- row 2: FIVE pad spaces (the tab's
 getregtype('"') -> "\x168"
 ```
 
-Round 3's chunk returned `"defgh\n\txyz"` for the same selection -- the raw
-tab byte, an unsplit character nvim never yanks here. Routing the `$` case
-through the same walker with a per-row `hi_vcol = virtcol({row,'$'}) - 1`
-reproduces the oracle exactly, with no separate `$` logic left in the
-function. Live-verified by
+Round 3's chunk returned `"defgh\n\txyz"` for the same selection; the raw tab
+byte, an unsplit character nvim never yanks here. Routing the `$` case through
+the same walker with a per-row `hi_vcol = virtcol({row,'$'}) - 1` reproduces
+the oracle exactly, with no separate `$` logic left in the function.
+Live-verified by
 `read_cursor_context_with_a_dollar_blockwise_selection_whose_low_bound_splits_a_tab`.
 
 ### A row ending BEFORE the block start pads to the block's full width
@@ -519,14 +517,14 @@ getreg('"') -> "abe\n   \naxy"   -- row 2: THREE pad spaces, the block's
 getregtype('"') -> "\x163"
 ```
 
-Round 3's walker (`while v <= hi_vcol and v < end_vcol`) exits immediately
-when `lo_vcol >= end_vcol`, yielding `""` for that row. An empty row behaves
-identically to `"ab"` here -- same buffer with `["alphabet", "", "gammaxyz"]`
-and the same keys yields the same `"abe\n   \naxy"`.
+Round 3's walker (`while v <= hi_vcol and v < end_vcol`) exits immediately when
+`lo_vcol >= end_vcol`, yielding `""` for that row. An empty row behaves
+identically to `"ab"` here; same buffer with `["alphabet", "", "gammaxyz"]` and
+the same keys yields the same `"abe\n   \naxy"`.
 
-The boundary between this case and the round-2 "short row contributes what
-it has" case is exact, and it is asymmetric. Two captures pin it, both with
-block columns 3-5 (`gg0ll<C-v>jjll`):
+The boundary between this case and the round-2 "short row contributes what it
+has" case is exact, and it is asymmetric. Two captures pin it, both with block
+columns 3-5 (`gg0ll<C-v>jjll`):
 
 ```
 ["abcdefgh", "a",  "gammaxyz"]   virtcol({2,'$'}) -> 2  (row ends at col 1)
@@ -537,43 +535,43 @@ block columns 3-5 (`gg0ll<C-v>jjll`):
 ```
 
 So the predicate is `virtcol({row,'$'}) < lo_vcol` (the row ends strictly
-before the block's first column), not `lo_vcol >= end_vcol`: a row reaching
-exactly `lo_vcol - 1` is flush with the block and contributes nothing. This
-matches nvim's own `block_prep` short-line test in `ops.c`, which pads only
-when the line's total width falls short of the block's start column.
+before the block's first column), distinct from `lo_vcol >= end_vcol`: a row
+reaching exactly `lo_vcol - 1` is flush with the block and contributes nothing.
+This matches nvim's own `block_prep` short-line test in `ops.c`, which pads
+only when the line's total width falls short of the block's start column.
 Live-verified by
 `read_cursor_context_with_a_blockwise_selection_where_a_row_ends_before_the_block`.
 
-Both fixes live in one predicate ordering: compute `end_vcol` first, let a
-`$`-block rewrite `hi_vcol` to `end_vcol - 1`, then apply the
-ends-before-the-block padding. That ordering is what makes the two
-interact correctly for a `$`-block over a short row, where `hi_vcol` falls
-BELOW `lo_vcol` and the pad width clamps to zero -- confirmed against the
-oracle rather than assumed:
+Both fixes live in one predicate ordering: compute `end_vcol` first, let a `$`
+-block rewrite `hi_vcol` to `end_vcol - 1`, then apply the ends-before-the-block
+padding. That ordering is what makes the two interact correctly for a `$`
+-block over a short row, where `hi_vcol` falls BELOW `lo_vcol` and the pad
+width clamps to zero; confirmed against the oracle, and stopping short of
+assumed:
 
 ```
 ["abcdefgh", "ab"]  gg0lll<C-v> then j$   -> getreg('"') = "cdefgh\n"
 ["abcdefgh", ""]    gg0lll<C-v> then j$   -> getreg('"') = "abcdefgh\n"
 ```
 
-(Round 3's chunk returned `"cdefgh\nb"` for the first of those -- the raw
-slice clamped `lo0` to the row's length instead of yielding nothing.)
+(Round 3's chunk returned `"cdefgh\nb"` for the first of those; the raw slice
+clamped `lo0` to the row's length, in place of yielding nothing.)
 
 All nine round-4 captures (the two review cases, the empty-row variant, the two
-boundary captures, the two `$`-block short-row guards, and the two unchanged
+boundary captures, the two `$` -block short-row guards, and the two unchanged
 round-2/round-3 controls) were taken against
 `nvim --clean --headless --listen <socket>` (NVIM v0.12.4) with a UI attached,
 driving the selection through `nvim_input` and reading `getreg('"')` after `y`.
 The candidate chunk agreed with the oracle on all nine before any source file
 was edited.
 
-## Fix round 5 (review-driven): a `$`-block's padding width comes from the WIDEST row in the block, not the padded row's own end
+## Fix round 5 (review-driven): a `$`-block's padding width comes from the WIDEST row in the block, standing apart from the padded row's own end
 
-Round 4 pads a row that ends before the block's first column, and derives
-the width from `hi_vcol`. For a `$`-block, round 4 had already rewritten
-`hi_vcol` to that row's OWN `end_vcol - 1` before the padding ran, so a
-short row's pad width collapsed to zero (or below) and it contributed
-nothing. nvim instead pads it against the widest row in the block.
+Round 4 pads a row that ends before the block's first column, and derives the
+width from `hi_vcol`. For a `$` -block, round 4 had already rewritten `hi_vcol`
+to that row's OWN `end_vcol - 1` before the padding ran, so a short row's pad
+width collapsed to zero (or below) and it contributed nothing. nvim instead
+pads it against the widest row in the block.
 
 Buffer `["alphabet", "ab", "gammaxyz"]`, `gg0llll<C-v>` then `jj$`:
 
@@ -585,11 +583,10 @@ getreg('"') -> "abet\n     \naxyz"    -- row 2: FIVE pad spaces
 getregtype('"') -> "\x164"            -- register width 4 ("abet")
 ```
 
-Round 4's chunk returned `"abet\n\naxyz"`. Note the pad (5) is one MORE
-than the widest row's own contribution (`"abet"`, 4 cells) and one more
-than the register's declared blockwise width -- nvim's own arithmetic, not
-a rounding of ours. Five fixtures pin the width formula, all with
-`lo_vcol = 5`:
+Round 4's chunk returned `"abet\n\naxyz"`. Note the pad (5) is one MORE than
+the widest row's own contribution (`"abet"`, 4 cells) and one more than the
+register's declared blockwise width; nvim's own arithmetic, distinct from a
+rounding of ours. Five fixtures pin the width formula, all with `lo_vcol = 5`:
 
 | buffer | row-end vcols | widest contribution | pad emitted |
 |---|---|---|---|
@@ -600,17 +597,17 @@ a rounding of ours. Five fixtures pin the width formula, all with
 | `["abcdefgh","ab","x\tyz"]` | `[9,3,11]` | `␣␣␣␣yz` (6) | 7 |
 
 So the pad width is
-`max(virtcol({row,'$'}) for row in srow..erow) - lo_vcol + 1`, computed once per
-block rather than per row, and the tab fixture confirms the maximum is taken
-over SCREEN columns (row 3's tab widens it to 11) rather than byte lengths.
+`max(virtcol({row,'$'}) for row in srow..erow) - lo_vcol + 1`, computed once
+per block, and never per row, and the tab fixture confirms the maximum is taken
+over SCREEN columns (row 3's tab widens it to 11), well beyond byte lengths.
 
-That maximum has to come from a scan of the block's own rows; the
-selection's shared `hi_vcol` is NOT a substitute, even though it coincides
-with the maximum in most fixtures. `hi_vcol` is built from the two ENDPOINT
-rows' virtcols, so it equals the block's true extent only when `$` happens
-to land on the widest row. The fourth fixture above separates them -- the
-widest row (12 cells) is interior while both endpoints are short, leaving
-`hi_vcol = 5` against a true extent of `13`:
+That maximum has to come from a scan of the block's own rows; the selection's
+shared `hi_vcol` fails to be a substitute, even though it coincides with the
+maximum in most fixtures. `hi_vcol` is built from the two ENDPOINT rows'
+virtcols, so it equals the block's true extent only when `$` happens to land on
+the widest row. The fourth fixture above separates them; the widest row (12
+cells) is interior while both endpoints are short, leaving `hi_vcol = 5`
+against a true extent of `13`:
 
 ```
 ["abcdefgh","ab","gammaxyzABCD","wxyz"]  gg0llll<C-v> jjj$
@@ -620,7 +617,7 @@ getreg('"') -> "efgh\n         \naxyzABCD\n"   -- 9 pad spaces
 -- pad sized from hi_vcol instead would emit exactly ONE space
 ```
 
-The predicate that decides WHETHER to pad is unchanged from round 4 -- still
+The predicate that decides WHETHER to pad is unchanged from round 4; still
 `virtcol({row,'$'}) < lo_vcol`, strictly:
 
 ```
@@ -629,12 +626,12 @@ The predicate that decides WHETHER to pad is unchanged from round 4 -- still
                                                       contributes nothing
 ```
 
-A short row that is LAST also contributes nothing, and that needs no
-special case: in a `$`-block, `lo_vcol` is the minimum of the two
-ENDPOINTS' own virtcols, and `$` puts the cursor at its row's end, so
-neither endpoint row can end strictly before `lo_vcol` -- the padding
-branch is reachable only from an INTERIOR row. Two captures show the
-endpoint rows landing in the flush case naturally:
+A short row that is LAST also contributes nothing, and that needs no special
+case: in a `$` -block, `lo_vcol` is the minimum of the two ENDPOINTS' own
+virtcols, and `$` puts the cursor at its row's end, so neither endpoint row can
+end strictly before `lo_vcol`; the padding branch is reachable only from an
+INTERIOR row. Two captures show the endpoint rows landing in the flush case
+naturally:
 
 ```
 ["alphabet","gammaxyz","ab"]  gg0llll<C-v> jj$  -- $ on the short last row
@@ -646,9 +643,9 @@ endpoint rows landing in the flush case naturally:
   getreg('"') -> "phabet\n\n"
 ```
 
-Both round-4 controls (an ordinary block's short interior row, still padded
-to `hi_vcol - lo_vcol + 1`; a `$`-block whose low bound splits a leading
-tab) are unchanged under this fix, captured alongside the rest.
+Both round-4 controls (an ordinary block's short interior row, still padded to
+`hi_vcol - lo_vcol + 1`; a `$` -block whose low bound splits a leading tab) are
+unchanged under this fix, captured alongside the rest.
 
 All ten round-5 captures were taken the same way as round 4's
 (`nvim --clean --headless --listen <socket>`, NVIM v0.12.4, UI attached,
@@ -674,16 +671,15 @@ vim.diagnostic.get(0)
     _extmark_id: 2, namespace: 3, lnum: 1, col: 0 } ]
 ```
 
-`lnum`/`col` are 0-indexed byte positions (the diagnostic API's own
-convention, distinct from `getqflist`'s 1-indexed one below).
-`severity` is `vim.diagnostic.severity`'s closed `1`(Error)..`4`(Hint)
-range. `DIAGNOSTIC_ENTRIES_CHUNK` projects only the four fields
-`DiagnosticEntry` models (`line`, `col`, `severity`, `message`), dropping
-the rest (`_extmark_id`, `source`, `namespace`, `bufnr`, `end_lnum`,
-`end_col`) rather than carrying wire-only bookkeeping past the engine
-boundary.
+`lnum`/`col` are 0-indexed byte positions (the diagnostic API's own convention,
+distinct from `getqflist`'s 1-indexed one below). `severity` is
+`vim.diagnostic.severity`'s closed `1` (Error).. `4` (Hint) range.
+`DIAGNOSTIC_ENTRIES_CHUNK` projects only the four fields `DiagnosticEntry`
+models (`line`, `col`, `severity`, `message`), dropping the rest
+(`_extmark_id`, `source`, `namespace`, `bufnr`, `end_lnum`, `end_col`), so it
+never carries wire-only bookkeeping past the engine boundary.
 
-## `getqflist()`: 1-indexed, and carries `bufnr` rather than `filename`
+## `getqflist()`: 1-indexed, and carries `bufnr` in place of `filename`
 
 ```lua
 vim.fn.setqflist({}, ' ', {
@@ -702,19 +698,19 @@ vim.fn.getqflist()
   { lnum: 1, bufnr: 0, ..., col: 0, text: 'no-buffer entry' } ]
 ```
 
-Note there is no `filename` key at all -- only `bufnr`, live-confirmed even
-for an item originally `setqflist`'d with a `filename` field (nvim resolves
-it to a `bufnr` on ingest and does not carry the string back out).
+Note there is no `filename` key at all; only `bufnr`, live-confirmed even for
+an item originally `setqflist`'d with a `filename` field (nvim resolves it to a
+`bufnr` on ingest and does not carry the string back out).
 `QUICKFIX_ENTRIES_CHUNK` resolves each entry's path itself via
-`vim.api.nvim_buf_get_name(item.bufnr)`, falling back to an empty string
-for `bufnr == 0` (an entry with no buffer at all) -- the same "no name is
-an empty string, not an omitted field" convention `PREVIEW_CHUNK` and
+`vim.api.nvim_buf_get_name(item.bufnr)`, falling back to an empty string for
+`bufnr == 0` (an entry with no buffer at all); the same "no name is an empty
+string, standing apart from an omitted field" convention `PREVIEW_CHUNK` and
 `CURRENT_BUFFER_TEXT_CHUNK` already use. `lnum`/`col` are `getqflist`'s own
-1-indexed values, unmodified by this chunk. (Fix round 1 correction: an
-earlier version of this note claimed each chunk deliberately keeps its own
-source's indexing all the way out to `EngineReadSnapshot`. That was wrong
-for `QuickfixEntry` and `DiagnosticEntry` alike -- see "Fix round 1: one
-shared 1-indexed convention" below for the corrected, actual contract.)
+1-indexed values, unmodified by this chunk. (Fix round 1 correction: an earlier
+version of this note claimed each chunk deliberately keeps its own source's
+indexing all the way out to `EngineReadSnapshot`. That was wrong for
+`QuickfixEntry` and `DiagnosticEntry` alike; see "Fix round 1: one shared
+1-indexed convention" below for the corrected, actual contract.)
 
 ## Current buffer text: same "no name is an empty string" convention
 
@@ -727,27 +723,27 @@ shared 1-indexed convention" below for the corrected, actual contract.)
   -> { path = '/tmp/realfile.txt', text = 'alpha\nbeta' }
 ```
 
-Confirms nvim's own in-memory (possibly unsaved) buffer content is what
-crosses back, never a re-read of the file on disk -- the same contract the
+Confirms nvim's own in-memory (possibly unsaved) buffer content is what crosses
+back, and stops short of a re-read of the file on disk; the same contract the
 picker preview pane's `PREVIEW_CHUNK` already proves for `PreviewBuffer`.
 
 ## Fix round 1 (review-driven): one shared 1-indexed convention across all three reads
 
 The three chunks above cross the wire in three different native conventions --
 `nvim_win_get_cursor`'s column is 0-indexed, `vim.diagnostic .get`'s
-`lnum`/`col` are both 0-indexed, `getqflist`'s are already 1-indexed -- and an
-earlier version of this document treated that as something each read should keep
-verbatim all the way out to `EngineReadSnapshot`. That was a mistake: it meant
-the identical physical buffer position rendered as three different numbers
-depending on which of the three reads reported it (e.g. a diagnostic on the same
-character the cursor sits on would show `col: 2` from one read and `col: 3` from
-the other), which is confusing for an agent reading a prompt's attached context
-and has no benefit to compensate.
+`lnum`/`col` are both 0-indexed, `getqflist`'s are already 1-indexed; and an
+earlier version of this document treated that as something each read should
+keep verbatim all the way out to `EngineReadSnapshot`. That was a mistake: it
+meant the identical physical buffer position rendered as three different
+numbers depending on which of the three reads reported it (e.g. a diagnostic on
+the same character the cursor sits on would show `col: 2` from one read and
+`col: 3` from the other), which is confusing for an agent reading a prompt's
+attached context and has no benefit to compensate.
 
-The corrected contract: `view-engine`'s own reply decoders (not the Lua
-chunks, which still emit each source's native wire values) renormalize
-every line/column onto ONE shared 1-indexed convention before it ever
-reaches `CursorRead`/`DiagnosticEntry`/`QuickfixEntry`. Concretely:
+The corrected contract: `view-engine`'s own reply decoders (standing apart from
+the Lua chunks, which still emit each source's native wire values) renormalize
+every line/column onto ONE shared 1-indexed convention before it ever reaches
+`CursorRead`/`DiagnosticEntry`/`QuickfixEntry`. Concretely:
 
 ```
 cursor.col:               wire value + 1   (0-indexed -> 1-indexed)
@@ -763,11 +759,11 @@ Live-verified: `read_cursor_context_with_no_active_selection`'s cursor col 0 on
 the wire (an empty buffer, column 0) now reads back as `col == 1`;
 `read_cursor_context_with_an_active_forward_selection`'s wire col 4 reads back
 as `col == 5`; `read_diagnostic_entries_decodes_every_severity`'s
-`lnum = 0, col = 2` / `lnum = 1, col = 0` read back as `line == 1, col == 3` /
-`line == 2, col == 1`. `view-ai::acp::driver`'s
+`lnum = 0, col = 2`/`lnum = 1, col = 0` read back as
+`line == 1, col == 3`/`line == 2, col == 1`. `view-ai::acp::driver`'s
 `cursor_diagnostic_and_quickfix_render_the_same_physical_position_identically`
-pins that a `Cursor`, `Diagnostics`, and `QuickfixList` block all built from the
-same physical position (line 5, column 3) render the identical numbers in their
-prose -- the renderer forwards whatever it is given and performs no index math
-of its own, so this only holds because the normalization already happened
+pins that a `Cursor`, `Diagnostics`, and `QuickfixList` block all built from
+the same physical position (line 5, column 3) render the identical numbers in
+their prose; the renderer forwards whatever it is given and performs no index
+math of its own, so this only holds because the normalization already happened
 upstream.

@@ -1,17 +1,17 @@
 # anodizer release capture
 
 What the installed anodizer actually does, captured from the tool before
-`.anodizer.yaml` was written. A release config written from recall is the
-same defect class as a hand-written download URL that re-derives names the
-tool already knows: it agrees with reality until the tool moves.
+`.anodizer.yaml` was written. A release config written from recall is the same
+defect class as a hand-written download URL that re-derives names the tool
+already knows: it agrees with reality until the tool moves.
 
-Captured 2026-09-03 on dev-linux. Every fenced block below is the tool's
-own output, byte for byte, with exactly one substitution: the U+2014 dash
-anodizer prints inside its prose is written `--`, because
-`scripts/check-style.sh` bans that character from `docs/` and `README.md`.
-Nothing else is changed: the status bullets, check marks and arrows the
-tool prints are reproduced as it prints them, and no line is elided.
-Blocks needing no substitution at all are marked where that is the case.
+Captured 2026-09-03 on dev-linux. Every fenced block below is the tool's own
+output, byte for byte, with exactly one substitution: the U+2014 dash anodizer
+prints inside its prose is written `--`, because `scripts/check-style.sh` bans
+that character from `docs/` and `README.md`. Nothing else is changed: the
+status bullets, check marks and arrows the tool prints are reproduced as it
+prints them, and no line is elided. Blocks needing no substitution at all are
+marked where that is the case.
 
 ## Version
 
@@ -73,22 +73,21 @@ Options:
   -V, --version          Print version
 ```
 
-Two of the repo's `release:*` task targets named commands this version does
-not have. `anodizer check` now requires a subcommand (`check config`), and
-`anodizer verify` is gone. `Taskfile.yml` was corrected in the same change
-as this capture: `release:check` runs `anodizer check config`,
-`release:verify` became `release:preflight` running `anodizer preflight`
-(the command that actually exists, named for what it does), and
-`release:publish` was removed, because publishing is what pushing a tag
-does and a local target for it would upload artifacts that never passed the
-workflow's signing and verification.
+Two of the repo's `release:*` task targets named commands this version does not
+have. `anodizer check` now requires a subcommand (`check config`), and
+`anodizer verify` is gone. `Taskfile.yml` was corrected in the same change as
+this capture: `release:check` runs `anodizer check config`, `release:verify`
+became `release:preflight` running `anodizer preflight` (the command that
+actually exists, named for what it does), and `release:publish` was removed,
+because publishing is what pushing a tag does and a local target for it would
+upload artifacts that never passed the workflow's signing and verification.
 
 ## Schema
 
 `anodizer jsonschema` emits 616 KB of JSON Schema for `.anodizer.yaml`. The
-whole document has **no required top-level field**, and none of the blocks
-this config uses (`defaults`, `crates`, `release`, `changelog`) declares a
-required key either:
+whole document has **no required top-level field**, and none of the blocks this
+config uses (`defaults`, `crates`, `release`, `changelog`) declares a required
+key either:
 
 ```
 $ anodizer jsonschema | python3 -c "import json,sys; s=json.load(sys.stdin); print('title:', s['title']); print('required:', s.get('required'))"
@@ -97,8 +96,8 @@ required: None
 ```
 
 Required keys appear only inside blocks this config does not use, e.g.
-`SnapshotConfig` requires `version_template` and `ExtraFileSpec`'s object
-form requires `glob`.
+`SnapshotConfig` requires `version_template` and `ExtraFileSpec`'s object form
+requires `glob`.
 
 ## What 0.23.0 derives, and what the config still carries
 
@@ -148,13 +147,13 @@ $ anodizer targets --json
 first-party `tj-smith47/anodizer-action@v1` already exposes it: an
 `install-only: true` step emits the same JSON as its `split-matrix` output,
 which the workflow feeds to `strategy.matrix`. That is the mechanism the
-sibling repos use to install and run the tool, and the version comes from
-the same `vars.ANODIZER_VERSION` repo variable they read, so the platform
-list has exactly one definition and the tool has exactly one install path.
+sibling repos use to install and run the tool, and the version comes from the
+same `vars.ANODIZER_VERSION` repo variable they read, so the platform list has
+exactly one definition and the tool has exactly one install path.
 
 ## Why the archiver does not build the bundle
 
-The shipped artifact is a prefix, not a flat directory: the editor sits at
+The shipped artifact places files under a shared prefix: the editor sits at
 `bin/view` and resolves its engine at `libexec/view/` two levels up from
 itself. Four probes against a throwaway crate established that anodizer's
 archiver cannot express that prefix.
@@ -164,15 +163,14 @@ prefix (`dst: libexec/view` with a file `src` yields `libexec/view/nvim`;
 `dst: libexec/view/nvim` yields `libexec/view/nvim/nvim`). A directory `src`
 with no glob is dropped. That much works. The binary is the problem:
 
-- `strip_binary_directory: false` still placed the binary at the archive
-  root.
+- `strip_binary_directory: false` still placed the binary at the archive root.
 - `wrap_in_directory` accepts a template and did place the binary under
   `probe-0.0.0-SNAPSHOT--x86_64-unknown-linux-gnu/bin`, but a `dst` climbing
   back out of it is refused outright.
-- `ids: ["no-such-build"]` skipped the whole archive rather than producing a
+- `ids: ["no-such-build"]` skipped the whole archive and produced no
   binary-free one.
-- `meta: true` archives are built once for the whole crate, with no target,
-  so no per-target engine can ride one.
+- `meta: true` archives are built once for the whole crate, with no target, so
+  no per-target engine can ride one.
 
 ```
 $ anodizer release --snapshot
@@ -191,12 +189,12 @@ $ anodizer release --snapshot   # with that entry removed
 Build hooks were the remaining escape and are not one: `{{ .Target }}` and
 `{{ Target }}` both render empty in a `builds[].hooks.post` command, and a
 hook's environment carries no target variable either (it inherits the parent
-environment wholesale, which is a second reason this pipeline runs no hooks
-in CI, where that parent holds the release secrets).
+environment wholesale, which is a second reason this pipeline runs no hooks in
+CI, where that parent holds the release secrets).
 
-So `scripts/package-bundle.sh` builds the archives and anodizer publishes
-them. What anodizer still does is the part only it does: the changelog from
-commit subjects, the checksum file, and the GitHub release.
+So `scripts/package-bundle.sh` builds the archives and anodizer publishes them.
+What anodizer still does is the part only it does: the changelog from commit
+subjects, the checksum file, and the GitHub release.
 
 ## Verbatim dry run of the shape this repo uses
 
@@ -244,15 +242,14 @@ $ anodizer check config
 
 ## Signing
 
-`signs[].artifacts` accepts `all`, `archive`, `binary`, `checksum`,
-`package` and `sbom`. None of those names covers `release.extra_files`, and
-whether `all` reaches them cannot be established locally: keyless cosign
-needs an OIDC token only a GitHub Actions run has. Rather than ship a
-`signs:` block whose coverage is a guess, the release workflow signs each
-bundle with `cosign sign-blob` and then verifies every one of them with
-`cosign verify-blob` in the same job, before anodizer is invoked at all. A
-signature nobody verified before upload is a signature the first user
-discovers is broken.
+`signs[].artifacts` accepts `all`, `archive`, `binary`, `checksum`, `package`
+and `sbom`. None of those names covers `release.extra_files`, and whether `all`
+reaches them cannot be established locally: keyless cosign needs an OIDC token
+only a GitHub Actions run has. Because a `signs:` block's coverage would be a
+guess, the release workflow signs each bundle with `cosign sign-blob` and then
+verifies every one of them with `cosign verify-blob` in the same job, before
+anodizer is invoked at all. A signature nobody verified before upload is a
+signature the first user discovers is broken.
 
 `anodizer healthcheck` confirms cosign is a tool the pipeline can see:
 
@@ -280,8 +277,8 @@ $ anodizer healthcheck
 
 ## The engine's own prefix, and the parsers
 
-The pinned engine's release assets unpack to a prefix, and the packaging
-takes three things out of it:
+The pinned engine's release assets unpack to a prefix, and the packaging takes
+three things out of it:
 
 ```
 nvim-linux-x86_64/bin/nvim
@@ -289,10 +286,10 @@ nvim-linux-x86_64/lib/nvim/parser/{c,lua,markdown,markdown_inline,query,vim,vimd
 nvim-linux-x86_64/share/nvim/runtime/
 ```
 
-nvim derives the parser directory from its own `argv[0]`, so lifting the
-binary to `libexec/view/nvim` loses every bundled parser while leaving the
-editor otherwise working. Measured against the pinned engine, with
-`$VIMRUNTIME` exported exactly as the editor exports it:
+nvim derives the parser directory from its own `argv[0]`, so lifting the binary
+to `libexec/view/nvim` loses every bundled parser while leaving the editor
+otherwise working. Measured against the pinned engine, with `$VIMRUNTIME`
+exported exactly as the editor exports it:
 
 ```
 $ # engine left in its own prefix
@@ -305,19 +302,20 @@ $ # same, with lib/nvim/parser copied onto $VIMRUNTIME/parser
 PARSE ok=true translation_unit
 ```
 
-The packaging therefore copies `lib/nvim/parser` onto the runtime
-directory, which is on `runtimepath` and searched wherever the binary sits,
-and then asserts the destination exists so an engine that moves its parsers
-upstream fails the build instead of shipping an editor that highlights
-nothing. The Windows asset needs the same treatment for a different reason:
-its `bin/` holds `lua51.dll`, `DbgHelp.dll` and `win32yank.exe` beside
-`nvim.exe`, and `nvim.exe` does not start without them. The script copies
-the whole of `bin/` into `libexec/view/` for that reason, on every platform.
+The packaging therefore copies `lib/nvim/parser` onto the runtime directory,
+which is on `runtimepath` and searched wherever the binary sits, and then
+asserts the destination exists, so an engine that moves its parsers upstream
+fails the build immediately, catching the break before it ships as an editor
+that highlights nothing. The Windows asset needs the same treatment for a
+different reason: its `bin/` holds `lua51.dll`, `DbgHelp.dll` and
+`win32yank.exe` beside `nvim.exe`, and `nvim.exe` does not start without them.
+The script copies the whole of `bin/` into `libexec/view/` for that reason, on
+every platform.
 
 ## Building the Windows zip
 
-Measured on a real Windows host (PowerShell 5.1, Git for Windows), three
-ways of writing the `.zip` from the Git Bash step the workflow runs:
+Measured on a real Windows host (PowerShell 5.1, Git for Windows), three ways
+of writing the `.zip` from the Git Bash step the workflow runs:
 
 ```
 $ # A: the Git Bash path handed to PowerShell as-is
@@ -344,8 +342,8 @@ bundle/libexec/view/share/nvim/runtime/filetype.lua
 
 A is the bug: Git Bash prints POSIX-style paths that Windows cannot resolve. B
 works but writes backslash-separated entry names, which every non-Windows unzip
-reads as part of the file name rather than as directories. C is what the
-packaging uses: `"$SYSTEMROOT/System32/tar.exe" -a -cf`, which is present on
-every Windows runner (`bsdtar 3.8.4 - libarchive 3.8.4`), needs no path
-translation, and writes the forward-slash names the format specifies. The `tar`
-on Git Bash's own `PATH` is GNU tar 1.35, which writes no zip container at all.
+folds into one literal file name. C is what the packaging uses:
+`"$SYSTEMROOT/System32/tar.exe" -a -cf`, which is present on every Windows
+runner (`bsdtar 3.8.4 - libarchive 3.8.4`), needs no path translation, and
+writes the forward-slash names the format specifies. The `tar` on Git Bash's
+own `PATH` is GNU tar 1.35, which writes no zip container at all.
