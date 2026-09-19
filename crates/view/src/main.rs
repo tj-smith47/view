@@ -960,11 +960,14 @@ fn main() -> Result<()> {
     // work the design spec's 50ms target is meant to cover
     let process_start = Instant::now();
     vlog::init(process_start);
+    // the writer first: preparing the tie can itself be refused (a pipe,
+    // a thread, a /bin/sh), and a refusal raised with nowhere to write it
+    // is the one that says no child of this session is tied
+    view_proc::record_refusals_with(log_untied_child);
     // before any other thread exists, and as far from the engine spawn as
     // the body allows: off Linux the tie is a watcher process, and this is
     // what keeps forking it out of the spawn the startup budget measures
     view_proc::prepare_to_tie_children();
-    view_proc::record_refusals_with(log_untied_child);
     let cli = Cli::parse();
     if let Some(register) = cli.print_clipboard {
         return print_clipboard(register);
@@ -1966,22 +1969,26 @@ mod tests {
     /// startup notices, below the spawn, where a model and an executor
     /// exist to carry it.
     ///
-    /// The tie is the sixth, and it is here to keep a cost *off* the spawn
-    /// rather than to take one: off Linux a tied child is tied by a watcher
-    /// process, and the first tied spawn is the one that forks it -- which
-    /// is the engine spawn below. The fork is made by a thread while the
-    /// config chain runs, and the call has to be here rather than lower
+    /// The sixth reads nothing and forks nothing: it hands view-proc this
+    /// process's log, so that an arm of the tie the host refuses says so
+    /// instead of leaving a child running untied and indistinguishable
+    /// from a tied one. It stands above the line below it because
+    /// preparing the tie is itself refusable, and view-proc holds such a
+    /// refusal only as far as its own small buffer reaches.
+    ///
+    /// The tie is the seventh, and it is here to keep a cost *off* the
+    /// spawn rather than to take one: off Linux a tied child is tied by a
+    /// watcher process, and the first tied spawn is the one that forks it
+    /// -- which is the engine spawn below. The fork is made by a thread
+    /// while the config chain runs, and the call has to be here rather
+    /// than lower
     /// because the pipe that watcher reads is two syscalls where there is
     /// no `pipe2`: a fork on another thread landing between them inherits
     /// the write end and holds it open for the life of the session. This is
     /// the line before this process has a second thread of any kind.
     ///
-    /// The line under it is the seventh, and it reads nothing and forks
-    /// nothing: it hands view-proc this process's log, so that an arm of
-    /// the tie the host refuses says so instead of leaving a child running
-    /// untied and indistinguishable from a tied one. It is here because it
-    /// has to precede the first tied spawn, and the first tied spawn is the
-    /// engine's.
+    /// Both have to precede the first tied spawn, and the first tied spawn
+    /// is the engine's.
     #[test]
     fn only_the_config_prologue_runs_before_the_engine_spawn() {
         assert_eq!(
@@ -1989,8 +1996,8 @@ mod tests {
             vec![
                 "Instant::now",
                 "vlog::init",
-                "view_proc::prepare_to_tie_children",
                 "view_proc::record_refusals_with",
+                "view_proc::prepare_to_tie_children",
                 "Cli::parse",
                 "Some",
                 "print_clipboard",

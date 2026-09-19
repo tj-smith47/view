@@ -224,14 +224,27 @@ fn a_wedged_engine_dies_with_a_parent_that_was_killed_outright() {
     );
 }
 
-/// The same, for the ending a terminal or a service manager actually sends.
+/// The same, for the ending a terminal or a service manager actually sends
+/// -- to a process that installed no handler for it, which is what the
+/// intermediate below is.
 ///
-/// A `view README.md` asked to stop this way left its engine alive and
-/// reparented to init once (ledger, 2026-09-04). `SIGKILL` and `SIGTERM`
-/// reach the tie differently -- the first runs no code of the process at
-/// all, the second runs its teardown first and then ends every thread it
-/// had, including the one the parent-death signal is named against -- so a
-/// pin on one is no evidence about the other.
+/// The two endings reach the tie by different kernel paths and this is the
+/// one that can be caught: the parent-death signal is named against a
+/// thread, and a `SIGTERM` nothing catches ends every thread the process
+/// had, the one that armed it included. A pin on `SIGKILL` says nothing
+/// about that, so both are asked.
+///
+/// What this is not is view's own fatal-signal teardown. A libtest binary
+/// has no handler to install one from -- nothing in `std` registers a
+/// signal, and view's own registration lives behind `view-tui`'s terminal
+/// handle -- so what runs here is the default action, which is no code of
+/// the process at all. Two other things hold the teardown path: the forced
+/// arm of the shutdown sequence a teardown ends in (`tests/shutdown.rs`'s
+/// `shutdown_force_kills_when_unresponsive_within_timeout`, on an engine
+/// stalled past answering `qa!`), and a whole session ended that way from
+/// outside (`scripts/qa-respawn-loop.sh --signal TERM`, whose signal
+/// shapes take view's own fatal-signal path and then count what is left in
+/// the process table).
 #[cfg(unix)]
 #[test]
 fn a_wedged_engine_dies_with_a_parent_that_was_asked_to_stop() {

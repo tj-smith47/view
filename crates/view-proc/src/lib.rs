@@ -18,6 +18,21 @@ use std::process::{Child, Command};
 /// Where a refused tie is written down, or nowhere until a process says.
 static REPORT: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
 
+/// Refusals raised before a writer arrived, held until one does.
+///
+/// Every arm this crate ties with can be refused while the process is still
+/// starting up -- the watcher's pipe and its `/bin/sh` are made from the
+/// first line of `main` -- so the refusal a session most needs to read is
+/// the one raised before any log existed to write it to. Dropped, a host
+/// that refuses the tie outright looks exactly like one that ties every
+/// child.
+static PENDING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// How many of those are kept. Each arm refuses once per process, and a
+/// run that reaches this many has already said what a reader needs; a
+/// bound is what keeps a refusal in a loop from growing without one.
+const PENDING_CAP: usize = 8;
+
 /// Hands this crate somewhere to record a tie the host refused.
 ///
 /// Every arm can be refused -- a `prctl` a seccomp profile answers `EPERM`,
@@ -36,13 +51,41 @@ static REPORT: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
 ///
 /// The first caller wins, so a second call is a no-op rather than a
 /// replacement.
+///
+/// Whatever was refused before this call is written out here, so the order
+/// of the two lines in a `main` decides nothing.
 pub fn record_refusals_with(report: fn(&str)) {
-    let _ = REPORT.set(report);
+    // the lock is held across the install so that a refusal racing it is
+    // either buffered before the drain below or written straight out after
+    // it, never pushed onto a list nothing reads again
+    let Ok(mut held) = PENDING.lock() else {
+        let _ = REPORT.set(report);
+        return;
+    };
+    if REPORT.set(report).is_err() {
+        return;
+    }
+    // the lock is released before the writer runs: a writer that reached
+    // back into this crate would otherwise be waiting on itself
+    let notes = std::mem::take(&mut *held);
+    drop(held);
+    for note in notes {
+        report(&note);
+    }
 }
 
-/// Writes one refusal wherever [`record_refusals_with`] pointed.
+/// Writes one refusal wherever [`record_refusals_with`] pointed, or holds
+/// it for the writer that has not arrived yet.
 #[cfg(any(unix, windows))]
 fn refused(note: &str) {
+    if let Ok(mut pending) = PENDING.lock() {
+        if REPORT.get().is_none() {
+            if pending.len() < PENDING_CAP {
+                pending.push(note.to_string());
+            }
+            return;
+        }
+    }
     if let Some(report) = REPORT.get() {
         report(note);
     }
@@ -185,9 +228,9 @@ pub fn prepare_to_tie_children() {
 /// this one child loose.
 ///
 /// The refusal is written down through [`record_refusals_with`] here rather
-/// than at either call site: both of them -- this crate's own Windows arm
-/// and view-ai's tokio spawn -- are in crates with no logger of their own,
-/// and the three shapes a refusal takes are known here and nowhere else.
+/// than at the call site: a caller of this function is a crate that spawns,
+/// which is a crate with no logger of its own, and the three shapes a
+/// refusal takes are known here and nowhere else.
 /// The answer is still `#[must_use]`, for a caller that can do more with it
 /// than run on.
 #[cfg(windows)]
@@ -545,5 +588,69 @@ fn create_killing_job() -> Option<usize> {
             return None;
         }
         Some(job.expose_provenance())
+    }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{record_refusals_with, refused, PENDING_CAP};
+
+    /// What the writer installed below was handed.
+    static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    fn remember(note: &str) {
+        if let Ok(mut seen) = SEEN.lock() {
+            seen.push(note.to_string());
+        }
+    }
+
+    fn seen() -> Vec<String> {
+        SEEN.lock().unwrap().clone()
+    }
+
+    /// A refusal raised before any writer exists reaches the one that
+    /// arrives afterwards.
+    ///
+    /// The whole of the tie is decided in the first lines of a `main`, and
+    /// the watcher's own pipe and `/bin/sh` are made there: a process that
+    /// installed its writer one line later than it prepared the tie used to
+    /// drop exactly the refusal that says no child of this session is tied.
+    ///
+    /// One case and one test binary, because the two statics it reads are
+    /// per-process: a second case touching either would be deciding this
+    /// one's answer from another thread.
+    #[test]
+    fn a_refusal_raised_before_any_writer_is_installed_is_not_lost() {
+        for i in 0..PENDING_CAP + 2 {
+            refused(&format!("refused {i}"));
+        }
+        assert!(
+            seen().is_empty(),
+            "a refusal reached a writer that had not been installed yet"
+        );
+
+        record_refusals_with(remember);
+
+        assert_eq!(
+            seen().len(),
+            PENDING_CAP,
+            "the held refusals did not arrive whole at the writer that \
+             installed itself after them, or the bound on them did not hold"
+        );
+        assert_eq!(
+            seen().first().map(String::as_str),
+            Some("refused 0"),
+            "the refusals arrived in some order other than the one they \
+             were raised in"
+        );
+
+        refused("refused after the writer");
+        assert_eq!(
+            seen().len(),
+            PENDING_CAP + 1,
+            "a refusal raised after the writer was installed did not reach it"
+        );
     }
 }

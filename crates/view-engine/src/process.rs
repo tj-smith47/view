@@ -1424,10 +1424,12 @@ impl Engine {
     /// once: the bytes that say why the pipe went are exactly the ones
     /// still in flight when it does.
     ///
-    /// That cost is bounded, and it lands at most once per connection. The
-    /// caller is `recovery::resolve`'s `Flow::EngineLost` arm, on the
-    /// runtime loop's own thread, so a lost write can hold the loop for up
-    /// to `READER_SETTLE` before the stop resolves. It reaches the bound
+    /// That cost is bounded, and it lands at most once per connection. It
+    /// is spent on the runtime loop's own thread -- the answer decides
+    /// whether the session is dead or merely unwritable, and there is no
+    /// frame worth painting until it is in -- so a lost write can hold
+    /// that loop for up to `READER_SETTLE` before the stop resolves. It
+    /// reaches the bound
     /// only where the connection is already gone, which is a session with
     /// no frame left to paint that does not depend on the answer, and a
     /// reader slower than the bound resolves to `write_lost` -- the

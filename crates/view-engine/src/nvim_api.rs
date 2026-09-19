@@ -313,6 +313,15 @@ end
 /// fires on every key that leaves nvim waiting, and what it re-asks is
 /// answered in the first moments of a session or never.
 ///
+/// What a session pays for that minute is on the order of a microsecond
+/// per settled key, and nearly all of it is nvim's own dispatch of a Lua
+/// callback rather than the walk inside it: a session whose claimant never
+/// loads re-asks a list of two names, and the first test on each is a
+/// `package.loaded` lookup that answers nil. Against a frame that is three
+/// orders of magnitude longer, the listener is not a cost a typist can
+/// reach -- which is why it is allowed to run at all, and why it retires
+/// on a clock rather than on a count of keys.
+///
 /// An ask that raised is not an ask: a module a startup loader required
 /// before its own `setup` ran is on `package.loaded` with its config still
 /// nil, and `disable()` raises from inside it (noice's `init.lua` indexing

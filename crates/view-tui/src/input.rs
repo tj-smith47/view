@@ -1053,6 +1053,27 @@ mod tests {
         );
     }
 
+    /// The verdict reads the three hangup flags and nothing else, so a
+    /// descriptor with a keystroke waiting on it is still a live terminal.
+    ///
+    /// The mask is what makes this askable at all: Darwin's arm asks for
+    /// `POLLIN` so that `EVFILT_READ` is registered, which means a ready
+    /// descriptor answers the poll with `n > 0` and `POLLIN` alone there.
+    /// A verdict that stopped at the poll's own count would end the
+    /// session on the user's next key -- on the one platform whose mask
+    /// exists to make a hangup visible. Green by construction on the empty
+    /// mask, where a ready descriptor answers `n = 0`; the Apple leg is
+    /// the one this case is for.
+    #[test]
+    fn a_descriptor_with_bytes_ready_on_it_is_not_a_hangup() {
+        let (read, write) = rustix::pipe::pipe().unwrap();
+        rustix::io::write(&write, b"k").unwrap();
+        assert!(
+            !terminal_hungup(read.as_fd()),
+            "a live far end with a byte ready reads as hung up, so the              verdict is reading the poll's own answer rather than              POLLHUP, POLLERR and POLLNVAL"
+        );
+    }
+
     /// The default is nvim's own, so a session whose engine never relays
     /// anything still waits exactly as long as nvim would before reading a
     /// half-arrived key code as the Escape key.
