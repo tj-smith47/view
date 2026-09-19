@@ -1,10 +1,10 @@
 # Surface ownership
 
 A Neovim UI surface is either drawn by view or left to your plugins, and
-that is a per-surface answer rather than a mode. This page is the whole of
-it: which surfaces view claims, what happens when a plugin draws on one of
-them anyway, the `view.toml` line that hands it back, and the compat
-scenario state that proves the answer on the pinned engine.
+that answer is given per surface. This page is the whole of it: which
+surfaces view claims, what happens when a plugin draws on one of them
+anyway, the `view.toml` line that hands it back, and the compat scenario
+state that proves the answer on the pinned engine.
 
 The table below is generated from `SURFACES`, `SURFACE_CLAIMANTS` and
 `COMPLETION_MENUS` in `crates/view-core/src/native/surfaces.rs`, plus the
@@ -19,23 +19,21 @@ the tables view actually runs disagree.
 - **policy** is what view does when something else draws there. `Own` means
   view keeps drawing it and tells you once, with the line that resolves it.
   `Yield` means view does not draw it, so drawing there claims nothing.
-  `Absorb` means view takes what the claimant drew into its own chrome
-  rather than letting two renderers stack.
+  `Absorb` means view takes what the claimant drew into its own chrome, so
+  one renderer draws the surface.
 - **`[native]` switch** is the `view.toml` line that hands the surface back
   to your plugins, and it is the switch that surface's `ext_*` attach is
-  gated on rather than a second setting that means the same thing.
-  `-- none --` is honest rather than missing: no switch reaches that
-  surface, and a notice about it says what happened and stops rather than
-  naming a setting that does not exist.
+  gated on. `-- none --` is honest: no switch reaches that surface, and a
+  notice about it says what happened and names no setting.
 - **claiming plugin classes** are the plugins whose whole purpose is to
   render a surface view also renders, with the buffer `filetype` their own
-  floating windows present. A plugin nobody enumerated is not missing from
-  here: it reaches the generic float detector instead, which needs no table.
+  floating windows present. A plugin nobody enumerated reaches the generic
+  float detector, which needs no table.
 - **proving scenario / state** is every compat state whose probes assert
   that surface's `ext_*` attach. The attach is what decides whether view
   draws the surface, so a state asserting it on proves the policy and one
-  asserting it off proves the switch. `-- none --` is a coverage gap you can
-  see rather than one you have to go looking for.
+  asserting it off proves the switch. `-- none --` is a coverage gap
+  printed where you can see it.
 
 ## The matrix
 
@@ -69,17 +67,16 @@ bufferline has nothing left to draw into.
 
 The buffer grid is the one surface view never draws over. nvim owns it, and
 so does anything that wants to float above it, so a picker taking the screen
-is not a conflict and is never reported as one.
+goes unreported.
 
 ## What a claim actually is
 
 A claim is measured against the region the engine leaves for the surface
-view took over, never against the pixels view paints. Rect overlap with
-view's own chrome answers backwards: read against the palette box,
-nvim-cmp's cmdline menu misses it entirely while a centered telescope picker
-covers it whole, so the float that claims a surface looks innocent and the
-negative control looks guilty. The measurements behind that are in
-`docs/surface-float-wire-capture.md`.
+view took over. Rect overlap with view's own chrome answers backwards:
+read against the palette box, nvim-cmp's cmdline menu misses it entirely
+while a centered telescope picker covers it whole, so the float that
+claims a surface looks innocent and the negative control looks guilty.
+The measurements behind that are in `docs/surface-float-wire-capture.md`.
 
 Geometry alone is not enough either, so each rule is a conjunction: a rect
 that lands where a surface lives, and a state only that surface produces.
@@ -92,11 +89,10 @@ the same band silent.
 A plugin the table names gets one notice per launch, and view asks it to
 turn itself off first: the ask goes out with the takeover, and again for any
 claimant that loads after it, so a plugin lazy.nvim defers is turned off on
-the load event rather than left running behind a notice saying the ask never
-reached it.
+the load event.
 
-The notice stands until you take it down. Any key, click or paste --
-`<Esc>` included -- clears it once the notice has been on screen for as long
+The notice stands until you take it down. Any key, click or paste,
+`<Esc>` included, clears it once the notice has been on screen for as long
 as an ordinary one, so the keystroke you were already typing when it appeared
 leaves it alone. Its text stays in the notification history (`<leader>fm`)
 either way, which is where the `view.toml` line that resolves the conflict

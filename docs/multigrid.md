@@ -7,15 +7,13 @@ and the cmdline share a single coordinate space, and a UI has to work out
 which window owns which screen cell from `win_viewport` alone (see
 `docs/multigrid-wire-capture.md`, whose `win_viewport` section documents
 the trap in that inference). `ext_multigrid` asks nvim to address each
-window's own grid separately -- `grid_resize`, `grid_line` and friends
+window's own grid separately. `grid_resize`, `grid_line` and friends
 carry a `grid` id, `win_pos`/`win_float_pos` place that grid inside the
-editor, and a UI composites the panes itself instead of trusting one
-global buffer of cells.
+editor, and a UI composites the panes itself.
 
 view ships `ext_multigrid` on by default: it is what lets the pane
-compositor paint each window from its own grid rather than parsing one
-shared grid back apart, and what lets input routing address a click or a
-paste at the pane the cursor is actually in.
+compositor paint each window from its own grid, and what lets input
+routing address a click or a paste at the pane the cursor is actually in.
 
 ## What the knob does
 
@@ -30,16 +28,17 @@ single_grid = false   # default: false -- view composites nvim's windows
 `single_grid = true` (or `--single-grid` for one session) drops
 `ext_multigrid` from the attach request. nvim then draws the classic single
 grid and view renders it the way it did before multigrid became the default:
-one pane, no compositor. Every other `[native]`/`[ui]` switch is unaffected
--- this knob only changes how the grid protocol addresses windows, never
-which surfaces are externalized (`ext_linegrid`, `ext_cmdline`, etc. still
-follow `[native]`, see `crates/view-native/src/config.rs`'s `ext_surfaces`).
+one pane, no compositor. Every other `[native]`/`[ui]` switch is
+unaffected. This knob changes how the grid protocol addresses windows,
+and which surfaces are externalized still follows `[native]`
+(`ext_linegrid`, `ext_cmdline`, etc., see `ext_surfaces` in
+`crates/view-native/src/config.rs`).
 
 ## Why the knob exists
 
 `ext_multigrid` is the roughest corner of the UI protocol. A plugin that
-computes screen positions itself -- rather than through the window-relative
-APIs (`nvim_win_set_config`, `nvim_win_get_position`) -- is assuming the
+computes screen positions itself, bypassing the window-relative APIs
+(`nvim_win_set_config`, `nvim_win_get_position`), is assuming the
 single-grid coordinate space nvim has shipped since 0.4, and multigrid
 changes what those coordinates mean. Upstream is unifying the two attach
 modes (nvim PR #32691); until that lands, `single_grid` is the one-line
@@ -68,9 +67,9 @@ against it by hand:
 
 Any one of these, reproducible with `nvim -u NORC` against the same
 plugin (bare nvim, no view), points at a plugin computing screen
-coordinates itself rather than at view's compositor. `single_grid = true`
-is the workaround while the plugin (or upstream) catches up, not a verdict
-on which side is at fault.
+coordinates itself. `single_grid = true` is the workaround while the
+plugin (or upstream) catches up, and it leaves open which side is at
+fault.
 
 ## Re-evaluation
 
@@ -81,5 +80,5 @@ unification (PR #32691) has landed, and whether the knob can be retired.
 still open upstream. The knob stays.
 
 `scripts/check-engine-pin.sh` enforces that this line's pin matches
-`.engine-pin` -- bumping the pin without updating this line fails the same
+`.engine-pin`. Bumping the pin without updating this line fails the same
 gate that refuses a hardcoded nvim version.

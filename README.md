@@ -28,12 +28,12 @@ distro](#not-another-neovim-distro) &bull; [Performance](#performance) &bull;
 view is a terminal editor that embeds a real Neovim as its engine, so your
 existing config, plugins, LSP servers, and treesitter setup work on day one:
 the same Neovim you already run is running them. Around that engine, view
-draws its own UI in native Rust: one design system for the editor chrome
-instead of a patchwork of plugins, a process that paints before your config
-has finished loading, and AI agents as a first-class part of the editor rather
-than a bolt-on: an agent panel (`<leader>ai`) speaks
-[ACP](https://agentclientprotocol.com) to real agents, with in-editor review
-of every proposed change. See [docs/ai.md](docs/ai.md).
+draws its own UI in native Rust: one design system for the whole editor
+chrome, a process that paints before your config has finished loading, and
+AI agents as a first-class part of the editor. An agent panel
+(`<leader>ai`) speaks [ACP](https://agentclientprotocol.com) to real
+agents, with in-editor review of every proposed change. See
+[docs/ai.md](docs/ai.md).
 
 ## Features
 
@@ -41,11 +41,11 @@ of every proposed change. See [docs/ai.md](docs/ai.md).
   runs as it is: telescope, lualine, noice, nvim-cmp, treesitter, mini.nvim
   and the rest load on day one, with nothing reimplemented.
 - **Fast where you feel it.** Every performance claim is a moment you live
-  through -- launch until the screen is ready, keypress until the character
-  is there, scrolling a huge file -- measured paired against bare Neovim in
+  through: launch until the screen is ready, keypress until the character is
+  there, scrolling a huge file, each measured paired against bare Neovim in
   the same run and regression-gated in CI. Where a moment has not been
-  measured under a real config yet, it says so instead of borrowing a
-  bench-fixture number. See [Performance](#performance).
+  measured under a real config yet, the page says so in words. See
+  [Performance](#performance).
 - **Modern out of the box.** The surfaces view owns (statusline, picker,
   file tree, notifications, command palette) share one design system. Prefer
   the plugin you already use? It still loads, and a single config key hands
@@ -68,10 +68,10 @@ That architecture is why none of view's surfaces can be a repackaged plugin:
 the render path, input handling, the native UI, and the AI integration are
 all view's own code. It also changes what a launch looks like: a distro has
 nothing to draw until your config has run, while view's own chrome is on
-screen in about 4 ms -- not the screen you start working in, which arrives
-when your config is done, but view's own frame, painted whether your setup
-has zero plugins or forty with your config still loading behind it. That
-later screen is the moment the numbers below are about.
+screen in about 4 ms, the frame view paints whether your setup has zero
+plugins or forty, with your config still loading behind it. The screen you
+start working in arrives when your config is done, and that later screen is
+the moment the numbers below are about.
 
 ## Performance
 
@@ -81,28 +81,28 @@ on the same host, with the same config, samples interleaved. Neovim
 of this page.
 
 **You open a project.** You type `view ~/.config` and wait for the screen you
-can start working in. Under a login-shaped plugin config -- lazy.nvim, noice
-and nvim-notify -- that screen arrives in 53.9 ms under view against 52.4 ms
+can start working in. Under a login-shaped plugin config (lazy.nvim, noice
+and nvim-notify) that screen arrives in 53.9 ms under view against 52.4 ms
 under Neovim: view 1.5 ms behind, which is a bar view has not met, since the
 bar for this moment is level with Neovim. view's own chrome is on screen in
-about 4 ms regardless -- the earlier frame, not that screen, painted while
+about 4 ms regardless, which is the earlier frame, painted while
 your config is still loading. view no longer waits out that whole first
 screen before attaching to the engine; it attaches while your config is
 still running, which is where most of the gap went. What is left is the
 screen the attach asks for, travelling to view over the wire and painted
 again by view where Neovim's own terminal UI reads it out of the same
-process -- and because that attach now sits inside the engine's own startup,
+process, and because that attach now sits inside the engine's own startup,
 the engine's started mark lands 1.64 ms later under view: the same work,
-counted on the other side of the mark rather than added.
+counted on the other side of the mark.
 
 **You type.** You press a key and the character appears. Under that same
 login-shaped config, view's worst keystroke in a thousand takes 1.58 ms
 against Neovim's 1.43 ms, and at the median view is 11% behind against a bar
-of 10% -- a second bar missed, by 1% of the round trip, and both a fraction of
+of 10%, a second bar missed, by 1% of the round trip, and both a fraction of
 the ~10 ms where a person starts to notice a key lagging their finger. view
-can also draw the character it expects instead of waiting for the engine to
-confirm it: under that same config the predicted glyph is on screen in 0.32 ms
-at that same worst case, where the Neovim it is paired against in the same run
+can also draw the character it expects before the engine confirms it: under
+that same config the predicted glyph is on screen in 0.32 ms at that same
+worst case, where the Neovim it is paired against in the same run
 takes 1.25 ms, and the glyph is corrected the moment the engine answers. Both
 ran on this machine; what the prediction is for is an engine a network away,
 which a separate acceptance leg measures by injecting the round trip at four
@@ -172,7 +172,7 @@ milestone it waits for.
       hands the terminal to `mpv` and takes it back on exit.
 - [ ] **`view doctor`.** Terminal, tier and why, tmux passthrough, `mpv`
       on the path, a repro invocation to paste into an issue.
-- [ ] **Windows.** A first-class Windows Terminal experience, not a port.
+- [ ] **Windows.** A first-class Windows Terminal experience.
 - [ ] **Workspace arc.** Tiles for N content surfaces: an image, a media
       player, a remote tree, a qutebrowser-style browser over CDP, mpv
       composited in a pane.
@@ -183,9 +183,9 @@ milestone it waits for.
 - [ ] **Theme-switcher interop.** An Omarchy-style switcher that retargets
       your colorscheme carries view with it; no view config to rewrite.
 
-Beyond the feature list there is one standing direction, never a
-milestone: viewport highlighting and LSP UI move to view's side one
-subsystem at a time, each only once it renders exactly what Neovim would.
+Beyond the feature list there is one standing direction: viewport
+highlighting and LSP UI move to view's side one subsystem at a time, each
+only once it renders exactly what Neovim would.
 
 ## Install
 
