@@ -2665,6 +2665,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "clap",
+ "portable-pty",
  "rustix",
  "serde",
  "thiserror 2.0.18",

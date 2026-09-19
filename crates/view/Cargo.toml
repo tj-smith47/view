@@ -114,3 +114,9 @@ view-test-support = { version = "0.0.1", path = "../view-test-support" }
 # here would agree with the oracle's corpus only until one of the two moved.
 # A dev edge only: nothing in the shipped binary depends on the oracle.
 view-oracle = { version = "0.0.1", path = "../view-oracle" }
+# The command builder `PtySession::spawn_configured` takes
+# (tests/key_flood.rs): a session whose XDG roots are its own leaves
+# nothing behind in the hermetic home every other spawn in the suite
+# shares, which `PtySession::spawn`'s bare form cannot express. The same
+# version the three crates already driving ptys declare.
+portable-pty = "0.9.0"

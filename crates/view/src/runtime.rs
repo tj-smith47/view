@@ -1261,8 +1261,22 @@ pub fn run(
         // whether the frame reached the terminal, not whether one was
         // owed: a pass that renders and finds nothing to write changed no
         // cell, so it answered no keystroke (see `FeltLog::note_pass`)
+        // a pass holding input this loop has already decoded paints
+        // nothing. The frame it would write is replaced by the next key's
+        // before a terminal could draw it, and the queue is refilled only
+        // once it has emptied, so the frame is owed for the length of one
+        // drained batch and no longer. A keystroke arriving on its own
+        // leaves the queue empty and paints on the pass it always did: the
+        // cost here is one `is_empty` and the single-key path is untouched.
+        // Without it an unbracketed paste renders and writes a frame per
+        // key, and the surface render plus the tty write is nearly all of
+        // what such a paste costs a core.
+        #[cfg(unix)]
+        let backlog = !pending.is_empty();
+        #[cfg(not(unix))]
+        let backlog = false;
         let mut flushed = false;
-        if model.dirty {
+        if model.dirty && !backlog {
             // the three startup milestones a timeline needs and only this
             // point holds: the first pass with anything to draw at all, the
             // first frame the engine's flush produced, and the first one
@@ -1304,8 +1318,13 @@ pub fn run(
         // read once per pass rather than inside the branch: an input the
         // fold answered with no frame has to be closed by the pass that
         // decided that, or the next frame -- about something else, seconds
-        // later -- is written up as the wait it had
-        felt.note_pass(&model, flushed);
+        // later -- is written up as the wait it had. A pass that deferred
+        // its frame decided nothing: the key is still owed the frame the
+        // emptied queue paints, and closing it here would write every key
+        // of a paste up as answered by no frame at all
+        if !backlog {
+            felt.note_pass(&model, flushed);
+        }
         // resolved here rather than inside the wait because it is the one
         // deadline read off the model, which the wait does not hold
         let speculation = crate::speculate::next_expiry(&model, follow_ups.speculate);
