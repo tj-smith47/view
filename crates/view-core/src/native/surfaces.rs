@@ -1938,9 +1938,9 @@ mod tests {
             .collect();
         wrapped(&format!(
             "A float whose rows land in the command line's band is taken into the palette \
-             instead of being reported, but only when it presents a completion menu's own \
-             filetype ({}). That is the completion menu's `{:?}` read at the moment of the \
-             claim; the command line's own policy stays `{:?}`.",
+             when it presents a completion menu's own filetype ({}). That is the \
+             completion menu's `{:?}` read at the moment the float appears; the command \
+             line's own policy stays `{:?}`.",
             or_none(&menus),
             row(Surface::Popupmenu)
                 .expect("the completion menu has a row")

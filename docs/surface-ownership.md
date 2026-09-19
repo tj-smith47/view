@@ -2,7 +2,7 @@
 
 A Neovim UI surface is either drawn by view or left to your plugins, and
 that answer is given per surface. This page is the whole of it: which
-surfaces view claims, what happens when a plugin draws on one of them
+surfaces view owns, what happens when a plugin draws on one of them
 anyway, the `view.toml` line that hands it back, and the compat scenario
 state for it on the pinned engine.
 
@@ -17,7 +17,7 @@ loaded scenario set in `compat/scenarios/`.
   no attach carries.
 - **policy** is what view does when something else draws there. `Own` means
   view keeps drawing it and tells you once, with the line that resolves it.
-  `Yield` means view does not draw it, so drawing there claims nothing.
+  `Yield` means view does not draw it, so drawing there takes nothing.
   `Absorb` means view takes what the claimant drew into its own chrome, so
   one renderer draws the surface.
 - **`[native]` switch** is the `view.toml` line that hands the surface back
@@ -46,9 +46,9 @@ loaded scenario set in `compat/scenarios/`.
 
 <!-- generated from SURFACES -->
 A float whose rows land in the command line's band is taken into the palette
-instead of being reported, but only when it presents a completion menu's own
-filetype (`cmp_menu`). That is the completion menu's `Absorb` read at the moment
-of the claim; the command line's own policy stays `Own`.
+when it presents a completion menu's own filetype (`cmp_menu`). That is the
+completion menu's `Absorb` read at the moment the float appears; the command
+line's own policy stays `Own`.
 
 ## Three switches, five surfaces
 
@@ -67,11 +67,10 @@ The buffer grid is the one surface view never draws over. nvim owns it, and
 so does anything that wants to float above it, so a picker taking the screen
 goes unreported.
 
-## What a claim actually is
+## What a takeover actually is
 
-A claim is measured against the region the engine leaves for the surface
-view took over. The measurements behind that are in
-`docs/surface-float-wire-capture.md`.
+A takeover is measured against the region the engine leaves for the surface.
+The measurements behind that are in `docs/surface-float-wire-capture.md`.
 
 Each rule is a conjunction: a rect that lands where a surface lives, and a
 state only that surface produces. The command-line rule fires only while a

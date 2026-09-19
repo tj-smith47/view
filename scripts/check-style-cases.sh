@@ -3841,5 +3841,128 @@ case "$out" in
 esac
 expect_pin 'a helper called above its definition refuses the run with rc 2 naming it, rather than skipping the case at rc 127' "$bad_order"
 
+# ---------------------------------------------------------------------------
+# The stance walk over README.md and docs/: one red per shape the rule names
+# and one green per exemption it licenses. Every exemption is read off the
+# line, so a case plants the shape and never a filename the walk knows.
+# ---------------------------------------------------------------------------
+new_frames_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE/docs"
+  printf '# view\n\nA line of prose that says what is true and stops.\n' \
+    > "$CASE/README.md"
+  printf '# page\n\nAnother line that says what is true and stops.\n' \
+    > "$CASE/docs/page.md"
+}
+
+expect_frames() {
+  want_rc="$1"
+  want="$2"
+  desc="$3"
+  out=$(bash "$CHECKER" --prose-frames "$CASE" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" | awk '
+    /^(frame|tell|fairness|joiner) [^ ]+:[0-9]+: / {
+      loc = $2; sub(/:$/, "", loc); print $1 " " loc; next
+    }
+    /^STYLE FAIL: no markdown page found to grade for the stance$/ {
+      print "empty"; next
+    }
+  ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=%s [%s]\n  got  rc=%s [%s]\n%s\n' \
+    "$n" "$desc" "$want_rc" "$want" "$rc" "$got" "$out"
+}
+
+new_frames_case
+expect_frames 0 '' 'a tree whose pages say what is true and stop'
+
+new_frames_case
+printf 'The number is a reading, not a guess.\n' >> "$CASE/docs/page.md"
+expect_frames 1 'frame docs/page.md:4' 'a contrast frame on a page'
+
+new_frames_case
+printf 'The answer the run gives is the honest one.\n' >> "$CASE/docs/page.md"
+expect_frames 1 'tell docs/page.md:4' 'a tell word on a page'
+
+new_frames_case
+printf 'Both readings are taken in the same run.\n' >> "$CASE/docs/page.md"
+expect_frames 1 'fairness docs/page.md:4' 'a condition of fairness on a page'
+
+new_frames_case
+printf 'The key reaches the engine -- and the glyph is already drawn.\n' \
+  >> "$CASE/docs/page.md"
+expect_frames 1 'joiner docs/page.md:4' 'a dash joining two clauses on a page'
+
+# The same four shapes on README.md, because the page a person reads first
+# is in the population and a walk handed one directory would say nothing.
+new_frames_case
+printf 'The launch is a moment, not a segment.\n' >> "$CASE/README.md"
+expect_frames 1 'frame README.md:4' 'a contrast frame on the README'
+
+# A fenced block is a sample of a file or of a session: what it holds is
+# quoted rather than written.
+new_frames_case
+{
+  printf '```\n'
+  printf 'The number is a reading, not a guess, and the honest one.\n'
+  printf '```\n'
+} >> "$CASE/docs/page.md"
+expect_frames 0 '' 'a fenced sample holding every shape'
+
+new_frames_case
+printf '| id | note |\n| a | a reading, not a guess |\n' >> "$CASE/docs/page.md"
+expect_frames 0 '' 'a table row, which is a cell of data'
+
+new_frames_case
+printf '> The number is a reading, not a guess.\n' >> "$CASE/docs/page.md"
+expect_frames 0 '' 'a blockquote, which is quoted upstream text'
+
+new_frames_case
+printf 'A column named `fair` sits beside one named `honest` in the table.\n' \
+  >> "$CASE/docs/page.md"
+expect_frames 0 '' 'tell words inside backticked spans, which hold code'
+
+new_frames_case
+printf 'E5108: Error executing lua: not a function, instead of a table.\n' \
+  >> "$CASE/docs/page.md"
+expect_frames 0 '' 'an nvim message quoted as nvim writes it'
+
+# The transport denial .claude/rules/bench.md requires of the
+# speculated-echo paragraph, and nothing wider.
+new_frames_case
+printf 'That is the reading, not a network; the network case is the leg.\n' \
+  >> "$CASE/docs/page.md"
+expect_frames 0 '' 'the transport denial on a line that names the reading'
+
+new_frames_case
+printf 'The cache is warm, not a network away from the picker it serves.\n' \
+  >> "$CASE/docs/page.md"
+expect_frames 1 'frame docs/page.md:4' \
+  'the same words on a line naming neither the reading nor a local one'
+
+new_frames_case
+printf 'The gate reports whether or not a page trips but the run goes on.\n' \
+  >> "$CASE/docs/page.md"
+expect_frames 0 '' 'the idiom, which is one word to a reader'
+
+# A span the line leaves open is reported by the split-span rule; this walk
+# takes the rest of the line with it rather than reading a half-quoted
+# sample as prose.
+new_frames_case
+printf 'A page whose population is graded by the walk over `docs/`.\n' \
+  >> "$CASE/docs/page.md"
+expect_frames 0 '' 'a closed span on an ordinary line'
+
+new_frames_case
+rm -f "$CASE/README.md"
+rm -rf "$CASE/docs"
+expect_frames 1 'empty' \
+  'a tree with no page to grade, which would report ok having graded nothing'
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

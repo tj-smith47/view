@@ -2027,6 +2027,162 @@ check_prose_width() {
   return 1
 }
 
+# A page a person reads says what is true and what to do. A sentence that
+# argues for the design, denies an alternative, or states the conditions
+# that make a number fair is written for a reader who has doubted
+# something, and `.claude/rules/docs.md` removes it. The spellings below
+# are the visible half of that stance; the rule is the paragraph on that
+# page, and this walk is the tripwire under it.
+#
+# Written as a list rather than into the awk program so that the next
+# spelling is a line here. No backslash in any of them: the classes carry
+# the word boundaries, because `\b` is a backspace to gawk and undefined to
+# the others, and an apostrophe is spelled as its class for the reason
+# `.claude/rules/shell.md` gives for a paren in a comment.
+PROSE_CONTRAST='(, |; | -- )(not|never|rather than|instead of)([^[:alnum:]]|$)
+(^|[^[:alnum:]])rather than([^[:alnum:]]|$)
+(^|[^[:alnum:]])instead of([^[:alnum:]]|$)
+(^|[^[:alnum:]])(not|never) (a|an|the|just|only|merely|simply) [^,;]+, (it|they|that|this|which) (is|are|was|were)([^[:alnum:]]|$)
+(^|[^[:alnum:]])(not|never) [^,;]+ but[^[:alnum:]]
+(isn|aren|wasn|doesn|didn)[^[:alnum:][:space:]]t (a|an|the)([^[:alnum:]]|$)'
+# The tell words, whole and case-folded: each one is a sentence reaching
+# for the reader who asked whether the page is telling the truth.
+PROSE_TELLS='claim
+claims
+prove
+proves
+proven
+honest
+honestly
+genuine
+genuinely
+deliberate
+deliberately
+fair
+which is why
+the reason it exists
+so that nobody
+on purpose'
+# The conditions of fairness. A comparison that belongs on a page is a
+# table with the other column beside the one for view; how the numbers
+# were taken lives in docs/benchmarking.md.
+PROSE_FAIRNESS='in the same run
+on the same host
+on the same machine
+samples interleaved
+paired against
+under a real config'
+# The program the walk runs, held in a variable so that no line of it
+# is read inside an open command substitution: the population's
+# heaviest carried-line count is this file, and the portability case
+# that grades the reader's nesting state is a ratio over those lines.
+PROSE_FRAMES_AWK='
+    # what a backticked span holds is a sample of code or of a file, so it
+    # is taken out before the line is read. A run of backticks closes on a
+    # run of its own length, and a span the line leaves open takes the
+    # rest of the line with it -- the split-span rule reports that
+    function strip_spans(l,   i, n, out, run, open, ch) {
+      out = ""; i = 1; n = length(l); open = 0
+      while (i <= n) {
+        ch = substr(l, i, 1)
+        if (ch != "`") {
+          if (!open) { out = out ch }
+          i += 1
+          continue
+        }
+        run = 0
+        while (i + run <= n && substr(l, i + run, 1) == "`") { run += 1 }
+        i += run
+        if (!open) { open = run; continue }
+        if (open == run) { open = 0; out = out " " }
+      }
+      return out
+    }
+    function whole(t, w) {
+      return t ~ ("(^|[^[:alnum:]_])" w "([^[:alnum:]_]|$)")
+    }
+    function hit(shape, what) {
+      printf "%s %s:%d: %s\n", shape, FILENAME, FNR, what
+    }
+    BEGIN {
+      nc = split(contrast, C, "\n")
+      nt = split(tells, T, "\n")
+      nf = split(fairness, F, "\n")
+      EMDASH = sprintf("%c%c%c", 226, 128, 148)
+    }
+    FNR == 1 { fenced = 0 }
+    /^[[:space:]]*(```|~~~)/ {
+      match($0, /`+|~+/)
+      ch = substr($0, RSTART, 1)
+      run = RLENGTH
+      if (!fenced) { fenced = 1; fence_ch = ch; fence_run = run }
+      else if (ch == fence_ch && run >= fence_run) { fenced = 0 }
+      next
+    }
+    fenced { next }
+    # a row is a cell of data and a blockquote is quoted upstream text
+    is_table_row($0) { next }
+    /^[[:space:]]*>/ { next }
+    # an nvim message is quoted as nvim writes it
+    /(^|[^[:alnum:]])E[0-9]+:/ { next }
+    {
+      text = strip_spans($0)
+      if (index(text, " -- ") > 0) { hit("joiner", "a dash joins two clauses") }
+      if (index(text, EMDASH) > 0) { hit("joiner", "an em dash joins two clauses") }
+      low = tolower(text)
+      # the idiom, which is one word to a reader and a frame to a pattern
+      gsub(/whether or not/, "whether", low)
+      # the transport denial .claude/rules/bench.md requires of the
+      # speculated-echo paragraph, and nothing wider
+      if (index(low, "not a network") > 0 &&
+          (index(low, "local") > 0 || index(low, "reading") > 0)) {
+        gsub(/not a network/, "", low)
+      }
+      for (i = 1; i <= nc; i++) {
+        if (C[i] != "" && low ~ C[i]) { hit("frame", "a contrast frame"); break }
+      }
+      for (i = 1; i <= nt; i++) {
+        if (T[i] != "" && whole(low, T[i])) { hit("tell", T[i]); break }
+      }
+      for (i = 1; i <= nf; i++) {
+        if (F[i] != "" && index(low, F[i]) > 0) { hit("fairness", F[i]); break }
+      }
+    }'
+check_prose_frames() {
+  local pages found rc
+  pages=$(find "$@" -name '*.md' | LC_ALL=C sort)
+  if [ -z "$pages" ]; then
+    echo "STYLE FAIL: no markdown page found to grade for the stance"
+    echo "  A walk handed an empty list reports nothing and reads like a"
+    echo "  tree whose pages say what is true and stop."
+    return 1
+  fi
+  rc=0
+  # the program text comes after every option, because awk reads the first
+  # non-option word as the program and every word past it as a file: handed
+  # the fragment first, awk took the option words as filenames, found no
+  # main rule to read them with, and exited 0 having graded nothing
+  found=$(printf '%s\n' "$pages" | LC_ALL=C xargs awk \
+    -v contrast="$PROSE_CONTRAST" -v tells="$PROSE_TELLS" \
+    -v fairness="$PROSE_FAIRNESS" "$AWK_TABLE_ROW$PROSE_FRAMES_AWK") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$found"
+    echo "STYLE FAIL: the stance walk exited $rc instead of grading the pages"
+    echo "  awk names the page it could not read on stderr above."
+    return 1
+  fi
+  if [ -z "$found" ]; then
+    return 0
+  fi
+  printf '%s\n' "$found"
+  echo "STYLE FAIL: a page a person reads argues for itself"
+  echo "  Remove the sentence, the clause or the word. See the section"
+  echo "  \"A page is written for a reader who has not doubted anything\""
+  echo "  in .claude/rules/docs.md: it is removed and never reworded into"
+  echo "  another shape, and a page that comes out thin is the right length."
+  return 1
+}
+
 # The population every rule over scripts/ grades, read through the helper
 # scripts/lib/script-population.sh so that this gate, check-portability.sh
 # and check-budget-drift-cases.sh answer one list rather than three. Read
@@ -2188,6 +2344,26 @@ if [ "${1:-}" = "--prose-width" ]; then
   fi
   # shellcheck disable=SC2086
   check_prose_width $targets
+  exit $?
+fi
+# The stance walk alone, graded the same way. Its population is the two
+# kinds of page a person reads: README.md and docs/.
+if [ "${1:-}" = "--prose-frames" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --prose-frames ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  targets=""
+  if [ -f README.md ]; then targets="README.md"; fi
+  if [ -d docs ]; then targets="$targets docs"; fi
+  if [ -z "$targets" ]; then
+    check_prose_frames /dev/null
+    exit $?
+  fi
+  # shellcheck disable=SC2086
+  check_prose_frames $targets
   exit $?
 fi
 # The comment rules over scripts/ alone, graded the same way: a walk that
@@ -2495,5 +2671,9 @@ if [ -f README.md ]; then
   width_targets=("${doc_targets[@]}")
   if [ -d .claude/rules ]; then width_targets+=(.claude/rules); fi
   check_prose_width "${width_targets[@]}" || fail=1
+  # the stance walk over the pages a person reads. The convention pages are
+  # out of this population for now: they carry the voice and quote the
+  # spellings banned here, and they get their own pass later
+  check_prose_frames "${doc_targets[@]}" || fail=1
 fi
 exit $fail
