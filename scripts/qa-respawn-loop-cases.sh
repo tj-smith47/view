@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 #
-# Cases for the two decisions in scripts/qa-respawn-loop.sh that are made
-# before any session is driven: which pids a run is allowed to touch, and
-# which shape names it accepts. Both shipped wrong -- an empty view pid
-# named init and kthreadd, and an unknown shape measured the plain one
-# under the wrong name -- and neither is visible from a tally.
+# Cases for the three decisions in scripts/qa-respawn-loop.sh that are made
+# outside a driven session: which pids a run is allowed to touch, which of
+# them it reports as left behind, and which shape names it accepts. All
+# three shipped wrong -- an empty view pid named init and kthreadd, a
+# respawn's own engine was never sampled, and an unknown shape measured the
+# plain one under the wrong name -- and none of them is visible from a
+# tally.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -23,30 +25,62 @@ report() {
     fi
 }
 
-named=$(engine_children '')
-if [ -n "$named" ]; then
-    report fail 'an empty view pid names no children' "named:$named"
+# `task audit` runs this file inside `task ci`, and CI's windows leg runs
+# that under Git Bash, which ships no pgrep. The two cases below grade a
+# guard around pgrep itself, so where the tool is absent there is no guard
+# to grade -- named out loud rather than passed over, the way
+# scripts/acceptance/artifacts.sh prints its class skips, because a case
+# that quietly stops running is a case nobody can tell from a green one.
+if command -v pgrep >/dev/null 2>&1; then
+    named=$(engine_children '')
+    if [ -n "$named" ]; then
+        report fail 'an empty view pid names no children' "named:$named"
+    else
+        report ok 'an empty view pid names no children'
+    fi
+
+    sleep 30 &
+    FIXTURE=$!
+    named=$(engine_children "$$")
+    case " $named " in
+        (*" $FIXTURE "*) report ok 'a live pid names its own children' ;;
+        (*) report fail 'a live pid names its own children' "named:$named" ;;
+    esac
+    kill "$FIXTURE" 2>/dev/null || true
+    wait "$FIXTURE" 2>/dev/null || true
 else
-    report ok 'an empty view pid names no children'
+    printf 'SKIPPED the two pid cases (no pgrep on this host)\n'
 fi
 
+# `still_running` needs no pgrep, so it is graded everywhere. The duplicate
+# is the shape the teardown re-sample produces: the same engine, sampled
+# once before the quit and once after it.
 sleep 30 &
 FIXTURE=$!
-named=$(engine_children "$$")
-case " $named " in
-    (*" $FIXTURE "*) report ok 'a live pid names its own children' ;;
-    (*) report fail 'a live pid names its own children' "named:$named" ;;
-esac
+live=$(still_running "$FIXTURE" "$FIXTURE")
+if [ "$live" = " $FIXTURE" ]; then
+    report ok 'a pid sampled twice is reported once'
+else
+    report fail 'a pid sampled twice is reported once' "live:$live"
+fi
 kill "$FIXTURE" 2>/dev/null || true
 wait "$FIXTURE" 2>/dev/null || true
-
-status=0
-"$LOOP" --shape no-such-shape --runs 1 >/dev/null 2>&1 || status=$?
-if [ "$status" -eq 2 ]; then
-    report ok 'an unknown shape is refused'
+live=$(still_running "$FIXTURE")
+if [ -z "$live" ]; then
+    report ok 'a reaped pid is reported by nobody'
 else
-    report fail 'an unknown shape is refused' "status:$status"
+    report fail 'a reaped pid is reported by nobody' "live:$live"
 fi
+
+# Graded on what it says and not on its status: 2 is also what the script
+# returns for a missing view binary, a missing tmux and a missing nvim
+# configuration, and the audit job has none of the three -- so a status-only
+# case passes with the whole shape validation deleted.
+said=$("$LOOP" --shape no-such-shape --runs 1 2>&1 >/dev/null || true)
+case "$said" in
+    (*"unknown shape: no-such-shape"*) report ok 'an unknown shape is refused by name' ;;
+    (*) report fail 'an unknown shape is refused by name' "said:$said" ;;
+esac
 
 if [ "$FAILED" -eq 0 ]; then
     printf 'qa-respawn-loop cases: ok\n'

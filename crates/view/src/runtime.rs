@@ -461,8 +461,13 @@ fn note_supervision(
         read.observe(lost || handle.is_closed()),
         lost,
     ));
-    // the fold has already reduced every pass that agreed with the last one
-    // to nothing, so this is the verdict changing rather than the cadence
+    // the cadence, not the transition: `note` re-asserts a live wedge on
+    // every pass and `readout_deadline` wakes the loop once a
+    // `READOUT_RESOLUTION`, so this writes a line a second for as long as
+    // the wedge lasts. That is what a wedge hunt needs -- when it opened,
+    // whether the kind changed under it, when it closed -- and it costs a
+    // healthy session nothing: the steady state returns `None` above, and
+    // the line is built only where `VIEW_LOG` names a file
     if let Some(msg) = &noted {
         crate::vlog::log_with("engine", || format!("supervision verdict {msg:?}"));
     }

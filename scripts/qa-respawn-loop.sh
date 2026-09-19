@@ -85,6 +85,23 @@ end_watched() {
     done
 }
 
+# Which of these pids are alive, each named once. The duplicates are the
+# point of the dedupe: the same engine is sampled before the quit and again
+# after it, and a list naming it twice reports one process as two.
+still_running() {
+    local pid live=''
+    for pid in "$@"; do
+        [ -n "$pid" ] || continue
+        case " $live " in
+            (*" $pid "*) continue ;;
+        esac
+        if kill -0 "$pid" 2>/dev/null; then
+            live="$live $pid"
+        fi
+    done
+    printf '%s' "$live"
+}
+
 pane_holds() {
     local text
     text=$(tmux capture-pane -p -t "$1" 2>/dev/null || true)
@@ -209,7 +226,7 @@ LUA
 fi
 
 one_run() {
-    local idx="$1" root session run_pid view_pid engine_pids left verdict pid
+    local idx="$1" root session run_pid view_pid engine_pids after_pids left verdict
     session="view-qa-$$-$idx"
     root=$(mktemp -d "$SCRATCH/view-qa-XXXXXX")
     ROOTS="$ROOTS $root"
@@ -302,12 +319,13 @@ EOF
         cp "$root/view.log" "$EVIDENCE/unannounced-$SHAPE-$idx.log" 2>/dev/null || true
     fi
 
-    left=''
-    for pid in $view_pid $engine_pids; do
-        if kill -0 "$pid" 2>/dev/null; then
-            left="$left $pid"
-        fi
-    done
+    # sampled again here, not only before the quit: a respawn's engine is a
+    # child view started after the `:qa!`, so the pre-quit sample names
+    # every process this run is answerable for except the one a respawn
+    # leaves behind -- which is the process the column exists to find
+    after_pids=$(engine_children "$view_pid")
+    # shellcheck disable=SC2086
+    left=$(still_running "$view_pid" $engine_pids $after_pids)
     if [ -n "${left# }" ]; then
         STRAYS=$((STRAYS + 1))
         printf 'run %-3s %-13s strays:%s\n' "$idx" "$verdict" "$left"
