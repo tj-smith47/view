@@ -11,9 +11,9 @@ window's own grid separately. `grid_resize`, `grid_line` and friends
 carry a `grid` id, `win_pos`/`win_float_pos` place that grid inside the
 editor, and a UI composites the panes itself.
 
-view ships `ext_multigrid` on by default: it is what lets the pane
-compositor paint each window from its own grid, and what lets input
-routing address a click or a paste at the pane the cursor is actually in.
+view ships `ext_multigrid` on by default. The pane compositor paints each
+window from its own grid, and input routing addresses a click or a paste at
+the pane the cursor is actually in.
 
 ## What the knob does
 
@@ -34,16 +34,14 @@ and which surfaces are externalized still follows `[native]`
 (`ext_linegrid`, `ext_cmdline`, etc., see `ext_surfaces` in
 `crates/view-native/src/config.rs`).
 
-## Why the knob exists
+## When to reach for it
 
-`ext_multigrid` is the roughest corner of the UI protocol. A plugin that
-computes screen positions itself, bypassing the window-relative APIs
-(`nvim_win_set_config`, `nvim_win_get_position`), is assuming the
-single-grid coordinate space nvim has shipped since 0.4, and multigrid
-changes what those coordinates mean. Upstream is unifying the two attach
-modes (nvim PR #32691); until that lands, `single_grid` is the one-line
-way out for a session hitting a plugin that assumes the coordinate space
-multigrid no longer gives it.
+A plugin that computes screen positions itself, bypassing the
+window-relative APIs (`nvim_win_set_config`, `nvim_win_get_position`), is
+assuming the single-grid coordinate space nvim has shipped since 0.4, and
+multigrid changes what those coordinates mean. Upstream is unifying the two
+attach modes (nvim PR #32691); until that lands, `single_grid` is the
+one-line way out for a session hitting such a plugin.
 
 ## What a multigrid-shaped failure looks like
 
@@ -68,8 +66,7 @@ against it by hand:
 Any one of these, reproducible with `nvim -u NORC` against the same
 plugin (bare nvim, no view), points at a plugin computing screen
 coordinates itself. `single_grid = true` is the workaround while the
-plugin (or upstream) catches up, and it leaves open which side is at
-fault.
+plugin (or upstream) catches up.
 
 ## Re-evaluation
 

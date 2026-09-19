@@ -5,7 +5,7 @@ on that page are produced, what every recorded cell is called, and how a bar
 is re-seated. That page is written for someone deciding whether view is fast
 enough to use; this one is written for whoever runs the harness.
 
-## What a cell is allowed to claim
+## What a cell states
 
 Every `[[budget]]` row in `crates/view-bench/budgets.toml` declares what it
 means to a person, and the loader refuses a row that does not:
@@ -31,10 +31,7 @@ config   = "real"            # real (a plugin config a person runs) | fixture
   grounds, and a felt row that is neither is refused at load.
 - **diagnostic** explains a felt row's number and never stands alone. It
   names the row it decomposes (`decomposes = "startup.settled_ratio_p50"`),
-  the spec row says "Diagnostic", and it is never quoted as a win. A
-  hundred microseconds inside the input path is below what anyone
-  perceives, and a page that leads with it is measuring what was easy to
-  measure.
+  the spec row says "Diagnostic", and it is never quoted as a win.
 - **resource** is a footprint. No speed language attaches to it at all.
 
 `scripts/check-budget-drift.sh` holds both halves: every number in the file
@@ -48,9 +45,8 @@ millisecond"); identifiers live here.
 
 Every latency comparison is *paired*: view and bare Neovim run in the same
 invocation, on the same host, with the same config, and their samples are
-interleaved so background noise lands on both sides equally. 1000 samples
-per cell. `task perf-audit` reproduces the full matrix; `task bench` runs
-the gated subset CI uses.
+interleaved. 1000 samples per cell. `task perf-audit` reproduces the full
+matrix; `task bench` runs the gated subset CI uses.
 
 On macOS every timed target holds a power assertion for the length of its
 run (`scripts/hold-awake.sh`, fronting each harness in `Taskfile.yml`): the
@@ -87,10 +83,9 @@ before the plugins load, five leader mappings, two autocommands, the `habamax`
 colorscheme, the two plugins `heavy` carries only as dependencies loaded as spec
 entries of their own, and `setup()` on every plugin through one generic pass.
 What that costs through a pty is what its recorded row answers; headless, the
-two start within a few milliseconds of each other. It exists for coverage: a
-real config is what decides how long view's startup shell sits on screen
-saying it is waiting for Neovim, and until this fixture existed no recorded
-bar moved when that window got longer.
+two start within a few milliseconds of each other. A real config is what
+decides how long view's startup shell sits on screen saying it is waiting
+for Neovim.
 
 Two run-time notes for anyone recording it. The fixture is driven through
 a real session first (`task user-fixture`, after `task compat` has filled
@@ -188,15 +183,14 @@ fixture and carries `first_paint.marker_ratio_p50` and
 fixture, with the same two ratios `withdrawn`.
 
 Until a class records that cell, a gate run against that class reports it
-as uncovered and exits on it. That is the designed signal for a measured
-row with nothing to compare against. Every class has to record it before
+as uncovered and exits on it. Every class has to record it before
 its gate is green again: the dev classes in a quiet-host session each, the
 CI classes by re-seating from the `bench-measured-<class>.toml` artifact
 their gate leg uploads (CI runs no `--record` leg).
 
-The first two rows are unpaired on purpose: view paints its shell before it has
-even started the Neovim child, so bare Neovim has no comparable event. It
-shows nothing until your config finishes loading.
+The first two rows are unpaired: view paints its shell before it has even
+started the Neovim child, so bare Neovim has no comparable event. It shows
+nothing until your config finishes loading.
 
 The shell frame is nearly identical either way, because none of your config
 has run yet at that point: `first_paint.shell_visible_cold_ms` reads 4.1 ms
@@ -206,8 +200,8 @@ On the 15-plugin stack the same `first_paint.shell_visible_cold_ms` reads
 3.8 ms.
 
 The no-plugins memory row is view's own process only: the embedded Neovim
-engine is a separate process this budget deliberately excludes, so the
-bare-Neovim column reads `n/a`.
+engine is a separate process this budget excludes, so the bare-Neovim
+column reads `n/a`.
 
 ### The real-config legs, and which classes still owe them
 
@@ -270,11 +264,10 @@ its bar untouched. Which class holds the five:
 | `controlled-linux` | all five unseated | the matrix runs all five there and nothing scopes them away; its baseline holds no cell for any of them today, and it is the one class that loads the budget table, so a quiet-window recording there is what would attest the felt bars |
 
 An owed cell is committed empty with a `[withdrawn.<scenario>.user]` reason
-beside it. A gate run reports that state loudly (`GATE COVERAGE FAIL`), and
-filling one from the plugin-free leg's number is the substitution this whole
-vocabulary exists to refuse. `controlled-linux` carries no withdrawal for
-them because it carries no cell either: it is recorded on demand, outside
-any gate, and a run of `--all` there selects the same five.
+beside it. A gate run reports that state loudly (`GATE COVERAGE FAIL`), and an
+owed cell is never filled from the plugin-free leg's number. `controlled-linux`
+carries no withdrawal for them because it carries no cell either: it is recorded
+on demand, outside any gate, and a run of `--all` there selects the same five.
 
 Recording them is one quiet-host session per class:
 
@@ -304,7 +297,6 @@ The four session cells add ~3 min on top of that, both legs.
 
 ### Memory equivalence, 15-plugin lazy.nvim stack
 
-view embeds Neovim, so it can never be smaller than the Neovim it embeds.
 Under the committed 15-plugin lazy.nvim fixture, the same standard workload,
 recorded diagnostically and outside the CI gate
 (`task bench -- --scenario memory --fixture heavy`):
@@ -316,12 +308,11 @@ recorded diagnostically and outside the CI gate
 | view, own process + embedded Neovim engine child (tree) | **27.96 MB** |
 
 The first two rows measure different things: view's own-process number
-deliberately excludes the Neovim child it spawns, the same exclusion the
-no-plugins row above documents. The tree row is the honest one, summing
-view's process and its embedded engine's, and it is what a bare-Neovim
-comparison must be read against: 27.96 MB of resident memory for view and
-its engine together, where bare Neovim's whole process reads 4.39 MB. A
-footprint is a resource row and states no speed.
+excludes the Neovim child it spawns, the same exclusion the no-plugins row
+above documents. The tree row sums view's process and its embedded
+engine's: 27.96 MB of resident memory for view and its engine together,
+where bare Neovim's whole process reads 4.39 MB. A footprint is a resource
+row and states no speed.
 
 Neither side changes much between this reading and the plugin-free one for
 view's own-process number. Plugin-free, `memory.pss_mb` reads 4.96 MB. Under
@@ -342,14 +333,9 @@ trails it further. One line per leg, because each number is one fixture's:
 | 15-plugin stack (`heavy`) | -- | `scroll.ratio_p50` 1.891, the same paired figure |
 | login-shaped (`user`) | `echo.ratio_p50` 1.110, about 11% | `scroll.ratio_p50` 1.717 |
 
-Both are sub-millisecond and far inside their budgets, so neither is
-perceptible. The goal is to beat Neovim, so the gap gets tracked down.
-
-An obvious suspect was the architecture itself: maybe an out-of-process UI
-speaking Neovim's RPC protocol just costs this much. Neovim ships its own
-out-of-process TUI, which makes that theory testable, and the control leg
-measures it under the identical protocol on the same host, in the same
-interleaved run as the typing cell above:
+Neovim ships its own out-of-process TUI, and the control leg measures it
+under the identical protocol, in the same interleaved run as the typing
+cell above:
 
 | leg | Neovim's own TUI driving a headless Neovim |
 |---|---|
@@ -357,21 +343,20 @@ interleaved run as the typing cell above:
 | 15-plugin stack (`heavy`) | `echo_control.control_ratio_p50` 1.009 |
 
 Speaking the protocol from another process costs nothing this class can
-measure, so the gap is view's own code. (Three earlier theories, a
+measure, so the gap is view's own code. Three earlier theories, a
 thread-hop cost floor, the pty transport, and the measurement
 instrumentation itself, also failed to survive measurement; each retraction
-is recorded in the design spec.)
+is recorded in the design spec.
 
-So we profiled it. A tapped build times every stage of a keystroke's round
-trip, and the largest stage view owned was the handoff to a background
-thread whose only job was writing bytes to a pipe. That thread exists so a
-wedged Neovim stalls a background thread while the screen keeps painting,
-and the requirement on the write is that it never *block*. The main loop
-now writes the bytes itself whenever the pipe has signalled it
-can accept them and nothing is queued ahead. Skipping the ~40 µs cost of
-waking an idle core accounts for most of the improvement; the paired
-before-and-after readings that recorded it are in the commit that landed
-the change, where no re-record can leave them standing as current.
+A tapped build times every stage of a keystroke's round trip, and the largest
+stage view owned was the handoff to a background thread whose only job was
+writing bytes to a pipe. That thread exists so a wedged Neovim stalls a
+background thread while the screen keeps painting, and the requirement on the
+write is that it never *block*. The main loop now writes the bytes itself
+whenever the pipe has signalled it can accept them and nothing is queued ahead.
+Skipping the ~40 µs cost of waking an idle core accounts for most of the
+improvement; the paired before-and-after readings that recorded it are in the
+commit that landed the change.
 
 Everything that remains is measured. Of the ~644 µs from keypress to
 glyph, 366 are spent inside Neovim itself, 80 in the OS's terminal plumbing
@@ -440,12 +425,10 @@ gets worse, or if a listed one is fixed but left on the list.
 
 ## Re-seating a bar, or re-sizing the spread it gates under
 
-A recorded bar only ratchets down as far as the class's published spread
-says honest runs move; a measurement further below it than that is one
-lucky draw, and `--record` refuses it: a bar pinned there is one most
-honest runs would then fail. Moving such a bar takes a campaign (N gated
-replicates of the same cells on a quiet host), and that campaign is a mode
-of the tool that already measures:
+A recorded bar only ratchets down as far as the class's published spread says
+ordinary runs move, and `--record` refuses a measurement further below it than
+that. Moving such a bar takes a campaign (N gated replicates of the same cells
+on a quiet host), and that campaign is a mode of the tool that already measures:
 
 ```
 $ task bench -- --scenario scroll --fixture minimal --class dev-macos --campaign 8

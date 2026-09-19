@@ -42,8 +42,7 @@ runs, `✓` done, `✗` failed:
 ```
 
 A call the agent never finished, which is what a session that crashes
-mid-call leaves behind, settles back to `·`. The panel shows the outcomes
-the agent reported, and animates a marker while work is under way.
+mid-call leaves behind, settles back to `·`.
 
 The agent's plan reads the same way, one row per task: `·` not started,
 `▸` under way, `✓` done.
@@ -60,9 +59,8 @@ puts you back in it. The same key reads the panel before it acts:
 | open, and you are in it | closes it |
 | open, and you are not in it | puts you back in it |
 
-So the key never dead-ends. Closing it, whichever way you get there, leaves
-the agent session running, and reopening it brings the transcript back
-where you left it.
+Closing it, whichever way you get there, leaves the agent session running,
+and reopening it brings the transcript back where you left it.
 
 The prompt you are composing sits under the header, and it wraps. A prompt
 several sentences long grows the composer downward, indented under its own
@@ -99,14 +97,13 @@ so:
 -- more below, <PageDown> follows again --
 ```
 
-A page lands on the line directly above or below the one it came from,
-with nothing stepped over and nothing repeated, so paging up to the start
-of a session and back down shows you every line of it.
+A page lands on the line directly above or below the one it came from, so
+paging up to the start of a session and back down shows you every line of
+it.
 
 Scrolling back down to the newest line resumes following, and so does
-submitting a prompt, so an answer never streams in off screen. These are
-named keys the composer cannot type, so a half-written prompt survives a
-scroll.
+submitting a prompt. These are named keys the composer cannot type, so a
+half-written prompt survives a scroll.
 
 `<C-d>` is the one key with two jobs: while the crash banner is up it
 dismisses the banner (which is what the banner itself says), and it scrolls
@@ -128,9 +125,7 @@ The width holds between 15% and 70% and lasts the session. Close the panel
 and reopen it and it comes back the width you left it at. None of them is a
 key the composer can type, so a half-written prompt survives a resize: the
 chord's `>` goes to the width while `<C-w>` is waiting on it, and to the
-prompt at any other time. They work while a permission request is up: a
-width decides nothing the question owns, and a summary too narrow to read
-is exactly when you want it.
+prompt at any other time. They work while a permission request is up.
 
 The file tree resizes with the same keys, and `[keys]` rebinds them for
 both; see [keymaps.md](keymaps.md).
@@ -166,19 +161,16 @@ press a number, <Esc> cancels
 ```
 
 The two answers that outlive the question, always-allow and always-reject, are
-labelled with what they cover, because what they cover is view's own doing
-(below). A request that named no tool kind cannot be scoped to one, so its rows
-keep the wire word and nothing stands after them.
+labelled with what they cover (below). A request that named no tool kind cannot
+be scoped to one, so its rows keep the wire word and nothing stands after them.
 
 You answer with the digit. `<Esc>` answers too, cancelling the request,
 which is the one answer that exists whatever the agent offered. No letter
-answers a prompt, deliberately: the letters belong to the buffer, since an
-agent edit raises a review in the file beside the panel, and that file stays
-an ordinary editable buffer while you read the question.
+answers a prompt: the letters belong to the buffer, and the file beside the
+panel stays an ordinary editable buffer while you read the question.
 
-The colors carry the same split as the words: the always-allow row takes a
-color of its own, because it is the one answer whose consequence outlives
-the question.
+The colors carry the same split as the words, and the always-allow row takes
+a color of its own.
 
 ### What the two "Always" answers do
 
@@ -191,19 +183,18 @@ answered for you, and says so:
 ‼ auto-refused execute (standing answer)
 ```
 
-The line lands on the transcript. When the panel is closed, which is what a
-standing answer makes comfortable, it lands as a notice beside your buffer
-too. An answered request never pops the panel open: there is no question
-left on it to see.
+The line lands on the transcript. When the panel is closed it lands as a
+notice beside your buffer too. An answered request never pops the panel
+open.
 
 A different kind still asks, and answering the other way later replaces the
 standing answer. Nothing here is written to disk, so a new session,
 including one that came back after a crash, starts with none.
 
 view keeps this itself because the pinned adapter does not: it accepts the
-always-allow answer and then asks again on every later call. Saying so on
-both surfaces is what keeps that answerable: what view answered on your
-behalf is on the record with everything else the session did.
+always-allow answer and then asks again on every later call. What view
+answered on your behalf is on the record with everything else the session
+did.
 
 ## Reviewing an agent's edits
 
@@ -221,40 +212,27 @@ it would put there, and puts your cursor on the first hunk.
   gamma
 ```
 
-Nothing there is a window of view's own. The rows the agent would remove are
-highlighted with `ViewReviewRemoved`, what it proposes instead is a virtual line
-in `ViewReviewAdded`, the header naming the keys is `ViewReviewHeader`, a hunk
-your own typing has moved under turns `ViewReviewStale`, and the `▶` marking the
-current hunk is `ViewReviewSign`. Those five groups view derives from your
-colorscheme's own `DiffDelete`, `DiffAdd`, `DiffText` and `DiffChange` when the
-review opens, and re-derives when you change colorscheme. A diff group that
-defines the background a diffed row sits on hands that background over as it
-stands; where the color a row would be filled with is a foreground (a group with
-no background, or a reverse-video one, as dracula's are, where nvim fills from
-the foreground), it is blended a fifth of the way over your `Normal` background,
-so those schemes tint the rows. The text on those rows is the first color that
-reads on them: the diff group's own paired color, then your `Normal` foreground,
-then plain black or white, whichever comes first at 3:1 contrast or better, so a
-scheme pairing a light `Normal` foreground with a light diff background keeps
-the header legible. 3:1 is the bar view holds: it is the point past which your
-own theme's paired color still survives, and a stricter number would trade your
-palette for black and white on schemes that read perfectly well. The `▶` is
-drawn on the header's own background, and keeps your theme's diff accent over it
-wherever that accent reads. The gutter it lands in changes as you move: the
-marker sits on the hunk the cursor is on, so nvim fills that cell from
-`CursorLineSign` while your cursor is there and from `SignColumn` once it moves
-off, and a marker that took its color from the gutter would be legible on one
-and washed out on the other. A fill of its own is what makes the marker read the
-same wherever you leave the cursor, and it covers the whole sign column. A
-review reads as your theme's diff colors and the row under it keeps its own
-syntax highlighting. The review is drawn in the window the file is already in,
-and it scrolls, folds and wraps the way the rest of the buffer does. The
-buffer's text is untouched by any of it: nothing is written until you accept
-something. The `▶` on the current hunk needs a sign column to land in; with
-`signcolumn=no` it is simply absent, and the keys are still named. The header
-takes two rows because nvim's grid keeps its full width under the panel, so the
-panel covers the right of every header row, and a single-line hint would lose
-its tail, the way out of the review first, at the widths a laptop opens.
+The rows the agent would remove are highlighted with `ViewReviewRemoved`, what
+it proposes instead is a virtual line in `ViewReviewAdded`, the header naming
+the keys is `ViewReviewHeader`, a hunk your own typing has moved under turns
+`ViewReviewStale`, and the `▶` marking the current hunk is `ViewReviewSign`.
+Those five groups view derives from your colorscheme's own `DiffDelete`,
+`DiffAdd`, `DiffText` and `DiffChange` when the review opens, and re-derives
+when you change colorscheme. A diff group that defines the background a diffed
+row sits on hands that background over as it stands; where the color a row would
+be filled with is a foreground (a group with no background, or a reverse-video
+one, as dracula's are, where nvim fills from the foreground), it is blended a
+fifth of the way over your `Normal` background, so those schemes tint the rows.
+The text on those rows is the first color that reads on them: the diff group's
+own paired color, then your `Normal` foreground, then plain black or white,
+whichever comes first at 3:1 contrast or better. The `▶` is drawn on the
+header's own background over the whole sign column, and keeps your theme's diff
+accent over it wherever that accent reads. A review reads as your theme's diff
+colors and the row under it keeps its own syntax highlighting. The review is
+drawn in the window the file is already in, and it scrolls, folds and wraps the
+way the rest of the buffer does. Nothing is written until you accept something.
+The `▶` on the current hunk needs a sign column to land in; with `signcolumn=no`
+it is simply absent, and the keys are still named. The header takes two rows.
 
 The reviewed buffer stays an ordinary editable buffer, where every nvim key
 still does what it always did, so the review's own vocabulary is mapped out
@@ -274,21 +252,19 @@ open:
 
 `:View <Tab>` completes those command forms, feature then verb, and they are
 what to reach for if `<leader>h` is already yours. One verb is command-only:
-`:View review reject_all` throws the whole proposal away in one go, which is
-too much to hang off a keystroke.
+`:View review reject_all` throws the whole proposal away in one go.
 
 Type over a hunk yourself and it goes *stale*: view will not write a
 proposal against text that has moved, so a stale hunk offers `<leader>hR`
 (re-anchor it against what the buffer now holds) or `<leader>hx` in place of
 the accept it would have to refuse. Keep editing the same rows and even that
 goes: once your own edits reach past the context the hunk was anchored on,
-there is no text left to re-anchor it against honestly, so its header drops
-the re-diff and offers the reject alone. The panel keeps a summary of the
+there is no text left to re-anchor it against, so its header drops the
+re-diff and offers the reject alone. The panel keeps a summary of the
 review beside the buffer (which file, which hunk of how many, how many are
 still undecided, and the same keys), so a scroll away from every hunk does
-not lose you the review. Closing the panel loses you nothing either:
-the marks are in the buffer and the keys are on it, so a proposal is read
-and decided with no panel on screen at all.
+not lose you the review. The marks are in the buffer and the keys are on
+it, so a proposal is read and decided with no panel on screen at all.
 
 An accepted review is one undo entry of its own, separate from your own
 preceding edit: a single `u` retracts the whole thing.
@@ -337,14 +313,11 @@ same terms, and the notice below is what answers it. A tool that *replaces* a
 file is a save, and reads as one: whether it renames a temp file over the target
 or unlinks the target and writes it again, what you get is the ordinary reload.
 A save of the second kind can be caught between its two halves, since the file
-really is missing for the moment between the unlink and the rewrite, so view
-never speaks on the strength of one look: a path that reads as missing is
-checked once more, a fraction of a second later, and only a path that is still
-missing then is mentioned at all. For a save that finishes promptly, which is
-every shape above, nothing flashes up and disappears again. A file that stays
-missing for longer than that is genuinely missing as far as anything can tell,
-so it is mentioned, and its notice comes down as soon as any later check reads
-the path again.
+really is missing for the moment between the unlink and the rewrite. A path that
+reads as missing is checked once more, a fraction of a second later, and only a
+path that is still missing then is mentioned at all. A file that stays missing
+for longer than that is mentioned, and its notice comes down as soon as any
+later check reads the path again.
 
 Editing a file in a second editor, or a `git` command in another terminal,
 is detected on exactly those terms: during a session, inside the root,
@@ -362,8 +335,6 @@ reached while registering /home/you/project/crates (raise
 fs.inotify.max_user_watches); writes under it, and under everything not
 yet registered, will not be noticed
 ```
-
-It never goes quiet and leaves you believing detection is on.
 
 Both paths end up in the same place, nvim's own file-changed handling, so
 the outcome depends only on the buffer's own state when the write lands:
@@ -410,16 +381,14 @@ view: file /home/you/project/src/lib.rs is no longer a readable file on disk
 ```
 
 This case never opens the prompt: a path that cannot be read has no reload
-to offer, so there is no question to put to you.
+to offer.
 
 If the re-read is refused for some other reason, view says that too, and
-the notice names the refusal. It leaves open what you are left looking at,
-because a re-read that fails part way through can leave the new content or
-an empty buffer, so the notice tells you to check the buffer before you
-save over the file.
+the notice names the refusal. A re-read that fails part way through can
+leave the new content or an empty buffer, so the notice tells you to check
+the buffer before you save over the file.
 
-Nothing about the *outcome* depends on which tool made the change: once
-view knows a file changed on disk, an agent's shell command, a `git`
+Once view knows a file changed on disk, an agent's shell command, a `git`
 operation in another terminal, and a second editor all take the identical
-path through nvim's own file-changed handling. What differs is only whether
-view found out at the time; see the table above.
+path through nvim's own file-changed handling. What differs is whether view
+found out at the time; see the table above.

@@ -4,12 +4,11 @@ A Neovim UI surface is either drawn by view or left to your plugins, and
 that answer is given per surface. This page is the whole of it: which
 surfaces view claims, what happens when a plugin draws on one of them
 anyway, the `view.toml` line that hands it back, and the compat scenario
-state that proves the answer on the pinned engine.
+state for it on the pinned engine.
 
 The table below is generated from `SURFACES`, `SURFACE_CLAIMANTS` and
 `COMPLETION_MENUS` in `crates/view-core/src/native/surfaces.rs`, plus the
-loaded scenario set in `compat/scenarios/`; a test fails if this page and
-the tables view actually runs disagree.
+loaded scenario set in `compat/scenarios/`.
 
 ## Reading a row
 
@@ -23,7 +22,7 @@ the tables view actually runs disagree.
   one renderer draws the surface.
 - **`[native]` switch** is the `view.toml` line that hands the surface back
   to your plugins, and it is the switch that surface's `ext_*` attach is
-  gated on. `-- none --` is honest: no switch reaches that surface, and a
+  gated on. `-- none --` means no switch reaches that surface, and a
   notice about it says what happened and names no setting.
 - **claiming plugin classes** are the plugins whose whole purpose is to
   render a surface view also renders, with the buffer `filetype` their own
@@ -31,9 +30,8 @@ the tables view actually runs disagree.
   float detector, which needs no table.
 - **proving scenario / state** is every compat state whose probes assert
   that surface's `ext_*` attach. The attach is what decides whether view
-  draws the surface, so a state asserting it on proves the policy and one
-  asserting it off proves the switch. `-- none --` is a coverage gap
-  printed where you can see it.
+  draws the surface. `-- none --` is a coverage gap printed where you can
+  see it.
 
 ## The matrix
 
@@ -55,8 +53,8 @@ of the claim; the command line's own policy stays `Own`.
 ## Three switches, five surfaces
 
 `[native] palette = false` detaches `ext_cmdline` and `ext_popupmenu`
-together, which is why both rows name the same line: a session that handed
-the command line back absorbs nothing and hides nobody's window.
+together, so both rows name the same line: a session that handed the
+command line back absorbs nothing and hides nobody's window.
 
 `[native] tabline` is the one switch that ships off, so the tab line's row
 describes what a session running `tabline = true` does: nvim draws your own
@@ -72,17 +70,13 @@ goes unreported.
 ## What a claim actually is
 
 A claim is measured against the region the engine leaves for the surface
-view took over. Rect overlap with view's own chrome answers backwards:
-read against the palette box, nvim-cmp's cmdline menu misses it entirely
-while a centered telescope picker covers it whole, so the float that
-claims a surface looks innocent and the negative control looks guilty.
-The measurements behind that are in `docs/surface-float-wire-capture.md`.
+view took over. The measurements behind that are in
+`docs/surface-float-wire-capture.md`.
 
-Geometry alone is not enough either, so each rule is a conjunction: a rect
-that lands where a surface lives, and a state only that surface produces.
-The command-line rule fires only while a command line is actually open,
-which is what keeps a picker whose lowest chrome window sits one row above
-the same band silent.
+Each rule is a conjunction: a rect that lands where a surface lives, and a
+state only that surface produces. The command-line rule fires only while a
+command line is actually open, so a picker whose lowest chrome window sits
+one row above the same band stays silent.
 
 ## The notice a named claimant gets
 

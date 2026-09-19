@@ -3,11 +3,10 @@
 Every native feature is reached through a real nvim mapping, registered
 after your config has run so `<leader>` is whatever you set `mapleader`
 to. `:map`, `maparg()`, and which-key see these exactly as they see your
-own mappings, because that is what they are.
+own mappings.
 
 The table below is generated from `default_maps()` in
-`crates/view-core/src/native/mappings.rs`; a test fails if this page and
-the keys view registers disagree.
+`crates/view-core/src/native/mappings.rs`.
 
 <!-- generated from default_maps() -->
 | key | feature | command |
@@ -32,11 +31,10 @@ three states that gives you:
 | open, and you are in it | closes it |
 | open, and you are not in it | puts you back in it |
 
-The third row is why the key never dead-ends. A panel you are not in, one
-you escaped out of or one an agent's own permission request opened beside
-you, is one press from being yours. Closing it, whichever way you get
-there, leaves the agent session running, and reopening it brings the
-transcript back where you left it.
+A panel you are not in, one you escaped out of or one an agent's own
+permission request opened beside you, is one press from being yours.
+Closing it, whichever way you get there, leaves the agent session running,
+and reopening it brings the transcript back where you left it.
 
 ## Your own keys reach nvim under nvim's names
 
@@ -103,8 +101,7 @@ offered them:
 
 No letter answers a prompt: the same agent edit that raises the question
 raises a review in the buffer beside it, and that buffer stays an ordinary
-editable one. A letter that answered the prompt from there would mean two
-things at once. See [ai.md](ai.md) for what each option does and for what
+editable one. See [ai.md](ai.md) for what each option does and for what
 the two "always" answers stand for.
 
 ## Deciding an agent's proposed edit
@@ -113,8 +110,7 @@ A proposal is drawn in the file itself, and its keys are buffer-local nvim
 mappings on the reviewed buffer, set when the review opens and deleted when
 it closes. They are in `:map` for exactly that window, and they take
 nothing from your config in between: the whole set lives under
-`<leader>h` and on `]c`/`[c`, so no bare letter is claimed in a buffer that
-stays editable throughout.
+`<leader>h` and on `]c`/`[c`.
 
 <!-- generated from review_keys() -->
 | key | does | command |
@@ -128,8 +124,7 @@ stays editable throughout.
 | `[c` | the previous hunk still awaiting a decision | `:View review prev` |
 
 `:View review reject_all` rejects the whole proposal at once and is the one
-verb with no key: it decides everything in one press and offers no undo of
-its own, so it is asked for by name.
+verb with no key, so it is asked for by name.
 
 Every verb is also a `:View` form, which is what to map if you want the
 review on keys of your own. A global mapping of yours is never touched, and
@@ -156,11 +151,10 @@ See [ai.md](ai.md) for what a review is and what each decision writes.
 | `<S-CR>` | breaks the line -- needs the kitty keyboard protocol |
 | `<CR>` | sends the prompt |
 
-Both are bound because terminals disagree about Enter. Alt+Enter arrives as
-`ESC` + Enter from nearly every one of them, so `<M-CR>` is the one to reach
-for. A shifted Enter is distinguishable from a plain one only under the
-kitty keyboard protocol, and where the terminal does not speak it both send
-the same byte, so Shift+Enter *sends the prompt*.
+Alt+Enter arrives as `ESC` + Enter from nearly every terminal, so `<M-CR>` is
+the one to reach for. A shifted Enter is distinguishable from a plain one only
+under the kitty keyboard protocol, and where the terminal does not speak it both
+send the same byte, so Shift+Enter *sends the prompt*.
 
 What decides it is the startup capability probe's answer. Every
 `full`-tier terminal answers the kitty keyboard query, which is part of
@@ -177,9 +171,8 @@ protocol already on.
 | no | `CSI < u` on the way out and nothing else -- a pop nothing pushed is ignored |
 
 `--tier full` asserts all three capabilities, so view sends the sequence
-without asking first. The assertion stands on its own: a terminal that
-does not speak the protocol ignores it, and `<S-CR>` still will not reach
-the composer. No flag can add a protocol to a terminal that lacks one.
+without asking first. A terminal that does not speak the protocol ignores
+it, and `<S-CR>` still will not reach the composer.
 
 The window view holds the protocol open for is the one nvim holds it open
 for when you run nvim directly in kitty, ghostty or WezTerm. Every exit view
@@ -221,8 +214,7 @@ with the same keys, 5% of the terminal per press:
 Direction reads the way `<C-w><` and `<C-w>>` do in nvim, right widens and
 left narrows, whichever edge the sidebar is pinned to. Two bindings per
 direction because macOS Terminal and Termius keep the shifted arrows for
-themselves and view never sees them; the chord reaches through both, and it
-is the one you already resize an nvim window with.
+themselves and view never sees them; the chord reaches through both.
 
 These are view's own keys inside its own surfaces, so they take nothing
 from your config and appear in no `:map` listing. They are yours to change:
@@ -275,8 +267,7 @@ non-numeric value opens at the default and tells you so.
 
 An error or warning is sticky: it stays on screen until you have read it,
 where an ordinary message fades on its own. Motions, insert mode and idle
-time all leave it standing, on purpose: an error a `j` could wipe is an
-error you never got to read.
+time all leave it standing.
 
 `<Esc>` in normal mode takes it down:
 
@@ -304,8 +295,7 @@ which `<leader>fm` also opens.
 `<Esc>` clears nvim's own errors and warnings, and only those. A notice
 view raised itself about something it went and checked (a plugin drawing
 over the command line, a file that stopped being readable) stays up while
-that is still true, because nothing re-raises it once it is gone. Those
-come down one at a time, with `d` in the history.
+that is still true. Those come down one at a time, with `d` in the history.
 
 ## The message history
 
@@ -325,11 +315,10 @@ and scrolls:
 
 `<Esc>` closes it.
 
-`y` copies the selected line byte for byte. A path with a space in it
-arrives with the space, and nothing is trimmed, quoted or reworded. It goes
-to your system clipboard and, in the same keystroke, out as an OSC 52
-escape, so a `view` running over SSH puts the line on the clipboard of the
-machine you are reading it on:
+`y` copies the selected line byte for byte. A path with a space in it arrives
+with the space. It goes to your system clipboard and, in the same keystroke, out
+as an OSC 52 escape, so a `view` running over SSH puts the line on the clipboard
+of the machine you are reading it on:
 
 ```vim
 :View notifications
@@ -343,9 +332,8 @@ still goes to its own registers and out over OSC 52.
 `d` takes down the notice the selected entry belongs to, wherever the
 entry sits in the history, an older wording of a notice that has since
 re-worded itself included. The entry stays: the history is the record of
-what was said, and that stays true whether or not the line is still on
-screen. On a message from nvim, which has no notice standing behind it,
-`d` does nothing.
+what was said. On a message from nvim, which has no notice standing behind
+it, `d` does nothing.
 
 ## `:View`
 

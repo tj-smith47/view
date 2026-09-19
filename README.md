@@ -10,115 +10,77 @@ An agentic, Rust-fast terminal editor with a modern UI and Neovim mechanics.
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Status: pre-alpha](https://img.shields.io/badge/Status-pre--alpha-orange.svg)](#roadmap)
 
-[Install](#install) &bull; [Features](#features) &bull; [Not a
-distro](#not-another-neovim-distro) &bull; [Performance](#performance) &bull;
-[Roadmap](#roadmap) &bull; [Building](#building-from-source)
+[Install](#install) &bull; [Features](#features) &bull;
+[Performance](#performance) &bull; [Roadmap](#roadmap) &bull;
+[Building](#building-from-source)
 
 ![view editing Rust code, Dracula themed, with a plugin-heavy lazy.nvim config loaded](assets/view-screenshot.png)
 
 </div>
 
 > [!WARNING]
-> view is pre-alpha and not usable as a daily editor yet. The engine, the
-> runtime, and the test infrastructure are built; most of the visible feature
-> set is still landing. See the [roadmap](#roadmap).
+> view is pre-alpha and not usable as a daily editor yet. Most of the visible
+> feature set is still landing. See the [roadmap](#roadmap).
 
 ## What is view?
 
 view is a terminal editor that embeds a real Neovim as its engine, so your
-existing config, plugins, LSP servers, and treesitter setup work on day one:
-the same Neovim you already run is running them. Around that engine, view
-draws its own UI in native Rust: one design system for the whole editor
-chrome, a process that paints before your config has finished loading, and
-AI agents as a first-class part of the editor. An agent panel
-(`<leader>ai`) speaks [ACP](https://agentclientprotocol.com) to real
-agents, with in-editor review of every proposed change. See
+existing config, plugins, LSP servers, and treesitter setup work on day one.
+Around that engine, view draws its own UI in native Rust: one design system
+for the whole editor chrome, a process that paints before your config has
+finished loading, and AI agents as a first-class part of the editor. An
+agent panel (`<leader>ai`) speaks [ACP](https://agentclientprotocol.com) to
+real agents, with in-editor review of every proposed change. See
 [docs/ai.md](docs/ai.md).
 
 ## Features
 
 - **Bring your whole config.** Real Neovim is the engine, so your setup
   runs as it is: telescope, lualine, noice, nvim-cmp, treesitter, mini.nvim
-  and the rest load on day one, with nothing reimplemented.
-- **Fast where you feel it.** Every performance claim is a moment you live
-  through: launch until the screen is ready, keypress until the character is
-  there, scrolling a huge file, each measured paired against bare Neovim in
-  the same run and regression-gated in CI. Where a moment has not been
-  measured under a real config yet, the page says so in words. See
-  [Performance](#performance).
+  and the rest load on day one.
+- **Fast where you feel it.** Launch, keypress and scroll are measured with
+  your config loaded. See [Performance](#performance).
 - **Modern out of the box.** The surfaces view owns (statusline, picker,
-  file tree, notifications, command palette) share one design system. Prefer
-  the plugin you already use? It still loads, and a single config key hands
-  the surface back to it. Copy [`view.toml.example`](view.toml.example) to
-  `~/.config/view/view.toml`, change `picker = true` to `picker = false`
-  under its `[native]` table, and restart. Writing the file from scratch
-  instead? Then `native.picker = false` on a line of its own is the whole
-  config. view never edits your config, so that one key is the whole
-  reversal.
-
-## Not another Neovim distro
-
-A fair question, so here is the direct answer. LazyVim, NvChad, and friends
-are plugin collections running inside stock Neovim: same process, same
-render path, same startup. view is a separate Rust program that owns the
-terminal, embeds Neovim as a headless engine over its UI protocol, and
-paints every frame itself.
-
-That architecture is why none of view's surfaces can be a repackaged plugin:
-the render path, input handling, the native UI, and the AI integration are
-all view's own code. It also changes what a launch looks like: a distro has
-nothing to draw until your config has run, while view's own chrome is on
-screen in about 4 ms, the frame view paints whether your setup has zero
-plugins or forty, with your config still loading behind it. The screen you
-start working in arrives when your config is done, and that later screen is
-the moment the numbers below are about.
+  file tree, notifications, command palette) share one design system, and a
+  single config key hands one back to the plugin you already use. Copy
+  [`view.toml.example`](view.toml.example) to `~/.config/view/view.toml`,
+  change `picker = true` to `picker = false` under its `[native]` table, and
+  restart. In a file written from scratch, `native.picker = false` on a line
+  of its own is the whole config.
 
 ## Performance
 
-Two moments, measured paired: view and bare Neovim launched in the same run,
-on the same host, with the same config, samples interleaved. Neovim
-`v0.12.4` on a shared Linux dev host, whose `dev-linux` is the default class
-of this page.
+Neovim `v0.12.4` on a shared Linux dev host, whose `dev-linux` is the
+default class of this page.
 
 **You open a project.** You type `view ~/.config` and wait for the screen you
 can start working in. Under a login-shaped plugin config (lazy.nvim, noice
 and nvim-notify) that screen arrives in 53.9 ms under view against 52.4 ms
-under Neovim: view 1.5 ms behind, which is a bar view has not met, since the
-bar for this moment is level with Neovim. view's own chrome is on screen in
-about 4 ms regardless, which is the earlier frame, painted while
-your config is still loading. view no longer waits out that whole first
-screen before attaching to the engine; it attaches while your config is
-still running, which is where most of the gap went. What is left is the
-screen the attach asks for, travelling to view over the wire and painted
-again by view where Neovim's own terminal UI reads it out of the same
-process, and because that attach now sits inside the engine's own startup,
-the engine's started mark lands 1.64 ms later under view: the same work,
-counted on the other side of the mark.
+under Neovim: view 1.5 ms behind. The bar for this moment is level with
+Neovim, so it is a bar view has not met. view's own chrome is on screen in
+about 4 ms, painted while your config is still loading.
 
 **You type.** You press a key and the character appears. Under that same
 login-shaped config, view's worst keystroke in a thousand takes 1.58 ms
 against Neovim's 1.43 ms, and at the median view is 11% behind against a bar
-of 10%, a second bar missed, by 1% of the round trip, and both a fraction of
-the ~10 ms where a person starts to notice a key lagging their finger. view
-can also draw the character it expects before the engine confirms it: under
-that same config the predicted glyph is on screen in 0.32 ms at that same
-worst case, where the Neovim it is paired against in the same run
-takes 1.25 ms, and the glyph is corrected the moment the engine answers. Both
-ran on this machine; what the prediction is for is an engine a network away,
-which a separate acceptance leg measures by injecting the round trip at four
-tiers (`scripts/acceptance/remote-rtt.sh`).
+of 10%, a second bar missed, by 1% of the round trip. view can also draw the
+character it expects before the engine confirms it: under that same config
+the predicted glyph is on screen in 0.32 ms at that same worst case, where
+the Neovim it is paired against takes 1.25 ms, and the glyph is corrected the
+moment the engine answers. What the prediction is for is an engine a network
+away, which a separate acceptance leg measures by injecting the round trip at
+four tiers (`scripts/acceptance/remote-rtt.sh`).
 
 Scrolling, the picker, what happens when the engine hangs, memory, and what
 contributes to each of the numbers above:
-[docs/performance.md](docs/performance.md). How they are measured and which
-cells are diagnostics that carry no claim:
+[docs/performance.md](docs/performance.md). How they are measured:
 [docs/benchmarking.md](docs/benchmarking.md).
 
 ## Roadmap
 
 The goal is one terminal binary for anything you can view: a file, another
 machine's tree, an image, a website, a video. Rows marked ★ need code
-outside the Neovim process, so no plugin can provide them.
+outside the Neovim process.
 
 view is the product of bringing together the best features and ideas
 throughout the open-source community: [Omarchy](https://omarchy.org) and
@@ -155,9 +117,6 @@ the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
 
 ### Landing in the first release
 
-Everything below ships in the initial release; there is no later
-milestone it waits for.
-
 - [ ] **Tiled UI.** Framed panes with gaps and an active accent, status
       segments in the frame edge, a tabpage pill, the tree and the agent
       panel as overlays or sidebars per surface; `[ui] panes` keeps
@@ -184,8 +143,7 @@ milestone it waits for.
       your colorscheme carries view with it; no view config to rewrite.
 
 Beyond the feature list there is one standing direction: viewport
-highlighting and LSP UI move to view's side one subsystem at a time, each
-only once it renders exactly what Neovim would.
+highlighting and LSP UI move to view's side one subsystem at a time.
 
 ## Install
 
@@ -201,8 +159,7 @@ tar xzf view-v0.1.0-aarch64-apple-darwin.tar.gz
 ```
 
 Move the whole extracted directory where you keep local software and put its
-`bin/` on your `PATH`; the editor finds its engine relative to itself, so the
-directory stays intact:
+`bin/` on your `PATH`, keeping the directory intact:
 
 ```
 view-v0.1.0-aarch64-apple-darwin/
@@ -217,10 +174,10 @@ On Windows the archive is a `.zip` with the same shape (`bin\view.exe`,
 
 ### Verifying a download
 
-Releases are signed with [cosign](https://docs.sigstore.dev) keylessly, so
-the signing identity is the release workflow itself and there is no key to
-trust. Every archive ships a `.sig` and a `.pem` beside it, and a
-`view_<version>_checksums.txt` covers all of them.
+Releases are signed with [cosign](https://docs.sigstore.dev) keylessly, and
+the signing identity is the release workflow itself. Every archive ships a
+`.sig` and a `.pem` beside it, and a `view_<version>_checksums.txt` covers
+all of them.
 
 ```bash
 cosign verify-blob \
@@ -239,7 +196,7 @@ sha256sum --check --ignore-missing view_0.1.0_checksums.txt
 
 You will need stable Rust, [Task](https://taskfile.dev), and the Neovim version
 `.engine-pin` names on your `PATH`. A source build resolves `nvim` from your
-`PATH`; only the released bundles carry an engine of their own.
+`PATH`.
 
 ```bash
 git clone https://github.com/tj-smith47/view.git
