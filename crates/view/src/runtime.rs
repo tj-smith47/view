@@ -564,6 +564,56 @@ struct Wakeups<'a> {
 /// all. The bound is not a periodic wakeup a healthy session pays: the
 /// engine's own answer arrives first on every pass and the next wait is
 /// recomputed from the tick that answer belongs to.
+/// How many messages already waiting behind the one [`wait_for_msg`]
+/// returned move into the loop's own queue in one pass.
+///
+/// The channel's own capacity, so the queue beside it never holds more than
+/// the bound `sync_channel` already enforces and a producer faster than the
+/// loop blocks on the channel exactly as it did. Bounded rather than
+/// drained to empty because the drain runs ahead of the dispatch it feeds:
+/// a producer refilling as fast as this reads would otherwise hold the pass
+/// here with nothing dispatched.
+#[cfg(any(not(unix), test))]
+const DRAINED_BATCH: usize = crate::startup::MSG_CHANNEL_CAPACITY;
+
+/// [`wait_for_msg`] with whatever had already arrived behind its own
+/// message taken into `pending`, so the loop can tell a pass that holds
+/// undispatched input from one that does not and defer its frame
+/// accordingly.
+///
+/// The queue is popped before the channel is read, which keeps delivery
+/// order, and refilled only once it has emptied, so a frame deferred
+/// against it is owed for the length of one drained batch. A message
+/// arriving on its own leaves the queue empty and the pass paints where it
+/// always did: the cost is one `try_recv` that finds nothing.
+///
+/// The unix loop has no use for this -- its wait drains the terminal
+/// itself, into the same queue -- but the pass that paints reads the queue
+/// on both platforms, and an unbracketed paste is a flood of discrete keys
+/// on both.
+#[cfg(any(not(unix), test))]
+fn wait_for_msg_drained(
+    msg_rx: &mpsc::Receiver<Msg>,
+    wakeups: Wakeups<'_>,
+    pending: &mut std::collections::VecDeque<Msg>,
+) -> Option<Result<Msg, mpsc::RecvError>> {
+    if let Some(msg) = pending.pop_front() {
+        return Some(Ok(msg));
+    }
+    let received = wait_for_msg(msg_rx, wakeups)?;
+    if received.is_ok() {
+        for _ in 0..DRAINED_BATCH {
+            match msg_rx.try_recv() {
+                Ok(msg) => pending.push_back(msg),
+                // a disconnect is reported by the next wait, which returns
+                // the error rather than dropping the messages ahead of it
+                Err(_) => break,
+            }
+        }
+    }
+    Some(received)
+}
+
 #[cfg(any(not(unix), test))]
 fn wait_for_msg(
     msg_rx: &mpsc::Receiver<Msg>,
@@ -890,6 +940,18 @@ struct StartupMilestones {
 /// exists to avoid.
 const ATTACH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How long the loop may go on deferring a frame to input it has already
+/// decoded.
+///
+/// One frame's worth of time at the rate a terminal is drawn, which is the
+/// age at which a screen held back stops being a frame nobody could have
+/// seen and starts being a screen that lags the keys. A paste long enough
+/// to cross it pays a frame per frame's time rather than a frame per key,
+/// and what is on screen stays within one frame of what view has taken in,
+/// whatever the paste's length. A keystroke arriving on its own leaves the
+/// queue empty and never reaches this bound.
+const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+
 /// What is left of [`ATTACH_DEADLINE`] at `now`, or `None` once view has
 /// attached.
 ///
@@ -1001,8 +1063,10 @@ pub fn run(
     let waker = msg_tx.waker().cloned().ok_or_else(|| {
         anyhow::anyhow!("the unix runtime loop requires a wake-wired message sender")
     })?;
-    #[cfg(unix)]
     let mut pending = std::collections::VecDeque::new();
+    // when the last frame reached the terminal, which is what bounds the
+    // frames a drained batch defers (see `FRAME`)
+    let mut last_paint = Instant::now();
     // the last deadline this loop logged arming, so the idle cadence is
     // recorded once per value rather than once per block (see the wait's
     // own comment)
@@ -1262,19 +1326,17 @@ pub fn run(
         // owed: a pass that renders and finds nothing to write changed no
         // cell, so it answered no keystroke (see `FeltLog::note_pass`)
         // a pass holding input this loop has already decoded paints
-        // nothing. The frame it would write is replaced by the next key's
-        // before a terminal could draw it, and the queue is refilled only
-        // once it has emptied, so the frame is owed for the length of one
-        // drained batch and no longer. A keystroke arriving on its own
-        // leaves the queue empty and paints on the pass it always did: the
-        // cost here is one `is_empty` and the single-key path is untouched.
-        // Without it an unbracketed paste renders and writes a frame per
-        // key, and the surface render plus the tty write is nearly all of
-        // what such a paste costs a core.
-        #[cfg(unix)]
-        let backlog = !pending.is_empty();
-        #[cfg(not(unix))]
-        let backlog = false;
+        // nothing, up to `FRAME`. The frame it would write is replaced by
+        // the next key's before a terminal could draw it, and the queue is
+        // refilled only once it has emptied, so the frame is owed for the
+        // length of one drained batch or one frame's time, whichever ends
+        // first. A keystroke arriving on its own leaves the queue empty and
+        // paints on the pass it always did: the cost here is one `is_empty`
+        // and the single-key path is untouched. Without it an unbracketed
+        // paste renders and writes a frame per key, and the surface render
+        // plus the tty write is nearly all of what such a paste costs a
+        // core.
+        let backlog = !pending.is_empty() && last_paint.elapsed() < FRAME;
         let mut flushed = false;
         if model.dirty && !backlog {
             // the three startup milestones a timeline needs and only this
@@ -1314,6 +1376,7 @@ pub fn run(
             let damage = model.take_paint_damage();
             flushed = term.draw_surface(&model, surface, &damage)?; // a frame's own terminal I/O error aborts; engine errors never do, and neither does the OSC52 drain above (fire-and-forget, see its own comment)
             model.dirty = false;
+            last_paint = Instant::now();
         }
         // read once per pass rather than inside the branch: an input the
         // fold answered with no frame has to be closed by the pass that
@@ -1354,7 +1417,7 @@ pub fn run(
             &mut armed,
         )?;
         #[cfg(not(unix))]
-        let received = wait_for_msg(
+        let received = wait_for_msg_drained(
             &msg_rx,
             Wakeups {
                 write: &write_stall,
@@ -1366,6 +1429,7 @@ pub fn run(
                 attach_wait,
                 input: None,
             },
+            &mut pending,
         );
         let Some(received) = received else {
             // the wait expired against the stall watch's own deadline
@@ -5259,6 +5323,60 @@ mod tests {
             "the idle wait returned before its only message was sent: the loop was \
              woken by a deadline shorter than the silence that would justify one"
         );
+    }
+
+    /// The queue the non-unix loop reads its own backlog from. A wait that
+    /// finds three messages behind its own returns the first and leaves the
+    /// rest in hand, so the pass after it knows it is holding input nothing
+    /// has dispatched and defers its frame. With the channel holding them
+    /// instead, every pass reads an empty queue and paints between two keys
+    /// it already had -- what the unix loop stopped paying and the windows
+    /// loop went on paying.
+    #[test]
+    fn a_wait_leaves_the_messages_queued_behind_its_own_in_the_loops_queue() {
+        let watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        let fold = SupervisionFold::default();
+        let heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
+        let wakeups = || Wakeups {
+            write: &watch,
+            read: &heartbeat,
+            supervision: &fold,
+            speculation: None,
+            spinner: None,
+            attach_wait: None,
+            input: None,
+            reconnect: None,
+        };
+        let (msg_tx, msg_rx) = mpsc::sync_channel::<Msg>(crate::startup::MSG_CHANNEL_CAPACITY);
+        for _ in 0..3 {
+            msg_tx.send(Msg::RedrawReady).unwrap();
+        }
+
+        let mut pending = std::collections::VecDeque::new();
+        let first = wait_for_msg_drained(&msg_rx, wakeups(), &mut pending);
+        assert!(
+            matches!(first, Some(Ok(Msg::RedrawReady))),
+            "the wait returned something other than the first message sent to it"
+        );
+        assert_eq!(
+            pending.len(),
+            2,
+            "the messages already queued behind the first were left on the channel,              where the pass that paints cannot see them"
+        );
+
+        for expected in [1, 0] {
+            let next = wait_for_msg_drained(&msg_rx, wakeups(), &mut pending);
+            assert!(
+                matches!(next, Some(Ok(Msg::RedrawReady))),
+                "a queued message came back as something else"
+            );
+            assert_eq!(
+                pending.len(),
+                expected,
+                "the queue is refilled before it has emptied, so a frame deferred \
+                 against it is owed for longer than one drained batch"
+            );
+        }
     }
 
     /// The same silent session, with one prediction painted over the grid:
