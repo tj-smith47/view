@@ -99,6 +99,9 @@ pub fn pid_running(pid: u32) -> bool {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
+        // reports not running for the reason the sibling probe reports no
+        // entry: with no way to look, an inert assertion beats one that
+        // fails on the absence of one
         let _ = pid;
         false
     }
@@ -107,9 +110,11 @@ pub fn pid_running(pid: u32) -> bool {
 /// Whether the OS still holds a process-table entry for `pid`.
 ///
 /// The distinction a reaping assertion needs: a killed-and-reaped child
-/// leaves no entry at all, while a killed-but-never-waited one lingers
-/// (a zombie on unix, a handle nothing closed on Windows) until something
-/// reaps it, so an entry still being there says `kill` ran without `wait`.
+/// leaves no entry at all, while a killed-but-never-waited one lingers as a
+/// zombie until something reaps it, so an entry still being there says
+/// `kill` ran without `wait`. That distinction is unix's: `tasklist` drops
+/// a terminated process as it exits whatever handles are still open on it,
+/// so on Windows this and [`pid_running`] answer the same question.
 ///
 /// Deliberately not `kill -0`: that is unix-only, and gating a test on it
 /// takes the reaping proof away from exactly the platform whose process

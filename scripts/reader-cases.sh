@@ -94,9 +94,14 @@ eval "$(grep -E '^[A-Z_]+_RS=\$REPO_ROOT/' "$SWEEP")"
 CONST_SITES=$(grep -oE 'rust_const "\$[A-Z_]+_RS" [A-Z_]+' "$SWEEP" |
     tr -d '"$' | sed -E 's/^rust_const +//')
 # a call-site spelling this file can no longer find grades nothing at all,
-# which is the silence the cases below exist to refuse
-[ "$(printf '%s\n' "$CONST_SITES" | grep -c .)" -ge 3 ]
-check "the sweep constant reads are still written the way this file finds them" 0 $?
+# which is the silence the cases below exist to refuse. Counted against the
+# sweep own mentions rather than a floor: a floor passes a fourth read added
+# in a spelling the pattern above cannot see, which is the same silence
+# arriving one call site later. The one subtracted is the definition
+SITES_SEEN=$(printf '%s\n' "$CONST_SITES" | grep -c .)
+SITES_ALL=$(grep -c 'rust_const' "$SWEEP")
+[ "$SITES_SEEN" -eq "$((SITES_ALL - 1))" ]
+check "every sweep mention of rust_const is a call site this file grades" 0 $?
 
 while read -r var name; do
     [ -n "$name" ] || continue
@@ -107,6 +112,48 @@ done <<<"$CONST_SITES"
 
 rust_const "$PALETTE_RS" A_CONSTANT_NO_SOURCE_DECLARES >/dev/null 2>&1
 check "a constant no source declares fails rather than reading as an empty title" 1 $?
+
+# An Escape written straight before another keystroke. view holds a lone
+# Escape for `ttimeoutlen` in case more of a sequence is coming, so a write
+# that lands inside that window joins the run and decodes as a chord --
+# `<M-:>`, `<M-G>` -- which no leg means to send and no overlay answers.
+# Graded here because the legs themselves need tmux and a live nvim: the
+# sweep dismissal shipped this shape and passed for months on the legs that
+# happened not to depend on the close.
+unparted_escapes() {
+    awk '
+        /^[[:space:]]*send_key Escape[[:space:]]*$/ {
+            site = FILENAME ":" FNR
+            scanning = 1
+            next
+        }
+        scanning == 0 { next }
+        /^[[:space:]]*(#|$)/ { next }
+        # the enclosing block ends the scan: a write opening the next
+        # function is nothing this Escape can reach
+        /^\}/ || /^[a-zA-Z_]+\(\)/ { scanning = 0; next }
+        /send_text|send_key|command_line|submit |tmux send-keys/ {
+            print site
+            scanning = 0
+            next
+        }
+        /part_escape|settle|sleep|wait_|until_gone|capture/ { scanning = 0 }
+    ' "$@"
+}
+
+[ -z "$(unparted_escapes "$ROOT"/scripts/acceptance/*.sh)" ]
+check "no acceptance leg writes a key into the window an Escape is held for" 0 $?
+
+PLANTED=$(mktemp)
+trap 'rm -f "$PLANTED"' EXIT
+cat >"$PLANTED" <<'PLANT'
+leg_planted() {
+    send_key Escape
+    send_text ':View ai close'
+}
+PLANT
+[ -n "$(unparted_escapes "$PLANTED")" ]
+check "an unparted Escape is found rather than read as a parted one" 0 $?
 
 printf '%s cases, %s failures\n' "$cases" "$failures"
 [ "$failures" -eq 0 ] || exit 1

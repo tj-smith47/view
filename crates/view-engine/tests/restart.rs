@@ -321,9 +321,30 @@ fn kill_out_of_band(pid: u32) {
     );
 }
 
-/// Waits until `pid` has stopped running, or fails: a `kill` that has been
-/// sent is not yet a process that has died, and an assertion made against a
-/// still-running child would prove nothing about the crash path.
+/// Waits until `pid` has left the process table, or fails: a `kill` that has
+/// been sent is not yet a process that has died, and an assertion made
+/// against a still-running child would prove nothing about the crash path.
+///
+/// The entry and not the running state, because what every caller of this
+/// one is owed is the reap: a killed child nothing waited on keeps its
+/// entry, and nvim reads an owner that still has one as a session that may
+/// still be editing the file.
+fn wait_until_gone(pid: u32) {
+    let deadline = std::time::Instant::now() + common::rpc_deadline();
+    while std::time::Instant::now() < deadline {
+        if !common::pid_in_process_table(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !common::pid_in_process_table(pid),
+        "pid {pid} still in the process table 5s after SIGKILL"
+    );
+}
+
+/// Waits until `pid` has stopped running, for a caller whose killed child
+/// is still owned by a live engine and so has nobody to reap it yet.
 ///
 /// [`common::pid_running`] and not [`common::pid_in_process_table`], which
 /// asks who did the reaping: the killed process is the test's own child
@@ -333,7 +354,8 @@ fn kill_out_of_band(pid: u32) {
 /// remote command without forking; on Linux the same shell forks and the
 /// editor is a grandchild whose own parent reaps it, which is why the two
 /// remote tests failed on one platform and not the other.
-fn wait_until_gone(pid: u32) {
+#[cfg(unix)]
+fn wait_until_not_running(pid: u32) {
     let deadline = std::time::Instant::now() + common::rpc_deadline();
     while std::time::Instant::now() < deadline {
         if !common::pid_running(pid) {
@@ -347,7 +369,7 @@ fn wait_until_gone(pid: u32) {
     );
 }
 
-/// The distinction [`wait_until_gone`] rests on, taken against a real
+/// The distinction [`wait_until_not_running`] rests on, taken against a real
 /// zombie rather than argued from the platform's documentation: a child
 /// that has exited and nobody has waited for holds its process-table entry
 /// and is not running.
@@ -565,7 +587,7 @@ fn a_remote_restart_recovers_the_far_sides_swap_and_never_guesses_at_it() {
     );
     let far = engine_pid(&engine);
     kill_out_of_band(far);
-    wait_until_gone(far);
+    wait_until_not_running(far);
 
     let engine = engine
         .restart(editing_over_ssh(&dir, &file))
@@ -626,7 +648,7 @@ fn a_remote_restart_with_no_swap_left_comes_up_on_the_file_and_takes_the_users_k
     );
     let far = engine_pid(&engine);
     kill_out_of_band(far);
-    wait_until_gone(far);
+    wait_until_not_running(far);
 
     let engine = engine
         .restart(editing_over_ssh(&dir, &file).with_arg("-n"))

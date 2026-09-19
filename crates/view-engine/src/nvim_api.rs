@@ -370,6 +370,9 @@ vim.api.nvim_create_autocmd('User', {
   pattern = 'LazyLoad',
   callback = late_pass,
 })
+-- the loop's cached clock, which only advances when the loop turns: safe
+-- to bound this pass with because a SafeState callback is itself a loop
+-- turn, so a session that has stopped turning cannot age out its own retry
 local idle_deadline = vim.uv.now() + 60000
 local idle
 idle = vim.api.nvim_create_autocmd('SafeState', {

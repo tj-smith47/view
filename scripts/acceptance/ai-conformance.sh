@@ -359,6 +359,14 @@ submit() {
     send_key Enter
 }
 
+# Parts an Escape from the write behind it. A lone Escape is one byte, and
+# view holds it for `ttimeoutlen` in case more of an escape sequence is
+# coming: anything written inside that window joins the same run and decodes
+# as a chord -- `<M-:>` for a colon, `<M-G>` for a `G` -- which is nvim's own
+# reading of those bytes and not the two keys the leg meant to send. A poll
+# is five times the 50ms nvim defaults that timeout to.
+part_escape() { sleep "$POLL"; }
+
 # Leaves the panel, writes the buffer, and compares the file byte for byte
 # with what was expected -- the diff review's contract is a byte-exact
 # buffer mutation, and a screen that looks right is not that claim.
@@ -371,6 +379,7 @@ submit() {
 assert_file_is() {
     local expected="$1" what="$2" actual start
     send_key Escape
+    part_escape
     start=$(now)
     while :; do
         send_text ':w'
@@ -737,6 +746,7 @@ leg_agent_crash() {
     # between: a keystroke reaches the buffer and its frame renders. A loop
     # blocked on a dead agent's pipe fails here instead of hanging the run.
     send_key Escape
+    part_escape
     send_text 'Gopaint-after-crash'
     send_key Escape
     start=$(now)

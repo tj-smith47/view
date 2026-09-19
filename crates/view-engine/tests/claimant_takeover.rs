@@ -853,11 +853,9 @@ fn a_claimant_configured_after_the_ask_is_asked_again_once_the_session_idles() {
     );
 
     // the transition is driven rather than waited for, the way the sibling
-    // above drives its load event: an `--embed` child with no UI reaches
-    // no main loop to fire one of its own, and a test that answered the
-    // startup hook and attached to get there read the host's load rather
-    // than the chunk. That nvim fires this event in a real session is what
-    // `compat/scenarios/noice.toml` asserts
+    // above drives its load event: an `--embed` child with no UI reaches no
+    // main loop to fire one of its own. That nvim fires this event in a
+    // real session is what `compat/scenarios/noice.toml` asserts
     run_lua(
         &engine,
         "_G.view_pin.load_noice() \
