@@ -3,7 +3,7 @@
 Captured live against the pinned engine: every value below reflects an actual
 run of the pinned binary. Source of truth for `TREE_INPUT_PROMPT_CHUNK` (shared
 by `EngineHandle::tree_create_prompt` and `EngineHandle::tree_rename_prompt`)
-and `TREE_DELETE_CONFIRM_CHUNK` (`EngineHandle::tree_delete_confirm`) --
+and `TREE_DELETE_CONFIRM_CHUNK` (`EngineHandle::tree_delete_confirm`):
 whether a blocked `vim.fn.input()`/`vim.fn.confirm()`, primed with a
 `kind = "confirm"` `nvim_echo`, arrives on the redraw wire as the same
 `msg_show`/`cmdline_show` pair `PromptState`'s existing `Answer::Choices`

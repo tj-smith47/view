@@ -57,7 +57,7 @@ paths: ["**/*.rs"] template-source: "rules/rust.md.tmpl"
   `every_wire_capture_fence_matches_its_chunk_byte_for_byte` walks every capture
   doc, compares each marked fence to the const it names, and fails on a marker
   naming a const it does not carry. A new doc joins the pin by writing the
-  marker.
+  marker, and a fence published without one is graded by nothing.
 - **A test that asserts a floor ("nothing arrives for at least N") times it from
   the instant the work was dispatched, and discards a sample its own thread
   slept through.** `recv_timeout(floor).is_err()` reads the wrong window: a
@@ -299,7 +299,8 @@ paths: ["**/*.rs"] template-source: "rules/rust.md.tmpl"
   already-built `Command`, at the price of pinning thread and task spawns, whose
   rows say they are threads. The crate that spawns declares `view-proc` and
   names it (`view_proc::spawn_tied_to_this_process`). There is no re-export
-  chain to reach it through. A reaping pin adopts the pid its own child reports
+  chain to reach it through: a leaf two hops from its only caller is one
+  nobody finds. A reaping pin adopts the pid its own child reports
   (`orphan_reaping.rs`'s stderr marker), and never one recognised by `comm` off
   the process table: the first version of the bench pin adopted an
   `nvim --version` capability probe and passed identically against a plain
@@ -457,3 +458,26 @@ paths: ["**/*.rs"] template-source: "rules/rust.md.tmpl"
   under a checker with no escape list. Each case here reddens when the one rule
   it is about is reverted on a scratch copy of the checker, and that is what a
   new case owes before it ships.
+
+- **A test spawning one of this repository's `scripts/*.sh` takes its `bash`
+  from `view_test_support::bash_program()` and hands every path argument through
+  `view_test_support::bash_arg`.** `std::process::Command` resolves a bare
+  name the way `CreateProcessW` does. `search_paths` in std's own
+  `sys/process/windows.rs` reads the system directory at step 3 and the
+  inherited `PATH` only at step 5. Every GitHub Windows image keeps WSL's
+  launcher at `C:\Windows\System32\bash.exe`, so `Command::new("bash")`
+  reaches it, and with no distribution installed that launcher writes its
+  complaint to stdout and exits 1. An assertion that prints the script's
+  stderr then prints an empty string. Go's `exec.LookPath` reads `PATH`
+  alone, so a `bash` line in a Taskfile target runs Git Bash while a test
+  beside it runs the launcher: `release_layout.rs`'s two cases were red on
+  `windows-latest` while `task ci` ran its own gates through bash (run
+  35472867064). The second half is the argument. Git Bash rebuilds `argv`
+  from the command line with `\` as an escape, so `\\?\C:\...\view-under-test`,
+  which is what `Path::canonicalize` returns on Windows, reached `cp` as
+  `\?C:...view-under-test`. `bash_arg` drops the extended-length prefix and
+  writes the separators as `/`, which MSYS and the Windows API both resolve.
+  `no_source_spawns_bash_by_bare_name` in `view-test-support` walks every
+  source under `crates/` and fails a new `Command::new("bash")` by name.
+  Nothing mechanically fails a path argument that skips `bash_arg`, so this
+  entry is the check for that half.

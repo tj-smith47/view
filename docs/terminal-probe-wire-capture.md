@@ -99,8 +99,8 @@ Read as:
 
 | Reply | Bytes | Means |
 |---|---|---|
-| DECRPM | `\x1b[?2026;2$y` | `Pd=2026`, `Pm=2` (set, currently reset) -- `is_sync_supported` accepts 1 and 2, so `sync = true` |
-| kitty flags | `\x1b[?0u` | flags 0 -- the protocol is present and nothing is pushed yet; `kitty_kbd = true` |
+| DECRPM | `\x1b[?2026;2$y` | `Pd=2026`, `Pm=2` (set, currently reset). `is_sync_supported` accepts 1 and 2, so `sync = true` |
+| kitty flags | `\x1b[?0u` | flags 0. The protocol is present and nothing is pushed yet; `kitty_kbd = true` |
 | DECRQSS | `\x1bP1$r0;48:2:1:2:3m\x1b\\` | valid (`1$r`), whole SGR state echoed, **colon** separators, triple preserved -- `truecolor = true` |
 | CPR | `\x1b[1;2R` | cursor at row 1, column 2: `╭` advanced exactly one cell |
 | DA1 | `\x1b[?62;52;c` | class 62, and it is the last reply on the wire |
@@ -237,7 +237,7 @@ Read as:
 | DECRPM | `\x1b[?2026;0$y` | `Pm=0` -- the mode is *not recognized*. `is_sync_supported` accepts only 1 and 2, so `sync = false`, correctly |
 | kitty flags | *absent* | `\x1b[?u` is not understood; ConPTY passed it through to the screen, where it printed as `[?u` |
 | DECRQSS | `\x1bP1$r0;48:2::1:2:3m\x1b\\` | valid, colon-separated, and carrying an **empty colour-space-id field**: `48:2::1:2:3`, the ITU-T T.416 spelling |
-| CPR | `\x1b[7;2R` | row 7 (the harness had already printed seven lines), column 2 -- `╭` advanced one cell |
+| CPR | `\x1b[7;2R` | row 7 (the harness had already printed seven lines), column 2. `╭` advanced one cell |
 | DA1 | `\x1b[?61;...;42c` | class 61, last on the wire |
 
 `48:2::1:2:3` is the separator detail a plan cannot invent, and it departs from
@@ -253,9 +253,9 @@ consumer of this capture owes the empty-field spelling an accepted form.
 Four distinct negatives are on the wire above, and they are not
 interchangeable:
 
-| Shape | Seen on | What it proves |
+| Shape | Seen on | What it means |
 |---|---|---|
-| no reply at all | DECRPM and kitty on B/C/D/E; kitty on H | the query was swallowed. Proves nothing about the capability, only that the terminal will not say |
+| no reply at all | DECRPM and kitty on B/C/D/E; kitty on H | the query was swallowed. It says nothing about the capability, only that the terminal will not answer |
 | `\x1bP0$r\x1b\\` | DECRQSS on B/C/G | an explicit "invalid request": the terminal parsed the readback and declined it |
 | `\x1b[?2026;0$y` | DECRPM on H | an explicit "mode not recognized", `Pm=0`, distinct from `Pm=1`/`Pm=2` |
 | a *different* CPR column | E versus D | the query was answered and the answer differs: the glyph did not occupy one cell |

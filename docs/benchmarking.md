@@ -107,13 +107,13 @@ the one fixture that unit names.
 |---|---|---|---|
 | UI shell painted, engine still loading, no plugins (p99) | `first_paint.shell_visible_cold_ms` **4.1 ms** | n/a | budget 50 ms |
 | UI shell painted, engine still loading, 15-plugin lazy.nvim stack (p99) | `first_paint.shell_visible_cold_ms` **3.8 ms** | n/a | budget 50 ms |
-| First paint, cold, no plugins, `minimal` (p99) | 27.4 ms | **25.4 ms** | ~1.08x slower -- `first_paint.marker_ratio_p99`, a diagnostic of the felt `startup.settled_ratio_p50` |
-| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** | ~1.05x slower -- `first_paint.marker_ratio_p99`, a diagnostic of the felt `startup.settled_ratio_p50` |
+| First paint, cold, no plugins, `minimal` (p99) | 27.4 ms | **25.4 ms** | `first_paint.marker_ratio_p99` reads ~1.08x slower, a diagnostic of the felt `startup.settled_ratio_p50` |
+| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** | `first_paint.marker_ratio_p99` reads ~1.05x slower, a diagnostic of the felt `startup.settled_ratio_p50` |
 | First paint, cold, full login, `user` (p99) | `first_paint.marker_cold_ms` 80.5 ms | not recorded on its own | seated at `e9087db`; the ratio beside it was retaken 2026-09-06 (`first_paint.marker_ratio_p50` 1.084, `first_paint.marker_ratio_p99` 1.046) |
 | Resident memory (PSS), view process only, no plugins | `memory.pss_mb` **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | `output_path.p99_ms` **0.11 ms** | n/a | budget 1 ms |
 | Keystroke to cell change, steady typing, no plugins (p99) | `echo.view_p99_ms` 0.73 ms | 0.67 ms | `echo.ratio_p99` ~1.09x slower at the tail, where `echo.view_p99_ms` carries the bound; at the median `echo.ratio_p50` reads 1.130 |
-| Keystroke to predicted glyph, no plugins, engine local (p99) | `echo_speculated.speculated_paint_p99_ms` **0.30 ms** | n/a | `echo_speculated.speculated_ratio_p50` reads 0.394 against the bare Neovim paired with it in the same run. The injected round trips are a separate leg (`scripts/acceptance/remote-rtt.sh`) |
+| Keystroke to predicted glyph, no plugins, engine local (p99) | `echo_speculated.speculated_paint_p99_ms` **0.30 ms** | n/a | `echo_speculated.speculated_ratio_p50` reads 0.394 against the bare Neovim beside it. The injected round trips are a separate leg (`scripts/acceptance/remote-rtt.sh`) |
 | Sustained scroll, 100k lines, no plugins (p99 staleness) | `scroll.staleness_p99_ms` 1.07 ms | n/a | budget 16 ms |
 | Sustained scroll, 100k lines, 15-plugin lazy.nvim stack (p99 staleness) | `scroll.staleness_p99_ms` 1.23 ms | n/a | budget 16 ms |
 | Sustained scroll, no plugins, versus Neovim | | | ~1.6x slower (`scroll.ratio_p50`, the paired ratio beside the felt `scroll.staleness_p99_ms`) |

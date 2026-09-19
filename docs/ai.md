@@ -340,7 +340,7 @@ the outcome depends only on the buffer's own state when the write lands:
 
 | buffer state | outcome |
 | --- | --- |
-| not open in any buffer | nothing -- no UI, nothing to reconcile |
+| not open in any buffer | nothing. No UI, nothing to reconcile |
 | open, no unsaved edits of yours | reloaded silently, showing the new content |
 | open, with unsaved edits of yours | a prompt, since neither answer is safe to pick for you |
 

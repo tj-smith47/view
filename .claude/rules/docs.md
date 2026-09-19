@@ -18,8 +18,8 @@ plugins keep working" and never "compat suite with pinned plugin stacks".
 
 view is described in its own terms. Neovim is named where a fact about the
 engine is stated: the bundled version, the pin, a paired number in the
-Performance section. A feature row gives the capability and never Neovim as the
-reason it works.
+Performance section. A feature row gives the capability and never credits
+Neovim for it.
 
 The influences view takes something from (Omarchy, Hyprland, qutebrowser, tmux,
 herdr, ACP, kitty, mpv) are named once, in the paragraph under Roadmap that says
@@ -74,4 +74,8 @@ how the defect was found.
 under `docs/` and every page under `.claude/rules/` for the frame, the tell
 words and the joiner as a tripwire. A page that defines one of those spellings
 writes it in backticks, which is how the walk tells a sample of text from prose.
+Every table cell is read as a sentence of its own, apart from the separator row,
+and every line is read with the line under it joined on, so a spelling that sits
+across the 80-character margin is graded where it starts. A dash with nothing on
+one side of it is the placeholder a generated table writes for an empty column.
 The gate finds the spellings it knows; the two paragraphs above are the rule.

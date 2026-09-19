@@ -115,7 +115,7 @@ written against; reality corrected that assumption here.
 
 **The dialog *is* reachable when the owner is still alive** (or, by the same
 code path, whenever nvim cannot immediately confirm the owner dead), and when
-reached, it captures as **the exact same wire shape as `:confirm()` ** --
+reached, it captures as **the exact same wire shape as `:confirm()` **:
 `msg_show` kind `"confirm"` paired with a `cmdline_show` choice prompt, and
 `PromptState` needs no separate ATTENTION-specific code path. Captured
 with the default `nvim.swapfile` augroup removed so the dialog free-form
@@ -146,8 +146,8 @@ silently before it reaches the wire):
 
 Two `msg_show` entries land in the same batch: an `emsg` -kind header line
 ("E325: ATTENTION") and a `confirm` -kind body carrying the full block of
-explanatory text. `is_prompt()` only matches the `confirm` -kind one --
-correct, since the `emsg` line is ordinary persistent toast text (an error);
+explanatory text. `is_prompt()` only matches the `confirm` -kind one, which
+is correct, since the `emsg` line is ordinary persistent toast text (an error);
 the prompt question itself is a separate line, and the two coexist without
 conflict. Answering `q` (Quit) resolves cleanly; session stays alive.
 

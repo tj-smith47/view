@@ -147,8 +147,8 @@ See [ai.md](ai.md) for what a review is and what each decision writes.
 
 | key | does |
 | --- | --- |
-| `<M-CR>` | breaks the line -- works everywhere |
-| `<S-CR>` | breaks the line -- needs the kitty keyboard protocol |
+| `<M-CR>` | breaks the line, works everywhere |
+| `<S-CR>` | breaks the line, needs the kitty keyboard protocol |
 | `<CR>` | sends the prompt |
 
 Alt+Enter arrives as `ESC` + Enter from nearly every terminal, so `<M-CR>` is
@@ -168,7 +168,7 @@ protocol already on.
 | the probe's kitty keyboard answer | what view sends |
 | --- | --- |
 | yes | `CSI > 1 u` once the alternate screen is up, `CSI < u` before leaving it |
-| no | `CSI < u` on the way out and nothing else -- a pop nothing pushed is ignored |
+| no | `CSI < u` on the way out and nothing else. A pop nothing pushed is ignored |
 
 `--tier full` asserts all three capabilities, so view sends the sequence
 without asking first. A terminal that does not speak the protocol ignores

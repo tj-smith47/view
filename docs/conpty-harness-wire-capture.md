@@ -325,5 +325,5 @@ the recorder's contract all the same.
 | Sample boundaries | a repaint lands in one chunk under 200 us | a repaint is spread over 11 to 21 ms in several chunks; a boundary must state which end it takes, and a startup byte count is not stable enough to assert on |
 | Exit codes | `:cq 3` gives 3 | identical, no accommodation needed |
 | Clock | 18 ns tick | 100 ns tick, most consecutive reads identical; adequate for millisecond cells |
-| Teardown | process-group kill | per-child kill suffices; no group-kill equivalent needed |
+| Teardown | process-group kill | per-child kill suffices, with no group-kill equivalent |
 | Extra startup traffic | none | `\x1b[?9001h` (win32 input mode), `\x1b[?1004h` (focus reporting) and an OSC 0 title carrying the binary's full path, none of which the engine wrote |

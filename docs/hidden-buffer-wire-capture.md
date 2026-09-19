@@ -202,7 +202,7 @@ getbufvar(buf, '&modified')  -> 0
 nvim_buf_get_lines(buf, 0, -1, false) -> ['fn main() {}']
 ```
 
-Unlisted exactly like the `nvim_create_buf(false, false)` path (case 1) --
+Unlisted exactly like the `nvim_create_buf(false, false)` path (case 1):
 `bufadd` never lists the buffer it creates; but with filetype detection and
 every other `:edit` -triggered autocommand intact.
 
@@ -456,7 +456,7 @@ LOAD_HIDDEN_CHUNK(link/brand-new.rs)  -> {buf = 3, created = false, changedtick 
 
 ## 19. A relative path resolves against nvim's cwd, which view's process cwd does not track
 
-`canonical_hidden_key` joins a relative path onto `std::env::current_dir()` --
+`canonical_hidden_key` joins a relative path onto `std::env::current_dir()`,
 the *view process's* cwd. nvim resolves the same spelling against its own cwd,
 which the user moves with `:cd` at any time and which view never observes:
 

@@ -19,9 +19,9 @@ any quote it counts swallows the rest.
 
 | shape | 3.2 says | write instead |
 |---|---|---|
-| `declare -A m=([k]=v)` | `k: unbound variable` under `set -u` | a `case`, or newline-joined strings fed to `grep -Fqx` by here-string (`grep -Fqx -- "$x" <<<"$list"`) and never by a pipe — a quiet `grep` exits at its first match, SIGPIPEs the producer, and under `pipefail` the hit comes back a miss (`no_condition_reads_a_pipe_with_a_quiet_grep` in `view-oracle`'s shell guards refuses the pipe) |
-| a paren or a quote inside `$( )` or `<( )` that the reader counts and the writer did not mean: a `case` pattern with no leading paren, or a `)` or an apostrophe in a comment | `syntax error near unexpected token`, or ``bad substitution: no closing `)' `` | give every `case` pattern its leading paren (`case "$x" in (*.*) … ;; esac`) and reword the comment. Keep the `case` word on its header line too — that is not a third instance but the proxy a line scanner can see, and it is how the first one is caught |
-| `${x//a/b}` on anything longer than a word | nothing — it rescans the string per match and runs unbounded | `sed`/`tr` for a rewrite; `[[ $x == *[![:space:]]* ]]` (or its negation) for an emptiness test |
+| `declare -A m=([k]=v)` | `k: unbound variable` under `set -u` | a `case`, or newline-joined strings fed to `grep -Fqx` by here-string (`grep -Fqx -- "$x" <<<"$list"`) and never by a pipe. A quiet `grep` exits at its first match, SIGPIPEs the producer, and under `pipefail` the hit comes back a miss (`no_condition_reads_a_pipe_with_a_quiet_grep` in `view-oracle`'s shell guards refuses the pipe) |
+| a paren or a quote inside `$( )` or `<( )` that the reader counts and the writer did not mean: a `case` pattern with no leading paren, or a `)` or an apostrophe in a comment | `syntax error near unexpected token`, or ``bad substitution: no closing `)' `` | give every `case` pattern its leading paren (`case "$x" in (*.*) … ;; esac`) and reword the comment. Keep the `case` word on its header line too. That spelling is the proxy a line scanner can see, and it is how the first instance is caught |
+| `${x//a/b}` on anything longer than a word | nothing. It rescans the string per match and runs unbounded | `sed`/`tr` for a rewrite; `[[ $x == *[![:space:]]* ]]` (or its negation) for an emptiness test |
 
 The last row's class is the every-match substitution and nothing wider.
 `${x//a/b}`, `${x//a}` and `${!x//a/b}` are in it: the indirect spelling rescans
@@ -45,7 +45,9 @@ The middle row names two instances, and each has a gate of its own. The first, a
 scan bans in its place is the proxy: a `case` whose word runs onto the next
 line. That spelling took the whole style case matrix out of the 3.2 leg, and
 every `case` in this population puts its `in` on the header line, so a `case`
-with no `in` beside it is the tell.
+with no `in` beside it is the tell. The defect the row names is the missing
+paren: a split header whose patterns carry their parens extracts cleanly, and a
+one-line header whose patterns lack them breaks exactly as the split one does.
 
 The second instance, a comment inside a multi-line `$( )` or `<( )` whose own
 parens do not balance, or which carries an odd number of quotes, is read
@@ -373,7 +375,7 @@ which construct that is. Observed under bash 5.3.9, each line run with
 | the script | exits 1 |
 | a function (`f() { … }; f; echo S`) | exits 1, `S` unprinted |
 | a subshell in a list (`( … ); echo S`) | exits 1, `S` unprinted |
-| a command substitution (`x=$(f)`) | exits 1 -- the assignment takes what `f` returned |
+| a command substitution (`x=$(f)`) | exits 1. The assignment takes what `f` returned |
 | a brace group (`{ … }; echo S`) | carries status 1, prints `S`, does not exit |
 | a loop body (`for i in 1; do … done; echo S`) | carries status 1, prints `S`, does not exit |
 
@@ -494,7 +496,7 @@ themselves did not change, and every base block whose text survives verbatim
 inside a bigger head block, which is the deleted break itself: the same words,
 one paragraph shorter. It reports and never gates: the second shape names a
 paragraph that legitimately gained a sentence as readily as one a wrap
-swallowed.
+swallowed. A hard gate needs that tail answered first.
 
 What cannot wrap is exempt by shape:
 
@@ -518,10 +520,10 @@ short list reads exactly like a tree with nothing to report:
 
 | shape | what the list does |
 |---|---|
-| a file the rules cannot open | red verdict naming it -- a `grep -l` or an `xargs awk` would drop it and grade the survivors |
+| a file the rules cannot open | red verdict naming it. A `grep -l` or an `xargs awk` drops it and grades the survivors |
 | a symlink | listed (`find scripts \( -type f -o -type l \)`), so a dangling one and one pointing at a directory are both that red verdict |
 | a fifo, socket or device node | named and passed over: it is readable, it could never carry a shebang, and reddening a gate for it is a false red nobody can act on |
-| a path carrying a blank | selected by a loop rather than by `xargs`, so it stays in the population; the bans' `grep` and the walk's `xargs` then refuse it loudly rather than grading a list one file short |
+| a path carrying a blank | selected by a loop, so it stays in the population; the bans' `grep` and the walk's `xargs` then refuse it loudly and the run stops |
 
 Net of `check-style.sh` itself the population must still hold something. The two
 citation bans skip that one file, since it spells the banned phrases in order to

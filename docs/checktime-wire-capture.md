@@ -54,7 +54,7 @@ issued with no `FileChangedShell` autocmd registered at all:
 Under `--headless` nvim has nowhere to route the W12 "file changed and buffer
 changed" prompt, so it silently continues. Under an attached UI (view's real
 shape) the prompt routes through the UI's own message/cmdline channel and
-blocks the single-threaded RPC dispatch waiting for an answer nothing sends --
+blocks the single-threaded RPC dispatch waiting for an answer nothing sends:
 exactly the stall `RpcCall::Checktime` must never risk, since a stalled nvim
 stalls every other in-flight RPC call on the same connection, well beyond this
 one. `CHECKTIME_CHUNK` therefore ALWAYS registers a scoped, one-shot
@@ -426,7 +426,7 @@ before raising the autocmd.
 
 A *modified* buffer is safe here: the handler sets `v:fcs_choice = ''`, which
 short-circuits nvim's read before it opens anything. That is why the
-forced-branch FIFO row; which layers a local edit on the buffer first --
+forced-branch FIFO row, which layers a local edit on the buffer first,
 answers `fired = true` and never hangs, and why an unmodified buffer is the
 reachable shape. It is also the common one: a user is not editing every file
 that is open.
@@ -507,7 +507,7 @@ the probe returned:
 | a char device | `gone = true, modified = false` | `["original"]` | `gone = true, modified = true` | `["originallocal-edit"]` |
 | a socket | `gone = true, modified = false` | `["original"]` | `gone = true, modified = true` | `["originallocal-edit"]` |
 
-The rows that used to answer `fired = true`; deleted, dangling, FIFO --
+The rows that used to answer `fired = true` (deleted, dangling, FIFO)
 answered a conflict prompt whose only offer was a reload that could never
 happen. `gone` says so directly instead, and the directory row, which used to
 answer `fired = false` and say nothing at all, now says it too.
@@ -642,7 +642,7 @@ DELETE watched.txt
 
 | save shape | raises `DELETE`? | what the watch sees |
 | --- | --- | --- |
-| temp file + `rename` over the target (the atomic save) | no | `MOVED_TO`, which `notify` maps to `Modify(Name(To))` -- `is_modify()`, the arm that existed before removals were forwarded |
+| temp file + `rename` over the target (the atomic save) | no | `MOVED_TO`, which `notify` maps to `Modify(Name(To))`. `is_modify()` is the arm that existed before removals were forwarded |
 | unlink, then write the target again | **yes**, followed by `CREATE`/`MODIFY` | `Remove(File)` on its own if the coalesce window closes between the two halves, otherwise coalesced with the create |
 | plain `rm` | yes, and nothing after it | `Remove(File)` -- the shape with no create or modify to ride along with |
 
@@ -743,10 +743,10 @@ unexpected:
 
 | entry | outcome | UI |
 |---|---|---|
-| `found = false` | `NoBuffer` | nothing -- no buffer loaded (cases 1, 7) |
-| `found = true, fired = false` | `HandledSilently` | nothing -- nvim's own unmodified reload (cases 2/6/8) or a self-write no-op (cases 4/5) |
+| `found = false` | `NoBuffer` | nothing. No buffer loaded (cases 1, 7) |
+| `found = true, fired = false` | `HandledSilently` | nothing. nvim's own unmodified reload (cases 2/6/8) or a self-write no-op (cases 4/5) |
 | `found = true, fired = true` | `Conflict` | the conflict prompt (cases 3/8) |
-| `found = true, forced = true, ok = true` | `Reloaded` | nothing -- the answer the user already gave, carried out (case 7) |
+| `found = true, forced = true, ok = true` | `Reloaded` | nothing. The answer the user already gave, carried out (case 7) |
 | `found = true, forced = true, ok = false` | `ReloadFailed` | a notice: the discard the user asked for did not happen (case 7a) |
 | `found = true, gone = true, modified = <bool>` | `FileGone` | a notice: the path is not a readable file, so nothing was read; `modified` picks which of the two true sentences it gets (cases 7e, 10) |
 

@@ -156,9 +156,9 @@ Live-verified through the fixed `CURSOR_CONTEXT_CHUNK` by
 
 ## Fix round 2 (review-driven): blockwise is a SCREEN-column rectangle, standing apart from a byte-column one
 
-Round 1's blockwise fix above clamped `getpos`'s raw BYTE columns per line --
-correct only because its own capture buffer (`"alpha"`/`"beta"`/`"gamma"`) is
-ASCII, where byte column and screen column never diverge. Any line containing a
+Round 1's blockwise fix above clamped `getpos`'s raw BYTE columns per line.
+That holds only because its own capture buffer (`"alpha"`/`"beta"`/`"gamma"`)
+is ASCII, where byte column and screen column never diverge. Any line with a
 character whose BYTE width isn't 1 (any multi-byte UTF-8 sequence, `é`
 included) exposes the gap: nvim's real blockwise rectangle is defined in
 `virtcol()` (screen-column) terms, held constant across every row, and each
@@ -728,7 +728,7 @@ picker preview pane's `PREVIEW_CHUNK` already records for `PreviewBuffer`.
 
 ## Fix round 1 (review-driven): one shared 1-indexed convention across all three reads
 
-The three chunks above cross the wire in three different native conventions --
+The three chunks above cross the wire in three different native conventions.
 `nvim_win_get_cursor`'s column is 0-indexed, `vim.diagnostic .get`'s
 `lnum`/`col` are both 0-indexed, `getqflist`'s are already 1-indexed; and an
 earlier version of this document treated that as something each read should

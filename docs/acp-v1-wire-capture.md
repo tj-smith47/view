@@ -1499,7 +1499,7 @@ the agent asked for. The mapping this client uses:
 |---|---|---|
 | Path outside the session directory, or unresolvable | `-32602` Invalid params | The refused parameter is the `path`, and the code must not vary with whether the target exists (see above). |
 | The path resolved to no readable buffer | `-32002` Resource not found | The schema's own words for it. An agent can stop asking; `-32603` would have it retry a call that can never succeed. |
-| Stale `changedtick`, an unwritable target, or any other failure carrying out a well-formed request | `-32603` Internal error | "Reserved for implementation-defined server errors" -- these are conditions on this client's side of the call, and the distinction between them lives in `message` (a moved tick is worth retrying, `E212` is not). |
+| Stale `changedtick`, an unwritable target, or any other failure carrying out a well-formed request | `-32603` Internal error | "Reserved for implementation-defined server errors". These are conditions on this client's side of the call, and the distinction between them lives in `message` (a moved tick is worth retrying, `E212` is not). |
 
 ## Client crate on crates.io: `agent-client-protocol`
 

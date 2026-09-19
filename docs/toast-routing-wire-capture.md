@@ -144,7 +144,7 @@ Three consequences, each acted on directly:
 - The deliverable that turns the row green is the claimant probe below plus the
   composition suppression; the hold plays no part in it.
 - A discriminating kind does exist on the *other* path; a plugin calling
-  `vim.notify(msg, vim.log.levels.ERROR)` reaches `msg_show` as `echoerr` --
+  `vim.notify(msg, vim.log.levels.ERROR)` reaches `msg_show` as `echoerr`,
   but `echoerr` is a persistent kind, and persistent kinds are never held. The
   hold was not widened to cover it: an error the user is meant to read is
   exactly what a notice about surfaces must not stand in for.
