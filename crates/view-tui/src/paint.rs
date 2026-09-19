@@ -1105,6 +1105,24 @@ fn border_color(interior: ResolvedStyle) -> u32 {
     interior.fg.map_or(0x0080_8080, dim)
 }
 
+/// The foreground every frame view draws around a native float takes: the
+/// colorscheme's own `FloatBorder` when it states one, and the derived
+/// dimmed shade of `interior` only when it states nothing. A derivation is
+/// a guess at what the theme's author would have chosen, so a stated answer
+/// outranks it -- and a colorscheme that paints its floats transparent
+/// states a border color precisely because nothing else is left to read the
+/// frame's edge from.
+///
+/// Not the whole resolved style: the frame keeps the interior's background
+/// so the box reads as one continuous surface, the same reason
+/// [`ChromeGroup::FloatTitle`]'s background is pinned to it.
+fn float_border_color(theme: &Theme, interior: ResolvedStyle) -> u32 {
+    theme
+        .chrome(ChromeGroup::FloatBorder)
+        .fg
+        .unwrap_or_else(|| border_color(interior))
+}
+
 /// The style a selected row takes over an interior styled `base`:
 /// `PmenuSel` -- the group a colorscheme already uses for "this row is the
 /// one you are on" -- with its background made concrete.
@@ -1263,8 +1281,9 @@ fn paint_popupmenu(
 ///
 /// The title set into the top edge is the one piece of frame chrome with a
 /// style of its own (`ChromeGroup::FloatTitle`, bold): it is the label
-/// naming what the overlay is, and the frame's color is deliberately dimmed
-/// away from readable.
+/// naming what the overlay is, and the frame around it reads recessive --
+/// the colorscheme's `FloatBorder`, or a dimmed shade of the interior where
+/// it names none.
 fn paint_native_overlay(
     layer: &Layer,
     laid: Option<&view_surface::overlay::Rows>,
@@ -1287,16 +1306,21 @@ fn paint_native_overlay(
     // every overlay reads its colors from the floating-window group except
     // the statusline, which is its own chrome group (a status line is not a
     // float and a colorscheme that restyles one must not restyle the other)
-    let group = if matches!(layer.kind, LayerKind::Statusline(_)) {
-        ChromeGroup::StatusLine
-    } else {
+    let is_float = !matches!(layer.kind, LayerKind::Statusline(_));
+    let group = if is_float {
         ChromeGroup::NormalFloat
+    } else {
+        ChromeGroup::StatusLine
     };
     let base = theme.chrome(group);
     let interior = ratatui_style(base);
     let selected = ratatui_style(selection_style(theme, base));
     let frame = ratatui_style(ResolvedStyle {
-        fg: Some(border_color(base)),
+        fg: Some(if is_float {
+            float_border_color(theme, base)
+        } else {
+            border_color(base)
+        }),
         bg: base.bg,
         ..ResolvedStyle::default()
     });
@@ -3290,6 +3314,155 @@ mod tests {
             0x0099_0000,
             "a set msg_area foreground must still dim to 60%, distinct from the full-brightness interior text"
         );
+    }
+
+    /// The live defect, seen under dracula with `transparent = true`: the
+    /// scheme links `MsgArea` to `Normal` and states `FloatBorder` on its
+    /// own, so a border derived from the message area's foreground painted
+    /// a grey frame the user's theme never chose while every other surface
+    /// was themed. Disconfirm: dropping the `FloatBorder` read from
+    /// `float_border_color` leaves this asserting the dimmed buffer
+    /// foreground.
+    #[test]
+    fn a_stated_float_border_outranks_the_shade_derived_from_the_body() {
+        let mut model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0x00F8_F8F2),
+                bg: None,
+                sp: None,
+            },
+        );
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlAttrDefine {
+                id: 30,
+                fg: Some(0x0062_72A4),
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+        );
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlGroupSet {
+                name: ChromeGroup::FloatBorder.hl_name().to_string(),
+                hl_id: 30,
+            },
+        );
+        let theme = Theme::from_hl(model.engine.hl());
+        assert_eq!(
+            theme.chrome(ChromeGroup::MsgArea).fg,
+            theme.fg,
+            "the fixture only reproduces the defect while MsgArea reads as Normal"
+        );
+        assert_eq!(
+            toast::toast_border_color(&theme),
+            0x0062_72A4,
+            "a toast frame must take the colorscheme's own FloatBorder"
+        );
+        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps);
+        let buf = paint_layer_alone(&model, layer, 30, 10);
+        assert_eq!(
+            buf[(2, 1)].fg,
+            rgb(0x0062_72A4),
+            "and so must every other native float's"
+        );
+    }
+
+    /// A frame is drawn from one group, and the day a second border helper
+    /// reads a different one is the day two floats on the same screen carry
+    /// different frames. `FloatBorder` is the group nvim itself gives that
+    /// job, so a chrome group named inside a border helper is either it or
+    /// a drift nothing else reports: the border charset keyed on
+    /// `caps.tier` for months on exactly that silence.
+    ///
+    /// The window separator is out of scope by name -- it draws the column
+    /// between two windows, not a float's edge, and `WinSeparator` is
+    /// nvim's own group for it.
+    #[test]
+    fn every_border_helper_reads_the_float_border_group() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut dirs = vec![src.clone()];
+        let mut sites = Vec::new();
+        let mut wrong = Vec::new();
+        while let Some(dir) = dirs.pop() {
+            let listing = std::fs::read_dir(&dir).expect("this crate's own src/ must be readable");
+            for entry in listing.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                if path.extension() != Some("rs".as_ref()) {
+                    continue;
+                }
+                let source =
+                    std::fs::read_to_string(&path).expect("a listed source must be readable");
+                let production = source
+                    .split_once("#[cfg(test)]\nmod tests")
+                    .map_or(source.as_str(), |(prod, _)| prod);
+                for (name, body) in border_helpers(production) {
+                    for group in named_chrome_groups(body) {
+                        sites.push(format!("{}::{name}", path.display()));
+                        if group != "FloatBorder" {
+                            wrong.push(format!(
+                                "{}::{name} reads ChromeGroup::{group}",
+                                path.display()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            !sites.is_empty(),
+            "the walk reached no border helper naming a chrome group, so it \
+             proves nothing about what a frame is colored from"
+        );
+        assert!(
+            wrong.is_empty(),
+            "a float's frame takes `ChromeGroup::FloatBorder` and derives from \
+             the interior only where the colorscheme states none:\n  {}",
+            wrong.join("\n  ")
+        );
+    }
+
+    /// Each `fn` in `source` whose name carries `border`, paired with its
+    /// body up to the next item at column zero.
+    fn border_helpers(source: &str) -> Vec<(&str, &str)> {
+        let mut found = Vec::new();
+        for (offset, _) in source.match_indices("fn ") {
+            let rest = &source[offset + 3..];
+            let Some(open) = rest.find('(') else {
+                continue;
+            };
+            let name = rest[..open].trim();
+            if !name.contains("border") || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            let body = &rest[open..];
+            let end = body.find("\n}").map_or(body.len(), |at| at + 2);
+            found.push((name, &body[..end]));
+        }
+        found
+    }
+
+    /// Every `ChromeGroup::Variant` `source` names.
+    fn named_chrome_groups(source: &str) -> Vec<&str> {
+        source
+            .match_indices("ChromeGroup::")
+            .map(|(offset, marker)| {
+                let rest = &source[offset + marker.len()..];
+                let end = rest
+                    .find(|c: char| !c.is_alphanumeric() && c != '_')
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            })
+            .collect()
     }
 
     #[test]

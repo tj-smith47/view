@@ -41,6 +41,13 @@ pub enum ChromeFallback {
     /// [`Theme::emphasis`]: a selection-style group stays visibly distinct
     /// from the row beside it even with zero color information.
     Emphasis,
+    /// Nothing at all: every color unset, every attribute off. The answer a
+    /// group owes when its consumer derives its own value from a
+    /// neighbouring group and needs to tell "the colorscheme said nothing"
+    /// from "the colorscheme chose the buffer's own colors" -- a `Normal`
+    /// fallback makes those two indistinguishable, so the derivation can
+    /// never run once a theme carries any color at all.
+    Unset,
 }
 
 /// How many identifiers were handed in, evaluated at compile time so
@@ -214,6 +221,17 @@ chrome_groups! {
     /// colorscheme that never defines `NormalFloat` wants its floats on the
     /// buffer's own background.
     NormalFloat => "NormalFloat", Normal;
+    /// nvim's builtin floating-window frame group (`:h hl-FloatBorder`).
+    /// Every frame view draws around a native float resolves through it, so
+    /// a colorscheme that themes float borders themes view's.
+    ///
+    /// The `Unset` fallback is what lets a painter tell an unnamed group
+    /// from a themed one: with no `FloatBorder` to read, a frame derives a
+    /// dimmed shade of its own interior's foreground, and that derivation
+    /// has to stop the moment a colorscheme states a border color. Under
+    /// `Normal` the group would answer with the buffer's foreground on
+    /// every theme, and the derivation could never run.
+    FloatBorder => "FloatBorder", Unset;
     /// nvim's builtin floating-window title group (`:h hl-FloatTitle`). A
     /// native overlay's title is set into its top border, and this is the
     /// group nvim already uses for exactly that -- the title of a float,
@@ -386,6 +404,7 @@ impl Theme {
         match group.fallback() {
             ChromeFallback::Normal => self.normal(),
             ChromeFallback::Emphasis => self.emphasis(),
+            ChromeFallback::Unset => ResolvedStyle::default(),
         }
     }
 
@@ -973,13 +992,35 @@ mod tests {
         let hl = table_with(Some(0x1), Some(0x2), 1, no_attrs());
         let theme = Theme::from_hl(&hl);
         for group in ChromeGroup::ALL {
-            if group.fallback() == ChromeFallback::Emphasis {
+            if group.fallback() != ChromeFallback::Normal {
                 continue;
             }
             assert_eq!(
                 theme.chrome(group),
                 theme.normal(),
                 "{} must read as plain text while unmapped",
+                group.hl_name()
+            );
+        }
+    }
+
+    /// The `Unset` counterpart: a group whose consumer derives its own
+    /// value reads as nothing at all while unmapped, on a theme that
+    /// carries colors. Falling back to `normal()` here would hand that
+    /// consumer the buffer's foreground and retire the derivation on every
+    /// colorscheme.
+    #[test]
+    fn an_unset_group_reads_as_nothing_while_unmapped() {
+        let hl = table_with(Some(0x1), Some(0x2), 1, no_attrs());
+        let theme = Theme::from_hl(&hl);
+        for group in ChromeGroup::ALL {
+            if group.fallback() != ChromeFallback::Unset {
+                continue;
+            }
+            assert_eq!(
+                theme.chrome(group),
+                ResolvedStyle::default(),
+                "{} must carry nothing while unmapped",
                 group.hl_name()
             );
         }

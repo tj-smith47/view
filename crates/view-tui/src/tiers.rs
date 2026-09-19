@@ -223,7 +223,7 @@ const KITTY_KBD: CapabilityRow = CapabilityRow {
 /// Box-drawing cell accounting, from the cursor column reported after
 /// [`QUERY_BOX_GLYPH`] writes one `╭`: one column advanced means one cell.
 /// Captured in `docs/terminal-probe-wire-capture.md`, sections D and E,
-/// whose limits "What D and E prove, and what they do not" states -- this
+/// whose limits "What D and E show, and what they do not" states -- this
 /// is the terminal's accounting, never the font's coverage.
 const UNICODE_BOXES: CapabilityRow = CapabilityRow {
     capability: "unicode_boxes",

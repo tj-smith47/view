@@ -13,7 +13,7 @@ use view_core::native::views::Span;
 use view_surface::overlay::BorderSet;
 
 use super::{
-    border_color, paint_text_row, ratatui_style, set_border_cell, ChromeGroup, Damage,
+    float_border_color, paint_text_row, ratatui_style, set_border_cell, ChromeGroup, Damage,
     ResolvedStyle, Theme,
 };
 
@@ -30,7 +30,7 @@ use super::{
 /// tests) must still see no bleed from a frame that has no content to frame.
 ///
 /// The whole rect -- border cells included -- is cleared to the toast's own
-/// `msg_area` style first, before any text or border glyph: without this, a
+/// interior style first, before any text or border glyph: without this, a
 /// row, a border cell, or the columns past a line's own text on a row keeps
 /// showing whatever the `EngineGrid` layer painted underneath (real nvim
 /// content, e.g. a floating window's cells composited into the base grid
@@ -55,8 +55,8 @@ pub(super) fn paint_toast(
         return;
     }
 
-    let msg = theme.float_chrome(ChromeGroup::MsgArea, theme.float_bg());
-    let style = ratatui_style(msg);
+    let body = toast_body(theme);
+    let style = ratatui_style(body);
     let blank = " ".repeat(usize::from(area.width));
     for row in (0..area.height).filter(|&row| damage.covers_row_of(area, row)) {
         paint_text_row(&blank, style, area, row, buf);
@@ -64,7 +64,7 @@ pub(super) fn paint_toast(
 
     let border_style = ratatui_style(ResolvedStyle {
         fg: Some(toast_border_color(theme)),
-        bg: msg.bg,
+        bg: body.bg,
         ..ResolvedStyle::default()
     });
     paint_toast_border(area, borders, paused, border_style, damage, buf);
@@ -161,22 +161,35 @@ fn paint_toast_border(
     }
 }
 
-/// The toast border's foreground. `Theme` resolves no builtin group carrying
-/// a genuinely muted/comment tone -- `from_hl` maps only `StatusLine`, the
-/// tabline and popup-menu families, and `MsgArea`, none of which plays the
-/// role real nvim's own `Comment`/`NonText`/`FloatBorder` groups would (an
-/// unobtrusive chrome color distinct from both emphasis and interior-text
-/// colors), and this module never probes nvim for a group it does not
-/// already resolve -- so the border derives a dimmed variant of the
-/// interior's own `msg_area` foreground when one is set, visibly distinct
-/// from the full-brightness interior text with no further highlight lookup
-/// or RPC round trip. Never falls back to a dimmed `MsgArea` background: the
-/// border sits ON that background, so dimming it paints a frame that is
-/// merely a darker shade of the surface it is supposed to stand out from --
-/// on a black-bg/no-fg theme this dims pure black to itself, an invisible
-/// border around a box the user cannot tell apart from empty screen. The
-/// floor is the plain (undimmed) neutral grey constant instead, which stays
-/// visible against any background.
+/// A toast's interior: a float body first (`NormalFloat`), with nvim's
+/// message-area group filling whichever half of it the colorscheme left
+/// unstated, and `Normal` underneath both as their declared fallback.
+///
+/// That order is what a toast is. It carries a message, so a scheme that
+/// themes `MsgArea` and nothing else still reaches it; it is a box drawn
+/// over the buffer, so a scheme that themes floats and says nothing about
+/// the message area -- habamax, and it is far from alone -- gets its float
+/// colors rather than a box the user can only find by its border.
+fn toast_body(theme: &Theme) -> ResolvedStyle {
+    let float = theme.float_chrome(ChromeGroup::NormalFloat, theme.float_bg());
+    let msg = theme.float_chrome(ChromeGroup::MsgArea, theme.float_bg());
+    ResolvedStyle {
+        fg: float.fg.or(msg.fg),
+        bg: float.bg.or(msg.bg),
+        ..float
+    }
+}
+
+/// The toast border's foreground: the same `FloatBorder`-first answer every
+/// other native float's frame takes, over this box's own interior.
+///
+/// The derived floor behind it never dims a background: the border sits ON
+/// that background, so dimming it paints a frame that is merely a darker
+/// shade of the surface it is supposed to stand out from -- on a
+/// black-bg/no-fg theme this dims pure black to itself, an invisible border
+/// around a box the user cannot tell apart from empty screen. The floor is
+/// the plain (undimmed) neutral grey constant instead, which stays visible
+/// against any background.
 pub(super) fn toast_border_color(theme: &Theme) -> u32 {
-    border_color(theme.chrome(ChromeGroup::MsgArea))
+    float_border_color(theme, toast_body(theme))
 }

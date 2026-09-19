@@ -420,7 +420,15 @@ pub fn seeded_hl_table(theme: &Theme) -> HlTable {
     // offsets come from enumeration, not hand-written literals, so two
     // groups can never collide on a synthetic hl_id
     for (offset, group) in ChromeGroup::ALL.into_iter().enumerate() {
-        seed_named(&mut hl, group.hl_name(), theme.chrome(group), offset as u64);
+        let style = theme.chrome(group);
+        // a group carrying nothing was never named by a colorscheme, and an
+        // empty definition is not the same statement: `style_for` starts
+        // from `Normal`, so seeding one resolves the group to the buffer's
+        // own colors and retires the derivation its consumer owes it
+        if style == ResolvedStyle::default() {
+            continue;
+        }
+        seed_named(&mut hl, group.hl_name(), style, offset as u64);
     }
     hl
 }
@@ -985,7 +993,17 @@ mod tests {
 
     #[test]
     fn seeded_hl_table_gives_each_named_group_a_distinct_synthetic_hl_id() {
-        let hl = seeded_hl_table(&Theme::default());
+        let mut theme = Theme::with_colors(Some(0x101010), Some(0x202020));
+        for (offset, group) in ChromeGroup::ALL.into_iter().enumerate() {
+            theme.set_chrome(
+                group,
+                ResolvedStyle {
+                    fg: Some(0x30_0000 + offset as u32),
+                    ..ResolvedStyle::default()
+                },
+            );
+        }
+        let hl = seeded_hl_table(&theme);
         let ids: std::collections::HashSet<u64> = ChromeGroup::ALL
             .into_iter()
             .map(|group| {
@@ -997,6 +1015,38 @@ mod tests {
             ids.len(),
             ChromeGroup::COUNT,
             "each named group must get its own synthetic hl_id, not a shared one"
+        );
+    }
+
+    /// A cache written before a group existed carries no entry for it, so
+    /// the loaded theme holds nothing there. Seeding an empty definition
+    /// anyway would hand `Theme::from_hl` a group nvim never named, which
+    /// resolves through `Normal` -- and a consumer that derives its own
+    /// value from a neighbouring group (a float frame off its interior)
+    /// would then never derive at all on a warm start.
+    #[test]
+    fn seeding_names_no_group_the_cached_theme_left_empty() {
+        let mut theme = Theme::with_colors(Some(0x101010), Some(0x202020));
+        theme.set_chrome(
+            ChromeGroup::MsgArea,
+            ResolvedStyle {
+                fg: Some(0x303030),
+                ..ResolvedStyle::default()
+            },
+        );
+        let hl = seeded_hl_table(&theme);
+        assert!(
+            hl.group(ChromeGroup::MsgArea.hl_name()).is_some(),
+            "a group the cache carries must still be seeded"
+        );
+        assert!(
+            hl.group(ChromeGroup::FloatBorder.hl_name()).is_none(),
+            "a group the cache left empty must not be seeded"
+        );
+        assert_eq!(
+            Theme::from_hl(&hl).chrome(ChromeGroup::FloatBorder),
+            ResolvedStyle::default(),
+            "and must still read as nothing after a round trip through the table"
         );
     }
 
