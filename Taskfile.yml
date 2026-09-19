@@ -111,7 +111,7 @@ tasks:
     cmd: bash scripts/hold-awake.sh cargo test {{.CLI_ARGS}}
 
   audit:
-    desc: Enforce crate dependency direction, the pinned engine version, budget drift, the shell spellings both userlands accept, and the drift, hook, portability and reader case matrices
+    desc: Enforce crate dependency direction, the pinned engine version, budget drift, the shell spellings both userlands accept, and the drift, hook, portability, reader and quit-loop case matrices
     cmds:
       - bash scripts/audit-deps.sh
       - bash scripts/check-engine-pin.sh
@@ -122,6 +122,7 @@ tasks:
       - bash scripts/check-portability-cases.sh
       - bash .claude/hooks/tests/validate-commands-cases.sh
       - bash scripts/reader-cases.sh
+      - bash scripts/qa-respawn-loop-cases.sh
 
   drift:sweep:
     desc: Perturb every recorded figure on the pages and in the shortfall ledger and require the drift check to catch each one

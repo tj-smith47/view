@@ -456,11 +456,17 @@ fn note_supervision(
     // a connection the loop has already resolved as gone is not one this
     // pass has to ask about, and a pass that has not resolved one pays
     // exactly the single acquire load it always did
-    fold.note(wedge_kind(
+    let noted = fold.note(wedge_kind(
         stalled,
         read.observe(lost || handle.is_closed()),
         lost,
-    ))
+    ));
+    // the fold has already reduced every pass that agreed with the last one
+    // to nothing, so this is the verdict changing rather than the cadence
+    if let Some(msg) = &noted {
+        crate::vlog::log_with("engine", || format!("supervision verdict {msg:?}"));
+    }
+    noted
 }
 
 /// The soonest either watch -- or the visible readout -- would have

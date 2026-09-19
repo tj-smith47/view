@@ -776,6 +776,15 @@ impl SupervisionState {
     /// slow. Reading view's own kill as the engine's death respawns the
     /// editor the user just closed, on top of a swap file the announced
     /// exit had already cleaned up.
+    ///
+    /// One other stop reads as a session end because of that ordering: an
+    /// engine a stranger's `kill` reached after `VimLeavePre` had already
+    /// committed the exit. Offering to restart it would be wrong for the
+    /// same reason -- the session the user closed is closed, and its swap
+    /// file is gone with it. Nothing about that stop is hidden by the
+    /// reading: `VimLeavePre` is unconditional, the exit status still
+    /// travels in [`ExitInfo`] to whoever prints it, and the runtime still
+    /// records the stop's own reason as the session's fatal one.
     #[must_use]
     pub fn note_engine_stop(&mut self, exit: ExitInfo, announced_exit: bool) -> bool {
         self.exit_code = exit.code;

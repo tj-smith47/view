@@ -1414,11 +1414,24 @@ impl Engine {
     /// `VimLeave` -- and a write losing its pipe inside it is the user's own
     /// `:q` arriving a hair before the reader's `Msg::EngineStopped`.
     /// Calling that transient would leave the session running against a
-    /// corpse until the stop caught up. A connection still *open* is the
-    /// only thing that makes a failed write genuinely the write's fault, and
+    /// corpse until the stop caught up. A reader that has finished with
+    /// the stream is the only thing that makes a failed write genuinely the
+    /// write's fault, and
     /// [`wait_until_settled`](crate::handle::EngineHandle::wait_until_settled)
-    /// returns immediately on one already closed, so an open connection pays
-    /// its `READER_SETTLE` only on the pass that lost a write.
+    /// asks the reader for that rather than the shared closed flag, which
+    /// the writer sets as well. So a connection the writer has just closed
+    /// pays the whole `READER_SETTLE` here, where it used to return at
+    /// once: the bytes that say why the pipe went are exactly the ones
+    /// still in flight when it does.
+    ///
+    /// That cost is bounded, and it lands at most once per connection. The
+    /// caller is `recovery::resolve`'s `Flow::EngineLost` arm, on the
+    /// runtime loop's own thread, so a lost write can hold the loop for up
+    /// to `READER_SETTLE` before the stop resolves. It reaches the bound
+    /// only where the connection is already gone, which is a session with
+    /// no frame left to paint that does not depend on the answer, and a
+    /// reader slower than the bound resolves to `write_lost` -- the
+    /// recoverable reading, and the safe one to be wrong in.
     ///
     /// [`stop_report`]: Self::stop_report
     #[must_use]
@@ -1426,6 +1439,9 @@ impl Engine {
         if let Some(status) = self.child.try_wait().ok().flatten() {
             return Some(self.settled_report(exit_info_from_status(status)));
         }
+        // the runtime loop is the thread inside this wait, and the answer
+        // decides whether the session is dead or merely unwritable, so the
+        // loop holds rather than paint a frame against a guess
         if !self.handle.wait_until_settled(Self::READER_SETTLE) {
             return None;
         }
