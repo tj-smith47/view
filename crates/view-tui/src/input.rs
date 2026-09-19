@@ -152,8 +152,13 @@ fn read_ready(fd: BorrowedFd<'_>) -> Option<Vec<u8>> {
 /// `POLLIN` alone, which is none of the three flags read below.
 ///
 /// Linux reports all three whatever the mask holds, so it keeps the empty
-/// one and asks the kernel exactly what it asked before.
-#[cfg(all(unix, target_vendor = "apple"))]
+/// one and asks the kernel exactly what it asked before. The same arm
+/// covers every other non-Apple unix -- FreeBSD, NetBSD, the illumos
+/// family -- where POSIX asks for the three regardless of the mask and
+/// FreeBSD's `pollscan` ORs `POLLERR|POLLHUP|POLLNVAL` into what it hands
+/// `fo_poll`. That is read off the FreeBSD source: Linux and macOS are the
+/// only unixes this tree has a host for, so no other one is measured.
+#[cfg(target_vendor = "apple")]
 const HANGUP_EVENTS: rustix::event::PollFlags = rustix::event::PollFlags::IN;
 #[cfg(all(unix, not(target_vendor = "apple")))]
 const HANGUP_EVENTS: rustix::event::PollFlags = rustix::event::PollFlags::empty();
@@ -1002,6 +1007,29 @@ mod tests {
             source.contains(concat!("#[cfg(not(unix))]\n", "pub(crate) fn event_to_msg")),
             "`event_to_msg` is reachable on unix again, which is a second \
              reading of the same bytes"
+        );
+    }
+
+    /// The Darwin arm of the mask is invisible to every check this host
+    /// runs: the test below passes on Linux with that arm reverted, because
+    /// the empty mask is correct there. So the arm is held by its own text,
+    /// the way the crossterm reads above are -- split across `concat!`
+    /// pieces so the whole of it exists nowhere but at the definition, and
+    /// a revert that leaves the constant empty on Darwin fails here rather
+    /// than on the one host that would notice.
+    #[test]
+    fn darwin_asks_the_hangup_poll_for_an_event_its_kqueue_can_watch() {
+        let source = include_str!("input.rs");
+        let arm = concat!(
+            "#[cfg(target_vendor = \"apple\")]\n",
+            "const HANGUP_EVENTS: rustix::event::PollFlags",
+            " = rustix::event::PollFlags::IN;\n"
+        );
+        assert!(
+            source.contains(arm),
+            "the Darwin mask is not `POLLIN`: an empty mask registers no \
+             kqueue filter there, so a hung-up terminal and a closed \
+             descriptor both answer `revents=0` and the session stays"
         );
     }
 
