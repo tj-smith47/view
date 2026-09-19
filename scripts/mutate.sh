@@ -13,7 +13,9 @@ if [ -z "$BATTERY" ] || [ ! -f "$BATTERY" ]; then
   exit 2
 fi
 
-BACKUP_DIR="$(mktemp -d "${TMPDIR:-$HOME/.cache}/view-mutate.XXXXXX")"
+# shellcheck source=lib/scratch.sh
+. "$(dirname "$0")/lib/scratch.sh"
+BACKUP_DIR="$(mktemp -d "$(scratch_root)/view-mutate-XXXXXX")"
 RESTORE_LIST="$BACKUP_DIR/restore.list"
 : >"$RESTORE_LIST"
 

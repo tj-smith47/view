@@ -1429,11 +1429,10 @@ impl Engine {
     /// whether the session is dead or merely unwritable, and there is no
     /// frame worth painting until it is in -- so a lost write can hold
     /// that loop for up to `READER_SETTLE` before the stop resolves. It
-    /// reaches the bound
-    /// only where the connection is already gone, which is a session with
-    /// no frame left to paint that does not depend on the answer, and a
-    /// reader slower than the bound resolves to `write_lost` -- the
-    /// recoverable reading, and the safe one to be wrong in.
+    /// reaches the bound only where the connection is already gone, which
+    /// is a session with no frame left to paint that does not depend on the
+    /// answer, and a reader slower than the bound resolves to `write_lost`
+    /// -- the recoverable reading, and the safe one to be wrong in.
     ///
     /// [`stop_report`]: Self::stop_report
     #[must_use]

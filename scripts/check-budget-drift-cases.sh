@@ -49,7 +49,9 @@ fi
 
 printf 'checker under test: %s\n' "$CHECKER"
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/check-budget-drift-cases.XXXXXX")
+# shellcheck source=lib/scratch.sh
+. "$(dirname "$0")/lib/scratch.sh"
+WORK=$(mktemp -d "$(scratch_root)/check-budget-drift-cases-XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
 n=0

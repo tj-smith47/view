@@ -304,19 +304,28 @@ whole population, in `scripts/lib/scratch.sh`: the job's own scratch
 directory where a harness set `CLAUDE_JOB_DIR`, the user's cache otherwise.
 A script sources that file and writes `mktemp -d "$(scratch_root)/name-XXXXXX"`.
 
-An operand naming some other root is still an operand, and the legs that
-write `"${TMPDIR:-/tmp}/view-…-XXXXXX"` keep it: what a run of theirs makes
-is a session root a unix socket path is measured from, and the rule is about
-the call that names nowhere at all rather than about which nowhere it picks.
+An operand naming some other root is still an operand, and a call handed
+one is left alone -- with one root excepted. `"${TMPDIR:-/tmp}/…"` is the
+same shared tmpfs written longhand, so it buys nothing anywhere but
+`scripts/acceptance/`, where what a leg makes is a session root a unix
+socket path is measured from and the length a platform allows such a path
+is the reason the root is chosen by hand. That directory is the whole of
+the exemption. Read as "some other root", the spelling covered five gates
+that wanted the scratch directory and got the tmpfs.
 
 `check_temp_roots` in `scripts/check-style.sh` reads each line outside its
-single quotes and refuses a `mktemp` whose words are all options. The
-quoting is the whole of how the case files stay green: they plant scripts
-through `printf '…'` and through here-doc bodies, and a spelling written in
-either is a fixture rather than a call this tree makes -- the body is
-invisible to the reader this shares with the trap walk above, and the
-single-quoted run is stripped here. Five cases at the end of
-`scripts/check-style-cases.sh`, two red and three green, and each green one
+single quotes and refuses two shapes: a `mktemp` whose words are all
+options, and one whose operand is rooted at `$TMPDIR` in a file outside
+`scripts/acceptance/`. An option word is read short or long, because
+`--directory` read as an operand is a call that names nowhere passing as
+one that names a root; and a line the shell joins on a trailing backslash
+is joined here first, because the operand may sit on either side of the
+break. The quoting is the whole of how the case files stay green: they
+plant scripts through `printf '…'` and through here-doc bodies, and a
+spelling written in either is a fixture rather than a call this tree makes
+-- the body is invisible to the reader this shares with the trap walk
+above, and the single-quoted run is stripped here. Nine cases at the end of
+`scripts/check-style-cases.sh`, five red and four green, and each green one
 reddens when the one rule it names is reverted on a scratch copy of the
 checker.
 

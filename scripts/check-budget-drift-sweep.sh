@@ -94,7 +94,9 @@ BUDGETS='crates/view-bench/budgets.toml'
 BASELINES='crates/view-bench/baselines'
 PAGES='README.md docs/performance.md docs/benchmarking.md'
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/check-budget-drift-sweep.XXXXXX")
+# shellcheck source=lib/scratch.sh
+. "$(dirname "$0")/lib/scratch.sh"
+WORK=$(mktemp -d "$(scratch_root)/check-budget-drift-sweep-XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 TREE="$WORK/tree"
 mkdir -p "$TREE"

@@ -77,7 +77,9 @@ fi
 
 printf 'checker under test: %s\n' "$CHECKER"
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/check-style-cases.XXXXXX")
+# shellcheck source=lib/scratch.sh
+. "$(dirname "$0")/lib/scratch.sh"
+WORK=$(mktemp -d "$(scratch_root)/check-style-cases-XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
 n=0
@@ -2934,8 +2936,12 @@ expect_temp_roots() {
   desc="$3"
   out=$(bash "$CHECKER" --temp-roots "$CASE" 2>&1)
   rc=$?
+  # both verdicts read: the walk refuses a call that names no root and a
+  # template rooted at the shared tmpfs, and a harvest taking only the first
+  # can never grade the second
   got=$(printf '%s\n' "$out" \
-    | awk '/: makes a temp file with no template saying where it goes/ {
+    | awk '/: makes a temp file with no template saying where it goes/ ||
+           /: roots a temp file at TMPDIR, which is the shared tmpfs/ {
         c = $1; sub(/:[0-9]*:$/, "", c); print c
       }' \
     | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
@@ -2974,6 +2980,33 @@ expect_temp_roots 0 '' 'a bare mktemp written inside a single-quoted string'
 new_temp_trap_case
 printf 'cat <<%s\nf=$(mktemp)\nPLANT\n' "'PLANT'" | write_temp_trap_script
 expect_temp_roots 0 '' 'a bare mktemp written in a here-doc body'
+
+# the join the shell makes on a trailing backslash: read as far as the
+# backslash, the call is handed its options and a backslash, and the
+# backslash reads as the root the rule asks for.
+new_temp_trap_case
+printf 'f=$(mktemp \\\n  -d)\n' | write_temp_trap_script
+expect_temp_roots 1 'scripts/a.sh' 'a mktemp whose options continue onto the next line'
+
+# the long spelling of the same option, which a walk reading only `-x` takes
+# for an operand because the second dash is not a letter.
+new_temp_trap_case
+printf 'f=$(mktemp --directory)\n' | write_temp_trap_script
+expect_temp_roots 1 'scripts/a.sh' 'a mktemp handed a long option and no template'
+
+# the shared tmpfs written longhand, which is a root and still the tmpfs the
+# bare call lands on.
+new_temp_trap_case
+printf 'f=$(mktemp -d "${TMPDIR:-/tmp}/a-XXXXXX")\n' | write_temp_trap_script
+expect_temp_roots 1 'scripts/a.sh' 'a template rooted at TMPDIR outside scripts/acceptance'
+
+# the one directory that spelling is allowed in, and the whole of why the
+# case above is keyed on the path rather than on the operand alone.
+new_temp_trap_case
+mkdir -p "$CASE/scripts/acceptance"
+printf '#!/usr/bin/env bash\nf=$(mktemp -d "${TMPDIR:-/tmp}/view-acc-XXXXXX")\n' \
+  > "$CASE/scripts/acceptance/leg"
+expect_temp_roots 0 '' 'the same template under scripts/acceptance, where a session root is chosen by hand'
 
 # ---------------------------------------------------------------------------
 # the directories the whole run requires: a walk guarded on a directory that

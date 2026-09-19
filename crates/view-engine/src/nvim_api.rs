@@ -317,7 +317,7 @@ end
 /// per settled key, and nearly all of it is nvim's own dispatch of a Lua
 /// callback rather than the walk inside it: a session whose claimant never
 /// loads re-asks a list of two names, and the first test on each is a
-/// `package.loaded` lookup that answers nil. Against a frame that is three
+/// `package.loaded` lookup that answers nil. Against a frame that is four
 /// orders of magnitude longer, the listener is not a cost a typist can
 /// reach -- which is why it is allowed to run at all, and why it retires
 /// on a clock rather than on a count of keys.

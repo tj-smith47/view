@@ -33,6 +33,13 @@ static PENDING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new()
 /// bound is what keeps a refusal in a loop from growing without one.
 const PENDING_CAP: usize = 8;
 
+/// How many the bound above turned away.
+///
+/// A list cut at the bound and flushed without saying so reads as the whole
+/// of what a host refused, which is the same silence the holding exists to
+/// end. The count goes out as a line of its own behind the held ones.
+static DROPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Hands this crate somewhere to record a tie the host refused.
 ///
 /// Every arm can be refused -- a `prctl` a seccomp profile answers `EPERM`,
@@ -53,24 +60,34 @@ const PENDING_CAP: usize = 8;
 /// replacement.
 ///
 /// Whatever was refused before this call is written out here, so the order
-/// of the two lines in a `main` decides nothing.
+/// of the two lines in a `main` decides nothing. What the bound on the
+/// holding turned away follows as a line of its own, so a cut list never
+/// reads as the whole of it.
 pub fn record_refusals_with(report: fn(&str)) {
     // the lock is held across the install so that a refusal racing it is
     // either buffered before the drain below or written straight out after
-    // it, never pushed onto a list nothing reads again
-    let Ok(mut held) = PENDING.lock() else {
-        let _ = REPORT.set(report);
-        return;
-    };
+    // it, never pushed onto a list nothing reads again. A poison is
+    // recovered rather than propagated: the held notes are intact whatever
+    // panicked beside them, and the list this promises to write out is
+    // exactly the one a panicking session most needs read back
+    let mut held = PENDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if REPORT.set(report).is_err() {
         return;
     }
     // the lock is released before the writer runs: a writer that reached
     // back into this crate would otherwise be waiting on itself
     let notes = std::mem::take(&mut *held);
+    let dropped = DROPPED.swap(0, std::sync::atomic::Ordering::Relaxed);
     drop(held);
     for note in notes {
         report(&note);
+    }
+    if dropped > 0 {
+        report(&format!(
+            "{dropped} more refusals were dropped before the writer was installed"
+        ));
     }
 }
 
@@ -78,14 +95,22 @@ pub fn record_refusals_with(report: fn(&str)) {
 /// it for the writer that has not arrived yet.
 #[cfg(any(unix, windows))]
 fn refused(note: &str) {
-    if let Ok(mut pending) = PENDING.lock() {
-        if REPORT.get().is_none() {
-            if pending.len() < PENDING_CAP {
-                pending.push(note.to_string());
-            }
-            return;
+    // as in the install above, and for the same reason: a poisoned list
+    // still holds every note pushed onto it, and answering a poison by
+    // dropping this one loses the refusal rather than the panic
+    let mut pending = PENDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if REPORT.get().is_none() {
+        if pending.len() < PENDING_CAP {
+            pending.push(note.to_string());
+        } else {
+            DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        return;
     }
+    // released before the writer runs, for the reason the install states
+    drop(pending);
     if let Some(report) = REPORT.get() {
         report(note);
     }
@@ -595,7 +620,7 @@ fn create_killing_job() -> Option<usize> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{record_refusals_with, refused, PENDING_CAP};
+    use super::{record_refusals_with, refused, PENDING, PENDING_CAP};
 
     /// What the writer installed below was handed.
     static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
@@ -610,19 +635,48 @@ mod tests {
         SEEN.lock().unwrap().clone()
     }
 
+    /// Panics while holding the held list, which is the only way to reach
+    /// the recovery the two lock sites above make.
+    ///
+    /// A named function rather than the macro the workspace lints deny in
+    /// this crate: the unwrap of an `Err` this returns panics where the
+    /// call stands, which is inside the guard.
+    fn refuse_to_return() -> Result<(), String> {
+        Err(String::from("the thread holding the list is going down"))
+    }
+
     /// A refusal raised before any writer exists reaches the one that
-    /// arrives afterwards.
+    /// arrives afterwards -- through a poisoned list, and saying how many
+    /// the bound turned away.
     ///
     /// The whole of the tie is decided in the first lines of a `main`, and
     /// the watcher's own pipe and `/bin/sh` are made there: a process that
     /// installed its writer one line later than it prepared the tie used to
     /// drop exactly the refusal that says no child of this session is tied.
+    /// A panic anywhere beside the list used to drop the same thing a
+    /// second way, and a list cut at its bound used to read as the whole of
+    /// what the host refused.
     ///
-    /// One case and one test binary, because the two statics it reads are
-    /// per-process: a second case touching either would be deciding this
-    /// one's answer from another thread.
+    /// One case and one test binary, because the three statics it reads are
+    /// per-process: a second case touching any of them would be deciding
+    /// this one's answer from another thread.
     #[test]
     fn a_refusal_raised_before_any_writer_is_installed_is_not_lost() {
+        let poisoner = std::thread::spawn(|| {
+            let _held = PENDING
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            refuse_to_return().unwrap();
+        });
+        assert!(
+            poisoner.join().is_err(),
+            "the thread that poisons the held list returned instead"
+        );
+        assert!(
+            PENDING.is_poisoned(),
+            "the held list is not poisoned, so the recovery below grades nothing"
+        );
+
         for i in 0..PENDING_CAP + 2 {
             refused(&format!("refused {i}"));
         }
@@ -635,9 +689,10 @@ mod tests {
 
         assert_eq!(
             seen().len(),
-            PENDING_CAP,
+            PENDING_CAP + 1,
             "the held refusals did not arrive whole at the writer that \
-             installed itself after them, or the bound on them did not hold"
+             installed itself after them, or the line counting the ones \
+             the bound turned away is missing"
         );
         assert_eq!(
             seen().first().map(String::as_str),
@@ -645,11 +700,17 @@ mod tests {
             "the refusals arrived in some order other than the one they \
              were raised in"
         );
+        assert_eq!(
+            seen().get(PENDING_CAP).map(String::as_str),
+            Some("2 more refusals were dropped before the writer was installed"),
+            "the flushed list says nothing about the two refusals the bound \
+             turned away, so it reads as the whole of what was refused"
+        );
 
         refused("refused after the writer");
         assert_eq!(
             seen().len(),
-            PENDING_CAP + 1,
+            PENDING_CAP + 2,
             "a refusal raised after the writer was installed did not reach it"
         );
     }

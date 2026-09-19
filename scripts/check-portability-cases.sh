@@ -45,7 +45,9 @@ fi
 
 printf 'scanner under test: %s\n' "$SCANNER"
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/check-portability-cases.XXXXXX")
+# shellcheck source=lib/scratch.sh
+. "$(dirname "$0")/lib/scratch.sh"
+WORK=$(mktemp -d "$(scratch_root)/check-portability-cases-XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
 n=0

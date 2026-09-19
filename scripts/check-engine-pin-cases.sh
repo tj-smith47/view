@@ -41,7 +41,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 printf 'checker under test: %s\n' "$CHECKER"
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/check-engine-pin-cases.XXXXXX")
+# shellcheck source=lib/scratch.sh
+. "$(dirname "$0")/lib/scratch.sh"
+WORK=$(mktemp -d "$(scratch_root)/check-engine-pin-cases-XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
 n=0

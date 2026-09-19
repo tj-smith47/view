@@ -13,6 +13,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib/script-population.sh
 . "$SCRIPT_DIR/lib/script-population.sh"
 
+# Where the one temp file this gate makes goes, resolved beside this file for
+# the reason above.
+# shellcheck source=lib/scratch.sh
+. "$SCRIPT_DIR/lib/scratch.sh"
+
 # Session-narrative, spec-task-tag, and SDD-ledger-row markers, shared
 # between source comments (anchored on the language's own comment prefix,
 # `anchor` = "(prefix).*") and doc prose (`anchor` = "", matching anywhere
@@ -545,8 +550,8 @@ read_prod_lines() {
   if [ -n "$PROD_LINES_CACHE" ]; then
     return 0
   fi
-  if ! PROD_LINES_ERR=$(mktemp "${TMPDIR:-/tmp}/check-style-prod-lines.XXXXXX"); then
-    PROD_LINES_WHY="mktemp under ${TMPDIR:-/tmp} failed"
+  if ! PROD_LINES_ERR=$(mktemp "$(scratch_root)/check-style-prod-lines-XXXXXX"); then
+    PROD_LINES_WHY="mktemp under the scratch root failed"
     return 1
   fi
   # the scan is the slowest step in the gate, so the window in which a
@@ -1262,24 +1267,35 @@ EOF
 # nothing set that -- a small tmpfs shared with every job running beside
 # this one, and a name that says nothing about which script made it.
 # `scripts/lib/scratch.sh` holds the root this population writes in, and a
-# template under it is what puts a file there. An operand that names some
-# other root is still an operand: what this refuses is the call that names
-# none.
+# template under it is what puts a file there. Any other root a template
+# names is still a root, and one thing the walk refuses is the call that
+# names none.
+#
+# The other is a template rooted at `$TMPDIR` itself, which is that same
+# tmpfs written longhand. `scripts/acceptance/` is the one place it stands:
+# what a run of those legs makes is a session root a unix socket path is
+# measured from, and the length a platform allows such a path is the whole
+# reason that root is chosen by hand. Outside that directory the spelling
+# buys nothing and lands on the shared tmpfs, so it is named here.
 #
 # Read off the line outside its single quotes, because the case files plant
 # whole scripts through `printf '...'` and a spelling written there is a
 # fixture rather than a call this tree makes. A here-doc body -- where the
 # rest of those fixtures live -- is already invisible to the reader this
-# shares with the trap walk.
+# shares with the trap walk. Lines the shell joins on a trailing backslash
+# are joined here too: a call read only as far as the backslash is handed
+# its options and no operand, which reads as a root the next line names.
 check_temp_roots() {
-  local fail=0 f found
+  local fail=0 rootless=0 shared=0 f found exempt line
   if ! read_script_population; then
     return 1
   fi
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     grep -q 'mktemp' "$f" || continue
-    found=$(awk -v SQ="'" "$SCRIPT_CODE_AWK"'
+    exempt=0
+    case "$f" in (scripts/acceptance/*) exempt=1 ;; esac
+    found=$(awk -v SQ="'" -v exempt="$exempt" "$SCRIPT_CODE_AWK"'
       # the text outside every single-quoted run, which is the text the
       # shell runs. A run left open at the end of the line takes the rest
       # of that line with it, and the caller says whether this line began
@@ -1299,40 +1315,79 @@ check_temp_roots() {
         }
         return out
       }
-      # whether the call at `at` is handed anything but options. The option
-      # words go first, so `-d` and `-u` are skipped and the `DIR` after a
-      # `-p` is read as the operand it is
-      function has_template(s, at,   rest, c) {
+      # whether the line ends in a backslash the shell reads as a join. An
+      # even run is that many escaped backslashes and joins nothing
+      function continued(s,   i, c) {
+        c = 0
+        for (i = length(s); i >= 1 && substr(s, i, 1) == "\\"; i--) { c++ }
+        return c % 2
+      }
+      # what the call at `at` is handed once its option words are off. The
+      # option words go first, short and long, so `-d` and `--directory`
+      # both read as the spelling that names nowhere, while the DIR after a
+      # `-p` is left where it stands: it is the root the rule asks for
+      function operand(s, at,   rest) {
         rest = substr(s, at + 6)
-        while (rest ~ /^[[:space:]]+-[A-Za-z]/) {
-          sub(/^[[:space:]]+-[A-Za-z]+/, "", rest)
+        while (rest ~ /^[[:space:]]+--?[A-Za-z]/) {
+          sub(/^[[:space:]]+--?[A-Za-z][A-Za-z-]*/, "", rest)
         }
         sub(/^[[:space:]]+/, "", rest)
-        c = substr(rest, 1, 1)
-        return (c != "" && c !~ /[);<>&|`]/)
+        if (substr(rest, 1, 1) ~ /[);<>&|`]/) { return "" }
+        return rest
       }
+      # whether that operand is rooted at TMPDIR. An opening double quote
+      # is not part of the root, and a single one is already gone
+      function under_tmpdir(op) {
+        if (substr(op, 1, 1) == "\"") { op = substr(op, 2) }
+        return substr(op, 1, 8) == "${TMPDIR"
+      }
+      # every call on one joined line, reported against the line the join
+      # began on
+      function grade(text, at_line,   pos, k, at, op) {
+        pos = 0
+        while (1) {
+          k = index(substr(text, pos + 1), "mktemp")
+          if (k == 0) { return }
+          at = pos + k
+          pos = at + 5
+          if (at > 1 && substr(text, at - 1, 1) ~ /[A-Za-z0-9_-]/) { continue }
+          if (substr(text, at + 6, 1) ~ /[A-Za-z0-9_]/) { continue }
+          op = operand(text, at)
+          if (op == "") { print at_line ":none"; continue }
+          if (!exempt && under_tmpdir(op)) { print at_line ":shared" }
+        }
+      }
+      FNR == 1 { PEND = ""; START = 0 }
       {
         opened = (script_code_top() == SQ)
         script_code_scan($0)
         if (CODE == "") { next }
         line = unquoted(opened ? SQ CODE : CODE)
-        pos = 0
-        while (1) {
-          k = index(substr(line, pos + 1), "mktemp")
-          if (k == 0) { break }
-          at = pos + k
-          pos = at + 5
-          if (at > 1 && substr(line, at - 1, 1) ~ /[A-Za-z0-9_-]/) { continue }
-          if (substr(line, at + 6, 1) ~ /[A-Za-z0-9_]/) { continue }
-          if (has_template(line, at)) { continue }
-          print FNR
+        if (PEND == "") { START = FNR } else { line = PEND line }
+        if (continued(line)) {
+          PEND = substr(line, 1, length(line) - 1)
+          next
         }
+        PEND = ""
+        grade(line, START)
       }
+      # a file whose last line is continued leaves the call ungraded
+      # otherwise, which is the direction that passes a defect in silence
+      END { if (PEND != "") { grade(PEND, START) } }
     ' "$f")
     if [ -n "$found" ]; then
       while IFS= read -r line; do
         [ -n "$line" ] || continue
-        echo "$f:$line: makes a temp file with no template saying where it goes"
+        case "$line" in
+          (*:shared)
+            echo "$f:${line%:shared}: roots a temp file at TMPDIR, which is the shared tmpfs"
+            shared=1
+            ;;
+          (*)
+            echo "$f:${line%:none}: makes a temp file with no template saying where it goes"
+            rootless=1
+            ;;
+        esac
       done <<EOF
 $found
 EOF
@@ -1344,11 +1399,21 @@ EOF
   if [ "$fail" -eq 0 ]; then
     return 0
   fi
-  echo "STYLE FAIL: a temp file with no root named for it"
-  echo "  A bare mktemp writes under TMPDIR, which is /tmp here: a small"
-  echo "  tmpfs every parallel job shares, under a name saying nothing about"
-  echo "  which script made it. Source scripts/lib/scratch.sh and hand the"
-  echo "  call a template under \$(scratch_root)."
+  if [ "$rootless" -eq 1 ]; then
+    echo "STYLE FAIL: a temp file with no root named for it"
+    echo "  A bare mktemp writes under TMPDIR, which is /tmp here: a small"
+    echo "  tmpfs every parallel job shares, under a name saying nothing about"
+    echo "  which script made it. Source scripts/lib/scratch.sh and hand the"
+    echo "  call a template under \$(scratch_root)."
+  fi
+  if [ "$shared" -eq 1 ]; then
+    echo "STYLE FAIL: a temp root on the shared tmpfs"
+    echo "  A template rooted at \${TMPDIR:-/tmp} is that same tmpfs under a"
+    echo "  longer spelling. Only scripts/acceptance/ names it, where the"
+    echo "  session root a unix socket path is measured from has to be chosen"
+    echo "  by hand. Source scripts/lib/scratch.sh and root the template at"
+    echo "  \$(scratch_root)."
+  fi
   return 1
 }
 

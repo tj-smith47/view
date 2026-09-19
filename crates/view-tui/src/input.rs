@@ -1070,7 +1070,9 @@ mod tests {
         rustix::io::write(&write, b"k").unwrap();
         assert!(
             !terminal_hungup(read.as_fd()),
-            "a live far end with a byte ready reads as hung up, so the              verdict is reading the poll's own answer rather than              POLLHUP, POLLERR and POLLNVAL"
+            "a live far end with a byte ready reads as hung up, so the \
+             verdict is reading the poll's own answer rather than \
+             POLLHUP, POLLERR and POLLNVAL"
         );
     }
 
