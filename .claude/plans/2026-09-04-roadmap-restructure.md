@@ -101,13 +101,30 @@ cell-exact; the user's Termius pass shows no residue.
 
 ### S2 — Engine lifecycle: it starts, stops and dies exactly once
 
-1. `:qa!` respawns the engine 1 in 6 (#30) — `announced_exit` race.
-2. Stray reaping / busy loop after PTY death (#18, in progress).
-3. macOS: session whose pty master closed does not end (#38).
-4. Key-backlog spin root cause (T26, #15).
+Landed 793197e..0acb3e6 on `dev/p6-polish`. The range also carries the CI
+repairs that window needed (e319bde, 42306f8, 66dbc33, 3f46987, a8c10b8).
+
+1. `:qa!` respawns the engine 1 in 6 (#30) — `announced_exit` race (landed
+   af8121e: an exit nvim announced is never a fault, and a stop settles on
+   the reader's completion; repro loop 535d951, hardening 46fea04, 2207e2e).
+2. Stray reaping / busy loop after PTY death (#18) — the parent-death tie on
+   all three platforms, with the signal shapes to measure it (landed cd2adf4;
+   register ab138a4, hardening 3abb372, af462be, 7861cb2).
+3. macOS: session whose pty master closed does not end (#38) — a Darwin poll
+   with an empty mask registers no kqueue filter, so HUP never arrives
+   (landed 2d06383, source pin 56b7b39).
+4. Key-backlog spin root cause (T26, #15) — the paint happens once per
+   drained input batch instead of once per key, capped at one frame of
+   staleness (landed 0604ec8; Windows loop and cap 57d4834, hermetic data
+   root 01c48d4, 7c211a7, 0acb3e6).
 
 Exit: 30-run loops of each on dev-linux and mbp, zero strays in the
-process table after.
+process table after. Met on dev-linux at 0acb3e6 from the installed binary
+(390 quit and signal runs across ten shapes, 30 hangup runs, 30 paste runs,
+zero strays). On mbp the pre-attach signal legs (20 runs) and the hangup
+loop (30 runs) are recorded; the settled and editing signal legs are not
+recordable there, because the login-shaped config's failing mason installs
+repaint and the screen never settles.
 
 ### S3 — Tiled UI: the Hyprland / omarchy identity
 
