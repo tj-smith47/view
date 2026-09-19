@@ -138,6 +138,26 @@ fn read_ready(fd: BorrowedFd<'_>) -> Option<Vec<u8>> {
     }
 }
 
+/// The event mask [`terminal_hungup`] polls with: empty, except on Darwin,
+/// where an empty one watches nothing at all.
+///
+/// `poll(2)` there is a kqueue underneath, registering one filter per
+/// asked-for event and none at all for a descriptor whose mask is empty, so
+/// the call answers `n=0, revents=0` for a hung-up pty slave and for a
+/// closed descriptor alike: neither a hangup nor a `POLLNVAL` could be seen
+/// on that platform, and a macOS session read EOF off its gone terminal
+/// forever instead of leaving. `POLLIN` is what registers `EVFILT_READ`,
+/// whose `EV_EOF` arrives as `POLLHUP`; an unwatchable descriptor then
+/// answers `POLLNVAL`, and a live terminal with bytes ready answers
+/// `POLLIN` alone, which is none of the three flags read below.
+///
+/// Linux reports all three whatever the mask holds, so it keeps the empty
+/// one and asks the kernel exactly what it asked before.
+#[cfg(all(unix, target_vendor = "apple"))]
+const HANGUP_EVENTS: rustix::event::PollFlags = rustix::event::PollFlags::IN;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+const HANGUP_EVENTS: rustix::event::PollFlags = rustix::event::PollFlags::empty();
+
 /// Whether the terminal has hung up: its far end is gone, and every read on
 /// this descriptor from here on answers EOF or `EIO`.
 ///
@@ -152,12 +172,13 @@ fn read_ready(fd: BorrowedFd<'_>) -> Option<Vec<u8>> {
 /// for days over every measurement window on this host.
 ///
 /// One zero-timeout `poll(2)` on one descriptor and no read at all:
-/// `POLLHUP`, `POLLERR` and `POLLNVAL` are set by the kernel whether or not
-/// they were asked for, so an empty event mask reports a hangup and stays
-/// silent for an ordinary readable terminal. `POLLNVAL` counts as a hangup
-/// too: it is the answer a macOS `/dev/tty` fallback descriptor gives (see
-/// [`adopt_terminal_stdin`]), and a descriptor no readiness mechanism can
-/// watch has exactly the same consequence as one whose far end is gone.
+/// `POLLHUP`, `POLLERR` and `POLLNVAL` are the answer whether or not they
+/// were asked for, so the mask ([`HANGUP_EVENTS`]) is the narrowest each
+/// kernel accepts and an ordinary readable terminal still leaves all three
+/// clear. `POLLNVAL` counts as a hangup too: it is the answer a macOS
+/// `/dev/tty` fallback descriptor gives (see [`adopt_terminal_stdin`]), and
+/// a descriptor no readiness mechanism can watch has exactly the same
+/// consequence as one whose far end is gone.
 ///
 /// Unix only, as the whole descriptor loop around it is. The Windows
 /// session reads through crossterm's console backend, which has no
@@ -167,7 +188,7 @@ fn read_ready(fd: BorrowedFd<'_>) -> Option<Vec<u8>> {
 fn terminal_hungup(fd: BorrowedFd<'_>) -> bool {
     use rustix::event::{PollFd, PollFlags};
 
-    let mut fds = [PollFd::from_borrowed_fd(fd, PollFlags::empty())];
+    let mut fds = [PollFd::from_borrowed_fd(fd, HANGUP_EVENTS)];
     let ready = matches!(
         rustix::event::poll(&mut fds, Some(&rustix::event::Timespec::default())),
         Ok(n) if n > 0
@@ -981,6 +1002,26 @@ mod tests {
             source.contains(concat!("#[cfg(not(unix))]\n", "pub(crate) fn event_to_msg")),
             "`event_to_msg` is reachable on unix again, which is a second \
              reading of the same bytes"
+        );
+    }
+
+    /// The mask is the whole of what the hangup question asks the kernel,
+    /// and on Darwin an empty one asks nothing: `poll(2)` registers a
+    /// kqueue filter per asked-for event, so a gone descriptor read as
+    /// quiet there and the session stayed. A pipe stands in for the
+    /// terminal because both kernels answer a closed far end on one exactly
+    /// as they answer it on a pty slave, and a pipe needs no pty device.
+    #[test]
+    fn a_descriptor_whose_far_end_closed_reads_as_hung_up() {
+        let (read, write) = rustix::pipe::pipe().unwrap();
+        assert!(
+            !terminal_hungup(read.as_fd()),
+            "a live far end with nothing ready is not a hangup"
+        );
+        drop(write);
+        assert!(
+            terminal_hungup(read.as_fd()),
+            "a closed far end answers POLLHUP for a mask the kernel watches"
         );
     }
 
