@@ -2039,6 +2039,12 @@ check_prose_width() {
 # the word boundaries, because `\b` is a backspace to gawk and undefined to
 # the others, and an apostrophe is spelled as its class for the reason
 # `.claude/rules/shell.md` gives for a paren in a comment.
+#
+# The three lists reach awk through the environment. A `-v` assignment is
+# lexed as a string literal, and the one true awk macOS ships refuses a
+# newline inside one -- the stance walk exited 1 on every macOS run and
+# graded no page at all. ENVIRON takes the bytes as they are, which also
+# keeps a backslash written here from being read twice.
 PROSE_CONTRAST='(, |; | -- )(not|never|rather than|instead of)([^[:alnum:]]|$)
 (^|[^[:alnum:]])rather than([^[:alnum:]]|$)
 (^|[^[:alnum:]])instead of([^[:alnum:]]|$)
@@ -2072,6 +2078,7 @@ on the same machine
 samples interleaved
 paired against
 under a real config'
+export PROSE_CONTRAST PROSE_TELLS PROSE_FAIRNESS
 # The program the walk runs, held in a variable so that no line of it
 # is read inside an open command substitution: the population's
 # heaviest carried-line count is this file, and the portability case
@@ -2105,9 +2112,9 @@ PROSE_FRAMES_AWK='
       printf "%s %s:%d: %s\n", shape, FILENAME, FNR, what
     }
     BEGIN {
-      nc = split(contrast, C, "\n")
-      nt = split(tells, T, "\n")
-      nf = split(fairness, F, "\n")
+      nc = split(ENVIRON["PROSE_CONTRAST"], C, "\n")
+      nt = split(ENVIRON["PROSE_TELLS"], T, "\n")
+      nf = split(ENVIRON["PROSE_FAIRNESS"], F, "\n")
       EMDASH = sprintf("%c%c%c", 226, 128, 148)
     }
     FNR == 1 { fenced = 0 }
@@ -2163,8 +2170,7 @@ check_prose_frames() {
   # the fragment first, awk took the option words as filenames, found no
   # main rule to read them with, and exited 0 having graded nothing
   found=$(printf '%s\n' "$pages" | LC_ALL=C xargs awk \
-    -v contrast="$PROSE_CONTRAST" -v tells="$PROSE_TELLS" \
-    -v fairness="$PROSE_FAIRNESS" "$AWK_TABLE_ROW$PROSE_FRAMES_AWK") || rc=$?
+    "$AWK_TABLE_ROW$PROSE_FRAMES_AWK") || rc=$?
   if [ "$rc" -ne 0 ]; then
     printf '%s\n' "$found"
     echo "STYLE FAIL: the stance walk exited $rc instead of grading the pages"

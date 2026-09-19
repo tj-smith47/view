@@ -97,6 +97,24 @@ new_case() {
   mkdir -p "$CASE/$SRC" "$CASE/$TESTS"
 }
 
+# A symbolic link a walk has to refuse, planted where the host can make one.
+# Git for Windows turns `ln -s` into a copy of the target unless MSYS is told
+# to make a native link, and with no target to copy it writes nothing at all:
+# the three cases below planted no link on the Windows runner, two of them
+# silently. `nativestrict` asks for a native link and refuses to fall back,
+# which needs the symlink privilege the runner's account holds; where it is
+# not held the plant says so and the case reddens.
+plant_link() {
+  planted=$(MSYS=winsymlinks:nativestrict ln -sn "$1" "$2" 2>&1) || true
+  if [ -L "$2" ]; then
+    return 0
+  fi
+  rm -rf "$2"
+  printf 'PLANT FAIL: %s made no symbolic link at %s naming %s: %s\n' \
+    "$(uname -s)" "$2" "$1" "$planted" >&2
+  return 1
+}
+
 # A line of exactly WIDTH characters, opened by PREFIX and closed by
 # SUFFIX, padded between them. The widths are computed rather than written
 # out: a fixture whose 81st character came from a hand-counted string is one
@@ -1552,7 +1570,7 @@ expect_width 1 'docs/adir.md:unreadable' \
   'a directory named like a page, which awk skips with a warning and a zero status'
 
 new_width_case
-ln -sn missing.md "$CASE/docs/dangling.md"
+plant_link missing.md "$CASE/docs/dangling.md"
 expect_width 1 'docs/dangling.md:unreadable' \
   'a page the walk cannot read, which a discarded status would pass as clean'
 
@@ -1693,7 +1711,7 @@ expect_script_comments 1 'plan-ban scripts/relay:2' \
   'a planning-document citation in a suffix-less fixture'
 
 new_script_case
-ln -sn missing.sh "$CASE/scripts/gone.sh"
+plant_link missing.sh "$CASE/scripts/gone.sh"
 expect_script_comments 1 'scripts/gone.sh:unreadable' \
   'a script the rules cannot read, which a dropped selection would pass as clean'
 
@@ -1708,7 +1726,7 @@ expect_script_comments 0 'scripts/pipe:skipped' \
 
 new_script_case
 mkdir "$CASE/scripts/sub"
-ln -sn sub "$CASE/scripts/dirlink"
+plant_link sub "$CASE/scripts/dirlink"
 expect_script_comments 1 'scripts/dirlink:unreadable' \
   'a symlink to a directory, which is a symlink that was meant to name a file'
 
@@ -3964,5 +3982,36 @@ rm -f "$CASE/README.md"
 rm -rf "$CASE/docs"
 expect_frames 1 'empty' \
   'a tree with no page to grade, which would report ok having graded nothing'
+
+# Every case above runs the walk under whichever awk is first on PATH, and
+# that awk is a GNU one wherever this matrix has been green. The walk hands
+# its three newline-joined lists to awk, and an awk that lexes a `-v` value
+# as a string literal refuses a newline inside one: the stance step exited 1
+# and graded no page on every macOS run while this file reported 279 ok. So
+# one case runs the walk under the awk the host ships, from the stock bash,
+# and says where the host has neither.
+STOCK_BASH=/bin/bash
+STOCK_AWK=/usr/bin/awk
+FRAMES_STOCK='a page graded under the awk and the bash the host ships'
+new_frames_case
+printf 'The number is a reading, not a guess.\n' >> "$CASE/docs/page.md"
+if [ ! -x "$STOCK_BASH" ] || [ ! -x "$STOCK_AWK" ]; then
+  printf 'ok %s - %s # skip this host has no %s or no %s\n' \
+    "$n" "$FRAMES_STOCK" "$STOCK_BASH" "$STOCK_AWK"
+else
+  stock_out=$(PATH="$(dirname "$STOCK_AWK"):$PATH" \
+    "$STOCK_BASH" "$CHECKER" --prose-frames "$CASE" 2>&1)
+  stock_rc=$?
+  stock_hit=$(printf '%s\n' "$stock_out" |
+    grep -E '^frame docs/page[.]md:4: ' || true)
+  if [ "$stock_rc" = 1 ] && [ -n "$stock_hit" ]; then
+    printf 'ok %s - %s\n' "$n" "$FRAMES_STOCK"
+  else
+    failures=$((failures + 1))
+    printf 'FAIL %s - %s\n  want rc=1 [frame docs/page.md:4]\n  got  rc=%s\n%s\n' \
+      "$n" "$FRAMES_STOCK" "$stock_rc" "$stock_out"
+  fi
+fi
+
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]
