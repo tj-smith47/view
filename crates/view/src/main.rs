@@ -945,6 +945,14 @@ fn route_stderr_off_the_terminal() -> Option<view_tui::terminal::StderrGuard> {
     }
 }
 
+/// Writes down a tie the host refused, which view-proc cannot do for
+/// itself: a leaf crate with no workspace dependency has no log to reach,
+/// and a child running untied is otherwise indistinguishable from a tied
+/// one until it is found reparented to init.
+fn log_untied_child(note: &str) {
+    vlog::log("proc", note);
+}
+
 fn main() -> Result<()> {
     // startup's own VIEW_LOG "startup" line (see startup::paint_shell_frame)
     // measures the shell-paint budget from this instant, not from
@@ -956,6 +964,7 @@ fn main() -> Result<()> {
     // the body allows: off Linux the tie is a watcher process, and this is
     // what keeps forking it out of the spawn the startup budget measures
     view_proc::prepare_to_tie_children();
+    view_proc::record_refusals_with(log_untied_child);
     let cli = Cli::parse();
     if let Some(register) = cli.print_clipboard {
         return print_clipboard(register);
@@ -1960,11 +1969,19 @@ mod tests {
     /// The tie is the sixth, and it is here to keep a cost *off* the spawn
     /// rather than to take one: off Linux a tied child is tied by a watcher
     /// process, and the first tied spawn is the one that forks it -- which
-    /// is the engine spawn below. Built here it is built by a thread while
-    /// the config chain runs, and it has to be here rather than lower
+    /// is the engine spawn below. The fork is made by a thread while the
+    /// config chain runs, and the call has to be here rather than lower
     /// because the pipe that watcher reads is two syscalls where there is
     /// no `pipe2`: a fork on another thread landing between them inherits
-    /// the write end and holds it open for the life of the session.
+    /// the write end and holds it open for the life of the session. This is
+    /// the line before this process has a second thread of any kind.
+    ///
+    /// The line under it is the seventh, and it reads nothing and forks
+    /// nothing: it hands view-proc this process's log, so that an arm of
+    /// the tie the host refuses says so instead of leaving a child running
+    /// untied and indistinguishable from a tied one. It is here because it
+    /// has to precede the first tied spawn, and the first tied spawn is the
+    /// engine's.
     #[test]
     fn only_the_config_prologue_runs_before_the_engine_spawn() {
         assert_eq!(
@@ -1973,6 +1990,7 @@ mod tests {
                 "Instant::now",
                 "vlog::init",
                 "view_proc::prepare_to_tie_children",
+                "view_proc::record_refusals_with",
                 "Cli::parse",
                 "Some",
                 "print_clipboard",

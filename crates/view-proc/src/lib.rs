@@ -15,6 +15,39 @@
 
 use std::process::{Child, Command};
 
+/// Where a refused tie is written down, or nowhere until a process says.
+static REPORT: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+/// Hands this crate somewhere to record a tie the host refused.
+///
+/// Every arm can be refused -- a `prctl` a seccomp profile answers `EPERM`,
+/// a host with no `/bin/sh`, a job object an older Windows will not nest --
+/// and every refusal leaves that child running and untied rather than
+/// unspawned, because an editor with no engine is the worse answer. What
+/// makes the trade dangerous is that it is silent: nothing in the process
+/// table says which children are tied, so a session running one loose looks
+/// exactly like a session running none.
+///
+/// A handed-over writer rather than a logging dependency: nothing here
+/// depends on any other crate in this workspace, which is what lets every
+/// crate that spawns depend on this one. The process that has a log gives
+/// it one, from `main` and before it spawns; a process that never calls
+/// this records nothing, which is what a test binary and a bench driver do.
+///
+/// The first caller wins, so a second call is a no-op rather than a
+/// replacement.
+pub fn record_refusals_with(report: fn(&str)) {
+    let _ = REPORT.set(report);
+}
+
+/// Writes one refusal wherever [`record_refusals_with`] pointed.
+#[cfg(any(unix, windows))]
+fn refused(note: &str) {
+    if let Some(report) = REPORT.get() {
+        report(note);
+    }
+}
+
 /// Spawns `command` as a child the operating system ends when this process
 /// does.
 ///
@@ -69,7 +102,11 @@ pub fn spawn_tied_with(
     #[cfg(windows)]
     {
         let child = spawn(&mut command)?;
-        tie_spawned_child(child.id());
+        // a refused job leaves this one child running and untied, which is
+        // the trade every arm here makes; `tie_spawned_child` is what writes
+        // the refusal down, so there is nothing further to do with the
+        // answer at this call
+        let _tied = tie_spawned_child(child.id());
         Ok(child)
     }
     #[cfg(not(any(unix, windows)))]
@@ -79,6 +116,7 @@ pub fn spawn_tied_with(
     #[cfg(target_os = "linux")]
     {
         let Some(anchor) = anchor() else {
+            refused("no thread to fork from: this child runs untied");
             return spawn(&mut command);
         };
         arm_parent_death_at_spawn(&mut command);
@@ -99,17 +137,20 @@ pub fn spawn_tied_with(
 /// Call it from `main`, before the process starts any thread that spawns.
 /// Off Linux the tie is a watcher process, so the first tied spawn forks a
 /// `/bin/sh` -- and the first tied spawn is the engine, whose own cost is
-/// the one the startup budget measures. The pipe handed to that watcher is
-/// also two syscalls where there is no `pipe2`, and a fork landing between
-/// them inherits the write end and holds it open forever; no other thread
-/// spawning yet is what makes that unrepresentable rather than unlikely.
+/// the one the startup budget measures.
+///
+/// The pipe that watcher reads is made here, on the calling thread, and
+/// only the fork goes to a thread of its own. `std::io::pipe` is two calls
+/// where there is no `pipe2` -- the pair, then the `FD_CLOEXEC` -- and a
+/// fork landing between them inherits the write end and holds the pipe open
+/// for the life of the session, which is a watcher that never reads EOF and
+/// never fires. Made from `main` there is no second thread in existence to
+/// fork; made on a thread it would run beside whatever `main` does next,
+/// and what `main` does next is fork (the ssh probe, the clipboard helper).
 pub fn prepare_to_tie_children() {
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        // on a thread because the fork is the cost being moved, not deleted
-        let _ = std::thread::Builder::new()
-            .name(String::from("view-proc-watcher"))
-            .spawn(watcher);
+        let _ = WATCHER_IN.get_or_init(|| start_watcher(fork_on_a_thread));
     }
     #[cfg(target_os = "linux")]
     {
@@ -142,7 +183,15 @@ pub fn prepare_to_tie_children() {
 /// assigned once it is running. What that leaves open is the window the
 /// unix arms leave too: a kill landing between the spawn and the tie leaves
 /// this one child loose.
+///
+/// The refusal is written down through [`record_refusals_with`] here rather
+/// than at either call site: both of them -- this crate's own Windows arm
+/// and view-ai's tokio spawn -- are in crates with no logger of their own,
+/// and the three shapes a refusal takes are known here and nowhere else.
+/// The answer is still `#[must_use]`, for a caller that can do more with it
+/// than run on.
 #[cfg(windows)]
+#[must_use]
 pub fn tie_spawned_child(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
@@ -151,6 +200,7 @@ pub fn tie_spawned_child(pid: u32) -> bool {
     };
 
     let Some(job) = killing_job() else {
+        refused("no job object: this host refused to make one, so every tied child runs untied");
         return false;
     };
     // SAFETY: `job` is a job handle this process created and never closed,
@@ -161,10 +211,14 @@ pub fn tie_spawned_child(pid: u32) -> bool {
     unsafe {
         let child = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
         if child.is_null() {
+            refused(&format!("pid {pid} runs untied: it could not be opened"));
             return false;
         }
         let tied = AssignProcessToJobObject(std::ptr::with_exposed_provenance_mut(job), child) != 0;
         CloseHandle(child);
+        if !tied {
+            refused(&format!("pid {pid} runs untied: the job object refused it"));
+        }
         tied
     }
 }
@@ -316,21 +370,30 @@ exit 0
 /// Tells the watcher to end `pid` when this process ends, starting the
 /// watcher if this is the first tied spawn.
 ///
-/// Quiet about every failure it can meet: a host with no `/bin/sh`, a pipe
-/// the kernel refused, a watcher already gone. An editor that will not
-/// start is a worse answer than a child that can be orphaned, which is the
-/// same trade the Linux arm makes with a refused `prctl`.
+/// Every failure it can meet -- a host with no `/bin/sh`, a pipe the kernel
+/// refused, a watcher already gone -- leaves this child running and untied
+/// and is written down rather than raised. An editor that will not start is
+/// a worse answer than a child that can be orphaned, which is the same trade
+/// the Linux arm makes with a refused `prctl`.
 #[cfg(all(unix, not(target_os = "linux")))]
 fn watch_for_this_process_ending(pid: u32) {
     use std::io::Write;
 
     let Some(pipe) = watcher() else {
+        refused(&format!("pid {pid} runs untied: this host has no watcher"));
         return;
     };
     let Ok(mut pipe) = pipe.lock() else {
+        refused(&format!(
+            "pid {pid} runs untied: the watcher's pipe is held by a panicked thread"
+        ));
         return;
     };
-    let _ = writeln!(pipe, "{pid}");
+    if writeln!(pipe, "{pid}").is_err() {
+        refused(&format!(
+            "pid {pid} runs untied: the watcher is gone from the other end of its pipe"
+        ));
+    }
 }
 
 /// The pipe the watcher reads, kept for the life of the process.
@@ -345,17 +408,48 @@ fn watch_for_this_process_ending(pid: u32) {
 /// (every pipe `std::io::pipe` makes does), so no child spawned afterwards
 /// holds the pipe open against this process's own ending.
 #[cfg(all(unix, not(target_os = "linux")))]
+static WATCHER_IN: std::sync::OnceLock<Option<std::sync::Mutex<std::io::PipeWriter>>> =
+    std::sync::OnceLock::new();
+
+/// The write end, built here when nothing called
+/// [`prepare_to_tie_children`] first -- a test binary, a bench or oracle
+/// driver, anything whose `main` is not view's.
+///
+/// What that costs is stated rather than closed: the pipe is made on
+/// whichever thread reached the first tied spawn, and a binary that never
+/// calls the entry point above is one that already has threads running
+/// (libtest runs its cases on them). Where there is no `pipe2` the pair and
+/// its `FD_CLOEXEC` are two calls, so a fork by another of those threads
+/// landing between them inherits the write end, and a write end nothing
+/// closes is a pipe that never reads EOF and a watcher that never fires.
+/// The window is those two calls and not the whole watcher start -- the
+/// fork of `/bin/sh` below happens after the descriptor is already
+/// close-on-exec -- and closing it entirely takes the call from `main` that
+/// [`prepare_to_tie_children`] is.
+#[cfg(all(unix, not(target_os = "linux")))]
 fn watcher() -> Option<&'static std::sync::Mutex<std::io::PipeWriter>> {
-    static WATCHER_IN: std::sync::OnceLock<Option<std::sync::Mutex<std::io::PipeWriter>>> =
-        std::sync::OnceLock::new();
-    WATCHER_IN.get_or_init(start_watcher).as_ref()
+    WATCHER_IN.get_or_init(|| start_watcher(fork_here)).as_ref()
 }
 
-/// Starts the watcher, or reports that this host has none.
+/// Makes the pipe on the calling thread, then hands the read end to `fork`.
+///
+/// The split is the whole point: the pipe is the half that cannot be moved
+/// off a thread that may fork, and the `/bin/sh` is the half worth moving
+/// off the first tied spawn.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn start_watcher() -> Option<std::sync::Mutex<std::io::PipeWriter>> {
-    let (reader, writer) = std::io::pipe().ok()?;
-    Command::new("/bin/sh")
+fn start_watcher(fork: fn(std::io::PipeReader)) -> Option<std::sync::Mutex<std::io::PipeWriter>> {
+    let Ok((reader, writer)) = std::io::pipe() else {
+        refused("no watcher: this host refused the pipe one reads, so tied children run untied");
+        return None;
+    };
+    fork(reader);
+    Some(std::sync::Mutex::new(writer))
+}
+
+/// Forks the watcher on the calling thread.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn fork_here(reader: std::io::PipeReader) {
+    let started = Command::new("/bin/sh")
         .arg("-c")
         .arg(WATCHER)
         .stdin(std::process::Stdio::from(reader))
@@ -364,9 +458,22 @@ fn start_watcher() -> Option<std::sync::Mutex<std::io::PipeWriter>> {
         // wait, and the session below it reads no hangup
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    Some(std::sync::Mutex::new(writer))
+        .spawn();
+    if started.is_err() {
+        refused("no watcher: this host would not run /bin/sh, so tied children run untied");
+    }
+}
+
+/// Forks the watcher on a thread of its own, so the cost lands beside
+/// whatever the caller does next rather than inside the first tied spawn.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn fork_on_a_thread(reader: std::io::PipeReader) {
+    let started = std::thread::Builder::new()
+        .name(String::from("view-proc-watcher"))
+        .spawn(move || fork_here(reader));
+    if started.is_err() {
+        refused("no watcher: this process could not start the thread that forks it");
+    }
 }
 
 /// The job object every tied child is put in, created on the first tie and

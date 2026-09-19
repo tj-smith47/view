@@ -60,10 +60,14 @@ fn the_intermediate_parent() {
     // an ordinary spawn, deliberately not view-proc's: an editor runs a git,
     // a clipboard helper and a language server this way, and none of them is
     // the child the tie was given
-    // never waited on, deliberately: this child has to outlive the process
-    // that spawned it, which is the whole of what the driver checks about it
     #[allow(clippy::zombie_processes)]
     let untied = long_running().spawn().unwrap();
+    // nothing waits on this child by design -- it has to outlive the process
+    // that spawned it -- so a panic anywhere below would leave it running out
+    // its own full length on a host other suites share. The two endings this
+    // file measures run no destructor at all, so the guard reaches only the
+    // paths where the case itself gave up
+    let untied = EndedOnDrop(untied.id());
     // typed rather than requested: a blocking request for work that never
     // returns could not be waited on and then reported
     engine
@@ -84,7 +88,7 @@ fn the_intermediate_parent() {
     }
     let mut stderr = std::io::stderr();
     writeln!(stderr, "{PID_MARKER}{}", engine.pid()).unwrap();
-    writeln!(stderr, "{UNTIED_MARKER}{}", untied.id()).unwrap();
+    writeln!(stderr, "{UNTIED_MARKER}{}", untied.0).unwrap();
     stderr.flush().unwrap();
     let mut byte = [0_u8; 1];
     let _ = std::io::stdin().read(&mut byte);
@@ -123,7 +127,7 @@ fn a_wedged_engine_is_ended_by(end: fn(&mut std::process::Child), ending: &str) 
             .unwrap_or_else(|| panic!("the intermediate must report {marker}"))
     };
     let engine_pid = pid_after(PID_MARKER);
-    let untied_pid = pid_after(UNTIED_MARKER);
+    let untied = EndedOnDrop(pid_after(UNTIED_MARKER));
     assert!(
         common::pid_in_process_table(engine_pid),
         "the engine was already gone before its parent was \
@@ -144,8 +148,10 @@ fn a_wedged_engine_is_ended_by(end: fn(&mut std::process::Child), ending: &str) 
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let untied_alive = common::pid_in_process_table(untied_pid);
-    end_pid(untied_pid);
+    // read before the guard ends it, asserted after: the reading is the
+    // evidence and the ending is the cleanup, and one of them has to run
+    // whether the other passes or not
+    let untied_alive = common::pid_in_process_table(untied.0);
     assert!(
         untied_alive,
         "a child the parent spawned without a tie went with it ({ending}): \
@@ -169,6 +175,19 @@ fn long_running() -> std::process::Command {
     command.stdout(std::process::Stdio::null());
     command.stderr(std::process::Stdio::null());
     command
+}
+
+/// Ends the process it names when the case leaves, however the case leaves.
+///
+/// By pid on both sides of the pin: in the intermediate a `Child` is in hand
+/// but must not be waited on, and in the driver the process is one the case
+/// never spawned itself.
+struct EndedOnDrop(u32);
+
+impl Drop for EndedOnDrop {
+    fn drop(&mut self) {
+        end_pid(self.0);
+    }
 }
 
 /// Ends a process this case started through one it started, by pid: nothing

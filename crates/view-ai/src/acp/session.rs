@@ -366,7 +366,11 @@ fn spawn_agent(cfg: &AgentLaunch) -> Result<AgentChild, AiError> {
             .map_err(failed)?;
         #[cfg(windows)]
         if let Some(pid) = child.id() {
-            view_proc::tie_spawned_child(pid);
+            // a refused job leaves the adapter running and untied, which
+            // view-proc writes down where it is refused -- this crate has no
+            // log of its own to write it to, and an agent panel that will
+            // not open is the worse answer
+            let _tied = view_proc::tie_spawned_child(pid);
         }
         Ok(child)
     }
