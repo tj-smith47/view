@@ -426,7 +426,7 @@ Compat has three classes; only the first is "by construction":
 - Remote editing is v0.1 core (§9 invented capabilities, ruled 2026-08-05):
   the engine spawns over SSH while paint and input stay local. Attaching to
   an already-running instance via `:detach`/`:connect` is chartered
-  post-v0.1, after remote ships (plans/2026-08-14-post-v01-charters.md C1).
+  for the first release, after remote ships (plans/2026-08-14-post-v01-charters.md C1; the ruling of 2026-09-04 folds every charter into the initial release).
 
 ### 5.2 RPC client (own, thin — decided)
 
@@ -805,7 +805,7 @@ plus OSC 52, so a remote session copies to the local machine), reporting
 when no system clipboard is reachable rather than silently copying
 nowhere.
 
-Post-v0.1 candidates (recorded, not dropped — pitch before any is cut):
+Candidates for the first release (recorded, not dropped — pitch before any is cut; ruled 2026-09-04: there is no later milestone):
 which-key-style hint overlay, minimap, inline git hunks, popupmenu
 documentation panel, session/project switcher.
 
@@ -1010,7 +1010,7 @@ promoted to tier-1 before v0.1 ships. Promotion is a named P6 exit criterion:
 §3.1 budgets measured over ConPTY (§13.4) and validated on winserver — not
 deferred to CI faith.
 
-## 15. Strangler roadmap (post-v0.1 direction)
+## 15. Strangler roadmap (a direction, never a milestone)
 
 Order by user-felt-latency × oracle tractability; each step lands only behind
 its differential suite. Recorded intent, not v0.1 scope:
@@ -1022,7 +1022,7 @@ its differential suite. Recorded intent, not v0.1 scope:
 3. LSP UI surfaces (diagnostics rendering, hover, signature help) over
    engine-owned LSP state.
 4. Core buffer/editing: last — slated for a dedicated feasibility and
-   effort/maintenance-vs-benefit assessment after v0.2 (user ruling
+   effort/maintenance-vs-benefit assessment after the first release (user ruling
    2026-08-08: fresh-eyes evaluation, not foreclosed in advance); moves only
    if the oracle can prove parity per permutation and the perf win is
    measured, not assumed.
@@ -1032,7 +1032,7 @@ implementation starts**: the exact input set parity is claimed over (file
 set, grammar/LSP versions, locales, encodings, terminal sizes). "Parity
 proven" means proven over that manifest — no manifest, no strangling.
 
-### 15.1 Terminal workspace arc (v0.2, ruled 2026-08-07)
+### 15.1 Terminal workspace arc (ruled 2026-08-07; in the first release per the 2026-09-04 ruling)
 
 The identity extension past v0.1: "use it for anything you can view" —
 files, another machine's tree, pictures, websites, videos — bridging a bare
@@ -1088,7 +1088,7 @@ P5.5 Invented capabilities (§9, ruled v0.1 core): supervision, remote
 P6  Polish: multigrid attach + panes, config surface, doctor, docs, tier
     goldens, Windows tier-1 promotion (ConPTY-gated, winserver-validated)
                                                                   ← v0.1
-P7  Workspace arc (§15.1, v0.2): pane compositor, browser pane via CDP,
+P7  Workspace arc (§15.1): pane compositor, browser pane via CDP,
     in-pane media
 ```
 
@@ -1112,10 +1112,10 @@ copyable ones (polish).
 | Engine distribution | Bundled pinned pair + override | System nvim default: compat claims float against unknown versions |
 | Native-vs-plugin overlap default | Native wins, per-feature opt-out, runtime supersession only (§5.5) | Defer-to-plugins default (reviewer-recommended): maximally unsurprising, but ships the product hidden — the migration audience would never see what view is |
 | First-release scope (ruled 2026-08-05) | Five invented capabilities (§9: supervision, remote editing, session DVR, key introspector, image viewing) ship in v0.1 as core features alongside AI | Post-v0.1 rollout: differentiation would rest on refined plugin equivalents alone, which reads as repackaged nvim rather than a new category |
-| v0.1 media playback shape (ruled 2026-08-07) | Full-terminal handoff to detected system mpv; doctor-guided | Composited in-pane playback: requires the workspace-arc pane compositor, deferred to v0.2 with it |
+| v0.1 media playback shape (ruled 2026-08-07) | Full-terminal handoff to detected system mpv; doctor-guided | Composited in-pane playback: requires the workspace-arc pane compositor and lands with it |
 | Float title style (§7.1, ruled 2026-08-09 at the P4 exit drain) | `ChromeGroup::FloatTitle` (nvim's builtin `hl-FloatTitle`) fg over the surface's own bg, bold on every tier | §7.1's original `accent` fg: the accent role vocabulary is unimplemented tree-wide (no code resolves `Function`/`Statement` into a role), so it would have shipped as a hardcoded style nvim has no way to reach — the opposite of the migration audience's expectation that their colorscheme drives view's chrome. Coordinator ruling, reported to the user; §7.1 is itself still pending user ratification |
 | `ToastHistory` scope vs §9's letter (ruled 2026-08-09 at the P4 exit drain) | Keep recording confirm-class entries (`confirm`/`return_prompt`/inputlist-class) to scrollback history alongside the sticky and transient rows, and amend §9's routing table to say so | Narrow the recorder to only what §9's routing table listed: a history that silently omits the confirm prompt the user just answered is the surprising outcome for anyone coming from nvim's `:messages`, and painless migration is the tie-breaker. Coordinator ruling, reported to the user |
-| Browser pane engine (§15.1, v0.2) | CDP-driven system Chromium via `chromiumoxide`: screencast frames through the native graphics substrate; view owns bindings, hints, theme; browser detected, never bundled | Carbonyl/Carboxyl child process: stalled-upstream Chromium fork, supply-chain risk, UX never view's. Servo embedding: watched as the long-term in-process fit — API unstable and open-web compat incomplete as of 2026-08. Handrolled engine: never |
+| Browser pane engine (§15.1) | CDP-driven system Chromium via `chromiumoxide`: screencast frames through the native graphics substrate; view owns bindings, hints, theme; browser detected, never bundled | Carbonyl/Carboxyl child process: stalled-upstream Chromium fork, supply-chain risk, UX never view's. Servo embedding: watched as the long-term in-process fit — API unstable and open-web compat incomplete as of 2026-08. Handrolled engine: never |
 
 ## 19. Risks
 

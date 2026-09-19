@@ -153,9 +153,27 @@ the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
 - [x] ★ **Remote editing.** `view --remote host:path`: engine over SSH,
       paint and input local, keystrokes echoed without waiting for the round
       trip, OSC 52 clipboard.
+- [x] **Migration integrity.** Capability probing that survives SSH and
+      tmux, a register of which plugin still owns which surface,
+      `vim.notify` through view's notifications, a compat suite that fails
+      on migration defects.
+- [x] **Multigrid.** One grid per window, redraws scoped to the window
+      that changed.
+- [x] **Config surface.** `[ui]` (tier, theme) and `[engine]` (own nvim,
+      `NVIM_APPNAME`); anything derivable stays optional.
 
-### Landing before v0.1
+### Landing in the first release
 
+Everything below ships in the initial release; there is no later
+milestone it waits for.
+
+- [ ] **Engine lifecycle.** The engine starts, stops and dies exactly once:
+      no respawn on `:qa!`, no stray after the terminal or the parent goes
+      away, on every platform.
+- [ ] **Tiled UI.** Framed panes with gaps and an active accent, status
+      segments in the frame edge, a tabpage pill, the tree and the agent
+      panel as overlays or sidebars per surface; `[ui] panes` keeps
+      Neovim's own separators and statusline for anyone who wants them.
 - [ ] ★ **Session DVR.** Scrub, branch, and export the session's keystream
       and frames.
 - [ ] ★ **Key introspector.** `:View keys`: which mapping fired, whose it
@@ -164,32 +182,24 @@ the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
       cells elsewhere; picker preview and tree hover included.
 - [ ] ★ **Media handoff.** `view talk.mp4`, or a video picked in the tree,
       hands the terminal to `mpv` and takes it back on exit.
-- [ ] **Migration integrity.** Capability probing that survives SSH and
-      tmux, a register of which plugin still owns which surface,
-      `vim.notify` through view's notifications, a compat suite that fails
-      on migration defects.
-- [ ] **Multigrid.** One grid per window: chrome between splits, redraws
-      scoped to the window that changed.
 - [ ] **`view doctor`.** Terminal, tier and why, tmux passthrough, `mpv`
       on the path, a repro invocation to paste into an issue.
-- [ ] **Config surface.** `[ui]` (tier, theme) and `[engine]` (own nvim,
-      `NVIM_APPNAME`) go live; anything derivable stays optional.
 - [ ] **Windows as a supported tier.** ConPTY-validated, with its own
       budgets, oracle and compat legs in CI.
-
-### After v0.1
-
-- [ ] **Workspace arc (v0.2).** Tiled panes for N content surfaces, a
-      qutebrowser-style pane over CDP, mpv composited in a pane.
+- [ ] **Workspace arc.** Tiles for N content surfaces: an image, a media
+      player, a remote tree, a qutebrowser-style browser over CDP, mpv
+      composited in a pane.
 - [ ] ★ **Agent-fleet attention.** Agent tabs with status (working,
       blocked on you, done) as an attention queue inside the editor.
 - [ ] **Detach and reconnect.** tmux-style persistence for the remote
       engine: drop the link, reattach where you left off.
 - [ ] **Theme-switcher interop.** An Omarchy-style switcher that retargets
       your colorscheme carries view with it; no view config to rewrite.
-- [ ] **Native rendering, behind the oracle.** Viewport highlighting and
-      LSP UI move to view's side one subsystem at a time, each only after
-      the differential oracle proves parity over a committed corpus.
+
+Beyond the feature list there is one standing direction, never a
+milestone: viewport highlighting and LSP UI move to view's side one
+subsystem at a time, each only after the differential oracle proves parity
+over a committed corpus.
 
 ## Install
 
