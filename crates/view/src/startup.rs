@@ -686,7 +686,6 @@ fn drain_pre_attach_polled(
 /// -- silence under the threshold, exactly one line over it -- are provable
 /// without a live terminal, which the poll-driven wait it guards needs and
 /// `cargo test` cannot construct.
-#[cfg(unix)]
 fn slow_attach_due(opened: Instant, said: bool) -> bool {
     !said && opened.elapsed() >= SLOW_ATTACH_AFTER
 }
@@ -701,10 +700,41 @@ fn drain_pre_attach_with(
     mut repaint: impl FnMut(&mut Model),
 ) -> DrainedInput {
     let mut state = PreAttach::new();
-    // a recv error means every producer is gone: nothing left to wait for
-    while let Ok(msg) = msg_rx.recv() {
-        if state.absorb(msg, model, &mut repaint) {
-            break;
+    let opened = Instant::now();
+    let mut said_slow = false;
+    loop {
+        // the same deadline the polled wait rides, on the wait this side
+        // has: bounded until the line has been said and unbounded after,
+        // so a long attach sleeps through the rest of the window. Without
+        // it a Windows session -- and a unix one that fell back here --
+        // sat on a blank shell frame saying nothing, because the notice
+        // lived in a poll this wait never enters
+        let bound = (!said_slow).then(|| SLOW_ATTACH_AFTER.saturating_sub(opened.elapsed()));
+        // a recv error means every producer is gone: nothing left to wait
+        // for
+        let received = match bound {
+            Some(bound) => match msg_rx.recv_timeout(bound) {
+                Ok(msg) => Some(msg),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+            None => match msg_rx.recv() {
+                Ok(msg) => Some(msg),
+                Err(_) => break,
+            },
+        };
+        match received {
+            Some(msg) => {
+                if state.absorb(msg, model, &mut repaint) {
+                    break;
+                }
+            }
+            None => {
+                if slow_attach_due(opened, said_slow) {
+                    said_slow = true;
+                    state.note_slow_attach(model, &mut repaint);
+                }
+            }
         }
     }
     state.finish()
@@ -1454,7 +1484,35 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    /// The wait that has no poll raises the line too: it is the whole
+    /// pre-attach wait on Windows and the fallback on unix, and with the
+    /// deadline living in the poll alone a stalled start there showed a
+    /// blank shell frame and said nothing until the attach landed.
+    #[test]
+    fn a_stalled_attach_is_announced_by_the_channel_driven_wait() {
+        let (tx, rx) = std::sync::mpsc::channel::<Msg>();
+        let mut model = Model::with_term_size(80, 24);
+        // dropped rather than sent to: the window ends on the disconnect,
+        // having had nothing to absorb and only the threshold to cross
+        std::thread::spawn(move || {
+            std::thread::sleep(SLOW_ATTACH_AFTER + SLOW_ATTACH_AFTER / 4);
+            drop(tx);
+        });
+        drain_pre_attach_with(&rx, &mut model, |_| {});
+        let lines: Vec<String> = model
+            .engine
+            .messages
+            .entries
+            .iter()
+            .flat_map(view_core::model::MessageEntry::lines)
+            .collect();
+        assert_eq!(
+            lines,
+            vec![format!("{SLOW_ATTACH_FAMILY}...")],
+            "the wait said nothing while the attach it was waiting on stalled"
+        );
+    }
+
     #[test]
     fn an_attach_that_lands_inside_the_first_second_is_never_announced() {
         // the whole point of the threshold: a start the user never waited
@@ -1466,7 +1524,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_stalled_attach_is_announced_exactly_once() {
         let stalled = Instant::now()

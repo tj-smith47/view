@@ -572,6 +572,31 @@ mod tests {
     use std::time::{Duration, Instant};
     use view_test_support::ScratchDir;
 
+    /// An `AgentSpec::Command` naming a program that exits at once without
+    /// speaking ACP, in the spelling the host has: the session task then
+    /// ends on end-of-file and reports its own crash, which is the state
+    /// these tests are about.
+    ///
+    /// `true` is a unix image and no Windows host resolves it, so a spec
+    /// naming it there fails to spawn at all -- a different path, reaching
+    /// the same crash event by never starting a session, which left one
+    /// test asserting a `Ready` slot that could not appear and another
+    /// passing on a teardown it never exercised.
+    fn exits_at_once_spec() -> AgentSpec {
+        #[cfg(unix)]
+        {
+            AgentSpec::Command(vec!["true".to_string()])
+        }
+        #[cfg(not(unix))]
+        {
+            AgentSpec::Command(vec![
+                "cmd".to_string(),
+                "/c".to_string(),
+                "exit".to_string(),
+            ])
+        }
+    }
+
     /// An `AgentSpec::Command` naming a program that does not exist:
     /// resolving it never touches the network, so this fixture spawns
     /// promptly and predictably fails, the same shape a genuinely offline
@@ -750,7 +775,7 @@ mod tests {
     /// anymore.
     #[test]
     fn a_dead_ready_session_is_replaced_by_the_next_prompt() {
-        let (worker, rx) = worker_with(AgentSpec::Command(vec!["true".to_string()]));
+        let (worker, rx) = worker_with(exits_at_once_spec());
 
         worker.dispatch(AiCommand::Prompt {
             text: "first".to_string(),
@@ -1055,11 +1080,7 @@ mod tests {
     fn a_watch_never_outlives_its_own_crashed_session() {
         let dir = watch_tempdir("crashed");
         let (tx, rx) = mpsc::sync_channel(8);
-        let worker = AiWorker::new(
-            AgentSpec::Command(vec!["true".to_string()]),
-            dir.to_path_buf(),
-            LoopSender::new(tx),
-        );
+        let worker = AiWorker::new(exits_at_once_spec(), dir.to_path_buf(), LoopSender::new(tx));
 
         worker.dispatch(AiCommand::Prompt {
             text: "hello".to_string(),

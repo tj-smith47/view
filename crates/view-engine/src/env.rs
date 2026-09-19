@@ -616,13 +616,13 @@ pub fn hermetic_home() -> PathBuf {
 ///
 /// Emptiness is the wrong invariant for a home -- its holders write state
 /// under it, see [`hermetic_home`] -- so the check tolerates exactly the
-/// entries a child leaves behind (`.cache`, and `.local` holding only
-/// `state`) and refuses everything else. The entries that must never appear
-/// are the ones a subprocess resolves *inputs* through (`.netrc`,
-/// `.gitconfig`, `.ssh/`, `.config/`, and `.local/share`, whose
-/// `nvim/site/plugin/` sits on 'runtimepath'), and rather than enumerate
-/// those and miss one, an unexpected name is treated as a plant: the spawn
-/// fails naming it, never runs against it.
+/// entries a child leaves behind (`.cache`, `.local/state`, and the data
+/// root [`vet_data_root`] vets) and refuses everything else. The entries
+/// that must never appear are the ones a subprocess resolves *inputs*
+/// through (`.netrc`, `.gitconfig`, `.ssh/`, `.config/`, and any `site/`
+/// under the data root, which sits on 'runtimepath'), and rather than
+/// enumerate those and miss one, an unexpected name is treated as a plant:
+/// the spawn fails naming it, never runs against it.
 ///
 /// # Errors
 ///
@@ -633,6 +633,36 @@ pub fn prepare_hermetic_home() -> io::Result<PathBuf> {
     let path = hermetic_home();
     prepare_home_dir(&path)?;
     Ok(path)
+}
+
+/// Vets `<home>/.local/share`, the root [`HERMETIC_STDPATH_VARS`] points
+/// `XDG_DATA_HOME` at.
+///
+/// The root cannot be required absent: an embedded Neovim creates
+/// `<data>/nvim` the moment it starts, so a scan refusing the root refuses
+/// every spawn after the first one that ran -- and the refusal names the
+/// directory, never the layout that guaranteed it would be there. It cannot
+/// be tolerated wholesale either, because `<data>/nvim/site/plugin/` is
+/// sourced by the next child. So the root holds the engine's own data
+/// directory and nothing else, and that directory holds no `site`.
+///
+/// # Errors
+///
+/// Returns the underlying `std::io::Error` if the root cannot be read, and
+/// an [`io::Error::other`] naming the offending path otherwise.
+fn vet_data_root(home: &Path) -> io::Result<()> {
+    let share = Path::new(".local").join("share");
+    for entry in std::fs::read_dir(home.join(&share))? {
+        let name = entry?.file_name();
+        if name != engine_state_dir_name() {
+            return Err(home_refusal(home, &share.join(name)));
+        }
+        let site = share.join(name).join("site");
+        if home.join(&site).exists() {
+            return Err(home_refusal(home, &site));
+        }
+    }
+    Ok(())
 }
 
 /// The body of [`prepare_hermetic_home`], taking its path as an argument so
@@ -659,15 +689,21 @@ fn prepare_home_dir(path: &Path) -> io::Result<()> {
             if !entry.file_type()?.is_dir() {
                 return Err(home_refusal(path, Path::new(".local")));
             }
-            // tolerated for the state below it only: `.local/share` is
-            // `XDG_DATA_HOME`'s fallback, and `<data>/nvim/site/plugin/`
-            // sits on 'runtimepath' -- executable ground, unlike the logs
-            // and shada a child leaves in `.local/state`
+            // tolerated for the state below it and for the data root the
+            // same spawn points `XDG_DATA_HOME` at, which is vetted rather
+            // than refused: `<data>/nvim/site/plugin/` sits on
+            // 'runtimepath' -- executable ground, unlike the logs and shada
+            // a child leaves in `.local/state`
             for entry in std::fs::read_dir(path.join(".local"))? {
                 let name = entry?.file_name();
-                if name != "state" {
-                    return Err(home_refusal(path, &Path::new(".local").join(name)));
+                if name == "state" {
+                    continue;
                 }
+                if name == "share" {
+                    vet_data_root(path)?;
+                    continue;
+                }
+                return Err(home_refusal(path, &Path::new(".local").join(name)));
             }
             continue;
         }
@@ -1256,6 +1292,37 @@ mod tests {
         assert!(
             refused.to_string().contains("share"),
             "the refusal does not name the planted data entry: {refused}"
+        );
+    }
+
+    /// The layout and the scan agree: the data root a spawn points
+    /// `XDG_DATA_HOME` at is the one an embedded Neovim creates on startup,
+    /// so the spawn after the first must still be accepted. Refusing it
+    /// stopped every hermetic spawn in a working tree until the directory
+    /// was deleted by hand, with the refusal naming a path the layout
+    /// itself had guaranteed.
+    #[test]
+    fn a_child_that_wrote_its_own_data_dir_leaves_the_next_spawn_accepted() {
+        let dir = scratch("home-data-written");
+        prepare_home_dir(&dir).unwrap();
+        // what a child creates under the root the same spawn named: the
+        // engine's data directory, empty
+        std::fs::create_dir_all(dir.join(".local/share").join(engine_state_dir_name())).unwrap();
+        prepare_home_dir(&dir)
+            .expect("a home holding only the data dir its own spawn created is accepted");
+    }
+
+    /// The data root is vetted, not waved through: a directory under it
+    /// that is not the engine's own is the plant shape the wholesale
+    /// tolerance would have admitted.
+    #[test]
+    fn a_foreign_directory_under_the_data_root_refuses_the_next_spawn() {
+        let dir = scratch("home-data-foreign");
+        std::fs::create_dir_all(dir.join(".local/share/pipx")).unwrap();
+        let refused = prepare_home_dir(&dir).unwrap_err();
+        assert!(
+            refused.to_string().contains("pipx"),
+            "the refusal does not name the foreign data entry: {refused}"
         );
     }
 

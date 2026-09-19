@@ -111,22 +111,13 @@ fn a_paste_arriving_as_three_thousand_keys_costs_the_batch_and_not_the_keys() {
     }
     std::fs::write(&file, seeded).unwrap();
 
-    let mut cmd = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_view"));
-    cmd.arg(&file);
-    // this session's own standard-path roots, so its engine leaves its
-    // data and state here rather than in the hermetic home every other
-    // spawn in the suite shares -- a `.local/share` left there refuses the
-    // next spawn whatever test it belongs to
-    for var in [
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "XDG_CACHE_HOME",
-    ] {
-        cmd.env(var, scratch.path().join(var.to_ascii_lowercase()));
-    }
-    let mut session = PtySession::spawn_configured(cmd, COLS, ROWS)
-        .expect("a pty session for the view binary under test");
+    let mut session = PtySession::spawn(
+        env!("CARGO_BIN_EXE_view"),
+        &[file.to_str().expect("a utf-8 scratch path")],
+        COLS,
+        ROWS,
+    )
+    .expect("a pty session for the view binary under test");
     assert!(
         session.wait_for(SEED, view_test_support::host_deadline(STARTUP_BUDGET)),
         "the session never reached the opened file's own text; screen:\n{}",
