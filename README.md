@@ -161,15 +161,16 @@ the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
       that changed.
 - [x] **Config surface.** `[ui]` (tier, theme) and `[engine]` (own nvim,
       `NVIM_APPNAME`); anything derivable stays optional.
+- [x] **Engine lifecycle.** The engine starts, stops and dies exactly
+      once: no respawn on `:qa!`, no stray after the terminal or the
+      parent goes away, a paste of thousands of keys paints once per
+      batch, on Linux, macOS and Windows.
 
 ### Landing in the first release
 
 Everything below ships in the initial release; there is no later
 milestone it waits for.
 
-- [ ] **Engine lifecycle.** The engine starts, stops and dies exactly once:
-      no respawn on `:qa!`, no stray after the terminal or the parent goes
-      away, on every platform.
 - [ ] **Tiled UI.** Framed panes with gaps and an active accent, status
       segments in the frame edge, a tabpage pill, the tree and the agent
       panel as overlays or sidebars per surface; `[ui] panes` keeps
