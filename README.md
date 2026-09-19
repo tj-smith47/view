@@ -37,11 +37,9 @@ of every proposed change. See [docs/ai.md](docs/ai.md).
 
 ## Features
 
-- **Bring your whole config.** Real Neovim is the engine, so compatibility
-  comes from running your setup, not reimplementing it. A differential
-  oracle checks view against a reference Neovim on every build, and a compat
-  suite drives pinned real-world plugin stacks (telescope, lualine, noice,
-  nvim-cmp, treesitter, mini.nvim, and more) through a real pty.
+- **Bring your whole config.** Real Neovim is the engine, so your setup
+  runs as it is: telescope, lualine, noice, nvim-cmp, treesitter, mini.nvim
+  and the rest load on day one, with nothing reimplemented.
 - **Fast where you feel it.** Every performance claim is a moment you live
   through -- launch until the screen is ready, keypress until the character
   is there, scrolling a huge file -- measured paired against bare Neovim in
@@ -57,9 +55,6 @@ of every proposed change. See [docs/ai.md](docs/ai.md).
   instead? Then `native.picker = false` on a line of its own is the whole
   config. view never edits your config, so that one key is the whole
   reversal.
-- **Honest about the gaps.** The moments where view has not met its own bar
-  are written down with the rest, and the build fails if any of them quietly
-  regresses further.
 
 ## Not another Neovim distro
 
@@ -138,10 +133,8 @@ the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
 
 ### Shipped
 
-- [x] Embedded engine, RPC seam, input and redraw paths
 - [x] Command line, messages, popup menu, tabline, cursor shapes
 - [x] Terminal capability tiers (kitty/ghostty class down to 16-color)
-- [x] Differential oracle, fuzz harness, compat suite, benchmark matrix
 - [x] **Native UI**: picker, file tree, statusline, command palette,
       notifications, theme derived live from your colorscheme
 - [x] Clipboard provider and full CLI passthrough (`+42`, `-R`, `-O`,
@@ -153,18 +146,12 @@ the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
 - [x] ★ **Remote editing.** `view --remote host:path`: engine over SSH,
       paint and input local, keystrokes echoed without waiting for the round
       trip, OSC 52 clipboard.
-- [x] **Migration integrity.** Capability probing that survives SSH and
-      tmux, a register of which plugin still owns which surface,
-      `vim.notify` through view's notifications, a compat suite that fails
-      on migration defects.
-- [x] **Multigrid.** One grid per window, redraws scoped to the window
-      that changed.
-- [x] **Config surface.** `[ui]` (tier, theme) and `[engine]` (own nvim,
-      `NVIM_APPNAME`); anything derivable stays optional.
-- [x] **Engine lifecycle.** The engine starts, stops and dies exactly
-      once: no respawn on `:qa!`, no stray after the terminal or the
-      parent goes away, a paste of thousands of keys paints once per
-      batch, on Linux, macOS and Windows.
+- [x] **Your plugins keep working.** view knows which plugin still owns
+      which surface and steps aside for it; `vim.notify` lands in view's
+      notifications; everything holds up over SSH and inside tmux.
+- [x] **Small config.** `[ui]` for tier and theme, `[engine]` for your own
+      nvim or `NVIM_APPNAME`; everything view can work out for itself is
+      optional.
 
 ### Landing in the first release
 
@@ -185,8 +172,7 @@ milestone it waits for.
       hands the terminal to `mpv` and takes it back on exit.
 - [ ] **`view doctor`.** Terminal, tier and why, tmux passthrough, `mpv`
       on the path, a repro invocation to paste into an issue.
-- [ ] **Windows as a supported tier.** ConPTY-validated, with its own
-      budgets, oracle and compat legs in CI.
+- [ ] **Windows.** A first-class Windows Terminal experience, not a port.
 - [ ] **Workspace arc.** Tiles for N content surfaces: an image, a media
       player, a remote tree, a qutebrowser-style browser over CDP, mpv
       composited in a pane.
@@ -199,8 +185,7 @@ milestone it waits for.
 
 Beyond the feature list there is one standing direction, never a
 milestone: viewport highlighting and LSP UI move to view's side one
-subsystem at a time, each only after the differential oracle proves parity
-over a committed corpus.
+subsystem at a time, each only once it renders exactly what Neovim would.
 
 ## Install
 

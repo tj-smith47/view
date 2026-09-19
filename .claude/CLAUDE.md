@@ -110,4 +110,5 @@ the same edit done twice.
 - `.claude/settings.json` hooks block `git push` and plain `git commit`, and check edited Rust files for formatting and comment style.
 - Conventions for Rust code: `.claude/rules/rust.md`. Conventions for what a
   bench cell may claim: `.claude/rules/bench.md`. Conventions for the scripts
-  under `scripts/`: `.claude/rules/shell.md`.
+  under `scripts/`: `.claude/rules/shell.md`. Conventions for `README.md`
+  and the pages under `docs/`: `.claude/rules/docs.md`.
