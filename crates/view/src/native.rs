@@ -13,9 +13,10 @@
 use std::path::PathBuf;
 
 use view_core::model::Model;
-use view_core::msg::{Effect, EngineRequest, Msg, OptionValue, RpcCall, TakeoverStep};
-use view_core::native::ext::Ext;
+use view_core::msg::{Effect, EngineRequest, Msg, RpcCall, TakeoverStep};
+use view_core::native::channels::{self, Channel};
 use view_core::native::registry;
+use view_core::native::surfaces;
 use view_native::config::{NativeConfig, ViewConfig};
 use view_native::report::report;
 use view_native::supersede::{plan, Supersession};
@@ -222,15 +223,16 @@ impl NativeSession {
     /// statusline, so this push does not read `self.cfg` or `self.plan` at
     /// all.
     ///
-    /// `cmdheight=0` follows the externalized surfaces rather than
-    /// `self.plan`, and the attach that externalizes them closes the
-    /// sequence: the last screen line is
-    /// nvim's own cmdline and message area, so taking it away is correct
-    /// only for a session that externalized *both* of those surfaces. A
-    /// session that left either one with nvim -- `native.palette = false`
-    /// keeps the cmdline there, `native.notifications = false` keeps the
-    /// messages -- needs the row it draws them on, and zeroing it would
-    /// leave the user typing `:` into a line that is not on screen.
+    /// A channel more than one surface claims follows the externalized
+    /// surfaces rather than `self.plan`, and the attach that externalizes
+    /// them closes the sequence. The last screen line is nvim's own cmdline
+    /// and message area both, so taking it away is correct only for a
+    /// session that externalized both of those surfaces: one that left
+    /// either with nvim -- `native.palette = false` keeps the cmdline
+    /// there, `native.notifications = false` keeps the messages -- needs
+    /// the row it draws them on, and zeroing it would leave the user typing
+    /// `:` into a line that is not on screen. No single `[native]` switch
+    /// decides it, which is why it is not a feature's plan entry.
     fn take_over(&mut self, model: &mut Model) -> Vec<Effect> {
         if self.handed_over {
             return Vec::new();
@@ -269,11 +271,16 @@ impl NativeSession {
         effects.push(RpcCall::RegisterClipboard {
             channel_id: self.channel_id,
         });
-        if model.owns(Ext::Cmdline) && model.owns(Ext::Messages) {
-            effects.push(RpcCall::SetOption {
-                name: "cmdheight".to_string(),
-                value: OptionValue::Int(0),
-            });
+        for channel in session_held_channels() {
+            let Channel::Hold { option, value, .. } = channel else {
+                continue;
+            };
+            if channels::claimants_of(option).all(|s| surfaces::view_draws(s, model)) {
+                effects.push(RpcCall::HoldOption {
+                    name: option.to_string(),
+                    value: value.wire(),
+                });
+            }
         }
         crate::vlog::log_with("native", || {
             let taken: Vec<&str> = self.plan.iter().map(|e| e.feature).collect();
@@ -349,6 +356,26 @@ impl NativeSession {
     }
 }
 
+/// Every channel more than one surface claims, which is what makes it the
+/// session's to hold rather than a feature's.
+///
+/// A feature's plan is gated on one `[native]` switch; these are gated on
+/// the whole attach set, because the surfaces that claim them answer to
+/// different switches (`view_native::supersede`'s own derivation leaves
+/// them out for exactly that reason).
+fn session_held_channels() -> Vec<Channel> {
+    channels::CHANNELS
+        .iter()
+        .flat_map(|entry| entry.channels.iter().copied())
+        .filter(|channel| channels::claimants_of(channel.name()).count() > 1)
+        .fold(Vec::new(), |mut out, channel| {
+            if !out.contains(&channel) {
+                out.push(channel);
+            }
+            out
+        })
+}
+
 /// Folds `calls` into as few round trips as the vocabulary allows, keeping
 /// the order they were built in.
 ///
@@ -415,7 +442,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use view_core::msg::OptionValue;
     use view_core::msg::ReplyToken;
+    use view_core::native::ext::Ext;
     use view_core::native::mappings::MappingClaim;
 
     /// `effects` with the takeover expanded back into one effect per call
@@ -550,18 +579,31 @@ mod tests {
             .iter()
             .filter_map(|entry| entry.rpc.clone())
             .collect();
-        let holds: Vec<RpcCall> = effects
-            .iter()
-            .filter_map(|e| match e {
-                Effect::Rpc(call @ (RpcCall::HoldOption { .. } | RpcCall::HoldNotify)) => {
-                    Some(call.clone())
-                }
+        let session_held: Vec<RpcCall> = session_held_channels()
+            .into_iter()
+            .filter_map(|channel| match channel {
+                Channel::Hold { option, value, .. } => Some(RpcCall::HoldOption {
+                    name: option.to_string(),
+                    value: value.wire(),
+                }),
                 _ => None,
             })
             .collect();
+        let holds: Vec<RpcCall> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Rpc(
+                    call @ (RpcCall::HoldOption { .. }
+                    | RpcCall::HoldWindowOption { .. }
+                    | RpcCall::HoldNotify),
+                ) => Some(call.clone()),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<RpcCall> = planned.iter().cloned().chain(session_held).collect();
         assert_eq!(
-            holds, planned,
-            "every planned surface must be held: {effects:?}"
+            holds, expected,
+            "every planned surface, and every channel the session holds, must be held: {effects:?}"
         );
         assert!(
             !holds.is_empty(),
@@ -712,7 +754,7 @@ mod tests {
             let sets_cmdheight = effects.iter().any(|e| {
                 matches!(
                     e,
-                    Effect::Rpc(RpcCall::SetOption { name, value })
+                    Effect::Rpc(RpcCall::HoldOption { name, value })
                         if name == "cmdheight" && *value == OptionValue::Int(0)
                 )
             });
@@ -867,7 +909,7 @@ mod tests {
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
         let cmdheight = effects.iter().find_map(|e| match e {
-            Effect::Rpc(RpcCall::SetOption { name, value }) if name == "cmdheight" => Some(value),
+            Effect::Rpc(RpcCall::HoldOption { name, value }) if name == "cmdheight" => Some(value),
             _ => None,
         });
         assert_eq!(

@@ -27,6 +27,7 @@
 //! [`claims`] is integer arithmetic over one rect and the grid's size.
 
 use crate::model::Model;
+use crate::native::channels::{Channel, Region};
 use crate::native::ext::Ext;
 
 /// One surface a session can externalize, plus the buffer grid nvim keeps
@@ -42,9 +43,24 @@ pub enum Surface {
     Messages,
     /// The tab line.
     Tabline,
+    /// The status line, which view draws itself once nvim has stopped.
+    Statusline,
     /// The buffer grid, which view never draws over: nvim owns it, and so
     /// does anything that wants to float above it.
     Grid,
+}
+
+impl Surface {
+    /// The `[native]` feature whose switch decides whether view draws this
+    /// surface, where one decides it.
+    ///
+    /// Read off the table rather than matched here, so a row states its
+    /// gate once and the takeover, the notice and the generated page all
+    /// read the same answer.
+    #[must_use]
+    pub fn feature(self) -> Option<&'static str> {
+        row(self).and_then(|row| row.feature)
+    }
 }
 
 /// What a claim on a surface means for view.
@@ -75,6 +91,15 @@ pub struct OwnedSurface {
     /// The `ext_*` capability whose attachment decides whether view draws
     /// this surface at all, or `None` for a surface no attach carries.
     pub ext: Option<Ext>,
+    /// The `[native]` feature whose switch decides whether view draws it,
+    /// or `None` for a surface no switch reaches.
+    ///
+    /// Equal to [`Ext::feature`] for every row an attach carries
+    /// (`every_owned_surface_names_the_switch_its_attach_is_gated_on`); a
+    /// row with no `ext` carries it alone, which is how a surface nvim
+    /// gives up through an option rather than through a capability states
+    /// its gate at all.
+    pub feature: Option<&'static str>,
     /// What view does with a claim on it.
     pub policy: Policy,
     /// How a notice names it to a user, who never sees an `ext_*` key.
@@ -95,6 +120,7 @@ pub const SURFACES: &[OwnedSurface] = &[
     OwnedSurface {
         surface: Surface::Cmdline,
         ext: Some(Ext::Cmdline),
+        feature: Some("palette"),
         policy: Policy::Own,
         label: "the command line",
         remedy: Some("[native] palette = false"),
@@ -102,6 +128,7 @@ pub const SURFACES: &[OwnedSurface] = &[
     OwnedSurface {
         surface: Surface::Popupmenu,
         ext: Some(Ext::Popupmenu),
+        feature: Some("palette"),
         policy: Policy::Absorb,
         label: "the completion menu",
         remedy: Some("[native] palette = false"),
@@ -109,6 +136,7 @@ pub const SURFACES: &[OwnedSurface] = &[
     OwnedSurface {
         surface: Surface::Messages,
         ext: Some(Ext::Messages),
+        feature: Some("notifications"),
         policy: Policy::Own,
         label: "the message area",
         remedy: Some("[native] notifications = false"),
@@ -116,13 +144,23 @@ pub const SURFACES: &[OwnedSurface] = &[
     OwnedSurface {
         surface: Surface::Tabline,
         ext: Some(Ext::Tabline),
+        feature: Some("tabline"),
         policy: Policy::Own,
         label: "the tab line",
         remedy: Some("[native] tabline = false"),
     },
     OwnedSurface {
+        surface: Surface::Statusline,
+        ext: None,
+        feature: Some("statusline"),
+        policy: Policy::Own,
+        label: "the status line",
+        remedy: Some("[native] statusline = false"),
+    },
+    OwnedSurface {
         surface: Surface::Grid,
         ext: None,
+        feature: None,
         policy: Policy::Yield,
         label: "the buffer grid",
         remedy: None,
@@ -478,14 +516,19 @@ pub fn claims_at(
     // and a window that has taken the screen over, which is a different
     // thing and not this detector's business
     let chrome_rows = i64::from(grid_h) / 2;
-    if model.engine.paints_cmdline() && bottom >= last_row - (CMDLINE_ROWS - 1) {
-        return owned(Surface::Cmdline, model);
-    }
     let rows = bottom - top + 1;
-    if right == i64::from(grid_w) - 1 && top < chrome_rows && rows <= chrome_rows {
-        return owned(Surface::Messages, model);
-    }
-    None
+    let hit = crate::native::channels::CHANNELS.iter().find(|entry| {
+        entry.channels.iter().any(|channel| match channel {
+            Channel::Float(Region::CmdlineBand) => {
+                model.engine.paints_cmdline() && bottom >= last_row - (CMDLINE_ROWS - 1)
+            }
+            Channel::Float(Region::TopRightChrome) => {
+                right == i64::from(grid_w) - 1 && top < chrome_rows && rows <= chrome_rows
+            }
+            _ => false,
+        })
+    })?;
+    owned(hit.surface, model)
 }
 
 /// `surface` if this session externalized it, `None` otherwise -- the gate
@@ -1484,6 +1527,7 @@ mod tests {
             Surface::Popupmenu,
             Surface::Messages,
             Surface::Tabline,
+            Surface::Statusline,
             Surface::Grid,
         ] {
             let rows = SURFACES.iter().filter(|r| r.surface == surface).count();
@@ -1492,7 +1536,7 @@ mod tests {
         }
         assert_eq!(
             SURFACES.len(),
-            5,
+            6,
             "a surface added to the enum needs a row here, with its own policy and remedy"
         );
     }
@@ -2018,16 +2062,21 @@ mod tests {
     fn every_owned_surface_names_the_switch_its_attach_is_gated_on() {
         let matrix = render_matrix();
         for table_row in SURFACES.iter().filter(|row| row.policy != Policy::Yield) {
-            let gate = table_row
-                .ext
-                .and_then(Ext::feature)
-                .map(|id| format!("[native] {id} = false"));
+            let gate = table_row.feature.map(|id| format!("[native] {id} = false"));
             assert_eq!(
                 table_row.remedy.map(str::to_string),
                 gate,
-                "{}'s off switch is not the one its attach answers to",
+                "{}'s off switch is not the one its feature answers to",
                 table_row.label
             );
+            if let Some(ext) = table_row.ext {
+                assert_eq!(
+                    table_row.feature,
+                    ext.feature(),
+                    "{}'s feature and its attach's gate disagree",
+                    table_row.label
+                );
+            }
             let cell = table_row
                 .remedy
                 .map_or_else(|| NONE_CELL.to_string(), |line| format!("`{line}`"));

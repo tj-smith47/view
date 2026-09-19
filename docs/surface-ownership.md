@@ -8,7 +8,8 @@ state for it on the pinned engine.
 
 The table below is generated from `SURFACES`, `SURFACE_CLAIMANTS` and
 `COMPLETION_MENUS` in `crates/view-core/src/native/surfaces.rs`, plus the
-loaded scenario set in `compat/scenarios/`.
+loaded scenario set in `compat/scenarios/`. The channels of each surface
+are in `crates/view-core/src/native/channels.rs`.
 
 ## Reading a row
 
@@ -21,9 +22,9 @@ loaded scenario set in `compat/scenarios/`.
   `Absorb` means view takes what the claimant drew into its own chrome, so
   one renderer draws the surface.
 - **`[native]` switch** is the `view.toml` line that hands the surface back
-  to your plugins, and it is the switch that surface's `ext_*` attach is
-  gated on. `-- none --` means no switch reaches that surface, and a
-  notice about it says what happened and names no setting.
+  to your plugins. For a surface an attach carries it is the switch that
+  attach is gated on. `-- none --` means no switch reaches that surface,
+  and a notice about it says what happened and names no setting.
 - **claiming plugin classes** are the plugins whose whole purpose is to
   render a surface view also renders, with the buffer `filetype` their own
   floating windows present. A plugin nobody enumerated reaches the generic
@@ -42,6 +43,7 @@ loaded scenario set in `compat/scenarios/`.
 | the completion menu | `ext_popupmenu` | `Absorb` | `[native] palette = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred` |
 | the message area | `ext_messages` | `Own` | `[native] notifications = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
 | the tab line | `ext_tabline` | `Own` | `[native] tabline = false` | -- none -- | `noice`/`deferred`, `smoke-minimal`/`native-only` |
+| the status line | -- none -- | `Own` | `[native] statusline = false` | -- none -- | -- none -- |
 | the buffer grid | -- none -- | `Yield` | -- none -- | -- none -- | -- none -- |
 
 <!-- generated from SURFACES -->
@@ -50,11 +52,35 @@ when it presents a completion menu's own filetype (`cmp_menu`). That is the
 completion menu's `Absorb` read at the moment the float appears; the command
 line's own policy stays `Own`.
 
-## Three switches, five surfaces
+## Every way a surface can be drawn
+
+Neovim has five ways to put chrome on the screen: a global option, a
+window-local option, an `ext_*` capability a UI takes at attach, a runtime
+function a config can replace, and a floating window parked over the region
+a surface occupies. view holds all five for every surface it draws, and the
+lists are in `CHANNELS` in `crates/view-core/src/native/channels.rs`, one
+per surface.
+
+The tab line is the row where this shows. `ext_tabline` takes nvim's own
+tab row, and a window's `winbar` draws inside that window's grid, so the
+capability leaves it standing. view holds `winbar` empty in every window
+and in every window that opens afterwards, and says once what the option
+was set to, with the line that hands the tab line back.
+
+Channels view leaves to Neovim are listed beside them in `NOT_CHROME`,
+each with what you get instead: the gutter, line numbers, signs and
+virtual text belong to the buffer window, and view paints them as the
+engine sends them.
+
+## Four switches, six surfaces
 
 `[native] palette = false` detaches `ext_cmdline` and `ext_popupmenu`
 together, so both rows name the same line: a session that handed the
 command line back absorbs nothing and hides nobody's window.
+
+`[native] statusline = false` gives back the status line, which no attach
+carries. view holds `laststatus` at 0 while it draws one, and your own
+`statusline` is what nvim evaluates again the moment that switch goes.
 
 `[native] tabline` is the one switch that ships off, so the tab line's row
 describes what a session running `tabline = true` does: nvim draws your own

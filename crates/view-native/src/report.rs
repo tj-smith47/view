@@ -107,15 +107,23 @@ pub fn report(
     claimed: &[MappingClaim],
     features: &[FeatureDesc],
 ) -> Vec<Handover> {
-    let mut out: Vec<Handover> = plan
-        .iter()
-        .map(|entry| Handover {
+    let mut out: Vec<Handover> = Vec::new();
+    for entry in plan {
+        // one line per feature, not per channel: a feature whose surface
+        // changes hands on several channels says one thing to a user --
+        // view draws it now, and one config line gives it back -- and its
+        // record key is the feature id, so a second entry would be a
+        // duplicate sentence that the record could not silence separately
+        if out.iter().any(|held| held.feature == entry.feature) {
+            continue;
+        }
+        out.push(Handover {
             feature: entry.feature,
             surface: Surface::SessionHold,
             reverses_with: entry.reverses_with,
             supersedes: entry.supersedes,
-        })
-        .collect();
+        });
+    }
     out.extend(
         claimed
             .iter()
@@ -239,10 +247,12 @@ mod tests {
             &[claim("picker", "<leader>ff", true)],
             registry::features(),
         );
+        let mut features: Vec<&str> = plan.iter().map(|entry| entry.feature).collect();
+        features.dedup();
         assert_eq!(
             report.len(),
-            plan.len() + 1,
-            "every takeover and every claim must reach one report: {report:?}"
+            features.len() + 1,
+            "every feature the plan took and every claim must reach one report: {report:?}"
         );
         for handover in &report {
             let desc = registry::features()

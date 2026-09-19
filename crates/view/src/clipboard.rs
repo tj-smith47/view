@@ -873,6 +873,13 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn hold_window_option(
+            &self,
+            _name: &str,
+            _value: &view_core::msg::OptionValue,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn hold_notify(&self) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }

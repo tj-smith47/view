@@ -159,6 +159,12 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
                 .filter_map(|name| name.as_str().map(str::to_owned))
                 .collect(),
         }),
+        // one window-local channel of a surface view owns found holding
+        // something else, sent as the hold sets it back
+        "channel_held" => Some(Msg::ChannelHeld {
+            channel: first.as_str()?.to_owned(),
+            holder: rest.first()?.as_str()?.to_owned(),
+        }),
         // the probe's re-reading of `vim.notify`, sent only when the answer
         // changed: the takeover's own reading is taken before the UI
         // attaches, so a notifier a config installs on `UIEnter` is one

@@ -13,7 +13,8 @@
 //! "what has view taken over?", and an answer reassembled by inspecting two
 //! call sites drifts from the answer the session actually applied.
 
-use view_core::msg::{OptionValue, RpcCall};
+use view_core::msg::RpcCall;
+use view_core::native::channels::{self, Channel, Scope};
 use view_core::native::registry::FeatureDesc;
 
 use crate::config::NativeConfig;
@@ -32,11 +33,6 @@ pub struct Supersession {
     /// one call rather than in a second field a caller could forget (see
     /// [`takeover_call`]).
     ///
-    /// `None` for a surface the attach itself took
-    /// ([`TakeoverKind::Attach`]): the entry still exists, because what a
-    /// user is told about a taken surface is read off this plan, and only
-    /// the call is absent.
-    ///
     /// Always an API call, never `RpcCall::Input`: see that variant's own
     /// note on mode dependence.
     pub rpc: Option<RpcCall>,
@@ -54,43 +50,6 @@ pub struct Supersession {
     pub supersedes: Option<&'static str>,
 }
 
-/// A takeover's value as a `static` table can spell it.
-///
-/// [`OptionValue::Str`] owns a `String`, which no `const` expression can
-/// build, so a `static` table typed on `OptionValue` can hold numbers and
-/// booleans and silently cannot hold the string options -- `statusline`,
-/// `winbar`, `tabline` -- that the next surfaces to change hands are made
-/// of. A borrowed spell of the same three-variant domain keeps the table
-/// writable for all of them; [`takeover_call`] is the one place it becomes
-/// the owned value the wire takes.
-// the variants the shipped table happens not to use yet are the point: this
-// mirrors nvim's closed option value domain, so a boolean or string row is
-// writable the day a surface needs one rather than a change of this type
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OptionValueSpec {
-    /// A number option, e.g. `laststatus`.
-    Int(i64),
-    /// A boolean option, e.g. `ruler`.
-    Bool(bool),
-    /// A string option, e.g. `statusline`.
-    Str(&'static str),
-}
-
-impl OptionValueSpec {
-    /// This spec as the wire value an [`RpcCall`] carries. Total by
-    /// construction over both closed enums, so a fourth option type added to
-    /// either is a compile error here rather than a takeover that quietly
-    /// sets nothing.
-    fn value(self) -> OptionValue {
-        match self {
-            Self::Int(n) => OptionValue::Int(n),
-            Self::Bool(b) => OptionValue::Bool(b),
-            Self::Str(s) => OptionValue::Str(s.to_string()),
-        }
-    }
-}
-
 /// What one takeover row changes hands on.
 ///
 /// Two kinds rather than one, because the two surfaces nvim lets a plugin
@@ -102,47 +61,36 @@ impl OptionValueSpec {
 /// know which rows' values meant nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TakeoverKind {
-    /// A global nvim option, held at `value`.
+    /// An nvim option, held at `value` for as long as the session runs.
     ///
-    /// Global-scoped only. The takeover chunk sets and re-asserts the option
-    /// with an empty `{}` opts table, which `nvim_set_option_value` reads as
-    /// the current window and buffer, so a window- or buffer-local option
-    /// named here would be held for whichever window happened to be current
-    /// when the plan was applied and left to the plugin everywhere else --
-    /// with nothing failing. `every_held_option_is_global_scoped` in
-    /// `supersede_live` asks a real nvim, so a row naming a local option
-    /// fails rather than half-applying.
+    /// The scope decides which chunk performs it. A global option is set
+    /// and re-asserted with an empty `{}` opts table, which
+    /// `nvim_set_option_value` reads as the current window and buffer; a
+    /// window-local option is applied per window and again for every window
+    /// that opens, because one written with the empty table would be held
+    /// for whichever window happened to be current and left to whoever set
+    /// it everywhere else. `every_held_option_matches_its_declared_scope`
+    /// in `supersede_live` asks a real nvim, so a row naming the wrong
+    /// scope fails rather than half-applying.
     Option {
         /// The nvim option name, exactly as `nvim_set_option_value` takes it.
         option: &'static str,
+        /// Which scope the value is held at.
+        scope: Scope,
         /// The value that hands the surface to view.
-        value: OptionValueSpec,
+        value: channels::ChannelValue,
     },
     /// `vim.notify` itself, re-pointed at the engine default so every
     /// message a plugin raises through it crosses as `ext_messages` traffic
     /// and is drawn as one of view's toasts.
     Notify,
-    /// A surface that changes hands at `nvim_ui_attach` instead of through
-    /// a call: nvim stops drawing it the moment the session asks for its
-    /// `ext_*` option, so there is nothing to hold and nothing to re-assert.
-    ///
-    /// A row all the same, because the plan is what every consumer-facing
-    /// listing of "what did view take over" reads: without one, a feature
-    /// whose registry row names the plugin it supersedes has that sentence
-    /// rendered nowhere.
-    Attach {
-        /// The `nvim_ui_attach` option key that performs it.
-        ext: &'static str,
-    },
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl TakeoverKind {
     /// What this row claims, unique across the whole table: the augroup
-    /// name the hold it issues creates inside nvim -- `view-hold-<option>`
-    /// for an option, `view-hold-notify` for the function -- and, for a
-    /// kind that installs no hold, the surface name itself
-    /// ([`TakeoverKind::Attach`]'s `ext_*` key).
+    /// name the hold it issues creates inside nvim: `view-hold-<option>`
+    /// for an option and `view-hold-notify` for the function.
     ///
     /// This spelling is a copy of one that lives in `view-engine`'s two hold
     /// chunks, which this crate cannot read: `view-native` has no dependency
@@ -165,9 +113,6 @@ impl TakeoverKind {
         match self {
             Self::Option { option, .. } => format!("view-hold-{option}"),
             Self::Notify => "view-hold-notify".to_string(),
-            // an attach installs no guard, so this names the surface rather
-            // than an augroup; an `ext_*` key can equal no `view-hold-` name
-            Self::Attach { ext } => ext.to_string(),
         }
     }
 }
@@ -186,13 +131,7 @@ impl TakeoverKind {
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn takeover_augroups() -> Vec<String> {
-    TAKEOVERS
-        .iter()
-        .filter_map(|row| match row.kind {
-            TakeoverKind::Option { .. } | TakeoverKind::Notify => Some(row.kind.claims()),
-            TakeoverKind::Attach { .. } => None,
-        })
-        .collect()
+    takeovers().iter().map(|row| row.kind.claims()).collect()
 }
 
 /// One row of the takeover table: the feature that owns it, and what its
@@ -229,46 +168,81 @@ struct Takeover {
 /// apply half of it.
 fn takeover_call(row: &Takeover) -> Option<RpcCall> {
     match row.kind {
-        TakeoverKind::Option { option, value } => Some(RpcCall::HoldOption {
+        TakeoverKind::Option {
+            option,
+            scope: Scope::Global,
+            value,
+        } => Some(RpcCall::HoldOption {
             name: option.to_string(),
-            value: value.value(),
+            value: value.wire(),
+        }),
+        TakeoverKind::Option {
+            option,
+            scope: Scope::Window,
+            value,
+        } => Some(RpcCall::HoldWindowOption {
+            name: option.to_string(),
+            value: value.wire(),
         }),
         TakeoverKind::Notify => Some(RpcCall::HoldNotify),
-        // the attach already performed it; a call here would be a second
-        // way to take a surface that is only ever taken one way
-        TakeoverKind::Attach { .. } => None,
     }
 }
 
-/// Every takeover this build performs, as data rather than as a `match`, so
-/// the set is enumerable: the drift check that every row still names a live
-/// registry feature has something to walk.
+/// Every takeover this build performs, derived from the channel table
+/// `view_core::native::channels` holds.
 ///
-/// Only surfaces nvim itself owns -- through an option, or through a
-/// runtime function nvim ships a default for -- appear here. A picker or a
-/// tree claims its surface with a mapping and a command instead, and a
-/// plugin's own loading is left alone in every case: `laststatus = 0` stops
-/// nvim drawing a status line, and lualine keeps running and keeps setting
-/// `statusline` for whenever the user turns the native one off; `vim.notify`
-/// back at the engine default leaves nvim-notify loaded and its own
-/// `require('notify')` entry point working for anyone who calls it directly.
-static TAKEOVERS: [Takeover; 3] = [
-    Takeover {
-        feature: "statusline",
-        kind: TakeoverKind::Option {
-            option: "laststatus",
-            value: OptionValueSpec::Int(0),
-        },
-    },
-    Takeover {
-        feature: "notifications",
-        kind: TakeoverKind::Notify,
-    },
-    Takeover {
-        feature: "tabline",
-        kind: TakeoverKind::Attach { ext: "ext_tabline" },
-    },
-];
+/// Derived rather than written here, so the set of channels a surface
+/// claims is stated once: the audit that reads them back and the takeover
+/// that holds them cannot disagree about what view owns.
+///
+/// A channel claimed by more than one surface is not a feature's to hold --
+/// the last grid row carries nvim's command line and its message area
+/// both, and a session that gave either one back still needs it -- so those
+/// are held by the session against its attach set instead
+/// (`view::native`'s own reading of [`channels::claimants_of`]).
+fn takeovers() -> Vec<Takeover> {
+    let mut rows = Vec::new();
+    for entry in channels::CHANNELS {
+        let Some(feature) = entry.surface.feature() else {
+            continue;
+        };
+        for channel in entry.channels {
+            let kind = match *channel {
+                Channel::Hold {
+                    option,
+                    scope,
+                    value,
+                } => {
+                    if channels::claimants_of(option).any(|s| s.feature() != Some(feature)) {
+                        continue;
+                    }
+                    TakeoverKind::Option {
+                        option,
+                        scope,
+                        value,
+                    }
+                }
+                Channel::Replaced(NOTIFY_GLOBAL) => TakeoverKind::Notify,
+                // an attach performs the takeover at `nvim_ui_attach` and
+                // leaves nothing to hold; a covered channel is held by its
+                // own surface's other channel; a float is detected rather
+                // than taken
+                Channel::Attach(_)
+                | Channel::Covered { .. }
+                | Channel::Float(_)
+                | Channel::Replaced(_) => continue,
+            };
+            rows.push(Takeover { feature, kind });
+        }
+    }
+    rows
+}
+
+/// The one runtime function view holds, spelled once: the derivation above
+/// matches on it, and a [`Channel::Replaced`] naming anything else has no
+/// call behind it and is refused by
+/// `every_replaced_channel_has_a_call_behind_it`.
+const NOTIFY_GLOBAL: &str = "vim.notify";
 
 /// The supersession plan for `cfg`: one entry per enabled feature in
 /// `features` that takes a surface over through RPC, in registry order.
@@ -283,7 +257,7 @@ static TAKEOVERS: [Takeover; 3] = [
 /// listing of these features already uses.
 #[must_use]
 pub fn plan(cfg: &NativeConfig, features: &[FeatureDesc]) -> Vec<Supersession> {
-    plan_from(cfg, features, &TAKEOVERS)
+    plan_from(cfg, features, &takeovers())
 }
 
 /// [`plan`] against an arbitrary takeover table, so the table-walking rules
@@ -328,7 +302,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use view_core::msg::Effect;
+    use view_core::msg::{Effect, OptionValue};
     use view_core::native::registry;
     use view_test_support::ScratchDir;
 
@@ -369,13 +343,18 @@ mod tests {
             .iter()
             .find(|f| f.id == "notifications")
             .expect("the registry must carry a notifications feature");
+        let notify: Vec<&Supersession> = entries
+            .iter()
+            .filter(|entry| entry.rpc == Some(RpcCall::HoldNotify))
+            .collect();
         assert_eq!(
-            entries.len(),
+            notify.len(),
             1,
             "an enabled notifications must take vim.notify exactly once, got {entries:?}"
         );
-        assert_eq!(entries[0].rpc, Some(RpcCall::HoldNotify));
-        assert_eq!(entries[0].reverses_with, desc.off_switch);
+        for entry in &entries {
+            assert_eq!(entry.reverses_with, desc.off_switch);
+        }
     }
 
     #[test]
@@ -402,7 +381,7 @@ mod tests {
 
     #[test]
     fn every_takeover_row_names_a_live_registry_feature() {
-        for t in &TAKEOVERS {
+        for t in &takeovers() {
             assert!(
                 registry::is_feature(t.feature),
                 "takeover row {} names no registry feature",
@@ -436,7 +415,7 @@ mod tests {
     #[test]
     fn no_two_takeover_rows_claim_one_surface() {
         assert_eq!(
-            colliding_claim(&TAKEOVERS),
+            colliding_claim(&takeovers()),
             None,
             "one surface cannot be handed over twice: the later row's hold \
              replaces the earlier row's guard and wins silently"
@@ -454,14 +433,16 @@ mod tests {
                 feature: "statusline",
                 kind: TakeoverKind::Option {
                     option: "laststatus",
-                    value: OptionValueSpec::Int(0),
+                    scope: Scope::Global,
+                    value: channels::ChannelValue::Int(0),
                 },
             },
             Takeover {
                 feature: "notifications",
                 kind: TakeoverKind::Option {
                     option: "laststatus",
-                    value: OptionValueSpec::Int(3),
+                    scope: Scope::Global,
+                    value: channels::ChannelValue::Int(3),
                 },
             },
         ];
@@ -517,7 +498,8 @@ mod tests {
                 feature: "statusline",
                 kind: TakeoverKind::Option {
                     option: "notify",
-                    value: OptionValueSpec::Bool(true),
+                    scope: Scope::Global,
+                    value: channels::ChannelValue::Bool(true),
                 },
             },
         ];
@@ -536,19 +518,18 @@ mod tests {
         // the shipped table's own shape: two kinds, one feature each. A
         // uniqueness rule that collapsed both kinds onto one name would
         // reject it
-        assert_eq!(colliding_claim(&TAKEOVERS), None);
+        assert_eq!(colliding_claim(&takeovers()), None);
         // the kinds themselves rather than a row count: the exhaustive
         // match is what makes a kind added later fail here until the
         // shipped table either carries one or says it does not
-        let kinds: Vec<&str> = TAKEOVERS
+        let kinds: Vec<&str> = takeovers()
             .iter()
             .map(|row| match row.kind {
                 TakeoverKind::Option { .. } => "option",
                 TakeoverKind::Notify => "notify",
-                TakeoverKind::Attach { .. } => "attach",
             })
             .collect();
-        for kind in ["option", "notify", "attach"] {
+        for kind in ["option", "notify"] {
             assert!(
                 kinds.contains(&kind),
                 "the shipped table carries no {kind} row: {kinds:?}"
@@ -566,14 +547,16 @@ mod tests {
                 feature: "statusline",
                 kind: TakeoverKind::Option {
                     option: "laststatus",
-                    value: OptionValueSpec::Int(0),
+                    scope: Scope::Global,
+                    value: channels::ChannelValue::Int(0),
                 },
             },
             Takeover {
                 feature: "statusline",
                 kind: TakeoverKind::Option {
                     option: "ruler",
-                    value: OptionValueSpec::Bool(false),
+                    scope: Scope::Global,
+                    value: channels::ChannelValue::Bool(false),
                 },
             },
         ];
@@ -607,14 +590,16 @@ mod tests {
                 feature: "statusline",
                 kind: TakeoverKind::Option {
                     option: "statusline",
-                    value: OptionValueSpec::Str("%f"),
+                    scope: Scope::Global,
+                    value: channels::ChannelValue::Str("%f"),
                 },
             },
             Takeover {
                 feature: "statusline",
                 kind: TakeoverKind::Option {
                     option: "ruler",
-                    value: OptionValueSpec::Bool(false),
+                    scope: Scope::Global,
+                    value: channels::ChannelValue::Bool(false),
                 },
             },
         ];
@@ -643,14 +628,16 @@ mod tests {
                 feature: "statusline",
                 kind: TakeoverKind::Option {
                     option: "laststatus",
-                    value: OptionValueSpec::Int(0),
+                    scope: Scope::Global,
+                    value: channels::ChannelValue::Int(0),
                 },
             },
             Takeover {
                 feature: "statusline",
                 kind: TakeoverKind::Option {
                     option: "ruler",
-                    value: OptionValueSpec::Bool(false),
+                    scope: Scope::Global,
+                    value: channels::ChannelValue::Bool(false),
                 },
             },
         ];
@@ -770,7 +757,11 @@ mod tests {
             assert!(
                 matches!(
                     entry.rpc,
-                    None | Some(RpcCall::HoldOption { .. } | RpcCall::HoldNotify)
+                    None | Some(
+                        RpcCall::HoldOption { .. }
+                            | RpcCall::HoldWindowOption { .. }
+                            | RpcCall::HoldNotify
+                    )
                 ),
                 "{} must supersede through a durable API call, got {:?}",
                 entry.feature,
@@ -779,22 +770,32 @@ mod tests {
         }
     }
 
-    /// A surface the attach took still reaches the plan, because the
-    /// sentence a user reads about it is rendered from there.
+    /// The tab line's channels split between the attach and one option:
+    /// the plan carries the option, and the sentence a user reads about the
+    /// surface is rendered from the entry that carries it.
     #[test]
-    fn the_tab_line_is_planned_with_no_call_to_make() {
+    fn the_tab_line_is_planned_for_the_row_the_attach_cannot_reach() {
         let entries: Vec<Supersession> = plan(&NativeConfig::all_enabled(), registry::features())
             .into_iter()
             .filter(|s| s.feature == "tabline")
             .collect();
-        assert_eq!(entries.len(), 1, "{entries:?}");
         assert_eq!(
-            entries[0].rpc, None,
-            "nvim stops drawing the tab row at the attach; a call would be a second way to take it"
+            entries.len(),
+            1,
+            "nvim stops drawing the tab row at the attach, so the row a plan carries is the \
+             window-local one the attach leaves standing: {entries:?}"
         );
         assert!(
-            entries[0].supersedes.is_some(),
+            entries.iter().all(|entry| entry.supersedes.is_some()),
             "the row exists so the plugin it supersedes is named to the user"
+        );
+        assert!(
+            entries.iter().any(|entry| entry.rpc
+                == Some(RpcCall::HoldWindowOption {
+                    name: "winbar".to_string(),
+                    value: OptionValue::Str(String::new()),
+                })),
+            "the one chrome row an attach cannot reach is held per window: {entries:?}"
         );
         assert!(
             plan(

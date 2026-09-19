@@ -457,6 +457,22 @@ pub enum Msg {
     /// obligation; the hold was only ever the anti-flash mechanism for the
     /// claimant that loaded eagerly.
     ClaimantsProbed(Vec<String>),
+    /// One channel of a surface view owns was found holding something other
+    /// than the value view keeps it at, and has been set back.
+    ///
+    /// Raised by the window-local hold ([`RpcCall::HoldWindowOption`]) at
+    /// the session's own window events, so a window opened after the
+    /// takeover is answered for as it opens rather than at the next redraw.
+    /// The payload is the option's own name and the value found in it,
+    /// which is what a user needs in order to recognise what was drawing
+    /// there.
+    ChannelHeld {
+        /// The nvim option, exactly as nvim spells it.
+        channel: String,
+        /// The value found in it: an option string, or the expression a
+        /// config left there.
+        holder: String,
+    },
     /// The hand-back step's own answer, carried out of the same takeover
     /// reply as [`Msg::MappingsClaimed`]: the claimant modules whose own
     /// `disable` ran.
@@ -1789,6 +1805,32 @@ pub enum RpcCall {
         name: String,
         value: OptionValue,
     },
+    /// Sets one window-local nvim option to `value` in every window, keeps
+    /// it there, and reports each window that was holding something else.
+    ///
+    /// The window-scoped form of [`HoldOption`](Self::HoldOption), and a
+    /// separate call rather than a field on it because the two are
+    /// different mechanisms. A global option has one value and one
+    /// `OptionSet` to guard; a window-local one has a value per window and
+    /// a new window every time a split, a tab or a plugin's own scratch
+    /// buffer opens, so the hold has to run again for each of them.
+    ///
+    /// The report is what makes the takeover legible: the value found in a
+    /// window is whatever wrote it -- an option string, or an expression
+    /// calling into a plugin -- and view says so once, naming the surface,
+    /// the option and that value, with the `[native]` line that gives the
+    /// surface back.
+    ///
+    /// Runs on the session's own window events and never per key or per
+    /// frame, so the cost is one option read per window per window-opening
+    /// event.
+    ///
+    /// Reversible on exactly the same terms as every other call here:
+    /// session state, never a config edit.
+    HoldWindowOption {
+        name: String,
+        value: OptionValue,
+    },
     /// Re-points `vim.notify` at the engine's own default and keeps it there
     /// for the rest of the session, so every message a plugin raises through
     /// it crosses as `ext_messages` traffic and is drawn as one of view's
@@ -2503,6 +2545,8 @@ pub enum TakeoverStep {
     DisableClaimants { modules: Vec<String> },
     /// [`RpcCall::HoldOption`].
     HoldOption { name: String, value: OptionValue },
+    /// [`RpcCall::HoldWindowOption`].
+    HoldWindowOption { name: String, value: OptionValue },
     /// [`RpcCall::HoldNotify`].
     HoldNotify,
     /// [`RpcCall::SetOption`].
@@ -2534,6 +2578,10 @@ impl TakeoverStep {
                 name: name.clone(),
                 value: value.clone(),
             }),
+            RpcCall::HoldWindowOption { name, value } => Some(Self::HoldWindowOption {
+                name: name.clone(),
+                value: value.clone(),
+            }),
             RpcCall::HoldNotify => Some(Self::HoldNotify),
             RpcCall::SetOption { name, value } => Some(Self::SetOption {
                 name: name.clone(),
@@ -2561,6 +2609,7 @@ impl TakeoverStep {
         match self {
             Self::DisableClaimants { modules } => RpcCall::DisableClaimants { modules },
             Self::HoldOption { name, value } => RpcCall::HoldOption { name, value },
+            Self::HoldWindowOption { name, value } => RpcCall::HoldWindowOption { name, value },
             Self::HoldNotify => RpcCall::HoldNotify,
             Self::SetOption { name, value } => RpcCall::SetOption { name, value },
             Self::RegisterClipboard { channel_id } => RpcCall::RegisterClipboard { channel_id },
@@ -2592,6 +2641,10 @@ mod tests {
             RpcCall::HoldOption {
                 name: "laststatus".to_string(),
                 value: OptionValue::Int(0),
+            },
+            RpcCall::HoldWindowOption {
+                name: "winbar".to_string(),
+                value: OptionValue::Str(String::new()),
             },
             RpcCall::HoldNotify,
             RpcCall::SetOption {

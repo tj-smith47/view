@@ -282,6 +282,11 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::ClaimantsHandedBack { modules } => {
             surface_conflict::on_claimants_handed_back(model, modules)
         }
+        // the window-local hold's own report, raised on the session's
+        // window events rather than on the redraw path
+        Msg::ChannelHeld { channel, holder } => {
+            surface_conflict::on_channel_held(model, &channel, &holder)
+        }
         // marks dirty unconditionally: the reading decides which entries
         // the stack paints at all, so a frame drawn before it and one drawn
         // after are different frames whichever way it lands

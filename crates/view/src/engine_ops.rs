@@ -46,6 +46,10 @@ pub trait EngineOps {
     /// Sets one nvim option and keeps it there for the session, the durable
     /// takeover a superseded plugin cannot undo (see `RpcCall::HoldOption`).
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError>;
+    /// Sets one window-local nvim option in every window and keeps it
+    /// there for every window opened afterwards, reporting whatever each
+    /// window was holding (see `RpcCall::HoldWindowOption`).
+    fn hold_window_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError>;
     /// Re-points `vim.notify` at the engine default and keeps it there for
     /// the session, so a plugin's messages cross as `ext_messages` traffic
     /// (see `RpcCall::HoldNotify`).
@@ -302,6 +306,9 @@ impl EngineOps for EngineHandle {
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         self.hold_option(name, value)
     }
+    fn hold_window_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        self.hold_window_option(name, value)
+    }
     fn hold_notify(&self) -> Result<(), EngineError> {
         self.hold_notify()
     }
@@ -499,6 +506,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         (**self).hold_option(name, value)
+    }
+    fn hold_window_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        (**self).hold_window_option(name, value)
     }
     fn hold_notify(&self) -> Result<(), EngineError> {
         (**self).hold_notify()
@@ -699,6 +709,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         (**self).hold_option(name, value)
+    }
+    fn hold_window_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        (**self).hold_window_option(name, value)
     }
     fn hold_notify(&self) -> Result<(), EngineError> {
         (**self).hold_notify()
@@ -930,6 +943,9 @@ impl EngineOps for FakeOps {
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         self.record(format!("hold_option({name},{value:?})"))
     }
+    fn hold_window_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        self.record(format!("hold_window_option({name},{value:?})"))
+    }
     fn hold_notify(&self) -> Result<(), EngineError> {
         self.record("hold_notify()".to_string())
     }
@@ -988,6 +1004,9 @@ impl EngineOps for FakeOps {
                     self.disable_claimants(modules)?;
                 }
                 TakeoverStep::HoldOption { name, value } => self.hold_option(name, value)?,
+                TakeoverStep::HoldWindowOption { name, value } => {
+                    self.hold_window_option(name, value)?;
+                }
                 TakeoverStep::HoldNotify => self.hold_notify()?,
                 TakeoverStep::SetOption { name, value } => self.set_option(name, value)?,
                 TakeoverStep::RegisterClipboard { channel_id } => {
@@ -1215,6 +1234,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn hold_option(&self, _name: &str, _value: &OptionValue) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn hold_window_option(&self, _name: &str, _value: &OptionValue) -> Result<(), EngineError> {
         Ok(())
     }
     fn hold_notify(&self) -> Result<(), EngineError> {

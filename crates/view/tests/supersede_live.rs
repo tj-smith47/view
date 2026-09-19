@@ -14,7 +14,10 @@ mod common;
 
 use std::path::Path;
 
-use view_core::msg::RpcCall;
+use std::time::Duration;
+
+use view_core::msg::{Msg, RpcCall};
+use view_core::native::channels::{self, Channel, Scope};
 use view_core::native::registry;
 use view_engine::handle::EngineHandle;
 use view_engine::process::Engine;
@@ -85,6 +88,9 @@ fn apply(handle: &EngineHandle, plan: &[Supersession]) {
     for entry in plan {
         match &entry.rpc {
             Some(RpcCall::HoldOption { name, value }) => handle.hold_option(name, value).unwrap(),
+            Some(RpcCall::HoldWindowOption { name, value }) => {
+                handle.hold_window_option(name, value).unwrap();
+            }
             Some(RpcCall::HoldNotify) => handle.hold_notify().unwrap(),
             // the attach performed it, so there is nothing to apply here
             None => {}
@@ -140,27 +146,107 @@ fn an_enabled_statusline_takes_laststatus_over_without_touching_the_config() {
     );
 }
 
+/// How far into the chrome-shaped option list a reading is asked for: the
+/// option names nvim evaluates to draw something a user sees, spelled here
+/// because nvim's own option info carries no such classification.
+///
+/// An explicit list and not a shape test. `nvim_get_all_options_info`
+/// answers about three hundred options, nearly all of them about editing
+/// behaviour, and a heuristic over their names would have to be right
+/// about every one of them. The names below are the ones that put a row,
+/// a column or a line of text on the screen; a name added to the engine's
+/// list that belongs with them joins by being written here, which is the
+/// same edit as deciding what view does with it.
+const CHROME_SHAPED_OPTIONS: &[&str] = &[
+    "cmdheight",
+    "colorcolumn",
+    "foldcolumn",
+    "laststatus",
+    "number",
+    "relativenumber",
+    "ruler",
+    "rulerformat",
+    "showcmd",
+    "showmode",
+    "showtabline",
+    "signcolumn",
+    "statuscolumn",
+    "statusline",
+    "tabline",
+    "title",
+    "titlestring",
+    "winbar",
+];
+
 #[test]
-fn every_held_option_is_global_scoped() {
-    // the takeover chunk sets and re-asserts with an empty `{}` opts table,
-    // which nvim reads as the current window and buffer. A window- or
-    // buffer-local option named in the table would therefore be held in one
-    // window and left to the plugin in every other, with nothing failing --
-    // so the precondition is asked of a real nvim rather than restated in a
-    // second list here that could drift from what the options really are
+fn every_chrome_channel_the_engine_exposes_is_claimed_or_left_alone() {
+    // the completeness half of the channel table, asked of the engine
+    // rather than of a second list here: a plugin reaches the screen only
+    // through a channel nvim exposes, so a capability or a chrome option
+    // this build has never decided about is a way to draw over a surface
+    // view believes it owns
+    let dir = fixture("completeness");
+    let engine = session(&dir);
+
+    let ui_options = engine
+        .handle
+        .eval_str("join(api_info().ui_options, ' ')")
+        .unwrap();
+    let mut undecided: Vec<String> = Vec::new();
+    for name in ui_options.split_whitespace() {
+        if !channels::is_claimed(name) && !channels::is_yielded(name) {
+            undecided.push(name.to_string());
+        }
+    }
+
+    let present = engine
+        .handle
+        .eval_str("join(keys(luaeval('vim.api.nvim_get_all_options_info()')), ' ')")
+        .unwrap();
+    let present: Vec<&str> = present.split_whitespace().collect();
+    for name in CHROME_SHAPED_OPTIONS {
+        assert!(
+            present.contains(name),
+            "`{name}` is in this file's chrome list and the pinned engine has no such option"
+        );
+        if !channels::is_claimed(name) && !channels::is_yielded(name) {
+            undecided.push((*name).to_string());
+        }
+    }
+
+    assert!(
+        undecided.is_empty(),
+        "these channels can draw chrome and no surface claims them, with none of them on \
+         the not-chrome list: {undecided:?}"
+    );
+}
+
+#[test]
+fn every_held_option_matches_its_declared_scope() {
+    // a global takeover sets and re-asserts with an empty `{}` opts table,
+    // which nvim reads as the current window and buffer, so a window-local
+    // option held that way would be held in one window and left to whoever
+    // wrote it in every other, with nothing failing. The precondition is
+    // asked of a real nvim rather than restated in a second list here
     let dir = fixture("scope");
     let engine = session(&dir);
     let plan = plan(&NativeConfig::all_enabled(), registry::features());
     assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
 
+    let declared: Vec<(&str, Scope)> = channels::CHANNELS
+        .iter()
+        .flat_map(|entry| entry.channels.iter())
+        .filter_map(|channel| match channel {
+            Channel::Hold { option, scope, .. } => Some((*option, *scope)),
+            _ => None,
+        })
+        .collect();
+
     // an entry holding something other than an option has no scope to ask
     // about, so it is skipped rather than failed -- and counted, so a table
     // that stopped holding any option at all cannot leave this walk vacuous
     let mut asked = 0;
-    for entry in &plan {
-        let Some(RpcCall::HoldOption { name, .. }) = &entry.rpc else {
-            continue;
-        };
+    for (name, scope) in &declared {
         asked += 1;
         // the name is interpolated into a single-quoted vimscript literal
         // below, where a `'` would close the string and the rest would be
@@ -171,22 +257,180 @@ fn every_held_option_is_global_scoped() {
             name.bytes().all(|b| b.is_ascii_lowercase()),
             "a takeover option name must be lowercase ASCII, got `{name}`"
         );
-        let scope = engine
+        let answered = engine
             .handle
             .eval_str(&format!(
                 "luaeval('vim.api.nvim_get_option_info2(_A, {{}}).scope', '{name}')"
             ))
             .unwrap();
+        let want = match scope {
+            Scope::Global => "global",
+            Scope::Window => "win",
+        };
         assert_eq!(
-            scope, "global",
-            "{}'s takeover holds `{name}`, which nvim scopes as `{scope}`: only a global \
-             option can be held through an empty opts table",
-            entry.feature
+            answered, want,
+            "the channel table holds `{name}` at {scope:?} scope, which nvim scopes as \
+             `{answered}`"
         );
     }
     assert!(
         asked > 0,
-        "no plan entry holds an option any more, so this scope walk proved nothing"
+        "no channel holds an option any more, so this scope walk proved nothing"
+    );
+}
+
+/// A live session reading `init.lua` from `dir`, with its pump delivered
+/// to the caller: the shape a case needs when the report a hold sends back
+/// is half of what it asserts.
+fn reported_session(dir: &Path) -> (Engine, std::sync::mpsc::Receiver<Msg>) {
+    let (engine, _pump, rx) =
+        common::spawn_with_pump(common::isolated_reading(&dir.join("init.lua")), 256);
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+    (engine, rx)
+}
+
+/// How long a case waits for a hold's own report. Generous: the report
+/// rides the bridge behind the notification that produced it, so this is a
+/// ceiling on a loaded host and never a measured span.
+const REPORT_BUDGET: Duration = Duration::from_secs(10);
+
+/// Whether a report naming `channel` and `holder` arrives inside
+/// [`REPORT_BUDGET`].
+///
+/// Drains past the other reports that channel produces rather than reading
+/// the first one: a new window is written twice on its way to the screen --
+/// once as a window, once as a buffer entering it -- so the holder a case
+/// is about is not always the first one reported for the window.
+fn reported_holding(rx: &std::sync::mpsc::Receiver<Msg>, channel: &str, holder: &str) -> bool {
+    common::drain_until(rx, REPORT_BUDGET, |msg| match msg {
+        Msg::ChannelHeld {
+            channel: name,
+            holder: found,
+        } if name == channel && found == holder => Some(()),
+        _ => None,
+    })
+    .is_some()
+}
+
+#[test]
+fn a_window_local_chrome_row_is_cleared_in_every_window_and_reported() {
+    // the row an `ext_*` capability cannot reach: nvim draws a window's own
+    // winbar inside that window's grid, so a config that sets one puts a
+    // second chrome row on the screen under a tab line view is drawing.
+    // No plugin here -- the option is what a plugin would have set
+    let dir = common::fixture(
+        "supersede-live-winbar",
+        "vim.o.winbar = '%f'\n\
+         vim.api.nvim_create_autocmd('BufWinEnter', {\n\
+           callback = function() vim.wo.winbar = '%t' end,\n\
+         })\n",
+    );
+    let (engine, rx) = reported_session(&dir);
+    assert!(
+        !engine.handle.eval_str("&winbar").unwrap().is_empty(),
+        "the fixture config never took effect, so this test could not observe a takeover"
+    );
+
+    apply(
+        &engine.handle,
+        &plan(&NativeConfig::all_enabled(), registry::features()),
+    );
+
+    assert_eq!(
+        engine.handle.eval_str("&winbar").unwrap(),
+        "",
+        "the tab line's window-local channel must be empty in the window that was open"
+    );
+    assert!(
+        reported_holding(&rx, "winbar", "%t"),
+        "the hold must say what the option was set to"
+    );
+
+    // a window opened after the takeover, with the config's own autocmd
+    // writing the option as the window arrives: the case a one-shot walk
+    // over the window list at VimEnter answers wrongly. A window carrying
+    // a buffer of its own, because a split of the same buffer never
+    // announces the buffer arriving and so runs nothing the config wrote
+    engine.handle.eval_str("execute('new')").unwrap();
+    assert_eq!(
+        engine.handle.eval_str("&winbar").unwrap(),
+        "",
+        "a window opened after the takeover must be held too"
+    );
+    assert!(
+        reported_holding(&rx, "winbar", "%t"),
+        "the later window's own holder must be reported"
+    );
+
+    // the option written again after every window event has already
+    // happened, which is what a config recomputing its row as the cursor
+    // moves does: the three window events find a new window and nothing
+    // else, and the row was still on the screen under a real config while
+    // they were the whole guard
+    engine
+        .handle
+        .eval_str("execute('setlocal winbar=%m')")
+        .unwrap();
+    assert_eq!(
+        engine.handle.eval_str("&winbar").unwrap(),
+        "",
+        "an option written back after the window events must be held anyway"
+    );
+    assert!(
+        reported_holding(&rx, "winbar", "%m"),
+        "a holder that arrives outside the window events must be reported too"
+    );
+}
+
+#[test]
+fn a_global_chrome_option_under_an_externalized_surface_stays_with_view() {
+    // the tab line's other two channels. `ext_tabline` is what stops nvim
+    // drawing the row at all, and the options the table marks as covered by
+    // it are the proof that it does: a config setting both keeps its
+    // values, and nvim still draws nothing there
+    let dir = common::fixture(
+        "supersede-live-tabline",
+        "vim.o.showtabline = 2\nvim.o.tabline = '%f'\n",
+    );
+    let engine = session(&dir);
+    apply(
+        &engine.handle,
+        &plan(&NativeConfig::all_enabled(), registry::features()),
+    );
+
+    assert_eq!(engine.handle.eval_str("&showtabline").unwrap(), "2");
+    assert_eq!(
+        engine.handle.eval_str("&tabline").unwrap(),
+        "%f",
+        "an option the attach covers is left alone: nvim evaluates it only while it draws \
+         the row, and view asked for that row at the attach"
+    );
+}
+
+#[test]
+fn a_replaced_notify_is_put_back_for_a_session_that_draws_the_messages() {
+    // the replaced-global channel, set the way a config sets it and with no
+    // plugin involved
+    let dir = common::fixture(
+        "supersede-live-notify",
+        "vim.notify = function() end\nvim.g.view_foreign_notify = true\n",
+    );
+    let engine = session(&dir);
+    apply(
+        &engine.handle,
+        &plan(&NativeConfig::all_enabled(), registry::features()),
+    );
+
+    assert_eq!(
+        engine
+            .handle
+            .eval_str("luaeval('vim.notify == _G.view_notify_hold and 1 or 0')")
+            .unwrap(),
+        "1",
+        "the message surface's replaced global must be back at the hold view installed"
     );
 }
 

@@ -129,6 +129,92 @@ vim.api.nvim_create_autocmd('SafeState', {
   callback = hold,
 })";
 
+/// The lua chunk a window-local hold runs inside nvim, taking the option
+/// name, the value view keeps it at and view's own channel.
+///
+/// Window-local rather than global, which is the whole reason it is a
+/// second chunk: `nvim_set_option_value` with an empty `{}` opts table
+/// writes the current window, so one write would hold the option for
+/// whichever window happened to be current at `VimEnter` and leave it to
+/// whoever set it in every window opened afterwards -- a split, a new tab,
+/// or a scratch buffer a plugin floats. The hold therefore runs over
+/// `nvim_list_wins` and again on every event that can produce a window.
+///
+/// A window's option is written when the window is made and when a buffer
+/// enters it, so `VimEnter`, `WinNew` and `BufWinEnter` are the events that
+/// find a new window. They are not enough on their own: a config that
+/// recomputes its row as the cursor moves writes the option again on events
+/// of its own, and the row was still on the screen under a real config with
+/// only those three. `OptionSet` and `SafeState` are the same second guard
+/// the global hold carries, for the same reason and at the same cost -- one
+/// option read per window per idle transition, off the redraw path and
+/// never one per key or per frame.
+///
+/// The value found in a window before the write is reported back over the
+/// bridge, once per window and holder, so view can say what was drawing
+/// there. Keyed on both because the re-assert guard runs at every idle
+/// transition: a config that writes its row back a hundred times sends one
+/// notification, and a second window holding something else still sends
+/// its own. `pcall` around the whole per-window body: a window that
+/// closes between the list and the write, and one whose option nvim
+/// refuses, are the same outcome for view -- the remaining windows are
+/// still held.
+///
+/// The global value of the same name is written first. Several of these
+/// options are global-local, where an empty window-local value means "use
+/// the global one", so holding every window empty while a global value
+/// stands leaves nvim drawing the global one in all of them.
+const HOLD_WINDOW_OPTION_CHUNK: &str = "\
+local name, value, channel = ...
+local seen = {}
+local function report(win, held)
+  if held == nil or held == '' or held == value then
+    return
+  end
+  local key = tostring(win) .. '\0' .. tostring(held)
+  if seen[key] then
+    return
+  end
+  seen[key] = true
+  pcall(vim.rpcnotify, channel, 'view_bridge', 'channel_held',
+    name, tostring(held))
+end
+local function apply(win)
+  local held = vim.api.nvim_get_option_value(name, { win = win })
+  if held == value then
+    return
+  end
+  vim.api.nvim_set_option_value(name, value, { win = win })
+  report(win, held)
+end
+local function hold()
+  local ok, held = pcall(
+    vim.api.nvim_get_option_value, name, { scope = 'global' })
+  if ok and held ~= value then
+    pcall(vim.api.nvim_set_option_value, name, value, { scope = 'global' })
+    report('global', held)
+  end
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    pcall(apply, win)
+  end
+end
+hold()
+local group = vim.api.nvim_create_augroup(
+  'view-hold-' .. name, { clear = true })
+vim.api.nvim_create_autocmd({ 'VimEnter', 'WinNew', 'BufWinEnter' }, {
+  group = group,
+  callback = hold,
+})
+vim.api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = name,
+  callback = hold,
+})
+vim.api.nvim_create_autocmd('SafeState', {
+  group = group,
+  callback = hold,
+})";
+
 /// The lua chunk [`EngineHandle::hold_notify`] runs inside nvim, taking no
 /// arguments at all. Constant by construction for the same reason as
 /// [`FEED_KEYS_CHUNK`], and with nothing to interpolate in the first place.
@@ -3347,6 +3433,39 @@ impl EngineHandle {
         )
     }
 
+    /// Sets `name` to `value` in every window, keeps it there for every
+    /// window that opens afterwards, and reports the value each window was
+    /// holding: the window-scoped takeover
+    /// [`crate::RpcCall::HoldWindowOption`] describes.
+    ///
+    /// Its own call rather than a scope field on
+    /// [`hold_option`](Self::hold_option), because the mechanisms differ:
+    /// see [`HOLD_WINDOW_OPTION_CHUNK`] for the per-window walk and the
+    /// three events it re-runs on. `name` and `value` ride as arguments to
+    /// a constant chunk, like every other hold.
+    ///
+    /// A notification, not a request, like every other call the paint loop
+    /// may emit: the report crosses back over the bridge as
+    /// `Msg::ChannelHeld`, and nothing waits on the call itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn hold_window_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(HOLD_WINDOW_OPTION_CHUNK),
+                Value::Array(vec![
+                    Value::from(name),
+                    option_value(value),
+                    Value::from(self.channel_id),
+                ]),
+            ],
+        )
+    }
+
     /// Re-points `vim.notify` at the engine's own default and installs a
     /// session-lifetime guard that puts it back whenever a plugin patches
     /// it: the durable takeover [`crate::RpcCall::HoldNotify`] describes.
@@ -4552,6 +4671,14 @@ fn takeover_step(step: &TakeoverStep, channel_id: u64) -> Value {
         TakeoverStep::HoldOption { name, value } => (
             HOLD_OPTION_CHUNK,
             vec![Value::from(&name[..]), option_value(value)],
+        ),
+        TakeoverStep::HoldWindowOption { name, value } => (
+            HOLD_WINDOW_OPTION_CHUNK,
+            vec![
+                Value::from(name.as_str()),
+                option_value(value),
+                Value::from(channel_id),
+            ],
         ),
         TakeoverStep::HoldNotify => (HOLD_NOTIFY_CHUNK, Vec::new()),
         TakeoverStep::SetOption { name, value } => (

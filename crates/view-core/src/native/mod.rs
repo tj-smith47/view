@@ -8,6 +8,7 @@ pub mod ai_event;
 pub mod ai_fs;
 pub mod ai_panel;
 pub mod ai_registry;
+pub mod channels;
 pub mod diff;
 pub mod ext;
 pub mod geometry;

@@ -64,6 +64,59 @@ fn claimant_family(class: &str) -> String {
     format!("view: {class} is using ")
 }
 
+/// The opening every notice about a held channel shares: one family per
+/// channel, so a second window found holding the same option adds nothing
+/// and a different channel of the same surface gets its own line.
+///
+/// Built from nvim's own option name, which is a compile-time string from
+/// the channel table rather than anything a session can spell, so a
+/// collision with another family is an edit here and never a plugin's
+/// doing.
+fn channel_family(channel: &str) -> String {
+    format!("view: {channel} was drawing ")
+}
+
+/// Tells the user, once, that a channel of a surface view draws was
+/// holding something else, and what was in it.
+///
+/// Raised from the window-local hold's own report
+/// ([`crate::msg::RpcCall::HoldWindowOption`]), which fires on the
+/// session's window events: the option has already been set back by the
+/// time this runs, so the line is an account of what happened rather than
+/// a conflict still standing.
+///
+/// Silent for a channel no surface claims and for a surface this session
+/// handed back -- neither is view's to report -- and silent for a holder
+/// that spells nothing, since a notice naming an empty holder tells the
+/// user less than no notice at all.
+pub(super) fn on_channel_held(model: &mut Model, channel: &str, holder: &str) -> Vec<Effect> {
+    if holder.is_empty() {
+        return Vec::new();
+    }
+    let Some(surface) = crate::native::channels::claimants_of(channel)
+        .find(|surface| surfaces::view_draws(*surface, model))
+    else {
+        return Vec::new();
+    };
+    let Some(row) = surfaces::row(surface) else {
+        return Vec::new();
+    };
+    let family = channel_family(channel);
+    let remedy = match row.remedy {
+        Some(line) => format!("\nSet {line} in view.toml to give it back."),
+        None => String::new(),
+    };
+    // `--` rather than an em dash: notice text reaches the grid verbatim,
+    // and the charset a terminal can draw is not a reading the message
+    // layer takes
+    let text = format!(
+        "{family}{}, which view owns -- it was set to {holder}.{remedy}",
+        row.label
+    );
+    model.dirty = true;
+    model.engine.record_native_notice_sticky_once(&family, text)
+}
+
 /// Answers the claimant probe: one notice per loaded claimant that still
 /// has a surface view draws, and the resolution of the startup hold.
 ///
@@ -921,6 +974,75 @@ mod tests {
             model.engine.cmdline_speculated.is_some(),
             "the gate refused a `:` this case is about"
         );
+    }
+
+    /// The window-local hold's report, seen from the user's side: the line
+    /// names the surface, what was in the channel, and the switch that
+    /// hands the surface back.
+    #[test]
+    fn a_held_channel_is_named_with_its_holder_and_the_switch_that_returns_it() {
+        let mut model = captured_session();
+        model.attach_surfaces(vec![crate::native::ext::Ext::Tabline]);
+
+        let _ = update(
+            &mut model,
+            Msg::ChannelHeld {
+                channel: "winbar".to_string(),
+                holder: "%{%v:lua.crumbs()%}".to_string(),
+            },
+        );
+
+        let lines = notices(&model);
+        assert_eq!(lines.len(), 1, "one line per channel: {lines:?}");
+        let line = &lines[0];
+        for part in [
+            "winbar",
+            "the tab line",
+            "%{%v:lua.crumbs()%}",
+            "[native] tabline = false",
+        ] {
+            assert!(
+                line.contains(part),
+                "the line must name `{part}`, and reads: {line}"
+            );
+        }
+    }
+
+    /// The same report twice, which is what two windows holding one option
+    /// produce.
+    #[test]
+    fn a_second_window_holding_the_same_channel_adds_no_second_line() {
+        let mut model = captured_session();
+        model.attach_surfaces(vec![crate::native::ext::Ext::Tabline]);
+        for _ in 0..2 {
+            let _ = update(
+                &mut model,
+                Msg::ChannelHeld {
+                    channel: "winbar".to_string(),
+                    holder: "%f".to_string(),
+                },
+            );
+        }
+
+        assert_eq!(notices(&model).len(), 1, "{:?}", notices(&model));
+    }
+
+    /// A channel of a surface this session handed back is nvim's to draw,
+    /// so there is nothing to report.
+    #[test]
+    fn a_channel_of_a_surface_view_does_not_draw_is_left_unreported() {
+        let mut model = captured_session();
+        model.attach_surfaces(vec![crate::native::ext::Ext::LineGrid]);
+
+        let _ = update(
+            &mut model,
+            Msg::ChannelHeld {
+                channel: "winbar".to_string(),
+                holder: "%f".to_string(),
+            },
+        );
+
+        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
     }
 
     /// The hide runs inside the silence, because that is when a completion
@@ -2674,6 +2796,17 @@ mod tests {
             .chain(["noice", "notify", "telescope.nvim", "view"])
         {
             families.push(super::claimant_family(class));
+        }
+        // every channel the shipped table names, plus the names a future
+        // row would plausibly carry. An option name is a compile-time
+        // string from that table, never a session's own, so this is the
+        // whole population
+        for channel in crate::native::channels::CHANNELS
+            .iter()
+            .flat_map(|entry| entry.channels.iter().map(|channel| channel.name()))
+            .chain(["winbar", "statusline", "vim.ui.select", "view"])
+        {
+            families.push(super::channel_family(channel));
         }
         // and what a user can call a file. The path is the one part of a
         // family that stays under the user's control after the boundary

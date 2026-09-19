@@ -314,6 +314,9 @@ impl<E: EngineOps> Executor<E> {
                         .input_mouse(&button, &action, &modifier, grid.0, row, col),
                     RpcCall::SetOption { name, value } => self.ops.set_option(&name, &value),
                     RpcCall::HoldOption { name, value } => self.ops.hold_option(&name, &value),
+                    RpcCall::HoldWindowOption { name, value } => {
+                        self.ops.hold_window_option(&name, &value)
+                    }
                     RpcCall::HoldNotify => self.ops.hold_notify(),
                     RpcCall::Notify { text } => self.ops.raise_notice(&text),
                     RpcCall::DisableClaimants { modules } => self.ops.disable_claimants(&modules),
