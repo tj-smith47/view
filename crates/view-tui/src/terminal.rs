@@ -1291,8 +1291,10 @@ mod tests {
 
     /// A [`tiers::ReplySource`] a terminal that answers nothing looks like,
     /// so the probe's query batch is written and its window closes at once.
+    #[cfg(unix)]
     struct SilentTerminal;
 
+    #[cfg(unix)]
     impl tiers::ReplySource for SilentTerminal {
         fn next_chunk(&mut self, _budget: std::time::Duration) -> Option<Vec<u8>> {
             None

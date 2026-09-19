@@ -6,7 +6,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use view_engine::process::{Engine, EngineConfig, RemoteSpec, SWAP_RECOVERY_PROBE};
+#[cfg(unix)]
+use view_engine::process::RemoteSpec;
+use view_engine::process::{Engine, EngineConfig, SWAP_RECOVERY_PROBE};
 
 mod common;
 
@@ -99,6 +101,7 @@ fn editing_over_ssh(dir: &Path, file: &Path) -> EngineConfig {
 /// reaches sits behind however many processes that client made on the way.
 /// Only the editor can say which pid is its own, and killing anything else
 /// on this shared host is not this test's to do.
+#[cfg(unix)]
 fn engine_pid(engine: &Engine) -> u32 {
     u32::try_from(number(engine, "getpid()")).expect("a pid fits in u32")
 }
@@ -1407,6 +1410,7 @@ fn spawned_with(engine: &Engine, flag: &str) -> bool {
 /// `SWAP_RECOVERY_CMD` carries `'-r'` in its own text -- it is the argv test
 /// that opens the recovery window -- and a substring match reads every spawn
 /// as recovering.
+#[cfg(unix)]
 fn spawned_recovering(engine: &Engine) -> bool {
     engine.command_line().iter().any(|arg| {
         let text = arg.to_string_lossy();
@@ -1416,6 +1420,7 @@ fn spawned_recovering(engine: &Engine) -> bool {
 
 /// The command line with every `--cmd` chunk elided, so a failure names the
 /// arguments it is about instead of republishing two kilobytes of Lua.
+#[cfg(unix)]
 fn short_command_line(engine: &Engine) -> Vec<String> {
     engine
         .command_line()
