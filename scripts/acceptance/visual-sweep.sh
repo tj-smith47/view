@@ -924,6 +924,15 @@ dismiss() {
     local feature="${1:-}"
     send_key Escape
     if [ "$feature" = ai ]; then
+        # the Escape above is one byte, and written straight before the
+        # colon behind it the two reach view in a single escape run, which
+        # decodes as `<M-:>` -- nvim's own reading of those bytes. An
+        # entered panel ignores that chord and takes the rest of the line
+        # into its composer; an unentered one hands the line to nvim as
+        # normal-mode keys. Either way the close never runs. The settle is
+        # what parts the two writes into two reads: a poll is five times
+        # the `ttimeoutlen` view flushes a lone Escape after.
+        settle
         command_line ':View ai close'
     fi
     wait_no_box 15 "the overlay" >/dev/null || return 1
@@ -1200,17 +1209,22 @@ printf '%s\n' "Normal $NORMAL_BG" "CursorLine $CURSORLINE_BG" "NormalFloat $FLOA
           owner[$2] = $1 }
         END { exit bad }' || exit 1
 
-panel_const() {
-    local name="$1" value
-    value=$(grep -oE "const $name: &str = \"[^\"]+\"" "$PANEL_RS" | sed -E 's/.*"(.*)"/\1/') || true
+# A `&str` constant value, read out of the source that declares it. The
+# source is an argument rather than one fixed file: more than one surface is
+# titled through a constant now, and a reader pinned to a single source is
+# what left the message-history title read off a literal the palette had
+# stopped writing.
+rust_const() {
+    local rs="$1" name="$2" value
+    value=$(grep -oE "const $name: &str = \"[^\"]+\"" "$rs" | sed -E 's/.*"(.*)"/\1/') || true
     [ -n "$value" ] || {
-        printf 'FAIL: %s is not a &str constant in %s any more\n' "$name" "$PANEL_RS" >&2
+        printf 'FAIL: %s is not a &str constant in %s any more\n' "$name" "$rs" >&2
         return 1
     }
     printf '%s' "$value"
 }
-FOCUSED_TITLE=$(panel_const FOCUSED_TITLE) || exit 1
-PANEL_TITLE=$(panel_const TITLE) || exit 1
+FOCUSED_TITLE=$(rust_const "$PANEL_RS" FOCUSED_TITLE) || exit 1
+PANEL_TITLE=$(rust_const "$PANEL_RS" TITLE) || exit 1
 
 # The glyph a title too long for its top edge is cut with, read out of the
 # framing that appends it.
@@ -1297,12 +1311,13 @@ PERMISSION_PROMPT=$(grep -oE 'format!\("Permission requested for' "$PERMISSION_R
         "$PERMISSION_RS" >&2
     exit 1
 }
-HISTORY_TITLE=$(grep -oE 'PaletteView::new\("[^"]+"\)' "$PALETTE_RS" |
-    sed -E 's/.*"(.*)".*/\1/' | tail -1) || true
-[ -n "$HISTORY_TITLE" ] || {
-    printf 'FAIL: the message-history view sets no literal title in %s any more\n' "$PALETTE_RS" >&2
-    exit 1
-}
+# The title the message-history overlay is drawn under, read from the
+# constant that holds it: the palette titles every view it builds through
+# `title_for` or a named constant, so the construction site this used to
+# grep carries no literal to read. A constant the overlay stopped using
+# would still be read here, and the leg below is what would catch that --
+# it waits for this title on the screen.
+HISTORY_TITLE=$(rust_const "$PALETTE_RS" MESSAGE_HISTORY_TITLE) || exit 1
 # Joined across the two tables that decide it: which `Source` a picker verb
 # resolves to, and what title that source paints.
 PICKER_MARKERS=$(awk -v surfaces="$SURFACES_RS" -v picker="$PICKER_RS" '

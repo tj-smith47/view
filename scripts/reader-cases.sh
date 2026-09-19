@@ -76,5 +76,37 @@ check "grep -xE matches a whole row" 0 $?
 grep -xE -- 'first row' <<<"$CAPTURE" >/dev/null
 check "grep -xE refuses a partial row" 1 $?
 
+# The `&str` constants the visual sweep reads out of Rust source. Checked
+# here as well as on the sweep own run, because that run needs tmux and a
+# live nvim: a source the sweep can no longer read is a red acceptance leg
+# on a machine that can take one and nothing at all on `task ci`, which is
+# how the message-history title went unread from the commit that stopped
+# writing it as a literal until CI reached the sweep. The population is
+# taken from the sweep own call sites, so a constant added there is graded
+# without this file being touched.
+SWEEP="$ROOT/scripts/acceptance/visual-sweep.sh"
+eval "$(awk '/^rust_const\(\) \{/,/^\}/' "$SWEEP")"
+# the sources are named by the sweep own `*_RS` assignments, lifted rather
+# than copied for the reason the readers above are
+REPO_ROOT="$ROOT"
+eval "$(grep -E '^[A-Z_]+_RS=\$REPO_ROOT/' "$SWEEP")"
+
+CONST_SITES=$(grep -oE 'rust_const "\$[A-Z_]+_RS" [A-Z_]+' "$SWEEP" |
+    tr -d '"$' | sed -E 's/^rust_const +//')
+# a call-site spelling this file can no longer find grades nothing at all,
+# which is the silence the cases below exist to refuse
+[ "$(printf '%s\n' "$CONST_SITES" | grep -c .)" -ge 3 ]
+check "the sweep constant reads are still written the way this file finds them" 0 $?
+
+while read -r var name; do
+    [ -n "$name" ] || continue
+    eval "rs=\$$var"
+    [ -n "$(rust_const "$rs" "$name" 2>/dev/null)" ]
+    check "the sweep reads $name out of ${rs#"$ROOT"/}" 0 $?
+done <<<"$CONST_SITES"
+
+rust_const "$PALETTE_RS" A_CONSTANT_NO_SOURCE_DECLARES >/dev/null 2>&1
+check "a constant no source declares fails rather than reading as an empty title" 1 $?
+
 printf '%s cases, %s failures\n' "$cases" "$failures"
 [ "$failures" -eq 0 ] || exit 1
