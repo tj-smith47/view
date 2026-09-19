@@ -321,21 +321,57 @@ fn kill_out_of_band(pid: u32) {
     );
 }
 
-/// Waits until `pid` has left the process table, or fails: a `kill` that has
-/// been sent is not yet a process that has died, and an assertion made
-/// against a still-running child would prove nothing about the crash path.
+/// Waits until `pid` has stopped running, or fails: a `kill` that has been
+/// sent is not yet a process that has died, and an assertion made against a
+/// still-running child would prove nothing about the crash path.
+///
+/// [`common::pid_running`] and not [`common::pid_in_process_table`], which
+/// asks who did the reaping: the killed process is the test's own child
+/// wherever the stand-in ssh client collapsed into the editor, and then its
+/// entry stands until the restart below waits for it. On macOS that is
+/// every remote crash here, because `/bin/sh` runs the client's single
+/// remote command without forking; on Linux the same shell forks and the
+/// editor is a grandchild whose own parent reaps it, which is why the two
+/// remote tests failed on one platform and not the other.
 fn wait_until_gone(pid: u32) {
     let deadline = std::time::Instant::now() + common::rpc_deadline();
     while std::time::Instant::now() < deadline {
-        if !common::pid_in_process_table(pid) {
+        if !common::pid_running(pid) {
             return;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        !common::pid_in_process_table(pid),
-        "pid {pid} still in the process table 5s after SIGKILL"
+        !common::pid_running(pid),
+        "pid {pid} still running 5s after SIGKILL"
     );
+}
+
+/// The distinction [`wait_until_gone`] rests on, taken against a real
+/// zombie rather than argued from the platform's documentation: a child
+/// that has exited and nobody has waited for holds its process-table entry
+/// and is not running.
+#[cfg(unix)]
+#[test]
+fn a_child_nobody_waited_for_holds_its_entry_and_is_not_running() {
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .expect("a shell must spawn for a zombie to be observable at all");
+    let pid = child.id();
+    let deadline = std::time::Instant::now() + common::rpc_deadline();
+    while common::pid_running(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the child never exited, so nothing below is about a zombie"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        common::pid_in_process_table(pid),
+        "a child nobody has waited for keeps its entry: pid {pid}"
+    );
+    child.wait().unwrap();
 }
 
 /// Whether the engine is at a prompt nobody can answer. `nvim_get_mode` is
