@@ -723,18 +723,18 @@ fn drain_pre_attach_with(
                 Err(_) => break,
             },
         };
-        match received {
-            Some(msg) => {
-                if state.absorb(msg, model, &mut repaint) {
-                    break;
-                }
+        if let Some(msg) = received {
+            if state.absorb(msg, model, &mut repaint) {
+                break;
             }
-            None => {
-                if slow_attach_due(opened, said_slow) {
-                    said_slow = true;
-                    state.note_slow_attach(model, &mut repaint);
-                }
-            }
+        }
+        // after every return and not only after a timeout, which is where
+        // the polled wait checks it too: a user typing at a stalled attach
+        // keeps this wait returning messages, and a line owed only to
+        // silence would never be said to the one person waiting on it
+        if slow_attach_due(opened, said_slow) {
+            said_slow = true;
+            state.note_slow_attach(model, &mut repaint);
         }
     }
     state.finish()
@@ -1484,21 +1484,38 @@ mod tests {
         );
     }
 
-    /// The wait that has no poll raises the line too: it is the whole
-    /// pre-attach wait on Windows and the fallback on unix, and with the
-    /// deadline living in the poll alone a stalled start there showed a
-    /// blank shell frame and said nothing until the attach landed.
+    /// The wait that has no poll raises the line too, and raises it while
+    /// the window is still receiving.
+    ///
+    /// It is the whole pre-attach wait on Windows and the fallback on unix,
+    /// and with the deadline living in the poll alone a stalled start there
+    /// showed a blank shell frame and said nothing. Reading the deadline
+    /// only out of silence leaves the same gap for the one user who is
+    /// doing something about the stall: a person typing at a start that has
+    /// hung keeps this wait returning messages, and the line it owes them
+    /// waits for them to stop.
+    ///
+    /// The keys are queued before the wait opens and the repaint they
+    /// overflow into holds each one, so the channel is never empty across
+    /// the threshold and the window ends on the disconnect behind them.
     #[test]
-    fn a_stalled_attach_is_announced_by_the_channel_driven_wait() {
+    fn a_stalled_attach_is_announced_while_the_window_is_still_receiving() {
         let (tx, rx) = std::sync::mpsc::channel::<Msg>();
         let mut model = Model::with_term_size(80, 24);
-        // dropped rather than sent to: the window ends on the disconnect,
-        // having had nothing to absorb and only the threshold to cross
-        std::thread::spawn(move || {
-            std::thread::sleep(SLOW_ATTACH_AFTER + SLOW_ATTACH_AFTER / 4);
-            drop(tx);
-        });
-        drain_pre_attach_with(&rx, &mut model, |_| {});
+        let held = std::time::Duration::from_millis(1);
+        let keys = (SLOW_ATTACH_AFTER.as_millis() as u32).saturating_mul(3) / 2;
+        for _ in 0..keys {
+            tx.send(Msg::Key(key("a"))).unwrap();
+        }
+        drop(tx);
+
+        let opened = Instant::now();
+        drain_pre_attach_with(&rx, &mut model, |_| std::thread::sleep(held));
+        // reported rather than asserted on: a window that drained faster
+        // than the threshold owes no line, so the assertion below fails on
+        // its own, and a host slow enough to change this number cannot
+        // make the drain shorter
+        let open_for = opened.elapsed();
         let lines: Vec<String> = model
             .engine
             .messages
@@ -1506,10 +1523,12 @@ mod tests {
             .iter()
             .flat_map(view_core::model::MessageEntry::lines)
             .collect();
-        assert_eq!(
-            lines,
-            vec![format!("{SLOW_ATTACH_FAMILY}...")],
-            "the wait said nothing while the attach it was waiting on stalled"
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == &format!("{SLOW_ATTACH_FAMILY}...")),
+            "the wait said nothing about the stall while it was being typed \
+             at, over {open_for:?}; it said: {lines:?}"
         );
     }
 

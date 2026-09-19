@@ -5361,7 +5361,8 @@ mod tests {
         assert_eq!(
             pending.len(),
             2,
-            "the messages already queued behind the first were left on the channel,              where the pass that paints cannot see them"
+            "the messages already queued behind the first were left on the \
+             channel, where the pass that paints cannot see them"
         );
 
         for expected in [1, 0] {

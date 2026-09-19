@@ -635,6 +635,23 @@ pub fn prepare_hermetic_home() -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// What the engine reads out of its own data directory at startup, and so
+/// what a hermetic home's data root may never hold.
+///
+/// `rplugin.vim` is the remote-plugin manifest, sourced as vimscript on
+/// every start unless `$NVIM_RPLUGIN_MANIFEST` names another file --
+/// [`HOST_REDIRECT_VARS`] removes that variable, so the default path
+/// applies and a spawn carries no `--clean` that would skip it. `site` is
+/// on both 'runtimepath' and 'packpath', which loads `site/plugin/`,
+/// `site/pack/*/start/*` and the `site/pack/core/opt` directory the
+/// engine's own plugin manager keeps, none of them asked for.
+///
+/// The list is the engine's, read off the pinned version's own
+/// documentation (`:help remote-plugin-manifest`, `:help standard-path`,
+/// `:help packages`, `:help vim.pack`); shada, the log and the swap
+/// directory are under the state root, which nothing sources.
+const ENGINE_DATA_READS: &[&str] = &["rplugin.vim", "site"];
+
 /// Vets `<home>/.local/share`, the root [`HERMETIC_STDPATH_VARS`] points
 /// `XDG_DATA_HOME` at.
 ///
@@ -642,9 +659,11 @@ pub fn prepare_hermetic_home() -> io::Result<PathBuf> {
 /// `<data>/nvim` the moment it starts, so a scan refusing the root refuses
 /// every spawn after the first one that ran -- and the refusal names the
 /// directory, never the layout that guaranteed it would be there. It cannot
-/// be tolerated wholesale either, because `<data>/nvim/site/plugin/` is
-/// sourced by the next child. So the root holds the engine's own data
-/// directory and nothing else, and that directory holds no `site`.
+/// be tolerated wholesale either, because the next child sources what
+/// [`ENGINE_DATA_READS`] names out of it. So the root holds the engine's own
+/// data directory and nothing else, both are real directories rather than
+/// links onto a tree this scan never read, and the data directory holds
+/// none of those names.
 ///
 /// # Errors
 ///
@@ -652,14 +671,29 @@ pub fn prepare_hermetic_home() -> io::Result<PathBuf> {
 /// an [`io::Error::other`] naming the offending path otherwise.
 fn vet_data_root(home: &Path) -> io::Result<()> {
     let share = Path::new(".local").join("share");
+    // the root itself before anything under it: `read_dir` follows a
+    // symlink, so a link named `share` would be walked as the directory it
+    // points at and vetted on the wrong tree entirely
+    if !std::fs::symlink_metadata(home.join(&share))?.is_dir() {
+        return Err(home_refusal(home, &share));
+    }
     for entry in std::fs::read_dir(home.join(&share))? {
         let name = entry?.file_name();
         if name != engine_state_dir_name() {
             return Err(home_refusal(home, &share.join(name)));
         }
-        let site = share.join(name).join("site");
-        if home.join(&site).exists() {
-            return Err(home_refusal(home, &site));
+        let data = share.join(name);
+        if !std::fs::symlink_metadata(home.join(&data))?.is_dir() {
+            return Err(home_refusal(home, &data));
+        }
+        for read in ENGINE_DATA_READS {
+            let path = data.join(read);
+            // `symlink_metadata` rather than `exists`: a dangling link
+            // named for one of these is a plant waiting for its target,
+            // and `exists` reports it absent
+            if std::fs::symlink_metadata(home.join(&path)).is_ok() {
+                return Err(home_refusal(home, &path));
+            }
         }
     }
     Ok(())
@@ -1310,6 +1344,48 @@ mod tests {
         std::fs::create_dir_all(dir.join(".local/share").join(engine_state_dir_name())).unwrap();
         prepare_home_dir(&dir)
             .expect("a home holding only the data dir its own spawn created is accepted");
+    }
+
+    /// The manifest half of the same rule: `rplugin.vim` is sourced as
+    /// vimscript at every start, so a file planted at that name runs in the
+    /// child whether or not anything under `site` exists.
+    #[test]
+    fn a_remote_plugin_manifest_planted_in_the_data_dir_refuses_the_next_spawn() {
+        let dir = scratch("home-data-rplugin");
+        let data = dir.join(".local/share").join(engine_state_dir_name());
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("rplugin.vim"), "echo 'planted'").unwrap();
+        let refused = prepare_home_dir(&dir).unwrap_err();
+        assert!(
+            refused.to_string().contains("rplugin.vim"),
+            "the refusal does not name the planted manifest: {refused}"
+        );
+    }
+
+    /// A link is not the directory a child's own spawn created, and
+    /// following one puts the vetting on a tree this scan never read --
+    /// the same reason a `.local` that is not a directory is refused
+    /// outright.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_data_dir_refuses_the_next_spawn() {
+        let dir = scratch("home-data-linked");
+        // a target holding none of the names the scan refuses by name: the
+        // link itself is the finding, and a target that would have been
+        // refused anyway proves nothing about following it
+        let elsewhere = scratch("home-data-linked-target");
+        std::fs::create_dir_all(elsewhere.join("lsp")).unwrap();
+        std::fs::create_dir_all(dir.join(".local/share")).unwrap();
+        std::os::unix::fs::symlink(
+            &elsewhere,
+            dir.join(".local/share").join(engine_state_dir_name()),
+        )
+        .unwrap();
+        let refused = prepare_home_dir(&dir).unwrap_err();
+        assert!(
+            refused.to_string().contains(engine_state_dir_name()),
+            "the refusal does not name the linked data directory: {refused}"
+        );
     }
 
     /// The data root is vetted, not waved through: a directory under it

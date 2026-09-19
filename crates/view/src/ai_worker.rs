@@ -782,7 +782,7 @@ mod tests {
             context: Vec::new(),
         });
 
-        // `true` exits immediately without ever completing the ACP
+        // the spec exits at once without ever completing the ACP
         // handshake, so the session task ends on end-of-file and reports
         // its own crash -- this is what leaves the slot `Ready` with a
         // closed channel rather than ever reaching `SessionReady`.
@@ -1071,8 +1071,9 @@ mod tests {
     /// The out-of-band write watcher must never outlive its own session's
     /// crash: this is the falsifiable half of
     /// [`AiWorker::spawn_in_background`]'s own "## The watcher's own
-    /// lifetime" doc. `true` exits before its own watch can finish
-    /// starting, so the crash-forwarding closure's `stop_watch` runs while
+    /// lifetime" doc. A spec that exits at once ([`exits_at_once_spec`]) is
+    /// gone before its own watch can finish starting, so the
+    /// crash-forwarding closure's `stop_watch` runs while
     /// nothing is published yet -- the interleaving the generation slot
     /// exists for, and the one a plain "take the handle out" teardown would
     /// let a later `start_watch` walk straight past.
