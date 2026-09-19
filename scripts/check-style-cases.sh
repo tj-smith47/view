@@ -3977,6 +3977,27 @@ printf 'A page whose population is graded by the walk over `docs/`.\n' \
   >> "$CASE/docs/page.md"
 expect_frames 0 '' 'a closed span on an ordinary line'
 
+# A semicolon carrying a denial is the joiner in its quietest spelling, and
+# it shipped on README.md under a walk that graded the dash alone.
+new_frames_case
+printf 'The switcher retargets your colorscheme; no config to rewrite.\n' \
+  >> "$CASE/docs/page.md"
+expect_frames 1 'joiner docs/page.md:4' 'a semicolon joining a denial'
+
+new_frames_case
+printf 'The engine owns the text; nothing here holds a second copy.\n' \
+  >> "$CASE/README.md"
+expect_frames 1 'joiner README.md:4' 'a semicolon joining a denial on the README'
+
+# The convention pages under .claude/rules/ are read by whoever edits this
+# tree and are written in the voice they ask for, so the stance walk grades
+# them with the two kinds of page a reader outside the tree sees.
+new_frames_case
+mkdir -p "$CASE/.claude/rules"
+printf '# rule\n\nThe number is a reading, not a guess.\n' \
+  > "$CASE/.claude/rules/page.md"
+expect_frames 1 'frame .claude/rules/page.md:3' 'a contrast frame on a rules page'
+
 new_frames_case
 rm -f "$CASE/README.md"
 rm -rf "$CASE/docs"

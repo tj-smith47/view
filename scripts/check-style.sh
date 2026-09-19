@@ -2137,6 +2137,12 @@ PROSE_FRAMES_AWK='
       if (index(text, " -- ") > 0) { hit("joiner", "a dash joins two clauses") }
       if (index(text, EMDASH) > 0) { hit("joiner", "an em dash joins two clauses") }
       low = tolower(text)
+      # a semicolon carrying a denial is the joiner in its quietest
+      # spelling: the clause after it exists to say the alternative a
+      # reader never proposed is absent
+      if (low ~ /; (no|nothing|none|nor)([^[:alnum:]]|$)/) {
+        hit("joiner", "a semicolon joins a denial")
+      }
       # the idiom, which is one word to a reader and a frame to a pattern
       gsub(/whether or not/, "whether", low)
       # the transport denial .claude/rules/bench.md requires of the
@@ -2352,8 +2358,9 @@ if [ "${1:-}" = "--prose-width" ]; then
   check_prose_width $targets
   exit $?
 fi
-# The stance walk alone, graded the same way. Its population is the two
-# kinds of page a person reads: README.md and docs/.
+# The stance walk alone, graded the same way. Its population is the three
+# kinds of page someone reads: README.md, docs/ and the convention pages
+# under .claude/rules/, which is the population the width walk grades.
 if [ "${1:-}" = "--prose-frames" ]; then
   ROOT="${2:-}"
   if [ -z "$ROOT" ]; then
@@ -2364,6 +2371,7 @@ if [ "${1:-}" = "--prose-frames" ]; then
   targets=""
   if [ -f README.md ]; then targets="README.md"; fi
   if [ -d docs ]; then targets="$targets docs"; fi
+  if [ -d .claude/rules ]; then targets="$targets .claude/rules"; fi
   if [ -z "$targets" ]; then
     check_prose_frames /dev/null
     exit $?
@@ -2670,16 +2678,14 @@ if [ -f README.md ]; then
   # section (e.g. docs/statusline-wire-capture.md's "spec §9"), where
   # source code never has occasion to.
   check_narrative_markers "" "${doc_targets[@]}" || fail=1
-  # the convention pages wrap at the same width as the docs and are measured
-  # by the same walk: they are prose a contributor reads, and nothing else
-  # measured them. The two bans above stay off them -- a rules page cites a
-  # spec section and quotes the markers it bans, where a doc never does
-  width_targets=("${doc_targets[@]}")
-  if [ -d .claude/rules ]; then width_targets+=(.claude/rules); fi
-  check_prose_width "${width_targets[@]}" || fail=1
-  # the stance walk over the pages a person reads. The convention pages are
-  # out of this population for now: they carry the voice and quote the
-  # spellings banned here, and they get their own pass later
-  check_prose_frames "${doc_targets[@]}" || fail=1
+  # the convention pages are prose someone reads, so the width walk and the
+  # stance walk both grade them. An agent reads them before it edits this
+  # tree and writes in the voice they carry. The two bans above stay off
+  # them -- a rules page cites a spec section and quotes the markers it
+  # bans, where a doc never does
+  page_targets=("${doc_targets[@]}")
+  if [ -d .claude/rules ]; then page_targets+=(.claude/rules); fi
+  check_prose_width "${page_targets[@]}" || fail=1
+  check_prose_frames "${page_targets[@]}" || fail=1
 fi
 exit $fail
