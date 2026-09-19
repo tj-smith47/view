@@ -45,10 +45,11 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 VIEW_BIN=${VIEW_BIN:-$REPO_ROOT/target/release/view}
 VIEW_USER_CONFIG=${VIEW_USER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}}
-# never under /tmp: it is a small tmpfs shared with every other job on this
-# host, and a run holds a copy of a plugin tree per invocation
-SCRATCH=${CLAUDE_JOB_DIR:+$CLAUDE_JOB_DIR/tmp}
-SCRATCH=${SCRATCH:-$HOME/.cache/view/qa-respawn}
+# shellcheck source=scripts/lib/scratch.sh
+. "$SCRIPT_DIR/lib/scratch.sh"
+# a run holds a copy of a plugin tree per invocation, which is why this one
+# has a directory of its own under the shared root
+SCRATCH=$(scratch_root)/qa-respawn
 EVIDENCE=${EVIDENCE:-$SCRATCH/evidence}
 # KEEP=1 files every run's log, not only the ones a column flagged: a shape
 # whose verdict never fires leaves nothing behind to read otherwise

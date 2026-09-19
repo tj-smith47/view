@@ -2924,6 +2924,58 @@ expect_temp_traps 1 'scripts/a.sh' \
   "$note"
 
 # ---------------------------------------------------------------------------
+# the root a temp file is made under: a `mktemp` with no template answers
+# under TMPDIR, which is /tmp wherever nothing set that. Four cases, each
+# red when the one rule it names is taken out of the walk.
+# ---------------------------------------------------------------------------
+expect_temp_roots() {
+  want_rc="$1"
+  want="$2"
+  desc="$3"
+  out=$(bash "$CHECKER" --temp-roots "$CASE" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" \
+    | awk '/: makes a temp file with no template saying where it goes/ {
+        c = $1; sub(/:[0-9]*:$/, "", c); print c
+      }' \
+    | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=%s [%s]\n  got  rc=%s [%s]\n%s\n' \
+    "$n" "$desc" "$want_rc" "$want" "$rc" "$got" "$out"
+}
+
+new_temp_trap_case
+printf 'f=$(mktemp)\n' | write_temp_trap_script
+expect_temp_roots 1 'scripts/a.sh' 'a mktemp handed nothing at all'
+
+# the same call with only its options, which is the spelling this population
+# actually shipped: an option is not a root.
+new_temp_trap_case
+printf 'f=$(mktemp -d)\n' | write_temp_trap_script
+expect_temp_roots 1 'scripts/a.sh' 'a mktemp handed an option and no template'
+
+# the operand reading, which is the whole of what makes the case above red:
+# a walk that flagged every mktemp would redden this one too.
+new_temp_trap_case
+printf 'f=$(mktemp -d "$(scratch_root)/a-XXXXXX")\n' | write_temp_trap_script
+expect_temp_roots 0 '' 'a mktemp handed a template under a named root'
+
+# the single-quote reading: the case files plant whole scripts through
+# `printf` and a spelling written there is a fixture, not a call.
+new_temp_trap_case
+printf "printf 'f=\$(mktemp)\\\\n'\n" | write_temp_trap_script
+expect_temp_roots 0 '' 'a bare mktemp written inside a single-quoted string'
+
+# the here-doc reading, which is where the rest of those fixtures live.
+new_temp_trap_case
+printf 'cat <<%s\nf=$(mktemp)\nPLANT\n' "'PLANT'" | write_temp_trap_script
+expect_temp_roots 0 '' 'a bare mktemp written in a here-doc body'
+
+# ---------------------------------------------------------------------------
 # the directories the whole run requires: a walk guarded on a directory that
 # has moved grades nothing and says nothing, so the run reports on rules it
 # never reached. Every literal directory a guard names is required by name.

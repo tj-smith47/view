@@ -295,6 +295,31 @@ green. The population and not `scripts/*.sh`: that glob reaches neither
 `scripts/acceptance/` nor a file with no suffix, and the first script it missed
 was making a temp directory a Ctrl-C stranded.
 
+## A `mktemp` names the root it writes in
+
+A call handed no template answers under `$TMPDIR`, which is `/tmp` wherever
+nothing set that: a small tmpfs every job running beside this one shares, and
+a name that says nothing about which script made the file. One root for the
+whole population, in `scripts/lib/scratch.sh`: the job's own scratch
+directory where a harness set `CLAUDE_JOB_DIR`, the user's cache otherwise.
+A script sources that file and writes `mktemp -d "$(scratch_root)/name-XXXXXX"`.
+
+An operand naming some other root is still an operand, and the legs that
+write `"${TMPDIR:-/tmp}/view-…-XXXXXX"` keep it: what a run of theirs makes
+is a session root a unix socket path is measured from, and the rule is about
+the call that names nowhere at all rather than about which nowhere it picks.
+
+`check_temp_roots` in `scripts/check-style.sh` reads each line outside its
+single quotes and refuses a `mktemp` whose words are all options. The
+quoting is the whole of how the case files stay green: they plant scripts
+through `printf '…'` and through here-doc bodies, and a spelling written in
+either is a fixture rather than a call this tree makes -- the body is
+invisible to the reader this shares with the trap walk above, and the
+single-quoted run is stripped here. Five cases at the end of
+`scripts/check-style-cases.sh`, two red and three green, and each green one
+reddens when the one rule it names is reverted on a scratch copy of the
+checker.
+
 ## A path a walk is guarded on is required by name
 
 `scripts/check-style.sh` guards each walk on the directory or page it reads, so

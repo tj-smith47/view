@@ -35,6 +35,9 @@
 # shellcheck source=scripts/hold-awake.sh
 . "$REPO_ROOT/scripts/hold-awake.sh"
 
+# shellcheck source=scripts/lib/scratch.sh
+. "$REPO_ROOT/scripts/lib/scratch.sh"
+
 # A fractional-seconds clock every leg's wait loops time out against.
 #
 # BSD `date` (macOS, an established validation host for this repo) has no
@@ -264,7 +267,7 @@ check_view_reaping() {
     # them to `selfcheck_abort` while this frame is live, which is the only
     # reader either of them has
     local before SELFCHECK_TMP SELFCHECK_SESSION
-    SELFCHECK_TMP=$(mktemp -d)
+    SELFCHECK_TMP=$(mktemp -d "$(scratch_root)/view-acc-selfcheck-XXXXXX")
     # the straight-line rm at the end of this frame, and the one in
     # `selfcheck_abort`, both cover a path this function walks to its end; a
     # Ctrl-C in the ten-attempt wait below walks neither. The path is baked

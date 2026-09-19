@@ -11,6 +11,8 @@
 set -uo pipefail
 
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=scripts/lib/scratch.sh
+. "$ROOT/scripts/lib/scratch.sh"
 SHARED="$ROOT/scripts/acceptance/artifacts.sh"
 
 # the shipped definitions rather than copies: a copy here would keep
@@ -144,7 +146,7 @@ unparted_escapes() {
 [ -z "$(unparted_escapes "$ROOT"/scripts/acceptance/*.sh)" ]
 check "no acceptance leg writes a key into the window an Escape is held for" 0 $?
 
-PLANTED=$(mktemp)
+PLANTED=$(mktemp "$(scratch_root)/reader-cases-XXXXXX")
 trap 'rm -f "$PLANTED"' EXIT
 cat >"$PLANTED" <<'PLANT'
 leg_planted() {

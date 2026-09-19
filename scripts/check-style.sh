@@ -1256,6 +1256,102 @@ EOF
   return 1
 }
 
+# A `mktemp` names the directory it writes in.
+#
+# With no template it answers under `$TMPDIR`, which is `/tmp` wherever
+# nothing set that -- a small tmpfs shared with every job running beside
+# this one, and a name that says nothing about which script made it.
+# `scripts/lib/scratch.sh` holds the root this population writes in, and a
+# template under it is what puts a file there. An operand that names some
+# other root is still an operand: what this refuses is the call that names
+# none.
+#
+# Read off the line outside its single quotes, because the case files plant
+# whole scripts through `printf '...'` and a spelling written there is a
+# fixture rather than a call this tree makes. A here-doc body -- where the
+# rest of those fixtures live -- is already invisible to the reader this
+# shares with the trap walk.
+check_temp_roots() {
+  local fail=0 f found
+  if ! read_script_population; then
+    return 1
+  fi
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    grep -q 'mktemp' "$f" || continue
+    found=$(awk -v SQ="'" "$SCRIPT_CODE_AWK"'
+      # the text outside every single-quoted run, which is the text the
+      # shell runs. A run left open at the end of the line takes the rest
+      # of that line with it, and the caller says whether this line began
+      # inside one
+      function unquoted(s,   i, n, c, k, out) {
+        n = length(s); i = 1; out = ""
+        while (i <= n) {
+          c = substr(s, i, 1)
+          if (c == SQ) {
+            k = index(substr(s, i + 1), SQ)
+            if (k == 0) { return out }
+            i = i + k + 1
+            continue
+          }
+          out = out c
+          i++
+        }
+        return out
+      }
+      # whether the call at `at` is handed anything but options. The option
+      # words go first, so `-d` and `-u` are skipped and the `DIR` after a
+      # `-p` is read as the operand it is
+      function has_template(s, at,   rest, c) {
+        rest = substr(s, at + 6)
+        while (rest ~ /^[[:space:]]+-[A-Za-z]/) {
+          sub(/^[[:space:]]+-[A-Za-z]+/, "", rest)
+        }
+        sub(/^[[:space:]]+/, "", rest)
+        c = substr(rest, 1, 1)
+        return (c != "" && c !~ /[);<>&|`]/)
+      }
+      {
+        opened = (script_code_top() == SQ)
+        script_code_scan($0)
+        if (CODE == "") { next }
+        line = unquoted(opened ? SQ CODE : CODE)
+        pos = 0
+        while (1) {
+          k = index(substr(line, pos + 1), "mktemp")
+          if (k == 0) { break }
+          at = pos + k
+          pos = at + 5
+          if (at > 1 && substr(line, at - 1, 1) ~ /[A-Za-z0-9_-]/) { continue }
+          if (substr(line, at + 6, 1) ~ /[A-Za-z0-9_]/) { continue }
+          if (has_template(line, at)) { continue }
+          print FNR
+        }
+      }
+    ' "$f")
+    if [ -n "$found" ]; then
+      while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        echo "$f:$line: makes a temp file with no template saying where it goes"
+      done <<EOF
+$found
+EOF
+      fail=1
+    fi
+  done <<EOF
+$SCRIPT_POPULATION
+EOF
+  if [ "$fail" -eq 0 ]; then
+    return 0
+  fi
+  echo "STYLE FAIL: a temp file with no root named for it"
+  echo "  A bare mktemp writes under TMPDIR, which is /tmp here: a small"
+  echo "  tmpfs every parallel job shares, under a name saying nothing about"
+  echo "  which script made it. Source scripts/lib/scratch.sh and hand the"
+  echo "  call a template under \$(scratch_root)."
+  return 1
+}
+
 check_written_programs() {
   local expected actual
   expected=$(printf '%s\n' "$WRITTEN_PROGRAM_SITES" | awk 'NF { print $1, $2 }' | LC_ALL=C sort)
@@ -2127,6 +2223,17 @@ if [ "${1:-}" = "--temp-traps" ]; then
   check_temp_traps
   exit $?
 fi
+# The temp-root walk alone, graded the same way.
+if [ "${1:-}" = "--temp-roots" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --temp-roots ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  check_temp_roots
+  exit $?
+fi
 
 fail=0
 # Every directory a walk below is guarded on, named once and required here:
@@ -2151,6 +2258,7 @@ for required_file in README.md; do
 done
 if [ -d scripts ]; then
   check_temp_traps || fail=1
+  check_temp_roots || fail=1
 fi
 if [ -d crates ]; then
   check_content crates '//|#' --include='*.rs' || fail=1

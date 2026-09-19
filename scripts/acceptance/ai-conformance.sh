@@ -543,7 +543,7 @@ assert_tool_call_went_non_terminal_then_terminal() {
 leg_streaming_and_tool_status() {
     CURRENT_LEG=2-streaming-and-tool-status
     local resume
-    start_session stream "$STUB_ARGV" "$(mktemp -d)"
+    start_session stream "$STUB_ARGV" "$(mktemp -d "$(scratch_root)/view-ai-conf-cache-XXXXXX")"
     resume=$RESUME_FILE
     rm -f "$resume"
     open_panel "$WAIT_SECS"
@@ -609,7 +609,7 @@ leg_streaming_and_tool_status() {
 leg_diff_accept_and_reject() {
     local key
     CURRENT_LEG=3-diff-accept-and-reject
-    start_session diff "$STUB_ARGV" "$(mktemp -d)"
+    start_session diff "$STUB_ARGV" "$(mktemp -d "$(scratch_root)/view-ai-conf-cache-XXXXXX")"
     open_panel "$WAIT_SECS"
     # before the first in-buffer read, not after it: `buffer_region` finds
     # the buffer by cutting at the panel's own left border, so a border this
@@ -706,7 +706,7 @@ gamma' 'a rejected hunk changed the buffer'
 
 leg_cancel_mid_turn() {
     CURRENT_LEG=4-cancel-mid-turn
-    start_session cancel "$STUB_ARGV" "$(mktemp -d)"
+    start_session cancel "$STUB_ARGV" "$(mktemp -d "$(scratch_root)/view-ai-conf-cache-XXXXXX")"
     open_panel "$WAIT_SECS"
 
     submit 'ask'
@@ -732,7 +732,7 @@ leg_cancel_mid_turn() {
 leg_agent_crash() {
     CURRENT_LEG=5-agent-crash
     local start took
-    start_session crash "$STUB_ARGV" "$(mktemp -d)"
+    start_session crash "$STUB_ARGV" "$(mktemp -d "$(scratch_root)/view-ai-conf-cache-XXXXXX")"
     open_panel "$WAIT_SECS"
 
     submit 'die'
@@ -774,7 +774,7 @@ leg_agent_crash() {
 
 leg_permission_overlap() {
     CURRENT_LEG=6-permission-overlap
-    start_session overlap "$STUB_ARGV" "$(mktemp -d)"
+    start_session overlap "$STUB_ARGV" "$(mktemp -d "$(scratch_root)/view-ai-conf-cache-XXXXXX")"
     open_panel "$WAIT_SECS"
 
     submit 'ask-twice'
@@ -812,7 +812,7 @@ leg_permission_overlap() {
 # back, none of them read what the rows offered.
 leg_permission_keys_and_grant() {
     CURRENT_LEG=8-permission-keys-and-grant
-    start_session grant "$STUB_ARGV" "$(mktemp -d)"
+    start_session grant "$STUB_ARGV" "$(mktemp -d "$(scratch_root)/view-ai-conf-cache-XXXXXX")"
     open_panel "$WAIT_SECS"
 
     submit 'ask-always'
@@ -884,7 +884,7 @@ leg_permission_keys_and_grant() {
 leg_filesystem_round_trip() {
     CURRENT_LEG=7-filesystem-round-trip
     local settled
-    start_session fs "$STUB_ARGV" "$(mktemp -d)"
+    start_session fs "$STUB_ARGV" "$(mktemp -d "$(scratch_root)/view-ai-conf-cache-XXXXXX")"
     # Two lines and a final newline, because all three are things the answer
     # can get wrong: nvim's line list carries no record of a terminator at
     # all, so the join and the trailing newline are reconstructed on the way
@@ -948,7 +948,7 @@ leg_filesystem_round_trip() {
 leg_prompt_awaiting_its_answer() {
     CURRENT_LEG=9-prompt-awaiting-its-answer
     local resume held others
-    start_session think "$STUB_ARGV" "$(mktemp -d)"
+    start_session think "$STUB_ARGV" "$(mktemp -d "$(scratch_root)/view-ai-conf-cache-XXXXXX")"
     resume=$RESUME_FILE
     rm -f "$resume"
     open_panel "$WAIT_SECS"

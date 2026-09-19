@@ -13,6 +13,10 @@
 # usage: scripts/check-rewrap-structure.sh BASE HEAD
 set -uo pipefail
 
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=scripts/lib/scratch.sh
+. "$HERE/lib/scratch.sh"
+
 if [ "$#" -ne 2 ]; then
   printf 'usage: %s BASE HEAD\n' "$0" >&2
   exit 2
@@ -27,7 +31,7 @@ for rev in "$base" "$head_rev"; do
   fi
 done
 
-WORK=$(mktemp -d)
+WORK=$(mktemp -d "$(scratch_root)/check-rewrap-XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
 # each blank-separated block on one line, fenced samples dropped and every run

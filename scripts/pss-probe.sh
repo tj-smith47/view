@@ -27,6 +27,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+# shellcheck source=scripts/lib/scratch.sh
+. "$root/scripts/lib/scratch.sh"
 
 binary="${1:-${CARGO_TARGET_DIR:-target}/release/view}"
 open_file="${2:-README.md}"
@@ -61,7 +63,7 @@ git log --oneline -1 || true
 ls -l "$binary"
 echo "pty ${cols}x${rows}, settle ${settle_secs}s"
 
-work="$(mktemp -d)"
+work="$(mktemp -d "$(scratch_root)/view-pss-XXXXXX")"
 pid_file="$work/pid"
 driver="$work/pty-spawn.py"
 child_pid=""

@@ -15,6 +15,10 @@
 # pane's output is the thing being measured, not a place to put results.
 set -eu
 
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=scripts/lib/scratch.sh
+. "$HERE/lib/scratch.sh"
+
 MODE="${1:-probe}"
 OUT="${2:?usage: capture-terminal-probe.sh [probe|keys] <outfile>}"
 
@@ -22,7 +26,7 @@ exec </dev/tty >/dev/tty 2>/dev/null
 [ -t 0 ] || { echo "no controlling terminal" >>"$OUT"; exit 2; }
 exec 3>"$OUT"
 
-RAW="$(mktemp)"
+RAW="$(mktemp "$(scratch_root)/capture-terminal-probe-XXXXXX")"
 SAVED="$(stty -g)"
 cleanup() { stty "$SAVED" 2>/dev/null || true; rm -f "$RAW"; }
 trap cleanup EXIT INT TERM
