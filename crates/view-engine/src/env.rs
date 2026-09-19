@@ -181,9 +181,9 @@ pub const HOST_SUBPROCESS_CONFIG_VARS: &[&str] = &["GIT_CONFIG_GLOBAL", "GIT_CON
 /// profile-shaped lookups need them. That residual is accepted, not closed.
 pub const HERMETIC_HOME_VAR: &str = "HOME";
 
-/// The four standard-path roots a hermetic spawn names outright, each with
-/// its position under [`hermetic_home`]: the directory the same variable's
-/// own Unix default already resolves to there.
+/// The roots a hermetic spawn names outright, each with its position under
+/// [`hermetic_home`]: for the four standard-path variables, the directory
+/// the same variable's own Unix default already resolves to there.
 ///
 /// [`HERMETIC_HOME_VAR`] moves a child's home, and on Unix that moves every
 /// `stdpath()` with it, since all four default to a directory under
@@ -201,6 +201,23 @@ pub const HERMETIC_HOME_VAR: &str = "HOME";
 /// that holds on both, and changes nothing on Unix in effect: each value
 /// here is the path the child derived anyway.
 ///
+/// `%LOCALAPPDATA%` is here for a root the engine reads that is not a
+/// `stdpath()` at all. Its `plugin/rplugin.vim` migrates an older
+/// remote-plugin manifest: when the current one is unreadable -- which is
+/// every hermetic spawn -- it `rename()`s `$LOCALAPPDATA/nvim/rplugin.vim`
+/// into place and sources it, and `$NVIM_RPLUGIN_MANIFEST` does not stop
+/// that, because an unreadable manifest is what triggers the migration
+/// whatever names it. Passed through, that is the operator's own profile:
+/// the file runs inside the child and leaves their account. It is pointed
+/// at the same directory as `XDG_DATA_HOME` so the path the migration
+/// reads lands under the one root [`vet_data_root`] already scans -- on
+/// Windows `stdpath('data')` is `<data>/nvim-data`, so the migration's
+/// `<data>/nvim` is a foreign entry there and refused by name. Anything
+/// else a child writes through `%LOCALAPPDATA%` lands under the same scan,
+/// and is refused on the same terms; `stdpath()` itself never consults it
+/// here, because the four variables above are set and take precedence over
+/// every default.
+///
 /// Unlike [`HERMETIC_HOME_VAR`], a caller's own entry for one of these
 /// outranks the hermetic layer. Delivering a pinned configuration through
 /// `XDG_CONFIG_HOME` to an otherwise isolated child is how the measurement
@@ -212,6 +229,7 @@ pub const HERMETIC_STDPATH_VARS: &[(&str, &[&str])] = &[
     ("XDG_DATA_HOME", &[".local", "share"]),
     ("XDG_STATE_HOME", &[".local", "state"]),
     ("XDG_CACHE_HOME", &[".cache"]),
+    ("LOCALAPPDATA", &[".local", "share"]),
 ];
 
 /// [`HERMETIC_STDPATH_VARS`] resolved against [`hermetic_home`]: the value a
@@ -398,7 +416,9 @@ pub const CLIENT_FORWARDED_VARS: &[&str] = &[
 ///   would trade a measured non-effect for a real one.
 /// - The Windows system variables: process creation itself fails without
 ///   `SYSTEMROOT`, so dropping them would not isolate a child, it would
-///   stop there being one.
+///   stop there being one. `LOCALAPPDATA` is not among them: process
+///   creation does not read it, the engine does
+///   ([`HERMETIC_STDPATH_VARS`]), and it is redirected rather than passed.
 pub const HERMETIC_PASSTHROUGH_VARS: &[&str] = &[
     "PATH",
     "USER",
@@ -422,7 +442,6 @@ pub const HERMETIC_PASSTHROUGH_VARS: &[&str] = &[
     "HOMEDRIVE",
     "HOMEPATH",
     "APPDATA",
-    "LOCALAPPDATA",
     "PROGRAMDATA",
     "PROGRAMFILES",
     "PROGRAMFILES(X86)",
@@ -648,8 +667,19 @@ pub fn prepare_hermetic_home() -> io::Result<PathBuf> {
 ///
 /// The list is the engine's, read off the pinned version's own
 /// documentation (`:help remote-plugin-manifest`, `:help standard-path`,
-/// `:help packages`, `:help vim.pack`); shada, the log and the swap
-/// directory are under the state root, which nothing sources.
+/// `:help packages`, `:help vim.pack`) and its `plugin/rplugin.vim`; shada,
+/// the log and the swap directory are under the state root, which nothing
+/// sources.
+///
+/// The manifest has a second reader: on Windows that plugin migrates an
+/// older manifest by renaming `$LOCALAPPDATA/nvim/rplugin.vim` into place
+/// and sourcing it whenever the current one is unreadable. Both ends of
+/// that move land under this scan, because [`HERMETIC_STDPATH_VARS`] points
+/// `%LOCALAPPDATA%` at the data root -- `<data>/nvim` is not the engine's
+/// own data directory there (`nvim-data` is), so it is refused as a foreign
+/// entry before a manifest under it could be read. The plugin's other
+/// candidate is derived from `$MYVIMRC`, which resolves inside the
+/// configuration root the caller named.
 const ENGINE_DATA_READS: &[&str] = &["rplugin.vim", "site"];
 
 /// Vets `<home>/.local/share`, the root [`HERMETIC_STDPATH_VARS`] points
@@ -1213,6 +1243,39 @@ mod tests {
                  child whatever the plan names"
             );
         }
+    }
+
+    /// The engine reads `%LOCALAPPDATA%` for something no `stdpath()`
+    /// covers -- the manifest migration in its own `plugin/rplugin.vim` --
+    /// so the plan names that root too, at the data root's own directory,
+    /// which is what puts the migration's source path under
+    /// [`vet_data_root`]'s scan. Named rather than left to the walk above:
+    /// the row is what keeps a real profile's `nvim/rplugin.vim` from being
+    /// sourced inside a hermetic child and moved out of the operator's
+    /// account, and the walk would go on passing with the row deleted.
+    #[test]
+    fn the_local_app_data_root_is_redirected_onto_the_data_root() {
+        let dirs = hermetic_stdpath_dirs();
+        let local = dirs
+            .iter()
+            .find(|(name, _)| *name == "LOCALAPPDATA")
+            .map(|(_, dir)| dir.clone())
+            .expect("the plan names %LOCALAPPDATA%, on every platform's table");
+        let data = dirs
+            .iter()
+            .find(|(name, _)| *name == "XDG_DATA_HOME")
+            .map(|(_, dir)| dir.clone())
+            .expect("the plan names the data root");
+        assert_eq!(
+            local, data,
+            "the migration reads <localappdata>/nvim/rplugin.vim, which is \
+             vetted only where it falls under the data root"
+        );
+        assert!(
+            !is_hermetic_passthrough(OsStr::new("LOCALAPPDATA")),
+            "the host's own value reaches the child, so the redirect fills \
+             nothing and the operator's profile is what the engine reads"
+        );
     }
 
     /// The swap directory the preparation owns must be the one a child
