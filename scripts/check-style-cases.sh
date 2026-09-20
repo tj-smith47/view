@@ -3933,9 +3933,47 @@ new_frames_case
 } >> "$CASE/docs/page.md"
 expect_frames 0 '' 'a fenced sample holding every shape'
 
+# A cell holds a sentence someone wrote, and the row around it does not:
+# each cell is graded on its own, so two cells side by side are never read
+# as one line and the separator row has no words to read.
 new_frames_case
-printf '| id | note |\n| a | a reading, not a guess |\n' >> "$CASE/docs/page.md"
-expect_frames 0 '' 'a table row, which is a cell of data'
+printf '| id | note |\n|---|---|\n| a reading | not a guess |\n' \
+  >> "$CASE/docs/page.md"
+expect_frames 0 '' 'two cells whose words read as a frame only if the row were one line'
+
+new_frames_case
+printf '| id | note |\n| --- | --- |\n| a | one |\n' >> "$CASE/docs/page.md"
+expect_frames 0 '' 'the separator row, which carries no words'
+
+new_frames_case
+printf '| id | note |\n|---|---|\n| a | a reading, not a guess |\n' \
+  >> "$CASE/docs/page.md"
+expect_frames 1 'frame docs/page.md:6' 'a contrast frame in a table cell'
+
+new_frames_case
+printf '| id | note |\n|---|---|\n| a | the key reaches it -- the glyph is drawn |\n' \
+  >> "$CASE/docs/page.md"
+expect_frames 1 'joiner docs/page.md:6' 'a dash joining two clauses in a table cell'
+
+# A generated table writes a placeholder where a column is empty, and a
+# dash with nothing on one side of it joins nothing.
+new_frames_case
+printf '| id | note |\n|---|---|\n| a | -- none -- |\n' >> "$CASE/docs/page.md"
+expect_frames 0 '' 'a dash placeholder standing for an empty cell'
+
+# These pages wrap at 80 characters, so a tell word sits across the margin
+# as readily as inside a line, and the hit is reported where it starts.
+new_frames_case
+printf 'The page names the influence and never Neovim as the\n' \
+  >> "$CASE/docs/page.md"
+printf 'reason it exists for a reader deciding whether to try view.\n' \
+  >> "$CASE/docs/page.md"
+expect_frames 1 'tell docs/page.md:4' 'a tell word split across the wrap'
+
+new_frames_case
+printf 'The engine draws the screen.\n\nNot every line of it is prose.\n' \
+  >> "$CASE/docs/page.md"
+expect_frames 0 '' 'two lines a blank line keeps apart'
 
 new_frames_case
 printf '> The number is a reading, not a guess.\n' >> "$CASE/docs/page.md"
@@ -4032,6 +4070,37 @@ else
     printf 'FAIL %s - %s\n  want rc=1 [frame docs/page.md:4]\n  got  rc=%s\n%s\n' \
       "$n" "$FRAMES_STOCK" "$stock_rc" "$stock_out"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# The two walks over the convention pages are called twice: from the branch
+# a contributor runs by hand, and from inside the whole run, which is the
+# call `task ci` makes. The in-run callsite is the one with no case above
+# it: handed the list that holds README.md and docs/ alone, it grades no
+# rules page and every case in this file stays green.
+# ---------------------------------------------------------------------------
+IN_RUN='the convention pages graded by the whole run and not only by its branch'
+n=$((n + 1))
+CASE="$WORK/case$n"
+mkdir -p "$CASE/crates" "$CASE/scripts/acceptance" "$CASE/compat" \
+  "$CASE/corpus" "$CASE/docs" "$CASE/.claude/rules"
+printf '# view\n\nA line that says what is true and stops.\n' > "$CASE/README.md"
+{
+  printf '# rule\n\nThe number is a reading, not a guess.\n'
+  printf 'A line of prose on a rules page that runs well past the eighty %s\n' \
+    'character limit the width walk grades it by.'
+} > "$CASE/.claude/rules/page.md"
+in_run=$(cd "$CASE" && bash "$CHECKER" 2>&1 | sed -n \
+  -e 's/^frame \(.claude\/rules\/page.md:3\):.*/frame \1/p' \
+  -e 's/^\(.claude\/rules\/page.md:4\): [0-9]* characters$/wide \1/p' \
+  | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')
+want_in_run='frame .claude/rules/page.md:3 wide .claude/rules/page.md:4'
+if [ "$in_run" = "$want_in_run" ]; then
+  printf 'ok %s - %s\n' "$n" "$IN_RUN"
+else
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want [%s]\n  got  [%s]\n' \
+    "$n" "$IN_RUN" "$want_in_run" "$in_run"
 fi
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"

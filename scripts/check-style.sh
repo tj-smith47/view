@@ -2105,11 +2105,82 @@ PROSE_FRAMES_AWK='
       }
       return out
     }
-    function whole(t, w) {
-      return t ~ ("(^|[^[:alnum:]_])" w "([^[:alnum:]_]|$)")
+    # the separator row carries no words, so it is the one row with nothing
+    # to grade
+    function is_separator_row(l,   t) {
+      t = l; gsub(/[[:space:]]/, "", t)
+      return (t ~ /^[|:-]+$/ && index(t, "-") > 0)
     }
-    function hit(shape, what) {
-      printf "%s %s:%d: %s\n", shape, FILENAME, FNR, what
+    # what a shape is matched in, case-folded and with the two spellings a
+    # reader sees as one word blanked. A blank of the same width and never
+    # a shorter string, so that a position in the folded text is the same
+    # position in the text it was folded from
+    function fold(t,   lc) {
+      lc = tolower(t)
+      # the idiom, which is one word to a reader and a frame to a pattern
+      gsub(/whether or not/, "whether       ", lc)
+      # the transport denial .claude/rules/bench.md requires of the
+      # speculated-echo paragraph, and nothing wider
+      if (index(lc, "not a network") > 0 &&
+          (index(lc, "local") > 0 || index(lc, "reading") > 0)) {
+        gsub(/not a network/, "             ", lc)
+      }
+      return lc
+    }
+    # a hit is reported where it starts. Reading a pair of lines joined at
+    # a seam, only a hit carrying text from both sides is new: everything
+    # inside one line was graded when that line was read alone
+    function spans(p, len, seam) {
+      if (p == 0) { return 0 }
+      if (seam == 0) { return 1 }
+      return (p <= seam && p + len - 1 >= seam)
+    }
+    # a dash joins two clauses, so it is the joiner only where a clause
+    # stands on each side of it: a cell holding a placeholder such as the
+    # one a generated table writes for an empty column is a value
+    function joins(s, p, len) {
+      return (substr(s, 1, p - 1) ~ /[^[:space:]]/ &&
+              substr(s, p + len) ~ /[^[:space:]]/)
+    }
+    function whole(w) {
+      return "(^|[^[:alnum:]_])" w "([^[:alnum:]_]|$)"
+    }
+    function hit(shape, what, ln) {
+      printf "%s %s:%d: %s\n", shape, FILENAME, ln, what
+    }
+    # the two dash joiners are read off the text as written and everything
+    # else off the folded text, which is the same width
+    function grade(text, low, ln, seam,   i, p) {
+      p = index(text, " -- ")
+      if (spans(p, 4, seam) && joins(text, p, 4)) {
+        hit("joiner", "a dash joins two clauses", ln)
+      }
+      p = index(text, EMDASH)
+      if (spans(p, length(EMDASH), seam) && joins(text, p, length(EMDASH))) {
+        hit("joiner", "an em dash joins two clauses", ln)
+      }
+      # a semicolon carrying a denial is the joiner in its quietest
+      # spelling: the clause after it exists to say the alternative a
+      # reader never proposed is absent
+      if (match(low, /; (no|nothing|none|nor)([^[:alnum:]]|$)/) &&
+          spans(RSTART, RLENGTH, seam)) {
+        hit("joiner", "a semicolon joins a denial", ln)
+      }
+      for (i = 1; i <= nc; i++) {
+        if (C[i] != "" && match(low, C[i]) && spans(RSTART, RLENGTH, seam)) {
+          hit("frame", "a contrast frame", ln); break
+        }
+      }
+      for (i = 1; i <= nt; i++) {
+        if (T[i] != "" && match(low, whole(T[i])) &&
+            spans(RSTART, RLENGTH, seam)) {
+          hit("tell", T[i], ln); break
+        }
+      }
+      for (i = 1; i <= nf; i++) {
+        if (F[i] == "" || !match(low, whole(F[i]))) { continue }
+        if (spans(RSTART, RLENGTH, seam)) { hit("fairness", F[i], ln); break }
+      }
     }
     BEGIN {
       nc = split(ENVIRON["PROSE_CONTRAST"], C, "\n")
@@ -2117,49 +2188,43 @@ PROSE_FRAMES_AWK='
       nf = split(ENVIRON["PROSE_FAIRNESS"], F, "\n")
       EMDASH = sprintf("%c%c%c", 226, 128, 148)
     }
-    FNR == 1 { fenced = 0 }
+    FNR == 1 { fenced = 0; prev_no = 0 }
     /^[[:space:]]*(```|~~~)/ {
       match($0, /`+|~+/)
       ch = substr($0, RSTART, 1)
       run = RLENGTH
       if (!fenced) { fenced = 1; fence_ch = ch; fence_run = run }
       else if (ch == fence_ch && run >= fence_run) { fenced = 0 }
+      prev_no = 0
       next
     }
-    fenced { next }
-    # a row is a cell of data and a blockquote is quoted upstream text
-    is_table_row($0) { next }
-    /^[[:space:]]*>/ { next }
+    fenced { prev_no = 0; next }
+    # a row is a column of cells and each cell is read on its own: the words
+    # of one cell are a sentence, and two cells side by side are not
+    is_table_row($0) {
+      prev_no = 0
+      if (is_separator_row($0)) { next }
+      cells = split(strip_spans($0), cell, "|")
+      for (ci = 1; ci <= cells; ci++) {
+        grade(cell[ci], fold(cell[ci]), FNR, 0)
+      }
+      next
+    }
+    # a blockquote is quoted upstream text
+    /^[[:space:]]*>/ { prev_no = 0; next }
     # an nvim message is quoted as nvim writes it
-    /(^|[^[:alnum:]])E[0-9]+:/ { next }
+    /(^|[^[:alnum:]])E[0-9]+:/ { prev_no = 0; next }
     {
       text = strip_spans($0)
-      if (index(text, " -- ") > 0) { hit("joiner", "a dash joins two clauses") }
-      if (index(text, EMDASH) > 0) { hit("joiner", "an em dash joins two clauses") }
-      low = tolower(text)
-      # a semicolon carrying a denial is the joiner in its quietest
-      # spelling: the clause after it exists to say the alternative a
-      # reader never proposed is absent
-      if (low ~ /; (no|nothing|none|nor)([^[:alnum:]]|$)/) {
-        hit("joiner", "a semicolon joins a denial")
+      grade(text, fold(text), FNR, 0)
+      # these pages wrap at 80 characters, so a frame or a tell word sits
+      # across the margin as readily as inside a line, and a walk reading
+      # one line at a time is a bypass one wrap wide
+      if (prev_no == FNR - 1 && prev_text != "" && text != "") {
+        joined = prev_text " " text
+        grade(joined, fold(joined), prev_no, length(prev_text) + 1)
       }
-      # the idiom, which is one word to a reader and a frame to a pattern
-      gsub(/whether or not/, "whether", low)
-      # the transport denial .claude/rules/bench.md requires of the
-      # speculated-echo paragraph, and nothing wider
-      if (index(low, "not a network") > 0 &&
-          (index(low, "local") > 0 || index(low, "reading") > 0)) {
-        gsub(/not a network/, "", low)
-      }
-      for (i = 1; i <= nc; i++) {
-        if (C[i] != "" && low ~ C[i]) { hit("frame", "a contrast frame"); break }
-      }
-      for (i = 1; i <= nt; i++) {
-        if (T[i] != "" && whole(low, T[i])) { hit("tell", T[i]); break }
-      }
-      for (i = 1; i <= nf; i++) {
-        if (F[i] != "" && index(low, F[i]) > 0) { hit("fairness", F[i]); break }
-      }
+      prev_text = text; prev_no = FNR
     }'
 check_prose_frames() {
   local pages found rc
