@@ -478,38 +478,34 @@ fn a_float_opened_after_the_leading_scan_is_still_reported() {
     panic!("no round observed the leading scan ahead of the second float; the host stalled the deferred scan past every gap tried: {rounds:?}");
 }
 
-/// The whole probe against a real engine: what `package.loaded` answers,
-/// when it answers it, and that the answer decodes back into the message
-/// `update` acts on. A fixture that requires nothing and one that stands a
-/// module in the registry, so a pass cannot come from the probe answering
+/// The whole reading against a real engine: what stands at `vim.notify`,
+/// when it is answered, and that the answer decodes back into the message
+/// `update` acts on. A fixture that leaves nvim's own notifier alone and
+/// one that replaces it, so a pass cannot come from the reading answering
 /// the same thing either way.
 #[test]
-fn the_claimant_probe_answers_what_the_session_actually_loaded() {
+fn the_sink_reading_answers_who_actually_stands_at_vim_notify() {
     for (name, init, expected) in [
-        ("claimants-bare", "", Vec::new()),
-        (
-            "claimants-loaded",
-            "package.loaded['noice'] = { probed = true }\n",
-            vec!["noice".to_string()],
-        ),
+        ("sink-bare", "", false),
+        ("sink-taken", "vim.notify = function() end\n", true),
     ] {
         let session = Session::start(name, init);
         session
             .engine
             .handle
-            .probe_claimants(session.engine.api_info.channel_id)
+            .read_notify_sink(session.engine.api_info.channel_id)
             .unwrap();
-        // the probe fires on the first idle transition, which an eval
+        // the reading fires on the first idle transition, which an eval
         // barrier is not: this forces nvim through its main loop
         session.eval("execute('sleep 100m')");
         let mut model = model();
-        let probed = session
+        let read = session
             .wait_for(&mut model, ARRIVAL, |msg| match msg {
-                Msg::ClaimantsProbed(loaded) => Some(loaded.clone()),
+                Msg::NotifySinkRead { foreign } => Some(*foreign),
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("{name}: the probe never answered"));
-        assert_eq!(probed, expected, "{name}");
+            .unwrap_or_else(|| panic!("{name}: the reading never answered"));
+        assert_eq!(read, expected, "{name}");
     }
 }
 

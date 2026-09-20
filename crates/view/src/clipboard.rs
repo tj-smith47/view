@@ -853,13 +853,6 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
-        fn set_option(
-            &self,
-            _name: &str,
-            _value: &view_core::msg::OptionValue,
-        ) -> Result<(), view_engine::handle::EngineError> {
-            Ok(())
-        }
         fn takeover(
             &self,
             _steps: &[view_core::msg::TakeoverStep],
@@ -884,12 +877,6 @@ mod tests {
             Ok(())
         }
         fn raise_notice(&self, _text: &str) -> Result<(), view_engine::handle::EngineError> {
-            Ok(())
-        }
-        fn disable_claimants(
-            &self,
-            _modules: &[String],
-        ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
         fn reply(
@@ -960,13 +947,6 @@ mod tests {
             &self,
             _path: &str,
             _generation: u64,
-        ) -> Result<(), view_engine::handle::EngineError> {
-            Ok(())
-        }
-        fn set_float_hidden(
-            &self,
-            _win: u64,
-            _hide: bool,
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }

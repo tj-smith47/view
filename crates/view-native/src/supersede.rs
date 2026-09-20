@@ -117,9 +117,10 @@ impl TakeoverKind {
     }
 }
 
-/// Every augroup the shipped takeover table's holds create inside nvim, in
-/// table order: one per row whose kind installs a hold, and none for a kind
-/// that does not.
+/// Every augroup the shipped holds create inside nvim, in table order: one
+/// per takeover row whose kind installs a hold, none for a kind that does
+/// not, and one per channel the session holds on its own account
+/// ([`channels::session_held`]).
 ///
 /// The kind decides, through a match with no wildcard arm, rather than the
 /// shape of the string it produced. A later kind that does install a guard
@@ -131,7 +132,28 @@ impl TakeoverKind {
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn takeover_augroups() -> Vec<String> {
-    takeovers().iter().map(|row| row.kind.claims()).collect()
+    let mut names: Vec<String> = takeovers().iter().map(|row| row.kind.claims()).collect();
+    // the session's own holds install the same guards under the same
+    // names, and a guard nothing enumerates is a guard the cross-crate pin
+    // never reads
+    for channel in channels::session_held() {
+        if let Channel::Hold {
+            option,
+            scope,
+            value,
+        } = channel
+        {
+            names.push(
+                TakeoverKind::Option {
+                    option,
+                    scope,
+                    value,
+                }
+                .claims(),
+            );
+        }
+    }
+    names
 }
 
 /// One row of the takeover table: the feature that owns it, and what its
@@ -153,19 +175,19 @@ struct Takeover {
 /// Renders one row as the call that performs it: always a durable hold,
 /// never a plain set or assignment.
 ///
-/// A superseded plugin keeps running, and a plugin that owns a surface
-/// re-asserts its claim on its own events. lualine re-runs `setup()`
-/// on `ColorScheme` and on `OptionSet background`, and that `setup()` sets
-/// `laststatus`: measured against the compat harness's heavy fixture, a
-/// plain one-shot set to `0` was back at `2` after the first
+/// A superseded renderer keeps running, and one that owns a surface
+/// re-asserts its claim on its own events. A status-line config that
+/// re-runs its setup on `ColorScheme` and on `OptionSet background` sets
+/// `laststatus` with it: measured against the compat harness's heavy
+/// fixture, a plain one-shot set to `0` was back at `2` after the first
 /// `:colorscheme`, with nothing failing and view still drawing a status
-/// line it no longer owned. `vim.notify` is worse still -- noice patches it
-/// from a deferred load that runs after the plan, and nvim-notify's own
-/// documented setup patches it from `init.lua` -- so there the one-shot
-/// loses in the ordinary case rather than the exotic one. The takeover
-/// therefore has to be the kind that holds, and expressing it as one call
-/// rather than as a set plus a separate guard entry means no consumer can
-/// apply half of it.
+/// line it no longer owned. `vim.notify` is worse still -- a deferred load
+/// can patch it after the plan has run, and a notifier's documented setup
+/// patches it from `init.lua` -- so there the one-shot loses in the
+/// ordinary case rather than the exotic one. The takeover therefore has to
+/// be the kind that holds, and expressing it as one call rather than as a
+/// set plus a separate guard entry means no consumer can apply half of
+/// it.
 fn takeover_call(row: &Takeover) -> Option<RpcCall> {
     match row.kind {
         TakeoverKind::Option {
@@ -198,8 +220,8 @@ fn takeover_call(row: &Takeover) -> Option<RpcCall> {
 /// A channel claimed by more than one surface is not a feature's to hold --
 /// the last grid row carries nvim's command line and its message area
 /// both, and a session that gave either one back still needs it -- so those
-/// are held by the session against its attach set instead
-/// (`view::native`'s own reading of [`channels::claimants_of`]).
+/// are held by the session against its attach set instead, on the same
+/// reading ([`channels::shared_by_surfaces`]).
 fn takeovers() -> Vec<Takeover> {
     let mut rows = Vec::new();
     for entry in channels::CHANNELS {
@@ -213,7 +235,7 @@ fn takeovers() -> Vec<Takeover> {
                     scope,
                     value,
                 } => {
-                    if channels::claimants_of(option).any(|s| s.feature() != Some(feature)) {
+                    if channels::shared_by_surfaces(option) {
                         continue;
                     }
                     TakeoverKind::Option {
@@ -240,8 +262,8 @@ fn takeovers() -> Vec<Takeover> {
 
 /// The one runtime function view holds, spelled once: the derivation above
 /// matches on it, and a [`Channel::Replaced`] naming anything else has no
-/// call behind it and is refused by
-/// `every_replaced_channel_has_a_call_behind_it`.
+/// call behind it, which `every_replaced_channel_has_a_call_behind_it`
+/// refuses.
 const NOTIFY_GLOBAL: &str = "vim.notify";
 
 /// The supersession plan for `cfg`: one entry per enabled feature in
@@ -419,6 +441,30 @@ mod tests {
             None,
             "one surface cannot be handed over twice: the later row's hold \
              replaces the earlier row's guard and wins silently"
+        );
+    }
+
+    /// A replaced global with no call behind it is a surface view believes
+    /// it holds and does not: the derivation's own arm falls through for
+    /// anything but [`NOTIFY_GLOBAL`], the completeness walk passes because
+    /// the channel is claimed, and no takeover is ever issued for it.
+    ///
+    /// The table already names `vim.ui.select` and `vim.ui.input` as
+    /// yielded, so moving either onto a surface is one edit away.
+    #[test]
+    fn every_replaced_channel_has_a_call_behind_it() {
+        let unheld: Vec<&str> = channels::CHANNELS
+            .iter()
+            .flat_map(|entry| entry.channels.iter())
+            .filter_map(|channel| match channel {
+                Channel::Replaced(global) if *global != NOTIFY_GLOBAL => Some(*global),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            unheld.is_empty(),
+            "these replaced globals are claimed and never held, so view \
+             believes it owns a function a config has taken: {unheld:?}"
         );
     }
 
@@ -704,7 +750,7 @@ mod tests {
             .expect("the fixture directory must be creatable");
         std::fs::write(
             dir.join("init.lua"),
-            "vim.opt.laststatus = 3\nrequire('lualine').setup({})\n",
+            "vim.opt.laststatus = 3\nrequire('a.renderer').setup({})\n",
         )
         .expect("the fixture init.lua must be writable");
         dir

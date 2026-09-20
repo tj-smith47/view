@@ -12,42 +12,43 @@ use crate::native::toast::ToastMotion;
 use crate::native::views::Span;
 
 /// How long a session parks foreign startup messages before giving up on
-/// hearing which plugin claimed a surface and letting them through.
+/// hearing whether a channel it owns is held and letting them through.
 ///
-/// The deadline, not the schedule: the claimant probe answers in the first
-/// hundred milliseconds of an ordinary launch and resolves the hold there.
-/// This bounds the launch where it never answers at all -- a config that
-/// errors out before `VimEnter`, a plugin manager that blocks on a network
-/// install -- so the hold cannot silently swallow a message.
+/// The deadline rather than the schedule: the message area's own channel
+/// is read in the first hundred milliseconds of an ordinary launch and the
+/// hold resolves there. This bounds the launch where it is never read at
+/// all -- a config that errors out before `VimEnter`, a plugin manager
+/// that blocks on a network install -- so the hold cannot silently swallow
+/// a message.
 const STARTUP_HOLD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// When the last of a claimant's startup complaints was sighted, measured
-/// from launch on the heavy compat fixture (`noice`/`unaccommodated`,
-/// `VIEW_COMPAT_LOG`): noice re-runs its health check on a one-second
+/// When the last of a holder's startup complaints was sighted, measured
+/// from launch on the heavy compat fixture (`unaccommodated`,
+/// `VIEW_COMPAT_LOG`): the config re-runs its health check on a one-second
 /// interval and raises the one about view holding `vim.notify` on the
-/// fifth cycle, past any realistic first keystroke. The probe reply that
-/// arms the grace landed within half a second of that same launch, so
+/// fifth cycle, past any realistic first keystroke. The channel reading
+/// that arms the grace landed within half a second of that same launch, so
 /// nearly the whole grace was spent by the time the complaint arrived.
 const COMPLAINT_RAISE_MEASURED: std::time::Duration = std::time::Duration::from_millis(4960);
 
-/// The plugin's own checker interval (`noice/health.lua`, `Util.interval(1000, ..)`):
-/// the unit a raise moves in when the launch it rides on stretches.
-const CLAIMANT_CHECKER_CYCLE: std::time::Duration = std::time::Duration::from_secs(1);
+/// The checker interval the measured config runs its health check on: the
+/// unit a raise moves in when the launch it rides on stretches.
+const HOLDER_CHECKER_CYCLE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How much later than measured a raise is allowed to land and still be
 /// taken down. The two ends run on different clocks -- the grace is
-/// anchored to view's own probe reply, the raise to how long the plugin
-/// took to load and tick -- and plugin loading is what a slow runner
-/// stretches, so the margin is a multiple of the raise rather than a
-/// cycle or two added to it.
+/// anchored to view's own reading of the channel, the raise to how long
+/// the config took to load and tick -- and config loading is what a slow
+/// runner stretches, so the margin is a multiple of the raise rather than
+/// a cycle or two added to it.
 const COMPLAINT_RAISE_SLACK: u32 = 2;
 
-/// How long after a claimant is named view still takes that claimant's
+/// How long after a held channel is found view still takes that holder's
 /// complaints down, once the user has acted.
 ///
 /// Derived from the measured raise rather than written down, so the margin
 /// is on the record: twice [`COMPLAINT_RAISE_MEASURED`], which leaves about
-/// five of the plugin's own checker cycles past the raise on the host it
+/// five of the config's own checker cycles past the raise on the host it
 /// was measured on. Long enough for a stretched launch, short enough that
 /// a window the user opens minutes later is outside it; what bounds the
 /// take-down inside it is the complaint signature, not the clock.
@@ -59,7 +60,7 @@ const COMPLAINT_GRACE: std::time::Duration =
 // on the host it was measured on, and fail as a remote-leg flake
 const _: () = assert!(
     COMPLAINT_GRACE.as_millis()
-        >= COMPLAINT_RAISE_MEASURED.as_millis() + CLAIMANT_CHECKER_CYCLE.as_millis(),
+        >= COMPLAINT_RAISE_MEASURED.as_millis() + HOLDER_CHECKER_CYCLE.as_millis(),
     "COMPLAINT_GRACE must outlast the measured raise by a checker cycle"
 );
 
@@ -275,13 +276,6 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty |= model.engine.seed_startup_history(&text);
             Vec::new()
         }
-        // the takeover's own report decides how the claimant notice the
-        // probe reply raises afterwards is worded, and that reply is behind
-        // this one on the same connection; a late pass's report arrives
-        // with the notice already standing and re-words it
-        Msg::ClaimantsHandedBack { modules } => {
-            surface_conflict::on_claimants_handed_back(model, modules)
-        }
         // the window-local hold's own report, raised on the session's
         // window events rather than on the redraw path
         Msg::ChannelHeld { channel, holder } => {
@@ -293,10 +287,12 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::NotifySinkRead { foreign } => {
             let settled = model.engine.messages.set_foreign_notifier(foreign);
             model.dirty = true;
-            settled
+            let mut effects: Vec<Effect> = settled
                 .into_iter()
                 .map(|text| Effect::Rpc(RpcCall::Notify { text }))
-                .collect()
+                .collect();
+            effects.extend(surface_conflict::on_notify_sink_read(model, foreign));
+            effects
         }
         // whichever of the two attach paths arrives first performs it, and
         // the other finds it done (see `Model::takes_attach`)
@@ -312,7 +308,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }),
             // armed from the attach rather than from the connection, which
             // exists a config's whole sourcing earlier: the hold is what
-            // withholds a claimant's startup messages from the screen, and
+            // withholds a holder's startup messages from the screen, and
             // there is no screen to withhold them from until this arrives
             Effect::ScheduleStartupHold {
                 after: STARTUP_HOLD_DEADLINE,
@@ -626,13 +622,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::FloatObserved(float) => surface_conflict::observe_float(model, &float),
         Msg::FloatSweep => surface_conflict::sweep_floats(model),
-        Msg::FloatRows {
-            win,
-            hidden,
-            lines,
-            selected,
-        } => surface_conflict::on_float_rows(model, win, hidden, lines, selected),
-        Msg::ClaimantsProbed(probed) => surface_conflict::on_claimants_probed(model, &probed),
+        Msg::FloatRows { win, lines } => surface_conflict::on_float_rows(model, win, lines),
         Msg::ComplaintGraceExpired { generation } => {
             model.surface_conflicts.end_complaint_grace(generation);
             Vec::new()
@@ -1348,12 +1338,13 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             // used to be. The only mode signal a UI gets is `mode_change`,
             // and that is nvim's *cursor shape* mode, which a plugin can
             // leave standing at a value `mode()` disagrees with: on a
-            // default heavy launch with noice's cmdline and message
-            // components on -- the launch this notice exists for -- nvim
+            // default heavy launch with a config drawing its own cmdline
+            // and messages -- the launch this notice exists for -- nvim
             // reports `replace` at rest and never corrects it, while
             // `mode()` answers `n` throughout (compat, `neo-tree (heavy,
-            // unaccommodated)`; noice takes `guicursor` over and hands it
-            // back around its own cmdline). A mode-gated dismissal is
+            // unaccommodated)`, where the config takes `guicursor` over
+            // and hands it back around its own cmdline). A mode-gated
+            // dismissal is
             // therefore not merely approximate there, it is absent: the one
             // way out of a box across the top of the buffer never fires,
             // for the whole session.

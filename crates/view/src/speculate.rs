@@ -157,13 +157,11 @@ pub(crate) fn note_engine_call(model: &mut Model, call: &RpcCall, clock: Specula
     }
 }
 
-/// The loop's per-pass age check on what speculation is still holding, and
-/// whatever a guess the backstop took back owes the engine.
+/// The loop's per-pass age check on what speculation is still holding.
 ///
-/// Deliberately not gated on a redraw arriving: see this module's own doc.
-#[must_use]
-pub(crate) fn expire_speculation(model: &mut Model, clock: SpeculationClock) -> Vec<Effect> {
-    fold_expiry(model, clock.now())
+/// Not gated on a redraw arriving: see this module's own doc.
+pub(crate) fn expire_speculation(model: &mut Model, clock: SpeculationClock) {
+    fold_expiry(model, clock.now());
 }
 
 #[cfg(test)]
@@ -283,7 +281,7 @@ mod tests {
         assert_eq!(model.speculate.pending().len(), 1);
         model.dirty = false;
 
-        let _ = expire_speculation(
+        expire_speculation(
             &mut model,
             clock_reading(origin, SPECULATION_MAX_AGE + Duration::from_millis(1)),
         );
@@ -308,7 +306,7 @@ mod tests {
         typed(&mut model, "x", SpeculationClock::started_at(origin));
         model.dirty = false;
 
-        let _ = expire_speculation(&mut model, SpeculationClock::started_at(origin));
+        expire_speculation(&mut model, SpeculationClock::started_at(origin));
 
         assert_eq!(model.speculate.pending().len(), 1);
         assert!(!model.dirty);
@@ -320,7 +318,7 @@ mod tests {
     fn a_pass_with_nothing_pending_leaves_the_frame_alone() {
         let mut model = typing_model();
 
-        let _ = expire_speculation(&mut model, SpeculationClock::default());
+        expire_speculation(&mut model, SpeculationClock::default());
 
         assert!(model.speculate.pending().is_empty());
         assert!(!model.dirty);

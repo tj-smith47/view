@@ -49,7 +49,7 @@ steps = [
   # across the top rows, and buffer line 1 is underneath it. It is sticky
   # because the condition is still true, so no wait outlasts it; `d` in the
   # message history is its dismissal.
-  { wait_for = "view: noice.nvim is using", timeout_ms = 60000 },
+  { wait_for = "view: vim.notify was drawing", timeout_ms = 60000 },
   { send = ":View notifications<CR>" },
   { wait_for = "Messages", timeout_ms = 60000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },

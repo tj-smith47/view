@@ -130,11 +130,6 @@ struct Inputs {
     // different rows, so a cache keyed on the stack's contents alone would
     // hand back the frame before the one that just advanced
     toast_motion: Option<view_core::native::toast::ToastMotion>,
-    // the palette's second row source: a plugin's own completion float,
-    // read back off its buffer. It turns over as the typed prefix narrows
-    // without the cmdline state above it changing at all -- the wire's
-    // `cmdline_show` fires for the typed line, not for somebody else's menu
-    absorbed: Option<view_core::native::palette::AbsorbedRows>,
 }
 
 impl Inputs {
@@ -155,7 +150,6 @@ impl Inputs {
             popupmenu: engine.popupmenu.clone(),
             messages: engine.messages.clone(),
             toast_motion: model.toast_motion.clone(),
-            absorbed: engine.absorbed_rows().cloned(),
         }
     }
 
@@ -179,7 +173,6 @@ impl Inputs {
             && self.popupmenu == engine.popupmenu
             && self.messages == engine.messages
             && self.toast_motion == model.toast_motion
-            && self.absorbed.as_ref() == engine.absorbed_rows()
     }
 }
 
@@ -404,7 +397,7 @@ mod tests {
 
     /// The class pin behind `Inputs`: a paint-relevant field added to the
     /// model and forgotten here reuses a frame that no longer draws it, and
-    /// nothing fails -- twice now, for `absorbed` and for the pause mark.
+    /// nothing fails -- the pause mark is the shipped case.
     /// Every field is either captured or classified in the doc above
     /// `Inputs`, and there is no third answer.
     #[test]
@@ -697,98 +690,6 @@ mod tests {
             .iter()
             .any(|l| matches!(l.kind, LayerKind::Cmdline(_))));
         assert_eq!((cache.frames, cache.rebuilds), (2, 2));
-    }
-
-    /// The rows view took off a plugin's own completion float are a palette
-    /// input like every other one: a frame reused across a change to them
-    /// paints the candidates of a prefix the user has already typed past,
-    /// and the plugin's window is hidden, so nothing else on screen would
-    /// contradict them.
-    #[test]
-    fn absorbed_completion_rows_rebuild_the_frame() {
-        let mut model = model_with_grid(20, 6);
-        let mut cache = SurfaceCache::new();
-        model.palette_enabled = true;
-        model.attach_surfaces(vec![
-            view_core::native::ext::Ext::LineGrid,
-            view_core::native::ext::Ext::Cmdline,
-            view_core::native::ext::Ext::Popupmenu,
-            view_core::native::ext::Ext::Messages,
-            view_core::native::ext::Ext::Tabline,
-        ]);
-        apply(
-            &mut model,
-            UiEvent::CmdlineShow {
-                content: vec![(0, "pre".to_string())],
-                pos: 3,
-                firstc: ":".to_string(),
-                prompt: String::new(),
-                indent: 0,
-                level: 1,
-            },
-        );
-        let _ = cache.render(&model);
-
-        absorb(&mut model, &["preflight"]);
-        let surface = cache.render(&model);
-        assert!(
-            palette_rows(surface).iter().any(|row| row == "preflight"),
-            "{:?}",
-            palette_rows(surface)
-        );
-
-        absorb(&mut model, &["prefabricated"]);
-        let surface = cache.render(&model);
-        assert_eq!(palette_rows(surface), vec!["prefabricated".to_string()]);
-        assert_eq!(
-            (cache.frames, cache.rebuilds),
-            (3, 3),
-            "rows that moved are a new frame, not a reused one"
-        );
-    }
-
-    /// One sighting of a plugin's cmdline menu at the bottom of the grid,
-    /// followed by the read that answers with `lines`.
-    fn absorb(model: &mut Model, lines: &[&str]) {
-        let _ = update(
-            model,
-            Msg::FloatObserved(view_core::native::surfaces::FloatSighting {
-                win: 1003,
-                buf: 2,
-                row: 4,
-                col: 0,
-                width: 20,
-                height: 2,
-                anchor: view_core::native::surfaces::FloatAnchor::NorthWest,
-                zindex: 1001,
-                filetype: "cmp_menu".to_string(),
-                name: String::new(),
-                hidden: false,
-            }),
-        );
-        let _ = update(
-            model,
-            Msg::FloatRows {
-                win: 1003,
-                hidden: true,
-                lines: lines.iter().map(|line| (*line).to_string()).collect(),
-                selected: None,
-            },
-        );
-    }
-
-    /// The palette layer's rows, or nothing when the frame carries no
-    /// palette at all.
-    fn palette_rows(surface: &Surface) -> Vec<String> {
-        surface
-            .layers
-            .iter()
-            .find_map(|layer| match &layer.kind {
-                LayerKind::Palette(view) => Some(view),
-                _ => None,
-            })
-            .map(|view| view.rows.iter().map(|row| row.label.clone()).collect())
-            .unwrap_or_default()
     }
 
     #[test]

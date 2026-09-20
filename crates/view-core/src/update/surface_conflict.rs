@@ -1,6 +1,6 @@
-//! Telling a user, once, that a plugin is drawing over a surface view took
-//! over -- which surface, which plugin as far as the window names one, and
-//! the `view.toml` line that hands it back.
+//! Telling a user, once, that something else is drawing over a surface view
+//! took over -- which surface, what the window or the channel names itself,
+//! and the `view.toml` line that hands it back.
 //!
 //! One notice per claiming identity, aggregating every surface that
 //! identity claims, rather than one per (identity, surface) pair. The
@@ -26,12 +26,13 @@ use crate::native::toast::HoldOutcome;
 /// `view_engine`'s `REGISTER_BRIDGE_CHUNK` takes it as an argument.
 pub const FLOAT_SCAN_THROTTLE: std::time::Duration = std::time::Duration::from_millis(150);
 
-// tied at compile time rather than by comment: nvim-cmp redraws its menu on
-// a 60 ms debounce, and a scan that ran before the menu it exists to see
+// tied at compile time rather than by comment: a cmdline completion menu
+// is redrawn on a debounce of its own -- 60 ms on the stack the wire
+// capture measured -- and a scan that ran before the menu it exists to see
 // reports the window the keystroke before it opened
 const _: () = assert!(
     FLOAT_SCAN_THROTTLE.as_millis() > 60,
-    "FLOAT_SCAN_THROTTLE must outlast nvim-cmp's own debounce"
+    "FLOAT_SCAN_THROTTLE must outlast a completion menu's own debounce"
 );
 
 /// The opening every one of a float claimant's notices shares, which is also
@@ -52,17 +53,6 @@ fn family(identity: Option<&str>) -> String {
 
 /// The family every float that names nobody shares.
 const ANONYMOUS_FAMILY: &str = "view: a plugin is drawing over ";
-
-/// The opening of the notice a named plugin class gets. A different verb
-/// from the float families on purpose, and not decoration: the two families
-/// have to be pairwise non-prefix or the withdrawal in
-/// `record_native_notice_once` is cross-family (see
-/// `no_two_native_notice_families_prefix_each_other`), and "is using" says
-/// the truer thing anyway -- this claim comes from the plugin being loaded
-/// at all, not from a window sighted covering some cells.
-fn claimant_family(class: &str) -> String {
-    format!("view: {class} is using ")
-}
 
 /// The opening every notice about a held channel shares: one family per
 /// channel, so a second window found holding the same option adds nothing
@@ -98,164 +88,147 @@ pub(super) fn on_channel_held(model: &mut Model, channel: &str, holder: &str) ->
     else {
         return Vec::new();
     };
-    let Some(row) = surfaces::row(surface) else {
+    // a surface the table gives no row is a surface the notice can name
+    // nothing about, and an empty label reads as a sentence view broke
+    if surfaces::row(surface).is_none() {
         return Vec::new();
-    };
+    }
+    let mut effects = note_held(model, surface);
     let family = channel_family(channel);
-    let remedy = match row.remedy {
-        Some(line) => format!("\nSet {line} in view.toml to give it back."),
-        None => String::new(),
-    };
-    // `--` rather than an em dash: notice text reaches the grid verbatim,
-    // and the charset a terminal can draw is not a reading the message
-    // layer takes
     let text = format!(
-        "{family}{}, which view owns -- it was set to {holder}.{remedy}",
-        row.label
+        "{}{}",
+        notice(&family, &[surface], model.config_was_read(), Some(holder)),
+        startup_account(model)
     );
     model.dirty = true;
-    model.engine.record_native_notice_sticky_once(&family, text)
+    effects.extend(model.engine.record_native_notice_sticky_once(&family, text));
+    effects
 }
 
-/// Answers the claimant probe: one notice per loaded claimant that still
-/// has a surface view draws, and the resolution of the startup hold.
+/// The longest holder a notice spells out.
 ///
-/// One notice per claimant, aggregating every surface it takes, rather than
-/// one per (claimant, surface) pair -- the same rule the float notices
-/// follow, for the same reason: the notices of one claimant share a family
-/// and would retract each other.
+/// A replaced global's holder is whatever `debug.getinfo` calls the
+/// function's chunk, which for a plugin is the absolute path it was
+/// installed at -- longer on its own than the widest line the message
+/// layer can draw, which clips at the grid width less two.
+const HOLDER_WIDTH: usize = 60;
+
+/// `holder` as a notice spells it: the end of it, which is the file that
+/// names the plugin, with the install prefix every plugin in the config
+/// shares dropped in front.
 ///
-/// Raised once and never re-recorded. There is no running count in the
-/// wording, because a count that updates is a notice that re-records, and a
-/// notice that re-records re-enters the toast stack and re-animates.
+/// `...` rather than an ellipsis glyph: notice text reaches the grid
+/// verbatim, and the charset a terminal can draw is not a reading the
+/// message layer takes.
+fn spelled(holder: &str) -> String {
+    let len = holder.chars().count();
+    if len <= HOLDER_WIDTH {
+        return holder.to_string();
+    }
+    let tail: String = holder.chars().skip(len - (HOLDER_WIDTH - 3)).collect();
+    format!("...{tail}")
+}
+
+/// The sentence a notice about a launch ends on, and nothing for one
+/// raised after the user has acted.
 ///
-/// Called for every reading the probe takes, not just the first, and the
-/// notice is raised from whichever reading first names a claimant. The hold
-/// is the part that is one-shot: a reading that names nobody resolves it
-/// `Release`, and a claimant that loads after that -- noice's own documented
-/// spec is `event = "VeryLazy"`, so this is the ordinary case rather than the
-/// unlucky one -- finds the collapse window already closed. The bound,
-/// stated: everything that plugin raised before view could detect it has
-/// already been shown, and view has no way to un-show it. What the late
-/// reading still buys is the notice itself -- which surfaces went, and the
-/// `view.toml` line that hands them back -- which is the obligation here.
-/// The hold was only ever the anti-flash mechanism for the eager case.
-pub(super) fn on_claimants_probed(model: &mut Model, probed: &[String]) -> Vec<Effect> {
+/// The box is the account of a launch: view's own startup lines are in the
+/// ring on every launch, so a user reading it is owed the key that shows
+/// the rest of them. A notice raised mid-session -- a window opened an hour
+/// in, writing a chrome option of its own -- is not about a launch and says
+/// nothing about the history.
+fn startup_account(model: &Model) -> &'static str {
+    if model.surface_conflicts.startup_window_open() {
+        "\nStartup messages from this launch are in the history -- <leader>fm."
+    } else {
+        ""
+    }
+}
+
+/// Records that a channel of `surface` was found populated by a holder that
+/// is not view: the complaint grace opens on the first such finding, and
+/// every float line the channel notice now accounts for is narrowed or
+/// withdrawn.
+///
+/// One conflict, one box. A float over the message area and a replaced
+/// `vim.notify` are the same renderer drawing through two channels, and a
+/// second line saying so with the same `[native]` remedy is that conflict
+/// counted twice.
+fn note_held(model: &mut Model, surface: Surface) -> Vec<Effect> {
+    if !model.surface_conflicts.note_channel_held(surface) {
+        return Vec::new();
+    }
     let mut effects = Vec::new();
-    let mut named = false;
-    for claimant in surfaces::probed_claimants(probed) {
-        let claimed: Vec<Surface> = claimant
-            .surfaces
-            .iter()
-            .copied()
-            .filter(|surface| surfaces::view_draws(*surface, model))
-            .collect();
-        if claimed.is_empty() {
+    // the bound on how long a holder's own complaints are still view's to
+    // take down: they are not all raised by the time anyone can type, so
+    // the keystroke alone would leave the late ones standing beside the
+    // notice they duplicate
+    if model.surface_conflicts.arm_complaint_grace() {
+        effects.push(Effect::ScheduleComplaintGrace {
+            after: super::COMPLAINT_GRACE,
+            generation: model.surface_conflicts.engine_generation(),
+        });
+    }
+    for (identity, rest) in model.surface_conflicts.narrow_to_held() {
+        let family = family(identity.as_deref());
+        if rest.is_empty() {
+            model.dirty |= model.engine.withdraw_native_notice(&family);
             continue;
         }
-        named = true;
-        let asked = surfaces::superseded_claimants(model)
-            .any(|superseded| superseded.module == claimant.module);
-        let disabled = asked.then(|| Ask {
-            class: claimant.class,
-            taken: model.surface_conflicts.took_the_hand_back(claimant.module),
-        });
-        let family = claimant_family(claimant.class);
-        let text = notice(&family, &claimed, model.config_was_read(), true, disabled);
+        let text = notice(&family, &rest, model.config_was_read(), None);
         effects.extend(model.engine.record_native_notice_sticky_once(&family, text));
-        effects.extend(absorb_float_notices(model, claimant, &claimed));
         model.dirty = true;
     }
-    let outcome = if named {
-        // the plugin's own complaints about view's defaults are on screen
+    effects
+}
+
+/// Answers one reading of the message area's replaced global
+/// ([`crate::msg::Msg::NotifySinkRead`]): the channel is recorded as held
+/// when somebody other than view stands at it, and the startup hold is
+/// resolved.
+///
+/// Taken at the session's first idle transition and re-taken whenever the
+/// answer moves, which is what makes it the reading a float placed during
+/// startup waits for ([`classify_sink_holds`]).
+///
+/// The hold's own resolution is one-shot: a reading that finds nvim's
+/// default at `vim.notify` releases it, and a notifier installed after that
+/// finds the collapse window already closed. The bound, stated: everything
+/// that renderer drew before view could detect it has already been shown,
+/// and view has no way to un-show it. The hold was only ever the anti-flash
+/// mechanism for the eager case.
+pub(super) fn on_notify_sink_read(model: &mut Model, foreign: bool) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    let held = foreign && surfaces::view_draws(Surface::Messages, model);
+    if held {
+        effects.extend(note_held(model, Surface::Messages));
+        // whatever that renderer drew about view's defaults is on screen
         // already, and the next thing that would arm a scan is CursorHold
         // seconds away or the keystroke that ends the startup window
         effects.push(Effect::Rpc(crate::msg::RpcCall::ScanFloats));
-        // and the bound on how long that plugin's complaints are still
-        // view's to take down: its own are not all raised by the time
-        // anyone can type (noice re-checks its health every second), so
-        // the keystroke alone would leave the late ones standing beside
-        // the notice they duplicate
-        if model.surface_conflicts.arm_complaint_grace() {
-            effects.push(Effect::ScheduleComplaintGrace {
-                after: super::COMPLAINT_GRACE,
-                generation: model.surface_conflicts.engine_generation(),
-            });
-        }
+    }
+    let outcome = if held {
         HoldOutcome::Collapse
     } else {
         HoldOutcome::Release
     };
     model.dirty |= model.engine.messages.resolve_startup_hold(outcome);
-    effects.extend(classify_probe_holds(model));
-    effects
-}
-
-/// Takes the anonymous float notice down to whatever the claimant notice
-/// just raised does not already cover, so a default first launch gets one
-/// notice per plugin rather than one per way view noticed the same one.
-///
-/// The float detector cannot attribute an unnamed window to a plugin -- that
-/// is what "anonymous" means -- but it does not have to: a claim on a
-/// surface a named claimant has already been reported for is the same
-/// conflict with the same remedy, told by the notice that could not say who.
-/// The claimant's own windows are the same case with a name on them:
-/// [`SurfaceClaimant::identities`](surfaces::SurfaceClaimant::identities)
-/// says which filetypes this plugin's floats present, so a sighting of one
-/// is this plugin drawing on the surface its notice already names, not a
-/// second plugin. Any other name keeps its line -- one notice per plugin is
-/// the rule.
-///
-/// Ordinarily a no-op: the probe answers at the session's first idle
-/// transition, well before a float scan can have been armed and waited out
-/// its [`FLOAT_SCAN_THROTTLE`], so there is usually nothing standing yet to
-/// narrow. This is the other order -- a claimant that loaded late, or a
-/// float sighted during a slow startup -- and it exists because the guard
-/// in [`observe_float`] only covers sightings that arrive after the notice.
-fn absorb_float_notices(
-    model: &mut Model,
-    claimant: &surfaces::SurfaceClaimant,
-    claimed: &[Surface],
-) -> Vec<Effect> {
-    model
-        .surface_conflicts
-        .note_covered(claimed, claimant.identities);
-    let mut effects = Vec::new();
-    for identity in std::iter::once(None).chain(claimant.identities.iter().copied().map(Some)) {
-        let Some(rest) = model
-            .surface_conflicts
-            .narrow(identity)
-            .map(<[Surface]>::to_vec)
-        else {
-            continue;
-        };
-        let family = family(identity);
-        if rest.is_empty() {
-            model.dirty |= model.engine.withdraw_native_notice(&family);
-            continue;
-        }
-        let text = notice(&family, &rest, model.config_was_read(), false, None);
-        effects.extend(model.engine.record_native_notice_sticky_once(&family, text));
-    }
+    effects.extend(classify_sink_holds(model));
     effects
 }
 
 /// Answers one float sighting: nothing at all for a float drawing where
 /// view does not, and otherwise the one notice its claimant owes the user.
 ///
-/// The two halves are keyed on different readings of the command line. The
-/// hide runs on the one the frame is painting -- a speculated `:` included
-/// -- because the silence it covers is exactly when a plugin draws its own
-/// cmdline box, and view's palette standing beside that box is the
-/// double-menu this path exists to prevent. The notice runs on nvim's own,
-/// because a line telling the user which plugin took the command line is
-/// wrong the moment the guess was.
+/// The notice runs on nvim's own command line rather than on the one the
+/// frame is painting: a line telling the user what took the command line is
+/// wrong the moment a speculated `:` was.
 ///
 /// The watcher re-reports a float that moved -- every keystroke of a
-/// cmdline session, for nvim-cmp -- and a repeat that adds no surface stops
-/// at `SurfaceConflicts::record`, which answers news only. So a standing
-/// claim costs a lookup per sighting and nothing else: no notice churn, and
-/// no repaint asked of a screen that did not change.
+/// cmdline session, for a menu that follows the cursor -- and a repeat that
+/// adds no surface stops at `SurfaceConflicts::record`, which answers news
+/// only. So a standing claim costs a lookup per sighting and nothing else:
+/// no notice churn, and no repaint asked of a screen that did not change.
 ///
 /// The line is sticky for the same reason the repeat is answered: the
 /// keystroke that summons the float is the keystroke that dismisses a
@@ -268,76 +241,61 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
     let Some(surface) = surfaces::claims(float, model) else {
         return Vec::new();
     };
-    let identity = float.identity().map(str::to_owned);
-    let covered = model.surface_conflicts.covers(surface, identity.as_deref());
-    if surfaces::absorbs(float, surface, model) && !covered {
-        // ahead of the notice and ahead of the hidden-float filter below:
-        // the window this hides is the one view then has to keep reading,
-        // and a claimant already named (`covered`) is a plugin whose own
-        // notice stands -- hiding one of its windows would leave a user
-        // reading "noice.nvim is using the command line" beside a command
-        // line whose menu view had quietly taken over
-        return absorb(model, float, surface);
-    }
     if surface == Surface::Cmdline && model.engine.cmdline.is_none() {
         // the command line this float is over is view's own guess at one,
-        // and a sticky line naming a plugin never rests on a guess: the
-        // hide above is what keeps the two menus off the screen together,
-        // and the notice waits for the `cmdline_show` that makes it true
+        // and a sticky line never rests on a guess: the notice waits for
+        // the `cmdline_show` that makes it true
         return Vec::new();
     }
     if float.hidden {
         // a window with its `hide` flag set draws nothing, so it covers
-        // nothing; the scan reports it only so an absorption can keep
-        // reading the rows behind it (`FloatSighting::hidden`)
+        // nothing
         return Vec::new();
     }
     if !surfaces::view_draws(surface, model) {
         return Vec::new();
     }
-    if covered {
-        // a named claimant's notice already says this surface is taken, says
-        // who by, and carries the same `[native]` line as the remedy; a
-        // second box -- one that cannot even say who, or one spelling a
-        // filetype that claimant's own windows present -- is the same
-        // conflict counted twice
+    if model.surface_conflicts.channel_held(surface) {
+        // the channel notice already says this surface is taken, says what
+        // was in the channel, and carries the same `[native]` line as the
+        // remedy; a second box is the same conflict counted twice
         return take_complaint(model, float, surface);
     }
-    raise_notice(model, identity.as_deref(), surface)
+    raise_notice(model, float.identity(), surface)
 }
 
-/// Answers one `win_float_pos`: a float a superseded claimant of a native
-/// surface just opened is held off the screen before the frame that would
-/// paint it, and its rows are asked for.
+/// Answers one `win_float_pos`: a float opened over a native surface whose
+/// channel is already held by somebody else is kept off the screen before
+/// the frame that would paint it, and its rows are asked for.
 ///
 /// The sighting the float scan takes is the same judgment one round trip
-/// later, which is a round trip after the plugin's first frame is already
+/// later, which is a round trip after that window's first frame is already
 /// on the terminal: the scan is armed by autocmd transitions and runs on
-/// [`FLOAT_SCAN_THROTTLE`], nvim-notify opens its windows `noautocmd` so
-/// `WinNew` never fires for one, and its slide animation moves the window
-/// with `nvim_win_set_config`, which arms nothing either. So a complaint
-/// drawn during a startup nobody has typed into waits for the next
-/// unrelated arming event -- seconds away on both of the configurations
-/// this was measured on. The placement event is the zero-latency sighting,
-/// and this is the whole reason it is read here.
+/// [`FLOAT_SCAN_THROTTLE`], a toast opened `noautocmd` fires no `WinNew`,
+/// and a slide animation moves the window with `nvim_win_set_config`,
+/// which arms nothing either. So a complaint drawn during a startup nobody
+/// has typed into waits for the next unrelated arming event -- seconds away
+/// on both of the configurations this was measured on. The placement event
+/// is the zero-latency sighting, and this is the whole reason it is read
+/// here.
 ///
 /// The bar is [`take_complaint`]'s, with the identity half left out
 /// because a placement carries none: the rect claims a surface view draws
-/// ([`surfaces::claims_at`]), a named claimant's notice already accounts
-/// for that surface, and the startup window or the complaint grace is
-/// still open. Every other float -- a picker, a hover, a completion menu,
-/// anything outside that window -- is classified in the same arithmetic
-/// and paints on the frame it arrived for.
+/// ([`surfaces::claims_at`]), a channel of that surface is already reported
+/// held, and the startup window or the complaint grace is still open. Every
+/// other float -- a picker, a hover, a completion menu, anything outside
+/// that window -- is classified in the same arithmetic and paints on the
+/// frame it arrived for.
 ///
-/// A claimant is suspected as well as known: while the probe armed at the
-/// attach is unanswered the middle term cannot be evaluated at all, so the
-/// float is held on the same terms and [`classify_probe_holds`] runs the
-/// judgment over it when the reply lands.
+/// A holder is suspected as well as known: while the message area's
+/// replaced global is unread the middle term cannot be evaluated at all, so
+/// the float is held on the same terms and [`classify_sink_holds`] runs the
+/// judgment over it when the reading lands.
 ///
 /// The cost, stated: one round trip of delay for a benign float that lands
-/// in the message area's corner while a claimant of that surface is known,
-/// and nothing at all for every other float. The paint loop waits on none
-/// of it -- the flag is model state, and the rows lift it.
+/// in the message area's corner while a channel of that surface is known
+/// held, and nothing at all for every other float. The paint loop waits on
+/// none of it -- the flag is model state, and the rows lift it.
 pub(super) fn on_float_placed(
     model: &mut Model,
     grid: crate::grid::registry::GridId,
@@ -346,8 +304,8 @@ pub(super) fn on_float_placed(
     col: i64,
 ) -> Vec<Effect> {
     if model.surface_conflicts.is_complaint(win) {
-        // a plugin animating its window sends a placement per step, and the
-        // window is the same window at every one of them
+        // a window being animated sends a placement per step, and it is the
+        // same window at every one of them
         let withheld = model.surface_conflicts.withholds_float(win, grid);
         model.dirty |= model.engine.withhold_float(grid, withheld);
         return Vec::new();
@@ -373,13 +331,13 @@ pub(super) fn on_float_placed(
     {
         return Vec::new();
     }
-    if !model.surface_conflicts.covers(surface, None) {
-        // the suspected half: until the probe answers, "no claimant is
-        // known" and "no claimant is loaded" are the same answer, and a
-        // plugin whose timer fires at a fixed offset from `VimEnter` can
-        // beat the probe's round trip over a slow link. Held on the same
-        // terms and classified by the reply
-        if model.surface_conflicts.hold_for_probe(win, grid) {
+    if !model.surface_conflicts.channel_held(surface) {
+        // the suspected half: until the reading arrives, "no holder is
+        // known" and "no holder is there" are the same answer, and a timer
+        // firing at a fixed offset from `VimEnter` can beat that round trip
+        // over a slow link. Held on the same terms and classified by the
+        // reading
+        if model.surface_conflicts.hold_for_sink_read(win, grid) {
             model.dirty |= model.engine.withhold_float(grid, true);
         }
         return Vec::new();
@@ -391,20 +349,20 @@ pub(super) fn on_float_placed(
     vec![Effect::Rpc(crate::msg::RpcCall::ReadFloatRows { win })]
 }
 
-/// Puts every float the unanswered probe held off the screen through the
-/// classification a known claimant's float takes at its placement, now
-/// that the reply has named who is loaded: over a surface a named claimant
-/// took, the rows are asked for and the window is taken; otherwise it goes
-/// back to the screen on the next frame.
+/// Puts every float the unread channel held off the screen through the
+/// classification a float over a held channel takes at its placement, now
+/// that the reading has named who stands there: over a surface whose
+/// channel is held, the rows are asked for and the window is taken;
+/// otherwise it goes back to the screen on the next frame.
 ///
-/// The cost, stated: a benign float opened inside the probe's own round
-/// trip waits for the reply before it paints. Nothing else changes -- a
-/// float placed after the reply is judged by the cover alone, as before.
-fn classify_probe_holds(model: &mut Model) -> Vec<Effect> {
+/// The cost, stated: a benign float opened inside that reading's own round
+/// trip waits for it before it paints. Nothing else changes -- a float
+/// placed after the reading is judged by the held set alone, as before.
+fn classify_sink_holds(model: &mut Model) -> Vec<Effect> {
     let mut effects = Vec::new();
-    for (win, grid) in model.surface_conflicts.answer_probe() {
+    for (win, grid) in model.surface_conflicts.read_sink() {
         let taken = surfaces::view_draws(Surface::Messages, model)
-            && model.surface_conflicts.covers(Surface::Messages, None)
+            && model.surface_conflicts.channel_held(Surface::Messages)
             && (model.surface_conflicts.startup_window_open()
                 || model.surface_conflicts.within_complaint_grace())
             && model.surface_conflicts.claim_complaint(win, Some(grid));
@@ -417,9 +375,9 @@ fn classify_probe_holds(model: &mut Model) -> Vec<Effect> {
     effects
 }
 
-/// Starts the take-down of one float a named claimant's notice already
-/// accounts for: its text goes to the notification history, and the window
-/// goes, once [`complaint_recorded`] has the lines.
+/// Starts the take-down of one float the channel notice already accounts
+/// for: its text goes to the notification history, and the window goes,
+/// once [`complaint_recorded`] has the lines.
 ///
 /// The read first and the close second, never the close alone: spec 5.5
 /// discards nothing, and a window closed before its buffer was read takes
@@ -429,7 +387,7 @@ fn classify_probe_holds(model: &mut Model) -> Vec<Effect> {
 ///
 /// The message area, because that is what a complaint is: a float over the
 /// *command line* is a menu the user is typing at, and view's answer to one
-/// of those is the absorption above or a notice, never a close.
+/// of those is a notice, never a close.
 ///
 /// And the time bound, which is the startup window -- ending at the first
 /// key, click or paste
@@ -437,11 +395,11 @@ fn classify_probe_holds(model: &mut Model) -> Vec<Effect> {
 /// -- or the claimant-complaint grace that outlives it
 /// ([`SurfaceConflicts::within_complaint_grace`](surfaces::SurfaceConflicts::within_complaint_grace)).
 /// What that bound buys is that view never closes a window a user opened:
-/// a float standing outside it is something the session asked for --
-/// noice's own `:Noice` log among them -- and closing that would be view
-/// taking a window out from under the person reading it. The grace exists
-/// because a claimant's own complaints are not all raised by the time
-/// anyone can type, and inside it the rows have to read as a complaint
+/// a float standing outside it is something the session asked for -- a log
+/// view opened by hand among them -- and closing that would be view taking
+/// a window out from under the person reading it. The grace exists because
+/// a holder's own complaints are not all raised by the time anyone can
+/// type, and inside it the rows have to read as a complaint
 /// before anything is closed ([`on_float_rows`]) -- which bar applies is
 /// fixed here, at the sighting, not when the reply lands.
 fn take_complaint(model: &mut Model, float: &FloatSighting, surface: Surface) -> Vec<Effect> {
@@ -461,18 +419,18 @@ fn take_complaint(model: &mut Model, float: &FloatSighting, surface: Surface) ->
     })]
 }
 
-/// Finishes one take-down: the lines a claimant's float was drawing are
-/// recorded in that plugin's own voice, and the window is closed.
+/// Finishes one take-down: the lines the float was drawing are recorded in
+/// their own voice, and the window is closed.
 ///
 /// Two destinations, parted by what the text is rather than by when it
 /// arrived. A complaint about the surfaces view took
 /// ([`SurfaceConflicts::reads_as_complaint`](surfaces::SurfaceConflicts::reads_as_complaint))
 /// goes to the notification history and never to the toast stack: view's
 /// own notice already says which surface went and which `view.toml` line
-/// hands it back, and the plugin's second box would be that conflict
-/// counted twice. Anything else is a notification the plugin was showing
-/// the user -- a plugin manager's update summary is the case of record --
-/// and it reaches the toast stack in view's chrome
+/// hands it back, and a second box would be that conflict counted twice.
+/// Anything else is a notification that window was showing the user -- an
+/// update summary is the case of record -- and it reaches the toast stack
+/// in view's chrome
 /// ([`record_seen_notification`](crate::model::EngineModel::record_seen_notification)),
 /// because view withheld the window it was drawn in.
 ///
@@ -500,79 +458,25 @@ fn complaint_recorded(model: &mut Model, win: u64, lines: &[String]) -> Vec<Effe
     effects
 }
 
-/// Answers one sighting of a float view absorbs rather than reports: the
-/// hide that stops two menus stacking, and the read that fills the palette
-/// with what the hidden one was showing.
+/// Answers one [`Msg::FloatRows`](crate::msg::Msg::FloatRows): the lines a
+/// withheld float was drawing, read before the window is closed.
 ///
-/// The read is an effect whose reply is a `Msg`, never a read taken here:
-/// this runs on the same `update()` the keystrokes run on, and a paint that
-/// waited on an RPC would make every cmdline keystroke cost a round trip.
-///
-/// No `dirty` on this path. A standing menu is re-sighted at the scan's own
-/// rate for as long as a user reads it, and the frame owes a repaint only
-/// when the rows actually move -- which is decided where they arrive
-/// ([`on_float_rows`]), not here.
-fn absorb(model: &mut Model, float: &FloatSighting, surface: Surface) -> Vec<Effect> {
-    let step = model
-        .engine
-        .float_absorption
-        .observe(float.win, float.hidden, float.identity());
-    match step {
-        surfaces::AbsorbStep::HideThenRead => vec![
-            Effect::Rpc(crate::msg::RpcCall::SetFloatHidden {
-                win: float.win,
-                hide: true,
-            }),
-            Effect::Rpc(crate::msg::RpcCall::ReadFloatRows { win: float.win }),
-        ],
-        surfaces::AbsorbStep::Read => {
-            vec![Effect::Rpc(crate::msg::RpcCall::ReadFloatRows {
-                win: float.win,
-            })]
-        }
-        // the disclosed failure mode: view could not hold the surface, so
-        // the user is told which plugin took it and which line hands it
-        // back, rather than left reading two menus
-        surfaces::AbsorbStep::Yield => raise_notice(model, float.identity(), surface),
-        // somebody else's hide, on a window view has never taken: it draws
-        // nothing, so there is nothing here to paint and nothing to report
-        surfaces::AbsorbStep::Ignore => Vec::new(),
+/// `hidden` is the window's own flag as nvim reported it, and a reply about
+/// a window nothing claimed is a read this session is no longer waiting on.
+pub(super) fn on_float_rows(model: &mut Model, win: u64, lines: Vec<String>) -> Vec<Effect> {
+    if !model.surface_conflicts.is_complaint(win) {
+        return Vec::new();
     }
-}
-
-/// Answers one [`Msg::FloatRows`](crate::msg::Msg::FloatRows): the rows a
-/// hidden float was drawing become the palette's, or the absorption gives
-/// up and the notice takes its place.
-pub(super) fn on_float_rows(
-    model: &mut Model,
-    win: u64,
-    hidden: bool,
-    lines: Vec<String>,
-    selected: Option<usize>,
-) -> Vec<Effect> {
-    if model.surface_conflicts.is_complaint(win) {
-        // the grace's own bar, applied here because the rows are what it is
-        // about, but decided at the sighting: a float sighted before anyone
-        // had acted is a complaint by construction, and a key landing inside
-        // this round trip does not turn it into a window the user opened
-        if !model.surface_conflicts.claimed_unconditionally(win)
-            && !surfaces::SurfaceConflicts::reads_as_complaint(&lines)
-        {
-            return release_float(model, win);
-        }
-        return complaint_recorded(model, win, &lines);
+    // the grace's own bar, applied here because the rows are what it is
+    // about, but decided at the sighting: a float sighted before anyone
+    // had acted is a complaint by construction, and a key landing inside
+    // this round trip does not turn it into a window the user opened
+    if !model.surface_conflicts.claimed_unconditionally(win)
+        && !surfaces::SurfaceConflicts::reads_as_complaint(&lines)
+    {
+        return release_float(model, win);
     }
-    let rows = crate::native::palette::AbsorbedRows { lines, selected };
-    match model.engine.float_absorption.rows_read(win, hidden, rows) {
-        surfaces::RowsOutcome::Absorbed { changed } => {
-            model.dirty |= changed;
-            Vec::new()
-        }
-        surfaces::RowsOutcome::Yield(identity) => {
-            raise_notice(model, identity.as_deref(), Surface::Cmdline)
-        }
-        surfaces::RowsOutcome::Stale => Vec::new(),
-    }
+    complaint_recorded(model, win, &lines)
 }
 
 /// Gives a withheld float back to the screen: the rows say a user opened
@@ -607,7 +511,7 @@ fn raise_notice(model: &mut Model, identity: Option<&str>, surface: Surface) -> 
         return Vec::new();
     };
     let family = family(identity);
-    let text = notice(&family, &claimed, model.config_was_read(), false, None);
+    let text = notice(&family, &claimed, model.config_was_read(), None);
     // reaching here at all means the claim is news, so the wording is about
     // to change and the frame does owe a repaint
     model.dirty = true;
@@ -630,35 +534,7 @@ pub(super) fn sweep_floats(model: &mut Model) -> Vec<Effect> {
             .withdraw_native_notice(&family(identity.as_deref()));
         model.dirty |= withdrew;
     }
-    // the same rule for the floats view took over instead of reporting: a
-    // prefix that narrows to no candidates closes the menu while the command
-    // line stays open, and the palette must stop offering what it was
-    // showing rather than hold the last set that had any
-    model.dirty |= model.engine.float_absorption.sweep();
     Vec::new()
-}
-
-/// Ends every absorption, because the command line the absorbed menus were
-/// completing has closed: the palette gives up the rows, and every window
-/// view hid to get them is shown again.
-///
-/// The teardown the sweep cannot do on its own: nvim-cmp closes its menu
-/// from inside a non-nested `CmdlineLeave` callback, so no `WinClosed`
-/// announces it, and the scan that would eventually miss the window is
-/// armed by events a closed command line no longer produces. Without this
-/// the next command line would open onto the previous one's candidates.
-///
-/// The un-hide is sent for every window still being absorbed, including the
-/// ones that are already closed -- which, for the plugin this was built
-/// against, is all of them: cmp's menu goes with the `CmdlineLeave` that
-/// produced this very event, so the show lands on a window that no longer
-/// exists and the chunk answers it by doing nothing. That is the cheap
-/// half. The expensive half is the other order, where the window outlives
-/// the command line: nothing else in the session would ever clear the flag,
-/// and the user is left with a window that has stopped drawing and no way
-/// to know why.
-pub(super) fn cmdline_closed(model: &mut Model) -> Vec<Effect> {
-    surfaces::release_absorptions(model)
 }
 
 /// The whole notice for `claimed`, opening with its own `family` -- which
@@ -671,46 +547,7 @@ pub(super) fn cmdline_closed(model: &mut Model) -> Vec<Effect> {
 /// pushed onto the end of the first sentence is a remedy the user cannot
 /// read.
 ///
-/// `disabled` is the ask view made of a plugin it can name, and only the
-/// claimant notice ever carries one: a named plugin is one view can
-/// ask to stop (`crate::msg::RpcCall::DisableClaimants`), while an
-/// anonymous float is a window nobody can be asked anything about.
-///
-/// The clause states the asking and whether it took, and the second half is
-/// the hand-back's own answer rather than this probe's
-/// ([`Msg::ClaimantsHandedBack`](crate::msg::Msg::ClaimantsHandedBack)): the
-/// takeover runs a module's own `disable` only where the module was already
-/// loaded when it went out, and it runs ahead of every other plugin's
-/// `VimEnter`, so a claimant loading from one of those never receives it.
-/// Read off the probe instead, the clause said "and it is still loaded" for
-/// every plugin -- including the one that had turned itself off exactly as
-/// asked, since a disabled module is still in `package.loaded` -- which
-/// reports a success as a failure.
-///
-/// `startup_account` adds the last line, and only the claimant notice
-/// passes it true: that notice is the account of a launch, and the history
-/// is where everything else from that launch is. It is not conditional on
-/// anything having actually been parked -- view's own startup lines are in
-/// the ring on every launch, so the sentence is true whether or not the
-/// hold caught a foreign one, and a user reading a box about their first
-/// launch is owed the key that shows the rest of it. A float notice raised
-/// mid-session is about a window that just opened, not about a launch, and
-/// says nothing about the history.
-/// One plugin view asked to turn itself off, and whether the ask took.
-struct Ask {
-    class: &'static str,
-    /// Whether the module's own `disable` ran, which is the hand-back's
-    /// answer and not the probe's.
-    taken: bool,
-}
-
-fn notice(
-    family: &str,
-    claimed: &[Surface],
-    config_was_read: bool,
-    startup_account: bool,
-    disabled: Option<Ask>,
-) -> String {
+fn notice(family: &str, claimed: &[Surface], config_was_read: bool, held: Option<&str>) -> String {
     let rows: Vec<_> = claimed
         .iter()
         .filter_map(|surface| surfaces::row(*surface))
@@ -742,76 +579,11 @@ fn notice(
             join(&remedies)
         )
     };
-    // `--` rather than the decided box's em dash: notice text is written to
-    // the grid verbatim, and the charset a terminal can draw is a capability
-    // reading the message layer does not take
-    let history = if startup_account {
-        "\nStartup messages from this launch are in the history -- <leader>fm."
-    } else {
-        ""
-    };
-    // its own row rather than a clause on the first: the message layer
-    // clips at the grid's width less two rather than wrapping
-    let turned_off = match disabled {
-        Some(Ask { class, taken }) => ask_clause(class, taken),
+    let value = match held {
+        Some(holder) => format!("\nIt was set to {}.", spelled(holder)),
         None => String::new(),
     };
-    format!(
-        "{family}{}, which view owns.{turned_off}{remedy}{history}",
-        join(&labels)
-    )
-}
-
-/// The notice's account of the ask, in both wordings.
-///
-/// One place rather than two literals, because a claimant that loads after
-/// the takeover has the standing notice re-worded by swapping one of these
-/// for the other ([`on_claimants_handed_back`]): a second spelling of
-/// either sentence would leave a notice nothing could re-word.
-fn ask_clause(class: &str, taken: bool) -> String {
-    if taken {
-        format!("\nview asked {class} to turn itself off at startup, and it did.")
-    } else {
-        format!(
-            "\nview asked {class} to turn itself off at startup, and the ask \
-             never reached it."
-        )
-    }
-}
-
-/// Answers the hand-back's own report, including the one a late pass sends
-/// for a claimant that loaded after the takeover asked.
-///
-/// A late report arrives with the notice already standing and already
-/// worded from the first pass's answer, which said the ask never reached a
-/// plugin that has now taken it. The standing line is re-worded rather than
-/// rebuilt: the rest of it is still true and is not recoverable from
-/// anything the model kept.
-///
-/// The replacement is transient where the notice it replaces was sticky. A
-/// sticky line is one standing for a condition the user has to act on, and
-/// what this one now says is that view asked and the plugin complied --
-/// which the remedy beside it still makes worth reading once, and worth
-/// nothing after that.
-pub(super) fn on_claimants_handed_back(model: &mut Model, modules: Vec<String>) -> Vec<Effect> {
-    let mut effects = Vec::new();
-    for claimant in surfaces::probed_claimants(&modules) {
-        let family = claimant_family(claimant.class);
-        let never = ask_clause(claimant.class, false);
-        let took = ask_clause(claimant.class, true);
-        let Some(text) = model
-            .engine
-            .native_notice_line(&family)
-            .filter(|line| line.contains(&never))
-            .map(|line| line.replace(&never, &took))
-        else {
-            continue;
-        };
-        effects.extend(model.engine.record_native_notice_once(&family, text));
-        model.dirty = true;
-    }
-    model.surface_conflicts.note_handed_back(modules);
-    effects
+    format!("{family}{}, which view owns.{value}{remedy}", join(&labels))
 }
 
 /// `["a", "b", "c"]` as `"a, b and c"`: the reading order a sentence needs,
@@ -829,7 +601,7 @@ fn join(parts: &[&str]) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{absorb_float_notices, observe_float, surfaces};
+    use super::observe_float;
     use crate::events::UiEvent;
     use crate::model::Model;
     use crate::msg::{Effect, Msg, RpcCall};
@@ -867,7 +639,7 @@ mod tests {
     }
 
     /// nvim-cmp's cmdline menu, verbatim from the capture.
-    fn cmp_cmdline_menu(filetype: &str) -> FloatSighting {
+    fn cmdline_float(filetype: &str) -> FloatSighting {
         FloatSighting {
             win: 1003,
             buf: 2,
@@ -905,7 +677,7 @@ mod tests {
     fn hidden_menu(filetype: &str) -> FloatSighting {
         FloatSighting {
             hidden: true,
-            ..cmp_cmdline_menu(filetype)
+            ..cmdline_float(filetype)
         }
     }
 
@@ -913,38 +685,6 @@ mod tests {
     /// itself, then the engine answering that the window is still not
     /// hidden.
     ///
-    /// The path back onto the notice for every test below that is about the
-    /// wording rather than about the absorption. A float over the command
-    /// line is absorbed first now, and the notice is what a *failed*
-    /// absorption leaves -- so a test that wants the line has to drive the
-    /// failure rather than assume it.
-    fn unhidable(model: &mut Model, float: &FloatSighting) -> Vec<Effect> {
-        let mut effects = observe_float(model, float);
-        effects.extend(update(
-            model,
-            Msg::FloatRows {
-                win: float.win,
-                hidden: false,
-                lines: Vec::new(),
-                selected: None,
-            },
-        ));
-        effects
-    }
-
-    /// The rows one read of an absorbed float answers with.
-    fn rows_arrive(model: &mut Model, win: u64, lines: &[&str], selected: Option<usize>) {
-        let _ = update(
-            model,
-            Msg::FloatRows {
-                win,
-                hidden: true,
-                lines: lines.iter().map(|line| (*line).to_string()).collect(),
-                selected,
-            },
-        );
-    }
-
     /// Every native line standing on `model`, in the order they were
     /// recorded.
     fn notices(model: &Model) -> Vec<String> {
@@ -956,24 +696,6 @@ mod tests {
             .filter(|entry| entry.is_native())
             .filter_map(|entry| entry.content.first().map(|(_, line)| line.clone()))
             .collect()
-    }
-
-    /// A typed `:` the gate admits: the palette stands on a guess, with no
-    /// `cmdline_show` behind it and nvim's own command line still closed.
-    fn speculate_colon(model: &mut Model) {
-        model.palette_enabled = true;
-        model.engine.mode.current = "normal".to_string();
-        crate::native::speculate::fold_engine_call(
-            model,
-            &RpcCall::Input {
-                notation: ":".to_string(),
-            },
-            crate::native::speculate::SpecStamp::default(),
-        );
-        assert!(
-            model.engine.cmdline_speculated.is_some(),
-            "the gate refused a `:` this case is about"
-        );
     }
 
     /// The window-local hold's report, seen from the user's side: the line
@@ -1045,136 +767,11 @@ mod tests {
         assert!(notices(&model).is_empty(), "{:?}", notices(&model));
     }
 
-    /// The hide runs inside the silence, because that is when a completion
-    /// menu and view's speculated palette would be on screen together --
-    /// and the notice does not, because a sticky line naming a plugin must
-    /// never rest on a guess.
-    #[test]
-    fn a_menu_sighted_on_a_guess_is_absorbed_and_named_to_nobody() {
-        let mut model = captured_session();
-        speculate_colon(&mut model);
-
-        let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-
-        assert!(
-            effects.iter().any(|eff| matches!(
-                eff,
-                Effect::Rpc(RpcCall::SetFloatHidden {
-                    win: 1003,
-                    hide: true
-                })
-            )),
-            "the menu is hidden while the guess stands: {effects:?}"
-        );
-        assert!(
-            notices(&model).is_empty(),
-            "a line naming the plugin would be wrong the moment the guess was: {:?}",
-            notices(&model)
-        );
-    }
-
-    /// The other end of that hide. A guess produces no `cmdline_hide`,
-    /// because nvim never opened a command line, so the withdrawal is the
-    /// only thing that can give the window back -- and a plugin left with a
-    /// window that has stopped drawing has no way to know why.
-    #[test]
-    fn a_guess_taken_back_shows_every_window_it_had_hidden() {
-        let mut model = captured_session();
-        speculate_colon(&mut model);
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        rows_arrive(&mut model, 1003, &["one", "two"], Some(0));
-        assert!(
-            model.engine.absorbed_rows().is_some(),
-            "the palette is showing the hidden menu's rows"
-        );
-
-        let effects = crate::native::speculate::withdraw_cmdline_speculation(&mut model);
-
-        assert!(
-            matches!(
-                effects.as_slice(),
-                [Effect::Rpc(RpcCall::SetFloatHidden {
-                    win: 1003,
-                    hide: false
-                })]
-            ),
-            "the window view hid has to be shown again: {effects:?}"
-        );
-        assert!(
-            model.engine.absorbed_rows().is_none(),
-            "and the palette stops offering candidates for a command line nobody opened"
-        );
-        assert!(model.dirty, "both halves change what is on screen");
-    }
-
-    /// The `cmdline_show` that answers a guess is not a withdrawal of it:
-    /// the menus absorbed during the silence are completing the command
-    /// line that is now on screen, and showing them again would put two
-    /// menus up.
-    #[test]
-    fn the_answer_to_a_guess_leaves_the_absorption_standing() {
-        let mut model = captured_session();
-        speculate_colon(&mut model);
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        rows_arrive(&mut model, 1003, &["one", "two"], Some(0));
-
-        open_cmdline(&mut model);
-
-        assert!(
-            model.engine.cmdline_speculated.is_none(),
-            "the guess was answered"
-        );
-        assert!(
-            model.engine.absorbed_rows().is_some(),
-            "the rows the palette is drawing belong to the command line that just opened"
-        );
-    }
-
-    /// A `cmdline_hide` with no `cmdline_show` behind it, which nvim really
-    /// does send: `<silent>` suppresses the show and not the hide, so every
-    /// `<silent>` normal-mode mapping that runs an Ex command produces this
-    /// batch, and a `:` a plugin's own `getchar()` then swallows lands in
-    /// exactly that silence (probed against the pinned 0.12.4 engine over
-    /// `ext_cmdline`: `nnoremap <silent> <F3> :echo 1<CR>` emits
-    /// `cmdline_hide` alone, the same mapping without `<silent>` emits both).
-    /// The un-hides the withdrawal owes have to leave through `update`'s own
-    /// return, or every window the guess hid stays hidden for the rest of
-    /// the session.
-    #[test]
-    fn a_hide_with_no_show_behind_it_returns_the_un_hides_the_guess_owes() {
-        let mut model = captured_session();
-        speculate_colon(&mut model);
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        rows_arrive(&mut model, 1003, &["one", "two"], Some(0));
-        assert!(
-            model.engine.cmdline.is_none(),
-            "nvim opened no command line"
-        );
-
-        let effects = update(&mut model, Msg::Redraw(vec![UiEvent::CmdlineHide]));
-
-        assert!(
-            effects.iter().any(|eff| matches!(
-                eff,
-                Effect::Rpc(RpcCall::SetFloatHidden {
-                    win: 1003,
-                    hide: false
-                })
-            )),
-            "the window view hid under the guess has to be shown again: {effects:?}"
-        );
-        assert!(model.engine.cmdline_speculated.is_none());
-        assert!(
-            model.engine.absorbed_rows().is_none(),
-            "and the palette stops offering candidates for a command line nobody opened"
-        );
-    }
-
     #[test]
     fn a_float_over_the_cmdline_is_named_once_with_the_line_that_resolves_it() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let _ = observe_float(&mut model, &cmdline_float("cmp_menu"));
         assert_eq!(
             notices(&model),
             vec![
@@ -1189,7 +786,7 @@ mod tests {
     fn a_float_with_no_identity_is_named_a_plugin() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = unhidable(&mut model, &cmp_cmdline_menu(""));
+        let _ = observe_float(&mut model, &cmdline_float(""));
         assert_eq!(
             notices(&model),
             vec![
@@ -1204,7 +801,7 @@ mod tests {
     fn one_identity_claiming_two_surfaces_raises_one_notice_naming_both() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = unhidable(&mut model, &cmp_cmdline_menu("noice"));
+        let _ = observe_float(&mut model, &cmdline_float("noice"));
         let _ = observe_float(&mut model, &toast("noice"));
         assert_eq!(
             notices(&model),
@@ -1222,9 +819,9 @@ mod tests {
     fn a_repeated_detection_replaces_its_wording_instead_of_stacking() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let _ = observe_float(&mut model, &cmdline_float("cmp_menu"));
         for _ in 0..4 {
-            let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+            let _ = observe_float(&mut model, &cmdline_float("cmp_menu"));
         }
         assert_eq!(notices(&model).len(), 1, "a repeat is not a second notice");
         let _ = observe_float(&mut model, &toast("cmp_menu"));
@@ -1252,13 +849,13 @@ mod tests {
              Set [native] palette = false in view.toml to give it back."
                 .to_string(),
         ];
-        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let _ = observe_float(&mut model, &cmdline_float("cmp_menu"));
         assert_eq!(notices(&model), expected);
 
         for key in 1..=8 {
             // the scan a keystroke arms, one FLOAT_SCAN_THROTTLE later
             model.dirty = false;
-            let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+            let _ = observe_float(&mut model, &cmdline_float("cmp_menu"));
             assert_eq!(notices(&model), expected, "sighting {key} stacked a copy");
             assert!(
                 !model.dirty,
@@ -1278,7 +875,7 @@ mod tests {
     fn each_float_notice_starts_with_its_own_family() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let _ = observe_float(&mut model, &cmdline_float("cmp_menu"));
         let _ = observe_float(&mut model, &toast("notify"));
         let standing = notices(&model);
         assert_eq!(
@@ -1302,7 +899,7 @@ mod tests {
         let mut model = captured_session();
         open_cmdline(&mut model);
         model.attach_surfaces(vec![Ext::LineGrid, Ext::Tabline]);
-        let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let effects = observe_float(&mut model, &cmdline_float("cmp_menu"));
         assert!(effects.is_empty());
         assert!(notices(&model).is_empty(), "{:?}", notices(&model));
         let effects = observe_float(&mut model, &toast("notify"));
@@ -1318,7 +915,7 @@ mod tests {
         let mut model = captured_session();
         open_cmdline(&mut model);
         model.note_config_unread();
-        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let _ = observe_float(&mut model, &cmdline_float("cmp_menu"));
         let standing = notices(&model);
         assert_eq!(standing.len(), 1);
         assert!(
@@ -1367,11 +964,11 @@ mod tests {
     fn a_notice_comes_down_with_the_float_that_stopped_being_sighted() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let _ = observe_float(&mut model, &cmdline_float("cmp_menu"));
         assert_eq!(notices(&model).len(), 1);
 
         // a scan that still finds it: the line stays
-        let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("cmp_menu")));
+        let _ = update(&mut model, Msg::FloatObserved(cmdline_float("cmp_menu")));
         let _ = update(&mut model, Msg::FloatSweep);
         assert_eq!(notices(&model).len(), 1, "the menu is still drawing");
 
@@ -1383,495 +980,41 @@ mod tests {
         assert!(model.dirty, "the box left the screen: that is a repaint");
 
         // and the same plugin drawing again is owed the line again
-        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let _ = observe_float(&mut model, &cmdline_float("cmp_menu"));
         assert_eq!(notices(&model).len(), 1);
     }
 
     /// The dispatch seam itself: the message a decoded bridge notification
-    /// arrives as reaches the same answer `observe_float` gives, and the
-    /// message its reply arrives as reaches `on_float_rows`.
+    /// arrives as reaches the same answer `observe_float` gives.
     #[test]
     fn the_float_message_routes_through_update() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let effects = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("cmp_menu")));
+        let routed = update(&mut model, Msg::FloatObserved(cmdline_float("a.menu")));
+        let lines = notices(&model);
+        assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
-            matches!(
-                effects.as_slice(),
-                [
-                    Effect::Rpc(RpcCall::SetFloatHidden {
-                        win: 1003,
-                        hide: true
-                    }),
-                    Effect::Rpc(RpcCall::ReadFloatRows { win: 1003 })
-                ]
-            ),
-            "{effects:?}"
-        );
-        rows_arrive(&mut model, 1003, &[" preflight  Text "], Some(0));
-        assert_eq!(
-            model
-                .engine
-                .absorbed_rows()
-                .map(|rows| rows.lines.clone())
-                .unwrap_or_default(),
-            vec![" preflight  Text ".to_string()]
-        );
-        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
-    }
-
-    /// The ordering that is the whole point: a frame carrying view's palette
-    /// rows *and* the plugin's own menu is the bug this feature exists to
-    /// prevent, so the hide is issued before the read and the rows do not
-    /// exist to paint until the read comes back -- which it cannot do before
-    /// the hide it followed down the same connection has run.
-    #[test]
-    fn the_float_is_hidden_before_its_rows_are_painted() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        let calls: Vec<&RpcCall> = effects
-            .iter()
-            .filter_map(|effect| match effect {
-                Effect::Rpc(call) => Some(call),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            matches!(
-                calls.as_slice(),
-                [
-                    RpcCall::SetFloatHidden {
-                        win: 1003,
-                        hide: true
-                    },
-                    RpcCall::ReadFloatRows { win: 1003 }
-                ]
-            ),
-            "the hide goes first, and both name the sighted window: {calls:?}"
-        );
-        assert!(
-            model.engine.absorbed_rows().is_none(),
-            "nothing is painted from a float until its own read answers"
-        );
-        rows_arrive(&mut model, 1003, &["preflight"], None);
-        assert!(model.engine.absorbed_rows().is_some());
-    }
-
-    /// The cadence bound, which is what keeps this off the key path: the
-    /// window is hidden once and remembered, so a menu re-sighted at the
-    /// scan's own rate for a whole cmdline session costs one hide and not
-    /// one per keystroke.
-    #[test]
-    fn the_same_float_is_hidden_once_however_often_it_is_observed() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        let mut hides = 0;
-        let mut reads = 0;
-        let mut others = 0;
-        for key in 0..8 {
-            // the first sighting is of a window nobody has hidden yet; every
-            // one after it is the same window with view's own hide standing
-            let float = if key == 0 {
-                cmp_cmdline_menu("cmp_menu")
-            } else {
-                hidden_menu("cmp_menu")
-            };
-            for effect in update(&mut model, Msg::FloatObserved(float)) {
-                match effect {
-                    Effect::Rpc(RpcCall::SetFloatHidden { hide: true, .. }) => hides += 1,
-                    Effect::Rpc(RpcCall::ReadFloatRows { .. }) => reads += 1,
-                    _ => others += 1,
-                }
-            }
-            rows_arrive(&mut model, 1003, &["preflight"], None);
-        }
-        assert_eq!(others, 0, "an absorbed float owes nothing else");
-        assert_eq!(hides, 1, "one hide per window, never one per keystroke");
-        assert_eq!(reads, 8, "the rows are re-read, because they change");
-    }
-
-    /// The flash bound, as a counter rather than as a test of the frame: view
-    /// cannot hold a window against its owner, so a plugin that puts its menu
-    /// back gets re-hidden -- twice, and then view stops absorbing it and
-    /// says so instead.
-    #[test]
-    fn a_float_that_reshows_three_times_falls_back_to_the_notice() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        rows_arrive(&mut model, 1003, &["preflight"], None);
-
-        for reshow in 1..=2 {
-            let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-            assert!(
-                effects.iter().any(|effect| matches!(
-                    effect,
-                    Effect::Rpc(RpcCall::SetFloatHidden { hide: true, .. })
-                )),
-                "re-show {reshow} must be re-hidden"
-            );
-            assert!(notices(&model).is_empty(), "{:?}", notices(&model));
-            rows_arrive(&mut model, 1003, &["preflight"], None);
-        }
-
-        let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        assert!(
-            !effects.iter().any(|effect| matches!(
-                effect,
-                Effect::Rpc(RpcCall::SetFloatHidden { hide: true, .. })
-            )),
-            "the third re-show stops the absorption rather than fighting on: {effects:?}"
-        );
-        assert_eq!(
-            notices(&model),
-            vec![
-                "view: cmp_menu is drawing over the command line, which view owns.\n\
-                 Set [native] palette = false in view.toml to give it back."
-                    .to_string()
-            ]
-        );
-        assert!(
-            model.engine.absorbed_rows().is_none(),
-            "and the palette stops showing rows off a menu that is on screen"
-        );
-    }
-
-    /// The other failure mode the same disclosure covers: an engine that does
-    /// not take the flag at all. The read that follows the hide reports the
-    /// window still visible, and view stops rather than painting its rows
-    /// under a menu that never went away.
-    #[test]
-    fn a_hide_failure_degrades_to_the_notice_and_never_paints_both() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        let _ = update(
-            &mut model,
-            Msg::FloatRows {
-                win: 1003,
-                hidden: false,
-                lines: vec![" preflight  Text ".to_string()],
-                selected: Some(0),
-            },
-        );
-        assert!(
-            model.engine.absorbed_rows().is_none(),
-            "rows read off a window still on screen are the double chrome"
-        );
-        assert_eq!(
-            notices(&model),
-            vec![
-                "view: cmp_menu is drawing over the command line, which view owns.\n\
-                 Set [native] palette = false in view.toml to give it back."
-                    .to_string()
-            ],
-            "the failure mode is telling the user, never drawing over them"
-        );
-        // and it stays yielded: a window view could not hide is not one to
-        // keep trying to hide on every scan
-        let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        assert!(
-            !effects.iter().any(|effect| matches!(
-                effect,
-                Effect::Rpc(RpcCall::SetFloatHidden { hide: true, .. })
-            )),
-            "{effects:?}"
-        );
-    }
-
-    /// The teardown. nvim-cmp closes its menu from inside a non-nested
-    /// `CmdlineLeave` callback, so no `WinClosed` announces it and no scan is
-    /// armed to miss it -- without this the next command line would open onto
-    /// the previous one's candidates.
-    #[test]
-    fn absorption_stops_when_the_cmdline_closes() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        rows_arrive(&mut model, 1003, &["preflight", "prefabricated"], Some(0));
-        assert!(model.engine.absorbed_rows().is_some());
-
-        model.dirty = false;
-        let _ = update(&mut model, Msg::Redraw(vec![UiEvent::CmdlineHide]));
-        assert!(
-            model.engine.absorbed_rows().is_none(),
-            "the palette must not reopen holding the last command line's candidates"
-        );
-        assert!(model.dirty, "rows left the screen: that is a repaint");
-    }
-
-    /// The teardown the command line cannot do, because it is still open: a
-    /// prefix that narrows to no candidates closes the menu on its own (the
-    /// capture's `:zqx` opens no window at all), and the scan's end marker is
-    /// the only thing that says so.
-    #[test]
-    fn absorption_stops_when_the_menu_closes_under_an_open_cmdline() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("cmp_menu")));
-        rows_arrive(&mut model, 1003, &["preflight"], None);
-        let _ = update(&mut model, Msg::FloatSweep);
-        assert!(
-            model.engine.absorbed_rows().is_some(),
-            "a scan that still finds the menu changes nothing"
+            lines[0].starts_with("view: a.menu is drawing over "),
+            "{lines:?}"
         );
 
-        model.dirty = false;
-        let _ = update(&mut model, Msg::FloatSweep);
-        assert!(model.engine.absorbed_rows().is_none(), "the menu closed");
-        assert!(model.dirty, "rows left the screen: that is a repaint");
-    }
-
-    /// The same gate on the surface whose rows are the ones being taken.
-    /// `[native] palette = false` detaches `ext_cmdline` and
-    /// `ext_popupmenu` together, so no config reaches this state -- but
-    /// `absorbs()` answers about a surface handed to it rather than about a
-    /// rect it resolved itself, and an answer of "yes, take those rows" for
-    /// a completion surface this session does not draw would be one its
-    /// caller's invariants, not its own, were holding up.
-    #[test]
-    fn a_session_that_does_not_draw_completions_absorbs_nothing() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        model.attach_surfaces(vec![
-            Ext::LineGrid,
-            Ext::Cmdline,
-            Ext::Messages,
-            Ext::Tabline,
-        ]);
-        assert!(!surfaces::absorbs(
-            &cmp_cmdline_menu("cmp_menu"),
-            Surface::Cmdline,
-            &model
-        ));
-    }
-
-    /// The window the effects of one sighting would take over, if any.
-    fn taken(effects: &[Effect]) -> Vec<u64> {
-        effects
-            .iter()
-            .filter_map(|effect| match effect {
-                Effect::Rpc(RpcCall::SetFloatHidden { win, hide: true })
-                | Effect::Rpc(RpcCall::ReadFloatRows { win }) => Some(*win),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The rect is not evidence, and this is the float that proves it: a
-    /// diagnostic float carrying `markdown` -- the filetype
-    /// `CONTENT_FILETYPES` exists to refuse as a plugin's name -- standing
-    /// in the two rows the command line keeps.
-    ///
-    /// Absorbed on the rect alone, its window goes dark and its text is
-    /// offered to the user as completion candidates under `> :`. It is a
-    /// conflict and it gets the conflict's own answer: the notice naming
-    /// the surface and the `view.toml` line that hands it back.
-    #[test]
-    fn a_float_that_is_not_a_completion_menu_is_reported_never_taken() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        let diagnostic = FloatSighting {
-            win: 2001,
-            filetype: "markdown".to_string(),
-            ..cmp_cmdline_menu("markdown")
-        };
-        let effects = observe_float(&mut model, &diagnostic);
-        assert!(
-            taken(&effects).is_empty(),
-            "a float view cannot read as a menu is never hidden and never read: {effects:?}"
-        );
-        assert!(
-            model.engine.absorbed_rows().is_none(),
-            "and its lines are never candidates"
-        );
-        assert_eq!(
-            notices(&model),
-            vec![
-                "view: a plugin is drawing over the command line, which view owns.\n\
-                 Set [native] palette = false in view.toml to give it back."
-                    .to_string()
-            ],
-            "the claim is still a claim: it takes the notice path instead"
-        );
-    }
-
-    /// The same rule against the float that reaches it from this repo's own
-    /// plugin set. `compat/scenarios/fidget.toml` waits on grid row 28 for
-    /// an LSP progress float to clear, so fidget's window is in the band the
-    /// command line keeps for every `:w` a user types -- and it presents a
-    /// widget filetype, so "the float names itself" is not the bound
-    /// either. A progress spinner that goes dark for the rest of the session
-    /// is the failure this shape is here to keep failing.
-    #[test]
-    fn an_lsp_progress_float_under_a_command_line_is_reported_never_taken() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        let progress = FloatSighting {
-            win: 2002,
-            row: 27,
-            col: 60,
-            width: 40,
-            height: 2,
-            zindex: 45,
-            filetype: "fidget".to_string(),
-            ..cmp_cmdline_menu("fidget")
-        };
-        let effects = observe_float(&mut model, &progress);
-        assert!(taken(&effects).is_empty(), "{effects:?}");
-        assert!(model.engine.absorbed_rows().is_none());
-        assert_eq!(
-            notices(&model),
-            vec![
-                "view: fidget is drawing over the command line, which view owns.\n\
-                 Set [native] palette = false in view.toml to give it back."
-                    .to_string()
-            ]
-        );
+        let mut direct = captured_session();
+        open_cmdline(&mut direct);
+        let called = observe_float(&mut direct, &cmdline_float("a.menu"));
+        assert_eq!(format!("{routed:?}"), format!("{called:?}"));
+        assert_eq!(notices(&direct), lines);
     }
 
     /// A window that was already hidden when view first saw it is somebody
     /// else's -- a user's own config, another plugin -- and it is drawing
-    /// nothing. Absorbing it would put its buffer on the wire at the scan's
-    /// own rate and paint rows nobody can see beside them.
+    /// nothing, so there is nothing for view to report or to take.
     #[test]
     fn a_float_hidden_before_view_ever_saw_it_is_left_alone() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let effects = observe_float(&mut model, &hidden_menu("cmp_menu"));
+        let effects = observe_float(&mut model, &hidden_menu("a.menu"));
         assert!(effects.is_empty(), "{effects:?}");
-        assert!(model.engine.absorbed_rows().is_none());
         assert!(notices(&model).is_empty(), "{:?}", notices(&model));
-    }
-
-    /// The other half of the hide: view gives the window back.
-    ///
-    /// The flag survives the plugin's own next reconfigure -- the capture
-    /// measured 277 samples with no re-show -- so a window view hid and then
-    /// stopped absorbing has nothing left in the session that would ever
-    /// show it again. The absorption ending is the only moment view still
-    /// knows the handle.
-    #[test]
-    fn a_window_that_outlives_the_command_line_is_shown_again() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        rows_arrive(&mut model, 1003, &["preflight"], None);
-
-        let effects = update(&mut model, Msg::Redraw(vec![UiEvent::CmdlineHide]));
-        assert!(
-            matches!(
-                effects.as_slice(),
-                [Effect::Rpc(RpcCall::SetFloatHidden {
-                    win: 1003,
-                    hide: false
-                })]
-            ),
-            "the window view hid is the window view shows: {effects:?}"
-        );
-    }
-
-    /// And the case that is not owed one: the plugin closed its own menu,
-    /// the scan that missed it dropped the window, and asking nvim to show a
-    /// window nobody has is a call with an error at the end of it.
-    #[test]
-    fn a_menu_its_plugin_closed_is_never_asked_to_come_back() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("cmp_menu")));
-        rows_arrive(&mut model, 1003, &["preflight"], None);
-        // the scan that no longer finds it, which is what says it closed
-        let _ = update(&mut model, Msg::FloatSweep);
-        let _ = update(&mut model, Msg::FloatSweep);
-        assert!(model.engine.absorbed_rows().is_none());
-
-        let effects = update(&mut model, Msg::Redraw(vec![UiEvent::CmdlineHide]));
-        assert!(effects.is_empty(), "{effects:?}");
-    }
-
-    /// The one line that keeps a 6.7 Hz scan off the paint loop. A standing
-    /// menu is re-read once per scan for as long as a user reads it, and a
-    /// read that brings back the rows the palette already has changed
-    /// nothing on the screen -- a frame per read of those is view's paint
-    /// loop keeping time with a plugin's debounce.
-    #[test]
-    fn a_re_read_that_brings_back_the_same_rows_asks_for_no_frame() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        rows_arrive(&mut model, 1003, &["preflight", "prefabricated"], Some(0));
-
-        model.dirty = false;
-        for scan in 1..=4 {
-            let _ = update(&mut model, Msg::FloatObserved(hidden_menu("cmp_menu")));
-            rows_arrive(&mut model, 1003, &["preflight", "prefabricated"], Some(0));
-            assert!(
-                !model.dirty,
-                "scan {scan} repainted a screen whose candidates never moved"
-            );
-        }
-
-        // and the read that does move them
-        rows_arrive(&mut model, 1003, &["preflight"], Some(0));
-        assert!(model.dirty, "rows that changed are rows worth a frame");
-    }
-
-    /// Absorption follows ownership, exactly as the notice does: with
-    /// `[native] palette = false` the command line was never taken from the
-    /// user's plugins, so view neither hides their window nor reads their
-    /// buffer -- the detector and the absorber both follow the config rather
-    /// than a constant.
-    #[test]
-    fn a_yielded_cmdline_absorbs_nothing_and_hides_nobody() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        model.attach_surfaces(vec![Ext::LineGrid, Ext::Messages, Ext::Tabline]);
-        let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        assert!(effects.is_empty(), "{effects:?}");
-        assert!(model.engine.absorbed_rows().is_none());
-        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
-    }
-
-    /// A float already accounted for by a named claimant's notice is that
-    /// plugin's, and its windows are not view's to take over: a user reading
-    /// "noice.nvim is using the command line" must not also find that command
-    /// line's menu quietly absorbed.
-    #[test]
-    fn a_claimants_own_float_is_never_absorbed() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        probe(&mut model, &["noice"]);
-        let effects = observe_float(&mut model, &cmp_cmdline_menu("noice"));
-        assert!(effects.is_empty(), "{effects:?}");
-        assert!(model.engine.absorbed_rows().is_none());
-    }
-
-    /// The same rule with the identity gate cleared, which is the only way
-    /// to ask it: a float presenting a name view *would* absorb, over a
-    /// surface a named claimant's notice already covers, is that plugin's
-    /// window and still not view's to take.
-    ///
-    /// The cover is recorded directly rather than probed through
-    /// `SURFACE_CLAIMANTS`, because no shipped row can produce this input --
-    /// `no_claimant_names_an_absorbable_identity` keeps the two tables
-    /// disjoint on purpose. The branch it guards is real all the same, and
-    /// the sibling test above cannot fail on it: the float that one drives
-    /// is refused by the identity gate before the cover is ever consulted.
-    #[test]
-    fn an_absorbable_menu_a_claimants_notice_covers_is_left_alone() {
-        let mut model = captured_session();
-        open_cmdline(&mut model);
-        model
-            .surface_conflicts
-            .note_covered(&[Surface::Cmdline], &["cmp_menu"]);
-        let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        assert!(
-            effects.is_empty(),
-            "a window whose plugin already has a notice standing is not one to \
-             hide out from under it: {effects:?}"
-        );
-        assert!(model.engine.absorbed_rows().is_none());
     }
 
     /// A hidden float draws nothing, so it is nobody's conflict -- the scan
@@ -1880,7 +1023,7 @@ mod tests {
     fn a_hidden_float_is_never_reported_as_drawing_over_anything() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        probe(&mut model, &["noice"]);
+        sink_read(&mut model, true);
         let effects = observe_float(
             &mut model,
             &FloatSighting {
@@ -1898,22 +1041,26 @@ mod tests {
         );
     }
 
-    /// The takeover's hand-back answer, as the reply that carries it beside
-    /// the mapping claims delivers it: the modules whose own `disable` ran.
-    fn handed_back(model: &mut Model, modules: &[&str]) {
-        let _ = update(
-            model,
-            Msg::ClaimantsHandedBack {
-                modules: modules.iter().map(|m| (*m).to_string()).collect(),
-            },
-        );
+    /// One reading of the message area's replaced global, as the bridge
+    /// notification carrying it arrives: `true` when somebody other than
+    /// view stands at `vim.notify`.
+    fn sink_read(model: &mut Model, foreign: bool) {
+        let _ = update(model, Msg::NotifySinkRead { foreign });
     }
 
-    fn probe(model: &mut Model, loaded: &[&str]) {
-        let _ = update(
+    /// A notifier of the user's standing at `vim.notify`, as a live
+    /// session delivers it: the hold names the function it set back, and
+    /// the sink reading arrives on the same idle transition.
+    fn notifier_takes_the_messages(model: &mut Model) -> Vec<Effect> {
+        let mut effects = update(
             model,
-            Msg::ClaimantsProbed(loaded.iter().map(|m| (*m).to_string()).collect()),
+            Msg::ChannelHeld {
+                channel: "vim.notify".to_string(),
+                holder: "function <a.renderer>".to_string(),
+            },
         );
+        effects.extend(update(model, Msg::NotifySinkRead { foreign: true }));
+        effects
     }
 
     /// The startup hold's deadline, as the timer thread the running
@@ -1965,31 +1112,6 @@ mod tests {
         generations[0]
     }
 
-    /// The wording `compat/scenarios/noice.toml` reads back off a real
-    /// screen, asserted here so a reworded notice fails in a unit test
-    /// rather than in a 15-second pty wait. The file's own needles are
-    /// graded against this text by
-    /// [`every_compat_needle_is_a_row_view_still_writes`].
-    #[test]
-    fn a_loaded_claimant_is_named_once_with_every_surface_it_takes() {
-        let mut model = captured_session();
-        handed_back(&mut model, &["noice"]);
-        probe(&mut model, &["noice"]);
-        assert_eq!(
-            notices(&model),
-            vec![
-                "view: noice.nvim is using the command line and the message area, \
-                 which view owns.\n\
-                 view asked noice.nvim to turn itself off at startup, and it \
-                 did.\n\
-                 Set [native] palette = false and [native] notifications = false \
-                 in view.toml to give them back.\n\
-                 Startup messages from this launch are in the history -- <leader>fm."
-                    .to_string()
-            ]
-        );
-    }
-
     /// The lifetime the claimant notice is recorded with, pinned at the one
     /// call site that chooses it.
     ///
@@ -2002,7 +1124,7 @@ mod tests {
     #[test]
     fn the_conflict_notice_outlives_the_transient_timeout() {
         let mut model = captured_session();
-        let effects = update(&mut model, Msg::ClaimantsProbed(vec!["noice".to_string()]));
+        let effects = notifier_takes_the_messages(&mut model);
         let standing = notices(&model);
         assert_eq!(standing.len(), 1, "{standing:?}");
 
@@ -2052,51 +1174,41 @@ mod tests {
         armed[0]
     }
 
-    /// The decided wording, line for line: the three-line shape the message
-    /// box can actually draw -- one break per sentence, because the layer
-    /// that sizes the box clips at the grid width instead of wrapping -- with
-    /// the file the remedy goes in and the key that shows the rest of the
-    /// launch.
+    /// The decided wording, line for line: the shape the message box can
+    /// actually draw -- one break per sentence, because the layer that
+    /// sizes the box clips at the grid width instead of wrapping -- with
+    /// the channel, what was in it, the file the remedy goes in and the key
+    /// that shows the rest of the launch.
     ///
-    /// Ranged over whether the hold actually parked a foreign message,
-    /// because neither clause is conditional on that: the remedy is a line in
-    /// a file either way, and view's own startup lines are in the history on
-    /// every launch, so a user reading this box is one key from the rest of
-    /// it whatever the hold caught. The flagship launch is in fact the
-    /// `false` leg -- noice raises its errors through nvim-notify directly,
-    /// so nothing foreign is ever parked there.
+    /// Ranged over whether anyone has typed yet, because only the last line
+    /// is conditional on that: a notice raised mid-session is not about a
+    /// launch and says nothing about the history.
     #[test]
     fn the_notice_breaks_at_every_sentence_so_the_remedy_is_on_screen() {
-        for parked in [false, true] {
+        for acted in [false, true] {
             let mut model = captured_session();
-            if parked {
-                let _ = update(
-                    &mut model,
-                    Msg::Redraw(vec![UiEvent::MsgShow {
-                        kind: "echomsg".to_string(),
-                        content: vec![(0, "noice.nvim: setup".to_string())],
-                        replace_last: false,
-                    }]),
-                );
+            if acted {
+                key(&mut model);
             }
-            handed_back(&mut model, &["noice"]);
-            probe(&mut model, &["noice"]);
-            let standing = notices(&model);
-            assert_eq!(standing.len(), 1, "parked={parked}: {standing:?}");
-            let lines: Vec<&str> = standing[0].split('\n').collect();
-            assert_eq!(
-                lines,
-                vec![
-                    "view: noice.nvim is using the command line and the message area, \
-                     which view owns.",
-                    "view asked noice.nvim to turn itself off at startup, and it \
-                     did.",
-                    "Set [native] palette = false and [native] notifications = false \
-                     in view.toml to give them back.",
-                    "Startup messages from this launch are in the history -- <leader>fm.",
-                ],
-                "parked={parked}"
+            let _ = update(
+                &mut model,
+                Msg::ChannelHeld {
+                    channel: "vim.notify".to_string(),
+                    holder: "function <a.renderer>".to_string(),
+                },
             );
+            let standing = notices(&model);
+            assert_eq!(standing.len(), 1, "acted={acted}: {standing:?}");
+            let lines: Vec<&str> = standing[0].split('\n').collect();
+            let mut want = vec![
+                "view: vim.notify was drawing the message area, which view owns.",
+                "It was set to function <a.renderer>.",
+                "Set [native] notifications = false in view.toml to give it back.",
+            ];
+            if !acted {
+                want.push("Startup messages from this launch are in the history -- <leader>fm.");
+            }
+            assert_eq!(lines, want, "acted={acted}");
             for line in &lines {
                 assert!(
                     line.chars().count() <= 98,
@@ -2106,159 +1218,84 @@ mod tests {
         }
     }
 
-    /// The composition the review mandated, ranged over both of the float
-    /// detector's families on the default-launch path.
-    ///
-    /// One notice per plugin is the rule. noice's own health float carries
-    /// `markdown` -- a document type, not a name -- so it reaches the
-    /// anonymous family, and a second box about a surface the claimant
-    /// notice already names would be noice reported twice. A float that
-    /// does name itself is a different plugin, whose line says something
-    /// the claimant's does not.
+    /// The holder a real session hands over is a plugin's install path,
+    /// which is wider on its own than the line the message layer can draw.
+    /// The end of it is the half that names the plugin.
     #[test]
-    fn a_default_launch_names_each_plugin_once_however_many_ways_view_noticed() {
+    fn a_holder_wider_than_the_line_is_spelled_from_its_end() {
         let mut model = captured_session();
-        open_cmdline(&mut model);
-        probe(&mut model, &["noice"]);
-        let claimant = notices(&model);
-        assert_eq!(claimant.len(), 1, "{claimant:?}");
-
-        // noice's own floats, unnamed, over the two surfaces its notice
-        // already covers
-        let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("markdown")));
-        let _ = update(&mut model, Msg::FloatObserved(toast("")));
-        let _ = update(&mut model, Msg::FloatSweep);
-        assert_eq!(
-            notices(&model),
-            claimant,
-            "a float that cannot say who it belongs to, over a surface the claimant \
-             notice already names, is that claimant reported twice"
-        );
-
-        // and a second plugin, which says who it is
-        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        let standing = notices(&model);
-        assert_eq!(standing.len(), 2, "{standing:?}");
-        assert!(
-            standing
-                .iter()
-                .any(|line| line.starts_with("view: cmp_menu is drawing over ")),
-            "one notice per plugin, not one per surface: {standing:?}"
-        );
-    }
-
-    /// The ordering a lazy claimant actually launches in: noice's own
-    /// documented spec is `event = "VeryLazy"`, so the session's first
-    /// `SafeState` finds `package.loaded.noice` empty, and the hold resolves
-    /// `Release` -- everything parked goes onto the stack, and anything the
-    /// plugin raises after that toasts normally.
-    ///
-    /// The notice is the obligation; the hold is only the anti-flash
-    /// mechanism for the eager case. So the bound this pins is the honest
-    /// one: the messages raised before the late detection have already been
-    /// seen, and the notice that says which surfaces went and how to get
-    /// them back still arrives.
-    #[test]
-    fn a_claimant_that_loads_after_the_hold_resolved_still_gets_its_notice() {
-        let mut model = captured_session();
+        let holder = "@/home/a/.local/share/nvim/lazy/a.renderer/lua/a/renderer/init.lua";
         let _ = update(
             &mut model,
-            Msg::Redraw(vec![UiEvent::MsgShow {
-                kind: "echomsg".to_string(),
-                content: vec![(0, "some other plugin: loaded".to_string())],
-                replace_last: false,
-            }]),
+            Msg::ChannelHeld {
+                channel: "vim.notify".to_string(),
+                holder: holder.to_string(),
+            },
         );
-        assert!(!model.engine.messages.held().is_empty());
-
-        // the first idle transition, with nothing loaded yet
-        probe(&mut model, &[]);
-        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
-        assert!(
-            model.engine.messages.held().is_empty(),
-            "an empty reading releases the hold rather than stranding what it caught"
-        );
-
-        // and the reading the re-firing probe takes once the plugin loads
-        probe(&mut model, &["noice"]);
         let standing = notices(&model);
         assert_eq!(standing.len(), 1, "{standing:?}");
+        let spelled: Vec<&str> = standing[0]
+            .split('\n')
+            .filter(|line| line.starts_with("It was set to "))
+            .collect();
+        assert_eq!(spelled.len(), 1, "{standing:?}");
         assert!(
-            standing[0].starts_with("view: noice.nvim is using "),
-            "{standing:?}"
+            spelled[0].ends_with("lua/a/renderer/init.lua."),
+            "{spelled:?}"
         );
-    }
-
-    /// The same rule for a float that does name itself, when the name it
-    /// carries is the claimant's own.
-    ///
-    /// noice sets `filetype = "noice"` on every window it opens
-    /// (`lua/noice/view/nui.lua:41`), so its floats reach the *named* family
-    /// rather than the anonymous one the guard above covers, and a default
-    /// launch that both loads noice and sights one of its windows would say
-    /// "noice.nvim is using the command line" and "noice is drawing over the
-    /// command line" -- one plugin, two boxes, differing only in how view
-    /// happened to notice it. Driven in both orders, because the claimant
-    /// probe and the float scan race each other on a real launch.
-    #[test]
-    fn a_claimants_own_windows_are_that_claimant_rather_than_a_second_plugin() {
-        for float_first in [false, true] {
-            let mut model = captured_session();
-            open_cmdline(&mut model);
-            if float_first {
-                let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("noice")));
-            }
-            probe(&mut model, &["noice"]);
-            if !float_first {
-                let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("noice")));
-            }
-            let standing = notices(&model);
-            assert_eq!(standing.len(), 1, "float_first={float_first}: {standing:?}");
+        for line in standing[0].split('\n') {
             assert!(
-                standing[0].starts_with("view: noice.nvim is using "),
-                "float_first={float_first}: {standing:?}"
+                line.chars().count() <= 98,
+                "a line the toast layer clips is a line the user cannot read: {line:?}"
             );
         }
     }
 
     /// The other order, which the sighting-time guard cannot cover: the
-    /// unnamed float was already reported when the claimant answered.
+    /// unnamed float was already reported when the channel answered.
     #[test]
-    fn a_claimant_notice_absorbs_the_float_notice_already_standing() {
+    fn a_channel_notice_withdraws_the_float_notice_already_standing() {
         let mut model = captured_session();
-        open_cmdline(&mut model);
-        let _ = unhidable(&mut model, &cmp_cmdline_menu(""));
+        let _ = observe_float(&mut model, &toast(""));
         assert_eq!(notices(&model).len(), 1);
-        probe(&mut model, &["noice"]);
+        let _ = update(
+            &mut model,
+            Msg::ChannelHeld {
+                channel: "vim.notify".to_string(),
+                holder: "function <a.renderer>".to_string(),
+            },
+        );
         let standing = notices(&model);
         assert_eq!(standing.len(), 1, "{standing:?}");
         assert!(
-            standing[0].starts_with("view: noice.nvim is using "),
+            standing[0].starts_with("view: vim.notify was drawing "),
             "{standing:?}"
         );
     }
 
     /// The narrowing half of the same seam: an unnamed float claiming a
-    /// surface no claimant covers keeps its line, re-worded to what is left.
+    /// surface the held channel does not draw keeps its line, re-worded to
+    /// what is left.
     #[test]
     fn a_float_claim_the_notice_does_not_cover_survives_it() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = unhidable(&mut model, &cmp_cmdline_menu(""));
+        let _ = observe_float(&mut model, &cmdline_float(""));
         let _ = update(&mut model, Msg::FloatObserved(toast("")));
         assert_eq!(notices(&model).len(), 1);
-        // a claimant that takes only the command line back
-        let claimant = crate::native::surfaces::SurfaceClaimant {
-            surfaces: &[Surface::Cmdline],
-            ..*crate::native::surfaces::SURFACE_CLAIMANTS
-                .first()
-                .expect("the shipped table has a row")
-        };
-        let _ = absorb_float_notices(&mut model, &claimant, &[Surface::Cmdline]);
+        let _ = update(
+            &mut model,
+            Msg::ChannelHeld {
+                channel: "vim.notify".to_string(),
+                holder: "function <a.renderer>".to_string(),
+            },
+        );
         let standing = notices(&model);
-        assert_eq!(standing.len(), 1, "{standing:?}");
+        assert_eq!(standing.len(), 2, "{standing:?}");
         assert!(
-            standing[0].starts_with("view: a plugin is drawing over the message area,"),
+            standing
+                .iter()
+                .any(|line| line.starts_with("view: a plugin is drawing over the command line,")),
             "{standing:?}"
         );
     }
@@ -2277,7 +1314,7 @@ mod tests {
     #[test]
     fn a_claimants_own_startup_complaint_goes_to_the_history_and_the_window_goes() {
         let mut model = captured_session();
-        probe(&mut model, &["noice"]);
+        let _ = notifier_takes_the_messages(&mut model);
         expire_hold(&mut model);
         let claimant = notices(&model);
         assert_eq!(claimant.len(), 1, "{claimant:?}");
@@ -2298,13 +1335,11 @@ mod tests {
             &mut model,
             Msg::FloatRows {
                 win: float.win,
-                hidden: false,
                 lines: vec![
                     String::new(),
                     String::new(),
                     "`vim.notify` has been overwritten by another plugin?".to_string(),
                 ],
-                selected: None,
             },
         );
         assert!(
@@ -2363,7 +1398,7 @@ mod tests {
     #[test]
     fn naming_a_claimant_arms_one_float_scan() {
         let mut model = captured_session();
-        let effects = update(&mut model, Msg::ClaimantsProbed(vec!["noice".to_string()]));
+        let effects = update(&mut model, Msg::NotifySinkRead { foreign: true });
         assert_eq!(
             effects
                 .iter()
@@ -2374,7 +1409,7 @@ mod tests {
         );
 
         let mut quiet = captured_session();
-        let none = update(&mut quiet, Msg::ClaimantsProbed(Vec::new()));
+        let none = update(&mut quiet, Msg::NotifySinkRead { foreign: false });
         assert!(
             !none
                 .iter()
@@ -2392,7 +1427,7 @@ mod tests {
     #[test]
     fn a_replacement_engine_inherits_no_window_handle_and_no_keypress() {
         let mut model = captured_session();
-        probe(&mut model, &["noice"]);
+        sink_read(&mut model, true);
         expire_hold(&mut model);
         let float = toast("markdown");
         let _ = update(&mut model, Msg::FloatObserved(float.clone()));
@@ -2428,16 +1463,10 @@ mod tests {
     #[test]
     fn a_dead_engines_grace_expiry_does_not_close_the_replacements() {
         let mut model = captured_session();
-        let dead = armed_grace(&update(
-            &mut model,
-            Msg::ClaimantsProbed(vec!["noice".to_string()]),
-        ));
+        let dead = armed_grace(&notifier_takes_the_messages(&mut model));
 
         model.forget_engine_conflicts();
-        let live = armed_grace(&update(
-            &mut model,
-            Msg::ClaimantsProbed(vec!["noice".to_string()]),
-        ));
+        let live = armed_grace(&notifier_takes_the_messages(&mut model));
         assert_ne!(
             dead, live,
             "two engines, one generation: nothing tells the expiries apart"
@@ -2462,7 +1491,7 @@ mod tests {
     #[test]
     fn a_key_inside_the_read_round_trip_does_not_drop_a_complaint_the_sighting_qualified() {
         let mut model = captured_session();
-        probe(&mut model, &["noice"]);
+        sink_read(&mut model, true);
         assert!(model.surface_conflicts.startup_window_open());
         let float = toast("markdown");
         let read = update(&mut model, Msg::FloatObserved(float.clone()));
@@ -2486,9 +1515,7 @@ mod tests {
             &mut model,
             Msg::FloatRows {
                 win: float.win,
-                hidden: false,
                 lines: vec![prose.to_string()],
-                selected: None,
             },
         );
         assert!(
@@ -2519,7 +1546,7 @@ mod tests {
     #[test]
     fn the_first_reply_that_names_a_claimant_arms_one_grace() {
         let mut model = captured_session();
-        let first = update(&mut model, Msg::ClaimantsProbed(vec!["noice".to_string()]));
+        let first = update(&mut model, Msg::NotifySinkRead { foreign: true });
         assert_eq!(
             first
                 .iter()
@@ -2530,10 +1557,7 @@ mod tests {
         );
         assert!(model.surface_conflicts.within_complaint_grace());
 
-        let again = update(
-            &mut model,
-            Msg::ClaimantsProbed(vec!["noice".to_string(), "notify".to_string()]),
-        );
+        let again = update(&mut model, Msg::NotifySinkRead { foreign: true });
         assert!(
             !again
                 .iter()
@@ -2552,7 +1576,7 @@ mod tests {
     #[test]
     fn a_complaint_raised_after_the_first_key_is_taken_inside_the_grace() {
         let mut model = captured_session();
-        probe(&mut model, &["noice"]);
+        sink_read(&mut model, true);
         expire_hold(&mut model);
         key(&mut model);
         assert!(!model.surface_conflicts.startup_window_open());
@@ -2570,9 +1594,7 @@ mod tests {
             &mut model,
             Msg::FloatRows {
                 win: float.win,
-                hidden: false,
                 lines: vec!["`vim.notify` has been overwritten by another plugin?".to_string()],
-                selected: None,
             },
         );
         assert!(
@@ -2601,7 +1623,7 @@ mod tests {
     #[test]
     fn a_window_the_user_opened_inside_the_grace_stays_open() {
         let mut model = captured_session();
-        probe(&mut model, &["noice"]);
+        sink_read(&mut model, true);
         expire_hold(&mut model);
         key(&mut model);
 
@@ -2611,9 +1633,7 @@ mod tests {
             &mut model,
             Msg::FloatRows {
                 win: float.win,
-                hidden: false,
                 lines: vec!["2 messages  Ctrl-D to dismiss".to_string()],
-                selected: None,
             },
         );
         assert!(
@@ -2642,7 +1662,7 @@ mod tests {
     #[test]
     fn a_log_the_user_opened_inside_the_grace_that_quotes_a_surface_name_is_taken() {
         let mut model = captured_session();
-        probe(&mut model, &["noice"]);
+        sink_read(&mut model, true);
         expire_hold(&mut model);
         key(&mut model);
         assert!(!model.surface_conflicts.startup_window_open());
@@ -2655,9 +1675,7 @@ mod tests {
             &mut model,
             Msg::FloatRows {
                 win: float.win,
-                hidden: false,
                 lines: vec![log.to_string()],
-                selected: None,
             },
         );
         assert!(
@@ -2710,7 +1728,7 @@ mod tests {
     #[test]
     fn a_float_that_opens_after_the_grace_is_left_unread() {
         let mut model = captured_session();
-        probe(&mut model, &["noice"]);
+        sink_read(&mut model, true);
         key(&mut model);
         expire_grace(&mut model);
         assert!(
@@ -2720,29 +1738,10 @@ mod tests {
     }
 
     #[test]
-    fn a_claimant_this_session_did_not_load_says_nothing() {
-        let mut model = captured_session();
-        probe(&mut model, &[]);
-        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
-        probe(&mut model, &["telescope"]);
-        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
-    }
-
-    /// A claimant is only a conflict for the surfaces this session still
-    /// draws, so a config that already handed them back is told nothing.
-    #[test]
-    fn a_claimant_whose_surfaces_view_yielded_says_nothing() {
-        let mut model = captured_session();
-        model.attach_surfaces(vec![Ext::LineGrid, Ext::Tabline]);
-        probe(&mut model, &["noice"]);
-        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
-    }
-
-    #[test]
     fn a_claimant_notice_on_an_unread_config_names_the_file_not_the_line() {
         let mut model = captured_session();
         model.note_config_unread();
-        probe(&mut model, &["noice"]);
+        let _ = notifier_takes_the_messages(&mut model);
         let standing = notices(&model);
         assert_eq!(standing.len(), 1);
         assert!(!standing[0].contains("Set [native]"), "{standing:?}");
@@ -2783,19 +1782,9 @@ mod tests {
         ] {
             let sighting = FloatSighting {
                 filetype: filetype.to_string(),
-                ..cmp_cmdline_menu(filetype)
+                ..cmdline_float(filetype)
             };
             families.push(super::family(sighting.identity()));
-        }
-        // the class is a compile-time constant, never a session's own
-        // string, so the shipped table plus the names a future row would
-        // plausibly carry is the whole population
-        for class in crate::native::surfaces::SURFACE_CLAIMANTS
-            .iter()
-            .map(|claimant| claimant.class)
-            .chain(["noice", "notify", "telescope.nvim", "view"])
-        {
-            families.push(super::claimant_family(class));
         }
         // every channel the shipped table names, plus the names a future
         // row would plausibly carry. An option name is a compile-time
@@ -3024,7 +2013,7 @@ mod tests {
     #[test]
     fn a_claimants_float_is_withheld_before_the_first_frame_that_would_paint_it() {
         let mut model = captured_session();
-        probe(&mut model, &["noice"]);
+        sink_read(&mut model, true);
         let read = place_float(&mut model, 7, 1008, 50);
         assert!(
             read.iter().any(|effect| matches!(
@@ -3064,7 +2053,7 @@ mod tests {
     #[test]
     fn the_classification_gives_a_window_the_user_opened_back_to_the_screen() {
         let mut model = captured_session();
-        probe(&mut model, &["noice"]);
+        sink_read(&mut model, true);
         expire_hold(&mut model);
         key(&mut model);
         let _ = place_float(&mut model, 7, 1008, 50);
@@ -3074,9 +2063,7 @@ mod tests {
             &mut model,
             Msg::FloatRows {
                 win: 1008,
-                hidden: false,
                 lines: vec!["2 messages  Ctrl-D to dismiss".to_string()],
-                selected: None,
             },
         );
         assert!(
@@ -3096,7 +2083,7 @@ mod tests {
     #[test]
     fn the_withheld_flag_survives_a_slide_animations_position_steps() {
         let mut model = captured_session();
-        probe(&mut model, &["noice"]);
+        sink_read(&mut model, true);
         let _ = place_float(&mut model, 7, 1008, 50);
         for row in 1..4 {
             let step = step_float(&mut model, 7, 1008, row, 50);
@@ -3133,10 +2120,7 @@ mod tests {
     fn the_probe_reply_takes_a_held_float_or_gives_it_back() {
         let mut claimed = captured_session();
         let _ = place_float(&mut claimed, 7, 1008, 50);
-        let answered = update(
-            &mut claimed,
-            Msg::ClaimantsProbed(vec!["noice".to_string()]),
-        );
+        let answered = update(&mut claimed, Msg::NotifySinkRead { foreign: true });
         assert!(
             answered.iter().any(|effect| matches!(
                 effect,
@@ -3148,7 +2132,7 @@ mod tests {
 
         let mut benign = captured_session();
         let _ = place_float(&mut benign, 7, 1008, 50);
-        let answered = update(&mut benign, Msg::ClaimantsProbed(Vec::new()));
+        let answered = update(&mut benign, Msg::NotifySinkRead { foreign: false });
         assert!(
             !answered
                 .iter()
@@ -3167,7 +2151,7 @@ mod tests {
     #[test]
     fn a_restart_restores_the_hold_until_the_new_probe_answers() {
         let mut model = captured_session();
-        probe(&mut model, &[]);
+        sink_read(&mut model, false);
         let _ = place_float(&mut model, 7, 1008, 50);
         assert!(
             painted(&model, 7),
@@ -3180,7 +2164,7 @@ mod tests {
             !painted(&model, 9),
             "and the replacement's own probe is unanswered again"
         );
-        probe(&mut model, &[]);
+        sink_read(&mut model, false);
         assert!(painted(&model, 9), "until it answers");
     }
 
@@ -3191,15 +2175,13 @@ mod tests {
     #[test]
     fn a_taken_floats_later_position_step_asks_for_nothing_and_paints_nothing() {
         let mut model = captured_session();
-        probe(&mut model, &["noice"]);
+        sink_read(&mut model, true);
         let _ = place_float(&mut model, 7, 1008, 50);
         let closed = update(
             &mut model,
             Msg::FloatRows {
                 win: 1008,
-                hidden: false,
                 lines: vec!["`vim.notify` has been overwritten by another plugin?".to_string()],
-                selected: None,
             },
         );
         assert!(
@@ -3226,19 +2208,17 @@ mod tests {
     #[test]
     fn a_withheld_notification_is_toasted_while_a_complaint_only_files() {
         let mut model = captured_session();
-        probe(&mut model, &["noice"]);
+        sink_read(&mut model, true);
         let _ = place_float(&mut model, 7, 1008, 50);
         let _ = update(
             &mut model,
             Msg::FloatRows {
                 win: 1008,
-                hidden: false,
                 lines: vec![
                     String::new(),
                     "# Plugin Updates".to_string(),
                     "- **nvim-lspconfig**".to_string(),
                 ],
-                selected: None,
             },
         );
         let stacked: Vec<String> = model
@@ -3270,9 +2250,7 @@ mod tests {
             &mut model,
             Msg::FloatRows {
                 win: 1009,
-                hidden: false,
                 lines: vec!["Noice can't work when `ext_messages` is enabled".to_string()],
-                selected: None,
             },
         );
         assert!(
@@ -3317,92 +2295,6 @@ mod tests {
             .collect()
     }
 
-    /// The other half of the same wording: a claimant that never received
-    /// the ask.
-    ///
-    /// Both halves are pinned because the notice cannot read the outcome off
-    /// the probe -- a plugin that turned itself off is still loaded -- so
-    /// the clause is worded from the hand-back's own answer, and a clause
-    /// that stopped consulting it would still pass whichever of the two was
-    /// pinned alone.
-    #[test]
-    fn a_claimant_that_never_received_the_ask_is_told_apart_from_one_that_did() {
-        let mut model = captured_session();
-        handed_back(&mut model, &[]);
-        probe(&mut model, &["noice"]);
-        let standing = notices(&model);
-        assert_eq!(standing.len(), 1, "{standing:?}");
-        assert!(
-            standing[0].contains(
-                "view asked noice.nvim to turn itself off at startup, and the \
-                 ask never reached it."
-            ),
-            "{:?}",
-            standing[0]
-        );
-    }
-
-    /// A claimant loading after the takeover: the engine's late pass asks
-    /// it, reports what took, and the standing notice stops telling the
-    /// user the plugin never heard from view.
-    ///
-    /// The line is re-worded rather than rebuilt, so the rest of it -- the
-    /// surfaces, the remedy, the history key -- has to survive the swap:
-    /// nothing in the model holds those, and a rebuild from what is left
-    /// would print a notice missing the only actionable line it carries.
-    #[test]
-    fn a_claimant_that_loads_late_re_words_the_notice_it_left_standing() {
-        let mut model = captured_session();
-        handed_back(&mut model, &[]);
-        probe(&mut model, &["noice"]);
-        assert!(
-            notices(&model)[0].contains("the ask never reached it."),
-            "{:?}",
-            notices(&model)
-        );
-
-        // a module no row names is not a claimant of view's: the takeover
-        // asks it nothing, and a report naming it settles nothing about
-        // the notice standing for the one it does name
-        let before = notices(&model);
-        handed_back(&mut model, &["nvim-notify"]);
-        assert_eq!(notices(&model), before);
-
-        handed_back(&mut model, &["noice"]);
-        let standing = notices(&model);
-        assert_eq!(standing.len(), 1, "{standing:?}");
-        assert!(
-            standing[0].contains(
-                "view asked noice.nvim to turn itself off at startup, and it \
-                 did."
-            ),
-            "{:?}",
-            standing[0]
-        );
-        assert!(
-            !standing[0].contains("never reached it"),
-            "both accounts of one ask stood in one notice: {:?}",
-            standing[0]
-        );
-        assert!(
-            standing[0].contains("Set [native] palette = false"),
-            "the remedy is the only actionable line, and a rebuild would \
-             have dropped it: {:?}",
-            standing[0]
-        );
-        assert!(
-            !model
-                .engine
-                .messages
-                .entries
-                .iter()
-                .any(crate::model::MessageEntry::is_persistent),
-            "an account of an ask that took has nothing left to stand for: \
-             {:?}",
-            standing
-        );
-    }
-
     /// The claimant notice's one way down, which is what the session that
     /// left one standing top-right for its whole length was missing.
     ///
@@ -3416,7 +2308,7 @@ mod tests {
     fn the_conflict_notice_comes_down_on_any_input_once_it_has_stood_its_window() {
         for notation in ["j", "<Esc>"] {
             let mut model = captured_session();
-            let effects = update(&mut model, Msg::ClaimantsProbed(vec!["noice".to_string()]));
+            let effects = notifier_takes_the_messages(&mut model);
             let standing = notices(&model);
             assert_eq!(standing.len(), 1, "{notation}: {standing:?}");
 
@@ -3468,8 +2360,13 @@ mod tests {
         );
 
         let mut model = captured_session();
-        handed_back(&mut model, &["noice"]);
-        probe(&mut model, &["noice"]);
+        let _ = update(
+            &mut model,
+            Msg::ChannelHeld {
+                channel: "vim.notify".to_string(),
+                holder: "function <a.renderer>".to_string(),
+            },
+        );
         let standing = notices(&model);
         assert_eq!(standing.len(), 1, "{standing:?}");
 
@@ -3493,26 +2390,15 @@ mod tests {
         let claimed = [Surface::Cmdline, Surface::Messages];
         for family in [
             super::ANONYMOUS_FAMILY.to_string(),
-            super::family(Some("cmp_menu")),
-            super::claimant_family("noice.nvim"),
+            super::family(Some("a.menu")),
+            super::channel_family("vim.notify"),
         ] {
             for read in [true, false] {
-                for parked in [true, false] {
-                    for disabled in [
-                        Some(super::Ask {
-                            class: "noice.nvim",
-                            taken: true,
-                        }),
-                        Some(super::Ask {
-                            class: "noice.nvim",
-                            taken: false,
-                        }),
-                        None,
-                    ] {
-                        let text = super::notice(&family, &claimed, read, parked, disabled);
-                        assert!(text.starts_with(&family), "{text:?} is not in {family:?}");
-                    }
-                }
+                let text = super::notice(&family, &claimed, read, None);
+                assert!(
+                    text.starts_with(family.as_str()),
+                    "{text:?} is not in {family:?}"
+                );
             }
         }
     }

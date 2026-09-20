@@ -712,16 +712,6 @@ impl PumpShared {
         self.route_queued(msg);
     }
 
-    /// Routes the `Msg::ClaimantsProbed` a failed arming degrades to, on
-    /// [`route_checktime`](Self::route_checktime)'s terms.
-    ///
-    /// Never dropped: it is the only answer that will ever come for a probe
-    /// whose chunk did not arm, and view holds a superseded claimant's
-    /// floats off the screen until the probe answers.
-    pub(crate) fn route_claimants(&self, msg: Msg) {
-        self.route_queued(msg);
-    }
-
     fn route_queued(&self, msg: Msg) {
         let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
         route.retry_deferred();
@@ -777,21 +767,6 @@ impl PumpShared {
     /// switch gives it back.
     pub(crate) fn route_claims(&self, msg: Msg) {
         self.route_held(msg, Held::Claims);
-    }
-
-    /// Routes a `Msg::ClaimantsHandedBack` without ever dropping it on a
-    /// full sink, on [`route_checktime`](Self::route_checktime)'s
-    /// never-drop, never-reorder terms.
-    ///
-    /// The queue rather than a slot of its own: a connection sends this
-    /// more than once -- the takeover's own reading, then one report per
-    /// claimant that loads later and turns itself off -- so a single slot
-    /// would let the second report write over the first while both were
-    /// waiting on a full sink. A dropped reading is silent and permanent:
-    /// nothing re-issues a hand-back, and the notice standing on screen
-    /// would go on saying the ask never reached a plugin that took it.
-    pub(crate) fn route_claimants_handed_back(&self, msg: Msg) {
-        self.route_queued(msg);
     }
 
     /// Routes a `Msg::StartupMessages` without ever dropping it on a full
@@ -1712,49 +1687,6 @@ mod tests {
             "the probe reply was dropped by the full sink and never retried, \
              so this generation stays unconfirmed and a real black background \
              paints as unset for the rest of the session; saw {seen:?}"
-        );
-    }
-
-    /// The late pass makes the hand-back a repeating report -- one per
-    /// claimant that loads after the takeover -- so the two a full sink
-    /// refuses have to queue behind each other rather than share one slot.
-    #[test]
-    fn two_hand_back_reports_refused_by_a_full_sink_both_arrive() {
-        let shared = PumpShared::new();
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(1);
-        let (_pump, _cutover) = shared.attach_sink(tx);
-        shared
-            .route_msg(Msg::Resized {
-                width: 9,
-                height: 9,
-            })
-            .expect("the channel has room for the fill");
-
-        for module in ["noice", "notify"] {
-            shared.route_claimants_handed_back(Msg::ClaimantsHandedBack {
-                modules: vec![module.to_string()],
-            });
-        }
-
-        assert!(matches!(rx.recv(), Ok(Msg::Resized { width: 9, .. })));
-
-        // one slot, so each routing attempt carries what the last drain
-        // made room for -- the reader's own cadence, where a redraw is the
-        // most frequent attempt of all
-        let mut reported = Vec::new();
-        for _ in 0..2 {
-            shared.fold_redraw(vec![line(0, 0, 1), UiEvent::Flush]);
-            while let Ok(msg) = rx.try_recv() {
-                if let Msg::ClaimantsHandedBack { modules } = msg {
-                    reported.extend(modules);
-                }
-            }
-        }
-        assert_eq!(
-            reported,
-            vec!["noice".to_string(), "notify".to_string()],
-            "a lost report leaves the notice it belongs to saying the ask \
-             never reached a plugin that took it"
         );
     }
 

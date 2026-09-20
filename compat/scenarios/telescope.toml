@@ -62,8 +62,8 @@ steps = [
   # Read before any key is sent, because <Esc> is the dismissal of a
   # sticky notice whatever mode nvim last reported and this scenario
   # spends several of them: this is the default launch's own reading.
-  { wait_for = "view: noice.nvim is using the command line and the message area", timeout_ms = 15000 },
-  { wait_for = "Set [native] palette = false and [native] notifications = false", timeout_ms = 5000 },
+  { wait_for = "view: vim.notify was drawing the message area, which view owns", timeout_ms = 15000 },
+  { wait_for = "Set [native] notifications = false in view.toml to give it back", timeout_ms = 5000 },
   { send = ":Telescope help_tags<CR>" },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 15000 },
   { send = "nvim_buf_atta" },

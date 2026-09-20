@@ -149,24 +149,23 @@ Three consequences, each acted on directly:
   hold was not widened to cover it: an error the user is meant to read is
   exactly what a notice about surfaces must not stand in for.
 
-## Finding: `package.loaded` is the only portable claimant reading
+## Finding: who stands at `vim.notify` is the reading, and it moves
 
 Probed live against the heavy fixture, which loads plugins through lazy.nvim:
 
 ```
 $ # after VimEnter, at the first SafeState
-package.loaded['noice'] ~= nil   -->  true
+vim.notify ~= nvim's own   -->  true
 ```
 
-No plugin-manager API is consulted. lazy.nvim, packer, vim-plug and a plain
-`runtimepath` drop all end in the same registry, and the registry answers what
-is *loaded*, distinct from what is installed; a plugin present on disk but
-never required has taken no surface.
+The question is asked of the function itself. A plugin that replaced
+`vim.notify` is drawing the message area, and one that assigned it nothing
+is drawing nothing.
 
-The chunk that asks it, verbatim `PROBE_CLAIMANTS_CHUNK`:
+The chunk that asks it, verbatim `NOTIFY_SINK_CHUNK`:
 
 ```lua
-local channel, modules = ...
+local channel = ...
 local function is_engine_notify(fn)
   if type(fn) ~= 'function' or type(vim.notify_once) ~= 'function' then
     return false
@@ -179,35 +178,27 @@ local function is_engine_notify(fn)
   return ok and fine and sink ~= nil and own ~= nil
     and sink.source == own.source
 end
+local function notify_source(fn)
+  local ok, info = pcall(debug.getinfo, fn, 'S')
+  if ok and info ~= nil and info.source ~= nil then
+    return info.source
+  end
+  return tostring(fn)
+end
 local group = vim.api.nvim_create_augroup(
-  'view_bridge_claimants', { clear = true })
-local reported, first = {}, true
+  'view_bridge_notify_sink', { clear = true })
 local sink = nil
 local deadline = vim.uv.now() + 60000
 vim.api.nvim_create_autocmd('SafeState', {
   group = group,
   callback = function()
-    local loaded, fresh = {}, false
-    for _, name in ipairs(modules) do
-      if package.loaded[name] ~= nil then
-        loaded[#loaded + 1] = name
-        if not reported[name] then
-          reported[name] = true
-          fresh = true
-        end
-      end
-    end
-    if first or fresh then
-      first = false
-      pcall(vim.rpcnotify, channel, 'view_bridge', 'claimants', loaded)
-    end
     local foreign = vim.notify ~= nil
       and not is_engine_notify(vim.notify)
     if sink ~= foreign then
       sink = foreign
       pcall(vim.rpcnotify, channel, 'view_bridge', 'notify_sink', foreign)
     end
-    if (#loaded == #modules and sink) or vim.uv.now() > deadline then
+    if sink or vim.uv.now() > deadline then
       pcall(vim.api.nvim_del_augroup_by_id, group)
     end
   end,
@@ -227,11 +218,11 @@ manager that finishes its own deferred loading on a timer after `VimEnter`
 distinct from firing `once`, because a cold first launch clones the whole stack
 over the network and idles many times before the plugin it is about to load
 exists; the notify goes out only on the first answer or a changed one, and the
-group deletes itself once every module is found, a notifier of the user's has
-been seen at `vim.notify`, or the session is a minute old. The live proof that
-the chunk answers, and answers differently for a session that loaded the module
-and one that did not, is `crates/view/tests/bridge_live.rs`'s
-`the_claimant_probe_answers_what_the_session_actually_loaded`.
+group deletes itself once a notifier of the user's has been seen at
+`vim.notify` or the session is a minute old. The live proof that the chunk
+answers, and answers differently for a session that installed a notifier and
+one that did not, is `crates/view-engine/tests/notify_sink_takeover.rs`'s
+`a_notifier_installed_at_the_attach_is_read_after_the_takeover`.
 
 ## Conclusion for the implementation
 

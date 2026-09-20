@@ -341,10 +341,58 @@ pub fn is_claimed(channel: &str) -> bool {
     claimants_of(channel).next().is_some()
 }
 
+/// Whether more than one surface claims `channel`, which makes it the
+/// session's to hold rather than any one feature's: the surfaces that
+/// claim it can be handed back one at a time, and the channel is still
+/// needed while either of them is view's.
+///
+/// One spelling for one question. The takeover derivation leaves such a
+/// channel out of a feature's plan and the session holds it against its
+/// whole attach set, so two readings of "shared" would either hold it
+/// twice or not at all.
+#[must_use]
+pub fn shared_by_surfaces(channel: &str) -> bool {
+    claimants_of(channel).count() > 1
+}
+
+/// Every channel more than one surface claims, in table order and with no
+/// repeats.
+///
+/// The session holds these against its whole attach set rather than any
+/// feature's switch, so the crate that performs them and the crate that
+/// enumerates the guards they install both read this one answer.
+#[must_use]
+pub fn session_held() -> Vec<Channel> {
+    CHANNELS
+        .iter()
+        .flat_map(|entry| entry.channels.iter().copied())
+        .filter(|channel| shared_by_surfaces(channel.name()))
+        .fold(Vec::new(), |mut out, channel| {
+            if !out.contains(&channel) {
+                out.push(channel);
+            }
+            out
+        })
+}
+
 /// Whether view leaves `channel` to the engine on purpose.
 #[must_use]
 pub fn is_yielded(channel: &str) -> bool {
-    NOT_CHROME.iter().any(|row| row.channel == channel)
+    yielded_reason(channel).is_some()
+}
+
+/// What a channel view leaves alone gives the user instead, or `None` for
+/// a channel [`NOT_CHROME`] does not name.
+///
+/// The sentence the completeness walk prints beside every decision already
+/// made, so a reader told that some new channel is undecided can see what
+/// deciding one looks like.
+#[must_use]
+pub fn yielded_reason(channel: &str) -> Option<&'static str> {
+    NOT_CHROME
+        .iter()
+        .find(|row| row.channel == channel)
+        .map(|row| row.why)
 }
 
 #[cfg(test)]

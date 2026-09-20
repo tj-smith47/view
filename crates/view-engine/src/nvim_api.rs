@@ -85,13 +85,13 @@ vim.fn.feedkeys(vim.api.nvim_replace_termcodes(..., true, true, true), 't')";
 /// write the moment it happens, before anything redraws -- but nvim does
 /// not nest autocommands, so a write made *inside* another autocommand's
 /// callback fires no `OptionSet` at all, and that is exactly how a
-/// superseded plugin re-asserts its option (lualine's `ColorScheme`
-/// autocmd, defined without `nested`, re-runs its `setup()`). `SafeState`
+/// superseded renderer re-asserts its option (a `ColorScheme` autocmd
+/// defined without `nested`, re-running its own `setup()`). `SafeState`
 /// is the backstop for that class: it fires once nvim is back in its main
 /// loop with nothing pending, which nvim reaches before it redraws, so the
 /// value is restored ahead of the first frame that could have shown the
 /// plugin's. Both halves were measured against the live heavy fixture --
-/// an `OptionSet`-only guard left `laststatus` at lualine's `2` after
+/// an `OptionSet`-only guard left `laststatus` at the config's `2` after
 /// `:colorscheme`, and with `SafeState` added every frame a redraw witness
 /// recorded was painted with the held `0`.
 ///
@@ -155,8 +155,11 @@ vim.api.nvim_create_autocmd('SafeState', {
 /// there. Keyed on both because the re-assert guard runs at every idle
 /// transition: a config that writes its row back a hundred times sends one
 /// notification, and a second window holding something else still sends
-/// its own. `pcall` around the whole per-window body: a window that
-/// closes between the list and the write, and one whose option nvim
+/// its own. What has been reported is held per window and dropped when
+/// that window is gone, so a session that opens and closes windows for an
+/// hour carries one bucket per window on screen rather than one per window
+/// it has ever had. `pcall` around the whole per-window body: a window
+/// that closes between the list and the write, and one whose option nvim
 /// refuses, are the same outcome for view -- the remaining windows are
 /// still held.
 ///
@@ -171,11 +174,16 @@ local function report(win, held)
   if held == nil or held == '' or held == value then
     return
   end
-  local key = tostring(win) .. '\0' .. tostring(held)
-  if seen[key] then
+  local key = tostring(win)
+  local bucket = seen[key]
+  if bucket == nil then
+    bucket = {}
+    seen[key] = bucket
+  end
+  if bucket[tostring(held)] then
     return
   end
-  seen[key] = true
+  bucket[tostring(held)] = true
   pcall(vim.rpcnotify, channel, 'view_bridge', 'channel_held',
     name, tostring(held))
 end
@@ -194,8 +202,15 @@ local function hold()
     pcall(vim.api.nvim_set_option_value, name, value, { scope = 'global' })
     report('global', held)
   end
+  local live = { global = true }
   for _, win in ipairs(vim.api.nvim_list_wins()) do
+    live[tostring(win)] = true
     pcall(apply, win)
+  end
+  for key in pairs(seen) do
+    if not live[key] then
+      seen[key] = nil
+    end
   end
 end
 hold()
@@ -214,6 +229,48 @@ vim.api.nvim_create_autocmd('SafeState', {
   group = group,
   callback = hold,
 })";
+
+/// The predicate every reading of `vim.notify` asks, and the one way a
+/// function standing there is named, as one literal rather than a copy per
+/// chunk: three chunks decide whether the function is the engine's own, and
+/// three copies of a `debug.getinfo` guard would let them answer
+/// differently for the same session. A macro rather than a `const` because
+/// `concat!` composes literals, not constants.
+///
+/// `notify_source` answers with the chunk name `debug.getinfo` gives -- a
+/// path for a notifier loaded from a file -- and falls back to the value
+/// itself, since a notice naming an address says more than one naming
+/// nothing.
+///
+/// The type check and the `pcall` both have work to do: a notifier's
+/// module can be a table with a `__call` metamethod, and LuaJIT's
+/// `getinfo` raises on one. A value this cannot place is not the engine's
+/// default, which is the answer every caller needs from it.
+macro_rules! notify_predicate_lua {
+    () => {
+        "\
+local function is_engine_notify(fn)
+  if type(fn) ~= 'function' or type(vim.notify_once) ~= 'function' then
+    return false
+  end
+  if rawequal(fn, rawget(_G, 'view_notify_hold')) then
+    return true
+  end
+  local ok, sink = pcall(debug.getinfo, fn, 'S')
+  local fine, own = pcall(debug.getinfo, vim.notify_once, 'S')
+  return ok and fine and sink ~= nil and own ~= nil
+    and sink.source == own.source
+end
+local function notify_source(fn)
+  local ok, info = pcall(debug.getinfo, fn, 'S')
+  if ok and info ~= nil and info.source ~= nil then
+    return info.source
+  end
+  return tostring(fn)
+end
+"
+    };
+}
 
 /// The lua chunk [`EngineHandle::hold_notify`] runs inside nvim, taking no
 /// arguments at all. Constant by construction for the same reason as
@@ -241,36 +298,58 @@ vim.api.nvim_create_autocmd('SafeState', {
 /// default raises, rather than silently stringified into something the
 /// caller never wrote.
 ///
+/// Loaded under a name of its own rather than defined inline: a plugin
+/// that finds a function it did not install at `vim.notify` reports where
+/// that function came from, and an anonymous chunk reports as its entire
+/// source text, drawn over whatever the user was reading.
+///
 /// Reproduced rather than captured at runtime, which would be the shorter
-/// chunk: the plan is applied at `VimEnter`, and `vim.notify =
-/// require('notify')` in an `init.lua` is nvim-notify's own documented
-/// setup, so the function standing at that moment is very often the
-/// plugin's. Saving it would hold the plugin's notify -- the exact inverse
-/// of the takeover.
+/// chunk: the plan is applied at `VimEnter`, and assigning `vim.notify` in
+/// an `init.lua` is a notifier's own documented setup, so the function
+/// standing at that moment is very often that notifier's. Saving it would
+/// hold the notifier's own -- the exact inverse of the takeover.
 ///
 /// One guard, on `SafeState` alone. There is no `OptionSet` equivalent for
 /// a Lua assignment: nothing fires when a plugin writes `vim.notify`, so
 /// the idle backstop is the whole mechanism rather than the second half of
 /// one. That is enough for the write this exists to undo, because it fires
-/// before nvim redraws -- noice patches `vim.notify` from its deferred
-/// load, well after `VimEnter`, and nvim-notify's setup does it from
-/// `init.lua`; both are undone at the next return to the main loop. The
+/// before nvim redraws -- a deferred load can patch `vim.notify` well
+/// after `VimEnter`, and a notifier's setup does it from `init.lua`; both
+/// are undone at the next return to the main loop. The
 /// guard compares before it writes, so an idle transition that changed
 /// nothing costs one table lookup, which matters because `SafeState` fires
 /// every time nvim waits for input.
-const HOLD_NOTIFY_CHUNK: &str = "\
-local function notify(msg, level, opts)
-  local chunks =
-    { { msg, level == vim.log.levels.WARN and 'WarningMsg' or nil } }
-  vim.api.nvim_echo(chunks, true, {
-    err = level == vim.log.levels.ERROR,
-    _truncate = opts and opts._truncate,
-  })
-end
+const HOLD_NOTIFY_CHUNK: &str = concat!(
+    "local channel = ...\n",
+    notify_predicate_lua!(),
+    "\
+local notify = assert(load([[
+local msg, level, opts = ...
+local chunks =
+  { { msg, level == vim.log.levels.WARN and 'WarningMsg' or nil } }
+vim.api.nvim_echo(chunks, true, {
+  err = level == vim.log.levels.ERROR,
+  _truncate = opts and opts._truncate,
+})
+]], '@view (the message area)'))
 _G.view_notify_hold = notify
+local seen = {}
+local function report(held)
+  local source = notify_source(held)
+  if seen[source] then
+    return
+  end
+  seen[source] = true
+  pcall(vim.rpcnotify, channel, 'view_bridge', 'channel_held',
+    'vim.notify', source)
+end
 local function hold()
   if vim.notify ~= notify then
+    local held = vim.notify
     vim.notify = notify
+    if not is_engine_notify(held) then
+      report(held)
+    end
   end
 end
 hold()
@@ -279,207 +358,7 @@ local group = vim.api.nvim_create_augroup(
 vim.api.nvim_create_autocmd('SafeState', {
   group = group,
   callback = hold,
-})";
-
-/// The predicate every reading of `vim.notify` asks, as one literal rather
-/// than a copy per chunk: three chunks decide whether the function standing
-/// there is the engine's own, and three copies of a `debug.getinfo` guard
-/// would let them answer differently for the same session. A macro rather
-/// than a `const` because `concat!` composes literals, not constants.
-///
-/// The type check and the `pcall` are both load-bearing: nvim-notify's
-/// module is a table with a `__call` metamethod, and LuaJIT's `getinfo`
-/// raises on one. A value this cannot place is not the engine's default,
-/// which is the answer every caller needs from it.
-macro_rules! notify_predicate_lua {
-    () => {
-        "\
-local function is_engine_notify(fn)
-  if type(fn) ~= 'function' or type(vim.notify_once) ~= 'function' then
-    return false
-  end
-  if rawequal(fn, rawget(_G, 'view_notify_hold')) then
-    return true
-  end
-  local ok, sink = pcall(debug.getinfo, fn, 'S')
-  local fine, own = pcall(debug.getinfo, vim.notify_once, 'S')
-  return ok and fine and sink ~= nil and own ~= nil
-    and sink.source == own.source
-end
-"
-    };
-}
-
-/// The lua chunk [`EngineHandle::disable_claimants`] runs inside nvim,
-/// taking view's channel and the module names to turn off as its varargs.
-/// Constant by construction for the same reason as [`FEED_KEYS_CHUNK`]: the
-/// names travel as an argument and are only ever used as table keys and as
-/// `require` arguments.
-///
-/// `package.loaded` rather than `require` alone, on the same terms as
-/// [`PROBE_CLAIMANTS_CHUNK`]: a plugin present on disk but never loaded has
-/// claimed nothing, and requiring it here to ask would load it in order to
-/// turn it off.
-///
-/// `pcall` around the whole call rather than only around `require`: a
-/// module with no `disable` at all, and one whose `disable` raises on a
-/// half-configured plugin, are the same outcome for view -- the surface
-/// stays contested and the notice that names the conflict is still raised.
-/// Neither may take down the takeover the rest of this sequence performs.
-///
-/// # The sink a hand-back lands in
-///
-/// A claimant's `disable` restores the `vim.notify` it saved when it took
-/// the function, and what it saved is nvim's own echo whenever the user's
-/// config never assigned one itself -- the ordinary lazy.nvim setup, where
-/// nvim-notify is loaded but only ever reached through the claimant. Left
-/// there, a session that handed the messages back
-/// (`[native] notifications = false`) turns every later `vim.notify` into
-/// an echo, and lazy.nvim's own multi-line checker line into a blocking
-/// "Press ENTER" at startup -- worse than either renderer. So a hand-back
-/// that actually turned something off ends in the sink the config would
-/// have used without the claimant: nvim-notify where it is loaded,
-/// otherwise nvim's default, which is what it already is.
-///
-/// Unconditional rather than gated on whether view is about to install its
-/// own hold: [`HOLD_NOTIFY_CHUNK`] is issued behind this one by every
-/// session that owns the messages and overwrites this assignment in the
-/// same takeover, so the two never disagree and neither has to know about
-/// the other.
-///
-/// The re-point repairs one thing -- a restore that landed on nvim's own
-/// echo -- so it fires only when that is what the restore left. A claimant
-/// whose `disable` puts back a function the user's own config wrote is
-/// already at the sink that config chose, and taking that function away
-/// for nvim-notify would be view overriding the config it just handed the
-/// surface back to. The engine's default is recognised by the chunk it is
-/// defined in: `vim.notify` and `vim.notify_once` are declared side by side
-/// in the engine's own runtime (`vim/_core/editor` on the pinned engine),
-/// and a function assigned by a config or a plugin reports that file
-/// instead.
-///
-/// The reading itself is [`notify_predicate_lua`]'s, shared with the
-/// takeover's own and with the probe's later ones, so a session cannot be
-/// told two different things about the function standing at `vim.notify`.
-///
-/// It answers with the modules whose own `disable` ran, which is a
-/// different question from the one the later probe answers and the only
-/// one that can word the notice's account of the ask. A module absent from
-/// that list raised inside its own `disable`, or had not loaded yet, where
-/// the probe reading alone could only say the module is loaded now, which
-/// a plugin that turned itself off perfectly well still is.
-///
-/// # The pass that runs after this one
-///
-/// The first pass reaches only what `package.loaded` already holds, which
-/// is every module an init-time loader brought in: the takeover runs
-/// inside nvim's own `VimEnter`, after the config has been sourced, so a
-/// plugin loaded by anything at startup is on `package.loaded` by the time
-/// the ask goes out. Being loaded is not being configured, though, and the
-/// last paragraph here is about the gap between the two. What the first
-/// pass cannot reach at all is a plugin loaded after it -- noice's own
-/// documented spec is
-/// `event = "VeryLazy"`, so the ordinary lazy.nvim session loads the
-/// claimant later and the user reads a notice saying the ask never reached
-/// it for the whole session.
-///
-/// So the chunk leaves two autocommands behind. `User LazyLoad`, which
-/// lazy.nvim fires once per plugin it loads, carrying the plugin's name in
-/// `data`, and `SafeState`, which nvim fires each time it settles back to
-/// waiting for a key. Either runs the same pass again and reports what it
-/// turned off on the `view_bridge` `handed_back` event, where
-/// `Msg::ClaimantsHandedBack` re-words the standing notice.
-///
-/// A module is asked once and never again, whichever pass reached it, so a
-/// plugin that loads late is disabled exactly as the eager one is; the
-/// group deletes itself once every module has been asked -- so a module
-/// whose ask never succeeds keeps the `LazyLoad` listener alive -- because
-/// an autocommand still walking a settled list on every lazy load is work
-/// nobody reads. The idle listener retires itself a minute in instead: it
-/// fires on every key that leaves nvim waiting, and what it re-asks is
-/// answered in the first moments of a session or never.
-///
-/// What a session pays for that minute is on the order of a microsecond
-/// per settled key, and nearly all of it is nvim's own dispatch of a Lua
-/// callback rather than the walk inside it: a session whose claimant never
-/// loads re-asks a list of two names, and the first test on each is a
-/// `package.loaded` lookup that answers nil. Against a frame that is four
-/// orders of magnitude longer, the listener is not a cost a typist can
-/// reach -- which is why it is allowed to run at all, and why it retires
-/// on a clock rather than on a count of keys.
-///
-/// An ask that raised is not an ask: a module a startup loader required
-/// before its own `setup` ran is on `package.loaded` with its config still
-/// nil, and `disable()` raises from inside it (noice's `init.lua` indexing
-/// `Config.options.notify`). The idle pass is what asks such a module
-/// again, and a `LazyLoad` cannot. lazy.nvim fires that event when it
-/// loads the plugin, which for an eagerly configured claimant is before
-/// `VimEnter`, while the claimant's own `setup` defers the rest of its
-/// configuration to a `VimEnter` callback of its own -- noice schedules
-/// its `load` there whenever `v:vim_did_enter` is still 0. The takeover
-/// reaches that claimant from inside `VimEnter` with the channel drained
-/// on the spot, which is between the plugin's `require` and its
-/// configuration; the ask used to sit on nvim's queue until the loop's
-/// first turn after startup and landed after the claimant had configured
-/// itself.
-const DISABLE_CLAIMANTS_CHUNK: &str = concat!(
-    "local channel, modules = ...\n",
-    notify_predicate_lua!(),
-    "\
-local group = vim.api.nvim_create_augroup(
-  'view_claimant_hand_back', { clear = true })
-local asked, pending = {}, #modules
-local function hand_back()
-  local handed_back = {}
-  for _, name in ipairs(modules) do
-    if not asked[name] and package.loaded[name] ~= nil then
-      if pcall(function()
-        require(name).disable()
-      end) then
-        asked[name] = true
-        pending = pending - 1
-        handed_back[#handed_back + 1] = name
-      end
-    end
-  end
-  if #handed_back > 0
-    and package.loaded.notify ~= nil
-    and is_engine_notify(vim.notify)
-  then
-    vim.notify = package.loaded.notify
-  end
-  return handed_back
-end
-local function late_pass()
-  local handed_back = hand_back()
-  if #handed_back > 0 then
-    pcall(vim.rpcnotify, channel, 'view_bridge', 'handed_back',
-      handed_back)
-  end
-  if pending == 0 then
-    pcall(vim.api.nvim_del_augroup_by_id, group)
-  end
-end
-vim.api.nvim_create_autocmd('User', {
-  group = group,
-  pattern = 'LazyLoad',
-  callback = late_pass,
-})
--- the loop's cached clock, which only advances when the loop turns: safe
--- to bound this pass with because a SafeState callback is itself a loop
--- turn, so a session that has stopped turning cannot age out its own retry
-local idle_deadline = vim.uv.now() + 60000
-local idle
-idle = vim.api.nvim_create_autocmd('SafeState', {
-  group = group,
-  callback = function()
-    late_pass()
-    if pending > 0 and vim.uv.now() > idle_deadline then
-      pcall(vim.api.nvim_del_autocmd, idle)
-    end
-  end,
-})
-return hand_back()"
+})"
 );
 
 /// The lua chunk [`EngineHandle::raise_notice`] runs inside nvim, taking
@@ -488,9 +367,9 @@ return hand_back()"
 /// is never spliced into the source.
 ///
 /// `vim.notify` rather than a renderer of view's choosing: which function
-/// stands there is the answer the user's config gave and the hand-back
-/// preserved ([`DISABLE_CLAIMANTS_CHUNK`]), and a session that handed the
-/// surface back has no business deciding it again for its own notices.
+/// stands there is the answer the user's config gave, and a session that
+/// handed the surface back has no business deciding it again for its own
+/// notices.
 ///
 /// `INFO` for every notice: view's own toast stack draws them all alike, so
 /// a level picked here would be a distinction the shipped surface does not
@@ -553,11 +432,9 @@ pub const NOTIFY_HOLD_CHUNK: &str = HOLD_NOTIFY_CHUNK;
 /// palette for a key that reaches the mapping.
 ///
 /// Those listeners get an augroup of their own (`view_colon_map`) rather
-/// than joining the one [`DISABLE_CLAIMANTS_CHUNK`] already creates for the
-/// same `User LazyLoad`: that group deletes itself once every claimant
-/// module has been asked, so a re-read folded into it would stop at exactly
-/// the moment the last claimant loads, leaving every plugin loaded after
-/// that one free to map `:` unobserved.
+/// than joining another that retires itself: a group that stops listening
+/// part way through a session leaves every plugin loaded after that free
+/// to map `:` unobserved.
 ///
 /// What the user's config already mapped is snapshotted BEFORE the first key
 /// is set, since setting it is what destroys the answer. The snapshot spans
@@ -729,7 +606,7 @@ pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
 /// `docs/surface-float-wire-capture.md` is why: there is no event to
 /// forward. Every plugin measured there opens its floating window with
 /// `noautocmd = true`, so `WinNew` fired zero times across the whole
-/// capture, and nvim-cmp closes its menu from inside its own non-nested
+/// capture, and a completion menu closes from inside its own non-nested
 /// autocmd, so `WinClosed` never fires for that one either -- a watcher
 /// built on either event observes nothing at all. So the callback arms a
 /// throttled scan of `nvim_list_wins()` instead, and reports every float
@@ -738,13 +615,13 @@ pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
 /// These properties of that arrangement are load-bearing:
 ///
 /// - **The events that arm it are transitions, never a poll.** A cmdline
-///   float appears a debounce after the keystroke that summons it (cmp's
-///   own `performance.debounce`), and `CmdlineEnter`/`CmdlineChanged` are
+///   float appears a debounce after the keystroke that summons it (the
+///   menu's own debounce), and `CmdlineEnter`/`CmdlineChanged` are
 ///   what precede it; `ModeChanged`, `CursorHold`, `CursorHoldI` and
 ///   `WinEnter` cover the floats no cmdline brackets. None of them
 ///   re-fires because the scan ran, so an idle editor arms nothing and
 ///   costs nothing. `WinClosed` is in the set for the opposite direction:
-///   it cannot carry the watcher (it is the event nvim-cmp's own
+///   it cannot carry the watcher (it is the event a completion menu's own
 ///   non-nested autocmd swallows), but the plugins that close a float the
 ///   ordinary way do fire it, and without it a float that goes away while
 ///   the user is not typing leaves the last scan's answer standing -- view
@@ -753,13 +630,13 @@ pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
 ///   its own (every plugin measured opens `noautocmd`), and it costs one
 ///   arming for the plugins that do not. The `User ViewScanFloats` pattern
 ///   is the same door opened from view's side ([`SCAN_FLOATS_CHUNK`]), for
-///   the floats that are already on screen when a probe reply names their
-///   plugin.
+///   the floats that are already on screen when a reading finds a channel
+///   held.
 /// - **The throttle bounds the traffic, not the latency.** The first
 ///   arming event schedules one scan a throttle out and every event
 ///   inside that window is absorbed by it (`float_armed`), so a float
 ///   storm costs at most one window walk per throttle rather than one per
-///   event, and the delay is longer than cmp's own debounce so the scan
+///   event, and the delay is longer than a menu's own debounce so the scan
 ///   that follows a keystroke sees the window that keystroke opened.
 /// - **An absorbed event still owes a scan (`float_pending`).** The
 ///   absorbed keystroke's own float appears a debounce after it, which is
@@ -771,18 +648,13 @@ pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
 ///   one-walk-per-[`view_core::update::FLOAT_SCAN_THROTTLE`] bound.
 /// - **A hidden float is still a sighting, and says so.** `cfg.hide` rides
 ///   along as the last field rather than filtering the window out of the
-///   walk. The window view itself hides ([`HIDE_FLOAT_CHUNK`], for the
-///   completion menu it absorbs into the palette) is precisely the one
-///   whose buffer view then has to keep reading as the candidate list
-///   narrows, and a scan that dropped it the moment the hide landed would
-///   leave the palette holding the rows that stood at the keystroke the
-///   hide went out on. What a hidden float is *not* is a conflict to report
+///   walk. What a hidden float is *not* is a conflict to report
 ///   -- it draws nothing -- and that judgment is made in
 ///   `view_core::update::surface_conflict`, where the surface and the
 ///   `[native]` ownership are known, rather than in a chunk that knows
 ///   neither.
 /// - **Every scan closes with `float_sweep`.** A float that closes emits
-///   nothing (nvim-cmp's `WinClosed` never fires at all), so the only
+///   nothing (a completion menu's `WinClosed` never fires at all), so the only
 ///   evidence a window is gone is a walk that did not find it -- and a walk
 ///   that found nothing sends nothing, which is indistinguishable from no
 ///   walk having run. The end marker is what makes a scan's silence
@@ -932,92 +804,61 @@ vim.api.nvim_create_autocmd('VimLeavePre', {
 pub(crate) const FLOAT_SCAN_THROTTLE_MS: u64 =
     view_core::update::FLOAT_SCAN_THROTTLE.as_millis() as u64;
 
-/// The lua chunk [`EngineHandle::probe_claimants`] runs inside nvim, taking
-/// view's channel id and the module names to look for as its two varargs.
-/// Constant by construction for the same reason as
-/// [`REGISTER_BRIDGE_CHUNK`]: no caller data is interpolated into the Lua
-/// source -- the names travel as an argument and are only ever used as table
-/// keys.
+/// The lua chunk [`EngineHandle::read_notify_sink`] runs inside nvim,
+/// taking view's channel id as its single vararg. Constant by
+/// construction for the same reason as [`REGISTER_BRIDGE_CHUNK`]: no
+/// caller data is interpolated into the Lua source.
 ///
-/// `package.loaded` rather than a plugin-manager API, because there is no
-/// plugin-manager API: lazy.nvim, packer, vim-plug and a hand-rolled
-/// `runtimepath` all end in the same place, a module in that table. It
-/// answers what is *loaded*, which is the question -- a plugin present on
-/// disk but never required has taken no surface.
+/// The takeover reads `vim.notify` once, at `VimEnter`, which is before
+/// the UI attaches -- so a notifier a config installs on `UIEnter` is
+/// never the one that reading saw, and view goes on painting toasts over
+/// the float that notifier draws.
 ///
 /// On `SafeState`, not inline: being reached at all means `VimEnter` has
-/// fired, so every eager plugin has run, and the wait to the first idle
-/// transition also catches the manager that finishes its own deferred
-/// loading on a timer after `VimEnter` (lazy.nvim's `VeryLazy` is exactly
-/// that).
+/// fired, so every eager part of a config has run, and the wait to the
+/// first idle transition also catches the plugin manager that finishes its
+/// own deferred loading on a timer afterwards.
 ///
-/// Not `once`, and the reason is the launch this feature is *for*: a cold
-/// first launch installs the plugin stack over the network, and nvim
-/// returns to its main loop -- firing `SafeState` -- many times while
-/// lazy.nvim is still cloning. A single reading taken there answers "no
-/// claimants" about a session that is about to load one, and the notice is
-/// then never raised at all on the one launch that most needs it (observed:
+/// Not `once`, and the reason is the launch this exists for: a cold first
+/// launch installs the config's plugins over the network, and nvim returns
+/// to its main loop -- firing `SafeState` -- many times while the manager
+/// is still cloning. A single reading taken there answers about a session
+/// that is about to replace the global, and the notice is then never
+/// raised at all on the one launch that most needs it (observed:
 /// `neo-tree`/`unaccommodated` on a cold compat cache).
 ///
 /// What keeps a repeat from becoming a per-idle scan is the pair of stops
-/// rather than `once`: the notify goes out only when the answer is the
-/// first one or has something new in it, so a steady state sends nothing at
-/// all, and the group deletes itself once every module is found or the
-/// session is a minute old. A module loaded an hour later by a keypress is
-/// a surface the user took deliberately.
+/// rather than `once`: the notify goes out only when the reading moves, so
+/// a steady state sends nothing at all, and the group deletes itself once
+/// the answer is a foreign sink or the session is a minute old. A global
+/// replaced an hour later by a keypress is a surface the user took
+/// deliberately.
+///
+/// The retirement waits for a foreign notifier because an answer of
+/// "nvim's own echo" is the one that can still change into the float this
+/// reading exists to find.
 ///
 /// The notify is wrapped in a `pcall` for the reason the float sweep's is:
-/// it is timer-driven, so it is one of the few that can land after a channel
-/// teardown.
-///
-/// # The `vim.notify` reading it carries
-///
-/// The takeover reads `vim.notify` once, at `VimEnter`, which is before
-/// the UI attaches -- so a notifier a config installs on `UIEnter`
-/// (nvim-notify's own documented lazy spec) is never the one that reading
-/// saw, and view goes on painting toasts over the float that plugin draws.
-/// This idle transition is the place that already re-asks a question whose
-/// answer moves, so it re-takes the reading too and reports it on its own
-/// `notify_sink` event, change-detected like the claimant list beside it.
-///
-/// The retirement waits for a foreign notifier for the same reason: an
-/// answer of "nvim's own echo" is the one that can still change into the
-/// float this reading exists to find, so a session that has not seen one
-/// keeps looking until the deadline, exactly as it does for a claimant it
-/// has not seen.
-pub(crate) const PROBE_CLAIMANTS_CHUNK: &str = concat!(
-    "local channel, modules = ...\n",
+/// it is timer-driven, so it is one of the few that can land after a
+/// channel teardown.
+pub(crate) const NOTIFY_SINK_CHUNK: &str = concat!(
+    "local channel = ...\n",
     notify_predicate_lua!(),
     "\
 local group = vim.api.nvim_create_augroup(
-  'view_bridge_claimants', { clear = true })
-local reported, first = {}, true
+  'view_bridge_notify_sink', { clear = true })
 local sink = nil
 local deadline = vim.uv.now() + 60000
 vim.api.nvim_create_autocmd('SafeState', {
   group = group,
   callback = function()
-    local loaded, fresh = {}, false
-    for _, name in ipairs(modules) do
-      if package.loaded[name] ~= nil then
-        loaded[#loaded + 1] = name
-        if not reported[name] then
-          reported[name] = true
-          fresh = true
-        end
-      end
-    end
-    if first or fresh then
-      first = false
-      pcall(vim.rpcnotify, channel, 'view_bridge', 'claimants', loaded)
-    end
     local foreign = vim.notify ~= nil
       and not is_engine_notify(vim.notify)
     if sink ~= foreign then
       sink = foreign
       pcall(vim.rpcnotify, channel, 'view_bridge', 'notify_sink', foreign)
     end
-    if (#loaded == #modules and sink) or vim.uv.now() > deadline then
+    if sink or vim.uv.now() > deadline then
       pcall(vim.api.nvim_del_augroup_by_id, group)
     end
   end,
@@ -1131,16 +972,14 @@ end";
 /// `ext_messages`, which nothing was attached for, and not to stderr, which
 /// the spawn nulls.
 ///
-/// The `vim.notify` reading comes last, after every step, because the steps
-/// are what move it: a claimant's `disable` restores whatever it saved, and
-/// [`DISABLE_CLAIMANTS_CHUNK`] may re-point it at nvim-notify from there.
-/// It answers the same question that chunk asks -- is this the engine's own
-/// default, recognised by the source file it shares with `vim.notify_once`
-/// -- and reports the opposite polarity, since what view needs to know is
-/// whether a notifier of the user's is drawing.
+/// The `vim.notify` reading comes last, after every step, because a step
+/// is what can move it. It asks whether the function standing there is the
+/// engine's own default, recognised by the source file it shares with
+/// `vim.notify_once`, and reports the opposite polarity, since what view
+/// needs to know is whether a notifier of the user's is drawing.
 ///
-/// The reading is [`notify_predicate_lua`]'s, the same one the hand-back
-/// and the probe ask, so no two of them can answer differently about the
+/// The reading is [`notify_predicate_lua`]'s, the same one
+/// [`NOTIFY_SINK_CHUNK`] asks, so the two cannot answer differently about the
 /// same function.
 const TAKEOVER_CHUNK: &str = concat!(
     "local steps = ...\n",
@@ -1169,21 +1008,6 @@ return answer"
 pub(crate) const TAKEOVER_CLAIMS_KEY: &str = "claims";
 pub(crate) const TAKEOVER_MESSAGES_KEY: &str = "messages";
 pub(crate) const TAKEOVER_NOTIFIER_KEY: &str = "foreign_notifier";
-
-/// The key [`TAKEOVER_CHUNK`] returns [`DISABLE_CLAIMANTS_CHUNK`]'s answer
-/// under: the modules whose own `disable` ran.
-pub(crate) const TAKEOVER_DISABLED_KEY: &str = "disabled";
-
-/// [`EngineHandle::set_option`] as a chunk, for the one caller that batches
-/// it ([`TAKEOVER_CHUNK`]): `nvim_set_option_value` is an API call rather
-/// than a chunk everywhere else, and a batch carries lua or it carries
-/// nothing.
-///
-/// The empty `opts` map is the whole of why the wrapper exists at all --
-/// see [`EngineHandle::set_option`] for what a scopeless set means.
-const SET_OPTION_CHUNK: &str = "\
-local name, value = ...
-vim.api.nvim_set_option_value(name, value, {})";
 
 /// Applies the colorscheme `[ui] theme` named, and answers on the
 /// `view_bridge` method when nvim cannot find it.
@@ -1230,77 +1054,29 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 end
 return out";
 
-/// Writes one floating window's own `hide` flag, for the completion float
-/// view absorbs into the palette (`RpcCall::SetFloatHidden`).
+/// Reads the lines a float view is withholding was drawing.
 ///
-/// One field of a window config, and the only one written: the window keeps
-/// its buffer, its lines and its cursor, which is what makes the absorption
-/// reversible and what lets [`READ_FLOAT_ROWS_CHUNK`] keep reading rows off
-/// a window that is no longer drawing them. `docs/surface-float-wire-capture.md`
-/// measured the pinned nvim-cmp reconfiguring this very window while the
-/// flag stood and preserving it, 277 samples with no re-show -- which is
-/// also why the flag has to be written back: nothing else in the session
-/// clears it, so an absorption that ends is an absorption that shows the
-/// window again.
+/// A window that closed between the sighting and this call answers with no
+/// lines, which is the same degrade an error reply takes: the float is
+/// given back to the screen rather than held off it on text nobody read.
 ///
-/// `pcall`, because the window can close between the scan that sighted it
-/// and this call landing: this rides a notification, and nvim reports a
-/// notification's error to the user as a message about a window they never
-/// knew existed. That is the ordinary case for the un-hide rather than the
-/// unlucky one -- nvim-cmp closes its menu on the `CmdlineLeave` that ends
-/// the absorption. Constant, like every other chunk here -- the window
-/// handle and the flag travel as `nvim_exec_lua`'s positional varargs.
-const HIDE_FLOAT_CHUNK: &str = "\
-local win, hide = ...
-pcall(vim.api.nvim_win_set_config, win, { hide = hide })";
-
-/// Reads what a float view is absorbing was drawing: its `hide` flag, its
-/// buffer's lines, and its selection.
-///
-/// Every field is the one `docs/surface-float-wire-capture.md` recorded for
-/// the captured menu, and the selection is the reason this is a read rather
-/// than an inference: the menu buffer carries no extmarks in any namespace
-/// in any state, so the selection is the window's own cursor row gated on
-/// its `cursorline` option -- `false` means "menu open, nothing selected",
-/// `true` means "row N is it". The `hide` flag comes back with them because
-/// it is read after the hide has run, which is how view learns from the
-/// engine that a hide did not land instead of from a user seeing two menus.
-///
-/// A window that closed between the sighting and this call answers
-/// `hidden = false` with no lines, which is the same degrade an error reply
-/// takes: view stops absorbing that window rather than painting rows off a
-/// buffer nobody is showing. Constant, like every other chunk here.
-///
-/// The read is capped at 200 lines rather than taking the buffer whole,
-/// and the cap is a wire bound rather than a rendering one: the palette
-/// paints half a terminal's rows, so 200 is past what any terminal could
-/// show, while an uncapped `-1` puts however many lines somebody else's
-/// buffer holds on the wire once per scan, into the model, and into the
-/// frame cache's comparison on every frame after that.
+/// Constant, like every other chunk here -- the window handle travels as
+/// `nvim_exec_lua`'s positional vararg.
 const READ_FLOAT_ROWS_CHUNK: &str = "\
 local win = ...
 if not vim.api.nvim_win_is_valid(win) then
-  return { hidden = false, lines = {}, selected = -1 }
+  return { lines = {} }
 end
 local buf = vim.api.nvim_win_get_buf(win)
-local selected = -1
-if vim.wo[win].cursorline then
-  selected = vim.api.nvim_win_get_cursor(win)[1] - 1
-end
-return {
-  hidden = vim.api.nvim_win_get_config(win).hide == true,
-  lines = vim.api.nvim_buf_get_lines(buf, 0, 200, false),
-  selected = selected,
-}";
+return { lines = vim.api.nvim_buf_get_lines(buf, 0, 200, false) }";
 
-/// Closes one floating window, for a claiming plugin's startup complaint
-/// view has already recorded to the notification history
-/// (`RpcCall::CloseFloat`).
+/// Closes one floating window, for a holder's startup complaint view has
+/// already recorded to the notification history (`RpcCall::CloseFloat`).
 ///
-/// `pcall`, on the same terms as [`HIDE_FLOAT_CHUNK`]: the plugin's own
-/// timer can retire the float between the read that took its text and this
-/// call landing, and nvim reports a notification's error to the user as a
-/// message about a window they never knew existed. Force, because the
+/// `pcall`, because the holder's own timer can retire the float between
+/// the read that took its text and this call landing, and nvim reports a
+/// notification's error to the user as a message about a window they never
+/// knew existed. Force, because the
 /// buffer behind these windows is an unwritten `nofile` scratch buffer and
 /// a plain close on the last window showing a modified buffer fails.
 /// Constant, like every other chunk here -- the window handle travels as
@@ -3048,32 +2824,25 @@ impl EngineHandle {
         )
     }
 
-    /// Arms the probe that answers which of view's known surface claimants
-    /// this session actually loaded (see [`PROBE_CLAIMANTS_CHUNK`]). Answers
-    /// arrive asynchronously as `view_bridge` `claimants` notifications
-    /// carrying the loaded subset.
+    /// Arms the reading that answers whether a notifier other than the
+    /// engine's own stands at `vim.notify` (see [`NOTIFY_SINK_CHUNK`]).
+    /// Answers arrive asynchronously as `view_bridge` `notify_sink`
+    /// notifications.
     ///
-    /// Repeating rather than one-shot: it reads at every idle transition and
-    /// notifies whenever the reading is news, so a claimant that loads
-    /// lazily -- noice's own documented spec is `event = "VeryLazy"` -- is
-    /// still answered for. It retires itself once every module is accounted
-    /// for, or after a minute, so a session that never loads one stops
-    /// paying for the question.
-    ///
-    /// The module names come from
-    /// [`SURFACE_CLAIMANTS`](view_core::native::surfaces::SURFACE_CLAIMANTS),
-    /// the same table the notice's wording is built from, so the question
-    /// asked and the answer's use cannot drift apart.
+    /// Repeating rather than one-shot: it reads at every idle transition
+    /// and notifies whenever the reading moves, so a global replaced by a
+    /// deferred load is still answered for. It retires itself once a
+    /// foreign notifier is found, or after a minute, so a session that
+    /// never gets one stops paying for the question.
     ///
     /// A request rather than a notify, unlike
     /// [`register_bridge`](Self::register_bridge): nothing waits on the
     /// arming and the readings still arrive as notifications, but a chunk
     /// that fails to arm is otherwise silent on both sides -- an error
     /// inside `nvim_exec_lua` reaches neither `:messages` nor `v:errmsg` --
-    /// and view withholds a superseded claimant's floats until this
-    /// question is answered. The error reply is what turns that into "no
-    /// claimant loaded" instead of a window held off the screen for the
-    /// life of the engine.
+    /// and view withholds a held surface's floats until this question is
+    /// answered. The error reply is what turns that into "nvim's own echo"
+    /// instead of a window held off the screen for the life of the engine.
     ///
     /// The cost: one more reply on the startup path, read by the RPC reader
     /// thread and routed to the pump like every other async reply. Nothing
@@ -3083,16 +2852,12 @@ impl EngineHandle {
     ///
     /// Returns `EngineError::Closed` if the connection's writer thread has
     /// already exited.
-    pub fn probe_claimants(&self, channel_id: u64) -> Result<(), EngineError> {
-        let modules: Vec<Value> = view_core::native::surfaces::SURFACE_CLAIMANTS
-            .iter()
-            .map(|claimant| Value::from(claimant.module))
-            .collect();
-        self.request_claimants_probe(
+    pub fn read_notify_sink(&self, channel_id: u64) -> Result<(), EngineError> {
+        self.request_notify_sink_read(
             "nvim_exec_lua",
             vec![
-                Value::from(PROBE_CLAIMANTS_CHUNK),
-                Value::Array(vec![Value::from(channel_id), Value::Array(modules)]),
+                Value::from(NOTIFY_SINK_CHUNK),
+                Value::Array(vec![Value::from(channel_id)]),
             ],
         )
     }
@@ -3480,7 +3245,10 @@ impl EngineHandle {
     /// has only the idle arm its option sibling's has two of, is in
     /// [`HOLD_NOTIFY_CHUNK`].
     ///
-    /// No arguments: the chunk takes none and interpolates none.
+    /// One argument, view's own channel, which is the chunk's route back:
+    /// the function it displaces is reported as `Msg::ChannelHeld`, so the
+    /// surface that channel draws can be accounted for the way an option's
+    /// is.
     ///
     /// A notification, not a request, like every other call the paint loop
     /// may emit: nothing waits on the result.
@@ -3492,7 +3260,10 @@ impl EngineHandle {
     pub fn hold_notify(&self) -> Result<(), EngineError> {
         self.notify(
             "nvim_exec_lua",
-            vec![Value::from(HOLD_NOTIFY_CHUNK), Value::Array(Vec::new())],
+            vec![
+                Value::from(HOLD_NOTIFY_CHUNK),
+                Value::Array(vec![Value::from(self.channel_id)]),
+            ],
         )
     }
 
@@ -3522,32 +3293,6 @@ impl EngineHandle {
             vec![
                 Value::from(RAISE_NOTICE_CHUNK),
                 Value::Array(vec![Value::from(text)]),
-            ],
-        )
-    }
-
-    /// Calls `disable` on every one of `modules` that is loaded, the
-    /// hand-back [`crate::RpcCall::DisableClaimants`] describes.
-    ///
-    /// Issued ahead of [`hold_notify`](Self::hold_notify) by every caller
-    /// that issues both, because a claimant's `disable` restores the
-    /// `vim.notify` it took: see [`DISABLE_CLAIMANTS_CHUNK`] for what the
-    /// chunk guards, and `RpcCall::DisableClaimants` for why the order is
-    /// the whole point.
-    ///
-    /// A notification, not a request, like every other call the paint loop
-    /// may emit: nothing waits on the result.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::Closed` if the connection's writer thread has
-    /// already exited.
-    pub fn disable_claimants(&self, modules: &[String]) -> Result<(), EngineError> {
-        self.notify(
-            "nvim_exec_lua",
-            vec![
-                Value::from(DISABLE_CLAIMANTS_CHUNK),
-                Value::Array(disable_claimants_args(modules, self.channel_id)),
             ],
         )
     }
@@ -4104,32 +3849,12 @@ impl EngineHandle {
         )
     }
 
-    /// Writes `win`'s `hide` flag via [`HIDE_FLOAT_CHUNK`], for a completion
-    /// float view is taking into its own palette (`hide = true`) or handing
-    /// back (`hide = false`). Fire-and-forget, and issued once per window
-    /// per direction rather than once per keystroke (the cadence bound lives
-    /// in `view_core::native::surfaces::FloatAbsorption`).
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::Closed` if the connection is already closed or
-    /// the writer thread has already exited.
-    pub fn set_float_hidden(&self, win: u64, hide: bool) -> Result<(), EngineError> {
-        self.notify(
-            "nvim_exec_lua",
-            vec![
-                Value::from(HIDE_FLOAT_CHUNK),
-                Value::Array(vec![Value::from(win), Value::from(hide)]),
-            ],
-        )
-    }
-
     /// Issues [`READ_FLOAT_ROWS_CHUNK`] as an async request correlated on
-    /// `win`, reading the rows and selection of a float view is absorbing.
-    /// Async by construction, like [`preview_buffer`](Self::preview_buffer):
-    /// this returns immediately and the answer crosses back as
-    /// `Msg::FloatRows` through the connection's pump, which is what keeps
-    /// the palette's second row source off the paint path.
+    /// `win`, reading the lines a withheld float was drawing. Async by
+    /// construction, like [`preview_buffer`](Self::preview_buffer): this
+    /// returns immediately and the answer crosses back as `Msg::FloatRows`
+    /// through the connection's pump, which is what keeps the read off the
+    /// paint path.
     ///
     /// # Errors
     ///
@@ -4146,8 +3871,8 @@ impl EngineHandle {
         )
     }
 
-    /// Closes `win` via [`CLOSE_FLOAT_CHUNK`], for a claiming plugin's own
-    /// startup complaint whose text view has already taken into the
+    /// Closes `win` via [`CLOSE_FLOAT_CHUNK`], for a holder's own startup
+    /// complaint whose text view has already taken into the
     /// notification history. Fire-and-forget, and issued at most once per
     /// window.
     ///
@@ -4646,16 +4371,6 @@ fn mapping_args(specs: &[MappingSpec], channel_id: u64) -> Vec<Value> {
     ]
 }
 
-/// [`DISABLE_CLAIMANTS_CHUNK`]'s varargs, shared by the standalone call and
-/// the takeover's step so the two can never send the chunk a different
-/// shape: the channel its late pass reports on, then the names.
-fn disable_claimants_args(modules: &[String], channel_id: u64) -> Vec<Value> {
-    vec![
-        Value::from(channel_id),
-        Value::Array(modules.iter().map(|m| Value::from(&m[..])).collect()),
-    ]
-}
-
 /// One [`TakeoverStep`] as the `{ src, args, out }` table
 /// [`TAKEOVER_CHUNK`] runs.
 ///
@@ -4664,10 +4379,6 @@ fn disable_claimants_args(modules: &[String], channel_id: u64) -> Vec<Value> {
 /// rather than travelling as a step nvim never runs.
 fn takeover_step(step: &TakeoverStep, channel_id: u64) -> Value {
     let (src, args) = match step {
-        TakeoverStep::DisableClaimants { modules } => (
-            DISABLE_CLAIMANTS_CHUNK,
-            disable_claimants_args(modules, channel_id),
-        ),
         TakeoverStep::HoldOption { name, value } => (
             HOLD_OPTION_CHUNK,
             vec![Value::from(&name[..]), option_value(value)],
@@ -4680,11 +4391,7 @@ fn takeover_step(step: &TakeoverStep, channel_id: u64) -> Value {
                 Value::from(channel_id),
             ],
         ),
-        TakeoverStep::HoldNotify => (HOLD_NOTIFY_CHUNK, Vec::new()),
-        TakeoverStep::SetOption { name, value } => (
-            SET_OPTION_CHUNK,
-            vec![Value::from(&name[..]), option_value(value)],
-        ),
+        TakeoverStep::HoldNotify => (HOLD_NOTIFY_CHUNK, vec![Value::from(channel_id)]),
         TakeoverStep::RegisterClipboard { channel_id } => {
             (REGISTER_CLIPBOARD_CHUNK, vec![Value::from(*channel_id)])
         }
@@ -4696,14 +4403,8 @@ fn takeover_step(step: &TakeoverStep, channel_id: u64) -> Value {
         (Value::from("src"), Value::from(src)),
         (Value::from("args"), Value::Array(args)),
     ];
-    match step {
-        TakeoverStep::RegisterMappings { .. } => {
-            table.push((Value::from("out"), Value::from(TAKEOVER_CLAIMS_KEY)));
-        }
-        TakeoverStep::DisableClaimants { .. } => {
-            table.push((Value::from("out"), Value::from(TAKEOVER_DISABLED_KEY)));
-        }
-        _ => {}
+    if let TakeoverStep::RegisterMappings { .. } = step {
+        table.push((Value::from("out"), Value::from(TAKEOVER_CLAIMS_KEY)));
     }
     Value::Map(table)
 }
@@ -4733,7 +4434,7 @@ mod tests {
             ("HOLD_NOTIFY_CHUNK", HOLD_NOTIFY_CHUNK),
             ("OPEN_FILE_CHUNK", OPEN_FILE_CHUNK),
             ("PREVIEW_CHUNK", PREVIEW_CHUNK),
-            ("PROBE_CLAIMANTS_CHUNK", PROBE_CLAIMANTS_CHUNK),
+            ("NOTIFY_SINK_CHUNK", NOTIFY_SINK_CHUNK),
             ("RENAME_CHUNK", RENAME_CHUNK),
             ("REVIEW_CLEAR_CHUNK", REVIEW_CLEAR_CHUNK),
             ("REVIEW_SHOW_CHUNK", REVIEW_SHOW_CHUNK),
@@ -5103,71 +4804,57 @@ mod tests {
         );
     }
 
-    /// The claimant probe's load-bearing properties, each a silent defect
-    /// if it drifts: a probe that reads anything but `package.loaded` asks a
-    /// question no plugin manager answers the same way, one that fires on
-    /// `VimEnter` misses a manager's deferred load, one whose group does not
-    /// clear itself stacks a second copy after an engine restart, and a
-    /// notify outside a `pcall` is a timer-driven call that can raise on a
-    /// channel already torn down.
+    /// The sink reading's load-bearing properties, each a silent defect if
+    /// it drifts: a reading that fires on `VimEnter` misses a notifier a
+    /// manager installs later, one whose group does not clear itself stacks
+    /// a second copy after an engine restart, and a notify outside a
+    /// `pcall` is a timer-driven call that can raise on a channel already
+    /// torn down.
     ///
-    /// The three that keep a repeating autocmd from becoming a per-idle
-    /// scan: it answers only on a first or changed reading, and it deletes
-    /// its own group once every module is found -- and a notifier of the
-    /// user's has been seen -- or the session is a minute old.
+    /// The two that keep a repeating autocmd from becoming a per-idle scan:
+    /// it answers only on a first or changed reading, and it deletes its own
+    /// group once a notifier of the user's has been seen or the session is a
+    /// minute old.
     #[test]
-    fn the_claimant_probe_asks_package_loaded_at_every_idle_until_it_knows() {
-        assert!(PROBE_CLAIMANTS_CHUNK.contains("package.loaded[name]"));
-        assert!(PROBE_CLAIMANTS_CHUNK.contains("'SafeState'"));
-        assert!(PROBE_CLAIMANTS_CHUNK.contains("'view_bridge_claimants', { clear = true }"));
-        assert_eq!(
-            PROBE_CLAIMANTS_CHUNK
-                .matches("channel, 'view_bridge'")
-                .count(),
-            2,
-            "two answers, both riding the bridge every other reading already uses"
-        );
-        assert!(PROBE_CLAIMANTS_CHUNK.contains("pcall(vim.rpcnotify"));
+    fn the_sink_reading_is_retaken_at_every_idle_until_a_notifier_stands() {
+        assert!(NOTIFY_SINK_CHUNK.contains("'SafeState'"));
+        assert!(NOTIFY_SINK_CHUNK.contains("'view_bridge_notify_sink', { clear = true }"));
+        assert!(NOTIFY_SINK_CHUNK.contains("pcall(vim.rpcnotify"));
         assert!(
-            !PROBE_CLAIMANTS_CHUNK.contains("VimEnter"),
-            "a reading taken at VimEnter misses every manager that defers its own loading"
+            !NOTIFY_SINK_CHUNK.contains("VimEnter"),
+            "a reading taken at VimEnter misses every notifier installed after it"
         );
         assert!(
-            !PROBE_CLAIMANTS_CHUNK.contains("once = true"),
+            !NOTIFY_SINK_CHUNK.contains("once = true"),
             "a cold first launch idles many times before the stack it is cloning exists"
         );
+        assert!(NOTIFY_SINK_CHUNK.contains("pcall(vim.api.nvim_del_augroup_by_id"));
         assert!(
-            PROBE_CLAIMANTS_CHUNK.contains("if first or fresh then"),
-            "a steady state must send nothing at all"
-        );
-        assert!(
-            PROBE_CLAIMANTS_CHUNK
-                .contains("(#loaded == #modules and sink) or vim.uv.now() > deadline"),
-            "the group must stop itself once it knows both answers, and again on a deadline"
-        );
-        assert!(PROBE_CLAIMANTS_CHUNK.contains("pcall(vim.api.nvim_del_augroup_by_id"));
-        assert!(
-            PROBE_CLAIMANTS_CHUNK.contains("'notify_sink', foreign"),
+            NOTIFY_SINK_CHUNK.contains("'notify_sink', foreign"),
             "a notifier installed after the takeover is one only this reading reports"
         );
         assert!(
-            PROBE_CLAIMANTS_CHUNK.contains("if sink ~= foreign then"),
+            NOTIFY_SINK_CHUNK.contains("if sink ~= foreign then"),
             "an unchanged sink must send nothing at all"
+        );
+        assert!(
+            NOTIFY_SINK_CHUNK.contains("if sink or vim.uv.now() > deadline then"),
+            "the group must stop itself once it has its answer, and again on a deadline"
         );
     }
 
     /// Every chunk that decides where a notice belongs asks one predicate,
-    /// carried as one literal: three copies of a `debug.getinfo` guard
-    /// would let a session be told two different things about the function
+    /// carried as one literal: two copies of a `debug.getinfo` guard would
+    /// let a session be told two different things about the function
     /// standing at `vim.notify`. The guard itself is the fix for a callable
-    /// table -- nvim-notify's real shape -- raising inside a batch whose
-    /// whole reply was then lost.
+    /// table -- a notifier module's real shape -- raising inside a batch
+    /// whose whole reply was then lost.
     #[test]
     fn every_reading_of_vim_notify_asks_the_one_guarded_predicate() {
         for (name, chunk) in [
-            ("DISABLE_CLAIMANTS_CHUNK", DISABLE_CLAIMANTS_CHUNK),
             ("TAKEOVER_CHUNK", TAKEOVER_CHUNK),
-            ("PROBE_CLAIMANTS_CHUNK", PROBE_CLAIMANTS_CHUNK),
+            ("NOTIFY_SINK_CHUNK", NOTIFY_SINK_CHUNK),
+            ("HOLD_NOTIFY_CHUNK", HOLD_NOTIFY_CHUNK),
         ] {
             assert!(
                 chunk.contains(notify_predicate_lua!()),
@@ -5175,7 +4862,7 @@ mod tests {
             );
             assert_eq!(
                 chunk.matches("debug.getinfo").count(),
-                2,
+                notify_predicate_lua!().matches("debug.getinfo").count(),
                 "{name} must ask debug.getinfo nowhere but inside the predicate"
             );
         }
@@ -5219,33 +4906,23 @@ mod tests {
         );
     }
 
-    /// The question asked and the answer's use come from one table, so a
-    /// row added to it cannot arrive with nothing probing for its module.
+    /// The reading travels as the one constant chunk, with the channel it
+    /// answers on as its only argument.
     #[test]
-    fn the_probe_asks_for_exactly_the_shipped_claimant_modules() {
+    fn the_sink_reading_sends_the_constant_chunk_with_its_channel() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
-        h.probe_claimants(7).unwrap();
+        h.read_notify_sink(7).unwrap();
         let (method, params) = cap_rx
             .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
             .unwrap();
         assert_eq!(method, "nvim_exec_lua");
-        assert_eq!(params[0], Value::from(PROBE_CLAIMANTS_CHUNK));
-        let args = params[1].as_array().expect("channel and the module list");
-        let [channel, modules] = args.as_slice() else {
-            unreachable!("the chunk takes exactly two arguments: {args:?}")
-        };
-        assert_eq!(channel.as_u64(), Some(7));
-        let asked: Vec<&str> = modules
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect();
-        let shipped: Vec<&str> = view_core::native::surfaces::SURFACE_CLAIMANTS
-            .iter()
-            .map(|claimant| claimant.module)
-            .collect();
-        assert_eq!(asked, shipped);
+        assert_eq!(
+            params,
+            vec![
+                Value::from(NOTIFY_SINK_CHUNK),
+                Value::Array(vec![Value::from(7)]),
+            ]
+        );
     }
 
     /// Every trigger the bridge exists to carry lives in the one group, and
@@ -5368,27 +5045,14 @@ mod tests {
         );
     }
 
-    /// The two chunks an absorption runs, held to the shape that makes it
-    /// reversible and bounded.
-    ///
-    /// The flag is written from a vararg rather than spelled `true`: view
-    /// hides a window and view shows it again, and on the pinned engine
-    /// nothing else in the session would ever clear a flag view left set
-    /// (the capture measured the plugin's own reconfigure preserving it
-    /// across 277 samples). The read is capped because it is re-issued once
-    /// per scan for as long as a menu stands, and `-1` puts however many
-    /// lines somebody else's buffer holds on the wire every time.
+    /// The row read is capped because it is re-issued once per scan for as
+    /// long as a window stands, and `-1` puts however many lines somebody
+    /// else's buffer holds on the wire every time.
     #[test]
-    fn the_absorption_chunks_write_a_reversible_flag_and_read_a_bounded_buffer() {
-        assert!(
-            HIDE_FLOAT_CHUNK.contains("local win, hide = ...")
-                && HIDE_FLOAT_CHUNK.contains("{ hide = hide }"),
-            "a chunk that can only set the flag is an absorption a window \
-             never comes back from: {HIDE_FLOAT_CHUNK}"
-        );
+    fn the_float_row_read_is_bounded_by_what_a_notice_can_hold() {
         assert!(
             READ_FLOAT_ROWS_CHUNK.contains("nvim_buf_get_lines(buf, 0, 200, false)"),
-            "the row read is bounded by what a palette could paint, never by \
+            "the row read is bounded by what a notice could carry, never by \
              what a buffer happens to hold: {READ_FLOAT_ROWS_CHUNK}"
         );
     }
@@ -5634,83 +5298,10 @@ mod tests {
         assert_eq!(method, "nvim_exec_lua");
         assert_eq!(
             params,
-            vec![Value::from(HOLD_NOTIFY_CHUNK), Value::Array(Vec::new())]
-        );
-    }
-
-    #[test]
-    fn disable_claimants_sends_the_constant_chunk_with_the_names_as_one_list() {
-        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
-        // a module name is table-sourced today; it still travels as data,
-        // for the reason `feed_keys` does
-        let hostile = "x'); os.exit()--".to_string();
-        h.disable_claimants(&["noice".to_string(), hostile.clone()])
-            .unwrap();
-        let (method, params) = cap_rx
-            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
-            .unwrap();
-        assert_eq!(method, "nvim_exec_lua");
-        assert_eq!(
-            params,
             vec![
-                Value::from(DISABLE_CLAIMANTS_CHUNK),
-                Value::Array(vec![
-                    Value::from(h.channel_id),
-                    Value::Array(vec![Value::from("noice"), Value::from(&hostile[..]),]),
-                ]),
+                Value::from(HOLD_NOTIFY_CHUNK),
+                Value::Array(vec![Value::from(h.channel_id)])
             ]
-        );
-        assert!(
-            !DISABLE_CLAIMANTS_CHUNK.contains(&hostile),
-            "a module name reached the source"
-        );
-    }
-
-    /// The chunk's two guards: it asks `package.loaded` rather than
-    /// requiring the plugin it means to turn off, and it survives a module
-    /// with no `disable` at all. A chunk that lost either would still pass
-    /// the wire-shape test above -- and losing the second takes down every
-    /// call the takeover sends behind this one.
-    #[test]
-    fn the_disable_chunk_asks_what_is_loaded_and_survives_a_module_that_refuses() {
-        assert!(DISABLE_CLAIMANTS_CHUNK.contains("package.loaded[name] ~= nil"));
-        assert!(DISABLE_CLAIMANTS_CHUNK.contains("pcall(function()"));
-        assert!(DISABLE_CLAIMANTS_CHUNK.contains("require(name).disable()"));
-    }
-
-    /// The late pass's own three guards. A chunk that lost the `asked`
-    /// table would call one plugin's `disable` again at every lazy load,
-    /// one that lost the autocommand would leave the whole lazy.nvim
-    /// population unreachable, and one that lost the report would turn the
-    /// plugin off while the notice went on saying the ask never arrived.
-    #[test]
-    fn the_disable_chunk_asks_again_when_a_claimant_loads_late() {
-        assert!(DISABLE_CLAIMANTS_CHUNK.contains("not asked[name]"));
-        assert!(DISABLE_CLAIMANTS_CHUNK.contains("pattern = 'LazyLoad'"));
-        assert!(DISABLE_CLAIMANTS_CHUNK.contains("'view_bridge', 'handed_back'"));
-        assert!(
-            DISABLE_CLAIMANTS_CHUNK.contains("pcall(vim.api.nvim_del_augroup_by_id"),
-            "the group must stop itself once every module has been asked"
-        );
-    }
-
-    /// The idle pass's own three guards. It is the only pass that reaches a
-    /// claimant loaded before the ask and configured after it -- the
-    /// shipped case, since lazy.nvim's load event fires before `VimEnter`
-    /// and noice configures itself from a `VimEnter` callback. The deadline
-    /// keeps it from walking a settled list on every keystroke for the life
-    /// of a session, and it retires itself rather than the group, which
-    /// still has a plugin loaded an hour from now to reach.
-    #[test]
-    fn the_disable_chunk_asks_again_once_the_session_goes_idle() {
-        assert!(DISABLE_CLAIMANTS_CHUNK.contains("nvim_create_autocmd('SafeState'"));
-        assert!(
-            DISABLE_CLAIMANTS_CHUNK.contains("pending > 0 and vim.uv.now() > idle_deadline"),
-            "the idle pass must stop itself on a deadline"
-        );
-        assert!(
-            DISABLE_CLAIMANTS_CHUNK.contains("pcall(vim.api.nvim_del_autocmd, idle)"),
-            "the idle pass retires itself, never the group the load listener is in"
         );
     }
 
@@ -5756,6 +5347,13 @@ mod tests {
         // the halves are what make a takeover durable; a chunk that lost
         // any one of them would still pass the wire-shape test above
         assert!(HOLD_NOTIFY_CHUNK.contains("vim.notify = notify"));
+        // a plugin that finds a function it did not install at
+        // `vim.notify` prints where it came from, and an anonymous chunk
+        // prints as its own whole source, over the user's buffer
+        assert!(
+            HOLD_NOTIFY_CHUNK.contains("]], '@view (the message area)'))"),
+            "the held function must carry a name a reader can place"
+        );
         assert!(
             HOLD_NOTIFY_CHUNK.contains("'SafeState'"),
             "without the idle backstop the assignment is a one-shot, and \
@@ -5775,6 +5373,19 @@ mod tests {
         assert!(HOLD_NOTIFY_CHUNK.contains("err = level == vim.log.levels.ERROR"));
         assert!(HOLD_NOTIFY_CHUNK.contains("level == vim.log.levels.WARN and 'WarningMsg'"));
         assert!(HOLD_NOTIFY_CHUNK.contains("_truncate = opts and opts._truncate"));
+        // the hold is the only reading of this channel that sees the
+        // function it replaces, so a chunk that set it back without
+        // reporting leaves the surface taken and the user never told
+        assert!(HOLD_NOTIFY_CHUNK.contains("'channel_held',\n    'vim.notify', source"));
+        assert!(
+            HOLD_NOTIFY_CHUNK.contains("if not is_engine_notify(held) then"),
+            "the engine's own default standing there is nobody's takeover"
+        );
+        assert!(
+            HOLD_NOTIFY_CHUNK.contains("if seen[source] then"),
+            "SafeState fires on every idle, and a config that writes the \
+             global back forever must cost one notification"
+        );
     }
 
     #[test]

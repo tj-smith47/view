@@ -344,7 +344,6 @@ impl Model {
                 toast_history: crate::native::toast::ToastHistory::new(),
                 tabline: None,
                 popupmenu: None,
-                float_absorption: crate::native::surfaces::FloatAbsorption::default(),
                 mouse_on: false,
                 statusline: crate::native::statusline::StatuslineState::default(),
             },
@@ -420,7 +419,7 @@ impl Model {
     /// finishes is what made view's startup roughly twice its own engine's:
     /// a frontend that externalizes the cmdline, the messages and the
     /// popupmenu is a GUI the config can see, and a config that reacts to
-    /// one -- noice's health check is the measured case -- does that work
+    /// one -- a config's own health check is the measured case -- does that work
     /// inside `init.lua`, where every plugin it drags in is prepended to
     /// the first frame. Attaching after `VimEnter` moves all of it behind
     /// the screen the user is waiting for, and the attach's own redraw is
@@ -460,6 +459,27 @@ impl Model {
     #[must_use]
     pub fn owns(&self, surface: crate::native::ext::Ext) -> bool {
         self.ext_surfaces.contains(&surface)
+    }
+
+    /// Whether `feature`'s `[native]` switch left this session drawing the
+    /// surface it gates, or `None` for a feature this model carries no
+    /// answer for.
+    ///
+    /// The answer for a surface nvim gives up through an option rather than
+    /// through an `ext_*` capability: [`Self::owns`] can say nothing about
+    /// one of those, because no capability was ever attached for it.
+    ///
+    /// `None` rather than `false` for an unknown name, so a surface whose
+    /// switch this model does not carry is refused by
+    /// `every_owned_surface_without_an_attach_names_a_switch_the_model_answers`
+    /// instead of reading as a surface nobody draws.
+    #[must_use]
+    pub fn feature_switch(&self, feature: &str) -> Option<bool> {
+        match feature {
+            "statusline" => Some(self.statusline_enabled),
+            "palette" => Some(self.palette_enabled),
+            _ => None,
+        }
     }
 
     /// Records that this session never read a `view.toml`'s `[native]`
@@ -1376,15 +1396,6 @@ pub struct EngineModel {
     pub toast_history: crate::native::toast::ToastHistory,
     pub tabline: Option<TablineState>,
     pub popupmenu: Option<PopupmenuState>,
-    /// The floating windows view has taken over and the rows it took off
-    /// them, for a plugin drawing its own completion menu on the command
-    /// line view renders (`update::surface_conflict`'s absorption).
-    ///
-    /// On the engine's own model rather than beside
-    /// [`Model::surface_conflicts`], because what it holds is window
-    /// handles: those are per-connection allocations, and a replacement
-    /// engine's are somebody else's numbers.
-    pub(crate) float_absorption: crate::native::surfaces::FloatAbsorption,
     /// Whether nvim currently wants terminal mouse reporting on, from the
     /// last `mouse_on`/`mouse_off` redraw event. The terminal only enables
     /// mouse capture while this is `true`: capturing unconditionally would
@@ -1502,17 +1513,6 @@ impl EngineModel {
         self.hl.mark_dirty();
     }
 
-    /// The rows view took off a plugin's own cmdline completion float, or
-    /// `None` while it is absorbing none.
-    ///
-    /// The palette's second row source, read by `view-surface::render` and
-    /// written only by the reply to an `RpcCall::ReadFloatRows`: no paint
-    /// asks the engine anything to get them.
-    #[must_use]
-    pub fn absorbed_rows(&self) -> Option<&crate::native::palette::AbsorbedRows> {
-        self.float_absorption.rows()
-    }
-
     /// Whether a command line is on screen: nvim's own, or the empty `:`
     /// the palette stands on while it waits for `cmdline_show`.
     ///
@@ -1545,7 +1545,6 @@ impl EngineModel {
     /// | `key_round_trips`, `key_round_trips_at` | the readings after them, eight keys later | no: the link is the host's, not the connection's |
     /// | `literal_pending` | the next key, or a batch moving the mode or the cursor | yes, for the same reason |
     /// | `popupmenu` | `popupmenu_hide` | yes |
-    /// | `float_absorption` | the plugin's window dies with the connection | yes |
     /// | `tabline` | the next `tabline_update` | yes |
     /// | `mouse_on` | `mouse_off` | yes |
     /// | `statusline`'s `msg_*` segments | the same event, empty | yes, via [`crate::native::statusline::StatuslineState::forget_engine_segments`] |
@@ -1572,7 +1571,6 @@ impl EngineModel {
         self.literal_pending = false;
         self.popupmenu = None;
         self.grids.forget_grids();
-        let _ = self.float_absorption.forget();
         self.tabline = None;
         self.mouse_on = false;
         self.statusline.forget_engine_segments();
@@ -1616,7 +1614,7 @@ impl EngineModel {
     /// plugins are still loading, and so before the complaints this records
     /// have been raised at all. A window sighted after that is still inside
     /// the startup conflict window (which ends at the first key, click or
-    /// paste) or inside the claimant-complaint grace that outlives it, and
+    /// paste) or inside the complaint grace that outlives it, and
     /// its text still owes the history rather than the stack.
     pub fn record_history_only(&mut self, content: Vec<(u64, String)>) -> Vec<crate::msg::Effect> {
         self.record_message_in_family(
@@ -1741,7 +1739,7 @@ impl EngineModel {
     /// nvim's own UI the user watched them scroll past during startup, and
     /// under view they were raised before there was a UI at all -- so the
     /// obligation is that `<leader>fm` can show them, which is exactly what
-    /// view's claimant notice promises. Toasting them would replay a whole
+    /// view's channel notice promises. Toasting them would replay a whole
     /// launch at the moment the screen settles.
     ///
     /// One entry for the whole launch, never one per line: the history
@@ -1991,8 +1989,8 @@ pub struct ModeState {
     pub modes: Vec<ModeInfo>,
     /// nvim's *cursor-shape* mode, not `mode()`: a plugin that takes
     /// `guicursor` over can leave it standing at a value `mode()` disagrees
-    /// with for the rest of the session (noice holds `replace` at rest on a
-    /// default heavy launch). Safe to key cursor styling on -- that is this
+    /// with for the rest of the session (a heavy default launch holds
+    /// `replace` at rest). Safe to key cursor styling on -- that is this
     /// channel's contract -- and unsafe to gate behavior on; a consumer that
     /// needs the real mode has no accurate channel here today.
     pub current: String,

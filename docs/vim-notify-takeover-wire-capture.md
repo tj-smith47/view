@@ -157,18 +157,53 @@ catch that change.
 verbatim `HOLD_NOTIFY_CHUNK`:
 
 ```lua
-local function notify(msg, level, opts)
-  local chunks =
-    { { msg, level == vim.log.levels.WARN and 'WarningMsg' or nil } }
-  vim.api.nvim_echo(chunks, true, {
-    err = level == vim.log.levels.ERROR,
-    _truncate = opts and opts._truncate,
-  })
+local channel = ...
+local function is_engine_notify(fn)
+  if type(fn) ~= 'function' or type(vim.notify_once) ~= 'function' then
+    return false
+  end
+  if rawequal(fn, rawget(_G, 'view_notify_hold')) then
+    return true
+  end
+  local ok, sink = pcall(debug.getinfo, fn, 'S')
+  local fine, own = pcall(debug.getinfo, vim.notify_once, 'S')
+  return ok and fine and sink ~= nil and own ~= nil
+    and sink.source == own.source
 end
+local function notify_source(fn)
+  local ok, info = pcall(debug.getinfo, fn, 'S')
+  if ok and info ~= nil and info.source ~= nil then
+    return info.source
+  end
+  return tostring(fn)
+end
+local notify = assert(load([[
+local msg, level, opts = ...
+local chunks =
+  { { msg, level == vim.log.levels.WARN and 'WarningMsg' or nil } }
+vim.api.nvim_echo(chunks, true, {
+  err = level == vim.log.levels.ERROR,
+  _truncate = opts and opts._truncate,
+})
+]], '@view (the message area)'))
 _G.view_notify_hold = notify
+local seen = {}
+local function report(held)
+  local source = notify_source(held)
+  if seen[source] then
+    return
+  end
+  seen[source] = true
+  pcall(vim.rpcnotify, channel, 'view_bridge', 'channel_held',
+    'vim.notify', source)
+end
 local function hold()
   if vim.notify ~= notify then
+    local held = vim.notify
     vim.notify = notify
+    if not is_engine_notify(held) then
+      report(held)
+    end
   end
 end
 hold()

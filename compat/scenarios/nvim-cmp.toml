@@ -96,14 +96,15 @@ steps = [
 # The same plugin under view's own defaults, where the completion menu
 # stops being only a semantic question: with `native = {}` view owns the
 # command line, and the pinned cmp draws its cmdline menu on the grid's
-# last rows -- over the palette view painted there. Two menus for one
-# command line is the migration failure this state exists to catch, and
-# view resolves it by taking the plugin's rows rather than by arguing over
-# the rectangle: cmp's own window is hidden, its candidates and its
-# selection are re-rendered as palette rows, and the user completes with
-# the plugin's own logic inside view's chrome. The notice that names the
-# conflict is what a session gets when that cannot be done, so this state
-# asserts the absorption positively and the notice's absence after it.
+# last rows -- over the palette view painted there. view answers that the
+# way it answers every float over a surface it draws: the window keeps
+# drawing, view names it by what the window calls itself, and the notice
+# carries the `view.toml` line that hands the command line back. The
+# `present` state above is that remedy applied, so the pair is what a user
+# reads and what the user does about it.
+#
+# Insert mode is the negative half: nvim's own completion menu rides
+# `ext_popupmenu`, so it is already view's and there is no float to name.
 [[states]]
 name = "unaccommodated"
 accommodations = false
@@ -168,61 +169,43 @@ steps = [
   { send = "p" },
   { send = "r" },
   { send = "e" },
-  # The absorption itself, asked of the engine rather than of the screen:
-  # cmp's menu window exists (so the plugin really did offer candidates for
-  # this cmdline) and carries view's own `hide` flag. "none" here would be
-  # a menu that never opened, which is a different failure from one view
-  # failed to take over, so the two are not collapsed into one needle.
-  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"cmp_menu\" then if vim.api.nvim_win_get_config(w).hide == true then return \"hidden\" end return \"showing\" end end return \"none\" end)()')", expect = "hidden", timeout_ms = 15000 },
-  # And where the rows went: cmp renders every candidate with a kind column
-  # (`Text` for a word from the buffer source -- see the captured rows in
-  # docs/surface-float-wire-capture.md), which is the plugin's own
-  # rendering rather than anything view writes on its own, and the window
-  # that used to draw it is hidden by the step above. The candidate labels
-  # this scenario types into are deliberately not named: cmp-buffer
-  # re-indexes the buffer as the keys land, so how far through one of them a
-  # run has got differs between runs. The word placed by the seeding step is
-  # not one of those -- it is in the buffer before any of this state's keys
-  # are typed, so it is a candidate for `pre` in every run -- and naming it
-  # is the difference between a palette holding cmp's candidates and one
-  # holding rows.
-  # Two needles rather than one: the palette's own header line proves the
-  # box on screen is view's command line and not some other overlay, and the
-  # candidate carries the two-space gutter and kind column cmp itself
-  # rendered (`" prefabricated  Text   "` in the capture), which is also what
-  # parts it from the buffer line reading `prefabricated preflight` on the
-  # same screen.
+  # The window itself, asked of the engine rather than of the screen: cmp's
+  # menu exists (so the plugin really did offer candidates for this
+  # cmdline) and draws. "none" here would be a menu that never opened,
+  # which is a different failure from one view left standing, so the two
+  # are not collapsed into one needle.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"cmp_menu\" then if vim.api.nvim_win_get_config(w).hide == true then return \"hidden\" end return \"showing\" end end return \"none\" end)()')", expect = "showing", timeout_ms = 15000 },
+  # Both boxes on screen at once, which is the whole reading of this state:
+  # view's own command line carrying the query, and cmp's window under it
+  # carrying the candidates it rendered itself. cmp writes every candidate
+  # with a kind column (`Text` for a word from the buffer source -- see the
+  # captured rows in docs/surface-float-wire-capture.md), and the two-space
+  # gutter is what parts that row from the buffer line reading
+  # `prefabricated preflight` on the same screen. The candidate labels this
+  # scenario types into are deliberately not named: cmp-buffer re-indexes
+  # the buffer as the keys land, so how far through one of them a run has
+  # got differs between runs. The word placed by the seeding step is not
+  # one of those -- it is in the buffer before any of this state's keys are
+  # typed, so it is a candidate for `pre` in every run.
   { wait_for = "> :e pre", timeout_ms = 15000 },
   { wait_for = "prefabricated  Text", timeout_ms = 15000 },
-  # A completion menu a user cannot move is a screenshot. `<C-n>` is the
-  # plugin's own cmdline mapping, so the selection is cmp's to make and
-  # view's to show: the marker view puts on a selected palette row appears
-  # on a candidate (every candidate for this prefix starts with it), and
-  # the query line it might otherwise be confused with reads `> :e ...`
-  # rather than `> pre...`.
-  { send = "<C-n>" },
-  { wait_for = "> pre", timeout_ms = 15000 },
-  # With the rows on screen and the window hidden, the conflict notice is
-  # the wrong answer, and this is the state that used to raise it.
-  { assert_absent = "cmp_menu is drawing over" },
-  # noice keeps its own line: this fixture also loads noice, whose claimant
-  # notice covers the same command line, and a claimant naming the surface
-  # it uses is not a float view can absorb.
-  { wait_for = "view: noice.nvim is using the command line", timeout_ms = 5000 },
-  # Nor the anonymous float wording, for the same command line.
+  # And the notice a user reads about it, named by what the window calls
+  # itself and carrying the line that ends the overlap. The `present` state
+  # above is that line applied.
+  { wait_for = "cmp_menu is drawing over the command line", timeout_ms = 15000 },
+  { wait_for = "Set [native] palette = false in view.toml to give it back", timeout_ms = 5000 },
+  # Not the anonymous wording: a window that names itself is named, and
+  # nothing else on this row claims it.
   { assert_absent = "a plugin is drawing over the command line" },
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { assert_absent = "> pre" },
-  # The teardown, asked the only way that can answer it: cmp closes its
-  # cmdline menu from inside its own `CmdlineLeave` handler, with no
-  # `WinClosed` to see it, so what proves the absorption ended is a second
-  # command line opening onto none of the first one's state. A palette that
-  # merely closed would pass the line above and fail here.
+  # The teardown: cmp closes its cmdline menu from inside its own
+  # `CmdlineLeave` handler, so a second command line opening onto none of
+  # the first one's rows is what proves the window went with it.
   #
   # `zqx` is the capture's own no-candidate prefix: cmp opens no window for
-  # it at all, so this palette has nothing of its own to draw and every row
-  # it could show would be the last session's.
+  # it at all, so a kind column on screen here would be the last session's.
   { send = ":" },
   { send = "e" },
   { send = " " },

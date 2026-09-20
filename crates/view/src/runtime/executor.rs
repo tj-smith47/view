@@ -312,14 +312,12 @@ impl<E: EngineOps> Executor<E> {
                     } => self
                         .ops
                         .input_mouse(&button, &action, &modifier, grid.0, row, col),
-                    RpcCall::SetOption { name, value } => self.ops.set_option(&name, &value),
                     RpcCall::HoldOption { name, value } => self.ops.hold_option(&name, &value),
                     RpcCall::HoldWindowOption { name, value } => {
                         self.ops.hold_window_option(&name, &value)
                     }
                     RpcCall::HoldNotify => self.ops.hold_notify(),
                     RpcCall::Notify { text } => self.ops.raise_notice(&text),
-                    RpcCall::DisableClaimants { modules } => self.ops.disable_claimants(&modules),
                     RpcCall::Takeover { steps } => self.ops.takeover(&steps),
                     RpcCall::GetDefaultHl { generation } => self.ops.probe_default_hl(generation),
                     RpcCall::ProbeSwapRecovery { generation } => {
@@ -339,7 +337,6 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::PreviewBuffer { path, generation } => {
                         self.ops.preview_buffer(&path, generation)
                     }
-                    RpcCall::SetFloatHidden { win, hide } => self.ops.set_float_hidden(win, hide),
                     RpcCall::ReadFloatRows { win } => self.ops.read_float_rows(win),
                     RpcCall::CloseFloat { win } => self.ops.close_float(win),
                     RpcCall::ScanFloats => self.ops.scan_floats(),

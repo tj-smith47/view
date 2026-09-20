@@ -422,15 +422,7 @@ impl SpecSession {
                 }
             },
         )?;
-        let released = fold_expiry(&mut self.model, now);
-        if !released.is_empty() {
-            pump_rpc(
-                &self.engine.handle,
-                &mut self.model,
-                released,
-                |_model, _effects| {},
-            )?;
-        }
+        fold_expiry(&mut self.model, now);
         Ok(())
     }
 
@@ -655,16 +647,8 @@ impl SpecSession {
         let events = self.pump.take_damage();
         if events.is_empty() {
             let now = self.now();
-            let released = fold_expiry(&mut self.model, now);
-            if released.is_empty() {
-                return Ok(());
-            }
-            pump_rpc(
-                &self.engine.handle,
-                &mut self.model,
-                released,
-                |_model, _effects| {},
-            )
+            fold_expiry(&mut self.model, now);
+            Ok(())
         } else {
             self.apply(events)
         }

@@ -137,35 +137,13 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
             Some(Msg::EscapeTimeout(Duration::from_millis(within)))
         }
         "float" => decode_float_observed(params),
-        // the whole answer is the one array argument, and an empty one is a
-        // real answer -- "none of them loaded" is what releases the startup
-        // hold, so a session that loaded nothing must reach `update` too
-        "claimants" => Some(Msg::ClaimantsProbed(
-            first
-                .as_array()?
-                .iter()
-                .filter_map(|name| name.as_str().map(str::to_owned))
-                .collect(),
-        )),
-        // the hand-back's late pass, sent only when a claimant that loaded
-        // after the takeover actually turned itself off: the takeover's own
-        // answer names only what was loaded when it went out, and a
-        // lazy-loaded plugin is asked by the autocommands the chunk leaves
-        // behind (`DISABLE_CLAIMANTS_CHUNK`)
-        "handed_back" => Some(Msg::ClaimantsHandedBack {
-            modules: first
-                .as_array()?
-                .iter()
-                .filter_map(|name| name.as_str().map(str::to_owned))
-                .collect(),
-        }),
         // one window-local channel of a surface view owns found holding
         // something else, sent as the hold sets it back
         "channel_held" => Some(Msg::ChannelHeld {
             channel: first.as_str()?.to_owned(),
             holder: rest.first()?.as_str()?.to_owned(),
         }),
-        // the probe's re-reading of `vim.notify`, sent only when the answer
+        // the idle re-reading of `vim.notify`, sent only when the answer
         // changed: the takeover's own reading is taken before the UI
         // attaches, so a notifier a config installs on `UIEnter` is one
         // only this event can report
@@ -381,15 +359,11 @@ pub(super) struct TakeoverReading {
     pub(super) colon_mapped: bool,
     pub(super) messages: String,
     pub(super) foreign_notifier: bool,
-    /// The modules whose own `disable` ran, which is what lets a notice
-    /// say whether the ask took rather than only that the plugin is
-    /// loaded.
-    pub(super) handed_back: Vec<String>,
 }
 
 /// Decodes the takeover's one reply: the claims under `claims`, the startup
-/// messages under `messages`, the `vim.notify` reading under
-/// `foreign_notifier`, and the hand-back's own answer under `disabled`.
+/// messages under `messages`, and the `vim.notify` reading under
+/// `foreign_notifier`.
 ///
 /// Any key absent is the honest answer for that part alone -- a session
 /// that registered no mappings, a startup that said nothing, a reading a
@@ -412,15 +386,6 @@ pub(super) fn decode_takeover_reply(result: &Value) -> TakeoverReading {
         foreign_notifier: crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_NOTIFIER_KEY)
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        handed_back: crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_DISABLED_KEY)
-            .and_then(Value::as_array)
-            .map(|names| {
-                names
-                    .iter()
-                    .filter_map(|name| name.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default(),
     }
 }
 
@@ -538,39 +503,26 @@ pub(super) fn decode_preview_reply(result: &Value) -> (bool, Vec<String>) {
     (true, lines)
 }
 
-/// Decodes an absorbed float's `hidden`/`lines`/`selected` keys, in the
-/// shape `crate::nvim_api::READ_FLOAT_ROWS_CHUNK` returns them.
+/// Decodes a withheld float's `lines` key, in the shape
+/// `crate::nvim_api::READ_FLOAT_ROWS_CHUNK` returns it.
 ///
-/// `selected` is the chunk's own zero-based row or `-1` for "the menu is
-/// open and nothing in it is selected", which is what the captured menu
-/// expresses by leaving `cursorline` off
-/// (`docs/surface-float-wire-capture.md`); a negative or absent value is
-/// therefore `None` rather than row zero.
-///
-/// A non-map or malformed `result` degrades to `(false, [], None)` -- the
-/// same "absent or malformed is exactly as informative as an explicit
-/// false" precedent `decode_preview_reply` follows, and the safe direction
-/// here: `hidden = false` is what makes the caller stop absorbing rather
-/// than paint rows it cannot vouch for.
-pub(super) fn decode_float_rows_reply(result: &Value) -> (bool, Vec<String>, Option<usize>) {
+/// A non-map or malformed `result` degrades to no lines -- the same
+/// "absent or malformed is exactly as informative as an explicit false"
+/// precedent `decode_preview_reply` follows, and the safe direction here:
+/// a float whose text view cannot read is one view gives back to the
+/// screen.
+pub(super) fn decode_float_rows_reply(result: &Value) -> Vec<String> {
     let Some(pairs) = result.as_map() else {
-        return (false, Vec::new(), None);
+        return Vec::new();
     };
-    let hidden = crate::wire::map_find(pairs, "hidden")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let lines = crate::wire::map_find(pairs, "lines")
+    crate::wire::map_find(pairs, "lines")
         .and_then(Value::as_array)
         .map(|rows| {
             rows.iter()
                 .filter_map(|v| v.as_str().map(str::to_owned))
                 .collect()
         })
-        .unwrap_or_default();
-    let selected = crate::wire::map_find(pairs, "selected")
-        .and_then(Value::as_i64)
-        .and_then(|row| usize::try_from(row).ok());
-    (hidden, lines, selected)
+        .unwrap_or_default()
 }
 
 /// Decodes a rename reply's `ok` key, live-verified against a real `nvim

@@ -3,12 +3,14 @@
 # three. The child's whole startup runs against the UI nvim's own TUI
 # reports, so noice sets itself up exactly as it does under `nvim` -- its
 # health check has nothing to refuse and its three ext_* errors are never
-# raised -- and view settles the conflict at the attach instead, by calling
-# noice's own `disable` before it installs anything of its own. The fixture
-# therefore runs noice as its README configures it, and the default states
-# assert what a user is left with: one renderer per surface, one notice
-# naming the plugin view asked to turn itself off, and nothing of noice's
-# on screen.
+# raised -- and view settles the conflict at the channel instead: it holds
+# `vim.notify` at the engine default and reports the function it set back,
+# which is the one notice a defaults user reads. noice keeps running, and
+# what it draws through the surfaces view detached reaches nobody. The
+# fixture therefore runs noice as its README configures it, and the default
+# states assert what a user is left with: one renderer per surface, one
+# notice naming the channel and what stood in it, and nothing of noice's on
+# screen.
 #
 # `notifications` takes two things: the attach, and `vim.notify` itself.
 # The attach -- `palette = false` detaches ext_cmdline and ext_popupmenu,
@@ -52,22 +54,21 @@ native = {}
 steps = [
   { wait_for_probe = "luaeval('package.loaded.noice ~= nil')", expect = "true", timeout_ms = 180000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
-  # What a defaults user must see: view's own single notice, carrying what
-  # view did about the conflict and the exact keys that undo it. One needle
-  # per row because the notice is four rows -- the message layer clips at
-  # the grid's width less two rather than wrapping. Each row of that notice
-  # has to be covered by a needle here, which
+  # What a defaults user must see: view's own single notice, carrying the
+  # channel that was taken, what stood in it, and the exact line that undoes
+  # it. One needle per row because the notice is four rows -- the message
+  # layer clips at the grid's width less two rather than wrapping. Each row
+  # of that notice has to be covered by a needle here, which
   # `every_compat_needle_is_a_row_view_still_writes` grades: these are a
   # copy of view's own wording, and nothing else read it back.
-  { wait_for = "noice.nvim is using the command line and the message area", timeout_ms = 30000 },
-  { wait_for = "view asked noice.nvim to turn itself off at startup, and it did", timeout_ms = 5000 },
-  { wait_for = "Set [native] palette = false and [native] notifications = false", timeout_ms = 5000 },
-  { wait_for = "in view.toml to give them back", timeout_ms = 5000 },
+  { wait_for = "vim.notify was drawing the message area, which view owns", timeout_ms = 30000 },
+  { wait_for = "It was set to", timeout_ms = 5000 },
+  { wait_for = "Set [native] notifications = false in view.toml to give it back", timeout_ms = 5000 },
   { wait_for = "Startup messages from this launch are in the history", timeout_ms = 5000 },
-  # The notice's middle row, asked of noice rather than read off the screen:
-  # view's takeover calls `require("noice").disable()` at VimEnter, which is
-  # what leaves one renderer on each of these surfaces instead of two.
-  { wait_for_probe = "luaeval('(function() if package.loaded[\"noice\"] == nil then return \"unloaded\" end if require(\"noice.config\").is_running() then return \"running\" end return \"off\" end)()')", expect = "off", timeout_ms = 30000 },
+  # What view does about the conflict, asked of noice rather than read off
+  # the screen: the plugin is left running, and the channel it wrote is the
+  # only thing view sets back.
+  { wait_for_probe = "luaeval('(function() if package.loaded[\"noice\"] == nil then return \"unloaded\" end if require(\"noice.config\").is_running() then return \"running\" end return \"off\" end)()')", expect = "running", timeout_ms = 30000 },
   # And what the launch cost the user, which is nothing: the startup ran
   # against the UI nvim's own TUI reports, so noice's health check was never
   # shown a GUI to refuse and raised none of its three ext_* errors. Asked of
@@ -77,15 +78,15 @@ steps = [
   { probe = "luaeval('(function() local ok, n = pcall(require, \"notify\") if not ok then return \"no-mod\" end for _, rec in ipairs(n.history()) do for _, line in ipairs(rec.message or {}) do if line:find(\"work when the GUI has\", 1, true) then return \"raised\" end end end return \"absent\" end)()')", expect = "absent" },
   { assert_absent = "Noice can't work when the GUI has" },
   # The fourth error, the one noice's 1 s health checker raises about view
-  # holding `vim.notify`: the checker runs only while `is_running()`, so
-  # turning the plugin off is what ends that too.
+  # holding `vim.notify`: it names the channel view took, so view reads it
+  # as the holder's own account of a conflict it has already reported and
+  # files it in the history under the notice above.
   { assert_absent = "has been overwritten by another plugin" },
   # No float at all on this launch -- there is nothing for view's float
   # detector to sight, so the one box the user is left reading is the
   # notice above and nothing is composed beside it.
   { wait_for_probe = "luaeval('(function() local n = 0 for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.api.nvim_win_get_config(w).relative ~= \"\" then n = n + 1 end end return tostring(n) end)()')", expect = "0", timeout_ms = 30000 },
   { assert_absent = "a plugin is drawing over" },
-  { assert_absent = "view: noice is drawing over" },
   # And the history the notice's own last row points at is one key away,
   # holding what view recorded of this launch. The generous timeout is for
   # the overlay's title row specifically: view's own startup handover toasts
@@ -109,13 +110,13 @@ steps = [
   # ext_popupmenu rides the same default attach; nothing else in the suite
   # asserts it ON, so a dropped attach flag would fail nothing without this.
   { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_popupmenu == true)')", expect = "true" },
-  # noice defers its real setup until after VimEnter, and view's takeover
-  # turns it off from inside the same VimEnter: the module is loaded, its
-  # router is not running, and the surfaces it renders are view's alone.
+  # noice defers its real setup until after VimEnter, and view detaches the
+  # surfaces it renders from inside the same VimEnter: the module is loaded,
+  # its router is running, and what it renders reaches no grid.
   # Generous timeout: the first heavy scenario to run on a cold shared
   # cache pays for the full plugin clone before any plugin can load.
   { wait_for_probe = "luaeval('package.loaded.noice ~= nil')", expect = "true", timeout_ms = 180000 },
-  { wait_for_probe = "luaeval('(function() if package.loaded[\"noice\"] == nil then return \"unloaded\" end if require(\"noice.config\").is_running() then return \"running\" end return \"off\" end)()')", expect = "off", timeout_ms = 30000 },
+  { wait_for_probe = "luaeval('(function() if package.loaded[\"noice\"] == nil then return \"unloaded\" end if require(\"noice.config\").is_running() then return \"running\" end return \"off\" end)()')", expect = "running", timeout_ms = 30000 },
   # A cold install leaves lazy.nvim's own window holding input focus until
   # the fixture's LazyDone autocmd closes it; a keystroke sent before that
   # lands in the install window instead of the buffer.
@@ -126,10 +127,9 @@ steps = [
   # presence says nothing about who drew it on its own.
   { wait_for = "noice-compat-marker", timeout_ms = 15000 },
   # Who drew it, read from noice: view holds vim.notify at the engine
-  # default behind a hand-back that turned the router off, so noice
-  # receives this call on neither path and its own manager history never
-  # records it. The deferred state below runs the identical probe against
-  # a session that took none of noice's surfaces and reads "routed".
+  # default, so the call reaches nvim's own echo and noice's router never
+  # sees it. The deferred state below runs the identical probe against a
+  # session that took none of noice's surfaces and reads "routed".
   { probe = "luaeval('(function() local ok, m = pcall(require, \"noice.message.manager\") if not ok then return \"no-mod\" end local msgs = m.get({ event = \"notify\" }, { history = true }) for _, msg in ipairs(msgs) do if tostring(msg:content()):find(\"noice%-compat%-marker\") then return \"routed\" end end return \"absent\" end)()')", expect = "absent" },
   # Generous for the same reason as the unaccommodated state's own read of
   # this title: the toast stack standing over the overlay's top border
@@ -169,7 +169,7 @@ steps = [
   { probe = "luaeval('tostring(vim.o.cmdheight)')", expect = "0" },
   # The remedy's whole point: neither complaint survives it.
   { assert_absent = "Noice can't work when the GUI has" },
-  { assert_absent = "noice.nvim is using the command line" },
+  { assert_absent = "vim.notify was drawing the message area" },
   { send = ":lua vim.notify('noice-compat-marker')<CR>" },
   { wait_for = "noice-compat-marker", timeout_ms = 15000 },
   { wait_for_probe = "luaeval('(function() local ok, m = pcall(require, \"noice.message.manager\") if not ok then return \"no-mod\" end local msgs = m.get({ event = \"notify\" }, { history = true }) for _, msg in ipairs(msgs) do if tostring(msg:content()):find(\"noice%-compat%-marker\") then return \"routed\" end end return \"absent:\" .. #msgs end)()')", expect = "routed", timeout_ms = 10000 },

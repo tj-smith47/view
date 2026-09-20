@@ -112,13 +112,13 @@ enum Waiter {
     /// happened before this one, and the claim report is the first thing
     /// this session says about itself.
     Takeover,
-    /// The arming of the surface-claimant probe (see
-    /// [`EngineHandle::probe_claimants`]): a request rather than a notify
+    /// The arming of the `vim.notify` reading (see
+    /// [`EngineHandle::read_notify_sink`]): a request rather than a notify
     /// only so that a chunk that fails to arm is heard. Its success reply
-    /// carries nothing -- the readings arrive as `view_bridge` `claimants`
-    /// notifications -- so only an error reply is routed, as
-    /// `Msg::ClaimantsProbed` naming nobody.
-    ClaimantsProbe,
+    /// carries nothing -- the readings arrive as `view_bridge`
+    /// `notify_sink` notifications -- so only an error reply is routed, as
+    /// `Msg::NotifySinkRead` answering "nvim's own echo".
+    NotifySinkProbe,
     /// An async read of what this engine recovered while starting (see
     /// [`EngineHandle::probe_swap_recovery`]): nothing is blocked on this
     /// `msgid`, so its `Response` is decoded and routed to `pump` as
@@ -672,24 +672,23 @@ impl EngineHandle {
                                         claimed: reading.claimed,
                                         colon_mapped: reading.colon_mapped,
                                     });
-                                    pump.route_claimants_handed_back(Msg::ClaimantsHandedBack {
-                                        modules: reading.handed_back,
-                                    });
                                 }
                             }
-                            Some(Waiter::ClaimantsProbe) => {
+                            Some(Waiter::NotifySinkProbe) => {
                                 if let Some(pump) = &reader_pump {
-                                    // an error reply degrades to "nothing
-                                    // loaded": the chunk never armed, so no
+                                    // an error reply degrades to "nvim's own
+                                    // echo": the chunk never armed, so no
                                     // reading will ever come, and view holds
                                     // floats off the screen until this
                                     // question is answered -- an unanswered
-                                    // probe would leave a plugin's window
-                                    // withheld for the life of the engine.
-                                    // A success reply carries nothing the
+                                    // arming would leave a window withheld
+                                    // for the life of the engine. A success
+                                    // reply carries nothing the
                                     // notifications do not
                                     if error != Value::Nil {
-                                        pump.route_claimants(Msg::ClaimantsProbed(Vec::new()));
+                                        pump.route_notify_sink(Msg::NotifySinkRead {
+                                            foreign: false,
+                                        });
                                     }
                                 }
                             }
@@ -837,26 +836,19 @@ impl EngineHandle {
                             }
                             Some(Waiter::FloatRows { win }) => {
                                 if let Some(pump) = &reader_pump {
-                                    // an error reply degrades to "not
-                                    // hidden, no rows", the same "safe
-                                    // default" precedent every async reply
-                                    // here follows -- and the safe direction
-                                    // for this one specifically: view stops
-                                    // absorbing a float it could not read
-                                    // and says so, rather than painting
-                                    // rows it does not have under a menu it
-                                    // cannot prove it hid
-                                    let (hidden, lines, selected) = if error == Value::Nil {
+                                    // an error reply degrades to "no
+                                    // rows", the same "safe default"
+                                    // precedent every async reply here
+                                    // follows -- and the safe direction for
+                                    // this one specifically: a float whose
+                                    // rows view could not read is given back
+                                    // to the screen rather than held off it
+                                    let lines = if error == Value::Nil {
                                         decode_float_rows_reply(&result)
                                     } else {
-                                        (false, Vec::new(), None)
+                                        Vec::new()
                                     };
-                                    pump.route_float_rows(Msg::FloatRows {
-                                        win,
-                                        hidden,
-                                        lines,
-                                        selected,
-                                    });
+                                    pump.route_float_rows(Msg::FloatRows { win, lines });
                                 }
                             }
                             Some(Waiter::Rename { generation }) => {
@@ -977,16 +969,6 @@ impl EngineHandle {
                                     // notices belong
                                     Some(msg @ Msg::NotifySinkRead { .. }) => {
                                         pump.route_notify_sink(msg);
-                                    }
-                                    // and the same for the hand-back's late
-                                    // pass: one report per claimant that
-                                    // loads after the takeover and turns
-                                    // itself off, and nothing recomputes
-                                    // one. Dropped, the notice standing on
-                                    // screen goes on saying the ask never
-                                    // reached a plugin that took it
-                                    Some(msg @ Msg::ClaimantsHandedBack { .. }) => {
-                                        pump.route_claimants_handed_back(msg);
                                     }
                                     Some(msg) => {
                                         let _ = pump.route_msg(msg);
@@ -1774,8 +1756,8 @@ impl EngineHandle {
         self.request_async(method, params, Waiter::AiFs { request_id, write })
     }
 
-    /// Issues `method`/`params` as the arming of the surface-claimant probe
-    /// (see [`Waiter::ClaimantsProbe`]). Async on the same terms as
+    /// Issues `method`/`params` as the arming of the `vim.notify` reading
+    /// (see [`Waiter::NotifySinkProbe`]). Async on the same terms as
     /// [`request_probe`](Self::request_probe): nothing blocks on it, and
     /// only a failure to arm is routed anywhere.
     ///
@@ -1783,12 +1765,12 @@ impl EngineHandle {
     ///
     /// Returns `EngineError::Closed` if the connection is already closed or
     /// the writer thread has already exited.
-    pub fn request_claimants_probe(
+    pub fn request_notify_sink_read(
         &self,
         method: &str,
         params: Vec<Value>,
     ) -> Result<(), EngineError> {
-        self.request_async(method, params, Waiter::ClaimantsProbe)
+        self.request_async(method, params, Waiter::NotifySinkProbe)
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded
@@ -2631,64 +2613,31 @@ mod tests {
     }
 
     #[test]
-    fn decode_float_rows_reply_carries_the_hide_flag_lines_and_selection() {
-        // the capture's own menu, one `<C-n>` in:
-        // docs/surface-float-wire-capture.md records the buffer lines as
-        // rendered rows (abbreviation and kind column included) and the
-        // selection as the window cursor's row, which the chunk sends
-        // zero-based
-        let result = Value::Map(vec![
-            (Value::from("hidden"), Value::from(true)),
-            (
-                Value::from("lines"),
-                Value::Array(vec![
-                    Value::from(" preflight      Text   "),
-                    Value::from(" prefabricated  Text   "),
-                ]),
-            ),
-            (Value::from("selected"), Value::from(1)),
-        ]);
+    fn decode_float_rows_reply_carries_the_lines() {
+        // the capture's own float, as
+        // docs/surface-float-wire-capture.md records its buffer lines
+        let result = Value::Map(vec![(
+            Value::from("lines"),
+            Value::Array(vec![
+                Value::from(" preflight      Text   "),
+                Value::from(" prefabricated  Text   "),
+            ]),
+        )]);
         assert_eq!(
             decode_float_rows_reply(&result),
-            (
-                true,
-                vec![
-                    " preflight      Text   ".to_string(),
-                    " prefabricated  Text   ".to_string()
-                ],
-                Some(1)
-            )
+            vec![
+                " preflight      Text   ".to_string(),
+                " prefabricated  Text   ".to_string()
+            ]
         );
     }
 
     #[test]
-    fn decode_float_rows_reply_reads_the_menus_no_selection_sentinel() {
-        // `cursorline = false` is the captured menu's "open, nothing
-        // selected" state, which the chunk sends as -1 rather than as an
-        // absent key
-        let result = Value::Map(vec![
-            (Value::from("hidden"), Value::from(true)),
-            (
-                Value::from("lines"),
-                Value::Array(vec![Value::from(" pre ")]),
-            ),
-            (Value::from("selected"), Value::from(-1)),
-        ]);
-        assert_eq!(
-            decode_float_rows_reply(&result),
-            (true, vec![" pre ".to_string()], None)
-        );
-    }
-
-    #[test]
-    fn decode_float_rows_reply_degrades_a_reply_it_cannot_read_to_not_hidden() {
-        // "not hidden" is the degrade that yields the surface back and
-        // raises the notice, so a reply this decoder cannot read can never
-        // be read as permission to paint somebody else's rows
-        assert_eq!(
-            decode_float_rows_reply(&Value::Nil),
-            (false, Vec::new(), None)
-        );
+    fn decode_float_rows_reply_degrades_a_reply_it_cannot_read_to_no_lines() {
+        // no lines is the degrade that gives the window back and raises the
+        // notice, so a reply this decoder cannot read can never be read as
+        // an account of what that window was drawing
+        assert_eq!(decode_float_rows_reply(&Value::Nil), Vec::<String>::new());
     }
 
     #[test]
@@ -3201,16 +3150,15 @@ mod tests {
 
     /// The arming is a request so that a chunk which never armed is heard:
     /// nothing else on the wire says so -- an error inside `nvim_exec_lua`
-    /// reaches neither `:messages` nor `v:errmsg` -- and view holds a
-    /// superseded claimant's floats off the screen until this question is
-    /// answered.
+    /// reaches neither `:messages` nor `v:errmsg` -- and view holds a float
+    /// off the screen until this question is answered.
     #[test]
-    fn an_error_arming_the_claimant_probe_answers_that_nobody_loaded() {
+    fn an_error_arming_the_sink_reading_answers_that_nobody_stands_there() {
         let (h, pump, peer_read, mut peer_write) = pumped_peer();
         let (tx, rx) = mpsc::sync_channel(64);
         let _dpump = pump.attach_sink(tx);
 
-        h.probe_claimants(7).unwrap();
+        h.read_notify_sink(7).unwrap();
         let mut r = std::io::BufReader::new(peer_read);
         let v = rmpv::decode::read_value(&mut r).unwrap();
         let RpcMessage::Request { msgid, method, .. } = RpcMessage::from_value(v).unwrap() else {
@@ -3229,18 +3177,19 @@ mod tests {
         let msg = rx
             .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
             .unwrap();
-        let Msg::ClaimantsProbed(loaded) = msg else {
-            unreachable!("expected ClaimantsProbed, got {msg:?}");
+        let Msg::NotifySinkRead { foreign } = msg else {
+            unreachable!("expected NotifySinkRead, got {msg:?}");
         };
         assert!(
-            loaded.is_empty(),
-            "a probe that never armed loaded nobody: {loaded:?}"
+            !foreign,
+            "a reading that never armed found nobody standing there"
         );
 
-        // and a success reply carries nothing the `claimants` notifications
-        // do not: routing one would answer the probe before the readings
-        // arrive, which is the same wrong answer with better manners
-        h.probe_claimants(7).unwrap();
+        // and a success reply carries nothing the `notify_sink`
+        // notifications do not: routing one would answer the reading before
+        // it has been taken, which is the same wrong answer with better
+        // manners
+        h.read_notify_sink(7).unwrap();
         let v = rmpv::decode::read_value(&mut r).unwrap();
         let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
             unreachable!("expected a Request");
@@ -3255,7 +3204,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         assert!(
             rx.try_recv().is_err(),
-            "an armed probe answers with its readings, not with its ack"
+            "an armed reading answers with its own notification, not with its ack"
         );
     }
 

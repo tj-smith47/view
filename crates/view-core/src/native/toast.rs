@@ -58,7 +58,7 @@ pub enum StartupHold {
     /// released onto the stack.
     #[default]
     Pending,
-    /// A claimant was found and named, so the parked messages stay in the
+    /// A held channel was found, so the parked messages stay in the
     /// history and the ones still arriving from the same startup join them.
     /// The notice standing on screen is what explains where they went.
     Collapsed,
@@ -79,7 +79,7 @@ impl StartupHold {
 /// What resolving the startup hold does with what it parked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HoldOutcome {
-    /// A claimant is named on screen: the parked messages stay in the
+    /// A channel notice is on screen: the parked messages stay in the
     /// history ring, reachable from the message-history overlay, and the
     /// hold keeps parking until the first keypress so a late complaint from
     /// the same startup lands beside them rather than on top of the notice.
@@ -97,7 +97,7 @@ pub enum HoldOutcome {
 /// Four classes are never parked, and the last is what keeps the collapse
 /// honest. Persistent kinds, prompts and statusline kinds are excluded by
 /// construction -- [`route`] never calls them `Transient` -- and view's own
-/// notices are excluded here: view is not a claimant and never speaks in
+/// notices are excluded here: view is not a foreign holder and never speaks in
 /// one's name, so a broken-config line, a startup key-buffer warning or any
 /// other line view raises about itself paints immediately, conflict or no
 /// conflict. Without that a config typo the user needs to see would be

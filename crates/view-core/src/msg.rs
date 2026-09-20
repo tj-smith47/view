@@ -297,7 +297,7 @@ pub enum Msg {
     /// read by the takeover ([`RpcCall::Takeover`]) after every step has
     /// run -- so it reports the sink the hand-back actually left, not the
     /// one the session started with -- and re-read at every idle
-    /// transition by the claimant probe, which is what sees a notifier a
+    /// transition by the message area's own channel reading, which is what sees a notifier a
     /// config installs on `UIEnter`, after the takeover has answered.
     ///
     /// What it decides: whether view's own notices are spoken through that
@@ -410,53 +410,25 @@ pub enum Msg {
     /// The only way a closed float is observable. A window that goes away
     /// notifies nothing, and a scan that finds no floats sends nothing, so
     /// without a marker the wire cannot distinguish "the menu closed" from
-    /// "no scan has run since". With one, a claimant missing from a
-    /// completed walk is a claimant whose float is gone, which is what
+    /// "no scan has run since". With one, a holder missing from a
+    /// completed walk is a holder whose float is gone, which is what
     /// retires the notice about it (`update::surface_conflict`).
     FloatSweep,
-    /// The decoded answer to one [`RpcCall::ReadFloatRows`]: what a float
-    /// view is absorbing was drawing, and whether it is still hidden.
+    /// The decoded answer to one [`RpcCall::ReadFloatRows`]: the lines a
+    /// withheld float was drawing.
     ///
     /// Correlated on `win` rather than tagged with a generation. The window
-    /// handle is the correlation the absorption is already keyed on, and it
-    /// is stable for exactly as long as the absorption is (the capture
-    /// measures one id reused across a cmdline session and never across
-    /// two); a reply that outlives its own absorption names a window
-    /// `FloatAbsorption` no longer holds and is dropped there.
-    ///
-    /// `hidden` is read *after* the hide this reply follows, so a `false`
-    /// here is the engine saying the hide did not land -- an older engine
-    /// that does not take the flag, or a plugin that put the window back --
-    /// and view stops absorbing that float rather than painting its rows
-    /// underneath a menu that is still on screen.
+    /// handle is the correlation the withholding is already keyed on, and
+    /// it is stable for exactly as long as that is (the capture measures
+    /// one id reused across a cmdline session and never across two); a
+    /// reply that outlives its own claim names a window nothing holds and
+    /// is dropped where it arrives.
     FloatRows {
         /// The window the rows came off.
         win: u64,
-        /// Whether that window's `hide` flag was set when they were read.
-        hidden: bool,
-        /// Its buffer's lines, top to bottom, as the plugin rendered them.
+        /// Its buffer's lines, top to bottom, as the holder rendered them.
         lines: Vec<String>,
-        /// Which row it was showing as selected, or `None` for none.
-        selected: Option<usize>,
     },
-    /// The claimant probe's answer: the Lua module names from
-    /// [`SURFACE_CLAIMANTS`](crate::native::surfaces::SURFACE_CLAIMANTS)
-    /// that `package.loaded` reported present.
-    ///
-    /// Arrives at every idle transition whose reading is news -- the first
-    /// one, and any later one that found a module the earlier readings had
-    /// not -- so a lazily-loaded claimant is answered for whenever it
-    /// actually loads. Off the paint path, and about no plugin private:
-    /// `package.loaded` is the public module registry.
-    ///
-    /// The first of the three triggers that resolve the startup hold, and
-    /// the only one that can collapse it. The *hold* is what a late answer
-    /// cannot recover: a first reading naming nobody releases it, so a
-    /// claimant loading after that finds the collapse window closed and its
-    /// messages have already toasted. The notice still arrives, which is the
-    /// obligation; the hold was only ever the anti-flash mechanism for the
-    /// claimant that loaded eagerly.
-    ClaimantsProbed(Vec<String>),
     /// One channel of a surface view owns was found holding something other
     /// than the value view keeps it at, and has been set back.
     ///
@@ -473,18 +445,6 @@ pub enum Msg {
         /// config left there.
         holder: String,
     },
-    /// The hand-back step's own answer, carried out of the same takeover
-    /// reply as [`Msg::MappingsClaimed`]: the claimant modules whose own
-    /// `disable` ran.
-    ///
-    /// What it settles is the wording of the claimant notice, which
-    /// otherwise has only the probe's later reading to go on -- and a
-    /// plugin that turned itself off exactly as asked is still in
-    /// `package.loaded`, so that reading alone reports a success as a
-    /// failure.
-    ClaimantsHandedBack {
-        modules: Vec<String>,
-    },
     /// The startup hold's deadline elapsed
     /// ([`Effect::ScheduleStartupHold`]) with no probe answer. Releases the
     /// hold, which is what makes an engine that never answers degrade to
@@ -500,9 +460,9 @@ pub enum Msg {
     StartupHoldExpired {
         generation: u64,
     },
-    /// The claimant-complaint grace elapsed
+    /// The complaint grace elapsed
     /// ([`Effect::ScheduleComplaintGrace`]). After this a complaint a named
-    /// claimant raises over the message area is left standing like any
+    /// holder raises over the message area is left standing like any
     /// other window the session is holding.
     ///
     /// `generation` is gated on the same terms as
@@ -1402,7 +1362,7 @@ pub enum Effect {
         after: Duration,
         generation: u64,
     },
-    /// Arms the claimant-complaint grace's deadline: after `after` elapses
+    /// Arms the complaint grace's deadline: after `after` elapses
     /// the timer worker sends [`Msg::ComplaintGraceExpired`] into the loop.
     /// The same one-shot thread and the same shape as
     /// [`Effect::ScheduleStartupHold`], for the same reason -- `update()`
@@ -1410,7 +1370,7 @@ pub enum Effect {
     ///
     /// The degrade when a runtime or harness drops this effect is stated
     /// rather than hidden: the grace never closes, so a float a named
-    /// claimant draws over the message area is taken down for the rest of
+    /// holder draws over the message area is taken down for the rest of
     /// that engine's life whenever its rows read as a complaint about the
     /// surfaces view took.
     ///
@@ -1607,7 +1567,7 @@ pub enum Effect {
     },
 }
 
-/// The value side of [`RpcCall::SetOption`] and [`RpcCall::HoldOption`],
+/// The value side of [`RpcCall::HoldOption`] and its window-local twin,
 /// spelled in Rust's own scalar types so `view-core` stays free of `rmpv`:
 /// the crate that speaks the wire maps each variant onto a msgpack value.
 ///
@@ -1765,37 +1725,18 @@ pub enum RpcCall {
         row: u16,
         col: u16,
     },
-    /// Sets one nvim option to `value` via `nvim_set_option_value`, the
-    /// non-interactive channel every option change view makes on the user's
-    /// behalf rides.
-    ///
-    /// Never `Input`: that variant shares one stream with startup's
-    /// buffered-key replay and with live typeahead, so an ex-command
-    /// interleaved into it lands wherever the session's mode happens to be
-    /// at that instant. A user left in insert mode by replayed keys would
-    /// get `:set laststatus=0` typed into their buffer rather than applied
-    /// to their session. An API call carries no mode dependency at all.
-    ///
-    /// Fire-and-forget like every other `RpcCall`, and reversible by
-    /// construction: nothing here writes to the user's config, so the
-    /// option returns to whatever that config set the moment the feature
-    /// that asked for it is turned off and the session is restarted.
-    SetOption {
-        name: String,
-        value: OptionValue,
-    },
     /// Sets one nvim option to `value` and keeps it there for the rest of
-    /// the session: the durable form of [`SetOption`](Self::SetOption), for
-    /// a surface view has taken over from a plugin that is still running.
+    /// the session, for a surface view has taken over from a renderer that
+    /// is still running.
     ///
-    /// A one-shot write is not enough for a takeover. A plugin that owns a
-    /// surface re-asserts its own option on its own events -- lualine
-    /// re-runs `setup()` on `ColorScheme` and on `OptionSet background`,
-    /// and that `setup()` sets `laststatus` back (observed live against the
-    /// compat harness's heavy fixture: `laststatus` returned to `2` on the
-    /// first `:colorscheme` after a plain set to `0`). Nothing about that
-    /// fails loudly: view would go on drawing a status line it no longer
-    /// owned, over the one nvim had resumed drawing.
+    /// A one-shot write is not enough for a takeover. A renderer that owns
+    /// a surface re-asserts its own option on its own events -- a
+    /// status-line config re-running its setup on `ColorScheme` and on
+    /// `OptionSet background` sets `laststatus` back (observed live against
+    /// the compat harness's heavy fixture: `laststatus` returned to `2` on
+    /// the first `:colorscheme` after a plain set to `0`). Nothing about
+    /// that fails loudly: view would go on drawing a status line it no
+    /// longer owned, over the one nvim had resumed drawing.
     ///
     /// Reversible on exactly the same terms as every other call here: the
     /// hold is session state, never a config edit, so it is gone the moment
@@ -1837,11 +1778,11 @@ pub enum RpcCall {
     /// toasts rather than as a float composited over view's chrome.
     ///
     /// The takeover has to hold for the same reason [`HoldOption`](Self::HoldOption)
-    /// does, and rather more urgently: nvim-notify's own documented setup is
-    /// `vim.notify = require('notify')`, and noice patches the function from
-    /// its deferred load, which runs after `VimEnter` -- after the point a
-    /// plan is applied. A one-shot assignment is therefore overwritten by
-    /// the plugin in the ordinary case, not the exotic one.
+    /// does, and rather more urgently: a notifier's documented setup
+    /// assigns the global directly, and a config can patch it again from a
+    /// deferred load, which runs after `VimEnter` -- after the point a plan
+    /// is applied. A one-shot assignment is overwritten in the ordinary
+    /// case.
     ///
     /// Carries no payload: what the function is re-pointed *at* is the
     /// engine's own default behaviour, which `view-engine` reproduces from a
@@ -1864,10 +1805,8 @@ pub enum RpcCall {
     /// traffic view still has to place, and a handed-back session places it
     /// where the user's own notifications go rather than in a toast stack
     /// painted over the notifier drawing them. What that sink is has
-    /// already been settled by the hand-back
-    /// ([`DisableClaimants`](Self::DisableClaimants)) -- nvim-notify where
-    /// the config loaded it, nvim's own echo otherwise -- so this carries
-    /// text and no opinion about the renderer.
+    /// already been settled by the session's own `vim.notify`, so this
+    /// carries text and no opinion about the renderer.
     ///
     /// One severity for every notice, the engine's `INFO`, because view's
     /// own stack draws them all alike: a level chosen here would be a
@@ -1880,38 +1819,6 @@ pub enum RpcCall {
     /// (`Messages::paints`).
     Notify {
         text: String,
-    },
-    /// Turns off every loaded plugin in `modules` that exists to render a
-    /// surface this session externalized, by calling the module's own
-    /// `disable`.
-    ///
-    /// The other half of the answer spec 5.5 gives a claimed surface, and
-    /// the half that makes the notice true: view attaches with the real
-    /// vocabulary only once nvim has finished sourcing, so a plugin that
-    /// configured itself against nvim's plain terminal UI has already taken
-    /// the cmdline, the messages and the popup menu through `vim.ui_attach`
-    /// -- a channel no attach of view's can take them back over. Asking the
-    /// plugin to stop is what leaves one renderer per surface; the
-    /// alternative is two, and a user reading a plugin's health errors
-    /// about a conflict view created.
-    ///
-    /// Ordered ahead of [`HoldNotify`](Self::HoldNotify) wherever both are
-    /// issued, and that order is load-bearing rather than tidy: a claimant's
-    /// own `disable` restores the `vim.notify` it saved when it took the
-    /// function (noice's `source/notify.lua`), so a hold installed first is
-    /// overwritten by the very call that was meant to clear the way for it.
-    ///
-    /// Carries the module names rather than reading the claimant table
-    /// engine-side: which claimants this session supersedes is a `[native]`
-    /// answer, and a session that handed a plugin's surfaces back has no
-    /// business turning that plugin off.
-    ///
-    /// Reversible on the same terms as every other call here: session
-    /// state, never a config edit. A plugin that has no `disable`, or one
-    /// whose `disable` raises, leaves the session exactly as it was --
-    /// the notice still names the conflict.
-    DisableClaimants {
-        modules: Vec<String>,
     },
     /// Attaches view as nvim's UI, externalizing exactly `surfaces`.
     ///
@@ -2113,55 +2020,22 @@ pub enum RpcCall {
         path: String,
         generation: u64,
     },
-    /// Writes `win`'s own `hide` flag through `nvim_win_set_config`, so a
-    /// plugin's floating window stops drawing while view renders what it was
-    /// drawing (`update::surface_conflict`'s absorption) -- and starts again
-    /// when view is done with it.
+    /// Reads `win`'s buffer lines, for a float view is withholding from
+    /// the screen. Async like `PreviewBuffer`: the reply decodes on the
+    /// reader thread and routes back as `Msg::FloatRows`.
     ///
-    /// Reversible and text-free by construction: `hide` is one field of a
-    /// window's config, the window keeps its buffer, its lines and its
-    /// cursor, and nothing here writes to a buffer or to the user's config.
-    /// The plugin's own next `nvim_win_set_config` preserves the flag on the
-    /// pinned versions (`docs/surface-float-wire-capture.md` measured 277
-    /// samples with no re-show) and is free to clear it on any other, which
-    /// is what [`ReadFloatRows`](Self::ReadFloatRows)'s reply reports back.
-    /// Preserved is why `hide = false` exists here at all: a window view
-    /// hid and then stopped absorbing has nothing else in the session that
-    /// would ever show it again.
-    ///
-    /// Fire-and-forget, and issued at most twice per window view takes over
-    /// -- once to take it, once to give it back, never once per keystroke --
-    /// so a menu standing through a whole cmdline session costs two calls.
-    /// The chunk checks the window is still valid and wraps the set in a
-    /// `pcall`: the window can close between the scan that sighted it and
-    /// this call, and a bare notification's error would reach the user as a
-    /// message about a window they never knew existed.
-    SetFloatHidden {
-        win: u64,
-        hide: bool,
-    },
-    /// Reads `win`'s buffer lines and its selection, for a float view is
-    /// absorbing into the palette. Async like `PreviewBuffer`: the reply
-    /// decodes on the reader thread and routes back as `Msg::FloatRows`.
-    ///
-    /// The selection is `nvim_win_get_cursor(win)[1]` gated on
-    /// `vim.wo[win].cursorline`, which
-    /// `docs/surface-float-wire-capture.md` measured as the whole carrier
-    /// for the captured menu -- its buffer holds no extmarks in any
-    /// namespace, so there is nothing else to read. The reply also carries
-    /// the window's own `hide` flag, read after
-    /// [`SetFloatHidden`](Self::SetFloatHidden) has run, which is how view learns a
-    /// hide did not land from the engine rather than from a user noticing
-    /// two menus.
+    /// The lines are what decides whether the window is a complaint view
+    /// has already taken into its own history or a window the user opened,
+    /// so they are read before the close goes out.
     ReadFloatRows {
         win: u64,
     },
-    /// Arms one float scan, for the moment view learns from a probe reply
-    /// that a claiming plugin is loaded.
+    /// Arms one float scan, for the moment view learns that a channel it
+    /// owns is held by somebody else.
     ///
-    /// The float scan is armed by editor transitions, and a probe reply is
-    /// not one: the complaints a claiming plugin raised about view's own
-    /// defaults are already on screen when the reply lands, and the next
+    /// The float scan is armed by editor transitions, and that reading is
+    /// not one: the complaints the holder raised about view's own
+    /// defaults are already on screen when it lands, and the next
     /// transition is `CursorHold` seconds later or the keystroke that
     /// closes the startup conflict window for good. This is what makes the
     /// take-down as prompt as the notice it belongs to.
@@ -2169,8 +2043,8 @@ pub enum RpcCall {
     /// Fire-and-forget: the sightings arrive as `Msg::FloatObserved` like
     /// every other scan's.
     ScanFloats,
-    /// Closes `win`, for a claiming plugin's own startup complaint whose
-    /// text view has already taken into the notification history
+    /// Closes `win`, for a holder's own startup complaint whose text view
+    /// has already taken into the notification history
     /// (`update::surface_conflict`, spec 5.5).
     ///
     /// The one call here that destroys a window rather than reconfiguring
@@ -2178,16 +2052,16 @@ pub enum RpcCall {
     /// only while the startup conflict window is open (no key typed yet,
     /// [`SurfaceConflicts::startup_window_open`](crate::native::surfaces::SurfaceConflicts::startup_window_open)),
     /// only for a float drawing on
-    /// a surface a named claimant's notice already accounts for, and only
+    /// a surface a channel notice already accounts for, and only
     /// after that float's lines have crossed back as `Msg::FloatRows` and
     /// been recorded. Nothing is discarded -- the text is in the history
     /// ring before the close goes out, and the notice on screen says which
     /// key opens it.
     ///
-    /// Not [`SetFloatHidden`](Self::SetFloatHidden): a hidden window is one
-    /// view then owes a show, and these windows are their plugin's to
-    /// manage -- nvim-notify's own timer closes them, so a flag view set
-    /// would outlive the session's interest in it with nothing to clear it.
+    /// A close rather than a hide: a hidden window is one view then owes a
+    /// show, and these windows are their own renderer's to manage -- a
+    /// notifier's timer closes them, so a flag view set would outlive the
+    /// session's interest in it with nothing to clear it.
     ///
     /// Fire-and-forget, at most once per window, and the chunk `pcall`s the
     /// close: a plugin's own timer can retire the float between the read
@@ -2541,16 +2415,12 @@ pub enum RpcCall {
 /// can carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TakeoverStep {
-    /// [`RpcCall::DisableClaimants`].
-    DisableClaimants { modules: Vec<String> },
     /// [`RpcCall::HoldOption`].
     HoldOption { name: String, value: OptionValue },
     /// [`RpcCall::HoldWindowOption`].
     HoldWindowOption { name: String, value: OptionValue },
     /// [`RpcCall::HoldNotify`].
     HoldNotify,
-    /// [`RpcCall::SetOption`].
-    SetOption { name: String, value: OptionValue },
     /// [`RpcCall::RegisterClipboard`].
     RegisterClipboard { channel_id: u64 },
     /// [`RpcCall::RegisterMappings`], the one step whose answer the reply
@@ -2571,9 +2441,6 @@ impl TakeoverStep {
     #[must_use]
     pub fn from_call(call: &RpcCall) -> Option<Self> {
         match call {
-            RpcCall::DisableClaimants { modules } => Some(Self::DisableClaimants {
-                modules: modules.clone(),
-            }),
             RpcCall::HoldOption { name, value } => Some(Self::HoldOption {
                 name: name.clone(),
                 value: value.clone(),
@@ -2583,10 +2450,6 @@ impl TakeoverStep {
                 value: value.clone(),
             }),
             RpcCall::HoldNotify => Some(Self::HoldNotify),
-            RpcCall::SetOption { name, value } => Some(Self::SetOption {
-                name: name.clone(),
-                value: value.clone(),
-            }),
             RpcCall::RegisterClipboard { channel_id } => Some(Self::RegisterClipboard {
                 channel_id: *channel_id,
             }),
@@ -2607,11 +2470,9 @@ impl TakeoverStep {
     #[must_use]
     pub fn into_call(self) -> RpcCall {
         match self {
-            Self::DisableClaimants { modules } => RpcCall::DisableClaimants { modules },
             Self::HoldOption { name, value } => RpcCall::HoldOption { name, value },
             Self::HoldWindowOption { name, value } => RpcCall::HoldWindowOption { name, value },
             Self::HoldNotify => RpcCall::HoldNotify,
-            Self::SetOption { name, value } => RpcCall::SetOption { name, value },
             Self::RegisterClipboard { channel_id } => RpcCall::RegisterClipboard { channel_id },
             Self::RegisterMappings { specs, channel_id } => {
                 RpcCall::RegisterMappings { specs, channel_id }
@@ -2635,9 +2496,6 @@ mod tests {
     #[test]
     fn every_batchable_call_names_itself_back_from_its_step() {
         let calls = vec![
-            RpcCall::DisableClaimants {
-                modules: vec!["noice".to_string()],
-            },
             RpcCall::HoldOption {
                 name: "laststatus".to_string(),
                 value: OptionValue::Int(0),
@@ -2647,10 +2505,6 @@ mod tests {
                 value: OptionValue::Str(String::new()),
             },
             RpcCall::HoldNotify,
-            RpcCall::SetOption {
-                name: "cmdheight".to_string(),
-                value: OptionValue::Int(0),
-            },
             RpcCall::RegisterClipboard { channel_id: 7 },
             RpcCall::RegisterMappings {
                 specs: vec![MappingSpec {

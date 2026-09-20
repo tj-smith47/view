@@ -283,21 +283,11 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
                 )
             });
         }
-        // the other half of an absorption, on the same terms: a palette
-        // standing empty beside a plugin's menu is either a read whose
-        // reply never came back or one that answered with the window still
-        // visible, and only the reply's own fields tell those apart
-        Msg::FloatRows {
-            win,
-            hidden,
-            lines,
-            selected,
-        } => {
+        // the reply that decides whether a withheld float is a complaint
+        // view has already recorded or a window the user opened
+        Msg::FloatRows { win, lines } => {
             log_with("native", || {
-                format!(
-                    "float-rows win={win} hidden={hidden} rows={} selected={selected:?}",
-                    lines.len()
-                )
+                format!("float-rows win={win} rows={}", lines.len())
             });
         }
         // the one `Msg` with a wall-clock cadence of its own, and so the
@@ -315,13 +305,6 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
         }
         Msg::NotifySinkRead { foreign } => {
             log_with("native", || format!("notify-sink foreign={foreign}"));
-        }
-        // dated because the pass that sent it is the one nothing else in
-        // the log records: a claimant asked at the takeover and a claimant
-        // asked again after its own setup leave the same standing notice,
-        // and only this line says which of them turned the surface loose
-        Msg::ClaimantsHandedBack { modules } => {
-            log_with("native", || format!("handed-back {}", modules.join(",")));
         }
         Msg::MappingsClaimed {
             claimed,

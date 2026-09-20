@@ -283,7 +283,7 @@ mod tests {
             "the notice must name the off switch verbatim, got {statusline:?}"
         );
         assert!(
-            statusline.contains("lualine"),
+            statusline.contains("your own status line"),
             "the notice must name what it superseded, got {statusline:?}"
         );
         let key = notices

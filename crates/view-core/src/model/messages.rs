@@ -390,7 +390,7 @@ impl Messages {
     }
 
     /// Records whether a notifier other than nvim's own echo stands at
-    /// `vim.notify`, as the takeover read it and as the claimant probe
+    /// `vim.notify`, as the takeover read it and as the channel reading
     /// re-reads it ([`crate::msg::Msg::NotifySinkRead`]), answering with
     /// the notices this reading takes off the toast stack.
     ///
@@ -708,7 +708,7 @@ impl Messages {
         let collapsed = self.startup_hold == StartupHold::Collapsed;
         self.startup_hold = StartupHold::Off;
         if collapsed {
-            // a claimant was named and the notice on screen already says
+            // a held channel was found and the notice on screen already says
             // where these went; releasing them onto the stack now would put
             // the wall of startup errors back up, one keypress late
             self.held.clear();

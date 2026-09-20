@@ -58,7 +58,7 @@ pub struct MappingClaim {
     pub had_user_mapping: bool,
 }
 
-// Telescope's and neo-tree's default keys deliberately, spelled the way a
+// the ecosystem's own default keys deliberately, spelled the way a
 // switching user already has them in muscle memory; a claim over a user's
 // own `<leader>f` or `<leader>e` prefix is reported rather than avoided by
 // picking keys nobody uses.
@@ -394,7 +394,7 @@ pub struct ExemptFeatureDesc {
 /// a feature lands here.
 static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 1] = [ExemptFeatureDesc {
     id: "ai",
-    supersedes: Some("avante.nvim / codecompanion.nvim"),
+    supersedes: Some("your own AI chat plugin"),
     off_switch: "ai.enabled = false",
 }];
 

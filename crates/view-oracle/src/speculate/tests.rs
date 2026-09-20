@@ -293,7 +293,7 @@ fn the_battery_drives_the_runtime_folds_a_stamp_at_a_time() {
         "a batch that answers nothing retired a prediction"
     );
 
-    let _ = fold_expiry(
+    fold_expiry(
         &mut model,
         SpecStamp::new(SPECULATION_MAX_AGE - Duration::from_millis(1)),
     );
@@ -303,7 +303,7 @@ fn the_battery_drives_the_runtime_folds_a_stamp_at_a_time() {
         "retired inside the bound"
     );
 
-    let _ = fold_expiry(&mut model, SpecStamp::new(SPECULATION_MAX_AGE));
+    fold_expiry(&mut model, SpecStamp::new(SPECULATION_MAX_AGE));
     assert!(model.speculate.pending().is_empty());
 }
 

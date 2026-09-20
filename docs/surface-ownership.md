@@ -6,10 +6,10 @@ surfaces view owns, what happens when a plugin draws on one of them
 anyway, the `view.toml` line that hands it back, and the compat scenario
 state for it on the pinned engine.
 
-The table below is generated from `SURFACES`, `SURFACE_CLAIMANTS` and
-`COMPLETION_MENUS` in `crates/view-core/src/native/surfaces.rs`, plus the
-loaded scenario set in `compat/scenarios/`. The channels of each surface
-are in `crates/view-core/src/native/channels.rs`.
+The table below is generated from `SURFACES` in
+`crates/view-core/src/native/surfaces.rs` and `CHANNELS` in
+`crates/view-core/src/native/channels.rs`, plus the loaded scenario set in
+`compat/scenarios/`.
 
 ## Reading a row
 
@@ -19,16 +19,15 @@ are in `crates/view-core/src/native/channels.rs`.
 - **policy** is what view does when something else draws there. `Own` means
   view keeps drawing it and tells you once, with the line that resolves it.
   `Yield` means view does not draw it, so drawing there takes nothing.
-  `Absorb` means view takes what the claimant drew into its own chrome, so
-  one renderer draws the surface.
 - **`[native]` switch** is the `view.toml` line that hands the surface back
   to your plugins. For a surface an attach carries it is the switch that
   attach is gated on. `-- none --` means no switch reaches that surface,
   and a notice about it says what happened and names no setting.
-- **claiming plugin classes** are the plugins whose whole purpose is to
-  render a surface view also renders, with the buffer `filetype` their own
-  floating windows present. A plugin nobody enumerated reaches the generic
-  float detector, which needs no table.
+- **channels that draw it** are every way Neovim can put something on that
+  surface: the options it evaluates, the capability a UI takes at attach,
+  a runtime function a config can replace, and a floating window parked
+  over the region the surface occupies. view holds all of them for a
+  surface it draws.
 - **proving scenario / state** is every compat state whose probes assert
   that surface's `ext_*` attach. The attach is what decides whether view
   draws the surface. `-- none --` is a coverage gap printed where you can
@@ -37,20 +36,16 @@ are in `crates/view-core/src/native/channels.rs`.
 ## The matrix
 
 <!-- generated from SURFACES -->
-| surface | `ext_*` option | policy | `[native]` switch that hands it back | claiming plugin classes | proving scenario / state |
+| surface | `ext_*` option | policy | `[native]` switch that hands it back | channels that draw it | proving scenario / state |
 | --- | --- | --- | --- | --- | --- |
-| the command line | `ext_cmdline` | `Own` | `[native] palette = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
-| the completion menu | `ext_popupmenu` | `Absorb` | `[native] palette = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred` |
-| the message area | `ext_messages` | `Own` | `[native] notifications = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
-| the tab line | `ext_tabline` | `Own` | `[native] tabline = false` | -- none -- | `noice`/`deferred`, `smoke-minimal`/`native-only` |
-| the status line | -- none -- | `Own` | `[native] statusline = false` | -- none -- | -- none -- |
+| the command line | `ext_cmdline` | `Own` | `[native] palette = false` | `ext_cmdline`, `cmdheight`, `showmode`, `showcmd`, `ruler`, `rulerformat`, `a float over the command line` | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
+| the completion menu | `ext_popupmenu` | `Own` | `[native] palette = false` | `ext_popupmenu`, `ext_wildmenu` | `noice`/`superseded`, `noice`/`deferred` |
+| the message area | `ext_messages` | `Own` | `[native] notifications = false` | `ext_messages`, `vim.notify`, `cmdheight`, `a float over the message area` | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
+| the tab line | `ext_tabline` | `Own` | `[native] tabline = false` | `ext_tabline`, `winbar`, `tabline`, `showtabline` | `noice`/`deferred`, `smoke-minimal`/`native-only` |
+| the status line | -- none -- | `Own` | `[native] statusline = false` | `laststatus`, `statusline` | -- none -- |
 | the buffer grid | -- none -- | `Yield` | -- none -- | -- none -- | -- none -- |
 
 <!-- generated from SURFACES -->
-A float whose rows land in the command line's band is taken into the palette
-when it presents a completion menu's own filetype (`cmp_menu`). That is the
-completion menu's `Absorb` read at the moment the float appears; the command
-line's own policy stays `Own`.
 
 ## Every way a surface can be drawn
 
@@ -75,8 +70,7 @@ engine sends them.
 ## Four switches, six surfaces
 
 `[native] palette = false` detaches `ext_cmdline` and `ext_popupmenu`
-together, so both rows name the same line: a session that handed the
-command line back absorbs nothing and hides nobody's window.
+together, so both rows name the same line.
 
 `[native] statusline = false` gives back the status line, which no attach
 carries. view holds `laststatus` at 0 while it draws one, and your own
@@ -84,10 +78,9 @@ carries. view holds `laststatus` at 0 while it draws one, and your own
 
 `[native] tabline` is the one switch that ships off, so the tab line's row
 describes what a session running `tabline = true` does: nvim draws your own
-`tabline` (and whatever bufferline plugin sets it) into grid 1 by default,
-and the compositor paints that row like any other. Turning it on detaches
-the row from nvim and hands it to view's own tab renderer, at which point a
-bufferline has nothing left to draw into.
+`tabline` into grid 1 by default, and the compositor paints that row like
+any other. Turning it on detaches the row from nvim and hands it to view's
+own tab renderer.
 
 The buffer grid is the one surface view never draws over. nvim owns it, and
 so does anything that wants to float above it, so a picker taking the screen
@@ -103,12 +96,13 @@ state only that surface produces. The command-line rule fires only while a
 command line is actually open, so a picker whose lowest chrome window sits
 one row above the same band stays silent.
 
-## The notice a named claimant gets
+## The notice a conflict gets
 
-A plugin the table names gets one notice per launch, and view asks it to
-turn itself off first: the ask goes out with the takeover, and again for any
-claimant that loads after it, so a plugin lazy.nvim defers is turned off on
-the load event.
+When something else writes a channel of a surface view draws, view sets the
+channel back and tells you once: which surface it was, what the channel was
+set to, and the `view.toml` line that hands the surface back. A float parked
+over one of those surfaces gets the same notice, named by what that window
+calls itself.
 
 The notice stands until you take it down. Any key, click or paste,
 `<Esc>` included, clears it once the notice has been on screen for as long

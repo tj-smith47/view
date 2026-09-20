@@ -192,8 +192,16 @@ fn every_chrome_channel_the_engine_exposes_is_claimed_or_left_alone() {
         .handle
         .eval_str("join(api_info().ui_options, ' ')")
         .unwrap();
+    let exposed: Vec<&str> = ui_options.split_whitespace().collect();
+    for ext in view_engine::UI_EXT_OPTIONS {
+        assert!(
+            exposed.contains(ext),
+            "the engine exposes no `{ext}`, so this half of the walk proves nothing \
+             about the capabilities view attaches with: {ui_options:?}"
+        );
+    }
     let mut undecided: Vec<String> = Vec::new();
-    for name in ui_options.split_whitespace() {
+    for name in exposed.iter().copied() {
         if !channels::is_claimed(name) && !channels::is_yielded(name) {
             undecided.push(name.to_string());
         }
@@ -214,10 +222,16 @@ fn every_chrome_channel_the_engine_exposes_is_claimed_or_left_alone() {
         }
     }
 
+    let decided: Vec<String> = channels::NOT_CHROME
+        .iter()
+        .map(|row| format!("{}: {}", row.channel, row.why))
+        .collect();
     assert!(
         undecided.is_empty(),
         "these channels can draw chrome and no surface claims them, with none of them on \
-         the not-chrome list: {undecided:?}"
+         the not-chrome list: {undecided:?}\nthe channels view leaves to the engine, each \
+         with what the user gets instead:\n  {}",
+        decided.join("\n  ")
     );
 }
 
@@ -364,6 +378,20 @@ fn a_window_local_chrome_row_is_cleared_in_every_window_and_reported() {
         reported_holding(&rx, "winbar", "%t"),
         "the later window's own holder must be reported"
     );
+    // every window, asked of the window list rather than of whichever
+    // window the split left current: a hold that walked only the new one
+    // leaves the row standing in the window the user was already in
+    assert_eq!(
+        engine
+            .handle
+            .eval_str(
+                "luaeval('table.concat(vim.tbl_map(function(w) \
+                 return vim.wo[w].winbar end, vim.api.nvim_list_wins()), \"|\")')"
+            )
+            .unwrap(),
+        "|",
+        "the row must be empty in every window, not only the current one"
+    );
 
     // the option written again after every window event has already
     // happened, which is what a config recomputing its row as the cursor
@@ -431,6 +459,151 @@ fn a_replaced_notify_is_put_back_for_a_session_that_draws_the_messages() {
             .unwrap(),
         "1",
         "the message surface's replaced global must be back at the hold view installed"
+    );
+}
+
+/// Every row of nvim's own screen, as one string per row.
+///
+/// `screenstring` cell by cell rather than any buffer read: what is asked
+/// is what nvim put on the screen, which is where a chrome row a plugin
+/// wrote and a chrome row view draws would both appear.
+fn screen_rows(engine: &Engine) -> Vec<String> {
+    let joined = engine
+        .handle
+        .eval_str(
+            "luaeval('(function() vim.cmd(\"redraw\") local out = {} \
+             for r = 1, vim.o.lines do local s = {} \
+             for c = 1, vim.o.columns do s[#s + 1] = vim.fn.screenstring(r, c) end \
+             out[#out + 1] = table.concat(s) end return table.concat(out, \"\\n\") end)()')",
+        )
+        .unwrap();
+    joined.lines().map(str::to_string).collect()
+}
+
+#[test]
+fn a_held_chrome_row_leaves_no_second_copy_of_the_file_name_on_the_grid() {
+    // the duplication the window-local hold exists to prevent, read off
+    // nvim's own screen: a config that draws the file name in a chrome row
+    // of its own puts it there a second time under the row view draws
+    let dir = common::fixture("supersede-live-winbar-grid", "vim.o.winbar = '%f'\n");
+    let engine = session(&dir);
+    engine
+        .handle
+        .eval_str("execute('edit view_pin_chrome.txt')")
+        .unwrap();
+
+    let before = screen_rows(&engine)
+        .iter()
+        .filter(|line| line.contains("view_pin_chrome.txt"))
+        .count();
+    assert!(
+        before > 0,
+        "the fixture never drew the name, so this case could not observe the hold"
+    );
+
+    apply(
+        &engine.handle,
+        &plan(&NativeConfig::all_enabled(), registry::features()),
+    );
+
+    let after: Vec<String> = screen_rows(&engine)
+        .into_iter()
+        .filter(|line| line.contains("view_pin_chrome.txt"))
+        .collect();
+    assert!(
+        after.is_empty(),
+        "the chrome rows view draws are view's own, so nvim's grid must carry no \
+         copy of the name: {after:?}"
+    );
+}
+
+#[test]
+fn a_float_parked_over_the_command_line_is_claimed_at_the_geometry_nvim_reports() {
+    // the float channel of the command line, opened the way a plugin opens
+    // one and measured from nvim's own window config rather than from a
+    // rect written here
+    let dir = common::fixture("supersede-live-float", "");
+    let engine = session(&dir);
+    let size = engine
+        .handle
+        .eval_str("join([&lines, &columns], ' ')")
+        .unwrap();
+    let (lines, columns) = size
+        .split_once(' ')
+        .map(|(l, c)| {
+            (
+                l.parse::<u16>().expect("nvim reports a row count"),
+                c.parse::<u16>().expect("nvim reports a column count"),
+            )
+        })
+        .expect("the eval answers both");
+
+    let opened = engine
+        .handle
+        .eval_str(&format!(
+            "luaeval('(function() local buf = vim.api.nvim_create_buf(false, true) \
+             local win = vim.api.nvim_open_win(buf, false, {{ relative = \"editor\", \
+             row = {row}, col = 0, width = 20, height = 2, style = \"minimal\" }}) \
+             local cfg = vim.api.nvim_win_get_config(win) \
+             return table.concat({{ cfg.row, cfg.col, cfg.width, cfg.height, cfg.anchor }}, \
+             \" \") end)()')",
+            row = lines - 2
+        ))
+        .unwrap();
+    let parts: Vec<&str> = opened.split_whitespace().collect();
+    let [row, col, width, height, anchor] = parts.as_slice() else {
+        panic!("nvim must report the window's own rect: {opened:?}")
+    };
+    assert_eq!(
+        *anchor, "NW",
+        "the rule below reads the anchor nvim reports"
+    );
+    let row: f64 = row.parse().expect("nvim reports the row as a number");
+    let col: f64 = col.parse().expect("nvim reports the column as a number");
+    let width: u16 = width.parse().expect("nvim reports the width");
+    let height: u16 = height.parse().expect("nvim reports the height");
+
+    let mut model = view_core::model::Model::with_term_size(columns, lines);
+    model.attach_surfaces(vec![view_core::native::ext::Ext::Cmdline]);
+    let _ = view_core::update::update(
+        &mut model,
+        Msg::Redraw(vec![view_core::events::UiEvent::GridResize {
+            grid: 1,
+            width: u64::from(columns),
+            height: u64::from(lines),
+        }]),
+    );
+    let _ = view_core::update::update(
+        &mut model,
+        Msg::Redraw(vec![view_core::events::UiEvent::CmdlineShow {
+            content: vec![(0, "e pre".to_string())],
+            pos: 5,
+            firstc: ":".to_string(),
+            prompt: String::new(),
+            indent: 0,
+            level: 1,
+        }]),
+    );
+
+    let anchor = view_core::native::surfaces::FloatAnchor::NorthWest;
+    assert_eq!(
+        view_core::native::surfaces::claims_at(
+            row as i64, col as i64, width, height, anchor, &model
+        ),
+        Some(view_core::native::surfaces::Surface::Cmdline),
+        "a window nvim parked on the command line's own rows claims that surface"
+    );
+    assert_eq!(
+        view_core::native::surfaces::claims_at(
+            row as i64 - 3,
+            col as i64,
+            width,
+            height,
+            anchor,
+            &model
+        ),
+        None,
+        "the same window three rows higher is over the buffer, and claims nothing"
     );
 }
 

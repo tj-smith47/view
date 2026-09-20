@@ -40,9 +40,6 @@ pub trait EngineOps {
         row: u16,
         col: u16,
     ) -> Result<(), EngineError>;
-    /// Sets one nvim option via `nvim_set_option_value`, the channel every
-    /// non-interactive option change rides (see `RpcCall::SetOption`).
-    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError>;
     /// Sets one nvim option and keeps it there for the session, the durable
     /// takeover a superseded plugin cannot undo (see `RpcCall::HoldOption`).
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError>;
@@ -58,10 +55,6 @@ pub trait EngineOps {
     /// session was left with, for a session that handed the messages
     /// surface back (see `RpcCall::Notify`).
     fn raise_notice(&self, text: &str) -> Result<(), EngineError>;
-    /// Calls `disable` on every loaded module in `modules`, so a plugin
-    /// that claimed a surface view externalized stops drawing it (see
-    /// `RpcCall::DisableClaimants`).
-    fn disable_claimants(&self, modules: &[String]) -> Result<(), EngineError>;
     /// Attaches view as nvim's UI, externalizing exactly `surfaces` (see
     /// `RpcCall::UiAttach`).
     fn ui_attach(
@@ -120,16 +113,11 @@ pub trait EngineOps {
     /// `generation`; never blocks, and never itself returns the answer (see
     /// `Msg::PickerPreviewReply`).
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError>;
-    /// Writes one floating window's own `hide` flag, for the completion
-    /// float view absorbs into the palette and hands back;
-    /// fire-and-forget, no reply (see `RpcCall::SetFloatHidden`).
-    fn set_float_hidden(&self, win: u64, hide: bool) -> Result<(), EngineError>;
-    /// Reads an absorbed float's rows and selection; never blocks, and
-    /// never itself returns the answer (see `RpcCall::ReadFloatRows`,
-    /// `Msg::FloatRows`).
+    /// Reads a withheld float's lines; never blocks, and never itself
+    /// returns the answer (see `RpcCall::ReadFloatRows`, `Msg::FloatRows`).
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError>;
-    /// Closes one floating window, for a claiming plugin's startup
-    /// complaint already recorded to the notification history;
+    /// Closes one floating window, for a holder's startup complaint
+    /// already recorded to the notification history;
     /// fire-and-forget, no reply (see `RpcCall::CloseFloat`).
     fn close_float(&self, win: u64) -> Result<(), EngineError>;
     /// Arms one float scan, for the moment a probe reply names a claiming
@@ -300,9 +288,6 @@ impl EngineOps for EngineHandle {
     ) -> Result<(), EngineError> {
         self.input_mouse(button, action, modifier, grid, row, col)
     }
-    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
-        self.set_option(name, value)
-    }
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         self.hold_option(name, value)
     }
@@ -314,9 +299,6 @@ impl EngineOps for EngineHandle {
     }
     fn raise_notice(&self, text: &str) -> Result<(), EngineError> {
         self.raise_notice(text)
-    }
-    fn disable_claimants(&self, modules: &[String]) -> Result<(), EngineError> {
-        self.disable_claimants(modules)
     }
     fn ui_attach(
         &self,
@@ -366,9 +348,6 @@ impl EngineOps for EngineHandle {
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.preview_buffer(path, generation)
-    }
-    fn set_float_hidden(&self, win: u64, hide: bool) -> Result<(), EngineError> {
-        self.set_float_hidden(win, hide)
     }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         self.read_float_rows(win)
@@ -501,9 +480,6 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     ) -> Result<(), EngineError> {
         (**self).input_mouse(button, action, modifier, grid, row, col)
     }
-    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
-        (**self).set_option(name, value)
-    }
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         (**self).hold_option(name, value)
     }
@@ -515,9 +491,6 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn raise_notice(&self, text: &str) -> Result<(), EngineError> {
         (**self).raise_notice(text)
-    }
-    fn disable_claimants(&self, modules: &[String]) -> Result<(), EngineError> {
-        (**self).disable_claimants(modules)
     }
     fn ui_attach(
         &self,
@@ -566,9 +539,6 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
-    }
-    fn set_float_hidden(&self, win: u64, hide: bool) -> Result<(), EngineError> {
-        (**self).set_float_hidden(win, hide)
     }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         (**self).read_float_rows(win)
@@ -704,9 +674,6 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     ) -> Result<(), EngineError> {
         (**self).input_mouse(button, action, modifier, grid, row, col)
     }
-    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
-        (**self).set_option(name, value)
-    }
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         (**self).hold_option(name, value)
     }
@@ -718,9 +685,6 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn raise_notice(&self, text: &str) -> Result<(), EngineError> {
         (**self).raise_notice(text)
-    }
-    fn disable_claimants(&self, modules: &[String]) -> Result<(), EngineError> {
-        (**self).disable_claimants(modules)
     }
     fn ui_attach(
         &self,
@@ -769,9 +733,6 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
-    }
-    fn set_float_hidden(&self, win: u64, hide: bool) -> Result<(), EngineError> {
-        (**self).set_float_hidden(win, hide)
     }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         (**self).read_float_rows(win)
@@ -937,9 +898,6 @@ impl EngineOps for FakeOps {
             "input_mouse({button},{action},{modifier},{grid},{row},{col})"
         ))
     }
-    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
-        self.record(format!("set_option({name},{value:?})"))
-    }
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         self.record(format!("hold_option({name},{value:?})"))
     }
@@ -951,9 +909,6 @@ impl EngineOps for FakeOps {
     }
     fn raise_notice(&self, text: &str) -> Result<(), EngineError> {
         self.record(format!("raise_notice({text})"))
-    }
-    fn disable_claimants(&self, modules: &[String]) -> Result<(), EngineError> {
-        self.record(format!("disable_claimants({})", modules.join("+")))
     }
     fn ui_attach(
         &self,
@@ -1000,15 +955,11 @@ impl EngineOps for FakeOps {
         // the same whether or not it travelled as one message
         for step in steps {
             match step {
-                TakeoverStep::DisableClaimants { modules } => {
-                    self.disable_claimants(modules)?;
-                }
                 TakeoverStep::HoldOption { name, value } => self.hold_option(name, value)?,
                 TakeoverStep::HoldWindowOption { name, value } => {
                     self.hold_window_option(name, value)?;
                 }
                 TakeoverStep::HoldNotify => self.hold_notify()?,
-                TakeoverStep::SetOption { name, value } => self.set_option(name, value)?,
                 TakeoverStep::RegisterClipboard { channel_id } => {
                     self.register_clipboard(*channel_id)?;
                 }
@@ -1037,9 +988,6 @@ impl EngineOps for FakeOps {
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.record(format!("preview_buffer({path},{generation})"))
-    }
-    fn set_float_hidden(&self, win: u64, hide: bool) -> Result<(), EngineError> {
-        self.record(format!("set_float_hidden({win},{hide})"))
     }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         self.record(format!("read_float_rows({win})"))
@@ -1230,9 +1178,6 @@ impl EngineOps for SlowOps {
     ) -> Result<(), EngineError> {
         Ok(())
     }
-    fn set_option(&self, _name: &str, _value: &OptionValue) -> Result<(), EngineError> {
-        Ok(())
-    }
     fn hold_option(&self, _name: &str, _value: &OptionValue) -> Result<(), EngineError> {
         Ok(())
     }
@@ -1243,9 +1188,6 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn raise_notice(&self, _text: &str) -> Result<(), EngineError> {
-        Ok(())
-    }
-    fn disable_claimants(&self, _modules: &[String]) -> Result<(), EngineError> {
         Ok(())
     }
     fn ui_attach(
@@ -1298,9 +1240,6 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn preview_buffer(&self, _path: &str, _generation: u64) -> Result<(), EngineError> {
-        Ok(())
-    }
-    fn set_float_hidden(&self, _win: u64, _hide: bool) -> Result<(), EngineError> {
         Ok(())
     }
     fn read_float_rows(&self, _win: u64) -> Result<(), EngineError> {

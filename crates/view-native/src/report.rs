@@ -70,8 +70,8 @@ impl Handover {
             Surface::Key { lhs } => format!("view took {lhs} for the {}", self.feature),
         };
         match self.supersedes {
-            Some(plugin) => format!(
-                "{took} ({plugin} still loads). Turn it off with {}",
+            Some(theirs) => format!(
+                "{took} ({theirs} still loads). Turn it off with {}",
                 self.reverses_with
             ),
             None => format!("{took}. Turn it off with {}", self.reverses_with),
@@ -181,8 +181,8 @@ mod tests {
         assert_eq!(report.len(), 1, "the claimed key must be reported");
         assert_eq!(
             report[0].notice(),
-            "view took <leader>ff for the picker (telescope still loads). \
-             Turn it off with native.picker = false"
+            "view took <leader>ff for the picker (your own fuzzy finder \
+             still loads). Turn it off with native.picker = false"
         );
     }
 
@@ -198,8 +198,8 @@ mod tests {
         .expect("an all-enabled plan must supersede the statusline");
         assert_eq!(
             handover.notice(),
-            "view is drawing the statusline (lualine still loads). \
-             Turn it off with native.statusline = false"
+            "view is drawing the statusline (your own status line still \
+             loads). Turn it off with native.statusline = false"
         );
     }
 
@@ -221,8 +221,8 @@ mod tests {
         assert_eq!(handover.surface, Surface::SessionHold);
         assert_eq!(
             handover.notice(),
-            "view is drawing the notifications (nvim-notify / noice messages \
-             still loads). Turn it off with native.notifications = false"
+            "view is drawing the notifications (your own notifier still \
+             loads). Turn it off with native.notifications = false"
         );
     }
 
@@ -317,8 +317,8 @@ mod tests {
         );
         assert_eq!(
             report[0].notice(),
-            "view took <leader>ai for the ai (avante.nvim / codecompanion.nvim \
-             still loads). Turn it off with ai.enabled = false"
+            "view took <leader>ai for the ai (your own AI chat plugin still \
+             loads). Turn it off with ai.enabled = false"
         );
     }
 }

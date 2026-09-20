@@ -286,35 +286,16 @@ pub fn is_cmdline_mode(mode: &str) -> bool {
     mode.starts_with("cmdline_")
 }
 
-/// Takes a speculated palette back down, marking the frame when one was up
-/// and showing every window an absorption hid to get its rows.
+/// Takes a speculated palette back down, marking the frame when one was up.
 ///
-/// Every withdrawal goes through here so neither half can be forgotten at
-/// one of them. An empty palette left on screen with nothing to repaint it
-/// is the one failure this speculation can produce that a later redraw does
-/// not fix by itself; a window hidden for a palette that is coming down is
-/// the other, and it is worse, because the plugin that owns that window
-/// never asked for the hide and nothing else in the session would ever
-/// clear it (`update::surface_conflict`'s `cmdline_closed` states the same
-/// failure for the real command line).
-///
-/// The release is skipped while nvim's own command line is up, which is the
-/// `cmdline_show` case: the guess is being answered rather than refuted,
-/// and the menus absorbed under it are completing the command line that is
-/// now on screen.
-///
-/// `Vec` carries no `must_use` of its own, and dropping these leaves every
-/// window the guess hid hidden for the rest of the session.
-#[must_use]
-pub fn withdraw_cmdline_speculation(model: &mut Model) -> Vec<Effect> {
+/// Every withdrawal goes through here, so an empty palette cannot be left
+/// on screen with nothing to repaint it -- the one failure this
+/// speculation can produce that a later redraw does not fix by itself.
+pub fn withdraw_cmdline_speculation(model: &mut Model) {
     if model.engine.cmdline_speculated.take().is_none() {
-        return Vec::new();
+        return;
     }
     model.dirty = true;
-    if model.engine.cmdline.is_some() {
-        return Vec::new();
-    }
-    crate::native::surfaces::release_absorptions(model)
 }
 
 /// Folds one engine-bound key into the palette's speculation: a `:` that
@@ -347,16 +328,15 @@ fn fold_cmdline_key(model: &mut Model, notation: &str, now: SpecStamp) {
 /// with its own `getchar()`, one inside a mapping the gate cannot see, and
 /// an engine that says nothing at all. [`cmdline_backstop`] is what sizes
 /// that wait to the link instead of to the glyphs' own bound.
-fn expire_cmdline_speculation(model: &mut Model, now: SpecStamp) -> Vec<Effect> {
+fn expire_cmdline_speculation(model: &mut Model, now: SpecStamp) {
     let bound = cmdline_backstop(model);
     if model
         .engine
         .cmdline_speculated
         .is_some_and(|open| now.age_since(open.since) >= bound)
     {
-        return withdraw_cmdline_speculation(model);
+        withdraw_cmdline_speculation(model);
     }
-    Vec::new()
 }
 
 /// What is left of [`cmdline_backstop`] for the speculated palette, or
@@ -925,8 +905,8 @@ pub fn fold_redraw(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> Vec
 /// A batch answers the key the gate was waiting for only when it carries an
 /// event nvim sends *because* input was read -- a `mode_change`, a cursor
 /// move, a `cmdline_show` or a `grid_line`. Every other batch is somebody
-/// else's flush: a plugin on a timer, a spinner, an animation, a lualine
-/// refresh, an LSP float. Reading the arrival alone as the answer fails in
+/// else's flush: a plugin on a timer, a spinner, an animation, a status
+/// line refresh, an LSP float. Reading the arrival alone as the answer fails in
 /// both directions at once on a session that has one of those, which is
 /// most login-shaped configs. The gate opens on a key nvim has not read
 /// yet, and worse, the round trip below times the timer's own cadence
@@ -1015,7 +995,7 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
         model.engine.literal_pending = false;
     }
     if moved_cursor_there && !shows_cmdline {
-        return withdraw_cmdline_speculation(model);
+        withdraw_cmdline_speculation(model);
     }
     Vec::new()
 }
@@ -1026,18 +1006,17 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
 /// that never comes is the condition [`SPECULATION_MAX_AGE`] and
 /// [`cmdline_backstop`] exist for, for the predicted glyphs and for the
 /// speculated palette alike.
-pub fn fold_expiry(model: &mut Model, now: SpecStamp) -> Vec<Effect> {
-    let effects = expire_cmdline_speculation(model, now);
+pub fn fold_expiry(model: &mut Model, now: SpecStamp) {
+    expire_cmdline_speculation(model, now);
     // the pending list is read before anything else so a steady-state pass
     // costs one null check and one length compare: expiring an empty list is
     // a no-op, and a session outside a typing burst takes that pass forever
     if model.speculate.pending().is_empty() {
-        return effects;
+        return;
     }
     let before = model.speculate.pending().len();
     model.speculate.expire_stale(now);
     mark_retirement(model, before);
-    effects
 }
 
 /// Folds one engine-bound keystroke into the display-only prediction it is
@@ -1490,16 +1469,14 @@ mod tests {
         typed_colon(&mut model, stamp(0));
         model.dirty = false;
 
-        assert!(
-            fold_expiry(&mut model, SpecStamp::new(bound - Duration::from_millis(1))).is_empty()
-        );
+        fold_expiry(&mut model, SpecStamp::new(bound - Duration::from_millis(1)));
         assert!(
             model.engine.cmdline_speculated.is_some(),
             "inside the bound the palette stands"
         );
         assert!(!model.dirty);
 
-        assert!(fold_expiry(&mut model, SpecStamp::new(bound)).is_empty());
+        fold_expiry(&mut model, SpecStamp::new(bound));
 
         assert!(model.engine.cmdline_speculated.is_none());
         assert!(model.dirty, "the withdrawal has to be painted");
@@ -1531,12 +1508,12 @@ mod tests {
             );
 
             typed_colon(&mut model, stamp(0));
-            let _ = fold_expiry(&mut model, stamp(bound_ms - 1));
+            fold_expiry(&mut model, stamp(bound_ms - 1));
             assert!(
                 model.engine.cmdline_speculated.is_some(),
                 "{what}: the guess came off inside its own bound"
             );
-            let _ = fold_expiry(&mut model, stamp(bound_ms));
+            fold_expiry(&mut model, stamp(bound_ms));
             assert!(
                 model.engine.cmdline_speculated.is_none(),
                 "{what}: the guess outlasted its own bound"

@@ -239,18 +239,6 @@ impl NativeSession {
         }
         self.handed_over = true;
         let mut effects: Vec<RpcCall> = Vec::new();
-        // ahead of every hold below, `HoldNotify` above all: a claimant's
-        // own `disable` restores the `vim.notify` it saved when it took the
-        // function, so a hold installed first is undone by the call that
-        // was meant to clear the way for it
-        let superseded: Vec<String> = view_core::native::surfaces::superseded_claimants(model)
-            .map(|claimant| claimant.module.to_string())
-            .collect();
-        if !superseded.is_empty() {
-            effects.push(RpcCall::DisableClaimants {
-                modules: superseded,
-            });
-        }
         // a plan entry with no call is a surface the attach already took
         // (`Supersession::rpc`); it is in the plan to be reported, not to be
         // performed
@@ -271,7 +259,7 @@ impl NativeSession {
         effects.push(RpcCall::RegisterClipboard {
             channel_id: self.channel_id,
         });
-        for channel in session_held_channels() {
+        for channel in channels::session_held() {
             let Channel::Hold { option, value, .. } = channel else {
                 continue;
             };
@@ -354,26 +342,6 @@ impl NativeSession {
         }
         effects
     }
-}
-
-/// Every channel more than one surface claims, which is what makes it the
-/// session's to hold rather than a feature's.
-///
-/// A feature's plan is gated on one `[native]` switch; these are gated on
-/// the whole attach set, because the surfaces that claim them answer to
-/// different switches (`view_native::supersede`'s own derivation leaves
-/// them out for exactly that reason).
-fn session_held_channels() -> Vec<Channel> {
-    channels::CHANNELS
-        .iter()
-        .flat_map(|entry| entry.channels.iter().copied())
-        .filter(|channel| channels::claimants_of(channel.name()).count() > 1)
-        .fold(Vec::new(), |mut out, channel| {
-            if !out.contains(&channel) {
-                out.push(channel);
-            }
-            out
-        })
 }
 
 /// Folds `calls` into as few round trips as the vocabulary allows, keeping
@@ -579,7 +547,7 @@ mod tests {
             .iter()
             .filter_map(|entry| entry.rpc.clone())
             .collect();
-        let session_held: Vec<RpcCall> = session_held_channels()
+        let session_held: Vec<RpcCall> = channels::session_held()
             .into_iter()
             .filter_map(|channel| match channel {
                 Channel::Hold { option, value, .. } => Some(RpcCall::HoldOption {
@@ -635,52 +603,6 @@ mod tests {
         assert!(
             session.follow_up(&mut m, Stage::VimEnter).is_empty(),
             "a second VimEnter must register nothing: the second pass would read view's own keys back as the user's"
-        );
-    }
-
-    /// The claimant hand-back goes on first, and it goes on only for a
-    /// session that took a surface the plugin renders.
-    ///
-    /// Both halves are the whole of `RpcCall::DisableClaimants`'s contract.
-    /// The order, because noice's `disable` restores the `vim.notify` it
-    /// saved when it took the function: a hold sent first is undone by the
-    /// call sent second. The condition, because a session that handed the
-    /// command line, the completion menu and the messages back has nothing
-    /// to supersede, and turning a plugin off there would be view breaking
-    /// a config it was told to keep out of.
-    #[test]
-    fn the_claimant_hand_back_leads_the_takeover_and_only_for_the_surfaces_taken() {
-        let mut session = NativeSession::all_enabled(7, None);
-        let mut m = model();
-        let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
-        let Some(Effect::Rpc(RpcCall::DisableClaimants { modules })) = effects.first() else {
-            unreachable!("the hand-back must lead the takeover, got {effects:?}")
-        };
-        assert_eq!(
-            *modules,
-            view_core::native::surfaces::SURFACE_CLAIMANTS
-                .iter()
-                .map(|claimant| claimant.module.to_string())
-                .collect::<Vec<_>>(),
-            "a session holding every surface supersedes every claimant"
-        );
-        let notify = effects
-            .iter()
-            .position(|e| matches!(e, Effect::Rpc(RpcCall::HoldNotify)))
-            .expect("the shipped plan holds vim.notify");
-        assert!(
-            notify > 0,
-            "the notify hold must follow the hand-back that would restore it: {effects:?}"
-        );
-
-        let mut handed_back = NativeSession::all_enabled(7, None);
-        let mut quiet = model();
-        quiet.attach_surfaces(vec![view_core::native::ext::Ext::LineGrid]);
-        assert!(
-            !unbatched(handed_back.follow_up(&mut quiet, Stage::VimEnter))
-                .iter()
-                .any(|e| matches!(e, Effect::Rpc(RpcCall::DisableClaimants { .. }))),
-            "a session that externalized no claimed surface turns nothing off"
         );
     }
 

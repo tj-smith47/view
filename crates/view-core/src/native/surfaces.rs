@@ -1,16 +1,15 @@
-//! The surfaces view draws itself, what it does when a plugin draws over
-//! one of them, and the arithmetic that decides whether a floating window
-//! is doing exactly that.
+//! The surfaces view draws itself, what it does when something else draws
+//! over one of them, and the arithmetic that decides whether a floating
+//! window is doing exactly that.
 //!
 //! The set view claims is fixed and small, so the conflict class is
-//! decidable generically -- for a plugin nobody has tested, and without
-//! naming one. What a float actually carries is recorded live in
-//! `docs/surface-float-wire-capture.md`, and two of its findings shape
-//! everything here:
+//! decidable from the grid alone. What a float actually carries is recorded
+//! live in `docs/surface-float-wire-capture.md`, and two of its findings
+//! shape everything here:
 //!
 //! - **Rect overlap with what view paints answers backwards.** Read
-//!   against view's own palette box, nvim-cmp's cmdline menu (grid rows
-//!   26..27) misses it entirely while telescope's picker (rows 1..26)
+//!   against view's own palette box, a cmdline completion menu on the grid's
+//!   last two rows misses it entirely while a picker filling rows 1..26
 //!   covers it whole -- so the float that claims a surface looks innocent
 //!   and the negative control looks guilty. A claim is against the region
 //!   the *engine* leaves for the surface view took over, which is why
@@ -23,8 +22,8 @@
 //!   which is what keeps a picker whose lowest chrome window sits one row
 //!   above the menu's bottom edge silent.
 //!
-//! Nothing here names a plugin, does I/O, or allocates per observation:
-//! [`claims`] is integer arithmetic over one rect and the grid's size.
+//! Nothing here does I/O or allocates per observation: [`claims`] is
+//! integer arithmetic over one rect and the grid's size.
 
 use crate::model::Model;
 use crate::native::channels::{Channel, Region};
@@ -73,12 +72,6 @@ pub enum Policy {
     Own,
     /// view does not draw it at all, so drawing there claims nothing.
     Yield,
-    /// view takes what the claimant drew into its own chrome rather than
-    /// letting two renderers stack -- what already happens to a
-    /// cmdline-sourced popupmenu, whose rows are folded into the palette
-    /// instead of painted as a second menu (`view_surface`'s
-    /// `consumed_by_palette`).
-    Absorb,
 }
 
 /// One row of the ownership table: what view does with `surface`, and the
@@ -129,7 +122,7 @@ pub const SURFACES: &[OwnedSurface] = &[
         surface: Surface::Popupmenu,
         ext: Some(Ext::Popupmenu),
         feature: Some("palette"),
-        policy: Policy::Absorb,
+        policy: Policy::Own,
         label: "the completion menu",
         remedy: Some("[native] palette = false"),
     },
@@ -176,98 +169,12 @@ pub fn row(surface: Surface) -> Option<&'static OwnedSurface> {
     SURFACES.iter().find(|row| row.surface == surface)
 }
 
-/// One plugin class whose whole purpose is to render a surface view also
-/// renders, identified by the Lua module a session can be asked about.
-///
-/// A float sighting names a *widget*; this names a *plugin*, which is the
-/// difference between "something is drawing over the command line" and
-/// "noice.nvim is using the command line". The presence question is asked of
-/// `package.loaded`, the public module registry, so nothing here reaches
-/// into a plugin's private state or depends on a version of its config.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SurfaceClaimant {
-    /// How a notice names the plugin, in the spelling its own README uses.
-    pub class: &'static str,
-    /// The module `package.loaded` is asked about.
-    pub module: &'static str,
-    /// Every surface this class exists to render. Filtered at notice time
-    /// against [`Policy::Own`] and [`Model::owns`], so a surface this
-    /// session handed back -- or one view absorbs rather than fights over --
-    /// is not something the user is told about.
-    pub surfaces: &'static [Surface],
-    /// The `filetype`s this class's own floating windows present, which is
-    /// what [`FloatSighting::identity`] reads a name out of. A sighting
-    /// carrying one of these is this plugin drawing on a surface its own
-    /// notice already names -- not a second plugin -- so the composition
-    /// guard treats it exactly as it treats an anonymous float.
-    ///
-    /// Empty is the honest answer for a class whose windows carry no
-    /// distinguishing filetype; those sightings reach the anonymous family
-    /// and are absorbed there.
-    pub identities: &'static [&'static str],
-}
-
-/// The shipped claimant table.
-///
-/// One row, deliberately. A claimant row is a *named* claim, and the price
-/// of naming a plugin that turns out not to be drawing anything is a notice
-/// that says something false; the generic, evidence-first path for every
-/// plugin nobody enumerated is the float detector ([`claims`]), which needs
-/// no table at all. noice.nvim earns a row because it is the class of
-/// record: it exists to take the command line, the popup menu and the
-/// messages, it says so in its own health check, and on view's defaults that
-/// check fires three errors at a user who has been told nothing about how to
-/// resolve them.
-pub const SURFACE_CLAIMANTS: &[SurfaceClaimant] = &[SurfaceClaimant {
-    class: "noice.nvim",
-    module: "noice",
-    surfaces: &[Surface::Cmdline, Surface::Popupmenu, Surface::Messages],
-    // every window noice opens goes through its own nui view, which sets
-    // `filetype = "noice"` on the buffer (lua/noice/view/nui.lua:41)
-    identities: &["noice"],
-}];
-
-/// The claimants this session supersedes: every row whose plugin exists to
-/// render a surface this session externalized.
-///
-/// The gate on turning a plugin off (`crate::msg::RpcCall::DisableClaimants`)
-/// and it is the whole `[native]` answer: `palette = false` leaves the
-/// command line and the completion menu with the plugin, `notifications =
-/// false` leaves the messages, and a session that handed all three back
-/// supersedes nobody and turns nothing off.
-///
-/// Wider than [`view_draws`] on purpose: that predicate gates a *notice*
-/// and so excludes a surface view absorbs rather than owns, while this one
-/// gates whether two renderers are pointed at the same cells, which the
-/// completion menu is as much as the command line.
-pub fn superseded_claimants(model: &Model) -> impl Iterator<Item = &'static SurfaceClaimant> + '_ {
-    SURFACE_CLAIMANTS.iter().filter(|claimant| {
-        claimant
-            .surfaces
-            .iter()
-            .any(|surface| owned(*surface, model).is_some())
-    })
-}
-
-/// The claimants `probed` names, in table order -- the order a notice per
-/// claimant is raised in, so two claimants read the same way whichever
-/// module the probe listed first.
-///
-/// Unknown module names are ignored rather than trusted: the reply crosses
-/// the wire, and a name no row carries names no claimant.
-pub fn probed_claimants(probed: &[String]) -> impl Iterator<Item = &'static SurfaceClaimant> + '_ {
-    SURFACE_CLAIMANTS
-        .iter()
-        .filter(|claimant| probed.iter().any(|name| name == claimant.module))
-}
-
 /// Which corner of a float its `row`/`col` name.
 ///
 /// Load-bearing rather than decoration: an `NE`-anchored window at
 /// `col = 100` on a 100-column grid has its *right* edge there and covers
 /// columns 50..99 at width 50, so a consumer reading `col` without the
-/// anchor places nvim-notify's toast off the grid entirely (the wire
+/// anchor places a corner-pinned toast off the grid entirely (the wire
 /// capture's own warning).
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -328,8 +235,8 @@ pub struct FloatSighting {
     pub anchor: FloatAnchor,
     /// The window's `zindex`.
     pub zindex: u16,
-    /// The buffer's filetype: the one identifying mark most floats carry
-    /// (`cmp_menu`, `notify`, `TelescopeResults`), and empty for the rest.
+    /// The buffer's filetype: the one identifying mark most floats carry,
+    /// and empty for the rest.
     pub filetype: String,
     /// The buffer's name, empty for the unfiled scratch buffer nearly every
     /// float uses.
@@ -337,57 +244,53 @@ pub struct FloatSighting {
     /// Whether the window's own `hide` flag is set, so it occupies its cells
     /// without drawing anything in them.
     ///
-    /// Reported rather than filtered out at the scan, and the absorption is
-    /// why: the one window view itself hides ([`Policy::Absorb`]) is the one
-    /// whose rows view then has to keep reading as the candidate list
-    /// narrows, and a scan that stopped reporting it the moment the hide
-    /// landed would leave the palette holding the rows that stood at the
-    /// keystroke the hide went out on. A hidden float draws nothing, so it
-    /// is never a conflict to tell a user about -- that filter lives in
-    /// `update::surface_conflict`, where the surface and the ownership are
-    /// already known, rather than in a Lua chunk that knows neither.
+    /// Reported rather than filtered out at the scan: a hidden float draws
+    /// nothing, so it is never a conflict to tell a user about, and that
+    /// filter lives in `update::surface_conflict`, where the surface and
+    /// the ownership are already known, rather than in a Lua chunk that
+    /// knows neither.
     pub hidden: bool,
 }
 
 /// Filetypes that say what a buffer holds, never who opened the window.
 ///
-/// The capture's discriminator table parts the two kinds cleanly. Every
-/// float that names its plugin does it with a filetype the plugin invented
-/// for its own widget -- `cmp_menu`, `notify`, `TelescopeResults`,
-/// `TelescopePrompt` -- while noice's health float carries `markdown`,
-/// which its `on_open` sets so the message *renders*, not to sign it
-/// (`docs/surface-float-wire-capture.md`, the noice section). Taking that
-/// as a name produces "view: markdown is drawing over the message area",
-/// which names a document type as if it were a plugin, and mints a notice
-/// family per content type on top.
+/// The capture's discriminator table parts the two kinds cleanly. A widget
+/// carries a filetype its author invented for that widget alone, while a
+/// float rendering a document carries the document's own type --
+/// `markdown` on a health report, set so the text *renders*
+/// (`docs/surface-float-wire-capture.md`). Taking that as a name produces
+/// "view: markdown is drawing over the message area", which names a
+/// document type as if it were the thing that opened the window, and mints
+/// a notice family per content type on top.
 ///
 /// A deny-list rather than an allow-list of widget filetypes because the
-/// widget names are open-ended (every plugin invents its own) while the
-/// document types a plugin sets to get rendering are a short, stable set.
-/// A content type not listed here reads as a name until it is added; the
-/// cost is one wrong word in one notice, against an allow-list's cost of
-/// staying silent about every plugin nobody enumerated.
+/// widget names are open-ended while the document types set to get
+/// rendering are a short, stable set. A content type not listed here reads
+/// as a name until it is added; the cost is one wrong word in one notice,
+/// against an allow-list's cost of staying silent about every window
+/// nobody enumerated.
 const CONTENT_FILETYPES: [&str; 5] = ["markdown", "help", "text", "man", "log"];
 
 impl FloatSighting {
     /// The name this float carries for whatever opened it, or `None` when it
     /// carries none.
     ///
-    /// Best-effort and bounded by design: a floating window records no
-    /// authorship, so this reads the one mark a plugin sets on its own
-    /// widget -- the buffer's filetype -- and never infers a plugin from
-    /// geometry. A filetype naming what the buffer *holds* is not that mark
-    /// ([`CONTENT_FILETYPES`]), and neither is the buffer's name: every float
-    /// in `docs/surface-float-wire-capture.md` carries `name = ""`, and a
-    /// plugin that floats a real file would put a path where a plugin's name
-    /// belongs -- the same category error, plus a fresh claimant per file.
-    /// A filetype that is not spelled the way filetypes are is refused as a
-    /// name as well, and that is a trust boundary rather than tidiness: this
-    /// string arrives off the wire and is interpolated into a notice family,
-    /// which native notices are withdrawn by prefix match. A filetype
-    /// carrying a space could spell another family exactly -- `a plugin`
-    /// spells the anonymous one -- and a notice that retracts a different
-    /// notice's line is a fact the user was told and then silently un-told.
+    /// A name for the notice to quote and nothing view decides on: what a
+    /// float is doing is read off the region it covers, so this only
+    /// answers what to call it. A floating window records no authorship,
+    /// so the mark read here is the one its author set on the widget's own
+    /// buffer -- the filetype. A filetype naming what the buffer *holds*
+    /// is not that mark ([`CONTENT_FILETYPES`]), and neither is the
+    /// buffer's name: every float in `docs/surface-float-wire-capture.md`
+    /// carries `name = ""`, and a window floating a real file would put a
+    /// path where a name belongs, plus a fresh family per file. A filetype
+    /// that is not spelled the way filetypes are is refused as a name as
+    /// well, and that is a trust boundary rather than tidiness: this string
+    /// arrives off the wire and is interpolated into a notice family, which
+    /// native notices are withdrawn by prefix match. A filetype carrying a
+    /// space could spell another family exactly -- `a plugin` spells the
+    /// anonymous one -- and a notice that retracts a different notice's
+    /// line is a fact the user was told and then silently un-told.
     #[must_use]
     pub fn identity(&self) -> Option<&str> {
         let filetype = self.filetype.as_str();
@@ -445,10 +348,10 @@ fn span(
 
 /// How many rows at the bottom of the grid belong to the command line: the
 /// row nvim itself would draw one on, plus the row above it that a plugin
-/// drawing a cmdline completion holds back for it. nvim-cmp's own
-/// `window.lua` clamps its height to keep exactly one, which is why its
-/// menu's bottom edge lands on the second-to-last grid row rather than the
-/// last one.
+/// drawing a cmdline completion holds back for it. A menu that leaves the
+/// command line visible clamps its own height to keep exactly one, which
+/// is why such a menu's bottom edge lands on the second-to-last grid row
+/// rather than the last one.
 const CMDLINE_ROWS: i64 = 2;
 
 /// The surface `float` is drawing over, or `None` when it is drawing
@@ -464,17 +367,13 @@ const CMDLINE_ROWS: i64 = 2;
 ///
 /// - **the command line**, when a command line is on screen and the float's
 ///   bottom edge lands in the rows the engine keeps for it. The command
-///   line is what parts nvim-cmp's cmdline menu from a picker whose lowest
-///   chrome window sits one row above the same band. A command line view is
-///   speculating counts here, and what that buys is bounded by what
-///   [`absorbs`] will take: a completion menu sighted during the silence is
-///   hidden then rather than after the `cmdline_show`, so view's palette
-///   and the menu are never on screen together. A claimant's own cmdline
-///   box is not in that set and is not hidden -- during a guess it is not
-///   named either, because the notice rests on nvim's own command line
-///   (`update::surface_conflict`'s `observe_float`), so it and the
-///   speculated palette can share the screen until the answer lands. What
-///   stands the plugin down is the takeover's own ask, not this.
+///   line is what parts a cmdline completion menu from a picker whose
+///   lowest chrome window sits one row above the same band. A command line
+///   view is speculating counts here, and the notice does not rest on it:
+///   a line naming what took the command line waits for the
+///   `cmdline_show` that makes it true (`update::surface_conflict`'s
+///   `observe_float`), so a guess and a window drawing under it can share
+///   the screen until the answer lands.
 /// - **the message area**, when the float is pinned to the grid's top
 ///   right corner -- where view stacks its toasts -- and is short enough to
 ///   be chrome rather than a screenful. A picker centered in the grid
@@ -531,85 +430,33 @@ pub fn claims_at(
     owned(hit.surface, model)
 }
 
-/// `surface` if this session externalized it, `None` otherwise -- the gate
-/// that makes the detector follow the `[native]` switches instead of a
+/// `surface` if this session draws it, `None` otherwise -- the gate that
+/// makes the detector follow the `[native]` switches instead of a
 /// constant.
+///
+/// Two ways a session answers, and the row says which it takes. A surface
+/// nvim gives up at `nvim_ui_attach` is drawn by whoever holds the
+/// capability ([`Model::owns`]). A surface nvim gives up through an option
+/// carries no capability at all, so its `[native]` switch is the whole
+/// answer -- read straight off the session
+/// ([`Model::feature_switch`]), because a row like that read through
+/// `ext` answers `false` for every session and a hold issued for it would
+/// take the user's chrome with nothing said.
 fn owned(surface: Surface, model: &Model) -> Option<Surface> {
-    match row(surface)?.ext {
-        Some(ext) if model.owns(ext) => Some(surface),
-        _ => None,
-    }
-}
-
-/// Whether a claim on `surface` is one view answers by taking the
-/// claimant's rows into the palette rather than by telling the user about
-/// it.
-///
-/// The filetypes a cmdline completion menu presents, and the whole of what
-/// view will take a window over for.
-///
-/// An allow-list, which is the opposite discipline from
-/// [`CONTENT_FILETYPES`]'s deny-list, because the two answers cost
-/// different things. Getting a *name* wrong costs one wrong word in a
-/// notice the user can read and act on. Getting a *taking* wrong costs the
-/// user a window that stops drawing and, on the pinned engine, stays that
-/// way through the plugin's own next reconfigure -- so absorption is gated
-/// on what was measured rather than on what a rect suggests. The capture's
-/// discriminator table has one column that reads "survives view's `hide`:
-/// yes" and it is this one; every other float in it reads "not measured".
-///
-/// One row, on the same terms as [`SURFACE_CLAIMANTS`]: a menu no row names
-/// takes the notice path instead, which is a line naming the plugin and the
-/// `view.toml` switch that hands the command line back -- exactly what a
-/// user got before any float was absorbed at all.
-const COMPLETION_MENUS: [&str; 1] = ["cmp_menu"];
-
-/// Whether a claim on `surface` by this float is one view answers by taking
-/// the claimant's rows into the palette rather than by telling the user
-/// about it.
-///
-/// Three conditions, and the float's own identity is the first of them.
-/// The rect is not evidence: [`claims`] answers `Cmdline` for anything
-/// whose bottom edge lands in the rows the command line keeps, and an LSP
-/// progress spinner parked above the status line is in that band whenever a
-/// user types `:w` (`compat/scenarios/fidget.toml` runs one at grid row
-/// 28). Absorbing on the rect alone hides a window that is not a menu and
-/// paints a diagnostic line into the palette as a completion candidate, so
-/// the float has to present a completion menu's own identity
-/// ([`COMPLETION_MENUS`]) before anything is taken. A float that claims the
-/// command line without one is still a conflict and still gets its notice;
-/// it is only never hidden.
-///
-/// Then the policy read, which is [`Surface::Popupmenu`]'s
-/// ([`Policy::Absorb`], the same answer view already gives a
-/// cmdline-sourced popupmenu that arrives on the wire): the rows a menu
-/// draws belong to the *completion* surface rather than to the command line
-/// the rect lands on -- [`claims`] names the cells, this names what was
-/// drawn in them. And the ownership gate is that surface's own: `[native]
-/// palette = false` detaches `ext_cmdline` and `ext_popupmenu` together, so
-/// a session that handed the command line back absorbs nothing and hides
-/// nobody's window.
-///
-/// Reading the table rather than matching on a variant is what keeps this
-/// following the config: a surface whose row stops saying `Absorb` stops
-/// being absorbed here, with no second place saying otherwise.
-#[must_use]
-pub fn absorbs(float: &FloatSighting, surface: Surface, model: &Model) -> bool {
-    surface == Surface::Cmdline
-        && float
-            .identity()
-            .is_some_and(|identity| COMPLETION_MENUS.contains(&identity))
-        && row(Surface::Popupmenu).is_some_and(|row| row.policy == Policy::Absorb)
-        && owned(Surface::Popupmenu, model).is_some()
+    let row = row(surface)?;
+    let drawn = match row.ext {
+        Some(ext) => model.owns(ext),
+        None => model.feature_switch(row.feature?)?,
+    };
+    drawn.then_some(surface)
 }
 
 /// Whether this session actually draws `surface` and would fight a second
-/// renderer for it: the table says [`Policy::Own`], and the `[native]`
-/// switch behind its `ext_*` left it attached.
+/// renderer for it: the table says [`Policy::Own`], and the row's own
+/// `[native]` answer ([`owned`]) left it with view.
 ///
 /// The one predicate a notice is gated on, wherever the notice comes from.
-/// A surface view absorbs rather than owns is not a conflict, and one this
-/// session handed back is not view's to complain about.
+/// A surface this session handed back is not view's to complain about.
 #[must_use]
 pub fn view_draws(surface: Surface, model: &Model) -> bool {
     row(surface).is_some_and(|row| row.policy == Policy::Own && owned(surface, model).is_some())
@@ -633,12 +480,12 @@ pub fn view_draws(surface: Surface, model: &Model) -> bool {
 #[derive(Debug, Default)]
 pub struct SurfaceConflicts {
     claimants: Vec<Claimant>,
-    /// What the named claimant notices already account for. A float drawing
-    /// on one of these surfaces, carrying no name or one of that claimant's
-    /// own, adds nothing a user can act on -- same plugin, same surface,
-    /// same `[native]` line -- and a second box saying so is the
-    /// two-notices-for-one-plugin case the spec forbids.
-    covers: Vec<Cover>,
+    /// The surfaces a channel report has already found populated by a
+    /// holder that is not view ([`Self::note_channel_held`]). A float
+    /// drawing on one of them is the same conflict the channel notice
+    /// already names, with the same `[native]` line, and a second box
+    /// saying so is one conflict counted twice.
+    held: Vec<Surface>,
     /// The floating windows the take-down has already asked rows of,
     /// whether or not the answer was filed, so a scan that sights one again
     /// before its close lands does not record it twice. Each carries the
@@ -651,37 +498,38 @@ pub struct SurfaceConflicts {
     /// Whether the user has acted -- a key, a click or a paste -- which is
     /// where spec 5.5 ends the startup conflict window.
     typed: bool,
-    /// Whether a claimant named this session is still inside the grace its
-    /// probe reply armed, during which a complaint it raises is taken down
-    /// even though the user has acted.
+    /// Whether a channel of a surface view draws was found held this
+    /// session and is still inside the grace that finding armed, during
+    /// which a complaint the holder raises is taken down even though the
+    /// user has acted.
     ///
-    /// The window a keystroke closes is the wrong bound for a plugin that
-    /// raises its complaint on a timer of its own: noice re-runs its health
-    /// check every second and raises the one about view holding
+    /// The window a keystroke closes is the wrong bound for a renderer
+    /// that raises its complaint on a timer of its own: a health check
+    /// re-running every second raises the one about view holding
     /// `vim.notify` several seconds in, which is past any realistic first
     /// keystroke. What the grace does not relax is what may be taken: a
     /// float inside it is closed only when its rows read as a complaint
     /// ([`SurfaceConflicts::reads_as_complaint`]), so a window the user
-    /// opened over the message area -- `:Noice` output being the realistic
-    /// case -- is left standing.
+    /// opened over the message area is left standing.
     complaint_grace: bool,
-    /// Whether the claimant probe armed at the attach has answered yet.
+    /// Whether the reading of the message area's replaced global has
+    /// arrived yet ([`crate::msg::Msg::NotifySinkRead`]).
     ///
-    /// Before it does, view knows nothing about which plugins are loaded,
-    /// so a float landing on a surface view draws cannot be told from a
-    /// superseded claimant's -- and the probe's own round trip is short
+    /// Before it does, view knows nothing about who stands at
+    /// `vim.notify`, so a float landing on the message area cannot be told
+    /// from that holder's own -- and the reading's round trip is short
     /// enough that the answer is worth waiting for and long enough that a
-    /// plugin timer firing at a fixed offset from `VimEnter` can beat it
-    /// (a remote link left tens of milliseconds between the two). A float
-    /// placed while
-    /// this is false is held in `probe_holds` and classified by the reply.
-    probe_answered: bool,
-    /// The floats held off the screen only because the probe had not
-    /// answered when they were placed, and the grid each draws into.
-    /// Drained by [`SurfaceConflicts::answer_probe`], which is what puts
-    /// them through the classification a known claimant's float takes at
-    /// its placement.
-    probe_holds: Vec<(u64, crate::grid::registry::GridId)>,
+    /// timer firing at a fixed offset from `VimEnter` can beat it (a remote
+    /// link left tens of milliseconds between the two). A float placed
+    /// while this is false is held in `sink_holds` and classified by the
+    /// reading.
+    sink_read: bool,
+    /// The floats held off the screen only because that reading had not
+    /// arrived when they were placed, and the grid each draws into.
+    /// Drained by [`SurfaceConflicts::read_sink`], which is what puts them
+    /// through the classification a float over a held channel takes at its
+    /// placement.
+    sink_holds: Vec<(u64, crate::grid::registry::GridId)>,
     /// Which engine the deadlines armed this session belong to. A timer
     /// thread sleeping on a dead engine's behalf still wakes, and the
     /// expiry it sends names this value as it was when the deadline was
@@ -692,14 +540,6 @@ pub struct SurfaceConflicts {
     /// [`Model::expire_startup_hold`](crate::model::Model::expire_startup_hold)),
     /// never at the dispatch site.
     generation: u64,
-    /// The claimant modules whose own `disable` ran when the takeover asked them to turn themselves
-    /// off ([`Msg::ClaimantsHandedBack`](crate::msg::Msg::ClaimantsHandedBack)).
-    ///
-    /// The notice's account of the ask is worded from this and not from the
-    /// probe: a plugin that turned itself off exactly as asked is still in
-    /// `package.loaded`, so the probe reading alone reports every success
-    /// as "still loaded".
-    handed_back: Vec<String>,
 }
 
 /// One float the take-down has claimed, and the bar its rows are held to.
@@ -715,27 +555,14 @@ struct Complaint {
     unconditional: bool,
     /// The grid this float draws into, once a placement event has named
     /// one. `None` for a float the scan sighted without view having seen
-    /// its `win_float_pos` -- one already on screen when the probe reply
-    /// named its plugin -- which is a window nothing is holding back.
+    /// its `win_float_pos` -- one already on screen when the channel
+    /// report landed -- which is a window nothing is holding back.
     grid: Option<crate::grid::registry::GridId>,
     /// Whether the rows came back reading as something the user opened, so
     /// the window is theirs again. The claim itself stays: it is what keeps
     /// the scan's next sighting of the same window from asking for the rows
     /// a second time.
     released: bool,
-}
-
-/// One named claimant's accounted-for surfaces, with the identities its own
-/// floats present.
-///
-/// Kept per claimant rather than as one flat surface set, because the
-/// identity half is what makes the absorption *this* plugin's: a second
-/// claimant covering the message area cannot make noice's own windows
-/// anonymous, and a flat set could not tell the two apart.
-#[derive(Debug)]
-struct Cover {
-    surfaces: Vec<Surface>,
-    identities: &'static [&'static str],
 }
 
 /// One identity's standing claim.
@@ -797,77 +624,56 @@ impl SurfaceConflicts {
         Some(&claimant.surfaces)
     }
 
-    /// Whether a named claimant's notice already accounts for a float of
-    /// `identity` drawing on `surface`, so the sighting is a conflict the
-    /// user has already been told about, with the same remedy.
+    /// Whether a channel notice already accounts for a float drawing on
+    /// `surface`, so the sighting is a conflict the user has been told
+    /// about with the same remedy.
     ///
-    /// `None` -- a float that names nobody -- is covered by any claimant
-    /// holding the surface: the sighting cannot say who, and the standing
-    /// notice can. A float that does name itself is covered only by the
-    /// claimant whose own windows present that name
-    /// ([`SurfaceClaimant::identities`]); any other name is a second plugin,
-    /// whose line says something the first plugin's never does.
+    /// Read off what the channel audit found rather than off any name the
+    /// float carries: a window over a surface whose channel is populated by
+    /// a holder that is not view is that holder drawing, whatever its
+    /// buffer happens to call itself.
     #[must_use]
-    pub fn covers(&self, surface: Surface, identity: Option<&str>) -> bool {
-        self.covers.iter().any(|cover| {
-            cover.surfaces.contains(&surface)
-                && identity.is_none_or(|name| cover.identities.contains(&name))
-        })
+    pub fn channel_held(&self, surface: Surface) -> bool {
+        self.held.contains(&surface)
     }
 
-    /// Records that a named claimant's notice now accounts for `surfaces`,
-    /// drawn by floats presenting `identities`.
+    /// Records that a channel of `surface` was found populated by a holder
+    /// that is not view, and answers whether that is news for this
+    /// surface.
     ///
-    /// Paired with [`Self::narrow`], which is what takes the notices already
-    /// standing down to what this cover leaves of them.
-    pub fn note_covered(&mut self, surfaces: &[Surface], identities: &'static [&'static str]) {
-        if let Some(cover) = self
-            .covers
-            .iter_mut()
-            .find(|cover| cover.identities == identities)
-        {
-            for surface in surfaces {
-                if !cover.surfaces.contains(surface) {
-                    cover.surfaces.push(*surface);
-                }
-            }
-            return;
+    /// News-only because the grace is armed from it: a second channel of
+    /// the same surface reporting later must not re-arm a deadline that is
+    /// already running, or the first deadline's expiry ends a grace the
+    /// second report had just extended.
+    pub fn note_channel_held(&mut self, surface: Surface) -> bool {
+        if self.held.contains(&surface) {
+            return false;
         }
-        self.covers.push(Cover {
-            surfaces: surfaces.to_vec(),
-            identities,
-        });
+        self.held.push(surface);
+        true
     }
 
-    /// Answers what the recorded covers leave of `identity`'s standing
-    /// claim: `None` when it has none or none of it was covered, `Some(&[])`
-    /// when all of it was (its notice comes down), and `Some(rest)` when part
-    /// of it survives (its notice is re-worded to the rest).
-    pub fn narrow(&mut self, identity: Option<&str>) -> Option<&[Surface]> {
-        let index = self
-            .claimants
-            .iter()
-            .position(|claimant| claimant.identity.as_deref() == identity)?;
-        let covered: Vec<Surface> = self
-            .claimants
-            .get(index)?
-            .surfaces
-            .iter()
-            .copied()
-            .filter(|surface| self.covers(*surface, identity))
-            .collect();
-        if covered.is_empty() {
-            return None;
-        }
-        let claimant = self.claimants.get_mut(index)?;
-        claimant
-            .surfaces
-            .retain(|surface| !covered.contains(surface));
-        if claimant.surfaces.is_empty() {
-            self.claimants.remove(index);
-            return Some(&[]);
-        }
-        Some(&self.claimants.get(index)?.surfaces)
+    /// Drops every surface a channel report has accounted for from the
+    /// standing float claims, and answers each claim it changed with what
+    /// is left of it.
+    ///
+    /// An empty rest is a claim the channel notice now covers whole, so the
+    /// float line comes down; a shorter one is re-worded to the rest. A
+    /// claimant left with nothing is forgotten, so a float drawing later on
+    /// a surface no report covers is news again.
+    pub fn narrow_to_held(&mut self) -> Vec<(Option<String>, Vec<Surface>)> {
+        let held = self.held.clone();
+        let mut narrowed = Vec::new();
+        self.claimants.retain_mut(|claimant| {
+            let before = claimant.surfaces.len();
+            claimant.surfaces.retain(|surface| !held.contains(surface));
+            if claimant.surfaces.len() == before {
+                return true;
+            }
+            narrowed.push((claimant.identity.clone(), claimant.surfaces.clone()));
+            !claimant.surfaces.is_empty()
+        });
+        narrowed
     }
 
     /// Claims `win`'s text for the notification history, and answers
@@ -925,29 +731,30 @@ impl SurfaceConflicts {
         complaint.grid
     }
 
-    /// Holds `win`'s float off the screen because the claimant probe has
-    /// not answered, and answers whether it is now held.
+    /// Holds `win`'s float off the screen because the message area's
+    /// replaced global has not been read yet, and answers whether it is now
+    /// held.
     ///
-    /// `false` once the probe has answered: from then on the cover the
-    /// reply recorded is the whole test, and a float this says `false`
-    /// about paints on the frame it arrived for.
-    pub fn hold_for_probe(&mut self, win: u64, grid: crate::grid::registry::GridId) -> bool {
-        if self.probe_answered {
+    /// `false` once that reading has arrived: from then on what the audit
+    /// found held is the whole test, and a float this says `false` about
+    /// paints on the frame it arrived for.
+    pub fn hold_for_sink_read(&mut self, win: u64, grid: crate::grid::registry::GridId) -> bool {
+        if self.sink_read {
             return false;
         }
-        match self.probe_holds.iter_mut().find(|held| held.0 == win) {
-            // a plugin animating its window sends a placement per step
+        match self.sink_holds.iter_mut().find(|held| held.0 == win) {
+            // a window being animated sends a placement per step
             Some(held) => held.1 = grid,
-            None => self.probe_holds.push((win, grid)),
+            None => self.sink_holds.push((win, grid)),
         }
         true
     }
 
-    /// Marks the probe answered and hands back every float held for it, for
-    /// the caller to classify now that the claimants are named.
-    pub fn answer_probe(&mut self) -> Vec<(u64, crate::grid::registry::GridId)> {
-        self.probe_answered = true;
-        std::mem::take(&mut self.probe_holds)
+    /// Marks the reading arrived and hands back every float held for it,
+    /// for the caller to classify now that the holder is known.
+    pub fn read_sink(&mut self) -> Vec<(u64, crate::grid::registry::GridId)> {
+        self.sink_read = true;
+        std::mem::take(&mut self.sink_holds)
     }
 
     /// Whether `win`'s rows were read for the notification history rather
@@ -981,14 +788,13 @@ impl SurfaceConflicts {
         self.typed = true;
     }
 
-    /// Opens the claimant-complaint grace, and answers whether this call is
-    /// what opened it.
+    /// Opens the complaint grace, and answers whether this call is what
+    /// opened it.
     ///
-    /// Answered rather than assumed, because the probe reports every
-    /// reading it takes: a second claimant named later must not re-arm a
-    /// deadline that is already running, or the first deadline's expiry
-    /// ends a grace the second reading had just extended. The grace runs
-    /// from the first reply that names anyone.
+    /// Answered rather than assumed: a second channel found held later
+    /// must not re-arm a deadline that is already running, or the first
+    /// deadline's expiry ends a grace the second report had just extended.
+    /// The grace runs from the first report of a held channel.
     pub fn arm_complaint_grace(&mut self) -> bool {
         if self.complaint_grace {
             return false;
@@ -1005,35 +811,34 @@ impl SurfaceConflicts {
 
     /// Closes the grace, on the deadline the arming scheduled -- and only
     /// that one: an expiry carrying another engine's `generation` was armed
-    /// against a probe reply this engine never gave, and closing on it
-    /// would end the replacement's grace early.
+    /// against a report this engine never made, and closing on it would end
+    /// the replacement's grace early.
     pub fn end_complaint_grace(&mut self, generation: u64) {
         if generation == self.generation {
             self.complaint_grace = false;
         }
     }
 
-    /// Whether the lines a float was drawing read as a plugin complaining
-    /// about the UI view took over, rather than as something the user
-    /// opened.
+    /// Whether the lines a float was drawing read as a complaint about the
+    /// UI view took over, rather than as something the user opened.
     ///
-    /// The discriminator is view's own vocabulary appearing in a plugin's
-    /// text: the `ext_*` capability names ([`Ext::as_str`]) are what a GUI
-    /// takes and what a plugin names when it says it cannot work, and
-    /// `vim.notify` is the one function a takeover re-points, which is the
-    /// other thing a claimant reports as broken. Derived from the enum
-    /// rather than written down, so a surface added later is matched
+    /// The discriminator is view's own vocabulary appearing in somebody
+    /// else's text: the `ext_*` capability names ([`Ext::as_str`]) are what
+    /// a GUI takes and what a renderer names when it says it cannot work,
+    /// and `vim.notify` is the one function a takeover re-points, which is
+    /// the other thing such a window reports as broken. Derived from the
+    /// enum rather than written down, so a surface added later is matched
     /// without a second list to remember.
     ///
     /// Only consulted for a float sighted after the user has acted: inside
-    /// the startup window every complaint over a surface a named claimant
-    /// covers is taken, text unread, and which bar applies is fixed at the
-    /// sighting ([`Self::claim_complaint`]). This is the narrower bar the
-    /// grace runs under, and the cost of getting it wrong is a window
+    /// the startup window every complaint over a surface whose channel was
+    /// found held is taken, text unread, and which bar applies is fixed at
+    /// the sighting ([`Self::claim_complaint`]). This is the narrower bar
+    /// the grace runs under, and the cost of getting it wrong is a window
     /// closed under someone's hand. The cost the other way is accepted and
     /// pinned: a window the user opened that quotes one of these names --
-    /// a `:Noice` log listing the health error -- reads as a complaint
-    /// inside the grace and is filed and closed.
+    /// a log view listing the health error -- reads as a complaint inside
+    /// the grace and is filed and closed.
     #[must_use]
     pub fn reads_as_complaint(lines: &[String]) -> bool {
         lines.iter().any(|line| {
@@ -1051,49 +856,20 @@ impl SurfaceConflicts {
     /// | field | why |
     /// | --- | --- |
     /// | `complaints` | window handles, and a fresh process issues them from 1000 again: a handle held past the death names one of the replacement's own windows, and the reply to a read of it would file a live window's rows into the history and close it |
-    /// | `typed` | the replacement sources the config again, so its own claimants raise their complaints again, and a session that had been typed at would leave them stacked beside the re-raised notice |
-    /// | `complaint_grace` | a deadline armed against the dead engine's probe reply, and the replacement's own reply arms its own |
-    /// | `probe_answered`, `probe_holds` | the attach arms a claimant probe per engine, so the replacement is back inside the window where a float over a native surface is held until its own reply names who is loaded; the held handles belong to the dead process |
+    /// | `typed` | the replacement sources the config again, so whatever drew over a surface draws again, and a session that had been typed at would leave those windows stacked beside the re-raised notice |
+    /// | `complaint_grace` | a deadline armed against the dead engine's report, and the replacement's own report arms its own |
+    /// | `sink_read`, `sink_holds` | the attach re-reads the message area's replaced global per engine, so the replacement is back inside the window where a float over a native surface is held until that reading lands; the held handles belong to the dead process |
     /// | `generation` | bumped: the dead engine's deadlines are still sleeping in their timer threads, and their expiries must find nobody to answer to |
-    /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config loads the same plugins -- forgetting it would raise a second notice per plugin for one conflict |
-    /// | `covers` | kept: the surfaces a standing notice accounts for, which the replacement's notice accounts for identically |
-    /// | `handed_back` | dropped: the hand-back is a step of one connection's takeover, and the replacement's own asks its own plugins again -- a list kept past the death would word the replacement's notice from an ask that went to a process that is gone |
+    /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config draws the same windows -- forgetting it would raise a second notice per window for one conflict |
+    /// | `held` | cleared: the replacement re-reports its own channels, and a surface left in here would swallow that report as a conflict already accounted for |
     pub fn forget_engine(&mut self) {
         self.complaints.clear();
         self.typed = false;
         self.complaint_grace = false;
-        self.probe_answered = false;
-        self.probe_holds.clear();
-        self.handed_back.clear();
+        self.sink_read = false;
+        self.sink_holds.clear();
+        self.held.clear();
         self.generation += 1;
-    }
-
-    /// Records which claimant modules took the hand-back, answering whether
-    /// any of them is news: a report naming only modules already recorded
-    /// -- an empty one included -- records nothing and changes no notice.
-    ///
-    /// Added to rather than replacing what is already recorded: the ask
-    /// goes out in more than one pass (a claimant that loads after the
-    /// takeover is asked by the engine's own autocommands, and reported on
-    /// its own), and each pass names only what it turned off. Replacing
-    /// would leave the eager plugin's notice worded from the lazy one's
-    /// answer.
-    pub fn note_handed_back(&mut self, modules: Vec<String>) -> bool {
-        let mut news = false;
-        for module in modules {
-            if !self.took_the_hand_back(&module) {
-                self.handed_back.push(module);
-                news = true;
-            }
-        }
-        news
-    }
-
-    /// Whether `module`'s own `disable` ran when view asked it to turn
-    /// itself off.
-    #[must_use]
-    pub fn took_the_hand_back(&self, module: &str) -> bool {
-        self.handed_back.iter().any(|name| name == module)
     }
 
     /// Whether the startup conflict window is still open, which is spec
@@ -1130,275 +906,6 @@ impl SurfaceConflicts {
         });
         gone
     }
-}
-
-/// How many times one window may be put back on screen after view has
-/// hidden it before view stops absorbing it and says so instead.
-///
-/// The flash this bounds is real and cannot be designed away: between a
-/// plugin's re-show and view's next observation of it there is a frame
-/// carrying both chromes, and view cannot hold a window against its owner
-/// -- nvim offers no lock. What it can do is stop after a bounded number of
-/// them. Three, because two is a plugin that reconfigured its window twice
-/// and a third is a plugin that is going to keep doing it; the wire capture
-/// measured zero over 277 samples on the pinned versions, so this counter
-/// is for the plugin and the engine nobody has run yet.
-const MAX_RESHOWS: u8 = 3;
-
-/// What one sighting of an absorbable float asks view to do.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AbsorbStep {
-    /// Hide the window, then read its rows: the first sighting of a float
-    /// view has not taken yet, and the re-hide after a tolerated re-show.
-    HideThenRead,
-    /// Read its rows and nothing else -- the window is already hidden, and
-    /// what changes from here is the candidate list inside it.
-    Read,
-    /// Stop absorbing this one and tell the user about it instead: view
-    /// hid it and it came back, or the hide never landed at all.
-    Yield,
-    /// Nothing at all: the first sighting of this window already carries
-    /// somebody else's `hide`, so it is drawing nothing for view to take
-    /// and nothing for view to report.
-    Ignore,
-}
-
-/// What a reply carrying one float's rows leaves the palette holding.
-#[non_exhaustive]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RowsOutcome {
-    /// The rows are view's to paint now. `changed` is whether they differ
-    /// from what the palette already had, which is the only thing that owes
-    /// a repaint: the scan re-reads a standing menu at its own cadence, and
-    /// a frame per read of rows nobody moved is a paint loop keeping time
-    /// with a plugin.
-    Absorbed { changed: bool },
-    /// The window was not hidden when its own rows were read, so the hide
-    /// did not land -- an engine that does not take the flag, or a plugin
-    /// that put the window straight back. Nothing is absorbed, nothing is
-    /// painted twice, and the identity is handed back so the caller can
-    /// raise the notice that says so.
-    Yield(Option<String>),
-    /// The reply names a window this session is not absorbing (a teardown
-    /// overtook it, or it has already yielded), so there is nothing to do.
-    Stale,
-}
-
-/// The floats view has taken over, and the rows it took off them.
-///
-/// Keyed on the window handle, which is the one identifier that is stable
-/// for exactly as long as this state is: the capture measures one window id
-/// reused across a whole cmdline session and never across two, which is
-/// also the lifetime of an absorption ([`Self::forget`] runs at
-/// `cmdline_hide`). Nothing here outlives the connection -- window handles
-/// are per-session allocations, so a replacement engine's are somebody
-/// else's numbers.
-#[derive(Debug, Default)]
-pub struct FloatAbsorption {
-    windows: Vec<AbsorbedWindow>,
-    /// The rows last read, and the window they came off, so a window that
-    /// goes away takes its own rows with it and not another's.
-    rows: Option<(u64, crate::native::palette::AbsorbedRows)>,
-}
-
-/// One float view has taken over.
-#[derive(Debug)]
-struct AbsorbedWindow {
-    win: u64,
-    /// What the float called itself when it was first sighted, kept so the
-    /// notice a degrade raises names the same thing the notice would have
-    /// named had view never absorbed it at all.
-    identity: Option<String>,
-    /// Whether a read has come back saying the hide actually landed. Until
-    /// one has, a sighting that still shows the window is not yet evidence
-    /// of anything: the reply is what nvim itself says about the flag, read
-    /// after the hide ran, while a sighting is a scan that may have walked
-    /// the window list before the hide was even written.
-    confirmed: bool,
-    reshows: u8,
-    degraded: bool,
-    /// Whether this window was sighted during the scan now running, on the
-    /// same terms as [`Claimant::seen`].
-    seen: bool,
-}
-
-impl FloatAbsorption {
-    /// Answers one sighting of a float view may absorb.
-    ///
-    /// The cadence bound lives here: a hide goes out on the first sighting
-    /// of a window and on nothing else until the plugin puts that window
-    /// back, so a menu observed at the scan rate for a whole cmdline session
-    /// costs one hide, not one per keystroke.
-    ///
-    /// `hidden` is read on the first sighting as well as on the ones after
-    /// it, and it parts two different windows: one view hid (`confirmed`,
-    /// and its rows are what the palette is painting) from one that was
-    /// already hidden when view first saw it. The second is somebody else's
-    /// -- a user's own config, another plugin -- and it is drawing nothing,
-    /// so there is nothing to take and nothing to give back.
-    pub fn observe(&mut self, win: u64, hidden: bool, identity: Option<&str>) -> AbsorbStep {
-        let index = match self.windows.iter().position(|w| w.win == win) {
-            Some(index) => index,
-            None if hidden => return AbsorbStep::Ignore,
-            None => {
-                self.windows.push(AbsorbedWindow {
-                    win,
-                    identity: identity.map(str::to_owned),
-                    confirmed: false,
-                    reshows: 0,
-                    degraded: false,
-                    seen: true,
-                });
-                return AbsorbStep::HideThenRead;
-            }
-        };
-        let Some(window) = self.windows.get_mut(index) else {
-            return AbsorbStep::Yield;
-        };
-        window.seen = true;
-        if window.degraded {
-            return AbsorbStep::Yield;
-        }
-        if hidden || !window.confirmed {
-            return AbsorbStep::Read;
-        }
-        window.reshows = window.reshows.saturating_add(1);
-        if window.reshows >= MAX_RESHOWS {
-            window.degraded = true;
-            self.drop_rows(win);
-            return AbsorbStep::Yield;
-        }
-        AbsorbStep::HideThenRead
-    }
-
-    /// Folds one read of a float's rows.
-    pub fn rows_read(
-        &mut self,
-        win: u64,
-        hidden: bool,
-        rows: crate::native::palette::AbsorbedRows,
-    ) -> RowsOutcome {
-        let Some(window) = self.windows.iter_mut().find(|w| w.win == win) else {
-            return RowsOutcome::Stale;
-        };
-        if window.degraded {
-            return RowsOutcome::Stale;
-        }
-        if !hidden {
-            window.degraded = true;
-            let identity = window.identity.clone();
-            self.drop_rows(win);
-            return RowsOutcome::Yield(identity);
-        }
-        window.confirmed = true;
-        let changed = !matches!(&self.rows, Some((owner, held)) if *owner == win && held == &rows);
-        self.rows = Some((win, rows));
-        RowsOutcome::Absorbed { changed }
-    }
-
-    /// The rows the palette paints, or `None` while view is absorbing
-    /// nothing.
-    #[must_use]
-    pub fn rows(&self) -> Option<&crate::native::palette::AbsorbedRows> {
-        self.rows.as_ref().map(|(_, rows)| rows)
-    }
-
-    /// Closes one float scan: drops every absorbed window the scan did not
-    /// sight, and answers whether the palette's rows went with one of them.
-    ///
-    /// The teardown for the case the command line does not cover: a prefix
-    /// with no candidates produces no window at all (the capture's `:zqx`),
-    /// so the menu is gone while the command line the user is still typing
-    /// stays open. Without this the palette would keep offering the
-    /// candidates of a prefix that no longer has any.
-    pub fn sweep(&mut self) -> bool {
-        let mut dropped = Vec::new();
-        self.windows.retain_mut(|window| {
-            if std::mem::take(&mut window.seen) {
-                return true;
-            }
-            dropped.push(window.win);
-            false
-        });
-        let mut cleared = false;
-        for win in dropped {
-            // every dropped window, not the first one that owned the rows:
-            // `any` would stop walking at it and leave the rest holding
-            cleared |= self.drop_rows(win);
-        }
-        cleared
-    }
-
-    /// Forgets every absorption, and answers which windows view still owes
-    /// an un-hide.
-    ///
-    /// The hide is view's to reverse, and the reversal is the last thing an
-    /// absorption does. That nvim-cmp's own menu window is already gone by
-    /// then -- it closes from a `CmdlineLeave` callback, which is also why
-    /// no `WinClosed` announces it -- is a fact about one plugin, and view
-    /// cannot see from here which one it is holding: a window this returns
-    /// may be closed, and asking nvim to show a closed window is what the
-    /// caller's chunk answers safely (it checks validity, and rides a
-    /// `pcall`). What view must never do is stop tracking a window it hid
-    /// while that window still exists, because the flag survives the
-    /// plugin's own next reconfigure (the capture measured 277 samples with
-    /// no re-show) and nothing else in the session will ever clear it.
-    ///
-    /// A window the scan stopped sighting is not in here to begin with:
-    /// [`Self::sweep`] dropped it, which is the plugin having closed it and
-    /// the one case where there is genuinely nothing to give back.
-    ///
-    /// Called when the command line closes and when a connection is
-    /// replaced. The replacement discards the list rather than sending it:
-    /// those handles were allocated in a session that no longer exists.
-    #[must_use]
-    pub fn forget(&mut self) -> Vec<u64> {
-        self.rows = None;
-        self.windows
-            .drain(..)
-            .map(|window| window.win)
-            .collect::<Vec<_>>()
-    }
-
-    /// Drops the palette's rows if they came off `win`, and answers whether
-    /// they did.
-    fn drop_rows(&mut self, win: u64) -> bool {
-        if self.rows.as_ref().is_some_and(|(owner, _)| *owner == win) {
-            self.rows = None;
-            return true;
-        }
-        false
-    }
-}
-
-/// Ends every absorption: the palette gives up the rows it was showing, and
-/// every window view hid to get them is shown again.
-///
-/// The body both endings share, so neither can drift from the other. nvim's
-/// own command line closing is one (`update::surface_conflict`'s
-/// `cmdline_closed`, on `cmdline_hide`), and a speculated one being
-/// withdrawn is the other
-/// ([`crate::native::speculate::withdraw_cmdline_speculation`]) -- a guess
-/// produces no `cmdline_hide`, because nvim never opened a command line,
-/// so a hide taken under one has no other way back.
-///
-/// The show is sent for every window still being absorbed, including the
-/// ones already closed: the chunk answering it checks the window's validity,
-/// so a show landing on a closed window does nothing. The expensive half is
-/// the other order, where the window outlives the absorption and nothing
-/// else in the session would ever clear its `hide` flag.
-#[must_use]
-pub fn release_absorptions(model: &mut Model) -> Vec<crate::msg::Effect> {
-    let painted = model.engine.float_absorption.rows().is_some();
-    let shown = model.engine.float_absorption.forget();
-    model.dirty |= painted || !shown.is_empty();
-    shown
-        .into_iter()
-        .map(|win| {
-            crate::msg::Effect::Rpc(crate::msg::RpcCall::SetFloatHidden { win, hide: false })
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -1541,6 +1048,53 @@ mod tests {
         );
     }
 
+    /// The float rule reads the channel table, so every region the table
+    /// names has to be answerable through it -- and a surface the table
+    /// gives no float row must be answered for neither region. A
+    /// `Channel::Float` row added to a surface, or taken off one, changes
+    /// what `claims_at` says and is what this reads.
+    #[test]
+    fn every_float_region_the_table_names_is_claimed_through_it() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
+        model.attach_surfaces(vec![Ext::Cmdline, Ext::Messages, Ext::Tabline]);
+        for entry in crate::native::channels::CHANNELS {
+            for channel in entry.channels {
+                let crate::native::channels::Channel::Float(region) = channel else {
+                    continue;
+                };
+                let sighting = match region {
+                    crate::native::channels::Region::CmdlineBand => cmp_cmdline_menu(),
+                    crate::native::channels::Region::TopRightChrome => notify_toast(),
+                };
+                assert_eq!(
+                    claims(&sighting, &model),
+                    Some(entry.surface),
+                    "{:?} names {region:?} and a float parked there answers otherwise",
+                    entry.surface
+                );
+            }
+        }
+
+        let floatless: Vec<Surface> = crate::native::channels::CHANNELS
+            .iter()
+            .filter(|entry| {
+                !entry
+                    .channels
+                    .iter()
+                    .any(|channel| matches!(channel, crate::native::channels::Channel::Float(_)))
+            })
+            .map(|entry| entry.surface)
+            .collect();
+        for sighting in [cmp_cmdline_menu(), notify_toast()] {
+            let answer = claims(&sighting, &model);
+            assert!(
+                !answer.is_some_and(|surface| floatless.contains(&surface)),
+                "a surface the table gives no float row was claimed by one: {answer:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_float_on_the_cmdline_row_is_a_cmdline_claim() {
         let mut model = captured_session();
@@ -1589,7 +1143,7 @@ mod tests {
     fn a_float_on_the_cmdline_row_claims_nothing_once_the_guess_is_withdrawn() {
         let mut model = captured_session();
         speculate_colon(&mut model);
-        let _ = crate::native::speculate::withdraw_cmdline_speculation(&mut model);
+        crate::native::speculate::withdraw_cmdline_speculation(&mut model);
         assert_eq!(claims(&cmp_cmdline_menu(), &model), None);
     }
 
@@ -1747,68 +1301,6 @@ mod tests {
         );
     }
 
-    /// The two tables that decide what happens to one float must not name
-    /// the same plugin: a claimant's own windows are covered by a notice
-    /// that says which surfaces it took, and a window view also hides is a
-    /// user reading that line beside a menu view quietly took over. The
-    /// notice-side guard for it lives in `update::surface_conflict`, which
-    /// answers per sighting; this is the guard that walks the population, so
-    /// a row added to either table trips over it in a unit test rather than
-    /// on somebody's screen.
-    /// Every row of [`COMPLETION_MENUS`] read back out of the document that
-    /// measured it, rather than trusted because somebody typed it here.
-    ///
-    /// Absorption is view taking a window away from the plugin that opened
-    /// it, and the fact that makes that safe is one measurement:
-    /// `docs/surface-float-wire-capture.md`'s discriminator table has a
-    /// `survives view's hide` row, and it reads `yes` for exactly one
-    /// column. A second completion plugin is welcome in the table -- after
-    /// its own column is in the document with that cell answered, which is
-    /// what this walk is here to insist on. A row added without the
-    /// measurement fails here by name.
-    #[test]
-    fn every_absorbable_menu_is_one_the_capture_measured_a_hide_surviving() {
-        const DOC: &str = include_str!("../../../../docs/surface-float-wire-capture.md");
-        let row = |label: &str| -> Vec<String> {
-            DOC.lines()
-                .find(|line| line.starts_with(label))
-                .map(|line| {
-                    line.trim_matches('|')
-                        .split('|')
-                        .map(|cell| cell.trim().to_string())
-                        .collect()
-                })
-                .expect("the capture doc must carry the discriminator table")
-        };
-        let filetypes = row("| buffer `filetype` |");
-        let survives = row("| survives view's `hide` |");
-        assert_eq!(
-            filetypes.len(),
-            survives.len(),
-            "the two rows describe the same columns or neither says anything \
-             about the other"
-        );
-        for menu in super::COMPLETION_MENUS {
-            let column = filetypes
-                .iter()
-                .position(|cell| cell.contains(&format!("`{menu}`")))
-                .unwrap_or_else(|| {
-                    unreachable!(
-                        "{menu} is absorbed but names no column of the capture's \
-                         discriminator table"
-                    )
-                });
-            assert!(
-                survives
-                    .get(column)
-                    .is_some_and(|cell| cell.contains("yes")),
-                "{menu} is absorbed on a column the capture never measured a \
-                 hide surviving: {:?}",
-                survives.get(column)
-            );
-        }
-    }
-
     /// What a matrix cell says when the population it walks is empty.
     ///
     /// ASCII dashes: `scripts/check-style.sh` bans the em-dash outright in
@@ -1933,7 +1425,7 @@ mod tests {
     fn render_matrix() -> String {
         let mut out = String::from(
             "| surface | `ext_*` option | policy | `[native]` switch that hands it back \
-             | claiming plugin classes | proving scenario / state |\n\
+             | channels that draw it | proving scenario / state |\n\
              | --- | --- | --- | --- | --- | --- |\n",
         );
         for table_row in SURFACES {
@@ -1944,17 +1436,9 @@ mod tests {
             let remedy = table_row
                 .remedy
                 .map_or_else(|| NONE_CELL.to_string(), |line| format!("`{line}`"));
-            let claimants: Vec<String> = super::SURFACE_CLAIMANTS
+            let claimants: Vec<String> = crate::native::channels::channels(table_row.surface)
                 .iter()
-                .filter(|claimant| claimant.surfaces.contains(&table_row.surface))
-                .map(|claimant| {
-                    let identities: Vec<String> = claimant
-                        .identities
-                        .iter()
-                        .map(|identity| format!("`{identity}`"))
-                        .collect();
-                    format!("`{}` ({})", claimant.class, or_none(&identities))
-                })
+                .map(|channel| format!("`{}`", channel.name()))
                 .collect();
             let proving = table_row.ext.map(proving_states).unwrap_or_default();
             out.push_str(&format!(
@@ -1968,65 +1452,8 @@ mod tests {
         out
     }
 
-    /// The sentence the matrix owes about absorption, which no policy
-    /// column can carry on its own: the command line's own policy is
-    /// [`Policy::Own`], and the taking is decided one row down --
-    /// [`Surface::Popupmenu`]'s [`Policy::Absorb`] read against the
-    /// float's own filetype ([`super::absorbs`]). Generated from both
-    /// rows and from the menu list, so a policy that changes rewrites the
-    /// sentence rather than leaving it asserting the old arrangement.
-    fn render_absorb_note() -> String {
-        let menus: Vec<String> = super::COMPLETION_MENUS
-            .iter()
-            .map(|menu| format!("`{menu}`"))
-            .collect();
-        wrapped(&format!(
-            "A float whose rows land in the command line's band is taken into the palette \
-             when it presents a completion menu's own filetype ({}). That is the \
-             completion menu's `{:?}` read at the moment the float appears; the command \
-             line's own policy stays `{:?}`.",
-            or_none(&menus),
-            row(Surface::Popupmenu)
-                .expect("the completion menu has a row")
-                .policy,
-            row(Surface::Cmdline)
-                .expect("the command line has a row")
-                .policy,
-        ))
-    }
-
-    /// The width the page's prose is graded at, so a sentence this module
-    /// generates arrives wrapped rather than as one long line a page
-    /// cannot carry: `scripts/check-style.sh` reads the generated block
-    /// like any other prose, and a hand re-wrap of it would be gone at the
-    /// next run of the pin above.
-    const PAGE_WIDTH: usize = 80;
-
-    /// Greedy word wrap at [`PAGE_WIDTH`]. A word longer than the width
-    /// stands on its own line: it cannot be brought under the limit by
-    /// wrapping, which is the same reading the style gate takes.
-    fn wrapped(text: &str) -> String {
-        let mut out = String::new();
-        let mut column = 0;
-        for word in text.split_whitespace() {
-            if column == 0 {
-                out.push_str(word);
-                column = word.chars().count();
-            } else if column + 1 + word.chars().count() <= PAGE_WIDTH {
-                out.push(' ');
-                out.push_str(word);
-                column += 1 + word.chars().count();
-            } else {
-                out.push('\n');
-                out.push_str(word);
-                column = word.chars().count();
-            }
-        }
-        out
-    }
-
     /// The page a user reads instead of this module, pinned to what the
-    /// module actually does. A policy, a switch, a claimant or a proving
+    /// module actually does. A policy, a switch, a channel or a proving
     /// state that changes here and not there fails naming the row that
     /// drifted.
     #[test]
@@ -2046,11 +1473,48 @@ mod tests {
             page.contains(&matrix),
             "docs/surface-ownership.md is stale, it must carry:\n{matrix}"
         );
-        let note = render_absorb_note();
-        assert!(
-            page.contains(&note),
-            "docs/surface-ownership.md is stale, it must carry:\n{note}"
-        );
+    }
+
+    /// A surface with no attach answers to its `[native]` switch alone, so
+    /// the model has to carry that switch by name: one this session cannot
+    /// answer reads as a surface nobody draws, and a hold issued for it
+    /// takes the user's chrome with nothing said.
+    #[test]
+    fn every_owned_surface_without_an_attach_names_a_switch_the_model_answers() {
+        for table_row in SURFACES
+            .iter()
+            .filter(|row| row.policy != Policy::Yield && row.ext.is_none())
+        {
+            let mut model = Model::with_term_size(80, 24);
+            model.attach_surfaces(Vec::new());
+            let answered = table_row
+                .feature
+                .and_then(|feature| model.feature_switch(feature));
+            assert!(
+                answered.is_some(),
+                "{} answers to {:?}, which Model::feature_switch does not carry",
+                table_row.label,
+                table_row.feature
+            );
+        }
+    }
+
+    /// The gate itself, over the session that turns one such surface off
+    /// and the session that leaves it on: read through `ext`, both answer
+    /// the same, and the notice about a held channel never reaches the
+    /// screen.
+    #[test]
+    fn a_surface_with_no_attach_follows_its_own_switch() {
+        for (enabled, drawn) in [(false, false), (true, true)] {
+            let mut model = Model::with_term_size(80, 24);
+            model.attach_surfaces(Vec::new());
+            model.statusline_enabled = enabled;
+            assert_eq!(
+                super::view_draws(Surface::Statusline, &model),
+                drawn,
+                "the status line follows `[native] statusline`, not an attach"
+            );
+        }
     }
 
     /// A surface view draws names the `view.toml` line that hands it back,
@@ -2118,19 +1582,5 @@ mod tests {
             ]),
             "a window quoting no surface and no function is the user's to close"
         );
-    }
-
-    #[test]
-    fn no_claimant_names_an_absorbable_identity() {
-        for claimant in super::SURFACE_CLAIMANTS {
-            for identity in claimant.identities {
-                assert!(
-                    !super::COMPLETION_MENUS.contains(identity),
-                    "{} presents {identity}, which is also in COMPLETION_MENUS: \
-                     a claimant's float is reported, never taken",
-                    claimant.class
-                );
-            }
-        }
     }
 }

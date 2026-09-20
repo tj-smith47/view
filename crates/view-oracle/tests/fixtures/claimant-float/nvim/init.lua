@@ -1,13 +1,16 @@
 -- A stand-in for the plugin class view supersedes, reduced to the two
--- things that make one: a module the claimant probe finds loaded, and a
--- window over the message area opened after VimEnter and reconfigured on a
--- timer -- which is how nvim-notify opens and slides its own boxes
--- (`noautocmd = true`, then `nvim_win_set_config` per animation frame, so
--- no autocmd fires for the window's arrival or for any step of it).
-package.loaded["noice"] = {}
+-- things that make one: a message channel this config holds instead of the
+-- engine, and a window over the message area opened after VimEnter and
+-- reconfigured on a timer -- which is how a notification plugin opens and
+-- slides its own boxes (`noautocmd = true`, then `nvim_win_set_config` per
+-- animation frame, so no autocmd fires for the window's arrival or for any
+-- step of it).
+vim.notify = function(msg, level, opts)
+  return msg, level, opts
+end
 
-local FLOAT_TEXT = "CLAIMANTFLOATTEXT Noice can't work when the GUI has "
-  .. "ext_messages enabled"
+local FLOAT_TEXT = "CLAIMANTFLOATTEXT this renderer cannot work when the "
+  .. "GUI has ext_messages enabled"
 
 -- Both markers sit well down the buffer, and the float sits below the top
 -- rows: view's own claimant notice is a box across rows 0-4, and anything
@@ -29,7 +32,6 @@ vim.api.nvim_create_autocmd("VimEnter", {
     mark("CLAIMANTFLOATREADY")
     vim.defer_fn(function()
       local buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[buf].filetype = "notify"
       vim.api.nvim_buf_set_lines(buf, 0, -1, false, { FLOAT_TEXT })
       local cols = vim.o.columns
       local win = vim.api.nvim_open_win(buf, false, {

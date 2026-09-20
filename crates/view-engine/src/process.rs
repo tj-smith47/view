@@ -1818,7 +1818,7 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// burst still ran with `v:vim_did_enter` at 1 and the config's own
 /// `:colorscheme` already applied. A `--cmd` runs before any of it, which
 /// is why the `VimEnter` hook, the `view_bridge` group and the
-/// surface-claimant probe all ride here rather than over the channel.
+/// `vim.notify` reading all ride here rather than over the channel.
 ///
 /// The channel is discovered rather than passed: an `--embed` child's
 /// stdio channel exists by the time `--cmd` arguments run, and a spawn has
@@ -1828,7 +1828,7 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// so what runs here is byte for byte what
 /// [`EngineHandle::register_bridge`](crate::nvim_api::EngineHandle::register_bridge)
 /// and
-/// [`EngineHandle::probe_claimants`](crate::nvim_api::EngineHandle::probe_claimants)
+/// [`EngineHandle::read_notify_sink`](crate::nvim_api::EngineHandle::read_notify_sink)
 /// send over the channel for a caller that does not spawn this way.
 ///
 /// `g:view` is set for a config that wants to branch on which editor is
@@ -1841,22 +1841,23 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// it asks is `nvim_list_uis()`. On this spawn that list is empty for the
 /// whole of startup, and every such plugin therefore decides against a
 /// session it is being told does not exist: measured on the pinned engine
-/// against `compat/scenarios/noice.toml`, noice claims the cmdline, the
-/// message area and the popup menu through `vim.ui_attach` and keeps
-/// routing them after view's own attach lands, so a `vim.notify` view holds
-/// still ends up in nvim-notify's history. lazy.nvim reads the same list to
-/// decide it is running headless.
+/// against the compat suite's cmdline-replacing scenario, the config
+/// claims the cmdline, the message area and the popup menu through
+/// `vim.ui_attach` and keeps routing them after view's own attach lands,
+/// so a `vim.notify` view holds still ends up in that config's own
+/// history. A plugin manager reads the same list to decide it is running
+/// headless.
 ///
 /// So the list answers for a UI, and the one it answers for is nvim's own
 /// terminal UI: the real size, `ext_linegrid` alone, `rgb` as the attach
 /// carries it. Startup then configures every plugin exactly as `nvim`
-/// itself does -- noice's health check passes silently instead of raising
-/// three errors into nvim-notify, and nothing drags a markdown float and
-/// its `FileType` chain into `init.lua`. What view externalizes is settled
-/// afterwards, at the attach, by taking the surfaces off whoever claimed
-/// them (`view_core::msg::RpcCall::DisableClaimants`), because a plugin
-/// that configured for a plain UI cannot be asked to re-decide when
-/// `ext_*` appears mid-session.
+/// itself does -- a config's health check passes silently instead of
+/// raising three errors into its own notifier, and nothing drags a
+/// markdown float and its `FileType` chain into `init.lua`. What view
+/// externalizes is settled afterwards, at the attach, by holding the
+/// channels that draw each surface, because a plugin that configured for
+/// a plain UI cannot be asked to re-decide when `ext_*` appears
+/// mid-session.
 ///
 /// The shim delegates the moment a real UI exists, which makes it correct
 /// for the rest of the session rather than only until `VimEnter`, and it is
@@ -2002,9 +2003,9 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// it: on the loop's next turn, after every other `VimEnter` autocommand
 /// has run. A handler registered from a plugin's own `VimEnter`, or from a
 /// lazy `config` that runs there, is therefore registered before the event
-/// arrives -- nvim-notify's documented lazy spec installs its notifier at
-/// exactly that event, and `view-engine/tests/claimant_takeover.rs` reads
-/// that notifier back.
+/// arrives -- a notifier's documented lazy spec installs it at exactly
+/// that event, and `view-engine/tests/notify_sink_takeover.rs` reads that
+/// notifier back.
 ///
 /// What the event cannot carry is `v:event.chan`: `nvim_exec_autocmds`
 /// hands its `data` to the callback as `args.data`, and no API sets
@@ -2039,11 +2040,6 @@ pub const SYNC_PARSE_BYTES: usize = 256 * 1024;
 pub const COMBINED_PARSE_BYTES: usize = 16 * 1024;
 
 fn late_attach_cmd(width: u16, height: u16) -> String {
-    let modules: Vec<String> = view_core::native::surfaces::SURFACE_CLAIMANTS
-        .iter()
-        .map(|claimant| format!("'{}'", claimant.module))
-        .collect();
-    let modules = modules.join(", ");
     let vocabulary: Vec<String> = crate::nvim_api::UI_EXT_OPTIONS_MULTIGRID
         .iter()
         .map(|name| format!("'{name}'"))
@@ -2051,7 +2047,7 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
     let vocabulary = vocabulary.join(", ");
     let bridge = crate::nvim_api::REGISTER_BRIDGE_CHUNK;
     let throttle = crate::nvim_api::FLOAT_SCAN_THROTTLE_MS;
-    let claimants = crate::nvim_api::PROBE_CLAIMANTS_CHUNK;
+    let notify_sink = crate::nvim_api::NOTIFY_SINK_CHUNK;
     let sync_parse_bytes = SYNC_PARSE_BYTES;
     let combined_parse_bytes = COMBINED_PARSE_BYTES;
     format!(
@@ -2107,11 +2103,11 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          -- dispatch below is: a raise costs the colours, never the event\n\
          pcall(function()\n\
          local buf = vim.api.nvim_get_current_buf()\n\
-         -- package.loaded rather than vim.treesitter.highlighter: asking\n\
-         -- for the module is what loads it, and a startup with no\n\
-         -- highlighter never needs it loaded\n\
-         local hl = package.loaded['vim.treesitter.highlighter']\n\
-         local h = hl and hl.active[buf]\n\
+         -- the buffer flag first: the highlighter sets it when it\n\
+         -- attaches, so a startup with no highlighter never loads the\n\
+         -- module to ask, and one that has it takes a memo hit\n\
+         local h = vim.b[buf].ts_highlight\n\
+         and require('vim.treesitter.highlighter').active[buf]\n\
          local bytes = vim.api.nvim_buf_get_offset(buf,\n\
          vim.api.nvim_buf_line_count(buf))\n\
          if h and bytes <= sync_parse_bytes then\n\
@@ -2144,8 +2140,8 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          {bridge}\n\
          ]==]))(channel, {throttle})\n\
          assert(load([==[\n\
-         {claimants}\n\
-         ]==]))(channel, {{ {modules} }})"
+         {notify_sink}\n\
+         ]==]))(channel)"
     )
 }
 
