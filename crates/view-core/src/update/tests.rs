@@ -12578,7 +12578,8 @@ fn a_panes_flip_reissues_the_hold_the_look_decides() {
 /// runs.
 ///
 /// Disconfirm: dropping the `forget_window_status` call from either arm
-/// leaves 1003's record in the map.
+/// leaves 1003's record in the map, and emptying the map instead of
+/// removing one key takes 1002's with it.
 #[test]
 fn a_closed_windows_status_is_dropped() {
     for ev in [
@@ -12586,25 +12587,34 @@ fn a_closed_windows_status_is_dropped() {
         UiEvent::GridDestroy { grid: 6 },
     ] {
         let mut m = vsplit_model();
-        let win = crate::events::WinHandle(1003);
-        let _ = update(
-            &mut m,
-            Msg::WindowStatus {
-                win,
-                status: crate::model::WindowStatus {
-                    name: "left.rs".to_string(),
-                    ..crate::model::WindowStatus::default()
+        let (closing, staying) = (
+            crate::events::WinHandle(1003),
+            crate::events::WinHandle(1002),
+        );
+        for win in [closing, staying] {
+            let _ = update(
+                &mut m,
+                Msg::WindowStatus {
+                    win,
+                    status: crate::model::WindowStatus {
+                        name: "left.rs".to_string(),
+                        ..crate::model::WindowStatus::default()
+                    },
                 },
-            },
-        );
-        assert!(
-            m.window_status.contains_key(&win),
-            "the trigger's report never reached the model"
-        );
+            );
+            assert!(
+                m.window_status.contains_key(&win),
+                "the trigger's report never reached the model"
+            );
+        }
         let _ = update(&mut m, Msg::Redraw(vec![ev.clone()]));
         assert!(
-            !m.window_status.contains_key(&win),
+            !m.window_status.contains_key(&closing),
             "{ev:?} left the closed window's status behind"
+        );
+        assert!(
+            m.window_status.contains_key(&staying),
+            "{ev:?} took the other window's status with it"
         );
     }
 }

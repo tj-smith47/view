@@ -13,7 +13,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use std::collections::BTreeSet;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 use view_core::grid::registry::{GridId, Pane, PaneKind, GLOBAL_GRID};
 use view_core::model::{Look, Model, Panes, WindowStatus};
 use view_core::native::statusline::StatuslineState;
@@ -278,12 +278,26 @@ fn name_spans(status: &WindowStatus) -> Vec<Span> {
     spans
 }
 
+/// The cells one character takes on the edge, which is both what the fit
+/// check counts and what the run advances by.
+///
+/// One rule in one place: measuring a combining mark at the zero width it
+/// really has while the run gives it a cell of its own walks the text past
+/// the corner, and on a gapless edge that ends on the screen's last column
+/// it walks it past the buffer. A name that arrives decomposed (macOS
+/// hands back `café.rs` as `cafe` plus a mark) is over-measured by one
+/// cell per mark instead, which drops a group a hair early.
+fn cell_width(ch: char) -> u16 {
+    u16::try_from(ch.width().unwrap_or(1).max(1)).unwrap_or(1)
+}
+
 /// One group's width in terminal cells, which is what the edge has room
 /// for rather than its count of characters.
 fn group_width(group: &[Span]) -> u16 {
     group
         .iter()
-        .map(|span| u16::try_from(UnicodeWidthStr::width(span.text.as_str())).unwrap_or(u16::MAX))
+        .flat_map(|span| span.text.chars())
+        .map(cell_width)
         .fold(0, u16::saturating_add)
 }
 
@@ -328,6 +342,10 @@ fn write_edge(groups: &[Vec<Span>], base: Style, theme: &Theme, edge: Rect, buf:
     }
     let first = edge.x.saturating_add(2);
     let last = edge.x.saturating_add(edge.width).saturating_sub(3);
+    // the closing blank's own cell, and the last cell inside the edge that
+    // any write below may reach: `set_border_cell` indexes the buffer with
+    // no bounds of its own, so a run that walked past this would panic
+    let stop = last.saturating_add(1);
     let mut x = first;
     for group in groups.iter().filter(|group| group_width(group) > 0) {
         let separator = u16::from(x > first);
@@ -344,12 +362,15 @@ fn write_edge(groups: &[Vec<Span>], base: Style, theme: &Theme, edge: Rect, buf:
         for span in group {
             let style = span_style(span.role, base, theme);
             for ch in span.text.chars() {
-                let width = u16::try_from(ch.width().unwrap_or(1).max(1)).unwrap_or(1);
+                if x > last {
+                    break;
+                }
+                let width = cell_width(ch);
                 set_border_cell(buf, x, edge.y, ch, style);
                 // ratatui's own convention for the cell a two-cell glyph
                 // covers: the diff skips it, and anything left in it would
                 // be drawn one column to the right of where it was written
-                if width == 2 {
+                if width == 2 && x < stop {
                     buf[(x.saturating_add(1), edge.y)].reset();
                 }
                 x = x.saturating_add(width);
@@ -360,7 +381,9 @@ fn write_edge(groups: &[Vec<Span>], base: Style, theme: &Theme, edge: Rect, buf:
         return;
     }
     set_border_cell(buf, first.saturating_sub(1), edge.y, ' ', base);
-    set_border_cell(buf, x, edge.y, ' ', base);
+    if x <= stop {
+        set_border_cell(buf, x, edge.y, ' ', base);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -1902,6 +1902,63 @@ fn a_two_cell_name_is_measured_in_cells_and_not_in_chars() {
             "a {chars}-character name drawing {} cells in a 32-cell edge: {edge:?}",
             chars * 2
         );
+        if fits {
+            // the cell a two-cell glyph covers is reset to a space, so a
+            // run that advanced one column per character reads back with
+            // the glyphs against each other
+            assert!(
+                edge.contains("編 編"),
+                "a two-cell glyph advanced one column: {edge:?}"
+            );
+        }
+    }
+}
+
+/// A name that arrives decomposed stops inside the edge. macOS hands back
+/// `café.rs` as `cafe` and a combining mark, and a mark measured at the
+/// zero width it really has while the run gives it a cell of its own walks
+/// the text one cell further than the fit check allowed. The gapless edge
+/// of a full-width tile ends on the screen's last column, so the cell after
+/// it is outside the buffer.
+///
+/// Disconfirm: measuring a span with its display width paints the closing
+/// blank over the corner for the first name, and outside `buf.area` for the
+/// second.
+#[test]
+fn a_decomposed_name_stops_inside_the_edge() {
+    let slots = vec![(0, 0, TILED_WIDTH - 1, TILED_HEIGHT - 2)];
+    let row_with = |name: String| {
+        let mut model = tiled_model(false, TILED_HEIGHT, &slots);
+        let _ = update(
+            &mut model,
+            Msg::WindowStatus {
+                win: WinHandle(1000),
+                status: {
+                    let mut status = WindowStatus::default();
+                    status.name = name;
+                    status
+                },
+            },
+        );
+        let buf = tiled_frame(&model);
+        row_text(&buf, edge_rows(&model, slots[0]).1)
+    };
+    let plain = row_with("left.rs".to_string());
+    // two marks, so the run reaches two cells past the display width of
+    // the string: at 75 the closing blank lands on the corner, at 76 it
+    // lands one column past the screen
+    for cells in [75_usize, 76] {
+        let name = format!("e\u{301}e\u{301}{}", "a".repeat(cells - 2));
+        let edge = row_with(name);
+        assert_eq!(
+            edge.chars().last(),
+            plain.chars().last(),
+            "the name walked over the corner: {edge:?}"
+        );
+        assert!(
+            !edge.contains("aaa"),
+            "a name wider than the edge was painted into it: {edge:?}"
+        );
     }
 }
 

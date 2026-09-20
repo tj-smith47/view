@@ -157,8 +157,12 @@ fn a_cursor_burst_collapses_to_one_message_per_tick() {
          vim.api.nvim_win_close({}, true)",
         closing.0
     ));
-    // the count is not pinned here: closing a window enters the other one,
-    // which arms it again a tick later
+    // the count is not pinned on this drain: closing a window enters the
+    // other one, which arms it again a tick later. These two assertions
+    // redden a flush that reported the dead handle or stopped at it, and
+    // not a missing `pcall`: `report` returns early on an invalid window,
+    // so the guard the `pcall` is there for is pinned on the chunk's text
+    // in `nvim_api.rs`
     let survivor = drain_window_status(&rx);
     assert!(
         survivor.iter().any(|(win, _)| *win == both[1].0),
@@ -168,5 +172,22 @@ fn a_cursor_burst_collapses_to_one_message_per_tick() {
     assert!(
         survivor.iter().all(|(win, _)| *win != closing),
         "a window that no longer exists reported a status: {survivor:?}"
+    );
+
+    // the session goes on: a close that left the throttle armed with a
+    // dead handle in its pending set reports nothing from here on
+    lua(format!(
+        "for _ = 1, {BURST} do vim.api.nvim_exec_autocmds('CursorMoved', {{}}) end"
+    ));
+    let after_close = drain_window_status(&rx);
+    assert_eq!(
+        after_close.len(),
+        1,
+        "a burst after the close notified {} times",
+        after_close.len()
+    );
+    assert_eq!(
+        after_close[0].0, both[1].0,
+        "the burst after the close reported a window that is gone"
     );
 }
