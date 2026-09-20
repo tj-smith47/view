@@ -159,9 +159,9 @@ impl MessageHistoryState {
         if history.pushed() == self.read {
             return false;
         }
+        let arrived = history.pushed() - self.read;
         self.read = history.pushed();
         let entries: Vec<MessageEntry> = history.entries().cloned().collect();
-        let arrived = entries.len().saturating_sub(self.entries.len());
         self.entries = entries;
         let last = self.entries.len().saturating_sub(1);
         self.selected = self.selected.saturating_add(arrived).min(last);
@@ -261,6 +261,7 @@ mod tests {
     use super::*;
     use crate::events::PmItem;
     use crate::model::Messages;
+    use crate::native::toast::DEFAULT_CAPACITY;
 
     fn cmdline(firstc: &str, typed: &str) -> CmdlineState {
         CmdlineState {
@@ -431,6 +432,29 @@ mod tests {
             view.selected,
             Some(2),
             "the row above pushed the selected entry down, and the selection went with it"
+        );
+    }
+
+    #[test]
+    fn a_history_refresh_past_capacity_keeps_the_selection_on_its_entry() {
+        let mut history = ToastHistory::new();
+        for i in 0..DEFAULT_CAPACITY {
+            history.push(&message_entry(&format!("entry {i}")));
+        }
+        let mut state = MessageHistoryState::snapshot(&history);
+        assert!(state.select(5));
+        let selected_text = state.view().rows[5].label.clone();
+
+        history.push(&message_entry("newest, after the ring is full"));
+        assert!(state.refresh(&history));
+
+        let view = state.view();
+        let labels: Vec<String> = view.rows.iter().map(|r| r.label.clone()).collect();
+        assert_eq!(
+            labels[view.selected.expect("an entry is still selected")],
+            selected_text,
+            "an eviction moves every row by one without changing the count, \
+             so the selection has to follow the entry rather than the row"
         );
     }
 }

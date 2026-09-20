@@ -2441,16 +2441,15 @@ macro_rules! review_ns_lua {
 /// for the rest of the session -- the migration contract broken by the one
 /// feature that borrowed the git-hunk vocabulary. So the mapping each key
 /// displaces is kept, and [`REVIEW_CLEAR_CHUNK`] hands it back. The keymap
-/// list is read before and after the set rather than matched against
-/// `k.lhs`, because `<leader>` is expanded at set time and only nvim knows
-/// what it expanded to: the entries carrying view's own `desc` name the
-/// expanded left-hand sides, and
-/// whatever the earlier read held under those names is what this review
-/// took. The bookkeeping is a Lua global keyed by buffer rather than a
-/// buffer variable, since a mapping set from Lua carries a function in its
-/// `callback` field and `b:` holds only what msgpack can carry. Only a
-/// review's first show saves, or a redraw would save view's own keys over
-/// the user's.
+/// list is read before and after the set rather than matched against `k.lhs`,
+/// because `<leader>` is expanded at set time and only nvim knows what it
+/// expanded to: the entries carrying view's own `desc` name the expanded
+/// left-hand sides, and whatever the earlier read held under those names is
+/// what this review took. The bookkeeping is a Lua global keyed by buffer
+/// rather than a buffer variable, since a mapping set from Lua carries a
+/// function in its `callback` field and `b:` holds only what msgpack can
+/// carry. Only a review's first show saves, or a redraw would save view's own
+/// keys over the user's.
 ///
 /// The cursor is moved only when `focus` asks for it, and never past the
 /// end of a buffer the user has since shortened.
