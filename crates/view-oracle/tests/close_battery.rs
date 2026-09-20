@@ -1418,3 +1418,81 @@ fn the_tree_alone_on_an_inner_tabpage_closes_with_its_tabpage() {
         "the close said nvim could not take it: {screen}"
     );
 }
+
+/// A file put into the tree's window by something other than view. A
+/// plugin autocommand, a quickfix jump or a `:buffer` can land there, and
+/// the scratch buffer is `bufhidden = wipe`, so by the time the toggle
+/// runs the buffer in that window is the person's. The close read the
+/// buffer out of the window and force-deleted it, taking unsaved edits
+/// with it and handing the window back on something else.
+///
+/// Disconfirm: reading the buffer out of the window again
+/// (`scratch = vim.api.nvim_win_get_buf(win)`) deletes the file buffer,
+/// which fails on the buffer still existing.
+#[test]
+fn a_file_put_in_the_trees_window_survives_the_close() {
+    let work = common::ScratchPaths::new("close-battery-tree-foreign");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = windowed_tree_session(&dir);
+    engine.arm_and_input(":e notes.txt<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine.arm_and_input(":set number<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    open_the_tree(&mut engine);
+
+    // the cursor is in the tree's window, so this is a file arriving
+    // where view drew its surface
+    engine.arm_and_input(":edit README.md<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .arm_and_input(":call setline(1, 'edited and not written')<CR>")
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine
+            .eval_str("expand('%:t') . ':' . &modified . ':' . winnr('$')")
+            .unwrap()
+            .trim(),
+        "README.md:1:2",
+        "the file did not land in the tree's window with edits in it"
+    );
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the toggle asks nvim to close the window");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine
+            .eval_str("bufexists('README.md') . ':' . expand('%:t') . ':' . &modified")
+            .unwrap()
+            .trim(),
+        "1:README.md:1",
+        "the close threw away a buffer view never opened"
+    );
+    assert_eq!(
+        engine.eval_str("getline(1)").unwrap().trim(),
+        "edited and not written",
+        "the edits in the person's own buffer are gone"
+    );
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        2,
+        "the window the person's file was in went away with the tree"
+    );
+    assert_eq!(
+        engine
+            .eval_str("&number . ',' . &signcolumn . ',' . &winfixwidth")
+            .unwrap()
+            .trim(),
+        "1,auto,0",
+        "the person reads their file in a window still wearing the \
+         tree's look"
+    );
+    assert!(
+        !engine.tree_is_open(),
+        "the tree's state outlived the window it was drawn in"
+    );
+}

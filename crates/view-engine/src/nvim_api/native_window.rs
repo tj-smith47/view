@@ -29,6 +29,14 @@ const OPEN_NATIVE_WINDOW_TIMEOUT: Duration = Duration::from_secs(5);
 /// "open it" and "go to it". The table is written into `vim.g` rather than
 /// a Lua local because each `nvim_exec_lua` call is its own chunk.
 ///
+/// Each entry carries the window and the buffer view put in it, and the
+/// window counts as the surface's only while it still shows that buffer.
+/// A window is a position and a buffer is an identity: anything outside
+/// view can put a file in the window (a plugin autocommand, a quickfix
+/// jump, `:sbuffer`), and a table that remembered the window alone would
+/// have the next open take that file's window for the tree and the close
+/// treat the file as view's to throw away.
+///
 /// The buffer is scratch and stays that way: `buftype = nofile` so nothing
 /// writes it, `bufhidden = wipe` so closing the window takes the buffer
 /// with it, `buflisted = false` so it never reaches the pill or a picker,
@@ -55,9 +63,10 @@ pub(crate) const OPEN_NATIVE_WINDOW_CHUNK: &str = "\
 local id, split, pct = ...
 local wins = vim.g.view_native_windows or {}
 local live = wins[id]
-if live and vim.api.nvim_win_is_valid(live) then
-  vim.api.nvim_set_current_win(live)
-  return live
+if live and vim.api.nvim_win_is_valid(live.win)
+  and vim.api.nvim_win_get_buf(live.win) == live.buf then
+  vim.api.nvim_set_current_win(live.win)
+  return live.win
 end
 local buf = vim.api.nvim_create_buf(false, true)
 vim.bo[buf].buftype = 'nofile'
@@ -96,7 +105,7 @@ for opt, value in pairs(look) do
 end
 vim.bo[buf].modifiable = false
 vim.bo[buf].readonly = true
-wins[id] = win
+wins[id] = { win = win, buf = buf }
 vim.g.view_native_windows = wins
 return win";
 
@@ -106,8 +115,26 @@ return win";
 /// Guarded for the reason
 /// [`SELECT_TAB_CHUNK`](super::buffers::SELECT_TAB_CHUNK) is: the window
 /// can be gone by the time the key that closes it reaches nvim, and an
-/// invalid handle raises rather than doing nothing. `force` is set because
-/// the buffer is scratch and has nothing to lose.
+/// invalid handle raises rather than doing nothing.
+///
+/// The chunk touches nothing it did not open. It takes the buffer number
+/// the open chunk recorded beside the window, and goes on only while that
+/// buffer is still alive, still `buftype = nofile`, and still the one the
+/// window shows; otherwise it drops the surface's entry and leaves the
+/// window and its buffer where they are, because a window holding
+/// somebody else's buffer is the person's, apart from its look, which the
+/// tree put there and which goes back whichever way the close runs. A
+/// buffer that arrives in a window takes the look the window is wearing,
+/// so a file that landed in the tree's window is being read with no line
+/// numbers, no sign column, no wrapping and the width the tree pinned;
+/// none of that is the person's setting, because the window was the
+/// tree's the whole time it was worn. That buffer number is the only
+/// thing that says which buffer is view's: the scratch buffer is
+/// `bufhidden = wipe`, so a file put into the window takes its place, and
+/// a close that read the buffer out of the window would have
+/// force-deleted the person's file with its unsaved edits in it. `force`
+/// is set on the wipe because the buffer it names is view's own and has
+/// nothing to lose.
 ///
 /// The only window of the only tabpage cannot be closed at all -- `:only`
 /// from inside the surface leaves the tree's window alone there and nvim
@@ -128,17 +155,20 @@ return win";
 /// The last window of any other tabpage closes as `:q` would, taking the
 /// tabpage with it.
 ///
-/// The surface's entry in `vim.g.view_native_windows` goes either way. A
-/// window that survives the close is nvim's again, and a later open that
-/// found the handle still listed there would take the person's window for
-/// the tree.
+/// The surface's entry in `vim.g.view_native_windows` goes whichever way
+/// the close runs. A window that survives it is nvim's again, and a later
+/// open that found the handle still listed there would take the person's
+/// window for the tree.
 ///
 /// The whole body runs under one `pcall`, and the chunk runs as a
 /// notification, whose error nvim reports to its log and not to the
 /// screen. The echo puts a refusal from either arm back on the screen
 /// through the same `msg_show` every other engine error reaches the
 /// reader by, and the order of the hand-back leaves the scratch buffer
-/// standing where the buffer it would be replaced by never arrived.
+/// standing where the buffer it would be replaced by never arrived. The
+/// wipe keeps a `pcall` of its own and no echo: the window already has
+/// its buffer back by then, so a refusal there costs the person nothing
+/// and a message would arrive after a close they watched succeed.
 ///
 /// [`EngineHandle::close_native_window`]: super::EngineHandle::close_native_window
 pub(crate) const CLOSE_NATIVE_WINDOW_CHUNK: &str = "\
@@ -148,12 +178,34 @@ local ok, err = pcall(function()
     return
   end
   local wins = vim.g.view_native_windows or {}
-  for id, handle in pairs(wins) do
-    if handle == win then
+  local scratch = 0
+  for id, entry in pairs(wins) do
+    if entry.win == win then
+      scratch = entry.buf
       wins[id] = nil
     end
   end
   vim.g.view_native_windows = wins
+  local function unpin()
+    for _, opt in ipairs({ 'winfixwidth', 'winfixheight' }) do
+      vim.api.nvim_set_option_value(opt, false, { win = win, scope = 'local' })
+    end
+  end
+  if scratch == 0 then
+    return
+  end
+  if not vim.api.nvim_buf_is_valid(scratch)
+    or vim.api.nvim_get_option_value('buftype', { buf = scratch }) ~= 'nofile'
+    or vim.api.nvim_win_get_buf(win) ~= scratch then
+    unpin()
+    for _, opt in ipairs({ 'number', 'relativenumber', 'signcolumn',
+      'foldcolumn', 'wrap' }) do
+      vim.api.nvim_set_option_value(opt,
+        vim.api.nvim_get_option_value(opt, { scope = 'global' }),
+        { win = win, scope = 'local' })
+    end
+    return
+  end
   local tab = vim.api.nvim_win_get_tabpage(win)
   local alone = #vim.api.nvim_tabpage_list_wins(tab) == 1
     and #vim.api.nvim_list_tabpages() == 1
@@ -161,7 +213,6 @@ local ok, err = pcall(function()
     vim.api.nvim_win_close(win, true)
     return
   end
-  local scratch = vim.api.nvim_win_get_buf(win)
   local target = vim.fn.bufnr('#')
   if target < 1 or target == scratch or vim.fn.buflisted(target) == 0 then
     target = 0
@@ -176,14 +227,12 @@ local ok, err = pcall(function()
       target = vim.api.nvim_create_buf(true, false)
     end
   end
-  for _, opt in ipairs({ 'winfixwidth', 'winfixheight' }) do
-    vim.api.nvim_set_option_value(opt, false, { win = win, scope = 'local' })
-  end
+  unpin()
   if target ~= 0 then
     vim.api.nvim_win_set_buf(win, target)
   end
   if vim.api.nvim_buf_is_valid(scratch) then
-    vim.api.nvim_buf_delete(scratch, { force = true })
+    pcall(vim.api.nvim_buf_delete, scratch, { force = true })
   end
 end)
 if not ok then
@@ -419,6 +468,7 @@ mod tests {
             "nvim_win_set_buf",
             "nvim_create_buf",
             "nvim_buf_delete",
+            "nvim_buf_is_valid",
         ] {
             assert!(
                 CLOSE_NATIVE_WINDOW_CHUNK.contains(call),
@@ -459,10 +509,30 @@ mod tests {
             .find("vim.api.nvim_echo({ { tostring(err), 'ErrorMsg' } }, true, {})")
             .expect("a refusal reaches the screen");
         assert!(
-            body < echo && CLOSE_NATIVE_WINDOW_CHUNK.matches("pcall(").count() == 1,
-            "an arm outside the pcall reports its refusal to nvim's log \
-             alone, which is where this chunk's errors are invisible"
+            body < echo && CLOSE_NATIVE_WINDOW_CHUNK.matches("pcall(").count() == 2,
+            "an arm outside the body's pcall reports its refusal to nvim's \
+             log alone, which is where this chunk's errors are invisible, \
+             and the wipe keeps one of its own so a refusal there says \
+             nothing after a close the person watched succeed"
         );
+        assert!(
+            CLOSE_NATIVE_WINDOW_CHUNK
+                .contains("pcall(vim.api.nvim_buf_delete, scratch, { force = true })"),
+            "the wipe no longer names the buffer the open chunk recorded"
+        );
+        for line in [
+            "scratch = entry.buf",
+            "if scratch == 0 then",
+            "vim.api.nvim_get_option_value('buftype', { buf = scratch }) ~= 'nofile'",
+            "vim.api.nvim_win_get_buf(win) ~= scratch",
+        ] {
+            assert!(
+                CLOSE_NATIVE_WINDOW_CHUNK.contains(line),
+                "the chunk reaches a buffer it did not open, and a file \
+                 somebody else put in the window is force-deleted with its \
+                 unsaved edits in it: {line}"
+            );
+        }
         let listed = CLOSE_NATIVE_WINDOW_CHUNK
             .find("wins[id] = nil")
             .expect("the chunk forgets the surface's window");
@@ -506,6 +576,16 @@ mod tests {
             assert!(
                 OPEN_NATIVE_WINDOW_CHUNK.contains(opt),
                 "the tree's window no longer takes {opt}"
+            );
+        }
+        for line in [
+            "wins[id] = { win = win, buf = buf }",
+            "and vim.api.nvim_win_get_buf(live.win) == live.buf then",
+        ] {
+            assert!(
+                OPEN_NATIVE_WINDOW_CHUNK.contains(line),
+                "a window is the surface's by position alone, so a file \
+                 somebody else put in it is entered as the tree: {line}"
             );
         }
     }
