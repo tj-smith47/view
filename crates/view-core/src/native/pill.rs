@@ -100,6 +100,11 @@ pub struct PillView {
 pub struct PillSlot {
     /// The tabpage or buffer this cell run names.
     pub id: u64,
+    /// Which of [`PillView::entries`] this run draws. A row longer than
+    /// the terminal is a window into the list, so the first run is not
+    /// always the first entry and a painter that counted along would draw
+    /// the wrong name under every one of them.
+    pub entry: usize,
     /// The row's first column this run covers.
     pub col: u16,
     /// How many columns it covers.
@@ -177,6 +182,7 @@ impl PillView {
             };
             slots.push(PillSlot {
                 id: entry.id,
+                entry: index,
                 col,
                 cells,
                 current: entry.current,

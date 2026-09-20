@@ -725,7 +725,6 @@ fn body(kind: &LayerKind) -> Option<Body> {
         LayerKind::EngineGrid
         | LayerKind::Cmdline(_)
         | LayerKind::Toast { .. }
-        | LayerKind::Tabline(_)
         | LayerKind::Popupmenu(_)
         | LayerKind::Speculated(_)
         | LayerKind::Pill(_)

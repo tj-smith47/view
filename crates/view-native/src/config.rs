@@ -1321,29 +1321,62 @@ mod tests {
     /// A key with no fixed default is shown commented, and it is still a
     /// key the example documents.
     fn example_native_switches() -> BTreeSet<String> {
+        native_switches(EXAMPLE_TOML)
+    }
+
+    /// [`example_native_switches`] over any text, so the shape a key is
+    /// written in can be pinned without editing the shipped example.
+    ///
+    /// Indentation is dropped before anything else is read: TOML takes an
+    /// indented key, and a scrape that skipped one would report a switch
+    /// the example documents as missing.
+    fn native_switches(toml: &str) -> BTreeSet<String> {
         let mut in_native = false;
         let mut keys = BTreeSet::new();
-        for line in EXAMPLE_TOML.lines() {
-            let body = line.strip_prefix("# ").unwrap_or(line);
+        for line in toml.lines() {
+            let trimmed = line.trim();
+            let body = trimmed.strip_prefix("# ").unwrap_or(trimmed);
             if body.starts_with('[') {
                 in_native = body.starts_with("[native]");
                 continue;
             }
-            // a continuation of the comment beside the key above it
-            if !in_native || line.starts_with(' ') {
+            if !in_native {
                 continue;
             }
             let Some((key, value)) = body.split_once('=') else {
                 continue;
             };
+            let key = key.trim();
+            // a wrapped line of the comment beside the key above it is
+            // prose, and prose carrying an `=` is not a key
+            if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
             if matches!(
                 value.split('#').next().map(str::trim),
                 Some("true" | "false")
             ) {
-                keys.insert(key.trim().to_string());
+                keys.insert(key.to_string());
             }
         }
         keys
+    }
+
+    /// The scrape reads the key and not the column it starts in: TOML
+    /// takes an indented key, and a user who indents the block would have
+    /// their switch read as absent.
+    #[test]
+    fn an_indented_native_key_is_still_scraped() {
+        let indented = "[native]\n    picker = true\n    # tabline = true   # a wrapped\n      # note = with an equals sign in it\n";
+        assert_eq!(
+            native_switches(indented)
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["picker", "tabline"],
+            "the scrape read {:?}",
+            native_switches(indented)
+        );
     }
 
     #[test]

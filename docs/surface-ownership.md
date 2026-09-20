@@ -88,8 +88,8 @@ the segments in the frame edges and leaves the frames standing.
 `[native] tabline` is the one switch with no fixed default. It follows
 `[ui] panes`: on under `"tiles"`, off under `"nvim"`, and a value you write
 wins either way. On, the row is detached from nvim and view draws the top
-pill in it. Off, nvim draws your own `tabline` into grid 1 and the
-compositor paints that row like any other.
+pill in it, under either mode. Off, nvim draws your own `tabline` into grid
+1 and the compositor paints that row like any other.
 
 The buffer grid is the one surface view never draws over. nvim owns it, and
 so does anything that wants to float above it, so a picker taking the screen

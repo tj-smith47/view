@@ -228,7 +228,6 @@ fn paint_layer<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid, offse
         // the bottom row: styling with no text, and so nothing a plain-text
         // raster can represent
         LayerKind::Shell => {}
-        LayerKind::Tabline(state) => paint_tabline(canvas, layer, state),
         LayerKind::Pill(view) => paint_pill(canvas, layer, view),
         LayerKind::Cmdline(state) => paint_cmdline(canvas, layer, state),
         LayerKind::Toast { lines, .. } => paint_toast(canvas, layer, lines),
@@ -296,16 +295,6 @@ fn paint_grid<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid) {
     }
 }
 
-fn paint_tabline(canvas: &mut Canvas<'_>, layer: &Layer, state: &view_core::model::TablineState) {
-    let text = state
-        .tabs
-        .iter()
-        .map(|t| t.name.as_str())
-        .collect::<Vec<_>>()
-        .join(" | ");
-    paint_text(canvas, layer.rect.row, layer.rect.col, &text);
-}
-
 /// Writes the pill's row: the host at the left edge, the names where
 /// [`view_core::native::pill::PillView::slots`] placed them, and the agent's
 /// word at the right.
@@ -317,7 +306,13 @@ fn paint_pill(canvas: &mut Canvas<'_>, layer: &Layer, view: &view_core::native::
 
     blank_row(canvas, layer.rect.row, layer.rect.col, layer.rect.width);
     paint_text(canvas, layer.rect.row, layer.rect.col + 1, &view.host);
-    for (slot, entry) in view.slots(layer.rect.width).into_iter().zip(&view.entries) {
+    for slot in view.slots(layer.rect.width) {
+        // the entry the slot names, never the one beside it in the list: a
+        // row too narrow for every name is a window into the list, and its
+        // first slot is not its first entry
+        let Some(entry) = view.entries.get(slot.entry) else {
+            continue;
+        };
         paint_text(
             canvas,
             layer.rect.row,

@@ -378,7 +378,6 @@ fn kind_name(kind: &crate::LayerKind) -> &'static str {
         crate::LayerKind::EngineGrid => "EngineGrid",
         crate::LayerKind::Cmdline(_) => "Cmdline",
         crate::LayerKind::Toast { .. } => "Toast",
-        crate::LayerKind::Tabline(_) => "Tabline",
         crate::LayerKind::Popupmenu(_) => "Popupmenu",
         crate::LayerKind::Shell => "Shell",
         crate::LayerKind::Picker(_) => "Picker",

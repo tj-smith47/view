@@ -42,9 +42,9 @@ standing.
 
 The top row names what you have open. Under tiles it is there from the
 moment the session starts; under `panes = "nvim"` it appears once a second
-tabpage is open, the way nvim's own `showtabline` behaves. `:View ui panes`
-moves the row with the mode it switches to, and says which of the two now
-draws it.
+tabpage is open, the way nvim's own `showtabline` behaves. It is the same
+row in both modes. `:View ui panes` moves the row with the mode it switches
+to, and says which of the two now draws it.
 
 | where | what it carries |
 |---|---|
@@ -52,7 +52,7 @@ draws it.
 | middle | your tabpages, the current one lit |
 | right edge | what the agent is doing |
 
-Clicking a name switches to it.
+Clicking a name switches to it, in either mode.
 
 ```toml
 [native]

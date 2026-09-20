@@ -11,7 +11,7 @@
 //! wrong buffer rather than nowhere.
 
 use crate::grid::registry::GridId;
-use crate::model::{Model, MouseCapture, Panes};
+use crate::model::{Model, MouseCapture};
 use crate::msg::{Effect, MouseInput, RpcCall};
 use crate::native::pill::{PillNames, PillView};
 
@@ -94,13 +94,11 @@ fn position_owner(model: &Model, input: &MouseInput) -> Option<MouseCapture> {
 /// No gesture is claimed: the pill has nothing to drag, and a press that
 /// switched tabpage has already done the whole of what it means.
 ///
-/// Only under tiles. `panes = "nvim"` with an explicit `[native] tabline`
-/// puts nvim's own row there instead, left-aligned from column 0 by a
-/// painter that spends no slots, and hit-testing that row through the
-/// centred layout answers with whichever name the pill would have drawn
-/// under the pointer.
+/// Under either look. `chrome_rows()` decides whether the row exists at
+/// all -- under `panes = "nvim"` it follows nvim's own `showtabline`
+/// threshold -- and when it exists it is the pill, laid out the one way.
 fn pill_press(model: &Model, input: &MouseInput) -> Option<RpcCall> {
-    if input.row != 0 || model.chrome_rows() == 0 || model.look.panes != Panes::Tiles {
+    if input.row != 0 || model.chrome_rows() == 0 {
         return None;
     }
     let pill = PillView::from_model(model);

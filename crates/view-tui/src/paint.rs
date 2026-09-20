@@ -5,10 +5,9 @@
 
 use ratatui::buffer::{Buffer, Cell, CellWidth};
 use ratatui::style::{Color, Modifier, Style};
-use unicode_width::UnicodeWidthStr;
 use view_core::grid::{Grid, GridDamage};
 pub use view_core::hl::{HlAttr, HlTable};
-use view_core::model::{CmdlineState, Look, Model, Panes, PopupmenuState, TablineState};
+use view_core::model::{CmdlineState, Look, Model, Panes, PopupmenuState};
 use view_core::native::speculate::PredictedCell;
 use view_core::native::views::{Span, StyleRole};
 use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
@@ -818,7 +817,6 @@ fn composite_layers(
             LayerKind::Toast { lines, paused, .. } => {
                 toast::paint_toast(lines, *paused, &theme, borders, area, damage, buf);
             }
-            LayerKind::Tabline(state) => paint_tabline(state, &theme, area, buf),
             LayerKind::Pill(view) => pill::paint_pill(view, &theme, area, buf),
             LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, damage, buf),
             LayerKind::Shell => paint_shell(
@@ -1165,57 +1163,6 @@ fn selection_style(theme: &Theme, base: ResolvedStyle) -> ResolvedStyle {
 fn dim(c: u32) -> u32 {
     let channel = |shift: u32| -> u32 { ((c >> shift) & 0xFF) * 3 / 5 };
     (channel(16) << 16) | (channel(8) << 8) | channel(0)
-}
-
-/// Renders the tabline into its reserved row: each tab as ` name `, the
-/// current tab reverse-styled so it reads as selected without needing
-/// bracket characters that would shift every other tab's column.
-fn paint_tabline(
-    state: &TablineState,
-    theme: &Theme,
-    area: ratatui::layout::Rect,
-    buf: &mut Buffer,
-) {
-    // painted before the tab labels themselves so `TabLineFill` shows
-    // through any column the labels below do not reach (a short tab list
-    // in a wide terminal), matching what that builtin group names: the
-    // row's background beyond the tabs
-    let fill = " ".repeat(usize::from(area.width));
-    paint_text_row(
-        &fill,
-        ratatui_style(theme.chrome(ChromeGroup::TabLineFill)),
-        area,
-        0,
-        buf,
-    );
-
-    let mut text = String::new();
-    let mut current_range: Option<(u16, u16)> = None;
-    for tab in &state.tabs {
-        // display-cell width, not char count: a tab name containing a wide
-        // (CJK) character occupies more columns than it has chars, and the
-        // selection-highlight range below must land on the same columns
-        // paint_text_row actually painted the label into
-        let start = u16::try_from(text.width()).unwrap_or(u16::MAX);
-        text.push_str(&format!(" {} ", tab.name));
-        let end = u16::try_from(text.width()).unwrap_or(u16::MAX);
-        if tab.tab == state.current {
-            current_range = Some((start, end));
-        }
-    }
-    paint_text_row(
-        &text,
-        ratatui_style(theme.chrome(ChromeGroup::TabLine)),
-        area,
-        0,
-        buf,
-    );
-    if let Some((start, end)) = current_range {
-        for col in start..end.min(area.width) {
-            buf[(area.x + col, area.y)]
-                .set_style(ratatui_style(theme.chrome(ChromeGroup::TabLineSel)));
-        }
-    }
 }
 
 /// Renders the popup menu: one item per row via [`PmItem::display_text`],
@@ -1780,6 +1727,8 @@ fn rgb(c: u32) -> Color {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use unicode_width::UnicodeWidthStr;
+
     use super::*;
     use ratatui::backend::{Backend, TestBackend};
     use ratatui::Terminal;
@@ -2506,8 +2455,15 @@ mod tests {
     /// offset below the reserved top row, so the tabline and the
     /// grid's own content occupy disjoint rows in the same frame.
     #[test]
-    fn tabline_reserves_the_top_row_and_never_covers_resting_grid_text() {
+    fn the_top_row_is_reserved_and_never_covers_resting_grid_text() {
         let mut model = owning_the_tabline();
+        // the row is laid out on the terminal, not on the engine's grid,
+        // so a fixture that left the terminal at zero would centre the
+        // names nowhere, and the agent's word would take six of these ten
+        // columns off the names this samples
+        model.term_width = 10;
+        model.term_height = 3;
+        model.ai_enabled = false;
         model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
@@ -2556,14 +2512,14 @@ mod tests {
         assert_eq!(
             &buf[(0, 0)].symbol(),
             &" ",
-            "tabline label starts with a space"
+            "the first name starts with its own blank"
         );
         assert_eq!(&buf[(1, 0)].symbol(), &"o");
         assert_eq!(&buf[(2, 0)].symbol(), &"n");
         assert_eq!(
             &buf[(0, 1)].symbol(),
             &"a",
-            "grid content must land one row below the reserved tabline row"
+            "grid content must land one row below the reserved top row"
         );
         assert_eq!(&buf[(1, 1)].symbol(), &"b");
     }

@@ -33,10 +33,10 @@ pub(super) fn paint_pill(pill: &PillView, theme: &Theme, area: Rect, buf: &mut B
     let tab = ratatui_style(theme.chrome(ChromeGroup::TabLine));
     let selected = ratatui_style(theme.chrome(ChromeGroup::TabLineSel));
     for slot in pill.slots(area.width) {
-        // by the handle the slot names, never by position: a list longer
-        // than the row is a window into it, and its first slot is not its
-        // first entry
-        let Some(entry) = pill.entries.iter().find(|entry| entry.id == slot.id) else {
+        // by the index the slot names, never by the loop's own count: a
+        // list longer than the row is a window into it, and its first slot
+        // is not its first entry
+        let Some(entry) = pill.entries.get(slot.entry) else {
             continue;
         };
         let style = if slot.current { selected } else { tab };
@@ -139,6 +139,84 @@ mod tests {
             }]),
         );
         model
+    }
+
+    /// Every `.rs` file under `path`, however deep.
+    fn sources(path: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let at = entry.path();
+            if at.is_dir() {
+                sources(&at, found);
+            } else if at.extension().is_some_and(|ext| ext == "rs") {
+                found.push(at);
+            }
+        }
+    }
+
+    /// One painter for the top row, under either look. A second one drew
+    /// the same names left-aligned from column 0 while the mouse router
+    /// hit-tested the centred layout, so a click on that row selected a
+    /// tabpage the user was not pointing at.
+    #[test]
+    fn no_second_painter_for_the_top_row_remains() {
+        // spelled in halves so this pin is not its own match
+        let gone = concat!("paint_", "tabline");
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("every crate sits inside the crates directory");
+        let mut files = Vec::new();
+        sources(crates, &mut files);
+        let carriers: Vec<_> = files
+            .iter()
+            .filter(|at| std::fs::read_to_string(at).is_ok_and(|text| text.contains(gone)))
+            .collect();
+        assert!(
+            carriers.is_empty(),
+            "a second painter for the top row is back in {carriers:?}"
+        );
+    }
+
+    /// A row too narrow for every name is a window into the list, so its
+    /// first run is not the first entry. Painting along the list instead
+    /// of by the index each run names put a neighbour's name under every
+    /// one of them.
+    #[test]
+    fn a_row_too_narrow_for_the_list_paints_the_names_its_slots_name() {
+        let mut model = two_tabs();
+        model.ai_enabled = false;
+        let _ = view_core::update::update(
+            &mut model,
+            view_core::msg::Msg::Redraw(vec![view_core::events::UiEvent::TablineUpdate {
+                current: view_core::events::TabHandle(4),
+                tabs: (1..=4)
+                    .map(|at| view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(at),
+                        name: format!("name{at}"),
+                    })
+                    .collect(),
+            }]),
+        );
+        let theme = Theme::from_hl(model.engine.hl());
+        let pill = PillView::from_model(&model);
+        // room for two of the four names, so the window holds the current
+        // one and the one before it
+        let width = 20;
+        let slots = pill.slots(width);
+        assert_eq!(slots.len(), 2, "the fixture drew {} names", slots.len());
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| paint_pill(&pill, &theme, frame.area(), frame.buffer_mut()))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row: String = (0..width).map(|col| buf[(col, 0)].symbol()).collect();
+        assert_eq!(
+            row.trim(),
+            "prod  name3  name4",
+            "the row reads {row:?} where its slots name entries 2 and 3"
+        );
     }
 
     /// The bool on the slot is not the colour on the screen: only this

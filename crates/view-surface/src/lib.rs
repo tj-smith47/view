@@ -18,9 +18,7 @@ use view_core::grid::registry::GridId;
 #[cfg(test)]
 use view_core::grid::registry::GLOBAL_GRID;
 use view_core::grid::Grid;
-use view_core::model::{
-    CmdlineState, Model, Overlay, OverlayKind, PopupmenuState, TablineState, TermCaps,
-};
+use view_core::model::{CmdlineState, Model, Overlay, OverlayKind, PopupmenuState, TermCaps};
 use view_core::native::geometry::{OverlayBox, OverlayRect};
 use view_core::native::palette::PaletteState;
 use view_core::native::prompt::PromptState;
@@ -138,13 +136,15 @@ pub enum LayerKind {
         x_offset: u16,
         paused: bool,
     },
-    /// The open tabs, present once nvim has sent a `tabline_update` and
-    /// `panes = "nvim"` leaves the row to nvim's own tab list restyled.
-    Tabline(TablineState),
-    /// The top pill under tiles: the tabpages or buffers across the
-    /// middle, the host at the left edge and the agent's state at the
-    /// right. A view rather than the model it was built from, so the row
-    /// can be dumped and compared without a session behind it.
+    /// The top row: the tabpages or buffers across the middle, the host at
+    /// the left edge and the agent's state at the right. A view rather than
+    /// the model it was built from, so the row can be dumped and compared
+    /// without a session behind it.
+    ///
+    /// The one kind either look puts there. A second painter for
+    /// `panes = "nvim"` drew the same names left-aligned from column 0,
+    /// which the mouse router's centred hit test could not reach, so a
+    /// click on that row selected the wrong tabpage or none at all.
     Pill(view_core::native::pill::PillView),
     /// The completion popup menu, present while it is open.
     Popupmenu(PopupmenuState),
@@ -245,7 +245,6 @@ impl LayerKind {
             Self::EngineGrid
             | Self::Cmdline(_)
             | Self::Toast { .. }
-            | Self::Tabline(_)
             | Self::Pill(_)
             | Self::Popupmenu(_)
             | Self::Speculated(_)
@@ -389,11 +388,11 @@ pub fn grid_origin(model: &Model) -> (u16, u16) {
 
 /// Builds the [`Surface`] for one frame from `model`.
 ///
-/// The tabline is the only persistent chrome: when it is showing (more
-/// than one tab open), [`Model::chrome_rows`] reserves one row for it and
-/// this offsets the `EngineGrid` layer, the cursor, and every grid-space
-/// overlay (cmdline, messages, popupmenu) down by that many rows, so the
-/// tabline's row is never shared with buffer content. Overlays otherwise
+/// The top row is the only persistent chrome above the grid: when it is
+/// showing, [`Model::chrome_rows`] reserves one row for it and this offsets
+/// the `EngineGrid` layer, the cursor, and every grid-space overlay
+/// (cmdline, messages, popupmenu) down by that many rows, so the row is
+/// never shared with buffer content. Overlays otherwise
 /// paint directly over the grid at rest: they are transient (present only
 /// while their originating state is `Some`/non-empty) and vanish the frame
 /// after nvim clears that state.
@@ -401,7 +400,7 @@ pub fn grid_origin(model: &Model) -> (u16, u16) {
 /// # Z-order
 ///
 /// Ascending: the engine grid (with any speculation directly over it), then
-/// the persistent chrome (shell placeholder, tabline, statusline), then the
+/// the persistent chrome (shell placeholder, the top row, statusline), then the
 /// native overlays in stack order, and last nvim's own transient surfaces --
 /// cmdline (or the palette standing in for it), messages, popupmenu. Those
 /// three are last because they are ephemeral notice: they exist only while
@@ -470,22 +469,15 @@ pub fn render(model: &Model) -> Surface {
     // Read off the model rather than off the arrival of a tabline event, so
     // the host and the agent word stand on row 0 from the first frame
     if view_core::native::pill::shows(model) {
-        if model.look.panes == view_core::model::Panes::Tiles {
-            // the pill spans the whole terminal width, the ring included:
-            // it stands above the outer frame rather than inside it, which
-            // is what leaves the frame's own top edge unbroken
-            layers.push(Layer::new(
-                Rect::new(0, 0, model.term_width, 1),
-                LayerKind::Pill(view_core::native::pill::PillView::from_model(model)),
-                model.caps,
-            ));
-        } else if let Some(tabline) = &engine.tabline {
-            layers.push(Layer::new(
-                Rect::new(0, 0, grid_w, 1).clamp_to(grid_w, grid_h),
-                LayerKind::Tabline(tabline.clone()),
-                model.caps,
-            ));
-        }
+        // the whole terminal width under either look, the ring included:
+        // the pill stands above the outer frame rather than inside it,
+        // which is what leaves the frame's own top edge unbroken, and it is
+        // the width the mouse router hit-tests the row at
+        layers.push(Layer::new(
+            Rect::new(0, 0, model.term_width, 1),
+            LayerKind::Pill(view_core::native::pill::PillView::from_model(model)),
+            model.caps,
+        ));
     }
     if model.statusline_rows() > 0 {
         let ring = model.look.ring();
@@ -1932,9 +1924,10 @@ mod tests {
     }
 
     #[test]
-    fn oversized_tabline_rect_clamps_to_grid_width() {
-        // a grid narrower than a typical tabline row still yields a clamped,
-        // in-bounds layer rather than one wider than the grid
+    fn the_top_row_spans_the_terminal_whatever_the_grid_holds() {
+        // the row stands above the engine's grid rather than inside it, so
+        // a grid narrower than the terminal leaves the names centred on the
+        // terminal, which is the width the mouse router hit-tests at
         let mut model = model_with_grid(3, 4);
         apply(
             &mut model,
@@ -1955,17 +1948,19 @@ mod tests {
 
         let surface = render(&model);
 
-        let tabline = surface
+        let row = surface
             .layers
             .iter()
-            .find(|l| matches!(l.kind, LayerKind::Tabline(_)))
-            .expect("tabline layer present");
-        assert!(tabline.rect.col + tabline.rect.width <= 3);
-        assert!(tabline.rect.row + tabline.rect.height <= 4);
+            .find(|l| matches!(l.kind, LayerKind::Pill(_)))
+            .expect("the top row's layer present");
+        assert_eq!(
+            (row.rect.row, row.rect.col, row.rect.width, row.rect.height),
+            (0, 0, model.term_width, 1)
+        );
     }
 
     #[test]
-    fn single_tab_renders_no_tabline_layer_and_reserves_no_row() {
+    fn single_tab_renders_no_top_row_layer_and_reserves_no_row() {
         let mut model = model_with_grid(10, 5);
         apply(
             &mut model,
@@ -1983,7 +1978,7 @@ mod tests {
         assert!(!surface
             .layers
             .iter()
-            .any(|l| matches!(l.kind, LayerKind::Tabline(_))));
+            .any(|l| matches!(l.kind, LayerKind::Pill(_))));
         assert_eq!(surface.layers[0].rect.row, 0, "no chrome, no offset");
     }
 
@@ -2017,13 +2012,13 @@ mod tests {
             .iter()
             .find(|l| matches!(l.kind, LayerKind::EngineGrid))
             .expect("grid layer present");
-        assert_eq!(grid_layer.rect.row, 1, "grid offset below the tabline row");
-        let tabline_layer = surface
+        assert_eq!(grid_layer.rect.row, 1, "grid offset below the top row");
+        let row_layer = surface
             .layers
             .iter()
-            .find(|l| matches!(l.kind, LayerKind::Tabline(_)))
-            .expect("tabline layer present");
-        assert_eq!(tabline_layer.rect.row, 0);
+            .find(|l| matches!(l.kind, LayerKind::Pill(_)))
+            .expect("the top row's layer present");
+        assert_eq!(row_layer.rect.row, 0);
         assert_eq!(
             surface.cursor.map(|c| (c.row, c.col)),
             Some((3, 4)),

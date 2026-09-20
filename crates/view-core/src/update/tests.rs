@@ -12840,11 +12840,11 @@ fn a_click_on_a_pill_tab_selects_that_tabpage() {
     );
 }
 
-/// Under `panes = "nvim"` an explicit `[native] tabline` leaves row 0 to
-/// nvim's own left-aligned tab line, which the pill's centred layout would
-/// hit-test into the wrong name.
+/// Row 0 is the pill under `panes = "nvim"` too, once more than one
+/// tabpage reserves it: one painter, so one layout for the press to land
+/// in, and a column carrying no name reaches nothing.
 #[test]
-fn a_press_on_nvims_own_tab_row_selects_nothing_through_the_pill() {
+fn a_press_on_the_nvim_look_row_selects_the_tab_under_it() {
     let mut m = pill_model(crate::native::pill::TablineShows::Tabs);
     m.look = crate::model::Look::new(crate::model::Panes::Nvim, true);
     assert_eq!(
@@ -12853,13 +12853,21 @@ fn a_press_on_nvims_own_tab_row_selects_nothing_through_the_pill() {
         "two tabpages under nvim mode left the row unreserved"
     );
     let slots = crate::native::pill::PillView::from_model(&m).slots(m.term_width);
-    for col in [0, slots[0].col, slots[1].col] {
-        let effects = update(&mut m, click(0, col));
+    for slot in &slots {
+        let effects = update(&mut m, click(0, slot.col));
         assert!(
-            effects.is_empty(),
-            "a press on nvim's own tab row at column {col} sent {effects:?}"
+            matches!(
+                effects.as_slice(),
+                [Effect::Rpc(RpcCall::SelectTab { tab })] if *tab == slot.id
+            ),
+            "a press on the name at column {} sent {effects:?}",
+            slot.col
         );
     }
+    assert!(
+        update(&mut m, click(0, 0)).is_empty(),
+        "a press on a blank column of the row reached the grid"
+    );
 }
 
 #[test]
