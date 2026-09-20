@@ -301,6 +301,22 @@ about 12 h of session time across six commits, 823b76c through b880b9b).
   one draw at load 1.8, not a replicate median; this session re-seats both
   from a replicate median (`--campaign 8`) on a quiet host.
 
+**S2 exit echo seat drift, the glyph after a keystroke** (2026-09-19/20, no
+code change).
+
+- *What remains.* `echo.minimal`/`echo.heavy` `ratio_p50` on `dev-linux`/`user`
+  read 1.205 / 1.174 against bars 1.198 / 1.163 at both 793197e and 0acb3e6
+  (A/B alternated twice, `~/.claude/tmp/s2-exit/ab-echo.log`), so S2 moved
+  nothing and the seat itself has drifted. gh-linux at cd5bdcb (Bench
+  35492734666) reads 1.237 / 1.220 / 1.234 (minimal / heavy / user) against
+  bars 1.161 / 1.063 / 1.160, inside the shared class's 1.25 ratio headroom;
+  `echo_control` holds at 1.024 / 0.995, which puts the movement in view's own
+  echo path rather than the paired harness.
+- *Owed.* Re-seat both classes from a replicate median on a quiet host, and
+  attribute the ~6-15 % before re-seating: the S1/S2 changes on the redraw
+  path since the bars were recorded (4825940 for gh-linux) are the population
+  to bisect with `task heartbeat-ab`-shaped A/B pairs.
+
 **S1.13 flood cadence, the screen under a terminal storm** (2026-09-15, about
 3 h of session time, no code change).
 
