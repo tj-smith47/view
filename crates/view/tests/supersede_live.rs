@@ -462,6 +462,236 @@ fn a_replaced_notify_is_put_back_for_a_session_that_draws_the_messages() {
     );
 }
 
+/// What nvim answers about `option`: the type it takes, and the value nvim
+/// itself left there.
+///
+/// The second half is the reading a hold refuses to report. A value nvim
+/// wrote names no holder, and a notice about it is a box on every launch.
+fn nvim_stock(handle: &EngineHandle, option: &str) -> (String, String) {
+    let answer = handle
+        .eval_str(&format!(
+            "luaeval('(function() \
+             local i = vim.api.nvim_get_option_info2(\"{option}\", {{}}) \
+             return i.type .. \"=\" .. tostring(i.default) end)()')"
+        ))
+        .unwrap();
+    let (kind, stock) = answer.split_once('=').unwrap();
+    (kind.to_string(), stock.to_string())
+}
+
+/// A value of `option`'s own type that is neither what nvim left there nor
+/// what the table holds the channel at, in nvim's own spelling of it: the
+/// only reading a hold has anything to report about.
+///
+/// `None` for a flag, which has two readings and neither names a holder:
+/// one is nvim's own, and the other is the user switching the channel off.
+fn populated(kind: &str, stock: &str, held_at: Option<&str>) -> Option<String> {
+    match kind {
+        "boolean" => None,
+        "number" => ('0'..='9')
+            .map(|digit| digit.to_string())
+            .find(|value| value != stock && Some(value.as_str()) != held_at),
+        _ => Some("view-pin-held".to_string()),
+    }
+}
+
+/// A channel value as nvim spells it back, which is what a case compares a
+/// hold's own value against.
+fn spelled(value: channels::ChannelValue) -> String {
+    match value {
+        channels::ChannelValue::Int(n) => n.to_string(),
+        channels::ChannelValue::Bool(b) => u8::from(b).to_string(),
+        channels::ChannelValue::Str(s) => s.to_string(),
+    }
+}
+
+/// The chunk name a replaced global's holder is loaded under, which is
+/// what `debug.getinfo` answers about it and so what the report spells.
+const REPLACEMENT_SOURCE: &str = "@view-pin-held";
+
+/// The hold `surface` declares, which is the call that reads the surface's
+/// covered channels beside its own option.
+fn hold_of(
+    surface: view_core::native::surfaces::Surface,
+) -> Option<(&'static str, Scope, channels::ChannelValue)> {
+    channels::channels(surface)
+        .iter()
+        .find_map(|channel| match channel {
+            Channel::Hold {
+                option,
+                scope,
+                value,
+            } => Some((*option, *scope, *value)),
+            _ => None,
+        })
+}
+
+/// The hold of `option`, issued over the call its scope names.
+fn hold(handle: &EngineHandle, option: &str, scope: Scope, value: channels::ChannelValue) {
+    match scope {
+        Scope::Global => handle.hold_option(option, &value.wire()).unwrap(),
+        Scope::Window => handle.hold_window_option(option, &value.wire()).unwrap(),
+    }
+}
+
+#[test]
+fn every_channel_kind_that_can_be_held_reports_the_holder_it_found() {
+    // the class the window-local hold's own report belongs to: a surface
+    // that changes hands with nothing said leaves the user no way to learn
+    // which switch gives it back, and that is a property of every channel
+    // rather than of the one whose report was written first. No plugin in
+    // any of these -- the channel is populated the way a config populates
+    // it
+    let mut options: Vec<&str> = Vec::new();
+    let mut globals: Vec<&str> = Vec::new();
+    let mut covered: Vec<&str> = Vec::new();
+    let mut flags: Vec<&str> = Vec::new();
+    let mut capabilities: Vec<&str> = Vec::new();
+    for entry in channels::CHANNELS {
+        for channel in entry.channels {
+            match *channel {
+                Channel::Hold {
+                    option,
+                    scope,
+                    value,
+                } => {
+                    if options.contains(&option) {
+                        continue;
+                    }
+                    options.push(option);
+                    let dir = common::fixture(&format!("supersede-live-held-{option}"), "");
+                    let (engine, rx) = reported_session(&dir);
+                    let (kind, stock) = nvim_stock(&engine.handle, option);
+                    let held =
+                        populated(&kind, &stock, Some(&spelled(value))).unwrap_or_else(|| {
+                            panic!("no value of `{option}`'s own type can name a holder")
+                        });
+                    // written after the attach rather than from the fixture
+                    // config: nvim zeroes some of these itself when a UI
+                    // takes the capability beside them, and a case that let
+                    // it do so would assert on a channel nothing had
+                    // populated
+                    engine
+                        .handle
+                        .eval_str(&format!("execute('set {option}={held}')"))
+                        .unwrap();
+                    assert_eq!(
+                        engine.handle.eval_str(&format!("&{option}")).unwrap(),
+                        held,
+                        "`{option}` never took the value this case is about to hold over"
+                    );
+                    hold(&engine.handle, option, scope, value);
+                    assert!(
+                        reported_holding(&rx, option, &held),
+                        "the hold of `{option}` said nothing about the value it displaced"
+                    );
+                }
+                Channel::Covered { option, by } => {
+                    // a capability is nvim's answer to `nvim_ui_attach`, and
+                    // no config writes one, so it has no holder to find
+                    if option.starts_with("ext_") {
+                        if !capabilities.contains(&option) {
+                            capabilities.push(option);
+                        }
+                        continue;
+                    }
+                    if covered.contains(&option) || flags.contains(&option) {
+                        continue;
+                    }
+                    let Some((held_option, scope, value)) = hold_of(entry.surface) else {
+                        panic!("`{option}` is covered by `{by}` and no hold of the same surface reads it")
+                    };
+                    let dir = common::fixture(&format!("supersede-live-covered-{option}"), "");
+                    let (engine, rx) = reported_session(&dir);
+                    let (kind, stock) = nvim_stock(&engine.handle, option);
+                    let Some(claimed) = populated(&kind, &stock, None) else {
+                        flags.push(option);
+                        continue;
+                    };
+                    covered.push(option);
+                    engine
+                        .handle
+                        .eval_str(&format!("execute('set {option}={claimed}')"))
+                        .unwrap();
+                    hold(&engine.handle, held_option, scope, value);
+                    assert!(
+                        reported_holding(&rx, option, &claimed),
+                        "the hold of `{held_option}` said nothing about what was drawing `{option}`"
+                    );
+                }
+                Channel::Replaced(global) => {
+                    if globals.contains(&global) {
+                        continue;
+                    }
+                    globals.push(global);
+                    let dir = common::fixture(
+                        &format!("supersede-live-held-{}", global.replace('.', "-")),
+                        &format!(
+                            "{global} = assert(load('', '{REPLACEMENT_SOURCE}'))
+"
+                        ),
+                    );
+                    let (engine, rx) = reported_session(&dir);
+                    apply(
+                        &engine.handle,
+                        &plan(&NativeConfig::all_enabled(), registry::features()),
+                    );
+                    assert!(
+                        reported_holding(&rx, global, REPLACEMENT_SOURCE),
+                        "the hold of `{global}` said nothing about the function it displaced"
+                    );
+                }
+                // an attach takes its surface at `nvim_ui_attach`, where
+                // nvim stops drawing it and leaves no holder to name; a
+                // float is read off the window list and reported by the
+                // scan that finds it
+                Channel::Attach(_) | Channel::Float(_) => {}
+            }
+        }
+    }
+    assert_eq!(
+        (
+            options.len(),
+            globals.len(),
+            covered.len(),
+            flags.len(),
+            capabilities.len()
+        ),
+        (3, 1, 4, 3, 1),
+        "held {options:?}, replaced {globals:?}, read beside {covered:?}, \
+         flags with no holder to name {flags:?}, capabilities {capabilities:?}"
+    );
+}
+
+#[test]
+fn a_hold_that_finds_nvims_own_value_names_nobody() {
+    // the notice on every launch: nvim's own `laststatus` is 2 and its own
+    // `cmdheight` is 1, so a hold reporting whatever it displaced announced
+    // a takeover from nvim itself before a config had claimed anything
+    let dir = common::fixture("supersede-live-stock", "");
+    let (engine, rx) = reported_session(&dir);
+    for (option, scope) in [
+        ("laststatus", Scope::Global),
+        ("cmdheight", Scope::Global),
+        ("winbar", Scope::Window),
+    ] {
+        hold(
+            &engine.handle,
+            option,
+            scope,
+            channels::ChannelValue::Int(0),
+        );
+    }
+    let stray = common::drain_until(&rx, Duration::from_secs(2), |msg| match msg {
+        Msg::ChannelHeld { channel, holder } => Some(format!("{channel} = {holder}")),
+        _ => None,
+    });
+    assert!(
+        stray.is_none(),
+        "a hold of an untouched config found a holder to name: {stray:?}"
+    );
+}
+
 /// Every row of nvim's own screen, as one string per row.
 ///
 /// `screenstring` cell by cell rather than any buffer read: what is asked

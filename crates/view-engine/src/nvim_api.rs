@@ -21,11 +21,12 @@ use view_core::native::mappings::{
     command_only_forms, default_maps, is_spellable, review_keys, MappingSpec, COMMAND,
 };
 
-pub(crate) use decode::{decode_ai_fs_reply, decode_checktime_reply};
 use decode::{
-    decode_buf_set_text_reply, decode_current_buffer_text_reply, decode_cursor_context_reply,
-    decode_diagnostic_entries_reply, decode_quickfix_entries_reply, option_value, value_to_string,
+    covered_beside, decode_buf_set_text_reply, decode_current_buffer_text_reply,
+    decode_cursor_context_reply, decode_diagnostic_entries_reply, decode_quickfix_entries_reply,
+    option_value, value_to_string,
 };
+pub(crate) use decode::{decode_ai_fs_reply, decode_checktime_reply};
 
 /// Upper bound on how long each of [`EngineHandle::read_current_buffer_text`],
 /// [`EngineHandle::read_cursor_context`], [`EngineHandle::read_diagnostic_entries`],
@@ -77,9 +78,27 @@ const FEED_KEYS_CHUNK: &str = "\
 vim.fn.feedkeys(vim.api.nvim_replace_termcodes(..., true, true, true), 't')";
 
 /// The lua chunk [`EngineHandle::hold_option`] runs inside nvim, taking the
-/// option name and its value as its two varargs. Constant by construction
-/// for the same reason as [`FEED_KEYS_CHUNK`]: no caller data is
-/// interpolated, so no option name or value can change what runs.
+/// option name, its value and view's own channel as its three varargs.
+/// Constant by construction for the same reason as [`FEED_KEYS_CHUNK`]: no
+/// caller data is interpolated, so no option name or value can change what
+/// runs.
+///
+/// What was drawing the surface is reported back over the bridge, so a
+/// takeover is never one the user is left to work out for themselves.
+/// Two readings, because a hold alone answers about one of them:
+///
+/// - the value found before each write, once per distinct value, which is
+///   what a config that claims the option itself left there;
+/// - every covered channel of the same surfaces (`covered`, from the
+///   channel table), read at each guard pass under its own name, because
+///   nvim evaluates those only while this option leaves them a row and a
+///   plugin drawing there writes one of them instead of this one.
+///
+/// A value nvim itself put there names nobody, so `nvim_get_option_info2`'s
+/// own default is refused, as are an empty string and a false flag: a
+/// status line nvim draws at its default `laststatus`, a `showmode` a
+/// config turned off, and an unset `winbar` are all channels with no
+/// holder to report.
 ///
 /// Two guards, because one cannot see every write. `OptionSet` catches a
 /// write the moment it happens, before anything redraws -- but nvim does
@@ -110,15 +129,45 @@ vim.fn.feedkeys(vim.api.nvim_replace_termcodes(..., true, true, true), 't')";
 /// precondition and whose rows are checked against a live nvim's
 /// `nvim_get_option_info2` scope.
 const HOLD_OPTION_CHUNK: &str = "\
-local name, value = ...
-vim.api.nvim_set_option_value(name, value, {})
+local name, value, channel, covered = ...
+local seen = {}
+local function stock(option)
+  local ok, info = pcall(vim.api.nvim_get_option_info2, option, {})
+  if ok and info ~= nil then
+    return info.default
+  end
+  return nil
+end
+local function report(option, held, key)
+  if held == nil or held == false or held == '' or held == stock(option) then
+    return
+  end
+  if seen[key] then
+    return
+  end
+  seen[key] = true
+  pcall(vim.rpcnotify, channel, 'view_bridge', 'channel_held',
+    option, tostring(held))
+end
+local function beside()
+  for _, option in ipairs(covered) do
+    local ok, held = pcall(vim.api.nvim_get_option_value, option, {})
+    if ok then
+      report(option, held, option)
+    end
+  end
+end
 local group = vim.api.nvim_create_augroup(
   'view-hold-' .. name, { clear = true })
 local function hold()
-  if vim.api.nvim_get_option_value(name, {}) ~= value then
+  local held = vim.api.nvim_get_option_value(name, {})
+  if held ~= value then
     vim.api.nvim_set_option_value(name, value, {})
+    report(name, held, name .. tostring(held))
   end
+  beside()
 end
+hold()
 vim.api.nvim_create_autocmd('OptionSet', {
   group = group,
   pattern = name,
@@ -152,7 +201,11 @@ vim.api.nvim_create_autocmd('SafeState', {
 ///
 /// The value found in a window before the write is reported back over the
 /// bridge, once per window and holder, so view can say what was drawing
-/// there. Keyed on both because the re-assert guard runs at every idle
+/// there. The covered channels of the same surfaces (`covered`) are read
+/// beside it once per guard pass, under their own names, on the same terms
+/// as the global hold: a tab line plugin writes `tabline` and leaves this
+/// row to whoever wants it. A value equal to nvim's own default names
+/// nobody and is refused. Keyed on both because the re-assert guard runs at every idle
 /// transition: a config that writes its row back a hundred times sends one
 /// notification, and a second window holding something else still sends
 /// its own. What has been reported is held per window and dropped when
@@ -168,10 +221,19 @@ vim.api.nvim_create_autocmd('SafeState', {
 /// the global one", so holding every window empty while a global value
 /// stands leaves nvim drawing the global one in all of them.
 const HOLD_WINDOW_OPTION_CHUNK: &str = "\
-local name, value, channel = ...
+local name, value, channel, covered = ...
 local seen = {}
+local stocked = {}
+local function stock(option)
+  local ok, info = pcall(vim.api.nvim_get_option_info2, option, {})
+  if ok and info ~= nil then
+    return info.default
+  end
+  return nil
+end
 local function report(win, held)
-  if held == nil or held == '' or held == value then
+  if held == nil or held == false or held == '' or held == value
+    or held == stock(name) then
     return
   end
   local key = tostring(win)
@@ -187,6 +249,17 @@ local function report(win, held)
   pcall(vim.rpcnotify, channel, 'view_bridge', 'channel_held',
     name, tostring(held))
 end
+local function beside()
+  for _, option in ipairs(covered) do
+    local ok, held = pcall(vim.api.nvim_get_option_value, option, {})
+    if ok and held ~= nil and held ~= false and held ~= ''
+      and held ~= stock(option) and not stocked[option] then
+      stocked[option] = true
+      pcall(vim.rpcnotify, channel, 'view_bridge', 'channel_held',
+        option, tostring(held))
+    end
+  end
+end
 local function apply(win)
   local held = vim.api.nvim_get_option_value(name, { win = win })
   if held == value then
@@ -196,6 +269,7 @@ local function apply(win)
   report(win, held)
 end
 local function hold()
+  beside()
   local ok, held = pcall(
     vim.api.nvim_get_option_value, name, { scope = 'global' })
   if ok and held ~= value then
@@ -421,7 +495,7 @@ pub const NOTIFY_HOLD_CHUNK: &str = HOLD_NOTIFY_CHUNK;
 /// event only when the answer moved. `User LazyLoad`, so a plugin that
 /// loads late and maps `:` closes the gate for the rest of the session --
 /// and `BufEnter`, `FileType` and `BufWinEnter` beside it, because a config
-/// that uses no lazy.nvim fires the first one never, and because a
+/// that loads no plugin lazily fires the first one never, and because a
 /// buffer-local `:` map belongs to whichever buffer is current: an ftplugin
 /// mapping `:` in a file opened later is seen at the moment its buffer
 /// becomes the one being typed into, and leaving that buffer is reported
@@ -824,8 +898,8 @@ pub(crate) const FLOAT_SCAN_THROTTLE_MS: u64 =
 /// to its main loop -- firing `SafeState` -- many times while the manager
 /// is still cloning. A single reading taken there answers about a session
 /// that is about to replace the global, and the notice is then never
-/// raised at all on the one launch that most needs it (observed:
-/// `neo-tree`/`unaccommodated` on a cold compat cache).
+/// raised at all on the one launch that most needs it (observed on a cold
+/// compat cache, in the heavy unaccommodated state).
 ///
 /// What keeps a repeat from becoming a per-idle scan is the pair of stops
 /// rather than `once`: the notify goes out only when the reading moves, so
@@ -2333,11 +2407,11 @@ macro_rules! review_ns_lua {
 /// `[a-z_]` verbs. Buffer-local, so the file under review is the only place
 /// these words mean anything.
 ///
-/// A key view claims can already be the user's own: gitsigns takes `]c`,
-/// `[c` and `<leader>hR` buffer-locally in every file it attaches to, and a
-/// review that ended would otherwise leave those dead for the rest of the
-/// session -- the migration contract broken by the one feature that borrowed
-/// gitsigns' vocabulary. So the mapping each key displaces is kept, and
+/// A key view claims can already be the user's own: a git-hunk plugin
+/// takes `]c`, `[c` and `<leader>hR` buffer-locally in every file it
+/// attaches to, and a review that ended would otherwise leave those dead
+/// for the rest of the session -- the migration contract broken by the one
+/// feature that borrowed the git-hunk vocabulary. So the mapping each key displaces is kept, and
 /// [`REVIEW_CLEAR_CHUNK`] hands it back. The keymap list is read before and
 /// after the set rather than matched against `k.lhs`, because `<leader>` is
 /// expanded at set time and only nvim knows what it expanded to: the entries
@@ -3141,30 +3215,10 @@ impl EngineHandle {
         )
     }
 
-    /// Sets option `name` to `value` via `nvim_set_option_value(String
-    /// name, Object value, Dict opts)`, with an empty `opts` map: no
-    /// `win`/`buf` key means nvim applies the change the way `:set` does,
-    /// which is what a session-wide takeover of a surface needs.
-    ///
-    /// A notification, not a request: nothing waits on the result, so the
-    /// paint loop that emitted it never blocks on nvim's reply. A rejected
-    /// option name surfaces as an nvim error message rather than as an
-    /// `Err` here, the same tradeoff every other fire-and-forget wrapper on
-    /// this handle makes.
-    pub fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
-        self.notify(
-            "nvim_set_option_value",
-            vec![
-                Value::from(name),
-                option_value(value),
-                Value::Map(Vec::new()),
-            ],
-        )
-    }
-
-    /// Sets `name` to `value` and installs a session-lifetime guard that
-    /// puts it back whenever anything else changes it: the durable takeover
-    /// [`crate::RpcCall::HoldOption`] describes.
+    /// Sets `name` to `value`, installs a session-lifetime guard that puts
+    /// it back whenever anything else changes it, and reports the value it
+    /// displaced: the durable takeover [`crate::RpcCall::HoldOption`]
+    /// describes.
     ///
     /// One `nvim_exec_lua` chunk rather than a set call followed by an
     /// autocmd call, because the two halves are not independently useful: a
@@ -3181,8 +3235,15 @@ impl EngineHandle {
     /// unrelated event costs one option read. Why it takes two events, and
     /// which write each one catches, is in [`HOLD_OPTION_CHUNK`].
     ///
+    /// Two more arguments: view's own channel, which is the chunk's route
+    /// back -- what it displaces crosses as `Msg::ChannelHeld`, so the
+    /// surface this option draws is accounted for the way a window-local
+    /// one and a replaced global are -- and the covered channels the table
+    /// gives this option, which the chunk reads beside it.
+    ///
     /// A notification, not a request, like every other call the paint loop
-    /// may emit: nothing waits on the result.
+    /// may emit: the report crosses back over the bridge, and nothing waits
+    /// on the call itself.
     ///
     /// # Errors
     ///
@@ -3193,7 +3254,12 @@ impl EngineHandle {
             "nvim_exec_lua",
             vec![
                 Value::from(HOLD_OPTION_CHUNK),
-                Value::Array(vec![Value::from(name), option_value(value)]),
+                Value::Array(vec![
+                    Value::from(name),
+                    option_value(value),
+                    Value::from(self.channel_id),
+                    covered_beside(name),
+                ]),
             ],
         )
     }
@@ -3206,8 +3272,9 @@ impl EngineHandle {
     /// Its own call rather than a scope field on
     /// [`hold_option`](Self::hold_option), because the mechanisms differ:
     /// see [`HOLD_WINDOW_OPTION_CHUNK`] for the per-window walk and the
-    /// three events it re-runs on. `name` and `value` ride as arguments to
-    /// a constant chunk, like every other hold.
+    /// three events it re-runs on. `name`, `value`, view's channel and the
+    /// covered channels the table gives this option ride as arguments to a
+    /// constant chunk, like every other hold.
     ///
     /// A notification, not a request, like every other call the paint loop
     /// may emit: the report crosses back over the bridge as
@@ -3226,6 +3293,7 @@ impl EngineHandle {
                     Value::from(name),
                     option_value(value),
                     Value::from(self.channel_id),
+                    covered_beside(name),
                 ]),
             ],
         )
@@ -4381,7 +4449,12 @@ fn takeover_step(step: &TakeoverStep, channel_id: u64) -> Value {
     let (src, args) = match step {
         TakeoverStep::HoldOption { name, value } => (
             HOLD_OPTION_CHUNK,
-            vec![Value::from(&name[..]), option_value(value)],
+            vec![
+                Value::from(&name[..]),
+                option_value(value),
+                Value::from(channel_id),
+                covered_beside(name),
+            ],
         ),
         TakeoverStep::HoldWindowOption { name, value } => (
             HOLD_WINDOW_OPTION_CHUNK,
@@ -4389,6 +4462,7 @@ fn takeover_step(step: &TakeoverStep, channel_id: u64) -> Value {
                 Value::from(name.as_str()),
                 option_value(value),
                 Value::from(channel_id),
+                covered_beside(name),
             ],
         ),
         TakeoverStep::HoldNotify => (HOLD_NOTIFY_CHUNK, vec![Value::from(channel_id)]),
@@ -5236,25 +5310,7 @@ mod tests {
     }
 
     #[test]
-    fn set_option_sends_name_value_and_an_empty_scope_map() {
-        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
-        h.set_option("laststatus", &OptionValue::Int(0)).unwrap();
-        let (method, params) = cap_rx
-            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
-            .unwrap();
-        assert_eq!(method, "nvim_set_option_value");
-        assert_eq!(
-            params,
-            vec![
-                Value::from("laststatus"),
-                Value::from(0),
-                Value::Map(Vec::new()),
-            ]
-        );
-    }
-
-    #[test]
-    fn hold_option_sends_the_constant_chunk_with_name_and_value_as_arguments() {
+    fn hold_option_sends_the_constant_chunk_with_name_value_channel_and_covered() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         h.hold_option("laststatus", &OptionValue::Int(0)).unwrap();
         let (method, params) = cap_rx
@@ -5265,8 +5321,14 @@ mod tests {
             params,
             vec![
                 Value::from(HOLD_OPTION_CHUNK),
-                Value::Array(vec![Value::from("laststatus"), Value::from(0)]),
-            ]
+                Value::Array(vec![
+                    Value::from("laststatus"),
+                    Value::from(0),
+                    Value::from(h.channel_id),
+                    Value::Array(vec![Value::from("statusline")]),
+                ]),
+            ],
+            "the covered channel a renderer actually writes must travel with the hold"
         );
     }
 
@@ -5276,6 +5338,29 @@ mod tests {
         // any one of them would still pass the wire-shape test above
         assert!(HOLD_OPTION_CHUNK.contains("nvim_set_option_value(name, value, {})"));
         assert!(HOLD_OPTION_CHUNK.contains("'OptionSet'"));
+        assert!(
+            HOLD_OPTION_CHUNK
+                .contains("pcall(vim.rpcnotify, channel, 'view_bridge', 'channel_held',"),
+            "a hold nobody is told about takes a surface with no way to \
+             learn which switch returns it"
+        );
+        assert!(
+            HOLD_OPTION_CHUNK.contains("if seen[key] then"),
+            "a config that writes its value back at every idle transition \
+             must still be one line"
+        );
+        for chunk in [HOLD_OPTION_CHUNK, HOLD_WINDOW_OPTION_CHUNK] {
+            assert!(
+                chunk.contains("held == stock("),
+                "a value nvim itself put there names nobody, and a notice \
+                 about it is a box on every launch"
+            );
+            assert!(
+                chunk.contains("for _, option in ipairs(covered) do"),
+                "a renderer writes the option nvim evaluates, so the hold \
+                 that covers it is what reads it"
+            );
+        }
         assert!(
             HOLD_OPTION_CHUNK.contains("'SafeState'"),
             "without the idle backstop the guard cannot see a write made \

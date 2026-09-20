@@ -391,18 +391,18 @@ pub enum Msg {
     ///
     /// Not an event -- there is no event to have. Every plugin observed in
     /// `docs/surface-float-wire-capture.md` opens its float with
-    /// `noautocmd = true`, so `WinNew` fires for none of them, and nvim-cmp
-    /// closes its menu from inside a non-nested autocmd, so `WinClosed`
-    /// does not fire for it either. What the bridge does instead is scan
-    /// the window list, throttled, on the ordinary activity that brackets a
-    /// float appearing (see `REGISTER_BRIDGE_CHUNK`); the throttle is what
-    /// bounds this message's rate under a float storm.
+    /// `noautocmd = true`, so `WinNew` fires for none of them, and a
+    /// completion menu is closed from inside a non-nested autocmd, so
+    /// `WinClosed` does not fire for it either. What the bridge does
+    /// instead is scan the window list, throttled, on the ordinary activity
+    /// that brackets a float appearing (see `REGISTER_BRIDGE_CHUNK`); the
+    /// throttle is what bounds this message's rate under a float storm.
     ///
-    /// Repeats are ordinary and expected: nvim-cmp reuses one window id and
-    /// re-sets its config as the candidate list narrows, which the watcher
-    /// reports as a fresh sighting because it cannot know whether the move
-    /// crossed onto a surface view owns. `update::surface_conflict` is what
-    /// makes the repeat free.
+    /// Repeats are ordinary and expected: a completion menu reuses one
+    /// window id and re-sets its config as the candidate list narrows,
+    /// which the watcher reports as a fresh sighting because it cannot know
+    /// whether the move crossed onto a surface view owns.
+    /// `update::surface_conflict` is what makes the repeat free.
     FloatObserved(crate::native::surfaces::FloatSighting),
     /// The end of one float scan: every [`Msg::FloatObserved`] since the
     /// last one of these is the complete set of floats nvim had open.
@@ -1725,9 +1725,9 @@ pub enum RpcCall {
         row: u16,
         col: u16,
     },
-    /// Sets one nvim option to `value` and keeps it there for the rest of
-    /// the session, for a surface view has taken over from a renderer that
-    /// is still running.
+    /// Sets one nvim option to `value`, keeps it there for the rest of the
+    /// session, and reports the value it displaced, for a surface view has
+    /// taken over from a renderer that is still running.
     ///
     /// A one-shot write is not enough for a takeover. A renderer that owns
     /// a surface re-asserts its own option on its own events -- a
@@ -1737,6 +1737,13 @@ pub enum RpcCall {
     /// the first `:colorscheme` after a plain set to `0`). Nothing about
     /// that fails loudly: view would go on drawing a status line it no
     /// longer owned, over the one nvim had resumed drawing.
+    ///
+    /// The report is what makes the takeover legible, on the same terms as
+    /// its window-local twin: view says once what was drawing the surface,
+    /// naming the surface, the channel and the value, with the `[native]`
+    /// line that gives the surface back. The channels this one covers are
+    /// read with it, since a renderer writes the option nvim evaluates
+    /// rather than the one that leaves it a row.
     ///
     /// Reversible on exactly the same terms as every other call here: the
     /// hold is session state, never a config edit, so it is gone the moment

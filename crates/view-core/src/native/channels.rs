@@ -375,6 +375,34 @@ pub fn session_held() -> Vec<Channel> {
         })
 }
 
+/// Every channel of every surface `option` belongs to that nvim evaluates
+/// only while something else leaves it a row to draw on, in table order and
+/// with no repeats.
+///
+/// The hold of `option` is what reads them. A covered channel is never
+/// held -- holding its coverer is what stops nvim drawing it -- but the
+/// value a config left in it names whoever was drawing that surface, and
+/// an option at nvim's own default names nobody: a status line plugin
+/// writes `statusline` and leaves `laststatus` exactly where nvim put it,
+/// so the hold alone has nothing to tell the user about.
+#[must_use]
+pub fn covered_beside(option: &str) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for surface in claimants_of(option) {
+        for channel in channels(surface) {
+            if let Channel::Covered {
+                option: covered, ..
+            } = channel
+            {
+                if !out.contains(covered) {
+                    out.push(covered);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Whether view leaves `channel` to the engine on purpose.
 #[must_use]
 pub fn is_yielded(channel: &str) -> bool {
@@ -442,6 +470,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The covered channels a hold carries are its own surfaces' and
+    /// nobody else's: a hold that carried another surface's would report a
+    /// holder under a remedy that gives back a surface the user never
+    /// asked about.
+    #[test]
+    fn a_holds_covered_channels_are_the_ones_its_own_surfaces_declare() {
+        assert_eq!(covered_beside("laststatus"), vec!["statusline"]);
+        assert_eq!(
+            covered_beside("cmdheight"),
+            vec!["showmode", "showcmd", "ruler", "rulerformat"]
+        );
+        assert_eq!(covered_beside("winbar"), vec!["tabline", "showtabline"]);
+        assert!(covered_beside("vim.notify").is_empty());
+        assert!(covered_beside("nothing-claims-this").is_empty());
     }
 
     #[test]

@@ -55,8 +55,10 @@ fn family(identity: Option<&str>) -> String {
 const ANONYMOUS_FAMILY: &str = "view: a plugin is drawing over ";
 
 /// The opening every notice about a held channel shares: one family per
-/// channel, so a second window found holding the same option adds nothing
-/// and a different channel of the same surface gets its own line.
+/// channel, so a second window found holding the same option adds nothing.
+/// The first channel of a surface to report is the one that raises its
+/// box (see [`on_channel_held`]), so the family a session actually sees is
+/// one per surface.
 ///
 /// Built from nvim's own option name, which is a compile-time string from
 /// the channel table rather than anything a session can spell, so a
@@ -91,6 +93,13 @@ pub(super) fn on_channel_held(model: &mut Model, channel: &str, holder: &str) ->
     // a surface the table gives no row is a surface the notice can name
     // nothing about, and an empty label reads as a sentence view broke
     if surfaces::row(surface).is_none() {
+        return Vec::new();
+    }
+    // one surface, one box: a config drawing its tab line through
+    // `winbar`, `tabline` and `showtabline` is one takeover, and three
+    // boxes carrying the same `[native]` line is that takeover counted
+    // three times over a screen the user is trying to read
+    if !model.surface_conflicts.note_channel_notice(surface) {
         return Vec::new();
     }
     let mut effects = note_held(model, surface);
@@ -745,6 +754,48 @@ mod tests {
                 },
             );
         }
+
+        assert_eq!(notices(&model).len(), 1, "{:?}", notices(&model));
+    }
+
+    /// A config drawing one surface through several channels: barbecue
+    /// writes `winbar`, bufferline writes `tabline`, and the switch that
+    /// gives the row back is the same line in both boxes.
+    #[test]
+    fn a_second_channel_of_the_same_surface_adds_no_second_line() {
+        let mut model = captured_session();
+        model.attach_surfaces(vec![crate::native::ext::Ext::Tabline]);
+        for (channel, holder) in [
+            ("winbar", "%#barbecue_normal#"),
+            ("tabline", "%!v:lua.nvim_bufferline()"),
+            ("showtabline", "2"),
+        ] {
+            let _ = update(
+                &mut model,
+                Msg::ChannelHeld {
+                    channel: channel.to_string(),
+                    holder: holder.to_string(),
+                },
+            );
+        }
+
+        assert_eq!(notices(&model).len(), 1, "{:?}", notices(&model));
+    }
+
+    /// The sink reading lands first on a live launch and records the
+    /// message area as held without raising anything, so the report that
+    /// follows is still the first notice about that surface.
+    #[test]
+    fn a_sink_reading_leaves_the_report_that_follows_it_its_own_line() {
+        let mut model = captured_session();
+        sink_read(&mut model, true);
+        let _ = update(
+            &mut model,
+            Msg::ChannelHeld {
+                channel: "vim.notify".to_string(),
+                holder: "function <a.renderer>".to_string(),
+            },
+        );
 
         assert_eq!(notices(&model).len(), 1, "{:?}", notices(&model));
     }

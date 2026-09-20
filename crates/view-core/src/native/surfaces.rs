@@ -486,6 +486,13 @@ pub struct SurfaceConflicts {
     /// already names, with the same `[native]` line, and a second box
     /// saying so is one conflict counted twice.
     held: Vec<Surface>,
+    /// The surfaces a channel notice already stands for
+    /// ([`Self::note_channel_notice`]). A config drawing one surface
+    /// through several channels is one takeover, and the remedy line is
+    /// the same in every box, so the channel that reports first is the one
+    /// that names it. Kept apart from `held`, which a sink reading sets
+    /// without raising a notice at all.
+    noticed: Vec<Surface>,
     /// The floating windows the take-down has already asked rows of,
     /// whether or not the answer was filed, so a scan that sights one again
     /// before its close lands does not record it twice. Each carries the
@@ -635,6 +642,17 @@ impl SurfaceConflicts {
     #[must_use]
     pub fn channel_held(&self, surface: Surface) -> bool {
         self.held.contains(&surface)
+    }
+
+    /// Records that a channel notice now stands for `surface`, and answers
+    /// whether that is news -- a second channel of the same surface has
+    /// nothing to add.
+    pub fn note_channel_notice(&mut self, surface: Surface) -> bool {
+        if self.noticed.contains(&surface) {
+            return false;
+        }
+        self.noticed.push(surface);
+        true
     }
 
     /// Records that a channel of `surface` was found populated by a holder
@@ -862,6 +880,7 @@ impl SurfaceConflicts {
     /// | `generation` | bumped: the dead engine's deadlines are still sleeping in their timer threads, and their expiries must find nobody to answer to |
     /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config draws the same windows -- forgetting it would raise a second notice per window for one conflict |
     /// | `held` | cleared: the replacement re-reports its own channels, and a surface left in here would swallow that report as a conflict already accounted for |
+    /// | `noticed` | cleared with `held`, and for the same reason: the replacement's own first report is the one that raises the box for its surface |
     pub fn forget_engine(&mut self) {
         self.complaints.clear();
         self.typed = false;
@@ -869,6 +888,7 @@ impl SurfaceConflicts {
         self.sink_read = false;
         self.sink_holds.clear();
         self.held.clear();
+        self.noticed.clear();
         self.generation += 1;
     }
 

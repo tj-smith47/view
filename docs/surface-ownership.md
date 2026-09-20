@@ -99,10 +99,11 @@ one row above the same band stays silent.
 ## The notice a conflict gets
 
 When something else writes a channel of a surface view draws, view sets the
-channel back and tells you once: which surface it was, what the channel was
-set to, and the `view.toml` line that hands the surface back. A float parked
-over one of those surfaces gets the same notice, named by what that window
-calls itself.
+channel back and tells you once for that surface: which surface it was,
+what the channel was set to, and the `view.toml` line that hands the
+surface back. A config drawing one surface through several channels is one
+box, for the channel that reported first. A float parked over one of those
+surfaces gets the same notice, named by what that window calls itself.
 
 The notice stands until you take it down. Any key, click or paste,
 `<Esc>` included, clears it once the notice has been on screen for as long

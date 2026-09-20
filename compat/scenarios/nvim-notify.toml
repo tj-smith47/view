@@ -175,12 +175,16 @@ native = { notifications = false }
 steps = [
   { wait_for_probe = "luaeval('package.loaded.notify ~= nil')", expect = "true", timeout_ms = 180000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
-  # No conflict notice at all on this launch, and the switch above is why:
-  # `notifications = false` leaves `vim.notify` to the session, so nothing
-  # writes a channel of a surface view draws. The command line is still
-  # view's, and the float this fixture's other plugin renders one in opens
-  # only when a command line does, which nothing here has asked for yet.
-  { assert_absent = "which view owns" },
+  # No notice about the message area on this launch, and the switch above
+  # is why: `notifications = false` leaves `vim.notify` to the session, so
+  # nothing writes a channel of the surface it hands back. The command
+  # line is still view's, and the float this fixture's other plugin
+  # renders one in opens only when a command line does, which nothing here
+  # has asked for yet. The status line is a different surface and this
+  # fixture's own lualine writes it, so the notice naming that one stands
+  # whatever this switch says.
+  { assert_absent = "the message area, which view owns" },
+  { assert_absent = "notify is drawing over" },
   # `d` in the message history is its dismissal: `<Esc>` takes down nvim's
   # own sticky errors and deliberately leaves a notice view raised about a
   # condition that is still true, which this one is for as long as the

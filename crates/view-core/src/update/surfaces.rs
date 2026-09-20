@@ -97,10 +97,11 @@ pub(super) fn open_picker(model: &mut Model, source: crate::native::picker::Sour
 }
 
 /// Opens the file tree sidebar over `model.cwd`, or closes it if one is
-/// already open -- the toggle semantic `<leader>e` carries over from
-/// neo-tree's own binding. Reachable only while the engine holds focus
-/// (`Msg::FeatureInvoke` is nvim's own `rpcnotify`, which a native overlay's
-/// focus would intercept before it ever reaches nvim's mapping, see
+/// already open -- the toggle semantic `<leader>e` carries over from the
+/// file-tree plugins a switching user arrives with. Reachable only while
+/// the engine holds focus (`Msg::FeatureInvoke` is nvim's own `rpcnotify`,
+/// which a native overlay's focus would intercept before it ever reaches
+/// nvim's mapping, see
 /// `Msg::Key`'s `Focus::Native` arm), so an already-open tree can only be
 /// found here in the corner case of a stray re-invocation; the ordinary
 /// close path is `<Esc>` from inside the tree's own key arm.

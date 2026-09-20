@@ -462,9 +462,20 @@ pub fn render(model: &Model) -> Surface {
     // covering the exact top-right corner the messages box pins itself to
     // hid every one of them -- including the panel's own review and
     // permission notices, which travel that same Messages layer.
+    //
+    // The one exception is the message history: those notices are read in
+    // it and `d` is how they are taken down, so a box standing over the
+    // list the user opened hides its own remedy. It is painted after the
+    // toasts below, and only while it holds the top of the stack.
+    let overlays = model.overlays();
+    let (under_toasts, over_toasts) = match overlays.last() {
+        Some(open) if matches!(open.kind, OverlayKind::MessageHistory(_)) => {
+            overlays.split_at(overlays.len().saturating_sub(1))
+        }
+        _ => (overlays, &overlays[overlays.len()..]),
+    };
     layers.extend(
-        model
-            .overlays()
+        under_toasts
             .iter()
             .filter_map(|open| native_layer(model, open)),
     );
@@ -508,6 +519,11 @@ pub fn render(model: &Model) -> Surface {
         }
     }
     layers.extend(toast_layers(model, (grid_w, grid_h), offset));
+    layers.extend(
+        over_toasts
+            .iter()
+            .filter_map(|open| native_layer(model, open)),
+    );
     if let Some(pm) = &engine.popupmenu {
         // mirrors, term for term, the condition the cmdline block above
         // actually built a `completion` under: only when every one of
@@ -2454,6 +2470,69 @@ mod tests {
         assert!(
             panel < popupmenu,
             "a completion menu must outrank the panel"
+        );
+    }
+
+    /// The message history is the one overlay a standing notice must not
+    /// cover: the notices are listed in it and `d` is how they are taken
+    /// down, so a box over the list hides its own remedy. A config
+    /// claiming several surfaces stacks several boxes down the screen,
+    /// which is how the centered list ends up underneath them.
+    #[test]
+    fn the_message_history_paints_above_a_standing_notice() {
+        use view_core::native::geometry::OverlayBox;
+        use view_core::native::palette::MessageHistoryState;
+
+        let mut model = model_with_grid(80, 24);
+        model.term_width = 80;
+        model.term_height = 24;
+        model
+            .engine
+            .record_native_notice("statusline was drawing the status line".to_string(), false);
+        let state = MessageHistoryState::snapshot(&model.engine.toast_history);
+        model.push_overlay(OverlayBox::new(70, 60), OverlayKind::MessageHistory(state));
+
+        let surface = render(&model);
+        let position =
+            |matches: fn(&LayerKind) -> bool| surface.layers.iter().position(|l| matches(&l.kind));
+        let history = position(|k| matches!(k, LayerKind::Palette(_)))
+            .expect("the message history overlay is open");
+        let toast =
+            position(|k| matches!(k, LayerKind::Toast { .. })).expect("a notice is standing");
+        assert!(
+            toast < history,
+            "a notice standing over the history hides the list opened to read it"
+        );
+    }
+
+    /// The exception is the history's alone, and only while it holds the
+    /// top of the stack: every other overlay stays under the transient
+    /// surfaces, which is what the panel case above pins.
+    #[test]
+    fn another_overlay_over_the_history_leaves_the_notice_on_top() {
+        use view_core::native::geometry::OverlayBox;
+        use view_core::native::palette::MessageHistoryState;
+
+        let mut model = model_with_grid(80, 24);
+        model.term_width = 80;
+        model.term_height = 24;
+        model
+            .engine
+            .record_native_notice("statusline was drawing the status line".to_string(), false);
+        let state = MessageHistoryState::snapshot(&model.engine.toast_history);
+        model.push_overlay(OverlayBox::new(70, 60), OverlayKind::MessageHistory(state));
+        model.push_overlay(OverlayBox::new(30, 100), OverlayKind::Ai);
+
+        let surface = render(&model);
+        let position =
+            |matches: fn(&LayerKind) -> bool| surface.layers.iter().position(|l| matches(&l.kind));
+        let history = position(|k| matches!(k, LayerKind::Palette(_)))
+            .expect("the message history overlay is open");
+        let toast =
+            position(|k| matches!(k, LayerKind::Toast { .. })).expect("a notice is standing");
+        assert!(
+            history < toast,
+            "an overlay opened over the history puts the stack back under the notices"
         );
     }
 

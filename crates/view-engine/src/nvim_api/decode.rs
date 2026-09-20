@@ -38,6 +38,21 @@ pub(super) fn option_value(value: &OptionValue) -> Value {
     }
 }
 
+/// The covered channels a hold of `option` reads beside it, as the Lua
+/// list the hold chunks take.
+///
+/// Read from the channel table rather than carried in the call: which
+/// channels a surface leaves nvim evaluating is a property of the table,
+/// and a copy travelling on the wire would be a second answer to that.
+pub(super) fn covered_beside(option: &str) -> Value {
+    Value::Array(
+        view_core::native::channels::covered_beside(option)
+            .into_iter()
+            .map(Value::from)
+            .collect(),
+    )
+}
+
 /// Renders an `nvim_eval` result as plain text for
 /// [`EngineHandle::eval_str`](crate::EngineHandle::eval_str).
 ///

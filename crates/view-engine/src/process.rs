@@ -1949,9 +1949,9 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// the limit is not set where the inline parse first crosses a frame. It
 /// is set where the inline parse stays well under the delay the
 /// asynchronous path costs on a plugin config, priced per KiB by the
-/// probe in the commit that set it, for rust, lua and typescript alike on
-/// the pinned engine with nvim-treesitter's parsers -- and the readings
-/// are in that commit's body.
+/// probe in the change that set it, for rust, lua and typescript alike on
+/// the pinned engine with the community parsers installed -- and the
+/// readings are in that change's body.
 ///
 /// A grammar whose injection query carries combined injections gets a
 /// smaller bound of its own, because that scan is the whole document
@@ -2031,7 +2031,7 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// few lines are visible, and the asynchronous path this bound refuses is
 /// not a frame later but behind whatever a plugin config queues at
 /// `UIEnter`, so the bound sits where the inline parse stays well under
-/// that delay on the pinned engine with nvim-treesitter's parsers.
+/// that delay on the pinned engine with the community parsers installed.
 pub const SYNC_PARSE_BYTES: usize = 256 * 1024;
 
 /// The tighter bound for a root grammar whose injection query is combined:

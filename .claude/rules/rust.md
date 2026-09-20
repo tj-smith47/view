@@ -200,11 +200,12 @@ paths: ["**/*.rs"] template-source: "rules/rust.md.tmpl"
   is either captured or classified where the cache declares its inputs.** A
   projection silently drops the next field added behind it: `cache::Inputs` held
   `messages.entries` and so compared no pause flag, and the ⏸ mark never reached
-  the terminal because the unmarked frame was reused. That is the same shape as
-  `absorbed` one task earlier, and as the `TermCaps` tier one before that. Both
-  halves are mechanical now: `Inputs` holds `Messages`, `TermCaps` and
-  `AbsorbedRows` whole, so a field added to any of them joins the comparison for
-  free, and `every_model_field_is_a_paint_input_or_named_here`
+  the terminal because the unmarked frame was reused. The `TermCaps` tier had
+  the same shape before it. Both halves are mechanical now: `Inputs` holds
+  `TermCaps`, `Messages` and each surface state it compares (`TablineState`,
+  `CmdlineState`, `PopupmenuState`) whole, so a field added to any of them
+  joins the comparison for free, and
+  `every_model_field_is_a_paint_input_or_named_here`
   (`view-surface/src/cache.rs`) walks every field `Model` and `EngineModel`
   declare and fails unless it is either captured by `Inputs` or named in the
   classification above `Inputs`. Three groups there, and a field in none of them

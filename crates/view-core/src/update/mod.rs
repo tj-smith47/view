@@ -1341,11 +1341,10 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             // default heavy launch with a config drawing its own cmdline
             // and messages -- the launch this notice exists for -- nvim
             // reports `replace` at rest and never corrects it, while
-            // `mode()` answers `n` throughout (compat, `neo-tree (heavy,
-            // unaccommodated)`, where the config takes `guicursor` over
-            // and hands it back around its own cmdline). A mode-gated
-            // dismissal is
-            // therefore not merely approximate there, it is absent: the one
+            // `mode()` answers `n` throughout (compat, a heavy
+            // unaccommodated launch whose config takes `guicursor` over and
+            // hands it back around its own cmdline). A mode-gated dismissal
+            // is therefore not merely approximate there, it is absent: the one
             // way out of a box across the top of the buffer never fires,
             // for the whole session.
             //

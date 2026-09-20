@@ -4,7 +4,7 @@
 //! Pure data, like [`super::registry`]: nothing here does I/O or
 //! serialization. The crate that reads `view.toml` decides which of these
 //! specs a session registers, and the crate that speaks RPC turns each one
-//! into a real nvim mapping so user remaps, which-key, and plugin
+//! into a real nvim mapping so user remaps, key browsers and plugin
 //! introspection all see view's keys the way they see any other plugin's.
 
 /// The ex-command every feature is reachable through, registered regardless
@@ -201,12 +201,13 @@ pub struct ReviewKey {
 /// The review's own keys, installed on the reviewed buffer while a review
 /// is open and removed with it.
 ///
-/// `<leader>h*` is gitsigns' hunk prefix and `]c`/`[c` are vanilla nvim's
-/// own diff-mode change motions, so a switching user already has both in
-/// muscle memory. Single letters are deliberately refused: a reviewed
-/// buffer stays editable -- the whole stale-hunk machinery presumes the
-/// user types in it -- so claiming `a`/`x`/`q` there, even buffer-locally,
-/// would break the one contract everything else here is built on.
+/// `<leader>h*` is the hunk prefix the common git-hunk plugins use and
+/// `]c`/`[c` are vanilla nvim's own diff-mode change motions, so a
+/// switching user already has both in muscle memory. Single letters are
+/// deliberately refused: a reviewed buffer stays editable -- the whole
+/// stale-hunk machinery presumes the user types in it -- so claiming
+/// `a`/`x`/`q` there, even buffer-locally, would break the one contract
+/// everything else here is built on.
 ///
 /// `reject_all` reaches no key on purpose: it decides the whole proposal in
 /// one keystroke with no undo of its own, and `:View review reject_all` is

@@ -438,7 +438,7 @@ impl Messages {
     /// A session that speaks its notices ([`Self::speaks_notices`]) paints
     /// none of them: they went to the user's own `vim.notify`
     /// ([`crate::msg::RpcCall::Notify`]) and a toast beside that would be a
-    /// second notifier on screen, drawn in the corner nvim-notify anchors
+    /// second notifier on screen, drawn in the corner a notifier anchors
     /// its own float to. They stay in `entries` all the same -- that is the
     /// record `record_native_notice_once` reads to keep from telling the
     /// user's notifier the same thing twice, and nothing takes them off it,
