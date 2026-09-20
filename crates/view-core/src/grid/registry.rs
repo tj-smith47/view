@@ -910,6 +910,16 @@ impl GridRegistry {
         self.claims.retain(|(handle, _)| *handle != win);
     }
 
+    /// How many window handles view holds a surface claim on.
+    ///
+    /// Test-only: `native_window` answers from the placed pane and so reads
+    /// the same either way, which leaves a claim never released invisible
+    /// to every other question the registry can be asked.
+    #[cfg(test)]
+    pub(crate) fn native_claims(&self) -> usize {
+        self.claims.len()
+    }
+
     /// The surface of the `PaneKind::Native` pane `cursor_grid()` names, or
     /// `None` when the cursor sits in an ordinary window or grid 1.
     #[must_use]

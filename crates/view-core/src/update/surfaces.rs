@@ -207,14 +207,12 @@ fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
     let Some(win) = model.engine.grids().native_window(NativeSurface::Tree) else {
         return Vec::new();
     };
-    let (columns, rows) = model.engine.grids().global().size();
-    let vertical = matches!(layout.anchor, Anchor::Left | Anchor::Right);
-    let extent = if vertical { columns } else { rows };
-    let cells = crate::native::geometry::share(extent, stepped).max(1);
+    let columns = model.engine.grids().global().size().0;
+    let cells = crate::native::geometry::share(columns, stepped).max(1);
     vec![Effect::Rpc(RpcCall::SetWindowSize {
         win: win.0,
-        width: vertical.then_some(cells),
-        height: (!vertical).then_some(cells),
+        width: Some(cells),
+        height: None,
     })]
 }
 
@@ -265,12 +263,11 @@ fn open_tree_state(model: &mut Model, beneath_top: bool) -> Vec<Effect> {
     // still handled rather than assumed, so a future change to `open`'s
     // initial state cannot silently turn this into a missing git scan
     let git_generation = state.request_git_refresh();
+    // the tree takes a side, never a band: both config layers accept only
+    // `left` and `right` for it, so the box is a share of the width at full
+    // height whichever side the anchor names
     let anchor = model.surfaces.layout(NativeSurface::Tree).anchor;
-    let geometry = match anchor {
-        Anchor::Top | Anchor::Bottom => OverlayBox::new(100, model.tree_width_pct),
-        _ => OverlayBox::new(model.tree_width_pct, 100),
-    }
-    .with_anchor(anchor);
+    let geometry = OverlayBox::new(model.tree_width_pct, 100).with_anchor(anchor);
     if beneath_top {
         model.insert_overlay_beneath_top(geometry, OverlayKind::Tree(state));
     } else {

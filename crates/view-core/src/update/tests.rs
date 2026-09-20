@@ -13227,6 +13227,46 @@ fn leader_e_from_inside_the_windowed_tree_closes_it() {
     );
 }
 
+/// nvim answers `CloseNativeWindow` with a `win_close` of its own, which
+/// arrives after view has already taken the tree down. The second pass has
+/// to be a no-op: a second `TreeClose` would cancel the scan of whatever
+/// tree the next `<leader>e` has opened by then.
+#[test]
+fn the_win_close_after_a_user_close_releases_nothing_twice() {
+    let mut m = focused_windowed_tree();
+    let closing = update(&mut m, tree_toggle());
+    assert_eq!(
+        closing
+            .iter()
+            .filter(|effect| matches!(effect, Effect::TreeClose))
+            .count(),
+        1,
+        "the keypress itself told the scan worker once: {closing:?}"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::WinClose { grid: TREE_GRID },
+            UiEvent::GridDestroy { grid: TREE_GRID },
+            UiEvent::Flush,
+        ]),
+    );
+
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::TreeClose)),
+        "nvim's own close of the window told the scan worker a second \
+         time: {effects:?}"
+    );
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        0,
+        "the claim survived the close view asked for"
+    );
+}
+
 #[test]
 fn leader_e_from_elsewhere_opens_or_focuses_it() {
     let mut m = windowed_tree_model();
@@ -13413,6 +13453,11 @@ fn an_nvim_side_close_of_the_tree_window_releases_it() {
 #[test]
 fn reopening_after_an_nvim_close_rescans_and_claims_once() {
     let mut m = focused_windowed_tree();
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        1,
+        "the fixture opens one window for the tree"
+    );
     let _ = update(
         &mut m,
         Msg::Redraw(vec![
@@ -13420,6 +13465,12 @@ fn reopening_after_an_nvim_close_rescans_and_claims_once() {
             UiEvent::GridDestroy { grid: TREE_GRID },
             UiEvent::Flush,
         ]),
+    );
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        0,
+        "the handle nvim closed is still claimed, so the next window nvim \
+         gives that number reads as view's own surface"
     );
     let effects = update(&mut m, tree_toggle());
     assert!(
@@ -13462,6 +13513,11 @@ fn reopening_after_an_nvim_close_rescans_and_claims_once() {
             .native_window(crate::native::geometry::NativeSurface::Tree),
         Some(crate::events::WinHandle(TREE_WIN.0 + 1)),
         "the reopened window is not the one the tree is drawn into"
+    );
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        1,
+        "the reopen left view holding two claims for one sidebar"
     );
 }
 

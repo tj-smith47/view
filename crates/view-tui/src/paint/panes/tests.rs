@@ -2308,3 +2308,32 @@ fn a_native_panes_frame_carries_its_surfaces_name() {
         "the tree's frame claims a cursor position: {bottom:?}"
     );
 }
+
+/// The gapless look has one edge row and no top run, so the name leads the
+/// segments there rather than sitting above them. The surface's name still
+/// has to be on it, and the segments still have to be gone.
+#[test]
+fn a_gapless_native_panes_edge_keeps_the_name_and_drops_the_segments() {
+    let tiles = tree_in_the_left_tile(false);
+    let (_, col, width, _) = tiles.slots[0];
+    let buf = tiled_frame(&tiles.model);
+    let offset = tiles.model.look.grid_offset();
+    let (_, edge_row) = edge_rows(&tiles.model, tiles.slots[0]);
+    let edge: String = row_text(&buf, edge_row)
+        .chars()
+        .skip(usize::from(col + offset))
+        .take(usize::from(width))
+        .collect();
+    assert!(
+        edge.contains("tree"),
+        "the gapless edge lost the surface's name: {edge:?}"
+    );
+    assert!(
+        !edge.contains("-- INSERT --"),
+        "the gapless edge claims nvim's mode: {edge:?}"
+    );
+    assert!(
+        !edge.chars().any(|ch| ch == ':'),
+        "the gapless edge claims a cursor position: {edge:?}"
+    );
+}
