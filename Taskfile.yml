@@ -393,6 +393,9 @@ tasks:
         msg: "The named paths include code, scripts, fixtures, CI, or build files; those go through `task commit` (the ci gate)."
     cmds:
       - bash scripts/check-style.sh
+      # README.md and docs/ quote recorded bench figures, and a rewording
+      # there is what moves a figure off its cell
+      - bash scripts/check-budget-drift.sh
       - task: _commit:only
         vars: { PATHS: "{{.PATHS}}", CLI_ARGS: "{{.CLI_ARGS}}" }
 

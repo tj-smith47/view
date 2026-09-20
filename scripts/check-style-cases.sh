@@ -3881,7 +3881,7 @@ expect_frames() {
   out=$(bash "$CHECKER" --prose-frames "$CASE" 2>&1)
   rc=$?
   got=$(printf '%s\n' "$out" | awk '
-    /^(frame|tell|fairness|joiner) [^ ]+:[0-9]+: / {
+    /^(frame|tell|fairness|joiner|mechanism) [^ ]+:[0-9]+: / {
       loc = $2; sub(/:$/, "", loc); print $1 " " loc; next
     }
     /^STYLE FAIL: no markdown page found to grade for the stance$/ {
@@ -3899,6 +3899,18 @@ expect_frames() {
 
 new_frames_case
 expect_frames 0 '' 'a tree whose pages say what is true and stop'
+
+new_frames_case
+printf '# view\n\nKeystrokes are echoed before the round trip returns.\n' > "$CASE/README.md"
+expect_frames 1 'mechanism README.md:3' 'a mechanism word on the README'
+
+new_frames_case
+printf '# page\n\nThe glyph is drawn before the round trip returns.\n' > "$CASE/docs/page.md"
+expect_frames 0 '' 'a mechanism word on a docs page, where the mechanism is described'
+
+new_frames_case
+printf '# view\n\nThe theme is under `[ui]`, the round trip is named nowhere.\n' > "$CASE/README.md"
+expect_frames 1 'mechanism README.md:3' 'a mechanism word outside a code span on the README'
 
 new_frames_case
 printf 'The number is a reading, not a guess.\n' >> "$CASE/docs/page.md"

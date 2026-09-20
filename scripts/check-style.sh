@@ -2078,7 +2078,33 @@ on the same machine
 samples interleaved
 paired against
 under a real config'
-export PROSE_CONTRAST PROSE_TELLS PROSE_FAIRNESS
+# The words of the mechanism. README.md is read by a person deciding
+# whether to try view, and each of these names how a feature is built
+# where the page owes what the person sees; the pages under docs/ are
+# where the mechanism is described.
+PROSE_MECHANISM='round trip
+round-trip
+round trips
+paint
+painted
+painting
+repaint
+osc 52
+rpc
+multigrid
+ext_popupmenu
+ext_cmdline
+ext_messages
+passthrough
+capability tier
+capability tiers
+keystream
+composited
+cdp
+chrome
+surface
+surfaces'
+export PROSE_CONTRAST PROSE_TELLS PROSE_FAIRNESS PROSE_MECHANISM
 # The program the walk runs, held in a variable so that no line of it
 # is read inside an open command substitution: the population's
 # heaviest carried-line count is this file, and the portability case
@@ -2181,11 +2207,17 @@ PROSE_FRAMES_AWK='
         if (F[i] == "" || !match(low, whole(F[i]))) { continue }
         if (spans(RSTART, RLENGTH, seam)) { hit("fairness", F[i], ln); break }
       }
+      if (FILENAME !~ /(^|\/)README\.md$/) { return }
+      for (i = 1; i <= nm; i++) {
+        if (M[i] == "" || !match(low, whole(M[i]))) { continue }
+        if (spans(RSTART, RLENGTH, seam)) { hit("mechanism", M[i], ln); break }
+      }
     }
     BEGIN {
       nc = split(ENVIRON["PROSE_CONTRAST"], C, "\n")
       nt = split(ENVIRON["PROSE_TELLS"], T, "\n")
       nf = split(ENVIRON["PROSE_FAIRNESS"], F, "\n")
+      nm = split(ENVIRON["PROSE_MECHANISM"], M, "\n")
       EMDASH = sprintf("%c%c%c", 226, 128, 148)
     }
     FNR == 1 { fenced = 0; prev_no = 0 }
@@ -2252,11 +2284,11 @@ check_prose_frames() {
     return 0
   fi
   printf '%s\n' "$found"
-  echo "STYLE FAIL: a page a person reads argues for itself"
-  echo "  Remove the sentence, the clause or the word. See the section"
-  echo "  \"A page is written for a reader who has not doubted anything\""
-  echo "  in .claude/rules/docs.md: it is removed and never reworded into"
-  echo "  another shape, and a page that comes out thin is the right length."
+  echo "STYLE FAIL: a page a person reads argues for itself, or the README"
+  echo "  names a mechanism. Remove the sentence, the clause or the word;"
+  echo "  a mechanism word on the README is replaced by what the person sees."
+  echo "  See \"A page is written for a reader who has not doubted anything\""
+  echo "  and \"The README lists what a person gets\" in .claude/rules/docs.md."
   return 1
 }
 
