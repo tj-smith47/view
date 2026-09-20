@@ -277,6 +277,11 @@ pub const DEFAULT_CAPACITY: usize = 200;
 pub struct ToastHistory {
     capacity: usize,
     entries: VecDeque<MessageEntry>,
+    /// How many entries have ever been pushed, which an open
+    /// message-history overlay compares against what it last read: the
+    /// count moves on an eviction as a length never does, and it is what
+    /// keeps a refresh check off the message path to two integers.
+    pushed: usize,
 }
 
 impl ToastHistory {
@@ -294,6 +299,7 @@ impl ToastHistory {
         Self {
             capacity: capacity.max(1),
             entries: VecDeque::new(),
+            pushed: 0,
         }
     }
 
@@ -303,6 +309,13 @@ impl ToastHistory {
             self.entries.pop_front();
         }
         self.entries.push_back(e.clone());
+        self.pushed = self.pushed.saturating_add(1);
+    }
+
+    /// How many entries this ring has taken over its life.
+    #[must_use]
+    pub fn pushed(&self) -> usize {
+        self.pushed
     }
 
     /// Newest-first; the palette's message-history view reads it.

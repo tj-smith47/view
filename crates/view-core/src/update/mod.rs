@@ -156,6 +156,10 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // not changed hands, which is nearly every message.
     effects.extend(model.engine.messages.arm_top_slot());
     effects.extend(start_toast_exit(model, departed));
+    // the history overlay draws under the toast stack, so a notice raised
+    // while it is open is neither on screen nor in the list unless the list
+    // follows the ring
+    model.dirty |= model.refresh_message_history();
     effects
 }
 
@@ -1344,9 +1348,9 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             // `mode()` answers `n` throughout (compat, a heavy
             // unaccommodated launch whose config takes `guicursor` over and
             // hands it back around its own cmdline). A mode-gated dismissal
-            // is therefore not merely approximate there, it is absent: the one
-            // way out of a box across the top of the buffer never fires,
-            // for the whole session.
+            // is therefore not merely approximate there, it is absent: the
+            // one way out of a box across the top of the buffer never
+            // fires, for the whole session.
             //
             // What that costs is real and smaller: an `<Esc>` leaving
             // insert or visual takes a standing wire error with it, so a

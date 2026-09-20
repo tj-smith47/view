@@ -106,30 +106,208 @@ fn hits(line: &str, needle: &str) -> Vec<usize> {
     found
 }
 
+/// What a line of source is left in the middle of when it ends: a text a
+/// brace inside cannot be counted from, or a `/* */` run.
+///
+/// Carried from line to line, which is what a string closing one line
+/// below the one it opens needs. A scanner that forgot it at the line end
+/// read the tail of a `\\`-continued message as code and took the `)` in
+/// it for a bracket the item had opened.
+enum Span {
+    Code,
+    Comment,
+    Text,
+    Raw(usize),
+}
+
+/// `line`'s code, with a string, a char literal, a line comment and a
+/// block comment's span taken out.
+///
+/// The same elision `scripts/audit-god-files.sh` does before it counts,
+/// for the same reason: a `}` inside a raw string or a `//` inside a URL
+/// ends an item that has not ended.
+fn code_only(line: &str, span: &mut Span) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut code = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match *span {
+            Span::Comment => {
+                if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                    *span = Span::Code;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            Span::Text => match chars[i] {
+                '\\' => i += 2,
+                '"' => {
+                    *span = Span::Code;
+                    i += 1;
+                }
+                _ => i += 1,
+            },
+            Span::Raw(hashes) => {
+                let hashed = chars[i + 1..]
+                    .iter()
+                    .take(hashes)
+                    .filter(|c| **c == '#')
+                    .count();
+                if chars[i] == '"' && hashed == hashes {
+                    *span = Span::Code;
+                    i += 1 + hashes;
+                } else {
+                    i += 1;
+                }
+            }
+            Span::Code => match chars[i] {
+                '/' if chars.get(i + 1) == Some(&'/') => break,
+                '/' if chars.get(i + 1) == Some(&'*') => {
+                    *span = Span::Comment;
+                    i += 2;
+                }
+                'r' => match raw_string_hashes(&chars, i) {
+                    Some(hashes) => {
+                        *span = Span::Raw(hashes);
+                        i += hashes + 2;
+                    }
+                    None => {
+                        code.push('r');
+                        i += 1;
+                    }
+                },
+                '"' => {
+                    *span = Span::Text;
+                    i += 1;
+                }
+                '\'' if chars.get(i + 1) == Some(&'\\') => {
+                    i = match chars[i + 2..].iter().position(|c| *c == '\'') {
+                        Some(at) => i + 3 + at,
+                        None => chars.len(),
+                    };
+                }
+                '\'' if chars.get(i + 2) == Some(&'\'') => i += 3,
+                c => {
+                    code.push(c);
+                    i += 1;
+                }
+            },
+        }
+    }
+    code
+}
+
+/// The `#` count of the raw string opening at `at`, or `None` when the `r`
+/// there is a letter of an identifier rather than a prefix.
+fn raw_string_hashes(chars: &[char], at: usize) -> Option<usize> {
+    let hashes = chars[at + 1..].iter().take_while(|c| **c == '#').count();
+    (chars.get(at + 1 + hashes) == Some(&'"')).then_some(hashes)
+}
+
+/// Whether `code` is an attribute that keeps its item out of a real build.
+///
+/// `any(test, feature = "...")` ships under that feature and `not(test)`
+/// ships outright, so both are production and are read.
+fn is_test_only_cfg(code: &str) -> bool {
+    let trimmed = code.trim_start();
+    if !trimmed.starts_with("#[cfg(") || trimmed.contains("any(") || trimmed.contains("not(") {
+        return false;
+    }
+    trimmed
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|word| word == "test")
+}
+
 /// `path`'s lines with every `#[cfg(test)]` item taken out, numbered from
 /// one.
 ///
 /// A test names the plugins it runs against, which is the coverage the
-/// ruling kept; only the shipped code is walked. The item runs from the
-/// attribute to the `}` in the first column that closes it, which is the
-/// shape `task fmt` guarantees for a top-level item.
+/// ruling kept; only the shipped code is walked. The attribute takes the
+/// one item it sits on and no more: the item ends at its own trailing `;`,
+/// or at the brace that closes the body it opened, counted by depth. A
+/// skip to the next `}` in the first column instead swallowed the 75
+/// production lines after a `#[cfg(test)] const` in `update/surfaces.rs`
+/// and the 26 after a `#[cfg(test)] use` in `view-surface/src/lib.rs`, so
+/// a plugin named on any of them was read by nothing.
 fn shipped_lines(source: &str) -> Vec<(usize, &str)> {
     let mut lines = Vec::new();
-    let mut in_test = false;
+    let mut span = Span::Code;
+    let mut in_item = false;
+    let mut depth: isize = 0;
+    let mut opened = false;
+    let mut attribute = 0usize;
     for (index, line) in source.lines().enumerate() {
-        if in_test {
-            if line == "}" {
-                in_test = false;
+        let code = code_only(line, &mut span);
+        if !in_item {
+            if !is_test_only_cfg(&code) {
+                lines.push((index + 1, line));
+                continue;
             }
-            continue;
+            depth = 0;
+            opened = false;
+            attribute = 0;
         }
-        if line == "#[cfg(test)]" {
-            in_test = true;
-            continue;
-        }
-        lines.push((index + 1, line));
+        // an item can carry several attributes, and a bracket pair that
+        // opens and closes on one line is the whole shape `item_ends`
+        // reads as an item ending
+        let announced =
+            attribute > 0 || (depth == 0 && !opened && code.trim_start().starts_with("#["));
+        let rest = if announced {
+            after_attribute(&code, &mut attribute)
+        } else {
+            code.as_str()
+        };
+        in_item = !item_ends(rest, &mut depth, &mut opened);
     }
     lines
+}
+
+/// What stands after the attribute an item is announced with: nothing on
+/// the shape `task fmt` writes, and the item itself where the two share a
+/// line. `depth` carries the attribute's own unclosed brackets on to the
+/// next line, since a long `allow` list is written over several.
+///
+/// The attribute's brackets are not the item's, and counting them as the
+/// item's would end every item on the line it was announced on.
+fn after_attribute<'a>(code: &'a str, depth: &mut usize) -> &'a str {
+    for (at, c) in code.char_indices() {
+        match c {
+            '[' | '(' => *depth += 1,
+            ']' | ')' if *depth > 0 => {
+                *depth -= 1;
+                if *depth == 0 {
+                    return code.get(at + 1..).unwrap_or_default();
+                }
+            }
+            _ => {}
+        }
+    }
+    ""
+}
+
+/// Folds one line of an attributed item's code into `depth`, reporting
+/// whether the item ended on that line.
+///
+/// An item that opens no bracket at all ends at its own `;` or `,` -- a
+/// `use`, a struct field, an enum variant -- and every other item ends on
+/// the line that closes the first bracket it opened. A `,` read as an
+/// ending once a bracket has been seen ends a multi-line signature at the
+/// comma inside its own `Result<_, _>`, since angle brackets are not
+/// counted and cannot be.
+fn item_ends(code: &str, depth: &mut isize, opened: &mut bool) -> bool {
+    for c in code.chars() {
+        match c {
+            '{' | '(' | '[' => {
+                *depth += 1;
+                *opened = true;
+            }
+            '}' | ')' | ']' => *depth -= 1,
+            ';' | ',' if !*opened => return true,
+            _ => {}
+        }
+    }
+    *opened && *depth <= 0
 }
 
 fn rust_sources(dir: &Path, into: &mut Vec<PathBuf>) {
@@ -199,6 +377,58 @@ fn out_of_line_test_modules(sources: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     found
+}
+
+/// The attribute takes its own item and no more, whatever the item is.
+///
+/// A skip that ran to the next `}` in the first column ended a
+/// `#[cfg(test)] use` at the close of the module below it, and every
+/// production line between was read by nothing.
+#[test]
+fn a_test_attribute_drops_its_own_item_and_the_lines_after_it_are_read() {
+    let source = "\
+#[cfg(test)]
+use crate::grid::GLOBAL_GRID;
+pub struct Rect; // telescope
+#[cfg(test)]
+pub(crate) fn helper() {
+    let brace = \"}\";
+    println!(\"{brace}\");
+}
+pub const KEYS: &str = \"lualine\";
+#[cfg(test)]
+mod tests {
+    fn inner() {}
+    // noice
+}
+pub fn tail() {} // bufferline
+";
+    let read: Vec<(usize, &str)> = shipped_lines(source);
+    let numbers: Vec<usize> = read.iter().map(|(number, _)| *number).collect();
+    assert_eq!(
+        numbers,
+        vec![3, 9, 15],
+        "only the three `#[cfg(test)]` items belong to the tests: {read:?}"
+    );
+    let named: Vec<&str> = read
+        .iter()
+        .filter(|(_, line)| {
+            IDENTITIES
+                .iter()
+                .any(|identity| !hits(line, identity).is_empty())
+        })
+        .map(|(_, line)| *line)
+        .collect();
+    assert_eq!(
+        named.len(),
+        3,
+        "a name on a production line after a `use`, after a `fn` and after a \
+         module has to reach the walk: {named:?}"
+    );
+    assert!(
+        read.iter().all(|(_, line)| !line.contains("inner")),
+        "the module's body is the one region a test attribute takes whole: {read:?}"
+    );
 }
 
 fn repo_root() -> PathBuf {

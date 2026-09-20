@@ -108,11 +108,13 @@ fn title_for(firstc: &str) -> &'static str {
 /// somewhere else.
 pub const MESSAGE_HISTORY_TITLE: &str = "Messages";
 
-/// A snapshot of `ToastHistory` at the moment the message-history view was
-/// opened: a `:messages`-style browse of what already happened, not a live
-/// window onto the ring. Taken once, like `PickerState` snapshots its
-/// result set, so entries scrolled past do not shift under a user's cursor
-/// as new messages keep arriving underneath the open overlay.
+/// The entries of `ToastHistory` as the message-history view is showing
+/// them: a `:messages`-style browse, kept level with the ring by
+/// [`Self::refresh`] so a notice raised while the overlay is open is in
+/// the list the user is looking at rather than waiting for the next open.
+/// The selection is carried across a refresh by the entry it is on, not by
+/// its row, since the ring reads newest-first and a new entry lands above
+/// every row already drawn.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageHistoryState {
@@ -123,6 +125,10 @@ pub struct MessageHistoryState {
     /// `selected` row already -- a second offset here would be a second
     /// opinion about which rows are on screen.
     selected: usize,
+
+    /// The ring's push count at the last read, which is how a refresh
+    /// costs two integers on a message that added nothing.
+    read: usize,
 
     /// Whether the last key was the first `g` of a `gg`.
     ///
@@ -139,8 +145,27 @@ impl MessageHistoryState {
         Self {
             entries: history.entries().cloned().collect(),
             selected: 0,
+            read: history.pushed(),
             pending_g: false,
         }
+    }
+
+    /// Re-reads `history` into the open overlay, reporting whether
+    /// anything changed (the caller's cue to repaint).
+    ///
+    /// Entries that arrived since the last read are prepended, so the
+    /// selection moves down by as many to stay on the entry it was on.
+    pub fn refresh(&mut self, history: &ToastHistory) -> bool {
+        if history.pushed() == self.read {
+            return false;
+        }
+        self.read = history.pushed();
+        let entries: Vec<MessageEntry> = history.entries().cloned().collect();
+        let arrived = entries.len().saturating_sub(self.entries.len());
+        self.entries = entries;
+        let last = self.entries.len().saturating_sub(1);
+        self.selected = self.selected.saturating_add(arrived).min(last);
+        true
     }
 
     /// Arms the `g` prefix, so the next `g` is a `gg`.
@@ -381,8 +406,31 @@ mod tests {
 
         let view = state.view();
         let labels: Vec<String> = view.rows.iter().map(|r| r.label.clone()).collect();
-        assert_eq!(labels.len(), 2, "the snapshot must not see the later push");
+        assert_eq!(labels.len(), 2, "a snapshot is taken once");
         assert!(labels.iter().any(|l| l.contains("first")));
         assert!(labels.iter().any(|l| l.contains("second")));
+    }
+
+    #[test]
+    fn a_refresh_takes_the_later_push_and_keeps_the_selection_on_its_entry() {
+        let mut history = ToastHistory::new();
+        history.push(&message_entry("first"));
+        history.push(&message_entry("second"));
+        let mut state = MessageHistoryState::snapshot(&history);
+        assert!(state.select(1));
+        assert!(!state.refresh(&history), "an unchanged ring is no repaint");
+
+        history.push(&message_entry("third, after the snapshot"));
+        assert!(state.refresh(&history));
+
+        let view = state.view();
+        let labels: Vec<String> = view.rows.iter().map(|r| r.label.clone()).collect();
+        assert_eq!(labels.len(), 3, "{labels:?}");
+        assert!(labels[0].contains("third"), "newest-first: {labels:?}");
+        assert_eq!(
+            view.selected,
+            Some(2),
+            "the row above pushed the selected entry down, and the selection went with it"
+        );
     }
 }

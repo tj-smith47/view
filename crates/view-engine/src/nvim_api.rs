@@ -120,6 +120,13 @@ vim.fn.feedkeys(vim.api.nvim_replace_termcodes(..., true, true, true), 't')";
 /// The guard's own write cannot re-enter it for the same
 /// no-nesting reason it exists.
 ///
+/// A channel already reported is answered from `seen` before anything is
+/// read, and `nvim_get_option_info2`'s answer is memoised per option name,
+/// because nvim's default for an option does not change within a session.
+/// Both are what keep the reporting half off the idle path: a session whose
+/// channels have all been named pays the one `nvim_get_option_value` this
+/// hold's own re-assert needs and nothing else, however long it runs.
+///
 /// Global options only. Both the set and the re-assert pass an empty `{}`
 /// opts table, which `nvim_set_option_value` and `nvim_get_option_value`
 /// read as the current window and buffer, so a window- or buffer-local
@@ -131,18 +138,25 @@ vim.fn.feedkeys(vim.api.nvim_replace_termcodes(..., true, true, true), 't')";
 const HOLD_OPTION_CHUNK: &str = "\
 local name, value, channel, covered = ...
 local seen = {}
+local defaults = {}
 local function stock(option)
+  local memo = defaults[option]
+  if memo ~= nil then
+    return memo.default
+  end
+  local default = nil
   local ok, info = pcall(vim.api.nvim_get_option_info2, option, {})
   if ok and info ~= nil then
-    return info.default
+    default = info.default
   end
-  return nil
+  defaults[option] = { default = default }
+  return default
 end
 local function report(option, held, key)
-  if held == nil or held == false or held == '' or held == stock(option) then
+  if seen[key] then
     return
   end
-  if seen[key] then
+  if held == nil or held == false or held == '' or held == stock(option) then
     return
   end
   seen[key] = true
@@ -151,9 +165,11 @@ local function report(option, held, key)
 end
 local function beside()
   for _, option in ipairs(covered) do
-    local ok, held = pcall(vim.api.nvim_get_option_value, option, {})
-    if ok then
-      report(option, held, option)
+    if not seen[option] then
+      local ok, held = pcall(vim.api.nvim_get_option_value, option, {})
+      if ok then
+        report(option, held, option)
+      end
     end
   end
 end
@@ -205,16 +221,19 @@ vim.api.nvim_create_autocmd('SafeState', {
 /// beside it once per guard pass, under their own names, on the same terms
 /// as the global hold: a tab line plugin writes `tabline` and leaves this
 /// row to whoever wants it. A value equal to nvim's own default names
-/// nobody and is refused. Keyed on both because the re-assert guard runs at every idle
-/// transition: a config that writes its row back a hundred times sends one
-/// notification, and a second window holding something else still sends
-/// its own. What has been reported is held per window and dropped when
-/// that window is gone, so a session that opens and closes windows for an
-/// hour carries one bucket per window on screen rather than one per window
-/// it has ever had. `pcall` around the whole per-window body: a window
-/// that closes between the list and the write, and one whose option nvim
-/// refuses, are the same outcome for view -- the remaining windows are
-/// still held.
+/// nobody and is refused. Keyed on both because the re-assert guard runs
+/// at every idle transition: a config that writes its row back a hundred
+/// times sends one notification, and a second window holding something
+/// else still sends its own. What has been reported is held per window
+/// and dropped when that window is gone, so a session that opens and
+/// closes windows for an hour carries one bucket per window on screen
+/// rather than one per window it has ever had. A covered channel already
+/// named is answered from `stocked` before its option is read at all, and
+/// `nvim_get_option_info2`'s answer is memoised per option name, since
+/// nvim's default for an option does not change within a session.
+/// `pcall` around the whole per-window body: a window that closes between
+/// the list and the write, and one whose option nvim refuses, are the same
+/// outcome for view -- the remaining windows are still held.
 ///
 /// The global value of the same name is written first. Several of these
 /// options are global-local, where an empty window-local value means "use
@@ -224,26 +243,33 @@ const HOLD_WINDOW_OPTION_CHUNK: &str = "\
 local name, value, channel, covered = ...
 local seen = {}
 local stocked = {}
+local defaults = {}
 local function stock(option)
+  local memo = defaults[option]
+  if memo ~= nil then
+    return memo.default
+  end
+  local default = nil
   local ok, info = pcall(vim.api.nvim_get_option_info2, option, {})
   if ok and info ~= nil then
-    return info.default
+    default = info.default
   end
-  return nil
+  defaults[option] = { default = default }
+  return default
 end
 local function report(win, held)
+  local key = tostring(win)
+  local bucket = seen[key]
+  if bucket ~= nil and bucket[tostring(held)] then
+    return
+  end
   if held == nil or held == false or held == '' or held == value
     or held == stock(name) then
     return
   end
-  local key = tostring(win)
-  local bucket = seen[key]
   if bucket == nil then
     bucket = {}
     seen[key] = bucket
-  end
-  if bucket[tostring(held)] then
-    return
   end
   bucket[tostring(held)] = true
   pcall(vim.rpcnotify, channel, 'view_bridge', 'channel_held',
@@ -251,12 +277,14 @@ local function report(win, held)
 end
 local function beside()
   for _, option in ipairs(covered) do
-    local ok, held = pcall(vim.api.nvim_get_option_value, option, {})
-    if ok and held ~= nil and held ~= false and held ~= ''
-      and held ~= stock(option) and not stocked[option] then
-      stocked[option] = true
-      pcall(vim.rpcnotify, channel, 'view_bridge', 'channel_held',
-        option, tostring(held))
+    if not stocked[option] then
+      local ok, held = pcall(vim.api.nvim_get_option_value, option, {})
+      if ok and held ~= nil and held ~= false and held ~= ''
+        and held ~= stock(option) then
+        stocked[option] = true
+        pcall(vim.rpcnotify, channel, 'view_bridge', 'channel_held',
+          option, tostring(held))
+      end
     end
   end
 end
@@ -2411,11 +2439,12 @@ macro_rules! review_ns_lua {
 /// takes `]c`, `[c` and `<leader>hR` buffer-locally in every file it
 /// attaches to, and a review that ended would otherwise leave those dead
 /// for the rest of the session -- the migration contract broken by the one
-/// feature that borrowed the git-hunk vocabulary. So the mapping each key displaces is kept, and
-/// [`REVIEW_CLEAR_CHUNK`] hands it back. The keymap list is read before and
-/// after the set rather than matched against `k.lhs`, because `<leader>` is
-/// expanded at set time and only nvim knows what it expanded to: the entries
-/// carrying view's own `desc` name the expanded left-hand sides, and
+/// feature that borrowed the git-hunk vocabulary. So the mapping each key
+/// displaces is kept, and [`REVIEW_CLEAR_CHUNK`] hands it back. The keymap
+/// list is read before and after the set rather than matched against
+/// `k.lhs`, because `<leader>` is expanded at set time and only nvim knows
+/// what it expanded to: the entries carrying view's own `desc` name the
+/// expanded left-hand sides, and
 /// whatever the earlier read held under those names is what this review
 /// took. The bookkeeping is a Lua global keyed by buffer rather than a
 /// buffer variable, since a mapping set from Lua carries a function in its

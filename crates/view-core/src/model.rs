@@ -827,6 +827,27 @@ impl Model {
             })
     }
 
+    /// Re-reads the notice ring into an open message-history overlay,
+    /// reporting whether the list changed.
+    ///
+    /// Wherever the overlay sits in the stack, not only when it is
+    /// topmost: `open_message_history` puts it under a prompt that is
+    /// already open, and a notice arriving afterwards belongs in it just
+    /// the same. One place at the end of a message rather than one beside
+    /// each of the thirty-odd recorders, which is what makes every notice
+    /// path reach the open list rather than the ones somebody remembered.
+    #[must_use]
+    pub fn refresh_message_history(&mut self) -> bool {
+        let history = &self.engine.toast_history;
+        self.overlays
+            .iter_mut()
+            .find_map(|overlay| match &mut overlay.kind {
+                OverlayKind::MessageHistory(state) => Some(state),
+                _ => None,
+            })
+            .is_some_and(|state| state.refresh(history))
+    }
+
     /// Re-sizes every open prompt overlay's box to the question it holds
     /// right now.
     ///

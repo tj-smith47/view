@@ -8367,6 +8367,48 @@ fn history_item_rows(model: &Model) -> usize {
     usize::from(model.overlay_rect(overlay).height.saturating_sub(4))
 }
 
+/// The overlay draws under the toast stack, so a notice raised while the
+/// history is open reaches the user through the list or not at all.
+#[test]
+fn a_notice_raised_while_the_history_is_open_joins_the_open_list() {
+    let mut m = model_with_history(&["first", "second"]);
+    let before = history_view(&m).rows.len();
+    let _ = press(&mut m, "j");
+    assert_eq!(history_view(&m).selected, Some(1));
+    m.dirty = false;
+
+    let _ = update(
+        &mut m,
+        Msg::ColorSchemeMissing {
+            name: "nonesuch".to_string(),
+        },
+    );
+
+    let view = history_view(&m);
+    assert_eq!(
+        view.rows.len(),
+        before + 1,
+        "the notice raised over the open history must join its list: {:?}",
+        view.rows
+    );
+    assert!(
+        view.rows
+            .first()
+            .is_some_and(|row| row.label.contains("nonesuch")),
+        "the ring reads newest-first, so the new line is the top row: {:?}",
+        view.rows
+    );
+    assert_eq!(
+        view.selected,
+        Some(2),
+        "the selection stays on the entry it was on when a row lands above it"
+    );
+    assert!(
+        m.dirty,
+        "a list that grew under an open overlay has to be repainted"
+    );
+}
+
 /// `j`/`k`/`<C-d>`/`<C-u>`/`gg`/`G` over a snapshot taller than the box
 /// drawn for it: the point of the whole gesture is reaching an entry the
 /// first frame never showed, so the selection has to leave the visible
