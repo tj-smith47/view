@@ -170,6 +170,15 @@ fn row_text(buf: &Buffer, row: u16) -> String {
         .collect()
 }
 
+/// A row read one cell at a time, for an assertion about which cell a
+/// glyph stands in -- which [`row_text`] cannot answer, since a cell whose
+/// symbol is a grapheme cluster contributes more than one character to it.
+fn row_cells(buf: &Buffer, row: u16) -> Vec<String> {
+    (0..buf.area.width)
+        .map(|col| buf[(col, row)].symbol().to_string())
+        .collect()
+}
+
 /// Every cell of the column between the two windows carries view's own
 /// separator -- its glyph and its style, over the one nvim painted into
 /// grid 1 underneath -- and neither window's text is displaced by it.
@@ -1914,20 +1923,48 @@ fn a_two_cell_name_is_measured_in_cells_and_not_in_chars() {
     }
 }
 
-/// A name that arrives decomposed stops inside the edge. macOS hands back
-/// `café.rs` as `cafe` and a combining mark, and a mark measured at the
-/// zero width it really has while the run gives it a cell of its own walks
-/// the text one cell further than the fit check allowed. The gapless edge
-/// of a full-width tile ends on the screen's last column, so the cell after
-/// it is outside the buffer.
+/// The gapless edge of a full-width tile ends on the screen's last column,
+/// so a name that overran it would take the corner and then the cell
+/// outside the buffer. The edge carries 76 cells of text between its two
+/// blanks, and a name is measured in the cells its clusters draw, so one
+/// of exactly 76 fits and one of 77 is dropped whole.
 ///
-/// Disconfirm: measuring a span with its display width paints the closing
-/// blank over the corner for the first name, and outside `buf.area` for the
-/// second.
+/// Disconfirm: measuring a decomposed name by its characters drops the one
+/// that fits, and measuring it by the string's display width paints the
+/// one that does not, over the corner and past the buffer.
 #[test]
 fn a_decomposed_name_stops_inside_the_edge() {
     let slots = vec![(0, 0, TILED_WIDTH - 1, TILED_HEIGHT - 2)];
-    let row_with = |name: String| {
+    let plain = edge_with_name(&slots, "left.rs".to_string());
+    // two combining marks, which take no cell of their own
+    for (cells, fits) in [(76_usize, true), (77, false)] {
+        let name = format!("e\u{301}e\u{301}{}", "a".repeat(cells - 2));
+        let edge = edge_with_name(&slots, name);
+        assert_eq!(
+            edge.chars().last(),
+            plain.chars().last(),
+            "the name walked over the corner: {edge:?}"
+        );
+        assert_eq!(
+            edge.contains("aaa"),
+            fits,
+            "a name of {cells} cells in a 76-cell edge: {edge:?}"
+        );
+    }
+}
+
+/// A name reaches view in whatever form the filesystem holds it, and the
+/// two forms of `café.rs` are the same name: macOS hands back the
+/// decomposed one, Linux usually the composed one, and a user who opens
+/// the file on either sees the same frame.
+///
+/// Disconfirm: a run that places one character per cell gives the mark a
+/// cell of its own, which moves `.rs` one column right and leaves the
+/// accent standing after the letter.
+#[test]
+fn a_decomposed_name_paints_as_its_composed_form() {
+    let slots = vec![(0, 0, TILED_WIDTH - 1, TILED_HEIGHT - 2)];
+    let cells = |name: &str| {
         let mut model = tiled_model(false, TILED_HEIGHT, &slots);
         let _ = update(
             &mut model,
@@ -1935,31 +1972,54 @@ fn a_decomposed_name_stops_inside_the_edge() {
                 win: WinHandle(1000),
                 status: {
                     let mut status = WindowStatus::default();
-                    status.name = name;
+                    status.name = name.to_string();
                     status
                 },
             },
         );
         let buf = tiled_frame(&model);
-        row_text(&buf, edge_rows(&model, slots[0]).1)
+        row_cells(&buf, edge_rows(&model, slots[0]).1)
     };
-    let plain = row_with("left.rs".to_string());
-    // two marks, so the run reaches two cells past the display width of
-    // the string: at 75 the closing blank lands on the corner, at 76 it
-    // lands one column past the screen
-    for cells in [75_usize, 76] {
-        let name = format!("e\u{301}e\u{301}{}", "a".repeat(cells - 2));
-        let edge = row_with(name);
-        assert_eq!(
-            edge.chars().last(),
-            plain.chars().last(),
-            "the name walked over the corner: {edge:?}"
-        );
-        assert!(
-            !edge.contains("aaa"),
-            "a name wider than the edge was painted into it: {edge:?}"
-        );
-    }
+    let composed = cells("caf\u{e9}.rs");
+    let decomposed = cells("cafe\u{301}.rs");
+    let differing: Vec<usize> = composed
+        .iter()
+        .zip(&decomposed)
+        .enumerate()
+        .filter(|(_, (left, right))| left != right)
+        .map(|(col, _)| col)
+        .collect();
+    assert_eq!(
+        differing.len(),
+        1,
+        "the two forms of one name took different cells: {:?} against {:?}",
+        composed.join("|"),
+        decomposed.join("|")
+    );
+    let col = differing[0];
+    assert_eq!(
+        (composed[col].as_str(), decomposed[col].as_str()),
+        ("\u{e9}", "e\u{301}"),
+        "the cell they differ in is not the accented letter"
+    );
+}
+
+/// One tile's gapless edge row, with `name` reported for it.
+fn edge_with_name(slots: &[(u16, u16, u16, u16)], name: String) -> String {
+    let mut model = tiled_model(false, TILED_HEIGHT, slots);
+    let _ = update(
+        &mut model,
+        Msg::WindowStatus {
+            win: WinHandle(1000),
+            status: {
+                let mut status = WindowStatus::default();
+                status.name = name;
+                status
+            },
+        },
+    );
+    let buf = tiled_frame(&model);
+    row_text(&buf, edge_rows(&model, slots[0]).1)
 }
 
 /// A group arrives whole or not at all. The separator is a span of its own

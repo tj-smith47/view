@@ -13,7 +13,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use std::collections::BTreeSet;
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 use view_core::grid::registry::{GridId, Pane, PaneKind, GLOBAL_GRID};
 use view_core::model::{Look, Model, Panes, WindowStatus};
 use view_core::native::statusline::StatuslineState;
@@ -278,17 +279,17 @@ fn name_spans(status: &WindowStatus) -> Vec<Span> {
     spans
 }
 
-/// The cells one character takes on the edge, which is both what the fit
-/// check counts and what the run advances by.
+/// The cells one grapheme cluster takes on the edge, which is both what
+/// the fit check counts and what the run advances by.
 ///
-/// One rule in one place: measuring a combining mark at the zero width it
-/// really has while the run gives it a cell of its own walks the text past
-/// the corner, and on a gapless edge that ends on the screen's last column
-/// it walks it past the buffer. A name that arrives decomposed (macOS
-/// hands back `café.rs` as `cafe` plus a mark) is over-measured by one
-/// cell per mark instead, which drops a group a hair early.
-fn cell_width(ch: char) -> u16 {
-    u16::try_from(ch.width().unwrap_or(1).max(1)).unwrap_or(1)
+/// One rule in one place, and a cluster rather than a character because a
+/// name reaches view in whatever form the filesystem holds it: macOS hands
+/// back `café.rs` as `cafe` and a combining mark, and a mark given a cell
+/// of its own both moves every character behind it and reads as a stray
+/// accent. `max(1)` is what keeps a cluster that measures nothing from
+/// leaving the run standing still.
+fn cluster_width(cluster: &str) -> u16 {
+    u16::try_from(UnicodeWidthStr::width(cluster).max(1)).unwrap_or(1)
 }
 
 /// One group's width in terminal cells, which is what the edge has room
@@ -296,9 +297,27 @@ fn cell_width(ch: char) -> u16 {
 fn group_width(group: &[Span]) -> u16 {
     group
         .iter()
-        .flat_map(|span| span.text.chars())
-        .map(cell_width)
+        .flat_map(|span| span.text.graphemes(true))
+        .map(cluster_width)
         .fold(0, u16::saturating_add)
+}
+
+/// Writes one grapheme cluster into a cell as its whole symbol, which is
+/// how a combining mark reaches the terminal in the cell its base
+/// character stands in.
+///
+/// A cluster carrying a control character is written as a blank, for the
+/// same reason `sanitized_char` exists: `Cell::set_symbol` computes the
+/// width itself and panics on one in a debug build.
+fn set_edge_cluster(buf: &mut Buffer, x: u16, y: u16, cluster: &str, style: Style) {
+    if cluster.chars().any(char::is_control) {
+        set_border_cell(buf, x, y, ' ', style);
+        return;
+    }
+    let cell = &mut buf[(x, y)];
+    cell.reset();
+    cell.set_symbol(cluster);
+    cell.set_style(style);
 }
 
 /// The colour a tile's own edge text sits in, which is the colour its frame
@@ -332,9 +351,11 @@ fn span_style(role: StyleRole, base: Style, theme: &Theme) -> Style {
 /// so is everything after it: the composer knows what a segment means and a
 /// column count does not, so half a diagnostic count is worse than none.
 ///
-/// Width is counted in cells rather than in characters, because a buffer
-/// named in a script that draws two cells to the character would otherwise
-/// run past the closing blank and over the corner.
+/// Width is counted in cells rather than in characters, and the run places
+/// one grapheme cluster per cell: a buffer named in a script that draws
+/// two cells to the character would otherwise run past the closing blank
+/// and over the corner, and one carrying a combining mark would show the
+/// mark standing on its own.
 fn write_edge(groups: &[Vec<Span>], base: Style, theme: &Theme, edge: Rect, buf: &mut Buffer) {
     // two corners, a blank either side and one character of text
     if edge.width < 5 {
@@ -361,12 +382,12 @@ fn write_edge(groups: &[Vec<Span>], base: Style, theme: &Theme, edge: Rect, buf:
         }
         for span in group {
             let style = span_style(span.role, base, theme);
-            for ch in span.text.chars() {
+            for cluster in span.text.graphemes(true) {
                 if x > last {
                     break;
                 }
-                let width = cell_width(ch);
-                set_border_cell(buf, x, edge.y, ch, style);
+                let width = cluster_width(cluster);
+                set_edge_cluster(buf, x, edge.y, cluster, style);
                 // ratatui's own convention for the cell a two-cell glyph
                 // covers: the diff skips it, and anything left in it would
                 // be drawn one column to the right of where it was written

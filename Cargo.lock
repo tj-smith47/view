@@ -2825,6 +2825,7 @@ dependencies = [
  "rustix",
  "signal-hook",
  "unicode-properties",
+ "unicode-segmentation",
  "unicode-width",
  "view-core",
  "view-oracle",
