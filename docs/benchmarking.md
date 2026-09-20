@@ -152,10 +152,9 @@ trip the late-attach design pays serially, since Neovim's own TUI attaches
 before init runs. Attribution past that outline is open work.
 
 Both dev classes are re-seated: dev-linux from the retake above, dev-macos
-from its own on mbp the same day. `gh-linux` and `gh-macos` carry their
-first-paint ratios as `withdrawn` entries with the reason attached, so a
-gate run on those classes fails loudly on the missing bars, until each is
-re-seated from a run under the answering pty.
+from its own on mbp the same day. `gh-linux` and `gh-macos` are re-seated
+from the measured artifacts of bench run 35472867066, the first gate run
+under the answering pty.
 
 The `user` row is recorded, and each class states its own reading on its own
 line, since a number belongs to one class and one fixture.
@@ -170,22 +169,21 @@ dev-macos holds `first_paint.marker_cold_ms` 87.563 ms and
 with `first_paint.marker_ratio_p50` and `first_paint.marker_ratio_p99` both
 reading 1.061 from its own retake.
 
-The other two classes hold the absolute and owe the ratio, one paragraph
-each, and both owe the same DSR re-seat on the plugin-free and 15-plugin
-legs.
-
 `gh-linux` holds `first_paint.marker_cold_ms` 96.326 ms on the `user`
-fixture and carries `first_paint.marker_ratio_p50` and
-`first_paint.marker_ratio_p99` on that cell as `withdrawn`.
+fixture, with `first_paint.marker_ratio_p50` 1.017 and
+`first_paint.marker_ratio_p99` 0.920 seated from the measured artifact of
+that gate run.
 
 `gh-macos` holds `first_paint.marker_cold_ms` 169.099 ms on the same `user`
-fixture, with the same two ratios `withdrawn`.
+fixture, with `first_paint.marker_ratio_p50` 0.990 and
+`first_paint.marker_ratio_p99` 1.006 seated from its own artifact of that
+run.
 
-Until a class records that cell, a gate run against that class reports it
-as uncovered and exits on it. Every class has to record it before
-its gate is green again: the dev classes in a quiet-host session each, the
-CI classes by re-seating from the `bench-measured-<class>.toml` artifact
-their gate leg uploads (CI runs no `--record` leg).
+All four classes record the cell, so a gate run reaches a verdict on it
+everywhere. A class that loses it again records it the way it did here: the
+dev classes in a quiet-host session each, the CI classes by re-seating from
+the `bench-measured-<class>.toml` artifact their gate leg uploads (CI runs
+no `--record` leg).
 
 The first two rows are unpaired: view paints its shell before it has even
 started the Neovim child, so bare Neovim has no comparable event. It shows
@@ -254,12 +252,12 @@ The three unmet cells are `[[shortfall]]` entries in
 `crates/view-bench/budgets.toml`, each accepted at its recorded value with
 its bar untouched. Which class holds the five:
 
-| class | the five `user` cells | how the rest get seated |
+| class | the five `user` cells | how each is seated |
 |---|---|---|
 | `dev-linux` | all five recorded | -- |
 | `dev-macos` | all five owed | a quiet-window session on mbp, `task user-fixture` first |
-| `gh-linux` | all five owed | re-seat from the `bench-measured-gh-linux.toml` artifact its gate leg uploads |
-| `gh-macos` | all five owed | the same re-seat from `bench-measured-gh-macos.toml` |
+| `gh-linux` | all five recorded | seated from the `bench-measured-gh-linux.toml` artifact its gate leg uploaded |
+| `gh-macos` | all five recorded | the same seating from `bench-measured-gh-macos.toml` |
 | `controlled-linux` | all five unseated | the matrix runs all five there and nothing scopes them away; its baseline holds no cell for any of them today, and it is the one class that loads the budget table, so a quiet-window recording there is what would attest the felt bars |
 
 An owed cell is committed empty with a `[withdrawn.<scenario>.user]` reason

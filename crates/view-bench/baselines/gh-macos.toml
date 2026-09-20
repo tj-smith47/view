@@ -2,48 +2,6 @@ schema = 1
 engine_pin = "v0.12.4"
 machine_class = "gh-macos"
 
-[withdrawn.first_paint.heavy]
-marker_ratio_p50 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-marker_ratio_p99 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-
-[withdrawn.first_paint.minimal]
-marker_ratio_p50 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-marker_ratio_p99 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-
-[withdrawn.first_paint.user]
-marker_ratio_p50 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-marker_ratio_p99 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-
-[withdrawn.startup.minimal]
-server_delta_ms = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-settled_ratio_p50 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-
-[withdrawn.echo.user]
-paired_delta_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-ratio_p99 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-view_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
-[withdrawn.echo_speculated.user]
-speculated_paint_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-speculated_ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
-[withdrawn.scroll.user]
-ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-ratio_p99 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-staleness_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
-[withdrawn.flood.user]
-cadence_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-cadence_p99_ratio = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-pace_ratio = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
-[withdrawn.startup.user]
-first_frame_cold_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-first_frame_ratio_p99 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-server_delta_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-settled_ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
 [echo.heavy]
 paired_delta_p99_ms = 4.27
 ratio_p50 = 1.148999015425008
@@ -74,14 +32,20 @@ speculated_ratio_p50 = 0.3044368600682594
 
 [first_paint.heavy]
 marker_cold_ms = 148.065584
+marker_ratio_p50 = 0.9851836061024842
+marker_ratio_p99 = 0.994046040648315
 shell_visible_cold_ms = 33.354875
 
 [first_paint.minimal]
 marker_cold_ms = 71.101125
+marker_ratio_p50 = 1.077473539396199
+marker_ratio_p99 = 1.04248703316896
 shell_visible_cold_ms = 33.911583
 
 [first_paint.user]
 marker_cold_ms = 169.09875
+marker_ratio_p50 = 0.9900486498567737
+marker_ratio_p99 = 1.0060813211391468
 shell_visible_cold_ms = 40.38275
 
 [flood.minimal]
@@ -120,17 +84,37 @@ ratio_p99 = 1.2774489839209198
 staleness_p99_ms = 4.929125
 
 [startup.minimal]
+first_frame_cold_ms = 74.010834
+first_frame_ratio_p99 = 1.062910173900399
+server_delta_ms = 1.6110000000000007
+settled_ratio_p50 = 1.0237211980100531
 
 [supervision.minimal]
 restart_rehydrate_p99_ms = 65.65383299999999
 wedge_detect_p99_ms = 11576.124875
 
 [echo.user]
+paired_delta_p99_ms = 4.818
+ratio_p50 = 1.347433728144388
+ratio_p99 = 1.2956137117582012
+view_p99_ms = 7.03
 
 [echo_speculated.user]
+speculated_paint_p99_ms = 1.189
+speculated_ratio_p50 = 0.2199367088607595
 
 [scroll.user]
+ratio_p50 = 2.2438036831896326
+ratio_p99 = 1.7257261749347257
+staleness_p99_ms = 5.422208
 
 [flood.user]
+cadence_p99_ms = 13.645291
+cadence_p99_ratio = 1.007655358939566
+pace_ratio = 1.0144214121940949
 
 [startup.user]
+first_frame_cold_ms = 134.774583
+first_frame_ratio_p99 = 0.9917987574009096
+server_delta_ms = 2.1440000000000055
+settled_ratio_p50 = 1.004860791045314
