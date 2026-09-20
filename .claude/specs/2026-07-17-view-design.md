@@ -397,10 +397,15 @@ Compat has three classes; only the first is "by construction":
   first launch must never be is a wall of somebody else's errors with no
   remedy in any of them. Per-surface policy is
   recorded in the surface-ownership matrix (`docs/surface-ownership.md`),
-  which names, for each externalized surface, the plugin classes that
-  claim it, view's policy (own / yield / absorb), and the compat scenario
-  that proves that policy. A surface with no proving scenario is a
-  coverage gap the matrix shows rather than hides.
+  which names, for each surface view draws, the Neovim channels that can
+  draw it (a held option and its scope, an `ext_*` attach, a replaced
+  runtime function, a float over the region), view's policy (own / yield),
+  and the compat scenario that proves that policy. Ownership is decided by
+  the channel a holder writes and never by the holder's name: no plugin,
+  module or filetype identity appears in the ownership code (user ruling
+  2026-09-19), so a plugin released tomorrow is handled by the channel it
+  draws through. A surface with no proving scenario is a coverage gap the
+  matrix shows rather than hides.
 - `doctor` lists every active supersession and the exact `[native]` key that
   reverses it. Overrides are per-feature (`picker = false` keeps your
   telescope; everything else stays native) — never all-or-nothing.

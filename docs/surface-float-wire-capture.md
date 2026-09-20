@@ -1,5 +1,10 @@
 # Wire capture: floats that land on a view-owned surface
 
+This page records what the pinned versions carried on the wire. view no
+longer absorbs a plugin's float into the palette: a float over an owned
+region is reported by its channel and handed back with the `[native]`
+switch the notice names.
+
 Captured live against the pinned engine and the compat harness's heavy fixture:
 every value below reflects an actual run. Source of truth for what a plugin's
 floating window actually carries when it draws over a surface view owns: its
