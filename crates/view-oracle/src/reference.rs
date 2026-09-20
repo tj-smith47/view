@@ -312,6 +312,15 @@ pub struct ReferenceSession {
     /// first one arrives, matching `view_core::model::EngineModel::tabline`
     /// starting `None` (both mean "no tabline reservation yet").
     tab_count: usize,
+    /// nvim's own `showtabline`, the second answer the row rule reads.
+    /// Holds the option's default until a leg sets it through
+    /// [`set_showtabline`](Self::set_showtabline), the way `tab_count`
+    /// holds `0` until a `TablineUpdate` reports one.
+    showtabline: u8,
+    /// Whether this session's UI owns the top row, which it does when the
+    /// attach externalized `ext_tabline`: a session that left the tab line
+    /// with nvim has it drawn inside the grid and reserves nothing.
+    owns_tabline: bool,
 }
 
 impl ReferenceSession {
@@ -383,6 +392,8 @@ impl ReferenceSession {
             term_width: cols,
             term_height: rows,
             tab_count: 0,
+            showtabline: view_core::native::pill::DEFAULT_SHOWTABLINE,
+            owns_tabline: surfaces.contains(&view_core::native::ext::Ext::Tabline.as_str()),
         };
         settle::install_hooks(&session.engine.handle)?;
         Ok(session)
@@ -699,13 +710,8 @@ impl ReferenceSession {
             UiEvent::TablineUpdate { tabs, .. } => {
                 let before = self.chrome_rows();
                 self.tab_count = tabs.len();
-                let after = self.chrome_rows();
-                if before != after {
-                    let target_height = self.term_height.saturating_sub(after);
-                    let _ = self
-                        .engine
-                        .handle
-                        .try_resize(self.term_width, target_height);
+                if before != self.chrome_rows() {
+                    self.resize_to_chrome();
                 }
             }
             // recorded (not discarded like the rest of this arm's ext
@@ -778,19 +784,57 @@ impl ReferenceSession {
         }
     }
 
-    /// Terminal rows reserved for the tabline: `1` once more than one tab
-    /// is open, `0` otherwise. Mirrors
-    /// `view_core::model::Model::chrome_rows`'s threshold exactly (bare
-    /// nvim's own default `showtabline` rule), re-derived here rather than
-    /// imported so this session's UI-attach-policy decision comes from its
-    /// own bookkeeping (`tab_count`), the same independence
-    /// [`RefGrid`]'s grid-apply logic keeps from `view_core::grid::Grid`.
+    /// Terminal rows reserved for the top row, from this session's own
+    /// bookkeeping through the rule `view_core::model::Model::chrome_rows`
+    /// spends.
+    ///
+    /// The rule is called rather than restated, which the grid-apply logic
+    /// beside it does not do with `view_core::grid::Grid`: this is a
+    /// UI-attach policy both sides must carry out identically or their
+    /// grids differ by a row, where the applier's independence is the
+    /// whole point of the comparison. A restated threshold read
+    /// `tab_count > 1` while the model had learned to follow
+    /// `showtabline`, and a leg that routes the option here would have
+    /// resized one side only.
     fn chrome_rows(&self) -> u16 {
-        if self.tab_count > 1 {
-            1
-        } else {
-            0
+        Self::chrome_rows_at(self.owns_tabline, self.tab_count, self.showtabline)
+    }
+
+    /// [`chrome_rows`](Self::chrome_rows) from the three answers it reads,
+    /// so a test can walk the rule against the model without a live
+    /// engine. `Panes::Nvim` because this session is bare nvim and draws
+    /// none of view's own tiles.
+    fn chrome_rows_at(owns_tabline: bool, tab_count: usize, showtabline: u8) -> u16 {
+        u16::from(view_core::native::pill::shows_under(
+            owns_tabline,
+            view_core::model::Panes::Nvim,
+            tab_count,
+            showtabline,
+        ))
+    }
+
+    /// Sets this session's `showtabline` and resizes its engine when the
+    /// reading moves the row, the way the `TablineUpdate` arm does for the
+    /// tab count.
+    ///
+    /// A leg that sets the option on the side under comparison sets it
+    /// here too, or the two grids differ by a row for the rest of the run.
+    pub fn set_showtabline(&mut self, value: u8) {
+        let before = self.chrome_rows();
+        self.showtabline = value;
+        if before != self.chrome_rows() {
+            self.resize_to_chrome();
         }
+    }
+
+    /// Asks this session's nvim for the grid the reserved rows leave it,
+    /// the one place a geometry reaches the engine after the attach.
+    fn resize_to_chrome(&self) {
+        let target_height = self.term_height.saturating_sub(self.chrome_rows());
+        let _ = self
+            .engine
+            .handle
+            .try_resize(self.term_width, target_height);
     }
 }
 
@@ -1317,5 +1361,47 @@ mod tests {
             "the delayed timer's own mutation never showed up in the reference screen:\n{}",
             reference_side.screen_text()
         );
+    }
+
+    /// The row this session reserves is the row the model reserves, over
+    /// every reading of the option and both tab counts. A threshold
+    /// restated here read `tab_count > 1` for a while after the model had
+    /// learned to follow `showtabline`, which is a grid a row taller on
+    /// one side of every comparison.
+    #[test]
+    fn the_reference_row_rule_is_the_models() {
+        for showtabline in [0_u8, 1, 2] {
+            for tabs in [1_usize, 2] {
+                let mut model = view_core::model::Model::with_term_size(80, 24);
+                let mut surfaces = view_core::native::ext::shipped_multigrid();
+                surfaces.push(view_core::native::ext::Ext::Tabline);
+                model.attach_surfaces(surfaces);
+                model.look = view_core::model::Look::new(view_core::model::Panes::Nvim, true);
+                model.showtabline = showtabline;
+                // through update(), since `TablineState` is
+                // non-exhaustive and no caller outside view-core builds one
+                let _ = view_core::update::update(
+                    &mut model,
+                    view_core::msg::Msg::Redraw(vec![UiEvent::TablineUpdate {
+                        current: view_core::events::TabHandle(1),
+                        tabs: (1..=tabs)
+                            .map(|at| view_core::events::TabEntry {
+                                tab: view_core::events::TabHandle(at as u64),
+                                name: format!("tab{at}"),
+                            })
+                            .collect(),
+                    }]),
+                );
+                assert_eq!(
+                    ReferenceSession::chrome_rows_at(true, tabs, showtabline),
+                    model.chrome_rows(),
+                    "showtabline={showtabline} with {tabs} tabpage(s)"
+                );
+            }
+        }
+        // a session that left the tab line with nvim has it drawn inside
+        // the grid, which is the model's own answer for a surface it does
+        // not own
+        assert_eq!(ReferenceSession::chrome_rows_at(false, 2, 2), 0);
     }
 }

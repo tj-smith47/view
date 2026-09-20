@@ -74,16 +74,20 @@ pub(super) fn on_buffer_list(model: &mut Model, buffers: Vec<BufferEntry>) -> Ve
 /// (`ui_event::apply_ui_event`'s `TablineUpdate` arm): the engine lays its
 /// windows out against the rows view leaves it, and a grid a row too tall
 /// paints its last line under the bar.
+///
+/// A reading that leaves the row where it stands paints nothing either,
+/// for [`on_buffer_list`]'s reason: under tiles the row is up whatever the
+/// option says, and past one tabpage `1` and `2` are the same picture.
 pub(super) fn on_showtabline(model: &mut Model, value: u8) -> Vec<Effect> {
     if model.showtabline == value {
         return Vec::new();
     }
     let before = model.chrome_rows();
     model.showtabline = value;
-    model.dirty = true;
     if before == model.chrome_rows() {
         return Vec::new();
     }
+    model.dirty = true;
     let (width, height) = model.grid_target();
     vec![Effect::Rpc(RpcCall::TryResize { width, height })]
 }

@@ -12911,6 +12911,41 @@ fn a_showtabline_reading_that_moves_the_row_resizes_the_engine() {
         "a reading saying what the model already held resized the engine"
     );
     assert!(!m.dirty, "an unchanged reading asked for a repaint");
+
+    // a second tabpage draws the row at 1 and at 2 alike, so the reading
+    // that crosses between them paints the same picture
+    m.engine
+        .tabline
+        .as_mut()
+        .expect("the fixture attaches a tabline")
+        .tabs
+        .push(crate::events::TabEntry {
+            tab: crate::events::TabHandle(2),
+            name: "docs".into(),
+        });
+    for (from, to) in [(2_u8, 1_u8), (1, 2)] {
+        m.showtabline = from;
+        m.dirty = false;
+        assert!(
+            update(&mut m, Msg::ShowTablineChanged { value: to }).is_empty(),
+            "{from} -> {to} with two tabpages open resized the engine"
+        );
+        assert!(!m.dirty, "{from} -> {to} with two tabpages open repainted");
+    }
+
+    // under tiles the row carries the host and the agent word whatever
+    // nvim would have drawn, so no reading of the option moves anything
+    m.look = crate::model::Look::new(crate::model::Panes::Tiles, true);
+    for (from, to) in [(1_u8, 0_u8), (0, 2), (2, 1)] {
+        m.showtabline = from;
+        m.dirty = false;
+        assert_eq!(m.chrome_rows(), 1, "the tiles row went away at {from}");
+        assert!(
+            update(&mut m, Msg::ShowTablineChanged { value: to }).is_empty(),
+            "{from} -> {to} under tiles resized the engine"
+        );
+        assert!(!m.dirty, "{from} -> {to} under tiles repainted");
+    }
 }
 
 #[test]
