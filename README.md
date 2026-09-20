@@ -67,8 +67,8 @@ for your own nvim or `NVIM_APPNAME`, everything else optional.
 
 ## Performance
 
-Neovim `v0.12.4` on a shared Linux dev host, whose `dev-linux` is the
-default class of this page.
+The numbers below were taken beside Neovim `v0.12.4` on a shared Linux dev
+host. `dev-linux` is the default class of this page.
 
 **You open a project.** You type `view ~/.config` and wait for the screen you
 can start working in. Under a login-shaped plugin config (lazy.nvim, noice
