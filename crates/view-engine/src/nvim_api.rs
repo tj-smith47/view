@@ -802,6 +802,12 @@ pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
 /// wait rather than an unbounded one, and so is a negative `ttimeoutlen`.
 /// Both mean the engine reads a run that stopped short on the pass that
 /// read it, which is why neither reaches the wire as a sentinel.
+///
+/// `showtabline` rides the same three relays for the same reason: under
+/// `panes = "nvim"` it decides whether view reserves the top row at all,
+/// so a session that set it in its config must be heard without waiting
+/// for the user to set it again. The payload is the option's own number,
+/// floored at zero because nvim takes a negative value as "off".
 pub(crate) const REGISTER_BRIDGE_CHUNK: &str = "\
 local channel, float_throttle = ...
 local group = vim.api.nvim_create_augroup('view_bridge', { clear = true })
@@ -892,15 +898,28 @@ local function relay_ttimeout()
   local within = vim.o.ttimeout and math.max(vim.o.ttimeoutlen, 0) or 0
   vim.rpcnotify(channel, 'view_bridge', 'ttimeout', tostring(within))
 end
+local function relay_showtabline()
+  vim.rpcnotify(channel, 'view_bridge', 'showtabline',
+    math.max(vim.o.showtabline, 0))
+end
 relay_ttimeout()
+relay_showtabline()
 vim.api.nvim_create_autocmd('VimEnter', {
   group = group,
-  callback = relay_ttimeout,
+  callback = function()
+    relay_ttimeout()
+    relay_showtabline()
+  end,
 })
 vim.api.nvim_create_autocmd('OptionSet', {
   group = group,
   pattern = { 'ttimeout', 'ttimeoutlen' },
   callback = relay_ttimeout,
+})
+vim.api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = 'showtabline',
+  callback = relay_showtabline,
 })
 vim.api.nvim_create_autocmd('VimLeavePre', {
   group = group,
@@ -5163,11 +5182,11 @@ mod tests {
             REGISTER_BRIDGE_CHUNK
                 .matches("channel, 'view_bridge'")
                 .count(),
-            7,
+            8,
             "colorscheme through the shared relay, plus diagnostics, git, \
-             buffer, float and the escape timing each sending their own \
-             richer payload instead of a bare match, and the marker that \
-             closes a float scan"
+             buffer, float, the escape timing and the tab-row option each \
+             sending their own richer payload instead of a bare match, and \
+             the marker that closes a float scan"
         );
     }
 

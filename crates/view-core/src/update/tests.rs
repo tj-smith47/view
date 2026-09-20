@@ -12824,7 +12824,7 @@ fn a_buffer_trigger_replaces_the_listed_buffer_set() {
 #[test]
 fn a_click_on_a_pill_tab_selects_that_tabpage() {
     let mut m = pill_model(crate::native::pill::TablineShows::Tabs);
-    let slots = crate::native::pill::PillView::from_model(&m).slots(m.term_width);
+    let slots = crate::native::pill::PillView::from_model(&m).row_slots();
     let effects = update(&mut m, click(0, slots[1].col));
     assert!(
         matches!(
@@ -12852,7 +12852,7 @@ fn a_press_on_the_nvim_look_row_selects_the_tab_under_it() {
         1,
         "two tabpages under nvim mode left the row unreserved"
     );
-    let slots = crate::native::pill::PillView::from_model(&m).slots(m.term_width);
+    let slots = crate::native::pill::PillView::from_model(&m).row_slots();
     for slot in &slots {
         let effects = update(&mut m, click(0, slot.col));
         assert!(
@@ -12870,6 +12870,49 @@ fn a_press_on_the_nvim_look_row_selects_the_tab_under_it() {
     );
 }
 
+/// A `showtabline` that moves the row across nvim's own threshold moves
+/// the grid the engine lays its windows out against, the same way a
+/// second tabpage opening does. A reading that only repainted would leave
+/// the engine a row too tall, painting its last line under the bar.
+#[test]
+fn a_showtabline_reading_that_moves_the_row_resizes_the_engine() {
+    let mut m = pill_model(crate::native::pill::TablineShows::Tabs);
+    m.look = crate::model::Look::new(crate::model::Panes::Nvim, true);
+    m.engine
+        .tabline
+        .as_mut()
+        .expect("the fixture attaches a tabline")
+        .tabs
+        .truncate(1);
+    assert_eq!(
+        m.chrome_rows(),
+        0,
+        "one tabpage at showtabline=1 drew a row"
+    );
+
+    let (_, tall) = m.grid_target();
+    let effects = update(&mut m, Msg::ShowTablineChanged { value: 2 });
+    assert_eq!(m.chrome_rows(), 1, "showtabline=2 left the row unreserved");
+    let (width, height) = m.grid_target();
+    assert_eq!(height, tall - 1, "the row was reserved out of nothing");
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::TryResize { width: w, height: h })]
+                if *w == width && *h == height
+        ),
+        "the reading sent {effects:?}"
+    );
+    assert!(m.dirty, "the row appeared and nothing asked for a repaint");
+
+    m.dirty = false;
+    assert!(
+        update(&mut m, Msg::ShowTablineChanged { value: 2 }).is_empty(),
+        "a reading saying what the model already held resized the engine"
+    );
+    assert!(!m.dirty, "an unchanged reading asked for a repaint");
+}
+
 #[test]
 fn a_click_on_a_pill_buffer_selects_that_buffer() {
     let mut m = pill_model(crate::native::pill::TablineShows::Buffers);
@@ -12885,7 +12928,7 @@ fn a_click_on_a_pill_buffer_selects_that_buffer() {
         false,
         false,
     )];
-    let slots = crate::native::pill::PillView::from_model(&m).slots(m.term_width);
+    let slots = crate::native::pill::PillView::from_model(&m).row_slots();
     let effects = update(&mut m, click(0, slots[0].col));
     assert!(
         matches!(

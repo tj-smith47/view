@@ -3,7 +3,7 @@
 //!
 //! The row is one picture with two readers. The painter writes the names
 //! into cells and the mouse router answers which name a column names, and
-//! both spend [`PillView::slots`] so a click lands on the name under the
+//! both spend [`PillView::row_slots`] so a click lands on the name under the
 //! pointer rather than on the one a second layout put there.
 
 use super::ai_panel::AiPanelState;
@@ -91,6 +91,15 @@ pub struct PillView {
     pub names: PillNames,
     /// What the agent is doing, empty for a session with `[ai]` off.
     pub agent: &'static str,
+    /// The row's own width: the terminal's, which is what the layer the
+    /// row is drawn into spans.
+    ///
+    /// Carried on the view so the painter and the mouse router cannot lay
+    /// the row out on two different widths. A painter handed a narrower
+    /// area writes only the cells inside it and never re-flows, so the
+    /// one frame between a resize reaching the model and reaching the
+    /// backend draws a clipped row rather than a differently placed one.
+    pub width: u16,
 }
 
 /// Where one entry was placed: its own column and how many cells it took,
@@ -135,7 +144,15 @@ impl PillView {
             entries,
             names,
             agent: agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted),
+            width: model.term_width,
         }
+    }
+
+    /// Where each entry lands on this session's own row, which is the one
+    /// layout both the painter and the mouse router spend.
+    #[must_use]
+    pub fn row_slots(&self) -> Vec<PillSlot> {
+        self.slots(self.width)
     }
 
     /// Where each entry lands on a row `width` cells wide, left to right.
@@ -150,7 +167,7 @@ impl PillView {
     /// leave the one name a person is looking for off the screen, and the
     /// hit test unable to reach it.
     #[must_use]
-    pub fn slots(&self, width: u16) -> Vec<PillSlot> {
+    pub(crate) fn slots(&self, width: u16) -> Vec<PillSlot> {
         let host = edge_cells(&self.host);
         let agent = edge_cells(self.agent);
         let Some(room) = width.checked_sub(host.saturating_add(agent)) else {
@@ -227,11 +244,11 @@ impl PillView {
         0
     }
 
-    /// The entry column `col` of a row `width` cells wide names, or `None`
-    /// for a column carrying no name.
+    /// The entry column `col` of this session's row names, or `None` for
+    /// a column carrying no name.
     #[must_use]
-    pub fn hit(&self, width: u16, col: u16) -> Option<u64> {
-        self.slots(width)
+    pub fn hit(&self, col: u16) -> Option<u64> {
+        self.row_slots()
             .into_iter()
             .find(|slot| col >= slot.col && col < slot.col.saturating_add(slot.cells))
             .map(|slot| slot.id)
@@ -319,6 +336,10 @@ pub fn agent_word(panel: &AiPanelState, enabled: bool, trusted: bool) -> &'stati
     }
 }
 
+/// nvim's own default `showtabline`, and what view holds until the bridge
+/// relays the session's own value.
+pub const DEFAULT_SHOWTABLINE: u8 = 1;
+
 /// Whether the pill takes the top row of this session's terminal.
 ///
 /// Read off the attach rather than off the arrival of a `tabline_update`,
@@ -328,8 +349,8 @@ pub fn agent_word(panel: &AiPanelState, enabled: bool, trusted: bool) -> &'stati
 ///
 /// Under tiles the row stands whatever is open, because a pill with one
 /// workspace still carries the host and the agent word; under
-/// `panes = "nvim"` it follows nvim's own `showtabline` threshold, which is
-/// the row a migrating user already has.
+/// `panes = "nvim"` it is the row nvim itself would have drawn, so it
+/// follows the user's own `showtabline`.
 #[must_use]
 pub fn shows(model: &Model) -> bool {
     shows_under(
@@ -340,16 +361,27 @@ pub fn shows(model: &Model) -> bool {
             .tabline
             .as_ref()
             .map_or(0, |state| state.tabs.len()),
+        model.showtabline,
     )
 }
 
-/// [`shows`] from the three answers it reads, for the one caller that has
+/// [`shows`] from the four answers it reads, for the one caller that has
 /// them before there is a model to ask: the spawn geometry, which is seeded
 /// a row shorter so the child is laid out against the grid the attach will
 /// ask for.
+///
+/// `showtabline` is read the way nvim reads it: `0` keeps the row off, `1`
+/// shows it once a second tabpage is open, and anything from `2` up shows
+/// it always. Under tiles it decides nothing, because the row carries the
+/// host and the agent word whatever nvim would have drawn there.
 #[must_use]
-pub fn shows_under(owns_tabline: bool, panes: Panes, tabs: usize) -> bool {
-    owns_tabline && (panes == Panes::Tiles || tabs > 1)
+pub fn shows_under(owns_tabline: bool, panes: Panes, tabs: usize, showtabline: u8) -> bool {
+    let nvim_would_draw_it = match showtabline {
+        0 => false,
+        1 => tabs > 1,
+        _ => true,
+    };
+    owns_tabline && (panes == Panes::Tiles || nvim_would_draw_it)
 }
 
 #[cfg(test)]
@@ -388,6 +420,7 @@ mod tests {
             entries,
             names: PillNames::Tabs,
             agent: "",
+            width: 20,
         }
     }
 
@@ -486,6 +519,7 @@ mod tests {
             }],
             names: PillNames::Tabs,
             agent: "idle",
+            width: 30,
         };
         let slots = pill.slots(30);
         // 5 for the host, 6 for the agent word, the name centred in 19
@@ -506,11 +540,11 @@ mod tests {
                 current: true,
             },
         ]);
-        assert_eq!(pill.hit(20, 4), None);
-        assert_eq!(pill.hit(20, 5), Some(7));
-        assert_eq!(pill.hit(20, 9), Some(7));
-        assert_eq!(pill.hit(20, 10), Some(9));
-        assert_eq!(pill.hit(20, 15), None);
+        assert_eq!(pill.hit(4), None);
+        assert_eq!(pill.hit(5), Some(7));
+        assert_eq!(pill.hit(9), Some(7));
+        assert_eq!(pill.hit(10), Some(9));
+        assert_eq!(pill.hit(15), None);
     }
 
     #[test]
@@ -588,6 +622,60 @@ mod tests {
             agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted),
             "waiting"
         );
+    }
+
+    /// Under `panes = "nvim"` the row is the one nvim itself would have
+    /// drawn, so the user's own `showtabline` decides it. A threshold
+    /// hardcoded to a second tabpage took the always-on row away from a
+    /// user who had set 2, and gave a row to one who had set 0.
+    #[test]
+    fn the_nvim_look_row_follows_showtabline() {
+        for (showtabline, tabs, under_nvim) in [
+            (0_u8, 1_usize, false),
+            (0, 2, false),
+            (1, 1, false),
+            (1, 2, true),
+            (2, 1, true),
+            (2, 2, true),
+        ] {
+            assert_eq!(
+                shows_under(true, Panes::Nvim, tabs, showtabline),
+                under_nvim,
+                "showtabline={showtabline} with {tabs} tabpage(s) under the nvim look"
+            );
+            assert!(
+                shows_under(true, Panes::Tiles, tabs, showtabline),
+                "showtabline={showtabline} with {tabs} tabpage(s) took the tiles row away"
+            );
+            assert!(
+                !shows_under(false, Panes::Nvim, tabs, showtabline)
+                    && !shows_under(false, Panes::Tiles, tabs, showtabline),
+                "a session that left the tab line with nvim drew a row anyway"
+            );
+        }
+    }
+
+    /// The whole row is laid out once, on the terminal's own width, and
+    /// both readers spend that layout: the painter draws the names there
+    /// and the router answers which name a column carries.
+    #[test]
+    fn the_row_is_laid_out_on_the_terminals_own_width() {
+        let mut model = Model::with_term_size(30, 5);
+        model.engine.tabline = Some(tabline(1, &["work", "docs"]));
+        let pill = PillView::from_model(&model);
+        assert_eq!(pill.width, model.term_width);
+        assert_eq!(pill.row_slots(), pill.slots(model.term_width));
+        assert_eq!(pill.row_slots().len(), 2);
+        for slot in pill.row_slots() {
+            for col in slot.col..slot.col.saturating_add(slot.cells) {
+                assert_eq!(
+                    pill.hit(col),
+                    Some(slot.id),
+                    "column {col} was drawn for tab {} and hit-tests as something else",
+                    slot.id
+                );
+            }
+        }
     }
 
     #[test]

@@ -101,7 +101,9 @@ impl Frame {
 ///   is marked changed where the status changes), `overlays` (via
 ///   `had_overlays`),
 ///   `statusline` (via `statusline_rows`), `toast_history` (only the
-///   palette's history view reads it, and that is an overlay)
+///   palette's history view reads it, and that is an overlay),
+///   `showtabline` (it decides whether the top row exists under
+///   `panes = "nvim"`, which is `offset`)
 /// - a setting no layer's geometry follows on its own:
 ///   `ai_panel_width_pct`,
 ///   `ai_review_open_target`, `tree_width_pct`, `ext_surfaces`,

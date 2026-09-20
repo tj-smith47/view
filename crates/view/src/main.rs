@@ -1107,6 +1107,10 @@ fn main() -> Result<()> {
         // no tabline event has arrived yet, and under nvim mode the row is
         // nvim's own until a second tabpage opens
         0,
+        // the option's own default: the child has not been asked yet, and
+        // a session that sets it elsewhere gets the row a tick after the
+        // bridge relays the value it read
+        view_core::native::pill::DEFAULT_SHOWTABLINE,
     ));
     let spawn_size = view_core::model::grid_target_for((width, height), chrome, statusline, ring);
     // what the chrome alone would have left, so this is true for every

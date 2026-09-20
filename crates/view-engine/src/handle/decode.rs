@@ -91,6 +91,7 @@ pub(super) fn decode_clipboard_set(token: ReplyToken, params: &[Value]) -> Optio
 /// and `colorscheme_failed` carry the scheme's name alone, `diagnostics` an `(errors, warnings)`
 /// count pair, `git` the branch name alone, `buffer` a `(name, modified)`
 /// pair, `ttimeout` the effective escape wait in milliseconds as a string,
+/// `showtabline` nvim's own option value as a number,
 /// `handed_back` the module names a late hand-back pass turned off, and
 /// `float` the twelve positional fields [`decode_float_observed`] names.
 ///
@@ -146,6 +147,12 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
             let within: u64 = first.as_str()?.parse().ok()?;
             Some(Msg::EscapeTimeout(Duration::from_millis(within)))
         }
+        // nvim's own number, clamped rather than refused: the option is a
+        // small count, and a build that read a wider one would still draw
+        // the row the highest reading asks for
+        "showtabline" => Some(Msg::ShowTablineChanged {
+            value: u8::try_from(first.as_u64()?).unwrap_or(u8::MAX),
+        }),
         "float" => decode_float_observed(params),
         // one window-local channel of a surface view owns found holding
         // something else, sent as the hold sets it back

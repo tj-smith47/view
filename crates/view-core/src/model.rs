@@ -221,6 +221,15 @@ pub struct Model {
     /// What the pill names while one tabpage is open, set once at startup
     /// from `[native] tabline_shows` the same way `statusline_enabled` is.
     pub tabline_shows: crate::native::pill::TablineShows,
+    /// nvim's own `showtabline`, as the bridge last relayed it: `0` never
+    /// draws the top row under `panes = "nvim"`, `1` draws it once a
+    /// second tabpage is open, `2` always.
+    ///
+    /// Holds nvim's default until the bridge's first reading arrives, for
+    /// the reason the row is reserved off the attach rather than off a
+    /// tabline event: a session that reserved no row and then found it
+    /// wanted one would shift every window down a frame later.
+    pub showtabline: u8,
     /// Whether `[native] tabline` is still the value the look derived, so
     /// a later `:View ui panes` flip derives it again.
     ///
@@ -409,6 +418,7 @@ impl Model {
             remote: None,
             buffers: Vec::new(),
             tabline_shows: crate::native::pill::TablineShows::default(),
+            showtabline: crate::native::pill::DEFAULT_SHOWTABLINE,
             tabline_follows_look: true,
             colorscheme: None,
             ai_trusted: false,

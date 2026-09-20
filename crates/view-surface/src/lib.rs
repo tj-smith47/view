@@ -1929,6 +1929,11 @@ mod tests {
         // a grid narrower than the terminal leaves the names centred on the
         // terminal, which is the width the mouse router hit-tests at
         let mut model = model_with_grid(3, 4);
+        // seated wider than the grid: a terminal left at zero would let a
+        // row laid out on the grid pass a pin about the terminal, and a
+        // zero-width layer is one the compositor skips entirely
+        model.term_width = 20;
+        model.term_height = 6;
         apply(
             &mut model,
             UiEvent::TablineUpdate {
@@ -1955,7 +1960,7 @@ mod tests {
             .expect("the top row's layer present");
         assert_eq!(
             (row.rect.row, row.rect.col, row.rect.width, row.rect.height),
-            (0, 0, model.term_width, 1)
+            (0, 0, 20, 1)
         );
     }
 

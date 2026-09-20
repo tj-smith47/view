@@ -2,13 +2,14 @@
 //!
 //! nvim raises no redraw event for a buffer's name, its filetype, its
 //! diagnostics or a window's cursor position, so view installs autocmds of
-//! its own and they arrive here. Every one of them changes text on screen
-//! and nothing else, which is why none returns an RPC of its own beyond the
-//! tree's git refresh.
+//! its own and they arrive here. Most of them change text on screen and
+//! nothing else, so they return no RPC beyond the tree's git refresh; the
+//! tab-row option is the one that can move a row the engine's own grid is
+//! laid out against.
 
 use crate::events::WinHandle;
 use crate::model::{BufferEntry, Model, WindowStatus};
-use crate::msg::Effect;
+use crate::msg::{Effect, RpcCall};
 use crate::native::statusline::SegmentUpdate;
 
 use super::surfaces::tree_git_refresh_effect;
@@ -63,6 +64,28 @@ pub(super) fn on_buffer_list(model: &mut Model, buffers: Vec<BufferEntry>) -> Ve
     model.buffers = buffers;
     model.dirty = true;
     Vec::new()
+}
+
+/// nvim's own `showtabline`, which decides whether the top row exists at
+/// all under `panes = "nvim"`.
+///
+/// A value that moves the row across nvim's own threshold moves the grid
+/// with it, the same `TryResize` a second tabpage opening produces
+/// (`ui_event::apply_ui_event`'s `TablineUpdate` arm): the engine lays its
+/// windows out against the rows view leaves it, and a grid a row too tall
+/// paints its last line under the bar.
+pub(super) fn on_showtabline(model: &mut Model, value: u8) -> Vec<Effect> {
+    if model.showtabline == value {
+        return Vec::new();
+    }
+    let before = model.chrome_rows();
+    model.showtabline = value;
+    model.dirty = true;
+    if before == model.chrome_rows() {
+        return Vec::new();
+    }
+    let (width, height) = model.grid_target();
+    vec![Effect::Rpc(RpcCall::TryResize { width, height })]
 }
 
 /// One window's own status, which is what its tile's frame edge reads.

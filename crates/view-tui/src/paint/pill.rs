@@ -1,6 +1,6 @@
 //! The top pill: the row above everything else, naming what is open.
 //!
-//! Placement is [`PillView::slots`]'s, the same answer the mouse router
+//! Placement is [`PillView::row_slots`]'s, the same answer the mouse router
 //! spends, so the name a click selects is the name that was drawn under
 //! the pointer.
 
@@ -18,6 +18,13 @@ use super::{ratatui_style, rgb};
 /// The row is filled in `TabLineFill` first, so every column the names do
 /// not reach carries the group nvim names for exactly that: the row behind
 /// the tabs.
+///
+/// Laid out on [`PillView::width`], the terminal's own width, and written
+/// only into the cells `area` holds. An `area` the compositor clipped
+/// narrower -- the one frame between a resize reaching the model and
+/// reaching the backend -- loses the columns off its right edge and moves
+/// none of the others, so a name a click reaches is the name that was
+/// drawn under the pointer.
 pub(super) fn paint_pill(pill: &PillView, theme: &Theme, area: Rect, buf: &mut Buffer) {
     let fill = ratatui_style(theme.chrome(ChromeGroup::TabLineFill));
     fill_run(buf, area, 0, area.width, fill);
@@ -27,12 +34,12 @@ pub(super) fn paint_pill(pill: &PillView, theme: &Theme, area: Rect, buf: &mut B
     // take it down with the rest
     let edge = theme.accent().fg.map_or(fill, |fg| fill.fg(rgb(fg)));
     write_at(buf, area, 1, &pill.host, edge);
-    let agent = area.width.saturating_sub(edge_cells(pill.agent));
+    let agent = pill.width.saturating_sub(edge_cells(pill.agent));
     write_at(buf, area, agent.saturating_add(1), pill.agent, edge);
 
     let tab = ratatui_style(theme.chrome(ChromeGroup::TabLine));
     let selected = ratatui_style(theme.chrome(ChromeGroup::TabLineSel));
-    for slot in pill.slots(area.width) {
+    for slot in pill.row_slots() {
         // by the index the slot names, never by the loop's own count: a
         // list longer than the row is a window into it, and its first slot
         // is not its first entry
@@ -93,10 +100,14 @@ mod tests {
     /// carry rather than the row's own foreground.
     const ACCENT: u32 = 0x44_44_44;
 
-    /// A session on a remote host with two tabpages, its three pill groups
-    /// three different colours so a cell says which one painted it.
-    fn two_tabs() -> Model {
-        let mut model = Model::new().with_remote(Some("prod".to_string()));
+    /// A session on a remote host with two tabpages on a terminal `width`
+    /// cells wide, its three pill groups three different colours so a cell
+    /// says which one painted it.
+    ///
+    /// The terminal's width is the row's own layout width, so a fixture
+    /// that left it at zero would place every name nowhere.
+    fn two_tabs(width: u16) -> Model {
+        let mut model = Model::with_term_size(width, 24).with_remote(Some("prod".to_string()));
         model.engine.set_accent_token(Some(ACCENT));
         for (id, group, fg) in [
             (1_u64, ChromeGroup::TabLine, 0x11_11_11_u32),
@@ -185,7 +196,10 @@ mod tests {
     /// one of them.
     #[test]
     fn a_row_too_narrow_for_the_list_paints_the_names_its_slots_name() {
-        let mut model = two_tabs();
+        // room for two of the four names, so the window holds the current
+        // one and the one before it
+        let width = 20;
+        let mut model = two_tabs(width);
         model.ai_enabled = false;
         let _ = view_core::update::update(
             &mut model,
@@ -201,10 +215,7 @@ mod tests {
         );
         let theme = Theme::from_hl(model.engine.hl());
         let pill = PillView::from_model(&model);
-        // room for two of the four names, so the window holds the current
-        // one and the one before it
-        let width = 20;
-        let slots = pill.slots(width);
+        let slots = pill.row_slots();
         assert_eq!(slots.len(), 2, "the fixture drew {} names", slots.len());
         let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
         terminal
@@ -219,15 +230,56 @@ mod tests {
         );
     }
 
+    /// The row the mouse router hit-tests is the row the painter draws,
+    /// on the terminal's own width. A painter that laid the names out on
+    /// the area handed to it re-centred them for the one frame between a
+    /// resize reaching the model and reaching the backend, and a click in
+    /// that frame landed on a name drawn at another column.
+    #[test]
+    fn a_clipped_row_paints_the_columns_the_router_would_hit() {
+        let model = two_tabs(40);
+        let theme = Theme::from_hl(model.engine.hl());
+        let pill = PillView::from_model(&model);
+        let row = |area: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(area, 1)).unwrap();
+            terminal
+                .draw(|frame| paint_pill(&pill, &theme, frame.area(), frame.buffer_mut()))
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+            (0..area)
+                .map(|col| buf[(col, 0)].symbol().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        let clipped = 24;
+        assert_eq!(
+            row(clipped),
+            row(40)[..usize::from(clipped)],
+            "a row clipped to {clipped} columns re-flowed the names"
+        );
+        // the router's own reading of the same view: every column a slot
+        // covers answers with that slot's id
+        for slot in pill.row_slots() {
+            for col in slot.col..slot.col.saturating_add(slot.cells) {
+                assert_eq!(
+                    pill.hit(col),
+                    Some(slot.id),
+                    "column {col} was painted for tab {} and hit-tests as something else",
+                    slot.id
+                );
+            }
+        }
+    }
+
     /// The bool on the slot is not the colour on the screen: only this
     /// composite says the current name is the one lit, and the goldens
     /// carry text without styling.
     #[test]
     fn the_current_name_is_the_one_the_selected_group_paints() {
-        let model = two_tabs();
+        let model = two_tabs(40);
         let theme = Theme::from_hl(model.engine.hl());
         let pill = PillView::from_model(&model);
-        let slots = pill.slots(40);
+        let slots = pill.row_slots();
         assert_eq!(slots.len(), 2, "the fixture drew {} names", slots.len());
         let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
         terminal

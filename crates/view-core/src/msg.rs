@@ -421,6 +421,15 @@ pub enum Msg {
     BufferList {
         buffers: Vec<crate::model::BufferEntry>,
     },
+    /// The bridge relayed nvim's own `showtabline`: its reading at
+    /// registration, and every `OptionSet showtabline` after it.
+    ///
+    /// Under `panes = "nvim"` this decides whether view reserves the top
+    /// row at all, so a change to it resizes the engine's grid the same
+    /// way a second tabpage opening does.
+    ShowTablineChanged {
+        value: u8,
+    },
     /// The bridge's float watcher saw a floating window, or saw one it had
     /// already reported move: geometry, anchor and whatever identity the
     /// window carries, in the grid's own cells.

@@ -89,8 +89,9 @@ fn position_owner(model: &Model, input: &MouseInput) -> Option<MouseCapture> {
 /// The switch a press on one of the pill's names asks for, or `None` for
 /// a press anywhere else.
 ///
-/// Laid out through [`PillView::slots`], the same placement the painter
-/// spends, so the name under the pointer is the name that was drawn there.
+/// Laid out through [`PillView::row_slots`], on the terminal's own width
+/// the view carries, which is the one layout the painter spends too, so
+/// the name under the pointer is the name that was drawn there.
 /// No gesture is claimed: the pill has nothing to drag, and a press that
 /// switched tabpage has already done the whole of what it means.
 ///
@@ -102,7 +103,7 @@ fn pill_press(model: &Model, input: &MouseInput) -> Option<RpcCall> {
         return None;
     }
     let pill = PillView::from_model(model);
-    let id = pill.hit(model.term_width, input.col)?;
+    let id = pill.hit(input.col)?;
     Some(match pill.names {
         PillNames::Tabs => RpcCall::SelectTab { tab: id },
         PillNames::Buffers => RpcCall::SelectBuffer { buf: id },

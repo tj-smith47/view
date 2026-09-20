@@ -296,8 +296,8 @@ fn paint_grid<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid) {
 }
 
 /// Writes the pill's row: the host at the left edge, the names where
-/// [`view_core::native::pill::PillView::slots`] placed them, and the agent's
-/// word at the right.
+/// [`view_core::native::pill::PillView::row_slots`] placed them, and the
+/// agent's word at the right.
 ///
 /// The placement is the painter's own answer rather than a second layout,
 /// so the columns a golden shows are the columns a session draws into.
@@ -306,7 +306,7 @@ fn paint_pill(canvas: &mut Canvas<'_>, layer: &Layer, view: &view_core::native::
 
     blank_row(canvas, layer.rect.row, layer.rect.col, layer.rect.width);
     paint_text(canvas, layer.rect.row, layer.rect.col + 1, &view.host);
-    for slot in view.slots(layer.rect.width) {
+    for slot in view.row_slots() {
         // the entry the slot names, never the one beside it in the list: a
         // row too narrow for every name is a window into the list, and its
         // first slot is not its first entry
@@ -320,7 +320,7 @@ fn paint_pill(canvas: &mut Canvas<'_>, layer: &Layer, view: &view_core::native::
             &entry.label,
         );
     }
-    let agent = layer.rect.width.saturating_sub(edge_cells(view.agent));
+    let agent = view.width.saturating_sub(edge_cells(view.agent));
     paint_text(
         canvas,
         layer.rect.row,

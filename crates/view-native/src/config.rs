@@ -1320,7 +1320,7 @@ mod tests {
     /// Every `[native]` switch the example shows, live or commented out.
     /// A key with no fixed default is shown commented, and it is still a
     /// key the example documents.
-    fn example_native_switches() -> BTreeSet<String> {
+    fn example_native_switches() -> BTreeMap<String, (usize, String)> {
         native_switches(EXAMPLE_TOML)
     }
 
@@ -1330,10 +1330,15 @@ mod tests {
     /// Indentation is dropped before anything else is read: TOML takes an
     /// indented key, and a scrape that skipped one would report a switch
     /// the example documents as missing.
-    fn native_switches(toml: &str) -> BTreeSet<String> {
+    ///
+    /// Each key carries the 1-based line it was read off and that line's
+    /// own text, because a comment line reading `# word = true` is a key
+    /// by every text rule there is, and a failure has to show the reader
+    /// the line to tell the two apart.
+    fn native_switches(toml: &str) -> BTreeMap<String, (usize, String)> {
         let mut in_native = false;
-        let mut keys = BTreeSet::new();
-        for line in toml.lines() {
+        let mut keys = BTreeMap::new();
+        for (at, line) in toml.lines().enumerate() {
             let trimmed = line.trim();
             let body = trimmed.strip_prefix("# ").unwrap_or(trimmed);
             if body.starts_with('[') {
@@ -1356,10 +1361,35 @@ mod tests {
                 value.split('#').next().map(str::trim),
                 Some("true" | "false")
             ) {
-                keys.insert(key.to_string());
+                keys.insert(key.to_string(), (at + 1, trimmed.to_string()));
             }
         }
         keys
+    }
+
+    /// What [`the_example_config_keys_are_exactly_the_registry_ids`] fails
+    /// with: the keys on either side that the other has not got, each
+    /// scraped one with the line it came from.
+    fn key_mismatch_report(
+        scraped: &BTreeMap<String, (usize, String)>,
+        registry: &BTreeSet<&str>,
+    ) -> String {
+        let mut report =
+            String::from("the example's [native] keys and the registry's ids must be the same set");
+        for (key, (at, text)) in scraped {
+            if !registry.contains(key.as_str()) {
+                report.push_str(&format!(
+                    "\n  the registry has no `{key}`, read off line {at}: {text}\n    \
+                     (a wrapped comment ending in a word and `= true` reads as a key)"
+                ));
+            }
+        }
+        for id in registry {
+            if !scraped.contains_key(*id) {
+                report.push_str(&format!("\n  the example shows no `{id}`"));
+            }
+        }
+        report
     }
 
     /// The scrape reads the key and not the column it starts in: TOML
@@ -1370,7 +1400,7 @@ mod tests {
         let indented = "[native]\n    picker = true\n    # tabline = true   # a wrapped\n      # note = with an equals sign in it\n";
         assert_eq!(
             native_switches(indented)
-                .iter()
+                .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             vec!["picker", "tabline"],
@@ -1379,14 +1409,32 @@ mod tests {
         );
     }
 
+    /// The other half of dropping the indentation skip: prose that wraps
+    /// onto its own comment line and ends in one word and `= true` is a
+    /// key by text alone, so the failure names the line rather than
+    /// sending the reader to the registry.
+    #[test]
+    fn a_wrapped_comment_read_as_a_key_is_named_by_its_line() {
+        let planted = "[native]\n# the switch above and the one below it\n# and = true\n";
+        let report = key_mismatch_report(&native_switches(planted), &BTreeSet::new());
+        for expected in ["line 3", "# and = true", "wrapped comment"] {
+            assert!(
+                report.contains(expected),
+                "the failure must name {expected:?}, and it read:\n{report}"
+            );
+        }
+    }
+
     #[test]
     fn the_example_config_keys_are_exactly_the_registry_ids() {
         let shown = example_native_switches();
-        let in_example: BTreeSet<&str> = shown.iter().map(String::as_str).collect();
+        let in_example: BTreeSet<&str> = shown.keys().map(String::as_str).collect();
         let in_registry: BTreeSet<&str> = registry::features().iter().map(|f| f.id).collect();
         assert_eq!(
-            in_example, in_registry,
-            "the example's [native] keys and the registry's ids must be the same set"
+            in_example,
+            in_registry,
+            "{}",
+            key_mismatch_report(&shown, &in_registry)
         );
     }
 
