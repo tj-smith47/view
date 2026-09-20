@@ -8,6 +8,7 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use thiserror::Error;
 
@@ -682,6 +683,10 @@ pub fn generate_user_fixture_with_stall(slow_ms: u64) -> Result<PathBuf, Fixture
     Ok(dest)
 }
 
+/// Counts [`write_generated`] calls in this process, so two generations in
+/// flight at once never name the same staging neighbour.
+static NEXT_STAGING: AtomicU64 = AtomicU64::new(0);
+
 /// Writes one generated fixture file, creating its parent directories.
 ///
 /// Through a private neighbour and a rename rather than in place: this tree
@@ -689,6 +694,9 @@ pub fn generate_user_fixture_with_stall(slow_ms: u64) -> Result<PathBuf, Fixture
 /// them writing the same `init.lua` at once would otherwise hand an editor
 /// a half-written config with nothing raising an error. The rename is what
 /// makes a reader see the old file or the new one and never a torn one.
+/// `rename` replaces an existing destination in one step on Linux and
+/// macOS (POSIX) and on Windows (`MoveFileEx` with `REPLACE_EXISTING`,
+/// which is what `std::fs::rename` asks for there).
 /// Per file rather than by swapping the whole directory, because the two
 /// sides of one pair resolve this tree independently and a directory
 /// swapped out from under the first side is a file the second run deleted.
@@ -701,7 +709,15 @@ fn write_generated(path: &Path, content: impl AsRef<[u8]>) -> Result<(), Fixture
         std::fs::create_dir_all(parent).map_err(ctx(parent))?;
     }
     let mut staging = path.as_os_str().to_os_string();
-    staging.push(format!(".{}.tmp", std::process::id()));
+    // the process id separates concurrent test binaries and sessions; the
+    // counter separates two threads of one of them, which would otherwise
+    // pick the same neighbour and leave whichever renamed second reporting
+    // its own destination missing
+    staging.push(format!(
+        ".{}-{}.tmp",
+        std::process::id(),
+        NEXT_STAGING.fetch_add(1, Ordering::Relaxed)
+    ));
     let staging = PathBuf::from(staging);
     // a failed write or rename leaves the neighbour behind otherwise, and
     // the next run picks a name off the same pid: one stale byte string in
@@ -925,6 +941,91 @@ mod tests {
                 "an unpopulated cache must say so; got {err:?}"
             ),
         }
+    }
+
+    /// Every generated file is present in every generation that came back,
+    /// however many are in flight at once. The staging neighbour was named
+    /// off the process id alone, so two threads of one test binary picked
+    /// the same path and whichever renamed second found it already gone,
+    /// reporting its own destination as missing.
+    #[test]
+    fn concurrent_generations_each_get_a_whole_fixture() {
+        const THREADS: usize = 4;
+        const ROUNDS: usize = 8;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        for _ in 0..ROUNDS {
+            let mut handles = Vec::new();
+            for _ in 0..THREADS {
+                let barrier = std::sync::Arc::clone(&barrier);
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    generate_user_fixture()
+                }));
+            }
+            let mut generated = None;
+            for handle in handles {
+                match handle.join().unwrap() {
+                    Ok(dir) => {
+                        assert_whole_fixture(&dir);
+                        generated = Some(dir);
+                    }
+                    Err(err) => assert!(
+                        matches!(err, FixtureError::EmptyPluginCache { .. }),
+                        "a generation racing its peers must still hand back a whole tree, or \
+                         say the cache is empty; got {err:?}"
+                    ),
+                }
+            }
+            if let Some(dir) = generated {
+                let left = staging_leftovers(&dir);
+                assert!(
+                    left.is_empty(),
+                    "every staging neighbour must be renamed or reaped; found {left:?}"
+                );
+            }
+        }
+    }
+
+    /// Reads every file a generation writes, through the same check the
+    /// plugin-cache test applies to the init.
+    fn assert_whole_fixture(dir: &Path) {
+        let nvim = dir.join("nvim");
+        let config = nvim.join("lua").join("config");
+        for path in [
+            nvim.join("lazy-lock.json"),
+            config.join("options.lua"),
+            config.join("keymaps.lua"),
+            config.join("autocmds.lua"),
+            dir.join("view").join("view.toml"),
+        ] {
+            assert!(
+                std::fs::read(&path).is_ok(),
+                "{} is missing from a generation that came back",
+                path.display()
+            );
+        }
+        let init = std::fs::read_to_string(nvim.join("init.lua")).unwrap_or_default();
+        assert!(
+            init.contains("plugin("),
+            "a generated login with no plugin spec is not a login:\n{init}"
+        );
+    }
+
+    /// Every `.tmp` neighbour still sitting under the generated tree.
+    fn staging_leftovers(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return found;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(staging_leftovers(&path));
+            } else if path.to_string_lossy().ends_with(".tmp") {
+                found.push(path);
+            }
+        }
+        found
     }
 
     #[test]
