@@ -98,11 +98,20 @@ return win";
 /// invalid handle raises rather than doing nothing. `force` is set because
 /// the buffer is scratch and has nothing to lose.
 ///
+/// The close can still be refused -- `:only` from inside the surface
+/// leaves its window the last one and nvim answers E444 -- and this runs
+/// as a notification, whose error nvim reports to its log and not to the
+/// screen. The `pcall` puts it back on the screen through the same
+/// `msg_show` every other engine error reaches the reader by.
+///
 /// [`EngineHandle::close_native_window`]: super::EngineHandle::close_native_window
 pub(crate) const CLOSE_NATIVE_WINDOW_CHUNK: &str = "\
 local win = ...
 if vim.api.nvim_win_is_valid(win) then
-  vim.api.nvim_win_close(win, true)
+  local ok, err = pcall(vim.api.nvim_win_close, win, true)
+  if not ok then
+    vim.api.nvim_echo({ { tostring(err), 'ErrorMsg' } }, true, {})
+  end
 end";
 
 /// The lua chunk [`EngineHandle::set_window_size`] runs inside nvim,

@@ -1067,4 +1067,31 @@ fn a_windowed_tree_keeps_its_tile_as_the_windows_of_a_split_close() {
         wanted,
         "the reopen left view holding a grid nvim has no window for"
     );
+
+    // nvim refusing the close outright, which is what `:only` from inside
+    // the tree sets up: its window is then the last one and
+    // `nvim_win_close` answers E444, so no `win_close` follows
+    engine.arm_and_input(":only<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the toggle asks nvim to close the window");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_ne!(
+        tree_width(&mut engine),
+        "",
+        "nvim did not refuse the close, so this leg tests nothing"
+    );
+    assert!(
+        !engine.tree_is_open(),
+        "the tree's state waits on a win_close nvim will never send"
+    );
+    let screen = engine.screen_text();
+    assert!(
+        screen.contains("E444"),
+        "a refused close said nothing to the reader: {screen}"
+    );
 }

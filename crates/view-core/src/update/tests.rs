@@ -13227,6 +13227,34 @@ fn leader_e_from_inside_the_windowed_tree_closes_it() {
     );
 }
 
+/// nvim can refuse the close: `:only` from inside the tree leaves its
+/// window the last one and `nvim_win_close` answers E444, so no `win_close`
+/// follows. The keypress still has to leave the model consistent, because
+/// nothing else is coming.
+#[test]
+fn a_failed_window_close_still_releases_the_claim() {
+    let mut m = focused_windowed_tree();
+    let effects = update(&mut m, tree_toggle());
+
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        0,
+        "the handle stayed claimed for the rest of the session"
+    );
+    assert!(
+        m.tree_mut().is_none(),
+        "the tree's state outlived the close"
+    );
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::TreeClose))
+            .count(),
+        1,
+        "the scan worker was not told exactly once: {effects:?}"
+    );
+}
+
 /// nvim answers `CloseNativeWindow` with a `win_close` of its own, which
 /// arrives after view has already taken the tree down. The second pass has
 /// to be a no-op: a second `TreeClose` would cancel the scan of whatever

@@ -217,12 +217,20 @@ fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
 }
 
 /// Closes the window the tree sits in and drops its state.
+///
+/// The claim goes here rather than on the `win_close` the close produces,
+/// because nvim can refuse the close and then send nothing: `:only` from
+/// inside the tree leaves its window the last one, and `nvim_win_close`
+/// answers E444. Waiting for an event that never comes left the handle
+/// claimed for the rest of the session, and the next window nvim gave that
+/// number read as a surface of view's own. Releasing a handle whose window
+/// survives costs one repaint as an ordinary window; the release the
+/// `win_close` path does is a `retain` and stays a no-op.
 fn close_windowed_tree(model: &mut Model) -> Vec<Effect> {
-    let win = model
-        .engine
-        .grids()
-        .native_window(NativeSurface::Tree)
-        .map(|handle| handle.0);
+    let win = model.engine.grids().native_window(NativeSurface::Tree);
+    if let Some(win) = win {
+        model.engine.grids_mut().release_native_window(win);
+    }
     let closed = model.close_tree();
     model.dirty = true;
     let mut effects = Vec::new();
@@ -230,7 +238,9 @@ fn close_windowed_tree(model: &mut Model) -> Vec<Effect> {
         effects.append(&mut vec![Effect::TreeClose]);
     }
     if let Some(win) = win {
-        effects.append(&mut vec![Effect::Rpc(RpcCall::CloseNativeWindow { win })]);
+        effects.append(&mut vec![Effect::Rpc(RpcCall::CloseNativeWindow {
+            win: win.0,
+        })]);
     }
     effects
 }
