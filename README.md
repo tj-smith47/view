@@ -62,10 +62,8 @@ screen never goes blank.
 your config loaded. See [Performance](#performance).
 
 **Everyday details.** Looks right in every terminal, from kitty and ghostty
-down to 16 colors. The system clipboard works. The command-line flags you
-already use work (`+42`, `-R`, `-O`, `ls | view -`). The config is small:
-`[ui]` for the theme, `[engine]` for your own nvim or `NVIM_APPNAME`,
-everything else optional.
+down to 16 colors. The config is small: `[ui]` for the theme, `[engine]`
+for your own nvim or `NVIM_APPNAME`, everything else optional.
 
 ## Performance
 
@@ -109,8 +107,8 @@ view brings together ideas from across the open-source community:
 - [tmux](https://github.com/tmux/tmux): sessions that outlive a connection
 - [herdr](https://github.com/herdrdev/herdr): a fleet of agents as an
   attention queue
-- Zed's [Agent Client Protocol](https://agentclientprotocol.com): the seam
-  an agent plugs into
+- Zed's [Agent Client Protocol](https://agentclientprotocol.com): the
+  protocol an agent plugs into
 - [kitty](https://sw.kovidgoyal.net/kitty/): the graphics and keyboard
   protocols
 - [mpv](https://mpv.io): video playback
