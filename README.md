@@ -26,8 +26,8 @@ An agentic, Rust-fast terminal editor with a modern UI and Neovim mechanics.
 
 view is a terminal editor written in Rust with a modern, cohesive UI and
 AI agents as a first-class part of the editor. One design system covers the
-whole editor chrome, the screen is painted before your config has finished
-loading, and an agent panel (`<leader>ai`) speaks
+whole editor, the editor is on screen before your config has
+finished loading, and an agent panel (`<leader>ai`) speaks
 [ACP](https://agentclientprotocol.com) to real agents, with in-editor review
 of every proposed change. view embeds Neovim as its engine, so your existing
 config, plugins, LSP servers and treesitter setup run unchanged. See
@@ -36,34 +36,37 @@ config, plugins, LSP servers and treesitter setup run unchanged. See
 ## Features
 
 **Your config, unchanged.** telescope, lualine, noice, nvim-cmp, treesitter,
-mini.nvim and the rest load on day one. view knows which plugin owns which
-surface and steps aside for it, `vim.notify` lands in view's notifications,
-and everything holds up over SSH and inside tmux.
+mini.nvim and the rest load on day one. Where a plugin already draws
+something view also draws, the plugin wins. Plugin messages show up in view's
+notifications, and everything holds up over SSH and inside tmux.
 
-**One design system.** The surfaces view draws (picker, file tree,
+**One design system.** The parts of the screen view draws (picker, file tree,
 statusline, command palette, notifications, tabline) share one look, themed
 live from your colorscheme. A single config key hands any one of them back
 to the plugin you already use: copy [`view.toml.example`](view.toml.example)
 to `~/.config/view/view.toml` and set `picker = false` under `[native]`.
 
-**Agents in the editor.** An agent panel that speaks ACP, context providers
-that hand the agent what you are looking at, and every proposed change
-reviewed as a diff in the file itself.
+**Agents in the editor.** An agent panel that speaks ACP, an agent that
+sees the file, selection and diagnostics you are looking at, and every
+proposed change reviewed as a diff in the file itself.
 
-**Remote editing.** `view --remote host:path` runs the engine over SSH with
-paint and input local. Keystrokes are echoed before the round trip returns,
-and the clipboard works through OSC 52.
+**Remote editing.** `view --remote host:path` edits files on another
+machine over SSH. Typing feels local: the character you press appears at
+once and never waits on the network. Copy and paste reach your own
+clipboard.
 
-**Engine supervision.** A hung or crashed engine is interrupted or restarted
-with your buffers restored, and the screen never blanks.
+**Your work survives a crash.** If Neovim hangs or crashes underneath
+view, it is interrupted or restarted with your buffers restored, and the
+screen never goes blank.
 
 **Fast where you feel it.** Launch, keypress and scroll are measured with
 your config loaded. See [Performance](#performance).
 
-**Everyday details.** Terminal capability tiers from kitty and ghostty down
-to 16 colors, a clipboard provider, full CLI passthrough (`+42`, `-R`, `-O`,
-`ls | view -`), and a small config: `[ui]` for tier and theme, `[engine]`
-for your own nvim or `NVIM_APPNAME`, everything else optional.
+**Everyday details.** Looks right in every terminal, from kitty and ghostty
+down to 16 colors. The system clipboard works. The command-line flags you
+already use work (`+42`, `-R`, `-O`, `ls | view -`). The config is small:
+`[ui]` for the theme, `[engine]` for your own nvim or `NVIM_APPNAME`,
+everything else optional.
 
 ## Performance
 
@@ -74,21 +77,22 @@ default class of this page.
 can start working in. Under a login-shaped plugin config (lazy.nvim, noice
 and nvim-notify) that screen arrives in 53.9 ms under view against 52.4 ms
 under Neovim: view 1.5 ms behind. The bar for this moment is level with
-Neovim, so it is a bar view has not met. view's own chrome is on screen in
-about 4 ms, painted while your config is still loading.
+Neovim, so it is a bar view has not met. view's own tree, tabline and
+status line are on screen in about 4 ms, drawn while your config is still
+loading.
 
 **You type.** You press a key and the character appears. Under that same
 login-shaped config, view's worst keystroke in a thousand takes 1.58 ms
 against Neovim's 1.43 ms, and at the median view is 11% behind against a bar
-of 10%, a second bar missed, by 1% of the round trip. view can also draw the
-character it expects before the engine confirms it: under that same config
-the predicted glyph is on screen in 0.32 ms at that same worst case, beside
-Neovim's 1.25 ms, and the glyph is corrected the moment the engine answers.
-What the prediction is for is an engine a network away, which a separate
-acceptance leg measures by injecting the round trip at four tiers
+of 10%, a second bar missed by 1%. view can also draw the character it
+expects before Neovim confirms it: under that same config the predicted
+glyph is on screen in 0.32 ms at that same worst case, beside Neovim's
+1.25 ms, and the glyph is corrected the moment Neovim answers. The
+prediction is for editing over a network, which a separate acceptance leg
+measures by adding network delay at four levels
 (`scripts/acceptance/remote-rtt.sh`).
 
-Scrolling, the picker, what happens when the engine hangs, memory, and what
+Scrolling, the picker, what happens when Neovim hangs, memory, and what
 contributes to each of the numbers above:
 [docs/performance.md](docs/performance.md). How they are measured:
 [docs/benchmarking.md](docs/benchmarking.md).
@@ -116,34 +120,35 @@ view brings together ideas from across the open-source community:
 
 - **Tiled UI.** Framed panes with gaps and an active accent, status
   segments in the frame edge, a tabpage pill, the tree and the agent
-  panel as overlays or sidebars per surface.
-- **Session DVR.** Scrub, branch, and export the session's keystream and
-  frames.
+  panel as overlays or sidebars, chosen for each.
+- **Rewind the session.** Scrub back through everything you typed and
+  saw, branch from any point, export a clip.
 - **Key introspector.** `:View keys`: which mapping fired, whose it was,
   what it displaced.
-- **Image viewing.** Kitty graphics on capable terminals, half-block cells
-  elsewhere; picker preview and tree hover included.
+- **Image viewing.** Open an image in a pane, or preview one from the
+  picker or the tree. Sharp on terminals that can show pictures, blocky
+  elsewhere.
 - **Media handoff.** `view talk.mp4`, or a video picked in the tree, hands
   the terminal to `mpv` and takes it back on exit.
-- **`view doctor`.** Terminal, tier and why, tmux passthrough, `mpv` on the
-  path, a repro invocation to paste into an issue.
+- **`view doctor`.** Which terminal you are in and what it can show,
+  whether tmux is in the way, whether `mpv` is installed, and a report to
+  paste into an issue.
 - **Windows.** A first-class Windows Terminal experience.
-- **Workspace arc.** Tiles for N content surfaces: an image, a media
-  player, a remote tree, a qutebrowser-style browser over CDP, mpv
-  composited in a pane.
+- **Panes for anything.** An image, a video, another machine's file
+  tree, or a vim-driven web browser, each in a pane beside your code.
 - **Agent-fleet attention.** Agent tabs with status (working, blocked on
   you, done) as an attention queue inside the editor.
-- **Detach and reconnect.** tmux-style persistence for the remote engine:
-  drop the link, reattach where you left off.
+- **Detach and reconnect.** Drop a remote connection and pick up where
+  you left off, the way tmux does.
 
-Beyond the feature list there is one standing direction: viewport
-highlighting and LSP UI move to view's side one subsystem at a time.
+Beyond the feature list there is one standing direction: syntax
+highlighting and LSP UI are drawn by view itself, one piece at a time.
 
 ## Install
 
 Every release ships a bundle per platform: the `view` binary and the exact
 Neovim the release was tested against, together in one archive. Nothing else
-is needed on the machine. view runs the bundled engine.
+is needed on the machine. view ships with its own Neovim.
 
 ```bash
 # pick your platform from https://github.com/tj-smith47/view/releases/latest

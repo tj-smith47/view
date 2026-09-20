@@ -15,6 +15,14 @@ and nothing else. What does not belong there, whatever streak produced it:
 
 A capability the tooling makes possible is stated as the capability: "your
 plugins keep working" and never "compat suite with pinned plugin stacks".
+A feature is stated as what the person sees, and never as how it is built:
+"the character you press appears at once" and never "keystrokes are echoed
+before the round trip returns". The words of the mechanism (`round trip`,
+`paint`, `RPC`, `OSC 52`, `surface`, `chrome`, `passthrough`, `tier` and
+their siblings) belong on the pages under `docs/`; `check_prose_frames`
+refuses them on `README.md` from the `PROSE_MECHANISM` list in
+`scripts/check-style.sh`, and a new one is added there. Neovim is named as
+the engine once, in the sentence that says your config runs unchanged.
 
 view is described in its own terms. Neovim is named where a fact about the
 engine is stated: the bundled version, the pin, a paired number in the
