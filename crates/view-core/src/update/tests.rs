@@ -13549,6 +13549,67 @@ fn reopening_after_an_nvim_close_rescans_and_claims_once() {
     );
 }
 
+/// A buffer nvim put in the window the tree was drawn into takes the
+/// window with it. The pane goes back to an ordinary window, the claim
+/// goes, and the tree's state goes, so the person sees the file they
+/// opened rather than the tree painted over it.
+#[test]
+fn a_foreign_buffer_in_the_trees_window_releases_the_pane() {
+    let mut m = focused_windowed_tree();
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        1,
+        "the fixture opens one window for the tree"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::NativeWindowTaken {
+            surface: crate::native::geometry::NativeSurface::Tree,
+        },
+    );
+
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        0,
+        "view still holds the window nvim gave to a file"
+    );
+    assert_eq!(
+        m.engine.grids().native_surface(GridId(TREE_GRID)),
+        None,
+        "the pane still paints the tree over the person's own buffer"
+    );
+    assert_eq!(
+        m.focus(),
+        Focus::Engine,
+        "keys still reach the tree while the cursor sits in a file"
+    );
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::TreeClose))
+            .count(),
+        1,
+        "the tree's own state outlived its window: {effects:?}"
+    );
+    assert!(m.tree_mut().is_none(), "the tree is still open");
+
+    let after = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::WinClose { grid: TREE_GRID },
+            UiEvent::GridDestroy { grid: TREE_GRID },
+            UiEvent::Flush,
+        ]),
+    );
+    assert!(
+        !after
+            .iter()
+            .any(|effect| matches!(effect, Effect::TreeClose)),
+        "the window's own close closed the tree a second time: {after:?}"
+    );
+}
+
 /// The cursor a windowed surface leaves in nvim sits in the scratch buffer
 /// that window shows, which is `modifiable = false`, so the paste that
 /// reached the engine landed in no buffer at all. The surface answers it

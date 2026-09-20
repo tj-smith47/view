@@ -52,6 +52,10 @@ Close the tree while its window is the only window of the only tab and the
 window stays, holding the file you were last in. On any other tab the window
 closes, and the tab goes with it.
 
+Open a file in the tree's window and the window is yours from that moment:
+the file is what you read there, with your own line numbers and sign column
+back, and the next `<leader>e` opens a fresh tree beside it.
+
 `<Esc>` inside the tree takes you back to the window you came from and
 leaves the tree standing. Under the default `placement = "overlay"` the
 tree draws over your buffers instead, and `<Esc>` closes it.

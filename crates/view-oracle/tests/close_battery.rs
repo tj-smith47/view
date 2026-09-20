@@ -1421,16 +1421,17 @@ fn the_tree_alone_on_an_inner_tabpage_closes_with_its_tabpage() {
 
 /// A file put into the tree's window by something other than view. A
 /// plugin autocommand, a quickfix jump or a `:buffer` can land there, and
-/// the scratch buffer is `bufhidden = wipe`, so by the time the toggle
-/// runs the buffer in that window is the person's. The close read the
-/// buffer out of the window and force-deleted it, taking unsaved edits
-/// with it and handing the window back on something else.
+/// the window stops being the tree's the moment it does: the person is
+/// reading their own file, and view kept painting the tree's rows over it
+/// until the next toggle. The window is theirs from that moment, the
+/// buffer they put there is untouched, and the next `<leader>e` opens a
+/// fresh tree beside it.
 ///
-/// Disconfirm: reading the buffer out of the window again
-/// (`scratch = vim.api.nvim_win_get_buf(win)`) deletes the file buffer,
-/// which fails on the buffer still existing.
+/// Disconfirm: a `BufWinEnter` callback in `OPEN_NATIVE_WINDOW_CHUNK`
+/// that returns before it reports leaves the pane painting the tree,
+/// which fails on the keys still belonging to it.
 #[test]
-fn a_file_put_in_the_trees_window_survives_the_close() {
+fn a_file_put_in_the_trees_window_takes_it_back_from_view() {
     let work = common::ScratchPaths::new("close-battery-tree-foreign");
     let dir = build_fixture(&work.isolated_home);
     let mut engine = windowed_tree_session(&dir);
@@ -1448,6 +1449,7 @@ fn a_file_put_in_the_trees_window_survives_the_close() {
         .arm_and_input(":call setline(1, 'edited and not written')<CR>")
         .unwrap();
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
     assert_eq!(
         engine
             .eval_str("expand('%:t') . ':' . &modified . ':' . winnr('$')")
@@ -1456,31 +1458,41 @@ fn a_file_put_in_the_trees_window_survives_the_close() {
         "README.md:1:2",
         "the file did not land in the tree's window with edits in it"
     );
-
-    engine
-        .feed(view_core::msg::Msg::FeatureInvoke {
-            feature: "tree".to_string(),
-            verb: "toggle".to_string(),
-        })
-        .expect("the toggle asks nvim to close the window");
-    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
-    assert_eq!(
-        engine
-            .eval_str("bufexists('README.md') . ':' . expand('%:t') . ':' . &modified")
-            .unwrap()
-            .trim(),
-        "1:README.md:1",
-        "the close threw away a buffer view never opened"
-    );
     assert_eq!(
         engine.eval_str("getline(1)").unwrap().trim(),
         "edited and not written",
         "the edits in the person's own buffer are gone"
     );
     assert_eq!(
-        nvim_window_sizes(&mut engine).len(),
-        2,
-        "the window the person's file was in went away with the tree"
+        engine.focus(),
+        view_core::model::Focus::Engine,
+        "keys still reach the tree while the cursor sits in a file"
+    );
+    // the window's own grid, which is where its text lives under
+    // multigrid: the screen this harness rasters is the outer grid and
+    // view's own chrome over it
+    let text = engine.grid_screens();
+    assert!(
+        text.iter().any(|(id, screen)| *id != GLOBAL_GRID
+            && screen
+                .rows
+                .first()
+                .is_some_and(|row| row.contains("edited and not written"))),
+        "view paints the tree over the file the person is reading: {text:#?}"
+    );
+    assert!(
+        !engine.tree_is_open(),
+        "the tree's state outlived the window it was drawn in"
+    );
+    assert_eq!(
+        tree_window_widths(&mut engine),
+        "",
+        "the tree still holds a window of its own"
+    );
+    assert_eq!(
+        view_buffers(&mut engine),
+        "",
+        "the tree's scratch buffer outlived the window it was drawn in"
     );
     assert_eq!(
         engine
@@ -1491,8 +1503,22 @@ fn a_file_put_in_the_trees_window_survives_the_close() {
         "the person reads their file in a window still wearing the \
          tree's look"
     );
-    assert!(
-        !engine.tree_is_open(),
-        "the tree's state outlived the window it was drawn in"
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the tree opens again");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.eval_str("winnr('$')").unwrap().trim(),
+        "3",
+        "the tree reopened into a window it no longer owns"
+    );
+    assert_ne!(
+        tree_window_widths(&mut engine),
+        "",
+        "the next `<leader>e` opened no tree at all"
     );
 }

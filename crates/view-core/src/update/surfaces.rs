@@ -186,6 +186,22 @@ pub(super) fn native_window_closed(
     }
 }
 
+/// What a window view opened for a surface holding something else owes the
+/// model: everything an nvim-side close owes it, minus the close.
+///
+/// nvim gives the window to whatever asked for it -- `:edit` typed in the
+/// tree, a quickfix jump, a plugin autocommand -- and sends no event view
+/// can read as "that window is no longer yours". The claim stays, the pane
+/// keeps painting the surface's rows over the file the person is now
+/// reading, and only the next toggle takes them off. The Lua that notices
+/// the buffer arrive hands the window's look back and reports it here.
+pub(super) fn native_window_taken(model: &mut Model, surface: NativeSurface) -> Vec<Effect> {
+    let Some(win) = model.engine.grids().native_window(surface) else {
+        return Vec::new();
+    };
+    native_window_closed(model, surface, win)
+}
+
 /// Carries the share the resize keys just stepped to the window the tree
 /// sits in, in the cells it works out to against the grid nvim lays its
 /// windows in.

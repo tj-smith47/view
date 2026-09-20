@@ -474,6 +474,9 @@ pub struct EngineSession {
     /// Frame-to-frame surface reuse; see [`Session`]'s same-named field
     /// for why it exists and why capture methods take `&mut self`.
     cache: view_surface::SurfaceCache,
+    /// The engine's own messages -- a bridge event an autocommand sent,
+    /// a `Msg::RedrawReady` token -- as the pump's sink hands them over.
+    msgs: std::sync::mpsc::Receiver<Msg>,
 }
 
 impl EngineSession {
@@ -582,12 +585,13 @@ impl EngineSession {
     ) -> Result<Self, OracleError> {
         let mut engine = Engine::spawn(cfg)?;
         engine.handle.ui_attach(cols, rows, surfaces)?;
-        // no consumer ever drains this channel: EngineSession polls
-        // DamagePump::take_damage directly instead (leg (c) is
-        // harness-owned polling, not a blocking recv on a sink), and
-        // RedrawReady tokens are safely lossy (see view_engine::damage's
-        // module docs) when nothing ever removes them
-        let (sink, _unused_rx) = sync_channel(64);
+        // the damage this session paints from is polled off
+        // DamagePump::take_damage (leg (c) is harness-owned polling, not a
+        // blocking recv on a sink); what arrives here is the engine's own
+        // messages, which `pump_until_flush` folds. Dropping them left a
+        // surface nvim had taken the window back from painting over the
+        // person's file for the rest of the run.
+        let (sink, msgs) = sync_channel(64);
         let (pump, _cutover) = engine.start_pump(sink);
         settle::install_hooks(&engine.handle)?;
         let mut model = Model::with_term_size(cols, rows);
@@ -607,6 +611,7 @@ impl EngineSession {
             pump,
             markers: settle::QuiesceMarkers::default(),
             cache: view_surface::SurfaceCache::new(),
+            msgs,
         })
     }
 
@@ -777,6 +782,7 @@ impl EngineSession {
     pub fn pump_until_flush(&mut self, deadline: Duration) -> Result<bool, OracleError> {
         let start = Instant::now();
         loop {
+            self.fold_routed_msgs()?;
             let events = self.pump.take_damage();
             let saw_flush = events.iter().any(|e| matches!(e, UiEvent::Flush));
             if !events.is_empty() {
@@ -933,6 +939,26 @@ impl EngineSession {
     }
 }
 
+impl EngineSession {
+    /// Folds every message the engine routed to this driver through
+    /// [`update`] and forwards what that produces, answering whether any
+    /// of them was traffic the settle protocol's silence window counts.
+    ///
+    /// A `Msg::RedrawReady` token is not: it says damage is waiting, which
+    /// both loops calling this drain themselves, so counting it would
+    /// reset the window on every fold and a session with a live cursor
+    /// blink would never settle.
+    fn fold_routed_msgs(&mut self) -> Result<bool, OracleError> {
+        let routed: Vec<Msg> = self.msgs.try_iter().collect();
+        let counted = routed.iter().any(|msg| !matches!(msg, Msg::RedrawReady));
+        for msg in routed {
+            let effects = update(&mut self.model, msg);
+            self.apply_effects(effects)?;
+        }
+        Ok(counted)
+    }
+}
+
 impl settle::Settling for EngineSession {
     fn handle(&self) -> &view_engine::handle::EngineHandle {
         &self.engine.handle
@@ -949,6 +975,10 @@ impl settle::Settling for EngineSession {
 
     fn markers(&mut self) -> &mut settle::QuiesceMarkers {
         &mut self.markers
+    }
+
+    fn fold_engine_msgs(&mut self) -> Result<bool, OracleError> {
+        self.fold_routed_msgs()
     }
 }
 

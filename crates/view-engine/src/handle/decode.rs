@@ -154,6 +154,12 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
             value: u8::try_from(first.as_u64()?).unwrap_or(u8::MAX),
         }),
         "float" => decode_float_observed(params),
+        // the window view opened for one of its own surfaces holding a
+        // buffer view did not put there: the surface id is the whole
+        // payload, and one that names no surface decodes to nothing
+        "native_window_taken" => Some(Msg::NativeWindowTaken {
+            surface: view_core::native::geometry::NativeSurface::from_id(first.as_str()?)?,
+        }),
         // one window-local channel of a surface view owns found holding
         // something else, sent as the hold sets it back
         "channel_held" => Some(Msg::ChannelHeld {

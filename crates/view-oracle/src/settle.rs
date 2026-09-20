@@ -203,6 +203,21 @@ pub(crate) trait Settling {
 
     /// This driver's marker bookkeeping.
     fn markers(&mut self) -> &mut QuiesceMarkers;
+
+    /// Folds whatever the engine routed to this driver outside the redraw
+    /// stream -- a bridge event an autocommand sent, most of all -- and
+    /// answers whether any of it was traffic the silence window counts.
+    ///
+    /// Defaulted to none, for a driver that keeps no message sink: such a
+    /// session has nothing to fold and nothing to wait for.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever the driver's own effect routing could not settle,
+    /// on [`apply_batch`](Self::apply_batch)'s terms.
+    fn fold_engine_msgs(&mut self) -> Result<bool, OracleError> {
+        Ok(false)
+    }
 }
 
 /// Pins `timeoutlen`/`updatetime` far outside any run's real duration (a
@@ -446,6 +461,9 @@ pub(crate) fn settle<S: Settling>(
     let mut last_state: Option<(String, bool)> = None;
     let mut last_park_probe: Option<Instant> = None;
     loop {
+        if session.fold_engine_msgs()? {
+            quiet_since = Instant::now();
+        }
         let mut events = session.take_damage();
         if !events.is_empty() {
             if fired_mode.is_none() {

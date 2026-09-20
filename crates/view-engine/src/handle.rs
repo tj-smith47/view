@@ -3903,6 +3903,32 @@ mod tests {
         );
     }
 
+    /// The name the open chunk sends the taken window under, and the
+    /// surface id it carries: a payload naming no surface of view's own
+    /// decodes to nothing rather than releasing a pane at random.
+    #[test]
+    fn a_bridge_native_window_taken_event_decodes_the_surface() {
+        let decoded =
+            decode_bridge_event(&[Value::from("native_window_taken"), Value::from("tree")]);
+        assert!(
+            matches!(
+                decoded,
+                Some(Msg::NativeWindowTaken {
+                    surface: view_core::native::geometry::NativeSurface::Tree
+                })
+            ),
+            "got {decoded:?}"
+        );
+        assert!(
+            decode_bridge_event(&[
+                Value::from("native_window_taken"),
+                Value::from("not-a-surface"),
+            ])
+            .is_none(),
+            "a payload naming no surface released one anyway"
+        );
+    }
+
     #[test]
     fn a_bridge_git_event_decodes_the_branch_name() {
         let decoded = decode_bridge_event(&[Value::from("git"), Value::from("main")]);

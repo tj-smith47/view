@@ -733,6 +733,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             surface,
             win,
         } => surfaces::native_window_opened(model, generation, surface, win),
+        Msg::NativeWindowTaken { surface } => surfaces::native_window_taken(model, surface),
         // this arm's whole job is turning the raw reply into a corpus and
         // handing it to the worker as `resolved`, gated on the generation
         // still being the picker's own (see `Effect::PickerQuery`'s doc for

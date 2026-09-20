@@ -21,7 +21,8 @@ use view_core::msg::WinSplit;
 const OPEN_NATIVE_WINDOW_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The lua chunk [`EngineHandle::open_native_window`] runs inside nvim,
-/// taking the surface id, the split word and the size in percent.
+/// taking the surface id, the split word, the size in percent and view's
+/// own channel id.
 ///
 /// One window per surface, kept in a table on the module's own upvalue: a
 /// second call for a surface that already has a live window enters that
@@ -51,6 +52,23 @@ const OPEN_NATIVE_WINDOW_TIMEOUT: Duration = Duration::from_secs(5);
 /// `signcolumn` and `wrap` away from every window they opened afterwards
 /// for the rest of the session.
 ///
+/// The window stops being view's the moment nvim puts another buffer in
+/// it, or turns the one view put there into a file, which the
+/// `BufWinEnter` autocommand the open registers is what notices. Both
+/// spellings, because `:edit` inside the window reuses the scratch buffer
+/// itself -- it is unnamed and unmodified, which is nvim's own condition
+/// for reusing a buffer rather than making one -- and comes back under
+/// the same number with the file's name, `buftype` and contents. The
+/// window is the surface's while it shows the recorded buffer and that
+/// buffer is still `buftype = nofile`, which is the same identity the
+/// close chunk keeps. It reports the surface over the bridge as
+/// `native_window_taken`, hands the window's look back, forgets the
+/// surface's entry so a later close finds nothing to do, and deletes
+/// itself, so one taken window costs one message. Without it view went on
+/// painting the surface's rows over the file the person had just opened
+/// there, and they could not see what they were editing until the next
+/// toggle.
+///
 /// The window is made with `:split` rather than `nvim_open_win`, which
 /// allocates a second grid under `ext_multigrid` and leaves it behind: view
 /// then holds one more grid than nvim has windows.
@@ -60,7 +78,7 @@ const OPEN_NATIVE_WINDOW_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// [`EngineHandle::open_native_window`]: super::EngineHandle::open_native_window
 pub(crate) const OPEN_NATIVE_WINDOW_CHUNK: &str = "\
-local id, split, pct = ...
+local id, split, pct, channel = ...
 local wins = vim.g.view_native_windows or {}
 local live = wins[id]
 if live and vim.api.nvim_win_is_valid(live.win)
@@ -107,6 +125,36 @@ vim.bo[buf].modifiable = false
 vim.bo[buf].readonly = true
 wins[id] = { win = win, buf = buf }
 vim.g.view_native_windows = wins
+vim.api.nvim_create_autocmd('BufWinEnter', {
+  group = vim.api.nvim_create_augroup('view_native_' .. id,
+    { clear = true }),
+  callback = function()
+    local scratch = vim.api.nvim_buf_is_valid(buf)
+      and vim.api.nvim_get_option_value('buftype', { buf = buf }) == 'nofile'
+    if vim.api.nvim_get_current_win() ~= win
+      or (scratch and vim.api.nvim_win_get_buf(win) == buf) then
+      return
+    end
+    local held = vim.g.view_native_windows or {}
+    held[id] = nil
+    vim.g.view_native_windows = held
+    for _, opt in ipairs({ 'winfixwidth', 'winfixheight' }) do
+      vim.api.nvim_set_option_value(opt, false,
+        { win = win, scope = 'local' })
+    end
+    for _, opt in ipairs({ 'number', 'relativenumber', 'signcolumn',
+      'foldcolumn', 'wrap' }) do
+      vim.api.nvim_set_option_value(opt,
+        vim.api.nvim_get_option_value(opt, { scope = 'global' }),
+        { win = win, scope = 'local' })
+    end
+    if scratch and vim.fn.bufwinid(buf) == -1 then
+      pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    end
+    pcall(vim.rpcnotify, channel, 'view_bridge', 'native_window_taken', id)
+    return true
+  end,
+})
 return win";
 
 /// The lua chunk [`EngineHandle::close_native_window`] runs inside nvim,
@@ -297,6 +345,7 @@ impl super::EngineHandle {
                     Value::from(surface.id()),
                     Value::from(split.word()),
                     Value::from(size),
+                    Value::from(self.channel_id),
                 ]),
             ],
             generation,
@@ -333,6 +382,7 @@ impl super::EngineHandle {
                     Value::from(surface.id()),
                     Value::from(split.word()),
                     Value::from(size),
+                    Value::from(self.channel_id),
                 ]),
             ],
             OPEN_NATIVE_WINDOW_TIMEOUT,
@@ -588,6 +638,47 @@ mod tests {
                  somebody else put in it is entered as the tree: {line}"
             );
         }
+    }
+
+    /// The window is the surface's only while it holds the surface's own
+    /// buffer, and nvim names no event for the moment that stops being
+    /// true. The open registers one, and the report, the hand-back and
+    /// the entry it drops all belong to the same firing: a chunk that
+    /// reported without dropping the entry would have the next close act
+    /// on a window that is the person's.
+    #[test]
+    fn the_open_chunk_reports_a_window_nvim_gives_to_something_else() {
+        for line in [
+            "vim.api.nvim_create_autocmd('BufWinEnter', {",
+            "if vim.api.nvim_get_current_win() ~= win",
+            "or (scratch and vim.api.nvim_win_get_buf(win) == buf) then",
+            "and vim.api.nvim_get_option_value('buftype', { buf = buf }) == 'nofile'",
+            "held[id] = nil",
+            "if scratch and vim.fn.bufwinid(buf) == -1 then",
+            "pcall(vim.rpcnotify, channel, 'view_bridge', 'native_window_taken', id)",
+            "return true",
+        ] {
+            assert!(
+                OPEN_NATIVE_WINDOW_CHUNK.contains(line),
+                "the window nvim gave to a file goes on painting the \
+                 surface over it: {line}"
+            );
+        }
+        assert!(
+            OPEN_NATIVE_WINDOW_CHUNK.starts_with("local id, split, pct, channel = ..."),
+            "the chunk takes no channel to report the window on"
+        );
+        let dropped = OPEN_NATIVE_WINDOW_CHUNK
+            .find("held[id] = nil")
+            .expect("the callback drops the surface's entry");
+        let reported = OPEN_NATIVE_WINDOW_CHUNK
+            .find("'native_window_taken'")
+            .expect("the callback reports the window");
+        assert!(
+            dropped < reported,
+            "the entry outlives the report, so a close that follows acts \
+             on a window that is the person's"
+        );
     }
 
     #[test]

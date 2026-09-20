@@ -725,6 +725,20 @@ pub enum Msg {
         /// The window, as nvim addresses it.
         win: crate::events::WinHandle,
     },
+    /// A window view opened for a surface of its own now holds something
+    /// else: nvim put a buffer there (a plugin autocommand, a quickfix
+    /// jump, `:edit` typed inside it), and the window is the person's from
+    /// that moment. The bridge sends this once per window taken, from the
+    /// same Lua that hands the window's look back and forgets the surface
+    /// ever claimed it.
+    ///
+    /// Without it view kept painting the surface's rows over a window nvim
+    /// had given to a file, and the person could not see what they were
+    /// editing until the next toggle.
+    NativeWindowTaken {
+        /// The surface whose window was taken.
+        surface: crate::native::geometry::NativeSurface,
+    },
     /// The decoded answer to one `RpcCall::PreviewBuffer`, resolving the
     /// preview pane's text for the picker's selected candidate; see
     /// `docs/picker-preview-wire-capture.md`. `path` echoes back the path
