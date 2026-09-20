@@ -387,10 +387,10 @@ mod tests {
             .expect("write the rendered page");
         let gate =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/check-style.sh");
-        let out = std::process::Command::new("bash")
-            .arg(&gate)
+        let out = std::process::Command::new(view_test_support::bash_program())
+            .arg(view_test_support::bash_arg(&gate))
             .arg("--prose-width")
-            .arg(scratch.path())
+            .arg(view_test_support::bash_arg(scratch.path()))
             .output()
             .expect("the style gate runs");
         assert!(

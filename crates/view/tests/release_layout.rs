@@ -23,7 +23,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn package_bundle(root: &Path, args: &[&str]) -> std::process::Output {
-    Command::new("bash")
+    Command::new(view_test_support::bash_program())
         .arg("scripts/package-bundle.sh")
         .args(args)
         .current_dir(root)
@@ -68,11 +68,15 @@ fn the_archive_layout_matches_what_the_binary_resolves() {
     std::fs::write(&editor, b"").expect("a stand-in for the built editor");
 
     let bundle = scratch.join("bundle");
-    let out = Command::new("bash")
+    let out = Command::new(view_test_support::bash_program())
         .arg("scripts/package-bundle.sh")
-        .args(["stage", current_target(), &editor.to_string_lossy()])
-        .arg(&bundle)
-        .env("VIEW_ENGINE_PREFIX", &prefix)
+        .args([
+            "stage",
+            current_target(),
+            &view_test_support::bash_arg(&editor),
+        ])
+        .arg(view_test_support::bash_arg(&bundle))
+        .env("VIEW_ENGINE_PREFIX", view_test_support::bash_arg(&prefix))
         .current_dir(&root)
         .output()
         .expect("bash runs the packaging script");

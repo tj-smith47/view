@@ -668,10 +668,101 @@ pub fn announce_skip(case: &str, reason: &str) {
     }
 }
 
+/// The `bash` a test runs this repository's `scripts/*.sh` with.
+///
+/// Spawning it by bare name reaches the wrong program on Windows.
+/// `std::process::Command` resolves a name the way `CreateProcessW` does
+/// and searches `%SystemRoot%\System32` ahead of `PATH`, where the runner
+/// images keep WSL's launcher `bash.exe`. With no distribution installed
+/// that launcher writes its complaint to stdout and exits non-zero, so a
+/// test that reports the script's stderr reports an empty string. Go's
+/// `exec.LookPath` reads `PATH` alone, which is why the same `bash` line in
+/// a Taskfile target runs Git Bash and the test beside it does not.
+#[must_use]
+pub fn bash_program() -> PathBuf {
+    if !cfg!(windows) {
+        return PathBuf::from("bash");
+    }
+    let windows_dir = std::env::var_os("SystemRoot")
+        .unwrap_or_else(|| "C:\\Windows".into())
+        .to_string_lossy()
+        .to_lowercase();
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        // every spelling under the Windows directory, so `SysWOW64`'s copy
+        // of the launcher is skipped along with `System32`'s
+        .filter(|dir| {
+            !dir.to_string_lossy()
+                .to_lowercase()
+                .starts_with(&windows_dir)
+        })
+        .map(|dir| dir.join("bash.exe"))
+        .find(|candidate| candidate.is_file())
+        // a host with no POSIX bash on PATH fails at the spawn, naming the
+        // program, rather than here with a path nobody asked for
+        .unwrap_or_else(|| PathBuf::from("bash"))
+}
+
+/// A path as an argument to a script [`bash_program`] runs.
+///
+/// Git Bash rebuilds its own `argv` from the command line with `\` as an
+/// escape character, so a Windows path handed straight to a script arrives
+/// with its separators eaten: `\\?\C:\...\view-under-test` reaches `cp` as
+/// `\?C:...view-under-test`, which it reports as a missing file. The
+/// extended-length prefix `Path::canonicalize` returns on Windows is no
+/// path to a MSYS program either. Forward slashes behind a drive letter are
+/// what both understand. On unix the path is its own argument.
+#[must_use]
+pub fn bash_arg(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.strip_prefix(r"\\?\")
+            .unwrap_or(&text)
+            .replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// The population, not the two sites a red Windows leg happened to
+    /// name: a bare `bash` reaches WSL's launcher out of `System32` on
+    /// every Windows host, and the failure it hands back is an empty
+    /// stderr. A new site joins by calling [`bash`].
+    #[test]
+    fn no_source_spawns_bash_by_bare_name() {
+        let mut offenders = Vec::new();
+        let mut stack = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("..")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name == "target") {
+                        continue;
+                    }
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs")
+                    && !path.ends_with("view-test-support/src/lib.rs")
+                    && std::fs::read_to_string(&path)
+                        .unwrap_or_default()
+                        .contains(r#"new("bash")"#)
+                {
+                    offenders.push(path.display().to_string());
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these spawn bash by bare name instead of through view_test_support::bash(), \
+             which on Windows reaches WSL's launcher rather than Git Bash: {offenders:?}"
+        );
+    }
 
     #[test]
     fn new_creates_an_existing_empty_directory() {
