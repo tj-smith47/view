@@ -140,8 +140,8 @@ fn provisioning_notice(spec: &AgentSpec) -> Option<String> {
         return None;
     }
     Some(format!(
-        "{PROVISION_NOTICE_PREFIX} {id} {version} -- first run downloads and installs it, \
-         which can take a few minutes"
+        "{PROVISION_NOTICE_PREFIX} {id} {version}. The first run downloads and installs \
+         it, which can take a few minutes"
     ))
 }
 

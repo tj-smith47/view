@@ -54,8 +54,8 @@ pub(super) fn on_vim_enter(model: &mut Model, token: ReplyToken) -> Vec<Effect> 
 pub(super) fn on_colorscheme_missing(model: &mut Model, name: &str) -> Vec<Effect> {
     model.engine.record_native_notice(
         format!(
-            "view: [ui] theme = {name} is a colorscheme nvim cannot find -- view's chrome is \
-             derived from the colorscheme your own config ends on this run"
+            "view: [ui] theme = {name} is a colorscheme nvim cannot find. view's chrome \
+             is derived from the colorscheme your own config ends on this run"
         ),
         false,
     )

@@ -354,6 +354,17 @@ pub(crate) fn painted_grid_size(model: &Model) -> (u16, u16) {
     }
 }
 
+/// The width the statusline bar lays its own view out at: the engine
+/// grid's width once there is one, and the terminal's own less the ring on
+/// the startup frame, which has no grid to measure.
+pub(crate) fn statusline_width(model: &Model) -> u16 {
+    if model.chrome_painted {
+        painted_grid_size(model).0
+    } else {
+        model.term_width.saturating_sub(model.look.ring())
+    }
+}
+
 /// Where the engine grid's cell `(0, 0)` lands on the terminal, as
 /// `(row, col)`.
 ///
@@ -363,7 +374,8 @@ pub(crate) fn painted_grid_size(model: &Model) -> (u16, u16) {
 /// draw. A position that added only the first sat one cell up and one cell
 /// left of the cell it named, which is where the caret, the predicted
 /// glyph and both popup menus were drawn under tiles.
-pub(crate) fn grid_origin(model: &Model) -> (u16, u16) {
+#[must_use]
+pub fn grid_origin(model: &Model) -> (u16, u16) {
     let inset = model.look.grid_offset();
     (model.chrome_rows().saturating_add(inset), inset)
 }
@@ -395,7 +407,7 @@ pub(crate) fn grid_origin(model: &Model) -> (u16, u16) {
 ///
 /// "Valid" is bounded by the engine grid's own reported `(grid_w, grid_h)`,
 /// not by the terminal frame: the `EngineGrid` layer's rect is always
-/// exactly `grid_w`x`grid_h` at `chrome_rows()`'s offset, by construction,
+/// exactly `grid_w`x`grid_h` at [`grid_origin`], by construction,
 /// but for one transient frame -- a `TablineUpdate` crossing the 1-tab
 /// chrome-reservation boundary before nvim's matching `GridResize` round
 /// trips -- that offset rect can extend past `model.term_height`. This
@@ -452,20 +464,28 @@ pub fn render(model: &Model) -> Surface {
         }
     }
     if model.statusline_rows() > 0 {
+        let ring = model.look.ring();
+        let bar_width = statusline_width(model);
         // `grid_target()` already shrank the engine's own grid by
         // `statusline_rows()` and by the ring, so the two together put the
-        // bar on the terminal's own bottom row -- never recomputed from
-        // `term_height`, which would disagree the moment a resize is still
-        // in flight to nvim.
-        let ring = model.look.ring();
+        // bar on the terminal's own bottom row, and a row recomputed from
+        // `term_height` would disagree the moment a resize is still in
+        // flight to nvim. The startup frame has no grid yet, and the same
+        // arithmetic there put a two-cell bar in the ring's top-left
+        // corner, so that one frame takes the terminal's bottom row.
+        let bar_row = if model.chrome_painted {
+            offset.saturating_add(grid_h).saturating_add(ring)
+        } else {
+            model.term_height.saturating_sub(model.statusline_rows())
+        };
         layers.push(Layer::new(
             Rect::new(
-                offset.saturating_add(grid_h).saturating_add(ring),
+                bar_row,
                 0,
-                grid_w.saturating_add(ring),
+                bar_width.saturating_add(ring),
                 model.statusline_rows(),
             ),
-            LayerKind::Statusline(engine.statusline.view(grid_w)),
+            LayerKind::Statusline(engine.statusline.view(bar_width)),
             model.caps,
         ));
     }
@@ -837,8 +857,9 @@ fn cmdline_popupmenu_layer(
 /// Builds one grid-space overlay [`Layer`]: `rect` is first clamped to
 /// `bounds` (the grid's own coordinate space, which is what wire-derived
 /// positions like a popup menu's `(row, col)` are expressed in), then
-/// translated down by `offset` (the reserved chrome rows) to land in the
-/// terminal's own coordinate space. Clamping before translating means a
+/// translated by `origin` ([`grid_origin`]: the reserved chrome rows on the
+/// row axis, and the tiled look's inset on both) to land in the terminal's
+/// own coordinate space. Clamping before translating means a
 /// hostile or stale position/size from wire-derived state can never place a
 /// layer outside the current grid, regardless of whether chrome is
 /// currently reserved.
@@ -1039,8 +1060,9 @@ fn painted_cmdline(model: &Model) -> Option<Cow<'_, CmdlineState>> {
     }
 }
 
-/// The real terminal cursor: position plus shape, offset by `offset`
-/// (reserved chrome rows) to land in the terminal's own coordinate space.
+/// The real terminal cursor: position plus shape, offset by `origin`
+/// ([`grid_origin`], which moves both axes) to land in the terminal's own
+/// coordinate space.
 /// While the command line is open, the cursor tracks its `pos` on the
 /// bottom grid row instead of the grid's own cursor (matching the
 /// cmdheight=0 floating UX external UIs give: the engine grid's cursor
@@ -1980,20 +2002,28 @@ mod tests {
     }
 
     /// Under tiles the ring moves the whole grid one cell in on each axis,
-    /// and every position built from a grid coordinate moves with it. One
-    /// model, three looks: the engine layer, the caret, the predicted
-    /// glyph's layer and an editor-anchored popupmenu each sit exactly
-    /// `grid_offset()` in from where nvim mode puts them.
+    /// and every position built from a grid coordinate moves with it. Two
+    /// scenes, three looks each: the engine layer, the predicted glyph's
+    /// layer, an editor-anchored popupmenu, a cmdline-sourced one, a toast
+    /// box, the cmdline's own layer and the caret in both of the branches
+    /// that place it each sit exactly `grid_offset()` in from where nvim
+    /// mode puts them.
     ///
-    /// Disconfirm: add only `chrome_rows()` to any of the four and that one
+    /// Every grid-space layer the scene opens is read off the surface
+    /// rather than listed here, so a layer kind added later is walked by
+    /// this test without being added to it.
+    ///
+    /// Disconfirm: add only `chrome_rows()` to any of them and that one
     /// stops moving between the looks, which is the cell above and left of
     /// the cell it names.
     #[test]
     fn every_grid_space_position_carries_the_rings_inset_under_tiles() {
-        fn scene() -> Model {
+        /// The buffer's own caret, a prediction over it, and a popupmenu
+        /// nvim anchored to the editor grid.
+        fn editor_scene() -> Model {
             let mut model = model_with_grid(40, 12);
-            model.term_width = 40;
-            model.term_height = 12;
+            model.term_width = 44;
+            model.term_height = 16;
             model
                 .engine
                 .apply_grid(GridOp::CursorGoto { row: 4, col: 6 });
@@ -2014,43 +2044,89 @@ mod tests {
             model
         }
 
+        /// An open command line with its own completion menu (`grid < 0`,
+        /// the cmdline source) and a notice standing in the toast stack.
+        /// The caret is the plain-cmdline branch's here, not the buffer's.
+        fn cmdline_scene() -> Model {
+            let mut model = model_with_grid(40, 12);
+            model.term_width = 44;
+            model.term_height = 16;
+            apply(
+                &mut model,
+                UiEvent::CmdlineShow {
+                    content: vec![(0, "ech".to_string())],
+                    pos: 3,
+                    firstc: ":".to_string(),
+                    prompt: String::new(),
+                    indent: 0,
+                    level: 1,
+                },
+            );
+            apply(
+                &mut model,
+                UiEvent::PopupmenuShow {
+                    items: vec![
+                        view_core::events::PmItem::default(),
+                        view_core::events::PmItem::default(),
+                    ],
+                    selected: -1,
+                    row: 0,
+                    col: 1,
+                    grid: -1,
+                },
+            );
+            let _ = model
+                .engine
+                .record_native_notice("a notice is standing".to_string(), false);
+            model
+        }
+
+        /// Every grid-space layer on the surface, in the order the surface
+        /// carries them, plus the caret.
         fn places(model: &Model) -> Vec<(&'static str, u16, u16)> {
             let surface = render(model);
-            let mut found = Vec::new();
-            for (name, wanted) in [("grid", 0u8), ("speculated", 1), ("popupmenu", 2)] {
-                let layer = surface
-                    .layers
-                    .iter()
-                    .find(|layer| {
-                        matches!(
-                            (&layer.kind, wanted),
-                            (LayerKind::EngineGrid, 0)
-                                | (LayerKind::Speculated(_), 1)
-                                | (LayerKind::Popupmenu(_), 2)
-                        )
-                    })
-                    .unwrap_or_else(|| unreachable!("the fixture paints a {name} layer"));
-                found.push((name, layer.rect.row, layer.rect.col));
-            }
+            let mut found: Vec<(&'static str, u16, u16)> = surface
+                .layers
+                .iter()
+                .filter_map(|layer| {
+                    let name = match layer.kind {
+                        LayerKind::EngineGrid => "grid",
+                        LayerKind::Speculated(_) => "speculated",
+                        LayerKind::Popupmenu(_) => "popupmenu",
+                        LayerKind::Toast { .. } => "toast",
+                        LayerKind::Cmdline(_) => "cmdline",
+                        _ => return None,
+                    };
+                    Some((name, layer.rect.row, layer.rect.col))
+                })
+                .collect();
             let cursor = surface.cursor.expect("a sized grid places a cursor");
             found.push(("caret", cursor.row, cursor.col));
             found
         }
 
-        let mut model = scene();
-        let bare = places(&model);
-        for gaps in [true, false] {
-            let look = view_core::model::Look::new(view_core::model::Panes::Tiles, gaps);
-            model.look = look;
-            let inset = look.grid_offset();
-            assert_eq!(inset, 1, "a tiled look always insets the grid by one cell");
-            for (tiled, plain) in places(&model).iter().zip(&bare) {
-                assert_eq!(
-                    (tiled.0, tiled.1, tiled.2),
-                    (plain.0, plain.1 + inset, plain.2 + inset),
-                    "{} is not the ring's inset in from where nvim mode puts it (gaps {gaps})",
-                    tiled.0
-                );
+        for (scene, opened) in [(editor_scene as fn() -> Model, 4), (cmdline_scene, 5)] {
+            let mut model = scene();
+            let bare = places(&model);
+            assert_eq!(
+                bare.len(),
+                opened,
+                "the scene opened {:?} rather than {opened} places",
+                bare.iter().map(|place| place.0).collect::<Vec<_>>()
+            );
+            for gaps in [true, false] {
+                let look = view_core::model::Look::new(view_core::model::Panes::Tiles, gaps);
+                model.look = look;
+                let inset = look.grid_offset();
+                assert_eq!(inset, 1, "a tiled look always insets the grid by one cell");
+                for (tiled, plain) in places(&model).iter().zip(&bare) {
+                    assert_eq!(
+                        (tiled.0, tiled.1, tiled.2),
+                        (plain.0, plain.1 + inset, plain.2 + inset),
+                        "{} is not the ring's inset in from where nvim mode puts it (gaps {gaps})",
+                        tiled.0
+                    );
+                }
             }
         }
     }

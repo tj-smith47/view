@@ -384,8 +384,8 @@ struct NativeTable {
 const TREE_WIDTH_KEY: &str = "tree_width";
 
 /// What a `tree_width` that is not a whole number is answered with.
-const TREE_WIDTH_NOTICE: &str = "view: [native] tree_width must be a whole number of percent -- \
-     the file tree opens at its default width this run";
+const TREE_WIDTH_NOTICE: &str = "view: [native] tree_width must be a whole number of percent. \
+     The file tree opens at its default width this run";
 
 /// The width the tree opens at, and the notice a value that is not a whole
 /// number owes the user.
@@ -529,20 +529,20 @@ struct KeysTable {
 /// user has to go fix.
 const SIDEBAR_WIDER_NOTICE: &str =
     "view: [keys] sidebar_wider must be key notations spelled as nvim spells them, case \
-     included (\"<C-w>>\", \"<S-Right>\"), at most two keys each -- the sidebars widen on \
-     their default keys this run";
+     included (\"<C-w>>\", \"<S-Right>\"), at most two keys each. The sidebars widen \
+     on their default keys this run";
 
 /// The narrowing half of [`SIDEBAR_WIDER_NOTICE`].
 const SIDEBAR_NARROWER_NOTICE: &str =
     "view: [keys] sidebar_narrower must be key notations spelled as nvim spells them, case \
-     included (\"<C-w><\", \"<S-Left>\"), at most two keys each -- the sidebars narrow on \
-     their default keys this run";
+     included (\"<C-w><\", \"<S-Left>\"), at most two keys each. The sidebars narrow \
+     on their default keys this run";
 
 /// The composer's own, on the same terms as [`SIDEBAR_WIDER_NOTICE`].
 const COMPOSER_NEWLINE_NOTICE: &str =
     "view: [keys] composer_newline must be key notations spelled as nvim spells them, case \
-     included (\"<S-CR>\", \"<M-CR>\"), at most two keys each -- the composer breaks a line \
-     on its default keys this run";
+     included (\"<S-CR>\", \"<M-CR>\"), at most two keys each. The composer breaks a \
+     line on its default keys this run";
 
 /// The bindings every rebindable action answers to, and the notice each
 /// action whose value could not be read owes the user.

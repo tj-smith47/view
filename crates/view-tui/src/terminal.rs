@@ -897,7 +897,7 @@ impl Term {
         // placed one cell in, so a grid row lands one terminal row lower
         // than the chrome alone puts it, and a damage set built without it
         // repaints the row above the one that changed.
-        let offset = model.chrome_rows() + model.look.grid_offset();
+        let offset = view_surface::grid_origin(model).0;
         let overlay_damage = self.shadow.overlay_damage(surface);
         #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_FRAME_PREPARED);

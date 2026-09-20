@@ -68,8 +68,8 @@ pub const OPEN_TARGET_EXPECTED: &str = "\"current\" or \"split\"";
 #[must_use]
 pub fn discarded_env(name: &str, value: &str, expected: &str, table: &str, key: &str) -> String {
     format!(
-        "view: {name}={value} is not {expected} -- [{table}] {key} answers from the layer below \
-         it this run"
+        "view: {name}={value} is not {expected}. [{table}] {key} answers from the \
+         layer below it this run"
     )
 }
 
@@ -85,8 +85,8 @@ pub fn discarded_env(name: &str, value: &str, expected: &str, table: &str, key: 
 #[must_use]
 pub fn discarded_file(value: &str, expected: &str, table: &str, key: &str) -> String {
     format!(
-        "view: [{table}] {key} = {value} is not {expected} -- it answers from the layer below \
-         it this run"
+        "view: [{table}] {key} = {value} is not {expected}. It answers from the \
+         layer below it this run"
     )
 }
 

@@ -136,8 +136,8 @@ impl From<&Cli> for Overrides {
     after_help = "view's own flags (--tier, --theme, --panes, --single-grid, --clean, --appname, \
                   --config, --nvim-bin, --remote, ...) \
                   must appear before the first argument meant for nvim: once a token does \
-                  not match one of view's flags, every remaining token -- including a later \
-                  view flag -- is forwarded to nvim verbatim."
+                  not match one of view's flags, every remaining token, a later \
+                  view flag included, is forwarded to nvim verbatim."
 )]
 struct Cli {
     /// Path to the nvim binary (defaults to PATH lookup)
@@ -413,7 +413,7 @@ const RESERVED_SSH_OPTS: [(&str, &str); 2] = [
         "view sets `BatchMode=yes` so a connection that needs a password or a \
          host-key answer fails fast: an embedded editor owns the terminal and \
          has none to spare for a prompt. Arrange the credential the connection \
-         needs -- an agent, a key, a known_hosts entry -- rather than re-arming \
+         needs, whether an agent, a key or a known_hosts entry, rather than re-arming \
          a prompt nothing can answer",
     ),
     (

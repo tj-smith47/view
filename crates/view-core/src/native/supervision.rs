@@ -468,7 +468,7 @@ impl ReconnectProgress {
     pub fn notice(self) -> Option<String> {
         (!self.exhausted()).then(|| {
             format!(
-                "connection lost -- reconnecting ({}/{})",
+                "connection lost, reconnecting ({}/{})",
                 self.attempt, self.max_attempts
             )
         })
@@ -521,9 +521,9 @@ pub fn swap_recovery_notice(count: u64) -> Option<String> {
 #[must_use]
 pub fn swap_recovery_failure_notice(error: &str, buffer_empty: bool) -> String {
     if buffer_empty {
-        format!("view: swap recovery failed, this buffer is empty -- {error}")
+        format!("view: swap recovery failed and this buffer is empty. {error}")
     } else {
-        format!("view: swap recovery failed -- {error}")
+        format!("view: swap recovery failed. {error}")
     }
 }
 
@@ -539,7 +539,7 @@ pub fn swap_recovery_failure_notice(error: &str, buffer_empty: bool) -> String {
 /// itself -- so this says only that the buffer is not whole.
 #[must_use]
 pub fn swap_recovery_damage_notice(error: &str) -> String {
-    format!("view: swap recovery finished with errors, check the buffer -- {error}")
+    format!("view: swap recovery finished with errors, check the buffer. {error}")
 }
 
 /// What a session says when the recovery worked and the engine warned about
@@ -556,8 +556,8 @@ pub fn swap_recovery_damage_notice(error: &str) -> String {
 #[must_use]
 pub fn swap_recovery_warning_notice(count: u64, error: &str) -> String {
     match swap_recovery_notice(count) {
-        Some(recovered) => format!("{recovered} -- {error}"),
-        None => format!("view: swap recovery finished with a warning -- {error}"),
+        Some(recovered) => format!("{recovered}. {error}"),
+        None => format!("view: swap recovery finished with a warning. {error}"),
     }
 }
 
@@ -884,11 +884,11 @@ mod tests {
     fn a_scheduled_reconnect_names_the_attempt_it_is_on() {
         assert_eq!(
             ReconnectProgress::new(1, 5).notice().as_deref(),
-            Some("connection lost -- reconnecting (1/5)")
+            Some("connection lost, reconnecting (1/5)")
         );
         assert_eq!(
             ReconnectProgress::new(5, 5).notice().as_deref(),
-            Some("connection lost -- reconnecting (5/5)")
+            Some("connection lost, reconnecting (5/5)")
         );
         for attempt in 1..=5 {
             assert!(

@@ -1453,16 +1453,32 @@ fn a_grid_line_on_a_window_leaves_the_frame_rows_undamaged() {
     }
 }
 
-/// The first frame of a session, before the engine has sent a picture to
-/// put inside it.
-fn shell_frame(look: view_core::model::Look) -> Buffer {
+/// A session's first frame, before the engine has sent a picture to put
+/// inside it.
+fn shell_model(look: view_core::model::Look) -> Model {
     let mut model = Model::new().with_look(look);
     model.term_width = TILED_WIDTH;
     model.term_height = TILED_HEIGHT;
     model.caps = model.caps.with_unicode_boxes(DRAWS_BOX_GLYPHS);
     model.chrome_painted = false;
     model.statusline_enabled = true;
-    tiled_frame(&model)
+    model
+}
+
+fn shell_frame(look: view_core::model::Look) -> Buffer {
+    tiled_frame(&shell_model(look))
+}
+
+/// The rect the bar claims on that frame. Read off the surface rather than
+/// off the picture, since an empty bar paints no glyph either way.
+fn shell_bar_rect(look: view_core::model::Look) -> view_surface::Rect {
+    view_surface::render(&shell_model(look))
+        .layers
+        .iter()
+        .find_map(|layer| {
+            matches!(layer.kind, view_surface::LayerKind::Statusline(_)).then_some(layer.rect)
+        })
+        .expect("the statusline feature is on, so the frame carries a bar")
 }
 
 #[test]
@@ -1505,4 +1521,22 @@ fn the_shell_frame_paints_the_ring_under_tiles_and_the_bar_under_nvim() {
         !ringed,
         "the nvim-mode shell reserves a row for its bar and frames nothing"
     );
+
+    // the bar's own rect, which the blank row above cannot discriminate:
+    // this frame has no grid to measure, and the arithmetic the attached
+    // frame uses put a two-cell bar in the ring's top-left corner here
+    for gaps in [true, false] {
+        for panes in [
+            view_core::model::Panes::Tiles,
+            view_core::model::Panes::Nvim,
+        ] {
+            let look = view_core::model::Look::new(panes, gaps);
+            assert_eq!(
+                shell_bar_rect(look),
+                view_surface::Rect::new(TILED_HEIGHT - 1, 0, TILED_WIDTH, 1),
+                "the shell frame's bar takes the terminal's bottom row \
+                 ({panes:?}, gaps {gaps})"
+            );
+        }
+    }
 }

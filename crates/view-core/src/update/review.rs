@@ -102,7 +102,7 @@ fn unbindable(model: &mut Model) -> Vec<Effect> {
         return Vec::new();
     };
     let notice = format!(
-        "{} could not be opened -- {}",
+        "{} could not be opened: {}",
         review.path.display(),
         ReviewSync::Unbindable.notice().unwrap_or_default()
     );
@@ -371,22 +371,22 @@ fn promote_queued(model: &mut Model) -> Vec<Effect> {
 /// if they were the same fact is how a user comes to press a key twice.
 fn refusal_notice(why: Refusal) -> String {
     match why {
-        Refusal::NotLive => "This review's buffer can no longer be written -- re-open the review",
+        Refusal::NotLive => "This review's buffer can no longer be written. Re-open the review",
         Refusal::NotFresh => {
-            "That hunk is not fresh -- re-diff it (<leader>hR) or reject it (<leader>hx) first"
+            "That hunk is not fresh. Re-diff it (<leader>hR) or reject it (<leader>hx) first"
         }
         Refusal::NothingFresh => {
-            "No hunk here is fresh -- re-diff (<leader>hR) or reject (<leader>hx) what the \
+            "No hunk here is fresh. Re-diff (<leader>hR) or reject (<leader>hx) what the \
              buffer moved under"
         }
-        Refusal::NotOpen => "That hunk is decided already -- ]c moves to the next one still open",
+        Refusal::NotOpen => "That hunk is decided already. ]c moves to the next one still open",
         Refusal::NotStale => "That hunk is not stale, so there is nothing to re-diff",
         Refusal::AnchorLost => {
-            "Your own edits took this hunk's anchor with them -- reject it (<leader>hx) or \
+            "Your own edits took this hunk's anchor with them. Reject it (<leader>hx) or \
              leave the review (<leader>hq)"
         }
         Refusal::UnknownVerb => {
-            "The review has no such verb -- :View review <Tab> offers the ones it answers"
+            "The review has no such verb. :View review <Tab> offers the ones it answers"
         }
     }
     .to_string()

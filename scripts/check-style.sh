@@ -440,6 +440,72 @@ check_string_literal_width() {
 # whole config still is), and a `#rrggbb` inside one is an expectation that
 # outlives whichever scheme it was copied out of. Fixtures are excluded by
 # the include filter: a colorscheme is made of the literals this bans.
+# A notice a person reads is prose, and the pages under docs/ join a clause
+# to the next with a full stop rather than with a two-hyphen dash
+# (.claude/rules/docs.md). The notices are the same prose written in Rust,
+# and one of them shipped with the dash after the rule was written.
+#
+# Each row is path, the text that identifies the line, and the grounds.
+NOTICE_JOINER_EXEMPT='crates/view-core/src/native/ai_panel/review.rs|{position} -- {notice}|a review row: the position, and the notice beside it
+crates/view-core/src/native/ai_panel/review.rs|{position} -- {keys}|a review row: the position, and its key legend beside it
+crates/view/src/remote_guard.rs|env -- |the shell argument separator inside a command line view prints'
+
+check_notice_joiners() {
+  local files report status joiners
+  files=$(find crates/view/src crates/view-core/src crates/view-native/src \
+    crates/view-ai/src crates/view-tui/src -name '*.rs' 2>/dev/null | sort) || files=""
+  if [ -z "$files" ]; then
+    echo "STYLE FAIL: no sources found; the notice joiner check did not run"
+    return 1
+  fi
+  status=0
+  report=$(LC_ALL=C awk -v exempt="$NOTICE_JOINER_EXEMPT" '
+    BEGIN {
+      rows = split(exempt, row, "\n")
+      for (i = 1; i <= rows; i++) {
+        split(row[i], field, "|")
+        epath[i] = field[1]; etext[i] = field[2]; ewhy[i] = field[3]; used[i] = 0
+      }
+    }
+    FNR == 1 { intest = 0 }
+    /#\[cfg\(test\)\]/ { intest = 1 }
+    intest { next }
+    {
+      bare = $0
+      sub(/^[[:space:]]+/, "", bare)
+      if (substr(bare, 1, 2) == "//") next
+      if (index($0, " -- ") == 0) next
+      for (i = 1; i <= rows; i++) {
+        if (epath[i] == FILENAME && index($0, etext[i]) > 0) { used[i] = 1; next }
+      }
+      printf "JOINER %s:%d: %s\n", FILENAME, FNR, bare
+      found++
+    }
+    END {
+      for (i = 1; i <= rows; i++) {
+        if (used[i]) { printf "EXEMPT %s: %s, %s\n", epath[i], etext[i], ewhy[i] }
+        else { printf "DEAD %s: %s\n", epath[i], etext[i]; dead++ }
+      }
+      exit (found > 0 || dead > 0) ? 1 : 0
+    }
+  ' $files) || status=$?
+  printf "%s\n" "$report" | sed -n "s/^EXEMPT /  notice joiner exempt: /p"
+  if [ "$status" -ne 0 ]; then
+    joiners=$(printf "%s\n" "$report" | sed -n "s/^JOINER //p")
+    [ -n "$joiners" ] && printf "%s\n" "$joiners"
+    printf "%s\n" "$report" | sed -n "s/^DEAD /STYLE FAIL: an exemption matches no line any more: /p"
+    if [ -n "$joiners" ]; then
+      echo "STYLE FAIL: a notice joins its clauses with a two-hyphen dash"
+      echo "  Write a full stop between the two thoughts, the way the pages"
+      echo "  under docs/ do. A line that is no sentence at all (a row of"
+      echo "  two fields, a CLI separator) goes in NOTICE_JOINER_EXEMPT with"
+      echo "  its grounds."
+    fi
+    return 1
+  fi
+  return 0
+}
+
 check_acceptance_expectations() {
   local acceptfail=0
   [ -d scripts/acceptance ] || return 0
@@ -2576,6 +2642,18 @@ if [ "${1:-}" = "--temp-traps" ]; then
   check_temp_traps
   exit $?
 fi
+# The notice joiner walk alone, graded the same way.
+if [ "${1:-}" = "--notice-joiners" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --notice-joiners ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  check_notice_joiners
+  exit $?
+fi
+
 # The temp-root walk alone, graded the same way.
 if [ "${1:-}" = "--temp-roots" ]; then
   ROOT="${2:-}"
@@ -2764,6 +2842,7 @@ if [ -d scripts ]; then
   check_script_comment_rules || fail=1
 fi
 check_acceptance_expectations || fail=1
+check_notice_joiners || fail=1
 if [ -f README.md ]; then
   doc_targets=(README.md)
   if [ -d docs ]; then doc_targets+=(docs); fi

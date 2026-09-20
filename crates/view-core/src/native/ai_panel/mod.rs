@@ -770,9 +770,8 @@ impl AiPanelState {
             // One row, not an error row plus a hint row: the overlay's
             // tail-keep truncation would keep a trailing hint row and drop
             // the error itself at the tightest budget.
-            view = view.with_local_error(vec![vec![Span::plain(format!(
-                "Error: {message} -- {hint}"
-            ))]]);
+            view =
+                view.with_local_error(vec![vec![Span::plain(format!("Error: {message}. {hint}"))]]);
         }
         match &self.pending_permission {
             Some(prompt) => {
@@ -2152,7 +2151,7 @@ mod tests {
         assert_eq!(
             view.local_error,
             vec![vec![Span::plain(format!(
-                "Error: the agent exited (signal: 9) -- {DISMISS_VERB_HINT}"
+                "Error: the agent exited (signal: 9). {DISMISS_VERB_HINT}"
             ))]]
         );
     }
@@ -2169,14 +2168,14 @@ mod tests {
         assert_eq!(
             state.view(ROOM, WIDE_PANEL).local_error,
             vec![vec![Span::plain(format!(
-                "Error: gone -- {DISMISS_KEY_HINT}"
+                "Error: gone. {DISMISS_KEY_HINT}"
             ))]]
         );
         state.focused = false;
         assert_eq!(
             state.view(ROOM, WIDE_PANEL).local_error,
             vec![vec![Span::plain(format!(
-                "Error: gone -- {DISMISS_VERB_HINT}"
+                "Error: gone. {DISMISS_VERB_HINT}"
             ))]]
         );
     }

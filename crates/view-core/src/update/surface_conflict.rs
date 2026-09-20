@@ -148,7 +148,7 @@ fn spelled(holder: &str) -> String {
 /// nothing about the history.
 fn startup_account(model: &Model) -> &'static str {
     if model.surface_conflicts.startup_window_open() {
-        "\nStartup messages from this launch are in the history -- <leader>fm."
+        "\nStartup messages from this launch are in the history: <leader>fm."
     } else {
         ""
     }
@@ -1257,7 +1257,7 @@ mod tests {
                 "Set [native] notifications = false in view.toml to give it back.",
             ];
             if !acted {
-                want.push("Startup messages from this launch are in the history -- <leader>fm.");
+                want.push("Startup messages from this launch are in the history: <leader>fm.");
             }
             assert_eq!(lines, want, "acted={acted}");
             for line in &lines {

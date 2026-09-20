@@ -102,7 +102,7 @@ pub enum ProvisionError {
     /// error, not a warning.
     #[error(
         "adapter `{id}` failed checksum verification: expected {expected}, got {actual} \
-         (cache path: {}) -- delete that file to force a clean re-download; if the mismatch \
+         (cache path: {}). Delete that file to force a clean re-download; if the mismatch \
          recurs against a fresh download, the release has moved out from under its pin and must \
          be re-pinned against a freshly captured checksum, not worked around",
         cache_path.display()
@@ -154,7 +154,7 @@ pub enum ProvisionError {
     /// so directly instead of letting the eventual `Command::new("node")`
     /// fail with a bare "not found".
     #[error(
-        "node was not found on PATH; the claude-code adapter runs under Node.js -- install \
+        "node was not found on PATH; the claude-code adapter runs under Node.js. Install \
          Node.js (https://nodejs.org) and ensure `node` is on PATH, then retry"
     )]
     NodeNotFound,
@@ -166,7 +166,7 @@ pub enum ProvisionError {
     /// nothing.
     #[error(
         "npm was not found on PATH; the claude-code adapter's own dependencies are installed \
-         with it -- ensure the `npm` that ships with Node.js is on PATH, then retry"
+         with it. Ensure the `npm` that ships with Node.js is on PATH, then retry"
     )]
     NpmNotFound,
     /// The pinned lockfile and the pin itself disagree -- a row whose
@@ -175,8 +175,8 @@ pub enum ProvisionError {
     /// rather than installed from: a lockfile that does not belong to the
     /// pinned tarball pins nothing about what this build will run.
     #[error(
-        "adapter `{id}`'s pinned lockfile does not match its pin: {detail} -- re-capture the \
-         lockfile from the pinned tarball (see this module's own header), since installing \
+        "adapter `{id}`'s pinned lockfile does not match its pin: {detail}. Re-capture \
+         the lockfile from the pinned tarball (see this module's own header), since installing \
          from a disagreeing lockfile would run packages the pin never covered"
     )]
     LockfileMismatch {

@@ -249,7 +249,7 @@ pub(crate) fn attach_failure_context(remote: &RemoteSpec, failure: &AttachFailur
             "view: the remote editor on {} started and then failed to attach \
              or answer in time (the connection itself is up: it carried the \
              handshake). Check what the far side's own nvim configuration \
-             does at startup -- a config that prompts or blocks there leaves \
+             does at startup. A config that prompts or blocks there leaves \
              an embedded editor with a question no UI can answer.",
             remote.target
         ),
@@ -285,8 +285,8 @@ fn absent_client_message(
     };
     let opening = format!(
         "view: `--remote {}` needs the system ssh client, and {missing}. view \
-         opens a remote session by running that client -- it speaks no ssh \
-         protocol of its own -- so there is nothing here to connect with.",
+         opens a remote session by running that client, which speaks no ssh \
+         protocol of its own, so there is nothing here to connect with.",
         remote.target
     );
     // a named path is a client this session chose, so the remediation is
@@ -345,8 +345,8 @@ fn reachability_message(remote: &RemoteSpec, found: Reachability) -> String {
             )
         }
         Reachability::Reached => format!(
-            "view: the ssh client reached {target} and authenticated -- a \
-             plain command ran there and succeeded -- so the connection is \
+            "view: the ssh client reached {target} and authenticated, and a \
+             plain command ran there and succeeded, so the connection is \
              not what failed. The remote editor is: `{}` either did not \
              start on that host, or started and did not speak the \
              msgpack-RPC an embedded editor speaks. Check it on the far side \

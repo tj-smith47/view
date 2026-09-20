@@ -311,7 +311,7 @@ pub fn invocations() -> Vec<String> {
 #[must_use]
 pub fn render_usage() -> String {
     format!(
-        ":{COMMAND} needs a feature and a verb -- try: {}",
+        ":{COMMAND} needs a feature and a verb. Try: {}",
         invocations().join(", ")
     )
 }

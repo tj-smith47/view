@@ -8911,7 +8911,7 @@ fn a_scheduled_reconnect_counts_on_the_banner_and_asks_for_no_second_attempt() {
         );
         assert_eq!(
             visible_texts(&m),
-            vec![format!("connection lost -- reconnecting ({attempt}/5)")],
+            vec![format!("connection lost, reconnecting ({attempt}/5)")],
             "the banner must name the attempt the reconnect is on"
         );
         assert!(
@@ -10939,7 +10939,7 @@ fn accepting_a_stale_hunk_through_the_key_path_is_refused_and_says_why() {
     );
     let texts = visible_texts(&m);
     assert!(
-        texts.iter().any(|line| line.contains("re-diff")),
+        texts.iter().any(|line| line.contains("Re-diff")),
         "the refusal names the way forward: {texts:?}"
     );
 
@@ -11627,7 +11627,7 @@ fn closing_a_review_with_hunks_left_discards_the_proposal_at_the_session() {
     assert!(
         rows.iter()
             .any(|line| line.contains("discarded the proposal")
-                && line.contains("2 hunks left undecided")),
+                && line.contains("2 hunks were left undecided")),
         "the abandoned review says so in the transcript rather than \
          vanishing: {rows:?}"
     );

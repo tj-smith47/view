@@ -873,6 +873,7 @@ mod tests {
     /// tracked template the generator might be pointed at.
     #[test]
     fn the_generated_user_fixture_carries_the_look_mode() {
+        let _shared = share_user_tree();
         const LOOK_MODE: &str = "panes = \"nvim\"";
         for template in ["minimal", "heavy", "clipboard-precedence"] {
             let path = fixtures_root()
@@ -922,6 +923,7 @@ mod tests {
     /// plugin-free login.
     #[test]
     fn the_generated_fixture_either_shares_the_plugin_cache_or_says_it_is_empty() {
+        let _shared = share_user_tree();
         let lockfile = fixtures_root()
             .join(USER_FIXTURE_PLUGIN_SOURCE)
             .join("nvim")
@@ -963,6 +965,9 @@ mod tests {
     /// reporting its own destination as missing.
     #[test]
     fn concurrent_generations_each_get_a_whole_fixture() {
+        let _exclusive = SHARED_USER_TREE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         const THREADS: usize = 4;
         const ROUNDS: usize = 8;
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
@@ -996,6 +1001,7 @@ mod tests {
     /// login as a slowed one.
     #[test]
     fn a_plain_generation_never_disturbs_a_stalled_one() {
+        let _shared = share_user_tree();
         const ROUNDS: usize = 8;
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         for _ in 0..ROUNDS {
@@ -1080,6 +1086,20 @@ mod tests {
             init.contains("plugin("),
             "a generated login with no plugin spec is not a login:\n{init}"
         );
+    }
+
+    /// The generations that share `target/bench-fixtures/user` inside this
+    /// test binary. A staging neighbour a sibling test has in flight is one
+    /// [`staging_leftovers`] cannot tell from an orphan, since the name
+    /// carries the process the two of them share.
+    static SHARED_USER_TREE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    /// Reads [`SHARED_USER_TREE`] without inheriting a panicked sibling's
+    /// poison, which is a failure of that test and not of this one.
+    fn share_user_tree() -> std::sync::RwLockReadGuard<'static, ()> {
+        SHARED_USER_TREE
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Every staging neighbour this process left under the generated tree.

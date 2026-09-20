@@ -221,7 +221,7 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             if let Some(queued) = abandoned {
                 effects.extend(model.engine.record_native_notice(
                     format!(
-                        "AI agent's queued changes to {} were dropped -- the session ended \
+                        "AI agent's queued changes to {} were dropped. The session ended \
                          before that review opened",
                         queued.path.display()
                     ),
@@ -284,7 +284,7 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
                 // look like a lost proposal.
                 return model.engine.record_native_notice(
                     format!(
-                        "AI agent proposed no change to {} -- the file already matches",
+                        "AI agent proposed no change to {}. The file already matches",
                         path.display()
                     ),
                     false,
@@ -299,7 +299,7 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
                 // ever saw.
                 let notice = model.engine.record_native_notice(
                     format!(
-                        "AI agent proposed changes to {} -- dropped, two reviews already waiting",
+                        "AI agent proposed changes to {} and dropped them. Two reviews are already waiting",
                         path.display()
                     ),
                     false,
@@ -323,7 +323,7 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
                 model.ai_panel_mut().pending_diff_next = Some(review);
                 return model.engine.record_native_notice(
                     format!(
-                        "AI agent proposed changes to {} -- queued behind the open review",
+                        "AI agent proposed changes to {}, queued behind the open review",
                         path.display()
                     ),
                     false,

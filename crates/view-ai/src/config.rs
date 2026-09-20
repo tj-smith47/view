@@ -412,8 +412,8 @@ fn parse_bool(value: &str) -> Option<bool> {
 }
 
 /// What a `panel_width` that is not a whole number is answered with.
-const PANEL_WIDTH_NOTICE: &str = "view: [ai] panel_width must be a whole number of percent -- \
-     the agent panel opens at its default width this run";
+const PANEL_WIDTH_NOTICE: &str = "view: [ai] panel_width must be a whole number of percent. \
+     The agent panel opens at its default width this run";
 
 /// The width the panel opens at, and the notice a value that is not a
 /// whole number owes the user.
@@ -434,9 +434,8 @@ fn resolve_panel_width(value: Option<toml::Value>) -> (u16, Option<&'static str>
 }
 
 /// What an `open_target` naming neither target is answered with.
-const OPEN_TARGET_NOTICE: &str =
-    "view: [ai.review] open_target must be \"current\" or \"split\" -- \
-     a review opens an unopened file in the current window this run";
+const OPEN_TARGET_NOTICE: &str = "view: [ai.review] open_target must be \"current\" or \"split\". \
+     A review opens an unopened file in the current window this run";
 
 /// Where a review opens a file no window has, and the notice an
 /// unrecognized value owes the user. Never fails the table, for the reason

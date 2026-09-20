@@ -125,7 +125,7 @@ pub(super) fn on_checktime_reply(
             CheckTimeOutcome::ReloadFailed => {
                 effects.extend(model.engine.record_native_notice(
                     format!(
-                        "reloading {} did not finish -- check the buffer before saving over it",
+                        "reloading {} did not finish. Check the buffer before saving over it",
                         path.display()
                     ),
                     false,
@@ -198,7 +198,7 @@ pub(super) fn on_checktime_reply(
                 let raised = model.engine.record_native_notice_once(
                     &family,
                     format!(
-                        "{family}no longer a readable file on disk -- nothing was \
+                        "{family}no longer a readable file on disk. Nothing was \
                          reloaded, {fate}"
                     ),
                 );
@@ -559,7 +559,7 @@ mod tests {
                 text,
                 format!(
                     "view: file /proj/src/lib.rs is no longer a readable file \
-                     on disk -- nothing was reloaded, {tail}"
+                     on disk. Nothing was reloaded, {tail}"
                 ),
                 "the notice docs/ai.md quotes for modified={modified} must say exactly this"
             );

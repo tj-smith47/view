@@ -4116,5 +4116,83 @@ else
     "$n" "$IN_RUN" "$want_in_run" "$in_run"
 fi
 
+# ---------------------------------------------------------------------------
+# the notice joiner ban: notice text a person reads joins its clauses with a
+# full stop, and the three lines the checker exempts are planted in every
+# case so an exemption that stops matching is itself a finding
+# ---------------------------------------------------------------------------
+NOTICE='crates/view-core/src/update/notice.rs'
+REVIEW='crates/view-core/src/native/ai_panel/review.rs'
+GUARD='crates/view/src/remote_guard.rs'
+
+new_joiner_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE/crates/view-core/src/update" \
+    "$CASE/crates/view-core/src/native/ai_panel" "$CASE/crates/view/src" \
+    "$CASE/crates/view-native/src" "$CASE/crates/view-ai/src" \
+    "$CASE/crates/view-tui/src"
+  printf 'fn a() -> String {\n    format!("{position} -- {notice}")\n}\n' \
+    > "$CASE/$REVIEW"
+  printf 'fn b() -> String {\n    format!("{position} -- {keys}")\n}\n' \
+    >> "$CASE/$REVIEW"
+  printf 'fn c() -> String {\n    format!("runs `env -- {} --embed`")\n}\n' \
+    > "$CASE/$GUARD"
+}
+
+expect_joiners() {
+  want_rc="$1"
+  want="$2"
+  desc="$3"
+  out=$(bash "$CHECKER" --notice-joiners "$CASE" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" | awk '
+    /^STYLE FAIL: a notice joins its clauses/ { print "joiner"; next }
+    /^STYLE FAIL: an exemption matches no line any more: / {
+      tail = $0
+      sub(/^STYLE FAIL: an exemption matches no line any more: /, "", tail)
+      split(tail, part, ":")
+      print "dead:" part[1]
+      next
+    }
+    /^ +notice joiner exempt: / { print "exempt" ++seen; next }
+    /^crates\/.*\.rs:[0-9]+: / { loc = $1; sub(/:$/, "", loc); print loc; next }
+  ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'not ok %s - %s\n  want rc=%s findings [%s]\n  got  rc=%s findings [%s]\n' \
+    "$n" "$desc" "$want_rc" "$want" "$rc" "$got"
+  printf '%s\n' "$out" | sed 's/^/  | /'
+}
+
+new_joiner_case
+printf 'const N: &str = "view: buffer open. Close it first";\n' > "$CASE/$NOTICE"
+expect_joiners 0 'exempt1 exempt2 exempt3' 'a notice whose two thoughts are one sentence each'
+
+new_joiner_case
+printf 'const N: &str = "view: buffer open -- close it first";\n' > "$CASE/$NOTICE"
+expect_joiners 1 "$NOTICE:1 exempt1 exempt2 exempt3 joiner" 'a notice joining its clauses with the dash'
+
+new_joiner_case
+printf 'fn a() {}\n' > "$CASE/$GUARD"
+printf 'const N: &str = "view: buffer open. Close it first";\n' > "$CASE/$NOTICE"
+expect_joiners 1 "dead:$GUARD exempt1 exempt2" 'an exemption whose line is gone'
+
+new_joiner_case
+printf '/// A comment about a -- b, which is prose nobody reads on screen.\n' \
+  > "$CASE/$NOTICE"
+expect_joiners 0 'exempt1 exempt2 exempt3' 'a doc comment carrying the dash'
+
+new_joiner_case
+{
+  printf 'const N: &str = "view: buffer open. Close it first";\n'
+  printf '#[cfg(test)]\nmod tests {\n'
+  printf '    const W: &str = "a fixture -- with the dash in it";\n}\n'
+} > "$CASE/$NOTICE"
+expect_joiners 0 'exempt1 exempt2 exempt3' 'a fixture below the test boundary carrying the dash'
+
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

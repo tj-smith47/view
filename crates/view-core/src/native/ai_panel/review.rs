@@ -67,9 +67,9 @@ impl ReviewSync {
         match self {
             Self::Binding => Some("resolving the file's buffer"),
             Self::Live => None,
-            Self::Unbindable => Some("no buffer for this path -- nothing can be applied"),
-            Self::Desynced => Some("lost track of this buffer's edits -- re-open the review"),
-            Self::Detached => Some("this buffer's edit stream ended -- re-open the review"),
+            Self::Unbindable => Some("no buffer for this path, so nothing can be applied"),
+            Self::Desynced => Some("lost track of this buffer's edits. Re-open the review"),
+            Self::Detached => Some("this buffer's edit stream ended. Re-open the review"),
         }
     }
 }
@@ -562,7 +562,7 @@ impl DiffReviewState {
     pub fn summary_rows(&self) -> Vec<Vec<Span>> {
         let open = self.hunks.iter().filter(|h| h.status.is_open()).count();
         let mut rows = vec![vec![Span::plain(format!(
-            "Review {} -- hunk {}/{}, {open} open",
+            "Review {}: hunk {}/{}, {open} open",
             self.path.display(),
             (self.cursor + 1).min(self.hunks.len().max(1)),
             self.hunks.len()
@@ -722,7 +722,7 @@ impl DiffReviewState {
         let open = self.hunks.iter().filter(|h| h.status.is_open()).count();
         let path = self.path.display();
         if open > 0 {
-            return format!("discarded the proposal for {path} -- {open} hunks left undecided");
+            return format!("discarded the proposal for {path}. {open} hunks were left undecided");
         }
         let accepted = count(&self.hunks, HunkStatus::Accepted);
         let rejected = count(&self.hunks, HunkStatus::Rejected);
@@ -750,13 +750,13 @@ const KEY_HINT: &str = "<leader>ha accept  <leader>hA accept all  <leader>hx rej
 
 /// [`KEY_HINT`] for a hunk the buffer has moved under: re-diff in place of
 /// the accept that would be refused.
-const STALE_KEY_HINT: &str = "stale -- <leader>hR re-diff  <leader>hx reject";
+const STALE_KEY_HINT: &str = "stale: <leader>hR re-diff  <leader>hx reject";
 
 /// [`STALE_KEY_HINT`] for a stale hunk whose anchor the user's own later
 /// edits have taken with them: `re_diff` refuses that hunk for good, so the
 /// header stops naming the key rather than offering one whose only answer
 /// is a refusal notice.
-const UNANCHORED_KEY_HINT: &str = "stale, anchor gone -- <leader>hx reject";
+const UNANCHORED_KEY_HINT: &str = "stale, anchor gone: <leader>hx reject";
 
 /// The row under every [`KEY_HINT`] variant: moving between hunks and
 /// leaving, which no hunk's own state can take away.
@@ -1139,7 +1139,7 @@ mod tests {
         let rows = state.summary_rows();
         assert_eq!(
             rows[0],
-            vec![Span::plain("Review /tmp/a.rs -- hunk 1/2, 2 open")]
+            vec![Span::plain("Review /tmp/a.rs: hunk 1/2, 2 open")]
         );
         assert_eq!(rows[1], vec![Span::plain(KEY_HINT)]);
         assert_eq!(
@@ -1441,7 +1441,7 @@ mod tests {
         let mut state = review();
         assert_eq!(
             state.outcome(),
-            "discarded the proposal for /tmp/a.rs -- 2 hunks left undecided"
+            "discarded the proposal for /tmp/a.rs. 2 hunks were left undecided"
         );
         let _ = state.accept(0).unwrap();
         assert!(state.reject(1).is_ok());

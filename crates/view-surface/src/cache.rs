@@ -221,11 +221,7 @@ impl SurfaceCache {
                 if frame.inputs.statusline_rows > 0 {
                     // the width the frame's own layers were built at, which
                     // is not the engine's while the grid is withheld
-                    refresh_statusline(
-                        &mut frame.surface,
-                        model,
-                        crate::painted_grid_size(model).0,
-                    );
+                    refresh_statusline(&mut frame.surface, model, crate::statusline_width(model));
                 }
                 refresh_speculated(&mut frame.surface, model, grid_origin(model));
             }
@@ -825,11 +821,11 @@ mod tests {
     }
 
     /// The bar's in-place refresh reads the width the frame around it was
-    /// built at, not the engine's own: while the startup hold is on, the
-    /// grid layer is an empty rect and the statusline beside it is too, and
-    /// a refresh at the engine's width would hand back a frame that
-    /// disagrees with a rebuild of the same model (the debug equivalence
-    /// check inside `render` is what says so).
+    /// built at, not the engine's own: while the startup hold is on there
+    /// is no grid to measure and the bar spans the terminal instead, so a
+    /// refresh at the engine's width would hand back a frame that disagrees
+    /// with a rebuild of the same model (the debug equivalence check inside
+    /// `render` is what says so).
     #[test]
     fn a_held_frames_statusline_refreshes_at_the_width_it_was_built_at() {
         use view_core::native::statusline::SegmentUpdate;
@@ -854,8 +850,8 @@ mod tests {
             .find(|l| matches!(l.kind, LayerKind::Statusline(_)))
             .expect("the statusline feature is on, so its layer must exist");
         assert_eq!(
-            layer.rect.width, 0,
-            "a withheld frame's bar is as wide as the grid it sits under"
+            layer.rect.width, model.term_width,
+            "a withheld frame has no grid to measure, so its bar spans the terminal"
         );
     }
 

@@ -1041,7 +1041,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 DeleteConfirmOutcome::Declined => Vec::new(),
                 DeleteConfirmOutcome::BufferOpen => model
                     .engine
-                    .record_native_notice("view: buffer open -- close it first".to_string(), false),
+                    .record_native_notice("view: buffer open. Close it first".to_string(), false),
                 DeleteConfirmOutcome::Confirmed => {
                     let Some(t) = model.tree_mut() else {
                         return Vec::new();
@@ -1131,7 +1131,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             } else {
                 model.dirty = true;
                 model.engine.record_native_notice(
-                    "view: AI agent access is not enabled for this project -- invoke :View ai again to be asked".to_string(),
+                    "view: AI agent access is not enabled for this project. Invoke :View ai again to be asked".to_string(),
                     false,
                 )
             }

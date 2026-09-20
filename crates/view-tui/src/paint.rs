@@ -834,12 +834,7 @@ fn composite_layers(
                 buf,
             ),
             LayerKind::Speculated(cells) => {
-                // the same two terms `view_surface::grid_origin` places the
-                // layer's own rect with: a glyph offset by the chrome rows
-                // alone lands outside the tile it predicts
-                let inset = model.look.grid_offset();
-                let origin = (model.chrome_rows().saturating_add(inset), inset);
-                paint_speculated(cells, origin, damage, buf);
+                paint_speculated(cells, view_surface::grid_origin(model), damage, buf);
             }
             LayerKind::Picker(_)
             | LayerKind::Tree(_)
@@ -1669,10 +1664,10 @@ fn paint_grid(
 /// predicted for.
 ///
 /// Their coordinates are the engine grid's own, not the layer rect's (see
-/// `LayerKind::Speculated`), so they are offset past the reserved chrome rows
-/// exactly as the grid layer's placement already is -- one coordinate space
-/// for both grid-content layers, and one fewer place the two could disagree
-/// about where a cell is.
+/// `LayerKind::Speculated`), so `origin` moves them onto the terminal on both
+/// axes exactly as `view_surface::grid_origin` moves the grid layer's own
+/// rect -- one coordinate space for both grid-content layers, and one fewer
+/// place the two could disagree about where a cell is.
 ///
 /// The symbol alone is written: the prediction wears whatever style the grid
 /// layer gave that cell in this same frame, which is the row's own highlight

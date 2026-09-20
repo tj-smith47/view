@@ -105,7 +105,7 @@ fn as_prompt_keys(text: &str) -> String {
 /// is gone (see `route_key`'s `OverlayKind::Ai` arm) -- so advising it
 /// would spend a decision the reader had not made, for a paste.
 pub(super) const PERMISSION_PASTE_NOTICE: &str =
-    "view: the agent is waiting on this request -- answer it, and the composer takes text again";
+    "view: the agent is waiting on this request. Answer it, and the composer takes text again";
 
 /// What a paste answers with at a focused native surface that composes no
 /// text: the tree, a confirm prompt, an `inputlist()` prompt. States that
