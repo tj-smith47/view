@@ -35,7 +35,7 @@ What a tiling desktop actually is, and what view takes from it:
 | **Workspaces**, one visible set of tiles at a time, switched from the bar. | tabpages are workspaces. |
 | **omarchy's top bar**: a thin bar with a centred workspace *pill* (the active workspace highlighted, siblings dimmed), clock/status at the edges, the launcher summoned by a key. | The tabline becomes a top pill: tabpages (or buffers when there is one tabpage — a config choice) centred as a pill, session identity (remote host, agent state) at the edges. Supersedes bufferline through the registry; `[native] tabline` chooses pill vs plugin (#25 folds into this). |
 | **Theme cohesion** comes from a switcher rewriting each tool's config. | `theme = "auto"` derives from the live colourscheme (C3 is the evidence task). |
-| **Menu**: one key opens a launcher listing everything the desktop can do. | the command palette, centred pill, same key convention as omarchy's (`Super+Alt+Space` → `<leader><leader>` default, configurable). |
+| **Menu**: one key opens a launcher listing everything the desktop can do. | the command palette, centred pill, same key convention as omarchy's (`SUPER + SPACE` is omarchy's menu, `SUPER + ALT + SPACE` its apps menu; the desktop key profile of S3.5b binds `Super+Space`, the editor profile `<leader><leader>`, both configurable). |
 
 Two look modes, both first-class, behind a knob that must always exist
 (user ruling 2026-09-04: tiles inside an already-tiled desktop look awkward,
@@ -191,6 +191,12 @@ keymaps, goldens), fable-reviewed, then:
    never resizes. `[native] tree_width` and `[ai] panel_width` stay as
    aliases with a deprecation notice. Goldens for gapped/gapless and for every surface
    in both placements join item 6.
+5b. Key profiles (user ruling 2026-09-20: an oversight, not a fork). `[keys]
+   profile = "auto" | "desktop" | "editor"`: omarchy's chords (Super, or Alt
+   where Super cannot reach the terminal) on a headless box, editor keys under
+   a GUI desktop, every chord configurable. Design in the S3 doc's key
+   profiles section; built after Task 5, before Task 6.
+
 6. Tier goldens for every tile/pill/float surface at every tier (T24, #13).
 7. README visuals (user ruling 2026-09-20): a tape or gif beside each
    feature block (agent panel, remote editing, engine restart, tiled panes)
