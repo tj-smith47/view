@@ -35,17 +35,35 @@ config, plugins, LSP servers and treesitter setup run unchanged. See
 
 ## Features
 
-- **Bring your whole config.** telescope, lualine, noice, nvim-cmp,
-  treesitter, mini.nvim and the rest load on day one, unchanged.
-- **Fast where you feel it.** Launch, keypress and scroll are measured with
-  your config loaded. See [Performance](#performance).
-- **Modern out of the box.** The surfaces view owns (statusline, picker,
-  file tree, notifications, command palette) share one design system, and a
-  single config key hands one back to the plugin you already use. Copy
-  [`view.toml.example`](view.toml.example) to `~/.config/view/view.toml`,
-  change `picker = true` to `picker = false` under its `[native]` table, and
-  restart. In a file written from scratch, `native.picker = false` on a line
-  of its own is the whole config.
+**Your config, unchanged.** telescope, lualine, noice, nvim-cmp, treesitter,
+mini.nvim and the rest load on day one. view knows which plugin owns which
+surface and steps aside for it, `vim.notify` lands in view's notifications,
+and everything holds up over SSH and inside tmux.
+
+**One design system.** The surfaces view draws (picker, file tree,
+statusline, command palette, notifications, tabline) share one look, themed
+live from your colorscheme. A single config key hands any one of them back
+to the plugin you already use: copy [`view.toml.example`](view.toml.example)
+to `~/.config/view/view.toml` and set `picker = false` under `[native]`.
+
+**Agents in the editor.** An agent panel that speaks ACP, context providers
+that hand the agent what you are looking at, and every proposed change
+reviewed as a diff in the file itself.
+
+**Remote editing.** `view --remote host:path` runs the engine over SSH with
+paint and input local. Keystrokes are echoed before the round trip returns,
+and the clipboard works through OSC 52.
+
+**Engine supervision.** A hung or crashed engine is interrupted or restarted
+with your buffers restored, and the screen never blanks.
+
+**Fast where you feel it.** Launch, keypress and scroll are measured with
+your config loaded. See [Performance](#performance).
+
+**Everyday details.** Terminal capability tiers from kitty and ghostty down
+to 16 colors, a clipboard provider, full CLI passthrough (`+42`, `-R`, `-O`,
+`ls | view -`), and a small config: `[ui]` for tier and theme, `[engine]`
+for your own nvim or `NVIM_APPNAME`, everything else optional.
 
 ## Performance
 
@@ -80,62 +98,43 @@ contributes to each of the numbers above:
 The goal is one terminal binary for anything you can view: a file, another
 machine's tree, an image, a website, a video.
 
-view is the product of bringing together the best features and ideas
-throughout the open-source community: [Omarchy](https://omarchy.org) and
-[Hyprland](https://hypr.land), for familiar window tiling navigation and
-a single config that propagates everywhere;
-[qutebrowser](https://qutebrowser.org), a browser driven by vim motions;
-[tmux](https://github.com/tmux/tmux), sessions that outlive a connection;
-[herdr](https://github.com/herdrdev/herdr), a fleet of agents as an
-attention queue; Zed's [Agent Client Protocol](https://agentclientprotocol.com),
-the seam an agent plugs into; [kitty](https://sw.kovidgoyal.net/kitty/),
-the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
+view brings together ideas from across the open-source community:
 
-### Shipped
+- [Omarchy](https://omarchy.org) and [Hyprland](https://hypr.land): tiling
+  navigation and one config that propagates everywhere
+- [qutebrowser](https://qutebrowser.org): a browser driven by vim motions
+- [tmux](https://github.com/tmux/tmux): sessions that outlive a connection
+- [herdr](https://github.com/herdrdev/herdr): a fleet of agents as an
+  attention queue
+- Zed's [Agent Client Protocol](https://agentclientprotocol.com): the seam
+  an agent plugs into
+- [kitty](https://sw.kovidgoyal.net/kitty/): the graphics and keyboard
+  protocols
+- [mpv](https://mpv.io): video playback
 
-- [x] Command line, messages, popup menu, tabline, cursor shapes
-- [x] Terminal capability tiers (kitty/ghostty class down to 16-color)
-- [x] **Native UI**: picker, file tree, statusline, command palette,
-      notifications, theme derived live from your colorscheme
-- [x] Clipboard provider and full CLI passthrough (`+42`, `-R`, `-O`,
-      `ls | view -`)
-- [x] **AI**: agent panel, ACP client, context providers, diff review in
-      the file itself
-- [x] **Engine supervision.** A hung or crashed engine is interrupted or
-      restarted with your buffers restored, and the screen never blanks.
-- [x] **Remote editing.** `view --remote host:path`: engine over SSH,
-      paint and input local, keystrokes echoed without waiting for the round
-      trip, OSC 52 clipboard.
-- [x] **Your plugins keep working.** view knows which plugin still owns
-      which surface and steps aside for it; `vim.notify` lands in view's
-      notifications; everything holds up over SSH and inside tmux.
-- [x] **Small config.** `[ui]` for tier and theme, `[engine]` for your own
-      nvim or `NVIM_APPNAME`; everything view can work out for itself is
-      optional.
+### Next
 
-### Landing in the first release
-
-- [ ] **Tiled UI.** Framed panes with gaps and an active accent, status
-      segments in the frame edge, a tabpage pill, the tree and the agent
-      panel as overlays or sidebars per surface.
-- [ ] **Session DVR.** Scrub, branch, and export the session's keystream
-      and frames.
-- [ ] **Key introspector.** `:View keys`: which mapping fired, whose it
-      was, what it displaced.
-- [ ] **Image viewing.** Kitty graphics on capable terminals, half-block
-      cells elsewhere; picker preview and tree hover included.
-- [ ] **Media handoff.** `view talk.mp4`, or a video picked in the tree,
-      hands the terminal to `mpv` and takes it back on exit.
-- [ ] **`view doctor`.** Terminal, tier and why, tmux passthrough, `mpv`
-      on the path, a repro invocation to paste into an issue.
-- [ ] **Windows.** A first-class Windows Terminal experience.
-- [ ] **Workspace arc.** Tiles for N content surfaces: an image, a media
-      player, a remote tree, a qutebrowser-style browser over CDP, mpv
-      composited in a pane.
-- [ ] **Agent-fleet attention.** Agent tabs with status (working,
-      blocked on you, done) as an attention queue inside the editor.
-- [ ] **Detach and reconnect.** tmux-style persistence for the remote
-      engine: drop the link, reattach where you left off.
+- **Tiled UI.** Framed panes with gaps and an active accent, status
+  segments in the frame edge, a tabpage pill, the tree and the agent
+  panel as overlays or sidebars per surface.
+- **Session DVR.** Scrub, branch, and export the session's keystream and
+  frames.
+- **Key introspector.** `:View keys`: which mapping fired, whose it was,
+  what it displaced.
+- **Image viewing.** Kitty graphics on capable terminals, half-block cells
+  elsewhere; picker preview and tree hover included.
+- **Media handoff.** `view talk.mp4`, or a video picked in the tree, hands
+  the terminal to `mpv` and takes it back on exit.
+- **`view doctor`.** Terminal, tier and why, tmux passthrough, `mpv` on the
+  path, a repro invocation to paste into an issue.
+- **Windows.** A first-class Windows Terminal experience.
+- **Workspace arc.** Tiles for N content surfaces: an image, a media
+  player, a remote tree, a qutebrowser-style browser over CDP, mpv
+  composited in a pane.
+- **Agent-fleet attention.** Agent tabs with status (working, blocked on
+  you, done) as an attention queue inside the editor.
+- **Detach and reconnect.** tmux-style persistence for the remote engine:
+  drop the link, reattach where you left off.
 
 Beyond the feature list there is one standing direction: viewport
 highlighting and LSP UI move to view's side one subsystem at a time.
