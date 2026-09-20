@@ -905,9 +905,27 @@ impl GridRegistry {
         self.claims.push((win, surface));
     }
 
-    /// Forgets the claim on `win`, for a window that has been closed.
+    /// Forgets the claim on `win` and puts any pane placed under that
+    /// claim back to an ordinary window.
+    ///
+    /// The placement is rewritten here rather than left to the next
+    /// `win_pos`, because a window that outlives the claim keeps the slot
+    /// it already had and nvim names no event for it. A pane still marked
+    /// `Native` paints the surface's own rows over a window that is nvim's
+    /// again, and a surface whose state is gone paints nothing at all,
+    /// which leaves the window's text unreachable under stale cells.
     pub fn release_native_window(&mut self, win: WinHandle) {
         self.claims.retain(|(handle, _)| *handle != win);
+        for slot in &mut self.slots {
+            if slot.window.as_ref().is_none_or(|window| window.win != win) {
+                continue;
+            }
+            if let Some(placed) = slot.placed.as_mut() {
+                if matches!(placed.kind, PaneKind::Native { .. }) {
+                    placed.kind = PaneKind::Window;
+                }
+            }
+        }
     }
 
     /// How many window handles view holds a surface claim on.
@@ -2006,6 +2024,49 @@ mod tests {
             registry.grid(GridId(2)).map(Grid::size),
             Some((30, 20)),
             "the native pane lost the size its resize gave it"
+        );
+    }
+
+    /// A window whose close nvim cannot take outlives the claim on it.
+    /// nvim sends no `win_pos` for a window whose slot did not move, so a
+    /// placement left as it was keeps refusing the engine's cells and
+    /// keeps naming a surface the cursor is no longer in.
+    #[test]
+    fn releasing_a_claim_puts_its_pane_back_to_an_ordinary_window() {
+        let mut registry = GridRegistry::new();
+        claimed(&mut registry, GridId(2), NativeSurface::Tree);
+        registry.release_native_window(WinHandle(2));
+        let panes = registry.panes_in_z_order();
+        assert!(
+            panes
+                .iter()
+                .any(|pane| pane.id == GridId(2) && pane.kind == PaneKind::Window),
+            "the released handle left a native pane placed: {panes:?}"
+        );
+        registry.apply_cells(
+            GridId(2),
+            GridOp::PutLine {
+                row: 0,
+                col_start: 0,
+                cells: vec![("buffer".to_string(), 0, 1)],
+            },
+        );
+        assert_eq!(
+            registry.grid(GridId(2)).map(Grid::has_text),
+            Some(true),
+            "the released window's grid still refuses the engine's cells"
+        );
+        registry.apply_cells(GridId(2), GridOp::CursorGoto { row: 0, col: 0 });
+        assert_eq!(
+            registry.native_pane_focus(),
+            None,
+            "the cursor in the released window still names a surface of \
+             view's own"
+        );
+        assert_eq!(
+            registry.native_claims(),
+            0,
+            "the claim outlived its release"
         );
     }
 

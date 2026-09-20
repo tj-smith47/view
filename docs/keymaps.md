@@ -48,6 +48,9 @@ same three states:
 | open, and you are in it | closes it |
 | open, and you are not in it | puts you back in it |
 
+Close the tree while its window is the only one open and the window stays,
+holding the file you were last in.
+
 `<Esc>` inside the tree takes you back to the window you came from and
 leaves the tree standing. Under the default `placement = "overlay"` the
 tree draws over your buffers instead, and `<Esc>` closes it.

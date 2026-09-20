@@ -713,6 +713,142 @@ fn window_grid_sizes(engine: &view_oracle::EngineSession) -> Vec<(usize, usize)>
     sizes
 }
 
+/// The width of every window holding the tree's own buffer, as nvim
+/// reports it, joined by commas and empty where the tree has no window.
+fn tree_window_widths(engine: &mut view_oracle::EngineSession) -> String {
+    engine
+        .eval_str(
+            "join(map(filter(getwininfo(), \
+             'getbufvar(v:val.bufnr, \"&filetype\") ==# \"view-tree\"'), \
+             'v:val.width'), \",\")",
+        )
+        .expect("nvim answers for the tree's own window")
+        .trim()
+        .to_string()
+}
+
+/// How many of nvim's buffers were opened for a surface of view's own.
+fn view_buffers(engine: &mut view_oracle::EngineSession) -> String {
+    engine
+        .eval_str(
+            "join(map(filter(getbufinfo(), \
+             'getbufvar(v:val.bufnr, \"&filetype\") =~# \"^view-\"'), \
+             'v:val.bufnr'), \",\")",
+        )
+        .expect("nvim answers for its own buffers")
+        .trim()
+        .to_string()
+}
+
+/// A tiled session on `dir` with the tree placed in a window of its own.
+fn windowed_tree_session(dir: &Path) -> view_oracle::EngineSession {
+    let mut engine = view_oracle::EngineSession::spawn_with_ext(
+        COLS,
+        ROWS,
+        view_oracle::UI_EXT_OPTIONS_MULTIGRID,
+    )
+    .expect("EngineSession::spawn_with_ext against real nvim");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .arm_and_input(&format!(":cd {}<CR>", dir.display()))
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .set_panes("tiles")
+        .expect("the tiled look is reachable");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine.set_surface(
+        view_core::native::geometry::NativeSurface::Tree,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Left,
+            30,
+        ),
+    );
+    engine
+}
+
+/// Opens the tree, leaves its window the only one on the tabpage, and
+/// closes it again -- the two keys a person reaches this by.
+fn close_the_tree_alone_on_its_tabpage(engine: &mut view_oracle::EngineSession) {
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the tree's window opens");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.eval_str("&filetype").unwrap().trim(),
+        "view-tree",
+        "the cursor did not land in the tree's own window"
+    );
+    engine.arm_and_input(":only<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        nvim_window_sizes(engine).len(),
+        1,
+        "`:only` left a second window open, so nvim would take the close"
+    );
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the toggle asks nvim to close the window");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+}
+
+/// What both arms of the close leave behind: one window, holding a buffer
+/// the person can type in, with nothing of the tree's left anywhere.
+fn assert_ordinary_window(engine: &mut view_oracle::EngineSession) {
+    assert_eq!(
+        nvim_window_sizes(engine).len(),
+        1,
+        "the window the tree sat in went away with the tree"
+    );
+    assert_eq!(
+        tree_window_widths(engine),
+        "",
+        "the tree's scratch window is still on screen"
+    );
+    assert_eq!(
+        view_buffers(engine),
+        "",
+        "the tree's scratch buffer outlived the window it was drawn in"
+    );
+    assert!(
+        !engine.tree_is_open(),
+        "the tree's state outlived the window it was drawn in"
+    );
+    assert_eq!(
+        engine.eval_str("&buftype").unwrap().trim(),
+        "",
+        "the window came back holding a buffer nvim writes nothing to"
+    );
+    assert_eq!(
+        engine.eval_str("&modifiable").unwrap().trim(),
+        "1",
+        "the window came back holding a buffer the person cannot type in"
+    );
+    assert_eq!(
+        engine.focus(),
+        view_core::model::Focus::Engine,
+        "the keyboard stayed in a surface of view's own"
+    );
+    let wanted = nvim_window_sizes(engine);
+    assert_eq!(
+        window_grid_sizes(engine),
+        wanted,
+        "view holds a grid the handed-back window does not answer for"
+    );
+    let screen = engine.screen_text();
+    assert!(
+        !screen.contains("E444"),
+        "the close still asked nvim to close the last window: {screen}"
+    );
+}
+
 /// The same splits and closes as the battery above, under
 /// `panes = "tiles"` at the same geometry, as an assertion rather than a
 /// capture: at every step view holds one grid per open window, each the
@@ -909,29 +1045,7 @@ fn the_pill_holds_its_row_as_tabpages_and_buffers_come_and_go() {
 fn a_windowed_tree_keeps_its_tile_as_the_windows_of_a_split_close() {
     let work = common::ScratchPaths::new("close-battery-tree");
     let dir = build_fixture(&work.isolated_home);
-    let mut engine = view_oracle::EngineSession::spawn_with_ext(
-        COLS,
-        ROWS,
-        view_oracle::UI_EXT_OPTIONS_MULTIGRID,
-    )
-    .expect("EngineSession::spawn_with_ext against real nvim");
-    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
-    engine
-        .arm_and_input(&format!(":cd {}<CR>", dir.display()))
-        .unwrap();
-    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
-    engine
-        .set_panes("tiles")
-        .expect("the tiled look is reachable");
-    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
-    engine.set_surface(
-        view_core::native::geometry::NativeSurface::Tree,
-        view_core::native::geometry::SurfaceLayout::new(
-            view_core::native::geometry::SurfacePlacement::Windowed,
-            view_core::native::geometry::Anchor::Left,
-            30,
-        ),
-    );
+    let mut engine = windowed_tree_session(&dir);
 
     let before = nvim_window_sizes(&mut engine).len();
     engine
@@ -979,18 +1093,7 @@ fn a_windowed_tree_keeps_its_tile_as_the_windows_of_a_split_close() {
         "<Esc> took the tree's tile down with the focus"
     );
 
-    let tree_width = |engine: &mut view_oracle::EngineSession| -> String {
-        engine
-            .eval_str(
-                "join(map(filter(getwininfo(), \
-                 'getbufvar(v:val.bufnr, \"&filetype\") ==# \"view-tree\"'), \
-                 'v:val.width'), \",\")",
-            )
-            .expect("nvim answers for the tree's own window")
-            .trim()
-            .to_string()
-    };
-    let opened_at = tree_width(&mut engine);
+    let opened_at = tree_window_widths(&mut engine);
 
     for (step, keys) in TILED_STEPS {
         engine.arm_and_input(keys).unwrap();
@@ -1005,7 +1108,7 @@ fn a_windowed_tree_keeps_its_tile_as_the_windows_of_a_split_close() {
             "{step}: view's window grids are not the windows nvim has open"
         );
         assert_eq!(
-            tree_width(&mut engine),
+            tree_window_widths(&mut engine),
             opened_at,
             "{step}: the splits re-flowed the tree's own window"
         );
@@ -1028,7 +1131,7 @@ fn a_windowed_tree_keeps_its_tile_as_the_windows_of_a_split_close() {
     engine.arm_and_input(":q<CR>").unwrap();
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     assert_eq!(
-        tree_width(&mut engine),
+        tree_window_widths(&mut engine),
         "",
         "nvim still has a window holding the tree"
     );
@@ -1068,11 +1171,16 @@ fn a_windowed_tree_keeps_its_tile_as_the_windows_of_a_split_close() {
         "the reopen left view holding a grid nvim has no window for"
     );
 
-    // nvim refusing the close outright, which is what `:only` from inside
-    // the tree sets up: its window is then the last one and
-    // `nvim_win_close` answers E444, so no `win_close` follows
+    // the tree's window left as the only one on the tabpage, which is
+    // what `:only` from inside it sets up: nvim closes no window there,
+    // so the close hands this one back as an ordinary window
     engine.arm_and_input(":only<CR>").unwrap();
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        1,
+        "`:only` left a second window open, so this leg tests nothing"
+    );
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
             feature: "tree".to_string(),
@@ -1080,18 +1188,92 @@ fn a_windowed_tree_keeps_its_tile_as_the_windows_of_a_split_close() {
         })
         .expect("the toggle asks nvim to close the window");
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
-    assert_ne!(
-        tree_width(&mut engine),
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        1,
+        "the window the tree sat in went away with the tree"
+    );
+    assert_eq!(
+        tree_window_widths(&mut engine),
         "",
-        "nvim did not refuse the close, so this leg tests nothing"
+        "the tree's scratch window is still on screen"
     );
     assert!(
         !engine.tree_is_open(),
-        "the tree's state waits on a win_close nvim will never send"
+        "the tree's state outlived the window it was drawn in"
+    );
+    let wanted = nvim_window_sizes(&mut engine);
+    assert_eq!(
+        window_grid_sizes(&engine),
+        wanted,
+        "view holds a grid the handed-back window does not answer for"
     );
     let screen = engine.screen_text();
     assert!(
-        screen.contains("E444"),
-        "a refused close said nothing to the reader: {screen}"
+        !screen.contains("E444"),
+        "the close still asked nvim to close the last window: {screen}"
     );
+}
+
+/// The tree closed while its window is the only one on the tabpage. nvim
+/// refuses `nvim_win_close` there, and view used to drop the tree anyway,
+/// leaving the person looking at the unnamed scratch window it had been
+/// drawn on with E444 under it. Two keys away: `:only` inside the tree,
+/// then the toggle.
+///
+/// Both arms of the fallback: a session with a file open takes the buffer
+/// it was last in, and one that has opened nothing takes its own empty
+/// buffer.
+///
+/// Disconfirm: dropping the `nvim_tabpage_list_wins` branch from
+/// `CLOSE_NATIVE_WINDOW_CHUNK` puts the scratch window back, which fails
+/// on the tree's own window still being on screen.
+#[test]
+fn closing_the_tree_in_its_last_window_leaves_an_ordinary_window() {
+    let work = common::ScratchPaths::new("close-battery-tree-alone");
+    let dir = build_fixture(&work.isolated_home);
+
+    {
+        let mut engine = windowed_tree_session(&dir);
+        engine.arm_and_input(":e README.md<CR>").unwrap();
+        assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+        close_the_tree_alone_on_its_tabpage(&mut engine);
+        assert_ordinary_window(&mut engine);
+        assert_eq!(
+            engine.eval_str("expand('%:t')").unwrap().trim(),
+            "README.md",
+            "the window came back on a buffer the person had not been in"
+        );
+        // the window's own grid, which is where its text lives under
+        // multigrid: the screen this harness rasters is the outer grid
+        // and view's own chrome over it
+        let text = engine.grid_screens();
+        assert!(
+            text.iter().any(|(id, screen)| *id != GLOBAL_GRID
+                && screen
+                    .rows
+                    .first()
+                    .is_some_and(|row| row.starts_with(FIRST_LINE))),
+            "the window came back holding none of the file's text: {text:#?}"
+        );
+    }
+
+    {
+        let mut engine = windowed_tree_session(&dir);
+        close_the_tree_alone_on_its_tabpage(&mut engine);
+        assert_ordinary_window(&mut engine);
+        assert_eq!(
+            engine.eval_str("bufname('%')").unwrap().trim(),
+            "",
+            "a session that opened no file came back on a named buffer"
+        );
+        assert_eq!(
+            engine
+                .eval_str("line('$') . ':' . getline(1)")
+                .unwrap()
+                .trim(),
+            "1:",
+            "the empty buffer the window came back on holds text"
+        );
+    }
 }

@@ -98,20 +98,77 @@ return win";
 /// invalid handle raises rather than doing nothing. `force` is set because
 /// the buffer is scratch and has nothing to lose.
 ///
-/// The close can still be refused -- `:only` from inside the surface
-/// leaves its window the last one and nvim answers E444 -- and this runs
-/// as a notification, whose error nvim reports to its log and not to the
-/// screen. The `pcall` puts it back on the screen through the same
-/// `msg_show` every other engine error reaches the reader by.
+/// A window that is the last one on its tabpage cannot be closed at all --
+/// `:only` from inside the surface leaves the tree's window alone there
+/// and nvim answers `nvim_win_close` with E444 -- so the chunk hands that
+/// window back to the person: the alternate buffer if one is listed, else
+/// the most recently used listed buffer, else an empty listed one, with
+/// the scratch buffer wiped and the window options the open chunk set put
+/// back. `nvim_create_buf` rather than `:enew`, which reuses an unnamed
+/// unmodified buffer and would leave the person typing into the scratch
+/// buffer the tree was drawn over. `winfixwidth` and `winfixheight` have
+/// no global value to read, so they go back to their defaults; the rest
+/// take the global the person's own `:set` wrote. The tabpage is read here
+/// rather than in the model, whose own reading would be a round trip old
+/// by the time the close ran.
+///
+/// The surface's entry in `vim.g.view_native_windows` goes either way. A
+/// window that survives the close is nvim's again, and a later open that
+/// found the handle still listed there would take the person's window for
+/// the tree.
+///
+/// A close refused for any other reason still runs as a notification,
+/// whose error nvim reports to its log and not to the screen. The `pcall`
+/// puts it back on the screen through the same `msg_show` every other
+/// engine error reaches the reader by.
 ///
 /// [`EngineHandle::close_native_window`]: super::EngineHandle::close_native_window
 pub(crate) const CLOSE_NATIVE_WINDOW_CHUNK: &str = "\
 local win = ...
-if vim.api.nvim_win_is_valid(win) then
+if not vim.api.nvim_win_is_valid(win) then
+  return
+end
+local wins = vim.g.view_native_windows or {}
+for id, handle in pairs(wins) do
+  if handle == win then
+    wins[id] = nil
+  end
+end
+vim.g.view_native_windows = wins
+local tab = vim.api.nvim_win_get_tabpage(win)
+if #vim.api.nvim_tabpage_list_wins(tab) > 1 then
   local ok, err = pcall(vim.api.nvim_win_close, win, true)
   if not ok then
     vim.api.nvim_echo({ { tostring(err), 'ErrorMsg' } }, true, {})
   end
+  return
+end
+local scratch = vim.api.nvim_win_get_buf(win)
+local target = vim.fn.bufnr('#')
+if target < 1 or target == scratch or vim.fn.buflisted(target) == 0 then
+  target = 0
+  local newest = -1
+  for _, info in ipairs(vim.fn.getbufinfo({ buflisted = 1 })) do
+    if info.bufnr ~= scratch and info.lastused > newest then
+      newest = info.lastused
+      target = info.bufnr
+    end
+  end
+  if target == 0 then
+    target = vim.api.nvim_create_buf(true, false)
+  end
+end
+if target ~= 0 then
+  vim.api.nvim_win_set_buf(win, target)
+end
+if vim.api.nvim_buf_is_valid(scratch) then
+  pcall(vim.api.nvim_buf_delete, scratch, { force = true })
+end
+vim.wo[win].winfixwidth = false
+vim.wo[win].winfixheight = false
+for _, opt in ipairs({ 'number', 'relativenumber', 'signcolumn',
+  'foldcolumn', 'wrap' }) do
+  vim.wo[win][opt] = vim.api.nvim_get_option_value(opt, { scope = 'global' })
 end";
 
 /// The lua chunk [`EngineHandle::set_window_size`] runs inside nvim,
@@ -325,6 +382,50 @@ mod tests {
             modifiable > open,
             "modifiable is cleared before the buffer reaches a window, \
              which the window's own buffer setup would undo"
+        );
+    }
+
+    /// A tree whose window is the last one on its tabpage cannot be
+    /// closed, and dropping the surface without doing anything else left
+    /// the person looking at an unnamed scratch window. Both arms are
+    /// named here because only one of them runs per close, so a chunk
+    /// that lost the fallback would still pass every test the close path
+    /// has against a tabpage with two windows in it.
+    #[test]
+    fn the_close_chunk_hands_back_a_window_it_cannot_close() {
+        for call in [
+            "nvim_tabpage_list_wins",
+            "nvim_win_close",
+            "nvim_win_set_buf",
+            "nvim_create_buf",
+            "nvim_buf_delete",
+        ] {
+            assert!(
+                CLOSE_NATIVE_WINDOW_CHUNK.contains(call),
+                "the chunk no longer calls {call}"
+            );
+        }
+        for line in [
+            "vim.wo[win].winfixwidth = false",
+            "vim.wo[win].winfixheight = false",
+            "vim.wo[win][opt] = vim.api.nvim_get_option_value(opt, \
+             { scope = 'global' })",
+        ] {
+            assert!(
+                CLOSE_NATIVE_WINDOW_CHUNK.contains(line),
+                "a window handed back keeps the look of the tree: {line}"
+            );
+        }
+        let listed = CLOSE_NATIVE_WINDOW_CHUNK
+            .find("wins[id] = nil")
+            .expect("the chunk forgets the surface's window");
+        let close = CLOSE_NATIVE_WINDOW_CHUNK
+            .find("nvim_tabpage_list_wins")
+            .expect("the chunk reads the tabpage's windows");
+        assert!(
+            listed < close,
+            "a window that survives the close stays in the table the open \
+             chunk enters, which gives the person's own window to the tree"
         );
     }
 
