@@ -957,6 +957,29 @@ mod tests {
         fn list_buffers(&self, _generation: u64) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn open_native_window(
+            &self,
+            _surface: view_core::native::geometry::NativeSurface,
+            _split: view_core::msg::WinSplit,
+            _size: u16,
+            _generation: u64,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn close_native_window(&self, _win: u64) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn set_window_size(
+            &self,
+            _win: u64,
+            _width: Option<u16>,
+            _height: Option<u16>,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn focus_previous_window(&self) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn preview_buffer(
             &self,
             _path: &str,

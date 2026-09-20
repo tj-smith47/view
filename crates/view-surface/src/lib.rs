@@ -973,6 +973,12 @@ fn speculated_layer(model: &Model, origin: (u16, u16)) -> Option<Layer> {
 /// the terminal's own probed capabilities, resolved once here rather than
 /// per painter.
 fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
+    // a windowed surface's state rides the overlay stack the way a
+    // floating one's does; what draws it is the pane compositor, and a
+    // float here would put a second copy over the tile
+    if !model.draws_as_overlay(&open.kind) {
+        return None;
+    }
     let cells = model.overlay_rect(open);
     let kind = layer_kind(model, &open.kind, cells.height, cells.width)?;
     Some(Layer::new(

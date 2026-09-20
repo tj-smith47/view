@@ -36,6 +36,22 @@ permission request opened beside you, is one press from being yours.
 Closing it, whichever way you get there, leaves the agent session running,
 and reopening it brings the transcript back where you left it.
 
+## `<leader>e` reads the tree the same way
+
+With `placement = "windowed"` under `[ui.surfaces.tree]` the file tree takes
+a window of its own beside your buffers, and `<leader>e` reads it over the
+same three states:
+
+| the tree is | `<leader>e` |
+| --- | --- |
+| closed | opens it and puts the cursor in it |
+| open, and you are in it | closes it |
+| open, and you are not in it | puts you back in it |
+
+`<Esc>` inside the tree takes you back to the window you came from and
+leaves the tree standing. Under the default `placement = "overlay"` the
+tree draws over your buffers instead, and `<Esc>` closes it.
+
 ## Your own keys reach nvim under nvim's names
 
 Every key view does not own itself is forwarded to nvim by the name nvim

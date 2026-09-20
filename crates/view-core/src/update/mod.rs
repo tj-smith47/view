@@ -4,6 +4,7 @@ use crate::model::{Focus, Model, OverlayKind, Tier};
 use crate::msg::{DeleteConfirmOutcome, Effect, EngineRequest, Key, Msg, RpcCall};
 use crate::native::ai_panel::TranscriptScroll;
 use crate::native::diff::BufTextChangedEvent;
+use crate::native::geometry::NativeSurface;
 use crate::native::keys::{Action, Resolved};
 use crate::native::supervision::WedgeKind;
 use crate::native::toast::HoldOutcome;
@@ -252,7 +253,10 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Paste(text) => match model.focus() {
             // never replayed as nvim_input keystrokes: one undo unit, no
             // mapping interference, matching nvim_paste's own contract
-            Focus::Engine => vec![Effect::Rpc(RpcCall::Paste { text })],
+            // a windowed surface owns the keyboard but holds no text of
+            // its own to paste into, so the paste goes where it would have
+            // gone with no surface open
+            Focus::Engine | Focus::Pane(_) => vec![Effect::Rpc(RpcCall::Paste { text })],
             Focus::Native(_) => paste_into_focused_surface(model, &text),
         },
         Msg::Mouse(input) => mouse::route(model, input),
@@ -723,6 +727,11 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // not matched here: the engine's Lua reply lists every listed
         // buffer unconditionally, with no needle to filter by, so the
         // actual fuzzy match still has to happen in the matcher worker --
+        Msg::NativeWindowOpened {
+            generation,
+            surface,
+            win,
+        } => surfaces::native_window_opened(model, generation, surface, win),
         // this arm's whole job is turning the raw reply into a corpus and
         // handing it to the worker as `resolved`, gated on the generation
         // still being the picker's own (see `Effect::PickerQuery`'s doc for
@@ -1378,6 +1387,10 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             }
             vec![Effect::Rpc(RpcCall::Input { notation })]
         }
+        Focus::Pane(NativeSurface::Tree) => surfaces::tree_key(model, &notation),
+        // a surface with no windowed placement yet: the cursor cannot be in
+        // a pane of it, and a key arriving here is one nvim would answer
+        Focus::Pane(_) => vec![Effect::Rpc(RpcCall::Input { notation })],
         Focus::Native(_) => match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
             // an nvim-relayed prompt answers by feeding the engine a
             // keystroke -- the engine is blocked in its own input
@@ -1440,156 +1453,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                 let generation = p.edit_query(&notation);
                 vec![picker_query(p, generation)]
             }
-            // discards the payload deliberately: every branch below
-            // reaches the tree through `model.tree_mut()` fresh
-            // instead, since a bound `&mut TreeState` here would
-            // keep `model` borrowed across the `model.pop_focused_overlay()`
-            // and `model.close_tree()` calls the <CR>/<Esc> arms need
-            Some(OverlayKind::Tree(_)) => {
-                // Ahead of the tree's own keys and resolved through the one
-                // shared set, so neither sidebar can drift onto a key the
-                // other does not answer (see [`take_binding`]).
-                match take_binding(model, &notation) {
-                    Some(Resolved::Act(Action::Resize(direction))) => {
-                        if model.resize_tree(direction.widens()) {
-                            model.dirty = true;
-                        }
-                        return Vec::new();
-                    }
-                    // The composer's line break is the agent panel's alone,
-                    // and the tree answers it the way it answers any key no
-                    // binding of its own names.
-                    Some(Resolved::Act(Action::ComposerNewline)) => {}
-                    // The chord's first key waits here rather than moving
-                    // the selection or closing the sidebar; the follower
-                    // that completes nothing falls straight through to the
-                    // arms below on its own next pass.
-                    Some(Resolved::Pending) => return Vec::new(),
-                    None => {}
-                }
-                match notation.as_str() {
-                    "<Esc>" => {
-                        model.pop_focused_overlay();
-                        model.dirty = true;
-                        vec![Effect::TreeClose]
-                    }
-                    "<Down>" => {
-                        if let Some(t) = model.tree_mut() {
-                            t.move_selection(1);
-                        }
-                        model.dirty = true;
-                        Vec::new()
-                    }
-                    "<Up>" => {
-                        if let Some(t) = model.tree_mut() {
-                            t.move_selection(-1);
-                        }
-                        model.dirty = true;
-                        Vec::new()
-                    }
-                    // a directory toggles in place; a leaf's path is
-                    // opened through RPC (nvim owns the buffer this
-                    // creates) and the sidebar closes on the same
-                    // keypress, matching a picker selection's own
-                    // close-on-open behavior
-                    "<CR>" => {
-                        let to_open = model.tree_mut().and_then(|t| {
-                            let entry = t.selected_entry()?;
-                            if entry.is_dir {
-                                if let Some(idx) = t.view().selected {
-                                    t.toggle_expand(idx);
-                                }
-                                None
-                            } else {
-                                t.selected_path()
-                            }
-                        });
-                        model.dirty = true;
-                        match to_open {
-                            Some(path) => {
-                                model.pop_focused_overlay();
-                                vec![Effect::Rpc(RpcCall::OpenFile {
-                                    path: path_to_wire(&path),
-                                })]
-                            }
-                            None => Vec::new(),
-                        }
-                    }
-                    // opens the blocked-engine Prompt overlay through
-                    // the entry's own RpcCall (`vim.fn.input` primed
-                    // with a `kind = "confirm"` `nvim_echo`, see
-                    // `RpcCall::TreeCreatePrompt`'s doc) rather than any
-                    // new local input state: the reply routes back as
-                    // `Msg::TreeCreatePromptReply` and resolves the
-                    // actual file write from there, once nvim has
-                    // answered. Any selection, including none at all
-                    // (an empty tree), can create -- `TreeCreatePromptReply`
-                    // resolves the target directory from whatever is
-                    // selected at reply time (see its arm below), since
-                    // nothing about the tree's selection can move while
-                    // this prompt holds focus.
-                    "a" => {
-                        let Some(t) = model.tree_mut() else {
-                            return Vec::new();
-                        };
-                        let generation = t.generation();
-                        vec![Effect::Rpc(RpcCall::TreeCreatePrompt { generation })]
-                    }
-                    // renaming a directory has no backing effect --
-                    // `RpcCall::RenameFile` and the `Effect::Tree*File`
-                    // pair are file-only by their own doc contracts --
-                    // so a directory selection is a silent no-op here
-                    // rather than opening a prompt whose answer nothing
-                    // could act on.
-                    "r" => {
-                        let Some(t) = model.tree_mut() else {
-                            return Vec::new();
-                        };
-                        let Some(entry) = t.selected_entry() else {
-                            return Vec::new();
-                        };
-                        if entry.is_dir {
-                            return Vec::new();
-                        }
-                        let current_name = entry
-                            .path
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let Some(old_path) = t.selected_path() else {
-                            return Vec::new();
-                        };
-                        let generation = t.generation();
-                        vec![Effect::Rpc(RpcCall::TreeRenamePrompt {
-                            generation,
-                            old_path: path_to_wire(&old_path),
-                            current_name,
-                        })]
-                    }
-                    // same file-only restriction as "r", for the same
-                    // reason.
-                    "d" => {
-                        let Some(t) = model.tree_mut() else {
-                            return Vec::new();
-                        };
-                        let Some(entry) = t.selected_entry() else {
-                            return Vec::new();
-                        };
-                        if entry.is_dir {
-                            return Vec::new();
-                        }
-                        let Some(path) = t.selected_path() else {
-                            return Vec::new();
-                        };
-                        let generation = t.generation();
-                        vec![Effect::Rpc(RpcCall::TreeDeleteConfirm {
-                            generation,
-                            path: path_to_wire(&path),
-                        })]
-                    }
-                    _ => Vec::new(),
-                }
-            }
+            Some(OverlayKind::Tree(_)) => surfaces::tree_key(model, &notation),
             // A pending permission request blocks the issuing agent's own
             // turn until answered; its digits and <Esc> reach it here
             // because `model.focus()` only ever names this overlay once

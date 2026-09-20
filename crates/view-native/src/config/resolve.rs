@@ -17,6 +17,7 @@ use view_core::config::{
 };
 use view_core::model::{Panes, Tier};
 use view_core::native::geometry;
+use view_core::native::geometry::{Anchor, NativeSurface, SurfaceLayout, SurfacePlacement};
 use view_core::native::keys::{Action, Direction, KeyBindings};
 use view_core::native::pill::TablineShows;
 use view_core::native::registry;
@@ -155,6 +156,13 @@ pub struct ResolvedConfig {
     /// Where each feature's switch came from, in `registry::features()`
     /// order.
     native: Vec<Source>,
+    /// Where each of view's own surfaces sits, indexed by
+    /// [`NativeSurface::index`].
+    pub surfaces: [SurfaceLayout; 4],
+    /// Where the tree's `placement`, `anchor` and `size` came from, in that
+    /// order. Only the tree's three keys are registered, so only the tree
+    /// has layers to report.
+    tree_surface: [Source; 3],
     /// Where `[native] tree_width` came from.
     tree_width: Source,
     /// Where `[native] tabline_shows` came from.
@@ -401,6 +409,9 @@ pub fn resolve_with(
             .then(|| file.native.tabline_shows()),
         TablineShows::default(),
     );
+    let file_surfaces = super::surfaces(file, &mut notices);
+    let (surfaces, tree_surface) =
+        resolve_surfaces(file, file_surfaces, &tree_width, env, &mut notices);
     let (bindings, key_sources) = resolve_keys(file, env, &mut notices);
     let auto_restart = layer(
         None,
@@ -419,6 +430,8 @@ pub fn resolve_with(
     ResolvedConfig {
         ui,
         engine,
+        surfaces,
+        tree_surface,
         tables: ViewConfig {
             native: NativeConfig {
                 disabled,
@@ -577,6 +590,24 @@ impl ResolvedConfig {
                 self.engine.single_grid.value.to_string(),
                 self.engine.single_grid.source,
             ),
+            ("ui.surfaces.tree", "placement") => (
+                self.surfaces[NativeSurface::Tree.index()]
+                    .placement
+                    .label()
+                    .to_string(),
+                self.tree_surface[0],
+            ),
+            ("ui.surfaces.tree", "anchor") => (
+                self.surfaces[NativeSurface::Tree.index()]
+                    .anchor
+                    .label()
+                    .to_string(),
+                self.tree_surface[1],
+            ),
+            ("ui.surfaces.tree", "size") => (
+                self.surfaces[NativeSurface::Tree.index()].size.to_string(),
+                self.tree_surface[2],
+            ),
             ("native", "tree_width") => {
                 (self.tables.native.tree_width.to_string(), self.tree_width)
             }
@@ -708,6 +739,78 @@ fn layer<T>(flag: Option<T>, env: Option<T>, file: Option<T>, derived: T) -> Res
     }
 }
 
+/// The tree's `[ui.surfaces.tree]` table with the environment layered over
+/// the file's answer, and every other surface at the file's.
+///
+/// `[native] tree_width` is the tree's `size` under its older name, so the
+/// older key's environment value answers the newer key too. Without that
+/// the alias would hold at the file layer and break at the one above it.
+fn resolve_surfaces(
+    file: &ViewConfig,
+    file_surfaces: [SurfaceLayout; 4],
+    tree_width: &Resolved<u16>,
+    env: &dyn Fn(&str) -> Option<String>,
+    notices: &mut Vec<String>,
+) -> ([SurfaceLayout; 4], [Source; 3]) {
+    const TABLE: &str = "ui.surfaces.tree";
+    let index = NativeSurface::Tree.index();
+    let mut surfaces = file_surfaces;
+    let from_file = file_surfaces[index];
+    let spelled = |key: &str| file.spells(TABLE, key);
+    let placement = layer(
+        None,
+        env_read(
+            env,
+            TABLE,
+            "placement",
+            PLACEMENT_EXPECTED,
+            SurfacePlacement::parse,
+            notices,
+        ),
+        spelled("placement").then_some(from_file.placement),
+        SurfacePlacement::default(),
+    );
+    let anchor = layer(
+        None,
+        env_read(
+            env,
+            TABLE,
+            "anchor",
+            TREE_ANCHOR_EXPECTED,
+            parse_tree_anchor,
+            notices,
+        ),
+        spelled("anchor").then_some(from_file.anchor),
+        SurfaceLayout::default_for(NativeSurface::Tree).anchor,
+    );
+    let size = layer(
+        None,
+        env_read(env, TABLE, "size", WIDTH_EXPECTED, parse_width, notices)
+            .or_else(|| (tree_width.source == Source::Env).then_some(tree_width.value)),
+        (spelled("size") || file.spells("native", "tree_width")).then_some(from_file.size),
+        geometry::DEFAULT_PANEL_WIDTH_PCT,
+    );
+    if let Some(tree) = surfaces.get_mut(index) {
+        *tree = SurfaceLayout::new(placement.value, anchor.value, size.value);
+    }
+    (surfaces, [placement.source, anchor.source, size.source])
+}
+
+/// What a `[ui.surfaces.tree] placement` outside the pair is answered with.
+const PLACEMENT_EXPECTED: &str = "overlay or windowed";
+
+/// What a `[ui.surfaces.tree] anchor` outside the pair is answered with.
+const TREE_ANCHOR_EXPECTED: &str = "left or right";
+
+/// The edge the tree may open at, `None` for a word outside the pair.
+fn parse_tree_anchor(value: &str) -> Option<Anchor> {
+    match value.trim() {
+        "left" => Some(Anchor::Left),
+        "right" => Some(Anchor::Right),
+        _ => None,
+    }
+}
+
 /// One key's environment value read through `parse`, and a notice for a
 /// value `parse` would not have.
 ///
@@ -834,6 +937,9 @@ mod tests {
             ("ui.tokens", "accent") => "#89b4fa",
             ("engine", "nvim_bin") => "/opt/nvim/bin/nvim",
             ("engine", "appname") => "work",
+            ("ui.surfaces.tree", "placement") => "windowed",
+            ("ui.surfaces.tree", "anchor") => "right",
+            ("ui.surfaces.tree", "size") => "40",
             ("native", "tree_width") => "40",
             ("native", "tabline_shows") => "buffers",
             ("keys", _) => "<C-w>>",

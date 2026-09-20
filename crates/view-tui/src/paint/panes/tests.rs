@@ -2158,3 +2158,138 @@ fn statusline_false_under_tiles_keeps_the_row_and_empties_the_segments() {
         );
     }
 }
+
+/// The left tile handed to the tree, as nvim reports it: the surface
+/// claims the window, the redraw places the same slot again, and the scan
+/// answers with two rows.
+fn tree_in_the_left_tile(gaps: bool) -> Tiles {
+    let tiles = tiled(gaps);
+    let slots = tiles.slots;
+    let mut model = tiles.model;
+    model.surfaces.set_layout(
+        view_core::native::geometry::NativeSurface::Tree,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Left,
+            30,
+        ),
+    );
+    let effects = update(
+        &mut model,
+        Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    let mut generation = 0;
+    let mut scan = 0;
+    for effect in &effects {
+        match effect {
+            view_core::msg::Effect::Rpc(view_core::msg::RpcCall::OpenNativeWindow {
+                generation: g,
+                ..
+            }) => generation = *g,
+            view_core::msg::Effect::TreeScan { generation: g, .. } => scan = *g,
+            _ => {}
+        }
+    }
+    let _ = update(
+        &mut model,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: view_core::native::geometry::NativeSurface::Tree,
+            win: WinHandle(1000),
+        },
+    );
+    let _ = update(
+        &mut model,
+        Msg::TreeScanResult {
+            generation: scan,
+            entries: vec![
+                view_core::native::tree::TreeEntry::new("alpha.rs".into(), false, 0),
+                view_core::native::tree::TreeEntry::new("beta.rs".into(), false, 0),
+            ],
+        },
+    );
+    let (row, col, width, height) = slots[0];
+    drive(
+        &mut model,
+        vec![
+            UiEvent::WinPos {
+                grid: LEFT,
+                win: WinHandle(1000),
+                startrow: u64::from(row),
+                startcol: u64::from(col),
+                width: u64::from(width),
+                height: u64::from(height),
+            },
+            UiEvent::Flush,
+        ],
+    );
+    Tiles { slots, model }
+}
+
+/// The windowed tree draws inside the rect nvim gave its window and
+/// nowhere else: its entries stand in the left tile's columns, and the
+/// right tile still carries the buffer text nvim painted there.
+#[test]
+fn the_tree_view_paints_into_its_native_panes_rect() {
+    let tiles = tree_in_the_left_tile(false);
+    let (row, col, width, _) = tiles.slots[0];
+    let model = tiles.model;
+    let buf = tiled_frame(&model);
+    let offset = model.look.grid_offset();
+    let inside = |line: &str| -> String {
+        line.chars()
+            .skip(usize::from(col + offset))
+            .take(usize::from(width))
+            .collect()
+    };
+    let mut found = false;
+    for screen_row in row..row + 6 {
+        if inside(&row_text(&buf, screen_row)).contains("alpha.rs") {
+            found = true;
+        }
+    }
+    assert!(found, "the tree painted nothing into its pane");
+    assert!(
+        (row..row + 6).any(|screen_row| row_text(&buf, screen_row).contains("right")),
+        "the tree's pane took the neighbour's text with it"
+    );
+}
+
+/// The committed picture of the tree in a tile of its own: its rows inside
+/// the left frame, the buffer's text inside the right one.
+#[test]
+fn tree_windowed() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-tree-windowed", tier.0),
+            &tiles_dump(tier, tree_in_the_left_tile(true)),
+        );
+    }
+}
+
+/// A surface's own window holds an unnamed scratch buffer, so its frame
+/// carries the surface's name where an ordinary tile carries the file's.
+#[test]
+fn a_native_panes_frame_carries_its_surfaces_name() {
+    let tiles = tree_in_the_left_tile(true);
+    let (_, col, width, _) = tiles.slots[0];
+    let buf = tiled_frame(&tiles.model);
+    let offset = tiles.model.look.grid_offset();
+    let (top_row, _) = edge_rows(&tiles.model, tiles.slots[0]);
+    let top: String = row_text(&buf, top_row)
+        .chars()
+        .skip(usize::from(col + offset))
+        .take(usize::from(width))
+        .collect();
+    assert!(
+        top.contains("tree"),
+        "the tree's frame did not name the surface: {top:?}"
+    );
+    assert!(
+        !top.contains("left.rs"),
+        "the tree's frame kept the buffer name of the window it took: {top:?}"
+    );
+}

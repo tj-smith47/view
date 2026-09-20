@@ -5,10 +5,13 @@
 //! raises instead of opening anything. One family, split out of `update`
 //! so the router keeps to routing.
 
-use crate::model::{Model, OverlayKind};
-use crate::msg::{Effect, RegisterType, RpcCall};
-use crate::native::geometry::{Anchor, OverlayBox};
+use crate::model::{Focus, Model, OverlayKind};
+use crate::msg::{Effect, RegisterType, RpcCall, WinSplit};
+use crate::native::geometry::{Anchor, NativeSurface, OverlayBox};
+use crate::native::keys::{Action, Resolved};
 use crate::native::palette::MessageHistoryState;
+
+use super::{path_to_wire, take_binding};
 
 /// Issues an `Effect::Rpc(RpcCall::PreviewBuffer)` for `state`'s current
 /// selection, or no effect at all when there is nothing to preview (an
@@ -126,6 +129,9 @@ pub(super) fn tree_git_refresh_effect(model: &mut Model) -> Vec<Effect> {
 }
 
 pub(super) fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
+    if model.tree_is_windowed() {
+        return toggle_windowed_tree(model);
+    }
     if model.close_tree() {
         model.dirty = true;
         return vec![Effect::TreeClose];
@@ -159,6 +165,102 @@ pub(super) fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
         });
     }
     effects
+}
+
+/// The tree's key while it takes a window of its own: closed from inside
+/// it, opened or entered from anywhere else.
+///
+/// Entering a standing window is the same call as opening one, because the
+/// engine answers a surface it has a live window for by going to it. One
+/// message, so a key pressed twice quickly cannot leave two windows.
+fn toggle_windowed_tree(model: &mut Model) -> Vec<Effect> {
+    if model.focus() == Focus::Pane(NativeSurface::Tree) {
+        return close_windowed_tree(model);
+    }
+    let mut effects = if model.tree_mut().is_some() {
+        Vec::new()
+    } else {
+        open_tree_state(model)
+    };
+    effects.append(&mut vec![Effect::Rpc(open_native_window(
+        model,
+        NativeSurface::Tree,
+    ))]);
+    effects
+}
+
+/// Closes the window the tree sits in and drops its state.
+fn close_windowed_tree(model: &mut Model) -> Vec<Effect> {
+    let win = model
+        .engine
+        .grids()
+        .native_window(NativeSurface::Tree)
+        .map(|handle| handle.0);
+    let closed = model.close_tree();
+    model.dirty = true;
+    let mut effects = Vec::new();
+    if closed {
+        effects.append(&mut vec![Effect::TreeClose]);
+    }
+    if let Some(win) = win {
+        effects.append(&mut vec![Effect::Rpc(RpcCall::CloseNativeWindow { win })]);
+    }
+    effects
+}
+
+/// The call that opens `surface`'s window, or enters the one it already
+/// has, at the anchor and size this session resolved for it.
+fn open_native_window(model: &mut Model, surface: NativeSurface) -> RpcCall {
+    let layout = model.surfaces.layout(surface);
+    RpcCall::OpenNativeWindow {
+        surface,
+        split: WinSplit::for_anchor(layout.anchor).unwrap_or(WinSplit::Left),
+        size: layout.size,
+        generation: model.surfaces.next_generation(),
+    }
+}
+
+/// The tree's own state on the overlay stack, with the scans its first
+/// frame needs. Shared by both placements: the state is the same either
+/// way, and only what draws it differs.
+fn open_tree_state(model: &mut Model) -> Vec<Effect> {
+    let mut state = crate::native::tree::TreeState::open(model.cwd.clone());
+    let scan_generation = state.generation();
+    let git_generation = state.request_git_refresh();
+    let geometry = OverlayBox::new(model.tree_width_pct, 100).with_anchor(Anchor::Left);
+    model.push_overlay(geometry, OverlayKind::Tree(state));
+    model.dirty = true;
+    let mut effects = vec![Effect::TreeScan {
+        generation: scan_generation,
+        root: model.cwd.clone(),
+    }];
+    if let Some(generation) = git_generation {
+        effects.append(&mut vec![Effect::TreeGitScan {
+            generation,
+            root: model.cwd.clone(),
+        }]);
+    }
+    effects
+}
+
+/// Binds the window nvim opened to the surface view asked for it, which is
+/// what makes the next `win_pos` for that handle place a pane view paints.
+///
+/// A reply for a generation older than the one the last open carried is
+/// dropped: the surface has been closed and reopened since the call, and
+/// the handle it names belongs to a window that is already gone.
+pub(super) fn native_window_opened(
+    model: &mut Model,
+    generation: u64,
+    surface: NativeSurface,
+    win: crate::events::WinHandle,
+) -> Vec<Effect> {
+    if generation != model.surfaces.generation() {
+        return Vec::new();
+    }
+    model.engine.grids_mut().claim_native_window(win, surface);
+    model.dirty = true;
+    Vec::new()
 }
 
 /// Opens the agent panel, anchored flush right like the tree sidebar is
@@ -280,6 +382,175 @@ const HISTORY_CHROME_ROWS: u16 = 4;
 /// Test-only, like the table renderer it feeds: the page carries the
 /// rendered rows and the walk presses them, and nothing in a running
 /// session reads this list.
+/// Every key the file tree answers, whether it is floating over the buffer
+/// or sitting in a window of its own.
+///
+/// Shared by both placements so a key cannot mean one thing in a float and
+/// another in a tile. The payload of the overlay match that reaches it here
+/// is discarded deliberately: every branch below reaches the tree through
+/// `model.tree_mut()` fresh instead, since a bound `&mut TreeState` would
+/// keep `model` borrowed across the `pop_focused_overlay` and `close_tree`
+/// calls the `<CR>` and `<Esc>` arms need.
+pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
+    // Ahead of the tree's own keys and resolved through the one
+    // shared set, so neither sidebar can drift onto a key the
+    // other does not answer (see [`take_binding`]).
+    match take_binding(model, notation) {
+        Some(Resolved::Act(Action::Resize(direction))) => {
+            if model.resize_tree(direction.widens()) {
+                model.dirty = true;
+            }
+            return Vec::new();
+        }
+        // The composer's line break is the agent panel's alone,
+        // and the tree answers it the way it answers any key no
+        // binding of its own names.
+        Some(Resolved::Act(Action::ComposerNewline)) => {}
+        // The chord's first key waits here rather than moving
+        // the selection or closing the sidebar; the follower
+        // that completes nothing falls straight through to the
+        // arms below on its own next pass.
+        Some(Resolved::Pending) => return Vec::new(),
+        None => {}
+    }
+    match notation {
+        // leaving a windowed tree is leaving its window, and the tile
+        // stands: nvim's own layout is what put it there, and a key that
+        // dissolved a window the user split for themselves would be view
+        // undoing a window command
+        "<Esc>" if model.tree_is_windowed() => {
+            vec![Effect::Rpc(RpcCall::FocusPreviousWindow)]
+        }
+        "<Esc>" => {
+            model.pop_focused_overlay();
+            model.dirty = true;
+            vec![Effect::TreeClose]
+        }
+        "<Down>" => {
+            if let Some(t) = model.tree_mut() {
+                t.move_selection(1);
+            }
+            model.dirty = true;
+            Vec::new()
+        }
+        "<Up>" => {
+            if let Some(t) = model.tree_mut() {
+                t.move_selection(-1);
+            }
+            model.dirty = true;
+            Vec::new()
+        }
+        // a directory toggles in place; a leaf's path is
+        // opened through RPC (nvim owns the buffer this
+        // creates) and the sidebar closes on the same
+        // keypress, matching a picker selection's own
+        // close-on-open behavior
+        "<CR>" => {
+            let to_open = model.tree_mut().and_then(|t| {
+                let entry = t.selected_entry()?;
+                if entry.is_dir {
+                    if let Some(idx) = t.view().selected {
+                        t.toggle_expand(idx);
+                    }
+                    None
+                } else {
+                    t.selected_path()
+                }
+            });
+            model.dirty = true;
+            match to_open {
+                Some(path) => {
+                    let open = Effect::Rpc(RpcCall::OpenFile {
+                        path: path_to_wire(&path),
+                    });
+                    // the cursor sits in the tree's own window, and `:edit`
+                    // opens in the window it runs in, so the file would
+                    // land inside the sidebar
+                    if model.tree_is_windowed() {
+                        return vec![Effect::Rpc(RpcCall::FocusPreviousWindow), open];
+                    }
+                    model.pop_focused_overlay();
+                    vec![open]
+                }
+                None => Vec::new(),
+            }
+        }
+        // opens the blocked-engine Prompt overlay through
+        // the entry's own RpcCall (`vim.fn.input` primed
+        // with a `kind = "confirm"` `nvim_echo`, see
+        // `RpcCall::TreeCreatePrompt`'s doc) rather than any
+        // new local input state: the reply routes back as
+        // `Msg::TreeCreatePromptReply` and resolves the
+        // actual file write from there, once nvim has
+        // answered. Any selection, including none at all
+        // (an empty tree), can create -- `TreeCreatePromptReply`
+        // resolves the target directory from whatever is
+        // selected at reply time (see its arm below), since
+        // nothing about the tree's selection can move while
+        // this prompt holds focus.
+        "a" => {
+            let Some(t) = model.tree_mut() else {
+                return Vec::new();
+            };
+            let generation = t.generation();
+            vec![Effect::Rpc(RpcCall::TreeCreatePrompt { generation })]
+        }
+        // renaming a directory has no backing effect --
+        // `RpcCall::RenameFile` and the `Effect::Tree*File`
+        // pair are file-only by their own doc contracts --
+        // so a directory selection is a silent no-op here
+        // rather than opening a prompt whose answer nothing
+        // could act on.
+        "r" => {
+            let Some(t) = model.tree_mut() else {
+                return Vec::new();
+            };
+            let Some(entry) = t.selected_entry() else {
+                return Vec::new();
+            };
+            if entry.is_dir {
+                return Vec::new();
+            }
+            let current_name = entry
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let Some(old_path) = t.selected_path() else {
+                return Vec::new();
+            };
+            let generation = t.generation();
+            vec![Effect::Rpc(RpcCall::TreeRenamePrompt {
+                generation,
+                old_path: path_to_wire(&old_path),
+                current_name,
+            })]
+        }
+        // same file-only restriction as "r", for the same
+        // reason.
+        "d" => {
+            let Some(t) = model.tree_mut() else {
+                return Vec::new();
+            };
+            let Some(entry) = t.selected_entry() else {
+                return Vec::new();
+            };
+            if entry.is_dir {
+                return Vec::new();
+            }
+            let Some(path) = t.selected_path() else {
+                return Vec::new();
+            };
+            let generation = t.generation();
+            vec![Effect::Rpc(RpcCall::TreeDeleteConfirm {
+                generation,
+                path: path_to_wire(&path),
+            })]
+        }
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) const HISTORY_KEYS: &[(&str, &str)] = &[
     ("j", "select the next entry"),

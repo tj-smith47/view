@@ -6,12 +6,13 @@
 
 use view_core::msg::{
     BufferHandle, HunkMark, OptionValue, ReplyToken, ReplyValue, ReviewOpenTarget, TakeoverStep,
-    TextEdit,
+    TextEdit, WinSplit,
 };
 use view_core::native::ai_context::{
     CurrentBufferRead, CursorRead, DiagnosticEntry, QuickfixEntry, SelectionRead,
 };
 use view_core::native::ext::Ext;
+use view_core::native::geometry::NativeSurface;
 use view_core::native::mappings::MappingSpec;
 use view_engine::handle::{EngineError, EngineHandle};
 use view_engine::nvim_api::BufWriteOutcome;
@@ -115,6 +116,27 @@ pub trait EngineOps {
     /// `generation`; never blocks, and never itself returns the list (see
     /// `Msg::PickerBufferList`).
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError>;
+    /// Opens a window for `surface`, or enters the one it already has;
+    /// never blocks, and never itself returns the handle (see
+    /// `Msg::NativeWindowOpened`).
+    fn open_native_window(
+        &self,
+        surface: NativeSurface,
+        split: WinSplit,
+        size: u16,
+        generation: u64,
+    ) -> Result<(), EngineError>;
+    /// Closes a window view opened for a surface of its own.
+    fn close_native_window(&self, win: u64) -> Result<(), EngineError>;
+    /// Sets a window's width, its height, or both.
+    fn set_window_size(
+        &self,
+        win: u64,
+        width: Option<u16>,
+        height: Option<u16>,
+    ) -> Result<(), EngineError>;
+    /// Moves the cursor back to the window it was in before this one.
+    fn focus_previous_window(&self) -> Result<(), EngineError>;
     /// Resolves the picker preview pane's text for `path`, tagged
     /// `generation`; never blocks, and never itself returns the answer (see
     /// `Msg::PickerPreviewReply`).
@@ -368,6 +390,29 @@ impl EngineOps for EngineHandle {
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
         self.list_buffers(generation)
     }
+    fn open_native_window(
+        &self,
+        surface: NativeSurface,
+        split: WinSplit,
+        size: u16,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.open_native_window(surface, split, size, generation)
+    }
+    fn close_native_window(&self, win: u64) -> Result<(), EngineError> {
+        self.close_native_window(win)
+    }
+    fn set_window_size(
+        &self,
+        win: u64,
+        width: Option<u16>,
+        height: Option<u16>,
+    ) -> Result<(), EngineError> {
+        self.set_window_size(win, width, height)
+    }
+    fn focus_previous_window(&self) -> Result<(), EngineError> {
+        self.focus_previous_window()
+    }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.preview_buffer(path, generation)
     }
@@ -576,6 +621,29 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
         (**self).list_buffers(generation)
+    }
+    fn open_native_window(
+        &self,
+        surface: NativeSurface,
+        split: WinSplit,
+        size: u16,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        (**self).open_native_window(surface, split, size, generation)
+    }
+    fn close_native_window(&self, win: u64) -> Result<(), EngineError> {
+        (**self).close_native_window(win)
+    }
+    fn set_window_size(
+        &self,
+        win: u64,
+        width: Option<u16>,
+        height: Option<u16>,
+    ) -> Result<(), EngineError> {
+        (**self).set_window_size(win, width, height)
+    }
+    fn focus_previous_window(&self) -> Result<(), EngineError> {
+        (**self).focus_previous_window()
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
@@ -788,6 +856,29 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
         (**self).list_buffers(generation)
+    }
+    fn open_native_window(
+        &self,
+        surface: NativeSurface,
+        split: WinSplit,
+        size: u16,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        (**self).open_native_window(surface, split, size, generation)
+    }
+    fn close_native_window(&self, win: u64) -> Result<(), EngineError> {
+        (**self).close_native_window(win)
+    }
+    fn set_window_size(
+        &self,
+        win: u64,
+        width: Option<u16>,
+        height: Option<u16>,
+    ) -> Result<(), EngineError> {
+        (**self).set_window_size(win, width, height)
+    }
+    fn focus_previous_window(&self) -> Result<(), EngineError> {
+        (**self).focus_previous_window()
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
@@ -1062,6 +1153,33 @@ impl EngineOps for FakeOps {
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
         self.record(format!("list_buffers({generation})"))
     }
+    fn open_native_window(
+        &self,
+        surface: NativeSurface,
+        split: WinSplit,
+        size: u16,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.record(format!(
+            "open_native_window({},{},{size},{generation})",
+            surface.id(),
+            split.word()
+        ))
+    }
+    fn close_native_window(&self, win: u64) -> Result<(), EngineError> {
+        self.record(format!("close_native_window({win})"))
+    }
+    fn set_window_size(
+        &self,
+        win: u64,
+        width: Option<u16>,
+        height: Option<u16>,
+    ) -> Result<(), EngineError> {
+        self.record(format!("set_window_size({win},{width:?},{height:?})"))
+    }
+    fn focus_previous_window(&self) -> Result<(), EngineError> {
+        self.record("focus_previous_window()".to_string())
+    }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.record(format!("preview_buffer({path},{generation})"))
     }
@@ -1328,6 +1446,29 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn list_buffers(&self, _generation: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn open_native_window(
+        &self,
+        _surface: NativeSurface,
+        _split: WinSplit,
+        _size: u16,
+        _generation: u64,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn close_native_window(&self, _win: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn set_window_size(
+        &self,
+        _win: u64,
+        _width: Option<u16>,
+        _height: Option<u16>,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn focus_previous_window(&self) -> Result<(), EngineError> {
         Ok(())
     }
     fn preview_buffer(&self, _path: &str, _generation: u64) -> Result<(), EngineError> {

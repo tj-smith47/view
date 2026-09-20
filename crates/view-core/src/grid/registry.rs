@@ -11,6 +11,7 @@
 use crate::events::WinHandle;
 use crate::grid::{Grid, GridDamage, GridOp};
 use crate::model::Look;
+use crate::native::geometry::NativeSurface;
 
 /// A grid's identity as nvim assigns it. The global grid keeps the id the
 /// engine gives it rather than a sentinel, so single-grid and multigrid
@@ -41,6 +42,13 @@ pub enum PaneKind {
         zindex: u32,
         /// The grid the float was anchored to.
         anchor_grid: GridId,
+    },
+    /// A window view opened for one of its own surfaces. Laid out by nvim
+    /// like any other window, and painted by view rather than from the
+    /// cells nvim sends for it.
+    Native {
+        /// The surface view opened the window for.
+        surface: NativeSurface,
     },
     /// nvim's own message/cmdline area (`msg_set_pos`), positioned only
     /// when `ext_messages` is not attached. Its own variant rather than a
@@ -176,6 +184,26 @@ pub enum GridEvent {
     },
 }
 
+impl PaneKind {
+    /// Whether the pane sits in the window layer: an ordinary window or one
+    /// view opened for a surface of its own. Both are laid out by nvim and
+    /// both are framed as tiles; only what paints their cells differs.
+    #[must_use]
+    pub const fn is_window(&self) -> bool {
+        matches!(self, Self::Window | Self::Native { .. })
+    }
+
+    /// The surface this pane was opened for, or `None` for a pane that is
+    /// not one of view's own.
+    #[must_use]
+    pub const fn native_surface(&self) -> Option<NativeSurface> {
+        match self {
+            Self::Native { surface } => Some(*surface),
+            _ => None,
+        }
+    }
+}
+
 /// A grid nvim has named, with the placement it has been given if any.
 #[derive(Debug, Clone)]
 struct Slot {
@@ -230,14 +258,14 @@ impl Placement {
     /// window, whatever zindex nvim gave it.
     fn layer(&self) -> u8 {
         match self.kind {
-            PaneKind::Window => 0,
+            PaneKind::Window | PaneKind::Native { .. } => 0,
             PaneKind::Float { .. } | PaneKind::Message { .. } => 1,
         }
     }
 
     fn zindex(&self) -> u32 {
         match self.kind {
-            PaneKind::Window => 0,
+            PaneKind::Window | PaneKind::Native { .. } => 0,
             PaneKind::Float { zindex, .. } | PaneKind::Message { zindex } => zindex,
         }
     }
@@ -260,6 +288,10 @@ pub struct GridRegistry {
     global: Grid,
     slots: Vec<Slot>,
     cursor: Option<GridId>,
+    /// Window handles view opened for its own surfaces, waiting for the
+    /// `win_pos` that places them. A claim outlives the placement so a
+    /// window nvim re-places keeps its kind.
+    claims: Vec<(WinHandle, NativeSurface)>,
     /// How window layout is drawn, which decides where a window grid's
     /// cell `(0, 0)` sits inside the slot nvim gave it.
     look: Look,
@@ -278,6 +310,7 @@ impl GridRegistry {
             global: Grid::new(),
             slots: Vec::new(),
             cursor: None,
+            claims: Vec::new(),
             look: Look::default(),
             placement_dirty: false,
         }
@@ -481,6 +514,13 @@ impl GridRegistry {
     pub(crate) fn apply_cells(&mut self, grid: GridId, op: GridOp) {
         if let GridOp::CursorGoto { .. } = op {
             self.cursor = Some(grid);
+        }
+        // view paints a native pane itself, so the engine's cells for the
+        // scratch buffer under it are read and dropped. The cursor and the
+        // size still apply: focus is read off the cursor's grid, and the
+        // pane needs a size to be hit-tested and clipped.
+        if matches!(op, GridOp::PutLine { .. }) && self.native_surface(grid).is_some() {
+            return;
         }
         if grid == GLOBAL_GRID {
             self.global.apply(op);
@@ -832,14 +872,89 @@ impl GridRegistry {
             });
         }
         let origin = inner_origin(look, slot, self.margin_top(grid));
-        self.place(grid, origin, PaneKind::Window, 0);
+        let kind = self.window_kind(win);
+        // a grid_line that beat the claim here left engine cells standing
+        // under a pane view paints itself
+        if matches!(kind, PaneKind::Native { .. }) && self.native_surface(grid).is_none() {
+            if let Some(entry) = self.slot_mut(grid) {
+                entry.grid.apply(GridOp::Clear);
+            }
+        }
+        self.place(grid, origin, kind, 0);
+    }
+
+    /// The kind a `win_pos` for `win` places: a native pane where view
+    /// claimed the handle, an ordinary window otherwise.
+    fn window_kind(&self, win: WinHandle) -> PaneKind {
+        self.claims
+            .iter()
+            .find(|(handle, _)| *handle == win)
+            .map_or(PaneKind::Window, |(_, surface)| PaneKind::Native {
+                surface: *surface,
+            })
+    }
+
+    /// Binds the window handle `nvim_open_win` answered with to the surface
+    /// view opened it for, so the next `win_pos` for it places a `Native`
+    /// pane rather than a `Window` one.
+    pub fn claim_native_window(&mut self, win: WinHandle, surface: NativeSurface) {
+        if let Some(entry) = self.claims.iter_mut().find(|(handle, _)| *handle == win) {
+            entry.1 = surface;
+            return;
+        }
+        self.claims.push((win, surface));
+    }
+
+    /// Forgets the claim on `win`, for a window that has been closed.
+    pub fn release_native_window(&mut self, win: WinHandle) {
+        self.claims.retain(|(handle, _)| *handle != win);
+    }
+
+    /// The surface of the `PaneKind::Native` pane `cursor_grid()` names, or
+    /// `None` when the cursor sits in an ordinary window or grid 1.
+    #[must_use]
+    pub fn native_pane_focus(&self) -> Option<NativeSurface> {
+        self.native_surface(self.cursor_grid()?)
+    }
+
+    /// The window view opened for `surface`, as nvim addresses it, or
+    /// `None` while no pane of that surface is placed.
+    #[must_use]
+    pub fn native_window(&self, surface: NativeSurface) -> Option<WinHandle> {
+        self.slots
+            .iter()
+            .find(|slot| {
+                slot.placed
+                    .as_ref()
+                    .is_some_and(|placed| placed.kind.native_surface() == Some(surface))
+            })
+            .and_then(|slot| slot.window.as_ref())
+            .map(|window| window.win)
+    }
+
+    /// The surface `grid`'s pane was placed for, if it is a native one.
+    fn native_surface(&self, grid: GridId) -> Option<NativeSurface> {
+        self.slots
+            .iter()
+            .find(|slot| slot.id == grid)
+            .and_then(|slot| slot.placed.as_ref())
+            .and_then(|placed| match placed.kind {
+                PaneKind::Native { surface } => Some(surface),
+                _ => None,
+            })
     }
 
     /// Records `grid`'s top margin, re-placing its window when the margin
     /// moves the inner origin or what the grid owes.
+    ///
+    /// A grid nvim has neither sized nor placed is not a grid: nvim sends
+    /// margins for a window's grid before the split that would size it is
+    /// settled, and the grid it settles on can be a different one, which it
+    /// never destroys the abandoned one for. Creating a slot here left that
+    /// one standing for the life of the session.
     fn set_margin_top(&mut self, grid: GridId, top: u16) {
         let look = self.look;
-        let Some(entry) = self.slot_mut(grid) else {
+        let Some(entry) = self.slots.iter_mut().find(|slot| slot.id == grid) else {
             return;
         };
         let Some(window) = entry.window.as_mut() else {
@@ -850,8 +965,10 @@ impl GridRegistry {
         }
         window.margin_top = top;
         let slot = window.slot;
+        let win = window.win;
         let origin = inner_origin(look, slot, top);
-        self.place(grid, origin, PaneKind::Window, 0);
+        let kind = self.window_kind(win);
+        self.place(grid, origin, kind, 0);
     }
 
     /// `grid`'s top margin, 0 for a grid with no window or no winbar.
@@ -1825,6 +1942,114 @@ mod tests {
             (7, 9),
             "nvim placed the float from the slot origin, two cells out from \
              the text it hovers"
+        );
+    }
+
+    /// Places a window nvim opened for a surface view claimed the handle
+    /// of, which is the whole shape of a windowed surface's placement.
+    fn claimed(registry: &mut GridRegistry, grid: GridId, surface: NativeSurface) {
+        registry.claim_native_window(WinHandle(grid.0), surface);
+        resize(registry, grid, 30, 20);
+        window(registry, grid, 0, 0);
+    }
+
+    #[test]
+    fn a_claimed_window_handle_places_a_native_pane() {
+        let mut registry = GridRegistry::new();
+        claimed(&mut registry, GridId(2), NativeSurface::Tree);
+        let panes = registry.panes_in_z_order();
+        assert!(
+            panes.iter().any(|pane| pane.id == GridId(2)
+                && pane.kind
+                    == PaneKind::Native {
+                        surface: NativeSurface::Tree
+                    }),
+            "the claimed handle did not place a native pane: {panes:?}"
+        );
+        registry.apply_cells(GridId(2), GridOp::CursorGoto { row: 0, col: 0 });
+        assert_eq!(
+            registry.native_pane_focus(),
+            Some(NativeSurface::Tree),
+            "the cursor in the native pane did not name its surface"
+        );
+    }
+
+    #[test]
+    fn a_native_panes_grid_line_paints_nothing() {
+        let mut registry = GridRegistry::new();
+        claimed(&mut registry, GridId(2), NativeSurface::Tree);
+        registry.apply_cells(
+            GridId(2),
+            GridOp::PutLine {
+                row: 0,
+                col_start: 0,
+                cells: vec![("scratch".to_string(), 0, 1)],
+            },
+        );
+        assert_eq!(
+            registry.grid(GridId(2)).map(Grid::has_text),
+            Some(false),
+            "the engine's cells for the scratch buffer reached the grid"
+        );
+        assert_eq!(
+            registry.grid(GridId(2)).map(Grid::size),
+            Some((30, 20)),
+            "the native pane lost the size its resize gave it"
+        );
+    }
+
+    #[test]
+    fn an_unclaimed_window_handle_still_places_an_ordinary_pane() {
+        let mut registry = GridRegistry::new();
+        resize(&mut registry, GridId(2), 30, 20);
+        window(&mut registry, GridId(2), 0, 0);
+        registry.apply_cells(
+            GridId(2),
+            GridOp::PutLine {
+                row: 0,
+                col_start: 0,
+                cells: vec![("buffer".to_string(), 0, 1)],
+            },
+        );
+        let panes = registry.panes_in_z_order();
+        assert!(
+            panes
+                .iter()
+                .any(|pane| pane.id == GridId(2) && pane.kind == PaneKind::Window),
+            "an unclaimed window was placed as something other than a window: {panes:?}"
+        );
+        assert_eq!(
+            registry.native_pane_focus(),
+            None,
+            "an ordinary window named a surface"
+        );
+        assert_eq!(
+            registry
+                .grid(GridId(2))
+                .map(|grid| grid.row_text(0).trim_end().to_string()),
+            Some("buffer".to_string()),
+            "an ordinary window's cells were dropped"
+        );
+    }
+
+    /// nvim names a grid in a margins event before the split that would
+    /// size it has settled, and settles on a different grid without
+    /// destroying the first. A slot made here would outlive the session.
+    #[test]
+    fn margins_for_a_grid_nvim_never_sized_leave_no_slot_behind() {
+        let mut registry = GridRegistry::new();
+        registry.apply(GridEvent::Margins {
+            grid: GridId(5),
+            top: 1,
+        });
+        assert!(
+            registry.grid(GridId(5)).is_none(),
+            "a grid nvim never sized or placed was recorded anyway"
+        );
+        assert_eq!(
+            registry.grid_ids(),
+            vec![GLOBAL_GRID],
+            "the margins event left a slot behind"
         );
     }
 }

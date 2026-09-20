@@ -884,6 +884,13 @@ experience.
 tier = "auto"              # auto | full | standard | basic
 theme = "auto"             # auto = derive from nvim colorscheme
 
+[ui.surfaces.tree]
+placement = "overlay"      # overlay | windowed -- a float, or a window of
+                           # its own in nvim's layout
+anchor = "left"            # left | right
+size = 30                  # share of the terminal width, 15..70;
+                           # [native] tree_width is this key's older name
+
 [engine]
 nvim_bin = "bundled"       # "bundled" | absolute path
 appname = ""               # NVIM_APPNAME passthrough for isolated profiles

@@ -33,8 +33,8 @@ pub struct ConfigKey {
 }
 
 /// Every key a user may set in `view.toml`, grouped by table:
-/// `[ui]`, `[engine]`, `[native]`, `[keys]`, `[supervision]`, `[ai]`,
-/// `[ai.review]`.
+/// `[ui]`, `[ui.surfaces.<surface>]`, `[engine]`, `[native]`, `[keys]`,
+/// `[supervision]`, `[ai]`, `[ai.review]`.
 ///
 /// The scope is the shipped example's own: every key that file documents
 /// has a row here, and a row here is a key that file documents
@@ -86,6 +86,24 @@ pub fn keys() -> &'static [ConfigKey] {
                 key: "accent",
                 flag: None,
                 derived: Some(super::AUTO),
+            },
+            ConfigKey {
+                table: "ui.surfaces.tree",
+                key: "placement",
+                flag: None,
+                derived: Some("overlay"),
+            },
+            ConfigKey {
+                table: "ui.surfaces.tree",
+                key: "anchor",
+                flag: None,
+                derived: Some("left"),
+            },
+            ConfigKey {
+                table: "ui.surfaces.tree",
+                key: "size",
+                flag: None,
+                derived: Some("30"),
             },
             ConfigKey {
                 table: "engine",
@@ -296,6 +314,7 @@ mod tests {
             vec![
                 "ui",
                 "ui.tokens",
+                "ui.surfaces.tree",
                 "engine",
                 "native",
                 "keys",

@@ -218,6 +218,23 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
     }
 }
 
+/// Lays `kind` out into a `width` by `height` rect with no frame of its
+/// own: rows of content, edge to edge.
+///
+/// What a surface drawn inside a tile needs. The tile's own frame is
+/// already on screen around it, and a second border inside that one is two
+/// boxes where a person sees one.
+#[must_use]
+pub fn unframed_rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Rows {
+    let Some(body) = body(kind) else {
+        return Rows::default();
+    };
+    if width == 0 || height == 0 {
+        return Rows::default();
+    }
+    content_rows(kind, &body, width, height, borders)
+}
+
 /// Where a rect's first content cell lands relative to the rect's own
 /// origin, once [`rows`] has framed it: the row past the top border, and
 /// the column past the left border plus the same one-cell pad `rows` grants

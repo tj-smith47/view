@@ -392,6 +392,13 @@ struct Route {
     /// latest generation's answer can still be the one a live picker is
     /// waiting on.
     deferred_buffer_list: Option<Msg>,
+    /// The newest `Msg::NativeWindowOpened` an attached-but-full sink
+    /// refused, held for the next routing attempt to retry.
+    ///
+    /// One slot, on [`Route::deferred_buffer_list`]'s terms: a surface has
+    /// one window open at a time, so only the latest generation's handle
+    /// can still be the one a live surface is waiting on.
+    deferred_native_window: Option<Msg>,
     /// The newest `Msg::HiddenBufferLoaded` an attached-but-full sink
     /// refused, held for the next routing attempt to retry.
     ///
@@ -483,6 +490,7 @@ enum Held {
     StartupMessages,
     NotifySink,
     BufferList,
+    NativeWindow,
     HiddenBufferLoaded,
     Preview,
     FloatRows,
@@ -502,6 +510,7 @@ impl Route {
             Held::StartupMessages => &mut self.deferred_startup_messages,
             Held::NotifySink => &mut self.deferred_notify_sink,
             Held::BufferList => &mut self.deferred_buffer_list,
+            Held::NativeWindow => &mut self.deferred_native_window,
             Held::HiddenBufferLoaded => &mut self.deferred_hidden_buffer_loaded,
             Held::Preview => &mut self.deferred_preview,
             Held::FloatRows => &mut self.deferred_float_rows,
@@ -524,6 +533,7 @@ impl Route {
             Held::StartupMessages,
             Held::NotifySink,
             Held::BufferList,
+            Held::NativeWindow,
             Held::HiddenBufferLoaded,
             Held::Preview,
             Held::FloatRows,
@@ -806,6 +816,17 @@ impl PumpShared {
     /// "lost".
     pub(crate) fn route_buffer_list(&self, msg: Msg) {
         self.route_held(msg, Held::BufferList);
+    }
+
+    /// Routes a `Msg::NativeWindowOpened` without ever dropping it on a
+    /// full sink, and without blocking, on the same terms as
+    /// [`route_buffer_list`](Self::route_buffer_list).
+    ///
+    /// A dropped handle leaves the window standing with nothing painting
+    /// into it: the pane stays an ordinary window, and the surface the user
+    /// opened never appears.
+    pub(crate) fn route_native_window(&self, msg: Msg) {
+        self.route_held(msg, Held::NativeWindow);
     }
 
     /// Routes a `Msg::HiddenBufferLoaded` without ever dropping it on a full

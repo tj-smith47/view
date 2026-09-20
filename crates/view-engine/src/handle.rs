@@ -144,6 +144,14 @@ enum Waiter {
     /// query has since superseded can be dropped by `update()` instead of
     /// clobbering it.
     BufferList { generation: u64 },
+    /// The reply decodes into the window handle nvim opened for one of
+    /// view's own surfaces and routes as `Msg::NativeWindowOpened`, tagged
+    /// with `generation` and the surface it was opened for so a handle
+    /// answering a call the user has already undone is dropped.
+    NativeWindow {
+        generation: u64,
+        surface: view_core::native::geometry::NativeSurface,
+    },
     /// A `RpcCall::LoadHidden` reply: the real buffer handle nvim holds
     /// `path` under, routed to the pump as `Msg::HiddenBufferLoaded` tagged
     /// with `generation` so a review superseded while its resolve was in
@@ -742,6 +750,33 @@ impl EngineHandle {
                                         failure: reading.failure,
                                         empty: reading.empty,
                                     });
+                                }
+                            }
+                            Some(Waiter::NativeWindow {
+                                generation,
+                                surface,
+                            }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply degrades to no
+                                    // handle, the same safe default
+                                    // decode_buffer_list_reply takes: the
+                                    // surface draws nothing rather than
+                                    // binding a pane to a window that may
+                                    // not exist
+                                    let win = if error == Value::Nil {
+                                        crate::nvim_api::native_window::decode_native_window_reply(
+                                            &result,
+                                        )
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(win) = win {
+                                        pump.route_native_window(Msg::NativeWindowOpened {
+                                            generation,
+                                            surface,
+                                            win,
+                                        });
+                                    }
                                 }
                             }
                             Some(Waiter::BufferList { generation }) => {
@@ -1706,6 +1741,35 @@ impl EngineHandle {
         generation: u64,
     ) -> Result<(), EngineError> {
         self.request_async(method, params, Waiter::BufferList { generation })
+    }
+
+    /// Issues `method`/`params` as a request whose `Response` is decoded
+    /// into a window handle and routed to the connection's pump as
+    /// `Msg::NativeWindowOpened` (see [`Waiter::NativeWindow`]). Async on
+    /// the same terms as [`request_buffer_list`](Self::request_buffer_list):
+    /// the key that opens a surface is dispatched from the runtime loop,
+    /// which must never block on a reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_native_window(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        generation: u64,
+        surface: view_core::native::geometry::NativeSurface,
+    ) -> Result<(), EngineError> {
+        self.request_async(
+            method,
+            params,
+            Waiter::NativeWindow {
+                generation,
+                surface,
+            },
+        )
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded

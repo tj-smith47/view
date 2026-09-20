@@ -7,6 +7,7 @@
 mod accent;
 mod buffers;
 mod decode;
+pub(crate) mod native_window;
 mod window_status;
 
 use crate::handle::{EngineError, EngineHandle};

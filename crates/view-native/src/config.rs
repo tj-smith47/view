@@ -21,6 +21,7 @@
 
 mod keys;
 mod resolve;
+mod surfaces;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -32,6 +33,7 @@ pub use resolve::{
     TierChoice,
 };
 use serde::{Deserialize, Serialize};
+pub use surfaces::surfaces;
 use view_core::model::Panes;
 use view_core::native::ext::{self, Ext};
 use view_core::native::geometry;
@@ -111,6 +113,71 @@ struct UiTable {
     gaps: Option<bool>,
     #[serde(default)]
     tokens: UiTokensTable,
+    #[serde(default)]
+    surfaces: SurfacesTable,
+}
+
+/// The `[ui.surfaces]` tables' wire shape: one table per surface view can
+/// draw beside the buffer.
+///
+/// Non-`Option` for the reason [`UiTable`]'s own fields are: a table this
+/// loader reads has to render through `loaded_tables` for the example pin
+/// to see it. Only the tree is here, because only the tree's placement is
+/// answered; a surface gains its table in the commit that gives its
+/// placement an effect.
+#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct SurfacesTable {
+    #[serde(default)]
+    tree: SurfaceTable,
+}
+
+/// One `[ui.surfaces.<id>]` table: where a surface sits and how much room
+/// it takes.
+///
+/// `placement` and `anchor` stay `String`-typed for the reason
+/// [`UiTable`]'s own words do: the vocabulary is view's, a word outside it
+/// is a notice rather than a refused file, and the same word has to read
+/// the same way wherever it was written. `size` is a `toml::Value` for
+/// `[native] tree_width`'s reason: a percentage written as `30.0` names a
+/// width a person meant, and refusing the document over it would revert
+/// every other key in the file for the run.
+#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct SurfaceTable {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    placement: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    size: Option<SurfaceSize>,
+}
+
+/// A `size` as the file wrote it: the whole number of percent it names, or
+/// the text it wrote instead, which owes a notice.
+///
+/// Read off a `toml::Value` rather than typed as an integer for
+/// `[native] tree_width`'s reason: refusing the document over a width
+/// written `30.0` would revert every other key in the file for the run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+enum SurfaceSize {
+    /// A whole number of percent, before clamping.
+    Percent(i64),
+    /// Anything else, as the file spelled it.
+    Other(String),
+}
+
+impl<'de> Deserialize<'de> for SurfaceSize {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = toml::Value::deserialize(deserializer)?;
+        Ok(value
+            .as_integer()
+            .map_or_else(|| Self::Other(value.to_string()), Self::Percent))
+    }
 }
 
 /// The `[ui.tokens]` table's wire shape: a colour a user names for a role
@@ -155,6 +222,11 @@ struct UiFile {
     panes: Option<Option<Panes>>,
     gaps: Option<bool>,
     tokens: Option<UiTokens>,
+    /// The `[ui.surfaces]` tables as the file wrote them. Unparsed here:
+    /// the words are read by [`surfaces::surfaces`], whose notices reach
+    /// the user through the session that asks for the layouts rather than
+    /// through this table's own list.
+    surfaces: SurfacesTable,
     /// What each value this build could not read owes the user, on the same
     /// terms `[native] tree_width` answers under: never a reason to refuse
     /// the file, never a silent fall-through either.
@@ -261,6 +333,7 @@ fn resolve_ui(table: &UiTable) -> UiFile {
         // keeps a value this build could not read from reading as the file
         // declining the role
         tokens: accent.map(|accent| UiTokens { accent }),
+        surfaces: table.surfaces.clone(),
         notices,
     }
 }
@@ -1023,6 +1096,15 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
     if file.ui.tokens.accent.is_some() {
         spelled.push(("ui.tokens", "accent"));
     }
+    for (key, spelled_here) in [
+        ("placement", file.ui.surfaces.tree.placement.is_some()),
+        ("anchor", file.ui.surfaces.tree.anchor.is_some()),
+        ("size", file.ui.surfaces.tree.size.is_some()),
+    ] {
+        if spelled_here {
+            spelled.push(("ui.surfaces.tree", key));
+        }
+    }
     spelled
 }
 
@@ -1242,13 +1324,15 @@ mod tests {
     /// Hand-written, and unavoidably so: it is a transcription of the spec,
     /// which no build artifact carries. What is *not* hand-written is which
     /// of them this build reads -- see [`loaded_tables`].
-    static SPECIFIED_TABLES: [&str; 8] = [
+    static SPECIFIED_TABLES: [&str; 10] = [
         "native",
         "keys",
         "supervision",
         "engine",
         "ui",
         "ui.tokens",
+        "ui.surfaces",
+        "ui.surfaces.tree",
         "ai",
         "ai.review",
     ];
@@ -1292,9 +1376,16 @@ mod tests {
             // header is what the example owes: `[ui.tokens]` is invisible
             // to a walk that only reads the top level
             for nested in value.as_table().into_iter().flatten() {
-                if nested.1.is_table() {
-                    names.insert(format!("{name}.{}", nested.0));
+                if !nested.1.is_table() {
+                    continue;
                 }
+                let nested_name = format!("{name}.{}", nested.0);
+                for deeper in nested.1.as_table().into_iter().flatten() {
+                    if deeper.1.is_table() {
+                        names.insert(format!("{nested_name}.{}", deeper.0));
+                    }
+                }
+                names.insert(nested_name);
             }
         }
         names
@@ -1494,6 +1585,9 @@ mod tests {
     /// and a fixture it cannot build is a key nobody has taught it about.
     fn document_spelling(table: &str, key: &str) -> String {
         let value = match (table, key) {
+            ("ui.surfaces.tree", "placement") => "\"windowed\"",
+            ("ui.surfaces.tree", "anchor") => "\"right\"",
+            ("ui.surfaces.tree", "size") => "25",
             ("native", TREE_WIDTH_KEY) => "25",
             ("native", _) => "false",
             ("keys", _) => "[\"<C-w>>\"]",

@@ -340,6 +340,19 @@ impl<E: EngineOps> Executor<E> {
                         self.ops.register_clipboard(channel_id)
                     }
                     RpcCall::ListBuffers { generation } => self.ops.list_buffers(generation),
+                    RpcCall::OpenNativeWindow {
+                        surface,
+                        split,
+                        size,
+                        generation,
+                    } => self
+                        .ops
+                        .open_native_window(surface, split, size, generation),
+                    RpcCall::CloseNativeWindow { win } => self.ops.close_native_window(win),
+                    RpcCall::SetWindowSize { win, width, height } => {
+                        self.ops.set_window_size(win, width, height)
+                    }
+                    RpcCall::FocusPreviousWindow => self.ops.focus_previous_window(),
                     RpcCall::PreviewBuffer { path, generation } => {
                         self.ops.preview_buffer(&path, generation)
                     }

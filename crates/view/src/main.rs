@@ -1233,6 +1233,10 @@ fn main() -> Result<()> {
     for notice in resolved.notices() {
         pre_executor_effects.extend(model.engine.record_native_notice(notice.clone(), false));
     }
+    // read here rather than in `NativeSession::load`: the placements come
+    // off the resolved `[ui.surfaces]` tables, and that session is handed
+    // the file's own tables
+    model.surfaces.set_layouts(resolved.surfaces);
     // the on-screen half of the geometry report above, raised here for the
     // same reason: the clamp was decided before the spawn, where the
     // terminal was not yet view's to write on. Both readings are named

@@ -711,6 +711,20 @@ pub enum Msg {
         generation: u64,
         names: Vec<String>,
     },
+    /// The window nvim opened for one of view's own surfaces, answering
+    /// one `RpcCall::OpenNativeWindow`. Binding the handle to the surface
+    /// is what makes the next `win_pos` for it place a native pane, so
+    /// this reply is the only thing that turns an ordinary window into
+    /// one view paints. Generation-gated: a handle for a surface that has
+    /// been closed and reopened since the call is dropped.
+    NativeWindowOpened {
+        /// Echoed back from the call.
+        generation: u64,
+        /// The surface the window was opened for.
+        surface: crate::native::geometry::NativeSurface,
+        /// The window, as nvim addresses it.
+        win: crate::events::WinHandle,
+    },
     /// The decoded answer to one `RpcCall::PreviewBuffer`, resolving the
     /// preview pane's text for the picker's selected candidate; see
     /// `docs/picker-preview-wire-capture.md`. `path` echoes back the path
@@ -1733,6 +1747,53 @@ pub enum ReviewOpenTarget {
     Split,
 }
 
+/// Which side of the current window a windowed surface splits off.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WinSplit {
+    /// To the left of the current window.
+    Left,
+    /// To the right of it.
+    Right,
+    /// Above it.
+    Above,
+    /// Below it.
+    Below,
+}
+
+impl WinSplit {
+    /// The word `nvim_open_win`'s own `split` field takes.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Above => "above",
+            Self::Below => "below",
+        }
+    }
+
+    /// Whether the split divides the screen sideways, which is the axis a
+    /// surface anchored to a side owns.
+    #[must_use]
+    pub const fn is_vertical(self) -> bool {
+        matches!(self, Self::Left | Self::Right)
+    }
+
+    /// The split that puts a surface at `anchor`, or `None` for an anchor
+    /// no edge answers.
+    #[must_use]
+    pub fn for_anchor(anchor: crate::native::geometry::Anchor) -> Option<Self> {
+        match anchor {
+            crate::native::geometry::Anchor::Left => Some(Self::Left),
+            crate::native::geometry::Anchor::Right => Some(Self::Right),
+            crate::native::geometry::Anchor::Top => Some(Self::Above),
+            crate::native::geometry::Anchor::Bottom => Some(Self::Below),
+            _ => None,
+        }
+    }
+}
+
 /// A closed vocabulary of RPC calls instead of `(method, Vec<Value>)`: core
 /// stays rmpv-free and an unencodable call is unrepresentable. Runner-up
 /// (stringly method + opaque params) rejected: re-opens the door to core
@@ -2180,6 +2241,47 @@ pub enum RpcCall {
     OpenFile {
         path: String,
     },
+    /// Opens a window for one of view's own surfaces: a scratch buffer no
+    /// one can type into, split off the current window at `split`, `size`
+    /// percent of the terminal wide or tall.
+    ///
+    /// Async like `ListBuffers`: the window handle nvim answers with comes
+    /// back as [`Msg::NativeWindowOpened`] carrying the same `generation`,
+    /// and that reply is what binds the handle to the surface. A call
+    /// naming a surface whose window is already open enters that window
+    /// instead of opening a second one, so one message is both "open it"
+    /// and "go to it".
+    OpenNativeWindow {
+        /// The surface the window is for.
+        surface: crate::native::geometry::NativeSurface,
+        /// Which side of the current window it splits off.
+        split: WinSplit,
+        /// Its share of the terminal, in percent.
+        size: u16,
+        /// Echoed back on the reply, so a handle that arrives after the
+        /// surface has been closed and reopened is dropped.
+        generation: u64,
+    },
+    /// Closes a window view opened for a surface of its own.
+    CloseNativeWindow {
+        /// The window, as nvim addresses it.
+        win: u64,
+    },
+    /// Sets a window's width, its height, or both, in cells. The axis a
+    /// windowed surface does not own is left alone rather than set to what
+    /// it already is, which is what nvim's own layout would otherwise
+    /// re-flow around.
+    SetWindowSize {
+        /// The window, as nvim addresses it.
+        win: u64,
+        /// Columns, or `None` to leave the width alone.
+        width: Option<u16>,
+        /// Rows, or `None` to leave the height alone.
+        height: Option<u16>,
+    },
+    /// Moves the cursor back to the window it was in before this one
+    /// (`:wincmd p`), which is what leaving a windowed surface means.
+    FocusPreviousWindow,
     /// Renames the file at `old_path` to `new_path` and, when a buffer is
     /// open for `old_path`, retargets that buffer onto the new path in the
     /// same call rather than leaving it pointing at a path that no longer

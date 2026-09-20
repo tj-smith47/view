@@ -13,7 +13,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use std::collections::BTreeSet;
-use view_core::grid::registry::{GridId, Pane, PaneKind, GLOBAL_GRID};
+use view_core::grid::registry::{GridId, Pane, GLOBAL_GRID};
 use view_core::model::{Look, Model, Panes, WindowStatus};
 use view_core::native::statusline::StatuslineState;
 use view_core::native::surfaces::{view_draws, Surface};
@@ -75,7 +75,7 @@ pub(crate) fn paint_frames(
 /// grid carries chrome rather than a window, and a float or a message grid
 /// has no slot of its own.
 fn is_tile(pane: &Pane) -> bool {
-    pane.id != GLOBAL_GRID && matches!(pane.kind, PaneKind::Window)
+    pane.id != GLOBAL_GRID && pane.kind.is_window()
 }
 
 /// The frame colour of a tile the user is not working in: `WinSeparator`'s
@@ -141,6 +141,17 @@ fn paint_edges(
         else {
             continue;
         };
+        // a native surface's window holds an unnamed scratch buffer, so the
+        // frame would carry nothing where every other tile carries a name
+        let status = match pane.kind.native_surface() {
+            Some(surface) => {
+                let mut named = status.clone();
+                named.name = surface.id().to_string();
+                std::borrow::Cow::Owned(named)
+            }
+            None => std::borrow::Cow::Borrowed(status),
+        };
+        let status = &*status;
         let is_active = active == Some(pane.id);
         if look.gaps {
             if !framed(pane) {

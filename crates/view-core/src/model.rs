@@ -288,6 +288,9 @@ pub struct Model {
     /// same terms as [`Model::ai_panel_width_pct`]: seeded from
     /// `[native] tree_width` and stepped by the sidebar's resize keys.
     pub tree_width_pct: u16,
+    /// Where each of view's own surfaces sits, seeded from
+    /// `[ui.surfaces]` and re-read when a user changes one mid-session.
+    pub surfaces: crate::native::placement::SurfaceState,
     /// Which keys each rebindable action answers to, seeded once at
     /// startup from `[keys]`. One set for every surface, so no two can
     /// answer the same key differently.
@@ -426,6 +429,7 @@ impl Model {
             ai_panel_width_pct: geometry::DEFAULT_PANEL_WIDTH_PCT,
             ai_review_open_target: crate::msg::ReviewOpenTarget::default(),
             tree_width_pct: geometry::DEFAULT_PANEL_WIDTH_PCT,
+            surfaces: crate::native::placement::SurfaceState::default(),
             key_bindings: crate::native::keys::KeyBindings::default(),
             pending_chord: None,
             supervision: crate::native::supervision::SupervisionState::default(),
@@ -766,7 +770,10 @@ impl Model {
     pub fn focus(&self) -> Focus {
         match self.focused_overlay() {
             Some(overlay) => Focus::Native(overlay.id),
-            None => Focus::Engine,
+            None => match self.engine.grids().native_pane_focus() {
+                Some(surface) => Focus::Pane(surface),
+                None => Focus::Engine,
+            },
         }
     }
 
@@ -808,11 +815,27 @@ impl Model {
     /// [`Self::pop_focused_overlay`] can read `ai_panel.focused` once,
     /// ahead of borrowing `overlays` mutably, instead of needing both
     /// borrows live at the same time.
-    const fn takes_focus_now(kind: &OverlayKind, ai_entered: bool) -> bool {
+    const fn takes_focus_now(kind: &OverlayKind, ai_entered: bool, tree_windowed: bool) -> bool {
         match kind {
             OverlayKind::Ai => ai_entered,
+            // a windowed tree is a pane nvim's own cursor moves into, so
+            // its state riding the overlay stack must not redirect a key
+            // the user aimed at the buffer
+            OverlayKind::Tree(_) => !tree_windowed,
             other => Self::takes_focus(other),
         }
+    }
+
+    /// Whether the overlay carrying `kind` is drawn as a float. False for
+    /// the tree while it is windowed: its state rides the overlay stack in
+    /// both placements, and the compositor paints it into its pane
+    /// instead.
+    #[must_use]
+    pub fn draws_as_overlay(&self, kind: &OverlayKind) -> bool {
+        !matches!(kind, OverlayKind::Tree(_))
+            || !self
+                .surfaces
+                .windowed(crate::native::geometry::NativeSurface::Tree)
     }
 
     /// The overlay [`Self::focus`] names, or `None` while the engine owns
@@ -826,10 +849,11 @@ impl Model {
     #[must_use]
     pub fn focused_overlay(&self) -> Option<&Overlay> {
         let ai_entered = self.ai_panel.focused;
+        let windowed = self.tree_is_windowed();
         self.overlays
             .iter()
             .rev()
-            .find(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered))
+            .find(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered, windowed))
     }
 
     /// The topmost focus-taking overlay, for a feature that needs to fold
@@ -837,10 +861,11 @@ impl Model {
     #[must_use]
     pub fn focused_overlay_mut(&mut self) -> Option<&mut Overlay> {
         let ai_entered = self.ai_panel.focused;
+        let windowed = self.tree_is_windowed();
         self.overlays
             .iter_mut()
             .rev()
-            .find(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered))
+            .find(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered, windowed))
     }
 
     /// Removes the overlay at `pos` and hands it back, releasing the mouse
@@ -868,10 +893,11 @@ impl Model {
     /// user never addressed while leaving the overlay they did address open.
     pub fn pop_focused_overlay(&mut self) -> Option<Overlay> {
         let ai_entered = self.ai_panel.focused;
+        let windowed = self.tree_is_windowed();
         let pos = self
             .overlays
             .iter()
-            .rposition(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered))?;
+            .rposition(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered, windowed))?;
         Some(self.take_overlay_at(pos))
     }
 
@@ -887,8 +913,18 @@ impl Model {
         self.overlays
             .iter()
             .rev()
-            .find(|overlay| self.overlay_rect(overlay).contains(row, col))
+            .find(|overlay| {
+                self.draws_as_overlay(&overlay.kind)
+                    && self.overlay_rect(overlay).contains(row, col)
+            })
             .map(|overlay| overlay.id)
+    }
+
+    /// Whether the file tree takes a window in nvim's layout this session.
+    #[must_use]
+    pub fn tree_is_windowed(&self) -> bool {
+        self.surfaces
+            .windowed(crate::native::geometry::NativeSurface::Tree)
     }
 
     /// The open overlays, bottom of the stack first.
@@ -2156,6 +2192,12 @@ pub enum Focus {
     /// is the exception, routing by position through [`Model::overlay_at`]
     /// rather than by focus.
     Native(OverlayId),
+    /// A windowed surface owns the keyboard: the cursor sits in the window
+    /// view opened for it, so keys route to that surface's own view rather
+    /// than to the engine. Derived from the cursor's own grid, which nvim
+    /// moves with every window command, so a `<C-w>h` into the tree and a
+    /// click on it reach the same answer with nothing of view's involved.
+    Pane(crate::native::geometry::NativeSurface),
 }
 
 /// One open native overlay: which overlay it is, how much of the terminal

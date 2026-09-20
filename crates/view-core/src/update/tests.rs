@@ -3515,7 +3515,7 @@ fn a_feature_invoke_while_a_blocked_prompt_is_topmost_does_not_steal_focus() {
     );
     let prompt_id = match m.focus() {
         Focus::Native(id) => id,
-        Focus::Engine => unreachable!("MsgShow must open a Prompt overlay"),
+        other => unreachable!("MsgShow must open a Prompt overlay: {other:?}"),
     };
     assert!(matches!(
         m.overlays().last().map(|o| &o.kind),
@@ -3842,7 +3842,7 @@ fn an_ai_invoke_while_a_blocked_prompt_is_topmost_does_not_steal_focus() {
     );
     let prompt_id = match m.focus() {
         Focus::Native(id) => id,
-        Focus::Engine => unreachable!("MsgShow must open a Prompt overlay"),
+        other => unreachable!("MsgShow must open a Prompt overlay: {other:?}"),
     };
     let _ = update(
         &mut m,
@@ -3879,7 +3879,7 @@ fn a_second_ai_invoke_while_a_blocked_prompt_is_topmost_still_replaces_in_place(
     );
     let prompt_id = match m.focus() {
         Focus::Native(id) => id,
-        Focus::Engine => unreachable!("MsgShow must open a Prompt overlay"),
+        other => unreachable!("MsgShow must open a Prompt overlay: {other:?}"),
     };
     let _ = update(
         &mut m,
@@ -5831,7 +5831,7 @@ fn a_prompt_opening_over_an_open_picker_takes_focus_and_returns_it_on_resolve() 
     );
     let picker_id = match m.focus() {
         Focus::Native(id) => id,
-        Focus::Engine => unreachable!("FeatureInvoke picker files must open a Picker overlay"),
+        other => unreachable!("FeatureInvoke picker files must open a Picker overlay: {other:?}"),
     };
 
     // the same real msg_show + cmdline_show pairing
@@ -5865,7 +5865,7 @@ fn a_prompt_opening_over_an_open_picker_takes_focus_and_returns_it_on_resolve() 
 
     let prompt_id = match m.focus() {
         Focus::Native(id) => id,
-        Focus::Engine => unreachable!("MsgShow must open a Prompt overlay over the picker"),
+        other => unreachable!("MsgShow must open a Prompt overlay over the picker: {other:?}"),
     };
     assert_ne!(
         prompt_id, picker_id,
@@ -7207,7 +7207,7 @@ fn tree_toggle_while_a_blocked_prompt_is_topmost_opens_beneath_it_without_steali
     );
     let prompt_id = match m.focus() {
         Focus::Native(id) => id,
-        Focus::Engine => unreachable!("MsgShow must open a Prompt overlay"),
+        other => unreachable!("MsgShow must open a Prompt overlay: {other:?}"),
     };
     assert!(matches!(
         m.overlays().last().map(|o| &o.kind),
@@ -7393,7 +7393,7 @@ fn ai_panel_toggle_while_a_blocked_prompt_is_topmost_opens_beneath_it_without_st
     );
     let prompt_id = match m.focus() {
         Focus::Native(id) => id,
-        Focus::Engine => unreachable!("MsgShow must open a Prompt overlay"),
+        other => unreachable!("MsgShow must open a Prompt overlay: {other:?}"),
     };
     assert!(matches!(
         m.overlays().last().map(|o| &o.kind),
@@ -7467,7 +7467,7 @@ fn a_second_ai_panel_toggle_under_the_same_blocked_prompt_closes_the_panel_it_en
     );
     let prompt_id = match m.focus() {
         Focus::Native(id) => id,
-        Focus::Engine => unreachable!("MsgShow must open a Prompt overlay"),
+        other => unreachable!("MsgShow must open a Prompt overlay: {other:?}"),
     };
     let toggle = || Msg::FeatureInvoke {
         feature: "ai".to_string(),
@@ -7508,7 +7508,7 @@ fn ai_panel_toggle_while_a_picker_is_topmost_opens_beneath_it_without_stealing_f
     assert!(matches!(effects.as_slice(), [Effect::PickerQuery { .. }]));
     let picker_id = match m.focus() {
         Focus::Native(id) => id,
-        Focus::Engine => unreachable!("opening a picker must take focus"),
+        other => unreachable!("opening a picker must take focus: {other:?}"),
     };
     assert!(matches!(
         m.overlays().last().map(|o| &o.kind),
@@ -12971,5 +12971,312 @@ fn a_click_on_a_pill_buffer_selects_that_buffer() {
             [Effect::Rpc(RpcCall::SelectBuffer { buf: 7 })]
         ),
         "a press on the buffer's name sent {effects:?}"
+    );
+}
+
+// --- the windowed tree sidebar ---------------------------------------
+
+/// The handle nvim answers a windowed surface's open with, in these tests.
+const TREE_WIN: crate::events::WinHandle = crate::events::WinHandle(4242);
+
+/// The grid nvim draws the tree's scratch buffer into.
+const TREE_GRID: u64 = 7;
+
+/// A model whose tree opens as a window rather than as a float.
+fn windowed_tree_model() -> Model {
+    let mut m = model();
+    m.surfaces.set_layout(
+        crate::native::geometry::NativeSurface::Tree,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Windowed,
+            crate::native::geometry::Anchor::Left,
+            30,
+        ),
+    );
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 1,
+                width: 80,
+                height: 24,
+            },
+            UiEvent::GridResize {
+                grid: 2,
+                width: 56,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: 2,
+                win: crate::events::WinHandle(1000),
+                startrow: 0,
+                startcol: 24,
+                width: 56,
+                height: 24,
+            },
+        ]),
+    );
+    m
+}
+
+/// The `<leader>e` verb, as the mapping sends it.
+fn tree_toggle() -> Msg {
+    Msg::FeatureInvoke {
+        feature: "tree".to_string(),
+        verb: "toggle".to_string(),
+    }
+}
+
+/// The generation the last open carried, out of the effects it produced.
+fn opened_generation(effects: &[Effect]) -> u64 {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Rpc(RpcCall::OpenNativeWindow { generation, .. }) => Some(*generation),
+            _ => None,
+        })
+        .expect("the toggle must have asked for a window")
+}
+
+/// nvim placing the tree's window and putting the cursor in it, which is
+/// the whole of what makes a windowed surface focused.
+fn tree_window_placed() -> Msg {
+    Msg::Redraw(vec![
+        UiEvent::GridResize {
+            grid: TREE_GRID,
+            width: 24,
+            height: 24,
+        },
+        UiEvent::WinPos {
+            grid: TREE_GRID,
+            win: TREE_WIN,
+            startrow: 0,
+            startcol: 0,
+            width: 24,
+            height: 24,
+        },
+        UiEvent::GridCursorGoto {
+            grid: TREE_GRID,
+            row: 0,
+            col: 0,
+        },
+        UiEvent::Flush,
+    ])
+}
+
+/// A model with the tree open in its own window and the cursor inside it,
+/// its scan already answered so the rows a key moves through exist.
+fn focused_windowed_tree() -> Model {
+    let mut m = windowed_tree_model();
+    let effects = update(&mut m, tree_toggle());
+    let scan = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::TreeScan { generation, .. } => Some(*generation),
+            _ => None,
+        })
+        .expect("opening the tree must issue its scan");
+    let _ = update(
+        &mut m,
+        Msg::TreeScanResult {
+            generation: scan,
+            entries: vec![
+                crate::native::tree::TreeEntry::new("a.rs".into(), false, 0),
+                crate::native::tree::TreeEntry::new("b.rs".into(), false, 0),
+            ],
+        },
+    );
+    let generation = opened_generation(&effects);
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: crate::native::geometry::NativeSurface::Tree,
+            win: TREE_WIN,
+        },
+    );
+    let _ = update(&mut m, tree_window_placed());
+    m
+}
+
+#[test]
+fn a_flush_whose_cursor_grid_is_the_tree_pane_focuses_the_tree() {
+    let m = focused_windowed_tree();
+    assert_eq!(
+        m.focus(),
+        Focus::Pane(crate::native::geometry::NativeSurface::Tree),
+        "the cursor sitting in the tree's own pane did not name the tree"
+    );
+}
+
+#[test]
+fn a_key_folded_before_that_flush_reaches_the_engine() {
+    let mut m = windowed_tree_model();
+    let effects = update(&mut m, tree_toggle());
+    let generation = opened_generation(&effects);
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: crate::native::geometry::NativeSurface::Tree,
+            win: TREE_WIN,
+        },
+    );
+    assert_eq!(m.focus(), Focus::Engine, "focus moved before nvim said so");
+    let effects = update(&mut m, key("j"));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "j"
+        ),
+        "a key pressed before the window was placed was eaten: {effects:?}"
+    );
+}
+
+#[test]
+fn a_key_folded_after_it_reaches_the_tree() {
+    let mut m = focused_windowed_tree();
+    let before = m
+        .tree_mut()
+        .and_then(|tree| tree.view().selected)
+        .unwrap_or(0);
+    let effects = update(&mut m, key("<Down>"));
+    assert!(
+        effects.is_empty(),
+        "a key the tree answers still reached the engine: {effects:?}"
+    );
+    let after = m
+        .tree_mut()
+        .and_then(|tree| tree.view().selected)
+        .unwrap_or(before);
+    assert_ne!(after, before, "the tree did not move its selection");
+}
+
+#[test]
+fn a_flush_leaves_an_open_overlays_focus_alone() {
+    let mut m = focused_windowed_tree();
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "picker".to_string(),
+            verb: "files".to_string(),
+        },
+    );
+    drop(effects);
+    let picker = match m.focus() {
+        Focus::Native(id) => id,
+        other => panic!("the picker did not take focus: {other:?}"),
+    };
+    let _ = update(&mut m, tree_window_placed());
+    assert_eq!(
+        m.focus(),
+        Focus::Native(picker),
+        "a flush took focus away from an open overlay"
+    );
+    // and with the cursor left in an ordinary window, the overlay still
+    // owns the keyboard
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridCursorGoto {
+                grid: 2,
+                row: 0,
+                col: 0,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert_eq!(m.focus(), Focus::Native(picker));
+}
+
+#[test]
+fn esc_in_the_windowed_tree_focuses_the_previous_window() {
+    let mut m = focused_windowed_tree();
+    let effects = update(&mut m, key("<Esc>"));
+    assert!(
+        matches!(&effects[..], [Effect::Rpc(RpcCall::FocusPreviousWindow)]),
+        "<Esc> in a windowed tree did something other than leave its window: {effects:?}"
+    );
+    assert!(
+        m.tree_mut().is_some(),
+        "<Esc> took the tile down with the focus"
+    );
+}
+
+#[test]
+fn leader_e_from_inside_the_windowed_tree_closes_it() {
+    let mut m = focused_windowed_tree();
+    let effects = update(&mut m, tree_toggle());
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Rpc(RpcCall::CloseNativeWindow { win }) if *win == TREE_WIN.0
+        )),
+        "the toggle did not close the window it was pressed in: {effects:?}"
+    );
+    assert!(
+        m.tree_mut().is_none(),
+        "the tree's state outlived its window"
+    );
+}
+
+#[test]
+fn leader_e_from_elsewhere_opens_or_focuses_it() {
+    let mut m = windowed_tree_model();
+    let effects = update(&mut m, tree_toggle());
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Rpc(RpcCall::OpenNativeWindow {
+                surface: crate::native::geometry::NativeSurface::Tree,
+                split: crate::msg::WinSplit::Left,
+                size: 30,
+                ..
+            })
+        )),
+        "the first press did not ask for a window: {effects:?}"
+    );
+    assert!(m.tree_mut().is_some(), "the first press opened no tree");
+    let generation = opened_generation(&effects);
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: crate::native::geometry::NativeSurface::Tree,
+            win: TREE_WIN,
+        },
+    );
+    let _ = update(&mut m, tree_window_placed());
+    // the cursor moves back to the buffer, and the key is pressed there
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridCursorGoto {
+                grid: 2,
+                row: 0,
+                col: 0,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    let effects = update(&mut m, tree_toggle());
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Rpc(RpcCall::OpenNativeWindow { .. }))),
+        "a press from outside a standing tree did not go to it: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::TreeScan { .. })),
+        "the standing tree was re-scanned as though it had just opened: {effects:?}"
     );
 }

@@ -17,6 +17,7 @@ pub mod mappings;
 pub mod palette;
 pub mod picker;
 pub mod pill;
+pub mod placement;
 pub mod prompt;
 pub mod registry;
 pub mod speculate;

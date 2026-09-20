@@ -71,6 +71,21 @@ pub enum Anchor {
     Bottom,
 }
 
+impl Anchor {
+    /// The word a user writes for this edge in `view.toml`, and the word a
+    /// report prints back.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Center => "center",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+}
+
 /// The share of the terminal a sidebar takes when nothing says otherwise:
 /// `[ai] panel_width` and `[native] tree_width` both resolve to this with
 /// no key written, so an absent config is the width view has always drawn.
@@ -266,6 +281,158 @@ impl OverlayRect {
             && col >= self.col
             && row < self.row.saturating_add(self.height)
             && col < self.col.saturating_add(self.width)
+    }
+}
+
+/// One of view's own surfaces: a feature that draws beside the buffer
+/// rather than inside it.
+///
+/// Named rather than derived from [`crate::model::OverlayKind`] because a
+/// surface exists whether or not it is open, and the placement a user
+/// configures for it is read before anything opens.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeSurface {
+    /// The file tree sidebar.
+    Tree,
+    /// The AI agent panel.
+    Agent,
+    /// The command palette.
+    Palette,
+    /// The notification stream.
+    Notifications,
+}
+
+impl NativeSurface {
+    /// Every surface, in the order a configured array is indexed by.
+    pub const ALL: [NativeSurface; 4] =
+        [Self::Tree, Self::Agent, Self::Palette, Self::Notifications];
+
+    /// This surface's position in [`Self::ALL`], which is the index of its
+    /// own [`SurfaceLayout`] in an array laid out that way.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Tree => 0,
+            Self::Agent => 1,
+            Self::Palette => 2,
+            Self::Notifications => 3,
+        }
+    }
+
+    /// The name this surface is spelled with in `view.toml`'s
+    /// `[ui.surfaces.<id>]` table, and on the wire where a call names the
+    /// surface it opened a window for.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Tree => "tree",
+            Self::Agent => "agent",
+            Self::Palette => "palette",
+            Self::Notifications => "notifications",
+        }
+    }
+
+    /// The surface [`Self::id`] spells as `id`, or `None` for anything
+    /// else. The reverse of `id`, for a wire value coming back.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.id() == id)
+    }
+}
+
+/// Whether a surface floats over the buffer or takes a window in nvim's own
+/// layout.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SurfacePlacement {
+    /// A float over the buffer, sized as a share of the terminal.
+    #[default]
+    Overlay,
+    /// An nvim window view opened, laid out by nvim beside the buffer.
+    Windowed,
+}
+
+impl SurfacePlacement {
+    /// The word a user writes for this placement, and the word a report
+    /// prints back.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Overlay => "overlay",
+            Self::Windowed => "windowed",
+        }
+    }
+
+    /// The placement `word` names, or `None` for a word outside the pair.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        match word.trim() {
+            "overlay" => Some(Self::Overlay),
+            "windowed" => Some(Self::Windowed),
+            _ => None,
+        }
+    }
+}
+
+/// Where one surface sits and how much room it takes.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurfaceLayout {
+    /// Float or window.
+    pub placement: SurfacePlacement,
+    /// The edge it is pinned to, read as the float anchor under
+    /// [`SurfacePlacement::Overlay`] and as the tile edge under
+    /// [`SurfacePlacement::Windowed`].
+    pub anchor: Anchor,
+    /// Its share of the terminal, in percent: of the columns for a left or
+    /// right anchor, of the rows for a top or bottom one.
+    pub size: u16,
+}
+
+impl SurfaceLayout {
+    /// A layout from its three parts.
+    #[must_use]
+    pub const fn new(placement: SurfacePlacement, anchor: Anchor, size: u16) -> Self {
+        Self {
+            placement,
+            anchor,
+            size,
+        }
+    }
+
+    /// The layout `surface` has with nothing configured: a float at the
+    /// edge that surface has always drawn at, at the shipped sidebar width.
+    #[must_use]
+    pub const fn default_for(surface: NativeSurface) -> Self {
+        Self {
+            placement: SurfacePlacement::Overlay,
+            anchor: match surface {
+                NativeSurface::Tree => Anchor::Left,
+                NativeSurface::Agent => Anchor::Right,
+                NativeSurface::Palette => Anchor::Center,
+                NativeSurface::Notifications => Anchor::Top,
+            },
+            size: DEFAULT_PANEL_WIDTH_PCT,
+        }
+    }
+
+    /// Every surface at [`Self::default_for`], indexed by
+    /// [`NativeSurface::index`].
+    #[must_use]
+    pub const fn defaults() -> [Self; 4] {
+        [
+            Self::default_for(NativeSurface::Tree),
+            Self::default_for(NativeSurface::Agent),
+            Self::default_for(NativeSurface::Palette),
+            Self::default_for(NativeSurface::Notifications),
+        ]
+    }
+
+    /// Whether this surface takes a window in nvim's layout.
+    #[must_use]
+    pub const fn windowed(self) -> bool {
+        matches!(self.placement, SurfacePlacement::Windowed)
     }
 }
 

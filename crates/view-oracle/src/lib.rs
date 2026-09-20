@@ -225,6 +225,31 @@ fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) -> 
                         },
                     });
                 }),
+            // blocking where production is async, for the reason
+            // `open_native_window_sync` states: this driver has no pump to
+            // route the handle back through, and without the handle the
+            // window stays an ordinary one and the surface never paints
+            RpcCall::OpenNativeWindow {
+                surface,
+                split,
+                size,
+                generation,
+            } => handle
+                .open_native_window_sync(*surface, *split, *size)
+                .map(|win| {
+                    if let Some(win) = win {
+                        follow_ups.push(Msg::NativeWindowOpened {
+                            generation: *generation,
+                            surface: *surface,
+                            win,
+                        });
+                    }
+                }),
+            RpcCall::CloseNativeWindow { win } => handle.close_native_window(*win),
+            RpcCall::SetWindowSize { win, width, height } => {
+                handle.set_window_size(*win, *width, *height)
+            }
+            RpcCall::FocusPreviousWindow => handle.focus_previous_window(),
             // RpcCall is #[non_exhaustive]: a future call kind degrades to a
             // no-op here rather than fail to compile, matching
             // Executor::run's own fallback arm.
@@ -608,6 +633,40 @@ impl EngineSession {
             },
         );
         self.apply_effects(effects)
+    }
+
+    /// Puts one of view's own surfaces into a placement, the way
+    /// `[ui.surfaces.<id>]` does in a config file.
+    ///
+    /// A production session takes the placements from its config, resolved
+    /// in `view-native`; this driver builds its own [`Model`] and never
+    /// reaches that resolver, so the state is set directly.
+    pub fn set_surface(
+        &mut self,
+        surface: view_core::native::geometry::NativeSurface,
+        layout: view_core::native::geometry::SurfaceLayout,
+    ) {
+        self.model.surfaces.set_layout(surface, layout);
+    }
+
+    /// Drives one [`Msg`] through `update()` and carries out every effect
+    /// it answers with, the way the production loop does.
+    ///
+    /// The front door for the messages a driver has no engine trigger for:
+    /// a `FeatureInvoke` a mapping would send, or a key view owns itself.
+    ///
+    /// # Errors
+    ///
+    /// Answers the first error an effect's RPC returned.
+    pub fn feed(&mut self, msg: Msg) -> Result<(), OracleError> {
+        let effects = update(&mut self.model, msg);
+        self.apply_effects(effects)
+    }
+
+    /// What holds the keyboard in this session's model.
+    #[must_use]
+    pub fn focus(&self) -> view_core::model::Focus {
+        self.model.focus()
     }
 
     /// Puts the listed-buffer set and what the pill names with it into this

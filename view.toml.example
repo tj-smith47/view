@@ -181,6 +181,24 @@ accent = "auto"            # default: "auto" -- the active tile's frame
                            # colour, derived from your colorscheme. A hex
                            # colour such as "#89b4fa" names it yourself
 
+# [ui.surfaces] is where each of view's own surfaces sits. placement
+# "overlay" floats it over your buffer; "windowed" gives it a window of its
+# own in nvim's layout, so your buffers make room for it and every window
+# command reaches it. anchor is the edge it opens at, and size is its share
+# of the terminal. [native] tree_width is [ui.surfaces.tree] size under its
+# older name; write either one.
+
+[ui.surfaces]
+
+[ui.surfaces.tree]
+placement = "overlay"      # default: "overlay" -- a float over your buffer.
+                           # "windowed" opens it as a window of its own
+anchor = "left"            # default: "left" -- the edge it opens at.
+                           # left | right
+size = 30                  # default: 30 -- percent of the terminal width,
+                           # on the same clamp-never-refuse terms as
+                           # [native] tree_width, whose value this shares
+
 # [ai] turns the agent panel and its ACP client on or off, and names which
 # agent view speaks to. "claude-code" is the one adapter this build knows
 # how to auto-provision on its own; naming another known adapter id or an

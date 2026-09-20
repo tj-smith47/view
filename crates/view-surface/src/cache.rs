@@ -103,7 +103,10 @@ impl Frame {
 ///   `statusline` (via `statusline_rows`), `toast_history` (only the
 ///   palette's history view reads it, and that is an overlay),
 ///   `showtabline` (it decides whether the top row exists under
-///   `panes = "nvim"`, which is `offset`)
+///   `panes = "nvim"`, which is `offset`), `surfaces` (it decides whether
+///   the tree draws as a float or in a pane, and both are painted off the
+///   `Model` while an overlay is open, which is every frame it is on
+///   screen)
 /// - a setting no layer's geometry follows on its own:
 ///   `ai_panel_width_pct`,
 ///   `ai_review_open_target`, `tree_width_pct`, `ext_surfaces`,

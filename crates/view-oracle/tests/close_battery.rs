@@ -896,3 +896,118 @@ fn the_pill_holds_its_row_as_tabpages_and_buffers_come_and_go() {
 
     engine.arm_and_input(":qa!<CR>").unwrap();
 }
+
+/// The same tiled session with the file tree in a window of its own: the
+/// tree opens into a tile, the cursor lands in it, `<Esc>` hands the
+/// keyboard back to the window it came from, and every split and close
+/// after that still leaves view holding one grid per open window at the
+/// size nvim reports for it.
+///
+/// Disconfirm: dropping `winfixwidth` from the open chunk lets the splits
+/// re-flow the tree's window, which fails on the width it opened at.
+#[test]
+fn a_windowed_tree_keeps_its_tile_as_the_windows_of_a_split_close() {
+    let work = common::ScratchPaths::new("close-battery-tree");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = view_oracle::EngineSession::spawn_with_ext(
+        COLS,
+        ROWS,
+        view_oracle::UI_EXT_OPTIONS_MULTIGRID,
+    )
+    .expect("EngineSession::spawn_with_ext against real nvim");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .arm_and_input(&format!(":cd {}<CR>", dir.display()))
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .set_panes("tiles")
+        .expect("the tiled look is reachable");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine.set_surface(
+        view_core::native::geometry::NativeSurface::Tree,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Left,
+            30,
+        ),
+    );
+
+    let before = nvim_window_sizes(&mut engine).len();
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the tree's window opens");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        before + 1,
+        "the tree took no window of its own"
+    );
+    assert_eq!(
+        engine.focus(),
+        view_core::model::Focus::Pane(view_core::native::geometry::NativeSurface::Tree),
+        "the cursor did not land in the tree's own window"
+    );
+    assert_eq!(
+        engine.eval_str("&filetype").unwrap().trim(),
+        "view-tree",
+        "the window the cursor sits in is not the tree's"
+    );
+
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "<Esc>".to_string(),
+        }))
+        .expect("<Esc> leaves the tree's window");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.focus(),
+        view_core::model::Focus::Engine,
+        "<Esc> left the keyboard in the tree"
+    );
+    assert_ne!(
+        engine.eval_str("&filetype").unwrap().trim(),
+        "view-tree",
+        "<Esc> left the cursor in the tree's own window"
+    );
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        before + 1,
+        "<Esc> took the tree's tile down with the focus"
+    );
+
+    let tree_width = |engine: &mut view_oracle::EngineSession| -> String {
+        engine
+            .eval_str(
+                "join(map(filter(getwininfo(), \
+                 'getbufvar(v:val.bufnr, \"&filetype\") ==# \"view-tree\"'), \
+                 'v:val.width'), \",\")",
+            )
+            .expect("nvim answers for the tree's own window")
+            .trim()
+            .to_string()
+    };
+    let opened_at = tree_width(&mut engine);
+
+    for (step, keys) in TILED_STEPS {
+        engine.arm_and_input(keys).unwrap();
+        assert!(
+            engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap(),
+            "{step}: the session never settled"
+        );
+        let wanted = nvim_window_sizes(&mut engine);
+        assert_eq!(
+            window_grid_sizes(&engine),
+            wanted,
+            "{step}: view's window grids are not the windows nvim has open"
+        );
+        assert_eq!(
+            tree_width(&mut engine),
+            opened_at,
+            "{step}: the splits re-flowed the tree's own window"
+        );
+    }
+}

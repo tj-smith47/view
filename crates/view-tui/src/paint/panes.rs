@@ -22,10 +22,11 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as TermRect;
 use view_core::grid::registry::{GridId, Pane, PaneKind, GLOBAL_GRID};
-use view_core::model::{Model, Panes};
+use view_core::model::{Model, OverlayKind, Panes};
+use view_core::native::geometry::NativeSurface;
 use view_core::theme::{ChromeGroup, Theme};
 use view_surface::overlay::BorderSet;
-use view_surface::Rect;
+use view_surface::{Layer, LayerKind, Rect};
 
 use super::{clip_to_frame, paint_grid, ratatui_style, set_border_cell, Damage};
 
@@ -75,7 +76,7 @@ pub(super) fn paint_panes(
         // windows because their boxes are what say where the column is, and
         // before anything floating because a float's rect owns every cell
         // under it.
-        if !separated && !matches!(pane.kind, PaneKind::Window) {
+        if !separated && !pane.kind.is_window() {
             if tiled {
                 frames::paint_frames(
                     model, &panes, look, cursor, theme, borders, area, damage, buf,
@@ -94,15 +95,20 @@ pub(super) fn paint_panes(
         if pane_area.width == 0 || pane_area.height == 0 {
             continue;
         }
-        paint_grid(
-            grid,
-            &pane_theme(theme, pane, cursor),
-            hl,
-            pane_area,
-            damage,
-            buf,
-        );
-        if pane.id != GLOBAL_GRID && matches!(pane.kind, PaneKind::Window) {
+        match pane.kind.native_surface() {
+            Some(surface) => {
+                paint_native_pane(model, surface, theme, borders, pane_area, damage, buf)
+            }
+            None => paint_grid(
+                grid,
+                &pane_theme(theme, pane, cursor),
+                hl,
+                pane_area,
+                damage,
+                buf,
+            ),
+        }
+        if pane.id != GLOBAL_GRID && pane.kind.is_window() {
             windows.push(pane_area);
         }
     }
@@ -114,6 +120,51 @@ pub(super) fn paint_panes(
         } else {
             paint_separators(&windows, theme, borders, damage, buf);
         }
+    }
+}
+
+/// Paints one of view's own surfaces into the pane nvim laid out for it.
+///
+/// Unframed: the tile's frame is already drawn around this rect, and a
+/// border of the surface's own inside it would be two boxes where a person
+/// sees one.
+fn paint_native_pane(
+    model: &Model,
+    surface: NativeSurface,
+    theme: &Theme,
+    borders: BorderSet,
+    pane_area: TermRect,
+    damage: &Damage,
+    buf: &mut Buffer,
+) {
+    let Some(kind) = native_pane_content(model, surface) else {
+        return;
+    };
+    let layer = Layer::new(
+        Rect::new(pane_area.y, pane_area.x, pane_area.width, pane_area.height),
+        kind,
+        model.caps,
+    );
+    let laid = view_surface::overlay::unframed_rows(
+        pane_area.width,
+        pane_area.height,
+        &layer.kind,
+        borders,
+    );
+    super::paint_native_overlay(&layer, Some(&laid), theme, pane_area, damage, buf);
+}
+
+/// What a windowed surface draws, or `None` while its state is not open.
+fn native_pane_content(model: &Model, surface: NativeSurface) -> Option<LayerKind> {
+    match surface {
+        NativeSurface::Tree => model
+            .overlays()
+            .iter()
+            .find_map(|overlay| match &overlay.kind {
+                OverlayKind::Tree(state) => Some(LayerKind::Tree(state.view())),
+                _ => None,
+            }),
+        _ => None,
     }
 }
 
