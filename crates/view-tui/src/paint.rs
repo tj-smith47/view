@@ -5,7 +5,7 @@
 
 use ratatui::buffer::{Buffer, Cell, CellWidth};
 use ratatui::style::{Color, Modifier, Style};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 use view_core::grid::{Grid, GridDamage};
 pub use view_core::hl::{HlAttr, HlTable};
 use view_core::model::{CmdlineState, Look, Model, Panes, PopupmenuState, TablineState};
@@ -16,7 +16,10 @@ use view_surface::{overlay::BorderSet, Layer, LayerKind, Rect, Surface};
 
 mod emit;
 mod panes;
+mod text;
 mod toast;
+
+use text::{cluster_width, clusters, set_cluster};
 
 /// The terminal-space rows a frame's composite must repaint, so a redraw
 /// touches only the changed region instead of all ~4800 cells.
@@ -916,14 +919,14 @@ fn reset_damaged_rows(buf: &mut Buffer, damage: &Damage) {
 /// The shared primitive every chrome renderer below uses, so column/row
 /// bounds-checking lives in exactly one place.
 ///
-/// Each character advances the column by its own display width (1 for
-/// ordinary text, 2 for wide characters like CJK ideographs) rather than
-/// unconditionally by one cell: a fixed one-column advance would place a
-/// wide character's glyph in a single cell it does not fit, misaligning
-/// every character painted after it on the row. A wide character's second
-/// (shadow) cell is reset so no later character in this same call can draw
+/// Each grapheme cluster advances the column by its own display width (1
+/// for ordinary text, 2 for wide characters like CJK ideographs) rather
+/// than unconditionally by one cell: a fixed one-column advance would place
+/// a wide character's glyph in a single cell it does not fit, misaligning
+/// every character painted after it on the row. A wide cluster's second
+/// (shadow) cell is reset so no later cluster in this same call can draw
 /// into it, matching the convention `ratatui::buffer::Buffer::set_stringn`
-/// itself uses for multi-width graphemes. A character wider than the columns
+/// itself uses for multi-width graphemes. A cluster wider than the columns
 /// left before the buffer's own row ends is written as a blank instead (see
 /// [`fitted_symbol`]).
 fn paint_text_row(
@@ -937,51 +940,50 @@ fn paint_text_row(
         return;
     }
     let mut col = 0_u16;
-    for ch in text.chars() {
+    for cluster in clusters(text) {
         if col >= area.width {
             break;
         }
-        col = col.saturating_add(paint_char_cell(buf, area, row_offset, col, ch, style));
+        col = col.saturating_add(paint_cluster_cell(
+            buf, area, row_offset, col, cluster, style,
+        ));
     }
 }
 
-/// Places one character at column `col` of row `row_offset` within `area`,
-/// styled `style`, and returns the number of columns it consumed.
+/// Places one grapheme cluster at column `col` of row `row_offset` within
+/// `area`, styled `style`, and returns the number of columns it consumed.
 ///
 /// The single per-cell placement primitive [`paint_text_row`] (one style for
 /// a whole row) and [`paint_span_row`] (one style per span, continuing the
 /// same column cursor across span boundaries) both build on, so wide-glyph
 /// handling and edge-of-buffer clipping live in exactly one place rather
 /// than as two copies that could drift.
-fn paint_char_cell(
+///
+/// A cluster and not a character, because a combining mark given a cell of
+/// its own both moves every character behind it and reads as a stray
+/// accent, and macOS hands back `café.rs` as `cafe` and a combining mark.
+fn paint_cluster_cell(
     buf: &mut Buffer,
     area: ratatui::layout::Rect,
     row_offset: u16,
     col: u16,
-    ch: char,
+    cluster: &str,
     style: Style,
 ) -> u16 {
-    let ch = sanitized_char(ch);
-    // sanitized_char already replaced every control character with a
-    // plain space, so `width` is `None` here only for the handful of
-    // zero-width combining marks that survive sanitization; `.max(1)`
-    // still advances the column for those rather than looping forever
-    // painting into the same cell
-    let width = ch.width().unwrap_or(1).max(1) as u16;
+    let width = cluster_width(cluster);
     let room = columns_left(buf, area.x.saturating_add(col));
-    let mut encode_buf = [0_u8; 4];
-    let symbol = fitted_symbol(ch.encode_utf8(&mut encode_buf), room);
+    let symbol = fitted_symbol(cluster, room);
+    // a symbol of one byte is ASCII and one column wide, which is both the
+    // ordinary case and the blank `fitted_symbol` substitutes for a cluster
+    // the buffer's own row has no room for
     let width = if symbol.len() == 1 { 1 } else { width };
-    let cell = &mut buf[(area.x + col, area.y + row_offset)];
-    // reset before styling, never merge: `ratatui::buffer::Cell::set_style`
-    // patches (a `None` field leaves the cell's current value), so a chrome
-    // cell painted over the grid keeps whatever background and modifiers the
-    // layer beneath left in it wherever this style carries none -- which is
-    // how a single cursorline cell survived mid-row inside an overlay in the
-    // live repro. A chrome layer owns every cell it covers, opaquely.
-    cell.reset();
-    cell.set_symbol(symbol);
-    cell.set_style(style);
+    set_cluster(
+        buf,
+        area.x.saturating_add(col),
+        area.y.saturating_add(row_offset),
+        symbol,
+        style,
+    );
     if width == 2 && col + 1 < area.width {
         buf[(area.x + col + 1, area.y + row_offset)].reset();
     }
@@ -1015,11 +1017,13 @@ fn paint_span_row(
             break;
         }
         let style = resolve(span.role);
-        for ch in span.text.chars() {
+        for cluster in clusters(&span.text) {
             if col >= area.width {
                 break;
             }
-            col = col.saturating_add(paint_char_cell(buf, area, row_offset, col, ch, style));
+            col = col.saturating_add(paint_cluster_cell(
+                buf, area, row_offset, col, cluster, style,
+            ));
         }
     }
 }
@@ -1084,7 +1088,7 @@ fn paint_cmdline(
 /// string of arbitrary (possibly wide/control) characters across a row,
 /// which a single fixed-width box-drawing character never needs.
 ///
-/// Resets the cell first for the reason [`paint_char_cell`] does, plus one
+/// Resets the cell first for the reason [`paint_cluster_cell`] does, plus one
 /// of its own: a frame glyph restyled over an already-painted interior cell
 /// must carry the frame's style alone, not the interior text's bold or
 /// italic as well, and `set_style` merges modifiers.
@@ -7227,5 +7231,204 @@ mod tests {
                 "only the title is bold, not the run of border it sits in ({at})"
             );
         }
+    }
+
+    /// The two spellings of `café.rs`. A name reaches view in whatever
+    /// form the filesystem holds it: macOS hands back the decomposed one,
+    /// Linux usually the composed one, and a user who opens the file on
+    /// either sees the same row.
+    const COMPOSED_NAME: &str = "caf\u{e9}.rs";
+    const DECOMPOSED_NAME: &str = "cafe\u{301}.rs";
+
+    /// The column the unsaved marker opens in, which is where a mark given
+    /// a cell of its own would push it.
+    fn marker_column(buf: &ratatui::buffer::Buffer, width: u16, row: u16) -> Option<u16> {
+        (0..width).find(|&col| buf[(col, row)].symbol() == "[")
+    }
+
+    /// Whether any cell of the row holds the combining acute on its own,
+    /// which is the stray accent a per-character run leaves on screen.
+    fn holds_a_stray_mark(buf: &ratatui::buffer::Buffer, width: u16, row: u16) -> bool {
+        (0..width).any(|col| buf[(col, row)].symbol() == "\u{301}")
+    }
+
+    /// A one-row buffer with `text` painted across it by the primitive
+    /// every chrome renderer in this module writes through.
+    fn text_row_buffer(text: &str, width: u16) -> ratatui::buffer::Buffer {
+        let area = ratatui::layout::Rect::new(0, 0, width, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        paint_text_row(text, Style::default(), area, 0, &mut buf);
+        buf
+    }
+
+    /// A row of text places one grapheme cluster per cell, so a combining
+    /// mark rides in the cell its base character stands in and everything
+    /// behind it keeps its column.
+    ///
+    /// Disconfirm: a run over `chars()` writes the mark into a cell of its
+    /// own, which moves the marker to column 9 and shows `cafe\u{301}.rs`.
+    #[test]
+    fn a_decomposed_name_takes_no_cell_of_its_own_on_a_text_row() {
+        let width = 20_u16;
+        for name in [COMPOSED_NAME, DECOMPOSED_NAME] {
+            let buf = text_row_buffer(&format!("{name} [+]"), width);
+            assert_eq!(
+                marker_column(&buf, width, 0),
+                Some(8),
+                "the marker behind {name:?} sits at the column the name's cells end at"
+            );
+            assert!(
+                !holds_a_stray_mark(&buf, width, 0),
+                "a combining mark took a cell of its own behind {name:?}"
+            );
+        }
+        let buf = text_row_buffer(&format!("{DECOMPOSED_NAME} [+]"), width);
+        assert_eq!(
+            buf[(3, 0)].symbol(),
+            "e\u{301}",
+            "the mark reaches the terminal in its base character's cell"
+        );
+    }
+
+    /// The same for a row built from spans, which is what the bar, the
+    /// tree, the palette, the AI panel and every framed overlay paint
+    /// through: the cursor carries across a span boundary, so a name
+    /// measured by its characters moves every span behind it too.
+    ///
+    /// Disconfirm: a run over `chars()` opens the modified marker's span
+    /// at column 9.
+    #[test]
+    fn a_decomposed_name_takes_no_cell_of_its_own_across_spans() {
+        let width = 20_u16;
+        for name in [COMPOSED_NAME, DECOMPOSED_NAME] {
+            let area = ratatui::layout::Rect::new(0, 0, width, 1);
+            let mut buf = ratatui::buffer::Buffer::empty(area);
+            let spans = vec![
+                Span::new(name.to_string(), StyleRole::File),
+                Span::new(" [+]", StyleRole::Modified),
+            ];
+            paint_span_row(&spans, |_| Style::default(), area, 0, &mut buf);
+            assert_eq!(
+                marker_column(&buf, width, 0),
+                Some(8),
+                "the marker's own span opens where {name:?} ends"
+            );
+            assert!(
+                !holds_a_stray_mark(&buf, width, 0),
+                "a combining mark took a cell of its own behind {name:?}"
+            );
+        }
+    }
+
+    /// The bar is the surface a user reads their filename off under
+    /// `panes = "nvim"`, and it paints the two forms of the name the same.
+    ///
+    /// Disconfirm: a run over `chars()` shifts the marker one column right
+    /// for the decomposed name alone, so the two rows differ.
+    #[test]
+    fn a_decomposed_name_takes_no_cell_of_its_own_on_the_bar() {
+        let model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
+        let width = 40_u16;
+        let bar = |name: &str| {
+            let kind = LayerKind::Statusline(view_core::native::views::StatuslineView::from_spans(
+                vec![
+                    Span::new(name.to_string(), StyleRole::File),
+                    Span::new(" [+]", StyleRole::Modified),
+                ],
+                Vec::new(),
+                Vec::new(),
+            ));
+            let layer = Layer::new(Rect::new(0, 0, width, 1), kind, model.caps);
+            paint_layer_alone(&model, layer, width, 2)
+        };
+        let composed = bar(COMPOSED_NAME);
+        let decomposed = bar(DECOMPOSED_NAME);
+        let at = marker_column(&composed, width, 0);
+        assert!(at.is_some(), "the bar carries the unsaved marker");
+        assert_eq!(
+            marker_column(&decomposed, width, 0),
+            at,
+            "the decomposed name moved the bar's unsaved marker: {:?}",
+            row_text(&decomposed, 0, 0, width)
+        );
+        assert!(
+            !holds_a_stray_mark(&decomposed, width, 0),
+            "the bar shows a stray accent: {:?}",
+            row_text(&decomposed, 0, 0, width)
+        );
+    }
+
+    /// Every native text writer in this crate places a grapheme cluster.
+    /// The two cell primitives are reached from a loop, and a loop over
+    /// `chars()` is what puts a combining mark in a cell of its own, so a
+    /// new writer that iterates characters fails here by name rather than
+    /// on whichever surface a user opens a decomposed name on.
+    ///
+    /// `clusters` is the one walk that produces a cluster, so a body that
+    /// places a cell without calling it took its cells from somewhere
+    /// else.
+    #[test]
+    fn every_native_text_writer_walks_grapheme_clusters() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut dirs = vec![src];
+        let mut sources = Vec::new();
+        while let Some(dir) = dirs.pop() {
+            let listing = std::fs::read_dir(&dir).expect("this crate's own src/ must be readable");
+            for entry in listing.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("a source file must be read");
+                    let name = path.display().to_string();
+                    sources.push((name, text));
+                }
+            }
+        }
+        assert!(
+            sources.len() > 5,
+            "the walk found no sources to read: {sources:?}"
+        );
+        let mut wrong = Vec::new();
+        for (name, text) in &sources {
+            // the production half alone: a test may place a cell by hand to
+            // build the picture it asserts against
+            let production = text.split("#[cfg(test)]").next().unwrap_or(text);
+            for (function, body) in fn_bodies(production) {
+                if function == "paint_cluster_cell" || function == "set_cluster" {
+                    continue;
+                }
+                let places_a_cell =
+                    body.contains("paint_cluster_cell(") || body.contains("set_cluster(");
+                if places_a_cell && !body.contains("clusters(") {
+                    wrong.push(format!("{name}: {function}"));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "a text writer places cells from something other than a grapheme walk:\n  {}",
+            wrong.join("\n  ")
+        );
+    }
+
+    /// Each `fn` in `source`, paired with its body up to the next item at
+    /// column zero.
+    fn fn_bodies(source: &str) -> Vec<(&str, &str)> {
+        let mut found = Vec::new();
+        for (offset, _) in source.match_indices("fn ") {
+            let rest = &source[offset + 3..];
+            let Some(open) = rest.find('(') else {
+                continue;
+            };
+            let name = rest[..open].trim();
+            if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            let body = &rest[open..];
+            let end = body.find("\n}").map_or(body.len(), |at| at + 2);
+            found.push((name, &body[..end]));
+        }
+        found
     }
 }

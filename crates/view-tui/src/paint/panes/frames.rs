@@ -13,8 +13,6 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use std::collections::BTreeSet;
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 use view_core::grid::registry::{GridId, Pane, PaneKind, GLOBAL_GRID};
 use view_core::model::{Look, Model, Panes, WindowStatus};
 use view_core::native::statusline::StatuslineState;
@@ -23,6 +21,7 @@ use view_core::native::views::{Span, StyleRole};
 use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
 use view_surface::overlay::BorderSet;
 
+use super::super::text::{cluster_width, clusters, group_width, set_cluster};
 use super::super::{ratatui_style, rgb, set_border_cell, Damage};
 
 /// One cell of the lattice, as `(row, col)` in the engine layer's own
@@ -279,47 +278,6 @@ fn name_spans(status: &WindowStatus) -> Vec<Span> {
     spans
 }
 
-/// The cells one grapheme cluster takes on the edge, which is both what
-/// the fit check counts and what the run advances by.
-///
-/// One rule in one place, and a cluster rather than a character because a
-/// name reaches view in whatever form the filesystem holds it: macOS hands
-/// back `café.rs` as `cafe` and a combining mark, and a mark given a cell
-/// of its own both moves every character behind it and reads as a stray
-/// accent. `max(1)` is what keeps a cluster that measures nothing from
-/// leaving the run standing still.
-fn cluster_width(cluster: &str) -> u16 {
-    u16::try_from(UnicodeWidthStr::width(cluster).max(1)).unwrap_or(1)
-}
-
-/// One group's width in terminal cells, which is what the edge has room
-/// for rather than its count of characters.
-fn group_width(group: &[Span]) -> u16 {
-    group
-        .iter()
-        .flat_map(|span| span.text.graphemes(true))
-        .map(cluster_width)
-        .fold(0, u16::saturating_add)
-}
-
-/// Writes one grapheme cluster into a cell as its whole symbol, which is
-/// how a combining mark reaches the terminal in the cell its base
-/// character stands in.
-///
-/// A cluster carrying a control character is written as a blank, for the
-/// same reason `sanitized_char` exists: `Cell::set_symbol` computes the
-/// width itself and panics on one in a debug build.
-fn set_edge_cluster(buf: &mut Buffer, x: u16, y: u16, cluster: &str, style: Style) {
-    if cluster.chars().any(char::is_control) {
-        set_border_cell(buf, x, y, ' ', style);
-        return;
-    }
-    let cell = &mut buf[(x, y)];
-    cell.reset();
-    cell.set_symbol(cluster);
-    cell.set_style(style);
-}
-
 /// The colour a tile's own edge text sits in, which is the colour its frame
 /// is drawn in.
 fn edge_style(active: bool, theme: &Theme) -> Style {
@@ -382,12 +340,12 @@ fn write_edge(groups: &[Vec<Span>], base: Style, theme: &Theme, edge: Rect, buf:
         }
         for span in group {
             let style = span_style(span.role, base, theme);
-            for cluster in span.text.graphemes(true) {
+            for cluster in clusters(&span.text) {
                 if x > last {
                     break;
                 }
                 let width = cluster_width(cluster);
-                set_edge_cluster(buf, x, edge.y, cluster, style);
+                set_cluster(buf, x, edge.y, cluster, style);
                 // ratatui's own convention for the cell a two-cell glyph
                 // covers: the diff skips it, and anything left in it would
                 // be drawn one column to the right of where it was written
