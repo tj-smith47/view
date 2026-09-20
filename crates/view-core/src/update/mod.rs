@@ -253,11 +253,12 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Paste(text) => match model.focus() {
             // never replayed as nvim_input keystrokes: one undo unit, no
             // mapping interference, matching nvim_paste's own contract
-            // a windowed surface owns the keyboard but holds no text of
-            // its own to paste into, so the paste goes where it would have
-            // gone with no surface open
-            Focus::Engine | Focus::Pane(_) => vec![Effect::Rpc(RpcCall::Paste { text })],
-            Focus::Native(_) => paste_into_focused_surface(model, &text),
+            Focus::Engine => vec![Effect::Rpc(RpcCall::Paste { text })],
+            // a surface answers a paste the same way in either placement.
+            // The cursor a windowed surface leaves in nvim sits in the
+            // scratch buffer its own window shows, so an `nvim_paste` here
+            // reaches no buffer a person is editing.
+            Focus::Pane(_) | Focus::Native(_) => paste_into_focused_surface(model, &text),
         },
         Msg::Mouse(input) => mouse::route(model, input),
         Msg::Redraw(events) => {

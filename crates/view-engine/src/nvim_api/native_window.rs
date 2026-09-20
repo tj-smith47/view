@@ -269,7 +269,7 @@ impl super::EngineHandle {
     }
 }
 
-/// The window handle an `nvim_open_win` reply carries, or `None` for a
+/// The window handle the open chunk's reply carries, or `None` for a
 /// reply that named none.
 ///
 /// A reply view cannot read degrades to no handle, the same safe default

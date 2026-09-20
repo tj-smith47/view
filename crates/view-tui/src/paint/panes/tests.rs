@@ -2271,19 +2271,25 @@ fn tree_windowed() {
 }
 
 /// A surface's own window holds an unnamed scratch buffer, so its frame
-/// carries the surface's name where an ordinary tile carries the file's.
+/// carries the surface's name where an ordinary tile carries the file's,
+/// and its bottom edge carries neither the mode nor a cursor position:
+/// nvim's are the scratch window's own and describe nothing a person is
+/// editing.
 #[test]
 fn a_native_panes_frame_carries_its_surfaces_name() {
     let tiles = tree_in_the_left_tile(true);
     let (_, col, width, _) = tiles.slots[0];
     let buf = tiled_frame(&tiles.model);
     let offset = tiles.model.look.grid_offset();
-    let (top_row, _) = edge_rows(&tiles.model, tiles.slots[0]);
-    let top: String = row_text(&buf, top_row)
-        .chars()
-        .skip(usize::from(col + offset))
-        .take(usize::from(width))
-        .collect();
+    let (top_row, bottom_row) = edge_rows(&tiles.model, tiles.slots[0]);
+    let run = |row: u16| -> String {
+        row_text(&buf, row)
+            .chars()
+            .skip(usize::from(col + offset))
+            .take(usize::from(width))
+            .collect()
+    };
+    let top = run(top_row);
     assert!(
         top.contains("tree"),
         "the tree's frame did not name the surface: {top:?}"
@@ -2291,5 +2297,14 @@ fn a_native_panes_frame_carries_its_surfaces_name() {
     assert!(
         !top.contains("left.rs"),
         "the tree's frame kept the buffer name of the window it took: {top:?}"
+    );
+    let bottom = run(bottom_row);
+    assert!(
+        !bottom.contains("-- INSERT --"),
+        "the tree's frame claims nvim's mode: {bottom:?}"
+    );
+    assert!(
+        !bottom.chars().any(|ch| ch == ':'),
+        "the tree's frame claims a cursor position: {bottom:?}"
     );
 }

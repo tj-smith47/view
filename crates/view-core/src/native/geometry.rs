@@ -252,7 +252,8 @@ impl OverlayBox {
 /// The `unwrap_or` fallback is unreachable arithmetic insurance rather than
 /// live error handling: with `pct` capped at 100 the quotient is at most
 /// `extent`, so the conversion back to `u16` always succeeds.
-fn share(extent: u16, pct: u16) -> u16 {
+#[must_use]
+pub(crate) fn share(extent: u16, pct: u16) -> u16 {
     // u32 because the product of two u16 extents overflows u16 long before
     // the divide brings it back into range
     let cells = u32::from(extent) * u32::from(pct.min(100)) / 100;

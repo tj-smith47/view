@@ -1010,4 +1010,61 @@ fn a_windowed_tree_keeps_its_tile_as_the_windows_of_a_split_close() {
             "{step}: the splits re-flowed the tree's own window"
         );
     }
+
+    // nvim's own close of the window, which reaches view as win_close and
+    // grid_destroy and nothing else
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the toggle enters the standing window");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.focus(),
+        view_core::model::Focus::Pane(view_core::native::geometry::NativeSurface::Tree),
+        "the toggle did not step back into the tree"
+    );
+    engine.arm_and_input(":q<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        tree_width(&mut engine),
+        "",
+        "nvim still has a window holding the tree"
+    );
+    assert_eq!(
+        engine.focus(),
+        view_core::model::Focus::Engine,
+        "the keyboard stayed in a window nvim closed"
+    );
+    assert!(
+        !engine.tree_is_open(),
+        "the tree's state outlived the window nvim closed, so its scan \
+         worker is still walking a sidebar nobody can see"
+    );
+    let wanted = nvim_window_sizes(&mut engine);
+    assert_eq!(
+        window_grid_sizes(&engine),
+        wanted,
+        "the closed window left a grid behind"
+    );
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the tree opens again");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.focus(),
+        view_core::model::Focus::Pane(view_core::native::geometry::NativeSurface::Tree),
+        "the reopened window is not one view draws the tree into"
+    );
+    let wanted = nvim_window_sizes(&mut engine);
+    assert_eq!(
+        window_grid_sizes(&engine),
+        wanted,
+        "the reopen left view holding a grid nvim has no window for"
+    );
 }

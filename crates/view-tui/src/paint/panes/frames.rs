@@ -143,7 +143,8 @@ fn paint_edges(
         };
         // a native surface's window holds an unnamed scratch buffer, so the
         // frame would carry nothing where every other tile carries a name
-        let status = match pane.kind.native_surface() {
+        let native = pane.kind.native_surface();
+        let status = match native {
             Some(surface) => {
                 let mut named = status.clone();
                 named.name = surface.id().to_string();
@@ -153,6 +154,10 @@ fn paint_edges(
         };
         let status = &*status;
         let is_active = active == Some(pane.id);
+        // nvim's mode and cursor for that scratch window describe the
+        // sidebar's own cursor, never the file being edited, so a native
+        // tile's edge states nothing about either
+        let state = (native.is_none()).then_some(state);
         if look.gaps {
             if !framed(pane) {
                 continue;
@@ -258,10 +263,13 @@ pub(crate) fn paint_name(
 /// A gapless tile has one edge row and no top run of its own, so its name
 /// leads the segments there; a gapped tile's name is already in the top
 /// edge and this is the segments alone.
+///
+/// `state` is `None` for a tile view draws itself, which has no mode and
+/// no cursor position of its own to state.
 pub(crate) fn paint_segments(
     status: &WindowStatus,
     active: bool,
-    state: &StatuslineState,
+    state: Option<&StatuslineState>,
     theme: &Theme,
     look: Look,
     edge: Rect,
@@ -272,7 +280,9 @@ pub(crate) fn paint_segments(
     } else {
         vec![name_spans(status)]
     };
-    groups.extend(state.tile_segments(status, active));
+    if let Some(state) = state {
+        groups.extend(state.tile_segments(status, active));
+    }
     write_edge(&groups, edge_style(active, theme), theme, edge, buf);
 }
 

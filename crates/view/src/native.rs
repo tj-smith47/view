@@ -123,7 +123,15 @@ impl NativeSession {
         let cfg = resolved.native;
         model.statusline_enabled = cfg.enabled("statusline");
         model.palette_enabled = cfg.enabled("palette");
-        model.tree_width_pct = cfg.tree_width();
+        // one source for the tree's share: the caller has already put the
+        // resolved `[ui.surfaces]` placements on the model, and that table's
+        // `size` is where `[native] tree_width` has been folded in under its
+        // older name. Reading the older key back here put the two in
+        // disagreement, so an overlay tree ignored `size` outright
+        model.tree_width_pct = model
+            .surfaces
+            .layout(view_core::native::geometry::NativeSurface::Tree)
+            .size;
         // a width that could not be read is the one `[native]` mistake that
         // does not fail the table (see `resolve_tree_width`), so this is the
         // only place it can be said out loud
@@ -1089,6 +1097,28 @@ composer_newline = \"<A-x>\"
             configured.key_bindings.resolve(None, "<M-x>"),
             Some(Resolved::Act(Action::ComposerNewline)),
             "and Alt reaches the same binding however the config spells it"
+        );
+    }
+
+    /// `main` puts the resolved `[ui.surfaces]` placements on the model
+    /// before `load` runs, and `load` read `[native] tree_width` back over
+    /// the tree's share, so a file naming only `[ui.surfaces.tree] size`
+    /// opened the float at the default width.
+    #[test]
+    fn the_overlay_tree_takes_its_configured_size() {
+        let mut m = model();
+        m.surfaces.set_layout(
+            view_core::native::geometry::NativeSurface::Tree,
+            view_core::native::geometry::SurfaceLayout::new(
+                view_core::native::geometry::SurfacePlacement::Overlay,
+                view_core::native::geometry::Anchor::Left,
+                22,
+            ),
+        );
+        let _ = load_from(None, 1, &mut m);
+        assert_eq!(
+            m.tree_width_pct, 22,
+            "the surfaces table's size was read back over by [native] tree_width"
         );
     }
 }

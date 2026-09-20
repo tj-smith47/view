@@ -136,35 +136,11 @@ pub(super) fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
         model.dirty = true;
         return vec![Effect::TreeClose];
     }
-    let mut state = crate::native::tree::TreeState::open(model.cwd.clone());
-    let scan_generation = state.generation();
-    // a freshly opened `TreeState` has never had a refresh in flight, so
-    // this always allocates rather than coalescing -- the `Option` is
-    // still handled rather than assumed, so a future change to `open`'s
-    // initial state cannot silently turn this into a missing git scan
-    let git_generation = state.request_git_refresh();
     let prompt_is_topmost = matches!(
         model.overlays().last().map(|overlay| &overlay.kind),
         Some(OverlayKind::Prompt(_))
     );
-    let geometry = OverlayBox::new(model.tree_width_pct, 100).with_anchor(Anchor::Left);
-    if prompt_is_topmost {
-        model.insert_overlay_beneath_top(geometry, OverlayKind::Tree(state));
-    } else {
-        model.push_overlay(geometry, OverlayKind::Tree(state));
-    }
-    model.dirty = true;
-    let mut effects = vec![Effect::TreeScan {
-        generation: scan_generation,
-        root: model.cwd.clone(),
-    }];
-    if let Some(generation) = git_generation {
-        effects.push(Effect::TreeGitScan {
-            generation,
-            root: model.cwd.clone(),
-        });
-    }
-    effects
+    open_tree_state(model, prompt_is_topmost)
 }
 
 /// The tree's key while it takes a window of its own: closed from inside
@@ -180,13 +156,66 @@ fn toggle_windowed_tree(model: &mut Model) -> Vec<Effect> {
     let mut effects = if model.tree_mut().is_some() {
         Vec::new()
     } else {
-        open_tree_state(model)
+        open_tree_state(model, false)
     };
     effects.append(&mut vec![Effect::Rpc(open_native_window(
         model,
         NativeSurface::Tree,
     ))]);
     effects
+}
+
+/// What an nvim-side close of a windowed surface's window owes the model:
+/// the claim goes, the surface's state goes, and its scan worker is told.
+///
+/// nvim closes such a window on `:q` inside it, `<C-w>c`, or `:only` from
+/// another window, and view hears nothing but `win_close` and
+/// `grid_destroy` for it. Left unhandled, the tree's state stayed on the
+/// overlay stack invisible, its scan worker kept walking, and the next
+/// `<leader>e` reopened the window on a listing as old as the first open.
+pub(super) fn native_window_closed(
+    model: &mut Model,
+    surface: NativeSurface,
+    win: crate::events::WinHandle,
+) -> Vec<Effect> {
+    model.engine.grids_mut().release_native_window(win);
+    model.dirty = true;
+    match surface {
+        NativeSurface::Tree if model.close_tree() => vec![Effect::TreeClose],
+        _ => Vec::new(),
+    }
+}
+
+/// Carries the share the resize keys just stepped to the window the tree
+/// sits in, in the cells it works out to against the grid nvim lays its
+/// windows in.
+///
+/// The stepped share is written back into the layout as well, so a tree
+/// closed and reopened comes back at the width the user left it at rather
+/// than at the one the config names. A float needs neither: `resize_tree`
+/// has already re-widthed its own box.
+fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
+    if !model.tree_is_windowed() {
+        return Vec::new();
+    }
+    let layout = model.surfaces.layout(NativeSurface::Tree);
+    let stepped = model.tree_width_pct;
+    model.surfaces.set_layout(
+        NativeSurface::Tree,
+        crate::native::geometry::SurfaceLayout::new(layout.placement, layout.anchor, stepped),
+    );
+    let Some(win) = model.engine.grids().native_window(NativeSurface::Tree) else {
+        return Vec::new();
+    };
+    let (columns, rows) = model.engine.grids().global().size();
+    let vertical = matches!(layout.anchor, Anchor::Left | Anchor::Right);
+    let extent = if vertical { columns } else { rows };
+    let cells = crate::native::geometry::share(extent, stepped).max(1);
+    vec![Effect::Rpc(RpcCall::SetWindowSize {
+        win: win.0,
+        width: vertical.then_some(cells),
+        height: (!vertical).then_some(cells),
+    })]
 }
 
 /// Closes the window the tree sits in and drops its state.
@@ -223,12 +252,30 @@ fn open_native_window(model: &mut Model, surface: NativeSurface) -> RpcCall {
 /// The tree's own state on the overlay stack, with the scans its first
 /// frame needs. Shared by both placements: the state is the same either
 /// way, and only what draws it differs.
-fn open_tree_state(model: &mut Model) -> Vec<Effect> {
+///
+/// The box takes the anchor `[ui.surfaces.tree]` names, and its share from
+/// `tree_width_pct`, which that table's `size` seeds and the resize keys
+/// step. `beneath_top` puts the tree under the overlay already on top,
+/// which is what a tree opened while a prompt is blocking owes that prompt.
+fn open_tree_state(model: &mut Model, beneath_top: bool) -> Vec<Effect> {
     let mut state = crate::native::tree::TreeState::open(model.cwd.clone());
     let scan_generation = state.generation();
+    // a freshly opened `TreeState` has never had a refresh in flight, so
+    // this always allocates rather than coalescing -- the `Option` is
+    // still handled rather than assumed, so a future change to `open`'s
+    // initial state cannot silently turn this into a missing git scan
     let git_generation = state.request_git_refresh();
-    let geometry = OverlayBox::new(model.tree_width_pct, 100).with_anchor(Anchor::Left);
-    model.push_overlay(geometry, OverlayKind::Tree(state));
+    let anchor = model.surfaces.layout(NativeSurface::Tree).anchor;
+    let geometry = match anchor {
+        Anchor::Top | Anchor::Bottom => OverlayBox::new(100, model.tree_width_pct),
+        _ => OverlayBox::new(model.tree_width_pct, 100),
+    }
+    .with_anchor(anchor);
+    if beneath_top {
+        model.insert_overlay_beneath_top(geometry, OverlayKind::Tree(state));
+    } else {
+        model.push_overlay(geometry, OverlayKind::Tree(state));
+    }
     model.dirty = true;
     let mut effects = vec![Effect::TreeScan {
         generation: scan_generation,
@@ -368,20 +415,6 @@ pub(super) fn open_message_history(model: &mut Model) -> Vec<Effect> {
 /// constant.
 const HISTORY_CHROME_ROWS: u16 = 4;
 
-/// Every key this overlay answers, with what the docs page says about it.
-///
-/// The one list: [`message_history_key`] matches these notations and
-/// `crate::native::mappings::render_history_table` renders them, so a key
-/// added to the overlay and not to the page fails
-/// `the_keys_page_renders_the_history_overlay_keys_this_build_answers`,
-/// and one that is documented but dead fails
-/// `every_documented_history_key_answers_a_real_keystroke`.
-///
-/// `gg` is two `g` presses; every other entry is one key event.
-///
-/// Test-only, like the table renderer it feeds: the page carries the
-/// rendered rows and the walk presses them, and nothing in a running
-/// session reads this list.
 /// Every key the file tree answers, whether it is floating over the buffer
 /// or sitting in a window of its own.
 ///
@@ -397,10 +430,11 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     // other does not answer (see [`take_binding`]).
     match take_binding(model, notation) {
         Some(Resolved::Act(Action::Resize(direction))) => {
-            if model.resize_tree(direction.widens()) {
-                model.dirty = true;
+            if !model.resize_tree(direction.widens()) {
+                return Vec::new();
             }
-            return Vec::new();
+            model.dirty = true;
+            return resize_windowed_tree(model);
         }
         // The composer's line break is the agent panel's alone,
         // and the tree answers it the way it answers any key no
@@ -441,10 +475,11 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
             Vec::new()
         }
         // a directory toggles in place; a leaf's path is
-        // opened through RPC (nvim owns the buffer this
-        // creates) and the sidebar closes on the same
-        // keypress, matching a picker selection's own
-        // close-on-open behavior
+        // opened through RPC, since nvim owns the buffer
+        // this creates. A floating sidebar closes on the
+        // same keypress, matching a picker selection's own
+        // close-on-open behavior, and a windowed one stays,
+        // the way a tiled sidebar does everywhere else
         "<CR>" => {
             let to_open = model.tree_mut().and_then(|t| {
                 let entry = t.selected_entry()?;
@@ -551,6 +586,20 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     }
 }
 
+/// Every key this overlay answers, with what the docs page says about it.
+///
+/// The one list: [`message_history_key`] matches these notations and
+/// `crate::native::mappings::render_history_table` renders them, so a key
+/// added to the overlay and not to the page fails
+/// `the_keys_page_renders_the_history_overlay_keys_this_build_answers`,
+/// and one that is documented but dead fails
+/// `every_documented_history_key_answers_a_real_keystroke`.
+///
+/// `gg` is two `g` presses; every other entry is one key event.
+///
+/// Test-only, like the table renderer it feeds: the page carries the
+/// rendered rows and the walk presses them, and nothing in a running
+/// session reads this list.
 #[cfg(test)]
 pub(crate) const HISTORY_KEYS: &[(&str, &str)] = &[
     ("j", "select the next entry"),

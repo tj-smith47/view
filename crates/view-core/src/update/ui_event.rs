@@ -4,12 +4,13 @@
 //! message, cmdline, popupmenu and tabline event nvim can send -- and it
 //! changes for reasons the message fold beside it never shares.
 
-use crate::events::{clamp_dim, saturate_u16, saturate_u32, UiEvent};
+use crate::events::{clamp_dim, saturate_u16, saturate_u32, UiEvent, WinHandle};
 use crate::grid::registry::{GridEvent, GridId};
 use crate::grid::GridOp;
 use crate::hl::HlAttr;
 use crate::model::{CmdlineState, Model, OverlayKind, PopupmenuState, TablineState};
 use crate::msg::{Effect, RpcCall};
+use crate::native::geometry::NativeSurface;
 use crate::native::prompt::PromptState;
 use crate::native::statusline::SegmentUpdate;
 
@@ -84,7 +85,10 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         UiEvent::GridDestroy { grid } => {
             let grid = GridId(grid);
             forget_window_status(model, grid);
-            place(model, GridEvent::Destroy { grid })
+            let native = native_pane_at(model, grid);
+            let mut effects = place(model, GridEvent::Destroy { grid });
+            effects.extend(closed_native_pane(model, native));
+            effects
         }
         UiEvent::WinPos {
             grid,
@@ -149,7 +153,10 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         UiEvent::WinClose { grid } => {
             let grid = GridId(grid);
             forget_window_status(model, grid);
-            place(model, GridEvent::Close { grid })
+            let native = native_pane_at(model, grid);
+            let mut effects = place(model, GridEvent::Close { grid });
+            effects.extend(closed_native_pane(model, native));
+            effects
         }
         UiEvent::MsgSetPos {
             grid,
@@ -466,6 +473,26 @@ fn forget_window_status(model: &mut Model, grid: GridId) {
 fn place(model: &mut Model, ev: GridEvent) -> Vec<Effect> {
     model.engine.apply_grid_event(ev);
     Vec::new()
+}
+
+/// The surface and window handle of the pane `grid` holds, read before the
+/// event that unplaces it, since that is the last moment either is known.
+fn native_pane_at(model: &Model, grid: GridId) -> Option<(NativeSurface, WinHandle)> {
+    let grids = model.engine.grids();
+    Some((grids.native_surface(grid)?, grids.window_handle(grid)?))
+}
+
+/// `win_close` is followed by `grid_destroy` for the same grid, and a grid
+/// can be destroyed without either. The first of the two to arrive unplaces
+/// the pane, so the second reads no surface here and the close runs once.
+fn closed_native_pane(
+    model: &mut Model,
+    native: Option<(NativeSurface, WinHandle)>,
+) -> Vec<Effect> {
+    match native {
+        Some((surface, win)) => super::surfaces::native_window_closed(model, surface, win),
+        None => Vec::new(),
+    }
 }
 
 /// The forwarding policy for one `nvim_ui_send` payload.

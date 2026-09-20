@@ -669,6 +669,12 @@ impl EngineSession {
         self.model.focus()
     }
 
+    /// Whether this session's model still holds the file tree open, in
+    /// either placement.
+    pub fn tree_is_open(&mut self) -> bool {
+        self.model.tree_mut().is_some()
+    }
+
     /// Puts the listed-buffer set and what the pill names with it into this
     /// session's model, through the same `update()` arm the bridge's
     /// `buffers` notification takes.

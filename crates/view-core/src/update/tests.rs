@@ -13280,3 +13280,213 @@ fn leader_e_from_elsewhere_opens_or_focuses_it() {
         "the standing tree was re-scanned as though it had just opened: {effects:?}"
     );
 }
+
+/// `[ui.surfaces.tree] anchor` is read under the default placement too:
+/// the table promises an edge, and the float opened at the left whatever
+/// the file said.
+#[test]
+fn the_overlay_tree_sits_at_its_configured_anchor() {
+    let mut m = model();
+    m.surfaces.set_layout(
+        crate::native::geometry::NativeSurface::Tree,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Overlay,
+            crate::native::geometry::Anchor::Right,
+            30,
+        ),
+    );
+    let _ = update(&mut m, tree_toggle());
+    let tree = m
+        .overlays()
+        .iter()
+        .find(|overlay| matches!(overlay.kind, OverlayKind::Tree(_)))
+        .expect("the toggle opens a tree");
+    assert_eq!(
+        tree.geometry.anchor,
+        crate::native::geometry::Anchor::Right,
+        "the float opened at the left with the table naming the right"
+    );
+}
+
+/// The same under a blocking prompt, which takes the other branch of the
+/// open and carried its own hard-coded anchor.
+#[test]
+fn the_overlay_tree_under_a_prompt_sits_at_its_configured_anchor() {
+    let mut m = model();
+    m.surfaces.set_layout(
+        crate::native::geometry::NativeSurface::Tree,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Overlay,
+            crate::native::geometry::Anchor::Right,
+            30,
+        ),
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::MsgShow {
+            kind: "confirm".into(),
+            content: vec![(0, "Save changes?".into())],
+            replace_last: false,
+        }]),
+    );
+    let _ = update(&mut m, tree_toggle());
+    let tree = m
+        .overlays()
+        .iter()
+        .find(|overlay| matches!(overlay.kind, OverlayKind::Tree(_)))
+        .expect("the toggle opens a tree under the prompt");
+    assert_eq!(
+        tree.geometry.anchor,
+        crate::native::geometry::Anchor::Right,
+        "the float opened beneath the prompt at the left"
+    );
+}
+
+/// A resize key in the tree's own window reaches nvim: the float re-widths
+/// its own box, but a window's geometry is nvim's, so the stepped share
+/// has to be carried there as cells.
+#[test]
+fn a_resize_key_in_the_windowed_tree_resizes_its_window() {
+    let mut m = focused_windowed_tree();
+    let before = m.tree_width_pct;
+    let effects = update(&mut m, key("<S-Right>"));
+    assert_ne!(m.tree_width_pct, before, "the key stepped no share at all");
+    let cells =
+        crate::native::geometry::share(m.engine.grids().global().size().0, m.tree_width_pct).max(1);
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::SetWindowSize {
+                win,
+                width: Some(width),
+                height: None,
+            })] if *win == TREE_WIN.0 && *width == cells
+        ),
+        "the resize reached no window: {effects:?}"
+    );
+    assert_eq!(
+        m.surfaces
+            .layout(crate::native::geometry::NativeSurface::Tree)
+            .size,
+        m.tree_width_pct,
+        "a reopen would come back at the width the user left behind"
+    );
+}
+
+/// nvim closing the tree's window from its own side (`:q` in it, `<C-w>c`,
+/// `:only` from elsewhere) reaches view as `win_close` and `grid_destroy`
+/// and nothing else. Unhandled, the tree's state stayed on the stack
+/// invisible and its scan worker kept walking.
+#[test]
+fn an_nvim_side_close_of_the_tree_window_releases_it() {
+    let mut m = focused_windowed_tree();
+    assert!(m.tree_mut().is_some(), "the fixture opens a tree");
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::WinClose { grid: TREE_GRID },
+            UiEvent::GridDestroy { grid: TREE_GRID },
+            UiEvent::Flush,
+        ]),
+    );
+    assert!(
+        m.tree_mut().is_none(),
+        "the tree's state outlived its window"
+    );
+    assert_eq!(
+        m.focus(),
+        Focus::Engine,
+        "the keyboard stayed in a window nvim closed"
+    );
+    let closes = effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::TreeClose))
+        .count();
+    assert_eq!(
+        closes, 1,
+        "the scan worker was told {closes} times, not once: {effects:?}"
+    );
+}
+
+/// The next `<leader>e` after such a close opens a fresh tree, with the
+/// scan its first frame needs, and claims one window rather than a second.
+#[test]
+fn reopening_after_an_nvim_close_rescans_and_claims_once() {
+    let mut m = focused_windowed_tree();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::WinClose { grid: TREE_GRID },
+            UiEvent::GridDestroy { grid: TREE_GRID },
+            UiEvent::Flush,
+        ]),
+    );
+    let effects = update(&mut m, tree_toggle());
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::TreeScan { .. })),
+        "the reopened tree showed a listing as old as the first open: {effects:?}"
+    );
+    let generation = opened_generation(&effects);
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: crate::native::geometry::NativeSurface::Tree,
+            win: crate::events::WinHandle(TREE_WIN.0 + 1),
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: TREE_GRID,
+                width: 24,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: TREE_GRID,
+                win: crate::events::WinHandle(TREE_WIN.0 + 1),
+                startrow: 0,
+                startcol: 0,
+                width: 24,
+                height: 24,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert_eq!(
+        m.engine
+            .grids()
+            .native_window(crate::native::geometry::NativeSurface::Tree),
+        Some(crate::events::WinHandle(TREE_WIN.0 + 1)),
+        "the reopened window is not the one the tree is drawn into"
+    );
+}
+
+/// The cursor a windowed surface leaves in nvim sits in the scratch buffer
+/// that window shows, which is `modifiable = false`, so the paste that
+/// reached the engine landed in no buffer at all. The surface answers it
+/// the way it does when it floats.
+#[test]
+fn a_paste_into_the_windowed_tree_reaches_no_buffer() {
+    let mut m = focused_windowed_tree();
+    m.dirty = false;
+
+    let effects = update(&mut m, Msg::Paste("pasted text".into()));
+
+    assert!(
+        rpc_calls(&effects).is_empty(),
+        "the paste went to the engine, which has the tree's own scratch \
+         buffer under the cursor: {effects:?}"
+    );
+    assert!(
+        visible_texts(&m)
+            .iter()
+            .any(|line| line == NO_TEXT_INPUT_NOTICE),
+        "the windowed tree answered a paste differently from the floating \
+         one: {:?}",
+        visible_texts(&m)
+    );
+}

@@ -933,7 +933,8 @@ impl GridRegistry {
     }
 
     /// The surface `grid`'s pane was placed for, if it is a native one.
-    fn native_surface(&self, grid: GridId) -> Option<NativeSurface> {
+    #[must_use]
+    pub(crate) fn native_surface(&self, grid: GridId) -> Option<NativeSurface> {
         self.slots
             .iter()
             .find(|slot| slot.id == grid)
