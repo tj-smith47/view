@@ -266,8 +266,8 @@ impl StatuslineState {
         StatuslineView::from_spans(left, center, right)
     }
 
-    /// The segments one tile's own frame edge carries, left to right, with
-    /// one space between each.
+    /// The segments one tile's own frame edge carries, left to right, in
+    /// the groups the painter separates with one space.
     ///
     /// Two sources, because two scopes: the mode and the pending keys are
     /// the session's and belong only to the tile the user is working in,
@@ -282,10 +282,15 @@ impl StatuslineState {
     ///
     /// No truncation here. A frame edge is as wide as its tile and the
     /// painter is what knows how many cells are left, so it drops whole
-    /// spans off the end rather than this composing against a width it
-    /// would have to be told.
+    /// groups off the end rather than this composing against a width it
+    /// would have to be told. A group is what has to arrive whole: half a
+    /// diagnostic count reads as the other half being zero.
     #[must_use]
-    pub fn tile_segments(&self, status: &crate::model::WindowStatus, active: bool) -> Vec<Span> {
+    pub fn tile_segments(
+        &self,
+        status: &crate::model::WindowStatus,
+        active: bool,
+    ) -> Vec<Vec<Span>> {
         let mut groups: Vec<Vec<Span>> = Vec::new();
         if active && !self.mode.is_empty() {
             groups.push(vec![Span::new(self.mode.clone(), StyleRole::Mode)]);
@@ -322,14 +327,7 @@ impl StatuslineState {
         if active && !self.showcmd.is_empty() {
             groups.push(vec![Span::plain(self.showcmd.clone())]);
         }
-        let mut spans: Vec<Span> = Vec::new();
-        for group in groups {
-            if !spans.is_empty() {
-                spans.push(Span::plain(" "));
-            }
-            spans.extend(group);
-        }
-        spans
+        groups
     }
 }
 
@@ -644,7 +642,7 @@ mod tests {
     #[test]
     fn the_position_segment_reads_the_window_trigger_under_tiles() {
         let (state, status) = positioned();
-        let segments = text(&state.tile_segments(&status, true));
+        let segments = text(&state.tile_segments(&status, true).concat());
         assert!(
             segments.contains("42:13"),
             "the window's own position is missing: {segments:?}"

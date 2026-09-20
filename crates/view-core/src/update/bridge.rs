@@ -75,7 +75,6 @@ pub(super) fn on_window_status(
 /// edge rows lie outside the window's own grid, so without this the frame
 /// is painted with every edge row clipped out of its damage and the
 /// segments keep the reading they had.
-///
 fn damage_frame_edges(model: &mut Model, win: WinHandle) {
     if model.look.panes != crate::model::Panes::Tiles {
         return;

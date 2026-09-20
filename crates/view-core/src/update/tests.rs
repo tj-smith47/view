@@ -12572,6 +12572,43 @@ fn a_panes_flip_reissues_the_hold_the_look_decides() {
     }
 }
 
+/// A window nvim closed keeps no status record. Handles are never reused,
+/// so an entry left behind is one nothing reads again, and a session that
+/// opens and closes splits all day would grow the map for as long as it
+/// runs.
+///
+/// Disconfirm: dropping the `forget_window_status` call from either arm
+/// leaves 1003's record in the map.
+#[test]
+fn a_closed_windows_status_is_dropped() {
+    for ev in [
+        UiEvent::WinClose { grid: 6 },
+        UiEvent::GridDestroy { grid: 6 },
+    ] {
+        let mut m = vsplit_model();
+        let win = crate::events::WinHandle(1003);
+        let _ = update(
+            &mut m,
+            Msg::WindowStatus {
+                win,
+                status: crate::model::WindowStatus {
+                    name: "left.rs".to_string(),
+                    ..crate::model::WindowStatus::default()
+                },
+            },
+        );
+        assert!(
+            m.window_status.contains_key(&win),
+            "the trigger's report never reached the model"
+        );
+        let _ = update(&mut m, Msg::Redraw(vec![ev.clone()]));
+        assert!(
+            !m.window_status.contains_key(&win),
+            "{ev:?} left the closed window's status behind"
+        );
+    }
+}
+
 /// The report is the only way a user finds out why a session came up in a
 /// mode they did not ask for, so it names the marker that decided it.
 #[test]

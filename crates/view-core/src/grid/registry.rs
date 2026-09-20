@@ -944,12 +944,18 @@ impl GridRegistry {
     /// in.
     #[must_use]
     pub fn window_edge_rows(&self, look: crate::model::Look) -> Vec<u16> {
-        self.slots
+        let mut rows: Vec<u16> = self
+            .slots
             .iter()
             .filter(|slot| slot.placed.as_ref().is_some_and(|p| !p.hidden))
             .filter_map(|slot| slot.window.as_ref())
             .flat_map(|window| look.edge_rows(window.slot))
-            .collect()
+            .collect();
+        // a gapless tile answers its one lattice row twice, and two tiles
+        // stacked in a column share the row between them
+        rows.sort_unstable();
+        rows.dedup();
+        rows
     }
 
     /// Marks a row of the global grid changed, for chrome view paints over

@@ -1,11 +1,9 @@
 //! The bridge's `window` trigger: one report per window whose own status
 //! segments changed.
 //!
-//! Beside the `view_bridge` chunk rather than inside it because
-//! `nvim_api.rs` is within a hundred lines of the file-size ceiling
-//! `task loc` enforces, and because this group answers a different
-//! question: the session-wide segments there are one value each, and these
-//! are one value per window.
+//! Beside the `view_bridge` chunk rather than inside it because this group
+//! answers a different question: the session-wide segments there are one
+//! value each, and these are one value per window.
 //!
 //! # The throttle
 //!

@@ -5457,6 +5457,44 @@ mod tests {
     }
 
     #[test]
+    fn the_window_status_chunk_arms_every_event_of_its_group_and_defers_to_a_tick() {
+        // only `CursorMoved` and `BufModifiedSet` reach the live test, and a
+        // group that lost any other event still answers every message it is
+        // asked for -- the tile simply stops following the window
+        for event in [
+            "WinEnter",
+            "BufEnter",
+            "BufModifiedSet",
+            "CursorMoved",
+            "CursorMovedI",
+            "DiagnosticChanged",
+            "VimEnter",
+        ] {
+            assert!(
+                REGISTER_WINDOW_STATUS_CHUNK.contains(&format!("'{event}'")),
+                "{event} arms no window, so a tile stops following it"
+            );
+        }
+        assert!(
+            REGISTER_WINDOW_STATUS_CHUNK.contains("vim.schedule(flush)"),
+            "a trigger that notifies inline sends one message per motion \
+             down a held-down j"
+        );
+        assert!(
+            REGISTER_WINDOW_STATUS_CHUNK.contains("pcall(report, win)"),
+            "a window closed between the tick that armed it and the tick \
+             that flushes it must not take the other windows' reports with \
+             it"
+        );
+        assert!(
+            REGISTER_WINDOW_STATUS_CHUNK
+                .contains("vim.rpcnotify(channel, 'view_bridge', 'window', win, buf,"),
+            "the payload is decoded field for field, so its order is the \
+             wire contract"
+        );
+    }
+
+    #[test]
     fn hold_notify_sends_the_constant_chunk_with_no_arguments() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         h.hold_notify().unwrap();

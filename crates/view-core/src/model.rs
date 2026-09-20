@@ -154,9 +154,10 @@ pub struct Model {
     /// switches back to.
     pub detected_look: Detected,
     /// The last status the bridge's `window` trigger reported for each
-    /// window, which is what a tile's own frame segments read. Entries for
-    /// windows nvim has since closed cost one small record each and are
-    /// dropped when the grid behind them goes.
+    /// window, which is what a tile's own frame segments read. A window's
+    /// entry is dropped when the grid showing it closes or is destroyed
+    /// (`update::ui_event`), so a session that opens and closes splits all
+    /// day holds one record per window on screen and no more.
     pub window_status: std::collections::HashMap<crate::events::WinHandle, WindowStatus>,
     /// Whether the `palette` native feature is enabled for this session, set
     /// the same way and at the same place as `statusline_enabled`. Gates

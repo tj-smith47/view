@@ -13,6 +13,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use std::collections::BTreeSet;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use view_core::grid::registry::{GridId, Pane, PaneKind, GLOBAL_GRID};
 use view_core::model::{Look, Model, Panes, WindowStatus};
 use view_core::native::statusline::StatuslineState;
@@ -233,7 +234,7 @@ pub(crate) fn paint_name(
     buf: &mut Buffer,
 ) {
     write_edge(
-        &name_spans(status),
+        &[name_spans(status)],
         edge_style(active, theme),
         theme,
         edge,
@@ -255,17 +256,13 @@ pub(crate) fn paint_segments(
     edge: Rect,
     buf: &mut Buffer,
 ) {
-    let mut spans = if look.gaps {
+    let mut groups = if look.gaps {
         Vec::new()
     } else {
-        name_spans(status)
+        vec![name_spans(status)]
     };
-    let segments = state.tile_segments(status, active);
-    if !spans.is_empty() && !segments.is_empty() {
-        spans.push(Span::plain(" "));
-    }
-    spans.extend(segments);
-    write_edge(&spans, edge_style(active, theme), theme, edge, buf);
+    groups.extend(state.tile_segments(status, active));
+    write_edge(&groups, edge_style(active, theme), theme, edge, buf);
 }
 
 /// The buffer name a tile's frame carries, with the unsaved marker behind
@@ -279,6 +276,15 @@ fn name_spans(status: &WindowStatus) -> Vec<Span> {
         spans.push(Span::new(" [+]", StyleRole::Modified));
     }
     spans
+}
+
+/// One group's width in terminal cells, which is what the edge has room
+/// for rather than its count of characters.
+fn group_width(group: &[Span]) -> u16 {
+    group
+        .iter()
+        .map(|span| u16::try_from(UnicodeWidthStr::width(span.text.as_str())).unwrap_or(u16::MAX))
+        .fold(0, u16::saturating_add)
 }
 
 /// The colour a tile's own edge text sits in, which is the colour its frame
@@ -304,29 +310,50 @@ fn span_style(role: StyleRole, base: Style, theme: &Theme) -> Style {
     }
 }
 
-/// Writes `spans` along a one-row frame edge, a blank cell either side of
-/// the text and the corners left to their junction glyphs.
+/// Writes `groups` along a one-row frame edge, one blank cell between
+/// groups and one either side of the whole run, with the corners left to
+/// their junction glyphs.
 ///
-/// A span that does not fit is dropped whole, with everything after it: the
-/// composer knows what a segment means and a column count does not, so half
-/// a diagnostic count is worse than none.
-fn write_edge(spans: &[Span], base: Style, theme: &Theme, edge: Rect, buf: &mut Buffer) {
+/// A group that does not fit is dropped whole, its separator with it, and
+/// so is everything after it: the composer knows what a segment means and a
+/// column count does not, so half a diagnostic count is worse than none.
+///
+/// Width is counted in cells rather than in characters, because a buffer
+/// named in a script that draws two cells to the character would otherwise
+/// run past the closing blank and over the corner.
+fn write_edge(groups: &[Vec<Span>], base: Style, theme: &Theme, edge: Rect, buf: &mut Buffer) {
     // two corners, a blank either side and one character of text
-    if edge.width < 5 || spans.iter().all(|span| span.text.is_empty()) {
+    if edge.width < 5 {
         return;
     }
     let first = edge.x.saturating_add(2);
     let last = edge.x.saturating_add(edge.width).saturating_sub(3);
     let mut x = first;
-    for span in spans {
-        let width = u16::try_from(span.text.chars().count()).unwrap_or(u16::MAX);
-        if x.saturating_add(width) > last.saturating_add(1) {
+    for group in groups.iter().filter(|group| group_width(group) > 0) {
+        let separator = u16::from(x > first);
+        if x.saturating_add(separator)
+            .saturating_add(group_width(group))
+            > last.saturating_add(1)
+        {
             break;
         }
-        let style = span_style(span.role, base, theme);
-        for ch in span.text.chars() {
-            set_border_cell(buf, x, edge.y, ch, style);
+        if separator == 1 {
+            set_border_cell(buf, x, edge.y, ' ', base);
             x = x.saturating_add(1);
+        }
+        for span in group {
+            let style = span_style(span.role, base, theme);
+            for ch in span.text.chars() {
+                let width = u16::try_from(ch.width().unwrap_or(1).max(1)).unwrap_or(1);
+                set_border_cell(buf, x, edge.y, ch, style);
+                // ratatui's own convention for the cell a two-cell glyph
+                // covers: the diff skips it, and anything left in it would
+                // be drawn one column to the right of where it was written
+                if width == 2 {
+                    buf[(x.saturating_add(1), edge.y)].reset();
+                }
+                x = x.saturating_add(width);
+            }
         }
     }
     if x == first {

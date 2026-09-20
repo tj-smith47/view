@@ -81,7 +81,11 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             },
         ),
         UiEvent::GridClear { grid } => cells(model, grid, GridOp::Clear),
-        UiEvent::GridDestroy { grid } => place(model, GridEvent::Destroy { grid: GridId(grid) }),
+        UiEvent::GridDestroy { grid } => {
+            let grid = GridId(grid);
+            forget_window_status(model, grid);
+            place(model, GridEvent::Destroy { grid })
+        }
         UiEvent::WinPos {
             grid,
             win,
@@ -142,7 +146,11 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             place(model, GridEvent::External { grid: GridId(grid) })
         }
         UiEvent::WinHide { grid } => place(model, GridEvent::Hide { grid: GridId(grid) }),
-        UiEvent::WinClose { grid } => place(model, GridEvent::Close { grid: GridId(grid) }),
+        UiEvent::WinClose { grid } => {
+            let grid = GridId(grid);
+            forget_window_status(model, grid);
+            place(model, GridEvent::Close { grid })
+        }
         UiEvent::MsgSetPos {
             grid,
             row,
@@ -444,6 +452,17 @@ fn cells(model: &mut Model, grid: u64, op: GridOp) -> Vec<Effect> {
 /// Applies one window-placement operation, producing no effects. Nothing
 /// repaints differently for it yet: the compositor still draws the global
 /// grid alone.
+/// Drops the status the bridge reported for the window `grid` was showing,
+/// before the event that takes the grid away makes the handle unreadable.
+///
+/// nvim never reuses a window handle, so a record left behind is one
+/// nothing will ever read again.
+fn forget_window_status(model: &mut Model, grid: GridId) {
+    if let Some(win) = model.engine.grids().window_handle(grid) {
+        model.window_status.remove(&win);
+    }
+}
+
 fn place(model: &mut Model, ev: GridEvent) -> Vec<Effect> {
     model.engine.apply_grid_event(ev);
     Vec::new()

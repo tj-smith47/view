@@ -1869,6 +1869,81 @@ fn a_gapless_tile_puts_the_name_and_the_segments_in_one_row() {
     );
 }
 
+/// A name is measured in the cells it draws, not in characters. A script
+/// that draws two cells to the character fits the edge by count and runs
+/// past the closing blank and over the corner.
+///
+/// Disconfirm: counting `chars()` writes the 36-cell name into a 32-cell
+/// edge.
+#[test]
+fn a_two_cell_name_is_measured_in_cells_and_not_in_chars() {
+    // the gapped top edge is the slot less its gap ring, less a blank and a
+    // corner either side: 32 cells for text
+    for (chars, fits) in [(18_usize, false), (15, true)] {
+        let tiles = tiled(true);
+        let mut model = tiles.model;
+        let _ = update(
+            &mut model,
+            Msg::WindowStatus {
+                win: WinHandle(1000),
+                status: {
+                    let mut status = WindowStatus::default();
+                    status.name = "編".repeat(chars);
+                    status
+                },
+            },
+        );
+        let buf = tiled_frame(&model);
+        let (top, _) = edge_rows(&model, tiles.slots[0]);
+        let edge = row_text(&buf, top);
+        assert_eq!(
+            edge.contains('編'),
+            fits,
+            "a {chars}-character name drawing {} cells in a 32-cell edge: {edge:?}",
+            chars * 2
+        );
+    }
+}
+
+/// A group arrives whole or not at all. The separator is a span of its own
+/// and the counts are two more, so a fit taken span by span paints a
+/// separator with nothing behind it and cuts the diagnostics between the
+/// errors and the warnings, which reads as no warnings at all.
+///
+/// Disconfirm: fitting span by span leaves `E 1` on the edge with the `W 2`
+/// it was measured beside dropped.
+#[test]
+fn an_edge_too_narrow_for_a_whole_group_carries_none_of_it() {
+    // 18 cells of text: the mode, and neither room for the counts beside it
+    // nor for the separator they would follow
+    let slots = vec![(0, 0, 24, TILED_HEIGHT - 3)];
+    let mut model = tiled_model(true, TILED_HEIGHT, &slots);
+    let _ = update(
+        &mut model,
+        Msg::WindowStatus {
+            win: WinHandle(1000),
+            status: {
+                let mut status = WindowStatus::default();
+                status.name = "left.rs".to_string();
+                status.errors = 1;
+                status.warnings = 2;
+                status
+            },
+        },
+    );
+    let buf = tiled_frame(&model);
+    let (_, bottom) = edge_rows(&model, slots[0]);
+    let edge = row_text(&buf, bottom);
+    assert!(
+        edge.contains("INSERT"),
+        "the edge carries no segments at all: {edge:?}"
+    );
+    assert!(
+        !edge.contains("E 1"),
+        "the errors were painted without the warnings beside them: {edge:?}"
+    );
+}
+
 /// `[native] statusline = false` hands the segments back and leaves the
 /// frame standing: the surface the switch answers for is the text, and the
 /// tile's own edge is drawn whatever the answer.
