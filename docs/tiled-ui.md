@@ -26,8 +26,8 @@ accent = "#89b4fa"   # the active tile's frame colour
 ```
 
 `"auto"` asks the environment who is already drawing frames. A tiling
-window manager puts a border around the terminal itself, so a second frame
-inside it is one border too many, and `"auto"` answers `nvim` there.
+window manager puts a border around the terminal itself, and `"auto"`
+answers `nvim` there.
 
 | environment marker | answer |
 |---|---|
@@ -38,19 +38,19 @@ inside it is one border too many, and `"auto"` answers `nvim` there.
 | anything else | `tiles` |
 
 The comparison against `XDG_CURRENT_DESKTOP` ignores case and reads every
-colon-separated member. An ssh session gets `tiles`, because the client's
-environment stays on the client.
+colon-separated member. An ssh session gets `tiles`.
 
 `[engine] single_grid = true` resolves `panes` to `nvim` whatever the file
 or the flag says. Without `ext_multigrid` nvim sends no `win_pos` and no
-per-window grid, so view has no window rects to frame.
+per-window grid.
 
 The mode follows the same precedence as every other `[ui]` key: the
 `--panes` flag, then `VIEW_UI_PANES`, then the file, then the environment.
-`view --show-config` prints the answer and the marker that decided it:
+`:View ui panes` in a running session prints the answer and the marker that
+decided it:
 
 ```
-ui.panes = nvim (derived: HYPRLAND_INSTANCE_SIGNATURE)
+ui.panes = nvim (HYPRLAND_INSTANCE_SIGNATURE)
 ```
 
 ## Flipping the mode in a running session
@@ -76,12 +76,12 @@ slot stays where nvim put it, the text grid becomes smaller than the slot,
 and the difference belongs to view. Tiles mode asks each window for a grid
 four columns and four rows smaller than its slot and draws the frame and the
 gap into what is left. `<C-w>` commands, `:split`, and a plugin that opens
-windows all keep working, because nvim keeps owning the layout tree.
+windows all keep working.
 
 Three properties of that request shape the geometry:
 
-- The request stands until it is replaced. After a `:vsplit` halves a slot,
-  the window keeps the old request, so view sends a fresh one on every
+- The request stands until it is replaced. After a `:vsplit` halves a slot
+  the window keeps the old request. view sends a fresh one on every
   `win_pos` whose slot size changed.
 - A request of `0, 0` returns a window to its slot's own size. That is what
   a gapless tile sends, and what every window gets on a flip to `nvim`.
@@ -105,13 +105,13 @@ The active tile's frame takes the first of these that resolves:
 3. the `Statement` highlight group's foreground
 4. view's own emphasis colour
 
-The two highlight groups are read from the engine when a colorscheme loads,
-because nvim broadcasts neither of them to a UI.
+The two highlight groups are read from the engine when a colorscheme
+loads.
 
 ## Width a surface has to work with
 
 The tree, the agent panel and the other surfaces size themselves as a
 percentage of the outer grid. Under gapped tiles the outer grid is already
 two columns narrower than the terminal, and a tile spends four more on its
-frame and gaps, so a windowed surface has up to six columns less text width
+frame and gaps. A windowed surface has up to six columns less text width
 than the same percentage of the terminal.

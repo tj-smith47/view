@@ -14,7 +14,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use std::collections::BTreeSet;
 use view_core::grid::registry::{GridId, Pane, PaneKind, GLOBAL_GRID};
-use view_core::model::{Model, Panes};
+use view_core::model::{Look, Panes};
 use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
 use view_surface::overlay::BorderSet;
 
@@ -24,42 +24,44 @@ use super::super::{ratatui_style, set_border_cell, Damage};
 /// coordinates.
 type Cell = (u16, u16);
 
-/// Paints the tiles' frames over the panes already composited into `buf`.
+/// Paints the tiles' frames over the window panes already composited into
+/// `buf`, and under every float the caller paints after it.
 ///
-/// `area` is the engine-grid layer's rect, the same one the panes were
-/// painted inside, so a slot's coordinates are applied within it exactly
-/// once. A look other than tiles paints nothing at all.
+/// `panes` is the compositor's own z-ordered list, read here rather than
+/// collected again; the window panes are the tiles and everything else is
+/// skipped. `area` is the engine-grid layer's rect, the same one the panes
+/// were painted inside, so a slot's coordinates are applied within it
+/// exactly once. A look other than tiles paints nothing at all.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_frames(
-    model: &Model,
+    panes: &[Pane],
+    look: Look,
+    active: Option<GridId>,
     theme: &Theme,
+    borders: BorderSet,
     area: Rect,
     damage: &Damage,
     buf: &mut Buffer,
 ) {
-    let registry = model.engine.grids();
-    let look = registry.look();
-    if look.panes != Panes::Tiles {
+    if look.panes != Panes::Tiles || !panes.iter().any(is_tile) {
         return;
     }
-    let tiles: Vec<Pane> = registry
-        .panes_in_z_order()
-        .into_iter()
-        .filter(|pane| pane.id != GLOBAL_GRID && matches!(pane.kind, PaneKind::Window))
-        .collect();
-    if tiles.is_empty() {
-        return;
-    }
-    let borders = BorderSet::for_caps(model.caps);
-    let active = registry.cursor_grid();
     let quiet = quiet_style(theme);
     let accent = ratatui_style(theme.accent());
     if look.gaps {
         paint_gapped(
-            &tiles, active, theme, borders, quiet, accent, area, damage, buf,
+            panes, active, theme, borders, quiet, accent, area, damage, buf,
         );
     } else {
-        paint_gapless(&tiles, active, borders, quiet, accent, area, damage, buf);
+        paint_gapless(panes, active, borders, quiet, accent, area, damage, buf);
     }
+}
+
+/// Whether a pane is one of the tiles a frame is drawn around: the global
+/// grid carries chrome rather than a window, and a float or a message grid
+/// has no slot of its own.
+fn is_tile(pane: &Pane) -> bool {
+    pane.id != GLOBAL_GRID && matches!(pane.kind, PaneKind::Window)
 }
 
 /// The frame colour of a tile the user is not working in: `WinSeparator`'s
@@ -94,7 +96,7 @@ fn framed(pane: &Pane) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn paint_gapped(
-    tiles: &[Pane],
+    panes: &[Pane],
     active: Option<GridId>,
     theme: &Theme,
     borders: BorderSet,
@@ -110,7 +112,7 @@ fn paint_gapped(
     // row; a stale separator left in the gap row survives every later
     // redraw, because nvim believes the window's own grid covers it
     let gap = ratatui_style(theme.normal());
-    for pane in tiles.iter().filter(|pane| framed(pane)) {
+    for pane in panes.iter().filter(|pane| is_tile(pane) && framed(pane)) {
         let (row, col, width, height) = pane.slot;
         // the grid's last row is nvim's command line, where the mode
         // message and the answer to every prompt are written, so every
@@ -141,7 +143,7 @@ fn paint_gapped(
             buf,
         );
     }
-    for pane in tiles.iter().filter(|pane| framed(pane)) {
+    for pane in panes.iter().filter(|pane| is_tile(pane) && framed(pane)) {
         let (row, col, width, height) = pane.slot;
         let style = if active == Some(pane.id) {
             accent
@@ -228,7 +230,7 @@ fn box_edge(
 
 #[allow(clippy::too_many_arguments)]
 fn paint_gapless(
-    tiles: &[Pane],
+    panes: &[Pane],
     active: Option<GridId>,
     borders: BorderSet,
     quiet: Style,
@@ -237,9 +239,9 @@ fn paint_gapless(
     damage: &Damage,
     buf: &mut Buffer,
 ) {
-    let lattice = lattice(tiles, area, buf.area);
+    let lattice = lattice(panes, area, buf.area);
     let edges: BTreeSet<Cell> = active
-        .and_then(|id| tiles.iter().find(|pane| pane.id == id))
+        .and_then(|id| panes.iter().find(|pane| is_tile(pane) && pane.id == id))
         .map(|pane| perimeter(pane, &lattice, area))
         .unwrap_or_default();
     for &(row, col) in &lattice {
@@ -260,17 +262,21 @@ fn paint_gapless(
 /// separator and status row into, plus the ring's top row and left column,
 /// which are the edges the topmost and leftmost tiles have no neighbour to
 /// share.
-fn lattice(tiles: &[Pane], area: Rect, screen: Rect) -> BTreeSet<Cell> {
+fn lattice(panes: &[Pane], area: Rect, screen: Rect) -> BTreeSet<Cell> {
     let mut cells = BTreeSet::new();
-    for pane in tiles {
+    // the grid's last row is nvim's command line, where the mode message
+    // and the answer to every prompt are written, so no run of the lattice
+    // reaches it -- the same bound the gapped ring already stops at
+    let cmdline_row = area.height.saturating_sub(1);
+    for pane in panes.iter().filter(|pane| is_tile(pane)) {
         let (row, col, width, height) = pane.slot;
         let (edge_col, edge_row) = (col.saturating_add(width), row.saturating_add(height));
         if edge_col < area.width {
-            for r in row..=edge_row.min(area.height.saturating_sub(1)) {
+            for r in row..=edge_row.min(cmdline_row.saturating_sub(1)) {
                 cells.insert((area.y.saturating_add(r), area.x.saturating_add(edge_col)));
             }
         }
-        if edge_row < area.height {
+        if edge_row < cmdline_row {
             for c in col..=edge_col.min(area.width.saturating_sub(1)) {
                 cells.insert((area.y.saturating_add(edge_row), area.x.saturating_add(c)));
             }

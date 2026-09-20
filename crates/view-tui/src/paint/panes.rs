@@ -39,6 +39,9 @@ use super::{clip_to_frame, paint_grid, ratatui_style, set_border_cell, Damage};
 /// `area` is the engine-grid layer's own rect, so a pane's origin -- which
 /// nvim states in global-grid coordinates -- is applied inside it and the
 /// reserved chrome rows are accounted for exactly once.
+///
+/// Under tiles the frames take the separators' place at the same boundary,
+/// so a float paints over a finished frame instead of being cut by one.
 pub(super) fn paint_panes(
     registry: &GridRegistry,
     theme: &Theme,
@@ -58,11 +61,13 @@ pub(super) fn paint_panes(
     // tiles restyle the separator column themselves: gapped paints it as
     // gap, gapless makes it the frame, and neither wants nvim's own glyph
     // put back under it
-    let tiled = registry.look().panes == Panes::Tiles;
+    let look = registry.look();
+    let tiled = look.panes == Panes::Tiles;
     let cursor = registry.cursor_grid();
+    let panes = registry.panes_in_z_order();
     let mut windows: Vec<TermRect> = Vec::new();
     let mut separated = false;
-    for pane in registry.panes_in_z_order() {
+    for pane in &panes {
         // a separator is a cell of the global grid, so it belongs to the
         // window layer and nothing above it: the pane list puts every
         // window ahead of every float and message grid, and the boundary
@@ -71,7 +76,9 @@ pub(super) fn paint_panes(
         // before anything floating because a float's rect owns every cell
         // under it.
         if !separated && !matches!(pane.kind, PaneKind::Window) {
-            if !tiled {
+            if tiled {
+                frames::paint_frames(&panes, look, cursor, theme, borders, area, damage, buf);
+            } else {
                 paint_separators(&windows, theme, borders, damage, buf);
             }
             separated = true;
@@ -87,7 +94,7 @@ pub(super) fn paint_panes(
         }
         paint_grid(
             grid,
-            &pane_theme(theme, &pane, cursor),
+            &pane_theme(theme, pane, cursor),
             hl,
             pane_area,
             damage,
@@ -97,8 +104,12 @@ pub(super) fn paint_panes(
             windows.push(pane_area);
         }
     }
-    if !separated && !tiled {
-        paint_separators(&windows, theme, borders, damage, buf);
+    if !separated {
+        if tiled {
+            frames::paint_frames(&panes, look, cursor, theme, borders, area, damage, buf);
+        } else {
+            paint_separators(&windows, theme, borders, damage, buf);
+        }
     }
 }
 

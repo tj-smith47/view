@@ -354,6 +354,20 @@ pub(crate) fn painted_grid_size(model: &Model) -> (u16, u16) {
     }
 }
 
+/// Where the engine grid's cell `(0, 0)` lands on the terminal, as
+/// `(row, col)`.
+///
+/// Two terms, and every position built from a grid coordinate spends both:
+/// the chrome rows reserved above the grid, and the cell the tiled look
+/// moves the whole grid in by on each axis so the ring has somewhere to
+/// draw. A position that added only the first sat one cell up and one cell
+/// left of the cell it named, which is where the caret, the predicted
+/// glyph and both popup menus were drawn under tiles.
+pub(crate) fn grid_origin(model: &Model) -> (u16, u16) {
+    let inset = model.look.grid_offset();
+    (model.chrome_rows().saturating_add(inset), inset)
+}
+
 /// Builds the [`Surface`] for one frame from `model`.
 ///
 /// The tabline is the only persistent chrome: when it is showing (more
@@ -392,13 +406,10 @@ pub fn render(model: &Model) -> Surface {
     let engine = &model.engine;
     let (grid_w, grid_h) = painted_grid_size(model);
     let offset = model.chrome_rows();
+    let origin = grid_origin(model);
 
-    // the ring is the band the frames and gaps are drawn in, and the whole
-    // pane stack moves one cell inside it, whatever the ring costs the
-    // grid: what is left over is the margin on the right and the bottom
-    let inset = model.look.grid_offset();
     let mut layers = vec![Layer::new(
-        Rect::new(offset.saturating_add(inset), inset, grid_w, grid_h),
+        Rect::new(origin.0, origin.1, grid_w, grid_h),
         LayerKind::EngineGrid,
         model.caps,
     )];
@@ -408,7 +419,7 @@ pub fn render(model: &Model) -> Surface {
     // content is, and an overlay that opened over it (a prompt, a picker,
     // the cmdline) is authoritative chrome that must never be shown through
     // a stale glyph underneath it
-    if let Some(layer) = speculated_layer(model, offset) {
+    if let Some(layer) = speculated_layer(model, origin) {
         layers.insert(SPECULATED_LAYER_INDEX, layer);
     }
 
@@ -517,13 +528,13 @@ pub fn render(model: &Model) -> Surface {
             layers.push(overlay_layer(
                 Rect::new(grid_h.saturating_sub(1), 0, grid_w, 1),
                 (grid_w, grid_h),
-                offset,
+                origin,
                 LayerKind::Cmdline(cmdline.clone()),
                 model.caps,
             ));
         }
     }
-    layers.extend(toast_layers(model, (grid_w, grid_h), offset));
+    layers.extend(toast_layers(model, (grid_w, grid_h), origin));
     layers.extend(
         over_toasts
             .iter()
@@ -543,7 +554,7 @@ pub fn render(model: &Model) -> Surface {
         if !consumed_by_palette {
             if pm.is_cmdline_sourced() {
                 if let Some(layer) =
-                    cmdline_popupmenu_layer(model, grid_h, offset, engine.cmdline.as_ref(), pm)
+                    cmdline_popupmenu_layer(model, grid_h, origin, engine.cmdline.as_ref(), pm)
                 {
                     layers.push(layer);
                 }
@@ -555,7 +566,7 @@ pub fn render(model: &Model) -> Surface {
                 layers.push(overlay_layer(
                     Rect::new(row, col, width, height),
                     (grid_w, grid_h),
-                    offset,
+                    origin,
                     LayerKind::Popupmenu(pm.clone()),
                     model.caps,
                 ));
@@ -563,7 +574,7 @@ pub fn render(model: &Model) -> Surface {
         }
     }
 
-    let cursor = cursor_spec(model, offset, &layers);
+    let cursor = cursor_spec(model, origin, &layers);
     Surface { layers, cursor }
 }
 
@@ -619,7 +630,7 @@ fn toast_box(lines: &[Vec<Span>], grid_w: u16) -> (u16, u16) {
 ///
 /// The departing box is pushed last, so it composites over the stack
 /// arriving underneath it instead of being cleared by it.
-fn toast_layers(model: &Model, bounds: (u16, u16), offset: u16) -> Vec<Layer> {
+fn toast_layers(model: &Model, bounds: (u16, u16), origin: (u16, u16)) -> Vec<Layer> {
     let (grid_w, _) = bounds;
     let paused = model.engine.messages.paused();
     let stack = model.engine.messages.visible_toasts(model.toast_rows());
@@ -657,7 +668,7 @@ fn toast_layers(model: &Model, bounds: (u16, u16), offset: u16) -> Vec<Layer> {
             paused: i == 0 && paused,
         };
         layers.push(toast_layer(
-            lines, placement, at, bounds, offset, model.caps,
+            lines, placement, at, bounds, origin, model.caps,
         ));
         row = row.saturating_add(height);
     }
@@ -672,7 +683,7 @@ fn toast_layers(model: &Model, bounds: (u16, u16), offset: u16) -> Vec<Layer> {
             x_offset: leaving.x_offset,
             paused: false,
         };
-        let layer = toast_layer(leaving.lines, placement, at, bounds, offset, model.caps);
+        let layer = toast_layer(leaving.lines, placement, at, bounds, origin, model.caps);
         // a box that has travelled its own width is entirely past the right
         // edge; it leaves the stack rather than sitting in it as an empty
         // rect the paint shadow still has to pair against
@@ -707,7 +718,7 @@ fn toast_layer(
     placement: Placement,
     row: u16,
     bounds: (u16, u16),
-    offset: u16,
+    origin: (u16, u16),
     caps: TermCaps,
 ) -> Layer {
     let (grid_w, _) = bounds;
@@ -718,7 +729,7 @@ fn toast_layer(
     overlay_layer(
         Rect::new(row, col, width, height),
         bounds,
-        offset,
+        origin,
         LayerKind::Toast {
             lines,
             slot: placement.slot,
@@ -793,13 +804,13 @@ fn palette_rect(model: &Model, offset: u16) -> Rect {
 fn cmdline_popupmenu_layer(
     model: &Model,
     grid_h: u16,
-    offset: u16,
+    origin: (u16, u16),
     cmdline: Option<&CmdlineState>,
     pm: &PopupmenuState,
 ) -> Option<Layer> {
     let cmdline = cmdline?;
     let prefix_cols = cmdline.firstc.chars().count() + cmdline.prompt.chars().count();
-    let cmdline_row = grid_h.saturating_sub(1).saturating_add(offset);
+    let cmdline_row = grid_h.saturating_sub(1).saturating_add(origin.0);
     let width = popupmenu_width(&pm.items).min(model.term_width).max(1);
     let height = u16::try_from(pm.items.len()).unwrap_or(u16::MAX).max(1);
     let row_offset = saturate_u16(pm.row);
@@ -813,7 +824,8 @@ fn cmdline_popupmenu_layer(
     };
     let col = u16::try_from(prefix_cols)
         .unwrap_or(u16::MAX)
-        .saturating_add(saturate_u16(pm.col));
+        .saturating_add(saturate_u16(pm.col))
+        .saturating_add(origin.1);
     let rect = Rect::new(row, col, width, height).clamp_to(model.term_width, model.term_height);
     Some(Layer::new(
         rect,
@@ -833,14 +845,15 @@ fn cmdline_popupmenu_layer(
 fn overlay_layer(
     rect: Rect,
     bounds: (u16, u16),
-    offset: u16,
+    origin: (u16, u16),
     kind: LayerKind,
     caps: TermCaps,
 ) -> Layer {
     let clamped = rect.clamp_to(bounds.0, bounds.1);
     Layer::new(
         Rect {
-            row: clamped.row.saturating_add(offset),
+            row: clamped.row.saturating_add(origin.0),
+            col: clamped.col.saturating_add(origin.1),
             ..clamped
         },
         kind,
@@ -879,7 +892,7 @@ pub(crate) const SPECULATED_LAYER_INDEX: usize = 1;
 /// cells the grid has and cells it does not, and clamping the rect around
 /// all of them would drag the survivors' glyphs to the grid edge (see
 /// [`PredictedCell`]).
-fn speculated_layer(model: &Model, offset: u16) -> Option<Layer> {
+fn speculated_layer(model: &Model, origin: (u16, u16)) -> Option<Layer> {
     let registry = model.engine.grids();
     let cells: Vec<PredictedCell> = model
         .speculate
@@ -904,8 +917,8 @@ fn speculated_layer(model: &Model, offset: u16) -> Option<Layer> {
     let right = cells.iter().map(|cell| cell.col).max()?;
     Some(Layer::new(
         Rect::new(
-            top.saturating_add(offset),
-            left,
+            top.saturating_add(origin.0),
+            left.saturating_add(origin.1),
             right.saturating_sub(left).saturating_add(1),
             bottom.saturating_sub(top).saturating_add(1),
         ),
@@ -1038,7 +1051,7 @@ fn painted_cmdline(model: &Model) -> Option<Cow<'_, CmdlineState>> {
 /// Takes the frame's own `layers` so the agent panel's caret lands on the
 /// row this frame painted its composer on, rather than on a second resolve
 /// of the panel's rect and a second render of its view.
-fn cursor_spec(model: &Model, offset: u16, layers: &[Layer]) -> Option<CursorSpec> {
+fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<CursorSpec> {
     let (width, height) = model.engine.grid().size();
     if width == 0 || height == 0 {
         return None;
@@ -1051,17 +1064,20 @@ fn cursor_spec(model: &Model, offset: u16, layers: &[Layer]) -> Option<CursorSpe
         return Some(spec);
     }
     let shape = shape_from_mode(model);
-    // each branch below already resolves in, and adds `offset` in, exactly
-    // the coordinate space its own source rect came from -- a shared tail
-    // add here double-counts `offset` for the palette branch, whose rect
-    // (via `palette_rect`) is offset-inclusive already.
+    // each branch below already resolves in, and adds in, exactly the
+    // coordinate space its own source rect came from -- a shared tail add
+    // here double-counts for the palette branch, whose rect (via
+    // `palette_rect`) is chrome-offset-inclusive already and sits in the
+    // terminal's own space rather than the grid's.
     let painted = painted_cmdline(model);
     let (row, col) = if let Some(cmdline) = painted.as_deref() {
         if model.palette_enabled {
-            palette_cursor(model, offset, cmdline)
+            palette_cursor(model, model.chrome_rows(), cmdline)
         } else {
-            let col = cmdline_cursor_col(cmdline).min(width.saturating_sub(1));
-            (height.saturating_sub(1).saturating_add(offset), col)
+            let col = cmdline_cursor_col(cmdline)
+                .min(width.saturating_sub(1))
+                .saturating_add(origin.1);
+            (height.saturating_sub(1).saturating_add(origin.0), col)
         }
     } else if !model.chrome_painted {
         // the buffer caret belongs to the grid this frame is not painting
@@ -1088,8 +1104,8 @@ fn cursor_spec(model: &Model, offset: u16, layers: &[Layer]) -> Option<CursorSpe
         let local_col = speculated_col(model, grid, size, row, col);
         let (orow, ocol) = registry.pane_origin(grid).unwrap_or((0, 0));
         (
-            row.saturating_add(orow).saturating_add(offset),
-            local_col.saturating_add(ocol),
+            row.saturating_add(orow).saturating_add(origin.0),
+            local_col.saturating_add(ocol).saturating_add(origin.1),
         )
     };
     Some(CursorSpec { row, col, shape })
@@ -1961,6 +1977,82 @@ mod tests {
             Some((3, 4)),
             "cursor offset by the same reserved row as the grid"
         );
+    }
+
+    /// Under tiles the ring moves the whole grid one cell in on each axis,
+    /// and every position built from a grid coordinate moves with it. One
+    /// model, three looks: the engine layer, the caret, the predicted
+    /// glyph's layer and an editor-anchored popupmenu each sit exactly
+    /// `grid_offset()` in from where nvim mode puts them.
+    ///
+    /// Disconfirm: add only `chrome_rows()` to any of the four and that one
+    /// stops moving between the looks, which is the cell above and left of
+    /// the cell it names.
+    #[test]
+    fn every_grid_space_position_carries_the_rings_inset_under_tiles() {
+        fn scene() -> Model {
+            let mut model = model_with_grid(40, 12);
+            model.term_width = 40;
+            model.term_height = 12;
+            model
+                .engine
+                .apply_grid(GridOp::CursorGoto { row: 4, col: 6 });
+            predict(&mut model, 'a', (4, 6), 10);
+            apply(
+                &mut model,
+                UiEvent::PopupmenuShow {
+                    items: vec![
+                        view_core::events::PmItem::default(),
+                        view_core::events::PmItem::default(),
+                    ],
+                    selected: -1,
+                    row: 5,
+                    col: 7,
+                    grid: 0,
+                },
+            );
+            model
+        }
+
+        fn places(model: &Model) -> Vec<(&'static str, u16, u16)> {
+            let surface = render(model);
+            let mut found = Vec::new();
+            for (name, wanted) in [("grid", 0u8), ("speculated", 1), ("popupmenu", 2)] {
+                let layer = surface
+                    .layers
+                    .iter()
+                    .find(|layer| {
+                        matches!(
+                            (&layer.kind, wanted),
+                            (LayerKind::EngineGrid, 0)
+                                | (LayerKind::Speculated(_), 1)
+                                | (LayerKind::Popupmenu(_), 2)
+                        )
+                    })
+                    .unwrap_or_else(|| unreachable!("the fixture paints a {name} layer"));
+                found.push((name, layer.rect.row, layer.rect.col));
+            }
+            let cursor = surface.cursor.expect("a sized grid places a cursor");
+            found.push(("caret", cursor.row, cursor.col));
+            found
+        }
+
+        let mut model = scene();
+        let bare = places(&model);
+        for gaps in [true, false] {
+            let look = view_core::model::Look::new(view_core::model::Panes::Tiles, gaps);
+            model.look = look;
+            let inset = look.grid_offset();
+            assert_eq!(inset, 1, "a tiled look always insets the grid by one cell");
+            for (tiled, plain) in places(&model).iter().zip(&bare) {
+                assert_eq!(
+                    (tiled.0, tiled.1, tiled.2),
+                    (plain.0, plain.1 + inset, plain.2 + inset),
+                    "{} is not the ring's inset in from where nvim mode puts it (gaps {gaps})",
+                    tiled.0
+                );
+            }
+        }
     }
 
     #[test]

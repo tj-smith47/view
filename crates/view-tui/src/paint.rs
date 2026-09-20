@@ -817,7 +817,6 @@ fn composite_layers(
                     damage,
                     buf,
                 );
-                panes::frames::paint_frames(model, &theme, area, damage, buf);
             }
             LayerKind::Cmdline(state) => paint_cmdline(state, &theme, area, buf),
             LayerKind::Toast { lines, paused, .. } => {
@@ -825,10 +824,22 @@ fn composite_layers(
             }
             LayerKind::Tabline(state) => paint_tabline(state, &theme, area, buf),
             LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, damage, buf),
-            LayerKind::Shell => paint_shell(&theme, model.look, borders, area, damage, buf),
+            LayerKind::Shell => paint_shell(
+                &theme,
+                model.look,
+                model.statusline_rows(),
+                borders,
+                area,
+                damage,
+                buf,
+            ),
             LayerKind::Speculated(cells) => {
-                let offset = model.chrome_rows();
-                paint_speculated(cells, offset, damage, buf);
+                // the same two terms `view_surface::grid_origin` places the
+                // layer's own rect with: a glyph offset by the chrome rows
+                // alone lands outside the tile it predicts
+                let inset = model.look.grid_offset();
+                let origin = (model.chrome_rows().saturating_add(inset), inset);
+                paint_speculated(cells, origin, damage, buf);
             }
             LayerKind::Picker(_)
             | LayerKind::Tree(_)
@@ -1481,6 +1492,7 @@ fn paint_frame_cells(
 fn paint_shell(
     theme: &Theme,
     look: Look,
+    bar_rows: u16,
     borders: BorderSet,
     area: ratatui::layout::Rect,
     damage: &Damage,
@@ -1489,11 +1501,15 @@ fn paint_shell(
     if area.height == 0 || area.width == 0 {
         return;
     }
-    // tiles reserve no row for a bar, so painting one here would put a
-    // band across the bottom of the first frame that vanishes the moment
-    // the engine's own picture arrives
+    // the bar keeps the terminal's bottom row in every look, so the ring
+    // closes on the row above it: a ring drawn through that row is a
+    // bottom edge the attached frame puts the bar on instead
     if look.panes != Panes::Nvim {
-        paint_shell_ring(theme, borders, area, damage, buf);
+        let ringed = ratatui::layout::Rect {
+            height: area.height.saturating_sub(bar_rows),
+            ..area
+        };
+        paint_shell_ring(theme, borders, ringed, damage, buf);
         return;
     }
     let bottom_row = area.height - 1;
@@ -1669,13 +1685,18 @@ fn paint_grid(
 /// A cell outside the buffer is skipped rather than clamped, per
 /// `PredictedCell`'s own contract: a clamped prediction paints a glyph the
 /// user did not type at the last real column.
-fn paint_speculated(cells: &[PredictedCell], offset: u16, damage: &Damage, buf: &mut Buffer) {
+fn paint_speculated(
+    cells: &[PredictedCell],
+    origin: (u16, u16),
+    damage: &Damage,
+    buf: &mut Buffer,
+) {
     for cell in cells {
-        let row = cell.row.saturating_add(offset);
+        let row = cell.row.saturating_add(origin.0);
         if !damage.covers(row) {
             continue;
         }
-        let Some(out) = buf.cell_mut((cell.col, row)) else {
+        let Some(out) = buf.cell_mut((cell.col.saturating_add(origin.1), row)) else {
             continue;
         };
         // every predicted glyph is one ASCII column wide (see `predict`), so

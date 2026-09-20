@@ -145,9 +145,9 @@ pub struct Model {
     /// whether `view-surface::render` reserves a bottom row for the bar.
     pub statusline_enabled: bool,
     /// How the window layout is drawn, set once at startup from the
-    /// resolved `[ui]` table and flipped live by `:View panes`. Decides the
-    /// ring the outer grid gives up, the inner size every window grid is
-    /// asked for, and whether the bottom bar has a row at all.
+    /// resolved `[ui]` table and flipped live by `:View ui panes`. Decides
+    /// the ring the outer grid gives up and the inner size every window
+    /// grid is asked for.
     pub look: Look,
     /// What `panes = "auto"` answered on this session's environment, which
     /// is what `:View ui panes` reports and what `:View ui panes auto`

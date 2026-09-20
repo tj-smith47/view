@@ -619,3 +619,134 @@ fn closing_each_window_of_a_split_leaves_no_residue_on_a_widening_terminal() {
         let _ = session.wait_for_exit(BUDGET);
     }
 }
+
+/// What a gapped tile spends on each axis of the outer grid: a frame cell
+/// on each of the two sides.
+const OUTER_RING: u16 = 2;
+
+/// The grid nvim paints chrome into, which no window owns.
+const GLOBAL_GRID: u64 = 1;
+
+/// The close sequence this leg types, in the notation the engine-attached
+/// driver takes.
+const TILED_STEPS: [(&str, &str); 7] = [
+    ("file", ":e README.md<CR>"),
+    ("vsplit", ":vsplit<CR>"),
+    ("split", ":split<CR>"),
+    ("vsplit2", ":vsplit<CR>"),
+    ("close1", ":q<CR>"),
+    ("close2", ":q<CR>"),
+    ("close3", ":q<CR>"),
+];
+
+const QUIESCE_SILENCE: Duration = Duration::from_millis(200);
+const QUIESCE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// The size of every window open in the engine, read off nvim itself.
+fn nvim_window_sizes(engine: &mut view_oracle::EngineSession) -> Vec<(usize, usize)> {
+    let listed = engine
+        .eval_str(
+            "join(map(range(1, winnr('$')), \
+             'winwidth(v:val) . \"x\" . winheight(v:val)'), \",\")",
+        )
+        .expect("nvim answers for its own windows");
+    let mut sizes: Vec<(usize, usize)> = listed
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (cols, rows) = entry.split_once('x').expect("winwidth x winheight");
+            (
+                cols.parse().expect("a column count"),
+                rows.parse().expect("a row count"),
+            )
+        })
+        .collect();
+    sizes.sort_unstable();
+    sizes
+}
+
+/// The size of every window grid view holds. The global grid is chrome
+/// rather than a window and is left out.
+fn window_grid_sizes(engine: &view_oracle::EngineSession) -> Vec<(usize, usize)> {
+    let mut sizes: Vec<(usize, usize)> = engine
+        .grid_screens()
+        .iter()
+        .filter(|(id, _)| *id != GLOBAL_GRID)
+        .map(|(_, screen)| {
+            (
+                screen.rows.first().map_or(0, |row| row.chars().count()),
+                screen.rows.len(),
+            )
+        })
+        .collect();
+    sizes.sort_unstable();
+    sizes
+}
+
+/// The same splits and closes as the battery above, under
+/// `panes = "tiles"` at the same geometry, as an assertion rather than a
+/// capture: at every step view holds one grid per open window, each the
+/// size nvim itself reports for that window, so neither a grid outliving
+/// the window that owned it nor one left at a stale size survives a close.
+///
+/// Driven through [`view_oracle::EngineSession::set_panes`]. That driver
+/// builds its own `Model` and never runs `view-native`'s resolver, so
+/// `VIEW_UI_PANES` reaches nothing here.
+///
+/// Disconfirm: dropping the `Destroy` arm from
+/// `view_core::grid::registry` leaves the closed windows' grids in the
+/// first `close` step's list, which fails naming both sets.
+#[test]
+fn every_tile_keeps_its_own_windows_size_as_the_windows_of_a_split_close() {
+    let work = common::ScratchPaths::new("close-battery-tiles");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = view_oracle::EngineSession::spawn_with_ext(
+        COLS,
+        ROWS,
+        view_oracle::UI_EXT_OPTIONS_MULTIGRID,
+    )
+    .expect("EngineSession::spawn_with_ext against real nvim");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .arm_and_input(&format!(":cd {}<CR>", dir.display()))
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .set_panes("tiles")
+        .expect("the tiled look is reachable");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    let outer = engine
+        .grid_screens()
+        .iter()
+        .find(|(id, _)| *id == GLOBAL_GRID)
+        .map(|(_, screen)| {
+            (
+                screen.rows.first().map_or(0, |row| row.chars().count()),
+                screen.rows.len(),
+            )
+        })
+        .expect("the global grid is always named");
+    assert_eq!(
+        outer,
+        (
+            usize::from(COLS - OUTER_RING),
+            usize::from(ROWS - OUTER_RING)
+        ),
+        "the tiled look takes its ring out of the outer grid"
+    );
+
+    for (step, keys) in TILED_STEPS {
+        engine.arm_and_input(keys).unwrap();
+        assert!(
+            engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap(),
+            "{step}: the session never settled"
+        );
+        let wanted = nvim_window_sizes(&mut engine);
+        assert_eq!(
+            window_grid_sizes(&engine),
+            wanted,
+            "{step}: view's window grids are not the windows nvim has open"
+        );
+    }
+}

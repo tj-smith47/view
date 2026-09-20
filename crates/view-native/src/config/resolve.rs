@@ -600,7 +600,7 @@ const SINGLE_GRID_MARKER: &str = "[engine] single_grid";
 /// What a session that asked for tiles without multigrid owes the user.
 const SINGLE_GRID_NOTICE: &str =
     "view: [engine] single_grid leaves nvim addressing one grid, so there are no window \
-     placements to draw tiles from -- [ui] panes answers nvim this run";
+     placements to draw tiles from. [ui] panes answers nvim this run";
 
 /// The look `"auto"` resolves to, with the marker that decided it.
 ///

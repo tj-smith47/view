@@ -119,9 +119,9 @@ single_grid = false        # default: false -- view composites nvim's windows
 # tier is the summary of the startup capability probe -- synchronized
 # output, truecolor, the kitty keyboard protocol -- and naming one here
 # forces it for terminals the probe reads wrong (a multiplexer that answers
-# for itself rather than for the terminal behind it). `view --doctor` prints
-# which probe decided each capability, so a forced tier is a last resort
-# rather than a first guess.
+# for itself rather than for the terminal behind it). `view --print-caps`
+# prints the capabilities and where they came from, so a forced tier is a
+# last resort rather than a first guess.
 #
 # theme names a colorscheme for nvim to run. view holds no palette of its
 # own: nvim applies the scheme with its own :colorscheme and view derives
@@ -136,9 +136,9 @@ single_grid = false        # default: false -- view composites nvim's windows
 # status bar keeps the bottom row in both. "auto" reads your session: a
 # tiling window manager is already arranging your screen, so view stays out
 # of its way and draws "nvim" there, and everything else -- a desktop, a
-# terminal on macOS or Windows, an ssh session -- gets "tiles". :View panes
-# tiles switches a running session, and :View panes on its own says which
-# mode you are in and what decided it.
+# terminal on macOS or Windows, an ssh session -- gets "tiles". :View ui
+# panes tiles switches a running session, and :View ui panes on its own says
+# which mode you are in and what decided it.
 #
 # gaps is about tiles only: true leaves a gap between neighbouring frames,
 # false has them share their edges.
@@ -154,8 +154,8 @@ single_grid = false        # default: false -- view composites nvim's windows
 [ui]
 tier = "auto"              # default: "auto" -- the probed terminal
                            # capability set. full | standard | basic force a
-                           # tier when a probe is wrong; `view --doctor`
-                           # prints which probe decided
+                           # tier when a probe is wrong; `view
+                           # --print-caps` prints what was probed
 theme = "auto"             # default: "auto" -- view derives its chrome from
                            # whatever colorscheme your config ends on. A
                            # name runs nvim's own :colorscheme and derives

@@ -935,8 +935,10 @@ fn the_command_line_under_the_lowest_tile_keeps_its_text() {
 /// command line.
 #[test]
 fn a_status_row_under_a_tile_is_cleared() {
-    let tiles = tiled(true);
-    let (row, col, width, height) = tiles.slots[0];
+    // under `laststatus = 0` a status row is drawn only for a window with
+    // another one below it, which is the upper right tile of this layout
+    let tiles = tiled_nested(true);
+    let (row, col, width, height) = tiles.slots[1];
     let mut model = tiles.model;
     drive(
         &mut model,
@@ -960,6 +962,101 @@ fn a_status_row_under_a_tile_is_cleared() {
     assert!(
         !status.contains('\u{2500}'),
         "the status row under a tile kept nvim's own line: {status:?}"
+    );
+}
+
+/// The grid a float's own text arrives in, and the box it draws around
+/// itself: an LSP hover or a completion menu wider than the window it
+/// opened from paints its border into its own grid.
+const TILED_FLOAT: u64 = 9;
+const FLOAT_LINES: [&str; 3] = [
+    "┌──── hover ─────┐",
+    "│ across the gap │",
+    "└────────────────┘",
+];
+/// The float's top-left cell, in the outer grid's own coordinates: far
+/// enough left that the box crosses the gap band between the two tiles and
+/// the frame column on each side of it.
+const FLOAT_AT: (u16, u16) = (5, 30);
+
+/// The gapped split with a float opened over the gap between the tiles.
+fn tiled_float(gaps: bool) -> Tiles {
+    let mut tiles = tiled(gaps);
+    let width = u64::try_from(FLOAT_LINES[0].chars().count()).unwrap_or(0);
+    let mut events = vec![
+        UiEvent::GridResize {
+            grid: TILED_FLOAT,
+            width,
+            height: 3,
+        },
+        UiEvent::WinFloatPos {
+            grid: TILED_FLOAT,
+            win: WinHandle(1009),
+            anchor_grid: 1,
+            zindex: 50,
+            compindex: 1,
+            screen_row: u64::from(FLOAT_AT.0),
+            screen_col: u64::from(FLOAT_AT.1),
+        },
+    ];
+    for (row, text) in FLOAT_LINES.iter().enumerate() {
+        events.push(line(TILED_FLOAT, row as u64, text, 0));
+    }
+    events.push(UiEvent::Flush);
+    drive(&mut tiles.model, events);
+    tiles
+}
+
+/// A float wide enough to cross the gap band keeps every cell of its own
+/// box: the frames are painted where the separators are, under everything
+/// that floats, so nothing draws through it.
+///
+/// Disconfirm: painting the frames after the whole pane list again puts the
+/// gap's blank band and two frame columns through the float's rows.
+#[test]
+fn a_float_over_a_gap_keeps_its_border() {
+    let tiles = tiled_float(true);
+    let buf = tiled_frame(&tiles.model);
+    let offset = tiles.model.look.grid_offset();
+    for (index, text) in FLOAT_LINES.iter().enumerate() {
+        let row = row_text(
+            &buf,
+            FLOAT_AT.0 + offset + u16::try_from(index).unwrap_or(0),
+        );
+        let start = usize::from(FLOAT_AT.1 + offset);
+        let painted: String = row.chars().skip(start).take(text.chars().count()).collect();
+        assert_eq!(
+            &painted, text,
+            "the frames were drawn through the float's own row {index}: {row:?}"
+        );
+    }
+}
+
+/// nvim's command line is the grid's last row, and the gapless lattice has
+/// no run on it: a line drawn there would sit on the mode message and the
+/// answer to every prompt.
+#[test]
+fn the_gapless_lattice_stops_above_the_command_line() {
+    let (_, grid_height) = outer_grid(false, TILED_HEIGHT);
+    let tiles = tiled(false);
+    let mut model = tiles.model;
+    drive(
+        &mut model,
+        vec![
+            line(1, u64::from(grid_height - 1), "-- INSERT --", 0),
+            UiEvent::Flush,
+        ],
+    );
+    let buf = tiled_frame(&model);
+    let offset = model.look.grid_offset();
+    let command_line = row_text(&buf, grid_height - 1 + offset);
+    assert!(
+        command_line.contains("-- INSERT --"),
+        "the lattice drew through nvim's command line: {command_line:?}"
+    );
+    assert!(
+        !command_line.contains(['│', '─', '┴', '┼']),
+        "the lattice left an edge on the command line: {command_line:?}"
     );
 }
 
@@ -991,6 +1088,18 @@ fn vsplit_gapless() {
         assert_golden(
             &format!("{}-vsplit-gapless", tier.0),
             &tiles_dump(tier, tiled(false)),
+        );
+    }
+}
+
+/// The gapped split with a float across the gap: the float's own cells,
+/// border included, stand where the frames and the gap band would be.
+#[test]
+fn vsplit_tiles_float() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-vsplit-tiles-float", tier.0),
+            &tiles_dump(tier, tiled_float(true)),
         );
     }
 }
@@ -1088,9 +1197,10 @@ struct Tiles {
 
 fn tiled(gaps: bool) -> Tiles {
     let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
-    // tiles hold `laststatus` at 2, so each window has a status row under
-    // it, and nvim's command line sits in the row under that
-    let window_height = grid_height - 2;
+    // the statusline feature holds nvim at `laststatus = 0`, so neither
+    // window of a vsplit has a status row and nvim's command line is the
+    // only row under them
+    let window_height = grid_height - 1;
     let left_width = (grid_width - 1) / 2;
     let right_col = left_width + 1;
     let slots = vec![
@@ -1110,17 +1220,18 @@ fn tiled_nested(gaps: bool) -> Tiles {
     let left_width = (grid_width - 1) / 2;
     let right_col = left_width + 1;
     let right_width = grid_width - right_col;
-    // the left window keeps its own status row and the command line; the
-    // right column spends one more row on the second window's status row
-    let top_height = (grid_height - 3).div_ceil(2);
+    // under `laststatus = 0` only a window with another one below it keeps
+    // a status row, so the upper right window has one and the left and
+    // lower right ones end on the row above nvim's command line
+    let top_height = (grid_height - 2).div_ceil(2);
     let slots = vec![
-        (0, 0, left_width, grid_height - 2),
+        (0, 0, left_width, grid_height - 1),
         (0, right_col, right_width, top_height),
         (
             top_height + 1,
             right_col,
             right_width,
-            grid_height - 3 - top_height,
+            grid_height - 2 - top_height,
         ),
     ];
     Tiles {
@@ -1273,14 +1384,14 @@ fn no_two_gapless_edge_lines_are_adjacent() {
 fn a_gapless_junction_takes_the_crossing_glyph() {
     let tiles = tiled(false);
     let buf = tiled_frame(&tiles.model);
-    let (_, col, width, height) = tiles.slots[0];
+    let (_, col, width, _) = tiles.slots[0];
     // the engine layer sits one cell in from the terminal on each axis
     // under gapless, so the lattice's own coordinates shift with it
-    let (x, y) = (col + width + 1, height + 1);
+    let x = col + width + 1;
     assert_eq!(
-        buf[(x, y)].symbol(),
-        "┴",
-        "the separator column ends where the two status rows meet"
+        buf[(x, 0)].symbol(),
+        "┬",
+        "the separator column starts where the ring's top run carries on"
     );
 
     // the nested layout is where a line carries on past the junction
@@ -1365,10 +1476,18 @@ fn the_shell_frame_paints_the_ring_under_tiles_and_the_bar_under_nvim() {
         "╭",
         "the tiled shell opens with the ring's own corner"
     );
+    // the bar keeps the terminal's bottom row in every look, so the ring
+    // closes on the row above it rather than on the row the attached frame
+    // gives the bar
     assert_eq!(
-        tiles[(TILED_WIDTH - 1, TILED_HEIGHT - 1)].symbol(),
+        tiles[(TILED_WIDTH - 1, TILED_HEIGHT - 2)].symbol(),
         "╯",
-        "and closes with the opposite one"
+        "and closes on the row above the bar's own"
+    );
+    assert_eq!(
+        row_text(&tiles, TILED_HEIGHT - 1).trim(),
+        "",
+        "the ring drew a bottom edge on the row the bar is given"
     );
 
     let nvim = shell_frame(view_core::model::Look::new(

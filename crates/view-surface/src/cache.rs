@@ -13,7 +13,9 @@
 
 use view_core::model::Model;
 
-use crate::{cursor_spec, render, speculated_layer, LayerKind, Surface, SPECULATED_LAYER_INDEX};
+use crate::{
+    cursor_spec, grid_origin, render, speculated_layer, LayerKind, Surface, SPECULATED_LAYER_INDEX,
+};
 
 /// Holds the previously rendered frame so the next one can reuse it.
 ///
@@ -214,7 +216,7 @@ impl SurfaceCache {
         self.frames = self.frames.wrapping_add(1);
         if self.frame.as_ref().is_some_and(|f| f.inputs.matches(model)) {
             if let Some(frame) = self.frame.as_mut() {
-                let cursor = cursor_spec(model, frame.inputs.offset, &frame.surface.layers);
+                let cursor = cursor_spec(model, grid_origin(model), &frame.surface.layers);
                 frame.surface.cursor = cursor;
                 if frame.inputs.statusline_rows > 0 {
                     // the width the frame's own layers were built at, which
@@ -225,7 +227,7 @@ impl SurfaceCache {
                         crate::painted_grid_size(model).0,
                     );
                 }
-                refresh_speculated(&mut frame.surface, model, frame.inputs.offset);
+                refresh_speculated(&mut frame.surface, model, grid_origin(model));
             }
         } else {
             self.frame = None;
@@ -263,8 +265,8 @@ fn refresh_statusline(surface: &mut Surface, model: &Model, grid_w: u16) {
 /// frames speculation exists to make faster. Reconciling in place keeps that
 /// frame at reuse cost, and the equivalence guard below is what proves the
 /// reconciled frame is the frame [`render`] would have built.
-fn refresh_speculated(surface: &mut Surface, model: &Model, offset: u16) {
-    let fresh = speculated_layer(model, offset);
+fn refresh_speculated(surface: &mut Surface, model: &Model, origin: (u16, u16)) {
+    let fresh = speculated_layer(model, origin);
     let at = surface
         .layers
         .iter()

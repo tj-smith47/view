@@ -4,15 +4,15 @@
   |left                              |   |right                              |  
   |                                  |   |                                   |  
   |                                  |   |                                   |  
+  |                            ┌──── hover ─────┐                            |  
+  |                            │ across the gap │                            |  
+  |                            └────────────────┘                            |  
   |                                  |   |                                   |  
   |                                  |   |                                   |  
   |                                  |   |                                   |  
-  |                                  |   +-----------------------------------+  
-  |                                  |                                          
-  |                                  |                                          
-  |                                  |                                          
-  |                                  |   +-----------------------------------+  
-  |                                  |   |under                              |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
   |                                  |   |                                   |  
   |                                  |   |                                   |  
   |                                  |   |                                   |  
@@ -29,14 +29,14 @@ AABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCAA
 AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
 AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
 AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
 AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
 AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
 AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
-AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCAA
-AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
 AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
 AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
 AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
