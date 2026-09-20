@@ -7367,6 +7367,14 @@ mod tests {
     /// `clusters` is the one walk that produces a cluster, so a body that
     /// places a cell without calling it took its cells from somewhere
     /// else.
+    ///
+    /// Reaching the two shared primitives is the bypass a writer takes by
+    /// accident; reaching `ratatui` itself is the one it takes on purpose,
+    /// and a `set_char` loop over `chars()` puts the mark back in a cell of
+    /// its own while calling neither of them. So every spelling that writes
+    /// a symbol into a cell is read as well, and a function outside
+    /// `paint/text.rs` that uses one is either [`CELL_WRITERS_THAT_ARE_NOT_TEXT`]
+    /// with its grounds or a failure.
     #[test]
     fn every_native_text_writer_walks_grapheme_clusters() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -7390,11 +7398,22 @@ mod tests {
             "the walk found no sources to read: {sources:?}"
         );
         let mut wrong = Vec::new();
+        let mut undeclared = Vec::new();
         for (name, text) in &sources {
             // the production half alone: a test may place a cell by hand to
             // build the picture it asserts against
             let production = text.split("#[cfg(test)]").next().unwrap_or(text);
+            // the module the two primitives live in is where a symbol
+            // reaches a cell at all, so its own writes are the rule rather
+            // than a breach of it
+            let shared = name.ends_with("paint/text.rs") || name.ends_with("paint\\text.rs");
             for (function, body) in fn_bodies(production) {
+                // a comment naming a writer writes nothing
+                let body: String = body
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("//"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 if function == "paint_cluster_cell" || function == "set_cluster" {
                     continue;
                 }
@@ -7403,6 +7422,21 @@ mod tests {
                 if places_a_cell && !body.contains("clusters(") {
                     wrong.push(format!("{name}: {function}"));
                 }
+                if shared {
+                    continue;
+                }
+                let Some(spelling) = RATATUI_CELL_WRITES
+                    .iter()
+                    .find(|spelling| body.contains(**spelling))
+                else {
+                    continue;
+                };
+                if !CELL_WRITERS_THAT_ARE_NOT_TEXT
+                    .iter()
+                    .any(|(declared, _)| *declared == function)
+                {
+                    undeclared.push(format!("{name}: {function} writes a cell with {spelling}"));
+                }
             }
         }
         assert!(
@@ -7410,7 +7444,61 @@ mod tests {
             "a text writer places cells from something other than a grapheme walk:\n  {}",
             wrong.join("\n  ")
         );
+        assert!(
+            undeclared.is_empty(),
+            "a function writes a symbol into a cell without going through the \
+             cluster walk and without grounds for standing outside it:\n  {}",
+            undeclared.join("\n  ")
+        );
+        let names: Vec<&str> = sources
+            .iter()
+            .flat_map(|(_, text)| {
+                let production = text.split("#[cfg(test)]").next().unwrap_or(text);
+                fn_bodies(production)
+                    .into_iter()
+                    .map(|(function, _)| function)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (declared, grounds) in CELL_WRITERS_THAT_ARE_NOT_TEXT {
+            assert!(
+                names.contains(&declared),
+                "{declared} is declared as a cell writer that is not text \
+                 ({grounds}) and this crate no longer has it"
+            );
+        }
     }
+
+    /// Every spelling by which a symbol reaches a `ratatui` cell without
+    /// passing the two shared primitives.
+    const RATATUI_CELL_WRITES: [&str; 7] = [
+        ".set_symbol(",
+        ".set_char(",
+        "set_string(",
+        "set_stringn(",
+        "set_span(",
+        "set_line(",
+        ".symbol =",
+    ];
+
+    /// The functions outside `paint/text.rs` that write a symbol into a
+    /// cell, with the grounds that keep each off the cluster walk. Each one
+    /// places a glyph the layout pass or the engine already decided, never
+    /// a run of text view composed.
+    const CELL_WRITERS_THAT_ARE_NOT_TEXT: [(&str, &str); 3] = [
+        (
+            "set_border_cell",
+            "one fixed box-drawing character per call",
+        ),
+        (
+            "paint_grid",
+            "engine grid cells, each already one grapheme cluster",
+        ),
+        (
+            "paint_speculated",
+            "one ASCII predicted glyph, one column wide by its own contract",
+        ),
+    ];
 
     /// Each `fn` in `source`, paired with its body up to the next item at
     /// column zero.
