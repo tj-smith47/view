@@ -497,6 +497,18 @@ impl ResolvedConfig {
             .collect()
     }
 
+    /// Whether `[native] tabline` is still the answer `[ui] panes` derived,
+    /// so a `:View ui panes` flip derives it again. False once a flag, an
+    /// environment variable or a `view.toml` line spelled the key.
+    #[must_use]
+    pub fn tabline_follows_look(&self) -> bool {
+        registry::features()
+            .iter()
+            .position(|feature| feature.id == "tabline")
+            .and_then(|index| self.native.get(index))
+            .is_none_or(|source| *source == Source::Derived)
+    }
+
     /// One line per environment value this session could not read. Empty
     /// whenever every `VIEW_*` in play said something view understood,
     /// which is the ordinary case.

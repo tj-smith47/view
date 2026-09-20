@@ -25,7 +25,7 @@ notifications = true       # false hands the message area back: ext_messages
 palette = true             # false hands back the command line and its
                            # completion popup: ext_cmdline/ext_popupmenu are
                            # not attached, so `:` is nvim's own last row
-tabline = true             # the one switch with no fixed default: it follows
+# tabline = true           # the one switch with no fixed default: it follows
                            # [ui] panes, on under "tiles" and off under
                            # "nvim", and a value written here wins either way.
                            # On, view draws the top pill: your tabpages or

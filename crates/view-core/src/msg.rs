@@ -411,7 +411,8 @@ pub enum Msg {
         status: crate::model::WindowStatus,
     },
     /// The bridge's `buffers` trigger group (`BufAdd`, `BufDelete`,
-    /// `BufEnter`) fired, carrying the whole listed-buffer set. The set
+    /// `BufEnter`, `BufModifiedSet`, `BufFilePost`, `OptionSet buflisted`
+    /// and `VimEnter`) fired, carrying the whole listed-buffer set. The set
     /// replaces what `Model.buffers` held: nvim answers with the list, so
     /// a diff here would be a second reading of the same fact.
     ///
@@ -1755,6 +1756,17 @@ pub enum RpcCall {
     },
     Paste {
         text: String,
+    },
+    /// `nvim_ui_set_option`, taking an `ext_*` surface from the engine or
+    /// handing it back on a UI that is already attached.
+    ///
+    /// A look flip changes which surfaces view draws itself, and the
+    /// session cannot be restarted to say so. Fire-and-forget: the answer
+    /// is the redraw traffic that follows, and the connection orders this
+    /// ahead of the resize issued behind it.
+    SetUiExt {
+        surface: crate::native::ext::Ext,
+        on: bool,
     },
     /// `nvim_set_current_tabpage`, for a click on a pill tab.
     ///

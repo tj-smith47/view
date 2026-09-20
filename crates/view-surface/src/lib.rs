@@ -447,39 +447,44 @@ pub fn render(model: &Model) -> Surface {
         // engine grid: the very first shell paint happens before nvim has
         // ever sent a grid_resize, so grid_w/grid_h are not yet meaningful
         // dimensions to paint a placeholder into
+        // under the row the pill reserved, which is reserved from the
+        // first frame: a shell frame ringing the whole terminal puts its
+        // top edge where the names go and then jumps down a row at the
+        // first flush
         layers.push(Layer::new(
-            Rect::new(0, 0, model.term_width, model.term_height),
+            Rect::new(
+                offset,
+                0,
+                model.term_width,
+                model.term_height.saturating_sub(offset),
+            ),
             LayerKind::Shell,
             model.caps,
         ));
     }
 
-    if let Some(tabline) = &engine.tabline {
-        // chrome_rows() is the single source for the tabline-visibility
-        // rule (bare nvim's default `showtabline`: a single tab shows no
-        // tabline row at all, so the grid keeps the full terminal height);
-        // this layer's placement must never disagree with the row
-        // reservation chrome_rows() feeds into grid_target(), or a row
-        // gets reserved with nothing painted into it or the tabline paints
-        // over buffer content
-        if offset > 0 {
+    // `pill::shows` is the single source for the row, and `chrome_rows()`
+    // is the same answer: this layer's placement must never disagree with
+    // the reservation `grid_target()` makes, or a row gets reserved with
+    // nothing painted into it or the tab line paints over buffer content.
+    // Read off the model rather than off the arrival of a tabline event, so
+    // the host and the agent word stand on row 0 from the first frame
+    if view_core::native::pill::shows(model) {
+        if model.look.panes == view_core::model::Panes::Tiles {
             // the pill spans the whole terminal width, the ring included:
             // it stands above the outer frame rather than inside it, which
             // is what leaves the frame's own top edge unbroken
-            let kind = if model.look.panes == view_core::model::Panes::Tiles {
-                Layer::new(
-                    Rect::new(0, 0, model.term_width, 1),
-                    LayerKind::Pill(view_core::native::pill::PillView::from_model(model)),
-                    model.caps,
-                )
-            } else {
-                Layer::new(
-                    Rect::new(0, 0, grid_w, 1).clamp_to(grid_w, grid_h),
-                    LayerKind::Tabline(tabline.clone()),
-                    model.caps,
-                )
-            };
-            layers.push(kind);
+            layers.push(Layer::new(
+                Rect::new(0, 0, model.term_width, 1),
+                LayerKind::Pill(view_core::native::pill::PillView::from_model(model)),
+                model.caps,
+            ));
+        } else if let Some(tabline) = &engine.tabline {
+            layers.push(Layer::new(
+                Rect::new(0, 0, grid_w, 1).clamp_to(grid_w, grid_h),
+                LayerKind::Tabline(tabline.clone()),
+                model.caps,
+            ));
         }
     }
     if model.statusline_rows() > 0 {

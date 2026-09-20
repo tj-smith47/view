@@ -1317,10 +1317,39 @@ mod tests {
             .collect()
     }
 
+    /// Every `[native]` switch the example shows, live or commented out.
+    /// A key with no fixed default is shown commented, and it is still a
+    /// key the example documents.
+    fn example_native_switches() -> BTreeSet<String> {
+        let mut in_native = false;
+        let mut keys = BTreeSet::new();
+        for line in EXAMPLE_TOML.lines() {
+            let body = line.strip_prefix("# ").unwrap_or(line);
+            if body.starts_with('[') {
+                in_native = body.starts_with("[native]");
+                continue;
+            }
+            // a continuation of the comment beside the key above it
+            if !in_native || line.starts_with(' ') {
+                continue;
+            }
+            let Some((key, value)) = body.split_once('=') else {
+                continue;
+            };
+            if matches!(
+                value.split('#').next().map(str::trim),
+                Some("true" | "false")
+            ) {
+                keys.insert(key.trim().to_string());
+            }
+        }
+        keys
+    }
+
     #[test]
     fn the_example_config_keys_are_exactly_the_registry_ids() {
-        let file: ViewFile = toml::from_str(EXAMPLE_TOML).expect("view.toml.example must parse");
-        let in_example: BTreeSet<&str> = file.native.features.keys().map(String::as_str).collect();
+        let shown = example_native_switches();
+        let in_example: BTreeSet<&str> = shown.iter().map(String::as_str).collect();
         let in_registry: BTreeSet<&str> = registry::features().iter().map(|f| f.id).collect();
         assert_eq!(
             in_example, in_registry,
@@ -1451,6 +1480,24 @@ mod tests {
             );
         }
         assert!(parsed > 0, "the walk must reach at least one key");
+    }
+
+    /// `[native] tabline` follows `[ui] panes`, and a value written in the
+    /// file wins under both looks. An example that ships the line spelled
+    /// forces the pill on for everyone who copies the file, which is what
+    /// the derivation exists to avoid for a user whose desktop reads as
+    /// nvim mode.
+    #[test]
+    fn the_example_leaves_the_derived_switch_unspelled() {
+        let cfg = ViewConfig::from_toml_str(EXAMPLE_TOML).expect("the example must parse");
+        assert!(
+            !cfg.spells("native", "tabline"),
+            "view.toml.example spells the one switch with no fixed default"
+        );
+        assert!(
+            EXAMPLE_TOML.contains("# tabline = true"),
+            "the example no longer shows the key at all"
+        );
     }
 
     #[test]
@@ -1916,12 +1963,12 @@ mod tests {
         let path = dir.join("view.toml");
         std::fs::write(&path, EXAMPLE_TOML).expect("the example must be writable");
         let loaded = NativeConfig::load(Some(&path));
-        // every feature on, not `defaults()`: the example writes `tabline`
-        // at the answer the tiled look derives, and the registry bit behind
-        // `defaults()` is the other look's
+        // the registry bits: the example spells every switch at the value
+        // it ships, and leaves the one with no fixed default for `[ui]
+        // panes` to derive
         assert_eq!(
             loaded.expect("the example must load"),
-            NativeConfig::all_enabled()
+            NativeConfig::defaults()
         );
     }
 

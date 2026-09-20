@@ -221,6 +221,13 @@ pub struct Model {
     /// What the pill names while one tabpage is open, set once at startup
     /// from `[native] tabline_shows` the same way `statusline_enabled` is.
     pub tabline_shows: crate::native::pill::TablineShows,
+    /// Whether `[native] tabline` is still the value the look derived, so
+    /// a later `:View ui panes` flip derives it again.
+    ///
+    /// False once a flag, an environment variable or a `view.toml` line
+    /// spelled the key: a value the user wrote is theirs under every look,
+    /// and re-deriving it would throw it away at the first flip.
+    pub tabline_follows_look: bool,
     /// The colorscheme `[ui] theme` named, or `None` when it named none and
     /// view derives its chrome from whatever the user's own config ends on.
     ///
@@ -402,6 +409,7 @@ impl Model {
             remote: None,
             buffers: Vec::new(),
             tabline_shows: crate::native::pill::TablineShows::default(),
+            tabline_follows_look: true,
             colorscheme: None,
             ai_trusted: false,
             ai_enabled: true,

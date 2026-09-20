@@ -35,7 +35,11 @@
 ///
 /// `BufModifiedSet` is in the trigger list beside the three that change the
 /// set itself: the row draws an unsaved marker, and without it the marker
-/// would stand until the user next changed buffers.
+/// would stand until the user next changed buffers. `BufFilePost` and
+/// `OptionSet buflisted` are there because `:file newname` and
+/// `:setlocal nobuflisted` change what the row says without adding or
+/// removing a buffer, and the row would stay stale until the next
+/// `BufEnter`.
 ///
 /// The report runs under a `pcall` for [`REGISTER_WINDOW_STATUS_CHUNK`]'s
 /// reason: it is scheduled, so it can land after a channel teardown.
@@ -74,8 +78,13 @@ local function arm()
   vim.schedule(flush)
 end
 vim.api.nvim_create_autocmd({ 'BufAdd', 'BufDelete', 'BufEnter',
-  'BufModifiedSet' }, {
+  'BufModifiedSet', 'BufFilePost' }, {
   group = group,
+  callback = arm,
+})
+vim.api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = 'buflisted',
   callback = arm,
 })
 vim.api.nvim_create_autocmd('VimEnter', {
@@ -108,3 +117,43 @@ local buf = ...
 if vim.api.nvim_buf_is_valid(buf) then
   vim.api.nvim_set_current_buf(buf)
 end";
+
+impl super::EngineHandle {
+    /// Switches nvim to `tab`, for a click on a pill tab.
+    ///
+    /// A notify rather than a request, for
+    /// [`register_bridge`](Self::register_bridge)'s reason: the answer a
+    /// caller wants is the `tabline` event nvim sends when the tabpage
+    /// changed, and the paint loop must never wait on a reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn select_tab(&self, tab: u64) -> Result<(), crate::handle::EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from(SELECT_TAB_CHUNK),
+                rmpv::Value::Array(vec![rmpv::Value::from(tab)]),
+            ],
+        )
+    }
+
+    /// Switches nvim to `buf`, for a click on a pill buffer. A notify on
+    /// [`select_tab`](Self::select_tab)'s terms.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn select_buffer(&self, buf: u64) -> Result<(), crate::handle::EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from(SELECT_BUFFER_CHUNK),
+                rmpv::Value::Array(vec![rmpv::Value::from(buf)]),
+            ],
+        )
+    }
+}

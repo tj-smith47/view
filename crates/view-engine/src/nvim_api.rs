@@ -24,7 +24,11 @@ use view_core::native::mappings::{
     command_only_forms, default_maps, is_spellable, review_keys, MappingSpec, COMMAND,
 };
 
-pub(crate) use buffers::{REGISTER_BUFFERS_CHUNK, SELECT_BUFFER_CHUNK, SELECT_TAB_CHUNK};
+pub(crate) use buffers::REGISTER_BUFFERS_CHUNK;
+// the two switch calls live beside their chunks; their own pin reads them
+// from there
+#[cfg(test)]
+use buffers::{SELECT_BUFFER_CHUNK, SELECT_TAB_CHUNK};
 use decode::{
     covered_beside, decode_buf_set_text_reply, decode_current_buffer_text_reply,
     decode_cursor_context_reply, decode_diagnostic_entries_reply, decode_quickfix_entries_reply,
@@ -2946,45 +2950,6 @@ impl EngineHandle {
         )
     }
 
-    /// Switches nvim to `tab`, for a click on a pill tab.
-    ///
-    /// A notify rather than a request, for [`register_bridge`]'s reason:
-    /// the answer a caller wants is the `tabline` event nvim sends when the
-    /// tabpage changed, and the paint loop must never wait on a reply.
-    ///
-    /// [`register_bridge`]: Self::register_bridge
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::Closed` if the connection's writer thread has
-    /// already exited.
-    pub fn select_tab(&self, tab: u64) -> Result<(), EngineError> {
-        self.notify(
-            "nvim_exec_lua",
-            vec![
-                Value::from(SELECT_TAB_CHUNK),
-                Value::Array(vec![Value::from(tab)]),
-            ],
-        )
-    }
-
-    /// Switches nvim to `buf`, for a click on a pill buffer. A notify on
-    /// [`select_tab`](Self::select_tab)'s terms.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::Closed` if the connection's writer thread has
-    /// already exited.
-    pub fn select_buffer(&self, buf: u64) -> Result<(), EngineError> {
-        self.notify(
-            "nvim_exec_lua",
-            vec![
-                Value::from(SELECT_BUFFER_CHUNK),
-                Value::Array(vec![Value::from(buf)]),
-            ],
-        )
-    }
-
     /// Arms the reading that answers whether a notifier other than the
     /// engine's own stands at `vim.notify` (see [`NOTIFY_SINK_CHUNK`]).
     /// Answers arrive asynchronously as `view_bridge` `notify_sink`
@@ -3272,6 +3237,31 @@ impl EngineHandle {
         self.notify(
             "nvim_ui_set_option",
             vec![Value::from(STDOUT_TTY_OPTION), Value::from(true)],
+        )
+    }
+
+    /// Takes an `ext_*` surface from the engine, or hands it back, on a UI
+    /// that is already attached (`:help ui-option`).
+    ///
+    /// A look flip changes which surfaces view draws itself, and a session
+    /// cannot be restarted to say so. `ext_tabline_toggle.rs` is the live
+    /// proof that the pinned engine honours the change after the attach.
+    ///
+    /// A notification, not a request, for
+    /// [`claim_stdout_tty`](Self::claim_stdout_tty)'s reason: the runtime
+    /// loop issues it and the answer it wants is the redraw traffic that
+    /// follows. The connection orders it ahead of the resize issued behind
+    /// it, which is what keeps the grid from being sized for a row nvim has
+    /// not yet stopped drawing.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn set_ui_ext(&self, surface: &str, on: bool) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_ui_set_option",
+            vec![Value::from(surface), Value::from(on)],
         )
     }
 
@@ -5549,6 +5539,8 @@ mod tests {
             "BufDelete",
             "BufEnter",
             "BufModifiedSet",
+            "BufFilePost",
+            "OptionSet",
             "VimEnter",
         ] {
             assert!(

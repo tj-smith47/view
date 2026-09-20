@@ -12587,6 +12587,88 @@ fn a_panes_flip_reissues_the_hold_the_look_decides() {
     }
 }
 
+/// `[native] tabline` has no fixed default: tiles draws the pill, nvim mode
+/// leaves row 0 to the user's own config. A flip takes the surface or hands
+/// it back on the running UI, the outer grid re-sizes once for the row, and
+/// the notice says where the row went.
+#[test]
+fn a_panes_flip_brings_the_pill_or_hands_the_row_back() {
+    let mut m = pill_model(crate::native::pill::TablineShows::Tabs);
+    assert!(m.chrome_rows() == 1 && m.tabline_follows_look);
+    for (word, on, rows) in [("nvim", false, 0), ("tiles", true, 1)] {
+        let effects = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "ui".to_string(),
+                verb: format!("panes {word}"),
+            },
+        );
+        let toggles: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Rpc(RpcCall::SetUiExt { surface, on }) => Some((*surface, *on)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            toggles,
+            vec![(crate::native::ext::Ext::Tabline, on)],
+            "`:View ui panes {word}` toggled {toggles:?}"
+        );
+        assert_eq!(
+            m.owns(crate::native::ext::Ext::Tabline),
+            on,
+            "`:View ui panes {word}` left the surface where it was"
+        );
+        assert_eq!(m.chrome_rows(), rows, "`:View ui panes {word}`");
+        let resizes = effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::Rpc(RpcCall::TryResize { .. })))
+            .count();
+        assert_eq!(resizes, 1, "`:View ui panes {word}` asked for {resizes}");
+        let notice: String = m
+            .engine
+            .messages
+            .entries
+            .last()
+            .map(|entry| {
+                entry
+                    .content
+                    .iter()
+                    .map(|(_, text)| text.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let row = if on { "view's" } else { "nvim's" };
+        assert!(
+            notice.contains(row),
+            "the notice does not say whose the row is now: {notice:?}"
+        );
+    }
+}
+
+/// A user who spelled `[native] tabline` keeps their value under both
+/// looks: re-deriving it would throw it away at the first flip.
+#[test]
+fn a_panes_flip_leaves_a_spelled_tabline_where_the_user_put_it() {
+    let mut m = pill_model(crate::native::pill::TablineShows::Tabs);
+    m.tabline_follows_look = false;
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ui".to_string(),
+            verb: "panes nvim".to_string(),
+        },
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Rpc(RpcCall::SetUiExt { .. }))),
+        "the flip moved a surface the user spelled"
+    );
+    assert!(m.owns(crate::native::ext::Ext::Tabline));
+}
+
 /// A window nvim closed keeps no status record. Handles are never reused,
 /// so an entry left behind is one nothing reads again, and a session that
 /// opens and closes splits all day would grow the map for as long as it
@@ -12756,6 +12838,28 @@ fn a_click_on_a_pill_tab_selects_that_tabpage() {
         update(&mut m, click(0, 0)).is_empty(),
         "a press on a blank column of the row reached the grid"
     );
+}
+
+/// Under `panes = "nvim"` an explicit `[native] tabline` leaves row 0 to
+/// nvim's own left-aligned tab line, which the pill's centred layout would
+/// hit-test into the wrong name.
+#[test]
+fn a_press_on_nvims_own_tab_row_selects_nothing_through_the_pill() {
+    let mut m = pill_model(crate::native::pill::TablineShows::Tabs);
+    m.look = crate::model::Look::new(crate::model::Panes::Nvim, true);
+    assert_eq!(
+        m.chrome_rows(),
+        1,
+        "two tabpages under nvim mode left the row unreserved"
+    );
+    let slots = crate::native::pill::PillView::from_model(&m).slots(m.term_width);
+    for col in [0, slots[0].col, slots[1].col] {
+        let effects = update(&mut m, click(0, col));
+        assert!(
+            effects.is_empty(),
+            "a press on nvim's own tab row at column {col} sent {effects:?}"
+        );
+    }
 }
 
 #[test]

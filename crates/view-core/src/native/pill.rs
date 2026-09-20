@@ -112,6 +112,10 @@ pub struct PillSlot {
 /// and the selected one's own colour reads as a pill rather than as a word.
 const PAD: u16 = 1;
 
+/// What a buffer with no file behind it is called, spelled the way nvim
+/// spells it on its own tab line.
+const NO_NAME: &str = "[No Name]";
+
 impl PillView {
     /// The pill this model would draw.
     #[must_use]
@@ -132,9 +136,14 @@ impl PillView {
     /// Where each entry lands on a row `width` cells wide, left to right.
     ///
     /// The run is centred on the row and clipped to what the host and the
-    /// agent word leave: a name that does not fit whole is dropped, and so
-    /// is every name behind it, for the reason a frame edge drops a whole
-    /// segment -- half a file name reads as a different file.
+    /// agent word leave: a name that does not fit whole is dropped, for
+    /// the reason a frame edge drops a whole segment -- half a file name
+    /// reads as a different file.
+    ///
+    /// More names than fit are a window rather than a prefix, and the
+    /// window always holds the current name: a row that dropped it would
+    /// leave the one name a person is looking for off the screen, and the
+    /// hit test unable to reach it.
     #[must_use]
     pub fn slots(&self, width: u16) -> Vec<PillSlot> {
         let host = edge_cells(&self.host);
@@ -147,17 +156,25 @@ impl PillView {
             .iter()
             .map(|entry| text_width(&entry.label).saturating_add(PAD * 2))
             .collect();
-        let total = widths.iter().fold(0, |acc: u16, w| acc.saturating_add(*w));
+        let first = self.window_start(&widths, room);
+        let mut shown = Vec::with_capacity(self.entries.len());
+        let mut used = 0_u16;
+        for (index, cells) in widths.iter().enumerate().skip(first) {
+            if used.saturating_add(*cells) > room {
+                break;
+            }
+            used = used.saturating_add(*cells);
+            shown.push((index, *cells));
+        }
         // centred inside the room the two edges leave, never inside the
         // whole row: a long host name would otherwise push the names under
         // it
-        let mut col = host.saturating_add(room.saturating_sub(total.min(room)) / 2);
-        let stop = host.saturating_add(room);
-        let mut slots = Vec::with_capacity(self.entries.len());
-        for (entry, cells) in self.entries.iter().zip(widths) {
-            if col.saturating_add(cells) > stop {
+        let mut col = host.saturating_add(room.saturating_sub(used) / 2);
+        let mut slots = Vec::with_capacity(shown.len());
+        for (index, cells) in shown {
+            let Some(entry) = self.entries.get(index) else {
                 break;
-            }
+            };
             slots.push(PillSlot {
                 id: entry.id,
                 col,
@@ -167,6 +184,41 @@ impl PillView {
             col = col.saturating_add(cells);
         }
         slots
+    }
+
+    /// The first entry the row starts at, given what each one takes and the
+    /// `room` the two edges leave.
+    ///
+    /// Zero while the current name fits in the run that starts at the first
+    /// name, which is every row that holds all of them. Past that the
+    /// current name becomes the last one drawn and the names before it fill
+    /// back towards the left, so moving forward through a long list scrolls
+    /// the row by one name at a time.
+    fn window_start(&self, widths: &[u16], room: u16) -> usize {
+        let Some(current) = self.entries.iter().position(|entry| entry.current) else {
+            return 0;
+        };
+        let mut used = 0_u16;
+        for (index, cells) in widths.iter().enumerate() {
+            if used.saturating_add(*cells) <= room {
+                used = used.saturating_add(*cells);
+                continue;
+            }
+            if index > current {
+                return 0;
+            }
+            let mut start = current;
+            let mut back = widths.get(current).copied().unwrap_or(0);
+            while let Some(previous) = start.checked_sub(1).and_then(|at| widths.get(at)) {
+                if back.saturating_add(*previous) > room {
+                    break;
+                }
+                back = back.saturating_add(*previous);
+                start -= 1;
+            }
+            return start;
+        }
+        0
     }
 
     /// The entry column `col` of a row `width` cells wide names, or `None`
@@ -209,10 +261,20 @@ fn entries(
             .iter()
             .map(|buffer| PillEntry {
                 id: buffer.buf,
-                label: if buffer.modified {
-                    format!("{} +", buffer.name)
-                } else {
-                    buffer.name.clone()
+                // a buffer with no file behind it is nvim's own [No Name];
+                // the empty string it reports would draw as two blank pad
+                // cells a person cannot tell from a gap
+                label: {
+                    let name = if buffer.name.is_empty() {
+                        NO_NAME
+                    } else {
+                        buffer.name.as_str()
+                    };
+                    if buffer.modified {
+                        format!("{name} +")
+                    } else {
+                        name.to_string()
+                    }
                 },
                 current: buffer.current,
             })
@@ -264,15 +326,24 @@ pub fn agent_word(panel: &AiPanelState, enabled: bool, trusted: bool) -> &'stati
 /// the row a migrating user already has.
 #[must_use]
 pub fn shows(model: &Model) -> bool {
-    if !model.owns(crate::native::ext::Ext::Tabline) {
-        return false;
-    }
-    model.look.panes == Panes::Tiles
-        || model
+    shows_under(
+        model.owns(crate::native::ext::Ext::Tabline),
+        model.look.panes,
+        model
             .engine
             .tabline
             .as_ref()
-            .is_some_and(|state| state.tabs.len() > 1)
+            .map_or(0, |state| state.tabs.len()),
+    )
+}
+
+/// [`shows`] from the three answers it reads, for the one caller that has
+/// them before there is a model to ask: the spawn geometry, which is seeded
+/// a row shorter so the child is laid out against the grid the attach will
+/// ask for.
+#[must_use]
+pub fn shows_under(owns_tabline: bool, panes: Panes, tabs: usize) -> bool {
+    owns_tabline && (panes == Panes::Tiles || tabs > 1)
 }
 
 #[cfg(test)]
@@ -335,6 +406,49 @@ mod tests {
         assert_eq!((slots[0].col, slots[0].cells), (5, 5));
         assert_eq!((slots[1].col, slots[1].cells), (10, 5));
         assert!(!slots[0].current && slots[1].current);
+    }
+
+    #[test]
+    fn the_current_name_is_always_on_the_row() {
+        let names = |current: usize| {
+            view(
+                (0..10)
+                    .map(|index| PillEntry {
+                        id: index + 1,
+                        label: format!("f{index}"),
+                        current: usize::try_from(index).unwrap() == current,
+                    })
+                    .collect(),
+            )
+        };
+        // ten names of four cells each in a row of thirty: seven fit, and
+        // the last one is three names past the cut
+        let scrolled = names(9).slots(30);
+        assert_eq!(scrolled.len(), 7);
+        assert_eq!(scrolled.first().map(|slot| slot.id), Some(4));
+        let last = scrolled.last().copied().unwrap();
+        assert_eq!(last.id, 10);
+        assert!(last.current);
+
+        // a current name inside the run the first name starts leaves the
+        // row where it was
+        let anchored = names(0).slots(30);
+        assert_eq!(anchored.first().map(|slot| slot.id), Some(1));
+        assert!(anchored.first().copied().unwrap().current);
+    }
+
+    #[test]
+    fn an_unnamed_buffer_is_named_the_way_nvim_names_it() {
+        let (entries, names) = entries(
+            Some(&tabline(1, &["one"])),
+            &[buffer(7, "", true)],
+            TablineShows::Buffers,
+        );
+        assert_eq!(names, PillNames::Buffers);
+        assert_eq!(
+            entries.first().map(|entry| entry.label.as_str()),
+            Some("[No Name]")
+        );
     }
 
     #[test]

@@ -88,8 +88,10 @@ impl Frame {
 ///   only when a `:` is folded or a batch arrives), `next_overlay_id`,
 ///   `attached` (it decides
 ///   only when the UI goes on, and the frame that follows is what flips
-///   `chrome_painted`, which is here) and `stdin_relay` (an attach option
-///   the session was started with)
+///   `chrome_painted`, which is here), `stdin_relay` (an attach option
+///   the session was started with) and `tabline_follows_look` (it decides
+///   whether a look flip moves `ext_surfaces`, and the move itself reaches
+///   a layer through `offset`)
 /// - read through a field already here: `engine` (this destructures it),
 ///   `grids` (via `grid`, which is the global grid's size -- the panes it
 ///   also holds reach no layer while the compositor paints that grid

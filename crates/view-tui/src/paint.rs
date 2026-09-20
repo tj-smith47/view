@@ -3834,6 +3834,71 @@ mod tests {
         }
     }
 
+    /// The pill's row is reserved from the first frame, so the shell frame
+    /// the session starts with rings the screen under it. A frame ringing
+    /// the whole terminal draws its top edge through the names and then
+    /// drops a row at the first flush, which is the jump reserving off the
+    /// attach exists to prevent.
+    #[test]
+    fn the_shell_frame_starts_under_the_pills_row() {
+        let ringed = |panes: view_core::model::Panes| {
+            let mut model = owning_the_tabline();
+            model.term_width = 20;
+            model.term_height = 6;
+            model.look = Look::new(panes, false);
+            model.chrome_painted = false;
+            // no tabline event has arrived on this frame, which is the
+            // whole of what the first frame knows
+            model.remote = Some("prod".to_string());
+            let surface = view_surface::render(&model);
+            let mut terminal = Terminal::new(TestBackend::new(20, 6)).unwrap();
+            terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            let ring = (0..6)
+                .map(|row| {
+                    (0..20)
+                        .filter(|col| {
+                            let glyph = buf[(*col, row)].symbol();
+                            glyph != " " && !glyph.chars().all(char::is_alphanumeric)
+                        })
+                        .count()
+                })
+                .collect::<Vec<_>>();
+            let top: String = (0..20).map(|col| buf[(col, 0)].symbol()).collect();
+            (ring, top)
+        };
+
+        // a whole horizontal edge rather than the two verticals a ring
+        // starting a row higher leaves on this row, since the pill paints
+        // over row 0 either way and the edge is the only thing that says
+        // where the frame starts
+        let (tiles, top) = ringed(view_core::model::Panes::Tiles);
+        assert!(
+            top.contains("prod"),
+            "the host is not on row 0 of the first frame: {top:?}"
+        );
+        assert_eq!(
+            tiles[0], 0,
+            "the shell frame drew a border glyph through the pill's row"
+        );
+        assert_eq!(tiles[1], 20, "the ring's top edge is not on row 1");
+        assert_eq!(
+            tiles[5], 20,
+            "the ring's bottom edge is not on the last row"
+        );
+        assert_eq!(
+            tiles[3], 2,
+            "the ring's sides are not the only glyphs between"
+        );
+
+        // nvim mode reserves no row, so the frame keeps the whole terminal
+        let (nvim, _) = ringed(view_core::model::Panes::Nvim);
+        assert!(
+            nvim.iter().take(5).all(|drawn| *drawn == 0),
+            "nvim mode's shell frame drew a ring it has no room for"
+        );
+    }
+
     #[test]
     fn shell_never_paints_once_chrome_painted_is_true() {
         let model = Model::with_term_size(20, 4);

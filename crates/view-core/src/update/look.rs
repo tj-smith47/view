@@ -65,11 +65,48 @@ pub(crate) fn set_look(model: &mut Model, look: Look) -> Vec<Effect> {
     model.engine.grids_mut().set_look(look);
     model.look = look;
     model.dirty = true;
+    // ahead of the size: the tab line is a row the outer grid does not
+    // get, so the surface moves first and one resize carries the new
+    // height
+    let mut effects = follow_the_look_with_the_tabline(model);
     let (width, height) = model.grid_target();
-    let mut effects = vec![Effect::Rpc(RpcCall::TryResize { width, height })];
+    effects.push(Effect::Rpc(RpcCall::TryResize { width, height }));
     effects.append(&mut look_keyed_holds(model));
     effects.append(&mut request_all(model));
     effects
+}
+
+/// The tab line surface the new look derives, taken or handed back on the
+/// running UI.
+///
+/// `[native] tabline` has no fixed default: tiles draws the pill, nvim mode
+/// leaves the row to whatever the user's own config puts there. A flip that
+/// left the surface where the session started it would give a session
+/// flipped to tiles no pill, and one flipped to nvim mode a pill over the
+/// tab row the user's own config draws. `ext_tabline_toggle.rs` is the live
+/// proof the engine honours the change after the attach.
+///
+/// Nothing at all when the user spelled the key: that value is theirs under
+/// both looks.
+fn follow_the_look_with_the_tabline(model: &mut Model) -> Vec<Effect> {
+    use crate::native::ext::Ext;
+    if !model.tabline_follows_look {
+        return Vec::new();
+    }
+    let on = model.look.panes == Panes::Tiles;
+    if model.owns(Ext::Tabline) == on {
+        return Vec::new();
+    }
+    let mut surfaces = model.attached_surfaces().to_vec();
+    surfaces.retain(|held| *held != Ext::Tabline);
+    if on {
+        surfaces.push(Ext::Tabline);
+    }
+    model.attach_surfaces(surfaces);
+    vec![Effect::Rpc(RpcCall::SetUiExt {
+        surface: Ext::Tabline,
+        on,
+    })]
 }
 
 /// The holds the new look owes, re-issued.
@@ -145,9 +182,17 @@ fn report(model: &Model) -> String {
         Panes::Tiles => "tiles",
         _ => "nvim",
     };
+    // the row is the half of the flip a person sees before anything else
+    // moves, and under an explicit `[native] tabline` it does not move at
+    // all, so the line says where it went rather than leaving them to look
+    let row = if crate::native::pill::shows(model) {
+        "the top row is view's"
+    } else {
+        "the top row is nvim's"
+    };
     match model.detected_look.marker {
-        Some(marker) => format!("ui.panes = {mode} ({marker})"),
-        None => format!("ui.panes = {mode}"),
+        Some(marker) => format!("ui.panes = {mode} ({marker}), {row}"),
+        None => format!("ui.panes = {mode}, {row}"),
     }
 }
 

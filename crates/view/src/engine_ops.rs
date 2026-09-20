@@ -129,6 +129,10 @@ pub trait EngineOps {
     /// Arms one float scan, for the moment a probe reply names a claiming
     /// plugin; fire-and-forget, no reply (see `RpcCall::ScanFloats`).
     fn scan_floats(&self) -> Result<(), EngineError>;
+    /// Takes an `ext_*` surface from the engine, or hands it back, on the
+    /// UI this session already attached; fire-and-forget, no reply (see
+    /// `RpcCall::SetUiExt`).
+    fn set_ui_ext(&self, surface: &str, on: bool) -> Result<(), EngineError>;
     /// Switches nvim to a tabpage, for a click on a pill tab;
     /// fire-and-forget, no reply (see `RpcCall::SelectTab`).
     fn select_tab(&self, tab: u64) -> Result<(), EngineError>;
@@ -379,6 +383,10 @@ impl EngineOps for EngineHandle {
         self.scan_floats()
     }
 
+    fn set_ui_ext(&self, surface: &str, on: bool) -> Result<(), EngineError> {
+        self.set_ui_ext(surface, on)
+    }
+
     fn select_tab(&self, tab: u64) -> Result<(), EngineError> {
         self.select_tab(tab)
     }
@@ -582,6 +590,10 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
 
     fn scan_floats(&self) -> Result<(), EngineError> {
         (**self).scan_floats()
+    }
+
+    fn set_ui_ext(&self, surface: &str, on: bool) -> Result<(), EngineError> {
+        (**self).set_ui_ext(surface, on)
     }
 
     fn select_tab(&self, tab: u64) -> Result<(), EngineError> {
@@ -790,6 +802,10 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
 
     fn scan_floats(&self) -> Result<(), EngineError> {
         (**self).scan_floats()
+    }
+
+    fn set_ui_ext(&self, surface: &str, on: bool) -> Result<(), EngineError> {
+        (**self).set_ui_ext(surface, on)
     }
 
     fn select_tab(&self, tab: u64) -> Result<(), EngineError> {
@@ -1059,6 +1075,9 @@ impl EngineOps for FakeOps {
     fn scan_floats(&self) -> Result<(), EngineError> {
         self.record("scan_floats()".to_string())
     }
+    fn set_ui_ext(&self, surface: &str, on: bool) -> Result<(), EngineError> {
+        self.record(format!("set_ui_ext({surface},{on})"))
+    }
     fn select_tab(&self, tab: u64) -> Result<(), EngineError> {
         self.record(format!("select_tab({tab})"))
     }
@@ -1321,6 +1340,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn scan_floats(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn set_ui_ext(&self, _surface: &str, _on: bool) -> Result<(), EngineError> {
         Ok(())
     }
     fn select_tab(&self, _tab: u64) -> Result<(), EngineError> {

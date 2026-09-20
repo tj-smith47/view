@@ -1101,9 +1101,13 @@ fn main() -> Result<()> {
     // the pill's own row, reserved in the spawn's geometry for the reason
     // the ring is: a child laid out a row taller than the first frame
     // leaves makes the attach a relayout of every window on screen
-    let chrome = u16::from(
-        resolved.tables.native.enabled("tabline") && look.panes == view_core::model::Panes::Tiles,
-    );
+    let chrome = u16::from(view_core::native::pill::shows_under(
+        surfaces.contains(&view_core::native::ext::Ext::Tabline),
+        look.panes,
+        // no tabline event has arrived yet, and under nvim mode the row is
+        // nvim's own until a second tabpage opens
+        0,
+    ));
     let spawn_size = view_core::model::grid_target_for((width, height), chrome, statusline, ring);
     // what the chrome alone would have left, so this is true for every
     // geometry the engine would have refused -- a zero floored to
@@ -1175,6 +1179,9 @@ fn main() -> Result<()> {
         // thing on screen that says which machine the session is on
         .with_remote(pill_host(cli.remote.as_deref()))
         .with_tabline_shows(resolved.tables.native.tabline_shows());
+    // whether a `:View ui panes` flip derives `[native] tabline` again, or
+    // leaves the value the user spelled where they put it
+    model.tabline_follows_look = resolved.tabline_follows_look();
     // the accent the user named, ahead of the two syntax groups the theme
     // probes for when they named none
     model
@@ -2122,7 +2129,8 @@ mod tests {
                 "bar_rows",
                 "enabled",
                 "u16::from",
-                "enabled",
+                "view_core::native::pill::shows_under",
+                "contains",
                 "view_core::model::grid_target_for",
                 "saturating_sub",
                 "saturating_sub",

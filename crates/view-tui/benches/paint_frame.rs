@@ -270,6 +270,59 @@ fn bench_paint_frame(c: &mut Criterion) {
     });
 }
 
+/// The pill's own row, repainted as the current tabpage changes: the cost
+/// the top row adds to a frame that would otherwise not touch row 0.
+fn pill_model() -> Model {
+    let mut model = populated_model();
+    let mut surfaces = view_core::native::ext::shipped_multigrid();
+    surfaces.push(view_core::native::ext::Ext::Tabline);
+    model.attach_surfaces(surfaces);
+    model.look = view_core::model::Look::new(view_core::model::Panes::Tiles, true);
+    model.remote = Some("deploy@prod-box".to_string());
+    model
+}
+
+/// One tabpage switch per frame, the repaint a click on the row asks for.
+fn bench_pill_row(c: &mut Criterion) {
+    let mut model = pill_model();
+    let mut backend = std::io::sink();
+    let mut shadow = primed_shadow(&mut backend, &mut model);
+
+    let tabs: Vec<_> = ["work", "docs", "review", "notes"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| view_core::events::TabEntry {
+            tab: view_core::events::TabHandle(index as u64 + 1),
+            name: name.to_string(),
+        })
+        .collect();
+    let mut flip = false;
+    c.bench_function("paint_frame_pill_row", |b| {
+        b.iter(|| {
+            flip = !flip;
+            let _ = update(
+                &mut model,
+                Msg::Redraw(vec![UiEvent::TablineUpdate {
+                    current: view_core::events::TabHandle(if flip { 1 } else { 2 }),
+                    tabs: tabs.clone(),
+                }]),
+            );
+            let grid_damage = model.take_paint_damage();
+            let surface = view_surface::render(&model);
+            let overlay_damage = shadow.overlay_damage(&surface);
+            let damage =
+                Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, false);
+            emit_frame(
+                black_box(&mut backend),
+                black_box(&mut shadow),
+                &model,
+                &surface,
+                &damage,
+            );
+        });
+    });
+}
+
 /// Same clipped steady-state frame, but writing into a growing in-memory
 /// buffer instead of discarding the bytes, still minus terminal write
 /// syscalls, so the difference against `paint_frame_steady_state` isolates
@@ -535,6 +588,7 @@ criterion_group!(
     bench_paint_frame_full,
     bench_paint_frame_full_wide,
     bench_paint_frame,
+    bench_pill_row,
     bench_paint_frame_crossterm,
     bench_paint_frame_cold,
     bench_paint_frame_agent_composer,

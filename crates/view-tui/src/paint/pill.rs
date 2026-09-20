@@ -32,7 +32,13 @@ pub(super) fn paint_pill(pill: &PillView, theme: &Theme, area: Rect, buf: &mut B
 
     let tab = ratatui_style(theme.chrome(ChromeGroup::TabLine));
     let selected = ratatui_style(theme.chrome(ChromeGroup::TabLineSel));
-    for (slot, entry) in pill.slots(area.width).into_iter().zip(&pill.entries) {
+    for slot in pill.slots(area.width) {
+        // by the handle the slot names, never by position: a list longer
+        // than the row is a window into it, and its first slot is not its
+        // first entry
+        let Some(entry) = pill.entries.iter().find(|entry| entry.id == slot.id) else {
+            continue;
+        };
         let style = if slot.current { selected } else { tab };
         fill_run(buf, area, slot.col, slot.cells, style);
         write_at(buf, area, slot.col.saturating_add(1), &entry.label, style);
@@ -69,5 +75,113 @@ fn write_at(buf: &mut Buffer, area: Rect, col: u16, text: &str, style: Style) {
             buf[(area.x.saturating_add(at).saturating_add(1), area.y)].reset();
         }
         at = at.saturating_add(width);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use view_core::model::Model;
+
+    use super::{paint_pill, PillView};
+    use crate::paint::{ratatui_style, rgb, ChromeGroup, Theme};
+
+    /// The accent this fixture names, which is what the host cell has to
+    /// carry rather than the row's own foreground.
+    const ACCENT: u32 = 0x44_44_44;
+
+    /// A session on a remote host with two tabpages, its three pill groups
+    /// three different colours so a cell says which one painted it.
+    fn two_tabs() -> Model {
+        let mut model = Model::new().with_remote(Some("prod".to_string()));
+        model.engine.set_accent_token(Some(ACCENT));
+        for (id, group, fg) in [
+            (1_u64, ChromeGroup::TabLine, 0x11_11_11_u32),
+            (2, ChromeGroup::TabLineSel, 0x22_22_22),
+            (3, ChromeGroup::TabLineFill, 0x33_33_33),
+        ] {
+            for event in [
+                view_core::events::UiEvent::HlAttrDefine {
+                    id,
+                    fg: Some(fg),
+                    bg: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    reverse: false,
+                },
+                view_core::events::UiEvent::HlGroupSet {
+                    name: group.hl_name().to_string(),
+                    hl_id: id,
+                },
+            ] {
+                let _ =
+                    view_core::update::update(&mut model, view_core::msg::Msg::Redraw(vec![event]));
+            }
+        }
+        let _ = view_core::update::update(
+            &mut model,
+            view_core::msg::Msg::Redraw(vec![view_core::events::UiEvent::TablineUpdate {
+                current: view_core::events::TabHandle(2),
+                tabs: vec![
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(1),
+                        name: "one".to_string(),
+                    },
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(2),
+                        name: "two".to_string(),
+                    },
+                ],
+            }]),
+        );
+        model
+    }
+
+    /// The bool on the slot is not the colour on the screen: only this
+    /// composite says the current name is the one lit, and the goldens
+    /// carry text without styling.
+    #[test]
+    fn the_current_name_is_the_one_the_selected_group_paints() {
+        let model = two_tabs();
+        let theme = Theme::from_hl(model.engine.hl());
+        let pill = PillView::from_model(&model);
+        let slots = pill.slots(40);
+        assert_eq!(slots.len(), 2, "the fixture drew {} names", slots.len());
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+        terminal
+            .draw(|frame| paint_pill(&pill, &theme, frame.area(), frame.buffer_mut()))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let fg_at = |col: u16| buf[(col, 0)].style().fg;
+
+        let plain = ratatui_style(theme.chrome(ChromeGroup::TabLine)).fg;
+        let lit = ratatui_style(theme.chrome(ChromeGroup::TabLineSel)).fg;
+        let fill = ratatui_style(theme.chrome(ChromeGroup::TabLineFill)).fg;
+        assert_ne!(plain, lit, "the fixture gave the two groups one colour");
+        for col in slots[0].col..slots[0].col + slots[0].cells {
+            assert_eq!(fg_at(col), plain, "column {col} of the first name");
+        }
+        for col in slots[1].col..slots[1].col + slots[1].cells {
+            assert_eq!(fg_at(col), lit, "column {col} of the current name");
+        }
+        assert_eq!(
+            fg_at(1),
+            Some(rgb(ACCENT)),
+            "the host carries the accent rather than the row's own foreground"
+        );
+        assert_eq!(
+            fg_at(slots[0].col - 1),
+            fill,
+            "the gap before the first name is not the row behind the tabs"
+        );
+        assert_eq!(
+            (buf[(1, 0)].symbol(), buf[(slots[1].col + 1, 0)].symbol()),
+            ("p", "t"),
+            "the host and the current name are not where the slots put them"
+        );
     }
 }

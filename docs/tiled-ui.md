@@ -42,7 +42,9 @@ standing.
 
 The top row names what you have open. Under tiles it is there from the
 moment the session starts; under `panes = "nvim"` it appears once a second
-tabpage is open, the way nvim's own `showtabline` behaves.
+tabpage is open, the way nvim's own `showtabline` behaves. `:View ui panes`
+moves the row with the mode it switches to, and says which of the two now
+draws it.
 
 | where | what it carries |
 |---|---|
@@ -54,14 +56,13 @@ Clicking a name switches to it.
 
 ```toml
 [native]
-tabline = true            # follows [ui] panes: on under tiles, off under "nvim"
+# tabline = true          # follows [ui] panes: on under tiles, off under "nvim"
 tabline_shows = "tabs"    # "tabs" | "buffers"
 ```
 
 With `tabline_shows = "buffers"` the middle names your open files instead,
 each with a `+` while it has unsaved changes. A second tabpage is named as
-tabpages either way: a tabpage you made is the thing the row would
-otherwise hide.
+tabpages either way.
 
 The agent's word is one of four:
 

@@ -973,6 +973,13 @@ mod tests {
         fn scan_floats(&self) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn set_ui_ext(
+            &self,
+            _surface: &str,
+            _on: bool,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn select_tab(&self, _tab: u64) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
