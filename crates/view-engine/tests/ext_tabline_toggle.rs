@@ -17,14 +17,14 @@ use view_engine::damage::DamagePump;
 use view_engine::process::{Engine, EngineConfig};
 use view_engine::ui_events::UiEvent;
 
-/// How many `tabline_update` events arrive before `deadline`, and whether
-/// row 0 of the grid carries nvim's own tab line.
+/// The tab count each `tabline_update` carries before `deadline`, and
+/// whether row 0 of the grid carries nvim's own tab line.
 ///
 /// Both readings come off one drain because they answer the same question
 /// from the two sides nvim can answer it: it either sends the row as an
 /// event or draws it into the grid, never both.
-fn drain(rx: &mpsc::Receiver<Msg>, pump: &DamagePump, deadline: Instant) -> (usize, bool) {
-    let mut tablines = 0;
+fn drain(rx: &mpsc::Receiver<Msg>, pump: &DamagePump, deadline: Instant) -> (Vec<usize>, bool) {
+    let mut tablines = Vec::new();
     let mut drawn = false;
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -33,7 +33,7 @@ fn drain(rx: &mpsc::Receiver<Msg>, pump: &DamagePump, deadline: Instant) -> (usi
         };
         for event in pump.take_damage() {
             match event {
-                UiEvent::TablineUpdate { .. } => tablines += 1,
+                UiEvent::TablineUpdate { tabs, .. } => tablines.push(tabs.len()),
                 UiEvent::GridLine { row: 0, .. } => drawn = true,
                 _ => {}
             }
@@ -64,29 +64,37 @@ fn ext_tabline_is_taken_and_handed_back_while_the_session_runs() {
 
     lua("vim.cmd('tabnew')");
     let (before, drawn_before) = drain(&rx, &pump, settle());
-    assert_eq!(
-        before, 0,
-        "the attach asked for no tab line and nvim sent one anyway"
+    assert!(
+        before.is_empty(),
+        "the attach asked for no tab line and nvim sent {before:?}"
     );
     assert!(
         drawn_before,
         "nvim drew nothing into row 0 while it owned the tab line"
     );
 
+    // back to one tabpage, so the take is read on the session a flip is
+    // likeliest to happen on: nothing about the tabs changed, and the row
+    // the pill is about to draw has names only if nvim sends them for the
+    // option set on its own
+    lua("vim.cmd('tabonly')");
+    let _ = drain(&rx, &pump, settle());
+
     engine.handle.set_ui_ext("ext_tabline", true).unwrap();
-    lua("vim.cmd('tabnew')");
     let (taken, _) = drain(&rx, &pump, settle());
-    assert!(
-        taken > 0,
-        "nvim sent no tabline_update after the option was set on a live UI"
+    assert_eq!(
+        taken.first().copied(),
+        Some(1),
+        "setting the option on a live UI with one tabpage sent {taken:?}, so \
+         a flip to tiles would paint a pill with no names on it"
     );
 
     engine.handle.set_ui_ext("ext_tabline", false).unwrap();
     lua("vim.cmd('tabnew')");
     let (given_back, drawn_after) = drain(&rx, &pump, settle());
-    assert_eq!(
-        given_back, 0,
-        "nvim kept sending tabline_update after the option was unset"
+    assert!(
+        given_back.is_empty(),
+        "nvim kept sending tabline_update after the option was unset: {given_back:?}"
     );
     assert!(
         drawn_after,

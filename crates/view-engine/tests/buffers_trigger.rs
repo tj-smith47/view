@@ -112,8 +112,9 @@ fn the_buffers_trigger_reports_the_listed_set_once_per_tick() {
         "for index = 1, {BURST} do vim.cmd('edit burst' .. index .. '.rs') end"
     ));
     let burst = drain(&rx);
-    assert!(
-        burst.len() <= BURST,
+    assert_eq!(
+        burst.len(),
+        1,
         "{BURST} switches in one turn reported {} times",
         burst.len()
     );
