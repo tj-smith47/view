@@ -41,6 +41,12 @@ pub const BOOL_EXPECTED: &str = "true or false";
 /// What a value that names no tier owes the user.
 pub const TIER_EXPECTED: &str = "one of auto, full, standard or basic";
 
+/// What a value that names no look mode owes the user.
+pub const PANES_EXPECTED: &str = "one of auto, tiles or nvim";
+
+/// What a value that is not a colour owes the user.
+pub const COLOR_EXPECTED: &str = "a hex colour such as \"#89b4fa\"";
+
 /// What a sidebar width that is not a whole number owes the user.
 pub const WIDTH_EXPECTED: &str = "a whole number of percent";
 

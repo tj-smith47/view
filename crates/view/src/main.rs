@@ -25,7 +25,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::sync::mpsc;
 use std::time::Instant;
-use view_core::model::{Model, TermCaps, Tier};
+use view_core::model::{Look, Model, Panes, TermCaps, Tier};
 use view_core::msg::Effect;
 use view_core::theme::Theme;
 use view_engine::process::{stdin_operands, BundledEngine, EngineConfig, RemoteSpec};
@@ -81,6 +81,27 @@ enum TierArg {
     Basic,
 }
 
+/// `--panes`'s value vocabulary, a `clap`-derived enum for the reason
+/// [`TierArg`] is one. `Auto` is spelled here because a flag has no absence
+/// to fall through to: writing it is how a user overrides a file that named
+/// a mode.
+#[derive(Copy, Clone, clap::ValueEnum)]
+enum PanesArg {
+    Auto,
+    Tiles,
+    Nvim,
+}
+
+impl From<PanesArg> for Option<Panes> {
+    fn from(arg: PanesArg) -> Self {
+        match arg {
+            PanesArg::Auto => None,
+            PanesArg::Tiles => Some(Panes::Tiles),
+            PanesArg::Nvim => Some(Panes::Nvim),
+        }
+    }
+}
+
 impl From<TierArg> for TierChoice {
     fn from(arg: TierArg) -> Self {
         match arg {
@@ -101,6 +122,7 @@ impl From<&Cli> for Overrides {
             // a bare switch can only say yes: multigrid comes back by
             // leaving it off, not by writing `--single-grid false`
             single_grid: cli.single_grid.then_some(true),
+            panes: cli.panes.map(Option::<Panes>::from),
         }
     }
 }
@@ -111,8 +133,8 @@ impl From<&Cli> for Overrides {
     version = VERSION,
     disable_version_flag = true,
     about = "A modern terminal editor powered by Neovim",
-    after_help = "view's own flags (--tier, --theme, --single-grid, --clean, --appname, --config, \
-                  --nvim-bin, --remote, ...) \
+    after_help = "view's own flags (--tier, --theme, --panes, --single-grid, --clean, --appname, \
+                  --config, --nvim-bin, --remote, ...) \
                   must appear before the first argument meant for nvim: once a token does \
                   not match one of view's flags, every remaining token -- including a later \
                   view flag -- is forwarded to nvim verbatim."
@@ -181,6 +203,11 @@ struct Cli {
     /// ended on, which is also what `auto` asks for.
     #[arg(long, value_name = "NAME")]
     theme: Option<String>,
+    /// How window layout is drawn for this session: `tiles` gives every
+    /// window a frame of view's own, `nvim` leaves the picture nvim paints
+    /// for itself, and `auto` reads the session the way an absent key does.
+    #[arg(long, value_name = "MODE")]
+    panes: Option<PanesArg>,
     /// Attaches without `ext_multigrid`, so nvim composites its own window
     /// layout into one grid. The triage flag for a layout view draws
     /// differently than nvim would.
@@ -1053,15 +1080,26 @@ fn main() -> Result<()> {
     // lays every window out against what this `--cmd` tells it, so a spawn
     // seeded a row taller than `Model::grid_target` makes the attach a
     // relayout of every window on screen
+    // the ring tiles mode frames the screen with comes off the spawn's own
+    // geometry, so the child lays its windows out against the grid the
+    // attach will ask for
+    let look = Look::new(resolved.ui.panes.value, resolved.ui.gaps.value);
+    let ring = look.ring();
     let statusline = resolved.tables.native.enabled("statusline");
-    let spawn_size = view_core::model::grid_target_for((width, height), 0, statusline);
+    let spawn_size = view_core::model::grid_target_for((width, height), 0, statusline, ring);
     // what the chrome alone would have left, so this is true for every
     // geometry the engine would have refused -- a zero floored to
     // `view_core::model::SIZE_FLOOR`, an axis clamped to
     // `view_core::model::ENGINE_MIN_SIZE` -- and for none it accepted. A
     // session clamped on either axis paints clipped against a terminal
     // smaller than its grid, and nothing else on screen says why
-    let clamped_geometry = spawn_size != (width, height.saturating_sub(u16::from(statusline)));
+    let clamped_geometry = spawn_size
+        != (
+            width.saturating_sub(ring),
+            height
+                .saturating_sub(u16::from(statusline))
+                .saturating_sub(ring),
+        );
     // the log line here and the notice below are the same report at the two
     // points it can be made: this runs before the terminal is entered, where
     // `VIEW_LOG` is the only sink a session has, and the notice needs a
@@ -1109,8 +1147,22 @@ fn main() -> Result<()> {
 
     // the cwd is resolved once at startup, before any picker ever opens:
     // `Source::Files` with no root override searches from here
-    let mut model =
-        Model::with_term_size(width, height).with_cwd(std::env::current_dir().unwrap_or_default());
+    let mut model = Model::with_term_size(width, height)
+        .with_cwd(std::env::current_dir().unwrap_or_default())
+        // the same look the spawn's geometry was seeded from, so the first
+        // frame reserves the ring the child was already laid out inside
+        .with_look(look);
+    // the accent the user named, ahead of the two syntax groups the theme
+    // probes for when they named none
+    model
+        .engine
+        .set_accent_token(resolved.ui.tokens.value.accent);
+    // what `"auto"` answered, kept beside the resolved mode so
+    // `:View ui panes` can report the marker and switch back to it
+    model.detected_look = view_core::model::Detected {
+        panes: Some(resolved.ui.detected_panes),
+        marker: resolved.ui.panes_marker,
+    };
     // what the probe's first window resolved, and what every frame is
     // painted at until the terminal says otherwise: a terminal slower than
     // that window revises this upward through `Msg::CapsUpgraded`, on
@@ -1679,6 +1731,11 @@ mod tests {
             "--appname",
             "work",
             "--single-grid",
+            // nvim rather than tiles for the reason `resolve.rs`'s own flag
+            // fixture states: the two flags contradict each other any other
+            // way round, and view resolves that by ignoring `--panes`
+            "--panes",
+            "nvim",
         ]);
         let resolved = resolved_for(&cli);
         for (key, _, source) in resolved.rows() {
@@ -1695,6 +1752,7 @@ mod tests {
         }
         assert_eq!(resolved.ui.theme.value.as_deref(), Some("gruvbox"));
         assert!(resolved.engine.single_grid.value);
+        assert_eq!(resolved.ui.panes.value, Panes::Nvim);
     }
 
     /// `--clean` is the triage tool, and its question -- view, or this
@@ -1954,8 +2012,10 @@ mod tests {
     /// The grid the spawn is seeded with is the fourth, and rides the size
     /// read above: the rows view's own chrome takes are not the child's to
     /// lay windows out in, so the spawn is handed the grid the attach will
-    /// ask for rather than the terminal's own. Both calls are arithmetic
-    /// over values already in hand.
+    /// ask for rather than the terminal's own. The ring tiles mode frames
+    /// the screen with is part of that grid, and it comes out of the
+    /// `[ui]` answers the chain above already resolved. Every call is
+    /// arithmetic over values in hand.
     ///
     /// The geometry notice is the fifth, and it is not a read at all: it
     /// reports the reading the line above stood a geometry in for, on every
@@ -2020,10 +2080,14 @@ mod tests {
                 "view_tui::terminal::size_now",
                 "context",
                 "view_native::config::ext_surfaces",
+                "Look::new",
+                "ring",
                 "enabled",
                 "view_core::model::grid_target_for",
                 "saturating_sub",
+                "saturating_sub",
                 "u16::from",
+                "saturating_sub",
                 "vlog::log_with",
                 "with_late_attach",
                 "stdin_relay_requested",

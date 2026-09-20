@@ -998,6 +998,13 @@ impl HangSession {
                 Effect::Rpc(RpcCall::TryResize { width, height }) => {
                     let _ = self.engine.handle.try_resize(width, height);
                 }
+                Effect::Rpc(RpcCall::TryResizeGrid {
+                    grid,
+                    width,
+                    height,
+                }) => {
+                    let _ = self.engine.handle.try_resize_grid(grid.0, width, height);
+                }
                 _ => {}
             }
         }

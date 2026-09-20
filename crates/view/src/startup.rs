@@ -1099,7 +1099,7 @@ mod tests {
         let content = scratch.join("source.txt");
         std::fs::write(&content, "hello from the relay\n").unwrap();
         let source = std::fs::File::open(&content).unwrap();
-        let floor = view_core::model::grid_target_for((0, 0), 0, false);
+        let floor = view_core::model::grid_target_for((0, 0), 0, false, 0);
 
         let spawned = AtomicU32::new(0);
         let refused = spawn_and_attach(

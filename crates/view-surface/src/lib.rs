@@ -393,8 +393,12 @@ pub fn render(model: &Model) -> Surface {
     let (grid_w, grid_h) = painted_grid_size(model);
     let offset = model.chrome_rows();
 
+    // the ring is the band the frames and gaps are drawn in, and the whole
+    // pane stack moves one cell inside it, whatever the ring costs the
+    // grid: what is left over is the margin on the right and the bottom
+    let inset = model.look.grid_offset();
     let mut layers = vec![Layer::new(
-        Rect::new(offset, 0, grid_w, grid_h),
+        Rect::new(offset.saturating_add(inset), inset, grid_w, grid_h),
         LayerKind::EngineGrid,
         model.caps,
     )];
@@ -438,15 +442,16 @@ pub fn render(model: &Model) -> Surface {
     }
     if model.statusline_rows() > 0 {
         // `grid_target()` already shrank the engine's own grid by
-        // `statusline_rows()`, so this row sits immediately below whatever
-        // `grid_h` the engine actually reported -- never recomputed from
+        // `statusline_rows()` and by the ring, so the two together put the
+        // bar on the terminal's own bottom row -- never recomputed from
         // `term_height`, which would disagree the moment a resize is still
         // in flight to nvim.
+        let ring = model.look.ring();
         layers.push(Layer::new(
             Rect::new(
-                offset.saturating_add(grid_h),
+                offset.saturating_add(grid_h).saturating_add(ring),
                 0,
-                grid_w,
+                grid_w.saturating_add(ring),
                 model.statusline_rows(),
             ),
             LayerKind::Statusline(engine.statusline.view(grid_w)),

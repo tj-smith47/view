@@ -181,6 +181,11 @@ fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) -> 
         };
         let _ = match call {
             RpcCall::TryResize { width, height } => handle.try_resize(*width, *height),
+            RpcCall::TryResizeGrid {
+                grid,
+                width,
+                height,
+            } => handle.try_resize_grid(grid.0, *width, *height),
             RpcCall::Input { notation } => handle.input(notation),
             RpcCall::Paste { text } => handle.paste(text),
             RpcCall::InputMouse {
@@ -192,6 +197,7 @@ fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) -> 
                 col,
             } => handle.input_mouse(button, action, modifier, grid.0, *row, *col),
             RpcCall::GetDefaultHl { generation } => handle.probe_default_hl(*generation),
+            RpcCall::GetAccentHl { generation } => handle.probe_accent_hl(*generation),
             // The one call whose outcome is not just ok-or-lost: a buffer
             // that moved past the tick the review named refuses the write,
             // and a driver that read that as success would compare a
@@ -566,6 +572,31 @@ impl EngineSession {
             markers: settle::QuiesceMarkers::default(),
             cache: view_surface::SurfaceCache::new(),
         })
+    }
+
+    /// Puts this session into a window look, the way typing
+    /// `:View ui panes <mode>` does, and sends the inner-size requests the
+    /// new look owes the outer grid and every window already open.
+    ///
+    /// A production session takes the mode from its config (`[ui] panes`,
+    /// `VIEW_UI_PANES`), which is resolved in `view-native`; this driver
+    /// builds its own [`Model`] and never reaches that resolver, so the
+    /// command is the front door it has.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OracleError::Engine`] if a request cannot be written to
+    /// the connection, or [`OracleError::PumpUnsettled`] if the effect loop
+    /// keeps producing follow-ups.
+    pub fn set_panes(&mut self, mode: &str) -> Result<(), OracleError> {
+        let effects = update(
+            &mut self.model,
+            Msg::FeatureInvoke {
+                feature: "ui".to_string(),
+                verb: format!("panes {mode}"),
+            },
+        );
+        self.apply_effects(effects)
     }
 
     /// Queues the next quiesce marker's arm command and `notation` into

@@ -66,6 +66,7 @@ const _: () = assert!(
 
 mod ai;
 mod ai_fs;
+pub(crate) mod look;
 mod mouse;
 mod paste;
 pub(super) mod review;
@@ -417,6 +418,11 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }
             Vec::new()
         }
+        Msg::AccentProbeReply {
+            generation,
+            function_fg,
+            statement_fg,
+        } => look::accent_reply(model, generation, function_fg, statement_fg),
         Msg::HeartbeatReply { .. } => {
             // the acknowledgement itself is recorded by the runtime loop's
             // liveness watch on the way in, before this arm ever runs; the
@@ -534,6 +540,12 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // one, and deciding it launches nothing.
             if feature == "review" {
                 return review::review_verb(model, &verb);
+            }
+            // the one form whose first token is not a feature id: the look
+            // is a session-wide setting rather than a surface with a key,
+            // so it has no registry row for the dispatch above to match
+            if feature == "ui" {
+                return look::invoke(model, &verb);
             }
             // a bare `:View` (both tokens empty) is the discoverability
             // entry point: nothing was asked for, so nothing was invoked,

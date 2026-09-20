@@ -8,7 +8,9 @@
 //! module: no I/O, no RPC, and every wire-sourced value already saturated by
 //! the decoder that produced it.
 
+use crate::events::WinHandle;
 use crate::grid::{Grid, GridDamage, GridOp};
+use crate::model::Look;
 
 /// A grid's identity as nvim assigns it. The global grid keeps the id the
 /// engine gives it rather than a sentinel, so single-grid and multigrid
@@ -57,10 +59,14 @@ pub enum PaneKind {
 pub struct Pane {
     /// The grid whose cells this pane paints.
     pub id: GridId,
-    /// Screen position as `(row, col)`, matching the order nvim announces it
-    /// in (`win_pos`'s `startrow`/`startcol`) and reads it back in
-    /// (`nvim_win_get_position`).
+    /// Where the grid's cell `(0, 0)` sits: the inner origin under gapped
+    /// tiles, and the slot's own origin everywhere else.
     pub origin: (u16, u16),
+    /// The layout slot nvim reported, as `(row, col, width, height)`, which
+    /// is what the frame painter draws into. A pane nvim never placed as an
+    /// ordinary window -- a float, the message area, the global grid --
+    /// carries its origin and the grid's own size here.
+    pub slot: (u16, u16, u16, u16),
     /// Which layer the pane belongs to and, for a float, how it sorts.
     pub kind: PaneKind,
     /// Whether nvim has taken the pane off screen without destroying it, per
@@ -91,14 +97,36 @@ pub enum GridEvent {
         /// The grid nvim destroyed.
         grid: GridId,
     },
-    /// `win_pos`: an ordinary window sits at `(startrow, startcol)`.
+    /// `win_pos`: an ordinary window occupies the slot at
+    /// `(startrow, startcol)`, `width` by `height` cells.
+    ///
+    /// The slot is the whole box nvim's layout tree keeps for the window,
+    /// which is larger than the grid it draws text into wherever view has
+    /// asked for an inner size inside it.
     Window {
         /// The window's grid.
         grid: GridId,
-        /// Screen row of the window's first text row.
+        /// The window nvim placed, as it addresses it.
+        win: WinHandle,
+        /// Screen row of the slot's first row.
         startrow: u16,
-        /// Screen column of the window's first text column.
+        /// Screen column of the slot's first column.
         startcol: u16,
+        /// Columns the slot spans.
+        width: u16,
+        /// Rows the slot spans.
+        height: u16,
+    },
+    /// `win_viewport_margins`: rows of `grid` that are not viewport --
+    /// what `winbar` takes off the top.
+    ///
+    /// nvim adds the top margin to whatever inner height view asks for, so
+    /// the request has to spend it first.
+    Margins {
+        /// The window's grid.
+        grid: GridId,
+        /// Rows above the viewport.
+        top: u16,
     },
     /// `win_float_pos`: a floating window sits at the position nvim already
     /// resolved from the anchor.
@@ -156,6 +184,29 @@ struct Slot {
     /// `None` for a grid nvim has sized but not placed, which is every grid
     /// between its first `win_viewport_margins` and its `win_pos`.
     placed: Option<Placement>,
+    /// What `win_pos` last said about this grid's window, `None` for a
+    /// grid that is not an ordinary window.
+    window: Option<Window>,
+}
+
+/// What a standing inner request answers for: the slot nvim gave the
+/// window, the look it was sized under, and the rows the winbar adds.
+type RequestKey = ((u16, u16, u16, u16), Look, u16);
+
+/// The layout nvim keeps for one ordinary window, and the inner size view
+/// has asked for inside it.
+#[derive(Debug, Clone)]
+struct Window {
+    /// The window nvim placed, as it addresses it.
+    win: WinHandle,
+    /// The slot, as `(row, col, width, height)`.
+    slot: (u16, u16, u16, u16),
+    /// `win_viewport_margins`'s top for this grid: rows nvim adds on top
+    /// of whatever inner height it is asked for.
+    margin_top: u16,
+    /// The key the standing inner request answers for, `None` while this
+    /// grid owes one.
+    requested: Option<RequestKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -209,6 +260,9 @@ pub struct GridRegistry {
     global: Grid,
     slots: Vec<Slot>,
     cursor: Option<GridId>,
+    /// How window layout is drawn, which decides where a window grid's
+    /// cell `(0, 0)` sits inside the slot nvim gave it.
+    look: Look,
     /// Set by any event that moves, reveals or removes a box on screen.
     /// Such an event names no cells at all, and the rows a vacated box
     /// leaves behind belong to whatever was under it, so the layout
@@ -224,6 +278,7 @@ impl GridRegistry {
             global: Grid::new(),
             slots: Vec::new(),
             cursor: None,
+            look: Look::default(),
             placement_dirty: false,
         }
     }
@@ -341,10 +396,16 @@ impl GridRegistry {
             }
             GridEvent::Window {
                 grid,
+                win,
                 startrow,
                 startcol,
+                width,
+                height,
             } if grid != GLOBAL_GRID => {
-                self.place(grid, (startrow, startcol), PaneKind::Window, 0);
+                self.place_window(grid, win, (startrow, startcol, width, height));
+            }
+            GridEvent::Margins { grid, top } if grid != GLOBAL_GRID => {
+                self.set_margin_top(grid, top);
             }
             GridEvent::Float {
                 grid,
@@ -354,9 +415,17 @@ impl GridRegistry {
                 zindex,
                 compindex,
             } if grid != GLOBAL_GRID => {
+                // nvim resolves a `relative = "win"` float from the anchor
+                // window's slot origin, which it knows; the inner origin is
+                // view's own and two cells away from it under gapped tiles,
+                // so a hover would otherwise land off the text it belongs to
+                let (rows, cols) = self.float_shift(anchor_grid);
                 self.place(
                     grid,
-                    (screen_row, screen_col),
+                    (
+                        screen_row.saturating_add(rows),
+                        screen_col.saturating_add(cols),
+                    ),
                     PaneKind::Float {
                         zindex,
                         anchor_grid,
@@ -396,6 +465,7 @@ impl GridRegistry {
             }
             GridEvent::Destroy { .. }
             | GridEvent::Window { .. }
+            | GridEvent::Margins { .. }
             | GridEvent::Float { .. }
             | GridEvent::Message { .. } => {}
         }
@@ -426,9 +496,11 @@ impl GridRegistry {
     /// picture, so it is the layer every window pane paints over.
     #[must_use]
     pub fn panes_in_z_order(&self) -> Vec<Pane> {
+        let (global_width, global_height) = self.global.size();
         let mut panes = vec![Pane {
             id: GLOBAL_GRID,
             origin: (0, 0),
+            slot: (0, 0, global_width, global_height),
             kind: PaneKind::Window,
             hidden: false,
         }];
@@ -444,6 +516,13 @@ impl GridRegistry {
         panes.extend(placed.into_iter().map(|(slot, p)| Pane {
             id: slot.id,
             origin: p.origin,
+            slot: slot.window.as_ref().map_or_else(
+                || {
+                    let (width, height) = slot.grid.size();
+                    (p.origin.0, p.origin.1, width, height)
+                },
+                |window| window.slot,
+            ),
             kind: p.kind.clone(),
             hidden: p.hidden,
         }));
@@ -734,6 +813,155 @@ impl GridRegistry {
         }
     }
 
+    /// Records the slot nvim gave `grid`'s window and places the grid at
+    /// the origin the current look puts inside it.
+    fn place_window(&mut self, grid: GridId, win: WinHandle, slot: (u16, u16, u16, u16)) {
+        let look = self.look;
+        if let Some(entry) = self.slot_mut(grid) {
+            let margin_top = entry.window.as_ref().map_or(0, |window| window.margin_top);
+            let requested = entry
+                .window
+                .as_ref()
+                .filter(|window| window.slot == slot)
+                .and_then(|window| window.requested);
+            entry.window = Some(Window {
+                win,
+                slot,
+                margin_top,
+                requested,
+            });
+        }
+        let origin = inner_origin(look, slot, self.margin_top(grid));
+        self.place(grid, origin, PaneKind::Window, 0);
+    }
+
+    /// Records `grid`'s top margin, re-placing its window when the margin
+    /// moves the inner origin or what the grid owes.
+    fn set_margin_top(&mut self, grid: GridId, top: u16) {
+        let look = self.look;
+        let Some(entry) = self.slot_mut(grid) else {
+            return;
+        };
+        let Some(window) = entry.window.as_mut() else {
+            return;
+        };
+        if window.margin_top == top {
+            return;
+        }
+        window.margin_top = top;
+        let slot = window.slot;
+        let origin = inner_origin(look, slot, top);
+        self.place(grid, origin, PaneKind::Window, 0);
+    }
+
+    /// `grid`'s top margin, 0 for a grid with no window or no winbar.
+    fn margin_top(&self, grid: GridId) -> u16 {
+        self.slots
+            .iter()
+            .find(|slot| slot.id == grid)
+            .and_then(|slot| slot.window.as_ref())
+            .map_or(0, |window| window.margin_top)
+    }
+
+    /// How much a float anchored to `anchor` has to move to sit over the
+    /// text it belongs to, as `(rows, cols)`.
+    fn float_shift(&self, anchor: GridId) -> (u16, u16) {
+        if anchor == GLOBAL_GRID {
+            return (0, 0);
+        }
+        let Some(window) = self
+            .slots
+            .iter()
+            .find(|slot| slot.id == anchor)
+            .and_then(|slot| slot.window.as_ref())
+        else {
+            return (0, 0);
+        };
+        let (row, col, width, height) = window.slot;
+        let origin = inner_origin(self.look, (row, col, width, height), window.margin_top);
+        (origin.0.saturating_sub(row), origin.1.saturating_sub(col))
+    }
+
+    /// How window layout is drawn, and whether this call changed it.
+    ///
+    /// A look change moves every window grid's origin and what every one of
+    /// them owes nvim, so the whole frame repaints and every standing
+    /// request is stale at once.
+    pub fn set_look(&mut self, look: Look) -> bool {
+        if self.look == look {
+            return false;
+        }
+        self.look = look;
+        for index in 0..self.slots.len() {
+            let Some(window) = self.slots.get(index).and_then(|slot| slot.window.as_ref()) else {
+                continue;
+            };
+            let (slot, margin_top) = (window.slot, window.margin_top);
+            let origin = inner_origin(look, slot, margin_top);
+            if let Some(entry) = self.slots.get_mut(index) {
+                if let Some(placed) = entry.placed.as_mut() {
+                    placed.origin = origin;
+                }
+            }
+        }
+        self.placement_dirty = true;
+        true
+    }
+
+    /// How window layout is currently drawn.
+    #[must_use]
+    pub fn look(&self) -> Look {
+        self.look
+    }
+
+    /// The window nvim last placed on `grid`, as it addresses it.
+    #[must_use]
+    pub fn window_handle(&self, grid: GridId) -> Option<WinHandle> {
+        self.slots
+            .iter()
+            .find(|slot| slot.id == grid)
+            .and_then(|slot| slot.window.as_ref())
+            .map(|window| window.win)
+    }
+
+    /// Every grid holding an ordinary window, in ascending id order.
+    #[must_use]
+    pub fn window_grids(&self) -> Vec<GridId> {
+        let mut ids: Vec<GridId> = self
+            .slots
+            .iter()
+            .filter(|slot| slot.window.is_some())
+            .map(|slot| slot.id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The inner request `grid` owes, or `None` when nothing has changed
+    /// since the last request this registry answered for it under this
+    /// `look` and this top margin.
+    ///
+    /// Keyed on `(slot, look, margin_top)` rather than the slot alone: a
+    /// gaps flip changes what every window owes while leaving slots whose
+    /// neighbours absorb the ring change exactly where they were, and a
+    /// slot-only key would drop the re-send that flip exists to make.
+    ///
+    /// Every `nvim_ui_try_resize_grid` costs a full redraw of the window it
+    /// names, so the guard is what keeps an attach from relaying out a
+    /// screen nvim has already drawn.
+    #[must_use]
+    pub fn pending_inner_request(&mut self, grid: GridId, look: Look) -> Option<(u16, u16)> {
+        let entry = self.slots.iter_mut().find(|slot| slot.id == grid)?;
+        let window = entry.window.as_mut()?;
+        let key = (window.slot, look, window.margin_top);
+        if window.requested == Some(key) {
+            return None;
+        }
+        window.requested = Some(key);
+        let (_, _, width, height) = window.slot;
+        Some(look.inner_request((width, height), window.margin_top))
+    }
+
     /// Whether view is holding `grid`'s float off the screen.
     ///
     /// Distinct from "absent from [`panes_in_z_order`]", which a hidden or
@@ -785,9 +1013,24 @@ impl GridRegistry {
             id,
             grid: Grid::new(),
             placed: None,
+            window: None,
         });
         self.slots.last_mut()
     }
+}
+
+/// Where a window grid's cell `(0, 0)` sits inside the slot nvim gave it.
+///
+/// A slot too small to frame is drawn bare, so its grid fills the slot and
+/// sits at its origin, which is also what gapless tiles and `"nvim"` mode
+/// answer.
+fn inner_origin(look: Look, slot: (u16, u16, u16, u16), margin_top: u16) -> (u16, u16) {
+    let (row, col, width, height) = slot;
+    if look.inner_request((width, height), margin_top) == (0, 0) {
+        return (row, col);
+    }
+    let (rows, cols) = look.inset();
+    (row.saturating_add(rows), col.saturating_add(cols))
 }
 
 impl Default for GridRegistry {
@@ -800,15 +1043,27 @@ impl Default for GridRegistry {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::model::{Panes, MIN_FRAMED_SLOT};
+
+    /// Places `grid`'s window over the whole slot its grid already fills,
+    /// which is the shape every `win_pos` takes while no inner size has
+    /// been asked for.
+    fn window(registry: &mut GridRegistry, grid: GridId, startrow: u16, startcol: u16) {
+        let (width, height) = registry.grid(grid).map_or((0, 0), Grid::size);
+        registry.apply(GridEvent::Window {
+            grid,
+            win: WinHandle(grid.0),
+            startrow,
+            startcol,
+            width,
+            height,
+        });
+    }
 
     #[test]
     fn a_placement_before_its_resize_is_retained() {
         let mut registry = GridRegistry::new();
-        registry.apply(GridEvent::Window {
-            grid: GridId(2),
-            startrow: 0,
-            startcol: 41,
-        });
+        window(&mut registry, GridId(2), 0, 41);
         registry.apply(GridEvent::Cells {
             grid: GridId(2),
             op: GridOp::Resize {
@@ -838,11 +1093,7 @@ mod tests {
         for closed in [false, true] {
             let mut registry = GridRegistry::new();
             resize(&mut registry, GridId(4), 40, 23);
-            registry.apply(GridEvent::Window {
-                grid: GridId(4),
-                startrow: 0,
-                startcol: 0,
-            });
+            window(&mut registry, GridId(4), 0, 0);
             if closed {
                 registry.apply(GridEvent::Close { grid: GridId(4) });
             }
@@ -860,11 +1111,7 @@ mod tests {
     fn hidden_grids_are_not_painted_but_are_not_forgotten() {
         let mut registry = GridRegistry::new();
         resize(&mut registry, GridId(5), 29, 19);
-        registry.apply(GridEvent::Window {
-            grid: GridId(5),
-            startrow: 0,
-            startcol: 41,
-        });
+        window(&mut registry, GridId(5), 0, 41);
         registry.apply(GridEvent::Hide { grid: GridId(5) });
         assert_eq!(ids(&registry), vec![GLOBAL_GRID]);
         assert_eq!(
@@ -874,11 +1121,7 @@ mod tests {
         );
         // a hidden window comes back through a bare `win_pos`; the wire
         // carries no paired "show"
-        registry.apply(GridEvent::Window {
-            grid: GridId(5),
-            startrow: 0,
-            startcol: 41,
-        });
+        window(&mut registry, GridId(5), 0, 41);
         assert_eq!(ids(&registry), vec![GLOBAL_GRID, GridId(5)]);
     }
 
@@ -887,11 +1130,7 @@ mod tests {
         let mut registry = GridRegistry::new();
         for id in [GridId(2), GridId(6)] {
             resize(&mut registry, id, 10, 5);
-            registry.apply(GridEvent::Window {
-                grid: id,
-                startrow: 0,
-                startcol: 0,
-            });
+            window(&mut registry, id, 0, 0);
         }
         for (id, zindex) in [(GridId(9), 200), (GridId(7), 50)] {
             resize(&mut registry, id, 4, 2);
@@ -1024,11 +1263,7 @@ mod tests {
         let mut registry = GridRegistry::new();
         resize(&mut registry, GLOBAL_GRID, 80, 24);
         resize(&mut registry, GridId(4), 39, 23);
-        registry.apply(GridEvent::Window {
-            grid: GridId(4),
-            startrow: 0,
-            startcol: 41,
-        });
+        window(&mut registry, GridId(4), 0, 41);
         registry.apply(GridEvent::Cells {
             grid: GridId(4),
             op: GridOp::CursorGoto { row: 2, col: 5 },
@@ -1052,11 +1287,7 @@ mod tests {
         let mut registry = GridRegistry::new();
         resize(&mut registry, GLOBAL_GRID, 80, 24);
         resize(&mut registry, GridId(4), 39, 23);
-        registry.apply(GridEvent::Window {
-            grid: GridId(4),
-            startrow: 0,
-            startcol: 41,
-        });
+        window(&mut registry, GridId(4), 0, 41);
         registry.apply(GridEvent::Cells {
             grid: GridId(4),
             op: GridOp::CursorGoto { row: 2, col: 5 },
@@ -1087,11 +1318,7 @@ mod tests {
         let mut registry = GridRegistry::new();
         resize(&mut registry, GLOBAL_GRID, 80, 24);
         resize(&mut registry, GridId(2), 39, 23);
-        registry.apply(GridEvent::Window {
-            grid: GridId(2),
-            startrow: 0,
-            startcol: 41,
-        });
+        window(&mut registry, GridId(2), 0, 41);
         // inside the pane, clamping is the translation hit_test already made
         assert_eq!(registry.clamp_into(GridId(2), 41, 3), Some((0, 3)));
         // left of it, and below it
@@ -1105,17 +1332,9 @@ mod tests {
         let mut registry = GridRegistry::new();
         resize(&mut registry, GLOBAL_GRID, 80, 24);
         resize(&mut registry, GridId(4), 40, 23);
-        registry.apply(GridEvent::Window {
-            grid: GridId(4),
-            startrow: 0,
-            startcol: 0,
-        });
+        window(&mut registry, GridId(4), 0, 0);
         resize(&mut registry, GridId(2), 39, 23);
-        registry.apply(GridEvent::Window {
-            grid: GridId(2),
-            startrow: 0,
-            startcol: 41,
-        });
+        window(&mut registry, GridId(2), 0, 41);
         resize(&mut registry, GridId(7), 22, 5);
         registry.apply(GridEvent::Float {
             grid: GridId(7),
@@ -1194,11 +1413,7 @@ mod tests {
             "a grid with no box on screen damaged the frame: {unplaced:?}"
         );
 
-        registry.apply(GridEvent::Window {
-            grid: GridId(5),
-            startrow: 12,
-            startcol: 0,
-        });
+        window(&mut registry, GridId(5), 12, 0);
         assert!(
             registry.take_damage().full,
             "a window appeared and the rows it covered were never repainted"
@@ -1262,11 +1477,7 @@ mod tests {
             "a message area and a float are not the file the user opened"
         );
 
-        registry.apply(GridEvent::Window {
-            grid: GridId(6),
-            startrow: 0,
-            startcol: 0,
-        });
+        window(&mut registry, GridId(6), 0, 0);
         resize(&mut registry, GridId(6), 80, 23);
         put(&mut registry, GridId(6), 0);
         registry.apply(GridEvent::Hide { grid: GridId(6) });
@@ -1276,21 +1487,13 @@ mod tests {
         );
 
         registry.withhold_float(GridId(5), true);
-        registry.apply(GridEvent::Window {
-            grid: GridId(5),
-            startrow: 0,
-            startcol: 0,
-        });
+        window(&mut registry, GridId(5), 0, 0);
         assert!(
             !registry.window_text_painted(),
             "a withheld float re-placed as a window keeps the hold and paints no cell"
         );
 
-        registry.apply(GridEvent::Window {
-            grid: GridId(2),
-            startrow: 0,
-            startcol: 0,
-        });
+        window(&mut registry, GridId(2), 0, 0);
         resize(&mut registry, GridId(2), 80, 23);
         assert!(
             !registry.window_text_painted(),
@@ -1344,5 +1547,240 @@ mod tests {
             .into_iter()
             .map(|pane| pane.id)
             .collect()
+    }
+
+    fn tiles(gaps: bool) -> Look {
+        Look::new(Panes::Tiles, gaps)
+    }
+
+    /// Places `grid`'s window in `slot` without touching the grid's own
+    /// size, which is the shape a `win_pos` takes before the `grid_resize`
+    /// that answers it.
+    fn window_slot(registry: &mut GridRegistry, grid: GridId, slot: (u16, u16, u16, u16)) {
+        let (startrow, startcol, width, height) = slot;
+        registry.apply(GridEvent::Window {
+            grid,
+            win: WinHandle(grid.0),
+            startrow,
+            startcol,
+            width,
+            height,
+        });
+    }
+
+    fn pane_of(registry: &GridRegistry, grid: GridId) -> Pane {
+        registry
+            .panes_in_z_order()
+            .into_iter()
+            .find(|pane| pane.id == grid)
+            .expect("the grid is placed")
+    }
+
+    #[test]
+    fn a_window_event_carries_the_slot_and_the_handle() {
+        let mut registry = GridRegistry::new();
+        assert!(registry.set_look(tiles(true)));
+        window_slot(&mut registry, GridId(2), (3, 5, 40, 20));
+        let pane = pane_of(&registry, GridId(2));
+        assert_eq!(pane.slot, (3, 5, 40, 20), "the slot nvim reported");
+        assert_eq!(pane.origin, (5, 7), "the inner origin the look puts in it");
+        assert_eq!(registry.window_handle(GridId(2)), Some(WinHandle(2)));
+    }
+
+    #[test]
+    fn a_viewport_margin_is_kept_for_the_grid_it_names() {
+        let mut registry = GridRegistry::new();
+        registry.set_look(tiles(true));
+        window_slot(&mut registry, GridId(2), (0, 0, 40, 20));
+        window_slot(&mut registry, GridId(3), (0, 40, 40, 20));
+        assert_eq!(
+            registry.pending_inner_request(GridId(2), tiles(true)),
+            Some((36, 16))
+        );
+        registry.apply(GridEvent::Margins {
+            grid: GridId(2),
+            top: 1,
+        });
+        assert_eq!(
+            registry.pending_inner_request(GridId(2), tiles(true)),
+            Some((36, 15)),
+            "the winbar row comes out of the height the window is asked for"
+        );
+        assert_eq!(
+            registry.pending_inner_request(GridId(3), tiles(true)),
+            Some((36, 16)),
+            "the neighbour has no winbar and owes its whole inner height"
+        );
+    }
+
+    #[test]
+    fn a_gapped_slot_requests_four_cells_less_at_the_inset_origin() {
+        let mut registry = GridRegistry::new();
+        registry.set_look(tiles(true));
+        window_slot(&mut registry, GridId(2), (4, 6, 40, 20));
+        assert_eq!(
+            registry.pending_inner_request(GridId(2), tiles(true)),
+            Some((36, 16))
+        );
+        assert_eq!(pane_of(&registry, GridId(2)).origin, (6, 8));
+    }
+
+    #[test]
+    fn a_gapless_slot_requests_nothing_and_fills_its_slot() {
+        let mut registry = GridRegistry::new();
+        registry.set_look(tiles(false));
+        window_slot(&mut registry, GridId(2), (4, 6, 40, 20));
+        assert_eq!(
+            registry.pending_inner_request(GridId(2), tiles(false)),
+            Some((0, 0))
+        );
+        assert_eq!(pane_of(&registry, GridId(2)).origin, (4, 6));
+        assert!(tiles(false).frames((40, 20), 0));
+    }
+
+    #[test]
+    fn a_winbar_takes_its_row_out_of_the_height_request() {
+        let mut registry = GridRegistry::new();
+        registry.set_look(tiles(true));
+        window_slot(&mut registry, GridId(2), (0, 0, 40, 20));
+        registry.apply(GridEvent::Margins {
+            grid: GridId(2),
+            top: 1,
+        });
+        assert_eq!(
+            registry.pending_inner_request(GridId(2), tiles(true)),
+            Some((36, 15))
+        );
+    }
+
+    #[test]
+    fn a_slot_under_the_framed_minimum_is_drawn_bare() {
+        let look = tiles(true);
+        let (min_width, min_height) = MIN_FRAMED_SLOT;
+        for slot in [(0, 0, min_width - 1, 20), (0, 0, 40, min_height - 1)] {
+            let mut registry = GridRegistry::new();
+            registry.set_look(look);
+            window_slot(&mut registry, GridId(2), slot);
+            assert_eq!(
+                registry.pending_inner_request(GridId(2), look),
+                Some((0, 0)),
+                "a slot of {slot:?} has no room for a ring"
+            );
+            assert_eq!(pane_of(&registry, GridId(2)).origin, (slot.0, slot.1));
+            assert!(!look.frames((slot.2, slot.3), 0));
+        }
+        assert!(look.frames((min_width, min_height), 0));
+    }
+
+    #[test]
+    fn a_five_row_slot_with_a_winbar_is_drawn_bare() {
+        let look = tiles(true);
+        let mut registry = GridRegistry::new();
+        registry.set_look(look);
+        window_slot(&mut registry, GridId(2), (0, 0, 40, 5));
+        registry.apply(GridEvent::Margins {
+            grid: GridId(2),
+            top: 1,
+        });
+        assert_eq!(
+            registry.pending_inner_request(GridId(2), look),
+            Some((0, 0))
+        );
+        assert_eq!(pane_of(&registry, GridId(2)).origin, (0, 0));
+        assert!(!look.frames((40, 5), 1));
+        assert!(look.frames((40, 6), 1), "one more row and the ring fits");
+    }
+
+    #[test]
+    fn nvim_mode_requests_nothing_and_frames_nothing() {
+        let look = Look::new(Panes::Nvim, true);
+        let mut registry = GridRegistry::new();
+        window_slot(&mut registry, GridId(2), (4, 6, 40, 20));
+        assert_eq!(look.ring(), 0);
+        assert_eq!(
+            registry.pending_inner_request(GridId(2), look),
+            Some((0, 0))
+        );
+        assert_eq!(pane_of(&registry, GridId(2)).origin, (4, 6));
+        assert!(!look.frames((40, 20), 0));
+    }
+
+    #[test]
+    fn an_unchanged_slot_sends_no_second_request() {
+        let mut registry = GridRegistry::new();
+        registry.set_look(tiles(true));
+        window_slot(&mut registry, GridId(2), (0, 0, 40, 20));
+        assert_eq!(
+            registry.pending_inner_request(GridId(2), tiles(true)),
+            Some((36, 16))
+        );
+        assert_eq!(registry.pending_inner_request(GridId(2), tiles(true)), None);
+        window_slot(&mut registry, GridId(2), (0, 0, 40, 20));
+        assert_eq!(
+            registry.pending_inner_request(GridId(2), tiles(true)),
+            None,
+            "nvim re-announcing the same slot changes nothing the window owes"
+        );
+    }
+
+    #[test]
+    fn a_gaps_flip_on_an_unmoved_slot_still_requests() {
+        let mut registry = GridRegistry::new();
+        registry.set_look(tiles(true));
+        window_slot(&mut registry, GridId(2), (0, 0, 40, 20));
+        assert_eq!(
+            registry.pending_inner_request(GridId(2), tiles(true)),
+            Some((36, 16))
+        );
+        assert!(registry.set_look(tiles(false)));
+        assert_eq!(
+            registry.pending_inner_request(GridId(2), tiles(false)),
+            Some((0, 0)),
+            "the slot is where it was and the look changed"
+        );
+    }
+
+    #[test]
+    fn a_flip_to_nvim_mode_clears_every_standing_request() {
+        let mut registry = GridRegistry::new();
+        registry.set_look(tiles(true));
+        window_slot(&mut registry, GridId(2), (0, 0, 40, 20));
+        window_slot(&mut registry, GridId(3), (0, 40, 40, 20));
+        for grid in registry.window_grids() {
+            assert_eq!(
+                registry.pending_inner_request(grid, tiles(true)),
+                Some((36, 16))
+            );
+        }
+        let nvim = Look::new(Panes::Nvim, true);
+        assert!(registry.set_look(nvim));
+        let cleared: Vec<_> = registry
+            .window_grids()
+            .into_iter()
+            .map(|grid| registry.pending_inner_request(grid, nvim))
+            .collect();
+        assert_eq!(cleared, vec![Some((0, 0)), Some((0, 0))]);
+    }
+
+    #[test]
+    fn a_float_anchored_to_a_gapped_window_paints_at_the_inner_origin() {
+        let mut registry = GridRegistry::new();
+        registry.set_look(tiles(true));
+        window_slot(&mut registry, GridId(2), (4, 6, 40, 20));
+        resize(&mut registry, GridId(7), 10, 3);
+        registry.apply(GridEvent::Float {
+            grid: GridId(7),
+            anchor_grid: GridId(2),
+            screen_row: 5,
+            screen_col: 7,
+            zindex: 50,
+            compindex: 1,
+        });
+        assert_eq!(
+            pane_of(&registry, GridId(7)).origin,
+            (7, 9),
+            "nvim placed the float from the slot origin, two cells out from \
+             the text it hovers"
+        );
     }
 }

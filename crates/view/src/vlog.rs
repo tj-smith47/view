@@ -2189,6 +2189,7 @@ mod tests {
     /// recoloured.
     #[test]
     fn the_highlight_reading_takes_the_placed_window_and_not_the_grid_beside_it() {
+        use view_core::events::WinHandle;
         use view_core::grid::registry::{GridEvent, GridId, GLOBAL_GRID};
         use view_core::grid::GridOp;
 
@@ -2208,8 +2209,11 @@ mod tests {
         });
         model.engine.apply_grid_event(GridEvent::Window {
             grid: window,
+            win: WinHandle(window.0),
             startrow: 0,
             startcol: 0,
+            width: 8,
+            height: 2,
         });
         model.engine.apply_grid_event(GridEvent::Cells {
             grid: GLOBAL_GRID,
@@ -2265,8 +2269,11 @@ mod tests {
         });
         model.engine.apply_grid_event(GridEvent::Window {
             grid: beside,
+            win: WinHandle(beside.0),
             startrow: 0,
             startcol: 8,
+            width: 4,
+            height: 1,
         });
         model.engine.apply_grid_event(GridEvent::Cells {
             grid: beside,
@@ -2310,6 +2317,7 @@ mod tests {
     /// was reported on -- recorded nowhere.
     #[test]
     fn every_wave_of_colours_is_reported_and_not_just_the_first() {
+        use view_core::events::WinHandle;
         use view_core::grid::registry::{GridEvent, GridId};
         use view_core::grid::GridOp;
 
@@ -2324,8 +2332,11 @@ mod tests {
         });
         model.engine.apply_grid_event(GridEvent::Window {
             grid: window,
+            win: WinHandle(window.0),
             startrow: 0,
             startcol: 0,
+            width: 8,
+            height: 2,
         });
         model.engine.apply_grid_event(GridEvent::Cells {
             grid: window,
@@ -2372,6 +2383,7 @@ mod tests {
     /// wave nor its closing line.
     #[test]
     fn a_pinned_window_that_went_away_says_so_and_closes_the_topic() {
+        use view_core::events::WinHandle;
         use view_core::grid::registry::{GridEvent, GridId};
         use view_core::grid::GridOp;
 
@@ -2386,8 +2398,11 @@ mod tests {
         });
         model.engine.apply_grid_event(GridEvent::Window {
             grid: window,
+            win: WinHandle(window.0),
             startrow: 0,
             startcol: 0,
+            width: 4,
+            height: 1,
         });
         model.engine.apply_grid_event(GridEvent::Cells {
             grid: window,
@@ -2425,6 +2440,7 @@ mod tests {
     /// watch on the exact moment the topic exists to record.
     #[test]
     fn a_pinned_window_that_went_blank_keeps_the_watch_open() {
+        use view_core::events::WinHandle;
         use view_core::grid::registry::{GridEvent, GridId};
         use view_core::grid::GridOp;
 
@@ -2439,8 +2455,11 @@ mod tests {
         });
         model.engine.apply_grid_event(GridEvent::Window {
             grid: window,
+            win: WinHandle(window.0),
             startrow: 0,
             startcol: 0,
+            width: 4,
+            height: 1,
         });
         model.engine.apply_grid_event(GridEvent::Cells {
             grid: window,

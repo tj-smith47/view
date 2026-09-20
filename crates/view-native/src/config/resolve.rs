@@ -11,16 +11,18 @@
 use std::path::PathBuf;
 
 pub use view_core::config::Source;
-use view_core::config::{BOOL_EXPECTED, KEYS_EXPECTED, TIER_EXPECTED, WIDTH_EXPECTED};
-use view_core::model::Tier;
+use view_core::config::{
+    BOOL_EXPECTED, COLOR_EXPECTED, KEYS_EXPECTED, PANES_EXPECTED, TIER_EXPECTED, WIDTH_EXPECTED,
+};
+use view_core::model::{Panes, Tier};
 use view_core::native::geometry;
 use view_core::native::keys::{Action, Direction, KeyBindings};
 use view_core::native::registry;
 
 use super::keys::{env_name, keys, ConfigKey};
 use super::{
-    parse_nvim_bin, parse_theme, parse_tier, KeysConfig, NativeConfig, SupervisionConfig,
-    ViewConfig, AUTO, BUNDLED,
+    parse_color, parse_nvim_bin, parse_panes, parse_theme, parse_tier, KeysConfig, NativeConfig,
+    SupervisionConfig, UiTokens, ViewConfig, AUTO, BUNDLED,
 };
 
 /// One resolved answer and the reason it is that answer.
@@ -72,7 +74,7 @@ impl From<TierChoice> for Tier {
 
 /// Every value a flag may override, taken from the parsed command line.
 ///
-/// The five keys decision 6a names, and no more: `[native]`'s switches are
+/// The keys decision 6a names, and no more: `[native]`'s switches are
 /// reached through `--clean` as a whole table, so a `None` flag on a
 /// registry row is a stated state rather than a gap.
 #[derive(Debug, Clone, Default)]
@@ -87,6 +89,9 @@ pub struct Overrides {
     pub appname: Option<String>,
     /// `--single-grid`.
     pub single_grid: Option<bool>,
+    /// `--panes`. Doubly optional the way the file layer is: `Some(None)`
+    /// is the word `auto`.
+    pub panes: Option<Option<Panes>>,
 }
 
 /// The `[ui]` table's resolved answers.
@@ -98,6 +103,17 @@ pub struct ResolvedUi {
     /// Which colorscheme to ask nvim for, or `None` to derive the chrome
     /// from whatever the user's own config ended on.
     pub theme: Resolved<Option<String>>,
+    /// How window layout is drawn.
+    pub panes: Resolved<Panes>,
+    /// The marker that decided `panes` under `"auto"`, for the report row.
+    pub panes_marker: Option<&'static str>,
+    /// What `"auto"` answered on this environment, whatever layer won.
+    /// `:View ui panes auto` switches back to it mid-session.
+    pub detected_panes: Panes,
+    /// Whether a gap separates neighbouring frames under tiles.
+    pub gaps: Resolved<bool>,
+    /// The colours the user named for themselves.
+    pub tokens: Resolved<UiTokens>,
 }
 
 /// The `[engine]` table's resolved answers.
@@ -187,28 +203,6 @@ pub fn resolve_with(
     env: &dyn Fn(&str) -> Option<String>,
 ) -> ResolvedConfig {
     let mut notices = Vec::new();
-    let ui = ResolvedUi {
-        // the file's answers arrive already doubly optional (see `UiFile`):
-        // the outer `None` is "this layer named nothing", which is exactly
-        // what `layer` falls through on, so a mistyped tier and an absent
-        // one reach the derived answer by the same route
-        tier: layer(
-            flags.tier.map(Some),
-            env_read(env, "ui", "tier", TIER_EXPECTED, parse_tier, &mut notices),
-            file.ui.tier,
-            None,
-        ),
-        theme: layer(
-            flags.theme.as_deref().map(parse_theme),
-            env_read(env, "ui", "theme", "", always(parse_theme), &mut notices),
-            file.ui.theme.clone(),
-            None,
-        ),
-    };
-    // the file layer's own notice, which an environment value above it
-    // neither answers for nor silences: a mistyped tier is still a mistyped
-    // tier, the same terms `[native] tree_width`'s notice is carried on
-    notices.extend(file.ui.notice.clone());
     let engine = ResolvedEngine {
         nvim_bin: layer(
             flags.nvim_bin.clone().map(Some),
@@ -252,6 +246,99 @@ pub fn resolve_with(
             false,
         ),
     };
+    // resolved after `[engine]` because `single_grid` overrules it: without
+    // multigrid nvim announces no window placements at all, so there is
+    // nothing for a tile to be drawn around
+    let (derived_panes, derived_marker) = detect_panes(env);
+    let asked_panes = layer(
+        flags.panes,
+        env_read(
+            env,
+            "ui",
+            "panes",
+            PANES_EXPECTED,
+            parse_panes,
+            &mut notices,
+        ),
+        file.ui.panes,
+        None,
+    );
+    let forced = engine.single_grid.value;
+    let single_grid_answer = (
+        Resolved {
+            value: Panes::Nvim,
+            source: Source::Derived,
+        },
+        Some(SINGLE_GRID_MARKER),
+    );
+    let (panes, panes_marker) = match asked_panes.value {
+        // a mode the user asked for and did not get owes a notice; one they
+        // asked for and got keeps its own layer, single grid or not
+        Some(value) if forced && value != Panes::Nvim => {
+            notices.push(SINGLE_GRID_NOTICE.to_string());
+            single_grid_answer
+        }
+        Some(value) => (
+            Resolved {
+                value,
+                source: asked_panes.source,
+            },
+            None,
+        ),
+        None if forced => single_grid_answer,
+        None => (
+            Resolved {
+                value: derived_panes,
+                source: Source::Derived,
+            },
+            derived_marker,
+        ),
+    };
+    let ui = ResolvedUi {
+        // the file's answers arrive already doubly optional (see `UiFile`):
+        // the outer `None` is "this layer named nothing", which is exactly
+        // what `layer` falls through on, so a mistyped tier and an absent
+        // one reach the derived answer by the same route
+        tier: layer(
+            flags.tier.map(Some),
+            env_read(env, "ui", "tier", TIER_EXPECTED, parse_tier, &mut notices),
+            file.ui.tier,
+            None,
+        ),
+        theme: layer(
+            flags.theme.as_deref().map(parse_theme),
+            env_read(env, "ui", "theme", "", always(parse_theme), &mut notices),
+            file.ui.theme.clone(),
+            None,
+        ),
+        panes,
+        panes_marker,
+        detected_panes: derived_panes,
+        gaps: layer(
+            None,
+            env_read(env, "ui", "gaps", BOOL_EXPECTED, parse_bool, &mut notices),
+            file.ui.gaps,
+            true,
+        ),
+        tokens: layer(
+            None,
+            env_read(
+                env,
+                "ui.tokens",
+                "accent",
+                COLOR_EXPECTED,
+                parse_color,
+                &mut notices,
+            )
+            .map(|accent| UiTokens { accent }),
+            file.ui.tokens.clone(),
+            UiTokens::default(),
+        ),
+    };
+    // the file layer's own notices, which an environment value above them
+    // neither answers for nor silences: a mistyped tier is still a mistyped
+    // tier, the same terms `[native] tree_width`'s notice is carried on
+    notices.extend(file.ui.notices.iter().cloned());
     let mut disabled = Vec::new();
     let mut native = Vec::with_capacity(registry::features().len());
     for feature in registry::features() {
@@ -405,6 +492,25 @@ impl ResolvedConfig {
                 self.ui.theme.value.clone().unwrap_or_else(|| AUTO.into()),
                 self.ui.theme.source,
             ),
+            ("ui", "panes") => (
+                match self.ui.panes_marker {
+                    // the marker is what makes a derived answer readable:
+                    // "nvim" alone leaves a user to guess which of their
+                    // environment said so
+                    Some(marker) => format!("{} ({marker})", panes_label(self.ui.panes.value)),
+                    None => panes_label(self.ui.panes.value).to_string(),
+                },
+                self.ui.panes.source,
+            ),
+            ("ui", "gaps") => (self.ui.gaps.value.to_string(), self.ui.gaps.source),
+            ("ui.tokens", "accent") => (
+                self.ui
+                    .tokens
+                    .value
+                    .accent
+                    .map_or_else(|| AUTO.to_string(), |rgb| format!("#{rgb:06x}")),
+                self.ui.tokens.source,
+            ),
             ("engine", "nvim_bin") => (
                 self.engine
                     .nvim_bin
@@ -456,6 +562,77 @@ impl ResolvedConfig {
             ),
             _ => return None,
         })
+    }
+}
+
+/// The environment names a tiling window manager exports, read in this
+/// order with the first one set deciding.
+///
+/// A compositor that lays windows out already gives a person the tiling
+/// they want, and a second set of frames inside it is two window managers
+/// disagreeing on screen.
+const TILING_MARKERS: [&str; 3] = ["HYPRLAND_INSTANCE_SIGNATURE", "SWAYSOCK", "I3SOCK"];
+
+/// The desktop name every other tiling window manager on the list exports,
+/// matched against any colon-separated member of `XDG_CURRENT_DESKTOP`,
+/// case ignored.
+const TILING_DESKTOPS: [&str; 12] = [
+    "hyprland",
+    "sway",
+    "i3",
+    "river",
+    "niri",
+    "bspwm",
+    "dwm",
+    "awesome",
+    "qtile",
+    "xmonad",
+    "herbstluftwm",
+    "leftwm",
+];
+
+/// The one name outside [`TILING_MARKERS`] the detection reads.
+const XDG_CURRENT_DESKTOP: &str = "XDG_CURRENT_DESKTOP";
+
+/// What the report prints beside a look mode `[engine] single_grid` decided.
+const SINGLE_GRID_MARKER: &str = "[engine] single_grid";
+
+/// What a session that asked for tiles without multigrid owes the user.
+const SINGLE_GRID_NOTICE: &str =
+    "view: [engine] single_grid leaves nvim addressing one grid, so there are no window \
+     placements to draw tiles from -- [ui] panes answers nvim this run";
+
+/// The look `"auto"` resolves to, with the marker that decided it.
+///
+/// The fallback is tiles, which is also what an ssh session gets: the
+/// client's environment never reaches the server, so nothing a remote
+/// session can read says what is drawing its terminal.
+fn detect_panes(env: &dyn Fn(&str) -> Option<String>) -> (Panes, Option<&'static str>) {
+    for marker in TILING_MARKERS {
+        if env(marker).is_some_and(|value| !value.trim().is_empty()) {
+            return (Panes::Nvim, Some(marker));
+        }
+    }
+    let named = env(XDG_CURRENT_DESKTOP).is_some_and(|desktop| {
+        desktop.split(':').any(|member| {
+            let member = member.trim().to_ascii_lowercase();
+            TILING_DESKTOPS.iter().any(|name| *name == member)
+        })
+    });
+    if named {
+        return (Panes::Nvim, Some(XDG_CURRENT_DESKTOP));
+    }
+    (Panes::Tiles, None)
+}
+
+/// The word a look mode is written as, in every layer that carries one.
+#[must_use]
+const fn panes_label(panes: Panes) -> &'static str {
+    match panes {
+        Panes::Tiles => "tiles",
+        // every other arm is `Panes::Nvim`, and a mode added later reads as
+        // the picture nvim paints for itself until this table names it
+        _ => "nvim",
     }
 }
 
@@ -608,6 +785,8 @@ mod tests {
         match (row.table, row.key) {
             ("ui", "tier") => "basic",
             ("ui", "theme") => "gruvbox",
+            ("ui", "panes") => "nvim",
+            ("ui.tokens", "accent") => "#89b4fa",
             ("engine", "nvim_bin") => "/opt/nvim/bin/nvim",
             ("engine", "appname") => "work",
             ("native", "tree_width") => "40",
@@ -875,7 +1054,13 @@ mod tests {
         // report the profile an unset `[engine] appname` inherits, never to
         // decide anything
         for name in asked.borrow().iter() {
-            if name == INHERITED_APPNAME_ENV {
+            // the look-mode detection is the other reader of names outside
+            // the namespace: a window manager announces itself under its
+            // own name, and nothing view could generate would find it
+            if name == INHERITED_APPNAME_ENV
+                || name == XDG_CURRENT_DESKTOP
+                || TILING_MARKERS.contains(&name.as_str())
+            {
                 continue;
             }
             assert!(
@@ -1171,6 +1356,12 @@ mod tests {
             nvim_bin: Some(PathBuf::from("/opt/nvim/bin/nvim")),
             appname: Some("work".to_string()),
             single_grid: Some(true),
+            // nvim rather than tiles: without multigrid there are no window
+            // placements to draw tiles from, so `--single-grid --panes
+            // tiles` is a contradiction view resolves by ignoring the
+            // second, and a fixture that spelled it could not show the
+            // second reaching its key
+            panes: Some(Some(Panes::Nvim)),
         };
         let resolved = resolve_with(&ViewConfig::defaults(), &flags, &every_key_set);
         for key in keys().iter().filter(|key| key.flag.is_some()) {
@@ -1190,6 +1381,125 @@ mod tests {
             Some(PathBuf::from("/opt/nvim/bin/nvim"))
         );
         assert!(resolved.engine.single_grid.value);
+        assert_eq!(resolved.ui.panes.value, Panes::Nvim);
+    }
+
+    /// One case per row of the detection table, with the marker the row
+    /// answers under kept on the answer: a report that said `nvim` without
+    /// naming what decided it leaves a user to guess which of their
+    /// environment view read.
+    #[test]
+    fn each_tiling_marker_resolves_to_nvim_mode() {
+        let mut cases: Vec<(&str, String)> = TILING_MARKERS
+            .iter()
+            .map(|marker| (*marker, "1".to_string()))
+            .collect();
+        for desktop in TILING_DESKTOPS {
+            cases.push((XDG_CURRENT_DESKTOP, format!("ubuntu:{desktop}:GNOME")));
+        }
+        for (marker, value) in cases {
+            let env = |asked: &str| (asked == marker).then(|| value.clone());
+            let resolved = resolve_with(&ViewConfig::defaults(), &Overrides::default(), &env);
+            assert_eq!(
+                (resolved.ui.panes.value, resolved.ui.panes_marker),
+                (Panes::Nvim, Some(marker)),
+                "{marker}={value} must leave the layout to the window manager"
+            );
+            assert_eq!(
+                row(&resolved, "ui", "panes"),
+                (format!("nvim ({marker})"), Source::Derived),
+                "the report row names the marker that decided it"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ssh_session_with_no_marker_resolves_to_tiles() {
+        // the client's environment never reaches the server, so nothing a
+        // remote session can read says what is drawing its terminal
+        let env =
+            |asked: &str| matches!(asked, "SSH_CONNECTION" | "SSH_TTY").then(|| "1".to_string());
+        let resolved = resolve_with(&ViewConfig::defaults(), &Overrides::default(), &env);
+        assert_eq!(
+            (resolved.ui.panes.value, resolved.ui.panes_marker),
+            (Panes::Tiles, None)
+        );
+        assert_eq!(
+            row(&resolved, "ui", "panes"),
+            ("tiles".to_string(), Source::Derived)
+        );
+    }
+
+    #[test]
+    fn an_explicit_panes_value_beats_every_marker() {
+        let env = |asked: &str| (asked == "HYPRLAND_INSTANCE_SIGNATURE").then(|| "1".to_string());
+        let file =
+            ViewConfig::from_toml_str("[ui]\npanes = \"tiles\"\n").expect("the fixture must parse");
+        let resolved = resolve_with(&file, &Overrides::default(), &env);
+        assert_eq!(
+            (resolved.ui.panes.value, resolved.ui.panes_marker),
+            (Panes::Tiles, None),
+            "a value the user wrote outranks what view would have detected"
+        );
+        assert_eq!(
+            row(&resolved, "ui", "panes"),
+            ("tiles".to_string(), Source::File)
+        );
+        let flagged = resolve_with(
+            &file,
+            &Overrides {
+                panes: Some(Some(Panes::Nvim)),
+                ..Overrides::default()
+            },
+            &env,
+        );
+        assert_eq!(
+            row(&flagged, "ui", "panes"),
+            ("nvim".to_string(), Source::Flag)
+        );
+    }
+
+    #[test]
+    fn a_bad_panes_value_notices_and_falls_back_to_auto() {
+        let file = ViewConfig::from_toml_str("[ui]\npanes = \"mosaic\"\n")
+            .expect("a mode this build cannot read must not fail the file");
+        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+        assert_eq!(
+            (resolved.ui.panes.value, resolved.ui.panes_marker),
+            (Panes::Tiles, None),
+            "an unreadable mode answers from the layer below rather than the file"
+        );
+        let notices = resolved.notices().join("\n");
+        for fact in ["mosaic", PANES_EXPECTED, "[ui] panes"] {
+            assert!(notices.contains(fact), "{fact} is missing from {notices:?}");
+        }
+    }
+
+    #[test]
+    fn single_grid_forces_nvim_mode_with_a_notice() {
+        let file =
+            ViewConfig::from_toml_str("[ui]\npanes = \"tiles\"\n\n[engine]\nsingle_grid = true\n")
+                .expect("the fixture must parse");
+        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+        assert_eq!(
+            (resolved.ui.panes.value, resolved.ui.panes_marker),
+            (Panes::Nvim, Some(SINGLE_GRID_MARKER)),
+            "without multigrid there are no window placements to draw tiles from"
+        );
+        assert!(
+            resolved.notices().iter().any(|n| n == SINGLE_GRID_NOTICE),
+            "a mode the user asked for and did not get owes a notice: {:?}",
+            resolved.notices()
+        );
+        // and a session that never asked for tiles is told nothing
+        let quiet = resolve_with(
+            &ViewConfig::from_toml_str("[engine]\nsingle_grid = true\n")
+                .expect("the fixture must parse"),
+            &Overrides::default(),
+            &no_env,
+        );
+        assert_eq!(quiet.ui.panes.value, Panes::Nvim);
+        assert!(!quiet.notices().iter().any(|n| n == SINGLE_GRID_NOTICE));
     }
 
     #[test]

@@ -167,6 +167,13 @@ pub enum Msg {
         fg: Option<u32>,
         bg: Option<u32>,
     },
+    /// The reply to [`RpcCall::GetAccentHl`]: each group's foreground, or
+    /// `None` where the colorscheme sets none.
+    AccentProbeReply {
+        generation: u64,
+        function_fg: Option<u32>,
+        statement_fg: Option<u32>,
+    },
     /// The async acknowledgement of one read-side liveness probe. Carries
     /// no value: that the engine answered at all is the whole signal, and
     /// `generation` names which probe it answered, so a reply arriving out
@@ -1707,6 +1714,17 @@ pub enum RpcCall {
         width: u16,
         height: u16,
     },
+    /// `nvim_ui_try_resize_grid`: one window grid's inner size inside the
+    /// layout slot nvim keeps for it. `0, 0` clears the request and gives
+    /// the window its whole slot back.
+    ///
+    /// The request stands until it is replaced, so a slot that moves under
+    /// a later split leaves a grid sized for the slot it used to have.
+    TryResizeGrid {
+        grid: GridId,
+        width: u16,
+        height: u16,
+    },
     Paste {
         text: String,
     },
@@ -1859,6 +1877,18 @@ pub enum RpcCall {
     /// engine-originated traffic uses, never by blocking the caller that
     /// emitted this effect.
     GetDefaultHl {
+        generation: u64,
+    },
+    /// `nvim_get_hl` for the two syntax groups the accent role resolves
+    /// from. A separate probe from [`GetDefaultHl`](Self::GetDefaultHl)
+    /// because nvim broadcasts neither group: `hl_group_set` covers the UI
+    /// elements only, so `Function` and `Statement` can be read no other
+    /// way.
+    ///
+    /// Carries the same `generation` the `Normal` probe beside it does, so
+    /// a reply that crossed a colorscheme change is dropped by the same
+    /// comparison.
+    GetAccentHl {
         generation: u64,
     },
     /// Runs nvim's own `:colorscheme name`, the answer `[ui] theme` gives

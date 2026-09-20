@@ -32,6 +32,7 @@ pub use resolve::{
     TierChoice,
 };
 use serde::{Deserialize, Serialize};
+use view_core::model::Panes;
 use view_core::native::ext::{self, Ext};
 use view_core::native::geometry;
 use view_core::native::keys::{Action, Direction, KeyBindings};
@@ -83,15 +84,17 @@ struct ViewFile {
     ui: UiTable,
 }
 
-/// The `[ui]` table's wire shape: which rendering tier a session paints at
-/// and which colorscheme it runs. Unknown keys are refused rather than
-/// ignored, for the reason `[supervision]`'s own check states.
+/// The `[ui]` table's wire shape: which rendering tier a session paints at,
+/// which colorscheme it runs, how window layout is drawn, and the colours a
+/// user names for themselves. Unknown keys are refused rather than ignored,
+/// for the reason `[supervision]`'s own check states.
 ///
-/// Both fields stay `String`-typed here rather than parsed by serde, for the
-/// reason [`EngineTable`]'s own do: each vocabulary includes a word that
-/// means *no choice* (`"auto"`, on both keys), which is a resolution answer
-/// rather than a type, and the same word has to read the same way when it
-/// arrives through the environment or a flag instead.
+/// `tier`, `theme` and `panes` stay `String`-typed here rather than parsed
+/// by serde, for the reason [`EngineTable`]'s own do: each vocabulary
+/// includes a word that means *no choice* (`"auto"`), which is a resolution
+/// answer rather than a type, and the same word has to read the same way
+/// when it arrives through the environment or a flag instead. `gaps` has no
+/// such word: it is the boolean it looks like.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct UiTable {
@@ -99,6 +102,35 @@ struct UiTable {
     tier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    panes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gaps: Option<bool>,
+    #[serde(default)]
+    tokens: UiTokensTable,
+}
+
+/// The `[ui.tokens]` table's wire shape: a colour a user names for a role
+/// view would otherwise resolve for itself.
+///
+/// Non-`Option` in [`UiTable`] for the reason [`ViewFile`]'s own table
+/// fields are: a table this loader reads has to render through
+/// `loaded_tables` for the example pin to see it.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UiTokensTable {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    accent: Option<String>,
+}
+
+/// The `[ui.tokens]` table: a colour a user names for a role view resolves
+/// for itself otherwise.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UiTokens {
+    /// The colour marking the active tile, as `0x00RRGGBB`, or `None` to
+    /// resolve it from the colorscheme.
+    pub accent: Option<u32>,
 }
 
 /// The `[ui]` table's resolved answers, as the file gave them.
@@ -115,10 +147,15 @@ struct UiTable {
 struct UiFile {
     tier: Option<Option<TierChoice>>,
     theme: Option<Option<String>>,
-    /// What a value this build could not read owes the user, on the same
+    /// `Some(None)` is the word `auto`, the same double meaning `tier`
+    /// carries.
+    panes: Option<Option<Panes>>,
+    gaps: Option<bool>,
+    tokens: Option<UiTokens>,
+    /// What each value this build could not read owes the user, on the same
     /// terms `[native] tree_width` answers under: never a reason to refuse
     /// the file, never a silent fall-through either.
-    notice: Option<String>,
+    notices: Vec<String>,
 }
 
 /// The word that names view deciding for itself, and therefore the absence
@@ -155,27 +192,94 @@ fn parse_theme(value: &str) -> Option<String> {
     (!value.is_empty() && value != AUTO).then(|| value.to_string())
 }
 
+/// A look mode a user named, `Some(None)` for the word that names the
+/// absence of a choice, and `None` for text that names no mode at all --
+/// which falls through to the layer below, the way [`parse_tier`] does.
+fn parse_panes(value: &str) -> Option<Option<Panes>> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        AUTO => Some(None),
+        "tiles" => Some(Some(Panes::Tiles)),
+        "nvim" => Some(Some(Panes::Nvim)),
+        _ => None,
+    }
+}
+
+/// The colour a value names as `0x00RRGGBB`, `Some(None)` for the word that
+/// names the absence of a choice, and `None` for text that names no colour
+/// at all -- which falls through to the layer below, the way
+/// [`parse_tier`] does.
+///
+/// Only the six-digit hex form nvim's own `guifg` takes, with or without
+/// the `#`: a highlight group name would be a second vocabulary resolved
+/// against an engine this parse cannot reach.
+fn parse_color(value: &str) -> Option<Option<u32>> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case(AUTO) {
+        return Some(None);
+    }
+    let digits = value.strip_prefix('#').unwrap_or(value);
+    (digits.len() == 6 && digits.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| u32::from_str_radix(digits, 16).ok())
+        .flatten()
+        .map(Some)
+}
+
 /// The `[ui]` table's answers with each key's own vocabulary applied, and
 /// the notice a value neither vocabulary accepts owes the user.
 fn resolve_ui(table: &UiTable) -> UiFile {
-    let mut notice = None;
-    let tier = table.tier.as_deref().and_then(|raw| {
-        let parsed = parse_tier(raw);
-        if parsed.is_none() {
-            notice = Some(view_core::config::discarded_file(
-                raw,
-                view_core::config::TIER_EXPECTED,
-                "ui",
-                "tier",
-            ));
-        }
-        parsed
-    });
+    let mut notices = Vec::new();
+    let tier = read_key(
+        table.tier.as_deref(),
+        ("ui", "tier"),
+        view_core::config::TIER_EXPECTED,
+        parse_tier,
+        &mut notices,
+    );
+    let panes = read_key(
+        table.panes.as_deref(),
+        ("ui", "panes"),
+        view_core::config::PANES_EXPECTED,
+        parse_panes,
+        &mut notices,
+    );
+    let accent = read_key(
+        table.tokens.accent.as_deref(),
+        ("ui.tokens", "accent"),
+        view_core::config::COLOR_EXPECTED,
+        parse_color,
+        &mut notices,
+    );
     UiFile {
         tier,
         theme: table.theme.as_deref().map(parse_theme),
-        notice,
+        panes,
+        gaps: table.gaps,
+        // the outer `Some` is the file naming the key at all, which is what
+        // keeps a value this build could not read from reading as the file
+        // declining the role
+        tokens: accent.map(|accent| UiTokens { accent }),
+        notices,
     }
+}
+
+/// One `[ui]` key read through its own vocabulary, with the notice a value
+/// that vocabulary refuses owes the user.
+///
+/// A refused value never fails the session and never falls through in
+/// silence either, the terms every other key already answers on.
+fn read_key<T>(
+    raw: Option<&str>,
+    (table, key): (&str, &str),
+    expected: &str,
+    parse: impl Fn(&str) -> Option<T>,
+    notices: &mut Vec<String>,
+) -> Option<T> {
+    let raw = raw?;
+    let parsed = parse(raw);
+    if parsed.is_none() {
+        notices.push(view_core::config::discarded_file(raw, expected, table, key));
+    }
+    parsed
 }
 
 /// The `[engine]` table's wire shape: which editor a session spawns, which
@@ -849,6 +953,15 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
     if file.ui.theme.is_some() {
         spelled.push(("ui", "theme"));
     }
+    if file.ui.panes.is_some() {
+        spelled.push(("ui", "panes"));
+    }
+    if file.ui.gaps.is_some() {
+        spelled.push(("ui", "gaps"));
+    }
+    if file.ui.tokens.accent.is_some() {
+        spelled.push(("ui.tokens", "accent"));
+    }
     spelled
 }
 
@@ -1052,12 +1165,13 @@ mod tests {
     /// Hand-written, and unavoidably so: it is a transcription of the spec,
     /// which no build artifact carries. What is *not* hand-written is which
     /// of them this build reads -- see [`loaded_tables`].
-    static SPECIFIED_TABLES: [&str; 7] = [
+    static SPECIFIED_TABLES: [&str; 8] = [
         "native",
         "keys",
         "supervision",
         "engine",
         "ui",
+        "ui.tokens",
         "ai",
         "ai.review",
     ];
@@ -1089,11 +1203,24 @@ mod tests {
     /// such a loader landing without its example block going live is caught
     /// by review, not by this test.
     fn loaded_tables() -> BTreeSet<String> {
-        toml::Value::try_from(ViewFile::default())
-            .expect("the loader's own shape must render as TOML")
-            .as_table()
-            .map(|table| table.keys().cloned().collect())
-            .unwrap_or_default()
+        let rendered = toml::Value::try_from(ViewFile::default())
+            .expect("the loader's own shape must render as TOML");
+        let Some(top) = rendered.as_table() else {
+            return BTreeSet::new();
+        };
+        let mut names = BTreeSet::new();
+        for (name, value) in top {
+            names.insert(name.clone());
+            // a nested table is a table this crate reads too, and its own
+            // header is what the example owes: `[ui.tokens]` is invisible
+            // to a walk that only reads the top level
+            for nested in value.as_table().into_iter().flatten() {
+                if nested.1.is_table() {
+                    names.insert(format!("{name}.{}", nested.0));
+                }
+            }
+        }
+        names
     }
 
     /// Every `[table]` header in `EXAMPLE_TOML`, as `(name, commented)`.
@@ -1186,6 +1313,9 @@ mod tests {
             ("supervision", _) => "false",
             ("ui", "tier") => "\"basic\"",
             ("ui", "theme") => "\"gruvbox\"",
+            ("ui", "panes") => "\"nvim\"",
+            ("ui", "gaps") => "false",
+            ("ui.tokens", "accent") => "\"#89b4fa\"",
             ("engine", "nvim_bin") => "\"/opt/nvim/bin/nvim\"",
             ("engine", "appname") => "\"work\"",
             ("engine", "single_grid") => "false",
@@ -1367,7 +1497,7 @@ mod tests {
             "an unreadable tier answers from the layer below rather than claiming the file's \
              own `auto`"
         );
-        let notice = cfg.ui.notice.as_deref().unwrap_or_default();
+        let notice = cfg.ui.notices.join(" ");
         for fact in ["turbo", view_core::config::TIER_EXPECTED, "[ui] tier"] {
             assert!(notice.contains(fact), "{fact} is missing from {notice:?}");
         }

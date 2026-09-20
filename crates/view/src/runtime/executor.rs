@@ -301,6 +301,11 @@ impl<E: EngineOps> Executor<E> {
                 let result = match call {
                     RpcCall::Input { notation } => self.ops.input(&notation),
                     RpcCall::TryResize { width, height } => self.ops.try_resize(width, height),
+                    RpcCall::TryResizeGrid {
+                        grid,
+                        width,
+                        height,
+                    } => self.ops.try_resize_grid(grid.0, width, height),
                     RpcCall::Paste { text } => self.ops.paste(&text),
                     RpcCall::InputMouse {
                         button,
@@ -320,6 +325,7 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::Notify { text } => self.ops.raise_notice(&text),
                     RpcCall::Takeover { steps } => self.ops.takeover(&steps),
                     RpcCall::GetDefaultHl { generation } => self.ops.probe_default_hl(generation),
+                    RpcCall::GetAccentHl { generation } => self.ops.probe_accent_hl(generation),
                     RpcCall::ProbeSwapRecovery { generation } => {
                         self.ops.probe_swap_recovery(generation)
                     }

@@ -1,0 +1,52 @@
+                                                                                
+                                                                                
+  +----------------------------------+   +-----------------------------------+  
+  |left                              |   |right                              |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   +-----------------------------------+  
+  |                                  |                                          
+  |                                  |                                          
+  |                                  |                                          
+  |                                  |   +-----------------------------------+  
+  |                                  |   |under                              |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  +----------------------------------+   +-----------------------------------+  
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+--- fg ---
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAA
+AABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBAAACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+A = Reset
+B = Rgb(137, 180, 250)
+C = Rgb(102, 110, 119)

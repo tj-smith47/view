@@ -65,6 +65,29 @@ pub fn keys() -> &'static [ConfigKey] {
                 derived: Some(super::AUTO),
             },
             ConfigKey {
+                table: "ui",
+                key: "panes",
+                flag: Some("--panes"),
+                // no text a user could write names the answer this key
+                // derives: `auto` is the absence of a choice, and what it
+                // resolves to is whatever the session's own environment
+                // says, which is the value the report prints beside the
+                // marker that decided it
+                derived: None,
+            },
+            ConfigKey {
+                table: "ui",
+                key: "gaps",
+                flag: None,
+                derived: Some("true"),
+            },
+            ConfigKey {
+                table: "ui.tokens",
+                key: "accent",
+                flag: None,
+                derived: Some(super::AUTO),
+            },
+            ConfigKey {
                 table: "engine",
                 key: "nvim_bin",
                 flag: Some("--nvim-bin"),
@@ -259,6 +282,7 @@ mod tests {
             tables,
             vec![
                 "ui",
+                "ui.tokens",
                 "engine",
                 "native",
                 "keys",
@@ -337,8 +361,8 @@ mod tests {
         let flagged: Vec<Option<&str>> = keys().iter().map(|row| row.flag).collect();
         assert_eq!(
             flagged.iter().filter(|flag| flag.is_some()).count(),
-            5,
-            "five flags, and a row without one is a stated state: {flagged:?}"
+            6,
+            "six flags, and a row without one is a stated state: {flagged:?}"
         );
         for row in keys().iter().filter(|row| row.flag.is_some()) {
             assert!(

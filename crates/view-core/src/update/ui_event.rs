@@ -84,17 +84,26 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         UiEvent::GridDestroy { grid } => place(model, GridEvent::Destroy { grid: GridId(grid) }),
         UiEvent::WinPos {
             grid,
+            win,
             startrow,
             startcol,
-            ..
-        } => place(
-            model,
-            GridEvent::Window {
-                grid: GridId(grid),
-                startrow: saturate_u16(startrow),
-                startcol: saturate_u16(startcol),
-            },
-        ),
+            width,
+            height,
+        } => {
+            let grid = GridId(grid);
+            place(
+                model,
+                GridEvent::Window {
+                    grid,
+                    win,
+                    startrow: saturate_u16(startrow),
+                    startcol: saturate_u16(startcol),
+                    width: saturate_u16(width),
+                    height: saturate_u16(height),
+                },
+            );
+            super::look::request_for(model, grid)
+        }
         UiEvent::WinFloatPos {
             grid,
             win,
@@ -179,7 +188,13 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // the (possibly still wire-ambiguous) raw values until a
             // matching reply lands
             let generation = model.engine.set_hl_default_colors(fg, bg);
-            vec![Effect::Rpc(RpcCall::GetDefaultHl { generation })]
+            // the accent's two groups are read on the same generation: a
+            // colorscheme moves `Function` and `Statement` exactly when it
+            // moves `Normal`, and nvim broadcasts neither of them
+            vec![
+                Effect::Rpc(RpcCall::GetDefaultHl { generation }),
+                Effect::Rpc(RpcCall::GetAccentHl { generation }),
+            ]
         }
         UiEvent::HlGroupSet { name, hl_id } => {
             model.engine.set_hl_group(name, hl_id);
@@ -401,9 +416,20 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         // as `grid_line`, and the only reader of a viewport is
         // `native::speculate`, which the host folds a batch through before
         // this applier ever sees it
-        UiEvent::WinViewport { .. }
-        | UiEvent::WinViewportMargins { .. }
-        | UiEvent::Unknown { .. } => Vec::new(),
+        // the margin is what nvim adds on top of any inner height view
+        // asks for, so the registry keeps it and spends it in the request
+        UiEvent::WinViewportMargins { grid, top, .. } => {
+            let grid = GridId(grid);
+            place(
+                model,
+                GridEvent::Margins {
+                    grid,
+                    top: saturate_u16(top),
+                },
+            );
+            super::look::request_for(model, grid)
+        }
+        UiEvent::WinViewport { .. } | UiEvent::Unknown { .. } => Vec::new(),
     }
 }
 

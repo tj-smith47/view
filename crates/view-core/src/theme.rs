@@ -5,7 +5,7 @@
 //! a read of state the engine already streams, so re-deriving it on every
 //! `ColorScheme` change costs nothing beyond a handful of `HashMap` lookups.
 
-use crate::hl::HlTable;
+use crate::hl::{AccentInputs, HlTable};
 
 /// One fully-resolved cell or chrome style: colors plus text attributes,
 /// backend-free so any frontend (not just `ratatui`) can consume it.
@@ -302,6 +302,9 @@ pub struct Theme {
     /// disagree about which slot belongs to which group: reads go through
     /// [`Theme::chrome`], writes through [`Theme::set_chrome`].
     chrome: [ResolvedStyle; ChromeGroup::COUNT],
+    /// What [`Theme::accent`] resolves through. Private for the reason
+    /// `chrome` is: the resolution order is the contract, never the slots.
+    accent: AccentInputs,
 }
 
 impl Theme {
@@ -346,6 +349,7 @@ impl Theme {
         let mut theme = Self {
             fg,
             bg,
+            accent: hl.accent(),
             ..Self::default()
         };
         for group in ChromeGroup::ALL {
@@ -458,6 +462,30 @@ impl Theme {
         ResolvedStyle {
             reverse: true,
             ..self.normal()
+        }
+    }
+
+    /// The colour that marks the one thing the user is working in: the
+    /// active tile's frame today.
+    ///
+    /// The first of the colour the user named in `[ui.tokens] accent`,
+    /// `Function`'s foreground, `Statement`'s foreground, and
+    /// [`emphasis`](Self::emphasis) where a session knows none of the
+    /// three. The user's own answer comes first, the order every other
+    /// configured key resolves in.
+    #[must_use]
+    pub fn accent(&self) -> ResolvedStyle {
+        let fg = self
+            .accent
+            .token
+            .or(self.accent.function_fg)
+            .or(self.accent.statement_fg);
+        match fg {
+            Some(fg) => ResolvedStyle {
+                fg: Some(fg),
+                ..self.normal()
+            },
+            None => self.emphasis(),
         }
     }
 
@@ -901,6 +929,40 @@ mod tests {
         assert_eq!(style.fg, Some(0x1));
         assert_eq!(style.bg, Some(0x2));
         assert!(style.reverse);
+    }
+
+    fn accent_table(function_fg: Option<u32>, statement_fg: Option<u32>) -> HlTable {
+        let mut hl = table_with(Some(0x1), Some(0x2), 1, no_attrs());
+        hl.confirm_accent(function_fg, statement_fg);
+        hl
+    }
+
+    #[test]
+    fn accent_resolves_to_the_probed_function_fg() {
+        let theme = Theme::from_hl(&accent_table(Some(0x89b4fa), Some(0xcba6f7)));
+        let style = theme.accent();
+        assert_eq!(style.fg, Some(0x89b4fa));
+        assert_eq!(style.bg, Some(0x2));
+        assert!(!style.reverse);
+    }
+
+    #[test]
+    fn accent_falls_back_to_statement_when_function_is_unset() {
+        let theme = Theme::from_hl(&accent_table(None, Some(0xcba6f7)));
+        assert_eq!(theme.accent().fg, Some(0xcba6f7));
+    }
+
+    #[test]
+    fn accent_falls_back_to_emphasis_when_neither_is_set() {
+        let theme = Theme::from_hl(&accent_table(None, None));
+        assert_eq!(theme.accent(), theme.emphasis());
+    }
+
+    #[test]
+    fn a_configured_accent_token_beats_the_probe() {
+        let mut hl = accent_table(Some(0x89b4fa), Some(0xcba6f7));
+        hl.set_accent_token(Some(0xf38ba8));
+        assert_eq!(Theme::from_hl(&hl).accent().fg, Some(0xf38ba8));
     }
 
     /// The load-bearing property this whole extension exists to prove: once

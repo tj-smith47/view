@@ -4,6 +4,7 @@
 //! `view` from depending on `rmpv` directly; these methods are the sanctioned
 //! way for it to reach the same calls.
 
+mod accent;
 mod decode;
 
 use crate::handle::{EngineError, EngineHandle};
@@ -625,8 +626,8 @@ for _, spec in ipairs(specs) do
   }
 end
 vim.api.nvim_create_user_command(command, function(opts)
-  vim.rpcnotify(channel, 'view_invoke', opts.fargs[1] or '',
-    opts.fargs[2] or '')
+  local verb = table.concat(vim.list_slice(opts.fargs, 2), ' ')
+  vim.rpcnotify(channel, 'view_invoke', opts.fargs[1] or '', verb)
 end, {
   nargs = '*',
   desc = 'invoke a view native feature',
@@ -3079,6 +3080,29 @@ impl EngineHandle {
         )
     }
 
+    /// Sets one window grid's inner size inside the layout slot nvim keeps
+    /// for it, via `nvim_ui_try_resize_grid`.
+    ///
+    /// The slot does not move: nvim keeps the window where its layout tree
+    /// puts it and draws text into a grid of the requested size inside it,
+    /// leaving the difference for the UI to fill. The request stands until
+    /// it is replaced, so a caller re-sends whenever the slot changes.
+    /// `0, 0` clears the request and returns the grid to its slot's size.
+    ///
+    /// Fire-and-forget for the same reason as [`input`](Self::input): the
+    /// request is issued from the paint loop and must not block it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn try_resize_grid(&self, grid: u64, width: u16, height: u16) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_ui_try_resize_grid",
+            vec![Value::from(grid), Value::from(width), Value::from(height)],
+        )
+    }
+
     /// Streams `text` into nvim via `nvim_paste` as a single non-streamed
     /// call (`phase = -1`, per `nvim --api-info`'s
     /// `nvim_paste(String data, Boolean crlf, Integer phase)` signature),
@@ -3543,6 +3567,27 @@ impl EngineHandle {
             vec![
                 Value::from(0),
                 Value::Map(vec![(Value::from("name"), Value::from("Normal"))]),
+            ],
+            generation,
+        )
+    }
+
+    /// Issues the accent role's two-group read as an async probe tagged
+    /// with `generation`, on the same terms as
+    /// [`probe_default_hl`](Self::probe_default_hl): the reply crosses back
+    /// as `Msg::AccentProbeReply` through the connection's pump, and
+    /// nothing blocks on it here.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn probe_accent_hl(&self, generation: u64) -> Result<(), EngineError> {
+        self.request_accent_probe(
+            "nvim_exec_lua",
+            vec![
+                Value::from(accent::ACCENT_PROBE_CHUNK),
+                Value::Array(Vec::new()),
             ],
             generation,
         )

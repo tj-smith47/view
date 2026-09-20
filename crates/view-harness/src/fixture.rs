@@ -838,6 +838,34 @@ mod tests {
         );
     }
 
+    /// Every bench and parity leg runs under nvim's own window picture, and
+    /// the generated fixture gets it by copying the template's `view.toml`
+    /// rather than writing one of its own, so the line has to be in every
+    /// tracked template the generator might be pointed at.
+    #[test]
+    fn the_generated_user_fixture_carries_the_look_mode() {
+        const LOOK_MODE: &str = "panes = \"nvim\"";
+        for template in ["minimal", "heavy", "clipboard-precedence"] {
+            let path = fixtures_root()
+                .join(template)
+                .join("view")
+                .join("view.toml");
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                text.contains("[ui]") && text.contains(LOOK_MODE),
+                "{template}'s view.toml must name the look mode:\n{text}"
+            );
+        }
+        if let Ok(dir) = generate_user_fixture() {
+            let generated =
+                std::fs::read_to_string(dir.join("view").join("view.toml")).unwrap_or_default();
+            assert!(
+                generated.contains(LOOK_MODE),
+                "the generated fixture must carry the template's look mode:\n{generated}"
+            );
+        }
+    }
+
     /// A knob nobody can parse must refuse rather than read as zero: a run
     /// that silently measured the unmodified fixture would be reported as
     /// the slowed one.

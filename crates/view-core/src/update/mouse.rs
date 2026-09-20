@@ -67,8 +67,13 @@ fn position_owner(model: &Model, input: &MouseInput) -> Option<MouseCapture> {
     if let Some(id) = model.overlay_at(input.row, input.col) {
         return Some(MouseCapture::Overlay(id));
     }
-    let row = input.row.checked_sub(model.chrome_rows())?;
-    let (grid, _, _) = model.engine.grids().hit_test(input.col, row)?;
+    let offset = model.look.grid_offset();
+    let row = input
+        .row
+        .checked_sub(model.chrome_rows())?
+        .checked_sub(offset)?;
+    let col = input.col.checked_sub(offset)?;
+    let (grid, _, _) = model.engine.grids().hit_test(col, row)?;
     Some(MouseCapture::Engine(grid))
 }
 
@@ -80,8 +85,17 @@ fn position_owner(model: &Model, input: &MouseInput) -> Option<MouseCapture> {
 /// up into the tabline, and while the pointer is inside the grid the clamp
 /// is the same translation the hit test made.
 fn effect(model: &Model, input: MouseInput, grid: GridId) -> Vec<Effect> {
-    let row = input.row.saturating_sub(model.chrome_rows());
-    let Some((col, row)) = model.engine.grids().clamp_into(grid, input.col, row) else {
+    let offset = model.look.grid_offset();
+    let row = input
+        .row
+        .saturating_sub(model.chrome_rows())
+        .saturating_sub(offset);
+    let Some((col, row)) =
+        model
+            .engine
+            .grids()
+            .clamp_into(grid, input.col.saturating_sub(offset), row)
+    else {
         return Vec::new();
     };
     vec![Effect::Rpc(RpcCall::InputMouse {

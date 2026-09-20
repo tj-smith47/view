@@ -79,8 +79,23 @@ pub struct HlTable {
     /// `.generation` against [`HlTable::probe_generation`] first, exactly
     /// what `Theme::from_hl` does.
     confirmed: Option<ProbedDefaults>,
+    /// What the accent role resolves from. nvim broadcasts neither of the
+    /// two syntax groups, so both arrive by probe rather than through
+    /// `hl_group_set`.
+    accent: AccentInputs,
     /// Whether any of the above changed since the last [`HlTable::take_dirty`].
     dirty: bool,
+}
+
+/// The colours the accent role resolves through, in preference order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AccentInputs {
+    /// The colour the user named in `[ui.tokens] accent`.
+    pub token: Option<u32>,
+    /// `Function`'s probed foreground.
+    pub function_fg: Option<u32>,
+    /// `Statement`'s probed foreground.
+    pub statement_fg: Option<u32>,
 }
 
 impl HlTable {
@@ -94,6 +109,7 @@ impl HlTable {
             groups: std::collections::HashMap::new(),
             probe_generation: 0,
             confirmed: None,
+            accent: AccentInputs::default(),
             dirty: false,
         }
     }
@@ -198,6 +214,31 @@ impl HlTable {
             return;
         }
         self.confirmed = Some(probe);
+        self.dirty = true;
+    }
+
+    /// What the accent role resolves through right now.
+    #[must_use]
+    pub fn accent(&self) -> AccentInputs {
+        self.accent
+    }
+
+    /// Records the colour the user named for the accent role.
+    pub fn set_accent_token(&mut self, token: Option<u32>) {
+        if self.accent.token == token {
+            return;
+        }
+        self.accent.token = token;
+        self.dirty = true;
+    }
+
+    /// Records the two probed syntax foregrounds the accent falls back to.
+    pub fn confirm_accent(&mut self, function_fg: Option<u32>, statement_fg: Option<u32>) {
+        if (self.accent.function_fg, self.accent.statement_fg) == (function_fg, statement_fg) {
+            return;
+        }
+        self.accent.function_fg = function_fg;
+        self.accent.statement_fg = statement_fg;
         self.dirty = true;
     }
 

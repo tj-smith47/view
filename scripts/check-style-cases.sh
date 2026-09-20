@@ -630,11 +630,12 @@ new_geometry_case() {
   # the classifier to see anything at all
   git -C "$CASE" init -q
   plant_geometry 'crates/view-core/src/model.rs' 1
-  plant_geometry 'crates/view-core/src/msg.rs' 2
+  plant_geometry 'crates/view-core/src/msg.rs' 3
   plant_release 'crates/view-core/src/update/ai_fs.rs' 4
+  plant_geometry 'crates/view-core/src/update/look.rs' 2
   plant_geometry 'crates/view-core/src/update/mod.rs' 1
   plant_geometry 'crates/view-core/src/update/ui_event.rs' 1
-  plant_geometry 'crates/view-engine/src/nvim_api.rs' 10
+  plant_geometry 'crates/view-engine/src/nvim_api.rs' 11
   plant_geometry 'crates/view-engine/src/process.rs' 10
   # the render and the field read, the two spellings that carry the seed
   # without being a call named late_attach: a walk narrowed to
@@ -643,8 +644,8 @@ new_geometry_case() {
     >> "$CASE/crates/view-engine/src/process.rs"
   printf 'if let Some((width, height)) = cfg.late_attach {\n' \
     >> "$CASE/crates/view-engine/src/process.rs"
-  plant_geometry 'crates/view-oracle/src/hang.rs' 4
-  plant_geometry 'crates/view-oracle/src/lib.rs' 2
+  plant_geometry 'crates/view-oracle/src/hang.rs' 5
+  plant_geometry 'crates/view-oracle/src/lib.rs' 3
   plant_geometry 'crates/view-oracle/src/reference.rs' 2
   plant_geometry 'crates/view-oracle/src/speculate.rs' 2
   plant_geometry 'crates/view/src/engine_ops.rs' 14
@@ -655,7 +656,7 @@ new_geometry_case() {
     >> "$CASE/crates/view/src/main.rs"
   plant_geometry 'crates/view/src/native.rs' 1
   plant_geometry 'crates/view/src/recovery.rs' 1
-  plant_geometry 'crates/view/src/runtime/executor.rs' 3
+  plant_geometry 'crates/view/src/runtime/executor.rs' 4
   plant_geometry 'crates/view/src/startup.rs' 7
   plant_geometry 'crates/view/src/vlog.rs' 2
 }

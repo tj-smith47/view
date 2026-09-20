@@ -13,11 +13,12 @@ use view_core::msg::{DeleteConfirmOutcome, EngineRequest, Msg, ReplyToken, Reply
 mod decode;
 
 use decode::{
-    decode_bridge_event, decode_buf_lines_event, decode_buffer_list_reply, decode_clipboard_get,
-    decode_clipboard_set, decode_delete_confirm_reply, decode_feature_invoke,
-    decode_float_rows_reply, decode_hl_probe_reply, decode_mapping_report, decode_preview_reply,
-    decode_prompt_reply, decode_rename_reply, decode_swap_recovery_reply, decode_takeover_reply,
-    takeover_error_text, SwapRecoveryReading, TakeoverReading,
+    decode_accent_probe_reply, decode_bridge_event, decode_buf_lines_event,
+    decode_buffer_list_reply, decode_clipboard_get, decode_clipboard_set,
+    decode_delete_confirm_reply, decode_feature_invoke, decode_float_rows_reply,
+    decode_hl_probe_reply, decode_mapping_report, decode_preview_reply, decode_prompt_reply,
+    decode_rename_reply, decode_swap_recovery_reply, decode_takeover_reply, takeover_error_text,
+    SwapRecoveryReading, TakeoverReading,
 };
 
 /// Errors produced by [`EngineHandle`] operations.
@@ -91,6 +92,11 @@ enum Waiter {
     /// so its `Response` is decoded and routed to `pump` as
     /// `Msg::HlProbeReply` instead of sent anywhere synchronous.
     HlProbe { generation: u64 },
+    /// An async read of the two syntax groups the accent role resolves
+    /// from (see [`EngineHandle::request_accent_probe`]): nothing is
+    /// blocked on this `msgid`, so its `Response` is decoded and routed to
+    /// `pump` as `Msg::AccentProbeReply`.
+    AccentProbe { generation: u64 },
     /// An async read-side liveness probe (see
     /// [`EngineHandle::request_heartbeat`]): nothing is blocked on this
     /// `msgid` either, and its `Response` carries no value this connection
@@ -603,6 +609,26 @@ impl EngineHandle {
                                         generation,
                                         fg,
                                         bg,
+                                    });
+                                }
+                            }
+                            Some(Waiter::AccentProbe { generation }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply degrades to "this
+                                    // colorscheme sets neither", which is
+                                    // the fallback the theme already has an
+                                    // answer for; leaving the generation
+                                    // unresolved would keep the frame
+                                    // marked accent-less forever
+                                    let (function_fg, statement_fg) = if error == Value::Nil {
+                                        decode_accent_probe_reply(&result)
+                                    } else {
+                                        (None, None)
+                                    };
+                                    pump.route_probe_reply(Msg::AccentProbeReply {
+                                        generation,
+                                        function_fg,
+                                        statement_fg,
                                     });
                                 }
                             }
@@ -1573,6 +1599,22 @@ impl EngineHandle {
         generation: u64,
     ) -> Result<(), EngineError> {
         self.request_async(method, params, Waiter::HlProbe { generation })
+    }
+
+    /// Issues `method`/`params` as an async probe whose reply is routed to
+    /// the pump as `Msg::AccentProbeReply` (see [`Waiter::AccentProbe`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn request_accent_probe(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::AccentProbe { generation })
     }
 
     /// Issues `nvim_get_mode` as a fire-and-forget liveness probe tagged

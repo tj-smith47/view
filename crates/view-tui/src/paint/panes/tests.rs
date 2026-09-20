@@ -797,10 +797,20 @@ fn dump(sync: bool, truecolor: bool, kitty: bool, unicode_boxes: bool) -> String
     let mut model = vsplit();
     model.caps = view_core::model::TermCaps::from_probe(sync, truecolor, kitty)
         .with_unicode_boxes(unicode_boxes);
-    let buf = frame(&model);
-    let mut out: Vec<String> = (0..buf.area.height)
-        .map(|row| row_text(&buf, row))
-        .collect();
+    screen_dump(&frame(&model))
+}
+
+/// The same picture for a tiled scene, composited at the fixture's own
+/// terminal size.
+fn tiles_dump(tier: (&str, bool, bool, bool, bool), mut tiles: Tiles) -> String {
+    let (_, sync, truecolor, kitty, unicode_boxes) = tier;
+    tiles.model.caps = view_core::model::TermCaps::from_probe(sync, truecolor, kitty)
+        .with_unicode_boxes(unicode_boxes);
+    screen_dump(&tiled_frame(&tiles.model))
+}
+
+fn screen_dump(buf: &Buffer) -> String {
+    let mut out: Vec<String> = (0..buf.area.height).map(|row| row_text(buf, row)).collect();
     out.push("--- fg ---".to_string());
     // Saturating on Z: b'A' + index overflows u8 at index 191, well before the
     // try_from fallback could fire, so the cap has to come before the add.
@@ -857,6 +867,146 @@ fn assert_golden(name: &str, actual: &str) {
 /// The committed picture of two windows and the column view draws between
 /// them, one per tier. Deleting the separator paint fails all three, which
 /// is what makes them a check on the feature rather than on the fixture.
+/// A tile's own gap ring is cleared, and not the cell beyond the slot
+/// alone.
+///
+/// nvim paints the separator column into grid 1 for as long as two windows
+/// face each other there, and when one closes it leaves the glyph standing
+/// in the cells the surviving window's smaller grid does not cover. Nothing
+/// later repaints them, `:redraw!` included, so a `\u{2502}` sat under the
+/// bottom frame of a 263x88 session for the rest of its life.
+#[test]
+fn a_glyph_left_in_a_tiles_gap_row_is_cleared() {
+    let tiles = tiled(true);
+    let (row, col, width, height) = tiles.slots[0];
+    let mut model = tiles.model;
+    let gap_row = u64::from(row + height - 1);
+    drive(
+        &mut model,
+        vec![
+            UiEvent::GridLine {
+                grid: 1,
+                row: gap_row,
+                col_start: u64::from(col + 1),
+                cells: vec![GridCell {
+                    text: "\u{2502}".to_string(),
+                    hl_id: VIEW_SEPARATOR_HL,
+                    repeat: u64::from(width - 2),
+                }],
+            },
+            UiEvent::Flush,
+        ],
+    );
+    let buf = tiled_frame(&model);
+    let offset = model.look.grid_offset();
+    let painted = row_text(&buf, row + height - 1 + offset);
+    assert!(
+        !painted.contains('\u{2502}'),
+        "the gap row under a tile kept a separator: {painted:?}"
+    );
+}
+
+/// nvim writes the mode message and the answer to every prompt into the
+/// grid's last row, which is the row under the slot when the window has no
+/// status row of its own.
+#[test]
+fn the_command_line_under_the_lowest_tile_keeps_its_text() {
+    let (grid_width, grid_height) = outer_grid(true, TILED_HEIGHT);
+    let slots = vec![(0, 0, grid_width, grid_height - 1)];
+    let mut model = tiled_model(true, TILED_HEIGHT, &slots);
+    drive(
+        &mut model,
+        vec![
+            line(1, u64::from(grid_height - 1), "-- INSERT --", 0),
+            UiEvent::Flush,
+        ],
+    );
+    let buf = tiled_frame(&model);
+    let offset = model.look.grid_offset();
+    let message = row_text(&buf, grid_height - 1 + offset);
+    assert!(
+        message.contains("-- INSERT --"),
+        "the command line lost nvim's message: {message:?}"
+    );
+}
+
+/// The status row nvim paints under a window is what the frame replaces,
+/// so it is cleared wherever another row stands between it and the
+/// command line.
+#[test]
+fn a_status_row_under_a_tile_is_cleared() {
+    let tiles = tiled(true);
+    let (row, col, width, height) = tiles.slots[0];
+    let mut model = tiles.model;
+    drive(
+        &mut model,
+        vec![
+            UiEvent::GridLine {
+                grid: 1,
+                row: u64::from(row + height),
+                col_start: u64::from(col),
+                cells: vec![GridCell {
+                    text: "\u{2500}".to_string(),
+                    hl_id: VIEW_SEPARATOR_HL,
+                    repeat: u64::from(width),
+                }],
+            },
+            UiEvent::Flush,
+        ],
+    );
+    let buf = tiled_frame(&model);
+    let offset = model.look.grid_offset();
+    let status = row_text(&buf, row + height + offset);
+    assert!(
+        !status.contains('\u{2500}'),
+        "the status row under a tile kept nvim's own line: {status:?}"
+    );
+}
+
+/// The three committed tiers, as the name a golden carries and the four
+/// capability probes that make it.
+const TIERS: [(&str, bool, bool, bool, bool); 3] = [
+    ("full", true, true, true, DRAWS_BOX_GLYPHS),
+    ("standard", false, true, false, DRAWS_BOX_GLYPHS),
+    ("basic", false, false, false, NO_BOX_GLYPHS),
+];
+
+/// The gapped split: a frame around each window with a clear cell between
+/// the two frames and around the outside.
+#[test]
+fn vsplit_tiles() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-vsplit-tiles", tier.0),
+            &tiles_dump(tier, tiled(true)),
+        );
+    }
+}
+
+/// The same split with `gaps = false`: one shared line between the windows
+/// and no clear cell anywhere.
+#[test]
+fn vsplit_gapless() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-vsplit-gapless", tier.0),
+            &tiles_dump(tier, tiled(false)),
+        );
+    }
+}
+
+/// A layout nvim built in two steps: three tiles, each framed inside its
+/// own slot, with the two on the right stacked.
+#[test]
+fn vsplit_tiles_nested() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-vsplit-tiles-nested", tier.0),
+            &tiles_dump(tier, tiled_nested(true)),
+        );
+    }
+}
+
 #[test]
 fn full_vsplit() {
     assert_golden("full-vsplit", &dump(true, true, true, DRAWS_BOX_GLYPHS));
@@ -917,5 +1067,323 @@ fn the_pane_chrome_groups_resolve_from_the_live_table() {
         theme.chrome(view_core::theme::ChromeGroup::WinSeparator).fg,
         Some(0x00AB_CDEF),
         "a colorscheme's own separator color never reached the theme"
+    );
+}
+
+/// A tiled `:vsplit` on a canvas wide enough to carry frames: grid 1 is the
+/// terminal less the ring, two windows sit side by side with nvim's
+/// separator column between them, and each window's grid is the inner size
+/// the look asked nvim for.
+const TILED_WIDTH: u16 = 80;
+const TILED_HEIGHT: u16 = 24;
+const ACCENT_FG: u32 = 0x0089_B4FA;
+/// One word per window, so a golden names which tile each rect holds.
+const TILE_TEXT: [&str; 3] = ["left", "right", "under"];
+
+struct Tiles {
+    /// The slot nvim gave each window, as `(row, col, width, height)`.
+    slots: Vec<(u16, u16, u16, u16)>,
+    model: Model,
+}
+
+fn tiled(gaps: bool) -> Tiles {
+    let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
+    // tiles hold `laststatus` at 2, so each window has a status row under
+    // it, and nvim's command line sits in the row under that
+    let window_height = grid_height - 2;
+    let left_width = (grid_width - 1) / 2;
+    let right_col = left_width + 1;
+    let slots = vec![
+        (0, 0, left_width, window_height),
+        (0, right_col, grid_width - right_col, window_height),
+    ];
+    Tiles {
+        model: tiled_model(gaps, TILED_HEIGHT, &slots),
+        slots,
+    }
+}
+
+/// The same vsplit with the right-hand column split again, so a frame meets
+/// three neighbours instead of one and the lattice has an interior crossing.
+fn tiled_nested(gaps: bool) -> Tiles {
+    let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
+    let left_width = (grid_width - 1) / 2;
+    let right_col = left_width + 1;
+    let right_width = grid_width - right_col;
+    // the left window keeps its own status row and the command line; the
+    // right column spends one more row on the second window's status row
+    let top_height = (grid_height - 3).div_ceil(2);
+    let slots = vec![
+        (0, 0, left_width, grid_height - 2),
+        (0, right_col, right_width, top_height),
+        (
+            top_height + 1,
+            right_col,
+            right_width,
+            grid_height - 3 - top_height,
+        ),
+    ];
+    Tiles {
+        model: tiled_model(gaps, TILED_HEIGHT, &slots),
+        slots,
+    }
+}
+
+/// The size of grid 1 under a look, which is the terminal less the ring the
+/// look spends on its outer frame.
+fn outer_grid(gaps: bool, height: u16) -> (u16, u16) {
+    let ring = if gaps { 2 } else { 1 };
+    (TILED_WIDTH - ring, height - ring)
+}
+
+fn tiled_model(gaps: bool, height: u16, slots: &[(u16, u16, u16, u16)]) -> Model {
+    let (grid_width, grid_height) = outer_grid(gaps, height);
+    let look = view_core::model::Look::new(view_core::model::Panes::Tiles, gaps);
+    let mut model = Model::new().with_look(look);
+    model.term_width = TILED_WIDTH;
+    model.term_height = height;
+    model.caps = model.caps.with_unicode_boxes(DRAWS_BOX_GLYPHS);
+    let mut events = vec![
+        UiEvent::GridResize {
+            grid: 1,
+            width: u64::from(grid_width),
+            height: u64::from(grid_height),
+        },
+        attr(VIEW_SEPARATOR_HL, VIEW_SEPARATOR_FG),
+        UiEvent::HlGroupSet {
+            name: "WinSeparator".to_string(),
+            hl_id: VIEW_SEPARATOR_HL,
+        },
+    ];
+    for (index, slot) in slots.iter().copied().enumerate() {
+        let grid = LEFT + index as u64;
+        let (row, col, width, height) = slot;
+        // the inner size the look asks for, which is the size nvim answers
+        // the request with
+        let (inner_width, inner_height) = look.inner_request((width, height), 0);
+        let (inner_width, inner_height) = if (inner_width, inner_height) == (0, 0) {
+            (width, height)
+        } else {
+            (inner_width, inner_height)
+        };
+        events.push(UiEvent::WinPos {
+            grid,
+            win: WinHandle(1000 + index as u64),
+            startrow: u64::from(row),
+            startcol: u64::from(col),
+            width: u64::from(width),
+            height: u64::from(height),
+        });
+        events.push(UiEvent::GridResize {
+            grid,
+            width: u64::from(inner_width),
+            height: u64::from(inner_height),
+        });
+        events.push(line(grid, 0, TILE_TEXT[index.min(TILE_TEXT.len() - 1)], 0));
+    }
+    events.extend([
+        UiEvent::GridCursorGoto {
+            grid: LEFT,
+            row: 0,
+            col: 0,
+        },
+        UiEvent::Flush,
+    ]);
+    drive(&mut model, events);
+    model.engine.set_accent_token(Some(ACCENT_FG));
+    model
+}
+
+fn tiled_frame(model: &Model) -> Buffer {
+    let surface = view_surface::render(model);
+    let backend = TestBackend::new(model.term_width, model.term_height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| composite_into(f.buffer_mut(), model, &surface, &Damage::full()))
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+/// Every column carrying a vertical frame run, and every row carrying a
+/// horizontal one, read back off the composited screen.
+fn frame_lines(buf: &Buffer) -> (Vec<u16>, Vec<u16>) {
+    let is = |col: u16, row: u16, glyphs: &str| glyphs.contains(buf[(col, row)].symbol());
+    let cols = (0..buf.area.width)
+        .filter(|&col| {
+            (0..buf.area.height)
+                .filter(|&row| is(col, row, "│├┤┼┬┴"))
+                .count()
+                >= 2
+        })
+        .collect();
+    let rows = (0..buf.area.height)
+        .filter(|&row| {
+            (0..buf.area.width)
+                .filter(|&col| is(col, row, "─├┤┼┬┴"))
+                .count()
+                >= 2
+        })
+        .collect();
+    (cols, rows)
+}
+
+#[test]
+fn a_gapped_frame_leaves_two_cells_between_neighbouring_tiles() {
+    let tiles = tiled(true);
+    let buf = tiled_frame(&tiles.model);
+    let (cols, _) = frame_lines(&buf);
+    assert_eq!(
+        cols.len(),
+        4,
+        "two gapped tiles carry two vertical frame runs each: {cols:?}"
+    );
+    let (left_edge, right_edge) = (cols[1], cols[2]);
+    assert_eq!(
+        right_edge - left_edge - 1,
+        3,
+        "two gaps and nvim's separator column sit between the frames: {cols:?}"
+    );
+    for col in (left_edge + 1)..right_edge {
+        for row in 0..TILED_HEIGHT {
+            assert_eq!(
+                buf[(col, row)].symbol(),
+                " ",
+                "the cells between two frames are gap, not nvim's separator"
+            );
+        }
+    }
+}
+
+#[test]
+fn no_two_gapless_edge_lines_are_adjacent() {
+    let buf = tiled_frame(&tiled(false).model);
+    let (cols, rows) = frame_lines(&buf);
+    assert!(!cols.is_empty() && !rows.is_empty(), "no lattice was drawn");
+    for lines in [&cols, &rows] {
+        for pair in lines.windows(2) {
+            assert!(
+                pair[1] - pair[0] > 1,
+                "two edge lines sit side by side, which is a doubled edge: {lines:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_gapless_junction_takes_the_crossing_glyph() {
+    let tiles = tiled(false);
+    let buf = tiled_frame(&tiles.model);
+    let (_, col, width, height) = tiles.slots[0];
+    // the engine layer sits one cell in from the terminal on each axis
+    // under gapless, so the lattice's own coordinates shift with it
+    let (x, y) = (col + width + 1, height + 1);
+    assert_eq!(
+        buf[(x, y)].symbol(),
+        "┴",
+        "the separator column ends where the two status rows meet"
+    );
+
+    // the nested layout is where a line carries on past the junction
+    let nested = tiled_nested(false);
+    let buf = tiled_frame(&nested.model);
+    let (row, col, _, height) = nested.slots[1];
+    assert_eq!(
+        buf[(col, row + height + 1)].symbol(),
+        "├",
+        "the row under the upper right tile starts where the column beside \
+         the left tile carries on"
+    );
+    assert_eq!(
+        buf[(TILED_WIDTH - 1, row + height + 1)].symbol(),
+        "─",
+        "that row ends at the terminal edge, which draws no line of its own"
+    );
+}
+
+#[test]
+fn only_the_active_tiles_frame_carries_the_accent_fg() {
+    let tiles = tiled(true);
+    let buf = tiled_frame(&tiles.model);
+    let accent = rgb(ACCENT_FG).expect("the accent token resolves to a colour");
+    let frame_fg = |slot: (u16, u16, u16, u16)| {
+        let (row, col, _, _) = slot;
+        buf[(col + 1 + 1, row + 1 + 1)].fg
+    };
+    assert_eq!(
+        frame_fg(tiles.slots[0]),
+        accent,
+        "the tile the cursor is in carries the accent"
+    );
+    assert_ne!(
+        frame_fg(tiles.slots[1]),
+        accent,
+        "every other tile's frame is the quiet separator colour"
+    );
+}
+
+#[test]
+fn a_grid_line_on_a_window_leaves_the_frame_rows_undamaged() {
+    let mut tiles = tiled(true);
+    let _ = tiles.model.take_paint_damage();
+    drive(&mut tiles.model, vec![line(LEFT, 1, "typed", 0)]);
+    let damage = tiles.model.take_paint_damage();
+    let (row, _, _, height) = tiles.slots[0];
+    let offset = tiles.model.chrome_rows() + tiles.model.look.grid_offset();
+    let damaged = Damage::from_frame(&damage, offset, &[], false);
+    assert!(
+        damaged.covers(offset + row + 2 + 1),
+        "the row the line landed on is repainted"
+    );
+    for frame_row in [row + 1, row + height - 2] {
+        assert!(
+            !damaged.covers(offset + frame_row),
+            "a grid line inside a window damaged the frame row at {frame_row}"
+        );
+    }
+}
+
+/// The first frame of a session, before the engine has sent a picture to
+/// put inside it.
+fn shell_frame(look: view_core::model::Look) -> Buffer {
+    let mut model = Model::new().with_look(look);
+    model.term_width = TILED_WIDTH;
+    model.term_height = TILED_HEIGHT;
+    model.caps = model.caps.with_unicode_boxes(DRAWS_BOX_GLYPHS);
+    model.chrome_painted = false;
+    model.statusline_enabled = true;
+    tiled_frame(&model)
+}
+
+#[test]
+fn the_shell_frame_paints_the_ring_under_tiles_and_the_bar_under_nvim() {
+    let tiles = shell_frame(view_core::model::Look::new(
+        view_core::model::Panes::Tiles,
+        true,
+    ));
+    assert_eq!(
+        tiles[(0, 0)].symbol(),
+        "╭",
+        "the tiled shell opens with the ring's own corner"
+    );
+    assert_eq!(
+        tiles[(TILED_WIDTH - 1, TILED_HEIGHT - 1)].symbol(),
+        "╯",
+        "and closes with the opposite one"
+    );
+
+    let nvim = shell_frame(view_core::model::Look::new(
+        view_core::model::Panes::Nvim,
+        true,
+    ));
+    assert_eq!(
+        row_text(&nvim, TILED_HEIGHT - 1).trim(),
+        "",
+        "the nvim-mode shell is a bar, which carries no glyph of its own"
+    );
+    let ringed = (0..TILED_HEIGHT)
+        .any(|row| row_text(&nvim, row).contains(['\u{256d}', '\u{2500}', '\u{2502}']));
+    assert!(
+        !ringed,
+        "the nvim-mode shell reserves a row for its bar and frames nothing"
     );
 }

@@ -14,6 +14,13 @@
 # rendering -- strictly more work than the nvim arm does, which is the
 # opposite of the neutrality the paragraph above asks for. A state that means
 # to measure the detached protocol asks for it in its own `native` override.
+# Both harnesses compare view's screen with bare nvim's, and tiles put a
+# frame around each window that nvim draws nothing for, so a leg run under
+# them would compare a framed screen to an unframed one. A leg that wants
+# tiles asks for them with `VIEW_UI_PANES`, which outranks this file.
+[ui]
+panes = "nvim"
+
 [native]
 picker = false
 tree = false

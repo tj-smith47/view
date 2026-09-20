@@ -128,8 +128,31 @@ pub fn isolate_xdg_native_off_except(
     disable_native_features_except(home, keep);
 }
 
-/// [`isolate_xdg_native_off`] without the config file, so the session runs
-/// the `[native]` defaults a user gets.
+/// The whole planted config a first-launch session reads: the window look
+/// and nothing else.
+///
+/// Every parity and bench leg compares view's screen against bare nvim's,
+/// and tiles put a frame around each window that nvim draws nothing for, so
+/// a leg run under them would compare a framed screen to an unframed one
+/// and fail for a reason it never set out to measure. A leg that wants
+/// tiles asks for them with `VIEW_UI_PANES`, which outranks the file.
+pub const PLANTED_LOOK_MODE: &str = "[ui]\npanes = \"nvim\"\n";
+
+/// Writes [`PLANTED_LOOK_MODE`] into `home`'s isolated config directory,
+/// replacing whatever is there.
+pub fn plant_look_mode(home: &Path) {
+    plant_view_config(home, PLANTED_LOOK_MODE);
+}
+
+/// Writes `text` as the isolated session's whole `view.toml`.
+fn plant_view_config(home: &Path, text: &str) {
+    let dir = xdg_home(home, "XDG_CONFIG_HOME").join("view");
+    std::fs::create_dir_all(&dir).expect("the isolated config home must be creatable");
+    std::fs::write(dir.join("view.toml"), text).expect("the isolated view.toml must be writable");
+}
+
+/// [`isolate_xdg_native_off`] with no `[native]` block, so the session runs
+/// the feature defaults a user gets.
 ///
 /// Two subjects want that. One is what a first launch does: reading the
 /// config, taking the superseded surfaces over, claiming the feature keys
@@ -139,6 +162,7 @@ pub fn isolate_xdg_first_launch(cmd: &mut portable_pty::CommandBuilder, home: &P
     for (var, dir) in xdg_first_launch_env(home) {
         cmd.env(var, dir);
     }
+    plant_look_mode(home);
 }
 
 /// [`isolate_xdg_first_launch`] for a test that hand-rolls its own pty and
@@ -148,6 +172,7 @@ pub fn isolate_xdg_first_launch_process(cmd: &mut std::process::Command, home: &
     for (var, dir) in xdg_first_launch_env(home) {
         cmd.env(var, dir);
     }
+    plant_look_mode(home);
 }
 
 /// The `XDG_*_HOME` variables an isolated child's `stdpath()` roots resolve
@@ -238,9 +263,8 @@ pub fn disable_native_features(home: &Path) {
 /// instead. Still generated from the registry, so a feature added later is
 /// switched off by the same call unless a caller names it.
 pub fn disable_native_features_except(home: &Path, keep: &[&str]) {
-    let dir = xdg_home(home, "XDG_CONFIG_HOME").join("view");
-    std::fs::create_dir_all(&dir).expect("the isolated config home must be creatable");
-    let mut text = String::from("[native]\n");
+    let mut text = String::from(PLANTED_LOOK_MODE);
+    text.push_str("\n[native]\n");
     for feature in view_core::native::registry::features() {
         text.push_str(feature.id);
         text.push_str(if keep.contains(&feature.id) {
@@ -249,7 +273,33 @@ pub fn disable_native_features_except(home: &Path, keep: &[&str]) {
             " = false\n"
         });
     }
-    std::fs::write(dir.join("view.toml"), text).expect("the isolated view.toml must be writable");
+    plant_view_config(home, &text);
+}
+
+#[test]
+fn the_planted_isolation_config_names_the_look_mode() {
+    let paths = ScratchPaths::new("look-mode");
+    let planted = xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME")
+        .join("view")
+        .join("view.toml");
+
+    plant_look_mode(&paths.isolated_home);
+    assert_eq!(
+        std::fs::read_to_string(&planted).ok().as_deref(),
+        Some(PLANTED_LOOK_MODE),
+        "a first launch plants the look mode and nothing else"
+    );
+
+    disable_native_features(&paths.isolated_home);
+    let with_native = std::fs::read_to_string(&planted).unwrap_or_default();
+    assert!(
+        with_native.starts_with(PLANTED_LOOK_MODE),
+        "a native-off session keeps the look mode:\n{with_native}"
+    );
+    assert!(
+        with_native.contains("[native]"),
+        "a native-off session still switches the features off:\n{with_native}"
+    );
 }
 
 static NEXT_SCRATCH_ID: AtomicU64 = AtomicU64::new(0);

@@ -76,6 +76,8 @@ impl Frame {
 /// - not state at all: `dirty`, `running`, `fatal_reason`, `config_was_read`,
 ///   `checktime_generation`, `pending_file_gone_probes`, `speculate`,
 ///   `supervision`, `claimed_keys`, `key_bindings`, `cwd`, `colorscheme`,
+///   `detected_look` (what `panes = "auto"` answered and the variable that
+///   decided it, read by the `:View ui panes` notice and the config report),
 ///   `mouse_capture`, `mouse_on`, `colon_mapped` (it gates whether a `:` is
 ///   speculated at all, and `cmdline_speculated` is the state that reaches
 ///   a layer), `key_unanswered`, `key_round_trips`, `key_round_trips_at` and
@@ -102,6 +104,10 @@ impl Frame {
 struct Inputs {
     grid: (u16, u16),
     offset: u16,
+    // the window look: it decides the outer grid's placement and whether a
+    // frame is drawn at all, and a flip that keeps the grid the same size
+    // (one look mode to another at the same ring) reaches no other field
+    look: view_core::model::Look,
     term: (u16, u16),
     chrome_painted: bool,
     palette_enabled: bool,
@@ -138,6 +144,7 @@ impl Inputs {
         Self {
             grid: engine.grid().size(),
             offset: model.chrome_rows(),
+            look: model.look,
             term: (model.term_width, model.term_height),
             chrome_painted: model.chrome_painted,
             palette_enabled: model.palette_enabled,
@@ -162,6 +169,7 @@ impl Inputs {
             && model.overlays().is_empty()
             && self.grid == engine.grid().size()
             && self.offset == model.chrome_rows()
+            && self.look == model.look
             && self.term == (model.term_width, model.term_height)
             && self.chrome_painted == model.chrome_painted
             && self.palette_enabled == model.palette_enabled

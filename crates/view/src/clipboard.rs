@@ -839,6 +839,14 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn try_resize_grid(
+            &self,
+            _grid: u64,
+            _width: u16,
+            _height: u16,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn paste(&self, _text: &str) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
@@ -888,6 +896,12 @@ mod tests {
             Ok(())
         }
         fn probe_default_hl(
+            &self,
+            _generation: u64,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn probe_accent_hl(
             &self,
             _generation: u64,
         ) -> Result<(), view_engine::handle::EngineError> {

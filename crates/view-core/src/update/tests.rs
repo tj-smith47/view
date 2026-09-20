@@ -3260,7 +3260,10 @@ fn default_colors_set_bumps_generation_and_emits_a_matching_probe_effect() {
     assert_eq!(m.engine.hl().probe_generation(), 1);
     assert!(matches!(
         effects.as_slice(),
-        [Effect::Rpc(RpcCall::GetDefaultHl { generation: 1 })]
+        [
+            Effect::Rpc(RpcCall::GetDefaultHl { generation: 1 }),
+            Effect::Rpc(RpcCall::GetAccentHl { generation: 1 })
+        ]
     ));
 }
 
@@ -3286,7 +3289,10 @@ fn a_second_default_colors_set_bumps_generation_again() {
     assert_eq!(m.engine.hl().probe_generation(), 2);
     assert!(matches!(
         effects.as_slice(),
-        [Effect::Rpc(RpcCall::GetDefaultHl { generation: 2 })]
+        [
+            Effect::Rpc(RpcCall::GetDefaultHl { generation: 2 }),
+            Effect::Rpc(RpcCall::GetAccentHl { generation: 2 })
+        ]
     ));
 }
 
@@ -12494,5 +12500,73 @@ fn the_colon_mapping_reading_is_recorded_and_replaced_by_the_late_re_read() {
     assert!(
         !m.colon_mapped(),
         "the later reading is the true one -- a plugin that mapped `:` can be unloaded again"
+    );
+}
+
+/// The look is a session-wide setting with no key of its own, so the
+/// command line is the whole of its reach: the completion has to offer the
+/// form and the dispatch has to answer it.
+#[test]
+fn the_ui_panes_form_completes_and_dispatches() {
+    assert!(
+        crate::native::mappings::command_only_forms()
+            .iter()
+            .any(|form| form.feature == "ui" && form.verb == "panes"),
+        "the completion offers no ui panes form"
+    );
+    let mut m = model();
+    m.detected_look = crate::model::Detected {
+        panes: Some(crate::model::Panes::Tiles),
+        marker: None,
+    };
+    for (word, expected) in [
+        ("tiles", crate::model::Panes::Tiles),
+        ("nvim", crate::model::Panes::Nvim),
+        ("auto", crate::model::Panes::Tiles),
+    ] {
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "ui".to_string(),
+                verb: format!("panes {word}"),
+            },
+        );
+        assert_eq!(m.look.panes, expected, "`:View ui panes {word}`");
+    }
+}
+
+/// The report is the only way a user finds out why a session came up in a
+/// mode they did not ask for, so it names the marker that decided it.
+#[test]
+fn view_panes_with_no_argument_reports_the_mode_and_its_marker() {
+    let mut m = model();
+    m.look = crate::model::Look::new(crate::model::Panes::Nvim, true);
+    m.detected_look = crate::model::Detected {
+        panes: Some(crate::model::Panes::Nvim),
+        marker: Some("HYPRLAND_INSTANCE_SIGNATURE"),
+    };
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ui".to_string(),
+            verb: "panes".to_string(),
+        },
+    );
+    let reported: String = m
+        .engine
+        .messages
+        .entries
+        .last()
+        .map(|entry| {
+            entry
+                .content
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        reported.contains("ui.panes = nvim") && reported.contains("HYPRLAND_INSTANCE_SIGNATURE"),
+        "the report names neither the mode nor the marker: {reported:?}"
     );
 }

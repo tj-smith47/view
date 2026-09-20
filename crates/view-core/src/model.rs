@@ -144,6 +144,15 @@ pub struct Model {
     /// handle). Gates [`Model::statusline_rows`], which in turn gates
     /// whether `view-surface::render` reserves a bottom row for the bar.
     pub statusline_enabled: bool,
+    /// How the window layout is drawn, set once at startup from the
+    /// resolved `[ui]` table and flipped live by `:View panes`. Decides the
+    /// ring the outer grid gives up, the inner size every window grid is
+    /// asked for, and whether the bottom bar has a row at all.
+    pub look: Look,
+    /// What `panes = "auto"` answered on this session's environment, which
+    /// is what `:View ui panes` reports and what `:View ui panes auto`
+    /// switches back to.
+    pub detected_look: Detected,
     /// Whether the `palette` native feature is enabled for this session, set
     /// the same way and at the same place as `statusline_enabled`. Gates
     /// `view-surface::render`'s choice between the centered floating
@@ -363,6 +372,8 @@ impl Model {
             claimed_keys: Vec::new(),
             colon_mapped: false,
             statusline_enabled: false,
+            look: Look::default(),
+            detected_look: Detected::default(),
             palette_enabled: false,
             ext_surfaces: crate::native::ext::shipped_multigrid(),
             config_was_read: true,
@@ -631,6 +642,16 @@ impl Model {
     #[must_use]
     pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
         self.cwd = cwd;
+        self
+    }
+
+    /// The window look this session starts under. The registry holds the
+    /// same answer, because it places every window grid at the origin the
+    /// look puts inside the slot nvim gave it.
+    #[must_use]
+    pub fn with_look(mut self, look: Look) -> Self {
+        self.look = look;
+        self.engine.grids_mut().set_look(look);
         self
     }
 
@@ -1218,6 +1239,10 @@ impl Model {
     /// from [`Model::chrome_rows`] (a top-row offset for the tabline, not a
     /// total reservation) -- `view-surface::render` uses both together to
     /// find the engine grid's target size and the statusline layer's row.
+    ///
+    /// The look never enters it. The feature holds nvim at `laststatus = 0`,
+    /// so a session that drops the bar has no status line and no mode
+    /// message anywhere on screen.
     #[must_use]
     pub fn statusline_rows(&self) -> u16 {
         u16::from(self.statusline_enabled)
@@ -1259,14 +1284,19 @@ impl Model {
         grid_target_for(
             (self.term_width, self.term_height),
             self.chrome_rows(),
-            self.statusline_enabled,
+            self.statusline_rows() > 0,
+            self.look.ring(),
         )
     }
 }
 
 /// The `(width, height)` an engine grid takes on a terminal of `size` with
-/// `chrome_rows` reserved at the top and, when `statusline` is on, view's
-/// own bottom bar.
+/// `chrome_rows` reserved at the top, `ring` cells of view's own outer frame
+/// on every side, and, when `statusline` is on, view's own bottom bar.
+///
+/// `ring` is what tiles mode spends framing the screen itself: two cells
+/// gapped, one gapless, none under `panes = "nvim"`. It comes off both axes,
+/// and the grid is then placed one cell in from the terminal's own edge.
 ///
 /// A free function because the spawn needs the answer before there is a
 /// [`Model`] to ask. The child is started `--headless` with this size on a
@@ -1283,16 +1313,26 @@ impl Model {
 /// own reading, and a 4-row terminal with a tabline and a statusline leaves
 /// 2.
 #[must_use]
-pub fn grid_target_for(size: (u16, u16), chrome_rows: u16, statusline: bool) -> (u16, u16) {
+pub fn grid_target_for(
+    size: (u16, u16),
+    chrome_rows: u16,
+    statusline: bool,
+    ring: u16,
+) -> (u16, u16) {
     let size = if size.0 == 0 || size.1 == 0 {
         SIZE_FLOOR
     } else {
         size
     };
+    // once per axis, not once per side: the grid sits one cell in from the
+    // top and left, and what is left over goes to the right and bottom,
+    // where a gapped tile's own gap already stands between its frame and
+    // the terminal edge
     (
-        size.0.max(ENGINE_MIN_SIZE.0),
+        size.0.saturating_sub(ring).max(ENGINE_MIN_SIZE.0),
         size.1
             .saturating_sub(chrome_rows + u16::from(statusline))
+            .saturating_sub(ring)
             .max(ENGINE_MIN_SIZE.1),
     )
 }
@@ -1451,6 +1491,14 @@ impl EngineModel {
         &self.grids
     }
 
+    /// Every grid and pane, for the two callers that change the window
+    /// look: nothing else may hand the registry a whole replacement, for
+    /// the reason the field's own doc gives.
+    #[inline]
+    pub(crate) fn grids_mut(&mut self) -> &mut GridRegistry {
+        &mut self.grids
+    }
+
     /// Applies one decoded `ext_linegrid` operation to the global grid,
     /// which is the whole picture until `ext_multigrid` is negotiated. The
     /// only way to mutate it, so every mutation goes through the tracker
@@ -1518,6 +1566,16 @@ impl EngineModel {
     /// generation check the caller owes first.
     pub fn confirm_hl_defaults(&mut self, probe: ProbedDefaults) {
         self.hl.confirm_defaults(probe);
+    }
+
+    /// Records the two probed foregrounds the accent role falls back to.
+    pub fn confirm_accent(&mut self, function_fg: Option<u32>, statement_fg: Option<u32>) {
+        self.hl.confirm_accent(function_fg, statement_fg);
+    }
+
+    /// Records the colour the user named for the accent role.
+    pub fn set_accent_token(&mut self, token: Option<u32>) {
+        self.hl.set_accent_token(token);
     }
 
     /// Installs a whole highlight table, as startup does with one seeded
@@ -2066,8 +2124,10 @@ impl CmdlineState {
     }
 }
 
+mod look;
 mod messages;
 
+pub use look::{Detected, Look, Panes, MIN_FRAMED_SLOT};
 pub use messages::{MessageEntry, MessageId, Messages};
 
 /// The open tabs, present once nvim has sent at least one `tabline_update`.
@@ -2935,6 +2995,24 @@ mod tests {
         assert_eq!(m.grid_target(), (80, 23));
     }
 
+    /// Under tiles the ring is the band view draws frames and gaps in, so
+    /// the engine never gets those cells. The bar keeps its own row in
+    /// every look, because the statusline feature holds nvim at
+    /// `laststatus = 0` and the bar is then the only status on screen.
+    #[test]
+    fn the_outer_grid_reserves_the_ring_and_the_status_row_under_tiles() {
+        let mut m = Model::with_term_size(80, 24);
+        m.statusline_enabled = true;
+        assert_eq!(m.grid_target(), (80, 23), "the bar takes a row under nvim");
+
+        m.look = Look::new(Panes::Tiles, true);
+        assert_eq!(m.statusline_rows(), 1);
+        assert_eq!(m.grid_target(), (78, 21));
+
+        m.look = Look::new(Panes::Tiles, false);
+        assert_eq!(m.grid_target(), (79, 22));
+    }
+
     #[test]
     fn grid_target_matches_term_size_with_no_chrome_reserved() {
         let m = Model::with_term_size(80, 24);
@@ -2953,7 +3031,7 @@ mod tests {
             m.statusline_enabled = statusline;
             assert_eq!(
                 m.grid_target(),
-                grid_target_for((263, 88), 0, statusline),
+                grid_target_for((263, 88), 0, statusline, 0),
                 "statusline = {statusline}"
             );
         }
@@ -2969,11 +3047,11 @@ mod tests {
     /// share one arithmetic.
     #[test]
     fn a_zero_on_either_axis_is_answered_with_the_floor_before_the_chrome() {
-        assert_eq!(grid_target_for((0, 0), 0, false), SIZE_FLOOR);
-        assert_eq!(grid_target_for((0, 88), 0, false), SIZE_FLOOR);
-        assert_eq!(grid_target_for((263, 0), 0, false), SIZE_FLOOR);
+        assert_eq!(grid_target_for((0, 0), 0, false, 0), SIZE_FLOOR);
+        assert_eq!(grid_target_for((0, 88), 0, false, 0), SIZE_FLOOR);
+        assert_eq!(grid_target_for((263, 0), 0, false, 0), SIZE_FLOOR);
         assert_eq!(
-            grid_target_for((0, 0), 1, true),
+            grid_target_for((0, 0), 1, true, 0),
             (SIZE_FLOOR.0, SIZE_FLOOR.1 - 2)
         );
         assert!(
@@ -3003,13 +3081,19 @@ mod tests {
     /// still refuses fails there rather than at a user's terminal.
     #[test]
     fn a_geometry_the_engine_refuses_is_clamped_on_each_axis() {
-        assert_eq!(grid_target_for((5, 40), 0, false), (ENGINE_MIN_SIZE.0, 40));
         assert_eq!(
-            grid_target_for((100, 1), 0, false),
+            grid_target_for((5, 40), 0, false, 0),
+            (ENGINE_MIN_SIZE.0, 40)
+        );
+        assert_eq!(
+            grid_target_for((100, 1), 0, false, 0),
             (100, ENGINE_MIN_SIZE.1)
         );
-        assert_eq!(grid_target_for((100, 4), 1, true), (100, ENGINE_MIN_SIZE.1));
-        assert_eq!(grid_target_for((263, 88), 0, false), (263, 88));
+        assert_eq!(
+            grid_target_for((100, 4), 1, true, 0),
+            (100, ENGINE_MIN_SIZE.1)
+        );
+        assert_eq!(grid_target_for((263, 88), 0, false, 0), (263, 88));
     }
 
     /// A full-height side panel takes its share of the rows an overlay may

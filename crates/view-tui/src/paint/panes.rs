@@ -23,6 +23,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as TermRect;
 use view_core::grid::registry::{GridId, GridRegistry, Pane, PaneKind, GLOBAL_GRID};
 use view_core::hl::HlTable;
+use view_core::model::Panes;
 use view_core::theme::{ChromeGroup, Theme};
 use view_surface::overlay::BorderSet;
 use view_surface::Rect;
@@ -54,6 +55,10 @@ pub(super) fn paint_panes(
         paint_grid(registry.global(), theme, hl, area, damage, buf);
         return;
     }
+    // tiles restyle the separator column themselves: gapped paints it as
+    // gap, gapless makes it the frame, and neither wants nvim's own glyph
+    // put back under it
+    let tiled = registry.look().panes == Panes::Tiles;
     let cursor = registry.cursor_grid();
     let mut windows: Vec<TermRect> = Vec::new();
     let mut separated = false;
@@ -66,7 +71,9 @@ pub(super) fn paint_panes(
         // before anything floating because a float's rect owns every cell
         // under it.
         if !separated && !matches!(pane.kind, PaneKind::Window) {
-            paint_separators(&windows, theme, borders, damage, buf);
+            if !tiled {
+                paint_separators(&windows, theme, borders, damage, buf);
+            }
             separated = true;
         }
         let Some(grid) = registry.grid(pane.id) else {
@@ -90,7 +97,7 @@ pub(super) fn paint_panes(
             windows.push(pane_area);
         }
     }
-    if !separated {
+    if !separated && !tiled {
         paint_separators(&windows, theme, borders, damage, buf);
     }
 }
@@ -159,6 +166,8 @@ fn faces_a_neighbour(windows: &[TermRect], col: u16, row: u16) -> bool {
         .iter()
         .any(|w| w.x == col.saturating_add(1) && (w.y..w.y.saturating_add(w.height)).contains(&row))
 }
+
+pub(crate) mod frames;
 
 #[cfg(test)]
 mod tests;

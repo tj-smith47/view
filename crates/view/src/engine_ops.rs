@@ -28,6 +28,9 @@ pub trait EngineOps {
     fn input(&self, notation: &str) -> Result<(), EngineError>;
     /// Notifies nvim of a terminal resize via `nvim_ui_try_resize`.
     fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError>;
+    /// Asks nvim for one window grid's inner size via
+    /// `nvim_ui_try_resize_grid`; `0, 0` clears the request.
+    fn try_resize_grid(&self, grid: u64, width: u16, height: u16) -> Result<(), EngineError>;
     /// Streams pasted text via `nvim_paste`.
     fn paste(&self, text: &str) -> Result<(), EngineError>;
     /// Forwards one mouse event via `nvim_input_mouse`.
@@ -70,6 +73,9 @@ pub trait EngineOps {
     /// with `generation`; never blocks, and never itself returns the reply
     /// (see `Msg::HlProbeReply`).
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError>;
+    /// Reads the two syntax groups the accent role resolves from
+    /// (see `Msg::AccentProbeReply`).
+    fn probe_accent_hl(&self, generation: u64) -> Result<(), EngineError>;
     /// Issues an async read of what this engine recovered while starting,
     /// tagged `generation`; never blocks, and never itself returns the
     /// reading (see `Msg::SwapRecovered`).
@@ -274,6 +280,9 @@ impl EngineOps for EngineHandle {
     fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError> {
         self.try_resize(width, height)
     }
+    fn try_resize_grid(&self, grid: u64, width: u16, height: u16) -> Result<(), EngineError> {
+        self.try_resize_grid(grid, width, height)
+    }
     fn paste(&self, text: &str) -> Result<(), EngineError> {
         self.paste(text)
     }
@@ -315,6 +324,9 @@ impl EngineOps for EngineHandle {
     }
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
         self.probe_default_hl(generation)
+    }
+    fn probe_accent_hl(&self, generation: u64) -> Result<(), EngineError> {
+        self.probe_accent_hl(generation)
     }
     fn probe_swap_recovery(&self, generation: u64) -> Result<(), EngineError> {
         self.probe_swap_recovery(generation)
@@ -466,6 +478,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError> {
         (**self).try_resize(width, height)
     }
+    fn try_resize_grid(&self, grid: u64, width: u16, height: u16) -> Result<(), EngineError> {
+        (**self).try_resize_grid(grid, width, height)
+    }
     fn paste(&self, text: &str) -> Result<(), EngineError> {
         (**self).paste(text)
     }
@@ -506,6 +521,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
         (**self).probe_default_hl(generation)
+    }
+    fn probe_accent_hl(&self, generation: u64) -> Result<(), EngineError> {
+        (**self).probe_accent_hl(generation)
     }
     fn probe_swap_recovery(&self, generation: u64) -> Result<(), EngineError> {
         (**self).probe_swap_recovery(generation)
@@ -660,6 +678,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError> {
         (**self).try_resize(width, height)
     }
+    fn try_resize_grid(&self, grid: u64, width: u16, height: u16) -> Result<(), EngineError> {
+        (**self).try_resize_grid(grid, width, height)
+    }
     fn paste(&self, text: &str) -> Result<(), EngineError> {
         (**self).paste(text)
     }
@@ -700,6 +721,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
         (**self).probe_default_hl(generation)
+    }
+    fn probe_accent_hl(&self, generation: u64) -> Result<(), EngineError> {
+        (**self).probe_accent_hl(generation)
     }
     fn probe_swap_recovery(&self, generation: u64) -> Result<(), EngineError> {
         (**self).probe_swap_recovery(generation)
@@ -882,6 +906,9 @@ impl EngineOps for FakeOps {
     fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError> {
         self.record(format!("try_resize({width},{height})"))
     }
+    fn try_resize_grid(&self, grid: u64, width: u16, height: u16) -> Result<(), EngineError> {
+        self.record(format!("try_resize_grid({grid},{width},{height})"))
+    }
     fn paste(&self, text: &str) -> Result<(), EngineError> {
         self.record(format!("paste({text})"))
     }
@@ -933,6 +960,9 @@ impl EngineOps for FakeOps {
     }
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
         self.record(format!("probe_default_hl({generation})"))
+    }
+    fn probe_accent_hl(&self, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("probe_accent_hl({generation})"))
     }
     fn probe_swap_recovery(&self, generation: u64) -> Result<(), EngineError> {
         self.record(format!("probe_swap_recovery({generation})"))
@@ -1164,6 +1194,9 @@ impl EngineOps for SlowOps {
     fn try_resize(&self, _width: u16, _height: u16) -> Result<(), EngineError> {
         Ok(())
     }
+    fn try_resize_grid(&self, _grid: u64, _width: u16, _height: u16) -> Result<(), EngineError> {
+        Ok(())
+    }
     fn paste(&self, _text: &str) -> Result<(), EngineError> {
         Ok(())
     }
@@ -1203,6 +1236,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn probe_default_hl(&self, _generation: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn probe_accent_hl(&self, _generation: u64) -> Result<(), EngineError> {
         Ok(())
     }
     fn probe_swap_recovery(&self, _generation: u64) -> Result<(), EngineError> {

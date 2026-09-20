@@ -112,8 +112,9 @@ single_grid = false        # default: false -- view composites nvim's windows
                            # See docs/multigrid.md.
 
 # [ui] is what view paints with: how much of the terminal's own capability
-# it uses, and which colorscheme the session runs. Both keys derive when the
-# key is absent, and "auto" is that same absence written down.
+# it uses, which colorscheme the session runs, how windows are drawn, and
+# the colours you name for yourself. Every key derives when it is absent,
+# and "auto" is that same absence written down.
 #
 # tier is the summary of the startup capability probe -- synchronized
 # output, truecolor, the kitty keyboard protocol -- and naming one here
@@ -129,9 +130,26 @@ single_grid = false        # default: false -- view composites nvim's windows
 # whatever colorscheme your own config ends on -- costs nothing extra. A
 # name nvim cannot find is reported and the derived chrome stands.
 #
-# Both keys are also flags for a single session -- view --tier basic and
-# view --theme gruvbox -- and a flag outranks this file, as does the
-# matching VIEW_UI_* variable.
+# panes decides how your windows are drawn. "tiles" gives every window a
+# frame of view's own, with the one you are working in picked out in the
+# accent colour; "nvim" leaves the picture nvim paints for itself. view's
+# status bar keeps the bottom row in both. "auto" reads your session: a
+# tiling window manager is already arranging your screen, so view stays out
+# of its way and draws "nvim" there, and everything else -- a desktop, a
+# terminal on macOS or Windows, an ssh session -- gets "tiles". :View panes
+# tiles switches a running session, and :View panes on its own says which
+# mode you are in and what decided it.
+#
+# gaps is about tiles only: true leaves a gap between neighbouring frames,
+# false has them share their edges.
+#
+# [ui.tokens] is where you name a colour yourself instead of letting view
+# derive it. accent is the colour on the active tile's frame; left out, view
+# takes it from your colorscheme.
+#
+# tier, theme and panes are also flags for a single session -- view --tier
+# basic, view --theme gruvbox, view --panes nvim -- and a flag outranks this
+# file, as does the matching VIEW_UI_* variable.
 
 [ui]
 tier = "auto"              # default: "auto" -- the probed terminal
@@ -142,6 +160,15 @@ theme = "auto"             # default: "auto" -- view derives its chrome from
                            # whatever colorscheme your config ends on. A
                            # name runs nvim's own :colorscheme and derives
                            # from that instead
+panes = "auto"             # default: "auto" -- tiles everywhere except under
+                           # a tiling window manager. tiles | nvim force it
+gaps = true                # default: true -- a gap between neighbouring
+                           # frames. false has them share their edges
+
+[ui.tokens]
+accent = "auto"            # default: "auto" -- the active tile's frame
+                           # colour, derived from your colorscheme. A hex
+                           # colour such as "#89b4fa" names it yourself
 
 # [ai] turns the agent panel and its ACP client on or off, and names which
 # agent view speaks to. "claude-code" is the one adapter this build knows

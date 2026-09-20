@@ -592,6 +592,22 @@ pub(super) fn decode_delete_confirm_reply(result: &Value) -> DeleteConfirmOutcom
 /// (non-map, or present keys of an unexpected wire type) degrade to `None`
 /// for that channel rather than erroring: a malformed reply is exactly as
 /// informative as an absent key for this probe's purposes.
+/// The accent probe's reply: `Function`'s and `Statement`'s foregrounds.
+///
+/// A key the chunk left out is a colorscheme that sets no foreground for
+/// that group, which is what the theme's fallback order exists for.
+pub(super) fn decode_accent_probe_reply(result: &Value) -> (Option<u32>, Option<u32>) {
+    let Some(map) = result.as_map() else {
+        return (None, None);
+    };
+    let get = |key: &str| {
+        crate::wire::map_find(map, key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+    };
+    (get("function"), get("statement"))
+}
+
 pub(super) fn decode_hl_probe_reply(result: &Value) -> (Option<u32>, Option<u32>) {
     let Some(map) = result.as_map() else {
         return (None, None);

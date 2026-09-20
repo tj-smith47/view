@@ -46,6 +46,11 @@ live from your colorscheme. A single config key hands any one of them back
 to the plugin you already use: copy [`view.toml.example`](view.toml.example)
 to `~/.config/view/view.toml` and set `picker = false` under `[native]`.
 
+**Every window in a frame.** Each window gets a frame of its own, with a
+gap between them and your accent colour on the one you are working in. Turn
+it off with one config key, or let view read your desktop and decide. See
+[`docs/tiled-ui.md`](docs/tiled-ui.md).
+
 **Agents in the editor.** An agent panel that speaks ACP, an agent that
 sees the file, selection and diagnostics you are looking at, and every
 proposed change reviewed as a diff in the file itself.
@@ -115,9 +120,6 @@ view brings together ideas from across the open-source community:
 
 ### Next
 
-- **Tiled UI.** Framed panes with gaps and an active accent, status
-  segments in the frame edge, a tabpage pill, the tree and the agent
-  panel as overlays or sidebars, chosen for each.
 - **Rewind the session.** Scrub back through everything you typed and
   saw, branch from any point, export a clip.
 - **Key introspector.** `:View keys`: which mapping fired, whose it was,

@@ -137,7 +137,7 @@ fn marker_path() -> PathBuf {
 #[test]
 fn a_spawn_sized_from_a_refused_geometry_runs_its_whole_startup_chunk() {
     for reading in [(0, 0), (5, 40), (100, 1)] {
-        let (width, height) = view_core::model::grid_target_for(reading, 0, false);
+        let (width, height) = view_core::model::grid_target_for(reading, 0, false, 0);
         let engine =
             Engine::spawn(EngineConfig::isolated().with_late_attach(width, height)).unwrap();
 

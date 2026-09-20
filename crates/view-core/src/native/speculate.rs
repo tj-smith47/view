@@ -2456,6 +2456,7 @@ mod tests {
     /// paints a wrong one.
     #[test]
     fn a_keystroke_whose_cursor_pane_is_hidden_predicts_nothing() {
+        use crate::events::WinHandle;
         use crate::grid::registry::{GridEvent, GridId};
         use crate::grid::GridOp;
         let mut model = typing_model();
@@ -2468,8 +2469,11 @@ mod tests {
         });
         model.engine.apply_grid_event(GridEvent::Window {
             grid: GridId(4),
+            win: WinHandle(4),
             startrow: 0,
             startcol: 41,
+            width: 39,
+            height: 23,
         });
         model.engine.apply_grid_event(GridEvent::Cells {
             grid: GridId(4),

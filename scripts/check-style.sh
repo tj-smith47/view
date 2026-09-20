@@ -659,21 +659,22 @@ GEOMETRY_CALLS='ui_attach|UiAttach|ui_try_resize|try_resize\(|TryResize|(^|[^A-Z
 GEOMETRY_ATTACH_CRATES='^crates/(view|view-core|view-engine|view-oracle)/'
 GEOMETRY_SITES='
 crates/view-core/src/model.rs 1 the one RpcCall::UiAttach production builds, from Model::grid_target -- grid_target_for over the model own terminal size
-crates/view-core/src/msg.rs 2 the UiAttach and TryResize variant declarations; the pair each variant carries is what its builder put in it
+crates/view-core/src/msg.rs 3 the UiAttach, TryResize and TryResizeGrid variant declarations; the pair each variant carries is what its builder put in it
 crates/view-core/src/update/ai_fs.rs 4 an AI filesystem lock release and its own helper, no geometry anywhere
+crates/view-core/src/update/look.rs 2 the look change building one TryResize for the outer grid and one TryResizeGrid for a window, each pair from Look arithmetic over the slot the registry already holds
 crates/view-core/src/update/mod.rs 1 the fold resizing the grid when the paint area moves, spending Model::grid_target
 crates/view-core/src/update/ui_event.rs 1 the tabline fold resizing the grid when the chrome row count moves, spending Model::grid_target
-crates/view-engine/src/nvim_api.rs 10 the handle three public attach entry points and its one resize entry point, the private attach two of them hand off to and both hand-off lines, and the three wire method-name strings, which name the call rather than a pair; the rest spend what the caller hands them
+crates/view-engine/src/nvim_api.rs 11 the handle three public attach entry points and its two resize entry points, the private attach two of them hand off to and both hand-off lines, and the three wire method-name strings, which name the call rather than a pair; the rest spend what the caller hands them
 crates/view-engine/src/process.rs 12 the spawn own geometry seed: the late_attach field and its None default, the builder and its assignment, the getter and its body, the attaches_late predicate, late_attach_cmd, and the two argv paths that destructure the field and render it into --cmd; the field, the default, the getter two lines and the predicate carry no pair, and the rest spend what main or recovery handed the config
-crates/view-oracle/src/hang.rs 4 the adversarial harness attaching its own engine at the fixture size it opened the session with and, on the restart leg, at Model::grid_target, plus the TryResize effect it forwards and the resize forwarding it
-crates/view-oracle/src/lib.rs 2 the oracle driver attaching at the size its caller opened the session with, and the TryResize effect it forwards
+crates/view-oracle/src/hang.rs 5 the adversarial harness attaching its own engine at the fixture size it opened the session with and, on the restart leg, at Model::grid_target, plus the TryResize and TryResizeGrid effects it forwards and the resize call forwarding the first of them
+crates/view-oracle/src/lib.rs 3 the oracle driver attaching at the size its caller opened the session with, and the TryResize and TryResizeGrid effects it forwards
 crates/view-oracle/src/reference.rs 2 the second applier attaching at the size the session under comparison was opened at, and resizing to the height the chrome row count leaves it
 crates/view-oracle/src/speculate.rs 2 the speculative-echo battery attaching and resizing at its own fixture geometry
 crates/view/src/engine_ops.rs 14 the EngineOps attach and resize surface: the two trait declarations and the three forwarding impls of each behind them, every impl spelled over its signature and the call it forwards to, spending the pair it was handed
 crates/view/src/main.rs 2 the attach guard release and the spawn own geometry seed, both spending spawn_size -- what grid_target_for answered the terminal reading with
 crates/view/src/native.rs 1 the native session resizing the grid for the row the statusline claims, spending Model::grid_target
 crates/view/src/recovery.rs 1 the replacement engine own geometry seed, spending Model::grid_target
-crates/view/src/runtime/executor.rs 3 the executor spending the pair the UiAttach and TryResize effects carry, which update() built from the model
+crates/view/src/runtime/executor.rs 4 the executor spending the pair the UiAttach, TryResize and TryResizeGrid effects carry, which update() built from the model
 crates/view/src/startup.rs 7 the attach guard release and the one attach it feeds, spending the pair main released rather than a reading of their own, plus the restart pattern destructuring the UiAttach and the two attaches that pattern feeds, which spend the pair Model::takes_attach built from grid_target, the zero-argument attach() closure call that carries it, and the read-back of the config late_attach seed
 crates/view/src/vlog.rs 2 the takeover topic naming the attach call of that batch: the pattern that matches the effect and the name it writes, which read how many ext surfaces were asked for and carry no pair
 '

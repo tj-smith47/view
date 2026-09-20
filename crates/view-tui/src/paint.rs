@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use view_core::grid::{Grid, GridDamage};
 pub use view_core::hl::{HlAttr, HlTable};
-use view_core::model::{CmdlineState, Model, PopupmenuState, TablineState};
+use view_core::model::{CmdlineState, Look, Model, Panes, PopupmenuState, TablineState};
 use view_core::native::speculate::PredictedCell;
 use view_core::native::views::{Span, StyleRole};
 use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
@@ -817,6 +817,7 @@ fn composite_layers(
                     damage,
                     buf,
                 );
+                panes::frames::paint_frames(model, &theme, area, damage, buf);
             }
             LayerKind::Cmdline(state) => paint_cmdline(state, &theme, area, buf),
             LayerKind::Toast { lines, paused, .. } => {
@@ -824,7 +825,7 @@ fn composite_layers(
             }
             LayerKind::Tabline(state) => paint_tabline(state, &theme, area, buf),
             LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, damage, buf),
-            LayerKind::Shell => paint_shell(&theme, area, damage, buf),
+            LayerKind::Shell => paint_shell(&theme, model.look, borders, area, damage, buf),
             LayerKind::Speculated(cells) => {
                 let offset = model.chrome_rows();
                 paint_speculated(cells, offset, damage, buf);
@@ -1477,8 +1478,22 @@ fn paint_frame_cells(
 /// usually over inside a frame read as slower than it is, and a start that
 /// really is slow is worth a message the notification path carries like
 /// every other one (see `view::startup`'s slow-attach notice).
-fn paint_shell(theme: &Theme, area: ratatui::layout::Rect, damage: &Damage, buf: &mut Buffer) {
+fn paint_shell(
+    theme: &Theme,
+    look: Look,
+    borders: BorderSet,
+    area: ratatui::layout::Rect,
+    damage: &Damage,
+    buf: &mut Buffer,
+) {
     if area.height == 0 || area.width == 0 {
+        return;
+    }
+    // tiles reserve no row for a bar, so painting one here would put a
+    // band across the bottom of the first frame that vanishes the moment
+    // the engine's own picture arrives
+    if look.panes != Panes::Nvim {
+        paint_shell_ring(theme, borders, area, damage, buf);
         return;
     }
     let bottom_row = area.height - 1;
@@ -1486,6 +1501,48 @@ fn paint_shell(theme: &Theme, area: ratatui::layout::Rect, damage: &Damage, buf:
         let fill = " ".repeat(usize::from(area.width));
         let style = ratatui_style(theme.chrome(ChromeGroup::StatusLine));
         paint_text_row(&fill, style, area, bottom_row, buf);
+    }
+}
+
+/// The outer ring of the tiled picture, drawn around the whole frame while
+/// the engine has sent nothing to put inside it.
+fn paint_shell_ring(
+    theme: &Theme,
+    borders: BorderSet,
+    area: ratatui::layout::Rect,
+    damage: &Damage,
+    buf: &mut Buffer,
+) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let style = ratatui_style(theme.chrome(ChromeGroup::WinSeparator));
+    let (last_col, last_row) = (area.width - 1, area.height - 1);
+    for row in [0, last_row] {
+        if !damage.covers_row_of(area, row) {
+            continue;
+        }
+        for col in 0..area.width {
+            set_border_cell(buf, area.x + col, area.y + row, borders.horizontal, style);
+        }
+    }
+    for row in 0..area.height {
+        if !damage.covers_row_of(area, row) {
+            continue;
+        }
+        for col in [0, last_col] {
+            set_border_cell(buf, area.x + col, area.y + row, borders.vertical, style);
+        }
+    }
+    for (col, row, glyph) in [
+        (0, 0, borders.top_left),
+        (last_col, 0, borders.top_right),
+        (0, last_row, borders.bottom_left),
+        (last_col, last_row, borders.bottom_right),
+    ] {
+        if damage.covers_row_of(area, row) {
+            set_border_cell(buf, area.x + col, area.y + row, glyph, style);
+        }
     }
 }
 

@@ -13,6 +13,7 @@
 //! so a capture that moves takes this test with it.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use view_core::events::WinHandle;
 use view_core::grid::registry::{GridEvent, GridId, GridRegistry, PaneKind, GLOBAL_GRID};
 use view_core::grid::{Grid, GridOp};
 
@@ -38,13 +39,23 @@ fn resize(grid: u64, width: u16, height: u16) -> GridEvent {
 }
 
 /// `win_pos [grid, win, startrow, startcol, width, height]`, the doc's
-/// `win_pos` section. The width and height the wire repeats here are the
-/// grid's own, which the matching `grid_resize` above already carries.
-fn win_pos(grid: u64, startrow: u16, startcol: u16) -> GridEvent {
+/// `win_pos` section, with the window handle written as the wire's
+/// `ext(1:NNNN)` number.
+fn win_pos(
+    grid: u64,
+    win: u64,
+    startrow: u16,
+    startcol: u16,
+    width: u16,
+    height: u16,
+) -> GridEvent {
     GridEvent::Window {
         grid: GridId(grid),
+        win: WinHandle(win),
         startrow,
         startcol,
+        width,
+        height,
     }
 }
 
@@ -61,23 +72,23 @@ fn transcript(label: &str) -> Vec<GridEvent> {
     let attach = vec![
         resize(1, 80, 24),
         resize(2, 80, 23),
-        win_pos(2, 0, 0), // win_pos [2, ext(1:1000), 0, 0, 80, 23]
+        win_pos(2, 1000, 0, 0, 80, 23),
     ];
     // "Ordering inside one cycle", verbatim minus the events carrying no
     // grid geometry (`win_viewport_margins`, `tabline_update`,
     // `win_viewport`, `grid_cursor_goto`, `flush`)
     let vsplit = vec![
-        win_pos(2, 0, 41),
+        win_pos(2, 1000, 0, 41, 39, 23),
         resize(4, 40, 23),
         resize(2, 39, 23),
-        win_pos(4, 0, 0),
+        win_pos(4, 1001, 0, 0, 40, 23),
     ];
     // "`nvim_ui_try_resize` and `nvim_ui_try_resize_grid`": one resize call
     // made the engine re-place and resize every grid itself
     let try_resize = vec![
         resize(1, 70, 20),
-        win_pos(6, 0, 0),
-        win_pos(5, 0, 41),
+        win_pos(6, 1003, 0, 0, 40, 19),
+        win_pos(5, 1002, 0, 41, 29, 19),
         resize(6, 40, 19),
         resize(5, 29, 19),
     ];
@@ -112,8 +123,8 @@ fn transcript(label: &str) -> Vec<GridEvent> {
                 GridEvent::Hide { grid: GridId(6) },
                 GridEvent::Hide { grid: GridId(5) },
                 GridEvent::Destroy { grid: GridId(8) },
-                win_pos(6, 0, 0),
-                win_pos(5, 0, 41),
+                win_pos(6, 1003, 0, 0, 40, 19),
+                win_pos(5, 1002, 0, 41, 29, 19),
             ],
         ]
         .concat(),
