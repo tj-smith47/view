@@ -460,12 +460,30 @@ mod tests {
     /// `empty_swap_dir` is crate-private, so a Windows pin against a real
     /// hold has to live in this module rather than in that integration
     /// test.
+    ///
+    /// The share mode is the whole subject. nvim opens its swap through the
+    /// C runtime, which shares reads and writes and never deletes, so the
+    /// handle refuses `remove_file`; Rust's `OpenOptions` adds
+    /// `FILE_SHARE_DELETE`, under which the removal succeeds and this pin
+    /// asserts the opposite of what it names.
     #[cfg(windows)]
     #[test]
     fn a_held_open_swap_file_survives_the_best_effort_cleanup() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        /// `FILE_SHARE_READ | FILE_SHARE_WRITE`, the CRT's own default for
+        /// a file opened without a sharing request.
+        const NVIM_SWAP_SHARE_MODE: u32 = 0x0000_0001 | 0x0000_0002;
+
         let dir = view_test_support::ScratchDir::new("bench-swap-windows-held").unwrap();
         let held = dir.join("scratch.txt.swp");
-        let file = std::fs::File::create(&held).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .share_mode(NVIM_SWAP_SHARE_MODE)
+            .open(&held)
+            .unwrap();
         empty_swap_dir(&dir);
         assert!(
             held.exists(),
