@@ -614,9 +614,10 @@ vim.api.nvim_create_autocmd("BufReadPost", {
 ///
 /// Idempotent rather than torn down and rebuilt: two sides of one pair
 /// resolve their fixture directory independently, and a rebuild between
-/// them would delete the tree the first side is still reading. The one
-/// conditional file (the stall plugin) is removed explicitly when the knob
-/// is off, so a run without it can never inherit the previous run's.
+/// them would delete the tree the first side is still reading. A stalled
+/// generation writes a tree of its own (see [`user_fixture_dir_name`]), so
+/// a run without the knob can neither inherit a stall nor take one away
+/// from a proof run beside it.
 ///
 /// # Errors
 ///
@@ -648,7 +649,7 @@ pub fn generate_user_fixture_with_stall(slow_ms: u64) -> Result<PathBuf, Fixture
         .join("lazy");
     let plugins = cached_plugin_names(&lazy_dir)?;
 
-    let dest = scratch_root("bench-fixtures").join(USER_FIXTURE);
+    let dest = scratch_root("bench-fixtures").join(user_fixture_dir_name(slow_ms));
     let nvim = dest.join("nvim");
     let config = nvim.join("lua").join("config");
     write_generated(&nvim.join("init.lua"), render_user_init(&plugins, slow_ms))?;
@@ -663,10 +664,9 @@ pub fn generate_user_fixture_with_stall(slow_ms: u64) -> Result<PathBuf, Fixture
         source,
     })?;
     write_generated(&dest.join("view").join(view_toml), view_bytes)?;
-    let stall = nvim.join("slow-init");
     if slow_ms > 0 {
         write_generated(
-            &stall.join("plugin").join("stall.lua"),
+            &nvim.join("slow-init").join("plugin").join("stall.lua"),
             // the receipt file is what separates "the stall ran" from "the
             // spec entry was quietly ignored": both look like a fast run
             // from outside, and only one of them is a proof
@@ -677,10 +677,23 @@ pub fn generate_user_fixture_with_stall(slow_ms: u64) -> Result<PathBuf, Fixture
                  vim.wait({slow_ms})\n"
             ),
         )?;
-    } else {
-        let _ = std::fs::remove_dir_all(&stall);
     }
     Ok(dest)
+}
+
+/// Directory under `target/bench-fixtures/` one generation writes.
+///
+/// A stalled generation gets a tree of its own. Sharing one meant the
+/// unstalled path had to take the stall back out, which deleted the file a
+/// proof run beside it was about to measure; and the unstalled tree keeps
+/// the path, and so the contents and timestamps, every recorded baseline
+/// was taken against.
+fn user_fixture_dir_name(slow_ms: u64) -> String {
+    if slow_ms == 0 {
+        USER_FIXTURE.to_string()
+    } else {
+        format!("{USER_FIXTURE}-slow-{slow_ms}")
+    }
 }
 
 /// Counts [`write_generated`] calls in this process, so two generations in
@@ -964,17 +977,7 @@ mod tests {
             }
             let mut generated = None;
             for handle in handles {
-                match handle.join().unwrap() {
-                    Ok(dir) => {
-                        assert_whole_fixture(&dir);
-                        generated = Some(dir);
-                    }
-                    Err(err) => assert!(
-                        matches!(err, FixtureError::EmptyPluginCache { .. }),
-                        "a generation racing its peers must still hand back a whole tree, or \
-                         say the cache is empty; got {err:?}"
-                    ),
-                }
+                generated = whole_or_empty_cache(handle.join().unwrap()).or(generated);
             }
             if let Some(dir) = generated {
                 let left = staging_leftovers(&dir);
@@ -982,6 +985,74 @@ mod tests {
                     left.is_empty(),
                     "every staging neighbour must be renamed or reaped; found {left:?}"
                 );
+            }
+        }
+    }
+
+    /// A stalled generation and a plain one in flight together each keep
+    /// their own tree. They shared one, so the plain path had to take the
+    /// stall back out of it -- deleting the file the stalled run beside it
+    /// was about to measure, and leaving that run reporting an ordinary
+    /// login as a slowed one.
+    #[test]
+    fn a_plain_generation_never_disturbs_a_stalled_one() {
+        const ROUNDS: usize = 8;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        for _ in 0..ROUNDS {
+            let mut handles = Vec::new();
+            for slow_ms in [0, USER_FIXTURE_STALL_MS] {
+                let barrier = std::sync::Arc::clone(&barrier);
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    generate_user_fixture_with_stall(slow_ms)
+                }));
+            }
+            let mut joined = handles.into_iter().map(|handle| handle.join().unwrap());
+            let plain = joined.next().and_then(whole_or_empty_cache);
+            let slow = joined.next().and_then(whole_or_empty_cache);
+            let (Some(plain), Some(slow)) = (plain, slow) else {
+                continue;
+            };
+            assert_ne!(
+                plain, slow,
+                "a stalled generation needs a tree of its own, or the plain one beside it \
+                 writes and deletes the same files"
+            );
+            let planted = slow
+                .join("nvim")
+                .join("slow-init")
+                .join("plugin")
+                .join("stall.lua");
+            let text = std::fs::read_to_string(&planted).unwrap_or_default();
+            assert!(
+                text.contains(&USER_FIXTURE_STALL_MS.to_string()),
+                "the plain generation beside this one removed the stall at {}",
+                planted.display()
+            );
+            assert!(
+                !plain.join("nvim").join("slow-init").exists(),
+                "an unstalled generation must carry no stall of its own"
+            );
+        }
+    }
+
+    /// Asserts one racing generation came back whole, or said the cache is
+    /// empty, and hands back the tree when there was one. Both outcomes
+    /// because the cache is populated by a compat or bench run, not by the
+    /// test suite.
+    fn whole_or_empty_cache(result: Result<PathBuf, FixtureError>) -> Option<PathBuf> {
+        match result {
+            Ok(dir) => {
+                assert_whole_fixture(&dir);
+                Some(dir)
+            }
+            Err(err) => {
+                assert!(
+                    matches!(err, FixtureError::EmptyPluginCache { .. }),
+                    "a generation racing its peers must still hand back a whole tree, or say \
+                     the cache is empty; got {err:?}"
+                );
+                None
             }
         }
     }
@@ -1011,8 +1082,13 @@ mod tests {
         );
     }
 
-    /// Every `.tmp` neighbour still sitting under the generated tree.
+    /// Every staging neighbour this process left under the generated tree.
+    ///
+    /// Its own only: `task test` runs the other harness binaries at the
+    /// same time, and one of them writing this tree legitimately has a
+    /// neighbour of its own in flight while this walk runs.
     fn staging_leftovers(dir: &Path) -> Vec<PathBuf> {
+        let mine = format!(".{}-", std::process::id());
         let mut found = Vec::new();
         let Ok(entries) = std::fs::read_dir(dir) else {
             return found;
@@ -1021,8 +1097,11 @@ mod tests {
             let path = entry.path();
             if path.is_dir() {
                 found.extend(staging_leftovers(&path));
-            } else if path.to_string_lossy().ends_with(".tmp") {
-                found.push(path);
+            } else {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.ends_with(".tmp") && name.contains(&mine) {
+                    found.push(path);
+                }
             }
         }
         found
