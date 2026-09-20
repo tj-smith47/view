@@ -51,9 +51,8 @@ sees the file, selection and diagnostics you are looking at, and every
 proposed change reviewed as a diff in the file itself.
 
 **Remote editing.** `view --remote host:path` edits files on another
-machine over SSH. As you type, view draws the character it expects right
-away, and the real one replaces it when the remote machine answers. Copy
-and paste reach your own clipboard.
+machine over SSH with the same editor, config and clipboard as at home.
+What typing over a link feels like is under [Performance](#performance).
 
 **Your work survives a crash.** If Neovim hangs or crashes underneath
 view, it is interrupted or restarted with your buffers restored, and the
