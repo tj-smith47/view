@@ -192,8 +192,16 @@ keymaps, goldens), fable-reviewed, then:
    aliases with a deprecation notice. Goldens for gapped/gapless and for every surface
    in both placements join item 6.
 6. Tier goldens for every tile/pill/float surface at every tier (T24, #13).
+7. README visuals (user ruling 2026-09-20): a tape or gif beside each
+   feature block (agent panel, remote editing, engine restart, tiled panes)
+   and a diagram for the surface ownership idea, once the tiled look
+   exists to record. The user decides where tapes live (repo or release
+   page). The structure pass is done (efc0a6d..e01a285); every Performance
+   figure has to stay resolvable under `scripts/check-budget-drift.sh` and
+   `task drift:sweep`.
 
-Exit: goldens committed for both look modes; user's Termius pass.
+Exit: goldens committed for both look modes; user's Termius pass; README
+visuals recorded under the user's config.
 
 ### S4 — Native surfaces that were claimed and never seen
 
