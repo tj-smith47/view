@@ -100,11 +100,15 @@ impl Frame {
 ///   `had_overlays`),
 ///   `statusline` (via `statusline_rows`), `toast_history` (only the
 ///   palette's history view reads it, and that is an overlay)
-/// - a setting no layer's geometry follows on its own: `ai_trusted`,
-///   `ai_enabled`, `ai_panel`, `ai_panel_width_pct`,
+/// - a setting no layer's geometry follows on its own:
+///   `ai_panel_width_pct`,
 ///   `ai_review_open_target`, `tree_width_pct`, `ext_surfaces`,
 ///   `statusline_enabled` -- each one only reaches a layer through an open
 ///   overlay, and an open overlay rebuilds
+/// - read through a field already here, second list: `ai_panel`,
+///   `ai_trusted` and `ai_enabled` reach the pill's one word, which
+///   `agent` carries, and `tabline_shows` decides only which of `tabline`
+///   and `buffers` the pill names, both of which are here
 #[derive(Debug)]
 struct Inputs {
     grid: (u16, u16),
@@ -125,6 +129,13 @@ struct Inputs {
     statusline_rows: u16,
     had_overlays: bool,
     tabline: Option<view_core::model::TablineState>,
+    // the pill's two model-side inputs: the names it draws, and the one
+    // word the agent's state resolves to. The state itself is four fields
+    // on three structs, and a frame keyed on them would compare a panel
+    // transcript to decide whether one word moved
+    buffers: Vec<view_core::model::BufferEntry>,
+    remote: Option<String>,
+    agent: &'static str,
     cmdline: Option<view_core::model::CmdlineState>,
     // presence alone: what the speculated palette draws is one fixed state
     // (`CmdlineState::bare_colon`), so the only thing a frame can differ by
@@ -143,6 +154,13 @@ struct Inputs {
     toast_motion: Option<view_core::native::toast::ToastMotion>,
 }
 
+/// The pill's agent word for `model`, or the empty string where the pill
+/// draws none. Read off `model.ai_panel`, `model.ai_trusted` and
+/// `model.ai_enabled`, the three fields it resolves.
+fn agent_of(model: &Model) -> &'static str {
+    view_core::native::pill::agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted)
+}
+
 impl Inputs {
     fn capture(model: &Model) -> Self {
         let engine = &model.engine;
@@ -157,6 +175,9 @@ impl Inputs {
             statusline_rows: model.statusline_rows(),
             had_overlays: !model.overlays().is_empty(),
             tabline: engine.tabline.clone(),
+            buffers: model.buffers.clone(),
+            remote: model.remote.clone(),
+            agent: agent_of(model),
             cmdline: engine.cmdline.clone(),
             cmdline_speculated: engine.cmdline_speculated.is_some(),
             popupmenu: engine.popupmenu.clone(),
@@ -181,6 +202,9 @@ impl Inputs {
             && self.caps == model.caps
             && self.statusline_rows == model.statusline_rows()
             && self.tabline == engine.tabline
+            && self.buffers == model.buffers
+            && self.remote == model.remote
+            && self.agent == agent_of(model)
             && self.cmdline == engine.cmdline
             && self.cmdline_speculated == engine.cmdline_speculated.is_some()
             && self.popupmenu == engine.popupmenu
@@ -362,6 +386,7 @@ fn kind_name(kind: &crate::LayerKind) -> &'static str {
         crate::LayerKind::Palette(_) => "Palette",
         crate::LayerKind::Speculated(_) => "Speculated",
         crate::LayerKind::Ai(_) => "Ai",
+        crate::LayerKind::Pill(_) => "Pill",
     }
 }
 

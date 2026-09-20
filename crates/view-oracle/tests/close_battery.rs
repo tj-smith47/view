@@ -624,6 +624,9 @@ fn closing_each_window_of_a_split_leaves_no_residue_on_a_widening_terminal() {
 /// on each of the two sides.
 const OUTER_RING: u16 = 2;
 
+/// The row the pill takes off the top of the outer grid under tiles.
+const PILL_ROW: u16 = 1;
+
 /// The grid nvim paints chrome into, which no window owns.
 const GLOBAL_GRID: u64 = 1;
 
@@ -660,6 +663,28 @@ fn nvim_window_sizes(engine: &mut view_oracle::EngineSession) -> Vec<(usize, usi
         .filter(|entry| !entry.is_empty())
         .map(|entry| {
             let (cols, rows) = entry.split_once('x').expect("winwidth x winheight");
+            (
+                cols.parse().expect("a column count"),
+                rows.parse().expect("a row count"),
+            )
+        })
+        .collect();
+    sizes.sort_unstable();
+    sizes
+}
+
+/// The size of every window nvim has open, tabpages other than the
+/// current one included: a new tabpage leaves the old one's windows open,
+/// and `winnr('$')` counts only the tabpage the session is on.
+fn all_window_sizes(engine: &mut view_oracle::EngineSession) -> Vec<(usize, usize)> {
+    let listed = engine
+        .eval_str("join(map(getwininfo(), 'v:val.width . \"x\" . v:val.height'), \",\")")
+        .expect("nvim answers for its own windows");
+    let mut sizes: Vec<(usize, usize)> = listed
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (cols, rows) = entry.split_once('x').expect("width x height");
             (
                 cols.parse().expect("a column count"),
                 rows.parse().expect("a row count"),
@@ -736,9 +761,9 @@ fn every_tile_keeps_its_own_windows_size_as_the_windows_of_a_split_close() {
         outer,
         (
             usize::from(COLS - OUTER_RING),
-            usize::from(ROWS - OUTER_RING)
+            usize::from(ROWS - OUTER_RING - PILL_ROW)
         ),
-        "the tiled look takes its ring out of the outer grid"
+        "the tiled look takes its ring and the pill's row out of the outer grid"
     );
 
     for (step, keys) in TILED_STEPS {
@@ -754,4 +779,120 @@ fn every_tile_keeps_its_own_windows_size_as_the_windows_of_a_split_close() {
             "{step}: view's window grids are not the windows nvim has open"
         );
     }
+}
+
+/// The outer grid under tiles with the pill on, as tabpages open and close
+/// and as the row names buffers instead.
+///
+/// The pill's row comes out of the grid nvim lays its windows in, so a row
+/// that appeared or went away without the grid following would leave every
+/// window a row taller or shorter than the screen has for it. Each step
+/// checks both: what the row names, and that view's window grids are still
+/// the windows nvim has open.
+#[test]
+fn the_pill_holds_its_row_as_tabpages_and_buffers_come_and_go() {
+    let work = common::ScratchPaths::new("close-battery-pill");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = view_oracle::EngineSession::spawn_with_ext(
+        COLS,
+        ROWS,
+        view_oracle::UI_EXT_OPTIONS_MULTIGRID,
+    )
+    .expect("EngineSession::spawn_with_ext against real nvim");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .arm_and_input(&format!(":cd {}<CR>", dir.display()))
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .set_panes("tiles")
+        .expect("the tiled look is reachable");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    let outer_rows = |engine: &view_oracle::EngineSession| {
+        engine
+            .grid_screens()
+            .iter()
+            .find(|(id, _)| *id == GLOBAL_GRID)
+            .map(|(_, screen)| screen.rows.len())
+            .expect("the global grid is always named")
+    };
+    let reserved = usize::from(ROWS - OUTER_RING - PILL_ROW);
+
+    for (step, keys) in [
+        ("file", ":e README.md<CR>"),
+        ("tab2", ":tabnew<CR>"),
+        ("tab3", ":tabnew<CR>"),
+        ("split", ":vsplit<CR>"),
+        ("close", ":q<CR>"),
+        ("tabclose", ":tabclose<CR>"),
+        ("tabonly", ":tabonly<CR>"),
+    ] {
+        engine.arm_and_input(keys).unwrap();
+        assert!(
+            engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap(),
+            "{step}: the session never settled"
+        );
+        assert_eq!(
+            outer_rows(&engine),
+            reserved,
+            "{step}: the pill's row left the outer grid"
+        );
+        let wanted = all_window_sizes(&mut engine);
+        assert_eq!(
+            window_grid_sizes(&engine),
+            wanted,
+            "{step}: view's window grids are not the windows nvim has open"
+        );
+    }
+
+    // three tabpages named across the row, each by the file it holds
+    engine
+        .arm_and_input(":e README.md<CR>:tabnew notes.txt<CR>:tabnew docs/guide.md<CR>")
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    let row = engine.screen().rows[0].clone();
+    assert_eq!(
+        row.chars().count(),
+        usize::from(COLS),
+        "the pill spans the whole terminal row"
+    );
+    for name in ["README.md", "notes.txt", "guide.md"] {
+        assert!(
+            row.contains(name),
+            "the tabpage holding {name} is missing from the row: {row}"
+        );
+    }
+
+    // the same row naming four buffers instead, one of them unsaved
+    engine.arm_and_input(":tabonly<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    let listed: Vec<view_core::model::BufferEntry> = ["a.rs", "b.rs", "c.rs", "d.rs"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            view_core::model::BufferEntry::new(
+                index as u64 + 1,
+                name.to_string(),
+                index == 1,
+                index == 0,
+            )
+        })
+        .collect();
+    engine.seed_pill_buffers(view_core::native::pill::TablineShows::Buffers, listed);
+    let row = engine.screen().rows[0].clone();
+    for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+        assert!(row.contains(name), "{name} is missing from the row: {row}");
+    }
+    assert!(
+        row.contains("b.rs +"),
+        "the unsaved buffer carries no marker: {row}"
+    );
+    assert_eq!(
+        outer_rows(&engine),
+        reserved,
+        "naming buffers instead of tabpages moved the grid"
+    );
+
+    engine.arm_and_input(":qa!<CR>").unwrap();
 }

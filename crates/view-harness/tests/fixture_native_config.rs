@@ -106,7 +106,22 @@ fn decides_the_attach(feature: &registry::FeatureDesc) -> bool {
     let file = ViewConfig::from_toml_str(&format!("[native]\n{id} = {flipped}\n"))
         .unwrap_or_else(|err| panic!("[native] {id} = {flipped} must parse: {err}"));
     let cfg = view_native::config::resolve_with(&file, &Overrides::default(), &|_| None);
-    ext_surfaces(&cfg) != ext::shipped_multigrid()
+    ext_surfaces(&cfg) != shipped_under(cfg.ui.panes.value)
+}
+
+/// The set a session with nothing to narrow it attaches under `panes`.
+///
+/// The tab line is the one `[native]` switch whose default follows the
+/// look, so a tiled session attaches every surface where an nvim-mode one
+/// attaches the registry's own set. Read against the wrong one of the two,
+/// every feature reads as deciding the attach and the walk below passes
+/// without asking anything.
+fn shipped_under(panes: view_core::model::Panes) -> Vec<ext::Ext> {
+    if panes == view_core::model::Panes::Tiles {
+        ext::ALL_MULTIGRID.to_vec()
+    } else {
+        ext::shipped_multigrid()
+    }
 }
 
 #[test]
@@ -163,7 +178,7 @@ fn no_fixture_hands_an_ext_surface_back_to_the_engine() {
             let attached = ext_surfaces(&cfg);
             assert_eq!(
                 attached,
-                ext::shipped_multigrid(),
+                shipped_under(cfg.ui.panes.value),
                 "{} attaches {attached:?} rather than the shipped set, so a session running it \
                  hands the rest back to nvim: nvim paints them into the grid, view applies that \
                  damage on top of its own rendering, and every row taken here describes a \

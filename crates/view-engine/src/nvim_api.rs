@@ -5,6 +5,7 @@
 //! way for it to reach the same calls.
 
 mod accent;
+mod buffers;
 mod decode;
 mod window_status;
 
@@ -23,6 +24,7 @@ use view_core::native::mappings::{
     command_only_forms, default_maps, is_spellable, review_keys, MappingSpec, COMMAND,
 };
 
+pub(crate) use buffers::{REGISTER_BUFFERS_CHUNK, SELECT_BUFFER_CHUNK, SELECT_TAB_CHUNK};
 use decode::{
     covered_beside, decode_buf_set_text_reply, decode_current_buffer_text_reply,
     decode_cursor_context_reply, decode_diagnostic_entries_reply, decode_quickfix_entries_reply,
@@ -2934,6 +2936,52 @@ impl EngineHandle {
                 Value::from(REGISTER_WINDOW_STATUS_CHUNK),
                 Value::Array(vec![Value::from(channel_id)]),
             ],
+        )?;
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(REGISTER_BUFFERS_CHUNK),
+                Value::Array(vec![Value::from(channel_id)]),
+            ],
+        )
+    }
+
+    /// Switches nvim to `tab`, for a click on a pill tab.
+    ///
+    /// A notify rather than a request, for [`register_bridge`]'s reason:
+    /// the answer a caller wants is the `tabline` event nvim sends when the
+    /// tabpage changed, and the paint loop must never wait on a reply.
+    ///
+    /// [`register_bridge`]: Self::register_bridge
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn select_tab(&self, tab: u64) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(SELECT_TAB_CHUNK),
+                Value::Array(vec![Value::from(tab)]),
+            ],
+        )
+    }
+
+    /// Switches nvim to `buf`, for a click on a pill buffer. A notify on
+    /// [`select_tab`](Self::select_tab)'s terms.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn select_buffer(&self, buf: u64) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(SELECT_BUFFER_CHUNK),
+                Value::Array(vec![Value::from(buf)]),
+            ],
         )
     }
 
@@ -5492,6 +5540,71 @@ mod tests {
             "the payload is decoded field for field, so its order is the \
              wire contract"
         );
+    }
+
+    #[test]
+    fn the_buffers_chunk_arms_every_event_of_its_group_and_defers_to_a_tick() {
+        for event in [
+            "BufAdd",
+            "BufDelete",
+            "BufEnter",
+            "BufModifiedSet",
+            "VimEnter",
+        ] {
+            assert!(
+                REGISTER_BUFFERS_CHUNK.contains(&format!("'{event}'")),
+                "{event} arms no report, so the row stops naming what is open"
+            );
+        }
+        assert!(
+            REGISTER_BUFFERS_CHUNK.contains("vim.schedule(flush)"),
+            "a trigger that notifies inline sends one list per window a \
+             :bufdo steps through"
+        );
+        assert!(
+            REGISTER_BUFFERS_CHUNK.contains("pcall(report)"),
+            "the report is scheduled, so it can land after a channel teardown"
+        );
+        assert!(
+            REGISTER_BUFFERS_CHUNK
+                .contains("vim.rpcnotify(channel, 'view_bridge', 'buffers', listed)"),
+            "the payload is decoded field for field, so its order is the \
+             wire contract"
+        );
+        assert!(
+            REGISTER_BUFFERS_CHUNK.contains("vim.bo[buf].buflisted"),
+            "an unlisted buffer is not one a person switches to by name"
+        );
+    }
+
+    #[test]
+    fn a_pill_click_sends_the_handle_to_the_call_that_switches() {
+        for (chunk, send) in [
+            (
+                SELECT_TAB_CHUNK,
+                Box::new(|h: &EngineHandle| h.select_tab(3)) as Box<dyn Fn(&EngineHandle) -> _>,
+            ),
+            (
+                SELECT_BUFFER_CHUNK,
+                Box::new(|h: &EngineHandle| h.select_buffer(3)),
+            ),
+        ] {
+            let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+            send(&h).unwrap();
+            let (method, params) = cap_rx
+                .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+                .unwrap();
+            assert_eq!(method, "nvim_exec_lua");
+            assert_eq!(
+                params,
+                vec![Value::from(chunk), Value::Array(vec![Value::from(3)])]
+            );
+            assert!(
+                chunk.contains("_is_valid("),
+                "a name can close between the frame that drew it and the \
+                 press that reaches nvim"
+            );
+        }
     }
 
     #[test]

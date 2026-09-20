@@ -55,6 +55,9 @@ pub const KEYS_EXPECTED: &str =
     "key notations spelled as nvim spells them, case included (\"<C-w>>\", \"<S-Right>\"), at \
      most two keys each, separated by spaces";
 
+/// What a value naming neither thing the pill can name owes the user.
+pub const TABLINE_SHOWS_EXPECTED: &str = "\"tabs\" or \"buffers\"";
+
 /// What a value naming neither review target owes the user.
 pub const OPEN_TARGET_EXPECTED: &str = "\"current\" or \"split\"";
 

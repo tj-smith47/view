@@ -495,6 +495,9 @@ fn mouse_in_engine_focus_becomes_rpc_input_mouse_effect() {
 fn mouse_row_is_offset_by_reserved_chrome_rows_before_reaching_the_engine() {
     use crate::events::{TabEntry, TabHandle};
     let mut m = model();
+    // the row is reserved by the attach that carries the surface, so a
+    // model nothing told about one leaves it to nvim
+    m.attach_surfaces(crate::native::ext::ALL_MULTIGRID.to_vec());
     // opening a second tab reserves one chrome row for the tabline
     // (Model::chrome_rows), so a click on terminal row 3 must land on
     // grid row 2, not grid row 3.
@@ -534,6 +537,9 @@ fn mouse_row_is_offset_by_reserved_chrome_rows_before_reaching_the_engine() {
 fn mouse_click_on_a_reserved_chrome_row_is_dropped_not_forwarded() {
     use crate::events::{TabEntry, TabHandle};
     let mut m = model();
+    // the row is reserved by the attach that carries the surface, so a
+    // model nothing told about one leaves it to nvim
+    m.attach_surfaces(crate::native::ext::ALL_MULTIGRID.to_vec());
     let _ = update(
         &mut m,
         Msg::Redraw(vec![UiEvent::TablineUpdate {
@@ -703,6 +709,9 @@ fn a_release_on_a_separator_still_ends_the_gesture() {
 fn a_release_on_a_reserved_chrome_row_still_ends_the_gesture() {
     use crate::events::{TabEntry, TabHandle};
     let mut m = vsplit_model();
+    // the row is reserved by the attach that carries the surface, so a
+    // model nothing told about one leaves it to nvim
+    m.attach_surfaces(crate::native::ext::ALL_MULTIGRID.to_vec());
     // a second tab reserves the tabline row, so terminal row 4 is grid row 3
     let _ = update(
         &mut m,
@@ -2872,6 +2881,9 @@ fn popupmenu_select_without_prior_show_is_a_noop() {
 fn resize_target_shrinks_by_chrome_rows_once_more_than_one_tab_is_open() {
     use crate::events::{TabEntry, TabHandle};
     let mut m = model();
+    // the row is reserved by the attach that carries the surface, so a
+    // model nothing told about one leaves it to nvim
+    m.attach_surfaces(crate::native::ext::ALL_MULTIGRID.to_vec());
     let _ = update(
         &mut m,
         Msg::Redraw(vec![UiEvent::TablineUpdate {
@@ -2908,6 +2920,9 @@ fn resize_target_shrinks_by_chrome_rows_once_more_than_one_tab_is_open() {
 fn tabline_crossing_the_one_tab_boundary_round_trips_the_reserved_row() {
     use crate::events::{TabEntry, TabHandle};
     let mut m = model();
+    // the row is reserved by the attach that carries the surface, so a
+    // model nothing told about one leaves it to nvim
+    m.attach_surfaces(crate::native::ext::ALL_MULTIGRID.to_vec());
     let _ = update(
         &mut m,
         Msg::Resized {
@@ -12652,5 +12667,119 @@ fn view_panes_with_no_argument_reports_the_mode_and_its_marker() {
     assert!(
         reported.contains("ui.panes = nvim") && reported.contains("HYPRLAND_INSTANCE_SIGNATURE"),
         "the report names neither the mode nor the marker: {reported:?}"
+    );
+}
+
+/// A pill model: the tabline surface attached, the tiled look, and three
+/// tabpages named across the row.
+fn pill_model(shows: crate::native::pill::TablineShows) -> Model {
+    let mut m = Model::with_term_size(80, 24);
+    m.attach_surfaces(crate::native::ext::ALL_MULTIGRID.to_vec());
+    m.look = crate::model::Look::new(crate::model::Panes::Tiles, true);
+    m.tabline_shows = shows;
+    m.engine.tabline = Some(crate::model::TablineState {
+        current: crate::events::TabHandle(1),
+        tabs: vec![
+            crate::events::TabEntry {
+                tab: crate::events::TabHandle(1),
+                name: "work".into(),
+            },
+            crate::events::TabEntry {
+                tab: crate::events::TabHandle(2),
+                name: "docs".into(),
+            },
+        ],
+    });
+    m
+}
+
+/// The set nvim sends replaces the set view held, rather than merging into
+/// it: a buffer wiped between two reports is gone from the list and must be
+/// gone from the row.
+#[test]
+fn a_buffer_trigger_replaces_the_listed_buffer_set() {
+    let mut m = model();
+    let listed =
+        |buf: u64, name: &str| crate::model::BufferEntry::new(buf, name.to_string(), false, false);
+    let _ = update(
+        &mut m,
+        Msg::BufferList {
+            buffers: vec![listed(3, "a.rs"), listed(4, "b.rs")],
+        },
+    );
+    assert_eq!(
+        m.buffers.iter().map(|b| b.buf).collect::<Vec<_>>(),
+        vec![3, 4],
+        "the trigger's report never reached the model"
+    );
+    m.dirty = false;
+    let _ = update(
+        &mut m,
+        Msg::BufferList {
+            buffers: vec![listed(4, "b.rs")],
+        },
+    );
+    assert_eq!(
+        m.buffers.iter().map(|b| b.buf).collect::<Vec<_>>(),
+        vec![4],
+        "a wiped buffer stayed on the list"
+    );
+    assert!(m.dirty, "the row changed and nothing asked for a repaint");
+
+    m.dirty = false;
+    let _ = update(
+        &mut m,
+        Msg::BufferList {
+            buffers: vec![listed(4, "b.rs")],
+        },
+    );
+    assert!(
+        !m.dirty,
+        "a report saying what the model already held asked for a repaint"
+    );
+}
+
+#[test]
+fn a_click_on_a_pill_tab_selects_that_tabpage() {
+    let mut m = pill_model(crate::native::pill::TablineShows::Tabs);
+    let slots = crate::native::pill::PillView::from_model(&m).slots(m.term_width);
+    let effects = update(&mut m, click(0, slots[1].col));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::SelectTab { tab: 2 })]
+        ),
+        "a press on the second name sent {effects:?}"
+    );
+    // the row is the pill's, so nothing of the press reaches the engine
+    assert!(
+        update(&mut m, click(0, 0)).is_empty(),
+        "a press on a blank column of the row reached the grid"
+    );
+}
+
+#[test]
+fn a_click_on_a_pill_buffer_selects_that_buffer() {
+    let mut m = pill_model(crate::native::pill::TablineShows::Buffers);
+    m.engine
+        .tabline
+        .as_mut()
+        .expect("the fixture attaches a tabline")
+        .tabs
+        .truncate(1);
+    m.buffers = vec![crate::model::BufferEntry::new(
+        7,
+        "a.rs".into(),
+        false,
+        false,
+    )];
+    let slots = crate::native::pill::PillView::from_model(&m).slots(m.term_width);
+    let effects = update(&mut m, click(0, slots[0].col));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::SelectBuffer { buf: 7 })]
+        ),
+        "a press on the buffer's name sent {effects:?}"
     );
 }

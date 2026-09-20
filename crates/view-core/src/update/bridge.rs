@@ -7,7 +7,7 @@
 //! tree's git refresh.
 
 use crate::events::WinHandle;
-use crate::model::{Model, WindowStatus};
+use crate::model::{BufferEntry, Model, WindowStatus};
 use crate::msg::Effect;
 use crate::native::statusline::SegmentUpdate;
 
@@ -47,6 +47,22 @@ pub(super) fn on_buffer(
     });
     model.dirty = true;
     tree_git_refresh_effect(model)
+}
+
+/// Every listed buffer, which is what the pill names while one tabpage is
+/// open.
+///
+/// Compared before it is stored, for the reason
+/// [`on_window_status`] compares: `BufEnter` fires on every window the
+/// user steps into, and the set it reports is unchanged for all but the
+/// one that switched buffers.
+pub(super) fn on_buffer_list(model: &mut Model, buffers: Vec<BufferEntry>) -> Vec<Effect> {
+    if model.buffers == buffers {
+        return Vec::new();
+    }
+    model.buffers = buffers;
+    model.dirty = true;
+    Vec::new()
 }
 
 /// One window's own status, which is what its tile's frame edge reads.

@@ -16,6 +16,7 @@ use view_surface::{overlay::BorderSet, Layer, LayerKind, Rect, Surface};
 
 mod emit;
 mod panes;
+mod pill;
 mod text;
 mod toast;
 
@@ -818,6 +819,7 @@ fn composite_layers(
                 toast::paint_toast(lines, *paused, &theme, borders, area, damage, buf);
             }
             LayerKind::Tabline(state) => paint_tabline(state, &theme, area, buf),
+            LayerKind::Pill(view) => pill::paint_pill(view, &theme, area, buf),
             LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, damage, buf),
             LayerKind::Shell => paint_shell(
                 &theme,
@@ -1861,6 +1863,18 @@ mod tests {
         assert_eq!(&buf[(1, 0)].symbol(), &"i");
     }
 
+    /// A model whose attach carries the tab line, which is what
+    /// [`Model::owns`] reads before any chrome row is reserved. The
+    /// shipped set leaves that surface with nvim, so a fixture about the
+    /// reserved row has to say it owns it.
+    fn owning_the_tabline() -> Model {
+        let mut model = Model::new();
+        let mut surfaces = view_core::native::ext::shipped_multigrid();
+        surfaces.push(view_core::native::ext::Ext::Tabline);
+        model.attach_surfaces(surfaces);
+        model
+    }
+
     /// A tabline with two entries, which is what reserves the one chrome row
     /// a speculated cell's grid coordinates have to be offset past.
     fn two_tabs() -> view_core::events::UiEvent {
@@ -1887,7 +1901,7 @@ mod tests {
     /// where it belongs.
     #[test]
     fn a_pending_prediction_paints_its_glyph_at_the_engine_cell_it_names() {
-        let mut model = Model::new();
+        let mut model = owning_the_tabline();
         apply(&mut model, two_tabs());
         model.engine.apply_grid(GridOp::Resize {
             width: 10,
@@ -2493,7 +2507,7 @@ mod tests {
     /// grid's own content occupy disjoint rows in the same frame.
     #[test]
     fn tabline_reserves_the_top_row_and_never_covers_resting_grid_text() {
-        let mut model = Model::new();
+        let mut model = owning_the_tabline();
         model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
@@ -2564,7 +2578,7 @@ mod tests {
     /// it rather than let the draw call index past the buffer.
     #[test]
     fn tabline_update_without_matching_grid_resize_clips_the_transient_overflow_row() {
-        let mut model = Model::new();
+        let mut model = owning_the_tabline();
         model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,

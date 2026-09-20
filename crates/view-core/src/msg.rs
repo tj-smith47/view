@@ -410,6 +410,16 @@ pub enum Msg {
         win: crate::events::WinHandle,
         status: crate::model::WindowStatus,
     },
+    /// The bridge's `buffers` trigger group (`BufAdd`, `BufDelete`,
+    /// `BufEnter`) fired, carrying the whole listed-buffer set. The set
+    /// replaces what `Model.buffers` held: nvim answers with the list, so
+    /// a diff here would be a second reading of the same fact.
+    ///
+    /// Distinct from [`Msg::PickerBufferList`], which is the picker's own
+    /// RPC reply and carries names alone.
+    BufferList {
+        buffers: Vec<crate::model::BufferEntry>,
+    },
     /// The bridge's float watcher saw a floating window, or saw one it had
     /// already reported move: geometry, anchor and whatever identity the
     /// window carries, in the grid's own cells.
@@ -1745,6 +1755,21 @@ pub enum RpcCall {
     },
     Paste {
         text: String,
+    },
+    /// `nvim_set_current_tabpage`, for a click on a pill tab.
+    ///
+    /// The call rather than `:tabnext`: the pill names a handle, an ex
+    /// command names an ordinal, and an ordinal read off a row drawn one
+    /// frame ago selects the wrong tabpage the moment one closed in
+    /// between. Fire-and-forget -- nvim's own `tabline_update` is what
+    /// tells view the switch happened.
+    SelectTab {
+        tab: u64,
+    },
+    /// `nvim_set_current_buf`, for a click on a pill buffer, on the same
+    /// terms as [`SelectTab`](Self::SelectTab).
+    SelectBuffer {
+        buf: u64,
     },
     /// Forwards one mouse event via `nvim_input_mouse`.
     ///

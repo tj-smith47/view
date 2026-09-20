@@ -38,6 +38,43 @@ everything after it.
 `[native] statusline = false` empties the segments and leaves the frames
 standing.
 
+## The top row
+
+The top row names what you have open. Under tiles it is there from the
+moment the session starts; under `panes = "nvim"` it appears once a second
+tabpage is open, the way nvim's own `showtabline` behaves.
+
+| where | what it carries |
+|---|---|
+| left edge | the host `--remote` named, on a remote session |
+| middle | your tabpages, the current one lit |
+| right edge | what the agent is doing |
+
+Clicking a name switches to it.
+
+```toml
+[native]
+tabline = true            # follows [ui] panes: on under tiles, off under "nvim"
+tabline_shows = "tabs"    # "tabs" | "buffers"
+```
+
+With `tabline_shows = "buffers"` the middle names your open files instead,
+each with a `+` while it has unsaved changes. A second tabpage is named as
+tabpages either way: a tabpage you made is the thing the row would
+otherwise hide.
+
+The agent's word is one of four:
+
+| what is happening | word |
+|---|---|
+| the agent is asking your permission | `waiting` |
+| a session is running | `running` |
+| the agent died | `crashed` |
+| anything else | `idle` |
+
+`[native] tabline = false` leaves the row to nvim, so your own tabline
+plugin keeps it.
+
 ## Choosing a mode
 
 ```toml

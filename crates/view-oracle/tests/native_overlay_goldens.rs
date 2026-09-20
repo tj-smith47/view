@@ -172,6 +172,126 @@ fn nvim_statusline() -> LayerKind {
     LayerKind::Statusline(state.view(NVIM_BAR_WIDTH))
 }
 
+/// The pill spans the whole terminal row, so its dump is as wide as the
+/// bar's and for the same reason: the two edges and the names between them
+/// need room to land where a real session puts them.
+const PILL_WIDTH: u16 = 72;
+
+/// Opens `names` as tabpages through the same `update()` path a session
+/// takes, because `TablineState` is non-exhaustive and cannot be built with
+/// struct-literal syntax from outside `view-core`.
+fn open_tabs(model: &mut view_core::model::Model, current: u64, names: &[&str]) {
+    let _ = view_core::update::update(
+        model,
+        view_core::msg::Msg::Redraw(vec![view_core::events::UiEvent::TablineUpdate {
+            current: view_core::events::TabHandle(current),
+            tabs: names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| view_core::events::TabEntry {
+                    tab: view_core::events::TabHandle(index as u64 + 1),
+                    name: (*name).to_string(),
+                })
+                .collect(),
+        }]),
+    );
+}
+
+/// A pill on a remote session with three tabpages open and an agent
+/// running: the destination at the left edge, the names centred with the
+/// current one lit, and the agent's word at the right.
+fn pill_tabs() -> LayerKind {
+    let mut model = view_core::model::Model::with_term_size(PILL_WIDTH, 24)
+        .with_remote(Some("deploy@prod-box".to_string()));
+    model.ai_trusted = true;
+    model.ai_panel_mut().session_id = Some("s-1".to_string());
+    open_tabs(&mut model, 2, &["work", "docs", "notes"]);
+    LayerKind::Pill(view_core::native::pill::PillView::from_model(&model))
+}
+
+/// The same row on a local session naming buffers instead, one of them
+/// unsaved, while the agent waits on a permission.
+fn pill_buffers() -> LayerKind {
+    let mut model = view_core::model::Model::with_term_size(PILL_WIDTH, 24)
+        .with_tabline_shows(view_core::native::pill::TablineShows::Buffers);
+    model.ai_panel_mut().pending_permission =
+        Some(view_core::native::ai_panel::PermissionPrompt::new(
+            1,
+            "call-1",
+            Some("run tests?".to_string()),
+            None,
+            Vec::new(),
+        ));
+    open_tabs(&mut model, 1, &["work"]);
+    model.buffers = ["main.rs", "model.rs", "paint.rs"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            view_core::model::BufferEntry::new(
+                index as u64 + 1,
+                name.to_string(),
+                name == "model.rs",
+                index == 0,
+            )
+        })
+        .collect();
+    LayerKind::Pill(view_core::native::pill::PillView::from_model(&model))
+}
+
+#[test]
+fn full_pill_tabs() {
+    assert_golden(
+        "full-pill-tabs",
+        &dump(Tier::Full, DRAWS_BOX_GLYPHS, PILL_WIDTH, 1, pill_tabs()),
+    );
+}
+
+#[test]
+fn standard_pill_tabs() {
+    assert_golden(
+        "standard-pill-tabs",
+        &dump(Tier::Standard, DRAWS_BOX_GLYPHS, PILL_WIDTH, 1, pill_tabs()),
+    );
+}
+
+#[test]
+fn basic_pill_tabs() {
+    assert_golden(
+        "basic-pill-tabs",
+        &dump(Tier::Basic, NO_BOX_GLYPHS, PILL_WIDTH, 1, pill_tabs()),
+    );
+}
+
+#[test]
+fn full_pill_buffers() {
+    assert_golden(
+        "full-pill-buffers",
+        &dump(Tier::Full, DRAWS_BOX_GLYPHS, PILL_WIDTH, 1, pill_buffers()),
+    );
+}
+
+#[test]
+fn standard_pill_buffers() {
+    assert_golden(
+        "standard-pill-buffers",
+        &dump(
+            Tier::Standard,
+            DRAWS_BOX_GLYPHS,
+            PILL_WIDTH,
+            1,
+            pill_buffers(),
+        ),
+    );
+}
+
+#[test]
+fn basic_pill_buffers() {
+    assert_golden(
+        "basic-pill-buffers",
+        &dump(Tier::Basic, NO_BOX_GLYPHS, PILL_WIDTH, 1, pill_buffers()),
+    );
+}
+
 #[test]
 fn full_nvim_statusline_bar() {
     assert_golden(
@@ -476,6 +596,8 @@ fn a_terminals_tier_never_reaches_its_frame() {
         ("statusline", 46, 3, statusline()),
         ("statusline-bar", 46, 1, statusline()),
         ("nvim-statusline-bar", NVIM_BAR_WIDTH, 1, nvim_statusline()),
+        ("pill-tabs", PILL_WIDTH, 1, pill_tabs()),
+        ("pill-buffers", PILL_WIDTH, 1, pill_buffers()),
         ("prompt", 32, 7, prompt()),
         ("palette", 38, 8, palette()),
         ("ai-panel", 30, 7, ai_panel()),

@@ -129,6 +129,12 @@ pub trait EngineOps {
     /// Arms one float scan, for the moment a probe reply names a claiming
     /// plugin; fire-and-forget, no reply (see `RpcCall::ScanFloats`).
     fn scan_floats(&self) -> Result<(), EngineError>;
+    /// Switches nvim to a tabpage, for a click on a pill tab;
+    /// fire-and-forget, no reply (see `RpcCall::SelectTab`).
+    fn select_tab(&self, tab: u64) -> Result<(), EngineError>;
+    /// Switches nvim to a buffer, for a click on a pill buffer;
+    /// fire-and-forget, no reply (see `RpcCall::SelectBuffer`).
+    fn select_buffer(&self, buf: u64) -> Result<(), EngineError>;
     /// Opens `path` as `:edit` would, reusing an already-loaded buffer
     /// rather than duplicating it; fire-and-forget, no reply (see
     /// `RpcCall::OpenFile`).
@@ -372,6 +378,14 @@ impl EngineOps for EngineHandle {
     fn scan_floats(&self) -> Result<(), EngineError> {
         self.scan_floats()
     }
+
+    fn select_tab(&self, tab: u64) -> Result<(), EngineError> {
+        self.select_tab(tab)
+    }
+
+    fn select_buffer(&self, buf: u64) -> Result<(), EngineError> {
+        self.select_buffer(buf)
+    }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         self.open_file(path)
     }
@@ -568,6 +582,14 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
 
     fn scan_floats(&self) -> Result<(), EngineError> {
         (**self).scan_floats()
+    }
+
+    fn select_tab(&self, tab: u64) -> Result<(), EngineError> {
+        (**self).select_tab(tab)
+    }
+
+    fn select_buffer(&self, buf: u64) -> Result<(), EngineError> {
+        (**self).select_buffer(buf)
     }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         (**self).open_file(path)
@@ -768,6 +790,14 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
 
     fn scan_floats(&self) -> Result<(), EngineError> {
         (**self).scan_floats()
+    }
+
+    fn select_tab(&self, tab: u64) -> Result<(), EngineError> {
+        (**self).select_tab(tab)
+    }
+
+    fn select_buffer(&self, buf: u64) -> Result<(), EngineError> {
+        (**self).select_buffer(buf)
     }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         (**self).open_file(path)
@@ -1029,6 +1059,12 @@ impl EngineOps for FakeOps {
     fn scan_floats(&self) -> Result<(), EngineError> {
         self.record("scan_floats()".to_string())
     }
+    fn select_tab(&self, tab: u64) -> Result<(), EngineError> {
+        self.record(format!("select_tab({tab})"))
+    }
+    fn select_buffer(&self, buf: u64) -> Result<(), EngineError> {
+        self.record(format!("select_buffer({buf})"))
+    }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         self.record(format!("open_file({path})"))
     }
@@ -1285,6 +1321,12 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn scan_floats(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn select_tab(&self, _tab: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn select_buffer(&self, _buf: u64) -> Result<(), EngineError> {
         Ok(())
     }
     fn open_file(&self, _path: &str) -> Result<(), EngineError> {

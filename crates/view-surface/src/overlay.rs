@@ -728,6 +728,7 @@ fn body(kind: &LayerKind) -> Option<Body> {
         | LayerKind::Tabline(_)
         | LayerKind::Popupmenu(_)
         | LayerKind::Speculated(_)
+        | LayerKind::Pill(_)
         | LayerKind::Shell => None,
     }
 }

@@ -29,10 +29,11 @@ pub enum Ext {
     Popupmenu,
     /// Messages, rendered by view as toasts and the message history.
     Messages,
-    /// The tab line, rendered by view as its own tab row. Attached only
-    /// when `[native] tabline` is on, which it is not by default: nvim
-    /// draws the user's own `tabline` into grid 1 otherwise, and the
-    /// compositor paints it like any other row of that grid.
+    /// The tab line, rendered by view as the top pill. Attached only when
+    /// `[native] tabline` is on, which follows `[ui] panes`: on under
+    /// tiles, off under `"nvim"`, and an explicit value wins in both. Off,
+    /// nvim draws the user's own `tabline` into grid 1 and the compositor
+    /// paints it like any other row of that grid.
     Tabline,
     /// Not a surface: the option that makes nvim address each window's grid
     /// separately (`docs/multigrid.md`). It externalizes nothing, so it is

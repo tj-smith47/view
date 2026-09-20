@@ -12,11 +12,13 @@ use std::path::PathBuf;
 
 pub use view_core::config::Source;
 use view_core::config::{
-    BOOL_EXPECTED, COLOR_EXPECTED, KEYS_EXPECTED, PANES_EXPECTED, TIER_EXPECTED, WIDTH_EXPECTED,
+    BOOL_EXPECTED, COLOR_EXPECTED, KEYS_EXPECTED, PANES_EXPECTED, TABLINE_SHOWS_EXPECTED,
+    TIER_EXPECTED, WIDTH_EXPECTED,
 };
 use view_core::model::{Panes, Tier};
 use view_core::native::geometry;
 use view_core::native::keys::{Action, Direction, KeyBindings};
+use view_core::native::pill::TablineShows;
 use view_core::native::registry;
 
 use super::keys::{env_name, keys, ConfigKey};
@@ -155,6 +157,8 @@ pub struct ResolvedConfig {
     native: Vec<Source>,
     /// Where `[native] tree_width` came from.
     tree_width: Source,
+    /// Where `[native] tabline_shows` came from.
+    tabline_shows: Source,
     /// Where each `[keys]` action's bindings came from, in [`KEY_ACTIONS`]
     /// order.
     keys: [Source; KEY_ACTIONS.len()],
@@ -354,7 +358,15 @@ pub fn resolve_with(
             ),
             file.spells("native", feature.id)
                 .then(|| !file.native.disabled.contains(&feature.id)),
-            feature.default_on,
+            // the pill is the tiled look's own row and nvim's tab line is
+            // the other look's, so the switch nobody set follows `panes`
+            // rather than the registry bit, which stays the answer for
+            // every other feature
+            if feature.id == "tabline" {
+                ui.panes.value == Panes::Tiles
+            } else {
+                feature.default_on
+            },
         );
         if !switch.value {
             disabled.push(feature.id);
@@ -374,6 +386,20 @@ pub fn resolve_with(
         file.spells("native", "tree_width")
             .then_some(file.native.tree_width),
         geometry::DEFAULT_PANEL_WIDTH_PCT,
+    );
+    let tabline_shows = layer(
+        None,
+        env_read(
+            env,
+            "native",
+            "tabline_shows",
+            TABLINE_SHOWS_EXPECTED,
+            TablineShows::parse,
+            &mut notices,
+        ),
+        file.spells("native", "tabline_shows")
+            .then(|| file.native.tabline_shows()),
+        TablineShows::default(),
     );
     let (bindings, key_sources) = resolve_keys(file, env, &mut notices);
     let auto_restart = layer(
@@ -401,6 +427,8 @@ pub fn resolve_with(
                 // above it neither answers for nor silences: a mistyped
                 // `tree_width` is still a mistyped `tree_width`
                 tree_width_notice: file.native.tree_width_notice,
+                tabline_shows: tabline_shows.value,
+                tabline_shows_notice: file.native.tabline_shows_notice,
             },
             supervision: SupervisionConfig {
                 auto_restart: auto_restart.value,
@@ -416,6 +444,7 @@ pub fn resolve_with(
         notices,
         native,
         tree_width: tree_width.source,
+        tabline_shows: tabline_shows.source,
         keys: key_sources,
         supervision: auto_restart.source,
         inherited_appname: env(INHERITED_APPNAME_ENV).filter(|name| !name.is_empty()),
@@ -539,6 +568,10 @@ impl ResolvedConfig {
             ("native", "tree_width") => {
                 (self.tables.native.tree_width.to_string(), self.tree_width)
             }
+            ("native", "tabline_shows") => (
+                self.tables.native.tabline_shows().label().to_string(),
+                self.tabline_shows,
+            ),
             ("keys", name) => {
                 let index = KEY_ACTIONS.iter().position(|(key, _)| *key == name)?;
                 (
@@ -790,6 +823,7 @@ mod tests {
             ("engine", "nvim_bin") => "/opt/nvim/bin/nvim",
             ("engine", "appname") => "work",
             ("native", "tree_width") => "40",
+            ("native", "tabline_shows") => "buffers",
             ("keys", _) => "<C-w>>",
             _ => "false",
         }
@@ -1427,6 +1461,127 @@ mod tests {
         assert_eq!(
             row(&resolved, "ui", "panes"),
             ("tiles".to_string(), Source::Derived)
+        );
+    }
+
+    #[test]
+    fn tabline_derives_on_under_tiles() {
+        let file =
+            ViewConfig::from_toml_str("[ui]\npanes = \"tiles\"\n").expect("the fixture must parse");
+        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+        assert!(
+            resolved.tables.native.enabled("tabline"),
+            "the pill is the tiled look's own row"
+        );
+    }
+
+    #[test]
+    fn tabline_derives_off_under_nvim_mode() {
+        let file =
+            ViewConfig::from_toml_str("[ui]\npanes = \"nvim\"\n").expect("the fixture must parse");
+        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+        assert!(
+            !resolved.tables.native.enabled("tabline"),
+            "nvim mode leaves the row to nvim and the user's own plugins"
+        );
+    }
+
+    #[test]
+    fn an_explicit_tabline_value_beats_the_derivation() {
+        let off =
+            ViewConfig::from_toml_str("[ui]\npanes = \"tiles\"\n\n[native]\ntabline = false\n")
+                .expect("the fixture must parse");
+        let resolved = resolve_with(&off, &Overrides::default(), &no_env);
+        assert_eq!(
+            row(&resolved, "native", "tabline"),
+            ("false".to_string(), Source::File)
+        );
+
+        let on = ViewConfig::from_toml_str("[ui]\npanes = \"nvim\"\n\n[native]\ntabline = true\n")
+            .expect("the fixture must parse");
+        let resolved = resolve_with(&on, &Overrides::default(), &no_env);
+        assert_eq!(
+            row(&resolved, "native", "tabline"),
+            ("true".to_string(), Source::File)
+        );
+
+        let env = |asked: &str| (asked == "VIEW_NATIVE_TABLINE").then(|| "false".to_string());
+        let tiles =
+            ViewConfig::from_toml_str("[ui]\npanes = \"tiles\"\n").expect("the fixture must parse");
+        assert_eq!(
+            row(
+                &resolve_with(&tiles, &Overrides::default(), &env),
+                "native",
+                "tabline"
+            ),
+            ("false".to_string(), Source::Env)
+        );
+    }
+
+    #[test]
+    fn the_tabline_row_reports_the_derived_source() {
+        let tiles =
+            ViewConfig::from_toml_str("[ui]\npanes = \"tiles\"\n").expect("the fixture must parse");
+        assert_eq!(
+            row(
+                &resolve_with(&tiles, &Overrides::default(), &no_env),
+                "native",
+                "tabline"
+            ),
+            ("true".to_string(), Source::Derived)
+        );
+        let nvim =
+            ViewConfig::from_toml_str("[ui]\npanes = \"nvim\"\n").expect("the fixture must parse");
+        assert_eq!(
+            row(
+                &resolve_with(&nvim, &Overrides::default(), &no_env),
+                "native",
+                "tabline"
+            ),
+            ("false".to_string(), Source::Derived)
+        );
+        // `--panes` is a layer above the file, and the derivation follows
+        // whatever answer won rather than the one the file wrote
+        let flagged = resolve_with(
+            &tiles,
+            &Overrides {
+                panes: Some(Some(Panes::Nvim)),
+                ..Overrides::default()
+            },
+            &no_env,
+        );
+        assert_eq!(
+            row(&flagged, "native", "tabline"),
+            ("false".to_string(), Source::Derived)
+        );
+    }
+
+    #[test]
+    fn tabline_shows_answers_tabs_until_the_file_or_the_environment_says_otherwise() {
+        let resolved = resolve_with(&ViewConfig::defaults(), &Overrides::default(), &no_env);
+        assert_eq!(
+            row(&resolved, "native", "tabline_shows"),
+            ("tabs".to_string(), Source::Derived)
+        );
+        let file = ViewConfig::from_toml_str("[native]\ntabline_shows = \"buffers\"\n")
+            .expect("the fixture must parse");
+        assert_eq!(
+            row(
+                &resolve_with(&file, &Overrides::default(), &no_env),
+                "native",
+                "tabline_shows"
+            ),
+            ("buffers".to_string(), Source::File)
+        );
+        let env =
+            |asked: &str| (asked == "VIEW_NATIVE_TABLINE_SHOWS").then(|| "buffers".to_string());
+        assert_eq!(
+            row(
+                &resolve_with(&ViewConfig::defaults(), &Overrides::default(), &env),
+                "native",
+                "tabline_shows"
+            ),
+            ("buffers".to_string(), Source::Env)
         );
     }
 

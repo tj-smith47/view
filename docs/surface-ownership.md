@@ -85,11 +85,11 @@ window per status redraw and view draws over the result. The switch empties
 the segments in the frame edges and leaves the frames standing.
 `[ui] panes = "nvim"` is what gives the row back to nvim.
 
-`[native] tabline` is the one switch that ships off, so the tab line's row
-describes what a session running `tabline = true` does: nvim draws your own
-`tabline` into grid 1 by default, and the compositor paints that row like
-any other. Turning it on detaches the row from nvim and hands it to view's
-own tab renderer.
+`[native] tabline` is the one switch with no fixed default. It follows
+`[ui] panes`: on under `"tiles"`, off under `"nvim"`, and a value you write
+wins either way. On, the row is detached from nvim and view draws the top
+pill in it. Off, nvim draws your own `tabline` into grid 1 and the
+compositor paints that row like any other.
 
 The buffer grid is the one surface view never draws over. nvim owns it, and
 so does anything that wants to float above it, so a picker taking the screen

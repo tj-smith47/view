@@ -2723,6 +2723,8 @@ version = "0.0.1"
 dependencies = [
  "criterion",
  "similar",
+ "unicode-segmentation",
+ "unicode-width",
  "view-test-support",
 ]
 
@@ -2825,7 +2827,6 @@ dependencies = [
  "rustix",
  "signal-hook",
  "unicode-properties",
- "unicode-segmentation",
  "unicode-width",
  "view-core",
  "view-oracle",

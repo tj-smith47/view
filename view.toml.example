@@ -7,8 +7,9 @@
 # own plugins. Turning one off is reversible and touches nothing else: view
 # never edits your config, and your plugins keep loading either way.
 #
-# tree_width is the one key here that is not a switch: the share of the
-# terminal width the file tree opens at. The resize keys under [keys] step
+# tree_width and tabline_shows are the two keys here that are not switches:
+# the share of the terminal width the file tree opens at, and what the top
+# pill names. The resize keys under [keys] step
 # the focused tree by 5% for the session; this is where a width that should
 # outlive the session goes.
 
@@ -24,12 +25,20 @@ notifications = true       # false hands the message area back: ext_messages
 palette = true             # false hands back the command line and its
                            # completion popup: ext_cmdline/ext_popupmenu are
                            # not attached, so `:` is nvim's own last row
-tabline = false            # the one switch that ships off: your own tabline
-                           # is already there and already yours (bufferline,
-                           # or nvim's default tab labels), so view leaves
-                           # ext_tabline unattached and nvim draws that row
-                           # itself. true takes the row over and view draws
-                           # its own tabs instead
+tabline = true             # the one switch with no fixed default: it follows
+                           # [ui] panes, on under "tiles" and off under
+                           # "nvim", and a value written here wins either way.
+                           # On, view draws the top pill: your tabpages or
+                           # buffers across the middle, the --remote host at
+                           # the left and what the agent is doing at the
+                           # right. Off leaves ext_tabline unattached, so your
+                           # own tabline (bufferline, or nvim's default tab
+                           # labels) draws that row
+tabline_shows = "tabs"     # default: tabs -- what the pill names while one
+                           # tabpage is open. "buffers" names your open files
+                           # instead; a second tabpage is named as tabpages
+                           # either way, since a tabpage you made is the thing
+                           # the row would otherwise hide
 tree_width = 30            # default: 30 -- percent of the terminal width,
                            # clamped to 15..70: any whole number outside that
                            # range opens at the nearest end, and anything that

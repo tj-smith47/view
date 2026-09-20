@@ -8,8 +8,8 @@ repository.workspace = true
 [lints]
 workspace = true
 
-# This crate's only production dependency, and a deliberate one: the diff
-# review's hunk engine runs synchronously inside `update()` on the
+# `similar` is the diff
+# review's hunk engine: it runs synchronously inside `update()` on the
 # key-dispatch path, against buffer-truth data the pure core already holds,
 # so it cannot live behind an async boundary in `view-ai`. A hand-rolled
 # line diff on a path that writes bytes into a user's buffer is avoidable
@@ -18,8 +18,15 @@ workspace = true
 # -- `scripts/audit-deps.sh` names every other workspace member in a
 # `check_absent similar` loop, so a second crate acquiring it fails the
 # audit rather than passing silently.
+# The cell measure: `native::text` answers how many terminal columns a
+# name takes, and both the painter that writes it and the model that says
+# which name a column names spend that one answer. Two pure table crates
+# with no transitive dependencies; a second measure living beside the
+# painter is what let a fit check and a run disagree about a name's width.
 [dependencies]
 similar = { version = "3.1.2", default-features = false }
+unicode-segmentation = "1.13.3"
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }

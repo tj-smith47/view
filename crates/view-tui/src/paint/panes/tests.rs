@@ -1116,6 +1116,64 @@ fn the_gapless_lattice_stops_above_the_command_line() {
     );
 }
 
+/// Records an attach carrying the tab line and gives the pill two names to
+/// draw, which is the shape a tiles session runs in: the derived default
+/// turns the row on and the tabpages are what it names.
+fn with_the_pill(model: &mut Model) {
+    let mut surfaces = view_core::native::ext::shipped_multigrid();
+    surfaces.push(view_core::native::ext::Ext::Tabline);
+    model.attach_surfaces(surfaces);
+    drive(
+        model,
+        vec![UiEvent::TablineUpdate {
+            current: view_core::events::TabHandle(1),
+            tabs: vec![
+                view_core::events::TabEntry {
+                    tab: view_core::events::TabHandle(1),
+                    name: "work".into(),
+                },
+                view_core::events::TabEntry {
+                    tab: view_core::events::TabHandle(2),
+                    name: "docs".into(),
+                },
+            ],
+        }],
+    );
+}
+
+/// The pill keeps row 0 to itself. Every horizontal run of the lattice
+/// moves down a row once the row is reserved, so no frame edge is drawn
+/// over a name a click has to land on.
+#[test]
+fn the_lattice_sits_under_the_pills_row() {
+    let mut tiles = tiled(true);
+    assert_eq!(
+        tiles.model.chrome_rows(),
+        0,
+        "the fixture starts with the tab line left to nvim"
+    );
+    let (_, bare) = frame_lines(&tiled_frame(&tiles.model));
+    with_the_pill(&mut tiles.model);
+    assert_eq!(tiles.model.chrome_rows(), 1, "the pill reserves its row");
+    let buf = tiled_frame(&tiles.model);
+    let (_, under) = frame_lines(&buf);
+    let moved: Vec<u16> = bare.iter().map(|row| row + 1).collect();
+    assert_eq!(
+        under.first().copied(),
+        moved.first().copied(),
+        "the lattice did not move under the pill: {under:?} against {moved:?}"
+    );
+    let pill = row_text(&buf, 0);
+    assert!(
+        pill.contains("work") && pill.contains("docs"),
+        "the reserved row carries no names: {pill:?}"
+    );
+    assert!(
+        !pill.contains(['\u{2502}', '\u{2500}', '\u{252c}', '\u{253c}']),
+        "the lattice drew an edge through the pill's row: {pill:?}"
+    );
+}
+
 /// The three committed tiers, as the name a golden carries and the four
 /// capability probes that make it.
 const TIERS: [(&str, bool, bool, bool, bool); 3] = [
@@ -1305,9 +1363,13 @@ fn outer_grid(gaps: bool, height: u16) -> (u16, u16) {
 /// Hands the command line back to nvim, which is the session nvim keeps a
 /// row of its own at the grid's foot for: the takeover holds `cmdheight`
 /// at 0 only where view owns that row's other tenant as well.
+///
+/// The tab line stays with nvim here for [`tiled_model`]'s reason: the row
+/// the pill takes is a separate question from the row nvim's command line
+/// keeps.
 fn with_nvims_command_line(model: &mut Model) {
     use view_core::native::ext::Ext;
-    model.attach_surfaces(vec![Ext::LineGrid, Ext::Messages, Ext::Tabline]);
+    model.attach_surfaces(vec![Ext::LineGrid, Ext::Messages]);
 }
 
 fn tiled_model(gaps: bool, height: u16, slots: &[(u16, u16, u16, u16)]) -> Model {
@@ -1319,8 +1381,12 @@ fn tiled_model(gaps: bool, height: u16, slots: &[(u16, u16, u16, u16)]) -> Model
     model.statusline_enabled = true;
     // the shipped attach: view owns the command line and the message area,
     // so the takeover holds `cmdheight` at 0 and the grid's last row is a
-    // window's status row rather than nvim's own
-    model.attach_surfaces(view_core::native::ext::ALL.to_vec());
+    // window's status row rather than nvim's own. The tab line is left with
+    // nvim, which is what keeps the lattice at the top of the screen: the
+    // row the pill takes is `the_lattice_sits_under_the_pills_row`'s
+    // question, and every slot here would otherwise be one row lower for a
+    // reason that has nothing to do with frames
+    model.attach_surfaces(view_core::native::ext::shipped_multigrid());
     model.caps = model.caps.with_unicode_boxes(DRAWS_BOX_GLYPHS);
     let mut events = vec![
         UiEvent::GridResize {
@@ -1677,7 +1743,7 @@ fn no_bar_row_stands_under_tiles() {
 /// gapless tile's single edge does.
 fn edge_rows(model: &Model, slot: (u16, u16, u16, u16)) -> (u16, u16) {
     let (row, _, _, height) = slot;
-    let offset = model.look.grid_offset();
+    let offset = model.look.grid_offset() + model.chrome_rows();
     if model.look.gaps {
         (row + 1 + offset, row + height - 2 + offset)
     } else {

@@ -973,6 +973,12 @@ mod tests {
         fn scan_floats(&self) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn select_tab(&self, _tab: u64) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn select_buffer(&self, _buf: u64) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn open_file(&self, _path: &str) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }

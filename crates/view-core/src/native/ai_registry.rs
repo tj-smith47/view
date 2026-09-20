@@ -26,6 +26,25 @@ pub enum SessionState {
     Crashed,
 }
 
+impl SessionState {
+    /// Where a session sits, read off the panel and the trust bit.
+    ///
+    /// The ladder stops at the first match: a crash surface outranks a live
+    /// id, because a session that died is dead however it was started.
+    #[must_use]
+    pub fn derive(panel: &AiPanelState, trusted: bool) -> Self {
+        if panel.local_error.is_some() {
+            Self::Crashed
+        } else if panel.session_id.is_some() {
+            Self::Active
+        } else if trusted {
+            Self::Trusted
+        } else {
+            Self::NotStarted
+        }
+    }
+}
+
 /// One agent session's lifecycle as the doctor reports it: session id
 /// (carried inside `session_state`'s `Active` case via the panel, not
 /// duplicated here), agent identity, state, last activity, and pending
@@ -75,15 +94,7 @@ impl AiStatus {
     /// a timestamp yet, so there is nothing honest to derive it from until
     /// a task threads one through.
     pub fn derive(panel: &AiPanelState, enabled: bool, agent_id: &str, trusted: bool) -> Self {
-        let session_state = if panel.local_error.is_some() {
-            SessionState::Crashed
-        } else if panel.session_id.is_some() {
-            SessionState::Active
-        } else if trusted {
-            SessionState::Trusted
-        } else {
-            SessionState::NotStarted
-        };
+        let session_state = SessionState::derive(panel, trusted);
         let pending_edit_count = [&panel.pending_diff, &panel.pending_diff_next]
             .into_iter()
             .flatten()

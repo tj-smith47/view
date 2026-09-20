@@ -138,8 +138,14 @@ pub enum LayerKind {
         x_offset: u16,
         paused: bool,
     },
-    /// The open tabs, present once nvim has sent a `tabline_update`.
+    /// The open tabs, present once nvim has sent a `tabline_update` and
+    /// `panes = "nvim"` leaves the row to nvim's own tab list restyled.
     Tabline(TablineState),
+    /// The top pill under tiles: the tabpages or buffers across the
+    /// middle, the host at the left edge and the agent's state at the
+    /// right. A view rather than the model it was built from, so the row
+    /// can be dumped and compared without a session behind it.
+    Pill(view_core::native::pill::PillView),
     /// The completion popup menu, present while it is open.
     Popupmenu(PopupmenuState),
     /// The startup shell view paints before the engine's first frame: a
@@ -240,6 +246,7 @@ impl LayerKind {
             | Self::Cmdline(_)
             | Self::Toast { .. }
             | Self::Tabline(_)
+            | Self::Pill(_)
             | Self::Popupmenu(_)
             | Self::Speculated(_)
             | Self::Shell => false,
@@ -456,11 +463,23 @@ pub fn render(model: &Model) -> Surface {
         // gets reserved with nothing painted into it or the tabline paints
         // over buffer content
         if offset > 0 {
-            layers.push(Layer::new(
-                Rect::new(0, 0, grid_w, 1).clamp_to(grid_w, grid_h),
-                LayerKind::Tabline(tabline.clone()),
-                model.caps,
-            ));
+            // the pill spans the whole terminal width, the ring included:
+            // it stands above the outer frame rather than inside it, which
+            // is what leaves the frame's own top edge unbroken
+            let kind = if model.look.panes == view_core::model::Panes::Tiles {
+                Layer::new(
+                    Rect::new(0, 0, model.term_width, 1),
+                    LayerKind::Pill(view_core::native::pill::PillView::from_model(model)),
+                    model.caps,
+                )
+            } else {
+                Layer::new(
+                    Rect::new(0, 0, grid_w, 1).clamp_to(grid_w, grid_h),
+                    LayerKind::Tabline(tabline.clone()),
+                    model.caps,
+                )
+            };
+            layers.push(kind);
         }
     }
     if model.statusline_rows() > 0 {
@@ -1359,6 +1378,12 @@ mod tests {
 
     fn model_with_grid(width: u16, height: u16) -> Model {
         let mut model = Model::new();
+        // the tab line is the one surface the shipped set leaves with nvim,
+        // and `Model::owns` is what answers whether a row is reserved for
+        // it, so a fixture about that row has to record owning it
+        let mut surfaces = view_core::native::ext::shipped_multigrid();
+        surfaces.push(view_core::native::ext::Ext::Tabline);
+        model.attach_surfaces(surfaces);
         model.engine.apply_grid(GridOp::Resize { width, height });
         // past the startup window: a foreign message is parked rather than
         // stacked until it closes (`view_core::native::toast::StartupHold`),
@@ -2119,10 +2144,14 @@ mod tests {
                 model.look = look;
                 let inset = look.grid_offset();
                 assert_eq!(inset, 1, "a tiled look always insets the grid by one cell");
+                // tiles turn the pill on, and it takes a row off the top
+                // before the ring is inset: rows move by both, columns by
+                // the ring alone
+                let down = inset + model.chrome_rows();
                 for (tiled, plain) in places(&model).iter().zip(&bare) {
                     assert_eq!(
                         (tiled.0, tiled.1, tiled.2),
-                        (plain.0, plain.1 + inset, plain.2 + inset),
+                        (plain.0, plain.1 + down, plain.2 + inset),
                         "{} is not the ring's inset in from where nvim mode puts it (gaps {gaps})",
                         tiled.0
                     );

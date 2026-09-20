@@ -116,7 +116,14 @@ pub fn keys() -> &'static [ConfigKey] {
             table: "native",
             key: feature.id,
             flag: None,
-            derived: Some(if feature.default_on { "true" } else { "false" }),
+            // the pill's switch follows `[ui] panes`, so no text a user
+            // could write names its absent answer: what it derives to
+            // depends on the look this session resolved
+            derived: if feature.id == "tabline" {
+                None
+            } else {
+                Some(if feature.default_on { "true" } else { "false" })
+            },
         }));
         rows.extend([
             ConfigKey {
@@ -124,6 +131,12 @@ pub fn keys() -> &'static [ConfigKey] {
                 key: "tree_width",
                 flag: None,
                 derived: Some("30"),
+            },
+            ConfigKey {
+                table: "native",
+                key: "tabline_shows",
+                flag: None,
+                derived: Some("tabs"),
             },
             ConfigKey {
                 table: "keys",
@@ -301,12 +314,12 @@ mod tests {
             .filter(|row| row.table == "native")
             .map(|row| row.key)
             .collect();
-        // the switches walked from the registry, then the one `[native]`
-        // key that is not a switch -- so a feature this build ships is a
+        // the switches walked from the registry, then the `[native]` keys
+        // that are not switches -- so a feature this build ships is a
         // config key by construction, and nothing else can slip in beside
         // them unnoticed
         let mut expected: Vec<&str> = registry::features().iter().map(|f| f.id).collect();
-        expected.push("tree_width");
+        expected.extend(["tree_width", "tabline_shows"]);
         assert_eq!(
             registered, expected,
             "a feature this build ships is a config key, in the registry's own order"

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 use view_core::events::WinHandle;
-use view_core::model::WindowStatus;
+use view_core::model::{BufferEntry, WindowStatus};
 use view_core::msg::{DeleteConfirmOutcome, EngineRequest, Msg, RegisterType, ReplyToken};
 use view_core::native::mappings::MappingClaim;
 use view_core::native::surfaces::{FloatAnchor, FloatSighting};
@@ -136,6 +136,9 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
             })
         }
         "window" => decode_window_status(params),
+        "buffers" => Some(Msg::BufferList {
+            buffers: decode_buffer_entries(first)?,
+        }),
         // the chunk resolves nvim's own two sentinels before sending, so
         // what arrives is always a plain count of milliseconds and a
         // payload that is not one leaves the reader's timing alone
@@ -167,6 +170,31 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
         }),
         _ => None,
     }
+}
+
+/// Decodes the `buffers` trigger's list of `(buf, name, modified, current)`
+/// tuples, or `None` for a payload that is not a list.
+///
+/// An entry the chunk could not have produced is dropped rather than
+/// failing the list: the set nvim just sent is a better answer than the set
+/// view already held, whichever one entry of it decoded badly.
+fn decode_buffer_entries(list: &Value) -> Option<Vec<BufferEntry>> {
+    Some(
+        list.as_array()?
+            .iter()
+            .filter_map(|entry| {
+                let [buf, name, modified, current] = entry.as_array()?.as_slice() else {
+                    return None;
+                };
+                Some(BufferEntry::new(
+                    buf.as_u64()?,
+                    name.as_str().unwrap_or_default().to_owned(),
+                    modified.as_bool().unwrap_or(false),
+                    current.as_bool().unwrap_or(false),
+                ))
+            })
+            .collect(),
+    )
 }
 
 /// Decodes the window trigger's `('window', win, buf, name, modified, row,

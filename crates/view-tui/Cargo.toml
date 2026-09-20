@@ -24,19 +24,13 @@ crossterm = "0.29.0"
 ratatui = "0.30.2"
 view-core = { version = "0.0.1", path = "../view-core" }
 view-surface = { version = "0.0.1", path = "../view-surface" }
-# Per-character display-cell width for paint_text_row's manual cell-by-cell
-# placement (a wide CJK character must advance the column by 2, and reset
-# its shadow cell, or later characters on the row misalign). Already
-# resolved transitively via ratatui's own use of it, but a transitive
-# dependency cannot be `use`d without also declaring it directly.
+# Display-cell width for the nvim-mode tab row's own placement. The
+# grapheme walk every other native row is written by lives in
+# `view_core::native::text`, where the mouse router spends the same
+# measure. Already resolved transitively via ratatui's own use of it, but a
+# transitive dependency cannot be `use`d without also declaring it
+# directly.
 unicode-width = "0.2.2"
-# A combining mark belongs in the cell its base character took, so a frame
-# edge places one grapheme cluster per cell rather than one character
-# (src/paint/panes/frames.rs): macOS hands back a decomposed buffer name,
-# and a mark given a cell of its own reads as an accent standing alone
-# after the letter it belongs to. Already resolved transitively via
-# ratatui, which lays its own strings out by grapheme for the same reason.
-unicode-segmentation = "1.13.3"
 # The pictographic and regional-indicator halves of nvim's
 # `utf_ambiguous_width`, which decides whether the painter re-syncs the
 # cursor after a glyph (src/paint/emit.rs). `unicode-width` answers only the

@@ -13,6 +13,7 @@
 use crate::grid::registry::GridId;
 use crate::model::{Model, MouseCapture};
 use crate::msg::{Effect, MouseInput, RpcCall};
+use crate::native::pill::{PillNames, PillView};
 
 /// Routes one mouse event to the surface that owns it.
 ///
@@ -24,6 +25,11 @@ use crate::msg::{Effect, MouseInput, RpcCall};
 /// press it never saw. `wheel` and `move` carry no gesture, so they always
 /// route by position and leave an in-flight capture alone.
 pub(super) fn route(model: &mut Model, input: MouseInput) -> Vec<Effect> {
+    if input.action == "press" {
+        if let Some(call) = pill_press(model, &input) {
+            return vec![Effect::Rpc(call)];
+        }
+    }
     let owner = match input.action.as_str() {
         "press" => {
             let owner = position_owner(model, &input);
@@ -57,7 +63,8 @@ pub(super) fn route(model: &mut Model, input: MouseInput) -> Vec<Effect> {
 /// Which surface the pointer is over: the topmost overlay covering the
 /// cell, the grid whose pane covers it, or nothing at all.
 ///
-/// Nothing is the answer for a row the tabline reserved and for a cell
+/// Nothing is the answer for a row the pill reserved -- a press there is
+/// already answered by [`pill_press`] before this runs -- and for a cell
 /// between windows that view's own separator chrome owns. Neither has a
 /// handler and neither is a position the engine has a window at, so a
 /// press there starts no gesture -- but a `drag` or `release` crossing one
@@ -75,6 +82,25 @@ fn position_owner(model: &Model, input: &MouseInput) -> Option<MouseCapture> {
     let col = input.col.checked_sub(offset)?;
     let (grid, _, _) = model.engine.grids().hit_test(col, row)?;
     Some(MouseCapture::Engine(grid))
+}
+
+/// The switch a press on one of the pill's names asks for, or `None` for
+/// a press anywhere else.
+///
+/// Laid out through [`PillView::slots`], the same placement the painter
+/// spends, so the name under the pointer is the name that was drawn there.
+/// No gesture is claimed: the pill has nothing to drag, and a press that
+/// switched tabpage has already done the whole of what it means.
+fn pill_press(model: &Model, input: &MouseInput) -> Option<RpcCall> {
+    if input.row != 0 || model.chrome_rows() == 0 {
+        return None;
+    }
+    let pill = PillView::from_model(model);
+    let id = pill.hit(model.term_width, input.col)?;
+    Some(match pill.names {
+        PillNames::Tabs => RpcCall::SelectTab { tab: id },
+        PillNames::Buffers => RpcCall::SelectBuffer { buf: id },
+    })
 }
 
 /// Maps one mouse event already routed to `grid` into the

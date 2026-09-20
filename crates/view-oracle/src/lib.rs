@@ -565,8 +565,19 @@ impl EngineSession {
         let (sink, _unused_rx) = sync_channel(64);
         let (pump, _cutover) = engine.start_pump(sink);
         settle::install_hooks(&engine.handle)?;
+        let mut model = Model::with_term_size(cols, rows);
+        // the set this session attached with, recorded the way the binary
+        // records its own: a model that never heard about the attach
+        // answers `owns` for a session nobody ran
+        model.attach_surfaces(
+            view_core::native::ext::ALL_MULTIGRID
+                .iter()
+                .copied()
+                .filter(|ext| surfaces.contains(&ext.as_str()))
+                .collect(),
+        );
         Ok(Self {
-            model: Model::with_term_size(cols, rows),
+            model,
             engine,
             pump,
             markers: settle::QuiesceMarkers::default(),
@@ -597,6 +608,22 @@ impl EngineSession {
             },
         );
         self.apply_effects(effects)
+    }
+
+    /// Puts the listed-buffer set and what the pill names with it into this
+    /// session's model, through the same `update()` arm the bridge's
+    /// `buffers` notification takes.
+    ///
+    /// The driver registers no autocommands of view's own, so the trigger
+    /// that sends that notification in a real session never fires here.
+    /// This is the front door it leaves.
+    pub fn seed_pill_buffers(
+        &mut self,
+        shows: view_core::native::pill::TablineShows,
+        buffers: Vec<view_core::model::BufferEntry>,
+    ) {
+        self.model.tabline_shows = shows;
+        let _ = update(&mut self.model, Msg::BufferList { buffers });
     }
 
     /// Queues the next quiesce marker's arm command and `notation` into

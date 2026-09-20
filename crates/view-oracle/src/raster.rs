@@ -229,6 +229,7 @@ fn paint_layer<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid, offse
         // raster can represent
         LayerKind::Shell => {}
         LayerKind::Tabline(state) => paint_tabline(canvas, layer, state),
+        LayerKind::Pill(view) => paint_pill(canvas, layer, view),
         LayerKind::Cmdline(state) => paint_cmdline(canvas, layer, state),
         LayerKind::Toast { lines, .. } => paint_toast(canvas, layer, lines),
         LayerKind::Popupmenu(state) => paint_popupmenu(canvas, layer, state),
@@ -303,6 +304,34 @@ fn paint_tabline(canvas: &mut Canvas<'_>, layer: &Layer, state: &view_core::mode
         .collect::<Vec<_>>()
         .join(" | ");
     paint_text(canvas, layer.rect.row, layer.rect.col, &text);
+}
+
+/// Writes the pill's row: the host at the left edge, the names where
+/// [`view_core::native::pill::PillView::slots`] placed them, and the agent's
+/// word at the right.
+///
+/// The placement is the painter's own answer rather than a second layout,
+/// so the columns a golden shows are the columns a session draws into.
+fn paint_pill(canvas: &mut Canvas<'_>, layer: &Layer, view: &view_core::native::pill::PillView) {
+    use view_core::native::pill::edge_cells;
+
+    blank_row(canvas, layer.rect.row, layer.rect.col, layer.rect.width);
+    paint_text(canvas, layer.rect.row, layer.rect.col + 1, &view.host);
+    for (slot, entry) in view.slots(layer.rect.width).into_iter().zip(&view.entries) {
+        paint_text(
+            canvas,
+            layer.rect.row,
+            layer.rect.col + slot.col + 1,
+            &entry.label,
+        );
+    }
+    let agent = layer.rect.width.saturating_sub(edge_cells(view.agent));
+    paint_text(
+        canvas,
+        layer.rect.row,
+        layer.rect.col + agent + 1,
+        view.agent,
+    );
 }
 
 fn paint_cmdline(canvas: &mut Canvas<'_>, layer: &Layer, state: &view_core::model::CmdlineState) {
@@ -389,6 +418,9 @@ mod tests {
 
     fn model_with_grid(width: u16, height: u16) -> Model {
         let mut model = Model::new();
+        // the row the tab line reserves is the attach's, so a model that
+        // never recorded one leaves it to nvim
+        model.attach_surfaces(view_core::native::ext::ALL_MULTIGRID.to_vec());
         model.engine.apply_grid(GridOp::Resize { width, height });
         model
     }

@@ -346,6 +346,8 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::ReadFloatRows { win } => self.ops.read_float_rows(win),
                     RpcCall::CloseFloat { win } => self.ops.close_float(win),
                     RpcCall::ScanFloats => self.ops.scan_floats(),
+                    RpcCall::SelectTab { tab } => self.ops.select_tab(tab),
+                    RpcCall::SelectBuffer { buf } => self.ops.select_buffer(buf),
                     RpcCall::OpenFile { path } => self.ops.open_file(&path),
                     RpcCall::RenameFile {
                         old_path,

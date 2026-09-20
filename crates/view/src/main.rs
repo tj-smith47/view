@@ -371,6 +371,15 @@ fn split_remote_target(value: &str) -> RemoteTarget<'_> {
     }
 }
 
+/// The host the pill names for this session, or `None` for a local one.
+///
+/// ssh's own destination as the user typed it, path and all else split off:
+/// a person with three windows open on three machines has nothing else on
+/// screen that says which is which.
+fn pill_host(remote: Option<&str>) -> Option<String> {
+    remote.map(|value| split_remote_target(value).destination.to_string())
+}
+
 /// The [`RemoteSpec`] `cli`'s remote flags describe, for a `target` already
 /// split out of `--remote`'s value.
 ///
@@ -1089,7 +1098,13 @@ fn main() -> Result<()> {
     // tiles the segments sit in each frame's own bottom edge, so no row is
     // reserved for a bar and `Model::statusline_rows` answers the same
     let statusline = look.bar_rows(resolved.tables.native.enabled("statusline")) > 0;
-    let spawn_size = view_core::model::grid_target_for((width, height), 0, statusline, ring);
+    // the pill's own row, reserved in the spawn's geometry for the reason
+    // the ring is: a child laid out a row taller than the first frame
+    // leaves makes the attach a relayout of every window on screen
+    let chrome = u16::from(
+        resolved.tables.native.enabled("tabline") && look.panes == view_core::model::Panes::Tiles,
+    );
+    let spawn_size = view_core::model::grid_target_for((width, height), chrome, statusline, ring);
     // what the chrome alone would have left, so this is true for every
     // geometry the engine would have refused -- a zero floored to
     // `view_core::model::SIZE_FLOOR`, an axis clamped to
@@ -1100,6 +1115,7 @@ fn main() -> Result<()> {
         != (
             width.saturating_sub(ring),
             height
+                .saturating_sub(chrome)
                 .saturating_sub(u16::from(statusline))
                 .saturating_sub(ring),
         );
@@ -1154,7 +1170,11 @@ fn main() -> Result<()> {
         .with_cwd(std::env::current_dir().unwrap_or_default())
         // the same look the spawn's geometry was seeded from, so the first
         // frame reserves the ring the child was already laid out inside
-        .with_look(look);
+        .with_look(look)
+        // ssh's own destination as the user typed it, which is the only
+        // thing on screen that says which machine the session is on
+        .with_remote(pill_host(cli.remote.as_deref()))
+        .with_tabline_shows(resolved.tables.native.tabline_shows());
     // the accent the user named, ahead of the two syntax groups the theme
     // probes for when they named none
     model
@@ -1781,6 +1801,19 @@ mod tests {
         assert!(resolved.tables.supervision.auto_restart);
     }
 
+    /// The set a session with nothing to narrow it attaches under `panes`.
+    ///
+    /// The tab line is the one `[native]` switch whose default follows the
+    /// look, so tiles attach every surface and nvim mode attaches the
+    /// registry's own set.
+    fn shipped_under(panes: view_core::model::Panes) -> Vec<view_core::native::ext::Ext> {
+        if panes == view_core::model::Panes::Tiles {
+            view_core::native::ext::ALL_MULTIGRID.to_vec()
+        } else {
+            view_core::native::ext::shipped_multigrid()
+        }
+    }
+
     /// `--clean` skips the file, but it must still reproduce the mode view
     /// ships rather than a second one of its own: a config-blind attach
     /// that fell back to single-grid would make the triage tool lie about
@@ -1792,7 +1825,7 @@ mod tests {
         let resolved = resolve_session_config(&Cli::parse_from(["view", "--clean"]), &file);
         assert_eq!(
             view_native::config::ext_surfaces(&resolved),
-            view_core::native::ext::shipped_multigrid(),
+            shipped_under(resolved.ui.panes.value),
             "--clean must attach the shipped set even when the file it ignores asked for the fallback"
         );
     }
@@ -2016,9 +2049,10 @@ mod tests {
     /// read above: the rows view's own chrome takes are not the child's to
     /// lay windows out in, so the spawn is handed the grid the attach will
     /// ask for rather than the terminal's own. The ring tiles mode frames
-    /// the screen with is part of that grid, and it comes out of the
-    /// `[ui]` answers the chain above already resolved. Every call is
-    /// arithmetic over values in hand.
+    /// the screen with is part of that grid, as is the row the pill takes,
+    /// and both come out of the `[ui]` and `[native]` answers the chain
+    /// above already resolved. Every call is arithmetic over values in
+    /// hand.
     ///
     /// The geometry notice is the fifth, and it is not a read at all: it
     /// reports the reading the line above stood a geometry in for, on every
@@ -2087,7 +2121,10 @@ mod tests {
                 "ring",
                 "bar_rows",
                 "enabled",
+                "u16::from",
+                "enabled",
                 "view_core::model::grid_target_for",
+                "saturating_sub",
                 "saturating_sub",
                 "saturating_sub",
                 "u16::from",
@@ -2581,7 +2618,7 @@ mod tests {
 
         assert_eq!(
             view_native::config::ext_surfaces(&resolved),
-            view_core::native::ext::shipped_multigrid(),
+            shipped_under(resolved.ui.panes.value),
             "a config that could not be read keeps every surface, and attaches \
              the mode view ships"
         );
@@ -2755,6 +2792,32 @@ mod tests {
             cfg.extra_args.is_empty(),
             "a bare destination named no file, so none may be forwarded: {:?}",
             cfg.extra_args
+        );
+    }
+
+    /// The pill's left edge names the machine, so the destination the model
+    /// carries is ssh's own, with the path and nothing else split off.
+    #[test]
+    fn the_remote_destination_reaches_the_model_at_startup() {
+        let model = view_core::model::Model::with_term_size(80, 24)
+            .with_remote(pill_host(Some("deploy@prod-box:/etc/app.conf")));
+        assert_eq!(model.remote.as_deref(), Some("deploy@prod-box"));
+        assert_eq!(
+            view_core::native::pill::PillView::from_model(&model).host,
+            "deploy@prod-box"
+        );
+        assert!(
+            startup_body().contains(".with_remote(pill_host(cli.remote.as_deref()))"),
+            "fn main builds its model without the destination, so the pill \
+             would name no machine however well the helper answers"
+        );
+        let local = view_core::model::Model::with_term_size(80, 24).with_remote(pill_host(None));
+        assert_eq!(local.remote, None);
+        assert!(
+            view_core::native::pill::PillView::from_model(&local)
+                .host
+                .is_empty(),
+            "a local session spends no columns saying so"
         );
     }
 

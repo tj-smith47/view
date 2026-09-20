@@ -36,6 +36,7 @@ use view_core::model::Panes;
 use view_core::native::ext::{self, Ext};
 use view_core::native::geometry;
 use view_core::native::keys::{Action, Direction, KeyBindings};
+use view_core::native::pill::TablineShows;
 use view_core::native::registry;
 
 /// A resolved on/off answer for every feature in the registry.
@@ -45,6 +46,8 @@ pub struct NativeConfig {
     disabled: Vec<&'static str>,
     tree_width: u16,
     tree_width_notice: Option<&'static str>,
+    tabline_shows: TablineShows,
+    tabline_shows_notice: Option<&'static str>,
 }
 
 /// The shape of `view.toml` this crate reads. Unknown top-level tables are
@@ -376,12 +379,25 @@ struct NativeTable {
     /// TOML the example's drift guard reads.
     #[serde(skip_serializing)]
     tree_width_notice: Option<&'static str>,
+    /// Optional for [`NativeTable::tree_width`]'s reason, and never
+    /// serialized because the type it holds is this crate's reading of the
+    /// word rather than the word itself.
+    #[serde(skip_serializing)]
+    tabline_shows: Option<TablineShows>,
+    #[serde(skip_serializing)]
+    tabline_shows_notice: Option<&'static str>,
     #[serde(flatten)]
     features: BTreeMap<String, bool>,
 }
 
-/// The one `[native]` key that is not a feature switch.
+/// The `[native]` keys that are not feature switches.
 const TREE_WIDTH_KEY: &str = "tree_width";
+const TABLINE_SHOWS_KEY: &str = "tabline_shows";
+
+/// What a `tabline_shows` naming neither thing is answered with.
+const TABLINE_SHOWS_NOTICE: &str =
+    "view: [native] tabline_shows must be \"tabs\" or \"buffers\". The pill names your \
+     tabpages this run";
 
 /// What a `tree_width` that is not a whole number is answered with.
 const TREE_WIDTH_NOTICE: &str = "view: [native] tree_width must be a whole number of percent. \
@@ -403,6 +419,19 @@ fn resolve_tree_width(value: &toml::Value) -> (u16, Option<&'static str>) {
     }
 }
 
+/// What the pill names, and the notice a word neither answer spells owes
+/// the user.
+///
+/// A word never fails the table, for the reason [`resolve_tree_width`]
+/// states: one mistyped value in `[native]` would otherwise revert every
+/// feature switch in the file for the run.
+fn resolve_tabline_shows(value: &toml::Value) -> (TablineShows, Option<&'static str>) {
+    match value.as_str().and_then(TablineShows::parse) {
+        Some(shows) => (shows, None),
+        None => (TablineShows::default(), Some(TABLINE_SHOWS_NOTICE)),
+    }
+}
+
 impl<'de> Deserialize<'de> for NativeTable {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -418,7 +447,10 @@ impl<'de> serde::de::Visitor<'de> for NativeTableVisitor {
     type Value = NativeTable;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a table of feature switches, each a boolean, optionally with tree_width")
+        f.write_str(
+            "a table of feature switches, each a boolean, optionally with tree_width and \
+             tabline_shows",
+        )
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -431,6 +463,12 @@ impl<'de> serde::de::Visitor<'de> for NativeTableVisitor {
                 let (width, notice) = resolve_tree_width(&map.next_value::<toml::Value>()?);
                 table.tree_width = Some(width);
                 table.tree_width_notice = notice;
+                continue;
+            }
+            if key == TABLINE_SHOWS_KEY {
+                let (shows, notice) = resolve_tabline_shows(&map.next_value::<toml::Value>()?);
+                table.tabline_shows = Some(shows);
+                table.tabline_shows_notice = notice;
                 continue;
             }
             match map.next_value::<bool>() {
@@ -448,8 +486,8 @@ impl<'de> serde::de::Visitor<'de> for NativeTableVisitor {
                 // this exists for.
                 Err(_) => {
                     return Err(serde::de::Error::custom(format!(
-                        "[native] {key} names no feature and is not {TREE_WIDTH_KEY}; \
-                         expected a boolean for one of: {}",
+                        "[native] {key} names no feature and is neither {TREE_WIDTH_KEY} \
+                         nor {TABLINE_SHOWS_KEY}; expected a boolean for one of: {}",
                         known_ids()
                     )))
                 }
@@ -746,6 +784,8 @@ impl NativeConfig {
             disabled: Vec::new(),
             tree_width: geometry::DEFAULT_PANEL_WIDTH_PCT,
             tree_width_notice: None,
+            tabline_shows: TablineShows::default(),
+            tabline_shows_notice: None,
         }
     }
 
@@ -760,6 +800,8 @@ impl NativeConfig {
                 .collect(),
             tree_width: geometry::DEFAULT_PANEL_WIDTH_PCT,
             tree_width_notice: None,
+            tabline_shows: TablineShows::default(),
+            tabline_shows_notice: None,
         }
     }
 
@@ -812,6 +854,8 @@ impl NativeConfig {
                 .tree_width
                 .unwrap_or(geometry::DEFAULT_PANEL_WIDTH_PCT),
             tree_width_notice: file.native.tree_width_notice,
+            tabline_shows: file.native.tabline_shows.unwrap_or_default(),
+            tabline_shows_notice: file.native.tabline_shows_notice,
         })
     }
 
@@ -865,6 +909,20 @@ impl NativeConfig {
     #[must_use]
     pub fn tree_width_notice(&self) -> Option<&'static str> {
         self.tree_width_notice
+    }
+
+    /// What the pill names while one tabpage is open. A second tabpage is
+    /// named whatever this says, which [`TablineShows::Buffers`] states.
+    #[must_use]
+    pub fn tabline_shows(&self) -> TablineShows {
+        self.tabline_shows
+    }
+
+    /// What a `tabline_shows` naming neither answer owes the user, or
+    /// `None` when the key was absent or usable.
+    #[must_use]
+    pub fn tabline_shows_notice(&self) -> Option<&'static str> {
+        self.tabline_shows_notice
     }
 }
 
@@ -922,6 +980,9 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
         .collect();
     if file.native.tree_width.is_some() {
         spelled.push(("native", TREE_WIDTH_KEY));
+    }
+    if file.native.tabline_shows.is_some() {
+        spelled.push(("native", TABLINE_SHOWS_KEY));
     }
     for (key, value) in [
         ("sidebar_wider", &file.keys.sidebar_wider),
@@ -1038,10 +1099,16 @@ mod tests {
     #[test]
     fn an_absent_config_attaches_the_shipped_set() {
         assert_eq!(
-            ext_surfaces(&resolved("")),
+            ext_surfaces(&resolved("[ui]\npanes = \"nvim\"\n")),
             ext::shipped_multigrid(),
             "a session with nothing to narrow it externalizes every surface whose \
              feature ships on, under the addressing it ships"
+        );
+        assert_eq!(
+            ext_surfaces(&resolved("[ui]\npanes = \"tiles\"\n")),
+            ext::ALL_MULTIGRID,
+            "the tiled look draws the top row itself, which is the one surface \
+             the registry defaults off"
         );
     }
 
@@ -1054,11 +1121,21 @@ mod tests {
     #[test]
     fn the_shipped_attach_is_what_an_unattached_model_answers_for() {
         assert_eq!(
-            ext_surfaces(&resolved("")),
+            ext_surfaces(&resolved("[ui]\npanes = \"nvim\"\n")),
             view_core::model::Model::new().attached_surfaces(),
             "the model's default set and the set a config-less session attaches \
              must be the same set"
         );
+        // the tiled look attaches one surface wider, and the model claiming
+        // narrower than the session sends is the safe direction of the two:
+        // view leaves a row to nvim until the attach it recorded says the
+        // row is its own
+        for surface in view_core::model::Model::new().attached_surfaces() {
+            assert!(
+                ext_surfaces(&resolved("[ui]\npanes = \"tiles\"\n")).contains(surface),
+                "{surface:?} is claimed by an unattached model and attached by no session"
+            );
+        }
     }
 
     /// The flip itself. Stated separately from the set-equality leg above
@@ -1129,13 +1206,13 @@ mod tests {
     }
 
     /// The tab row follows `[native] tabline` and nothing else, in both
-    /// directions: default-off means nvim keeps drawing the user's own
-    /// tabline into grid 1, and no sibling switch may take the row with it.
+    /// directions: off means nvim keeps drawing the user's own tabline into
+    /// grid 1, and no sibling switch may take the row with it.
     #[test]
     fn the_tabline_surface_follows_its_own_switch() {
         assert!(
-            !ext_surfaces(&resolved("")).contains(&Ext::Tabline),
-            "a session with no config leaves the tab row to nvim"
+            !ext_surfaces(&resolved("[ui]\npanes = \"nvim\"\n")).contains(&Ext::Tabline),
+            "nvim mode leaves the tab row to nvim"
         );
         assert!(!ext_surfaces(&resolved("[native]\ntabline = false\n")).contains(&Ext::Tabline));
         assert!(ext_surfaces(&resolved("[native]\ntabline = true\n")).contains(&Ext::Tabline));
@@ -1385,11 +1462,12 @@ mod tests {
         let edited = EXAMPLE_TOML.replace("picker = true", "picker = false");
         assert_ne!(edited, EXAMPLE_TOML, "the example must still ship the key");
         let cfg = NativeConfig::from_toml_str(&edited).expect("the edited example must parse");
+        let shipped = NativeConfig::from_toml_str(EXAMPLE_TOML).expect("the example must parse");
         assert!(!cfg.enabled("picker"));
         for f in registry::features().iter().filter(|f| f.id != "picker") {
             assert_eq!(
                 cfg.enabled(f.id),
-                f.default_on,
+                shipped.enabled(f.id),
                 "{} must stay at the value the example ships",
                 f.id
             );
@@ -1838,9 +1916,12 @@ mod tests {
         let path = dir.join("view.toml");
         std::fs::write(&path, EXAMPLE_TOML).expect("the example must be writable");
         let loaded = NativeConfig::load(Some(&path));
+        // every feature on, not `defaults()`: the example writes `tabline`
+        // at the answer the tiled look derives, and the registry bit behind
+        // `defaults()` is the other look's
         assert_eq!(
             loaded.expect("the example must load"),
-            NativeConfig::defaults()
+            NativeConfig::all_enabled()
         );
     }
 

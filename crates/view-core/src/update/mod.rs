@@ -622,6 +622,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             filetype,
         } => bridge::on_buffer(model, name, modified, filetype),
         Msg::WindowStatus { win, status } => bridge::on_window_status(model, win, status),
+        Msg::BufferList { buffers } => bridge::on_buffer_list(model, buffers),
         Msg::FloatObserved(float) => surface_conflict::observe_float(model, &float),
         Msg::FloatSweep => surface_conflict::sweep_floats(model),
         Msg::FloatRows { win, lines } => surface_conflict::on_float_rows(model, win, lines),

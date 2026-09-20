@@ -1,10 +1,11 @@
 //! Who draws the tab row, proven against a live engine on both sides of the
 //! differential and under both attach modes.
 //!
-//! `[native] tabline` ships off, so a config-less session never asks for
-//! `ext_tabline` and nvim renders the user's own `'tabline'` -- a
-//! bufferline plugin's, in a real session -- into row 0 of the grid it
-//! composites. The claim is worth a live test because nothing about it is
+//! `[native] tabline` follows `[ui] panes`, so a session under
+//! `panes = "nvim"` never asks for `ext_tabline` and nvim renders the
+//! user's own `'tabline'` -- a bufferline plugin's, in a real session --
+//! into row 0 of the grid it composites. That is the set both arms here
+//! attach. The claim is worth a live test because nothing about it is
 //! visible in view's own code: the row arrives as ordinary `grid_line`
 //! cells and there is no event to assert on. The negative control is the
 //! same session with `ext_tabline` attached, where nvim sends

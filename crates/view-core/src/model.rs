@@ -208,6 +208,19 @@ pub struct Model {
     /// ([`Model::with_cwd`]) since `update()` has no filesystem access to
     /// ask for it itself. Empty until startup sets it.
     pub cwd: PathBuf,
+    /// The `--remote` destination this session was started against, or
+    /// `None` for a local one. Seeded once at startup
+    /// ([`Model::with_remote`]) the same way `cwd` is, and drawn at the
+    /// pill's left edge: three windows open on three machines look alike
+    /// until one of them says which machine it is.
+    pub remote: Option<String>,
+    /// Every listed buffer, as the bridge's `buffers` trigger last
+    /// reported them. Empty until the first report, and replaced whole by
+    /// each one after it.
+    pub buffers: Vec<BufferEntry>,
+    /// What the pill names while one tabpage is open, set once at startup
+    /// from `[native] tabline_shows` the same way `statusline_enabled` is.
+    pub tabline_shows: crate::native::pill::TablineShows,
     /// The colorscheme `[ui] theme` named, or `None` when it named none and
     /// view derives its chrome from whatever the user's own config ends on.
     ///
@@ -386,6 +399,9 @@ impl Model {
             config_was_read: true,
             surface_conflicts: crate::native::surfaces::SurfaceConflicts::default(),
             cwd: PathBuf::new(),
+            remote: None,
+            buffers: Vec::new(),
+            tabline_shows: crate::native::pill::TablineShows::default(),
             colorscheme: None,
             ai_trusted: false,
             ai_enabled: true,
@@ -649,6 +665,25 @@ impl Model {
     #[must_use]
     pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
         self.cwd = cwd;
+        self
+    }
+
+    /// The `--remote` destination this session was started against.
+    ///
+    /// A builder step beside [`Model::with_cwd`] for the same reason: no
+    /// message carries it, so startup is the one place it can be learned,
+    /// and a field assigned directly at the call site is a second way to
+    /// reach the same state.
+    #[must_use]
+    pub fn with_remote(mut self, remote: Option<String>) -> Self {
+        self.remote = remote;
+        self
+    }
+
+    /// What the pill names while one tabpage is open.
+    #[must_use]
+    pub fn with_tabline_shows(mut self, shows: crate::native::pill::TablineShows) -> Self {
+        self.tabline_shows = shows;
         self
     }
 
@@ -1229,16 +1264,16 @@ impl Model {
     }
 
     /// Terminal rows reserved for persistent chrome outside the engine
-    /// grid: one row for the tabline once more than one tab is open
-    /// (matching bare nvim's default `showtabline` threshold), zero
-    /// otherwise. Transient overlays (cmdline, messages, popupmenu) paint
-    /// over the grid instead and never reserve rows.
+    /// grid: one row for the pill whenever it is showing, zero otherwise.
+    /// Transient overlays (cmdline, messages, popupmenu) paint over the
+    /// grid instead and never reserve rows.
+    ///
+    /// [`view_core::native::pill::shows`](crate::native::pill::shows) is
+    /// the one answer, so the row this reserves and the row the painter
+    /// draws into can never disagree.
     #[must_use]
     pub fn chrome_rows(&self) -> u16 {
-        match &self.engine.tabline {
-            Some(t) if t.tabs.len() > 1 => 1,
-            _ => 0,
-        }
+        u16::from(crate::native::pill::shows(self))
     }
 
     /// Terminal rows reserved for the bottom-row statusline bar: one while
@@ -2165,10 +2200,12 @@ impl CmdlineState {
     }
 }
 
+mod buffers;
 mod look;
 mod messages;
 mod window_status;
 
+pub use buffers::BufferEntry;
 pub use look::{Detected, Look, Panes, MIN_FRAMED_SLOT};
 pub use messages::{MessageEntry, MessageId, Messages};
 pub use window_status::WindowStatus;
@@ -3004,9 +3041,17 @@ mod tests {
         assert_eq!((m.term_width, m.term_height), (80, 24));
     }
 
+    /// A model with the tabline surface attached and the look nvim's own
+    /// tab row is drawn under.
+    fn tabline_model() -> Model {
+        let mut m = Model::with_term_size(80, 24);
+        m.attach_surfaces(crate::native::ext::ALL_MULTIGRID.to_vec());
+        m
+    }
+
     #[test]
     fn chrome_rows_is_zero_without_a_tabline_or_with_one_tab() {
-        let mut m = Model::with_term_size(80, 24);
+        let mut m = tabline_model();
         assert_eq!(m.chrome_rows(), 0);
         m.engine.tabline = Some(TablineState {
             current: TabHandle(1),
@@ -3020,7 +3065,7 @@ mod tests {
 
     #[test]
     fn chrome_rows_is_one_once_more_than_one_tab_is_open() {
-        let mut m = Model::with_term_size(80, 24);
+        let mut m = tabline_model();
         m.engine.tabline = Some(TablineState {
             current: TabHandle(1),
             tabs: vec![
@@ -3036,6 +3081,49 @@ mod tests {
         });
         assert_eq!(m.chrome_rows(), 1);
         assert_eq!(m.grid_target(), (80, 23));
+    }
+
+    /// Under tiles the row stands whatever is open: a pill naming one
+    /// workspace still carries the host and what the agent is doing.
+    #[test]
+    fn chrome_rows_is_one_whenever_the_pill_is_on() {
+        let mut m = tabline_model();
+        m.look = crate::model::Look::new(crate::model::Panes::Tiles, true);
+        m.engine.tabline = Some(TablineState {
+            current: TabHandle(1),
+            tabs: vec![TabEntry {
+                tab: TabHandle(1),
+                name: "a".into(),
+            }],
+        });
+        assert_eq!(m.chrome_rows(), 1);
+        // the surface handed back takes the row with it, in either look
+        m.attach_surfaces(crate::native::ext::shipped_multigrid());
+        assert_eq!(m.chrome_rows(), 0);
+    }
+
+    /// `panes = "nvim"` keeps nvim's own `showtabline` threshold, which is
+    /// the row a migrating user already has.
+    #[test]
+    fn chrome_rows_keeps_the_one_tab_rule_under_nvim_mode() {
+        let mut m = tabline_model();
+        m.look = crate::model::Look::new(crate::model::Panes::Nvim, true);
+        m.engine.tabline = Some(TablineState {
+            current: TabHandle(1),
+            tabs: vec![TabEntry {
+                tab: TabHandle(1),
+                name: "a".into(),
+            }],
+        });
+        assert_eq!(m.chrome_rows(), 0, "one tabpage reserves no row under nvim");
+        let Some(state) = m.engine.tabline.as_mut() else {
+            unreachable!("the fixture set a tabline")
+        };
+        state.tabs.push(TabEntry {
+            tab: TabHandle(2),
+            name: "b".into(),
+        });
+        assert_eq!(m.chrome_rows(), 1);
     }
 
     /// Under tiles the ring is the band view draws frames and gaps in, so
@@ -3168,7 +3256,7 @@ mod tests {
     fn a_full_height_overlay_stops_short_of_the_persistent_chrome() {
         use crate::native::geometry::{Anchor, OverlayBox};
 
-        let mut m = Model::with_term_size(80, 24);
+        let mut m = tabline_model();
         m.statusline_enabled = true;
         m.engine.tabline = Some(TablineState {
             current: TabHandle(1),
