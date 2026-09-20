@@ -768,9 +768,9 @@ fn windowed_tree_session(dir: &Path) -> view_oracle::EngineSession {
     engine
 }
 
-/// Opens the tree, leaves its window the only one on the tabpage, and
-/// closes it again -- the two keys a person reaches this by.
-fn close_the_tree_alone_on_its_tabpage(engine: &mut view_oracle::EngineSession) {
+/// Opens the tree and leaves the cursor in its window, which is where
+/// `<leader>e` puts it.
+fn open_the_tree(engine: &mut view_oracle::EngineSession) {
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
             feature: "tree".to_string(),
@@ -783,6 +783,12 @@ fn close_the_tree_alone_on_its_tabpage(engine: &mut view_oracle::EngineSession) 
         "view-tree",
         "the cursor did not land in the tree's own window"
     );
+}
+
+/// Opens the tree, leaves its window the only one on the tabpage, and
+/// closes it again -- the two keys a person reaches this by.
+fn close_the_tree_alone_on_its_tabpage(engine: &mut view_oracle::EngineSession) {
+    open_the_tree(engine);
     engine.arm_and_input(":only<CR>").unwrap();
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     assert_eq!(
@@ -1276,4 +1282,139 @@ fn closing_the_tree_in_its_last_window_leaves_an_ordinary_window() {
             "the empty buffer the window came back on holds text"
         );
     }
+}
+
+/// The window options a person sets for themselves. The tree's own window
+/// wants the opposite of each, which is what makes them read.
+const PERSONAL_OPTIONS: &str = ":set number signcolumn=yes wrap<CR>";
+
+/// Those three options as nvim answers for them, globally or for one
+/// window, joined the way both readings below take them.
+const OPTION_READING: &str = "&number . ',' . &signcolumn . ',' . &wrap";
+
+/// Opening the tree writes its own look into the window it opens, and the
+/// window it hands back at the close takes the person's look. Both were
+/// one bug: `vim.wo[win].number = false` writes nvim's global value as
+/// well as the window's, so opening the tree took the person's numbers,
+/// sign column and wrapping away from every window they opened for the
+/// rest of the session, and the hand-back then restored the tree's own
+/// values from that global.
+///
+/// Disconfirm: writing the open chunk's options with `vim.wo[win]` again
+/// fails on the globals, and dropping the close chunk's `winfixwidth`
+/// write fails on the width the handed-back window is pinned to.
+#[test]
+fn the_tree_leaves_the_persons_window_options_where_they_were() {
+    let work = common::ScratchPaths::new("close-battery-tree-options");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = windowed_tree_session(&dir);
+    engine.arm_and_input(":e README.md<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine.arm_and_input(PERSONAL_OPTIONS).unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    let globals = "&g:number . ',' . &g:signcolumn . ',' . &g:wrap";
+    assert_eq!(
+        engine.eval_str(globals).unwrap().trim(),
+        "1,yes,1",
+        "the session did not take the options this reads"
+    );
+
+    open_the_tree(&mut engine);
+    assert_eq!(
+        engine.eval_str(globals).unwrap().trim(),
+        "1,yes,1",
+        "opening the tree took the person's own options with it"
+    );
+    assert_eq!(
+        engine.eval_str(OPTION_READING).unwrap().trim(),
+        "0,no,0",
+        "the tree's own window is not wearing the tree's look"
+    );
+
+    engine.arm_and_input(":only<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the toggle asks nvim to close the window");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.eval_str(OPTION_READING).unwrap().trim(),
+        "1,yes,1",
+        "the window came back wearing the tree's look"
+    );
+    assert_eq!(
+        engine.eval_str("&winfixwidth").unwrap().trim(),
+        "0",
+        "the window came back holding the width the tree pinned it to"
+    );
+}
+
+/// The tree alone on a tabpage that is not the last one. nvim closes that
+/// window without complaint, taking the tabpage with it the way `:q`
+/// would, so the hand-back is for the only window of the only tabpage and
+/// nothing wider.
+///
+/// Disconfirm: taking `nvim_list_tabpages` out of the close chunk's
+/// condition leaves the tabpage standing with a file in it, which fails
+/// on the tabpage count.
+#[test]
+fn the_tree_alone_on_an_inner_tabpage_closes_with_its_tabpage() {
+    let work = common::ScratchPaths::new("close-battery-tree-tabpage");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = windowed_tree_session(&dir);
+    engine.arm_and_input(":e README.md<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine.arm_and_input(":tabnew<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    open_the_tree(&mut engine);
+    engine.arm_and_input(":only<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine
+            .eval_str("tabpagenr('$') . ':' . winnr('$')")
+            .unwrap()
+            .trim(),
+        "2:1",
+        "the tree is not alone on the second of two tabpages"
+    );
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the toggle asks nvim to close the window");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.eval_str("tabpagenr('$')").unwrap().trim(),
+        "1",
+        "the tree's tabpage outlived the window that was all it held"
+    );
+    assert_eq!(
+        tree_window_widths(&mut engine),
+        "",
+        "the tree's scratch window is still on screen"
+    );
+    assert_eq!(
+        view_buffers(&mut engine),
+        "",
+        "the tree's scratch buffer outlived its window"
+    );
+    assert!(
+        !engine.tree_is_open(),
+        "the tree's state outlived the window it was drawn in"
+    );
+    assert_eq!(
+        engine.eval_str("expand('%:t')").unwrap().trim(),
+        "README.md",
+        "the tabpage that closed did not hand the person back their file"
+    );
+    let screen = engine.screen_text();
+    assert!(
+        !screen.contains("E444"),
+        "the close said nvim could not take it: {screen}"
+    );
 }
