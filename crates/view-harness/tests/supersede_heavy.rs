@@ -240,15 +240,49 @@ fn witnessed_frames(handle: &EngineHandle) -> Vec<String> {
 /// The executor itself lives inside the `view` bin target and is
 /// unreachable from here; the mapping this mirrors is pinned by that
 /// crate's own `every_supersession_entry_reaches_an_engine_op`.
+///
+/// `RpcCall` is `#[non_exhaustive]`, so no match written outside
+/// `view-core` can be closed over it and a takeover call this mirror has
+/// not learned is a panic here rather than a build failure.
+/// [`the_mirror_carries_every_call_a_plan_can_ride`] walks the same set
+/// with no fixture, so that drift fails in the fast leg.
 fn apply(handle: &EngineHandle, plan: &[Supersession]) {
     for entry in plan {
         match &entry.rpc {
             Some(RpcCall::HoldOption { name, value }) => handle.hold_option(name, value).unwrap(),
+            Some(RpcCall::HoldWindowOption { name, value }) => {
+                handle.hold_window_option(name, value).unwrap();
+            }
             Some(RpcCall::HoldNotify) => handle.hold_notify().unwrap(),
             // the attach performed it, so there is nothing to apply here
             None => {}
             other => panic!("a plan entry must ride a durable takeover call, got {other:?}"),
         }
+    }
+}
+
+/// The shipped plan rides no call [`apply`] would panic on.
+///
+/// Runs by default and needs no fixture, unlike every other test here: a
+/// window-local hold joined the plan and reached this mirror only on a
+/// host carrying the plugin cache, which is a compat-leg failure for a
+/// mismatch that costs nothing to see.
+#[test]
+fn the_mirror_carries_every_call_a_plan_can_ride() {
+    for entry in plan(&NativeConfig::all_enabled(), registry::features()) {
+        assert!(
+            matches!(
+                entry.rpc,
+                None | Some(
+                    RpcCall::HoldOption { .. }
+                        | RpcCall::HoldWindowOption { .. }
+                        | RpcCall::HoldNotify
+                )
+            ),
+            "{}'s takeover rides {:?}, which `apply` has no arm for",
+            entry.feature,
+            entry.rpc
+        );
     }
 }
 
