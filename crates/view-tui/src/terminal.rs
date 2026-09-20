@@ -553,8 +553,13 @@ pub struct Term {
     /// The last terminal mouse-reporting state written, so `draw_surface`
     /// only toggles crossterm's mouse reporting when `model.engine.mouse_on`
     /// actually changed since the last frame instead of writing the escape
-    /// on every paint. `None` before the first frame, matching
-    /// `last_cursor_shape`'s convention.
+    /// on every paint. Starts at `Some(false)`: `enter_bytes` turns on
+    /// bracketed paste alone, so reporting is known to be off when the
+    /// terminal is entered, and a first frame that states it anyway writes a
+    /// disable. On Windows crossterm serves both mouse commands through the
+    /// console API instead of escape bytes, and the disable reads a console
+    /// mode that only the enable stores, so a disable ahead of the first
+    /// enable fails the frame.
     ///
     /// Named for reporting, not capture: this is whether the terminal sends
     /// mouse events at all, a different concept from
@@ -632,7 +637,7 @@ impl Term {
             inner,
             frame_buf,
             last_cursor_shape: None,
-            last_mouse_reporting: None,
+            last_mouse_reporting: Some(false),
             last_cursor: None,
             cursor_shown: None,
             shadow: Shadow::new(),
@@ -1052,7 +1057,7 @@ impl Term {
             inner,
             frame_buf,
             last_cursor_shape: None,
-            last_mouse_reporting: None,
+            last_mouse_reporting: Some(false),
             last_cursor: None,
             cursor_shown: None,
             shadow: Shadow::new(),
@@ -1845,6 +1850,9 @@ mod tests {
     /// The mouse toggle is queued ahead of the opener -- it is a terminal
     /// mode change, not part of the update being synchronized -- so a frame
     /// carrying only a toggle leaves the pair unopened.
+    // On Windows the toggle is a console-mode call that writes no bytes, so
+    // the expectation this builds through `queue!` cannot be built there.
+    #[cfg(not(windows))]
     #[test]
     fn a_mouse_toggle_alone_opens_no_bracket() {
         let mut model = probe_model(TermCaps::from_probe(true, true, true));
@@ -1862,6 +1870,31 @@ mod tests {
             "a frame that only turns mouse reporting on writes that escape \
              alone: the update it would bracket is empty"
         );
+    }
+
+    /// On Windows both mouse commands are console-API calls, and the disable
+    /// reads a console mode that only the enable stores, so a disable written
+    /// before any enable is an error and the frame that carries it fails. The
+    /// bytes are readable on unix, which is where the contract can be pinned.
+    #[test]
+    fn a_first_frame_with_reporting_off_writes_no_mouse_toggle() {
+        let model = probe_model(TermCaps::from_probe(true, true, true));
+        assert!(
+            !model.engine.mouse_on,
+            "the fixture starts with mouse reporting off"
+        );
+        let mut surface = view_surface::render(&model);
+        surface.cursor = caret_at(&model, 2, 1);
+        let mut term = Term::frame_probe(model.caps);
+
+        let first = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+        let first = String::from_utf8_lossy(&first);
+        for mode in ["?1000", "?1002", "?1003", "?1006", "?1015"] {
+            assert!(
+                !first.contains(mode),
+                "the first frame states no mouse-tracking mode, and it wrote {mode}"
+            );
+        }
     }
 
     #[test]
