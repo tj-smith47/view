@@ -629,11 +629,16 @@ const GLOBAL_GRID: u64 = 1;
 
 /// The close sequence this leg types, in the notation the engine-attached
 /// driver takes.
-const TILED_STEPS: [(&str, &str); 7] = [
+const TILED_STEPS: [(&str, &str); 9] = [
     ("file", ":e README.md<CR>"),
     ("vsplit", ":vsplit<CR>"),
     ("split", ":split<CR>"),
     ("vsplit2", ":vsplit<CR>"),
+    // a cursor that moves and a focus that moves with it: both are what
+    // the `window` trigger fires on, and neither may change a window's
+    // size
+    ("cursor", "5j"),
+    ("focus", "<C-w>w"),
     ("close1", ":q<CR>"),
     ("close2", ":q<CR>"),
     ("close3", ":q<CR>"),

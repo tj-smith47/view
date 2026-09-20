@@ -808,15 +808,7 @@ fn composite_layers(
         // sidebar's top edge until something else damages that row.
         match &layer.kind {
             LayerKind::EngineGrid => {
-                panes::paint_panes(
-                    model.engine.grids(),
-                    &theme,
-                    model.engine.hl(),
-                    borders,
-                    area,
-                    damage,
-                    buf,
-                );
+                panes::paint_panes(model, &theme, borders, area, damage, buf);
             }
             LayerKind::Cmdline(state) => paint_cmdline(state, &theme, area, buf),
             LayerKind::Toast { lines, paused, .. } => {
@@ -1419,6 +1411,17 @@ fn paint_native_overlay(
             // what it did to a whole reviewed row before the review
             // derived groups of its own.
             let resolve = |role: StyleRole| -> Style {
+                // the bar's mode is the one segment whose colorscheme group
+                // is usually the bar's own foreground, which leaves the
+                // word a user glances at to read their mode indistinct from
+                // the file path beside it; the accent the tile frames
+                // already carry is what marks it
+                if !is_float && role == StyleRole::Mode {
+                    return ratatui_style(ResolvedStyle {
+                        bg: base.bg,
+                        ..theme.accent()
+                    });
+                }
                 role.chrome_group().map_or(interior, |group| {
                     let style = theme.float_chrome(group, base.bg);
                     ratatui_style(ResolvedStyle {
@@ -6969,7 +6972,13 @@ mod tests {
         for span in &laid.lines[0] {
             let span_width = u16::try_from(UnicodeWidthStr::width(span.text.as_str())).unwrap();
             if let Some(group) = span.role.chrome_group() {
-                let expected = ratatui_style(theme.chrome(group));
+                // the bar's mode takes the accent rather than its group,
+                // so what it owes here is the accent's own colour
+                let expected = if span.role == StyleRole::Mode {
+                    ratatui_style(theme.accent())
+                } else {
+                    ratatui_style(theme.chrome(group))
+                };
                 for c in col..col + span_width {
                     assert_eq!(
                         buf[(c, rect.row)].fg,
@@ -7023,6 +7032,39 @@ mod tests {
                 "{} resolved from its fallback rather than the colorscheme's own \
                  highlight, so this test would pass over an unreachable mapping",
                 group.hl_name()
+            );
+        }
+    }
+
+    /// The bar's mode segment reads in the accent, the colour view's own
+    /// frames and markers already carry, so the word a user glances at to
+    /// read their mode is the one thing on the row that stands out.
+    ///
+    /// The accent is distinct from `ModeMsg`, which is where this segment
+    /// resolved before: a fixture that left the two the same colour would
+    /// pass whichever one the painter picked.
+    #[test]
+    fn the_bars_mode_segment_takes_the_accent_and_not_its_own_group() {
+        let mut model = model_with_distinctly_colored_chrome();
+        model.engine.set_accent_token(Some(0x0089_B4FA));
+        let theme = Theme::from_hl(model.engine.hl());
+        let accent = ratatui_style(theme.accent()).fg.unwrap();
+        assert_ne!(
+            accent,
+            ratatui_style(theme.chrome(ChromeGroup::ModeMsg))
+                .fg
+                .unwrap(),
+            "the fixture's accent and ModeMsg are the same colour"
+        );
+        let width = 46_u16;
+        let rect = Rect::new(1, 2, width, 1);
+        let layer = Layer::new(rect, spanful_statusline(), model.caps);
+        let buf = paint_layer_alone(&model, layer, width + 4, 4);
+        for col in rect.col..rect.col + u16::try_from("-- INSERT --".len()).unwrap() {
+            assert_eq!(
+                buf[(col, rect.row)].fg,
+                accent,
+                "the bar's mode segment at column {col} is not the accent"
             );
         }
     }

@@ -126,6 +126,7 @@ fn session() -> Model {
         SegmentUpdate::Buffer {
             name: "src/main.rs".to_string(),
             modified: true,
+            filetype: "rust".to_string(),
         },
         SegmentUpdate::Ruler("12:4".to_string()),
     ] {

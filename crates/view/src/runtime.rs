@@ -2081,6 +2081,7 @@ mod tests {
         let plan = view_native::supersede::plan(
             &view_native::config::NativeConfig::all_enabled(),
             view_core::native::registry::features(),
+            view_core::model::Look::default(),
         );
         assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
         let mut ran = 0;

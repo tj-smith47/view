@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use view_core::model::Look;
 use view_core::msg::{Msg, RpcCall};
 use view_core::native::registry;
 use view_engine::handle::EngineHandle;
@@ -269,7 +270,11 @@ fn apply(handle: &EngineHandle, plan: &[Supersession]) {
 /// mismatch that costs nothing to see.
 #[test]
 fn the_mirror_carries_every_call_a_plan_can_ride() {
-    for entry in plan(&NativeConfig::all_enabled(), registry::features()) {
+    for entry in plan(
+        &NativeConfig::all_enabled(),
+        registry::features(),
+        Look::default(),
+    ) {
         assert!(
             matches!(
                 entry.rpc,
@@ -298,7 +303,11 @@ fn an_enabled_statusline_takes_the_status_line_from_a_live_lualine() {
     let engine = session(&config, &scratch);
     wait_for_lualine(&engine.handle);
 
-    let plan = plan(&NativeConfig::all_enabled(), registry::features());
+    let plan = plan(
+        &NativeConfig::all_enabled(),
+        registry::features(),
+        Look::default(),
+    );
     apply(&engine.handle, &plan);
     // the writer thread preserves order and nvim processes the stream in
     // order, so this request cannot be answered before the notification
@@ -367,7 +376,7 @@ fn a_disabled_statusline_leaves_a_live_lualine_holding_the_surface() {
     wait_for_lualine(&engine.handle);
 
     let cfg = NativeConfig::from_toml_str("[native]\nstatusline = false\n").unwrap();
-    let plan = plan(&cfg, registry::features());
+    let plan = plan(&cfg, registry::features(), Look::default());
     assert!(
         !plan.iter().any(|s| s.feature == "statusline"),
         "a disabled statusline must contribute no takeover"
@@ -479,7 +488,11 @@ fn the_takeover_reasserts_after_a_plugin_repatches_it() {
     );
     run_lua(&engine.handle, "_G.__plugin_notify = vim.notify");
 
-    let plan = plan(&NativeConfig::all_enabled(), registry::features());
+    let plan = plan(
+        &NativeConfig::all_enabled(),
+        registry::features(),
+        Look::default(),
+    );
     apply(&engine.handle, &plan);
     assert_eq!(
         engine
@@ -559,7 +572,7 @@ fn a_disabled_notifications_leaves_vim_notify_with_the_plugin() {
     run_lua(&engine.handle, "_G.__plugin_notify = vim.notify");
 
     let cfg = NativeConfig::from_toml_str("[native]\nnotifications = false\n").unwrap();
-    let plan = plan(&cfg, registry::features());
+    let plan = plan(&cfg, registry::features(), Look::default());
     assert!(
         !plan.iter().any(|s| s.rpc == Some(RpcCall::HoldNotify)),
         "a disabled notifications must contribute no takeover"

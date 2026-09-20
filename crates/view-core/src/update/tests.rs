@@ -8041,6 +8041,7 @@ fn a_buffer_write_callback_with_a_tree_open_reissues_the_git_scan() {
         Msg::BufferChanged {
             name: "a.txt".to_string(),
             modified: false,
+            filetype: String::new(),
         },
     );
     let generation = match effects.as_slice() {
@@ -8126,6 +8127,7 @@ fn a_write_callback_while_a_refresh_is_in_flight_coalesces_into_it() {
         Msg::BufferChanged {
             name: "a.txt".to_string(),
             modified: false,
+            filetype: String::new(),
         },
     );
     assert!(
@@ -8221,6 +8223,7 @@ fn a_timed_out_git_reply_does_not_permanently_suppress_future_refreshes() {
         Msg::BufferChanged {
             name: "a.txt".to_string(),
             modified: false,
+            filetype: String::new(),
         },
     );
     assert!(
@@ -8244,6 +8247,7 @@ fn bridge_callbacks_with_no_tree_open_issue_no_tree_effect() {
         Msg::BufferChanged {
             name: "a.txt".to_string(),
             modified: true,
+            filetype: String::new(),
         },
     );
     assert!(
@@ -12532,6 +12536,39 @@ fn the_ui_panes_form_completes_and_dispatches() {
             },
         );
         assert_eq!(m.look.panes, expected, "`:View ui panes {word}`");
+    }
+}
+
+/// A flip re-issues the holds whose value the look decides.
+///
+/// `laststatus` is 0 under `"nvim"` and 2 under tiles, and the takeover set
+/// it once for the mode the session started in. Nothing else moves it, so a
+/// flip that did not re-issue it leaves nvim drawing a status row no frame
+/// paints over, or dropping the one a frame needs.
+#[test]
+fn a_panes_flip_reissues_the_hold_the_look_decides() {
+    let mut m = model();
+    m.statusline_enabled = true;
+    m.look = crate::model::Look::new(crate::model::Panes::Nvim, true);
+    for (word, expected) in [("tiles", 2_i64), ("nvim", 0)] {
+        let effects = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "ui".to_string(),
+                verb: format!("panes {word}"),
+            },
+        );
+        let held = effects.iter().find_map(|effect| match effect {
+            Effect::Rpc(RpcCall::HoldOption { name, value }) if name == "laststatus" => {
+                Some(value.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            held,
+            Some(crate::msg::OptionValue::Int(expected)),
+            "`:View ui panes {word}` re-issued {held:?}"
+        );
     }
 }
 

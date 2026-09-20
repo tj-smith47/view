@@ -6,8 +6,9 @@ use ratatui::Terminal;
 use view_core::events::{GridCell, UiEvent, WinHandle};
 use view_core::grid::registry::GridId;
 use view_core::hl::HlAttr;
-use view_core::model::Model;
+use view_core::model::{Model, WindowStatus};
 use view_core::msg::Msg;
+use view_core::native::statusline::SegmentUpdate;
 use view_core::update::update;
 use view_surface::Surface;
 
@@ -907,13 +908,14 @@ fn a_glyph_left_in_a_tiles_gap_row_is_cleared() {
 }
 
 /// nvim writes the mode message and the answer to every prompt into the
-/// grid's last row, which is the row under the slot when the window has no
-/// status row of its own.
+/// row it keeps at the grid's foot, which is the row under the slot when
+/// the window has no status row of its own.
 #[test]
 fn the_command_line_under_the_lowest_tile_keeps_its_text() {
     let (grid_width, grid_height) = outer_grid(true, TILED_HEIGHT);
     let slots = vec![(0, 0, grid_width, grid_height - 1)];
     let mut model = tiled_model(true, TILED_HEIGHT, &slots);
+    with_nvims_command_line(&mut model);
     drive(
         &mut model,
         vec![
@@ -935,8 +937,8 @@ fn the_command_line_under_the_lowest_tile_keeps_its_text() {
 /// command line.
 #[test]
 fn a_status_row_under_a_tile_is_cleared() {
-    // under `laststatus = 0` a status row is drawn only for a window with
-    // another one below it, which is the upper right tile of this layout
+    // `laststatus = 2` gives every window one, and the upper right tile of
+    // this layout has another window under its own
     let tiles = tiled_nested(true);
     let (row, col, width, height) = tiles.slots[1];
     let mut model = tiles.model;
@@ -962,6 +964,50 @@ fn a_status_row_under_a_tile_is_cleared() {
     assert!(
         !status.contains('\u{2500}'),
         "the status row under a tile kept nvim's own line: {status:?}"
+    );
+}
+
+/// A session that owns the command line keeps no row for it, so the
+/// bottom window's status row is the grid's last row and is cleared like
+/// any other. It shipped uncleared: the clear stopped one row short
+/// whatever the attach was, and a real session left nvim's status line
+/// standing under every tile.
+///
+/// Disconfirm: bounding the clear at the grid's height less one paints the
+/// line straight back.
+#[test]
+fn the_status_row_on_the_grids_last_row_is_cleared() {
+    let tiles = tiled(true);
+    let (row, _, width, height) = tiles.slots[0];
+    let (_, grid_height) = outer_grid(true, TILED_HEIGHT);
+    assert_eq!(
+        row + height,
+        grid_height - 1,
+        "the fixture no longer puts a status row on the grid's last row"
+    );
+    let mut model = tiles.model;
+    drive(
+        &mut model,
+        vec![
+            UiEvent::GridLine {
+                grid: 1,
+                row: u64::from(row + height),
+                col_start: 0,
+                cells: vec![GridCell {
+                    text: "\u{2500}".to_string(),
+                    hl_id: 0,
+                    repeat: u64::from(width),
+                }],
+            },
+            UiEvent::Flush,
+        ],
+    );
+    let buf = tiled_frame(&model);
+    let offset = model.look.grid_offset();
+    let status = row_text(&buf, row + height + offset);
+    assert!(
+        !status.contains('\u{2500}'),
+        "the grid's last row kept nvim's own status line: {status:?}"
     );
 }
 
@@ -1032,14 +1078,15 @@ fn a_float_over_a_gap_keeps_its_border() {
     }
 }
 
-/// nvim's command line is the grid's last row, and the gapless lattice has
-/// no run on it: a line drawn there would sit on the mode message and the
+/// The row nvim keeps for its command line carries no run of the gapless
+/// lattice: a line drawn there would sit on the mode message and the
 /// answer to every prompt.
 #[test]
 fn the_gapless_lattice_stops_above_the_command_line() {
     let (_, grid_height) = outer_grid(false, TILED_HEIGHT);
     let tiles = tiled(false);
     let mut model = tiles.model;
+    with_nvims_command_line(&mut model);
     drive(
         &mut model,
         vec![
@@ -1197,9 +1244,9 @@ struct Tiles {
 
 fn tiled(gaps: bool) -> Tiles {
     let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
-    // the statusline feature holds nvim at `laststatus = 0`, so neither
-    // window of a vsplit has a status row and nvim's command line is the
-    // only row under them
+    // tiles hold nvim at `laststatus = 2`, so every window has a status row
+    // of its own under it -- the row the frame's bottom edge is painted
+    // over -- and a session owning the command line keeps no row for it
     let window_height = grid_height - 1;
     let left_width = (grid_width - 1) / 2;
     let right_col = left_width + 1;
@@ -1220,9 +1267,8 @@ fn tiled_nested(gaps: bool) -> Tiles {
     let left_width = (grid_width - 1) / 2;
     let right_col = left_width + 1;
     let right_width = grid_width - right_col;
-    // under `laststatus = 0` only a window with another one below it keeps
-    // a status row, so the upper right window has one and the left and
-    // lower right ones end on the row above nvim's command line
+    // every window keeps a status row under `laststatus = 2`, so the right
+    // column spends two of its rows on them where the left spends one
     let top_height = (grid_height - 2).div_ceil(2);
     let slots = vec![
         (0, 0, left_width, grid_height - 1),
@@ -1247,12 +1293,25 @@ fn outer_grid(gaps: bool, height: u16) -> (u16, u16) {
     (TILED_WIDTH - ring, height - ring)
 }
 
+/// Hands the command line back to nvim, which is the session nvim keeps a
+/// row of its own at the grid's foot for: the takeover holds `cmdheight`
+/// at 0 only where view owns that row's other tenant as well.
+fn with_nvims_command_line(model: &mut Model) {
+    use view_core::native::ext::Ext;
+    model.attach_surfaces(vec![Ext::LineGrid, Ext::Messages, Ext::Tabline]);
+}
+
 fn tiled_model(gaps: bool, height: u16, slots: &[(u16, u16, u16, u16)]) -> Model {
     let (grid_width, grid_height) = outer_grid(gaps, height);
     let look = view_core::model::Look::new(view_core::model::Panes::Tiles, gaps);
     let mut model = Model::new().with_look(look);
     model.term_width = TILED_WIDTH;
     model.term_height = height;
+    model.statusline_enabled = true;
+    // the shipped attach: view owns the command line and the message area,
+    // so the takeover holds `cmdheight` at 0 and the grid's last row is a
+    // window's status row rather than nvim's own
+    model.attach_surfaces(view_core::native::ext::ALL.to_vec());
     model.caps = model.caps.with_unicode_boxes(DRAWS_BOX_GLYPHS);
     let mut events = vec![
         UiEvent::GridResize {
@@ -1303,6 +1362,31 @@ fn tiled_model(gaps: bool, height: u16, slots: &[(u16, u16, u16, u16)]) -> Model
     drive(&mut model, events);
     model.engine.set_accent_token(Some(ACCENT_FG));
     model
+        .engine
+        .statusline
+        .apply(SegmentUpdate::Mode("-- INSERT --".to_string()));
+    for (index, _) in slots.iter().enumerate() {
+        let _ = update(
+            &mut model,
+            Msg::WindowStatus {
+                win: WinHandle(1000 + index as u64),
+                status: window_status(TILE_TEXT[index.min(TILE_TEXT.len() - 1)], index),
+            },
+        );
+    }
+    model
+}
+
+/// One window's reported status, distinct per tile so a golden names which
+/// frame carries which.
+fn window_status(name: &str, index: usize) -> WindowStatus {
+    let mut status = WindowStatus::default();
+    status.buf = 1 + index as u64;
+    status.name = format!("{name}.rs");
+    status.row = 1 + index as u32;
+    status.col = 1;
+    status.errors = index as u32;
+    status
 }
 
 fn tiled_frame(model: &Model) -> Buffer {
@@ -1469,16 +1553,16 @@ fn shell_frame(look: view_core::model::Look) -> Buffer {
     tiled_frame(&shell_model(look))
 }
 
-/// The rect the bar claims on that frame. Read off the surface rather than
-/// off the picture, since an empty bar paints no glyph either way.
-fn shell_bar_rect(look: view_core::model::Look) -> view_surface::Rect {
+/// The rect the bar claims on that frame, or `None` where the look gives
+/// it no row. Read off the surface rather than off the picture, since an
+/// empty bar paints no glyph either way.
+fn shell_bar_rect(look: view_core::model::Look) -> Option<view_surface::Rect> {
     view_surface::render(&shell_model(look))
         .layers
         .iter()
         .find_map(|layer| {
             matches!(layer.kind, view_surface::LayerKind::Statusline(_)).then_some(layer.rect)
         })
-        .expect("the statusline feature is on, so the frame carries a bar")
 }
 
 #[test]
@@ -1492,18 +1576,12 @@ fn the_shell_frame_paints_the_ring_under_tiles_and_the_bar_under_nvim() {
         "╭",
         "the tiled shell opens with the ring's own corner"
     );
-    // the bar keeps the terminal's bottom row in every look, so the ring
-    // closes on the row above it rather than on the row the attached frame
-    // gives the bar
+    // tiles keep no row for a bar, so the ring runs to the terminal's own
+    // bottom row
     assert_eq!(
-        tiles[(TILED_WIDTH - 1, TILED_HEIGHT - 2)].symbol(),
+        tiles[(TILED_WIDTH - 1, TILED_HEIGHT - 1)].symbol(),
         "╯",
-        "and closes on the row above the bar's own"
-    );
-    assert_eq!(
-        row_text(&tiles, TILED_HEIGHT - 1).trim(),
-        "",
-        "the ring drew a bottom edge on the row the bar is given"
+        "and closes on the terminal's own bottom row"
     );
 
     let nvim = shell_frame(view_core::model::Look::new(
@@ -1531,12 +1609,294 @@ fn the_shell_frame_paints_the_ring_under_tiles_and_the_bar_under_nvim() {
             view_core::model::Panes::Nvim,
         ] {
             let look = view_core::model::Look::new(panes, gaps);
+            let expected = (panes == view_core::model::Panes::Nvim)
+                .then(|| view_surface::Rect::new(TILED_HEIGHT - 1, 0, TILED_WIDTH, 1));
             assert_eq!(
                 shell_bar_rect(look),
-                view_surface::Rect::new(TILED_HEIGHT - 1, 0, TILED_WIDTH, 1),
-                "the shell frame's bar takes the terminal's bottom row \
+                expected,
+                "the shell frame's bar row disagreed with the look \
                  ({panes:?}, gaps {gaps})"
             );
         }
+    }
+}
+
+/// Nothing reserves a bottom row under tiles: the segments sit in each
+/// frame's own bottom edge, so the bar's row would be a blank one the ring
+/// has to stop above.
+///
+/// Four readers answer the question and a disagreement between any two
+/// leaves a row painted by nobody or a grid an cell taller than the space
+/// for it: the model's own answer, the geometry the spawn's `--cmd` asks
+/// nvim for, the outer grid's target size, and whether the composed frame
+/// carries a bar layer at all.
+#[test]
+fn no_bar_row_stands_under_tiles() {
+    for gaps in [true, false] {
+        for (panes, bar) in [
+            (view_core::model::Panes::Tiles, 0),
+            (view_core::model::Panes::Nvim, 1),
+        ] {
+            let look = view_core::model::Look::new(panes, gaps);
+            let mut model = shell_model(look);
+            model.chrome_painted = true;
+            assert_eq!(
+                model.statusline_rows(),
+                bar,
+                "the model's own bar rows ({panes:?}, gaps {gaps})"
+            );
+            assert_eq!(
+                look.bar_rows(true),
+                bar,
+                "the rule the spawn geometry reads ({panes:?}, gaps {gaps})"
+            );
+            assert_eq!(
+                model.grid_target().1,
+                TILED_HEIGHT - look.ring() - bar,
+                "the outer grid's height ({panes:?}, gaps {gaps})"
+            );
+            assert_eq!(
+                shell_bar_rect(look).is_some(),
+                bar > 0,
+                "the composed frame's bar layer ({panes:?}, gaps {gaps})"
+            );
+        }
+    }
+}
+
+/// The rows a gapped tile's two frame edges land on, and the one row a
+/// gapless tile's single edge does.
+fn edge_rows(model: &Model, slot: (u16, u16, u16, u16)) -> (u16, u16) {
+    let (row, _, _, height) = slot;
+    let offset = model.look.grid_offset();
+    if model.look.gaps {
+        (row + 1 + offset, row + height - 2 + offset)
+    } else {
+        (row + height + offset, row + height + offset)
+    }
+}
+
+/// The mode is the session's, not the window's, so it belongs only to the
+/// tile the user is typing into. Two tiles both claiming `-- INSERT --`
+/// would say the user is in both at once.
+#[test]
+fn an_inactive_tile_shows_no_mode_segment() {
+    let tiles = tiled(true);
+    let buf = tiled_frame(&tiles.model);
+    let (_, active_row) = edge_rows(&tiles.model, tiles.slots[0]);
+    let (_, inactive_row) = edge_rows(&tiles.model, tiles.slots[1]);
+    assert!(
+        row_text(&buf, active_row).contains("-- INSERT --"),
+        "the tile the cursor is in lost its mode: {:?}",
+        row_text(&buf, active_row)
+    );
+    // one row, two tiles: the assertion above already read the left half
+    // of it, so the right half is where an inactive mode would show
+    let (_, _, left_width, _) = tiles.slots[0];
+    let right = row_text(&buf, inactive_row);
+    let right = right
+        .chars()
+        .skip(usize::from(left_width))
+        .collect::<String>();
+    assert!(
+        !right.contains("INSERT"),
+        "the tile the cursor is not in claimed the mode: {right:?}"
+    );
+}
+
+/// Under tiles the position comes from the bridge's `window` trigger,
+/// because nvim stops emitting `msg_ruler` the moment `laststatus` is 2 and
+/// the segment would otherwise read a number frozen at the last frame
+/// before the hold went in.
+#[test]
+fn the_position_segment_reads_the_window_trigger_under_tiles() {
+    let tiles = tiled(true);
+    let mut model = tiles.model;
+    model
+        .engine
+        .statusline
+        .apply(view_core::native::statusline::SegmentUpdate::Ruler(
+            "99,99".to_string(),
+        ));
+    let _ = update(
+        &mut model,
+        Msg::WindowStatus {
+            win: WinHandle(1000),
+            status: {
+                let mut status = WindowStatus::default();
+                status.name = "left.rs".to_string();
+                status.row = 42;
+                status.col = 13;
+                status
+            },
+        },
+    );
+    let buf = tiled_frame(&model);
+    let (_, bottom) = edge_rows(&model, tiles.slots[0]);
+    let edge = row_text(&buf, bottom);
+    assert!(
+        edge.contains("42:13"),
+        "the tile's own position never reached its frame: {edge:?}"
+    );
+    assert!(
+        !edge.contains("99,99"),
+        "the tile's frame took the session's stale ruler: {edge:?}"
+    );
+}
+
+/// A cursor move inside a tile repaints the edge its position is painted
+/// on. nvim redraws nothing for one, and the edge row lies outside the
+/// window's own grid, so a frame clipped to the damage nvim reported would
+/// keep the reading before the move.
+///
+/// Disconfirm: leaving the edge rows out of the update's own damage paints
+/// the first reading again.
+#[test]
+fn a_cursor_move_repaints_the_edge_its_position_stands_on() {
+    let tiles = tiled(true);
+    let mut model = tiles.model;
+    let moved = |row: u32, col: u32| {
+        let mut status = WindowStatus::default();
+        status.name = "left.rs".to_string();
+        status.row = row;
+        status.col = col;
+        status
+    };
+    let _ = update(
+        &mut model,
+        Msg::WindowStatus {
+            win: WinHandle(1000),
+            status: moved(1, 1),
+        },
+    );
+    let mut buf = tiled_frame(&model);
+    let _ = model.take_paint_damage();
+    let _ = update(
+        &mut model,
+        Msg::WindowStatus {
+            win: WinHandle(1000),
+            status: moved(42, 13),
+        },
+    );
+    let grid_damage = model.take_paint_damage();
+    let damage = Damage::from_frame(
+        &grid_damage,
+        view_surface::grid_origin(&model).0,
+        &[],
+        false,
+    );
+    let surface = view_surface::render(&model);
+    composite_into(&mut buf, &model, &surface, &damage);
+    let (_, bottom) = edge_rows(&model, tiles.slots[0]);
+    let edge = row_text(&buf, bottom);
+    assert!(
+        edge.contains("42:13"),
+        "the moved cursor never reached the frame: {edge:?}"
+    );
+}
+
+/// A session-wide segment repaints every tile's edge. The mode, the
+/// branch and the diagnostic counts reach every frame's own bottom edge,
+/// and nvim raises no grid damage for any of them, so a frame clipped to
+/// its damage kept the segments from before the update. It shipped that
+/// way: `key_flood` died on the composite guard at the bottom edge row.
+///
+/// Disconfirm: leaving the segment rows out of the frame's damage paints
+/// the mode the tile already showed.
+#[test]
+fn a_segment_change_repaints_every_tiles_edge() {
+    let tiles = tiled(true);
+    let mut model = tiles.model;
+    let mut buf = tiled_frame(&model);
+    let _ = model.take_paint_damage();
+    let _ = update(
+        &mut model,
+        Msg::Redraw(vec![UiEvent::MsgShowmode {
+            content: vec![(0, "-- VISUAL --".to_string())],
+        }]),
+    );
+    let grid_damage = model.take_paint_damage();
+    let damage = Damage::from_frame(
+        &grid_damage,
+        view_surface::grid_origin(&model).0,
+        &[],
+        false,
+    );
+    let surface = view_surface::render(&model);
+    composite_into(&mut buf, &model, &surface, &damage);
+    let (_, bottom) = edge_rows(&model, tiles.slots[0]);
+    let edge = row_text(&buf, bottom);
+    assert!(
+        edge.contains("VISUAL"),
+        "the new mode never reached the frame: {edge:?}"
+    );
+}
+
+/// A gapped tile's name is in the top edge, where the buffer it holds is
+/// read as a title rather than mixed in with the counts.
+#[test]
+fn a_gapped_tile_names_its_buffer_in_the_top_edge() {
+    let tiles = tiled(true);
+    let buf = tiled_frame(&tiles.model);
+    let (top, bottom) = edge_rows(&tiles.model, tiles.slots[0]);
+    assert!(
+        row_text(&buf, top).contains("left.rs"),
+        "the top edge carries no name: {:?}",
+        row_text(&buf, top)
+    );
+    assert!(
+        !row_text(&buf, bottom).contains("left.rs"),
+        "the name was written twice: {:?}",
+        row_text(&buf, bottom)
+    );
+}
+
+/// A gapless tile has one edge row and no top run of its own, so the name
+/// and the segments share it.
+#[test]
+fn a_gapless_tile_puts_the_name_and_the_segments_in_one_row() {
+    let tiles = tiled(false);
+    let buf = tiled_frame(&tiles.model);
+    let (_, bottom) = edge_rows(&tiles.model, tiles.slots[0]);
+    let edge = row_text(&buf, bottom);
+    let (name, position) = (
+        edge.find("left.rs").expect("the edge carries the name"),
+        edge.find("1:1").expect("the edge carries the position"),
+    );
+    assert!(
+        name < position,
+        "the name follows the segments instead of leading them: {edge:?}"
+    );
+}
+
+/// `[native] statusline = false` hands the segments back and leaves the
+/// frame standing: the surface the switch answers for is the text, and the
+/// tile's own edge is drawn whatever the answer.
+#[test]
+fn statusline_false_under_tiles_keeps_the_row_and_empties_the_segments() {
+    for gaps in [true, false] {
+        let tiles = tiled(gaps);
+        let mut model = tiles.model;
+        model.statusline_enabled = false;
+        let buf = tiled_frame(&model);
+        let (top, bottom) = edge_rows(&model, tiles.slots[0]);
+        let edge = row_text(&buf, bottom);
+        assert!(
+            !edge.contains("left.rs") && !edge.contains("1:1") && !edge.contains("INSERT"),
+            "the handed-back segments were painted anyway (gaps {gaps}): {edge:?}"
+        );
+        assert!(
+            !row_text(&buf, top).contains("left.rs"),
+            "the handed-back name was painted anyway (gaps {gaps})"
+        );
+        let (_, col, width, _) = tiles.slots[0];
+        let offset = model.look.grid_offset();
+        let run = (col + offset..col + width + offset)
+            .filter(|&c| "─┴┼╰┤├".contains(buf[(c, bottom)].symbol()))
+            .count();
+        assert!(
+            run > usize::from(width) / 2,
+            "the tile lost its bottom edge with its segments (gaps {gaps}): {run}"
+        );
     }
 }

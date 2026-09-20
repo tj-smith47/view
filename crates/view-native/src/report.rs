@@ -161,6 +161,7 @@ mod tests {
     use super::*;
     use crate::config::NativeConfig;
     use crate::supersede::plan;
+    use view_core::model::Look;
     use view_core::native::registry;
 
     fn claim(feature: &str, lhs: &str, had_user_mapping: bool) -> MappingClaim {
@@ -189,7 +190,11 @@ mod tests {
     #[test]
     fn a_held_option_is_reported_with_the_switch_that_returns_it() {
         let handover = report(
-            &plan(&NativeConfig::all_enabled(), registry::features()),
+            &plan(
+                &NativeConfig::all_enabled(),
+                registry::features(),
+                Look::default(),
+            ),
             &[],
             registry::features(),
         )
@@ -211,7 +216,11 @@ mod tests {
     #[test]
     fn the_notify_takeover_is_reported_with_the_switch_that_returns_it() {
         let handover = report(
-            &plan(&NativeConfig::all_enabled(), registry::features()),
+            &plan(
+                &NativeConfig::all_enabled(),
+                registry::features(),
+                Look::default(),
+            ),
             &[],
             registry::features(),
         )
@@ -241,7 +250,11 @@ mod tests {
 
     #[test]
     fn options_and_keys_report_through_the_same_mechanism() {
-        let plan = plan(&NativeConfig::all_enabled(), registry::features());
+        let plan = plan(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            Look::default(),
+        );
         let report = report(
             &plan,
             &[claim("picker", "<leader>ff", true)],
@@ -272,7 +285,11 @@ mod tests {
     #[test]
     fn one_feature_taking_two_surfaces_records_each_of_them() {
         let report = report(
-            &plan(&NativeConfig::all_enabled(), registry::features()),
+            &plan(
+                &NativeConfig::all_enabled(),
+                registry::features(),
+                Look::default(),
+            ),
             &[
                 claim("picker", "<leader>ff", true),
                 claim("picker", "<leader>fb", true),

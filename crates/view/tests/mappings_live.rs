@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
+use view_core::model::Look;
 use view_core::msg::{Msg, RpcCall};
 use view_core::native::mappings::MappingClaim;
 use view_core::native::registry;
@@ -168,7 +169,7 @@ impl Session {
 fn notices(claimed: &[MappingClaim], record: &Path) -> Vec<String> {
     let features = registry::features();
     let handovers = report(
-        &plan(&NativeConfig::all_enabled(), features),
+        &plan(&NativeConfig::all_enabled(), features, Look::default()),
         claimed,
         features,
     );

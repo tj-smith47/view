@@ -43,6 +43,7 @@ The table below is generated from `SURFACES` in
 | the message area | `ext_messages` | `Own` | `[native] notifications = false` | `ext_messages`, `vim.notify`, `cmdheight`, `a float over the message area` | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
 | the tab line | `ext_tabline` | `Own` | `[native] tabline = false` | `ext_tabline`, `winbar`, `tabline`, `showtabline` | `noice`/`deferred`, `smoke-minimal`/`native-only` |
 | the status line | -- none -- | `Own` | `[native] statusline = false` | `laststatus`, `statusline` | -- none -- |
+| the tile status segments | -- none -- | `Own` | `[native] statusline = false` | -- none -- | -- none -- |
 | the buffer grid | -- none -- | `Yield` | -- none -- | -- none -- | -- none -- |
 
 <!-- generated from SURFACES -->
@@ -67,14 +68,22 @@ each with what you get instead: the gutter, line numbers, signs and
 virtual text belong to the buffer window, and view paints them as the
 engine sends them.
 
-## Four switches, six surfaces
+## Four switches, seven surfaces
 
 `[native] palette = false` detaches `ext_cmdline` and `ext_popupmenu`
 together, so both rows name the same line.
 
 `[native] statusline = false` gives back the status line, which no attach
-carries. view holds `laststatus` at 0 while it draws one, and your own
-`statusline` is what nvim evaluates again the moment that switch goes.
+carries. Under `[ui] panes = "nvim"` view holds `laststatus` at 0 while it
+draws the bar, and your own `statusline` is what nvim evaluates again the
+moment that switch goes.
+
+Under `[ui] panes = "tiles"` the hold is `laststatus = 2`. Every window then
+has a status row and each tile's frame is painted over its own, so the
+`statusline` channel covers nothing: nvim evaluates your expression once per
+window per status redraw and view draws over the result. The switch empties
+the segments in the frame edges and leaves the frames standing.
+`[ui] panes = "nvim"` is what gives the row back to nvim.
 
 `[native] tabline` is the one switch that ships off, so the tab line's row
 describes what a session running `tabline = true` does: nvim draws your own

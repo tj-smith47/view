@@ -6,6 +6,7 @@
 
 mod accent;
 mod decode;
+mod window_status;
 
 use crate::handle::{EngineError, EngineHandle};
 use crate::process::SWAP_RECOVERY_PROBE;
@@ -28,6 +29,7 @@ use decode::{
     option_value, value_to_string,
 };
 pub(crate) use decode::{decode_ai_fs_reply, decode_checktime_reply};
+pub(crate) use window_status::REGISTER_WINDOW_STATUS_CHUNK;
 
 /// Upper bound on how long each of [`EngineHandle::read_current_buffer_text`],
 /// [`EngineHandle::read_cursor_context`], [`EngineHandle::read_diagnostic_entries`],
@@ -833,7 +835,7 @@ vim.api.nvim_create_autocmd(
   group = group,
   callback = function()
     vim.rpcnotify(channel, 'view_bridge', 'buffer', vim.fn.expand('%:t'),
-      vim.bo.modified)
+      vim.bo.modified, vim.bo.filetype)
   end,
 })
 local float_armed, float_pending = false, false
@@ -2873,10 +2875,11 @@ impl EngineHandle {
         )
     }
 
-    /// Registers the single `view_bridge` autocmd group -- the one channel
-    /// every editor-state change view reacts to arrives on. What it hooks,
-    /// and why it is one group rather than three, is in
-    /// [`REGISTER_BRIDGE_CHUNK`]. Each trigger answers asynchronously with a
+    /// Registers the `view_bridge` autocmd group -- the one channel every
+    /// editor-state change view reacts to arrives on -- and, beside it, the
+    /// per-window group of [`REGISTER_WINDOW_STATUS_CHUNK`]. What each
+    /// hooks, and why the session-wide triggers are one group rather than
+    /// three, is in [`REGISTER_BRIDGE_CHUNK`]. Each trigger answers asynchronously with a
     /// `view_bridge` notification carrying an event name and the event's
     /// `match`; `colorscheme` becomes `Msg::ColorSchemeChanged`.
     ///
@@ -2923,6 +2926,13 @@ impl EngineHandle {
                     Value::from(channel_id),
                     Value::from(FLOAT_SCAN_THROTTLE_MS),
                 ]),
+            ],
+        )?;
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(REGISTER_WINDOW_STATUS_CHUNK),
+                Value::Array(vec![Value::from(channel_id)]),
             ],
         )
     }

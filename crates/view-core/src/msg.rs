@@ -391,6 +391,24 @@ pub enum Msg {
     BufferChanged {
         name: String,
         modified: bool,
+        /// `vim.bo.filetype`, empty for a buffer nvim has detected none
+        /// for. The bar's own filetype segment, which hides on empty the
+        /// way every other segment does.
+        filetype: String,
+    },
+    /// The bridge's `window` trigger group (`WinEnter`, `BufEnter`,
+    /// `BufModifiedSet`, `DiagnosticChanged`, `CursorMoved`,
+    /// `CursorMovedI`) fired for one window, carrying everything that
+    /// window's own status segments read.
+    ///
+    /// One window per message: the tiles each draw their own bottom edge,
+    /// and a whole-layout sweep would cost a message per window on every
+    /// cursor move. The trigger is throttled in Lua to one message per
+    /// event-loop tick, so a held-down key costs one of these per tick
+    /// rather than one per keystroke.
+    WindowStatus {
+        win: crate::events::WinHandle,
+        status: crate::model::WindowStatus,
     },
     /// The bridge's float watcher saw a floating window, or saw one it had
     /// already reported move: geometry, anchor and whatever identity the

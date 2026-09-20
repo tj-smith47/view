@@ -153,6 +153,11 @@ pub struct Model {
     /// is what `:View ui panes` reports and what `:View ui panes auto`
     /// switches back to.
     pub detected_look: Detected,
+    /// The last status the bridge's `window` trigger reported for each
+    /// window, which is what a tile's own frame segments read. Entries for
+    /// windows nvim has since closed cost one small record each and are
+    /// dropped when the grid behind them goes.
+    pub window_status: std::collections::HashMap<crate::events::WinHandle, WindowStatus>,
     /// Whether the `palette` native feature is enabled for this session, set
     /// the same way and at the same place as `statusline_enabled`. Gates
     /// `view-surface::render`'s choice between the centered floating
@@ -374,6 +379,7 @@ impl Model {
             statusline_enabled: false,
             look: Look::default(),
             detected_look: Detected::default(),
+            window_status: std::collections::HashMap::new(),
             palette_enabled: false,
             ext_surfaces: crate::native::ext::shipped_multigrid(),
             config_was_read: true,
@@ -1240,12 +1246,33 @@ impl Model {
     /// total reservation) -- `view-surface::render` uses both together to
     /// find the engine grid's target size and the statusline layer's row.
     ///
-    /// The look never enters it. The feature holds nvim at `laststatus = 0`,
+    /// Under tiles the answer is zero whatever the switch says: each frame
+    /// carries its own segments in its bottom edge, and nvim is held at
+    /// `laststatus = 2` so every window has a row there to paint over.
+    /// Under `panes = "nvim"` the feature holds nvim at `laststatus = 0`,
     /// so a session that drops the bar has no status line and no mode
     /// message anywhere on screen.
     #[must_use]
     pub fn statusline_rows(&self) -> u16 {
-        u16::from(self.statusline_enabled)
+        self.look.bar_rows(self.statusline_enabled)
+    }
+
+    /// Rows nvim keeps for its command line at the foot of the outer grid.
+    ///
+    /// The takeover holds `cmdheight` at 0 for a session that owns both the
+    /// command line and the message area, since one row carries both; a
+    /// session that handed either back leaves nvim that row. The tiles
+    /// painter spends the answer to tell the grid's last row from a
+    /// window's status row, which it clears and draws a frame edge over.
+    ///
+    /// Read off the same channel table the hold is issued from, so the two
+    /// cannot disagree about which surfaces decide it.
+    #[must_use]
+    pub fn cmdline_rows(&self) -> u16 {
+        u16::from(
+            !crate::native::channels::claimants_of("cmdheight")
+                .all(|surface| crate::native::surfaces::view_draws(surface, self)),
+        )
     }
 
     /// Drains what changed since the last call, so a repaint can clip
@@ -1255,19 +1282,32 @@ impl Model {
     ///
     /// The one place damage is drained, because it is the one place that
     /// sees every input a composite reads: every visible pane's own changed
-    /// rows ([`crate::grid::registry::GridRegistry::take_damage`]), and the
-    /// highlight table behind every cell's resolved style. A highlight
-    /// change has no rows of its own -- it can restyle the whole screen at
-    /// once -- so it collapses to whole-frame damage. Draining a paint input
-    /// anywhere else would clip a frame against a subset of what it paints
-    /// from, which is why [`crate::grid::Grid::take_dirty`] is crate-private.
+    /// rows ([`crate::grid::registry::GridRegistry::take_damage`]), the
+    /// highlight table behind every cell's resolved style, and the
+    /// statusline segments. A highlight change has no rows of its own -- it
+    /// can restyle the whole screen at once -- so it collapses to
+    /// whole-frame damage. A segment change has rows under tiles, where
+    /// every frame's own edge carries the segments, and none under
+    /// `panes = "nvim"`, where the bar is a layer of its own. Draining a
+    /// paint input anywhere else would clip a frame against a subset of
+    /// what it paints from, which is why [`crate::grid::Grid::take_dirty`]
+    /// is crate-private.
     #[must_use]
     pub fn take_paint_damage(&mut self) -> crate::grid::GridDamage {
-        // both drained unconditionally: a change left in either tracker
+        // all three drained unconditionally: a change left in any tracker
         // would resurface as damage on some later frame that no longer
         // needs it
         let hl_changed = self.engine.hl.take_dirty();
-        let grid = self.engine.grids.take_damage();
+        let segments_changed = self.engine.statusline.take_dirty();
+        let edges = if segments_changed && self.look.panes == Panes::Tiles {
+            self.engine.grids.window_edge_rows(self.look)
+        } else {
+            Vec::new()
+        };
+        let mut grid = self.engine.grids.take_damage();
+        if !grid.full {
+            grid.rows.extend(edges);
+        }
         if hl_changed {
             crate::grid::GridDamage::full()
         } else {
@@ -2126,9 +2166,11 @@ impl CmdlineState {
 
 mod look;
 mod messages;
+mod window_status;
 
 pub use look::{Detected, Look, Panes, MIN_FRAMED_SLOT};
 pub use messages::{MessageEntry, MessageId, Messages};
+pub use window_status::WindowStatus;
 
 /// The open tabs, present once nvim has sent at least one `tabline_update`.
 #[non_exhaustive]
@@ -2996,9 +3038,9 @@ mod tests {
     }
 
     /// Under tiles the ring is the band view draws frames and gaps in, so
-    /// the engine never gets those cells. The bar keeps its own row in
-    /// every look, because the statusline feature holds nvim at
-    /// `laststatus = 0` and the bar is then the only status on screen.
+    /// the engine never gets those cells. The bar keeps a row of its own
+    /// under `panes = "nvim"` alone: each tile carries its own segments in
+    /// its bottom edge, so no row stands for a bar there.
     #[test]
     fn the_outer_grid_reserves_the_ring_and_the_status_row_under_tiles() {
         let mut m = Model::with_term_size(80, 24);
@@ -3006,11 +3048,30 @@ mod tests {
         assert_eq!(m.grid_target(), (80, 23), "the bar takes a row under nvim");
 
         m.look = Look::new(Panes::Tiles, true);
-        assert_eq!(m.statusline_rows(), 1);
-        assert_eq!(m.grid_target(), (78, 21));
+        assert_eq!(m.statusline_rows(), 0, "no bar row stands under tiles");
+        assert_eq!(m.grid_target(), (78, 22));
 
         m.look = Look::new(Panes::Tiles, false);
-        assert_eq!(m.grid_target(), (79, 22));
+        assert_eq!(m.grid_target(), (79, 23));
+    }
+
+    /// Which sessions nvim keeps a row at the grid's foot for. The row
+    /// carries the command line and the message area both, so the takeover
+    /// holds `cmdheight` at 0 only where view owns them both, and the
+    /// tiles painter clears the grid's last row only there.
+    #[test]
+    fn nvim_keeps_a_command_line_row_unless_view_owns_both_its_tenants() {
+        use crate::native::ext::Ext;
+        for (surfaces, rows) in [
+            (crate::native::ext::ALL.to_vec(), 0),
+            (vec![Ext::LineGrid, Ext::Messages, Ext::Tabline], 1),
+            (vec![Ext::LineGrid, Ext::Cmdline, Ext::Popupmenu], 1),
+            (vec![Ext::LineGrid], 1),
+        ] {
+            let mut m = Model::with_term_size(80, 24);
+            m.attach_surfaces(surfaces.clone());
+            assert_eq!(m.cmdline_rows(), rows, "attached {surfaces:?}");
+        }
     }
 
     #[test]

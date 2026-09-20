@@ -287,7 +287,7 @@ pub struct TabHandle(pub u64);
 /// is, and compared rather than dereferenced: it is what tells one window's
 /// [`UiEvent::WinViewport`] from another's when a split has several of them
 /// reporting viewports of their own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct WinHandle(pub u64);
 
 /// One entry in [`UiEvent::TablineUpdate`]'s `tabs` list.

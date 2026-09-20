@@ -232,6 +232,7 @@ mod tests {
     use crate::supersede::plan;
     #[cfg(unix)]
     use std::path::PathBuf;
+    use view_core::model::Look;
     use view_core::native::mappings::MappingClaim;
     use view_core::native::registry;
     use view_test_support::ScratchDir;
@@ -254,7 +255,11 @@ mod tests {
     /// held options and taken keys through the same pass.
     fn handovers() -> Vec<Handover> {
         report(
-            &plan(&NativeConfig::all_enabled(), registry::features()),
+            &plan(
+                &NativeConfig::all_enabled(),
+                registry::features(),
+                Look::default(),
+            ),
             &[claim("picker", "<leader>ff")],
             registry::features(),
         )
@@ -303,9 +308,13 @@ mod tests {
         let record = dir.join("native-first-run.toml");
         let cfg = Some(Path::new("/cfg/view.toml"));
         let features = registry::features();
-        let options = report(&plan(&NativeConfig::all_enabled(), features), &[], features);
+        let options = report(
+            &plan(&NativeConfig::all_enabled(), features, Look::default()),
+            &[],
+            features,
+        );
         let with_key = report(
-            &plan(&NativeConfig::all_enabled(), features),
+            &plan(&NativeConfig::all_enabled(), features, Look::default()),
             &[claim("statusline", "<leader>ss")],
             features,
         );

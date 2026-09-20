@@ -16,7 +16,8 @@ use std::path::Path;
 
 use std::time::Duration;
 
-use view_core::msg::{Msg, RpcCall};
+use view_core::model::Look;
+use view_core::msg::{Msg, OptionValue, RpcCall};
 use view_core::native::channels::{self, Channel, Scope};
 use view_core::native::registry;
 use view_engine::handle::EngineHandle;
@@ -111,7 +112,11 @@ fn an_enabled_statusline_takes_laststatus_over_without_touching_the_config() {
         "the fixture config never took effect, so this test could not observe a takeover"
     );
 
-    let plan = plan(&NativeConfig::all_enabled(), registry::features());
+    let plan = plan(
+        &NativeConfig::all_enabled(),
+        registry::features(),
+        Look::default(),
+    );
     apply(&engine.handle, &plan);
 
     // the writer thread preserves order and nvim processes the stream in
@@ -244,7 +249,11 @@ fn every_held_option_matches_its_declared_scope() {
     // asked of a real nvim rather than restated in a second list here
     let dir = fixture("scope");
     let engine = session(&dir);
-    let plan = plan(&NativeConfig::all_enabled(), registry::features());
+    let plan = plan(
+        &NativeConfig::all_enabled(),
+        registry::features(),
+        Look::default(),
+    );
     assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
 
     let declared: Vec<(&str, Scope)> = channels::CHANNELS
@@ -350,7 +359,11 @@ fn a_window_local_chrome_row_is_cleared_in_every_window_and_reported() {
 
     apply(
         &engine.handle,
-        &plan(&NativeConfig::all_enabled(), registry::features()),
+        &plan(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            Look::default(),
+        ),
     );
 
     assert_eq!(
@@ -426,7 +439,11 @@ fn a_global_chrome_option_under_an_externalized_surface_stays_with_view() {
     let engine = session(&dir);
     apply(
         &engine.handle,
-        &plan(&NativeConfig::all_enabled(), registry::features()),
+        &plan(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            Look::default(),
+        ),
     );
 
     assert_eq!(engine.handle.eval_str("&showtabline").unwrap(), "2");
@@ -449,7 +466,11 @@ fn a_replaced_notify_is_put_back_for_a_session_that_draws_the_messages() {
     let engine = session(&dir);
     apply(
         &engine.handle,
-        &plan(&NativeConfig::all_enabled(), registry::features()),
+        &plan(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            Look::default(),
+        ),
     );
 
     assert_eq!(
@@ -497,11 +518,13 @@ fn populated(kind: &str, stock: &str, held_at: Option<&str>) -> Option<String> {
 
 /// A channel value as nvim spells it back, which is what a case compares a
 /// hold's own value against.
+/// Resolved through the same look [`hold`] issues the value under, so a
+/// look-keyed channel is compared against the leg that was actually set.
 fn spelled(value: channels::ChannelValue) -> String {
-    match value {
-        channels::ChannelValue::Int(n) => n.to_string(),
-        channels::ChannelValue::Bool(b) => u8::from(b).to_string(),
-        channels::ChannelValue::Str(s) => s.to_string(),
+    match value.wire(Look::default()) {
+        OptionValue::Int(n) => n.to_string(),
+        OptionValue::Bool(b) => u8::from(b).to_string(),
+        OptionValue::Str(s) => s,
     }
 }
 
@@ -526,11 +549,13 @@ fn hold_of(
         })
 }
 
-/// The hold of `option`, issued over the call its scope names.
+/// The hold of `option` under the default look, issued over the call its
+/// scope names.
 fn hold(handle: &EngineHandle, option: &str, scope: Scope, value: channels::ChannelValue) {
+    let value = value.wire(Look::default());
     match scope {
-        Scope::Global => handle.hold_option(option, &value.wire()).unwrap(),
-        Scope::Window => handle.hold_window_option(option, &value.wire()).unwrap(),
+        Scope::Global => handle.hold_option(option, &value).unwrap(),
+        Scope::Window => handle.hold_window_option(option, &value).unwrap(),
     }
 }
 
@@ -634,7 +659,11 @@ fn every_channel_kind_that_can_be_held_reports_the_holder_it_found() {
                     let (engine, rx) = reported_session(&dir);
                     apply(
                         &engine.handle,
-                        &plan(&NativeConfig::all_enabled(), registry::features()),
+                        &plan(
+                            &NativeConfig::all_enabled(),
+                            registry::features(),
+                            Look::default(),
+                        ),
                     );
                     assert!(
                         reported_holding(&rx, global, REPLACEMENT_SOURCE),
@@ -733,7 +762,11 @@ fn a_held_chrome_row_leaves_no_second_copy_of_the_file_name_on_the_grid() {
 
     apply(
         &engine.handle,
-        &plan(&NativeConfig::all_enabled(), registry::features()),
+        &plan(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            Look::default(),
+        ),
     );
 
     let after: Vec<String> = screen_rows(&engine)
@@ -844,7 +877,7 @@ fn a_disabled_statusline_leaves_the_users_own_setting_alone() {
     let engine = session(&dir);
 
     let cfg = NativeConfig::from_toml_str("[native]\nstatusline = false\n").unwrap();
-    let plan = plan(&cfg, registry::features());
+    let plan = plan(&cfg, registry::features(), Look::default());
     assert!(
         !plan.iter().any(|s| s.feature == "statusline"),
         "a disabled statusline must contribute no takeover"
@@ -864,7 +897,11 @@ fn a_disabled_statusline_leaves_the_users_own_setting_alone() {
 fn the_takeover_reverses_when_the_feature_is_turned_off() {
     let dir = fixture("reversal");
     let engine = session(&dir);
-    let enabled = plan(&NativeConfig::all_enabled(), registry::features());
+    let enabled = plan(
+        &NativeConfig::all_enabled(),
+        registry::features(),
+        Look::default(),
+    );
     apply(&engine.handle, &enabled);
     assert_eq!(engine.handle.eval_str("&laststatus").unwrap(), "0");
     drop(engine);
@@ -882,7 +919,10 @@ fn the_takeover_reverses_when_the_feature_is_turned_off() {
     // config on its own
     let cfg = NativeConfig::from_toml_str(off).unwrap();
     let restarted = session(&dir);
-    apply(&restarted.handle, &plan(&cfg, registry::features()));
+    apply(
+        &restarted.handle,
+        &plan(&cfg, registry::features(), Look::default()),
+    );
 
     assert_eq!(
         restarted.handle.eval_str("&laststatus").unwrap(),

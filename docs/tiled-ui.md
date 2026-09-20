@@ -12,7 +12,31 @@ the places where lines meet take a junction glyph.
 Under `panes = "nvim"` the screen keeps the shape nvim draws: the `│`
 separator column between windows, restyled through `WinSeparator`.
 
-view's own statusline bar keeps the bottom row in both modes.
+Under `panes = "nvim"` view's own status bar keeps the bottom row. Under
+tiles there is no bar row at all: each tile says its own status in its
+frame.
+
+## What a tile's frame says
+
+| where | what it carries |
+|---|---|
+| gapped, top edge | the buffer name, with `[+]` on unsaved changes |
+| gapped, bottom edge | the segments below |
+| gapless, bottom edge | the buffer name, then the segments below |
+
+| segment | shown on |
+|---|---|
+| the mode, `-- INSERT --` or `recording @q` | the tile you are working in |
+| the git branch | every tile |
+| the diagnostic counts, `E 2` and `W 1` | every tile whose buffer has any |
+| the cursor position, `row:col` | every tile, from that window's own cursor |
+| the keys you have typed so far | the tile you are working in |
+
+A segment that runs out of room in the edge is dropped whole, with
+everything after it.
+
+`[native] statusline = false` empties the segments and leaves the frames
+standing.
 
 ## Choosing a mode
 
@@ -95,6 +119,12 @@ Gapless tiles need no room at all. The one cell between two windows is the
 cell nvim already paints its separator column and status row into, and view
 restyles those cells as the frame. The screen's top row and left column come
 from the outer grid attaching one row and one column short.
+
+Where view draws the command line it holds `cmdheight` at 0, so the lowest
+window's status row is the outer grid's last row and the lowest tile's frame
+reaches it. A session that gave back the palette or the notifications leaves
+nvim a command-line row at the foot of the grid, and the frames stop above
+it.
 
 ## The accent
 

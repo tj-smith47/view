@@ -924,6 +924,44 @@ impl GridRegistry {
             .map(|window| window.win)
     }
 
+    /// The slot nvim placed `win`'s window in, as
+    /// `(row, col, width, height)`.
+    #[must_use]
+    pub fn window_slot(&self, win: WinHandle) -> Option<(u16, u16, u16, u16)> {
+        self.slots
+            .iter()
+            .filter(|slot| slot.placed.as_ref().is_some_and(|p| !p.hidden))
+            .find_map(|slot| {
+                slot.window
+                    .as_ref()
+                    .filter(|window| window.win == win)
+                    .map(|window| window.slot)
+            })
+    }
+
+    /// The grid rows every placed window's frame edges stand on under
+    /// `look`, which are the rows a tile's own status segments are painted
+    /// in.
+    #[must_use]
+    pub fn window_edge_rows(&self, look: crate::model::Look) -> Vec<u16> {
+        self.slots
+            .iter()
+            .filter(|slot| slot.placed.as_ref().is_some_and(|p| !p.hidden))
+            .filter_map(|slot| slot.window.as_ref())
+            .flat_map(|window| look.edge_rows(window.slot))
+            .collect()
+    }
+
+    /// Marks a row of the global grid changed, for chrome view paints over
+    /// that grid itself.
+    ///
+    /// A tile's frame edge stands on one of those rows, and what it says
+    /// comes from view's own bridge rather than from a redraw event, so
+    /// nothing else in the frame's damage covers it.
+    pub fn mark_global_row(&mut self, row: u16) {
+        self.global.mark_row(row);
+    }
+
     /// Every grid holding an ordinary window, in ascending id order.
     #[must_use]
     pub fn window_grids(&self) -> Vec<GridId> {

@@ -29,6 +29,7 @@ use std::path::PathBuf;
 
 use view_core::grid::Grid;
 use view_core::model::{TermCaps, Tier};
+use view_core::native::statusline::{SegmentUpdate, StatuslineState};
 use view_core::native::views::{
     AiPanelView, PaletteRow, PaletteView, PickerView, PromptView, Span, StatuslineView, TreeRow,
     TreeView,
@@ -142,6 +143,75 @@ fn statusline() -> LayerKind {
         "crates/view-tui/src/paint.rs",
         "12:4",
     ))
+}
+
+/// The width the `nvim`-mode bar is dumped at: wide enough for every
+/// segment a session has at once, since the composer drops whole segments
+/// to fit and a narrower dump would show the truncation rather than the
+/// row.
+const NVIM_BAR_WIDTH: u16 = 72;
+
+/// The bar under `panes = "nvim"`, composed by [`StatuslineState`] itself
+/// rather than written out span by span like [`statusline`]: what this dump
+/// pins is the segments a real session gives the composer and the order and
+/// widths it lays them out in, the filetype behind the file name included.
+fn nvim_statusline() -> LayerKind {
+    let mut state = StatuslineState::default();
+    state.apply(SegmentUpdate::Mode("-- INSERT --".to_string()));
+    state.apply(SegmentUpdate::Buffer {
+        name: "paint.rs".to_string(),
+        modified: true,
+        filetype: "rust".to_string(),
+    });
+    state.apply(SegmentUpdate::GitBranch("dev/p6-polish".to_string()));
+    state.apply(SegmentUpdate::Diagnostics {
+        errors: 2,
+        warnings: 1,
+    });
+    state.apply(SegmentUpdate::Ruler("12:4".to_string()));
+    LayerKind::Statusline(state.view(NVIM_BAR_WIDTH))
+}
+
+#[test]
+fn full_nvim_statusline_bar() {
+    assert_golden(
+        "full-nvim-statusline-bar",
+        &dump(
+            Tier::Full,
+            DRAWS_BOX_GLYPHS,
+            NVIM_BAR_WIDTH,
+            1,
+            nvim_statusline(),
+        ),
+    );
+}
+
+#[test]
+fn standard_nvim_statusline_bar() {
+    assert_golden(
+        "standard-nvim-statusline-bar",
+        &dump(
+            Tier::Standard,
+            DRAWS_BOX_GLYPHS,
+            NVIM_BAR_WIDTH,
+            1,
+            nvim_statusline(),
+        ),
+    );
+}
+
+#[test]
+fn basic_nvim_statusline_bar() {
+    assert_golden(
+        "basic-nvim-statusline-bar",
+        &dump(
+            Tier::Basic,
+            NO_BOX_GLYPHS,
+            NVIM_BAR_WIDTH,
+            1,
+            nvim_statusline(),
+        ),
+    );
 }
 
 fn prompt() -> LayerKind {
@@ -405,6 +475,7 @@ fn a_terminals_tier_never_reaches_its_frame() {
         ("tree", 30, 7, tree()),
         ("statusline", 46, 3, statusline()),
         ("statusline-bar", 46, 1, statusline()),
+        ("nvim-statusline-bar", NVIM_BAR_WIDTH, 1, nvim_statusline()),
         ("prompt", 32, 7, prompt()),
         ("palette", 38, 8, palette()),
         ("ai-panel", 30, 7, ai_panel()),

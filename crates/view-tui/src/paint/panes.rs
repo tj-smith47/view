@@ -21,9 +21,8 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as TermRect;
-use view_core::grid::registry::{GridId, GridRegistry, Pane, PaneKind, GLOBAL_GRID};
-use view_core::hl::HlTable;
-use view_core::model::Panes;
+use view_core::grid::registry::{GridId, Pane, PaneKind, GLOBAL_GRID};
+use view_core::model::{Model, Panes};
 use view_core::theme::{ChromeGroup, Theme};
 use view_surface::overlay::BorderSet;
 use view_surface::Rect;
@@ -43,14 +42,15 @@ use super::{clip_to_frame, paint_grid, ratatui_style, set_border_cell, Damage};
 /// Under tiles the frames take the separators' place at the same boundary,
 /// so a float paints over a finished frame instead of being cut by one.
 pub(super) fn paint_panes(
-    registry: &GridRegistry,
+    model: &Model,
     theme: &Theme,
-    hl: &HlTable,
     borders: BorderSet,
     area: TermRect,
     damage: &Damage,
     buf: &mut Buffer,
 ) {
+    let registry = model.engine.grids();
+    let hl = model.engine.hl();
     // the shipped single-grid frame, and every multigrid one before its
     // first window lands: one grid covering the layer, no chrome between
     // windows, and no pane list allocated on the paint path to say so
@@ -77,7 +77,9 @@ pub(super) fn paint_panes(
         // under it.
         if !separated && !matches!(pane.kind, PaneKind::Window) {
             if tiled {
-                frames::paint_frames(&panes, look, cursor, theme, borders, area, damage, buf);
+                frames::paint_frames(
+                    model, &panes, look, cursor, theme, borders, area, damage, buf,
+                );
             } else {
                 paint_separators(&windows, theme, borders, damage, buf);
             }
@@ -106,7 +108,9 @@ pub(super) fn paint_panes(
     }
     if !separated {
         if tiled {
-            frames::paint_frames(&panes, look, cursor, theme, borders, area, damage, buf);
+            frames::paint_frames(
+                model, &panes, look, cursor, theme, borders, area, damage, buf,
+            );
         } else {
             paint_separators(&windows, theme, borders, damage, buf);
         }

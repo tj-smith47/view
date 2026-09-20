@@ -132,8 +132,10 @@ single_grid = false        # default: false -- view composites nvim's windows
 #
 # panes decides how your windows are drawn. "tiles" gives every window a
 # frame of view's own, with the one you are working in picked out in the
-# accent colour; "nvim" leaves the picture nvim paints for itself. view's
-# status bar keeps the bottom row in both. "auto" reads your session: a
+# accent colour, and each tile says its own buffer name, branch, diagnostic
+# counts and cursor position in its frame; "nvim" leaves the picture nvim
+# paints for itself and keeps view's status bar on the bottom row. "auto"
+# reads your session: a
 # tiling window manager is already arranging your screen, so view stays out
 # of its way and draws "nvim" there, and everything else -- a desktop, a
 # terminal on macOS or Windows, an ssh session -- gets "tiles". :View ui

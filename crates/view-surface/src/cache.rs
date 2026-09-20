@@ -94,7 +94,10 @@ impl Frame {
 ///   `grids` (via `grid`, which is the global grid's size -- the panes it
 ///   also holds reach no layer while the compositor paints that grid
 ///   alone), `hl` and `mode` (painters read them off the
-///   `Model` on the reuse path), `overlays` (via `had_overlays`),
+///   `Model` on the reuse path), `window_status` (the tile segments are
+///   painted off the `Model` the same way, and the row each one stands on
+///   is marked changed where the status changes), `overlays` (via
+///   `had_overlays`),
 ///   `statusline` (via `statusline_rows`), `toast_history` (only the
 ///   palette's history view reads it, and that is an overlay)
 /// - a setting no layer's geometry follows on its own: `ai_trusted`,

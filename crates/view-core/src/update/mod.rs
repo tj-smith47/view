@@ -5,7 +5,6 @@ use crate::msg::{DeleteConfirmOutcome, Effect, EngineRequest, Key, Msg, RpcCall}
 use crate::native::ai_panel::TranscriptScroll;
 use crate::native::diff::BufTextChangedEvent;
 use crate::native::keys::{Action, Resolved};
-use crate::native::statusline::SegmentUpdate;
 use crate::native::supervision::WedgeKind;
 use crate::native::toast::HoldOutcome;
 use crate::native::toast::ToastMotion;
@@ -66,6 +65,7 @@ const _: () = assert!(
 
 mod ai;
 mod ai_fs;
+mod bridge;
 pub(crate) mod look;
 mod mouse;
 mod paste;
@@ -613,29 +613,15 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::ColorSchemeMissing { name } => on_colorscheme_missing(model, &name),
         Msg::DiagnosticsChanged { errors, warnings } => {
-            model
-                .engine
-                .statusline
-                .apply(SegmentUpdate::Diagnostics { errors, warnings });
-            model.dirty = true;
-            Vec::new()
+            bridge::on_diagnostics(model, errors, warnings)
         }
-        Msg::GitBranchChanged { branch } => {
-            model
-                .engine
-                .statusline
-                .apply(SegmentUpdate::GitBranch(branch));
-            model.dirty = true;
-            tree_git_refresh_effect(model)
-        }
-        Msg::BufferChanged { name, modified } => {
-            model
-                .engine
-                .statusline
-                .apply(SegmentUpdate::Buffer { name, modified });
-            model.dirty = true;
-            tree_git_refresh_effect(model)
-        }
+        Msg::GitBranchChanged { branch } => bridge::on_git_branch(model, branch),
+        Msg::BufferChanged {
+            name,
+            modified,
+            filetype,
+        } => bridge::on_buffer(model, name, modified, filetype),
+        Msg::WindowStatus { win, status } => bridge::on_window_status(model, win, status),
         Msg::FloatObserved(float) => surface_conflict::observe_float(model, &float),
         Msg::FloatSweep => surface_conflict::sweep_floats(model),
         Msg::FloatRows { win, lines } => surface_conflict::on_float_rows(model, win, lines),

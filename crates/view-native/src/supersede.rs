@@ -13,6 +13,7 @@
 //! "what has view taken over?", and an answer reassembled by inspecting two
 //! call sites drifts from the answer the session actually applied.
 
+use view_core::model::Look;
 use view_core::msg::RpcCall;
 use view_core::native::channels::{self, Channel, Scope};
 use view_core::native::registry::FeatureDesc;
@@ -188,7 +189,10 @@ struct Takeover {
 /// be the kind that holds, and expressing it as one call rather than as a
 /// set plus a separate guard entry means no consumer can apply half of
 /// it.
-fn takeover_call(row: &Takeover) -> Option<RpcCall> {
+/// The look reaches the wire here: `row`'s `ChannelValue` may still be a
+/// `ByLook`, since [`takeovers`] copies the static table's value through
+/// untouched, and `wire(look)` is what answers it.
+fn takeover_call(row: &Takeover, look: Look) -> Option<RpcCall> {
     match row.kind {
         TakeoverKind::Option {
             option,
@@ -196,7 +200,7 @@ fn takeover_call(row: &Takeover) -> Option<RpcCall> {
             value,
         } => Some(RpcCall::HoldOption {
             name: option.to_string(),
-            value: value.wire(),
+            value: value.wire(look),
         }),
         TakeoverKind::Option {
             option,
@@ -204,7 +208,7 @@ fn takeover_call(row: &Takeover) -> Option<RpcCall> {
             value,
         } => Some(RpcCall::HoldWindowOption {
             name: option.to_string(),
-            value: value.wire(),
+            value: value.wire(look),
         }),
         TakeoverKind::Notify => Some(RpcCall::HoldNotify),
     }
@@ -278,8 +282,8 @@ const NOTIFY_GLOBAL: &str = "vim.notify";
 /// the registry's listing order, which is the order every consumer-facing
 /// listing of these features already uses.
 #[must_use]
-pub fn plan(cfg: &NativeConfig, features: &[FeatureDesc]) -> Vec<Supersession> {
-    plan_from(cfg, features, &takeovers())
+pub fn plan(cfg: &NativeConfig, features: &[FeatureDesc], look: Look) -> Vec<Supersession> {
+    plan_from(cfg, features, &takeovers(), look)
 }
 
 /// [`plan`] against an arbitrary takeover table, so the table-walking rules
@@ -299,6 +303,7 @@ fn plan_from(
     cfg: &NativeConfig,
     features: &[FeatureDesc],
     takeovers: &[Takeover],
+    look: Look,
 ) -> Vec<Supersession> {
     features
         .iter()
@@ -309,7 +314,7 @@ fn plan_from(
                 .filter(move |t| t.feature == f.id)
                 .map(move |t| Supersession {
                     feature: f.id,
-                    rpc: takeover_call(t),
+                    rpc: takeover_call(t, look),
                     reverses_with: f.off_switch,
                     supersedes: f.supersedes,
                 })
@@ -324,14 +329,49 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use view_core::model::Panes;
     use view_core::msg::{Effect, OptionValue};
     use view_core::native::registry;
     use view_test_support::ScratchDir;
 
+    /// Tiles mode holds nvim at `laststatus = 2`, which is what leaves a
+    /// row under every window for the frame's bottom edge to paint over.
+    #[test]
+    fn the_plan_holds_laststatus_at_two_under_tiles() {
+        let held = laststatus_held(Look::new(Panes::Tiles, true));
+        assert_eq!(held, Some(OptionValue::Int(2)));
+        assert_eq!(
+            held,
+            laststatus_held(Look::new(Panes::Tiles, false)),
+            "the gap setting decides no option's value"
+        );
+    }
+
+    /// `panes = "nvim"` keeps the hold that ships today: nvim draws no
+    /// status line and view's own bottom bar is the only one on screen.
+    #[test]
+    fn the_plan_holds_laststatus_at_zero_under_nvim_mode() {
+        assert_eq!(
+            laststatus_held(Look::new(Panes::Nvim, true)),
+            Some(OptionValue::Int(0))
+        );
+    }
+
+    /// The value the plan holds `laststatus` at under `look`, or `None`
+    /// where no entry holds it at all.
+    fn laststatus_held(look: Look) -> Option<OptionValue> {
+        plan(&NativeConfig::all_enabled(), registry::features(), look)
+            .into_iter()
+            .find_map(|entry| match entry.rpc {
+                Some(RpcCall::HoldOption { name, value }) if name == "laststatus" => Some(value),
+                _ => None,
+            })
+    }
+
     #[test]
     fn an_enabled_statusline_yields_one_entry_reversed_by_its_own_off_switch() {
         let cfg = NativeConfig::all_enabled();
-        let entries: Vec<Supersession> = plan(&cfg, registry::features())
+        let entries: Vec<Supersession> = plan(&cfg, registry::features(), Look::default())
             .into_iter()
             .filter(|s| s.feature == "statusline")
             .collect();
@@ -357,7 +397,7 @@ mod tests {
     #[test]
     fn notifications_enabled_supersedes_vim_notify() {
         let cfg = NativeConfig::all_enabled();
-        let entries: Vec<Supersession> = plan(&cfg, registry::features())
+        let entries: Vec<Supersession> = plan(&cfg, registry::features(), Look::default())
             .into_iter()
             .filter(|s| s.feature == "notifications")
             .collect();
@@ -383,7 +423,7 @@ mod tests {
     fn notifications_disabled_leaves_vim_notify_to_the_plugin() {
         let cfg = NativeConfig::from_toml_str("[native]\nnotifications = false\n")
             .expect("a known key must parse");
-        let plan = plan(&cfg, registry::features());
+        let plan = plan(&cfg, registry::features(), Look::default());
         assert!(
             !plan.iter().any(|s| s.rpc == Some(RpcCall::HoldNotify)),
             "a disabled notifications must leave vim.notify alone, got {plan:?}"
@@ -394,7 +434,7 @@ mod tests {
     fn a_disabled_feature_supersedes_nothing() {
         let cfg = NativeConfig::from_toml_str("[native]\nstatusline = false\n")
             .expect("a known key must parse");
-        let plan = plan(&cfg, registry::features());
+        let plan = plan(&cfg, registry::features(), Look::default());
         assert!(
             !plan.iter().any(|s| s.feature == "statusline"),
             "a disabled statusline must take over nothing, got {plan:?}"
@@ -606,7 +646,12 @@ mod tests {
                 },
             },
         ];
-        let entries = plan_from(&NativeConfig::all_enabled(), registry::features(), &table);
+        let entries = plan_from(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            &table,
+            Look::default(),
+        );
         // a non-option entry drops out here rather than being asserted on
         // directly, and the comparison below still catches it: the expected
         // list names both options, so anything that failed to arrive as one
@@ -649,7 +694,12 @@ mod tests {
                 },
             },
         ];
-        let entries = plan_from(&NativeConfig::all_enabled(), registry::features(), &table);
+        let entries = plan_from(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            &table,
+            Look::default(),
+        );
         let calls: Vec<&Option<RpcCall>> = entries.iter().map(|entry| &entry.rpc).collect();
         assert_eq!(
             calls,
@@ -689,7 +739,7 @@ mod tests {
         ];
         let cfg = NativeConfig::from_toml_str("[native]\nstatusline = false\n")
             .expect("a known key must parse");
-        let entries = plan_from(&cfg, registry::features(), &table);
+        let entries = plan_from(&cfg, registry::features(), &table, Look::default());
         assert!(
             !entries.iter().any(|s| s.feature == "statusline"),
             "a disabled feature must take over nothing at all, got {entries:?}"
@@ -698,7 +748,11 @@ mod tests {
 
     #[test]
     fn every_entry_reverses_with_its_own_registry_off_switch() {
-        let plan = plan(&NativeConfig::all_enabled(), registry::features());
+        let plan = plan(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            Look::default(),
+        );
         assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
         for entry in &plan {
             let desc = registry::features()
@@ -761,7 +815,11 @@ mod tests {
         let dir = fixture_dir("untouched");
         let before = snapshot_dir(&dir);
 
-        let plan = plan(&NativeConfig::all_enabled(), registry::features());
+        let plan = plan(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            Look::default(),
+        );
         let effects: Vec<Effect> = plan
             .iter()
             .filter_map(|s| s.rpc.clone().map(Effect::Rpc))
@@ -784,7 +842,11 @@ mod tests {
 
     #[test]
     fn every_entry_carries_its_registry_supersedes_verbatim() {
-        let plan = plan(&NativeConfig::all_enabled(), registry::features());
+        let plan = plan(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            Look::default(),
+        );
         assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
         for entry in &plan {
             let desc = registry::features()
@@ -797,7 +859,11 @@ mod tests {
 
     #[test]
     fn every_entry_rides_an_api_call_never_the_keyboard() {
-        let plan = plan(&NativeConfig::all_enabled(), registry::features());
+        let plan = plan(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            Look::default(),
+        );
         assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
         for entry in &plan {
             assert!(
@@ -821,10 +887,14 @@ mod tests {
     /// surface is rendered from the entry that carries it.
     #[test]
     fn the_tab_line_is_planned_for_the_row_the_attach_cannot_reach() {
-        let entries: Vec<Supersession> = plan(&NativeConfig::all_enabled(), registry::features())
-            .into_iter()
-            .filter(|s| s.feature == "tabline")
-            .collect();
+        let entries: Vec<Supersession> = plan(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            Look::default(),
+        )
+        .into_iter()
+        .filter(|s| s.feature == "tabline")
+        .collect();
         assert_eq!(
             entries.len(),
             1,
@@ -847,7 +917,8 @@ mod tests {
             plan(
                 &NativeConfig::from_toml_str("[native]\ntabline = false\n")
                     .expect("a known key must parse"),
-                registry::features()
+                registry::features(),
+                Look::default()
             )
             .iter()
             .all(|s| s.feature != "tabline"),

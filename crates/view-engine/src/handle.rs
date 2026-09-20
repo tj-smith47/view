@@ -3854,14 +3854,66 @@ mod tests {
             Value::from("buffer"),
             Value::from("statusline.rs"),
             Value::from(true),
+            Value::from("rust"),
         ]);
         assert!(
             matches!(
                 decoded,
-                Some(Msg::BufferChanged { ref name, modified: true }) if name == "statusline.rs"
+                Some(Msg::BufferChanged { ref name, modified: true, ref filetype })
+                    if name == "statusline.rs" && filetype == "rust"
             ),
             "got {decoded:?}"
         );
+    }
+
+    /// Every field of the window trigger's payload reaches the message,
+    /// in the order `REGISTER_WINDOW_STATUS_CHUNK` sends them.
+    ///
+    /// Positional and same-typed: `buf`, `row`, `col`, `errors` and
+    /// `warnings` are all plain counts, so a pair swapped anywhere along
+    /// the nine arguments decodes without complaint and paints a cursor
+    /// position that is really a diagnostic count. Every value here is
+    /// distinct for that reason.
+    #[test]
+    fn a_window_trigger_decodes_every_field_it_carries() {
+        let decoded = decode_bridge_event(&[
+            Value::from("window"),
+            Value::from(1001_u64),
+            Value::from(7_u64),
+            Value::from("model.rs"),
+            Value::from(true),
+            Value::from(42_u64),
+            Value::from(13_u64),
+            Value::from(2_u64),
+            Value::from(5_u64),
+        ]);
+        let Some(Msg::WindowStatus { win, status }) = decoded else {
+            unreachable!("the window trigger decoded to {decoded:?}")
+        };
+        assert_eq!(win, view_core::events::WinHandle(1001));
+        assert_eq!(status.buf, 7);
+        assert_eq!(status.name, "model.rs");
+        assert!(status.modified);
+        assert_eq!((status.row, status.col), (42, 13));
+        assert_eq!((status.errors, status.warnings), (2, 5));
+    }
+
+    /// A payload one field short is a chunk this build does not know,
+    /// which drops rather than decoding a position out of the wrong
+    /// argument.
+    #[test]
+    fn a_short_window_trigger_payload_decodes_to_nothing() {
+        let decoded = decode_bridge_event(&[
+            Value::from("window"),
+            Value::from(1001_u64),
+            Value::from(7_u64),
+            Value::from("model.rs"),
+            Value::from(true),
+            Value::from(42_u64),
+            Value::from(13_u64),
+            Value::from(2_u64),
+        ]);
+        assert!(decoded.is_none(), "got {decoded:?}");
     }
 
     /// The escape timing, whose payload is a string because the chunk

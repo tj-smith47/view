@@ -1085,7 +1085,10 @@ fn main() -> Result<()> {
     // attach will ask for
     let look = Look::new(resolved.ui.panes.value, resolved.ui.gaps.value);
     let ring = look.ring();
-    let statusline = resolved.tables.native.enabled("statusline");
+    // through `Look::bar_rows` rather than off the switch alone: under
+    // tiles the segments sit in each frame's own bottom edge, so no row is
+    // reserved for a bar and `Model::statusline_rows` answers the same
+    let statusline = look.bar_rows(resolved.tables.native.enabled("statusline")) > 0;
     let spawn_size = view_core::model::grid_target_for((width, height), 0, statusline, ring);
     // what the chrome alone would have left, so this is true for every
     // geometry the engine would have refused -- a zero floored to
@@ -2082,6 +2085,7 @@ mod tests {
                 "view_native::config::ext_surfaces",
                 "Look::new",
                 "ring",
+                "bar_rows",
                 "enabled",
                 "view_core::model::grid_target_for",
                 "saturating_sub",

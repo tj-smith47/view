@@ -50,6 +50,17 @@ pub struct StatuslineState {
     /// The current git branch, from the bridge's git trigger group's
     /// `vim.system()` lookup. Empty means no repo or a failed lookup.
     git_branch: String,
+    /// The current buffer's `filetype`, from the `buffer` trigger. Empty
+    /// for a buffer nvim detected none for, which hides the segment.
+    filetype: String,
+    /// Set by every update, drained by
+    /// [`Model::take_paint_damage`](crate::model::Model::take_paint_damage).
+    ///
+    /// Under tiles these segments are painted in each frame's own edge
+    /// rows, which lie outside every window's grid, so nvim raises no
+    /// damage for them and a frame clipped to its damage would keep the
+    /// reading before the update.
+    dirty: bool,
 }
 
 /// One segment source updating [`StatuslineState`]. Seven variants though
@@ -68,14 +79,22 @@ pub enum SegmentUpdate {
     Showcmd(String),
     Ruler(String),
     SearchCount(String),
-    Diagnostics { errors: u32, warnings: u32 },
+    Diagnostics {
+        errors: u32,
+        warnings: u32,
+    },
     GitBranch(String),
-    Buffer { name: String, modified: bool },
+    Buffer {
+        name: String,
+        modified: bool,
+        filetype: String,
+    },
 }
 
 impl StatuslineState {
     /// Applies one decoded segment update in place.
     pub fn apply(&mut self, update: SegmentUpdate) {
+        self.dirty = true;
         match update {
             SegmentUpdate::Mode(text) => self.mode = text,
             SegmentUpdate::Showcmd(text) => self.showcmd = text,
@@ -85,11 +104,21 @@ impl StatuslineState {
                 self.diagnostics = Some((errors, warnings));
             }
             SegmentUpdate::GitBranch(branch) => self.git_branch = branch,
-            SegmentUpdate::Buffer { name, modified } => {
+            SegmentUpdate::Buffer {
+                name,
+                modified,
+                filetype,
+            } => {
                 self.file = name;
                 self.modified = modified;
+                self.filetype = filetype;
             }
         }
+    }
+
+    /// Whether a segment changed since the last call.
+    pub(crate) fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
     }
 
     /// Clears the segments the engine both raises and retracts, for a
@@ -103,12 +132,16 @@ impl StatuslineState {
     /// replacement's own bar. The replacement re-raises whatever is true of
     /// it, so clearing costs a frame of nothing.
     ///
-    /// The other four ([`Self::file`], [`Self::modified`],
-    /// [`Self::diagnostics`], [`Self::git_branch`]) are deliberately kept:
-    /// they come from view's own bridge rather than from a redraw event,
-    /// they still describe the buffers a restart recovers, and the
+    /// The other five ([`Self::file`], [`Self::modified`],
+    /// [`Self::filetype`], [`Self::diagnostics`], [`Self::git_branch`]) are
+    /// kept: they come from view's own bridge rather than from a redraw
+    /// event, they still describe the buffers a restart recovers, and the
     /// replacement's bridge install re-fires them.
+    ///
+    /// [`Self::dirty`] is set here, because this clears four segments the
+    /// next frame has to repaint.
     pub fn forget_engine_segments(&mut self) {
+        self.dirty = true;
         self.mode.clear();
         self.showcmd.clear();
         self.ruler.clear();
@@ -156,6 +189,12 @@ impl StatuslineState {
             let mut spans = vec![Span::new(self.file.clone(), StyleRole::File)];
             if self.modified {
                 spans.push(Span::new(" [+]", StyleRole::Modified));
+            }
+            // in the file's own candidate rather than beside it: a
+            // filetype with no file name in front of it names nothing, so
+            // the two are dropped together when the row runs out of room
+            if !self.filetype.is_empty() {
+                spans.push(Span::plain(format!(" {}", self.filetype)));
             }
             candidates.push((Zone::Center, spans));
         }
@@ -225,6 +264,72 @@ impl StatuslineState {
         }
 
         StatuslineView::from_spans(left, center, right)
+    }
+
+    /// The segments one tile's own frame edge carries, left to right, with
+    /// one space between each.
+    ///
+    /// Two sources, because two scopes: the mode and the pending keys are
+    /// the session's and belong only to the tile the user is working in,
+    /// while the position and the diagnostic counts are the window's own
+    /// and come from the bridge's `window` trigger. The git branch is the
+    /// session's lookup and reads the same on every tile.
+    ///
+    /// The position comes from `status` rather than from the ruler text:
+    /// nvim stops emitting `msg_ruler` the moment `laststatus` is 2, which
+    /// is what tiles mode holds it at, so under tiles that segment has no
+    /// other source.
+    ///
+    /// No truncation here. A frame edge is as wide as its tile and the
+    /// painter is what knows how many cells are left, so it drops whole
+    /// spans off the end rather than this composing against a width it
+    /// would have to be told.
+    #[must_use]
+    pub fn tile_segments(&self, status: &crate::model::WindowStatus, active: bool) -> Vec<Span> {
+        let mut groups: Vec<Vec<Span>> = Vec::new();
+        if active && !self.mode.is_empty() {
+            groups.push(vec![Span::new(self.mode.clone(), StyleRole::Mode)]);
+        }
+        if !self.git_branch.is_empty() {
+            groups.push(vec![Span::new(
+                self.git_branch.clone(),
+                StyleRole::GitBranch,
+            )]);
+        }
+        let mut diagnostics = Vec::new();
+        if status.errors > 0 {
+            diagnostics.push(Span::new(
+                format!("E {}", status.errors),
+                StyleRole::DiagnosticError,
+            ));
+        }
+        if status.warnings > 0 {
+            if !diagnostics.is_empty() {
+                diagnostics.push(Span::plain(" "));
+            }
+            diagnostics.push(Span::new(
+                format!("W {}", status.warnings),
+                StyleRole::DiagnosticWarning,
+            ));
+        }
+        if !diagnostics.is_empty() {
+            groups.push(diagnostics);
+        }
+        groups.push(vec![Span::new(
+            format!("{}:{}", status.row, status.col),
+            StyleRole::Ruler,
+        )]);
+        if active && !self.showcmd.is_empty() {
+            groups.push(vec![Span::plain(self.showcmd.clone())]);
+        }
+        let mut spans: Vec<Span> = Vec::new();
+        for group in groups {
+            if !spans.is_empty() {
+                spans.push(Span::plain(" "));
+            }
+            spans.extend(group);
+        }
+        spans
     }
 }
 
@@ -374,6 +479,7 @@ mod tests {
         state.apply(SegmentUpdate::Buffer {
             name: "statusline.rs".to_string(),
             modified: true,
+            filetype: String::new(),
         });
         state.apply(SegmentUpdate::GitBranch("main".to_string()));
         let view = state.view(80);
@@ -404,6 +510,7 @@ mod tests {
         state.apply(SegmentUpdate::Buffer {
             name: "statusline.rs".to_string(),
             modified: true,
+            filetype: String::new(),
         });
         let view = state.view(80);
         assert_eq!(text(&view.center), "statusline.rs [+]");
@@ -415,6 +522,7 @@ mod tests {
         state.apply(SegmentUpdate::Buffer {
             name: "statusline.rs".to_string(),
             modified: false,
+            filetype: String::new(),
         });
         let view = state.view(80);
         assert_eq!(text(&view.center), "statusline.rs");
@@ -432,6 +540,7 @@ mod tests {
         state.apply(SegmentUpdate::Buffer {
             name: "statusline.rs".to_string(),
             modified: true,
+            filetype: String::new(),
         });
         state.apply(SegmentUpdate::Diagnostics {
             errors: 1,
@@ -464,6 +573,7 @@ mod tests {
         state.apply(SegmentUpdate::Buffer {
             name: "statusline.rs".to_string(),
             modified: true,
+            filetype: String::new(),
         });
         state.apply(SegmentUpdate::Diagnostics {
             errors: 1,
@@ -491,6 +601,7 @@ mod tests {
         state.apply(SegmentUpdate::Buffer {
             name: "statusline.rs".to_string(),
             modified: true,
+            filetype: String::new(),
         });
         state.apply(SegmentUpdate::Diagnostics {
             errors: 1,
@@ -511,5 +622,45 @@ mod tests {
         let state = StatuslineState::default();
         let view = state.view(80);
         assert_eq!(view, StatuslineView::new("", "", ""));
+    }
+
+    /// One state, one window: the fixture both position tests read, with a
+    /// ruler that disagrees with the window's own numbers so whichever
+    /// source a composer took is visible in its output.
+    fn positioned() -> (StatuslineState, crate::model::WindowStatus) {
+        let mut state = StatuslineState::default();
+        state.apply(SegmentUpdate::Ruler("99,99".to_string()));
+        let status = crate::model::WindowStatus {
+            row: 42,
+            col: 13,
+            ..Default::default()
+        };
+        (state, status)
+    }
+
+    /// nvim stops sending `msg_ruler` the moment `laststatus` is 2, which
+    /// is what tiles hold it at, so a tile that read the ruler would show
+    /// the position frozen at the frame before the hold went in.
+    #[test]
+    fn the_position_segment_reads_the_window_trigger_under_tiles() {
+        let (state, status) = positioned();
+        let segments = text(&state.tile_segments(&status, true));
+        assert!(
+            segments.contains("42:13"),
+            "the window's own position is missing: {segments:?}"
+        );
+        assert!(
+            !segments.contains("99,99"),
+            "a tile took the session's ruler: {segments:?}"
+        );
+    }
+
+    /// `"nvim"` mode holds `laststatus` at 0, which is the one setting nvim
+    /// sends `msg_ruler` under, so the bar reads it and never the trigger.
+    #[test]
+    fn the_position_segment_reads_msg_ruler_under_nvim_mode() {
+        let (state, _) = positioned();
+        let view = state.view(80);
+        assert_eq!(text(&view.right), "99,99");
     }
 }

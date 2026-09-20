@@ -18,6 +18,7 @@
 //! it arrives, and the gutter belongs to the buffer window rather than to
 //! view's chrome.
 
+use crate::model::{Look, Panes};
 use crate::msg::OptionValue;
 use crate::native::ext::Ext;
 use crate::native::surfaces::Surface;
@@ -49,19 +50,35 @@ pub enum ChannelValue {
     Bool(bool),
     /// A string option.
     Str(&'static str),
+    /// The two values one option takes, keyed by look.
+    ///
+    /// Resolved before the value reaches the wire, so no path can hold a
+    /// look-keyed spelling: the derivation that reads the table copies
+    /// this variant through untouched, and [`ChannelValue::wire`] is where
+    /// it answers its own look's leg.
+    ByLook {
+        /// The value held under `panes = "nvim"`.
+        nvim: &'static ChannelValue,
+        /// The value held under `panes = "tiles"`.
+        tiles: &'static ChannelValue,
+    },
 }
 
 impl ChannelValue {
-    /// This value as the wire carries it.
+    /// This value as the wire carries it, under `look`.
     ///
-    /// Total over both closed enums, so a fourth option type added to
+    /// Total over both closed enums, so a fifth option type added to
     /// either is a compile error rather than a hold that sets nothing.
     #[must_use]
-    pub fn wire(self) -> OptionValue {
+    pub fn wire(self, look: Look) -> OptionValue {
         match self {
             Self::Int(n) => OptionValue::Int(n),
             Self::Bool(b) => OptionValue::Bool(b),
             Self::Str(s) => OptionValue::Str(s.to_string()),
+            Self::ByLook { nvim, tiles } => match look.panes {
+                Panes::Nvim => nvim.wire(look),
+                Panes::Tiles => tiles.wire(look),
+            },
         }
     }
 }
@@ -217,16 +234,31 @@ pub const CHANNELS: &[SurfaceChannels] = &[
     SurfaceChannels {
         surface: Surface::Statusline,
         channels: &[
+            // keyed by look, and the only claim on the option whichever
+            // leg answers: under `nvim` view draws the one bottom bar and
+            // nvim draws no status line at all, and under tiles every
+            // window gets a status row for the frame's bottom edge to
+            // paint over
             Channel::Hold {
                 option: "laststatus",
                 scope: Scope::Global,
-                value: ChannelValue::Int(0),
+                value: ChannelValue::ByLook {
+                    nvim: &ChannelValue::Int(0),
+                    tiles: &ChannelValue::Int(2),
+                },
             },
             Channel::Covered {
                 option: "statusline",
                 by: "laststatus",
             },
         ],
+    },
+    // the frame is view's own paint over cells nvim already owns, so it
+    // takes no channel: the row is here because the surface exists, and a
+    // second claim on `laststatus` would leave the option nobody's to hold
+    SurfaceChannels {
+        surface: Surface::Frame,
+        channels: &[],
     },
     SurfaceChannels {
         surface: Surface::Grid,
@@ -437,6 +469,7 @@ mod tests {
             Surface::Messages,
             Surface::Tabline,
             Surface::Statusline,
+            Surface::Frame,
             Surface::Grid,
         ] {
             let rows = CHANNELS.iter().filter(|r| r.surface == surface).count();
@@ -444,7 +477,7 @@ mod tests {
         }
         assert_eq!(
             CHANNELS.len(),
-            6,
+            7,
             "a surface added to the enum needs a row here, with the channels that draw it"
         );
     }
@@ -526,11 +559,47 @@ mod tests {
 
     #[test]
     fn every_value_survives_the_table_to_wire_conversion() {
-        assert_eq!(ChannelValue::Int(0).wire(), OptionValue::Int(0));
-        assert_eq!(ChannelValue::Bool(false).wire(), OptionValue::Bool(false));
+        let look = Look::default();
+        assert_eq!(ChannelValue::Int(0).wire(look), OptionValue::Int(0));
         assert_eq!(
-            ChannelValue::Str("").wire(),
+            ChannelValue::Bool(false).wire(look),
+            OptionValue::Bool(false)
+        );
+        assert_eq!(
+            ChannelValue::Str("").wire(look),
             OptionValue::Str(String::new())
+        );
+        let by_look = ChannelValue::ByLook {
+            nvim: &ChannelValue::Int(0),
+            tiles: &ChannelValue::Int(2),
+        };
+        assert_eq!(
+            by_look.wire(Look::new(Panes::Nvim, true)),
+            OptionValue::Int(0)
+        );
+        assert_eq!(
+            by_look.wire(Look::new(Panes::Tiles, true)),
+            OptionValue::Int(2)
+        );
+    }
+
+    /// `laststatus` is the one option whose held value moves with the
+    /// look, and it stays a single surface's claim whichever leg answers.
+    ///
+    /// A `Surface::Frame` row carrying a `Hold` of its own would make it
+    /// shared, which skips it out of every feature's plan and hands it to
+    /// `session_held()` -- so `[native] statusline = false` would stop
+    /// handing the row back at all.
+    #[test]
+    fn laststatus_is_claimed_by_one_surface_whatever_the_look() {
+        assert!(
+            !shared_by_surfaces("laststatus"),
+            "laststatus must stay one surface's to hold"
+        );
+        assert_eq!(claimants_of("laststatus").count(), 1);
+        assert!(
+            !session_held().iter().any(|c| c.name() == "laststatus"),
+            "a session-held laststatus is one no feature's off switch reverses"
         );
     }
 }

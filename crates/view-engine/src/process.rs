@@ -2048,6 +2048,7 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
     let bridge = crate::nvim_api::REGISTER_BRIDGE_CHUNK;
     let throttle = crate::nvim_api::FLOAT_SCAN_THROTTLE_MS;
     let notify_sink = crate::nvim_api::NOTIFY_SINK_CHUNK;
+    let window_status = crate::nvim_api::REGISTER_WINDOW_STATUS_CHUNK;
     let sync_parse_bytes = SYNC_PARSE_BYTES;
     let combined_parse_bytes = COMBINED_PARSE_BYTES;
     format!(
@@ -2141,6 +2142,9 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          ]==]))(channel, {throttle})\n\
          assert(load([==[\n\
          {notify_sink}\n\
+         ]==]))(channel)\n\
+         assert(load([==[\n\
+         {window_status}\n\
          ]==]))(channel)"
     )
 }

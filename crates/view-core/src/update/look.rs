@@ -67,7 +67,47 @@ pub(crate) fn set_look(model: &mut Model, look: Look) -> Vec<Effect> {
     model.dirty = true;
     let (width, height) = model.grid_target();
     let mut effects = vec![Effect::Rpc(RpcCall::TryResize { width, height })];
+    effects.append(&mut look_keyed_holds(model));
     effects.append(&mut request_all(model));
+    effects
+}
+
+/// The holds the new look owes, re-issued.
+///
+/// An option whose held value is keyed by look (`laststatus`, today's only
+/// one) was set by the takeover for the look the session started in, and
+/// nothing else would move it: the flip has to re-issue it or nvim keeps
+/// drawing a status row the frame no longer paints over, or drops the one
+/// it does.
+///
+/// Read off the channel table rather than named here, so the option a look
+/// decides is stated once, and gated on the same `view_draws` predicate the
+/// takeover's own session-held walk uses -- a surface the user handed back
+/// is one view does not set options for.
+fn look_keyed_holds(model: &Model) -> Vec<Effect> {
+    use crate::native::channels::{Channel, ChannelValue, Scope, CHANNELS};
+    let mut effects = Vec::new();
+    for entry in CHANNELS {
+        if !crate::native::surfaces::view_draws(entry.surface, model) {
+            continue;
+        }
+        for channel in entry.channels {
+            let Channel::Hold {
+                option,
+                scope,
+                value: value @ ChannelValue::ByLook { .. },
+            } = *channel
+            else {
+                continue;
+            };
+            let name = option.to_string();
+            let value = value.wire(model.look);
+            effects.push(Effect::Rpc(match scope {
+                Scope::Global => RpcCall::HoldOption { name, value },
+                Scope::Window => RpcCall::HoldWindowOption { name, value },
+            }));
+        }
+    }
     effects
 }
 

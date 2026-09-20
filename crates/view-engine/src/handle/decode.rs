@@ -12,6 +12,8 @@ use rmpv::Value;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
+use view_core::events::WinHandle;
+use view_core::model::WindowStatus;
 use view_core::msg::{DeleteConfirmOutcome, EngineRequest, Msg, RegisterType, ReplyToken};
 use view_core::native::mappings::MappingClaim;
 use view_core::native::surfaces::{FloatAnchor, FloatSighting};
@@ -127,8 +129,13 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
         "buffer" => {
             let name = first.as_str()?.to_owned();
             let modified = rest.first()?.as_bool()?;
-            Some(Msg::BufferChanged { name, modified })
+            Some(Msg::BufferChanged {
+                name,
+                modified,
+                filetype: rest.get(1).and_then(Value::as_str).unwrap_or("").to_owned(),
+            })
         }
+        "window" => decode_window_status(params),
         // the chunk resolves nvim's own two sentinels before sending, so
         // what arrives is always a plain count of milliseconds and a
         // payload that is not one leaves the reader's timing alone
@@ -160,6 +167,39 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
         }),
         _ => None,
     }
+}
+
+/// Decodes the window trigger's `('window', win, buf, name, modified, row,
+/// col, errors, warnings)` params into [`Msg::WindowStatus`], or `None` for
+/// a shape the chunk does not produce.
+///
+/// Read off `params` whole, for the reason [`decode_float_observed`] is:
+/// one pattern a reviewer can check against the `rpcnotify` call in
+/// [`crate::nvim_api::REGISTER_WINDOW_STATUS_CHUNK`] argument for argument.
+///
+/// The cursor position and the diagnostic counts saturate into `u32`: a
+/// buffer with more than four billion lines or diagnostics is one nvim
+/// cannot hold, and a count that reached the ceiling still reads as "more
+/// than the edge can show".
+fn decode_window_status(params: &[Value]) -> Option<Msg> {
+    let [_, win, buf, name, modified, row, col, errors, warnings] = params else {
+        return None;
+    };
+    // field by field off a default rather than as one struct expression:
+    // `WindowStatus` is `#[non_exhaustive]`, so a field added to it stays
+    // additive for every crate that builds one
+    let mut status = WindowStatus::default();
+    status.buf = buf.as_u64()?;
+    status.name = name.as_str().unwrap_or_default().to_owned();
+    status.modified = modified.as_bool().unwrap_or(false);
+    status.row = saturate_u32(row.as_u64()?);
+    status.col = saturate_u32(col.as_u64()?);
+    status.errors = saturate_u32(errors.as_u64()?);
+    status.warnings = saturate_u32(warnings.as_u64()?);
+    Some(Msg::WindowStatus {
+        win: WinHandle(win.as_u64()?),
+        status,
+    })
 }
 
 /// Decodes the float watcher's `('float', win, buf, row, col, width,

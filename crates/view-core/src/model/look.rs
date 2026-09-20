@@ -85,6 +85,24 @@ impl Look {
         }
     }
 
+    /// Rows view's own bottom bar takes, given the `statusline` feature's
+    /// switch.
+    ///
+    /// Under tiles each frame carries its own status segments in its
+    /// bottom edge, so no row stands for a bar at all. The one answer both
+    /// the spawn's geometry `--cmd` and [`Model::statusline_rows`] spend,
+    /// since a spawn seeded a row taller than the attach relayouts every
+    /// window on screen.
+    ///
+    /// [`Model::statusline_rows`]: crate::model::Model::statusline_rows
+    #[must_use]
+    pub const fn bar_rows(self, statusline_enabled: bool) -> u16 {
+        match (self.panes, statusline_enabled) {
+            (Panes::Nvim, true) => 1,
+            _ => 0,
+        }
+    }
+
     /// Slot origin to grid origin, as `(rows, cols)`.
     ///
     /// Gapless tiles fill their slots, so only a gapped one moves its grid
@@ -121,6 +139,30 @@ impl Look {
                 .saturating_sub(inset_rows * 2)
                 .saturating_sub(margin_top),
         )
+    }
+
+    /// The grid rows a tile's frame edges stand on, for a window nvim
+    /// placed in `slot`.
+    ///
+    /// A gapped tile has two: the top edge one row into the slot, and the
+    /// bottom edge one row above its foot. A gapless tile has one, the
+    /// lattice row under the slot, which this answers twice.
+    ///
+    /// Read by the painter's own damage, without the refusals
+    /// [`Look::frames`] makes for a slot too small to carry a frame: a row
+    /// repainted where nothing is drawn costs a frame of work, and one
+    /// skipped leaves a stale reading on screen.
+    #[must_use]
+    pub fn edge_rows(self, slot: (u16, u16, u16, u16)) -> [u16; 2] {
+        let (row, _, _, height) = slot;
+        if self.gaps {
+            [
+                row.saturating_add(1),
+                row.saturating_add(height).saturating_sub(2),
+            ]
+        } else {
+            [row.saturating_add(height); 2]
+        }
     }
 
     /// Whether a slot of this size, with this top margin, carries a frame

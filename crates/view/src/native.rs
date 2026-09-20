@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use view_core::model::Model;
+use view_core::model::{Look, Model};
 use view_core::msg::{Effect, EngineRequest, Msg, RpcCall, TakeoverStep};
 use view_core::native::channels::{self, Channel};
 use view_core::native::registry;
@@ -85,6 +85,11 @@ pub(crate) struct NativeSession {
     /// feature is off, keeping `view-native` itself unaware of any feature
     /// beyond the generic registry/exemption predicate it already reads.
     ai_enabled: bool,
+    /// The look this session was loaded under, taken from the `[ui]`
+    /// answers `load` already receives, so every hold and every hand-back
+    /// resolves its look-keyed value without reading the config a second
+    /// time.
+    look: Look,
 }
 
 impl NativeSession {
@@ -146,14 +151,19 @@ impl NativeSession {
         // statusline at `offset + grid_h` using nvim's still-full grid
         // height and paints it one row below the terminal entirely, same
         // shape as `UiEvent::TablineUpdate`'s resize-on-change below.
-        if model.statusline_enabled {
+        if model.statusline_rows() > 0 {
             let (grid_width, grid_height) = model.grid_target();
             effects.push(Effect::Rpc(RpcCall::TryResize {
                 width: grid_width,
                 height: grid_height,
             }));
         }
-        let plan = plan(&cfg, registry::features());
+        // the model's own look, which `main.rs` set from the same resolved
+        // `[ui]` table before this ran: two readings of one answer would
+        // let the takeover hold `laststatus` for a look the frame is not
+        // drawing
+        let look = model.look;
+        let plan = plan(&cfg, registry::features(), look);
         let session = Self {
             cfg,
             plan,
@@ -162,6 +172,7 @@ impl NativeSession {
             channel_id,
             handed_over: false,
             ai_enabled: model.ai_enabled,
+            look,
         };
         (session, effects)
     }
@@ -266,7 +277,7 @@ impl NativeSession {
             if channels::claimants_of(option).all(|s| surfaces::view_draws(s, model)) {
                 effects.push(RpcCall::HoldOption {
                     name: option.to_string(),
-                    value: value.wire(),
+                    value: value.wire(self.look),
                 });
             }
         }
@@ -387,6 +398,7 @@ impl NativeSession {
             channel_id: 0,
             handed_over: true,
             ai_enabled: true,
+            look: Look::default(),
         }
     }
 
@@ -395,12 +407,17 @@ impl NativeSession {
     pub(crate) fn all_enabled(channel_id: u64, record: Option<PathBuf>) -> Self {
         Self {
             cfg: NativeConfig::all_enabled(),
-            plan: plan(&NativeConfig::all_enabled(), registry::features()),
+            plan: plan(
+                &NativeConfig::all_enabled(),
+                registry::features(),
+                Look::default(),
+            ),
             config_path: None,
             record,
             channel_id,
             handed_over: false,
             ai_enabled: true,
+            look: Look::default(),
         }
     }
 }
@@ -543,16 +560,20 @@ mod tests {
         // the plan's own calls, compared as a list rather than counted: a
         // count matches whenever a hold of the wrong surface replaces the
         // right one, and the plan carries two kinds of hold now
-        let planned: Vec<RpcCall> = plan(&NativeConfig::all_enabled(), registry::features())
-            .iter()
-            .filter_map(|entry| entry.rpc.clone())
-            .collect();
+        let planned: Vec<RpcCall> = plan(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            Look::default(),
+        )
+        .iter()
+        .filter_map(|entry| entry.rpc.clone())
+        .collect();
         let session_held: Vec<RpcCall> = channels::session_held()
             .into_iter()
             .filter_map(|channel| match channel {
                 Channel::Hold { option, value, .. } => Some(RpcCall::HoldOption {
                     name: option.to_string(),
-                    value: value.wire(),
+                    value: value.wire(Look::default()),
                 }),
                 _ => None,
             })
@@ -693,12 +714,17 @@ mod tests {
     fn a_disabled_ai_feature_registers_no_ai_key() {
         let mut session = NativeSession {
             cfg: NativeConfig::all_enabled(),
-            plan: plan(&NativeConfig::all_enabled(), registry::features()),
+            plan: plan(
+                &NativeConfig::all_enabled(),
+                registry::features(),
+                Look::default(),
+            ),
             config_path: None,
             record: None,
             channel_id: 13,
             handed_over: false,
             ai_enabled: false,
+            look: Look::default(),
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -766,6 +792,7 @@ mod tests {
             channel_id: 9,
             handed_over: false,
             ai_enabled: true,
+            look: Look::default(),
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -820,13 +847,14 @@ mod tests {
         let cfg =
             NativeConfig::from_toml_str("[native]\nnotifications = false\n").expect("valid toml");
         let mut session = NativeSession {
-            plan: plan(&cfg, registry::features()),
+            plan: plan(&cfg, registry::features(), Look::default()),
             cfg,
             config_path: None,
             record: None,
             channel_id: 11,
             handed_over: false,
             ai_enabled: true,
+            look: Look::default(),
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
