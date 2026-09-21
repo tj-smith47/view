@@ -1093,7 +1093,9 @@ fn layer_kind(model: &Model, kind: &OverlayKind, height: u16, width: u16) -> Opt
         // a message-history browse is presented the same way the palette
         // itself is: rows in a centered box, no fields of its own the
         // palette's LayerKind doesn't already carry
-        OverlayKind::MessageHistory(state) => Some(LayerKind::Palette(state.view())),
+        OverlayKind::MessageHistory(state) => {
+            Some(LayerKind::Palette(state.view(model.utc_offset_secs())))
+        }
         // a titled box with a message line and a fixed answer list is what
         // the confirm prompt's own layer already draws; the busy modal
         // carries no field that shape does not

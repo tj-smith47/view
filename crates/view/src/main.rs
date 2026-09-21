@@ -8,6 +8,7 @@ mod ai_worker;
 mod bridge;
 mod clipboard;
 mod engine_ops;
+mod localtime;
 mod loop_msgs;
 mod native;
 mod osc52;

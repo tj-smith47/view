@@ -287,6 +287,11 @@ pub struct Messages {
     /// The clock every entry pushed from here on stamps itself with. See
     /// [`Self::set_now`].
     now: SystemTime,
+    /// Seconds east of UTC, applied by [`format_at`] when a stamp is
+    /// rendered rather than when an entry is stamped: a timestamp already
+    /// on screen moves with a later DST flip the same way the clock in the
+    /// corner of a real desktop does. See [`Self::set_utc_offset`].
+    utc_offset_secs: i64,
 }
 
 impl Default for Messages {
@@ -303,26 +308,30 @@ impl Default for Messages {
             handed_back: false,
             foreign_notifier: false,
             now: SystemTime::UNIX_EPOCH,
+            utc_offset_secs: 0,
         }
     }
 }
 
-/// `at`, rendered `YYYY-MM-DD HH:MM:SS` in UTC -- the one format the history
-/// overlay and the windowed notification stream both show beside an entry's
-/// text.
+/// `at` shifted by `offset_secs` (seconds east of UTC, see
+/// [`Messages::set_utc_offset`]) and rendered `YYYY-MM-DD HH:MM:SS` -- the
+/// one format the history overlay and the windowed notification stream both
+/// show beside an entry's text.
 ///
 /// No timezone crate reaches `view-core` (it stays pure, per the crate
-/// dependency direction), so this is UTC rather than the viewer's local
-/// time; the civil-date conversion is Howard Hinnant's `civil_from_days`,
+/// dependency direction), so the offset is a plain integer of seconds
+/// handed in from `crates/view`, which is free to ask the platform for it;
+/// the civil-date conversion here is Howard Hinnant's `civil_from_days`,
 /// good over the whole range a `SystemTime` can represent on every
 /// platform view runs on. A clock before the epoch (an unset hardware
 /// clock) renders the epoch itself rather than panicking.
 #[must_use]
-pub fn format_at(at: SystemTime) -> String {
+pub fn format_at(at: SystemTime, offset_secs: i64) -> String {
     let secs = at
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .saturating_add(offset_secs);
     let days = secs.div_euclid(86_400);
     let time_of_day = secs.rem_euclid(86_400);
     let (year, month, day) = civil_from_days(days);
@@ -382,6 +391,21 @@ impl Messages {
     /// -- push and replace alike -- shares that fold's own instant.
     pub(crate) fn set_now(&mut self, now: SystemTime) {
         self.now = now;
+    }
+
+    /// Sets the offset [`format_at`] renders every stamp with. Called only
+    /// from [`crate::model::Model::set_utc_offset`], the sibling
+    /// [`Self::set_now`] takes its clock from -- `crates/view` asks the
+    /// platform for both ahead of the same fold.
+    pub(crate) fn set_utc_offset(&mut self, secs: i64) {
+        self.utc_offset_secs = secs;
+    }
+
+    /// The offset a display reads a stamp through. See
+    /// [`Self::set_utc_offset`].
+    #[must_use]
+    pub(crate) fn utc_offset_secs(&self) -> i64 {
+        self.utc_offset_secs
     }
 
     /// Stamps and appends one entry: `kind`/`content` as decoded off the
@@ -872,6 +896,7 @@ impl Messages {
     /// | `handed_back` | kept: it is the session's `[native]` answer, and the replacement attaches with the same `ext_*` set |
     /// | `foreign_notifier` | cleared: it named a `vim.notify` inside a process that is gone, and a notice raised in the restart window would be spoken to it |
     /// | `now` (`Self::set_now`) | kept: it is the loop thread's wall clock, not a fact about the dead connection, and the very next fold stamps it again regardless |
+    /// | `utc_offset_secs` (`Self::set_utc_offset`) | kept: it is the host's own clock offset, not a fact about the dead connection, and the very next fold sets it again regardless |
     pub(crate) fn forget_engine(&mut self) {
         // the restart marks the model dirty on either outcome of the attach
         // that follows, and `update()` arms the top slot on the next fold

@@ -8462,7 +8462,7 @@ fn open_history(model: &mut Model) {
 /// The open history overlay's own rendered view.
 fn history_view(model: &Model) -> crate::native::views::PaletteView {
     match model.overlays().last().map(|o| &o.kind) {
-        Some(OverlayKind::MessageHistory(state)) => state.view(),
+        Some(OverlayKind::MessageHistory(state)) => state.view(model.utc_offset_secs()),
         other => panic!("the history overlay must be open: {other:?}"),
     }
 }

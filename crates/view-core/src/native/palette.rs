@@ -181,8 +181,8 @@ impl MessageHistoryState {
     }
 
     #[must_use]
-    pub fn view(&self) -> PaletteView {
-        self.view_for_width(u16::MAX)
+    pub fn view(&self, utc_offset_secs: i64) -> PaletteView {
+        self.view_for_width(u16::MAX, utc_offset_secs)
     }
 
     /// The same rows [`Self::view`] builds, with the timestamp shortened to
@@ -192,12 +192,12 @@ impl MessageHistoryState {
     /// the history overlay always has the whole terminal width and keeps
     /// the full stamp by calling [`Self::view`].
     #[must_use]
-    pub fn view_for_width(&self, width: u16) -> PaletteView {
+    pub fn view_for_width(&self, width: u16, utc_offset_secs: i64) -> PaletteView {
         let short = width < NARROW_STREAM_STAMP_WIDTH;
         let rows: Vec<PaletteRow> = self
             .entries
             .iter()
-            .map(|entry| PaletteRow::new(entry_label_for(entry, short)))
+            .map(|entry| PaletteRow::new(entry_label_for(entry, short, utc_offset_secs)))
             .collect();
         let view = PaletteView::new(MESSAGE_HISTORY_TITLE).with_rows(rows);
         if self.entries.is_empty() {
@@ -277,13 +277,14 @@ const NARROW_STREAM_STAMP_WIDTH: u16 = 40;
 
 /// One history row's label: `entry_text` with its timestamp in front, full
 /// (`YYYY-MM-DD HH:MM:SS`) or `short` (`HH:MM:SS`, the last 8 characters of
-/// the same rendering). [`MessageHistoryState::view`] and
-/// [`MessageHistoryState::view_for_width`] are what draw this and nothing
-/// else reads it -- a copy takes [`entry_text`] alone, so a path or a
-/// message containing today's date is never mistaken for one this label
+/// the same rendering), local to the viewer per `utc_offset_secs` (I12; see
+/// [`crate::model::Model::set_utc_offset`]). [`MessageHistoryState::view`]
+/// and [`MessageHistoryState::view_for_width`] are what draw this and
+/// nothing else reads it -- a copy takes [`entry_text`] alone, so a path or
+/// a message containing today's date is never mistaken for one this label
 /// prepended.
-fn entry_label_for(entry: &MessageEntry, short: bool) -> String {
-    let stamp = format_at(entry.at());
+fn entry_label_for(entry: &MessageEntry, short: bool, utc_offset_secs: i64) -> String {
+    let stamp = format_at(entry.at(), utc_offset_secs);
     let stamp = if short { &stamp[11..] } else { &stamp[..] };
     format!("{stamp} {}", entry_text(entry))
 }
@@ -443,7 +444,7 @@ mod tests {
         let state = MessageHistoryState::snapshot(&history);
         history.push(&message_entry("third, after the snapshot"));
 
-        let view = state.view();
+        let view = state.view(0);
         let labels: Vec<String> = view.rows.iter().map(|r| r.label.clone()).collect();
         assert_eq!(labels.len(), 2, "a snapshot is taken once");
         assert!(labels.iter().any(|l| l.contains("first")));
@@ -458,10 +459,40 @@ mod tests {
         history.push(&message_entry_at("build finished", stamp));
 
         let state = MessageHistoryState::snapshot(&history);
-        let view = state.view();
+        let view = state.view(0);
 
         assert_eq!(view.rows.len(), 1);
         assert_eq!(view.rows[0].label, "2023-11-14 22:13:20 build finished");
+    }
+
+    #[test]
+    fn the_history_overlay_renders_the_stamp_local_to_the_offset_it_is_given() {
+        let stamp =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let mut history = ToastHistory::new();
+        history.push(&message_entry_at("build finished", stamp));
+
+        let state = MessageHistoryState::snapshot(&history);
+        // UTC-7: the same instant `the_history_overlay_renders_the_full_timestamp`
+        // reads as 22:13:20 UTC crosses midnight into the day before, local
+        let view = state.view(-7 * 3600);
+
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].label, "2023-11-14 15:13:20 build finished");
+    }
+
+    #[test]
+    fn a_narrow_windowed_streams_shortened_stamp_is_local_too() {
+        let stamp =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let mut history = ToastHistory::new();
+        history.push(&message_entry_at("build finished", stamp));
+
+        let state = MessageHistoryState::snapshot(&history);
+        let view = state.view_for_width(NARROW_STREAM_STAMP_WIDTH - 1, -7 * 3600);
+
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].label, "15:13:20 build finished");
     }
 
     #[test]
@@ -476,7 +507,7 @@ mod tests {
         history.push(&message_entry("third, after the snapshot"));
         assert!(state.refresh(&history));
 
-        let view = state.view();
+        let view = state.view(0);
         let labels: Vec<String> = view.rows.iter().map(|r| r.label.clone()).collect();
         assert_eq!(labels.len(), 3, "{labels:?}");
         assert!(labels[0].contains("third"), "newest-first: {labels:?}");
@@ -495,12 +526,12 @@ mod tests {
         }
         let mut state = MessageHistoryState::snapshot(&history);
         assert!(state.select(5));
-        let selected_text = state.view().rows[5].label.clone();
+        let selected_text = state.view(0).rows[5].label.clone();
 
         history.push(&message_entry("newest, after the ring is full"));
         assert!(state.refresh(&history));
 
-        let view = state.view();
+        let view = state.view(0);
         let labels: Vec<String> = view.rows.iter().map(|r| r.label.clone()).collect();
         assert_eq!(
             labels[view.selected.expect("an entry is still selected")],

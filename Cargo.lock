@@ -2665,6 +2665,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "clap",
+ "libc",
  "rustix",
  "serde",
  "thiserror 2.0.18",
@@ -2678,6 +2679,7 @@ dependencies = [
  "view-surface",
  "view-test-support",
  "view-tui",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

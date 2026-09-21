@@ -471,6 +471,26 @@ impl Model {
         self.engine.messages.set_now(now);
     }
 
+    /// Sets the offset (seconds east of UTC) a message stamp renders
+    /// through, the sibling [`Self::set_now`]'s own caller sets ahead of
+    /// the same fold. `view-core` stays pure (see the crate dependency
+    /// direction), so it never asks the platform for this itself -- I12
+    /// shipped with no such setter at all, and every stamp rendered UTC
+    /// with nothing on screen or in the docs saying so.
+    pub fn set_utc_offset(&mut self, secs: i64) {
+        self.engine.messages.set_utc_offset(secs);
+    }
+
+    /// The offset [`Self::set_utc_offset`] last set, for a renderer outside
+    /// this crate (`view-surface`, `view-tui`) to hand [`format_at`] at the
+    /// moment it draws a stamp.
+    ///
+    /// [`format_at`]: crate::model::format_at
+    #[must_use]
+    pub fn utc_offset_secs(&self) -> i64 {
+        self.engine.messages.utc_offset_secs()
+    }
+
     /// Whether the attach this session owes nvim is still outstanding.
     ///
     /// The loop's own read: it is what arms the deadline that attaches a

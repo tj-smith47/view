@@ -156,6 +156,7 @@ pub(crate) fn dispatch<E: EngineOps>(
     // only place that instant is ever taken -- the paint path never calls
     // `SystemTime::now()`.
     model.set_now(SystemTime::now());
+    model.set_utc_offset(crate::localtime::utc_offset_secs());
     // kept aside rather than logged here: a float's `layout` line carries
     // whether view is holding it off the screen, which is the fold below's
     // own answer. Empty, and so free, with no `VIEW_LOG` sink open

@@ -221,9 +221,9 @@ fn native_pane_content(
         NativeSurface::Notifications => model.overlays().iter().find_map(|overlay| match &overlay
             .kind
         {
-            OverlayKind::MessageHistory(state) => {
-                Some(LayerKind::Stream(state.view_for_width(width)))
-            }
+            OverlayKind::MessageHistory(state) => Some(LayerKind::Stream(
+                state.view_for_width(width, model.utc_offset_secs()),
+            )),
             _ => None,
         }),
         // `NativeSurface` is `#[non_exhaustive]`: every variant this crate
