@@ -345,9 +345,10 @@ impl<E: EngineOps> Executor<E> {
                         split,
                         size,
                         generation,
+                        enter,
                     } => self
                         .ops
-                        .open_native_window(surface, split, size, generation),
+                        .open_native_window(surface, split, size, generation, enter),
                     RpcCall::CloseNativeWindow { win } => self.ops.close_native_window(win),
                     RpcCall::SetWindowSize { win, width, height } => {
                         self.ops.set_window_size(win, width, height)

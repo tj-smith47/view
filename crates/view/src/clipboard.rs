@@ -963,6 +963,7 @@ mod tests {
             _split: view_core::msg::WinSplit,
             _size: u16,
             _generation: u64,
+            _enter: bool,
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }

@@ -125,6 +125,7 @@ pub trait EngineOps {
         split: WinSplit,
         size: u16,
         generation: u64,
+        enter: bool,
     ) -> Result<(), EngineError>;
     /// Closes a window view opened for a surface of its own.
     fn close_native_window(&self, win: u64) -> Result<(), EngineError>;
@@ -396,8 +397,9 @@ impl EngineOps for EngineHandle {
         split: WinSplit,
         size: u16,
         generation: u64,
+        enter: bool,
     ) -> Result<(), EngineError> {
-        self.open_native_window(surface, split, size, generation)
+        self.open_native_window(surface, split, size, generation, enter)
     }
     fn close_native_window(&self, win: u64) -> Result<(), EngineError> {
         self.close_native_window(win)
@@ -628,8 +630,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
         split: WinSplit,
         size: u16,
         generation: u64,
+        enter: bool,
     ) -> Result<(), EngineError> {
-        (**self).open_native_window(surface, split, size, generation)
+        (**self).open_native_window(surface, split, size, generation, enter)
     }
     fn close_native_window(&self, win: u64) -> Result<(), EngineError> {
         (**self).close_native_window(win)
@@ -863,8 +866,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
         split: WinSplit,
         size: u16,
         generation: u64,
+        enter: bool,
     ) -> Result<(), EngineError> {
-        (**self).open_native_window(surface, split, size, generation)
+        (**self).open_native_window(surface, split, size, generation, enter)
     }
     fn close_native_window(&self, win: u64) -> Result<(), EngineError> {
         (**self).close_native_window(win)
@@ -1159,9 +1163,10 @@ impl EngineOps for FakeOps {
         split: WinSplit,
         size: u16,
         generation: u64,
+        enter: bool,
     ) -> Result<(), EngineError> {
         self.record(format!(
-            "open_native_window({},{},{size},{generation})",
+            "open_native_window({},{},{size},{generation},{enter})",
             surface.id(),
             split.word()
         ))
@@ -1454,6 +1459,7 @@ impl EngineOps for SlowOps {
         _split: WinSplit,
         _size: u16,
         _generation: u64,
+        _enter: bool,
     ) -> Result<(), EngineError> {
         Ok(())
     }
