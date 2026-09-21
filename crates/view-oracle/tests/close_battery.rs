@@ -649,6 +649,12 @@ const TILED_STEPS: [(&str, &str); 9] = [
 
 const QUIESCE_SILENCE: Duration = Duration::from_millis(200);
 const QUIESCE_DEADLINE: Duration = Duration::from_secs(10);
+/// The silence window the two latency measurements below settle on --
+/// every other leg in this file uses [`QUIESCE_SILENCE`] because it is
+/// quiescing between steps whose correctness matters, not timing them. A
+/// stopwatch that never returns before 200ms of quiet has passed cannot
+/// tell a fast ring step from a slow one; it reads the floor.
+const LATENCY_SILENCE: Duration = Duration::from_millis(5);
 
 /// The size of every window open in the engine, read off nvim itself.
 fn nvim_window_sizes(engine: &mut view_oracle::EngineSession) -> Vec<(usize, usize)> {
@@ -2296,14 +2302,34 @@ fn the_cost_of_one_ring_step_with_all_four_surfaces_open() {
                 verb: "cycle_surfaces".to_string(),
             })
             .expect("the ring answers its own invoke");
-        assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+        assert!(engine.quiesce(LATENCY_SILENCE, QUIESCE_DEADLINE).unwrap());
         samples.push(start.elapsed());
     }
     samples.sort_unstable();
+
+    let baseline = median_noop_latency(&mut overlay_session(&dir));
+
     eprintln!(
-        "median ring-step latency, four surfaces open: {:?}",
+        "median ring-step latency, four surfaces open: {:?}, harness \
+         baseline (same surfaces, no step): {baseline:?}",
         samples[samples.len() / 2]
     );
+}
+
+/// The median wall time of the same quiesce this file's latency tests
+/// settle on, with a key that moves nothing -- the harness's own round-trip
+/// cost, isolated from any surface actually opening or closing, so the ring
+/// step's own cost is the difference between the two medians.
+fn median_noop_latency(engine: &mut view_oracle::EngineSession) -> Duration {
+    let mut samples = Vec::with_capacity(30);
+    for _ in 0..30 {
+        let start = Instant::now();
+        engine.arm_and_input("<Esc>").unwrap();
+        assert!(engine.quiesce(LATENCY_SILENCE, QUIESCE_DEADLINE).unwrap());
+        samples.push(start.elapsed());
+    }
+    samples.sort_unstable();
+    samples[samples.len() / 2]
 }
 
 /// The ticker's own tile, against real nvim under `panes = "tiles"` at the
