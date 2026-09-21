@@ -12,7 +12,7 @@
 //! be a second interpretation of the same wire traffic, free to drift from
 //! the first the moment either one changes.
 
-use crate::model::{CmdlineState, MessageEntry, PopupmenuState};
+use crate::model::{format_at, CmdlineState, MessageEntry, PopupmenuState};
 use crate::native::toast::ToastHistory;
 use crate::native::views::{PaletteRow, PaletteView};
 
@@ -185,7 +185,7 @@ impl MessageHistoryState {
         let rows: Vec<PaletteRow> = self
             .entries
             .iter()
-            .map(|entry| PaletteRow::new(entry_text(entry)))
+            .map(|entry| PaletteRow::new(entry_label(entry)))
             .collect();
         let view = PaletteView::new(MESSAGE_HISTORY_TITLE).with_rows(rows);
         if self.entries.is_empty() {
@@ -244,15 +244,26 @@ impl MessageHistoryState {
     }
 }
 
-/// One history entry's display text: its `content` chunks, joined the same
+/// One history entry's text, verbatim: its `content` chunks joined the same
 /// way `typed_text` joins a cmdline's -- nothing downstream repaints a
-/// history row's internal highlighting either.
+/// history row's internal highlighting either. What [`Self::selected_text`]
+/// hands the copy key, byte for byte; see [`entry_label`] for the row the
+/// overlay actually draws.
 fn entry_text(entry: &MessageEntry) -> String {
     entry
         .content
         .iter()
         .map(|(_, text)| text.as_str())
         .collect()
+}
+
+/// One history row's full label: `entry_text` with its timestamp in front,
+/// which is what [`MessageHistoryState::view`] draws and nothing else
+/// reads -- a copy takes [`entry_text`] alone, so a path or a message
+/// containing today's date is never mistaken for one this label
+/// prepended.
+fn entry_label(entry: &MessageEntry) -> String {
+    format!("{} {}", format_at(entry.at()), entry_text(entry))
 }
 
 #[cfg(test)]
@@ -295,9 +306,14 @@ mod tests {
     }
 
     fn message_entry(text: &str) -> MessageEntry {
+        message_entry_at(text, std::time::SystemTime::UNIX_EPOCH)
+    }
+
+    fn message_entry_at(text: &str, at: std::time::SystemTime) -> MessageEntry {
         // MessageEntry has no public constructor -- built through a real
         // Messages::push, the same way toast.rs's own tests do.
         let mut messages = Messages::default();
+        messages.set_now(at);
         messages.push("native".to_string(), vec![(0, text.to_string())], false);
         messages.entries.into_iter().next().expect("just pushed")
     }
@@ -410,6 +426,20 @@ mod tests {
         assert_eq!(labels.len(), 2, "a snapshot is taken once");
         assert!(labels.iter().any(|l| l.contains("first")));
         assert!(labels.iter().any(|l| l.contains("second")));
+    }
+
+    #[test]
+    fn the_history_overlay_renders_the_full_timestamp() {
+        let stamp =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let mut history = ToastHistory::new();
+        history.push(&message_entry_at("build finished", stamp));
+
+        let state = MessageHistoryState::snapshot(&history);
+        let view = state.view();
+
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].label, "2023-11-14 22:13:20 build finished");
     }
 
     #[test]

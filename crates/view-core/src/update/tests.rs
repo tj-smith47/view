@@ -8746,7 +8746,7 @@ fn the_dismiss_key_on_an_ordinary_history_entry_takes_down_nothing() {
     open_history(&mut m);
     assert_eq!(
         history_view(&m).rows.first().map(|r| r.label.as_str()),
-        Some("an ordinary message"),
+        Some("1970-01-01 00:00:00 an ordinary message"),
         "the selected row must be the one with no family of its own"
     );
     assert_eq!(history_view(&m).selected, Some(0));

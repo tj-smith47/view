@@ -4,6 +4,8 @@
 //! Split out of `model.rs` under the module-size ceiling; the types are
 //! re-exported from there, so nothing outside this crate names this module.
 
+use std::time::SystemTime;
+
 use crate::native::views::Span;
 
 /// A locally-assigned identity for one [`MessageEntry`], stamped by
@@ -50,9 +52,24 @@ pub struct MessageEntry {
     /// `EngineModel::record_native_notice_sticky_once` arms, which is the
     /// only clock view-core has.
     stood_its_window: bool,
+    /// The clock [`Model::set_now`](crate::model::Model::set_now) held when
+    /// the fold that pushed this entry ran. Never read from the entry's own
+    /// wall clock, because a notice decoded off the wire carries no
+    /// timestamp of its own -- this is the instant view learned of it, not
+    /// the instant nvim raised it.
+    at: SystemTime,
 }
 
 impl MessageEntry {
+    /// The instant the fold that pushed this entry ran, per
+    /// [`Model::set_now`](crate::model::Model::set_now). What the history
+    /// overlay and the windowed notification stream render alongside the
+    /// entry's text.
+    #[must_use]
+    pub fn at(&self) -> SystemTime {
+        self.at
+    }
+
     /// This entry's identity, stamped when it was pushed. `toast`'s
     /// idle-expiry timer names the entry it was scheduled for by this id,
     /// since positions in `Messages::entries` shift as later messages
@@ -221,7 +238,7 @@ impl MessageEntry {
 /// single `Option`, since nvim can show several messages in sequence
 /// (`:messages` history) before any are cleared.
 #[non_exhaustive]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Messages {
     pub entries: Vec<MessageEntry>,
     /// Foreign transient messages parked by the startup hold: recorded to
@@ -260,6 +277,67 @@ pub struct Messages {
     /// Whether a notifier other than nvim's own echo stands at
     /// `vim.notify`. See [`Self::set_foreign_notifier`].
     foreign_notifier: bool,
+    /// The clock every entry pushed from here on stamps itself with. See
+    /// [`Self::set_now`].
+    now: SystemTime,
+}
+
+impl Default for Messages {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            held: Vec::new(),
+            startup_hold: crate::native::toast::StartupHold::default(),
+            next_message_id: 0,
+            armed_slot: None,
+            armed_lines: Vec::new(),
+            paused: false,
+            handed_back: false,
+            foreign_notifier: false,
+            now: SystemTime::UNIX_EPOCH,
+        }
+    }
+}
+
+/// `at`, rendered `YYYY-MM-DD HH:MM:SS` in UTC -- the one format the history
+/// overlay and the windowed notification stream both show beside an entry's
+/// text.
+///
+/// No timezone crate reaches `view-core` (it stays pure, per the crate
+/// dependency direction), so this is UTC rather than the viewer's local
+/// time; the civil-date conversion is Howard Hinnant's `civil_from_days`,
+/// good over the whole range a `SystemTime` can represent on every
+/// platform view runs on. A clock before the epoch (an unset hardware
+/// clock) renders the epoch itself rather than panicking.
+#[must_use]
+pub fn format_at(at: SystemTime) -> String {
+    let secs = at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let time_of_day = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = time_of_day / 3600;
+    let minute = (time_of_day % 3600) / 60;
+    let second = time_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+}
+
+/// The proleptic Gregorian civil date `days` days after 1970-01-01,
+/// UTC. See [`format_at`]'s doc for provenance.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = i64::try_from(yoe).unwrap_or(0) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = u32::try_from(doy - (153 * mp + 2) / 5 + 1).unwrap_or(1);
+    let month = u32::try_from(if mp < 10 { mp + 3 } else { mp - 9 }).unwrap_or(1);
+    let year = if month <= 2 { y + 1 } else { y };
+    (year, month, day)
 }
 
 /// Which of `items` fit in `budget`, given each one's cost and whether it
@@ -290,6 +368,14 @@ fn keep_within(items: &[(bool, usize)], budget: usize) -> Vec<bool> {
 }
 
 impl Messages {
+    /// Sets the clock every entry pushed from here on stamps itself with.
+    /// Called only from [`crate::model::Model::set_now`], once per folded
+    /// message, ahead of `update()`, so every entry a single fold produces
+    /// -- push and replace alike -- shares that fold's own instant.
+    pub(crate) fn set_now(&mut self, now: SystemTime) {
+        self.now = now;
+    }
+
     /// Stamps and appends one entry: `kind`/`content` as decoded off the
     /// wire or synthesized locally, no classification, no history record,
     /// no expiry. `replace_last` overwrites the most recent entry instead
@@ -332,6 +418,7 @@ impl Messages {
             id,
             family: None,
             stood_its_window: false,
+            at: self.now,
         };
         if replace_last {
             if let Some(last) = self
@@ -372,6 +459,7 @@ impl Messages {
             id,
             family: None,
             stood_its_window: false,
+            at: self.now,
         }
     }
 
@@ -746,6 +834,7 @@ impl Messages {
     /// | `entries`, `next_message_id`, `armed_slot`, `armed_lines`, `paused` | kept: the toast stack and the scrollback outlive the connection, and an id stamped once is never reissued |
     /// | `handed_back` | kept: it is the session's `[native]` answer, and the replacement attaches with the same `ext_*` set |
     /// | `foreign_notifier` | cleared: it named a `vim.notify` inside a process that is gone, and a notice raised in the restart window would be spoken to it |
+    /// | `now` (`Self::set_now`) | kept: it is the loop thread's wall clock, not a fact about the dead connection, and the very next fold stamps it again regardless |
     pub(crate) fn forget_engine(&mut self) {
         // the restart marks the model dirty on either outcome of the attach
         // that follows, and `update()` arms the top slot on the next fold

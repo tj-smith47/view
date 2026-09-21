@@ -460,6 +460,17 @@ impl Model {
         self.engine.messages.hand_back(!owns_messages);
     }
 
+    /// Stamps the clock every message entry folded from here on records
+    /// itself with (see `MessageEntry::at`). Called once per folded message,
+    /// ahead of `update()`, so a single fold's pushes -- and a replace among
+    /// them -- all read the same instant. `Model` still holds no clock of
+    /// its own to measure elapsed time from (see `awaits_attach`'s doc): this
+    /// is a value handed in from outside, carried only far enough to label
+    /// an entry for display.
+    pub fn set_now(&mut self, now: std::time::SystemTime) {
+        self.engine.messages.set_now(now);
+    }
+
     /// Whether the attach this session owes nvim is still outstanding.
     ///
     /// The loop's own read: it is what arms the deadline that attaches a
@@ -2128,7 +2139,7 @@ mod window_status;
 
 pub use buffers::BufferEntry;
 pub use look::{Detected, Look, Panes, MIN_FRAMED_SLOT};
-pub use messages::{MessageEntry, MessageId, Messages};
+pub use messages::{format_at, MessageEntry, MessageId, Messages};
 pub use rows::{grid_target_for, ENGINE_MIN_SIZE, SIZE_FLOOR};
 pub use window_status::WindowStatus;
 
@@ -2722,6 +2733,16 @@ mod tests {
     fn message_entry_lines_single_line_message_yields_exactly_one_line() {
         let e = entry("echomsg", vec![(0, "hello".into())]);
         assert_eq!(e.lines(), vec!["hello"]);
+    }
+
+    #[test]
+    fn an_entry_carries_the_time_the_fold_was_stamped_with() {
+        let stamped = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        let mut messages = Messages::default();
+        messages.set_now(stamped);
+        messages.push("echomsg".to_string(), vec![(0, "hi".into())], false);
+        let entry = messages.entries.into_iter().next().unwrap();
+        assert_eq!(entry.at(), stamped);
     }
 
     #[test]

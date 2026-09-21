@@ -69,6 +69,16 @@ pub enum Anchor {
     Top,
     /// Flush against the bottom edge.
     Bottom,
+    /// Flush against the top-left corner: a toast stack's own anchor,
+    /// growing down from there.
+    TopLeft,
+    /// Flush against the top-right corner.
+    TopRight,
+    /// Flush against the bottom-left corner: a toast stack's own anchor,
+    /// growing up from there.
+    BottomLeft,
+    /// Flush against the bottom-right corner.
+    BottomRight,
 }
 
 impl Anchor {
@@ -82,7 +92,39 @@ impl Anchor {
             Self::Right => "right",
             Self::Top => "top",
             Self::Bottom => "bottom",
+            Self::TopLeft => "top-left",
+            Self::TopRight => "top-right",
+            Self::BottomLeft => "bottom-left",
+            Self::BottomRight => "bottom-right",
         }
+    }
+
+    /// Whether this anchor names one of the four corners rather than a
+    /// centered axis or a single edge -- the toast stack's own vocabulary
+    /// ([`Self::label`]'s four `*-*` words).
+    #[must_use]
+    pub const fn is_corner(self) -> bool {
+        matches!(
+            self,
+            Self::TopLeft | Self::TopRight | Self::BottomLeft | Self::BottomRight
+        )
+    }
+
+    /// Whether this corner sits on the terminal's top edge (`TopLeft`,
+    /// `TopRight`) rather than the bottom one. Only meaningful for a corner;
+    /// a non-corner anchor answers `true` (nothing reads it in that case).
+    #[must_use]
+    pub const fn is_top_corner(self) -> bool {
+        !matches!(self, Self::BottomLeft | Self::BottomRight)
+    }
+
+    /// Whether this corner sits on the terminal's left edge (`TopLeft`,
+    /// `BottomLeft`) rather than the right one. Only meaningful for a
+    /// corner; a non-corner anchor answers `true` (nothing reads it in that
+    /// case).
+    #[must_use]
+    pub const fn is_left_corner(self) -> bool {
+        !matches!(self, Self::TopRight | Self::BottomRight)
     }
 }
 
@@ -237,6 +279,10 @@ impl OverlayBox {
             Anchor::Right => (centered_row, term_w.saturating_sub(width)),
             Anchor::Top => (0, centered_col),
             Anchor::Bottom => (term_h.saturating_sub(height), centered_col),
+            Anchor::TopLeft => (0, 0),
+            Anchor::TopRight => (0, term_w.saturating_sub(width)),
+            Anchor::BottomLeft => (term_h.saturating_sub(height), 0),
+            Anchor::BottomRight => (term_h.saturating_sub(height), term_w.saturating_sub(width)),
         };
         OverlayRect {
             row,
@@ -464,6 +510,47 @@ mod tests {
         assert!(!r.contains(6, 19), "the column to the left is outside");
         assert!(!r.contains(18, 20), "the row below is outside");
         assert!(!r.contains(6, 60), "the column to the right is outside");
+    }
+
+    #[test]
+    fn each_corner_anchor_flushes_the_box_against_its_own_two_edges() {
+        let sized = OverlayBox::new(30, 20);
+        assert_eq!(
+            sized.with_anchor(Anchor::TopLeft).rect(100, 40),
+            OverlayRect {
+                row: 0,
+                col: 0,
+                width: 30,
+                height: 8
+            }
+        );
+        assert_eq!(
+            sized.with_anchor(Anchor::TopRight).rect(100, 40),
+            OverlayRect {
+                row: 0,
+                col: 70,
+                width: 30,
+                height: 8
+            }
+        );
+        assert_eq!(
+            sized.with_anchor(Anchor::BottomLeft).rect(100, 40),
+            OverlayRect {
+                row: 32,
+                col: 0,
+                width: 30,
+                height: 8
+            }
+        );
+        assert_eq!(
+            sized.with_anchor(Anchor::BottomRight).rect(100, 40),
+            OverlayRect {
+                row: 32,
+                col: 70,
+                width: 30,
+                height: 8
+            }
+        );
     }
 
     #[test]

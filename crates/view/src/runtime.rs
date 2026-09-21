@@ -34,7 +34,7 @@ use crate::speculate::{
     expire_speculation, note_engine_call, reconcile_speculation, SpeculationClock,
 };
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use view_core::model::Model;
 use view_core::msg::{Effect, ExitInfo, Msg, RpcCall};
 use view_core::native::supervision::{WedgeKind, READOUT_RESOLUTION};
@@ -150,6 +150,12 @@ pub(crate) fn dispatch<E: EngineOps>(
     msg: Msg,
 ) -> Flow {
     crate::vlog::log_msg(&msg);
+    // stamped ahead of every fold, never inside one: a message that pushes
+    // several entries (a redraw batch carrying more than one msg_show) must
+    // have them all read as the same instant, and the loop thread is the
+    // only place that instant is ever taken -- the paint path never calls
+    // `SystemTime::now()`.
+    model.set_now(SystemTime::now());
     // kept aside rather than logged here: a float's `layout` line carries
     // whether view is holding it off the screen, which is the fold below's
     // own answer. Empty, and so free, with no `VIEW_LOG` sink open
@@ -3493,6 +3499,46 @@ mod tests {
                 .len(),
             1,
             "the notice that left is gone from the stack it settled into"
+        );
+    }
+
+    /// `dispatch` stamps `model.set_now` ahead of every fold -- proven here
+    /// by pushing a real message through it and reading the entry's own
+    /// clock back, since a `Model` built fresh (`Messages::default`) starts
+    /// at `SystemTime::UNIX_EPOCH` and only a stamp taken before this
+    /// `dispatch` call could move it forward.
+    #[test]
+    fn the_runtime_stamps_before_every_fold() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        let _ = model
+            .engine
+            .messages
+            .resolve_startup_hold(view_core::native::toast::HoldOutcome::Release);
+        let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None, None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let before = SystemTime::now();
+        let _ = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::Redraw(vec![view_core::events::UiEvent::MsgShow {
+                kind: "echomsg".to_string(),
+                content: vec![(0, "stamped".to_string())],
+                replace_last: false,
+            }]),
+        );
+        let after = SystemTime::now();
+        let at = model.engine.messages.entries[0].at();
+        assert!(
+            at >= before && at <= after,
+            "entry stamped {at:?}, outside the fold's own [{before:?}, {after:?}]"
         );
     }
 

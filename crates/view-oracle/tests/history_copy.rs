@@ -55,6 +55,23 @@ const SETTLE: Duration = Duration::from_secs(5);
 #[cfg(target_os = "linux")]
 const NOTICE_OPENING: &str = "view: no system";
 
+/// Whether some line of `screen`'s contents is the selected history row
+/// (`> ` plus whatever the overlay drew, a timestamp among it) naming
+/// `text`.
+///
+/// A plain substring needle can no longer pin "the selected row holds this
+/// text" on its own: every row now opens with a `YYYY-MM-DD HH:MM:SS` this
+/// black-box session has no way to predict, sitting between the `> `
+/// marker and the row's own words.
+fn selected_row_contains(screen: &vt100::Screen, text: &str) -> bool {
+    screen.contents().lines().any(|line| {
+        // the framed overlay's own left border sits ahead of the `> `
+        // marker on every row (`│ > ...`), so this is a whole-line search
+        // rather than a prefix match
+        line.contains("> ") && line.contains(text)
+    })
+}
+
 fn wait_for_bytes(session: &mut view_oracle::PtySession, needle: &[u8], timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -127,9 +144,9 @@ fn scroll_to_target(session: &mut view_oracle::PtySession) {
     // the newest entry, which is where the overlay opens and the one row
     // this session can name without knowing which notices its own startup
     // raised behind the fixture
-    let newest = format!("> history filler {FILLER}");
+    let newest = format!("history filler {FILLER}");
     assert!(
-        session.wait_for(&newest, SETTLE),
+        session.wait_for_screen(SETTLE, |screen| selected_row_contains(screen, &newest)),
         "the history did not open on the newest entry; screen:\n{}",
         session.screen()
     );
@@ -138,7 +155,7 @@ fn scroll_to_target(session: &mut view_oracle::PtySession) {
         .send(b"G")
         .expect("the scroll keys must reach the session");
     assert!(
-        session.wait_for_screen(SETTLE, |screen| !screen.contents().contains(&newest)),
+        session.wait_for_screen(SETTLE, |screen| !selected_row_contains(screen, &newest)),
         "`G` left the selection on the newest entry; screen:\n{}",
         session.screen()
     );
@@ -146,7 +163,7 @@ fn scroll_to_target(session: &mut view_oracle::PtySession) {
         .send(b"gg")
         .expect("the scroll keys must reach the session");
     assert!(
-        session.wait_for(&newest, SETTLE),
+        session.wait_for_screen(SETTLE, |screen| selected_row_contains(screen, &newest)),
         "two `g` presses did not bring the selection back to the top; screen:\n{}",
         session.screen()
     );
@@ -155,7 +172,10 @@ fn scroll_to_target(session: &mut view_oracle::PtySession) {
         .send("j".repeat(FILLER).as_bytes())
         .expect("the scroll keys must reach the session");
     assert!(
-        session.wait_for("> view-history-copy", Duration::from_secs(10)),
+        session.wait_for_screen(Duration::from_secs(10), |screen| selected_row_contains(
+            screen,
+            "view-history-copy"
+        )),
         "the target row never scrolled into the overlay; screen:\n{}",
         session.screen()
     );
@@ -182,12 +202,26 @@ fn a_copied_history_line_reaches_both_the_terminal_and_the_local_register() {
         String::from_utf8_lossy(session.raw_output())
     );
 
+    // closed as its own step and waited out, rather than folded into the
+    // burst below: a row carrying a timestamp is long enough that the
+    // overlay's close can still be in flight when the next key arrives, and
+    // a `<CR>`/`o` sent into a session still holding the overlay open
+    // reaches the overlay's own map instead of opening a line in the buffer
+    session
+        .send(b"\x1b")
+        .expect("the close key must reach the session");
+    assert!(
+        session.wait_for_screen(SETTLE, |screen| !screen.contents().contains("Messages")),
+        "<Esc> never closed the message history; screen:\n{}",
+        session.screen()
+    );
+
     // and the local half, read back through view's own clipboard provider:
     // a `"+p` answers from the system clipboard when there is one and from
     // the worker's shadow register when there is not, and only the write
     // this same keypress performed can put the line in either
     session
-        .send(b"\x1bo\x1b\"+p")
+        .send(b"o\x1b\"+p")
         .expect("the paste keys must reach the session");
     assert!(
         session.wait_for(TARGET_NEEDLE, Duration::from_secs(10)),
