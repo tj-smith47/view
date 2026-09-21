@@ -175,6 +175,18 @@ pub fn keys() -> &'static [ConfigKey] {
                 derived: Some("<S-CR>, <M-CR>"),
             },
             ConfigKey {
+                table: "keys",
+                key: "toggle_gaps",
+                flag: None,
+                derived: Some("<F9>"),
+            },
+            ConfigKey {
+                table: "keys",
+                key: "cycle_surfaces",
+                flag: None,
+                derived: Some("<F10>"),
+            },
+            ConfigKey {
                 table: "supervision",
                 key: "auto_restart",
                 flag: None,

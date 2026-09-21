@@ -14480,3 +14480,140 @@ fn resizing_an_overlay_sidebar_still_steps_tree_width_pct() {
         "a floating sidebar's resize must issue no RPC: {effects:?}"
     );
 }
+
+/// `<F9>`/`<F10>` answer wherever the keyboard is aimed -- a plain engine
+/// focus, a focused windowed tree, a focused windowed agent panel -- because
+/// `route_key` resolves them ahead of every sidebar's own key table rather
+/// than through it. A key that reached the engine as ordinary text instead
+/// of the gaps toggle would leave `m.look.gaps` exactly where it started.
+#[test]
+fn the_two_new_key_actions_resolve_through_the_same_chain() {
+    for mut m in [model(), focused_windowed_tree(), focused_windowed_agent()] {
+        let before = m.look.gaps;
+        let effects = update(&mut m, key("<F9>"));
+        assert_ne!(before, m.look.gaps, "<F9> did not toggle gaps: {effects:?}");
+        assert!(
+            !effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Rpc(RpcCall::Input { notation }) if notation == "<F9>"
+            )),
+            "<F9> reached the engine as an ordinary keystroke: {effects:?}"
+        );
+    }
+}
+
+/// A cycle step never closes and reopens what is already open -- it only
+/// moves where a surface draws -- so the tree's own cursor row, which lives
+/// in its `TreeState` and nowhere the placement flag touches, survives
+/// every step of the ring untouched.
+#[test]
+fn an_open_tree_keeps_its_cursor_row_across_a_cycle() {
+    let mut m = focused_windowed_tree();
+    let _ = update(&mut m, key("<Down>"));
+    let selected = m.tree_mut().and_then(|tree| tree.view().selected);
+    assert!(selected.is_some(), "the cursor never moved onto a row");
+
+    for _ in 0..3 {
+        let _ = update(&mut m, key("<F10>"));
+        assert_eq!(
+            m.tree_mut().and_then(|tree| tree.view().selected),
+            selected,
+            "a placement cycle step moved a cursor row a placement change never owns"
+        );
+        assert!(
+            m.tree_mut().is_some(),
+            "a cycle step closed the tree rather than moving where it draws"
+        );
+    }
+}
+
+/// The agent panel's own terms, on the same standing as
+/// [`an_open_tree_keeps_its_cursor_row_across_a_cycle`]: its transcript
+/// lives in [`Model::ai_panel`], which a placement flip never reaches.
+#[test]
+fn an_open_panel_keeps_its_transcript_across_a_cycle() {
+    let mut m = focused_windowed_agent();
+    m.ai_panel_mut().transcript.append_or_extend(
+        Some("m0"),
+        "a message the cycle must not lose",
+        crate::native::ai_panel::TranscriptRole::Agent,
+    );
+    let before = panel_transcript_texts(&m);
+
+    for _ in 0..3 {
+        let _ = update(&mut m, key("<F10>"));
+        assert_eq!(
+            panel_transcript_texts(&m),
+            before,
+            "a placement cycle step touched a transcript a placement change never owns"
+        );
+        assert!(
+            m.ai_panel_overlay_open(),
+            "a cycle step closed the panel rather than moving where it draws"
+        );
+    }
+}
+
+/// A gaps flip changes what every window owes, not just the ones whose slot
+/// moved: [`GridRegistry::pending_inner_request`] keys its guard on
+/// `(slot, look, margin_top)`, so the look half of that key alone is enough
+/// to force a resend. A flip to gapless sends `(0, 0)` -- nvim reads a
+/// non-positive request as none at all and hands the window its whole slot
+/// back -- and a flip to gapped resends every inset, even for a window that
+/// never moved.
+#[test]
+fn toggle_gaps_reattaches_the_outer_grid_and_resends_every_request() {
+    let mut m = vsplit_model();
+    m.look = crate::model::Look::new(crate::model::Panes::Tiles, true);
+
+    let effects = update(&mut m, key("<F9>"));
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Rpc(RpcCall::TryResize { .. }))),
+        "the outer grid was not reattached: {effects:?}"
+    );
+    let gapless: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Rpc(RpcCall::TryResizeGrid {
+                grid,
+                width,
+                height,
+            }) => Some((*grid, *width, *height)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        gapless.len(),
+        2,
+        "both window grids must resend under the new look: {effects:?}"
+    );
+    assert!(
+        gapless.iter().all(|(_, w, h)| *w == 0 && *h == 0),
+        "a flip to gapless must send (0, 0), not the slot it already held: {gapless:?}"
+    );
+
+    let effects = update(&mut m, key("<F9>"));
+    let gapped: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Rpc(RpcCall::TryResizeGrid {
+                grid,
+                width,
+                height,
+            }) => Some((*grid, *width, *height)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        gapped.len(),
+        2,
+        "both window grids must resend on the way back too: {effects:?}"
+    );
+    assert!(
+        gapped.iter().all(|(_, w, h)| *w != 0 || *h != 0),
+        "a flip to gapped must resend a real inset, even for a window that \
+         never moved: {gapped:?}"
+    );
+}

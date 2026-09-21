@@ -44,6 +44,16 @@ pub enum Action {
     /// Insert a line break into the agent panel's composer, where `<CR>`
     /// sends the prompt instead.
     ComposerNewline,
+    /// Flip `[ui] gaps`: whether a gap separates neighbouring tiles.
+    /// Answers wherever the keyboard is aimed, not only inside a sidebar --
+    /// see `update::surfaces::route_key`'s own top for where that is
+    /// checked.
+    ToggleGaps,
+    /// Step every surface at once through the three-position ring `config
+    /// -> windowed -> overlay -> config`, kept across the session in
+    /// `SurfaceState`. Answers wherever the keyboard is aimed, the same as
+    /// [`Self::ToggleGaps`].
+    CycleSurfaces,
 }
 
 /// What a keystroke means to the surface that has the keyboard.
@@ -62,6 +72,8 @@ pub struct KeyBindings {
     wider: Vec<Binding>,
     narrower: Vec<Binding>,
     composer_newline: Vec<Binding>,
+    gaps: Vec<Binding>,
+    cycle: Vec<Binding>,
 }
 
 impl Default for KeyBindings {
@@ -92,6 +104,13 @@ impl Default for KeyBindings {
                 ("<C-w>".to_string(), Some("<lt>".to_string())),
             ],
             composer_newline: vec![("<S-CR>".to_string(), None), ("<M-CR>".to_string(), None)],
+            // one binding each, unlike the pairs above: a function key
+            // reports the same one way on every terminal tier this build
+            // runs on, so there is no capability gap for a second default
+            // to cover, and `<F5>` is already the same idiom for
+            // `RESTART_NOTATION`
+            gaps: vec![("<F9>".to_string(), None)],
+            cycle: vec![("<F10>".to_string(), None)],
         }
     }
 }
@@ -133,6 +152,8 @@ impl KeyBindings {
             Action::Resize(Direction::Wider) => &self.wider,
             Action::Resize(Direction::Narrower) => &self.narrower,
             Action::ComposerNewline => &self.composer_newline,
+            Action::ToggleGaps => &self.gaps,
+            Action::CycleSurfaces => &self.cycle,
         };
         bindings
             .iter()
@@ -150,6 +171,8 @@ impl KeyBindings {
             Action::Resize(Direction::Wider) => &mut self.wider,
             Action::Resize(Direction::Narrower) => &mut self.narrower,
             Action::ComposerNewline => &mut self.composer_newline,
+            Action::ToggleGaps => &mut self.gaps,
+            Action::CycleSurfaces => &mut self.cycle,
         }
     }
 
@@ -162,6 +185,8 @@ impl KeyBindings {
             (Action::Resize(Direction::Wider), &self.wider),
             (Action::Resize(Direction::Narrower), &self.narrower),
             (Action::ComposerNewline, &self.composer_newline),
+            (Action::ToggleGaps, &self.gaps),
+            (Action::CycleSurfaces, &self.cycle),
         ] {
             let hit = bindings
                 .iter()
@@ -190,6 +215,8 @@ impl KeyBindings {
             .iter()
             .chain(&self.narrower)
             .chain(&self.composer_newline)
+            .chain(&self.gaps)
+            .chain(&self.cycle)
             .any(|(first, second)| second.is_some() && first == notation)
             .then_some(Resolved::Pending)
     }
@@ -304,6 +331,8 @@ mod tests {
             Action::Resize(Direction::Wider),
             Action::Resize(Direction::Narrower),
             Action::ComposerNewline,
+            Action::ToggleGaps,
+            Action::CycleSurfaces,
         ] {
             let defaults = KeyBindings::default();
             let written = defaults.spellings(action);
@@ -324,6 +353,19 @@ mod tests {
             KeyBindings::default().spellings(Action::Resize(Direction::Narrower)),
             vec!["<S-Left>".to_string(), "<C-w><lt>".to_string()],
             "a chord is written as its two halves joined, `<` as nvim writes it"
+        );
+    }
+
+    #[test]
+    fn the_gaps_and_cycle_defaults_are_dedicated_function_keys() {
+        let keys = KeyBindings::default();
+        assert_eq!(
+            keys.resolve(None, "<F9>"),
+            Some(Resolved::Act(Action::ToggleGaps))
+        );
+        assert_eq!(
+            keys.resolve(None, "<F10>"),
+            Some(Resolved::Act(Action::CycleSurfaces))
         );
     }
 

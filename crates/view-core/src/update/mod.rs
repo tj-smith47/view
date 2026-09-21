@@ -1313,6 +1313,21 @@ fn ai_panel_size(model: &Model) -> (usize, usize) {
 /// caller has to carry in because the bookkeeping above may already have
 /// closed it.
 fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<Effect> {
+    // Gaps toggle and the placement cycle answer wherever the keyboard is
+    // aimed, the way a WM's own bindings reach through whatever client has
+    // focus, so the same press means the same thing whether the engine, a
+    // sidebar, a picker's query or a prompt currently has it -- checked
+    // ahead of everything below on purpose. `pending` is always `None`
+    // here: both ship on single-key defaults, so there is no chord to
+    // carry between keystrokes at this point, and a binding rebound onto a
+    // chord still answers from inside whichever sidebar context resolves
+    // `Model::key_bindings` with its own `pending_chord` (see
+    // `surfaces::apply_global_action`'s callers).
+    if let Some(Resolved::Act(action @ (Action::ToggleGaps | Action::CycleSurfaces))) =
+        model.key_bindings.resolve(None, &notation)
+    {
+        return surfaces::apply_global_action(model, action);
+    }
     let cmdline_open = model.engine.cmdline.is_some();
     model.dirty |= model
         .engine

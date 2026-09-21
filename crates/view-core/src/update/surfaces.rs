@@ -128,6 +128,99 @@ pub(super) fn tree_git_refresh_effect(model: &mut Model) -> Vec<Effect> {
     }
 }
 
+/// The two window-management actions, wherever [`crate::native::keys::
+/// Resolved`] resolved one -- [`super::route_key`]'s own top, or one of the
+/// sidebar/composer contexts that resolve the same [`Model::key_bindings`]
+/// for their own keys and fall through to this for the two neither of them
+/// answers itself.
+pub(super) fn apply_global_action(model: &mut Model, action: Action) -> Vec<Effect> {
+    match action {
+        Action::ToggleGaps => toggle_gaps(model),
+        Action::CycleSurfaces => cycle_placements(model),
+        Action::Resize(_) | Action::ComposerNewline => Vec::new(),
+    }
+}
+
+/// `[keys] toggle_gaps`: flips `[ui] gaps` and reissues everything a look
+/// change owes -- the outer grid's own size, then each window's inner size
+/// -- through [`super::look::set_look`], the one place that sequence is
+/// assembled. The gap is the whole of what moves: the panes stay exactly
+/// where they were, so the request `pending_inner_request` computes for a
+/// slot that did not move is still owed, because its guard is keyed on the
+/// look as well as the slot (see that method's own doc).
+fn toggle_gaps(model: &mut Model) -> Vec<Effect> {
+    let look = crate::model::Look::new(model.look.panes, !model.look.gaps);
+    super::look::set_look(model, look)
+}
+
+/// `[keys] cycle_surfaces`: advances the shared three-position ring
+/// (`config`, `windowed`, `overlay`) every surface answers to at once, and
+/// carries whatever is open across the step it just took.
+///
+/// A surface's own state -- the tree's cursor row, the agent panel's
+/// transcript, the notification stream's scroll position -- never moves for
+/// this: [`retile_open_surface`] only ever changes where a surface already
+/// open draws, through the same claim/release and `OpenNativeWindow`/
+/// `CloseNativeWindow` pair every other placement change goes through, and
+/// never the close that would drop the state riding under it. A surface
+/// with nothing open just gets a new default for its next open, no effect
+/// owed.
+pub(crate) fn cycle_placements(model: &mut Model) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    for (surface, target, changed) in model.surfaces.advance_ring() {
+        if changed && surface_is_open(model, surface) {
+            effects.append(&mut retile_open_surface(model, surface, target));
+        }
+    }
+    model.dirty = true;
+    effects
+}
+
+/// Whether `surface` has anything open right now, on whichever placement it
+/// currently draws under -- what [`cycle_placements`] asks before it moves
+/// anything, since a surface with nothing open owes no effect, only a new
+/// default for its next open.
+fn surface_is_open(model: &Model, surface: NativeSurface) -> bool {
+    match surface {
+        NativeSurface::Tree => model
+            .overlays()
+            .iter()
+            .any(|overlay| matches!(overlay.kind, OverlayKind::Tree(_))),
+        NativeSurface::Agent => model.ai_panel_overlay_open(),
+        NativeSurface::Notifications => history(model).is_some(),
+        // the palette's own overlay is nvim's cmdline, never a thing on
+        // `model.overlays()` -- see `open_native_window`'s doc
+        NativeSurface::Palette => model.engine.cmdline.is_some(),
+    }
+}
+
+/// Moves `surface`'s already-open state to `target`'s placement, touching
+/// only where it draws: the window claim and its wire pair, never the state
+/// itself. [`surface_is_open`] is the caller's guard that there is
+/// something here to move at all.
+fn retile_open_surface(
+    model: &mut Model,
+    surface: NativeSurface,
+    target: crate::native::geometry::SurfacePlacement,
+) -> Vec<Effect> {
+    use crate::native::geometry::SurfacePlacement;
+    match target {
+        SurfacePlacement::Windowed => {
+            if model.engine.grids().native_window(surface).is_some() {
+                return Vec::new();
+            }
+            vec![Effect::Rpc(open_native_window(model, surface))]
+        }
+        SurfacePlacement::Overlay => {
+            let Some(win) = model.engine.grids().native_window(surface) else {
+                return Vec::new();
+            };
+            model.engine.grids_mut().release_native_window(win);
+            vec![Effect::Rpc(RpcCall::CloseNativeWindow { win: win.0 })]
+        }
+    }
+}
+
 pub(super) fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
     if model.tree_is_windowed() {
         return toggle_windowed_tree(model);
@@ -633,6 +726,14 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         // and the tree answers it the way it answers any key no
         // binding of its own names.
         Some(Resolved::Act(Action::ComposerNewline)) => {}
+        // Dead in practice: `route_key`'s own top already answers these two
+        // for every keystroke before the tree ever sees one (see its doc),
+        // so this exists for the match to stay exhaustive as `Action`
+        // grows, and answers the same way on the rare path that reaches it
+        // anyway.
+        Some(Resolved::Act(action @ (Action::ToggleGaps | Action::CycleSurfaces))) => {
+            return apply_global_action(model, action);
+        }
         // The chord's first key waits here rather than moving
         // the selection or closing the sidebar; the follower
         // that completes nothing falls straight through to the

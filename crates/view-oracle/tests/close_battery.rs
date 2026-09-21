@@ -1685,3 +1685,79 @@ fn a_file_taken_into_the_trees_window_keeps_its_filetypes_look() {
          leg is measuring something other than the hand-back"
     );
 }
+
+/// `<F10>` stepped three times against the pinned nvim, under
+/// `panes = "tiles"` at the battery's own geometry: the tree's window
+/// opens on the step that carries it to `windowed`, closes on the step
+/// that carries it to `overlay`, and the tree's own state -- what
+/// `engine.tree_is_open()` answers for -- never closes with it.
+///
+/// Disconfirm: dropping the top-of-`route_key` intercept
+/// (`update::mod::route_key`) leaves `<F10>` reaching nvim as an ordinary
+/// keystroke, and the tree's window never moves at all.
+#[test]
+fn cycle_surfaces_moves_the_trees_window_against_real_nvim() {
+    let work = common::ScratchPaths::new("close-battery-cycle-tree");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = windowed_tree_session(&dir);
+    open_the_tree(&mut engine);
+    let opened_at = tree_window_widths(&mut engine);
+    assert_ne!(
+        opened_at, "",
+        "the tree never opened a window to begin with"
+    );
+
+    // ring position 1: windowed, where the tree already sat -- no window
+    // opens or closes
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "<F10>".to_string(),
+        }))
+        .expect("the ring answers a plain key");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        tree_window_widths(&mut engine),
+        opened_at,
+        "ring position 1 (windowed) must leave the tree in its own window"
+    );
+    assert!(engine.tree_is_open());
+
+    // ring position 2: overlay -- the tree's window closes and nvim is
+    // left with the one window it started the battery with
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "<F10>".to_string(),
+        }))
+        .expect("the ring answers a plain key");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        1,
+        "ring position 2 (overlay) must close the tree's own window"
+    );
+    assert_eq!(
+        tree_window_widths(&mut engine),
+        "",
+        "the tree's scratch window is still on screen under overlay"
+    );
+    assert!(
+        engine.tree_is_open(),
+        "the tree's own state must not close with its window"
+    );
+
+    // ring position 0 (config): this fixture's tree was never given a
+    // `[ui.surfaces.tree]` of its own, so config is overlay too and this
+    // step is a no-op -- proven by nvim's window count holding at one
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "<F10>".to_string(),
+        }))
+        .expect("the ring answers a plain key");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        1,
+        "ring position 0 (config, also overlay here) must open no window"
+    );
+    assert!(engine.tree_is_open());
+}

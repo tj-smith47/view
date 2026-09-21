@@ -633,6 +633,10 @@ struct KeysTable {
     sidebar_narrower: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     composer_newline: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toggle_gaps: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cycle_surfaces: Option<toml::Value>,
 }
 
 /// What a `sidebar_wider` naming no key this build can match is answered
@@ -654,6 +658,17 @@ const COMPOSER_NEWLINE_NOTICE: &str =
     "view: [keys] composer_newline must be key notations spelled as nvim spells them, case \
      included (\"<S-CR>\", \"<M-CR>\"), at most two keys each. The composer breaks a \
      line on its default keys this run";
+
+/// The gaps toggle's own, on the same terms as [`SIDEBAR_WIDER_NOTICE`].
+const TOGGLE_GAPS_NOTICE: &str =
+    "view: [keys] toggle_gaps must be key notations spelled as nvim spells them, case \
+     included (\"<F9>\"), at most two keys each. Gaps toggle on the default key this run";
+
+/// The placement cycle's own, on the same terms as [`SIDEBAR_WIDER_NOTICE`].
+const CYCLE_SURFACES_NOTICE: &str =
+    "view: [keys] cycle_surfaces must be key notations spelled as nvim spells them, case \
+     included (\"<F10>\"), at most two keys each. The placement cycle answers on the \
+     default key this run";
 
 /// The bindings every rebindable action answers to, and the notice each
 /// action whose value could not be read owes the user.
@@ -680,6 +695,12 @@ fn resolve_key_bindings(table: &KeysTable) -> (KeyBindings, Vec<&'static str>) {
             &table.composer_newline,
             Action::ComposerNewline,
             COMPOSER_NEWLINE_NOTICE,
+        ),
+        (&table.toggle_gaps, Action::ToggleGaps, TOGGLE_GAPS_NOTICE),
+        (
+            &table.cycle_surfaces,
+            Action::CycleSurfaces,
+            CYCLE_SURFACES_NOTICE,
         ),
     ] {
         let Some(value) = value.as_ref() else {
@@ -1061,6 +1082,8 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
         ("sidebar_wider", &file.keys.sidebar_wider),
         ("sidebar_narrower", &file.keys.sidebar_narrower),
         ("composer_newline", &file.keys.composer_newline),
+        ("toggle_gaps", &file.keys.toggle_gaps),
+        ("cycle_surfaces", &file.keys.cycle_surfaces),
     ] {
         if value.is_some() {
             spelled.push(("keys", key));
@@ -2238,10 +2261,12 @@ mod tests {
     /// to. Walked by the tests below rather than named one at a time, so an
     /// action added to [`KeysTable`] without a row here fails the
     /// crosscheck instead of shipping untested.
-    const KEYS_ACTIONS: [(&str, &str); 3] = [
+    const KEYS_ACTIONS: [(&str, &str); 5] = [
         ("sidebar_wider", "<S-Right>"),
         ("sidebar_narrower", "<S-Left>"),
         ("composer_newline", "<M-CR>"),
+        ("toggle_gaps", "<F9>"),
+        ("cycle_surfaces", "<F10>"),
     ];
 
     /// The population the walk above has to cover: every field of the
@@ -2252,6 +2277,8 @@ mod tests {
             sidebar_wider: Some("<S-Right>".into()),
             sidebar_narrower: Some("<S-Left>".into()),
             composer_newline: Some("<M-CR>".into()),
+            toggle_gaps: Some("<F9>".into()),
+            cycle_surfaces: Some("<F10>".into()),
         })
         .expect("the keys table serializes");
         let fields: BTreeSet<&str> = all
