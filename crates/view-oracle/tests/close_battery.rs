@@ -1577,6 +1577,61 @@ fn the_close_takes_the_trees_autocommand_with_it() {
     );
 }
 
+/// The other way the entry can be gone: nothing ran the close chunk, so
+/// the augroup is still armed, and the person's own edit landed in the
+/// tree's window while `vim.g.view_native_windows` held no entry for it
+/// at all. The callback's first question is whether the entry still
+/// names this window, and a `nil` entry answers that exactly as a
+/// changed one does: nothing here is view's window to hand back.
+///
+/// Disconfirm: a callback that skips its entry check runs the hand-back
+/// on a `nil` entry regardless, which fails on the width pin the tree
+/// set staying put.
+#[test]
+fn a_callback_whose_entry_is_gone_touches_nothing() {
+    let work = common::ScratchPaths::new("close-battery-tree-entry-gone");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = windowed_tree_session(&dir);
+    open_the_tree(&mut engine);
+    assert_eq!(
+        engine.eval_str("&winfixwidth").unwrap().trim(),
+        "1",
+        "the tree's own window did not open pinned"
+    );
+
+    // the close chunk never ran: the augroup is still armed and the
+    // entry is gone by a route other than the hand-back itself
+    engine
+        .arm_and_input(":let g:view_native_windows = {}<CR>")
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .arm_and_input(":set number wrap signcolumn=yes<CR>")
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    engine.arm_and_input(":edit README.md<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.eval_str("&winfixwidth").unwrap().trim(),
+        "1",
+        "the callback ran the hand-back on an entry that was gone"
+    );
+    assert_eq!(
+        engine
+            .eval_str("exists('#view_native_tree#BufWinEnter')")
+            .unwrap()
+            .trim(),
+        "0",
+        "the callback did not delete itself"
+    );
+    assert!(
+        engine.tree_is_open(),
+        "the model was told the tree was taken though nothing checked \
+         it out"
+    );
+}
+
 /// A file whose filetype carries a look of its own, opened in the tree's
 /// window. nvim fires `FileType` while the buffer loads, before the
 /// window is handed back, so the hand-back's restore from the globals had
