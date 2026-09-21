@@ -458,7 +458,7 @@ impl SurfaceLayout {
                 NativeSurface::Tree => Anchor::Left,
                 NativeSurface::Agent => Anchor::Right,
                 NativeSurface::Palette => Anchor::Center,
-                NativeSurface::Notifications => Anchor::Top,
+                NativeSurface::Notifications => Anchor::TopRight,
             },
             size: DEFAULT_PANEL_WIDTH_PCT,
         }

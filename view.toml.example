@@ -214,7 +214,8 @@ agent = "claude-code"      # default: "claude-code" -- the one adapter this
 panel_width = 30           # default: 30 -- percent of the terminal width the
                            # panel opens at, on the same clamp-never-refuse
                            # terms as [native] tree_width, and resized for the
-                           # session with the same keys, see [keys]
+                           # session with the same keys, see [keys]. Its own
+                           # newer name is [ui.surfaces.agent] size
 
 # [ai.review] is how an agent's proposed change presents itself. The diff is
 # drawn in the file's own buffer, so the only choice is where that file goes

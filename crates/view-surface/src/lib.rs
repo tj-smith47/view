@@ -19,7 +19,7 @@ use view_core::grid::registry::GridId;
 use view_core::grid::registry::GLOBAL_GRID;
 use view_core::grid::Grid;
 use view_core::model::{CmdlineState, Model, Overlay, OverlayKind, PopupmenuState, TermCaps};
-use view_core::native::geometry::{OverlayBox, OverlayRect};
+use view_core::native::geometry::{Anchor, NativeSurface, OverlayBox, OverlayRect};
 use view_core::native::palette::PaletteState;
 use view_core::native::prompt::PromptState;
 use view_core::native::speculate::PredictedCell;
@@ -651,23 +651,44 @@ fn toast_box(lines: &[Vec<Span>], grid_w: u16) -> (u16, u16) {
     (width, height)
 }
 
-/// The toast stack: one framed box per visible notice, oldest at the top,
-/// plus the box a dismissal is still carrying off to the right.
+/// The notifications stack's anchor, normalized to one of the four corners
+/// [`Anchor::is_top_corner`]/[`Anchor::is_left_corner`] read -- a defensive
+/// floor for a layout no config path writes a non-corner value into today,
+/// since the notifications table is not yet read (only the tree's is;
+/// `SurfaceLayout::default_for(NativeSurface::Notifications)` is itself a
+/// corner), but a slot nothing has assigned a corner to still has to grow
+/// and exit somewhere rather than misreading `is_top_corner`'s "only
+/// meaningful for a corner" floor as a real answer.
+fn notifications_corner(model: &Model) -> Anchor {
+    let anchor = model.surfaces.layout(NativeSurface::Notifications).anchor;
+    if anchor.is_corner() {
+        anchor
+    } else {
+        Anchor::TopRight
+    }
+}
+
+/// The toast stack: one framed box per visible notice, nearest the anchor
+/// corner first, plus the box a dismissal is still carrying off toward that
+/// same corner.
 ///
 /// The stack is already in its final state here -- the departed notice is
 /// out of `Messages::entries` -- so the motion decides only where the boxes
-/// are drawn. The departing box keeps the row it held; the boxes at and
-/// below the slot it vacated sit `y_shift` rows lower than the home they
-/// are settling into, and the ones above it do not move at all. `y_shift`
-/// runs from the departing box's full height down to nothing over the
-/// motion, which is the slide up, and the same eased fraction drives that
-/// box's own `x_offset` -- one motion, on one clock, not two that share a
-/// duration.
+/// are drawn. The departing box keeps the slot it held; the boxes at and
+/// beyond the slot it vacated sit `y_shift` rows farther from the corner
+/// than the home they are settling into, and the ones nearer the corner do
+/// not move at all. `y_shift` runs from the departing box's full height
+/// down to nothing over the motion, which is the slide toward the corner,
+/// and the same eased fraction drives that box's own `x_offset` -- one
+/// motion, on one clock, not two that share a duration.
 ///
 /// The departing box is pushed last, so it composites over the stack
 /// arriving underneath it instead of being cleared by it.
 fn toast_layers(model: &Model, bounds: (u16, u16), origin: (u16, u16)) -> Vec<Layer> {
-    let (grid_w, _) = bounds;
+    let (grid_w, grid_h) = bounds;
+    let anchor = notifications_corner(model);
+    let grow_down = anchor.is_top_corner();
+    let left_corner = anchor.is_left_corner();
     let paused = model.engine.messages.paused();
     let stack = model.engine.messages.visible_toasts(model.toast_rows());
     let leaving = model.toast_motion.as_ref().map(|motion| {
@@ -676,6 +697,7 @@ fn toast_layers(model: &Model, bounds: (u16, u16), origin: (u16, u16)) -> Vec<La
         Leaving {
             lines: lines.to_vec(),
             slot: slot.min(stack.len()),
+            height,
             x_offset: motion.cells_of(width),
             y_shift: height.saturating_sub(motion.cells_of(height)),
         }
@@ -685,18 +707,33 @@ fn toast_layers(model: &Model, bounds: (u16, u16), origin: (u16, u16)) -> Vec<La
     }
     let vacated = leaving.as_ref().map_or(usize::MAX, |l| l.slot);
     let y_shift = leaving.as_ref().map_or(0, |l| l.y_shift);
+    // the box's own top row, `dist` cells from the anchor's edge: measured
+    // down from row 0 for a top corner, up from `grid_h` for a bottom one,
+    // so both directions share one accumulator and only its reading differs
+    let to_row = |dist: u16, height: u16| -> u16 {
+        if grow_down {
+            dist
+        } else {
+            grid_h.saturating_sub(dist).saturating_sub(height)
+        }
+    };
     let mut layers = Vec::with_capacity(stack.len().saturating_add(1));
-    let mut row: u16 = 0;
+    let mut dist: u16 = 0;
     let mut vacated_row: u16 = 0;
     for (i, lines) in stack.into_iter().enumerate() {
         let (_, height) = toast_box(&lines, grid_w);
+        let near_row = to_row(dist, height);
         if i == vacated {
-            vacated_row = row;
+            vacated_row = near_row;
         }
         let at = if i >= vacated {
-            row.saturating_add(y_shift)
+            if grow_down {
+                near_row.saturating_add(y_shift)
+            } else {
+                near_row.saturating_sub(y_shift)
+            }
         } else {
-            row
+            near_row
         };
         let placement = Placement {
             slot: if i >= vacated { i.saturating_add(1) } else { i },
@@ -704,25 +741,39 @@ fn toast_layers(model: &Model, bounds: (u16, u16), origin: (u16, u16)) -> Vec<La
             paused: i == 0 && paused,
         };
         layers.push(toast_layer(
-            lines, placement, at, bounds, origin, model.caps,
+            lines,
+            placement,
+            at,
+            bounds,
+            origin,
+            left_corner,
+            model.caps,
         ));
-        row = row.saturating_add(height);
+        dist = dist.saturating_add(height);
     }
     if let Some(leaving) = leaving {
         let at = if leaving.slot < layers.len() {
             vacated_row
         } else {
-            row
+            to_row(dist, leaving.height)
         };
         let placement = Placement {
             slot: leaving.slot,
             x_offset: leaving.x_offset,
             paused: false,
         };
-        let layer = toast_layer(leaving.lines, placement, at, bounds, origin, model.caps);
-        // a box that has travelled its own width is entirely past the right
-        // edge; it leaves the stack rather than sitting in it as an empty
-        // rect the paint shadow still has to pair against
+        let layer = toast_layer(
+            leaving.lines,
+            placement,
+            at,
+            bounds,
+            origin,
+            left_corner,
+            model.caps,
+        );
+        // a box that has travelled its own width is entirely past the edge
+        // it is leaving through; it leaves the stack rather than sitting in
+        // it as an empty rect the paint shadow still has to pair against
         if layer.rect.width > 0 {
             layers.push(layer);
         }
@@ -734,6 +785,7 @@ fn toast_layers(model: &Model, bounds: (u16, u16), origin: (u16, u16)) -> Vec<La
 struct Leaving {
     lines: Vec<Vec<Span>>,
     slot: usize,
+    height: u16,
     x_offset: u16,
     y_shift: u16,
 }
@@ -747,23 +799,34 @@ struct Placement {
     paused: bool,
 }
 
-/// One toast box as a [`Layer`]: right-anchored to the grid, shifted
-/// `x_offset` cells further right while it is on its way out.
+/// One toast box as a [`Layer`]: anchored to the grid edge its own corner
+/// names, shifted `x_offset` cells further toward that corner's side while
+/// it is on its way out. A left corner is already flush against column 0,
+/// so its exit shrinks the visible width from the right instead of moving
+/// the column past a bound `u16` cannot express as negative -- the same
+/// clip a right corner gets for free from [`overlay_layer`]'s own bound,
+/// worked out by hand here so both directions read one rect.
 fn toast_layer(
     lines: Vec<Vec<Span>>,
     placement: Placement,
     row: u16,
     bounds: (u16, u16),
     origin: (u16, u16),
+    left_corner: bool,
     caps: TermCaps,
 ) -> Layer {
     let (grid_w, _) = bounds;
     let (width, height) = toast_box(&lines, grid_w);
-    let col = grid_w
-        .saturating_sub(width)
-        .saturating_add(placement.x_offset);
+    let visible_width = width.saturating_sub(placement.x_offset);
+    let col = if left_corner {
+        0
+    } else {
+        grid_w
+            .saturating_sub(width)
+            .saturating_add(placement.x_offset)
+    };
     overlay_layer(
-        Rect::new(row, col, width, height),
+        Rect::new(row, col, visible_width, height),
         bounds,
         origin,
         LayerKind::Toast {
@@ -1450,6 +1513,30 @@ mod tests {
             );
         }
         model
+    }
+
+    /// Points the notifications surface at `anchor`, keeping its placement
+    /// and size at whatever they already were -- the corner is the only
+    /// thing the toast-stack geometry tests below vary.
+    fn with_notifications_anchor(model: &mut Model, anchor: Anchor) {
+        let layout = model.surfaces.layout(NativeSurface::Notifications);
+        model.surfaces.set_layout(
+            NativeSurface::Notifications,
+            view_core::native::geometry::SurfaceLayout::new(layout.placement, anchor, layout.size),
+        );
+    }
+
+    /// Every toast layer's `(slot, rect)` in paint order -- the column as
+    /// well as the row, for the corner-exit tests below.
+    fn toast_rects(surface: &Surface) -> Vec<(usize, Rect)> {
+        surface
+            .layers
+            .iter()
+            .filter_map(|layer| match &layer.kind {
+                LayerKind::Toast { slot, .. } => Some((*slot, layer.rect)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Non-exhaustive `view-core` state structs (`CmdlineState`,
@@ -2497,6 +2584,107 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The stack's own vertical growth: each later box sits farther from
+    /// the top corner than the one before it, flush against that corner at
+    /// the near end.
+    #[test]
+    fn a_toast_stack_grows_down_from_a_top_corner() {
+        let mut model = model_with_three_toasts(view_core::model::Tier::Full);
+        with_notifications_anchor(&mut model, Anchor::TopLeft);
+        let rows: Vec<u16> = toasts(&render(&model))
+            .into_iter()
+            .map(|(_, _, row, _)| row)
+            .collect();
+        assert_eq!(rows.first(), Some(&0), "the near box sits at the corner");
+        assert!(
+            rows.windows(2).all(|w| w[0] < w[1]),
+            "each later box sits a strictly lower row, growing away from \
+             the top corner: {rows:?}"
+        );
+    }
+
+    /// Mirrors the top corner's own growth: each later box sits farther
+    /// from the bottom corner, flush against it at the near end.
+    #[test]
+    fn a_toast_stack_grows_up_from_a_bottom_corner() {
+        let mut model = model_with_three_toasts(view_core::model::Tier::Full);
+        with_notifications_anchor(&mut model, Anchor::BottomRight);
+        let rows: Vec<u16> = toasts(&render(&model))
+            .into_iter()
+            .map(|(_, _, row, _)| row)
+            .collect();
+        // one line of text plus a one-cell border on every edge: a 12-row
+        // grid's near box's top row sits three rows above the bottom edge
+        assert_eq!(rows.first(), Some(&9), "the near box sits at the corner");
+        assert!(
+            rows.windows(2).all(|w| w[0] > w[1]),
+            "each later box sits a strictly higher row, growing away from \
+             the bottom corner: {rows:?}"
+        );
+    }
+
+    /// A dismissed notice slides toward its own corner: a right corner's
+    /// box moves rightward until it is clipped by the grid edge, and a left
+    /// corner's box -- already flush against column 0, with nowhere further
+    /// left a `u16` column can express -- shrinks from the right instead.
+    /// Either way the box is gone once it has travelled its own width.
+    #[test]
+    fn a_toast_stack_leaves_toward_its_own_corner() {
+        for anchor in [
+            Anchor::TopLeft,
+            Anchor::TopRight,
+            Anchor::BottomLeft,
+            Anchor::BottomRight,
+        ] {
+            let mut model = model_with_three_toasts(view_core::model::Tier::Full);
+            with_notifications_anchor(&mut model, anchor);
+            let first = model.engine.messages.entries[0].id();
+            let _ = update(&mut model, Msg::ToastExpired { id: first });
+            let mut frames = Vec::new();
+            loop {
+                frames.push(toast_rects(&render(&model)));
+                if model.toast_motion.is_none() {
+                    break;
+                }
+                let _ = update(&mut model, Msg::AnimTick);
+            }
+            let moving: Vec<_> = frames.iter().take_while(|f| f.len() == 3).collect();
+            assert!(!moving.is_empty(), "{anchor:?} produced no moving frames");
+            let departing: Vec<Rect> = moving
+                .iter()
+                .map(|f| {
+                    f.iter()
+                        .find(|(slot, _)| *slot == 0)
+                        .expect("the departing box holds slot 0")
+                        .1
+                })
+                .collect();
+            let widths: Vec<u16> = departing.iter().map(|r| r.width).collect();
+            let cols: Vec<u16> = departing.iter().map(|r| r.col).collect();
+            assert!(
+                widths.windows(2).all(|w| w[0] >= w[1])
+                    && widths[0] > *widths.last().expect("a first frame"),
+                "{anchor:?}: the departing box shrinks every frame as it \
+                 leaves: {widths:?}"
+            );
+            if anchor.is_left_corner() {
+                assert!(
+                    cols.iter().all(|&c| c == 0),
+                    "{anchor:?}: a left corner's box is already flush \
+                     against column 0, so it exits by shrinking rather \
+                     than sliding: {cols:?}"
+                );
+            } else {
+                assert!(
+                    cols.windows(2).all(|w| w[0] <= w[1])
+                        && cols[0] < *cols.last().expect("a first frame"),
+                    "{anchor:?}: a right corner's box slides rightward as \
+                     it leaves: {cols:?}"
+                );
+            }
+        }
     }
 
     #[test]

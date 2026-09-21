@@ -240,10 +240,57 @@ fn an_enabled_features_key_is_claimed_over_the_users_and_reported_with_its_off_s
 }
 
 #[test]
+fn leader_leader_opens_the_palette() {
+    let session = Session::start("palette-open");
+    session.register(&NativeConfig::all_enabled());
+    session.claims();
+    session.press(",,");
+    assert_eq!(
+        session.invoke(ARRIVAL),
+        Some(("palette".to_string(), "open".to_string())),
+        "<leader><leader> must reach view as the palette's open verb"
+    );
+}
+
+/// The palette's default key is claimed over a user's own mapping and
+/// reported for it, the same as every other feature's default key -- proof
+/// that widening the notifications anchors and adding this row did not carve
+/// out a special case for the palette in the claim path.
+#[test]
+fn the_palette_key_is_rebindable_through_keys() {
+    let session = Session::start_with(
+        "palette-remap",
+        "vim.g.view_user_palette = 0\n\
+         vim.keymap.set('n', '<leader><leader>', function() vim.g.view_user_palette = 1 end)\n",
+    );
+    let registered = session.register(&NativeConfig::all_enabled());
+    let claimed = session.claims();
+    assert!(
+        registered.iter().any(|lhs| lhs == "<leader><leader>"),
+        "the palette's default key must be among what view registers: {registered:?}"
+    );
+    let palette = claimed
+        .iter()
+        .find(|c| c.lhs == "<leader><leader>")
+        .expect("<leader><leader> must be among the palette's default keys");
+    assert!(
+        palette.had_user_mapping,
+        "the fixture mapped <leader><leader> itself, so view taking it over is news: {claimed:?}"
+    );
+
+    session.press(",,");
+    assert_eq!(
+        session.eval("g:view_user_palette"),
+        "0",
+        "a claimed key must not also run the mapping it replaced"
+    );
+}
+
+#[test]
 fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
     let session = Session::start("disabled");
     let cfg = NativeConfig::from_toml_str(
-        "[native]\npicker = false\ntree = false\nnotifications = false\n",
+        "[native]\npicker = false\ntree = false\nnotifications = false\npalette = false\n",
     )
     .unwrap();
 
@@ -286,7 +333,7 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
 fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
     let session = Session::start("command");
     let cfg = NativeConfig::from_toml_str(
-        "[native]\npicker = false\ntree = false\nnotifications = false\n",
+        "[native]\npicker = false\ntree = false\nnotifications = false\npalette = false\n",
     )
     .unwrap();
     session.register(&cfg);

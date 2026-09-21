@@ -82,7 +82,7 @@ static FEATURES: [FeatureDesc; 6] = [
         id: "palette",
         supersedes: Some("your own command-line UI"),
         off_switch: "native.palette = false",
-        entry_keys: false,
+        entry_keys: true,
         default_on: true,
     },
     FeatureDesc {

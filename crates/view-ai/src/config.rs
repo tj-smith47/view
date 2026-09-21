@@ -100,13 +100,28 @@ impl AiConfig {
         // a key left out and a key written at its own default resolve to
         // the same answer, and only one of them is the file's -- the same
         // distinction `view-native`'s own loader draws, for the same reason
+        let panel_width_spelled = file.ai.panel_width.is_some();
+        let surface_size_spelled = file.ui.surfaces.agent.size.is_some();
         let spelled = [
             file.ai.enabled.is_some(),
             file.ai.agent.is_some(),
-            file.ai.panel_width.is_some(),
+            panel_width_spelled || surface_size_spelled,
             file.ai.review.open_target.is_some(),
         ];
         let (panel_width, panel_width_notice) = resolve_panel_width(file.ai.panel_width);
+        let (surface_size, surface_size_notice) =
+            resolve_surface_agent_size(file.ui.surfaces.agent.size);
+        let mut notices = Vec::new();
+        if let Some(notice) = surface_size_notice {
+            notices.push(notice.to_string());
+        }
+        // a notice only where the two could disagree: a document naming
+        // just the older key needs no warning that it has a newer name,
+        // and the shipped example spells only `panel_width` for exactly
+        // that reason -- a genuinely silent, notice-free baseline
+        if panel_width_spelled && surface_size_spelled {
+            notices.push(PANEL_WIDTH_ALIAS_NOTICE.to_string());
+        }
         let (review_open_target, review_open_target_notice) =
             resolve_open_target(file.ai.review.open_target);
         Ok(Self {
@@ -115,7 +130,7 @@ impl AiConfig {
                 Some(wire) => resolve_agent(wire)?,
                 None => AgentSpec::Id(DEFAULT_AGENT_ID.to_string()),
             },
-            panel_width,
+            panel_width: surface_size.unwrap_or(panel_width),
             panel_width_notice,
             review_open_target,
             review_open_target_notice,
@@ -126,7 +141,7 @@ impl AiConfig {
                     Source::Derived
                 }
             }),
-            notices: Vec::new(),
+            notices,
         })
     }
 
@@ -433,6 +448,31 @@ fn resolve_panel_width(value: Option<toml::Value>) -> (u16, Option<&'static str>
     }
 }
 
+/// What `[ai] panel_width`'s older name owes a user who wrote it: the newer
+/// key it has become, spelled once whether or not the newer one also
+/// answered this run -- the same unconditional-on-the-older-key notice
+/// `view-native`'s own `[native] tree_width` alias gives.
+const PANEL_WIDTH_ALIAS_NOTICE: &str =
+    "view: [ai] panel_width is now [ui.surfaces.agent] size; both read the same value";
+
+/// What a `[ui.surfaces.agent] size` that is not a whole number of percent
+/// is answered with.
+const SURFACE_AGENT_SIZE_NOTICE: &str = "view: [ui.surfaces.agent] size must be a whole number \
+     of percent. The agent panel opens at its default width this run";
+
+/// `[ui.surfaces.agent] size`, the newer key `panel_width` has become: read
+/// the same way [`resolve_panel_width`] reads the older one, and answered
+/// with `None` rather than a default when it is absent, so the caller can
+/// tell "not written" from "written at the shared default" and fall back to
+/// the older key.
+fn resolve_surface_agent_size(value: Option<toml::Value>) -> (Option<u16>, Option<&'static str>) {
+    match value {
+        None => (None, None),
+        Some(toml::Value::Integer(pct)) => (Some(geometry::clamp_panel_width(pct)), None),
+        Some(_) => (None, Some(SURFACE_AGENT_SIZE_NOTICE)),
+    }
+}
+
 /// What an `open_target` naming neither target is answered with.
 const OPEN_TARGET_NOTICE: &str = "view: [ai.review] open_target must be \"current\" or \"split\". \
      A review opens an unopened file in the current window this run";
@@ -497,13 +537,44 @@ fn resolve_agent(wire: WireAgentSpec) -> Result<AgentSpec, AiConfigError> {
     }
 }
 
-/// The shape of `view.toml` this loader reads: one table, `[ai]`, with
-/// every other top-level table ignored the same way `view-native`'s own
-/// `ViewFile` ignores `[ai]`.
+/// The shape of `view.toml` this loader reads: `[ai]` in full, plus the one
+/// field `[ui.surfaces.agent]` shares with it (`size`, `panel_width`'s newer
+/// name) -- every other `[ui]` key, and every other top-level table, is
+/// ignored the same way `view-native`'s own `ViewFile` ignores `[ai]`. Not
+/// `deny_unknown_fields` anywhere in this shape: this crate does not own
+/// `[ui]`, so a key `view-native` reads there is not this parser's to
+/// refuse.
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
     #[serde(default)]
     ai: WireAiTable,
+    #[serde(default)]
+    ui: WireUiTable,
+}
+
+/// The `[ui]` table's wire shape, as far as this crate reads it.
+#[derive(Debug, Default, Deserialize)]
+struct WireUiTable {
+    #[serde(default)]
+    surfaces: WireUiSurfacesTable,
+}
+
+/// The `[ui.surfaces]` table's wire shape, as far as this crate reads it:
+/// the agent panel's own sub-table, and nothing of any sibling surface's.
+#[derive(Debug, Default, Deserialize)]
+struct WireUiSurfacesTable {
+    #[serde(default)]
+    agent: WireUiSurfaceSizeTable,
+}
+
+/// One surface's table, as far as this crate reads it: `size` alone,
+/// mirroring `[ai] panel_width`'s own untyped `toml::Value` for the reason
+/// [`resolve_panel_width`] gives -- a percentage written `30.0` must not
+/// refuse the whole document.
+#[derive(Debug, Default, Deserialize)]
+struct WireUiSurfaceSizeTable {
+    #[serde(default)]
+    size: Option<toml::Value>,
 }
 
 /// The `[ai.review]` sub-table's wire shape: how a review presents itself.
@@ -745,6 +816,36 @@ agent = "claude-code"
     }
 
     #[test]
+    fn the_panel_width_alias_is_read_from_the_surfaces_table() {
+        // the newer key alone: nothing to warn about, since the older key
+        // was never spelled
+        let cfg = AiConfig::from_toml_str("[ui.surfaces.agent]\nsize = 45\n")
+            .expect("[ui.surfaces.agent] must parse beside [ai]");
+        assert_eq!(
+            cfg.panel_width(),
+            45,
+            "panel_width must read the surfaces table's own size"
+        );
+        assert!(cfg.notices().is_empty(), "{:?}", cfg.notices());
+
+        // both keys: the surfaces table wins, and the user is told why the
+        // older key's own 20 did not answer
+        let cfg =
+            AiConfig::from_toml_str("[ai]\npanel_width = 20\n\n[ui.surfaces.agent]\nsize = 45\n")
+                .expect("both keys must parse together");
+        assert_eq!(
+            cfg.panel_width(),
+            45,
+            "the surfaces table outranks the alias"
+        );
+        assert_eq!(
+            cfg.notices(),
+            [PANEL_WIDTH_ALIAS_NOTICE.to_string()],
+            "the user was not told which key answered"
+        );
+    }
+
+    #[test]
     fn a_panel_width_outside_the_range_is_clamped_rather_than_refused() {
         for (written, resolved) in [
             (0, geometry::MIN_PANEL_WIDTH_PCT),
@@ -972,7 +1073,13 @@ agent = "claude-code"
         // destructured rather than field-accessed: a second table this
         // loader learns to read stops this test compiling until the walk
         // below is told to cover it
-        let ConfigFile { ai: _ } =
+        // `ui` is not walked below the way `ai` is: `[ui]` is not this
+        // crate's table (`view-native` owns its shape and its own example
+        // walk), and the one field this loader borrows from it,
+        // `[ui.surfaces.agent] size`, is not yet in the shipped example --
+        // `view-native`'s own key registry does not recognize that table,
+        // since nothing there reads the agent surface's placement yet
+        let ConfigFile { ai: _, ui: _ } =
             toml::from_str(EXAMPLE_TOML).expect("the shipped example must parse as the wire shape");
         assert_example_sets_every_field(&doc, "ai");
         let cfg = AiConfig::from_toml_str(EXAMPLE_TOML)

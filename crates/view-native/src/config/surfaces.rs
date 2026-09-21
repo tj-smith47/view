@@ -13,6 +13,7 @@ use view_core::native::geometry::{
     clamp_panel_width, Anchor, NativeSurface, SurfaceLayout, SurfacePlacement,
 };
 
+use super::resolve::alias_notice;
 use super::{SurfaceSize, SurfaceTable, ViewConfig, TREE_WIDTH_KEY};
 
 /// What a `placement` outside the vocabulary is answered with.
@@ -21,22 +22,20 @@ const PLACEMENT_EXPECTED: &str = "overlay or windowed";
 /// What a `size` that is not a whole number of percent is answered with.
 const SIZE_EXPECTED: &str = "a whole number of percent";
 
-/// What the older key owes a user who has moved to the new one, and what it
-/// owes one who has not.
-const ALIAS_SUPERSEDED: &str = "view: [native] tree_width is now [ui.surfaces.tree] size; \
-                                both read the same value, and the one in [ui.surfaces] wins \
-                                this run";
-const ALIAS_READ: &str =
-    "view: [native] tree_width is now [ui.surfaces.tree] size; both read the same value";
-
 /// The anchors each surface may be pinned to. A surface draws at one edge
 /// of the screen and the set is what a sideways surface can honestly
 /// answer: a tree or an agent panel at a side, the palette in the middle,
-/// notifications at the top or the bottom.
+/// notifications at one of the four corners the toast stack grows away
+/// from and leaves toward.
 const fn anchors(surface: NativeSurface) -> &'static [Anchor] {
     match surface {
         NativeSurface::Palette => &[Anchor::Center, Anchor::Top],
-        NativeSurface::Notifications => &[Anchor::Top, Anchor::Bottom],
+        NativeSurface::Notifications => &[
+            Anchor::TopLeft,
+            Anchor::TopRight,
+            Anchor::BottomLeft,
+            Anchor::BottomRight,
+        ],
         _ => &[Anchor::Left, Anchor::Right],
     }
 }
@@ -122,12 +121,13 @@ fn alias(file: &ViewConfig, layouts: &mut [SurfaceLayout; 4], notices: &mut Vec<
     let Some(tree) = layouts.get_mut(NativeSurface::Tree.index()) else {
         return;
     };
+    let notice = alias_notice("native", "tree_width", "ui.surfaces.tree", "size");
     if file.spells("ui.surfaces.tree", "size") {
-        notices.push(ALIAS_SUPERSEDED.to_string());
+        notices.push(notice);
         return;
     }
     tree.size = file.native.tree_width();
-    notices.push(ALIAS_READ.to_string());
+    notices.push(notice);
 }
 
 #[cfg(test)]
@@ -173,7 +173,12 @@ mod tests {
         assert_eq!(layout.size, 45, "the older key was not read");
         assert_eq!(
             notices,
-            vec![ALIAS_READ.to_string()],
+            vec![alias_notice(
+                "native",
+                "tree_width",
+                "ui.surfaces.tree",
+                "size"
+            )],
             "the user was not told which key the two share"
         );
     }
@@ -185,8 +190,22 @@ mod tests {
         assert_eq!(layout.size, 22, "the older key won over the newer one");
         assert_eq!(
             notices,
-            vec![ALIAS_SUPERSEDED.to_string()],
+            vec![alias_notice(
+                "native",
+                "tree_width",
+                "ui.surfaces.tree",
+                "size"
+            )],
             "the user was not told which key answered"
+        );
+    }
+
+    #[test]
+    fn the_alias_notice_names_both_keys() {
+        let notice = alias_notice("native", "tree_width", "ui.surfaces.tree", "size");
+        assert!(
+            notice.contains("[native] tree_width") && notice.contains("[ui.surfaces.tree] size"),
+            "the notice must name both keys the pair shares: {notice}"
         );
     }
 
@@ -195,6 +214,26 @@ mod tests {
         let (layouts, notices) = read_toml("");
         assert_eq!(layouts, SurfaceLayout::defaults());
         assert!(notices.is_empty(), "a silent document owes nothing");
+    }
+
+    #[test]
+    fn a_notifications_anchor_names_all_four_corners() {
+        assert_eq!(
+            anchors(NativeSurface::Notifications),
+            &[
+                Anchor::TopLeft,
+                Anchor::TopRight,
+                Anchor::BottomLeft,
+                Anchor::BottomRight
+            ],
+            "the geometry layer supports all four corners; the allow-list \
+             left it at top/bottom after the first dispatch landed the \
+             corners"
+        );
+        assert_eq!(
+            anchors_expected(NativeSurface::Notifications),
+            "top-left or top-right or bottom-left or bottom-right"
+        );
     }
 
     #[test]

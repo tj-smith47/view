@@ -835,6 +835,25 @@ fn env_read<T>(
     parsed
 }
 
+/// What an older key that has moved under a newer name owes a user, once:
+/// the two are read as the same value whichever one a document spells, so a
+/// reader of either notices which key is now canonical without a second
+/// sentence for the case where a document spelled both.
+///
+/// Shared by every key this table has renamed rather than a literal per
+/// pair, so a rename never drifts from its sibling's wording -- `[native]
+/// tree_width` was the one pair here before `[ai] panel_width` joined it.
+pub(super) fn alias_notice(
+    old_table: &str,
+    old_key: &str,
+    new_table: &str,
+    new_key: &str,
+) -> String {
+    format!(
+        "view: [{old_table}] {old_key} is now [{new_table}] {new_key}; both read the same value"
+    )
+}
+
 /// One key's discarded-value notice, with the environment name taken from
 /// the key's own registry row rather than restated.
 fn discarded(table: &str, key: &str, value: &str, expected: &str) -> String {

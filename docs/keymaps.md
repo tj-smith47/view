@@ -18,6 +18,7 @@ The table below is generated from `default_maps()` in
 | `<leader>fm` | `notifications` | `:View notifications history` |
 | `<leader>fp` | `notifications` | `:View notifications pause` |
 | `<leader>ai` | `ai` | `:View ai toggle` |
+| `<leader><leader>` | `palette` | `:View palette open` |
 
 ## `<leader>ai` reads the panel before it acts
 
