@@ -209,7 +209,10 @@ fn retile_open_surface(
             if model.engine.grids().native_window(surface).is_some() {
                 return Vec::new();
             }
-            vec![Effect::Rpc(open_native_window(model, surface))]
+            // the ring carries a surface's state across a placement step
+            // the user aimed at the whole set, never at this one surface,
+            // so the keyboard stays where the step found it (I11)
+            vec![Effect::Rpc(open_native_window(model, surface, false))]
         }
         SurfacePlacement::Overlay => {
             let Some(win) = model.engine.grids().native_window(surface) else {
@@ -254,6 +257,7 @@ fn toggle_windowed_tree(model: &mut Model) -> Vec<Effect> {
     effects.append(&mut vec![Effect::Rpc(open_native_window(
         model,
         NativeSurface::Tree,
+        true,
     ))]);
     effects
 }
@@ -292,7 +296,11 @@ pub(super) fn toggle_windowed_agent(model: &mut Model) -> Vec<Effect> {
 /// [`open_ai_panel`]'s own floating contract.
 pub(super) fn open_windowed_agent(model: &mut Model) -> Vec<Effect> {
     let mut effects = open_ai_panel(model);
-    effects.push(Effect::Rpc(open_native_window(model, NativeSurface::Agent)));
+    effects.push(Effect::Rpc(open_native_window(
+        model,
+        NativeSurface::Agent,
+        true,
+    )));
     effects
 }
 
@@ -331,6 +339,10 @@ pub(super) fn native_window_closed(
 ) -> Vec<Effect> {
     model.engine.grids_mut().release_native_window(win);
     model.dirty = true;
+    // a window closed before its own `win_pos` ever placed it (open,
+    // then closed again within the same round) would otherwise leave
+    // `pending_open` stuck true with nothing left to clear it
+    model.surfaces.clear_pending(surface);
     match surface {
         NativeSurface::Tree if model.close_tree() => vec![Effect::TreeClose],
         NativeSurface::Agent => {
@@ -461,13 +473,23 @@ fn close_windowed_tree(model: &mut Model) -> Vec<Effect> {
 /// palette, which has no key of its own to toggle it open (see
 /// [`toggle_notifications_stream`]'s doc contrast) -- nvim's own cmdline
 /// arriving and leaving is its whole open/close signal.
-pub(super) fn open_native_window(model: &mut Model, surface: NativeSurface) -> RpcCall {
+///
+/// `enter` is `true` for a call a user's own toggle key made -- they asked
+/// to go there -- and `false` for a ring step carrying an already-open
+/// surface to `windowed` and for the palette's own open, neither of which
+/// is a place the keyboard should move to.
+pub(super) fn open_native_window(
+    model: &mut Model,
+    surface: NativeSurface,
+    enter: bool,
+) -> RpcCall {
     let layout = model.surfaces.layout(surface);
     RpcCall::OpenNativeWindow {
         surface,
         split: WinSplit::for_anchor(layout.anchor).unwrap_or(WinSplit::Left),
         size: layout.size,
-        generation: model.surfaces.next_generation(),
+        generation: model.surfaces.next_generation(surface),
+        enter,
     }
 }
 
@@ -514,20 +536,47 @@ fn open_tree_state(model: &mut Model, beneath_top: bool) -> Vec<Effect> {
 /// Binds the window nvim opened to the surface view asked for it, which is
 /// what makes the next `win_pos` for that handle place a pane view paints.
 ///
-/// A reply for a generation older than the one the last open carried is
-/// dropped: the surface has been closed and reopened since the call, and
-/// the handle it names belongs to a window that is already gone.
+/// A reply for a generation older than the one `surface`'s own last open
+/// carried is dropped: that surface has been closed and reopened since the
+/// call, and the handle it names belongs to a window that is already gone.
+/// Read off `surface`'s own counter, never a counter every surface shares --
+/// a ring step that opens two surfaces in one fold issues two calls before
+/// either reply lands, and a shared counter would answer only the second
+/// (see [`crate::native::placement::SurfaceState::generation`]'s doc).
 pub(super) fn native_window_opened(
     model: &mut Model,
     generation: u64,
     surface: NativeSurface,
     win: crate::events::WinHandle,
 ) -> Vec<Effect> {
-    if generation != model.surfaces.generation() {
+    if generation != model.surfaces.generation(surface) {
         return Vec::new();
     }
+    // `pending_open` stays true past this claim -- it is what
+    // `native_window()` will answer once the `win_pos` this claim is
+    // waiting on places it, and that is a separate redraw event, not
+    // this reply. Clearing it here reopens the same gap the flag exists
+    // to close: a keystroke landing between this claim and that `win_pos`
+    // would read "no window yet" and "nothing pending" and open a second
+    // one. `ui_event::WinPos`'s handler clears it once the placement the
+    // guard is actually waiting for has happened.
     model.engine.grids_mut().claim_native_window(win, surface);
     model.dirty = true;
+    Vec::new()
+}
+
+/// An `OpenNativeWindow` call answered with an error rather than a window
+/// handle: nothing to claim, but `pending_open` still has to clear, or a
+/// guard gated on it refuses every later open of `surface` for the rest of
+/// the session.
+pub(super) fn native_window_open_failed(
+    model: &mut Model,
+    generation: u64,
+    surface: NativeSurface,
+) -> Vec<Effect> {
+    if generation == model.surfaces.generation(surface) {
+        model.surfaces.clear_pending(surface);
+    }
     Vec::new()
 }
 
@@ -667,6 +716,7 @@ fn open_windowed_notifications(model: &mut Model) -> Vec<Effect> {
     vec![Effect::Rpc(open_native_window(
         model,
         NativeSurface::Notifications,
+        true,
     ))]
 }
 

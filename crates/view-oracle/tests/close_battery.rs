@@ -1761,3 +1761,194 @@ fn cycle_surfaces_moves_the_trees_window_against_real_nvim() {
     );
     assert!(engine.tree_is_open());
 }
+
+/// A tiled session on `dir` with every surface left at its shipped
+/// default (`Overlay`) -- the ring's `config` stop, and where the tree,
+/// the agent panel and the notification stream all start.
+fn overlay_session(dir: &Path) -> view_oracle::EngineSession {
+    let mut engine = view_oracle::EngineSession::spawn_with_ext(
+        COLS,
+        ROWS,
+        view_oracle::UI_EXT_OPTIONS_MULTIGRID,
+    )
+    .expect("EngineSession::spawn_with_ext against real nvim");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .arm_and_input(&format!(":cd {}<CR>", dir.display()))
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .set_panes("tiles")
+        .expect("the tiled look is reachable");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+}
+
+/// The row `getwininfo()` reports for the window holding a surface's own
+/// scratch buffer (`view-<id>`'s filetype), or `None` while it has none.
+fn native_window_row(engine: &mut view_oracle::EngineSession, id: &str) -> Option<i64> {
+    let out = engine
+        .eval_str(&format!(
+            "join(map(filter(getwininfo(), \
+             'getbufvar(v:val.bufnr, \"&filetype\") ==# \"view-{id}\"'), \
+             'v:val.winrow'), \",\")"
+        ))
+        .expect("nvim answers for its own windows");
+    out.trim().split(',').next()?.parse().ok()
+}
+
+/// C2 + I11, against real nvim: the tree, the agent panel and the
+/// notification stream are open as overlays (the ring's `config` stop),
+/// with the keyboard in the buffer throughout -- nothing here ever enters
+/// any of the three. `<F10>` to `windowed` opens all three in the same
+/// fold, each carrying its own surface's own generation; `<F10>` again to
+/// `overlay` must close all three real windows it opened, which a shared
+/// generation counter cannot do (the second and third replies answer a
+/// generation the counter has already moved past, so their handles are
+/// never claimed, the ring's own close finds nothing to close, and their
+/// scratch windows outlive the step that was meant to take them away).
+///
+/// Disconfirm: reverting `SurfaceState::generation` to one shared `u64`
+/// leaves two of the three windows standing after the second `<F10>`.
+#[test]
+fn a_ring_step_opens_and_closes_three_surfaces_windows_against_real_nvim() {
+    let work = common::ScratchPaths::new("close-battery-ring-three");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = overlay_session(&dir);
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the tree opens as an overlay");
+    engine.trust_ai();
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        })
+        .expect("the agent panel opens as an overlay");
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "history".to_string(),
+        })
+        .expect("the notification stream opens as an overlay");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        1,
+        "an overlay must draw over the buffer, never split a window for it"
+    );
+
+    // ring position 1: windowed -- all three open in the same fold
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "<F10>".to_string(),
+        }))
+        .expect("the ring answers a plain key");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        4,
+        "the tree, the agent panel and the stream must each claim a window \
+         of their own: {:?}",
+        nvim_window_sizes(&mut engine)
+    );
+    assert!(engine.tree_is_open());
+    assert!(engine.agent_is_open());
+    let focus = engine.focus();
+    assert!(
+        !matches!(
+            focus,
+            view_core::model::Focus::Pane(
+                view_core::native::geometry::NativeSurface::Tree
+                    | view_core::native::geometry::NativeSurface::Agent
+                    | view_core::native::geometry::NativeSurface::Notifications
+            )
+        ),
+        "a ring step opened three windows nobody asked to visit and left \
+         the keyboard in one of them: {focus:?}"
+    );
+
+    // ring position 2: overlay -- every real window the step above opened
+    // must close, or a shared generation's dropped reply leaves it orphaned
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "<F10>".to_string(),
+        }))
+        .expect("the ring answers a plain key");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        1,
+        "every window the ring opened for a surface must close with it, \
+         not just the last one whose reply a shared generation counter \
+         still answered to: {:?}",
+        nvim_window_sizes(&mut engine)
+    );
+    assert!(engine.tree_is_open(), "the tree's own state must survive");
+    assert!(
+        engine.agent_is_open(),
+        "the agent panel's own state must survive"
+    );
+}
+
+/// Minor 5, against real nvim: the tree and the agent panel share an edge
+/// (`anchor = "left"` on both), windowed in an order that puts the agent
+/// panel's window in nvim before the tree's -- the case a stacking rule
+/// keyed on open order alone gets backwards, since design puts the tree
+/// above the agent panel whichever one opened first.
+///
+/// Disconfirm: reverting the open chunk's stacking rule to "the new window
+/// always goes below the standing one" passes this leg with the open
+/// order reversed and fails it here.
+#[test]
+fn the_tree_stacks_above_the_agent_panel_however_they_open_against_real_nvim() {
+    let work = common::ScratchPaths::new("close-battery-stack-order");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = overlay_session(&dir);
+    engine.set_surface(
+        view_core::native::geometry::NativeSurface::Tree,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Left,
+            30,
+        ),
+    );
+    engine.set_surface(
+        view_core::native::geometry::NativeSurface::Agent,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Left,
+            30,
+        ),
+    );
+    engine.trust_ai();
+
+    // the agent panel opens first, the tree second -- the ordering design
+    // says must still end with the tree on top
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        })
+        .expect("the agent panel's window opens");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the tree's window opens");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    let tree_row = native_window_row(&mut engine, "tree").expect("the tree has a window");
+    let agent_row = native_window_row(&mut engine, "agent").expect("the agent panel has a window");
+    assert!(
+        tree_row < agent_row,
+        "the tree must sit above the agent panel on a shared edge \
+         whichever one opened first: tree={tree_row} agent={agent_row}"
+    );
+}

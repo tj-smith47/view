@@ -767,6 +767,10 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             surface,
             win,
         } => surfaces::native_window_opened(model, generation, surface, win),
+        Msg::NativeWindowOpenFailed {
+            generation,
+            surface,
+        } => surfaces::native_window_open_failed(model, generation, surface),
         Msg::NativeWindowTaken { surface } => surfaces::native_window_taken(model, surface),
         // this arm's whole job is turning the raw reply into a corpus and
         // handing it to the worker as `resolved`, gated on the generation
@@ -1385,12 +1389,13 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
         return vec![Effect::PickerClose];
     }
     match model.focus() {
-        // A windowed palette's cursor sits in its own pane once the tile is
-        // open (the `:split` that made room for it is what put it there),
-        // but typing into the command line is nvim's own input-capturing
-        // mode and answers exactly the same keys wherever the cursor is --
-        // so this reads as engine focus, the same arm a floating palette's
-        // typing already goes through.
+        // The palette's own tile is never entered (its open passes
+        // `enter = false`), so `native_pane_focus()` should never name it
+        // and this arm should never see `Focus::Pane(Palette)` in
+        // practice; it is kept here as the same fallback a floating
+        // palette's typing already goes through, since typing into the
+        // command line is nvim's own input-capturing mode and answers
+        // exactly the same keys either way.
         Focus::Engine | Focus::Pane(NativeSurface::Palette) => {
             // A sticky error outlives every incidental keypress by design
             // (`MessageEntry::is_persistent`), which without a way out is a

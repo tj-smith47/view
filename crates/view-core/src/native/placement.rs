@@ -25,7 +25,24 @@ pub struct SurfaceState {
     /// its configured placement, so the first `cycle_surfaces` press has
     /// somewhere to advance *from* that is not itself.
     ring: u8,
-    generation: u64,
+    /// One counter per surface, never one shared by all four: a ring step
+    /// that carries two surfaces to `windowed` in the same fold issues two
+    /// `OpenNativeWindow` calls before either reply lands, and a shared
+    /// counter would answer for whichever call went last, dropping the
+    /// other's handle and leaving nvim holding a scratch window view never
+    /// claims.
+    generation: [u64; 4],
+    /// Whether `generation`'s own open is still awaiting its reply. Nvim's
+    /// `cmdline_show` can arrive twice in the one redraw batch one `update`
+    /// call folds, and the palette's own open guard reads
+    /// `grids().native_window`, which stays `None` until that reply is
+    /// *applied* -- a step this same `update` call has not reached yet when
+    /// it sees the batch's second `cmdline_show`. Without this, that second
+    /// event read the guard as "not open yet" and issued a second
+    /// `OpenNativeWindow`, opening two windows in nvim for one surface and
+    /// leaving the first orphaned once the second's reply overwrote the
+    /// claim.
+    pending: [bool; 4],
 }
 
 impl Default for SurfaceState {
@@ -35,7 +52,8 @@ impl Default for SurfaceState {
             configured: layouts.map(|layout| layout.placement),
             layouts,
             ring: 0,
-            generation: 0,
+            generation: [0; 4],
+            pending: [false; 4],
         }
     }
 }
@@ -101,18 +119,38 @@ impl SurfaceState {
         })
     }
 
-    /// The generation the next window-open carries. Monotonic, so a handle
-    /// answering a call the user has already undone is told from a live
-    /// one by its number alone.
-    pub fn next_generation(&mut self) -> u64 {
-        self.generation = self.generation.wrapping_add(1);
-        self.generation
+    /// The generation `surface`'s next window-open carries. Monotonic per
+    /// surface, so a handle answering a call that surface's own open has
+    /// since superseded is told from a live one by its number alone, and a
+    /// second surface's own open in the same fold never touches this one's
+    /// counter.
+    pub fn next_generation(&mut self, surface: NativeSurface) -> u64 {
+        let slot = &mut self.generation[surface.index()];
+        *slot = slot.wrapping_add(1);
+        self.pending[surface.index()] = true;
+        *slot
     }
 
-    /// The generation the last window-open carried.
+    /// The generation `surface`'s last window-open carried.
     #[must_use]
-    pub const fn generation(&self) -> u64 {
-        self.generation
+    pub fn generation(&self, surface: NativeSurface) -> u64 {
+        self.generation[surface.index()]
+    }
+
+    /// Whether `surface`'s current generation is still waiting on its
+    /// `OpenNativeWindow` reply -- the guard a caller that reacts to a
+    /// redraw event (rather than a single keystroke) must add to "is there
+    /// a window already", since the latter stays false until the reply is
+    /// applied, several steps after the request that answers it was sent.
+    #[must_use]
+    pub fn pending_open(&self, surface: NativeSurface) -> bool {
+        self.pending[surface.index()]
+    }
+
+    /// Marks `surface`'s current generation as answered, whether or not the
+    /// reply's window handle was ultimately claimed.
+    pub fn clear_pending(&mut self, surface: NativeSurface) {
+        self.pending[surface.index()] = false;
     }
 }
 
@@ -139,9 +177,62 @@ mod tests {
     #[test]
     fn every_open_carries_a_generation_of_its_own() {
         let mut state = SurfaceState::default();
-        let first = state.next_generation();
-        assert_eq!(state.generation(), first);
-        assert_ne!(state.next_generation(), first);
+        let first = state.next_generation(NativeSurface::Tree);
+        assert_eq!(state.generation(NativeSurface::Tree), first);
+        assert_ne!(state.next_generation(NativeSurface::Tree), first);
+    }
+
+    // C2: a ring step opening the tree and the agent panel in the same
+    // fold issues one `next_generation` call per surface before either
+    // reply lands -- a shared counter answers only the last call, and the
+    // other surface's reply is dropped as stale, orphaning its window.
+    #[test]
+    fn two_surfaces_opened_in_one_step_keep_their_own_generation() {
+        let mut state = SurfaceState::default();
+        let tree_gen = state.next_generation(NativeSurface::Tree);
+        let agent_gen = state.next_generation(NativeSurface::Agent);
+        assert_eq!(state.generation(NativeSurface::Tree), tree_gen);
+        assert_eq!(state.generation(NativeSurface::Agent), agent_gen);
+        assert_eq!(
+            state.generation(NativeSurface::Notifications),
+            0,
+            "a third surface's own counter must not move"
+        );
+    }
+
+    // a single redraw batch can carry two `cmdline_show` events before
+    // either one's `OpenNativeWindow` reply has been applied -- a guard
+    // reading only `generation`/the grid registry sees both as "no window
+    // yet" and opens the surface twice; `pending_open` is what a second
+    // request within the same batch has to check.
+    #[test]
+    fn a_second_open_of_the_same_surface_reads_pending_until_its_reply_lands() {
+        let mut state = SurfaceState::default();
+        assert!(!state.pending_open(NativeSurface::Palette));
+        let generation = state.next_generation(NativeSurface::Palette);
+        assert!(
+            state.pending_open(NativeSurface::Palette),
+            "a request just issued must read pending until its reply lands"
+        );
+        state.clear_pending(NativeSurface::Palette);
+        assert!(!state.pending_open(NativeSurface::Palette));
+        assert_eq!(state.generation(NativeSurface::Palette), generation);
+    }
+
+    // an error reply clears `pending` too (there is no window to claim,
+    // but the flag still has to let a later open through) -- the same
+    // `clear_pending` call `native_window_open_failed` makes.
+    #[test]
+    fn a_failed_open_still_clears_pending_for_a_later_request() {
+        let mut state = SurfaceState::default();
+        state.next_generation(NativeSurface::Tree);
+        assert!(state.pending_open(NativeSurface::Tree));
+        state.clear_pending(NativeSurface::Tree);
+        assert!(
+            !state.pending_open(NativeSurface::Tree),
+            "an error reply must not leave the surface refusing every \
+             later open for the rest of the session"
+        );
     }
 
     #[test]

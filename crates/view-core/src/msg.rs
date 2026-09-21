@@ -725,6 +725,21 @@ pub enum Msg {
         /// The window, as nvim addresses it.
         win: crate::events::WinHandle,
     },
+    /// `RpcCall::OpenNativeWindow` came back an error, so no
+    /// `NativeWindowOpened` will ever answer this `generation`. Without a
+    /// message of its own for this arm, the surface's `pending_open` flag
+    /// (set the moment the call was made) never clears, and a guard that
+    /// reads it -- the palette's own `CmdlineShow` open, which must never
+    /// issue a second `OpenNativeWindow` while the first is still in
+    /// flight -- refuses every future open of that surface forever, not
+    /// just the failed one. Generation-gated on the same terms as
+    /// `NativeWindowOpened`.
+    NativeWindowOpenFailed {
+        /// Echoed back from the call.
+        generation: u64,
+        /// The surface whose open failed.
+        surface: crate::native::geometry::NativeSurface,
+    },
     /// A window view opened for a surface of its own now holds something
     /// else: nvim put a buffer there (a plugin autocommand, a quickfix
     /// jump, `:edit` typed inside it), and the window is the person's from
@@ -2275,6 +2290,14 @@ pub enum RpcCall {
         /// Echoed back on the reply, so a handle that arrives after the
         /// surface has been closed and reopened is dropped.
         generation: u64,
+        /// Whether nvim's cursor moves into the new window. False for a
+        /// surface nobody asked to visit -- a ring step carrying an
+        /// already-open surface to `windowed`, or the palette's tile,
+        /// which is a paint target and never a place the keyboard goes --
+        /// so the open leaves `curwin` and the `wincmd p` target exactly
+        /// where they were. True for a surface the user's own toggle key
+        /// named, which is a place they asked to go.
+        enter: bool,
     },
     /// Closes a window view opened for a surface of its own.
     CloseNativeWindow {

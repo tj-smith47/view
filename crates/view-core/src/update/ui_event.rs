@@ -110,6 +110,17 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                     height: saturate_u16(height),
                 },
             );
+            // `native_window_opened` clears `pending_open` the moment the
+            // open call's reply lands, but `native_window()` (what the
+            // CmdlineShow guard actually reads) stays `None` until this
+            // `win_pos` places the claimed handle -- a redraw event of its
+            // own, arriving separately from that reply. A keystroke landing
+            // in that gap read both signals as "go" and opened the palette
+            // a second time; clearing pending here, at the placement that
+            // is what the guard is actually waiting for, closes it.
+            if let Some(surface) = model.engine.grids().native_surface(grid) {
+                model.surfaces.clear_pending(surface);
+            }
             super::look::request_for(model, grid)
         }
         UiEvent::WinFloatPos {
@@ -298,10 +309,23 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                     .grids()
                     .native_window(NativeSurface::Palette)
                     .is_none()
+                && !model.surfaces.pending_open(NativeSurface::Palette)
             {
+                // a redraw batch can carry two `cmdline_show` events
+                // before either's `OpenNativeWindow` reply has been
+                // applied to `grids()`, so the guard above alone reads
+                // both as "not open yet" and opens the palette twice;
+                // `pending_open` closes that window between the request
+                // and its reply landing
+                //
+                // never entered (C1): the palette tile is a paint target
+                // over nvim's own cmdline, not a place the keyboard goes,
+                // so `:q`, `/pat`, `:only` and `wincmd p` keep acting on
+                // the window the user was already in
                 return vec![Effect::Rpc(super::surfaces::open_native_window(
                     model,
                     NativeSurface::Palette,
+                    false,
                 ))];
             }
             Vec::new()

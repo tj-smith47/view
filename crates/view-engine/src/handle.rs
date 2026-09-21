@@ -770,12 +770,29 @@ impl EngineHandle {
                                     } else {
                                         None
                                     };
-                                    if let Some(win) = win {
-                                        pump.route_native_window(Msg::NativeWindowOpened {
-                                            generation,
-                                            surface,
-                                            win,
-                                        });
+                                    match win {
+                                        Some(win) => {
+                                            pump.route_native_window(Msg::NativeWindowOpened {
+                                                generation,
+                                                surface,
+                                                win,
+                                            });
+                                        }
+                                        // an error reply, or a nil one
+                                        // `decode_native_window_reply`
+                                        // could not read as a handle,
+                                        // still has to clear the
+                                        // surface's `pending_open` flag --
+                                        // dropping this arm silently left
+                                        // that flag stuck once the call
+                                        // failed, refusing every later
+                                        // open of the surface
+                                        None => {
+                                            pump.route_native_window(Msg::NativeWindowOpenFailed {
+                                                generation,
+                                                surface,
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -1745,10 +1762,15 @@ impl EngineHandle {
 
     /// Issues `method`/`params` as a request whose `Response` is decoded
     /// into a window handle and routed to the connection's pump as
-    /// `Msg::NativeWindowOpened` (see [`Waiter::NativeWindow`]). Async on
-    /// the same terms as [`request_buffer_list`](Self::request_buffer_list):
-    /// the key that opens a surface is dispatched from the runtime loop,
-    /// which must never block on a reply.
+    /// `Msg::NativeWindowOpened`, or as `Msg::NativeWindowOpenFailed` when
+    /// the reply carries an error or decodes to no handle (see
+    /// [`Waiter::NativeWindow`]) -- either answer has to reach `update` so
+    /// `SurfaceState::pending_open` clears; a call this crate ever dropped
+    /// silently on the error branch would leave that surface refusing
+    /// every later open request. Async on the same terms as
+    /// [`request_buffer_list`](Self::request_buffer_list): the key that
+    /// opens a surface is dispatched from the runtime loop, which must
+    /// never block on a reply.
     ///
     /// # Errors
     ///

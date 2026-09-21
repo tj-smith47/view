@@ -234,16 +234,28 @@ fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) -> 
                 split,
                 size,
                 generation,
+                enter,
             } => handle
-                .open_native_window_sync(*surface, *split, *size)
+                .open_native_window_sync(*surface, *split, *size, *enter)
                 .map(|win| {
-                    if let Some(win) = win {
-                        follow_ups.push(Msg::NativeWindowOpened {
+                    // a `None` here still has to clear `pending_open`, the
+                    // same reason production's own async reply routes an
+                    // error to `NativeWindowOpenFailed` rather than
+                    // dropping it: this driver's own scripted sessions
+                    // reuse `SurfaceState`, and a call this arm dropped
+                    // silently would leave a surface refusing every later
+                    // open for the rest of the run
+                    follow_ups.push(match win {
+                        Some(win) => Msg::NativeWindowOpened {
                             generation: *generation,
                             surface: *surface,
                             win,
-                        });
-                    }
+                        },
+                        None => Msg::NativeWindowOpenFailed {
+                            generation: *generation,
+                            surface: *surface,
+                        },
+                    });
                 }),
             RpcCall::CloseNativeWindow { win } => handle.close_native_window(*win),
             RpcCall::SetWindowSize { win, width, height } => {
@@ -678,6 +690,29 @@ impl EngineSession {
     /// either placement.
     pub fn tree_is_open(&mut self) -> bool {
         self.model.tree_mut().is_some()
+    }
+
+    /// Whether this session's model still holds the agent panel open, in
+    /// either placement.
+    #[must_use]
+    pub fn agent_is_open(&self) -> bool {
+        self.model.ai_panel_overlay_open()
+    }
+
+    /// Whether this session's model still shows nvim's own cmdline as
+    /// open, which is what the windowed palette's own tile answers for
+    /// (see `open_native_window`'s doc: the palette has no overlay of its
+    /// own on `model.overlays()`).
+    #[must_use]
+    pub fn palette_is_open(&self) -> bool {
+        self.model.engine.cmdline.is_some()
+    }
+
+    /// Marks this session's model as trusting AI, the way a real session's
+    /// `.view/trust` marker does, so `Msg::FeatureInvoke { feature: "ai",
+    /// .. }` reaches the panel instead of the trust prompt.
+    pub fn trust_ai(&mut self) {
+        self.model.ai_trusted = true;
     }
 
     /// Puts the listed-buffer set and what the pill names with it into this

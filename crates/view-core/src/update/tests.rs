@@ -14319,6 +14319,19 @@ fn the_windowed_palette_opens_and_closes_with_the_palette() {
         ),
         "a palette anchored to the bottom must split toward it: {effects:?}"
     );
+    // C1: the palette's tile is never a place the keyboard goes -- `:q`,
+    // `/pat` and `:only` must keep acting on the user's own window, which
+    // the open chunk only guarantees while `enter` is false
+    assert!(
+        matches!(
+            effects.iter().find_map(|effect| match effect {
+                Effect::Rpc(RpcCall::OpenNativeWindow { enter, .. }) => Some(*enter),
+                _ => None,
+            }),
+            Some(false)
+        ),
+        "the palette must never be entered: {effects:?}"
+    );
     let _ = update(
         &mut m,
         Msg::NativeWindowOpened {
@@ -14361,6 +14374,48 @@ fn the_windowed_palette_opens_and_closes_with_the_palette() {
     assert!(
         m.engine.cmdline.is_none(),
         "the cmdline state must clear the same as it does under the floating placement"
+    );
+}
+
+/// One redraw batch can carry two `cmdline_show` events (an unmatched key
+/// re-arms the cmdline within the same `update` call that saw the first
+/// one open it) before either request's `NativeWindowOpened` reply has
+/// been applied -- `grids().native_window` alone stays `None` for both,
+/// so only `pending_open` tells the second event that an open is already
+/// in flight.
+#[test]
+fn two_cmdline_shows_in_one_batch_ask_for_one_window() {
+    let mut m = windowed_palette_model();
+
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::CmdlineShow {
+                content: vec![(0, String::new())],
+                pos: 0,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+            UiEvent::CmdlineShow {
+                content: vec![(0, String::new())],
+                pos: 0,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+        ]),
+    );
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::Rpc(RpcCall::OpenNativeWindow { .. })))
+            .count(),
+        1,
+        "a second `cmdline_show` in the same batch must not ask for a \
+         second window while the first request is still pending: {effects:?}"
     );
 }
 
