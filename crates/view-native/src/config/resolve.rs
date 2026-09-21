@@ -169,6 +169,13 @@ pub struct ResolvedConfig {
     /// Where each `[keys]` action's bindings came from, in [`KEY_ACTIONS`]
     /// order.
     keys: [Source; KEY_ACTIONS.len()],
+    /// Where `[keys] toggle_gaps` came from. Not a [`KEY_ACTIONS`] row: that
+    /// table drives `KeyBindings::rebind`, and this key registers a real
+    /// nvim mapping instead (see [`super::resolve_ui_lhs`]), file-layer
+    /// only -- no `VIEW_KEYS_TOGGLE_GAPS` exists to read a second layer from.
+    ui_gaps_key: Source,
+    /// [`Self::ui_gaps_key`]'s own for `[keys] cycle_surfaces`.
+    ui_cycle_key: Source,
     /// Where `[supervision] auto_restart` came from.
     supervision: Source,
     /// The `NVIM_APPNAME` this process already carries, which is what an
@@ -190,12 +197,10 @@ const INHERITED_APPNAME_ENV: &str = "NVIM_APPNAME";
 
 /// The `[keys]` actions, each beside the key that names it, in the order
 /// the registry lists them.
-const KEY_ACTIONS: [(&str, Action); 5] = [
+const KEY_ACTIONS: [(&str, Action); 3] = [
     ("sidebar_wider", Action::Resize(Direction::Wider)),
     ("sidebar_narrower", Action::Resize(Direction::Narrower)),
     ("composer_newline", Action::ComposerNewline),
-    ("toggle_gaps", Action::ToggleGaps),
-    ("cycle_surfaces", Action::CycleSurfaces),
 ];
 
 /// Resolves every key against the process environment.
@@ -414,6 +419,15 @@ pub fn resolve_with(
     let (surfaces, surfaces_source) =
         resolve_surfaces(file, file_surfaces, &tree_width, env, &mut notices);
     let (bindings, key_sources) = resolve_keys(file, env, &mut notices);
+    let (gaps_lhs, ui_gaps_key) =
+        resolve_ui_lhs_env(file, env, "toggle_gaps", file.keys.gaps_lhs(), &mut notices);
+    let (cycle_lhs, ui_cycle_key) = resolve_ui_lhs_env(
+        file,
+        env,
+        "cycle_surfaces",
+        file.keys.cycle_lhs(),
+        &mut notices,
+    );
     let auto_restart = layer(
         None,
         env_read(
@@ -450,6 +464,8 @@ pub fn resolve_with(
             keys: KeysConfig {
                 bindings,
                 notices: file.keys.notices().to_vec(),
+                gaps_lhs: gaps_lhs.clone(),
+                cycle_lhs: cycle_lhs.clone(),
             },
             engine: file.engine.clone(),
             ui: file.ui.clone(),
@@ -460,6 +476,8 @@ pub fn resolve_with(
         tree_width: tree_width.source,
         tabline_shows: tabline_shows.source,
         keys: key_sources,
+        ui_gaps_key,
+        ui_cycle_key,
         supervision: auto_restart.source,
         inherited_appname: env(INHERITED_APPNAME_ENV).filter(|name| !name.is_empty()),
     }
@@ -493,6 +511,36 @@ fn resolve_keys(
         }
     }
     (bindings, sources)
+}
+
+/// One `[keys]` single-notation action -- `toggle_gaps`/`cycle_surfaces` --
+/// through the same file/env/derived chain [`resolve_keys`] runs the
+/// rebindable table through. `file_lhs` is the file layer's own answer
+/// (already resolved against `lhs_is_spellable`, one crate up), so this
+/// only has to place it against `file.spells` and check the environment
+/// above it.
+fn resolve_ui_lhs_env(
+    file: &ViewConfig,
+    env: &dyn Fn(&str) -> Option<String>,
+    key: &str,
+    file_lhs: &str,
+    notices: &mut Vec<String>,
+) -> (String, Source) {
+    let mut lhs = file_lhs.to_string();
+    let mut source = if file.spells("keys", key) {
+        Source::File
+    } else {
+        Source::Derived
+    };
+    if let Some(raw) = env_value(env, "keys", key) {
+        if view_core::native::mappings::lhs_is_spellable(&raw) {
+            lhs = raw;
+            source = Source::Env;
+        } else {
+            notices.push(discarded("keys", key, &raw, KEYS_EXPECTED));
+        }
+    }
+    (lhs, source)
 }
 
 impl ResolvedConfig {
@@ -615,6 +663,10 @@ impl ResolvedConfig {
                 self.tables.native.tabline_shows().label().to_string(),
                 self.tabline_shows,
             ),
+            ("keys", "toggle_gaps") => (self.tables.keys.gaps_lhs().to_string(), self.ui_gaps_key),
+            ("keys", "cycle_surfaces") => {
+                (self.tables.keys.cycle_lhs().to_string(), self.ui_cycle_key)
+            }
             ("keys", name) => {
                 let index = KEY_ACTIONS.iter().position(|(key, _)| *key == name)?;
                 (

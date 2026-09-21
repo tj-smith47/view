@@ -550,12 +550,6 @@ pub(super) fn ai_panel_key(
                 model.ai_panel_mut().push_input("\n");
                 model.dirty = true;
             }
-            // Dead in practice, the same way `surfaces::tree_key`'s own
-            // matching arm is: `route_key`'s top already answers these two
-            // before the panel ever sees a key.
-            Resolved::Act(action @ (Action::ToggleGaps | Action::CycleSurfaces)) => {
-                return super::surfaces::apply_global_action(model, action);
-            }
             Resolved::Pending => {}
         }
     } else if notation == "<Esc>" {
@@ -711,7 +705,7 @@ mod tests {
         );
         assert!(model.dirty);
         assert_eq!(
-            model.ai_panel().view(64, 60).rows,
+            model.ai_panel().view(64, 60, model.ai_panel().focused).rows,
             vec![vec![
                 crate::native::views::Span::new(
                     "\u{25e6} ",

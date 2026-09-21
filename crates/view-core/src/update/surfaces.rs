@@ -128,32 +128,21 @@ pub(super) fn tree_git_refresh_effect(model: &mut Model) -> Vec<Effect> {
     }
 }
 
-/// The two window-management actions, wherever [`crate::native::keys::
-/// Resolved`] resolved one -- [`super::route_key`]'s own top, or one of the
-/// sidebar/composer contexts that resolve the same [`Model::key_bindings`]
-/// for their own keys and fall through to this for the two neither of them
-/// answers itself.
-pub(super) fn apply_global_action(model: &mut Model, action: Action) -> Vec<Effect> {
-    match action {
-        Action::ToggleGaps => toggle_gaps(model),
-        Action::CycleSurfaces => cycle_placements(model),
-        Action::Resize(_) | Action::ComposerNewline => Vec::new(),
-    }
-}
-
-/// `[keys] toggle_gaps`: flips `[ui] gaps` and reissues everything a look
-/// change owes -- the outer grid's own size, then each window's inner size
-/// -- through [`super::look::set_look`], the one place that sequence is
-/// assembled. The gap is the whole of what moves: the panes stay exactly
-/// where they were, so the request `pending_inner_request` computes for a
-/// slot that did not move is still owed, because its guard is keyed on the
-/// look as well as the slot (see that method's own doc).
-fn toggle_gaps(model: &mut Model) -> Vec<Effect> {
+/// `Msg::FeatureInvoke { feature: "ui", verb: "gaps" }`: flips `[ui] gaps`
+/// and reissues everything a look change owes -- the outer grid's own size,
+/// then each window's inner size -- through [`super::look::set_look`], the
+/// one place that sequence is assembled. The gap is the whole of what
+/// moves: the panes stay exactly where they were, so the request
+/// `pending_inner_request` computes for a slot that did not move is still
+/// owed, because its guard is keyed on the look as well as the slot (see
+/// that method's own doc).
+pub(crate) fn toggle_gaps(model: &mut Model) -> Vec<Effect> {
     let look = crate::model::Look::new(model.look.panes, !model.look.gaps);
     super::look::set_look(model, look)
 }
 
-/// `[keys] cycle_surfaces`: advances the shared three-position ring
+/// `Msg::FeatureInvoke { feature: "ui", verb: "cycle_surfaces" }`: advances
+/// the shared three-position ring
 /// (`config`, `windowed`, `overlay`) every surface answers to at once, and
 /// carries whatever is open across the step it just took.
 ///
@@ -762,19 +751,42 @@ pub(super) fn open_message_history(model: &mut Model) -> Vec<Effect> {
 /// The windowed notification stream's own key handling, while its pane
 /// holds the cursor (`Focus::Pane(NativeSurface::Notifications)`).
 ///
-/// The resize keys are resolved first, through the same shared
-/// [`take_binding`] the sidebars use, so `<S-Right>`/`<S-Left>` (or a
-/// rebound chord) resize the stream's own tile exactly as they resize the
-/// tree's; every other resolution falls through unchanged. Past that,
-/// [`history_mut`] reaches the same `MessageHistoryState` a float would, so
-/// [`message_history_key`]'s own dispatch answers every key here exactly as
-/// it does for the floating overlay -- the pane is a placement, not a
-/// different feature. `<Esc>` never reaches here (see the caller's guard in
-/// `update::mod::route_key`): it leaves the tile, the same as the tree's
-/// and the agent panel's own.
+/// `<Esc>` leaves the tile for the previous window, the same as the tree's
+/// and the agent panel's own ([`agent_pane_key`]'s own `<Esc>` arm), checked
+/// first for the same reason: past it, the resize keys are resolved through
+/// the same shared [`take_binding`] the sidebars use, so
+/// `<S-Right>`/`<S-Left>` (or a rebound chord) resize the stream's own tile
+/// exactly as they resize the tree's; every other resolution falls through
+/// unchanged. Past that, [`history_mut`] reaches the same
+/// `MessageHistoryState` a float would, so [`message_history_key`]'s own
+/// dispatch answers every key here exactly as it does for the floating
+/// overlay -- the pane is a placement, not a different feature.
 pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Vec<Effect> {
-    if let Some(Resolved::Act(Action::Resize(direction))) = take_binding(model, notation) {
-        return resize_windowed_stream(model, direction.widens());
+    if notation == "<Esc>" {
+        return vec![Effect::Rpc(RpcCall::FocusPreviousWindow)];
+    }
+    // `<C-w>` opens a real nvim window-command prefix, and this pane's own
+    // resize chord (`<C-w>>`/`<C-w><`) is only two of the followers nvim
+    // itself answers (`w`, `s`, `q`, ...); the raw keys have to reach nvim
+    // for those to still work, so the prefix is forwarded on arming and its
+    // follower is forwarded too whenever it did not complete the resize
+    // chord this build claims.
+    let armed_before = model.pending_chord.as_deref() == Some("<C-w>");
+    match take_binding(model, notation) {
+        Some(Resolved::Act(Action::Resize(direction))) => {
+            return resize_windowed_stream(model, direction.widens());
+        }
+        Some(Resolved::Pending) => {
+            return vec![Effect::Rpc(RpcCall::Input {
+                notation: notation.to_string(),
+            })];
+        }
+        _ => {}
+    }
+    if armed_before {
+        return vec![Effect::Rpc(RpcCall::Input {
+            notation: notation.to_string(),
+        })];
     }
     message_history_key(model, notation)
 }
@@ -867,14 +879,6 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         // and the tree answers it the way it answers any key no
         // binding of its own names.
         Some(Resolved::Act(Action::ComposerNewline)) => {}
-        // Dead in practice: `route_key`'s own top already answers these two
-        // for every keystroke before the tree ever sees one (see its doc),
-        // so this exists for the match to stay exhaustive as `Action`
-        // grows, and answers the same way on the rare path that reaches it
-        // anyway.
-        Some(Resolved::Act(action @ (Action::ToggleGaps | Action::CycleSurfaces))) => {
-            return apply_global_action(model, action);
-        }
         // The chord's first key waits here rather than moving
         // the selection or closing the sidebar; the follower
         // that completes nothing falls straight through to the

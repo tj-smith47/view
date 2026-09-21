@@ -238,9 +238,9 @@ tile is too narrow for the full date to fit beside the message.
 
 ## The placement ring
 
-`<F10>` (`cycle_surfaces`) steps the tree, the agent panel, the palette
-and the notification stream together through one shared, three-position
-ring:
+`<leader>uw` (`cycle_surfaces`) steps the tree, the agent panel, the
+palette and the notification stream together through one shared,
+three-position ring:
 
 ```
 config -> windowed -> overlay -> config
@@ -255,7 +255,7 @@ already open when the ring steps keeps what it was showing: the tree
 keeps its cursor row, the agent panel keeps its transcript, and the
 notification stream keeps what it was displaying. See
 [keymaps.md](keymaps.md#gaps-and-the-placement-ring) for the key itself
-and `<F9>`, the gaps toggle beside it.
+and `<leader>ug`, the gaps toggle beside it.
 
 ## Width a surface has to work with
 

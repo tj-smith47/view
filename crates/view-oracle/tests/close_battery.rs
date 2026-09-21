@@ -1686,15 +1686,18 @@ fn a_file_taken_into_the_trees_window_keeps_its_filetypes_look() {
     );
 }
 
-/// `<F10>` stepped three times against the pinned nvim, under
+/// `cycle_surfaces` stepped three times against the pinned nvim, under
 /// `panes = "tiles"` at the battery's own geometry: the tree's window
 /// opens on the step that carries it to `windowed`, closes on the step
 /// that carries it to `overlay`, and the tree's own state -- what
 /// `engine.tree_is_open()` answers for -- never closes with it.
 ///
-/// Disconfirm: dropping the top-of-`route_key` intercept
-/// (`update::mod::route_key`) leaves `<F10>` reaching nvim as an ordinary
-/// keystroke, and the tree's window never moves at all.
+/// The invoke, not the raw `<leader>uw` chord: this crate has no real
+/// terminal to encode a keystroke from, so the chord's own arrival is
+/// `view-core`'s `Msg::FeatureInvoke { feature: "ui", verb: "cycle_surfaces" }`
+/// -- the message the registered nvim mapping sends back, and the one
+/// `EngineSession::feed`'s own doc names as the front door for exactly
+/// this case.
 #[test]
 fn cycle_surfaces_moves_the_trees_window_against_real_nvim() {
     let work = common::ScratchPaths::new("close-battery-cycle-tree");
@@ -1710,10 +1713,11 @@ fn cycle_surfaces_moves_the_trees_window_against_real_nvim() {
     // ring position 1: windowed, where the tree already sat -- no window
     // opens or closes
     engine
-        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
-            notation: "<F10>".to_string(),
-        }))
-        .expect("the ring answers a plain key");
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ui".to_string(),
+            verb: "cycle_surfaces".to_string(),
+        })
+        .expect("the ring answers its own invoke");
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     assert_eq!(
         tree_window_widths(&mut engine),
@@ -1725,10 +1729,11 @@ fn cycle_surfaces_moves_the_trees_window_against_real_nvim() {
     // ring position 2: overlay -- the tree's window closes and nvim is
     // left with the one window it started the battery with
     engine
-        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
-            notation: "<F10>".to_string(),
-        }))
-        .expect("the ring answers a plain key");
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ui".to_string(),
+            verb: "cycle_surfaces".to_string(),
+        })
+        .expect("the ring answers its own invoke");
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     assert_eq!(
         nvim_window_sizes(&mut engine).len(),
@@ -1749,10 +1754,11 @@ fn cycle_surfaces_moves_the_trees_window_against_real_nvim() {
     // `[ui.surfaces.tree]` of its own, so config is overlay too and this
     // step is a no-op -- proven by nvim's window count holding at one
     engine
-        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
-            notation: "<F10>".to_string(),
-        }))
-        .expect("the ring answers a plain key");
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ui".to_string(),
+            verb: "cycle_surfaces".to_string(),
+        })
+        .expect("the ring answers its own invoke");
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     assert_eq!(
         nvim_window_sizes(&mut engine).len(),
@@ -1836,16 +1842,17 @@ fn native_window_rect(
 /// C2 + I11, against real nvim: the tree, the agent panel and the
 /// notification stream are open as overlays (the ring's `config` stop),
 /// with the keyboard in the buffer throughout -- nothing here ever enters
-/// any of the three. `<F10>` to `windowed` opens all three in the same
-/// fold, each carrying its own surface's own generation; `<F10>` again to
-/// `overlay` must close all three real windows it opened, which a shared
-/// generation counter cannot do (the second and third replies answer a
-/// generation the counter has already moved past, so their handles are
-/// never claimed, the ring's own close finds nothing to close, and their
-/// scratch windows outlive the step that was meant to take them away).
+/// any of the three. One `cycle_surfaces` invoke to `windowed` opens all
+/// three in the same fold, each carrying its own surface's own generation;
+/// a second invoke to `overlay` must close all three real windows it
+/// opened, which a shared generation counter cannot do (the second and
+/// third replies answer a generation the counter has already moved past,
+/// so their handles are never claimed, the ring's own close finds nothing
+/// to close, and their scratch windows outlive the step that was meant to
+/// take them away).
 ///
 /// Disconfirm: reverting `SurfaceState::generation` to one shared `u64`
-/// leaves two of the three windows standing after the second `<F10>`.
+/// leaves two of the three windows standing after the second invoke.
 #[test]
 fn a_ring_step_opens_and_closes_three_surfaces_windows_against_real_nvim() {
     let work = common::ScratchPaths::new("close-battery-ring-three");
@@ -1880,10 +1887,11 @@ fn a_ring_step_opens_and_closes_three_surfaces_windows_against_real_nvim() {
 
     // ring position 1: windowed -- all three open in the same fold
     engine
-        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
-            notation: "<F10>".to_string(),
-        }))
-        .expect("the ring answers a plain key");
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ui".to_string(),
+            verb: "cycle_surfaces".to_string(),
+        })
+        .expect("the ring answers its own invoke");
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     assert_eq!(
         nvim_window_sizes(&mut engine).len(),
@@ -1911,10 +1919,11 @@ fn a_ring_step_opens_and_closes_three_surfaces_windows_against_real_nvim() {
     // ring position 2: overlay -- every real window the step above opened
     // must close, or a shared generation's dropped reply leaves it orphaned
     engine
-        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
-            notation: "<F10>".to_string(),
-        }))
-        .expect("the ring answers a plain key");
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ui".to_string(),
+            verb: "cycle_surfaces".to_string(),
+        })
+        .expect("the ring answers its own invoke");
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     assert_eq!(
         nvim_window_sizes(&mut engine).len(),
@@ -1990,8 +1999,8 @@ fn the_tree_stacks_above_the_agent_panel_however_they_open_against_real_nvim() {
 }
 
 /// Against real nvim, from a default session with no `[ui.surfaces]` table
-/// touched: one ring step to `windowed` (`<F10>` from a fresh
-/// `Model::new()`) opens the tree, the agent panel and the notification
+/// touched: one ring step to `windowed` (a `cycle_surfaces` invoke from a
+/// fresh `Model::new()`) opens the tree, the agent panel and the notification
 /// stream at the position `default_windowed_anchor` names for each --
 /// nothing here sets a surface's layout by hand, so a stale fallback that
 /// silently mapped every anchor onto a left sidebar (the defect a config
@@ -2026,10 +2035,11 @@ fn a_ring_step_opens_every_default_surface_at_its_designed_windowed_position_aga
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
 
     engine
-        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
-            notation: "<F10>".to_string(),
-        }))
-        .expect("the ring answers a plain key");
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ui".to_string(),
+            verb: "cycle_surfaces".to_string(),
+        })
+        .expect("the ring answers its own invoke");
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
 
     let tree = native_window_rect(&mut engine, "tree").expect("the tree claims a window");
@@ -2147,6 +2157,90 @@ fn the_ticker_opens_and_closes_its_own_window_against_real_nvim() {
         "the close must hand the keyboard back to the window the ticker \
          was opened from, not leave it on the tile's own closed handle: \
          {ticker_id} closed"
+    );
+}
+
+/// The windowed stream against real nvim: `<Esc>` leaves it for the window
+/// that held focus before it opened, the same `wincmd p` the design names,
+/// without closing the stream's own window; and a window command the
+/// stream's own resize chord does not claim (`<C-w>w`, cycling back in)
+/// still reaches nvim rather than being swallowed by
+/// [`view_core::update::surfaces::notifications_pane_key`]'s message-key
+/// fallback.
+#[test]
+fn a_windowed_stream_leaves_focus_on_escape_and_forwards_a_window_command_against_real_nvim() {
+    let work = common::ScratchPaths::new("close-battery-stream-window-cmds");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = overlay_session(&dir);
+    engine.set_surface(
+        view_core::native::geometry::NativeSurface::Notifications,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Bottom,
+            30,
+        ),
+    );
+    let before_current = engine.eval_str("win_getid()").unwrap().trim().to_string();
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "history".to_string(),
+        })
+        .expect("the stream's window opens");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.eval_str("&filetype").unwrap().trim(),
+        "view-notifications",
+        "opening the stream must enter its own window"
+    );
+    let stream_id = engine.eval_str("win_getid()").unwrap().trim().to_string();
+
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "<Esc>".to_string(),
+        }))
+        .expect("escape leaves the stream's window");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    assert_eq!(
+        engine.eval_str("win_getid()").unwrap().trim(),
+        before_current,
+        "escape must hand focus back to the window the stream was opened \
+         from, the way wincmd p does"
+    );
+    assert!(
+        native_window_rect(&mut engine, "notifications").is_some(),
+        "escape leaves the stream's window in place; it must not close it"
+    );
+
+    engine
+        .eval_str(&format!("win_gotoid({stream_id})"))
+        .expect("nvim answers the jump back into the stream");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.eval_str("&filetype").unwrap().trim(),
+        "view-notifications",
+        "the jump back must land in the stream's own window again"
+    );
+
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "<C-w>".to_string(),
+        }))
+        .expect("the window-command prefix reaches nvim armed, not swallowed");
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "w".to_string(),
+        }))
+        .expect("the follower nvim answers as wincmd w reaches nvim too");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    assert_ne!(
+        engine.eval_str("win_getid()").unwrap().trim(),
+        stream_id,
+        "<C-w>w is not the stream's own resize chord, so nvim must have \
+         answered it and cycled the window itself"
     );
 }
 

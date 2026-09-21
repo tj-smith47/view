@@ -69,13 +69,16 @@ tree_width = 30            # default: 30 -- percent of the terminal width,
 # reason view refuses the file. A well-formed name this build never
 # receives is still simply inert. Alt is written M-, the way view's own
 # encoder emits it; A- is read as the same modifier.
+#
+# toggle_gaps and cycle_surfaces each take a single notation, and a leader
+# chord like the defaults below works fine there.
 
 [keys]
 sidebar_wider = ["<S-Right>", "<C-w>>"]
 sidebar_narrower = ["<S-Left>", "<C-w><"]
 composer_newline = ["<S-CR>", "<M-CR>"]
-toggle_gaps = "<F9>"
-cycle_surfaces = "<F10>"
+toggle_gaps = "<leader>ug"
+cycle_surfaces = "<leader>uw"
 
 # [supervision] decides how far view goes on its own when the engine fails.
 # Detection is always on: a wedged or dead engine raises a notice and, past

@@ -726,8 +726,16 @@ impl AiPanelState {
     /// An open review adds its summary rows and nothing else: the diff
     /// itself is drawn in the file, by nvim, over the real rows
     /// ([`DiffReviewState::marks`]).
+    ///
+    /// `has_keyboard` is `self.focused` for the floating placement's own
+    /// call site, the one truth that field carries there, but a windowed
+    /// panel is entered by nvim's own cursor move and never sets `focused`
+    /// (see the field's doc), so its call site passes
+    /// `model.focus() == Focus::Pane(NativeSurface::Agent)` instead: two
+    /// different placements, one "does this render currently have the
+    /// keyboard" question.
     #[must_use]
-    pub fn view(&self, panel_height: usize, panel_width: usize) -> AiPanelView {
+    pub fn view(&self, panel_height: usize, panel_width: usize, has_keyboard: bool) -> AiPanelView {
         let composer = self.composer_rows(panel_height, panel_width);
         let visible_rows = self.transcript_rows(panel_height, composer.len());
         let width = transcript_width(panel_width);
@@ -745,7 +753,7 @@ impl AiPanelState {
             rows.push(vec![Span::plain(MORE_BELOW)]);
             rows
         };
-        let mut view = AiPanelView::new(if self.focused { FOCUSED_TITLE } else { TITLE })
+        let mut view = AiPanelView::new(if has_keyboard { FOCUSED_TITLE } else { TITLE })
             .with_input_rows(composer)
             .with_rows(rows);
         if let Some(usage) = &self.usage {
@@ -762,7 +770,7 @@ impl AiPanelState {
             view = view.with_review(rows);
         }
         if let Some(message) = &self.local_error {
-            let hint = if self.focused {
+            let hint = if has_keyboard {
                 DISMISS_KEY_HINT
             } else {
                 DISMISS_VERB_HINT
@@ -776,7 +784,7 @@ impl AiPanelState {
         match &self.pending_permission {
             Some(prompt) => {
                 let mut rows = prompt.render_rows();
-                if !self.focused {
+                if !has_keyboard {
                     rows.push(vec![Span::plain(ENTER_HINT)]);
                 }
                 view.with_pending_permission(rows)
@@ -1320,7 +1328,7 @@ mod tests {
         panel_width: usize,
     ) -> Vec<String> {
         state
-            .view(panel_height, panel_width)
+            .view(panel_height, panel_width, state.focused)
             .rows
             .into_iter()
             .map(|row| row.into_iter().map(|span| span.text).collect())
@@ -1583,7 +1591,7 @@ mod tests {
         let mut state = AiPanelState::new();
         state.input.clone_from(&typed);
 
-        let rows = state.view(ROOM, WIDE_PANEL).input;
+        let rows = state.view(ROOM, WIDE_PANEL, state.focused).input;
 
         assert_eq!(rows.concat(), typed, "no character is dropped by the wrap");
         assert!(rows.len() > 1, "a prompt past the width takes more rows");
@@ -1612,7 +1620,7 @@ mod tests {
         let rows = |input: &str| {
             let mut state = AiPanelState::new();
             state.input = input.to_string();
-            state.view(ROOM, WIDE_PANEL).input
+            state.view(ROOM, WIDE_PANEL, state.focused).input
         };
 
         for (name, input) in [
@@ -1642,7 +1650,7 @@ mod tests {
         state.input = "ab\n".to_string();
 
         assert_eq!(
-            state.view(ROOM, WIDE_PANEL).input,
+            state.view(ROOM, WIDE_PANEL, state.focused).input,
             vec!["ab".to_string(), String::new()]
         );
         assert_eq!(
@@ -1671,7 +1679,7 @@ mod tests {
             acc
         });
 
-        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL, state.focused).input;
 
         assert_eq!(rows.len(), cap, "the composer keeps its cap: {rows:?}");
         assert_eq!(
@@ -1752,7 +1760,7 @@ mod tests {
             let mut state = AiPanelState::new();
             state.push_input(&input);
 
-            let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+            let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL, state.focused).input;
 
             assert_eq!(
                 rows,
@@ -1843,7 +1851,7 @@ mod tests {
         state.push_input("first\nsecond\n");
         state.input.clone_from(&letters);
 
-        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL, state.focused).input;
 
         assert_eq!(
             rows,
@@ -1905,7 +1913,7 @@ mod tests {
         let mut state = AiPanelState::new();
         state.input = "界".repeat(width);
 
-        let rows = state.view(ROOM, WIDE_PANEL).input;
+        let rows = state.view(ROOM, WIDE_PANEL, state.focused).input;
 
         assert_eq!(rows.concat(), state.input, "no glyph is dropped");
         for row in &rows {
@@ -1934,7 +1942,7 @@ mod tests {
         let mut state = AiPanelState::new();
         state.input = overlong_prompt(width, TEN_ROW_PANEL);
 
-        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL, state.focused).input;
 
         assert_eq!(
             rows.len(),
@@ -1979,7 +1987,7 @@ mod tests {
                     state.local_error = Some("gone".to_string());
                 }
 
-                let composer = state.view(height, WIDE_PANEL).input.len();
+                let composer = state.view(height, WIDE_PANEL, state.focused).input.len();
                 let transcript = state.transcript_viewport(height, WIDE_PANEL);
                 let banners = usize::from(usage) + usize::from(error);
                 let banner_note = format!("usage={usage} error={error}");
@@ -2026,7 +2034,10 @@ mod tests {
             state.input = "z".repeat(200);
 
             assert_eq!(
-                state.view(TEN_ROW_PANEL, panel_width).input.len(),
+                state
+                    .view(TEN_ROW_PANEL, panel_width, state.focused)
+                    .input
+                    .len(),
                 1,
                 "a {panel_width}-wide panel keeps its composer to one row"
             );
@@ -2125,7 +2136,7 @@ mod tests {
     fn an_empty_panel_views_as_an_empty_transcript_with_the_typed_input() {
         let mut state = AiPanelState::new();
         state.input = "hello".to_string();
-        let view = state.view(ROOM, WIDE_PANEL);
+        let view = state.view(ROOM, WIDE_PANEL, state.focused);
         assert_eq!(view.title, TITLE);
         assert_eq!(view.input, vec!["hello".to_string()]);
         assert!(view.rows.is_empty());
@@ -2147,7 +2158,7 @@ mod tests {
     fn a_local_error_renders_as_the_panels_own_banner_row() {
         let mut state = AiPanelState::new();
         state.local_error = Some("the agent exited (signal: 9)".to_string());
-        let view = state.view(ROOM, WIDE_PANEL);
+        let view = state.view(ROOM, WIDE_PANEL, state.focused);
         assert_eq!(
             view.local_error,
             vec![vec![Span::plain(format!(
@@ -2166,14 +2177,14 @@ mod tests {
         state.local_error = Some("gone".to_string());
         state.focused = true;
         assert_eq!(
-            state.view(ROOM, WIDE_PANEL).local_error,
+            state.view(ROOM, WIDE_PANEL, state.focused).local_error,
             vec![vec![Span::plain(format!(
                 "Error: gone. {DISMISS_KEY_HINT}"
             ))]]
         );
         state.focused = false;
         assert_eq!(
-            state.view(ROOM, WIDE_PANEL).local_error,
+            state.view(ROOM, WIDE_PANEL, state.focused).local_error,
             vec![vec![Span::plain(format!(
                 "Error: gone. {DISMISS_VERB_HINT}"
             ))]]
@@ -2187,9 +2198,9 @@ mod tests {
     #[test]
     fn an_entered_panel_announces_itself_in_its_title_even_while_idle() {
         let mut state = AiPanelState::new();
-        assert_eq!(state.view(ROOM, WIDE_PANEL).title, TITLE);
+        assert_eq!(state.view(ROOM, WIDE_PANEL, state.focused).title, TITLE);
         state.focused = true;
-        let view = state.view(ROOM, WIDE_PANEL);
+        let view = state.view(ROOM, WIDE_PANEL, state.focused);
         assert_eq!(view.title, FOCUSED_TITLE);
         assert!(
             view.title.contains("Esc"),
@@ -2218,7 +2229,7 @@ mod tests {
                 kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
             }],
         ));
-        let view = state.view(ROOM, WIDE_PANEL);
+        let view = state.view(ROOM, WIDE_PANEL, state.focused);
         assert_eq!(
             view.pending_permission,
             vec![
@@ -2254,7 +2265,7 @@ mod tests {
                 kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
             }],
         ));
-        let view = state.view(ROOM, WIDE_PANEL);
+        let view = state.view(ROOM, WIDE_PANEL, state.focused);
         assert_eq!(
             view.pending_permission.last(),
             Some(&vec![Span::plain(ENTER_HINT)]),
@@ -2281,7 +2292,7 @@ mod tests {
                 kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
             }],
         ));
-        let view = state.view(ROOM, WIDE_PANEL);
+        let view = state.view(ROOM, WIDE_PANEL, state.focused);
         assert!(
             view.pending_permission
                 .iter()
@@ -2291,11 +2302,51 @@ mod tests {
         );
     }
 
+    /// The windowed placement's own case: `focused` never sets for it (see
+    /// its doc), so a caller with the keyboard passes `has_keyboard` as its
+    /// own true rather than `self.focused`. `view()` must read that
+    /// argument, not the field, for the title and every hint -- the field
+    /// alone reading `false` here is what let a windowed, entered panel
+    /// draw `ENTER_HINT` and the verb-form dismiss hint over its own answer.
+    #[test]
+    fn an_unfocused_panel_with_the_keyboard_renders_as_focused() {
+        let mut state = AiPanelState::new();
+        assert!(!state.focused, "the windowed placement never sets this");
+        state.local_error = Some("gone".to_string());
+        state.pending_permission = Some(PermissionPrompt::new(
+            1,
+            "call_1",
+            Some("Delete config.yaml".to_string()),
+            Some("edit".to_string()),
+            vec![crate::native::ai_event::PermissionOption {
+                option_id: "allow-once".to_string(),
+                name: "Allow once".to_string(),
+                kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
+            }],
+        ));
+        let view = state.view(ROOM, WIDE_PANEL, true);
+        assert_eq!(view.title, FOCUSED_TITLE);
+        assert_eq!(
+            view.local_error,
+            vec![vec![Span::plain(format!(
+                "Error: gone. {DISMISS_KEY_HINT}"
+            ))]]
+        );
+        assert!(
+            view.pending_permission
+                .iter()
+                .all(|row| row != &vec![Span::plain(ENTER_HINT)]),
+            "a windowed panel that holds the keyboard already answers keys; \
+             the hint would be stale: {:?}",
+            view.pending_permission
+        );
+    }
+
     #[test]
     fn what_the_session_has_spent_is_on_the_panel_once_the_agent_reports_it() {
         let mut state = AiPanelState::new();
         assert!(
-            state.view(ROOM, WIDE_PANEL).usage.is_empty(),
+            state.view(ROOM, WIDE_PANEL, state.focused).usage.is_empty(),
             "nothing is claimed about a session that has reported nothing"
         );
 
@@ -2309,7 +2360,7 @@ mod tests {
         });
 
         assert_eq!(
-            state.view(ROOM, WIDE_PANEL).usage,
+            state.view(ROOM, WIDE_PANEL, state.focused).usage,
             vec![vec![Span::plain("context 100/1000, cost 0.05 USD")]]
         );
     }
@@ -2332,7 +2383,7 @@ mod tests {
         state
             .transcript
             .append_or_extend(Some("3"), "weighing it", TranscriptRole::Thought);
-        let view = state.view(ROOM, WIDE_PANEL);
+        let view = state.view(ROOM, WIDE_PANEL, state.focused);
 
         assert_eq!(view.rows.len(), 3);
         let roles: Vec<Vec<StyleRole>> = view
@@ -2380,7 +2431,7 @@ mod tests {
                 status,
                 None,
             );
-            let view = state.view(ROOM, WIDE_PANEL);
+            let view = state.view(ROOM, WIDE_PANEL, state.focused);
             assert_eq!(
                 view.rows,
                 vec![vec![
@@ -2412,9 +2463,9 @@ mod tests {
             "a call in flight is what buys the panel a clock"
         );
 
-        let first = state.view(ROOM, WIDE_PANEL).rows;
+        let first = state.view(ROOM, WIDE_PANEL, state.focused).rows;
         state.transcript.advance_spinner();
-        let second = state.view(ROOM, WIDE_PANEL).rows;
+        let second = state.view(ROOM, WIDE_PANEL, state.focused).rows;
 
         assert_eq!(
             first[0], second[0],
@@ -2438,7 +2489,7 @@ mod tests {
             "a resolved call leaves nothing to animate"
         );
         assert_eq!(
-            state.view(ROOM, WIDE_PANEL).rows[1][0],
+            state.view(ROOM, WIDE_PANEL, state.focused).rows[1][0],
             Span::new("✓ ", StyleRole::AiToolDone),
             "the last frame painted is the call's own outcome"
         );
@@ -2473,7 +2524,7 @@ mod tests {
         let prompt = "word ".repeat(60);
         state.transcript.echo_user_prompt(&prompt);
 
-        let rows = state.view(ROOM, 24).rows;
+        let rows = state.view(ROOM, 24, state.focused).rows;
         // asked of the framing's own arithmetic rather than of the panel's
         // reading of it, so the bound stands independent of what the panel
         // decided a row's width was
@@ -2531,21 +2582,26 @@ mod tests {
         after_break.push_input("\n");
         after_break.push_input(&paste);
 
-        let rows_alone = alone.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+        let rows_alone = alone.view(TEN_ROW_PANEL, WIDE_PANEL, alone.focused).input;
         assert_eq!(
             rows_alone,
             wrap(&paste, width, cap, Break::Cell),
             "the paste alone wraps as its own text does"
         );
         assert_eq!(
-            after_break.view(TEN_ROW_PANEL, WIDE_PANEL).input,
+            after_break
+                .view(TEN_ROW_PANEL, WIDE_PANEL, after_break.focused)
+                .input,
             wrap(&format!("first\n{paste}"), width, cap, Break::Cell),
             "and the same paste under a typed break wraps as that whole \
              input does, in the same columns"
         );
         assert_eq!(
             rows_alone.last(),
-            after_break.view(TEN_ROW_PANEL, WIDE_PANEL).input.last(),
+            after_break
+                .view(TEN_ROW_PANEL, WIDE_PANEL, after_break.focused)
+                .input
+                .last(),
             "which is the same last row either way"
         );
     }

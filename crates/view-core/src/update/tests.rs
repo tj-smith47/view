@@ -1154,7 +1154,9 @@ fn a_pasted_trailing_newline_leaves_the_prompt_in_the_composer() {
         "the text is kept verbatim, its line breaks included"
     );
     assert_eq!(
-        m.ai_panel().view(PANEL_HEIGHT, PANEL_WIDTH).input,
+        m.ai_panel()
+            .view(PANEL_HEIGHT, PANEL_WIDTH, m.ai_panel().focused)
+            .input,
         vec![
             "first line".to_string(),
             "second line".to_string(),
@@ -1197,7 +1199,10 @@ fn a_paste_past_the_wrap_cap_keeps_every_character_and_paints_its_tail() {
     let _ = update(&mut m, Msg::Paste(pasted.clone()));
 
     assert_eq!(m.ai_panel().input(), pasted, "no pasted character is cut");
-    let rows = m.ai_panel().view(PANEL_HEIGHT, PANEL_WIDTH).input;
+    let rows = m
+        .ai_panel()
+        .view(PANEL_HEIGHT, PANEL_WIDTH, m.ai_panel().focused)
+        .input;
     assert!(rows.len() > 1, "a paste this long has to wrap");
     assert!(
         rows.len() * 2 <= PANEL_HEIGHT,
@@ -4243,7 +4248,7 @@ fn an_always_allow_answer_answers_the_next_request_of_that_kind_by_itself() {
     );
     let rows: Vec<String> = m
         .ai_panel()
-        .view(24, 60)
+        .view(24, 60, m.ai_panel().focused)
         .rows
         .iter()
         .map(|row| row.iter().map(|span| span.text.clone()).collect())
@@ -4298,7 +4303,7 @@ fn an_always_reject_answer_refuses_the_next_request_of_that_kind_by_itself() {
     );
     let rows: Vec<String> = m
         .ai_panel()
-        .view(24, 60)
+        .view(24, 60, m.ai_panel().focused)
         .rows
         .iter()
         .map(|row| row.iter().map(|span| span.text.clone()).collect())
@@ -4540,7 +4545,7 @@ fn panel_transcript_texts(m: &Model) -> Vec<String> {
 /// unless the panel is wide enough to hold it on one.
 fn panel_transcript_texts_at(m: &Model, panel_width: usize) -> Vec<String> {
     m.ai_panel()
-        .view(24, panel_width)
+        .view(24, panel_width, m.ai_panel().focused)
         .rows
         .into_iter()
         .map(|row| row.into_iter().map(|span| span.text).collect())
@@ -5312,6 +5317,20 @@ fn key(notation: &str) -> Msg {
     })
 }
 
+fn gaps_invoke() -> Msg {
+    Msg::FeatureInvoke {
+        feature: "ui".to_string(),
+        verb: "gaps".to_string(),
+    }
+}
+
+fn cycle_surfaces_invoke() -> Msg {
+    Msg::FeatureInvoke {
+        feature: "ui".to_string(),
+        verb: "cycle_surfaces".to_string(),
+    }
+}
+
 /// Single printable characters accumulate into the composer line one at a
 /// time, and `<BS>` removes the last one -- the plain typing path every
 /// other assertion in this block depends on already working.
@@ -5414,7 +5433,7 @@ fn a_typed_line_break_opens_a_row_and_enter_still_submits() {
     assert!(effects.is_empty(), "a line break submits nothing");
     assert!(m.dirty, "and the panel repaints for it");
     assert_eq!(m.ai_panel().input(), "one\n");
-    let view = m.ai_panel().view(24, 40);
+    let view = m.ai_panel().view(24, 40, m.ai_panel().focused);
     assert_eq!(view.input, vec!["one".to_string(), String::new()]);
     assert_eq!(
         view.composer_cursor(),
@@ -5425,7 +5444,7 @@ fn a_typed_line_break_opens_a_row_and_enter_still_submits() {
     for ch in ["t", "w", "o"] {
         let _ = update(&mut m, key(ch));
     }
-    let view = m.ai_panel().view(24, 40);
+    let view = m.ai_panel().view(24, 40, m.ai_panel().focused);
     assert_eq!(view.input, vec!["one".to_string(), "two".to_string()]);
 
     let effects = update(&mut m, key("<CR>"));
@@ -14599,23 +14618,108 @@ fn resizing_an_overlay_sidebar_still_steps_tree_width_pct() {
     );
 }
 
-/// `<F9>`/`<F10>` answer wherever the keyboard is aimed -- a plain engine
+/// The gaps toggle answers wherever the keyboard is aimed -- a plain engine
 /// focus, a focused windowed tree, a focused windowed agent panel -- because
-/// `route_key` resolves them ahead of every sidebar's own key table rather
-/// than through it. A key that reached the engine as ordinary text instead
-/// of the gaps toggle would leave `m.look.gaps` exactly where it started.
+/// its `("ui", "gaps")` invoke is dispatched ahead of every sidebar's own
+/// key table rather than through it. A key that reached the engine as
+/// ordinary text instead of the gaps toggle would leave `m.look.gaps`
+/// exactly where it started.
 #[test]
 fn the_two_new_key_actions_resolve_through_the_same_chain() {
     for mut m in [model(), focused_windowed_tree(), focused_windowed_agent()] {
         let before = m.look.gaps;
-        let effects = update(&mut m, key("<F9>"));
-        assert_ne!(before, m.look.gaps, "<F9> did not toggle gaps: {effects:?}");
+        let effects = update(&mut m, gaps_invoke());
+        assert_ne!(
+            before, m.look.gaps,
+            "the invoke did not toggle gaps: {effects:?}"
+        );
+    }
+}
+
+/// The two function keys the gaps toggle and the placement cycle used to
+/// answer on are ordinary keys again: nothing in `KeyBindings` or the
+/// claimed-mapping path claims them once both actions move to leader
+/// chords with no two-key ceiling.
+#[test]
+fn the_old_function_keys_are_no_longer_claimed_by_any_key_table() {
+    let mut m = model();
+    for notation in ["<F9>", "<F10>"] {
+        let effects = update(&mut m, key(notation));
         assert!(
-            !effects.iter().any(|effect| matches!(
+            effects.iter().any(|effect| matches!(
                 effect,
-                Effect::Rpc(RpcCall::Input { notation }) if notation == "<F9>"
+                Effect::Rpc(RpcCall::Input { notation: sent }) if sent == notation
             )),
-            "<F9> reached the engine as an ordinary keystroke: {effects:?}"
+            "{notation} must reach the engine as ordinary input: {effects:?}"
+        );
+    }
+}
+
+/// `<leader><leader>` (`("palette", "open")`) opens the command line exactly
+/// as a typed `:` would -- the same `RpcCall::Input(":")` a hand-typed colon
+/// sends, so the palette's own `CmdlineShow` handling is what actually opens
+/// it, on either path.
+#[test]
+fn leader_leader_invoke_opens_the_command_line() {
+    let mut m = model();
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "palette".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == ":"
+        ),
+        "the invoke must open the command line the same way a typed : does: {effects:?}"
+    );
+}
+
+/// Every row [`crate::native::mappings::default_maps`],
+/// [`crate::native::mappings::command_only_forms`] and
+/// [`crate::native::mappings::review_keys`] name is a `(feature, verb)`
+/// pair a key or a `:View` form can actually send as a
+/// [`Msg::FeatureInvoke`]; a row with no arm in this file's own dispatch
+/// falls through to [`feature_invoke_notice`]'s "no handler" text instead
+/// of doing anything, which is the same as a key nobody ever finishes
+/// wiring up. Walked so a row added to any of the three tables without a
+/// matching arm here fails this test by the row's own name rather than
+/// shipping a key that prints an apology.
+#[test]
+fn every_registered_feature_invoke_has_a_dispatch_handler() {
+    use crate::native::mappings::{command_only_forms, default_maps, review_keys};
+    use std::collections::BTreeSet;
+
+    let rows: BTreeSet<(&str, &str)> = default_maps()
+        .iter()
+        .map(|spec| (spec.feature, spec.verb))
+        .chain(
+            command_only_forms()
+                .iter()
+                .map(|form| (form.feature, form.verb)),
+        )
+        .chain(review_keys().iter().map(|key| ("review", key.verb)))
+        .collect();
+
+    for (feature, verb) in rows {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: feature.to_string(),
+                verb: verb.to_string(),
+            },
+        );
+        let fallback = feature_invoke_notice(feature, verb, true);
+        assert!(
+            !visible_texts(&m)
+                .iter()
+                .any(|line| line.contains(&fallback)),
+            "({feature}, {verb}) has no dispatch handler: it fell through to the \
+             no-handler notice"
         );
     }
 }
@@ -14632,7 +14736,7 @@ fn an_open_tree_keeps_its_cursor_row_across_a_cycle() {
     assert!(selected.is_some(), "the cursor never moved onto a row");
 
     for _ in 0..3 {
-        let _ = update(&mut m, key("<F10>"));
+        let _ = update(&mut m, cycle_surfaces_invoke());
         assert_eq!(
             m.tree_mut().and_then(|tree| tree.view().selected),
             selected,
@@ -14659,7 +14763,7 @@ fn an_open_panel_keeps_its_transcript_across_a_cycle() {
     let before = panel_transcript_texts(&m);
 
     for _ in 0..3 {
-        let _ = update(&mut m, key("<F10>"));
+        let _ = update(&mut m, cycle_surfaces_invoke());
         assert_eq!(
             panel_transcript_texts(&m),
             before,
@@ -14684,7 +14788,7 @@ fn toggle_gaps_reattaches_the_outer_grid_and_resends_every_request() {
     let mut m = vsplit_model();
     m.look = crate::model::Look::new(crate::model::Panes::Tiles, true);
 
-    let effects = update(&mut m, key("<F9>"));
+    let effects = update(&mut m, gaps_invoke());
     assert!(
         effects
             .iter()
@@ -14712,7 +14816,7 @@ fn toggle_gaps_reattaches_the_outer_grid_and_resends_every_request() {
         "a flip to gapless must send (0, 0), not the slot it already held: {gapless:?}"
     );
 
-    let effects = update(&mut m, key("<F9>"));
+    let effects = update(&mut m, gaps_invoke());
     let gapped: Vec<_> = effects
         .iter()
         .filter_map(|effect| match effect {
@@ -14837,5 +14941,174 @@ fn resizing_a_windowed_sidebar_carries_its_new_width_to_a_sibling_stacked_on_the
         agent_after, stream_after,
         "a sibling pinned to the same edge must follow the resized share, not \
          keep its own stale one"
+    );
+}
+
+/// `<C-w>>`/`<C-w><` -- nvim's own window-resize chord, not the single
+/// `<S-Right>`/`<S-Left>` the tests above press -- resolves inside a
+/// windowed tree exactly as the single key does: the chord's first key
+/// arms `model.pending_chord` and the dispatch guard has to let it survive
+/// `Focus::Pane(Tree)`, which holds no [`OverlayKind`] for the guard's
+/// original overlay-only check to find.
+#[test]
+fn the_resize_chord_resolves_inside_a_windowed_tree() {
+    let mut m = focused_windowed_tree();
+    let before = m.tree_width_pct;
+
+    let effects = update(&mut m, key("<C-w>"));
+    assert!(effects.is_empty(), "the first key decides nothing yet");
+    assert_eq!(m.tree_width_pct, before, "and moves nothing yet");
+
+    let effects = update(&mut m, key(">"));
+    assert_ne!(
+        m.tree_width_pct, before,
+        "the chord stepped no share at all"
+    );
+    let cells =
+        crate::native::geometry::share(m.engine.grids().global().size().0, m.tree_width_pct).max(1);
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::SetWindowSize {
+                win,
+                width: Some(width),
+                height: None,
+            })] if *win == TREE_WIN.0 && *width == cells
+        ),
+        "the chord's resize never reached the window: {effects:?}"
+    );
+}
+
+/// [`the_resize_chord_resolves_inside_a_windowed_tree`], for the agent
+/// panel.
+#[test]
+fn the_resize_chord_resolves_inside_a_windowed_agent_panel() {
+    let mut m = focused_windowed_agent();
+    let before = m.ai_panel_width_pct;
+
+    let _ = update(&mut m, key("<C-w>"));
+    assert_eq!(m.ai_panel_width_pct, before, "the first key moves nothing");
+
+    let effects = update(&mut m, key(">"));
+    assert_ne!(
+        m.ai_panel_width_pct, before,
+        "the chord stepped no share at all"
+    );
+    let cells =
+        crate::native::geometry::share(m.engine.grids().global().size().0, m.ai_panel_width_pct)
+            .max(1);
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::SetWindowSize {
+                win,
+                width: Some(width),
+                height: None,
+            })] if *win == AGENT_WIN.0 && *width == cells
+        ),
+        "the chord's resize never reached the window: {effects:?}"
+    );
+}
+
+/// [`the_resize_chord_resolves_inside_a_windowed_tree`], for the
+/// notification stream.
+#[test]
+fn the_resize_chord_resolves_inside_a_windowed_stream() {
+    let mut m = focused_windowed_notifications();
+    let before = m
+        .surfaces
+        .layout(crate::native::geometry::NativeSurface::Notifications)
+        .size;
+
+    let _ = update(&mut m, key("<C-w>"));
+    let effects = update(&mut m, key("<lt>"));
+    let after = m
+        .surfaces
+        .layout(crate::native::geometry::NativeSurface::Notifications)
+        .size;
+    assert_ne!(after, before, "the chord stepped no share at all");
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::SetWindowSize {
+                win,
+                width: Some(_),
+                height: None,
+            })] if *win == NOTIFICATIONS_WIN.0
+        ),
+        "the chord's resize never reached the window: {effects:?}"
+    );
+}
+
+/// The palette has no share of its own for the chord to step -- it is a
+/// real nvim window with no [`resize_windowed_stream`]-style sidebar
+/// geometry behind it -- so its own contract is narrower: the chord must
+/// not be eaten by the dispatch guard the way a stale prefix from another
+/// surface would be. Both keys reach nvim as ordinary input, the same path
+/// [`a_key_in_the_windowed_palette_reaches_the_engine`] proves for a plain
+/// character, and nvim's own `<C-w>>` handling does the rest.
+#[test]
+fn the_resize_chords_first_key_survives_inside_a_windowed_palette() {
+    let mut m = windowed_palette_model();
+    let effects = update(&mut m, cmdline_show());
+    let generation = opened_generation(&effects);
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: crate::native::geometry::NativeSurface::Palette,
+            win: PALETTE_WIN,
+        },
+    );
+    let _ = update(&mut m, palette_window_placed());
+    assert_eq!(
+        m.focus(),
+        Focus::Pane(crate::native::geometry::NativeSurface::Palette),
+    );
+
+    let effects = update(&mut m, key("<C-w>"));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-w>"
+        ),
+        "the chord's first key must reach nvim, not be swallowed waiting \
+         for a follower this surface never resolves itself: {effects:?}"
+    );
+    let effects = update(&mut m, key(">"));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == ">"
+        ),
+        "the chord's second key must reach nvim too: {effects:?}"
+    );
+}
+
+/// Unlike the resize chord, `<C-w>w` (switch to the next window) names no
+/// action this build claims -- both keys have to reach nvim raw, or the
+/// windowed stream would swallow an ordinary window command as a no-op
+/// history keystroke instead of letting nvim answer it. See
+/// [`the_resize_chord_resolves_inside_a_windowed_stream`] for the sibling
+/// chord this same `<C-w>` prefix also has to still resolve.
+#[test]
+fn a_window_command_the_resize_chord_does_not_claim_still_reaches_nvim_from_the_stream() {
+    let mut m = focused_windowed_notifications();
+
+    let effects = update(&mut m, key("<C-w>"));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-w>"
+        ),
+        "the prefix must reach nvim so it knows a window command is coming: {effects:?}"
+    );
+    let effects = update(&mut m, key("w"));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "w"
+        ),
+        "the follower must reach nvim too, not be lost to history navigation: {effects:?}"
     );
 }

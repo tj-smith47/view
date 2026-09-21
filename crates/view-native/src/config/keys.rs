@@ -194,13 +194,13 @@ pub fn keys() -> &'static [ConfigKey] {
                 table: "keys",
                 key: "toggle_gaps",
                 flag: None,
-                derived: Some("<F9>"),
+                derived: Some("<leader>ug"),
             },
             ConfigKey {
                 table: "keys",
                 key: "cycle_surfaces",
                 flag: None,
-                derived: Some("<F10>"),
+                derived: Some("<leader>uw"),
             },
             ConfigKey {
                 table: "supervision",

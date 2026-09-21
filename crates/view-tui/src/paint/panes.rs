@@ -22,7 +22,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as TermRect;
 use view_core::grid::registry::{GridId, Pane, PaneKind, GLOBAL_GRID};
-use view_core::model::{Model, OverlayKind, Panes};
+use view_core::model::{Focus, Model, OverlayKind, Panes};
 use view_core::native::geometry::NativeSurface;
 use view_core::native::palette::PaletteState;
 use view_core::theme::{ChromeGroup, Theme};
@@ -177,11 +177,17 @@ fn native_pane_content(
             }),
         NativeSurface::Agent => model.overlays().iter().find_map(|overlay| {
             matches!(overlay.kind, OverlayKind::Ai).then(|| {
-                LayerKind::Ai(
-                    model
-                        .ai_panel()
-                        .view(usize::from(height), usize::from(width)),
-                )
+                // the floating placement's `focused` never sets for this
+                // placement (nvim's own cursor move is what "entered"
+                // means here, see `AiPanelState::focused`'s doc), so the
+                // hint rows read the placement's own keyboard-holder
+                // instead of a field that stays false for it
+                let has_keyboard = model.focus() == Focus::Pane(NativeSurface::Agent);
+                LayerKind::Ai(model.ai_panel().view(
+                    usize::from(height),
+                    usize::from(width),
+                    has_keyboard,
+                ))
             })
         }),
         // the tile is a paint target for state nvim owns

@@ -19,6 +19,8 @@ The table below is generated from `default_maps()` in
 | `<leader>fp` | `notifications` | `:View notifications pause` |
 | `<leader>ai` | `ai` | `:View ai toggle` |
 | `<leader><leader>` | `palette` | `:View palette open` |
+| `<leader>ug` | `ui` | `:View ui gaps` |
+| `<leader>uw` | `ui` | `:View ui cycle_surfaces` |
 
 ## `<leader>ai` reads the panel before it acts
 
@@ -308,28 +310,29 @@ every keystroke while it is open reaches nvim's own command line.
 
 | key | does |
 | --- | --- |
-| `<F9>` | toggles `[ui] gaps` for the session |
-| `<F10>` | steps every surface through the placement ring |
+| `<leader>ug` | toggles `[ui] gaps` for the session |
+| `<leader>uw` | steps every surface through the placement ring |
 
-`<F9>` is `toggle_gaps` under `[keys]`, working only under `panes = "tiles"`:
-the outer grid re-attaches at its new size and every open window is
-asked for a fresh inner size, gapped or flush against its neighbours.
-See [tiled-ui.md](tiled-ui.md#choosing-a-mode) for what a gap is.
+`<leader>ug` is a real nvim mapping (`:View ui gaps`) and answers wherever
+the keyboard is aimed, working only under `panes = "tiles"`: the outer grid
+re-attaches at its new size and every open window is asked for a fresh
+inner size, gapped or flush against its neighbours. See
+[tiled-ui.md](tiled-ui.md#choosing-a-mode) for what a gap is.
 
-`<F10>` is `cycle_surfaces`, and moves the tree, the agent panel, the
-palette and the notification stream together, one ring position at a
-time: `config` (what `view.toml` gave each of them) `->` `windowed` `->`
-`overlay` `->` back to `config`. A surface open when the ring steps moves
-with it: the tree keeps its cursor row, the agent panel keeps its
+`<leader>uw` is `:View ui cycle_surfaces`, and moves the tree, the agent
+panel, the palette and the notification stream together, one ring position
+at a time: `config` (what `view.toml` gave each of them) `->` `windowed`
+`->` `overlay` `->` back to `config`. A surface open when the ring steps
+moves with it: the tree keeps its cursor row, the agent panel keeps its
 transcript. See [tiled-ui.md](tiled-ui.md#placing-a-surface) for what
 each position looks like.
 
-Rebind either one the way every other `[keys]` action is rebound:
+Rebind either one under `[keys]` with a single notation:
 
 ```toml
 [keys]
-toggle_gaps = "<F9>"        # the default
-cycle_surfaces = "<F10>"    # the default
+toggle_gaps = "<leader>ug"     # the default
+cycle_surfaces = "<leader>uw"  # the default
 ```
 
 ## Dismissing an error

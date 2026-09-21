@@ -62,7 +62,7 @@ pub struct MappingClaim {
 // switching user already has them in muscle memory; a claim over a user's
 // own `<leader>f` or `<leader>e` prefix is reported rather than avoided by
 // picking keys nobody uses.
-static DEFAULT_MAPS: [MappingSpec; 8] = [
+static DEFAULT_MAPS: [MappingSpec; 10] = [
     MappingSpec {
         feature: "picker",
         lhs: "<leader>ff",
@@ -102,6 +102,21 @@ static DEFAULT_MAPS: [MappingSpec; 8] = [
         feature: "palette",
         lhs: "<leader><leader>",
         verb: "open",
+    },
+    // routed through the claimed-mapping path (nvim's own multi-key
+    // mapping tree) rather than the raw terminal-keystroke `KeyBindings`
+    // intercept: that intercept can resolve at most a two-raw-keystroke
+    // chord ([`split_keys`](super::keys)), and the design's own defaults
+    // here are three (`<leader>`, `u`, `g`/`w`).
+    MappingSpec {
+        feature: "ui",
+        lhs: "<leader>ug",
+        verb: "gaps",
+    },
+    MappingSpec {
+        feature: "ui",
+        lhs: "<leader>uw",
+        verb: "cycle_surfaces",
     },
 ];
 
@@ -278,7 +293,17 @@ pub fn review_keys() -> &'static [ReviewKey] {
 /// engine accepts any spec a caller builds.
 #[must_use]
 pub fn is_spellable(spec: &MappingSpec) -> bool {
-    is_token(spec.feature) && is_token(spec.verb) && !spec.lhs.contains(['"', '\\', '\n', '\''])
+    is_token(spec.feature) && is_token(spec.verb) && lhs_is_spellable(spec.lhs)
+}
+
+/// Whether `lhs` is safe to hand nvim as a mapping's left-hand side: the
+/// same restriction every compiled-in [`MappingSpec::lhs`] holds to, so a
+/// `view.toml`-supplied override (`[keys] toggle_gaps`, `cycle_surfaces`)
+/// can never carry a quote or a newline into the generated
+/// `vim.keymap.set` call.
+#[must_use]
+pub fn lhs_is_spellable(lhs: &str) -> bool {
+    !lhs.is_empty() && !lhs.contains(['"', '\\', '\n', '\''])
 }
 
 /// Whether `s` is a bare lowercase word: the shape a feature id and a verb
@@ -402,11 +427,22 @@ pub struct ExemptFeatureDesc {
 /// Features that reach a key in [`DEFAULT_MAPS`] without a
 /// [`registry::FeatureDesc`] row -- see [`is_reachable_feature`]'s doc on why
 /// a feature lands here.
-static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 1] = [ExemptFeatureDesc {
-    id: "ai",
-    supersedes: Some("your own AI chat plugin"),
-    off_switch: "ai.enabled = false",
-}];
+static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 2] = [
+    ExemptFeatureDesc {
+        id: "ai",
+        supersedes: Some("your own AI chat plugin"),
+        off_switch: "ai.enabled = false",
+    },
+    // `ui` has no on/off switch of its own (see the `Msg::FeatureInvoke`
+    // "ui" arm) -- its two `DEFAULT_MAPS` keys are rebound, not disabled,
+    // so the line a claim notice offers is the `[keys]` rebind rather than
+    // a `[native]` switch.
+    ExemptFeatureDesc {
+        id: "ui",
+        supersedes: None,
+        off_switch: "keys.toggle_gaps / keys.cycle_surfaces in view.toml",
+    },
+];
 
 /// Whether `feature` is reachable from somewhere a reviewer, and a
 /// `[native]` config loader deciding what to register, can both find it:

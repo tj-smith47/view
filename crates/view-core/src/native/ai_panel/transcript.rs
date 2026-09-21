@@ -1279,7 +1279,7 @@ mod tests {
 
         let mut state = crate::native::ai_panel::AiPanelState::new();
         state.push_input(text);
-        let composer = state.view(ROOM, panel).input;
+        let composer = state.view(ROOM, panel, state.focused).input;
 
         let mut transcript = Transcript::new();
         transcript.echo_user_prompt(text);
@@ -1316,7 +1316,7 @@ mod tests {
 
         let mut state = crate::native::ai_panel::AiPanelState::new();
         state.push_input(&text);
-        let composer = state.view(PANEL_ROWS, panel).input;
+        let composer = state.view(PANEL_ROWS, panel, state.focused).input;
 
         let mut transcript = Transcript::new();
         transcript.echo_user_prompt(&text);

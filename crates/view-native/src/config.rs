@@ -39,6 +39,7 @@ use view_core::native::ext::{self, Ext};
 use view_core::native::geometry;
 use view_core::native::geometry::NativeSurface;
 use view_core::native::keys::{Action, Direction, KeyBindings};
+use view_core::native::mappings;
 use view_core::native::pill::TablineShows;
 use view_core::native::registry;
 
@@ -686,16 +687,23 @@ const COMPOSER_NEWLINE_NOTICE: &str =
      included (\"<S-CR>\", \"<M-CR>\"), at most two keys each. The composer breaks a \
      line on its default keys this run";
 
-/// The gaps toggle's own, on the same terms as [`SIDEBAR_WIDER_NOTICE`].
+/// What `[keys] toggle_gaps` naming no key this build can register is
+/// answered with: unlike the raw intercept the other three actions still
+/// resolve through, this key is a real nvim mapping (the claimed-mapping
+/// path, `Msg::FeatureInvoke { feature: "ui", verb: "gaps" }`), so its
+/// value is one notation, not a list, and any nvim left-hand side view can
+/// register is well-formed here -- there is no two-raw-keystroke ceiling
+/// to fail against.
 const TOGGLE_GAPS_NOTICE: &str =
-    "view: [keys] toggle_gaps must be key notations spelled as nvim spells them, case \
-     included (\"<F9>\"), at most two keys each. Gaps toggle on the default key this run";
+    "view: [keys] toggle_gaps must be one key notation, spelled as nvim spells it \
+     (\"<leader>ug\"), with no quote or newline in it. Gaps toggle on the default key \
+     this run";
 
-/// The placement cycle's own, on the same terms as [`SIDEBAR_WIDER_NOTICE`].
+/// The placement cycle's own, on the same terms as [`TOGGLE_GAPS_NOTICE`].
 const CYCLE_SURFACES_NOTICE: &str =
-    "view: [keys] cycle_surfaces must be key notations spelled as nvim spells them, case \
-     included (\"<F10>\"), at most two keys each. The placement cycle answers on the \
-     default key this run";
+    "view: [keys] cycle_surfaces must be one key notation, spelled as nvim spells it \
+     (\"<leader>uw\"), with no quote or newline in it. The placement cycle answers on \
+     the default key this run";
 
 /// The bindings every rebindable action answers to, and the notice each
 /// action whose value could not be read owes the user.
@@ -723,12 +731,6 @@ fn resolve_key_bindings(table: &KeysTable) -> (KeyBindings, Vec<&'static str>) {
             Action::ComposerNewline,
             COMPOSER_NEWLINE_NOTICE,
         ),
-        (&table.toggle_gaps, Action::ToggleGaps, TOGGLE_GAPS_NOTICE),
-        (
-            &table.cycle_surfaces,
-            Action::CycleSurfaces,
-            CYCLE_SURFACES_NOTICE,
-        ),
     ] {
         let Some(value) = value.as_ref() else {
             continue;
@@ -748,12 +750,59 @@ fn resolve_key_bindings(table: &KeysTable) -> (KeyBindings, Vec<&'static str>) {
     (keys, notices)
 }
 
+/// `[keys] toggle_gaps`/`cycle_surfaces`: the left-hand side view registers
+/// for `ui gaps`/`ui cycle_surfaces` in place of the design's own default,
+/// applied by [`crate::mappings::register_plan`]'s caller
+/// (`crates/view/src/native.rs`'s `take_over`) mutating the built
+/// `RegisterMappings` spec in place.
+///
+/// One notation, not a list this build picks from: unlike the raw
+/// `KeyBindings` intercept the other three `[keys]` actions still resolve
+/// through, this key is a real nvim mapping, so there is no ceiling on how
+/// many raw keystrokes it may carry ([`view_core::native::mappings::
+/// lhs_is_spellable`] is the whole of what a value must pass).
+fn resolve_ui_lhs(
+    value: &Option<toml::Value>,
+    default: &'static str,
+    notice: &'static str,
+) -> (String, Option<&'static str>) {
+    match value {
+        None => (default.to_string(), None),
+        Some(toml::Value::String(lhs)) if mappings::lhs_is_spellable(lhs) => (lhs.clone(), None),
+        Some(_) => (default.to_string(), Some(notice)),
+    }
+}
+
+/// The `[keys] toggle_gaps`/`cycle_surfaces` value the file named no
+/// override for: `default_maps()`'s own row for `ui gaps`/`ui
+/// cycle_surfaces`, read back rather than restated so the two can never
+/// drift apart.
+fn default_ui_lhs(verb: &str) -> &'static str {
+    view_core::native::mappings::default_maps()
+        .iter()
+        .find(|spec| spec.feature == "ui" && spec.verb == verb)
+        .map_or("", |spec| spec.lhs)
+}
+
 /// Which keys perform which action.
 #[must_use]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeysConfig {
     bindings: KeyBindings,
     notices: Vec<&'static str>,
+    gaps_lhs: String,
+    cycle_lhs: String,
+}
+
+impl Default for KeysConfig {
+    fn default() -> Self {
+        Self {
+            bindings: KeyBindings::default(),
+            notices: Vec::new(),
+            gaps_lhs: default_ui_lhs("gaps").to_string(),
+            cycle_lhs: default_ui_lhs("cycle_surfaces").to_string(),
+        }
+    }
 }
 
 impl KeysConfig {
@@ -770,6 +819,19 @@ impl KeysConfig {
     #[must_use]
     pub fn notices(&self) -> &[&'static str] {
         &self.notices
+    }
+
+    /// The left-hand side `ui gaps` registers under: `[keys] toggle_gaps`'s
+    /// override, or `default_maps()`'s own row.
+    #[must_use]
+    pub fn gaps_lhs(&self) -> &str {
+        &self.gaps_lhs
+    }
+
+    /// [`Self::gaps_lhs`]'s own for `ui cycle_surfaces`.
+    #[must_use]
+    pub fn cycle_lhs(&self) -> &str {
+        &self.cycle_lhs
     }
 }
 
@@ -839,7 +901,19 @@ impl ViewConfig {
         // makes every `Result<_, NativeConfigError>` in this module a
         // large-error return there (`clippy::result_large_err`)
         let file: ViewFile = toml::from_str(s).map_err(|e| NativeConfigError::Toml(Box::new(e)))?;
-        let (bindings, notices) = resolve_key_bindings(&file.keys);
+        let (bindings, mut notices) = resolve_key_bindings(&file.keys);
+        let (gaps_lhs, gaps_notice) = resolve_ui_lhs(
+            &file.keys.toggle_gaps,
+            default_ui_lhs("gaps"),
+            TOGGLE_GAPS_NOTICE,
+        );
+        let (cycle_lhs, cycle_notice) = resolve_ui_lhs(
+            &file.keys.cycle_surfaces,
+            default_ui_lhs("cycle_surfaces"),
+            CYCLE_SURFACES_NOTICE,
+        );
+        notices.extend(gaps_notice);
+        notices.extend(cycle_notice);
         Ok(Self {
             native: NativeConfig::from_parsed(&file)?,
             supervision: SupervisionConfig {
@@ -848,7 +922,12 @@ impl ViewConfig {
                     .auto_restart
                     .unwrap_or(AUTO_RESTART_DEFAULT),
             },
-            keys: KeysConfig { bindings, notices },
+            keys: KeysConfig {
+                bindings,
+                notices,
+                gaps_lhs,
+                cycle_lhs,
+            },
             engine: EngineFile {
                 nvim_bin: file.engine.nvim_bin.as_deref().and_then(parse_nvim_bin),
                 appname: file.engine.appname.as_deref().and_then(parse_appname),
@@ -2312,9 +2391,21 @@ mod tests {
         ("sidebar_wider", "<S-Right>"),
         ("sidebar_narrower", "<S-Left>"),
         ("composer_newline", "<M-CR>"),
-        ("toggle_gaps", "<F9>"),
-        ("cycle_surfaces", "<F10>"),
+        ("toggle_gaps", "<leader>ug"),
+        ("cycle_surfaces", "<leader>uw"),
     ];
+
+    /// Whether `field` answers `default_key` under `cfg`: the shared chord
+    /// table for the three rebindable actions, `[keys]`'s own dedicated
+    /// `gaps_lhs`/`cycle_lhs` for the two single-notation ones -- they left
+    /// [`KeyBindings`] entirely once a leader chord needed representing.
+    fn resolves_to(cfg: &ViewConfig, field: &str, default_key: &str) -> bool {
+        match field {
+            "toggle_gaps" => cfg.keys.gaps_lhs() == default_key,
+            "cycle_surfaces" => cfg.keys.cycle_lhs() == default_key,
+            _ => cfg.keys.bindings().resolve(None, default_key).is_some(),
+        }
+    }
 
     /// The population the walk above has to cover: every field of the
     /// `[keys]` table, read off the serialized shape rather than restated.
@@ -2324,8 +2415,8 @@ mod tests {
             sidebar_wider: Some("<S-Right>".into()),
             sidebar_narrower: Some("<S-Left>".into()),
             composer_newline: Some("<M-CR>".into()),
-            toggle_gaps: Some("<F9>".into()),
-            cycle_surfaces: Some("<F10>".into()),
+            toggle_gaps: Some("<leader>ug".into()),
+            cycle_surfaces: Some("<leader>uw".into()),
         })
         .expect("the keys table serializes");
         let fields: BTreeSet<&str> = all
@@ -2362,7 +2453,11 @@ mod tests {
                 "true",
                 "[\"<C-w>\", 3]",
                 "{ key = \"<C-w>>\" }",
-                "\"abc\"",
+                // a string, so it passes the ui-lhs actions' own quote/
+                // backslash check as readily as the chord actions' length
+                // ceiling -- unlike a plain "abc", which a bare lhs would
+                // accept
+                "\"a\\\"b\"",
             ] {
                 let cfg = ViewConfig::from_toml_str(&format!(
                     "[native]\npicker = false\n\n[keys]\n{field} = {written}\n"
@@ -2374,7 +2469,7 @@ mod tests {
                 );
                 for (other, default_key) in KEYS_ACTIONS {
                     assert!(
-                        cfg.keys.bindings().resolve(None, default_key).is_some(),
+                        resolves_to(&cfg, other, default_key),
                         "{field} = {written} left {other} without its default {default_key}"
                     );
                 }
@@ -2402,12 +2497,12 @@ mod tests {
                 cfg.keys.notices()
             );
             assert!(
-                cfg.keys.bindings().resolve(None, "<M-.>").is_some(),
+                resolves_to(&cfg, field, "<M-.>"),
                 "{field} does not answer the key it was given"
             );
             for (other, default_key) in KEYS_ACTIONS {
                 assert_eq!(
-                    cfg.keys.bindings().resolve(None, default_key).is_some(),
+                    resolves_to(&cfg, other, default_key),
                     other != field,
                     "{field} rebound: {other}'s default {default_key} is wrong"
                 );

@@ -1101,11 +1101,11 @@ fn layer_kind(model: &Model, kind: &OverlayKind, height: u16, width: u16) -> Opt
         // to the whole terminal would page past rows the panel never
         // showed. The width is what its composer wraps at, and one taken
         // from the terminal would break the prompt past the frame's edge.
-        OverlayKind::Ai => Some(LayerKind::Ai(
-            model
-                .ai_panel()
-                .view(usize::from(height), usize::from(width)),
-        )),
+        OverlayKind::Ai => Some(LayerKind::Ai(model.ai_panel().view(
+            usize::from(height),
+            usize::from(width),
+            model.ai_panel().focused,
+        ))),
         _ => None,
     }
 }

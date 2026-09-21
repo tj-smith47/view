@@ -250,6 +250,17 @@ fn leader_leader_opens_the_palette() {
         Some(("palette".to_string(), "open".to_string())),
         "<leader><leader> must reach view as the palette's open verb"
     );
+    // `update`'s own ("palette", "open") arm answers the invoke with the
+    // same `:` a typed colon sends; feeding it here, the way the production
+    // executor would once it applied that effect, proves the round trip
+    // actually opens nvim's own command line rather than stopping at the
+    // invoke arriving
+    session.press(":");
+    assert_eq!(
+        session.eval("getcmdtype()"),
+        ":",
+        "the invoke's own : must have opened nvim's real command line"
+    );
 }
 
 /// The palette's default key is claimed over a user's own mapping and
@@ -297,18 +308,25 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
     let registered = session.register(&cfg);
     assert_eq!(
         registered,
-        vec!["<leader>ai".to_string()],
-        "a disabled feature must contribute no key of its own; the only \
-             survivor is ai's default key, which [native] has no switch to \
-             turn off, got {registered:?}"
+        vec![
+            "<leader>ai".to_string(),
+            "<leader>ug".to_string(),
+            "<leader>uw".to_string(),
+        ],
+        "a disabled feature must contribute no key of its own; the survivors \
+             are ai's default key and the two ui actions, neither of which \
+             [native] has a switch for, got {registered:?}"
     );
     let claimed = session.claims();
     assert_eq!(
         claimed.len(),
-        1,
-        "only ai's key, which no [native] entry here names, may be claimed: {claimed:?}"
+        3,
+        "only the keys no [native] entry here names may be claimed: {claimed:?}"
     );
-    assert_eq!(claimed[0].lhs, "<leader>ai");
+    assert_eq!(
+        claimed.iter().map(|c| c.lhs.as_str()).collect::<Vec<_>>(),
+        vec!["<leader>ai", "<leader>ug", "<leader>uw"]
+    );
 
     let rhs = session.eval("maparg('<leader>ff', 'n')");
     assert!(
@@ -339,10 +357,9 @@ fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
     session.register(&cfg);
     assert_eq!(
         session.claims().len(),
-        1,
-        "only ai's key, which [native] cannot turn off, survives every other \
-             feature being disabled: {:?}",
-        session.claims()
+        3,
+        "only ai's key and the two ui actions, none of which [native] can \
+             turn off, survive every other feature being disabled"
     );
 
     assert_eq!(

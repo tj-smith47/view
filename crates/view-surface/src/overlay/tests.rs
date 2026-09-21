@@ -678,7 +678,7 @@ fn the_painted_ai_panel_keeps_the_newest_transcript_row_at_every_height() {
     }
 
     for height in [6_u16, 9, 12, 24, 40] {
-        let kind = LayerKind::Ai(state.view(usize::from(height), 60));
+        let kind = LayerKind::Ai(state.view(usize::from(height), 60, state.focused));
         let text: Vec<String> = rows(60, height, &kind, BorderSet::ASCII)
             .lines
             .iter()
@@ -708,7 +708,7 @@ fn paging_a_held_ai_panel_reaches_every_line_at_every_height() {
         rows(
             60,
             height,
-            &LayerKind::Ai(state.view(usize::from(height), 60)),
+            &LayerKind::Ai(state.view(usize::from(height), 60, state.focused)),
             BorderSet::ASCII,
         )
         .lines
@@ -773,7 +773,7 @@ fn a_painted_ai_panel_wraps_a_long_prompt_and_keeps_its_tail() {
         let mut state = AiPanelState::new();
         state.push_input(&typed);
 
-        let view = state.view(24, usize::from(width));
+        let view = state.view(24, usize::from(width), state.focused);
         let tail = view.input.last().cloned().unwrap_or_default();
         let kind = LayerKind::Ai(view);
         let text: Vec<String> = rows(width, 24, &kind, BorderSet::ASCII)
@@ -823,7 +823,7 @@ fn a_painted_ai_panel_wraps_a_submitted_prompt_and_keeps_every_character() {
         let mut state = AiPanelState::new();
         state.transcript.echo_user_prompt(&sent);
 
-        let kind = LayerKind::Ai(state.view(24, usize::from(width)));
+        let kind = LayerKind::Ai(state.view(24, usize::from(width), state.focused));
         let text: Vec<String> = rows(width, 24, &kind, BorderSet::ASCII)
             .lines
             .iter()
@@ -884,7 +884,7 @@ fn a_permission_prompt_costs_the_transcripts_oldest_rows_not_its_newest() {
         }],
     ));
 
-    let kind = LayerKind::Ai(state.view(24, 60));
+    let kind = LayerKind::Ai(state.view(24, 60, state.focused));
     let text: Vec<String> = rows(60, 24, &kind, BorderSet::ASCII)
         .lines
         .iter()
@@ -1061,8 +1061,9 @@ fn a_pasted_multi_line_prompt_paints_a_row_per_line() {
     use view_core::native::views::AiPanelView;
     let mut state = AiPanelState::new();
     state.push_input("first\nsecond");
-    let kind =
-        LayerKind::Ai(AiPanelView::new("AI Agent").with_input_rows(state.view(10, 40).input));
+    let kind = LayerKind::Ai(
+        AiPanelView::new("AI Agent").with_input_rows(state.view(10, 40, state.focused).input),
+    );
 
     let framed = rows(40, 10, &kind, BorderSet::ASCII);
     let text: Vec<String> = framed.lines.iter().map(|line| line_text(line)).collect();
@@ -1093,8 +1094,11 @@ fn the_caret_lands_on_the_last_row_of_a_multi_line_prompt() {
     let (width, height) = (40, 10);
     let mut state = AiPanelState::new();
     state.push_input("first\nsecond");
-    let view = AiPanelView::new("AI Agent")
-        .with_input_rows(state.view(usize::from(height), usize::from(width)).input);
+    let view = AiPanelView::new("AI Agent").with_input_rows(
+        state
+            .view(usize::from(height), usize::from(width), state.focused)
+            .input,
+    );
 
     let framed = rows(
         width,

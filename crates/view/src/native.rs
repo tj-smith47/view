@@ -90,6 +90,14 @@ pub(crate) struct NativeSession {
     /// resolves its look-keyed value without reading the config a second
     /// time.
     look: Look,
+    /// `[keys] toggle_gaps`/`cycle_surfaces`: the left-hand side to
+    /// register `ui gaps`/`ui cycle_surfaces` under, applied to the built
+    /// `RegisterMappings` spec in [`Self::take_over`] the same way
+    /// `ai_enabled` is -- `view-native` resolves the override
+    /// (`ResolvedConfig::tables.keys`), but the spec it hands back always
+    /// carries `default_maps()`'s own compile-time `lhs`, since a
+    /// `MappingSpec` is a `&'static str` by construction.
+    ui_keys_lhs: (String, String),
 }
 
 impl NativeSession {
@@ -172,6 +180,10 @@ impl NativeSession {
         // drawing
         let look = model.look;
         let plan = plan(&cfg, registry::features(), look);
+        let ui_keys_lhs = (
+            resolved.keys.gaps_lhs().to_string(),
+            resolved.keys.cycle_lhs().to_string(),
+        );
         let session = Self {
             cfg,
             plan,
@@ -179,6 +191,7 @@ impl NativeSession {
             record: paths::state_dir().map(|dir| paths::first_run_record(&dir)),
             channel_id,
             handed_over: false,
+            ui_keys_lhs,
             ai_enabled: model.ai_enabled,
             look,
         };
@@ -272,6 +285,27 @@ impl NativeSession {
         if !self.ai_enabled {
             if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
                 specs.retain(|spec| spec.feature != "ai");
+            }
+        }
+        // `[keys] toggle_gaps`/`cycle_surfaces`: `view-native` already
+        // validated the override (`resolve_ui_lhs`), but a `MappingSpec`'s
+        // `lhs` is `&'static str` by construction, so the only way to hand
+        // a session-resolved value to one built from `default_maps()` is to
+        // leak it -- a one-time cost paid once per session, the same
+        // `Box::leak` precedent `view-native`'s own `keys.rs` config
+        // registry uses for a resolved value with nowhere `'static` to live.
+        if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
+            let (gaps_lhs, cycle_lhs) = &self.ui_keys_lhs;
+            for spec in specs.iter_mut() {
+                if spec.feature == "ui" && spec.verb == "gaps" && gaps_lhs.as_str() != spec.lhs {
+                    spec.lhs = Box::leak(gaps_lhs.clone().into_boxed_str());
+                }
+                if spec.feature == "ui"
+                    && spec.verb == "cycle_surfaces"
+                    && cycle_lhs.as_str() != spec.lhs
+                {
+                    spec.lhs = Box::leak(cycle_lhs.clone().into_boxed_str());
+                }
             }
         }
         effects.push(mapping_call);
@@ -394,6 +428,19 @@ fn batched(calls: Vec<RpcCall>) -> Vec<Effect> {
 }
 
 #[cfg(test)]
+/// [`NativeSession::ui_keys_lhs`]'s own default, for every test constructor
+/// below that has no override of its own to resolve.
+fn default_ui_keys_lhs() -> (String, String) {
+    let lhs_for = |verb: &str| {
+        view_core::native::mappings::default_maps()
+            .iter()
+            .find(|spec| spec.feature == "ui" && spec.verb == verb)
+            .map_or_else(String::new, |spec| spec.lhs.to_string())
+    };
+    (lhs_for("gaps"), lhs_for("cycle_surfaces"))
+}
+
+#[cfg(test)]
 impl NativeSession {
     /// A session that hands nothing over, for the tests whose subject is the
     /// dispatch path itself rather than what a native feature does on it.
@@ -407,6 +454,7 @@ impl NativeSession {
             handed_over: true,
             ai_enabled: true,
             look: Look::default(),
+            ui_keys_lhs: default_ui_keys_lhs(),
         }
     }
 
@@ -426,6 +474,7 @@ impl NativeSession {
             handed_over: false,
             ai_enabled: true,
             look: Look::default(),
+            ui_keys_lhs: default_ui_keys_lhs(),
         }
     }
 }
@@ -733,6 +782,7 @@ mod tests {
             handed_over: false,
             ai_enabled: false,
             look: Look::default(),
+            ui_keys_lhs: default_ui_keys_lhs(),
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -801,6 +851,7 @@ mod tests {
             handed_over: false,
             ai_enabled: true,
             look: Look::default(),
+            ui_keys_lhs: default_ui_keys_lhs(),
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -863,6 +914,7 @@ mod tests {
             handed_over: false,
             ai_enabled: true,
             look: Look::default(),
+            ui_keys_lhs: default_ui_keys_lhs(),
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -1097,6 +1149,55 @@ composer_newline = \"<A-x>\"
             configured.key_bindings.resolve(None, "<M-x>"),
             Some(Resolved::Act(Action::ComposerNewline)),
             "and Alt reaches the same binding however the config spells it"
+        );
+    }
+
+    /// `toggle_gaps`/`cycle_surfaces` are real nvim mappings, not
+    /// [`KeyBindings`] chords, so a `[keys]` override of either has no
+    /// two-key ceiling: this rebinds one to a bare function key and the
+    /// other to a two-character chord and checks both land on the spec
+    /// `take_over` actually registers, the way `mappings_live.rs` checks a
+    /// registered `lhs` against a real nvim rather than the plan alone.
+    #[test]
+    fn load_carries_a_ui_key_rebind_of_either_shape_into_the_registered_mapping() {
+        let dir = view_test_support::ScratchDir::new("native-ui-keys").unwrap();
+        let path = dir.join("view.toml");
+        std::fs::write(
+            &path,
+            "[keys]
+toggle_gaps = \"<F2>\"
+cycle_surfaces = \"gz\"
+",
+        )
+        .expect("a temp config must be writable");
+
+        let mut m = model();
+        let (mut session, _) = load_from(Some(path), 7, &mut m);
+        let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
+        let specs: Vec<view_core::native::mappings::MappingSpec> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Rpc(RpcCall::RegisterMappings { specs, .. }) => Some(specs.clone()),
+                _ => None,
+            })
+            .next()
+            .expect("a takeover always registers the mapping table");
+
+        let lhs_for = |verb: &str| {
+            specs
+                .iter()
+                .find(|spec| spec.feature == "ui" && spec.verb == verb)
+                .map(|spec| spec.lhs)
+        };
+        assert_eq!(
+            lhs_for("gaps"),
+            Some("<F2>"),
+            "the single-key rebind must reach the registered spec: {specs:?}"
+        );
+        assert_eq!(
+            lhs_for("cycle_surfaces"),
+            Some("gz"),
+            "the two-key rebind must reach the registered spec too: {specs:?}"
         );
     }
 
