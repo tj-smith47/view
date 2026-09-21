@@ -165,6 +165,61 @@ fn toggle_windowed_tree(model: &mut Model) -> Vec<Effect> {
     effects
 }
 
+/// The agent panel's key while it takes a window of its own: leaving the
+/// window is leaving the tile, the same as the tree's own `<Esc>` (see
+/// [`tree_key`]'s doc), and every other key is the panel's ordinary
+/// composer/permission handling.
+///
+/// A pending permission's own `<Esc>` (which cancels the request rather
+/// than leaving) still reaches [`crate::update::ai::ai_panel_key`]
+/// unchanged: only the plain "nothing else owns this key" `<Esc>` is
+/// reinterpreted as a window command here.
+pub(super) fn agent_pane_key(model: &mut Model, notation: &str) -> Vec<Effect> {
+    if notation == "<Esc>" && model.ai_panel().pending_permission.is_none() {
+        return vec![Effect::Rpc(RpcCall::FocusPreviousWindow)];
+    }
+    let binding = take_binding(model, notation);
+    super::ai::ai_panel_key(model, notation, binding)
+}
+
+/// The agent panel's key while it takes a window of its own, opened or
+/// entered from anywhere else. Mirrors [`toggle_windowed_tree`]: the same
+/// window is opened or entered by one message, so a doubled keypress cannot
+/// open two windows.
+pub(super) fn toggle_windowed_agent(model: &mut Model) -> Vec<Effect> {
+    if model.focus() == Focus::Pane(NativeSurface::Agent) {
+        return close_windowed_agent(model);
+    }
+    open_windowed_agent(model)
+}
+
+/// Opens the agent panel's window, or enters the one it already has.
+/// `:View ai open`/`focus`'s own windowed path -- unlike
+/// [`toggle_windowed_agent`], never closes what it finds, matching
+/// [`open_ai_panel`]'s own floating contract.
+pub(super) fn open_windowed_agent(model: &mut Model) -> Vec<Effect> {
+    let mut effects = open_ai_panel(model);
+    effects.push(Effect::Rpc(open_native_window(model, NativeSurface::Agent)));
+    effects
+}
+
+/// Closes the window the agent panel sits in. The session in
+/// [`Model::ai_panel`] is untouched -- exactly what [`Model::close_ai_panel`]
+/// already promises for the floating placement -- only the tile and its
+/// claim go.
+pub(super) fn close_windowed_agent(model: &mut Model) -> Vec<Effect> {
+    let win = model.engine.grids().native_window(NativeSurface::Agent);
+    if let Some(win) = win {
+        model.engine.grids_mut().release_native_window(win);
+    }
+    model.close_ai_panel();
+    model.dirty = true;
+    match win {
+        Some(win) => vec![Effect::Rpc(RpcCall::CloseNativeWindow { win: win.0 })],
+        None => Vec::new(),
+    }
+}
+
 /// What an nvim-side close of a windowed surface's window owes the model:
 /// the claim goes, the surface's state goes, and its scan worker is told.
 ///
@@ -173,6 +228,9 @@ fn toggle_windowed_tree(model: &mut Model) -> Vec<Effect> {
 /// `grid_destroy` for it. Left unhandled, the tree's state stayed on the
 /// overlay stack invisible, its scan worker kept walking, and the next
 /// `<leader>e` reopened the window on a listing as old as the first open.
+/// The agent panel's session in [`Model::ai_panel`] is never torn down here,
+/// for the same reason `close_ai_panel` never tears it down: the sidebar's
+/// visibility and the session's lifetime are independent by design.
 pub(super) fn native_window_closed(
     model: &mut Model,
     surface: NativeSurface,
@@ -182,6 +240,10 @@ pub(super) fn native_window_closed(
     model.dirty = true;
     match surface {
         NativeSurface::Tree if model.close_tree() => vec![Effect::TreeClose],
+        NativeSurface::Agent => {
+            model.close_ai_panel();
+            Vec::new()
+        }
         _ => Vec::new(),
     }
 }
@@ -384,6 +446,9 @@ pub(super) fn open_ai_panel(model: &mut Model) -> Vec<Effect> {
 /// or releases the panel's keyboard focus the same way the `open`/`close`
 /// verbs do.
 pub(super) fn toggle_ai_panel(model: &mut Model) -> Vec<Effect> {
+    if model.agent_is_windowed() {
+        return toggle_windowed_agent(model);
+    }
     // entered decides the direction, and only then does anything close:
     // `close_ai_panel` itself clears `AiPanelState::focused`, at the single
     // authoritative closing point, so a `true` here always names a panel

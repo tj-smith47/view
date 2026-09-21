@@ -826,8 +826,18 @@ impl Model {
     /// [`Self::pop_focused_overlay`] can read `ai_panel.focused` once,
     /// ahead of borrowing `overlays` mutably, instead of needing both
     /// borrows live at the same time.
-    const fn takes_focus_now(kind: &OverlayKind, ai_entered: bool, tree_windowed: bool) -> bool {
+    const fn takes_focus_now(
+        kind: &OverlayKind,
+        ai_entered: bool,
+        tree_windowed: bool,
+        agent_windowed: bool,
+    ) -> bool {
         match kind {
+            // a windowed agent panel is a pane nvim's own cursor moves
+            // into, the same as the tree below: its keys and pastes route
+            // through `Focus::Pane(Agent)` instead, so the overlay must
+            // never claim focus out from under that
+            OverlayKind::Ai if agent_windowed => false,
             OverlayKind::Ai => ai_entered,
             // a windowed tree is a pane nvim's own cursor moves into, so
             // its state riding the overlay stack must not redirect a key
@@ -838,15 +848,17 @@ impl Model {
     }
 
     /// Whether the overlay carrying `kind` is drawn as a float. False for
-    /// the tree while it is windowed: its state rides the overlay stack in
-    /// both placements, and the compositor paints it into its pane
-    /// instead.
+    /// the tree and the agent panel while either is windowed: their state
+    /// rides the overlay stack in both placements, and the compositor
+    /// paints them into their pane instead.
     #[must_use]
     pub fn draws_as_overlay(&self, kind: &OverlayKind) -> bool {
-        !matches!(kind, OverlayKind::Tree(_))
-            || !self
-                .surfaces
-                .windowed(crate::native::geometry::NativeSurface::Tree)
+        use crate::native::geometry::NativeSurface;
+        match kind {
+            OverlayKind::Tree(_) => !self.surfaces.windowed(NativeSurface::Tree),
+            OverlayKind::Ai => !self.surfaces.windowed(NativeSurface::Agent),
+            _ => true,
+        }
     }
 
     /// The overlay [`Self::focus`] names, or `None` while the engine owns
@@ -860,11 +872,11 @@ impl Model {
     #[must_use]
     pub fn focused_overlay(&self) -> Option<&Overlay> {
         let ai_entered = self.ai_panel.focused;
-        let windowed = self.tree_is_windowed();
-        self.overlays
-            .iter()
-            .rev()
-            .find(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered, windowed))
+        let tree_windowed = self.tree_is_windowed();
+        let agent_windowed = self.agent_is_windowed();
+        self.overlays.iter().rev().find(|overlay| {
+            Self::takes_focus_now(&overlay.kind, ai_entered, tree_windowed, agent_windowed)
+        })
     }
 
     /// The topmost focus-taking overlay, for a feature that needs to fold
@@ -872,11 +884,11 @@ impl Model {
     #[must_use]
     pub fn focused_overlay_mut(&mut self) -> Option<&mut Overlay> {
         let ai_entered = self.ai_panel.focused;
-        let windowed = self.tree_is_windowed();
-        self.overlays
-            .iter_mut()
-            .rev()
-            .find(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered, windowed))
+        let tree_windowed = self.tree_is_windowed();
+        let agent_windowed = self.agent_is_windowed();
+        self.overlays.iter_mut().rev().find(|overlay| {
+            Self::takes_focus_now(&overlay.kind, ai_entered, tree_windowed, agent_windowed)
+        })
     }
 
     /// Removes the overlay at `pos` and hands it back, releasing the mouse
@@ -904,11 +916,11 @@ impl Model {
     /// user never addressed while leaving the overlay they did address open.
     pub fn pop_focused_overlay(&mut self) -> Option<Overlay> {
         let ai_entered = self.ai_panel.focused;
-        let windowed = self.tree_is_windowed();
-        let pos = self
-            .overlays
-            .iter()
-            .rposition(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered, windowed))?;
+        let tree_windowed = self.tree_is_windowed();
+        let agent_windowed = self.agent_is_windowed();
+        let pos = self.overlays.iter().rposition(|overlay| {
+            Self::takes_focus_now(&overlay.kind, ai_entered, tree_windowed, agent_windowed)
+        })?;
         Some(self.take_overlay_at(pos))
     }
 
@@ -936,6 +948,13 @@ impl Model {
     pub fn tree_is_windowed(&self) -> bool {
         self.surfaces
             .windowed(crate::native::geometry::NativeSurface::Tree)
+    }
+
+    /// Whether the agent panel takes a window in nvim's layout this session.
+    #[must_use]
+    pub fn agent_is_windowed(&self) -> bool {
+        self.surfaces
+            .windowed(crate::native::geometry::NativeSurface::Agent)
     }
 
     /// The open overlays, bottom of the stack first.

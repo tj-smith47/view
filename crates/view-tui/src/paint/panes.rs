@@ -137,7 +137,7 @@ fn paint_native_pane(
     damage: &Damage,
     buf: &mut Buffer,
 ) {
-    let Some(kind) = native_pane_content(model, surface) else {
+    let Some(kind) = native_pane_content(model, surface, pane_area.height, pane_area.width) else {
         return;
     };
     let layer = Layer::new(
@@ -155,7 +155,17 @@ fn paint_native_pane(
 }
 
 /// What a windowed surface draws, or `None` while its state is not open.
-fn native_pane_content(model: &Model, surface: NativeSurface) -> Option<LayerKind> {
+///
+/// `height`/`width` are the pane's own resolved cell size, spent only by the
+/// agent panel: its transcript window and composer wrap derive from the
+/// room the tile actually has, the same numbers the floating placement's
+/// `layer_kind` (`view-surface/src/lib.rs`) draws it at.
+fn native_pane_content(
+    model: &Model,
+    surface: NativeSurface,
+    height: u16,
+    width: u16,
+) -> Option<LayerKind> {
     match surface {
         NativeSurface::Tree => model
             .overlays()
@@ -164,6 +174,15 @@ fn native_pane_content(model: &Model, surface: NativeSurface) -> Option<LayerKin
                 OverlayKind::Tree(state) => Some(LayerKind::Tree(state.view())),
                 _ => None,
             }),
+        NativeSurface::Agent => model.overlays().iter().find_map(|overlay| {
+            matches!(overlay.kind, OverlayKind::Ai).then(|| {
+                LayerKind::Ai(
+                    model
+                        .ai_panel()
+                        .view(usize::from(height), usize::from(width)),
+                )
+            })
+        }),
         _ => None,
     }
 }

@@ -79,7 +79,7 @@ mod ui_event;
 mod watch;
 
 use ai::{on_ai_event, open_ai_trust_prompt};
-use paste::paste_into_focused_surface;
+use paste::{paste_into_agent_composer, paste_into_focused_surface};
 use supervision::{note_engine_liveness, note_supervision_choice};
 pub use surface_conflict::FLOAT_SCAN_THROTTLE;
 use surfaces::{
@@ -254,6 +254,12 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // never replayed as nvim_input keystrokes: one undo unit, no
             // mapping interference, matching nvim_paste's own contract
             Focus::Engine => vec![Effect::Rpc(RpcCall::Paste { text })],
+            // the windowed agent panel's overlay never claims focus (see
+            // `Model::draws_as_overlay`'s doc), so `focused_overlay_mut`
+            // would find nothing here -- the composer is reached directly
+            // instead, the same text-delivery rule `paste_into_focused_surface`
+            // applies to the floating panel
+            Focus::Pane(NativeSurface::Agent) => paste_into_agent_composer(model, &text),
             // a surface answers a paste the same way in either placement.
             // The cursor a windowed surface leaves in nvim sits in the
             // scratch buffer its own window shows, so an `nvim_paste` here
@@ -485,6 +491,14 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 return toggle_ai_panel(model);
             }
             if feature == "ai" && (verb == "open" || verb == "focus") {
+                // a windowed panel has no "entered" state of its own to
+                // claim (see `Model::takes_focus_now`'s `agent_windowed`
+                // arm) -- entering its window is what nvim's own cursor
+                // move already does, so "open" and "focus" both reduce to
+                // opening or entering the tile
+                if model.agent_is_windowed() {
+                    return surfaces::open_windowed_agent(model);
+                }
                 // an explicit user invoke, unlike a `PermissionRequested`
                 // auto-open (`update::ai::on_ai_event`), is the one action
                 // that claims the panel's keyboard focus -- see
@@ -509,6 +523,9 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 return effects;
             }
             if feature == "ai" && verb == "close" {
+                if model.agent_is_windowed() {
+                    return surfaces::close_windowed_agent(model);
+                }
                 // `close_ai_panel` itself clears `AiPanelState::focused`, at
                 // the single authoritative closing point
                 if model.close_ai_panel() {
@@ -1390,6 +1407,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             vec![Effect::Rpc(RpcCall::Input { notation })]
         }
         Focus::Pane(NativeSurface::Tree) => surfaces::tree_key(model, &notation),
+        Focus::Pane(NativeSurface::Agent) => surfaces::agent_pane_key(model, &notation),
         // a surface with no windowed placement yet: the cursor cannot be in
         // a pane of it, and a key arriving here is one nvim would answer
         Focus::Pane(_) => vec![Effect::Rpc(RpcCall::Input { notation })],

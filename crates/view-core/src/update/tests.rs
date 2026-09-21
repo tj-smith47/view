@@ -13635,3 +13635,222 @@ fn a_paste_into_the_windowed_tree_reaches_no_buffer() {
         visible_texts(&m)
     );
 }
+
+// --- the windowed agent panel -----------------------------------------
+
+/// The handle nvim answers the agent panel's open with, in these tests.
+const AGENT_WIN: crate::events::WinHandle = crate::events::WinHandle(5353);
+
+/// The grid nvim draws the agent panel's scratch buffer into.
+const AGENT_GRID: u64 = 8;
+
+/// A trusted model whose agent panel opens as a window rather than as a
+/// float.
+fn windowed_agent_model() -> Model {
+    let mut m = model();
+    m.ai_trusted = true;
+    m.surfaces.set_layout(
+        crate::native::geometry::NativeSurface::Agent,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Windowed,
+            crate::native::geometry::Anchor::Right,
+            30,
+        ),
+    );
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    m
+}
+
+/// The `<leader>ai` verb, as the mapping sends it.
+fn agent_toggle() -> Msg {
+    Msg::FeatureInvoke {
+        feature: "ai".to_string(),
+        verb: "toggle".to_string(),
+    }
+}
+
+/// nvim placing the agent panel's window and putting the cursor in it,
+/// which is the whole of what makes a windowed surface focused.
+fn agent_window_placed() -> Msg {
+    Msg::Redraw(vec![
+        UiEvent::GridResize {
+            grid: AGENT_GRID,
+            width: 24,
+            height: 24,
+        },
+        UiEvent::WinPos {
+            grid: AGENT_GRID,
+            win: AGENT_WIN,
+            startrow: 0,
+            startcol: 56,
+            width: 24,
+            height: 24,
+        },
+        UiEvent::GridCursorGoto {
+            grid: AGENT_GRID,
+            row: 0,
+            col: 0,
+        },
+        UiEvent::Flush,
+    ])
+}
+
+/// A model with the agent panel open in its own window and the cursor
+/// inside it.
+fn focused_windowed_agent() -> Model {
+    let mut m = windowed_agent_model();
+    let effects = update(&mut m, agent_toggle());
+    let generation = opened_generation(&effects);
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: crate::native::geometry::NativeSurface::Agent,
+            win: AGENT_WIN,
+        },
+    );
+    let _ = update(&mut m, agent_window_placed());
+    m
+}
+
+#[test]
+fn a_flush_whose_cursor_grid_is_the_agent_pane_focuses_the_agent() {
+    let m = focused_windowed_agent();
+    assert_eq!(
+        m.focus(),
+        Focus::Pane(crate::native::geometry::NativeSurface::Agent),
+        "the cursor sitting in the agent panel's own pane did not name it"
+    );
+}
+
+#[test]
+fn esc_in_the_windowed_agent_panel_focuses_the_previous_window() {
+    let mut m = focused_windowed_agent();
+    let effects = update(&mut m, key("<Esc>"));
+    assert!(
+        matches!(&effects[..], [Effect::Rpc(RpcCall::FocusPreviousWindow)]),
+        "<Esc> in a windowed agent panel did something other than leave its \
+         window: {effects:?}"
+    );
+    assert!(
+        m.ai_panel_overlay_open(),
+        "<Esc> took the tile down with the focus"
+    );
+}
+
+#[test]
+fn leader_ai_from_inside_the_windowed_agent_panel_closes_it() {
+    let mut m = focused_windowed_agent();
+    let effects = update(&mut m, agent_toggle());
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Rpc(RpcCall::CloseNativeWindow { win }) if *win == AGENT_WIN.0
+        )),
+        "the toggle did not close the window it was pressed in: {effects:?}"
+    );
+    assert!(
+        !m.ai_panel_overlay_open(),
+        "the panel's tile outlived its window"
+    );
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        0,
+        "the handle stayed claimed for the rest of the session"
+    );
+}
+
+/// A paste that lands with the cursor in the agent panel's own window
+/// reaches its composer, the same as a paste into the floating, entered
+/// panel does -- the overlay never claims focus while windowed (see
+/// `Model::draws_as_overlay`'s doc), so this only holds if `Msg::Paste`
+/// routes a windowed pane's text delivery independently of
+/// `focused_overlay_mut`.
+#[test]
+fn a_paste_into_the_windowed_agent_panel_reaches_its_composer() {
+    let mut m = focused_windowed_agent();
+    m.dirty = false;
+
+    let effects = update(&mut m, Msg::Paste("hello agent".into()));
+
+    assert!(
+        rpc_calls(&effects).is_empty(),
+        "the paste reached the engine instead of the composer: {effects:?}"
+    );
+    assert_eq!(
+        m.ai_panel().input(),
+        "hello agent",
+        "the windowed panel's composer did not receive the pasted text"
+    );
+}
+
+/// The pending-permission `<Esc>` (cancel the request) still answers first,
+/// ahead of the windowed pane's own "leave the window" reinterpretation --
+/// the two keys mean different things and only one of them is a window
+/// command.
+#[test]
+fn esc_with_a_pending_permission_still_cancels_it_when_windowed() {
+    let mut m = focused_windowed_agent();
+    m.ai_panel_mut().pending_permission = Some(crate::native::ai_panel::PermissionPrompt::new(
+        1,
+        "call_1",
+        Some("run a command".to_string()),
+        None,
+        vec![],
+    ));
+
+    let effects = update(&mut m, key("<Esc>"));
+
+    assert!(
+        !matches!(&effects[..], [Effect::Rpc(RpcCall::FocusPreviousWindow)]),
+        "a pending permission's <Esc> left the window instead of \
+         cancelling the request: {effects:?}"
+    );
+    assert!(
+        m.ai_panel().pending_permission.is_none(),
+        "the request was not cancelled"
+    );
+}
+
+/// nvim gives the agent panel's window to something else -- a `:edit`, a
+/// quickfix jump -- and view hears only that the window is no longer the
+/// panel's. The session in `Model::ai_panel` survives, matching
+/// `native_window_closed`'s doc for every surface but the tree.
+#[test]
+fn native_window_taken_from_the_agent_panel_leaves_its_session_untouched() {
+    let mut m = focused_windowed_agent();
+    let transcript_len_before = m.ai_panel().transcript.len();
+
+    let effects = update(
+        &mut m,
+        Msg::NativeWindowTaken {
+            surface: crate::native::geometry::NativeSurface::Agent,
+        },
+    );
+
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        0,
+        "view still holds the window nvim gave to something else"
+    );
+    assert!(
+        !m.ai_panel_overlay_open(),
+        "the panel's tile outlived its window"
+    );
+    assert_eq!(
+        m.ai_panel().transcript.len(),
+        transcript_len_before,
+        "the agent session was torn down by a window it merely lost"
+    );
+    assert!(
+        effects.is_empty(),
+        "the agent panel issues no TreeClose-shaped effect of its own: \
+         {effects:?}"
+    );
+}

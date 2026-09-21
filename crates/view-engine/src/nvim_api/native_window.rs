@@ -161,7 +161,23 @@ local commands = {
   above = 'topleft split',
   below = 'botright split',
 }
-vim.cmd(commands[split] or 'topleft vsplit')
+-- a second surface anchored at an edge another already holds stacks
+-- under it instead of claiming a further column or row of its own:
+-- split the edge's own window, across the axis a shared column stacks
+-- on (rows for a left/right edge, columns for an above/below one)
+local stack_win = nil
+for other, held in pairs(wins) do
+  if other ~= id and held.edge == split and is_ours(held) then
+    stack_win = held.win
+    break
+  end
+end
+if stack_win then
+  vim.api.nvim_set_current_win(stack_win)
+  vim.cmd(vertical and 'belowright split' or 'belowright vsplit')
+else
+  vim.cmd(commands[split] or 'topleft vsplit')
+end
 local win = vim.api.nvim_get_current_win()
 vim.api.nvim_win_set_buf(win, buf)
 if vertical then
@@ -183,7 +199,7 @@ for opt, value in pairs(look) do
 end
 vim.bo[buf].modifiable = false
 vim.bo[buf].readonly = true
-wins[id] = { win = win, buf = buf }
+wins[id] = { win = win, buf = buf, edge = split }
 vim.g.view_native_windows = wins
 vim.api.nvim_create_autocmd('BufWinEnter', {
   group = vim.api.nvim_create_augroup('view_native_' .. id,
@@ -695,7 +711,7 @@ mod tests {
             );
         }
         for line in [
-            "wins[id] = { win = win, buf = buf }",
+            "wins[id] = { win = win, buf = buf, edge = split }",
             "if is_ours(live) then",
         ] {
             assert!(
@@ -768,9 +784,10 @@ mod tests {
         assert_eq!(
             OPEN_NATIVE_WINDOW_CHUNK.matches("is_ours(").count()
                 + CLOSE_NATIVE_WINDOW_CHUNK.matches("is_ours(").count(),
-            5,
-            "the rule is defined twice and asked at three sites: the \
-             re-entry guard, the callback and the close"
+            6,
+            "the rule is defined twice and asked at four sites: the \
+             re-entry guard, the shared-edge stacking scan, the callback \
+             and the close"
         );
         assert!(
             NATIVE_WINDOW_HELPERS.contains("vim.api.nvim_exec_autocmds('FileType',"),
@@ -796,6 +813,42 @@ mod tests {
                  spelling of the rule"
             );
         }
+    }
+
+    /// Two surfaces anchored to the same edge split that edge's own window
+    /// rather than each claiming a further column or row of the tabpage:
+    /// the second one's open scans the table for a live window sharing its
+    /// `edge` and, when it finds one, enters it and splits across the axis
+    /// that puts the two windows one above the other on a vertical edge
+    /// (`belowright split`) or side by side on a horizontal one
+    /// (`belowright vsplit`).
+    #[test]
+    fn two_sidebars_on_one_edge_stack_vertically_when_windowed() {
+        assert!(
+            OPEN_NATIVE_WINDOW_CHUNK.contains("held.edge == split"),
+            "the chunk no longer scans for a window sharing this edge"
+        );
+        assert!(
+            OPEN_NATIVE_WINDOW_CHUNK.contains("wins[id] = { win = win, buf = buf, edge = split }"),
+            "an opened window forgets which edge it was anchored to"
+        );
+        for line in ["'belowright split'", "'belowright vsplit'"] {
+            assert!(
+                OPEN_NATIVE_WINDOW_CHUNK.contains(line),
+                "a shared-edge stack no longer splits with {line}"
+            );
+        }
+        let scan = OPEN_NATIVE_WINDOW_CHUNK
+            .find("for other, held in pairs(wins) do")
+            .expect("the chunk scans the table for a shared edge");
+        let split = OPEN_NATIVE_WINDOW_CHUNK
+            .find("if stack_win then")
+            .expect("the chunk branches on whether it found one");
+        assert!(
+            scan < split,
+            "the split command runs before the scan that decides which one \
+             to use, so a shared edge is never stacked"
+        );
     }
 
     #[test]

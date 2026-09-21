@@ -50,7 +50,26 @@ pub(super) fn paste_into_focused_surface(model: &mut Model, text: &str) -> Vec<E
         Some(OverlayKind::Ai) => true,
         _ => false,
     };
-    if panel_has_the_keyboard && !model.ai_panel().an_owner_holds_the_keys() {
+    if panel_has_the_keyboard {
+        return paste_into_agent_composer(model, text);
+    }
+    model.dirty = true;
+    model
+        .engine
+        .record_native_notice(NO_TEXT_INPUT_NOTICE.to_string(), false)
+}
+
+/// Delivers a paste straight to the agent panel's composer, whether it is
+/// floating and entered ([`paste_into_focused_surface`]'s `Ai` arm) or
+/// windowed and holds the cursor (`Msg::Paste`'s `Focus::Pane(Agent)` arm,
+/// which reaches this rather than `paste_into_focused_surface` because the
+/// panel's overlay never claims focus while windowed -- see
+/// [`Model::draws_as_overlay`]'s doc).
+pub(super) fn paste_into_agent_composer(model: &mut Model, text: &str) -> Vec<Effect> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    if !model.ai_panel().an_owner_holds_the_keys() {
         // Verbatim, control characters and all: the shape a paste reads in
         // is a question for the wrap that paints it (`AiPanelState`'s own,
         // which ends a row at each line break), never for the text held
@@ -59,16 +78,13 @@ pub(super) fn paste_into_focused_surface(model: &mut Model, text: &str) -> Vec<E
         model.dirty = true;
         return Vec::new();
     }
-    let notice = if panel_has_the_keyboard {
-        // The only state left that owns the panel's keys, so the notice is
-        // named directly rather than chosen; see
-        // `AiPanelState::an_owner_holds_the_keys`.
-        PERMISSION_PASTE_NOTICE
-    } else {
-        NO_TEXT_INPUT_NOTICE
-    };
     model.dirty = true;
-    model.engine.record_native_notice(notice.to_string(), false)
+    // The only state left that owns the panel's keys, so the notice is
+    // named directly rather than chosen; see
+    // `AiPanelState::an_owner_holds_the_keys`.
+    model
+        .engine
+        .record_native_notice(PERMISSION_PASTE_NOTICE.to_string(), false)
 }
 
 /// `text` as the keys `nvim_input` types into a prompt blocked in
