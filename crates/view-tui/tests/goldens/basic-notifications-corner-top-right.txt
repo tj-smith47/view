@@ -1,0 +1,53 @@
+                                                                                
+                                                                        +-----+ 
+  + left.rs -------------------------+   + right.rs --------------------|saved| 
+  |left                              |   |right                         +-----+ 
+  |                                  |   |                          +---------+ 
+  |                                  |   |                          |2 matches| 
+  |                                  |   |                          +---------+ 
+  |                                  |   |                             +------+ 
+  |                                  |   |                             |linted| 
+  |                                  |   |                             +------+ 
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  |                                  |   |                                   |  
+  + -- INSERT -- 1:1 ----------------+   + E 1 2:1 --------------------------+  
+                                                                                
+                                                                                
+                                                                                
+--- fg ---
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBBBA
+AACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCAAADDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDBAAAAABA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBBBA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAABA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBBBBA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAABA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBBBBA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAA
+AACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAA
+AACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCAAADDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+A = Reset
+B = Rgb(128, 128, 128)
+C = Rgb(137, 180, 250)
+D = Rgb(102, 110, 119)

@@ -543,6 +543,12 @@ pub fn render(model: &Model) -> Surface {
     if let Some(cmdline) = painted.as_deref() {
         if prompt_open {
             // nothing to add: the Prompt overlay already covers this
+        } else if model.palette_is_windowed() {
+            // the pane compositor paints this cmdline state into the
+            // palette's own tile (`native_pane_content`'s `Palette` arm, in
+            // `view-tui`), the same split every other windowed surface's
+            // `draws_as_overlay` guard makes above -- a float or a bare
+            // echo row here would be a second copy of the same text
         } else if model.palette_enabled {
             // only a cmdline-sourced popupmenu (`is_cmdline_sourced`) ever
             // renders inside the palette; a buffer-anchored completion
@@ -3711,6 +3717,54 @@ mod tests {
             "the cursor must target the prompt's own input row, not the grid's stale bottom row"
         );
         assert_eq!(cursor.col, 31 + 2 + 2);
+    }
+
+    /// A windowed palette's cmdline state is painted by the pane compositor
+    /// into its own tile (`native_pane_content`'s `Palette` arm, in
+    /// `view-tui`), so `render()` must add neither the floating `Palette`
+    /// layer nor the bare bottom-row `Cmdline` echo for it -- either one
+    /// would be a second copy of the same typed text standing beside the
+    /// tile. Shipped without the guard: a windowed palette's golden carried
+    /// a stray `:e file.txt` echo on the grid's last row underneath the
+    /// tiles.
+    #[test]
+    fn a_windowed_palette_paints_no_floating_cmdline_layer() {
+        for palette_enabled in [false, true] {
+            let mut model = model_with_grid(80, 24);
+            model.term_width = 80;
+            model.term_height = 24;
+            model.palette_enabled = palette_enabled;
+            model.surfaces.set_layout(
+                NativeSurface::Palette,
+                view_core::native::geometry::SurfaceLayout::new(
+                    view_core::native::geometry::SurfacePlacement::Windowed,
+                    Anchor::Bottom,
+                    30,
+                ),
+            );
+            apply(
+                &mut model,
+                UiEvent::CmdlineShow {
+                    content: vec![(0, "e file.txt".to_string())],
+                    pos: 11,
+                    firstc: ":".to_string(),
+                    prompt: String::new(),
+                    indent: 0,
+                    level: 1,
+                },
+            );
+
+            let surface = render(&model);
+            assert!(
+                !surface
+                    .layers
+                    .iter()
+                    .any(|l| matches!(l.kind, LayerKind::Palette(_) | LayerKind::Cmdline(_))),
+                "a windowed palette (palette_enabled={palette_enabled}) must \
+                 paint through its tile alone: {:?}",
+                surface.layers.iter().map(|l| &l.kind).collect::<Vec<_>>()
+            );
+        }
     }
 
     /// Per the wire capture, a cmdline-sourced popupmenu's `row`/`col` are

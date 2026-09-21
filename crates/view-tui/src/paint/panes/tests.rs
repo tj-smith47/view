@@ -2270,6 +2270,292 @@ fn tree_windowed() {
     }
 }
 
+/// The agent panel windowed into the right tile, mirroring
+/// `tree_in_the_left_tile`: claims the existing tile's window (same grid,
+/// same handle) rather than asking nvim to open a fresh one, and carries one
+/// transcript line so the golden shows painted content, not an empty box.
+fn agent_in_the_right_tile(gaps: bool) -> Tiles {
+    let tiles = tiled(gaps);
+    let slots = tiles.slots;
+    let mut model = tiles.model;
+    model.ai_trusted = true;
+    model.surfaces.set_layout(
+        view_core::native::geometry::NativeSurface::Agent,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Right,
+            30,
+        ),
+    );
+    let effects = update(
+        &mut model,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    let mut generation = 0;
+    for effect in &effects {
+        if let view_core::msg::Effect::Rpc(view_core::msg::RpcCall::OpenNativeWindow {
+            generation: g,
+            ..
+        }) = effect
+        {
+            generation = *g;
+        }
+    }
+    let _ = update(
+        &mut model,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: view_core::native::geometry::NativeSurface::Agent,
+            win: WinHandle(1001),
+        },
+    );
+    model
+        .ai_panel_mut()
+        .transcript
+        .echo_user_prompt("what does the gaps toggle do?");
+    let (row, col, width, height) = slots[1];
+    drive(
+        &mut model,
+        vec![
+            UiEvent::WinPos {
+                grid: LEFT + 1,
+                win: WinHandle(1001),
+                startrow: u64::from(row),
+                startcol: u64::from(col),
+                width: u64::from(width),
+                height: u64::from(height),
+            },
+            UiEvent::Flush,
+        ],
+    );
+    Tiles { slots, model }
+}
+
+/// The committed picture of the agent panel in a tile of its own: its
+/// transcript line inside the right frame, the buffer's text inside the left
+/// one.
+#[test]
+fn agent_windowed() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-agent-windowed", tier.0),
+            &tiles_dump(tier, agent_in_the_right_tile(true)),
+        );
+    }
+}
+
+/// The palette windowed into the left tile, the same claim-the-tile
+/// recipe as the tree and the agent panel: nvim's own `CmdlineShow` is the
+/// whole signal a windowed palette watches (see `ui_event.rs`'s own doc),
+/// so there is no `FeatureInvoke` to send here.
+fn palette_in_the_left_tile(gaps: bool) -> Tiles {
+    let tiles = tiled(gaps);
+    let slots = tiles.slots;
+    let mut model = tiles.model;
+    model.surfaces.set_layout(
+        view_core::native::geometry::NativeSurface::Palette,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Bottom,
+            30,
+        ),
+    );
+    let effects = update(
+        &mut model,
+        Msg::Redraw(vec![UiEvent::CmdlineShow {
+            content: vec![(0, "e file.txt".to_string())],
+            pos: 11,
+            firstc: ":".to_string(),
+            prompt: String::new(),
+            indent: 0,
+            level: 1,
+        }]),
+    );
+    let mut generation = 0;
+    for effect in &effects {
+        if let view_core::msg::Effect::Rpc(view_core::msg::RpcCall::OpenNativeWindow {
+            generation: g,
+            ..
+        }) = effect
+        {
+            generation = *g;
+        }
+    }
+    let _ = update(
+        &mut model,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: view_core::native::geometry::NativeSurface::Palette,
+            win: WinHandle(1000),
+        },
+    );
+    let (row, col, width, height) = slots[0];
+    drive(
+        &mut model,
+        vec![
+            UiEvent::WinPos {
+                grid: LEFT,
+                win: WinHandle(1000),
+                startrow: u64::from(row),
+                startcol: u64::from(col),
+                width: u64::from(width),
+                height: u64::from(height),
+            },
+            UiEvent::Flush,
+        ],
+    );
+    Tiles { slots, model }
+}
+
+/// The committed picture of the palette in a tile of its own: nvim's
+/// command line inside the left frame, the buffer's text inside the right
+/// one.
+#[test]
+fn palette_windowed() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-palette-windowed", tier.0),
+            &tiles_dump(tier, palette_in_the_left_tile(true)),
+        );
+    }
+}
+
+/// The notification stream windowed into the left tile, one history entry
+/// recorded before the tile is claimed so the golden shows painted content.
+fn notifications_in_the_left_tile(gaps: bool) -> Tiles {
+    let tiles = tiled(gaps);
+    let slots = tiles.slots;
+    let mut model = tiles.model;
+    model.surfaces.set_layout(
+        view_core::native::geometry::NativeSurface::Notifications,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Left,
+            30,
+        ),
+    );
+    let _ = model.engine.record_message(
+        "echomsg".to_string(),
+        vec![(0, "3 files saved".to_string())],
+        false,
+    );
+    let effects = update(
+        &mut model,
+        Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "history".to_string(),
+        },
+    );
+    let mut generation = 0;
+    for effect in &effects {
+        if let view_core::msg::Effect::Rpc(view_core::msg::RpcCall::OpenNativeWindow {
+            generation: g,
+            ..
+        }) = effect
+        {
+            generation = *g;
+        }
+    }
+    let _ = update(
+        &mut model,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: view_core::native::geometry::NativeSurface::Notifications,
+            win: WinHandle(1000),
+        },
+    );
+    let (row, col, width, height) = slots[0];
+    drive(
+        &mut model,
+        vec![
+            UiEvent::WinPos {
+                grid: LEFT,
+                win: WinHandle(1000),
+                startrow: u64::from(row),
+                startcol: u64::from(col),
+                width: u64::from(width),
+                height: u64::from(height),
+            },
+            UiEvent::Flush,
+        ],
+    );
+    Tiles { slots, model }
+}
+
+/// The committed picture of the notification stream in a tile of its own:
+/// the recorded message inside the left frame, the buffer's text inside the
+/// right one.
+#[test]
+fn notifications_windowed() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-notifications-windowed", tier.0),
+            &tiles_dump(tier, notifications_in_the_left_tile(true)),
+        );
+    }
+}
+
+/// A toast stack anchored to one of the four corners, over the same two-tile
+/// scene every other golden here uses -- toasts float over the tiles rather
+/// than claiming one, so this needs none of the native-window machinery the
+/// windowed surfaces above do.
+fn toast_stack_in_the_corner(gaps: bool, anchor: view_core::native::geometry::Anchor) -> Tiles {
+    let tiles = tiled(gaps);
+    let slots = tiles.slots;
+    let mut model = tiles.model;
+    let _ = model
+        .engine
+        .messages
+        .resolve_startup_hold(view_core::native::toast::HoldOutcome::Release);
+    let layout = model
+        .surfaces
+        .layout(view_core::native::geometry::NativeSurface::Notifications);
+    model.surfaces.set_layout(
+        view_core::native::geometry::NativeSurface::Notifications,
+        view_core::native::geometry::SurfaceLayout::new(layout.placement, anchor, layout.size),
+    );
+    for text in ["saved", "2 matches", "linted"] {
+        drive(
+            &mut model,
+            vec![UiEvent::MsgShow {
+                kind: "echomsg".to_string(),
+                content: vec![(0, text.to_string())],
+                replace_last: false,
+            }],
+        );
+    }
+    Tiles { slots, model }
+}
+
+/// The four committed pictures of the toast stack growing away from its own
+/// corner, at three tiers each.
+#[test]
+fn notifications_corner_scenes() {
+    let corners = [
+        ("top-left", view_core::native::geometry::Anchor::TopLeft),
+        ("top-right", view_core::native::geometry::Anchor::TopRight),
+        (
+            "bottom-left",
+            view_core::native::geometry::Anchor::BottomLeft,
+        ),
+        (
+            "bottom-right",
+            view_core::native::geometry::Anchor::BottomRight,
+        ),
+    ];
+    for (name, anchor) in corners {
+        for tier in TIERS {
+            assert_golden(
+                &format!("{}-notifications-corner-{name}", tier.0),
+                &tiles_dump(tier, toast_stack_in_the_corner(true, anchor)),
+            );
+        }
+    }
+}
+
 /// A surface's own window holds an unnamed scratch buffer, so its frame
 /// carries the surface's name where an ordinary tile carries the file's,
 /// and its bottom edge carries neither the mode nor a cursor position:
