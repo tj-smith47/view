@@ -37,6 +37,7 @@ pub use surfaces::surfaces;
 use view_core::model::Panes;
 use view_core::native::ext::{self, Ext};
 use view_core::native::geometry;
+use view_core::native::geometry::NativeSurface;
 use view_core::native::keys::{Action, Direction, KeyBindings};
 use view_core::native::pill::TablineShows;
 use view_core::native::registry;
@@ -122,14 +123,40 @@ struct UiTable {
 ///
 /// Non-`Option` for the reason [`UiTable`]'s own fields are: a table this
 /// loader reads has to render through `loaded_tables` for the example pin
-/// to see it. Only the tree is here, because only the tree's placement is
-/// answered; a surface gains its table in the commit that gives its
-/// placement an effect.
+/// to see it. One field per [`NativeSurface`], read through
+/// [`SurfacesTable::get`] so a fifth surface fails to compile here before
+/// it can go unread anywhere else.
 #[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct SurfacesTable {
     #[serde(default)]
     tree: SurfaceTable,
+    #[serde(default)]
+    agent: SurfaceTable,
+    #[serde(default)]
+    palette: SurfaceTable,
+    #[serde(default)]
+    notifications: SurfaceTable,
+}
+
+impl SurfacesTable {
+    /// `surface`'s own table.
+    ///
+    /// Matched on [`NativeSurface::index`] rather than on the enum itself:
+    /// `NativeSurface` is `#[non_exhaustive]` (it is read from another
+    /// crate), which would force a catch-all arm here that a fifth surface
+    /// could fall through silently. `index`'s own match, and every other
+    /// exhaustive match on this enum, lives beside the enum in `view-core`
+    /// and refuses to compile the moment a fifth surface exists there --
+    /// this lookup can never run ahead of that one.
+    fn get(&self, surface: NativeSurface) -> &SurfaceTable {
+        match surface.index() {
+            0 => &self.tree,
+            1 => &self.agent,
+            2 => &self.palette,
+            _ => &self.notifications,
+        }
+    }
 }
 
 /// One `[ui.surfaces.<id>]` table: where a surface sits and how much room
@@ -1119,13 +1146,16 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
     if file.ui.tokens.accent.is_some() {
         spelled.push(("ui.tokens", "accent"));
     }
-    for (key, spelled_here) in [
-        ("placement", file.ui.surfaces.tree.placement.is_some()),
-        ("anchor", file.ui.surfaces.tree.anchor.is_some()),
-        ("size", file.ui.surfaces.tree.size.is_some()),
-    ] {
-        if spelled_here {
-            spelled.push(("ui.surfaces.tree", key));
+    for surface in NativeSurface::ALL {
+        let table = file.ui.surfaces.get(surface);
+        for (key, spelled_here) in [
+            ("placement", table.placement.is_some()),
+            ("anchor", table.anchor.is_some()),
+            ("size", table.size.is_some()),
+        ] {
+            if spelled_here {
+                spelled.push((surface.dotted_table(), key));
+            }
         }
     }
     spelled
@@ -1347,7 +1377,7 @@ mod tests {
     /// Hand-written, and unavoidably so: it is a transcription of the spec,
     /// which no build artifact carries. What is *not* hand-written is which
     /// of them this build reads -- see [`loaded_tables`].
-    static SPECIFIED_TABLES: [&str; 10] = [
+    static SPECIFIED_TABLES: [&str; 13] = [
         "native",
         "keys",
         "supervision",
@@ -1356,6 +1386,9 @@ mod tests {
         "ui.tokens",
         "ui.surfaces",
         "ui.surfaces.tree",
+        "ui.surfaces.agent",
+        "ui.surfaces.palette",
+        "ui.surfaces.notifications",
         "ai",
         "ai.review",
     ];
@@ -1607,10 +1640,22 @@ mod tests {
     /// here fails loudly rather than silently: the walk below is the point,
     /// and a fixture it cannot build is a key nobody has taught it about.
     fn document_spelling(table: &str, key: &str) -> String {
+        for surface in NativeSurface::ALL {
+            if table != surface.dotted_table() {
+                continue;
+            }
+            let value = match key {
+                "placement" => "\"windowed\"",
+                "anchor" => {
+                    let word = super::surfaces::anchors(surface)[0].label();
+                    return format!("[{table}]\n{key} = \"{word}\"\n");
+                }
+                "size" => "25",
+                _ => panic!("no fixture value for [{table}] {key}; teach this walk its shape"),
+            };
+            return format!("[{table}]\n{key} = {value}\n");
+        }
         let value = match (table, key) {
-            ("ui.surfaces.tree", "placement") => "\"windowed\"",
-            ("ui.surfaces.tree", "anchor") => "\"right\"",
-            ("ui.surfaces.tree", "size") => "25",
             ("native", TREE_WIDTH_KEY) => "25",
             ("native", _) => "false",
             ("keys", _) => "[\"<C-w>>\"]",

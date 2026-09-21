@@ -201,6 +201,34 @@ size = 30                  # default: 30 -- percent of the terminal width,
                            # on the same clamp-never-refuse terms as
                            # [native] tree_width, whose value this shares
 
+[ui.surfaces.agent]
+placement = "overlay"      # default: "overlay" -- a float over your buffer.
+                           # "windowed" opens it as a window of its own
+anchor = "right"           # default: "right" -- the edge it opens at.
+                           # left | right
+# size = 30                # default: 30 -- percent of the terminal width.
+                           # [ai] panel_width, spelled below, is this key's
+                           # older name; write either one, never both
+
+[ui.surfaces.palette]
+placement = "overlay"      # default: "overlay" -- a float over your buffer.
+                           # "windowed" opens it as a window of its own
+anchor = "center"          # default: "center" -- centered on both axes.
+                           # center | top
+size = 30                  # default: 30 -- percent of the terminal height
+                           # under "top"; ignored under "center"
+
+[ui.surfaces.notifications]
+placement = "overlay"      # default: "overlay" -- toasts float over your
+                           # buffer. "windowed" opens the message stream as
+                           # a window of its own
+anchor = "top-right"       # default: "top-right" -- the corner the toast
+                           # stack grows away from and leaves toward.
+                           # top-left | top-right | bottom-left |
+                           # bottom-right
+size = 30                  # default: 30 -- percent of the terminal width
+                           # the windowed stream opens at
+
 # [ai] turns the agent panel and its ACP client on or off, and names which
 # agent view speaks to. "claude-code" is the one adapter this build knows
 # how to auto-provision on its own; naming another known adapter id or an

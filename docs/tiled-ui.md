@@ -180,45 +180,45 @@ loads.
 ## Placing a surface
 
 The file tree, the agent panel, the palette and the notification stream
-each answer to a `placement`, an `anchor` and a `size`. `placement`
-`"overlay"` floats the surface over your buffer; `"windowed"` gives it a
-window of its own in nvim's layout, so your buffers make room for it and
-every window command reaches it. `anchor` is the edge (or, for the
-notification stream's toast stack, the corner) it opens at, and `size` is
-its share of the terminal.
-
-The tree is the one surface `view.toml` places directly:
+each have their own `[ui.surfaces.<id>]` table, with a `placement`, an
+`anchor` and a `size`. `placement` `"overlay"` floats the surface over
+your buffer. `"windowed"` gives it a window of its own in nvim's layout,
+so your buffers make room for it and every window command reaches it.
+`anchor` is the edge, or for the notification stream's toast stack the
+corner, it opens at. `size` is its share of the terminal.
 
 ```toml
 [ui.surfaces.tree]
 placement = "overlay"      # default: "overlay". "windowed" opens it as a
                             # window of its own
 anchor = "left"             # default: "left". left | right
-size = 30                   # default: 30 -- percent of the terminal width
-```
+size = 30                   # percent of the terminal width. Default: 30
 
-`[native] tree_width` is `[ui.surfaces.tree] size` under its older name;
-write either one. The agent panel shares the same split for its width
-alone:
-
-```toml
 [ui.surfaces.agent]
-size = 30                   # default: 30 -- percent of the terminal width
+placement = "overlay"
+anchor = "right"             # default: "right". left | right
+size = 30
 
-[ai]
-panel_width = 30            # the older name for the same value
+[ui.surfaces.palette]
+placement = "overlay"
+anchor = "center"            # default: "center". center | top
+size = 30                    # percent of the terminal height under "top"
+
+[ui.surfaces.notifications]
+placement = "overlay"
+anchor = "top-right"         # default: "top-right". top-left | top-right |
+                              # bottom-left | bottom-right
+size = 30
 ```
 
-The agent panel's own `placement`, and the palette's and the notification
-stream's `placement` and `anchor`, are not `view.toml` keys yet: the
-notification stream opens at its own default corner, top-right, and the
-only lever over any of the three surfaces' placement this session is the
-placement ring below. The four corners a toast stack can open at (top-left,
-top-right, bottom-left, bottom-right) and the direction each grows in are
-real regardless: the stack's near box sits flush against its own corner and
-every later one sits farther away, and a dismissed box leaves by sliding, or
-by shrinking where a left corner has left it no column to slide into, toward
-that same corner.
+`[native] tree_width` is `[ui.surfaces.tree] size` under its older name,
+and `[ai] panel_width` is `[ui.surfaces.agent] size` under its. Write
+either one; the newer key wins when a config writes both.
+
+The notification stream's `anchor` is the toast stack's own corner: the
+near box sits flush against it and every later box sits farther away. A
+dismissed box leaves by sliding toward that corner, or by shrinking where
+a left corner leaves it no column to slide into.
 
 ## The placement ring
 
@@ -231,7 +231,7 @@ config -> windowed -> overlay -> config
 ```
 
 `config` is what `view.toml` gave each surface at startup: `overlay` for
-every surface but a tree you placed windowed yourself. The ring's
+every surface but the ones you placed windowed yourself. The ring's
 `windowed` and `overlay` stops move every surface to that placement at
 once, whatever `view.toml` said. A third press returns every surface to
 its own configured placement, the loop's only three stops. A surface

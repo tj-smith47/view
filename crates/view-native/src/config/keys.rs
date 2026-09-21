@@ -10,6 +10,7 @@
 
 use std::sync::OnceLock;
 
+use view_core::native::geometry::{NativeSurface, SurfaceLayout};
 use view_core::native::registry;
 
 /// One config key: where it lives in the file, how a user overrides it,
@@ -87,24 +88,35 @@ pub fn keys() -> &'static [ConfigKey] {
                 flag: None,
                 derived: Some(super::AUTO),
             },
-            ConfigKey {
-                table: "ui.surfaces.tree",
-                key: "placement",
-                flag: None,
-                derived: Some("overlay"),
-            },
-            ConfigKey {
-                table: "ui.surfaces.tree",
-                key: "anchor",
-                flag: None,
-                derived: Some("left"),
-            },
-            ConfigKey {
-                table: "ui.surfaces.tree",
-                key: "size",
-                flag: None,
-                derived: Some("30"),
-            },
+        ];
+        // every surface's own placement, anchor and size, walked off
+        // `NativeSurface::ALL` and its own default layout rather than one
+        // hand-written row per surface, so a fifth surface's rows exist
+        // here the moment it exists in `geometry.rs`
+        rows.extend(NativeSurface::ALL.into_iter().flat_map(|surface| {
+            let default = SurfaceLayout::default_for(surface);
+            [
+                ConfigKey {
+                    table: surface.dotted_table(),
+                    key: "placement",
+                    flag: None,
+                    derived: Some(default.placement.label()),
+                },
+                ConfigKey {
+                    table: surface.dotted_table(),
+                    key: "anchor",
+                    flag: None,
+                    derived: Some(default.anchor.label()),
+                },
+                ConfigKey {
+                    table: surface.dotted_table(),
+                    key: "size",
+                    flag: None,
+                    derived: Some("30"),
+                },
+            ]
+        }));
+        rows.extend([
             ConfigKey {
                 table: "engine",
                 key: "nvim_bin",
@@ -126,8 +138,7 @@ pub fn keys() -> &'static [ConfigKey] {
                 flag: Some("--single-grid"),
                 derived: Some("false"),
             },
-        ];
-        // the feature registry walked rather than transcribed, the same
+        ]);
         // direction `[native]`'s own resolution walks: a feature this build
         // ships is a config key by construction
         rows.extend(registry::features().iter().map(|feature| ConfigKey {
@@ -327,6 +338,9 @@ mod tests {
                 "ui",
                 "ui.tokens",
                 "ui.surfaces.tree",
+                "ui.surfaces.agent",
+                "ui.surfaces.palette",
+                "ui.surfaces.notifications",
                 "engine",
                 "native",
                 "keys",

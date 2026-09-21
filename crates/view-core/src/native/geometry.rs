@@ -386,6 +386,19 @@ impl NativeSurface {
     pub fn from_id(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|s| s.id() == id)
     }
+
+    /// The `ui.surfaces.<id>` table name a notice about this surface's own
+    /// config names, spelled once here so a notice and the key-population
+    /// walk in `view-native`'s `spelled_keys` read the same string.
+    #[must_use]
+    pub const fn dotted_table(self) -> &'static str {
+        match self {
+            Self::Tree => "ui.surfaces.tree",
+            Self::Agent => "ui.surfaces.agent",
+            Self::Palette => "ui.surfaces.palette",
+            Self::Notifications => "ui.surfaces.notifications",
+        }
+    }
 }
 
 /// Whether a surface floats over the buffer or takes a window in nvim's own

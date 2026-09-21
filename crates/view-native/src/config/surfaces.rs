@@ -27,7 +27,7 @@ const SIZE_EXPECTED: &str = "a whole number of percent";
 /// answer: a tree or an agent panel at a side, the palette in the middle,
 /// notifications at one of the four corners the toast stack grows away
 /// from and leaves toward.
-const fn anchors(surface: NativeSurface) -> &'static [Anchor] {
+pub(super) const fn anchors(surface: NativeSurface) -> &'static [Anchor] {
     match surface {
         NativeSurface::Palette => &[Anchor::Center, Anchor::Top],
         NativeSurface::Notifications => &[
@@ -41,7 +41,7 @@ const fn anchors(surface: NativeSurface) -> &'static [Anchor] {
 }
 
 /// The anchors `surface` accepts, spelled the way a notice lists them.
-fn anchors_expected(surface: NativeSurface) -> String {
+pub(super) fn anchors_expected(surface: NativeSurface) -> String {
     let words: Vec<&str> = anchors(surface).iter().map(|a| a.label()).collect();
     words.join(" or ")
 }
@@ -57,10 +57,7 @@ fn anchors_expected(surface: NativeSurface) -> String {
 pub fn surfaces(file: &ViewConfig, notices: &mut Vec<String>) -> [SurfaceLayout; 4] {
     let mut layouts = SurfaceLayout::defaults();
     for surface in NativeSurface::ALL {
-        let table = match surface {
-            NativeSurface::Tree => &file.ui.surfaces.tree,
-            _ => continue,
-        };
+        let table = file.ui.surfaces.get(surface);
         let Some(layout) = layouts.get_mut(surface.index()) else {
             continue;
         };
@@ -77,10 +74,10 @@ fn read(
     fallback: Anchor,
     notices: &mut Vec<String>,
 ) -> SurfaceLayout {
-    let name = format!("ui.surfaces.{}", surface.id());
+    let name = surface.dotted_table();
     let placement = match table.placement.as_deref().map(str::trim) {
         Some(word) => SurfacePlacement::parse(word).unwrap_or_else(|| {
-            notices.push(discarded_file(word, PLACEMENT_EXPECTED, &name, "placement"));
+            notices.push(discarded_file(word, PLACEMENT_EXPECTED, name, "placement"));
             SurfacePlacement::default()
         }),
         None => SurfacePlacement::default(),
@@ -94,7 +91,7 @@ fn read(
                 notices.push(discarded_file(
                     word,
                     &anchors_expected(surface),
-                    &name,
+                    name,
                     "anchor",
                 ));
                 fallback
@@ -104,7 +101,7 @@ fn read(
     let size = match table.size.as_ref() {
         Some(SurfaceSize::Percent(pct)) => clamp_panel_width(*pct),
         Some(SurfaceSize::Other(written)) => {
-            notices.push(discarded_file(written, SIZE_EXPECTED, &name, "size"));
+            notices.push(discarded_file(written, SIZE_EXPECTED, name, "size"));
             SurfaceLayout::default_for(surface).size
         }
         None => SurfaceLayout::default_for(surface).size,
@@ -244,5 +241,62 @@ mod tests {
         let (layout, notices) = tree("[ui.surfaces.tree]\nplacement = \"docked\"\n");
         assert_eq!(layout.placement, SurfacePlacement::Overlay);
         assert_eq!(notices.len(), 1, "{notices:?}");
+    }
+
+    /// A document spelling every one of `surface`'s three keys, `anchor`
+    /// set to `word`.
+    fn document_for(surface: NativeSurface, anchor: &str) -> String {
+        format!(
+            "[ui.surfaces.{}]\nplacement = \"windowed\"\nanchor = \"{anchor}\"\nsize = 42\n",
+            surface.id()
+        )
+    }
+
+    #[test]
+    fn every_surfaces_own_placement_anchor_and_size_is_read() {
+        for surface in NativeSurface::ALL {
+            for anchor in [
+                anchors(surface)[0],
+                *anchors(surface)
+                    .last()
+                    .expect("every surface accepts at least one anchor"),
+            ] {
+                let (layouts, notices) = read_toml(&document_for(surface, anchor.label()));
+                assert!(
+                    notices.is_empty(),
+                    "{}'s own vocabulary owes no notice: {notices:?}",
+                    surface.id()
+                );
+                let layout = layouts[surface.index()];
+                assert_eq!(
+                    layout.placement,
+                    SurfacePlacement::Windowed,
+                    "{}",
+                    surface.id()
+                );
+                assert_eq!(layout.anchor, anchor, "{}", surface.id());
+                assert_eq!(layout.size, 42, "{}", surface.id());
+            }
+        }
+    }
+
+    #[test]
+    fn every_surfaces_bad_word_notices_by_name() {
+        for surface in NativeSurface::ALL {
+            let name = surface.dotted_table();
+            for (key, document) in [
+                ("placement", format!("[{name}]\nplacement = \"docked\"\n")),
+                ("anchor", format!("[{name}]\nanchor = \"nowhere\"\n")),
+                ("size", format!("[{name}]\nsize = \"wide\"\n")),
+            ] {
+                let (_, notices) = read_toml(&document);
+                assert_eq!(notices.len(), 1, "{name} {key}: {notices:?}");
+                assert!(
+                    notices[0].contains(&format!("[{name}] {key}")),
+                    "{name} {key}'s notice does not name its own key: {}",
+                    notices[0]
+                );
+            }
+        }
     }
 }

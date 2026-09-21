@@ -120,7 +120,12 @@ impl AiConfig {
         // and the shipped example spells only `panel_width` for exactly
         // that reason -- a genuinely silent, notice-free baseline
         if panel_width_spelled && surface_size_spelled {
-            notices.push(PANEL_WIDTH_ALIAS_NOTICE.to_string());
+            notices.push(view_core::config::alias_notice(
+                "ai",
+                "panel_width",
+                "ui.surfaces.agent",
+                "size",
+            ));
         }
         let (review_open_target, review_open_target_notice) =
             resolve_open_target(file.ai.review.open_target);
@@ -447,13 +452,6 @@ fn resolve_panel_width(value: Option<toml::Value>) -> (u16, Option<&'static str>
         Some(_) => (geometry::DEFAULT_PANEL_WIDTH_PCT, Some(PANEL_WIDTH_NOTICE)),
     }
 }
-
-/// What `[ai] panel_width`'s older name owes a user who wrote it: the newer
-/// key it has become, spelled once whether or not the newer one also
-/// answered this run -- the same unconditional-on-the-older-key notice
-/// `view-native`'s own `[native] tree_width` alias gives.
-const PANEL_WIDTH_ALIAS_NOTICE: &str =
-    "view: [ai] panel_width is now [ui.surfaces.agent] size; both read the same value";
 
 /// What a `[ui.surfaces.agent] size` that is not a whole number of percent
 /// is answered with.
@@ -840,7 +838,12 @@ agent = "claude-code"
         );
         assert_eq!(
             cfg.notices(),
-            [PANEL_WIDTH_ALIAS_NOTICE.to_string()],
+            [view_core::config::alias_notice(
+                "ai",
+                "panel_width",
+                "ui.surfaces.agent",
+                "size"
+            )],
             "the user was not told which key answered"
         );
     }
@@ -1075,10 +1078,11 @@ agent = "claude-code"
         // below is told to cover it
         // `ui` is not walked below the way `ai` is: `[ui]` is not this
         // crate's table (`view-native` owns its shape and its own example
-        // walk), and the one field this loader borrows from it,
-        // `[ui.surfaces.agent] size`, is not yet in the shipped example --
-        // `view-native`'s own key registry does not recognize that table,
-        // since nothing there reads the agent surface's placement yet
+        // walk). The one field this loader borrows from it,
+        // `[ui.surfaces.agent] size`, is real but left commented out in the
+        // shipped example: `[ai] panel_width` is the field this walk forces
+        // live, and spelling both there would owe the alias notice this
+        // test refuses
         let ConfigFile { ai: _, ui: _ } =
             toml::from_str(EXAMPLE_TOML).expect("the shipped example must parse as the wire shape");
         assert_example_sets_every_field(&doc, "ai");

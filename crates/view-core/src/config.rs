@@ -93,6 +93,21 @@ pub fn discarded_file(value: &str, expected: &str, table: &str, key: &str) -> St
     )
 }
 
+/// What a key that gained a newer name owes the user who still writes the
+/// older one: which key it became, spelled once whether or not the newer
+/// key also answered this run.
+///
+/// Shared rather than one copy per resolver, for [`discarded_env`]'s own
+/// reason: `[native] tree_width` and `[ai] panel_width` are both aliases
+/// for a `[ui.surfaces.<id>] size` key, read by `view-native` and `view-ai`
+/// respectively, and those two crates may not depend on each other.
+#[must_use]
+pub fn alias_notice(old_table: &str, old_key: &str, new_table: &str, new_key: &str) -> String {
+    format!(
+        "view: [{old_table}] {old_key} is now [{new_table}] {new_key}; both read the same value"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
