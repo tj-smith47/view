@@ -303,6 +303,34 @@ fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
     })]
 }
 
+/// [`resize_windowed_tree`], for the agent panel: carries the share
+/// `resize_ai_panel` just stepped to the window it sits in, and writes it
+/// back into the layout so a panel closed and reopened comes back at the
+/// width the user left it at. `pub(super)` rather than private: the
+/// resize key lives on `update::ai::ai_panel_key`'s own composer match,
+/// not here, the same split `tree_key`'s own module keeps for the sidebar.
+pub(super) fn resize_windowed_agent(model: &mut Model) -> Vec<Effect> {
+    if !model.agent_is_windowed() {
+        return Vec::new();
+    }
+    let layout = model.surfaces.layout(NativeSurface::Agent);
+    let stepped = model.ai_panel_width_pct;
+    model.surfaces.set_layout(
+        NativeSurface::Agent,
+        crate::native::geometry::SurfaceLayout::new(layout.placement, layout.anchor, stepped),
+    );
+    let Some(win) = model.engine.grids().native_window(NativeSurface::Agent) else {
+        return Vec::new();
+    };
+    let columns = model.engine.grids().global().size().0;
+    let cells = crate::native::geometry::share(columns, stepped).max(1);
+    vec![Effect::Rpc(RpcCall::SetWindowSize {
+        win: win.0,
+        width: Some(cells),
+        height: None,
+    })]
+}
+
 /// Closes the window the tree sits in and drops its state.
 ///
 /// The claim goes here rather than on the `win_close` the close produces,

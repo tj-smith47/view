@@ -14398,3 +14398,85 @@ fn a_key_in_the_windowed_palette_reaches_the_engine() {
          nvim's own cmdline: {effects:?}"
     );
 }
+
+/// The resize keys step a windowed sidebar's own share and carry it to the
+/// window nvim actually sized, mirroring
+/// `a_resize_key_in_the_windowed_tree_resizes_its_window` for the surface
+/// that had no windowed resize path: `RpcCall::SetWindowSize` was the
+/// tree's own resize keys alone, and the agent panel's `<S-Right>`/`<S-Left>`
+/// only ever re-widthed its floating box.
+#[test]
+fn resizing_a_windowed_sidebar_sets_the_nvim_window_width() {
+    let mut m = focused_windowed_agent();
+    let before = m.ai_panel_width_pct;
+
+    let effects = update(&mut m, key("<S-Right>"));
+
+    assert_ne!(
+        m.ai_panel_width_pct, before,
+        "the key stepped no share at all"
+    );
+    let cells =
+        crate::native::geometry::share(m.engine.grids().global().size().0, m.ai_panel_width_pct)
+            .max(1);
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::SetWindowSize {
+                win,
+                width: Some(width),
+                height: None,
+            })] if *win == AGENT_WIN.0 && *width == cells
+        ),
+        "the resize reached no window: {effects:?}"
+    );
+}
+
+/// The percent `[ui.surfaces.agent]` would read back after a restart moves
+/// with the resize key, so a panel closed and reopened -- or a session
+/// restarted -- comes back at the width the user actually left it, not the
+/// one the config on disk still names.
+#[test]
+fn resizing_a_windowed_sidebar_moves_the_surfaces_size_percent() {
+    let mut m = focused_windowed_agent();
+
+    let _ = update(&mut m, key("<S-Right>"));
+
+    assert_eq!(
+        m.surfaces
+            .layout(crate::native::geometry::NativeSurface::Agent)
+            .size,
+        m.ai_panel_width_pct,
+        "a reopen would come back at the width the user left behind"
+    );
+}
+
+/// The floating placement never owned an `nvim_win_set_width` in the first
+/// place -- `resize_ai_panel`/`resize_tree` already re-width their own
+/// drawn box -- so the windowed sidebars' new `RpcCall::SetWindowSize` path
+/// must stay behind `agent_is_windowed`/`tree_is_windowed`'s own gate and
+/// never fire for a float. Named for the tree since its resize path is
+/// the older of the two;
+/// `the_resize_keys_step_the_agent_panels_share_and_repaint_it` pins the
+/// identical no-effect contract for the floating agent panel.
+#[test]
+fn resizing_an_overlay_sidebar_still_steps_tree_width_pct() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    let before = m.tree_width_pct;
+    let _ = update(&mut m, tree_toggle());
+
+    let effects = update(&mut m, key("<S-Right>"));
+
+    assert_ne!(m.tree_width_pct, before, "the key stepped no share at all");
+    assert!(
+        effects.is_empty(),
+        "a floating sidebar's resize must issue no RPC: {effects:?}"
+    );
+}

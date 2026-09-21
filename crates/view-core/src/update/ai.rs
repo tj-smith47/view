@@ -539,6 +539,7 @@ pub(super) fn ai_panel_key(
             Resolved::Act(Action::Resize(direction)) => {
                 if model.resize_ai_panel(direction.widens()) {
                     model.dirty = true;
+                    return super::surfaces::resize_windowed_agent(model);
                 }
             }
             // The line break `<CR>` cannot be: that key sends
