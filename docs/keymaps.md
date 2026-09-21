@@ -227,7 +227,9 @@ read as the same modifier, so either spelling binds the same key.
 ## Resizing the sidebars
 
 The file tree and the AI panel are sidebars, and the focused one resizes
-with the same keys, 5% of the terminal per press:
+with the same keys, 5% of the terminal per press. A windowed notification
+stream or ticker answers the same keys while it holds focus, stepping
+columns at a left or right anchor and rows at a top or bottom one:
 
 | key | does |
 | --- | --- |
@@ -295,6 +297,12 @@ The percent it moved to is what the session remembers, so the next
 `placement = "overlay"` there is no window to resize, so the keys still
 step `tree_width`/`panel_width`, and a reopened float honours the new
 number.
+
+Two windowed surfaces pinned to the same edge are stacked in one nvim
+column or row. Widening a stacked agent panel and the notification stream
+beside it keeps the same width, whichever one held focus when you pressed
+the key. A windowed palette stacked on that edge follows along too, though
+every keystroke while it is open reaches nvim's own command line.
 
 ## Gaps and the placement ring
 

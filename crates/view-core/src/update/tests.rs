@@ -14735,3 +14735,107 @@ fn toggle_gaps_reattaches_the_outer_grid_and_resends_every_request() {
          never moved: {gapped:?}"
     );
 }
+
+/// A resize key inside the stream's own left tile carries the stepped
+/// share to nvim as a width, the same axis [`a_resize_key_in_the_windowed_tree_resizes_its_window`]
+/// asserts for the sidebar -- proving `resize_windowed_stream`'s width arm
+/// and its wiring through `notifications_pane_key`.
+#[test]
+fn a_resize_key_in_the_windowed_stream_resizes_its_width_on_a_side_anchor() {
+    let mut m = focused_windowed_notifications();
+    let before = m
+        .surfaces
+        .layout(crate::native::geometry::NativeSurface::Notifications)
+        .size;
+    let effects = update(&mut m, key("<S-Right>"));
+    let after = m
+        .surfaces
+        .layout(crate::native::geometry::NativeSurface::Notifications)
+        .size;
+    assert_ne!(after, before, "the key stepped no share at all");
+    let cells = crate::native::geometry::share(m.engine.grids().global().size().0, after).max(1);
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::SetWindowSize {
+                win,
+                width: Some(width),
+                height: None,
+            })] if *win == NOTIFICATIONS_WIN.0 && *width == cells
+        ),
+        "a left-anchored stream must resize in columns, not rows: {effects:?}"
+    );
+}
+
+/// The same key, with the stream pinned to the bottom edge instead: the
+/// stepped share now has to reach nvim as a height, since
+/// [`resize_windowed_stream`] follows `WinSplit::for_anchor(anchor).is_vertical()`
+/// rather than always writing a width the way the sidebars do.
+#[test]
+fn a_resize_key_in_the_windowed_ticker_resizes_its_height_on_a_top_or_bottom_anchor() {
+    let mut m = focused_windowed_notifications();
+    let before = m
+        .surfaces
+        .layout(crate::native::geometry::NativeSurface::Notifications)
+        .size;
+    m.surfaces.set_layout(
+        crate::native::geometry::NativeSurface::Notifications,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Windowed,
+            crate::native::geometry::Anchor::Bottom,
+            before,
+        ),
+    );
+    let effects = update(&mut m, key("<S-Right>"));
+    let after = m
+        .surfaces
+        .layout(crate::native::geometry::NativeSurface::Notifications)
+        .size;
+    assert_ne!(after, before, "the key stepped no share at all");
+    let cells = crate::native::geometry::share(m.engine.grids().global().size().1, after).max(1);
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::SetWindowSize {
+                win,
+                width: None,
+                height: Some(height),
+            })] if *win == NOTIFICATIONS_WIN.0 && *height == cells
+        ),
+        "a bottom-anchored ticker must resize in rows, not columns: {effects:?}"
+    );
+}
+
+/// Two windowed surfaces pinned to the same edge keep one width: resizing
+/// the focused one has to carry its stepped share onto the other's own
+/// layout too, in the model alone, so a later open of the sibling does not
+/// reopen it at a stale share nvim's own `win_pos` would then have to
+/// correct.
+#[test]
+fn resizing_a_windowed_sidebar_carries_its_new_width_to_a_sibling_stacked_on_the_same_edge() {
+    let mut m = focused_windowed_agent();
+    m.surfaces.set_layout(
+        crate::native::geometry::NativeSurface::Notifications,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Windowed,
+            crate::native::geometry::Anchor::Right,
+            m.surfaces
+                .layout(crate::native::geometry::NativeSurface::Agent)
+                .size,
+        ),
+    );
+    let _ = update(&mut m, key("<S-Right>"));
+    let agent_after = m
+        .surfaces
+        .layout(crate::native::geometry::NativeSurface::Agent)
+        .size;
+    let stream_after = m
+        .surfaces
+        .layout(crate::native::geometry::NativeSurface::Notifications)
+        .size;
+    assert_eq!(
+        agent_after, stream_after,
+        "a sibling pinned to the same edge must follow the resized share, not \
+         keep its own stale one"
+    );
+}

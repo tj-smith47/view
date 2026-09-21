@@ -7,7 +7,7 @@
 
 use crate::model::{Focus, Model, OverlayKind};
 use crate::msg::{Effect, RegisterType, RpcCall, WinSplit};
-use crate::native::geometry::{NativeSurface, OverlayBox};
+use crate::native::geometry::{Anchor, NativeSurface, OverlayBox};
 use crate::native::keys::{Action, Resolved};
 use crate::native::palette::MessageHistoryState;
 
@@ -378,6 +378,34 @@ pub(super) fn native_window_taken(model: &mut Model, surface: NativeSurface) -> 
     native_window_closed(model, surface, win)
 }
 
+/// Carries a resized sidebar's stepped share to every other windowed
+/// surface pinned to the same edge, in the model alone -- no RPC of its
+/// own.
+///
+/// Two windowed surfaces sharing an anchor are stacked one above the other
+/// inside the same nvim column (`split = "below"` opens the second inside
+/// the first's own window, per the open chunk's stacking rule), so
+/// `nvim_win_set_width`/`nvim_win_set_height` on either one already resizes
+/// the whole column nvim's side; what would otherwise drift is the two
+/// surfaces' own `layout.size`, each written only by its own resize key.
+/// Left unsynced, a ring step or a later resize of the sibling reads its
+/// stale share and asks nvim for a size the column is not actually at.
+fn sync_stacked_siblings(model: &mut Model, resized: NativeSurface, anchor: Anchor, size: u16) {
+    for surface in NativeSurface::ALL {
+        if surface == resized || !model.surfaces.windowed(surface) {
+            continue;
+        }
+        let sibling = model.surfaces.layout(surface);
+        if sibling.anchor != anchor {
+            continue;
+        }
+        model.surfaces.set_layout(
+            surface,
+            crate::native::geometry::SurfaceLayout::new(sibling.placement, sibling.anchor, size),
+        );
+    }
+}
+
 /// Carries the share the resize keys just stepped to the window the tree
 /// sits in, in the cells it works out to against the grid nvim lays its
 /// windows in.
@@ -396,6 +424,7 @@ fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
         NativeSurface::Tree,
         crate::native::geometry::SurfaceLayout::new(layout.placement, layout.anchor, stepped),
     );
+    sync_stacked_siblings(model, NativeSurface::Tree, layout.anchor, stepped);
     let Some(win) = model.engine.grids().native_window(NativeSurface::Tree) else {
         return Vec::new();
     };
@@ -424,6 +453,7 @@ pub(super) fn resize_windowed_agent(model: &mut Model) -> Vec<Effect> {
         NativeSurface::Agent,
         crate::native::geometry::SurfaceLayout::new(layout.placement, layout.anchor, stepped),
     );
+    sync_stacked_siblings(model, NativeSurface::Agent, layout.anchor, stepped);
     let Some(win) = model.engine.grids().native_window(NativeSurface::Agent) else {
         return Vec::new();
     };
@@ -433,6 +463,54 @@ pub(super) fn resize_windowed_agent(model: &mut Model) -> Vec<Effect> {
         win: win.0,
         width: Some(cells),
         height: None,
+    })]
+}
+
+/// [`resize_windowed_tree`]/[`resize_windowed_agent`], for the notification
+/// stream and ticker: steps `layout.size` one notch and carries it to the
+/// window nvim already opened for it.
+///
+/// The tree and the agent panel each keep a second copy of their share
+/// (`tree_width_pct`/`ai_panel_width_pct`) because the same number also
+/// sizes their floating placement's `OverlayBox`. The stream's floating
+/// placement never reads `layout.size` at all -- `open_message_history`
+/// opens the history overlay at a fixed `OverlayBox::new(70, 60)`, the same
+/// box on every open -- so `model.surfaces`'s own layout is the only copy
+/// of this surface's share there is, and this steps it directly rather than
+/// stepping a second field and copying it across the way the sidebars do.
+///
+/// The axis follows the anchor: a left or right tile resizes in columns,
+/// top or bottom in rows, per [`crate::native::geometry::SurfaceLayout`]'s
+/// own doc for what `size` percent means at each edge.
+pub(super) fn resize_windowed_stream(model: &mut Model, widen: bool) -> Vec<Effect> {
+    if !model.notifications_is_windowed() {
+        return Vec::new();
+    }
+    let layout = model.surfaces.layout(NativeSurface::Notifications);
+    let stepped = crate::native::geometry::step_panel_width(layout.size, widen);
+    if stepped == layout.size {
+        return Vec::new();
+    }
+    model.surfaces.set_layout(
+        NativeSurface::Notifications,
+        crate::native::geometry::SurfaceLayout::new(layout.placement, layout.anchor, stepped),
+    );
+    sync_stacked_siblings(model, NativeSurface::Notifications, layout.anchor, stepped);
+    let Some(win) = model
+        .engine
+        .grids()
+        .native_window(NativeSurface::Notifications)
+    else {
+        return Vec::new();
+    };
+    let (columns, rows) = model.engine.grids().global().size();
+    let vertical = WinSplit::for_anchor(layout.anchor).is_vertical();
+    let cells =
+        crate::native::geometry::share(if vertical { columns } else { rows }, stepped).max(1);
+    vec![Effect::Rpc(RpcCall::SetWindowSize {
+        win: win.0,
+        width: vertical.then_some(cells),
+        height: (!vertical).then_some(cells),
     })]
 }
 
@@ -684,6 +762,10 @@ pub(super) fn open_message_history(model: &mut Model) -> Vec<Effect> {
 /// The windowed notification stream's own key handling, while its pane
 /// holds the cursor (`Focus::Pane(NativeSurface::Notifications)`).
 ///
+/// The resize keys are resolved first, through the same shared
+/// [`take_binding`] the sidebars use, so `<S-Right>`/`<S-Left>` (or a
+/// rebound chord) resize the stream's own tile exactly as they resize the
+/// tree's; every other resolution falls through unchanged. Past that,
 /// [`history_mut`] reaches the same `MessageHistoryState` a float would, so
 /// [`message_history_key`]'s own dispatch answers every key here exactly as
 /// it does for the floating overlay -- the pane is a placement, not a
@@ -691,6 +773,9 @@ pub(super) fn open_message_history(model: &mut Model) -> Vec<Effect> {
 /// `update::mod::route_key`): it leaves the tile, the same as the tree's
 /// and the agent panel's own.
 pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Vec<Effect> {
+    if let Some(Resolved::Act(Action::Resize(direction))) = take_binding(model, notation) {
+        return resize_windowed_stream(model, direction.widens());
+    }
     message_history_key(model, notation)
 }
 
