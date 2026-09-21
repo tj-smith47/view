@@ -116,11 +116,16 @@ pub enum LayerKind {
     /// it slide up: two rects moving in different directions cannot be one
     /// rect. `slot` is this box's position in the painted stack counted from
     /// the top, the departing box included for as long as it is still on
-    /// screen; `x_offset` is how many cells right of its home column it has
-    /// travelled, `0` for every box that is not leaving. `rect` already
-    /// carries both, so a painter never re-derives a position from them --
-    /// they are what a test reads to tell one frame of the motion from the
-    /// next.
+    /// screen; `x_offset` is how many cells it has travelled toward the
+    /// corner it is exiting through, `0` for every box that is not leaving.
+    /// For a right (or unanchored-left) corner that travel moves `rect`'s
+    /// own column, which `rect` already carries so a painter never
+    /// re-derives a position from it. A left corner's column is already
+    /// flush against 0 with nowhere further left a `u16` can express, so
+    /// there `x_offset` instead tells the painter how many leading cells of
+    /// each line's own text to leave behind -- the same slide read as a
+    /// shrinking window into text moving out from under it, rather than a
+    /// box shrinking in place.
     ///
     /// Each row is a single [`view_core::native::views::StyleRole::Plain`]
     /// span (a toast has no per-segment structure to preserve), kept as a
@@ -136,6 +141,7 @@ pub enum LayerKind {
         lines: Vec<Vec<Span>>,
         slot: usize,
         x_offset: u16,
+        left_corner: bool,
         paused: bool,
     },
     /// The top row: the tabpages or buffers across the middle, the host at
@@ -667,12 +673,11 @@ fn toast_box(lines: &[Vec<Span>], grid_w: u16) -> (u16, u16) {
 
 /// The notifications stack's anchor, normalized to one of the four corners
 /// [`Anchor::is_top_corner`]/[`Anchor::is_left_corner`] read -- a defensive
-/// floor for a layout no config path writes a non-corner value into today,
-/// since the notifications table is not yet read (only the tree's is;
-/// `SurfaceLayout::default_for(NativeSurface::Notifications)` is itself a
-/// corner), but a slot nothing has assigned a corner to still has to grow
-/// and exit somewhere rather than misreading `is_top_corner`'s "only
-/// meaningful for a corner" floor as a real answer.
+/// floor for a layout `[ui.surfaces.notifications] anchor` writes a
+/// non-corner value into (bottom/top/left/right, valid for a windowed
+/// placement but not a floating stack's corner), so a slot with no corner
+/// of its own still has to grow and exit somewhere rather than misreading
+/// `is_top_corner`'s "only meaningful for a corner" floor as a real answer.
 fn notifications_corner(model: &Model) -> Anchor {
     let anchor = model.surfaces.layout(NativeSurface::Notifications).anchor;
     if anchor.is_corner() {
@@ -847,6 +852,7 @@ fn toast_layer(
             lines,
             slot: placement.slot,
             x_offset: placement.x_offset,
+            left_corner,
             paused: placement.paused,
         },
         caps,

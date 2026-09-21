@@ -2085,6 +2085,227 @@ fn a_ring_step_opens_every_default_surface_at_its_designed_windowed_position_aga
     );
 }
 
+/// A replay of all four surfaces through every ring stop -- windowed,
+/// overlay, back to each one's own configured placement -- against real
+/// nvim, with the keyboard never once landing in any of the four. At every
+/// stop this asserts both halves of a surface's claim: the model's own
+/// `*_is_open()` and nvim's own window (present at the windowed stop, gone
+/// at the other two, since `panes = "tiles"` configures every surface as
+/// an overlay by default). The tree, the agent panel and the stream are
+/// held open across every stop; the palette is opened fresh at each one
+/// and left with `<Esc>` before the ring moves again -- its own tile
+/// closes only on `CmdlineLeave`, run synchronously inside nvim so it
+/// cannot race the command the cmdline is about to run (see
+/// `OPEN_NATIVE_WINDOW_CHUNK`'s `id == 'palette'` branch), which a ring
+/// step's ordinary async `CloseNativeWindow` never fires while a command
+/// is still being typed. The close at the end must leave nothing behind:
+/// no surface open, no window but the user's own buffer.
+#[test]
+fn a_ring_cycles_all_four_surfaces_through_every_position_against_real_nvim() {
+    let work = common::ScratchPaths::new("close-battery-ring-all-four");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = overlay_session(&dir);
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the tree opens as an overlay");
+    engine.trust_ai();
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        })
+        .expect("the agent panel opens as an overlay");
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "history".to_string(),
+        })
+        .expect("the notification stream opens as an overlay");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert!(engine.tree_is_open());
+    assert!(engine.agent_is_open());
+    assert!(engine.notifications_is_open());
+
+    let stops = ["windowed", "overlay", "config"];
+    for stop in stops {
+        engine
+            .feed(view_core::msg::Msg::FeatureInvoke {
+                feature: "ui".to_string(),
+                verb: "cycle_surfaces".to_string(),
+            })
+            .expect("the ring answers its own invoke");
+        assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+        engine.arm_and_input(":").unwrap();
+        assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+        assert!(engine.tree_is_open(), "{stop}: the tree's claim must hold");
+        assert!(
+            engine.agent_is_open(),
+            "{stop}: the agent panel's claim must hold"
+        );
+        assert!(
+            engine.notifications_is_open(),
+            "{stop}: the stream's claim must hold"
+        );
+        assert!(
+            engine.palette_is_open(),
+            "{stop}: the palette's claim must hold"
+        );
+
+        let windowed = stop == "windowed";
+        assert_eq!(
+            native_window_rect(&mut engine, "tree").is_some(),
+            windowed,
+            "{stop}: the tree's own nvim window must exist only at the \
+             windowed stop"
+        );
+        assert_eq!(
+            native_window_rect(&mut engine, "agent").is_some(),
+            windowed,
+            "{stop}: the agent panel's own nvim window must exist only at \
+             the windowed stop"
+        );
+        assert_eq!(
+            native_window_rect(&mut engine, "notifications").is_some(),
+            windowed,
+            "{stop}: the stream's own nvim window must exist only at the \
+             windowed stop"
+        );
+        assert_eq!(
+            native_window_rect(&mut engine, "palette").is_some(),
+            windowed,
+            "{stop}: the palette's own nvim window must exist only at the \
+             windowed stop"
+        );
+
+        let focus = engine.focus();
+        assert!(
+            !matches!(
+                focus,
+                view_core::model::Focus::Pane(
+                    view_core::native::geometry::NativeSurface::Tree
+                        | view_core::native::geometry::NativeSurface::Agent
+                        | view_core::native::geometry::NativeSurface::Notifications
+                )
+            ),
+            "{stop}: a ring step must never land the keyboard in the tree, \
+             the agent panel or the stream -- the cmdline the user is \
+             already typing into is the only one of the four allowed to \
+             hold it: {focus:?}"
+        );
+
+        engine.arm_and_input("<Esc>").unwrap();
+        assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+        assert!(
+            !engine.palette_is_open(),
+            "{stop}: escape must close the palette before the next ring \
+             step, or its held-open window races the async close every \
+             other surface uses"
+        );
+        assert!(
+            native_window_rect(&mut engine, "palette").is_none(),
+            "{stop}: escape's own `CmdlineLeave` close must take the \
+             palette's window with it"
+        );
+    }
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the tree closes");
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "close".to_string(),
+        })
+        .expect("the agent panel closes");
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "history".to_string(),
+        })
+        .expect("the stream closes");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    assert!(!engine.tree_is_open(), "the tree must be fully closed");
+    assert!(
+        !engine.agent_is_open(),
+        "the agent panel must be fully closed"
+    );
+    assert!(
+        !engine.notifications_is_open(),
+        "the stream must be fully closed"
+    );
+    assert!(
+        !engine.palette_is_open(),
+        "the palette must be fully closed"
+    );
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        1,
+        "every surface's window must be gone, leaving only the user's own \
+         buffer: {:?}",
+        nvim_window_sizes(&mut engine)
+    );
+}
+
+/// The measured cost of one ring step -- the median over 30 steps, all
+/// four surfaces open at the ring's `config` stop (the heaviest of the
+/// three: every surface an overlay, so a step to `windowed` opens four
+/// real windows in one fold) -- since a step's own close-then-reopen work
+/// scales with how many surfaces it carries, not just whether one moved.
+#[test]
+fn the_cost_of_one_ring_step_with_all_four_surfaces_open() {
+    let work = common::ScratchPaths::new("close-battery-ring-step-latency");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = overlay_session(&dir);
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the tree opens as an overlay");
+    engine.trust_ai();
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        })
+        .expect("the agent panel opens as an overlay");
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "history".to_string(),
+        })
+        .expect("the notification stream opens as an overlay");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    let mut samples = Vec::with_capacity(30);
+    for _ in 0..30 {
+        let start = Instant::now();
+        engine
+            .feed(view_core::msg::Msg::FeatureInvoke {
+                feature: "ui".to_string(),
+                verb: "cycle_surfaces".to_string(),
+            })
+            .expect("the ring answers its own invoke");
+        assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+        samples.push(start.elapsed());
+    }
+    samples.sort_unstable();
+    eprintln!(
+        "median ring-step latency, four surfaces open: {:?}",
+        samples[samples.len() / 2]
+    );
+}
+
 /// The ticker's own tile, against real nvim under `panes = "tiles"` at the
 /// battery's own geometry: `<leader>fm` opening it (`enter = true`, the
 /// toggle a person pressed) both claims the model's overlay and lands the

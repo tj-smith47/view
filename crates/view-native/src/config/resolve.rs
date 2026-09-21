@@ -1891,8 +1891,9 @@ mod tests {
         let resolved = resolve_with(&file, &Overrides::default(), &no_env);
         assert!(resolved.notices().is_empty(), "{:?}", resolved.notices());
 
+        let from_document = resolved.surfaces;
         let mut state = view_core::native::placement::SurfaceState::default();
-        state.set_layouts(resolved.surfaces);
+        state.set_layouts(from_document);
         assert!(
             state.layout(NativeSurface::Agent).windowed(),
             "[ui.surfaces.agent] placement did not open the agent panel as a window"
@@ -1907,15 +1908,18 @@ mod tests {
             "[ui.surfaces.notifications] anchor did not move the toast stack"
         );
 
-        // the ring's `config` stop returns every surface to its own
-        // configured placement, whatever the ring has done to it meanwhile
+        // the ring's `config` stop returns every surface to the placement
+        // the document itself resolved to, whatever the ring did meanwhile
+        // -- the fixture's own words, read independently of `state`, so the
+        // comparison below can't collapse into `advance_ring`'s output
+        // agreeing with itself.
         state.advance_ring(); // windowed
         state.advance_ring(); // overlay
         let config = state.advance_ring(); // config
         for (surface, placement, _) in config {
             assert_eq!(
                 placement,
-                state.layout(surface).placement,
+                from_document[surface.index()].placement,
                 "{} did not return to its own [ui.surfaces.{}] placement",
                 surface.id(),
                 surface.id()

@@ -798,6 +798,10 @@ pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Vec<E
 /// [`toggle_windowed_tree`]/[`toggle_windowed_agent`].
 pub(super) fn toggle_notifications_stream(model: &mut Model) -> Vec<Effect> {
     if !model.notifications_is_windowed() {
+        if model.close_message_history() {
+            model.dirty = true;
+            return Vec::new();
+        }
         return open_message_history(model);
     }
     if model.focus() == Focus::Pane(NativeSurface::Notifications) {

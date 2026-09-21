@@ -814,8 +814,26 @@ fn composite_layers(
                 panes::paint_panes(model, &theme, borders, area, damage, buf);
             }
             LayerKind::Cmdline(state) => paint_cmdline(state, &theme, area, buf),
-            LayerKind::Toast { lines, paused, .. } => {
-                toast::paint_toast(lines, *paused, &theme, borders, area, damage, buf);
+            LayerKind::Toast {
+                lines,
+                x_offset,
+                left_corner,
+                paused,
+                ..
+            } => {
+                let skip = if *left_corner { *x_offset } else { 0 };
+                toast::paint_toast(
+                    lines,
+                    toast::ToastFrame {
+                        skip,
+                        paused: *paused,
+                    },
+                    &theme,
+                    borders,
+                    area,
+                    damage,
+                    buf,
+                );
             }
             LayerKind::Pill(view) => pill::paint_pill(view, &theme, area, buf),
             LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, damage, buf),
@@ -3559,7 +3577,10 @@ mod tests {
                 );
                 toast::paint_toast(
                     &[],
-                    false,
+                    toast::ToastFrame {
+                        skip: 0,
+                        paused: false,
+                    },
                     &theme,
                     BorderSet::ASCII,
                     area,
@@ -6190,6 +6211,7 @@ mod tests {
             lines,
             slot: 0,
             x_offset: 0,
+            left_corner: false,
             paused: false,
         }
     }

@@ -9,6 +9,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::style::Style;
 
+use view_core::native::text::{cluster_width, clusters};
 use view_core::native::views::Span;
 use view_surface::overlay::BorderSet;
 
@@ -42,9 +43,18 @@ use super::{
 /// Every write here is clipped to the rows `damage` names, border cells
 /// included: see `composite_layers` for why a row of this rect the frame is
 /// not repainting is not this painter's to touch.
+/// The two per-frame flags [`paint_toast`] takes beyond its lines and its
+/// geometry -- bundled into one argument to stay under clippy's
+/// too-many-arguments threshold once a corner's own exit slide needed a
+/// second one alongside `paused`.
+pub(super) struct ToastFrame {
+    pub(super) skip: u16,
+    pub(super) paused: bool,
+}
+
 pub(super) fn paint_toast(
     lines: &[Vec<Span>],
-    paused: bool,
+    frame: ToastFrame,
     theme: &Theme,
     borders: BorderSet,
     area: ratatui::layout::Rect,
@@ -67,7 +77,7 @@ pub(super) fn paint_toast(
         bg: body.bg,
         ..ResolvedStyle::default()
     });
-    paint_toast_border(area, borders, paused, border_style, damage, buf);
+    paint_toast_border(area, borders, frame.paused, border_style, damage, buf);
 
     let inner = inset_by_one(area);
     // every toast line is a single `StyleRole::Plain` span (see
@@ -82,13 +92,35 @@ pub(super) fn paint_toast(
             continue;
         }
         paint_text_row(
-            &view_surface::overlay::line_text(spans),
+            skip_cells(&view_surface::overlay::line_text(spans), frame.skip),
             style,
             inner,
             row,
             buf,
         );
     }
+}
+
+/// `text` with its first `cells` display columns dropped -- a left corner's
+/// exit slide (see [`view_surface::LayerKind::Toast`]'s `x_offset` doc):
+/// the box's rect can travel no further left than column 0, so instead the
+/// window into its own text narrows from the start, the same read as the
+/// text sliding out underneath it that a right corner gets from `rect`
+/// moving right on its own.
+fn skip_cells(text: &str, cells: u16) -> &str {
+    if cells == 0 {
+        return text;
+    }
+    let mut consumed = 0_u16;
+    let mut at = 0_usize;
+    for cluster in clusters(text) {
+        if consumed >= cells {
+            break;
+        }
+        consumed = consumed.saturating_add(cluster_width(cluster));
+        at = at.saturating_add(cluster.len());
+    }
+    text.get(at..).unwrap_or("")
 }
 
 /// `area` shrunk by one cell on every edge: the interior the border frame

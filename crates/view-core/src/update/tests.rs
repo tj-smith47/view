@@ -14760,13 +14760,29 @@ fn every_registered_feature_invoke_has_a_dispatch_handler() {
 /// every step of the ring untouched.
 #[test]
 fn an_open_tree_keeps_its_cursor_row_across_a_cycle() {
+    use crate::native::geometry::{NativeSurface, SurfacePlacement};
+
     let mut m = focused_windowed_tree();
     let _ = update(&mut m, key("<Down>"));
     let selected = m.tree_mut().and_then(|tree| tree.view().selected);
     assert!(selected.is_some(), "the cursor never moved onto a row");
 
-    for _ in 0..3 {
+    // the fixture starts the tree windowed with nothing configured, so the
+    // ring's three stops actually move it (windowed -> overlay -> overlay,
+    // the unconfigured floor) -- named here so a ring stuck on one
+    // placement fails this test instead of passing it silently.
+    let expected_placement = [
+        SurfacePlacement::Windowed,
+        SurfacePlacement::Overlay,
+        SurfacePlacement::Overlay,
+    ];
+    for expected in expected_placement {
         let _ = update(&mut m, cycle_surfaces_invoke());
+        assert_eq!(
+            m.surfaces.layout(NativeSurface::Tree).placement,
+            expected,
+            "the ring did not move the tree to its own next stop"
+        );
         assert_eq!(
             m.tree_mut().and_then(|tree| tree.view().selected),
             selected,
@@ -14784,6 +14800,8 @@ fn an_open_tree_keeps_its_cursor_row_across_a_cycle() {
 /// lives in [`Model::ai_panel`], which a placement flip never reaches.
 #[test]
 fn an_open_panel_keeps_its_transcript_across_a_cycle() {
+    use crate::native::geometry::{NativeSurface, SurfacePlacement};
+
     let mut m = focused_windowed_agent();
     m.ai_panel_mut().transcript.append_or_extend(
         Some("m0"),
@@ -14792,8 +14810,21 @@ fn an_open_panel_keeps_its_transcript_across_a_cycle() {
     );
     let before = panel_transcript_texts(&m);
 
-    for _ in 0..3 {
+    // same unconfigured floor as the tree's own cycle pin: windowed ->
+    // overlay -> overlay, named so a ring that never moves the panel
+    // passes nothing here by accident.
+    let expected_placement = [
+        SurfacePlacement::Windowed,
+        SurfacePlacement::Overlay,
+        SurfacePlacement::Overlay,
+    ];
+    for expected in expected_placement {
         let _ = update(&mut m, cycle_surfaces_invoke());
+        assert_eq!(
+            m.surfaces.layout(NativeSurface::Agent).placement,
+            expected,
+            "the ring did not move the panel to its own next stop"
+        );
         assert_eq!(
             panel_transcript_texts(&m),
             before,
@@ -14819,11 +14850,13 @@ fn toggle_gaps_reattaches_the_outer_grid_and_resends_every_request() {
     m.look = crate::model::Look::new(crate::model::Panes::Tiles, true);
 
     let effects = update(&mut m, gaps_invoke());
-    assert!(
-        effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::Rpc(RpcCall::TryResize { .. }))),
-        "the outer grid was not reattached: {effects:?}"
+    let resizes = effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::Rpc(RpcCall::TryResize { .. })))
+        .count();
+    assert_eq!(
+        resizes, 1,
+        "the outer grid must reattach exactly once: {effects:?}"
     );
     let gapless: Vec<_> = effects
         .iter()
@@ -15077,6 +15110,14 @@ fn the_resize_chord_resolves_inside_a_windowed_stream() {
 /// surface would be. Both keys reach nvim as ordinary input, the same path
 /// [`a_key_in_the_windowed_palette_reaches_the_engine`] proves for a plain
 /// character, and nvim's own `<C-w>>` handling does the rest.
+///
+/// Checking the two `Input` effects alone cannot fail: the palette's own
+/// key arm forwards every notation unconditionally and never calls
+/// [`take_binding`], so nothing in this path can intercept a key whatever
+/// the chord machinery does with it. `model.pending_chord` is what a
+/// mistaken future wiring of the palette through the shared
+/// tree/agent/stream binding lookup would actually touch, so that is the
+/// state this pins: unarmed before, still unarmed after, on both keys.
 #[test]
 fn the_resize_chords_first_key_survives_inside_a_windowed_palette() {
     let mut m = windowed_palette_model();
@@ -15095,6 +15136,10 @@ fn the_resize_chords_first_key_survives_inside_a_windowed_palette() {
         m.focus(),
         Focus::Pane(crate::native::geometry::NativeSurface::Palette),
     );
+    assert!(
+        m.pending_chord.is_none(),
+        "nothing armed a chord before either key was pressed"
+    );
 
     let effects = update(&mut m, key("<C-w>"));
     assert!(
@@ -15105,6 +15150,11 @@ fn the_resize_chords_first_key_survives_inside_a_windowed_palette() {
         "the chord's first key must reach nvim, not be swallowed waiting \
          for a follower this surface never resolves itself: {effects:?}"
     );
+    assert!(
+        m.pending_chord.is_none(),
+        "the palette's key arm armed a chord prefix it never consumes: {:?}",
+        m.pending_chord
+    );
     let effects = update(&mut m, key(">"));
     assert!(
         matches!(
@@ -15112,6 +15162,11 @@ fn the_resize_chords_first_key_survives_inside_a_windowed_palette() {
             [Effect::Rpc(RpcCall::Input { notation })] if notation == ">"
         ),
         "the chord's second key must reach nvim too: {effects:?}"
+    );
+    assert!(
+        m.pending_chord.is_none(),
+        "a chord prefix survived the follower that should have consumed it: {:?}",
+        m.pending_chord
     );
 }
 

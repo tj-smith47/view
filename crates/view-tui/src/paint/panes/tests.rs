@@ -2443,6 +2443,88 @@ fn palette_windowed() {
     }
 }
 
+/// [`palette_in_the_bottom_band`]'s own mirror for `anchor = "top"`: the
+/// band `nvim_open_win(split = "above")` opens, at the top edge instead of
+/// the bottom. Only the bottom shape had a committed picture (Minor 9);
+/// this is the other one `[ui.surfaces.palette] anchor` can configure.
+fn palette_in_the_top_band(gaps: bool) -> Tiles {
+    let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
+    let band_height = 6;
+    let main_height = grid_height - 2 - band_height;
+    let slots = vec![
+        (band_height + 1, 0, grid_width, main_height),
+        (0, 0, grid_width, band_height),
+    ];
+    let mut model = tiled_model(gaps, TILED_HEIGHT, &slots);
+    model.palette_enabled = true;
+    model.surfaces.set_layout(
+        view_core::native::geometry::NativeSurface::Palette,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Top,
+            30,
+        ),
+    );
+    let effects = update(
+        &mut model,
+        Msg::Redraw(vec![UiEvent::CmdlineShow {
+            content: vec![(0, "e file.txt".to_string())],
+            pos: 11,
+            firstc: ":".to_string(),
+            prompt: String::new(),
+            indent: 0,
+            level: 1,
+        }]),
+    );
+    let mut generation = 0;
+    for effect in &effects {
+        if let view_core::msg::Effect::Rpc(view_core::msg::RpcCall::OpenNativeWindow {
+            generation: g,
+            ..
+        }) = effect
+        {
+            generation = *g;
+        }
+    }
+    let _ = update(
+        &mut model,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: view_core::native::geometry::NativeSurface::Palette,
+            win: WinHandle(1001),
+        },
+    );
+    let (row, col, width, height) = slots[1];
+    drive(
+        &mut model,
+        vec![
+            UiEvent::WinPos {
+                grid: LEFT + 1,
+                win: WinHandle(1001),
+                startrow: u64::from(row),
+                startcol: u64::from(col),
+                width: u64::from(width),
+                height: u64::from(height),
+            },
+            UiEvent::Flush,
+        ],
+    );
+    Tiles { slots, model }
+}
+
+/// The committed picture of the palette anchored to the top instead: nvim's
+/// command line inside the top frame, the buffer's text inside the bottom
+/// one.
+#[test]
+fn palette_windowed_top() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-palette-windowed-top", tier.0),
+            &tiles_dump(tier, palette_in_the_top_band(true)),
+        );
+    }
+}
+
 /// I3: the caret is where the text goes, for every native surface that
 /// takes typed text -- the palette and the agent panel; the tree and the
 /// notification stream are selection surfaces with no insertion point of
@@ -2793,6 +2875,81 @@ fn notifications_corner_scenes() {
             assert_golden(
                 &format!("{}-notifications-corner-{name}", tier.0),
                 &tiles_dump(tier, toast_stack_in_the_corner(true, anchor)),
+            );
+        }
+    }
+}
+
+/// The exit slide's own paint, not just its rect (`view-surface`'s
+/// `a_toast_stack_leaves_toward_its_own_corner` already pins that a left
+/// corner's rect narrows from column 0 and a right corner's slides): a
+/// right corner's box keeps its own leading text at a moving column, so the
+/// character painted at its own left edge stays the message's first letter
+/// every frame; a left corner's box cannot move that column at all, so the
+/// text painted there has to slide instead -- the letter shown at its fixed
+/// left edge has to change as the box narrows, or the box is merely
+/// shrinking in place with a frozen header (the bug this pins, F4/Minor 8).
+#[test]
+fn a_dismissed_toasts_own_text_slides_at_every_corner() {
+    use view_core::native::geometry::Anchor;
+
+    for anchor in [
+        Anchor::TopLeft,
+        Anchor::TopRight,
+        Anchor::BottomLeft,
+        Anchor::BottomRight,
+    ] {
+        let tiles = toast_stack_in_the_corner(true, anchor);
+        let mut model = tiles.model;
+        // the interpolated exit is `Tier::Full` only (`start_toast_exit`'s
+        // own gate); a lower tier drops straight to the settled state with
+        // no motion to pin at all.
+        model.caps.tier = view_core::model::Tier::Full;
+        let first = model.engine.messages.entries[0].id();
+        let _ = update(&mut model, Msg::ToastExpired { id: first });
+
+        let mut left_edge_chars = Vec::new();
+        // only while the departing box is still standing: once it settles
+        // (`toast_motion` gone) the next box takes slot 0 in its place,
+        // which is a different box's own first letter, not a further frame
+        // of this one's exit; a sliver too narrow to hold an interior
+        // column (border cells only) carries nothing this pin can read
+        // either, so both are excluded rather than misread as the slide.
+        while model.toast_motion.is_some() {
+            let surface = view_surface::render(&model);
+            let departing = surface
+                .layers
+                .iter()
+                .find(|l| matches!(l.kind, view_surface::LayerKind::Toast { slot: 0, .. }));
+            if let Some(layer) = departing {
+                if layer.rect.width >= 3 {
+                    let buf = tiled_frame(&model);
+                    let ch = buf[(layer.rect.col + 1, layer.rect.row + 1)]
+                        .symbol()
+                        .to_string();
+                    left_edge_chars.push(ch);
+                }
+            }
+            let _ = update(&mut model, Msg::AnimTick);
+        }
+        assert!(
+            left_edge_chars.len() > 1,
+            "{anchor:?} produced too few moving frames: {left_edge_chars:?}"
+        );
+
+        if anchor.is_left_corner() {
+            assert!(
+                left_edge_chars.windows(2).any(|w| w[0] != w[1]),
+                "{anchor:?}: the box's own left edge painted the same \
+                 letter every frame. The text stood still while the box \
+                 shrank around it: {left_edge_chars:?}"
+            );
+        } else {
+            assert!(
+                left_edge_chars.iter().all(|c| c == &left_edge_chars[0]),
+                "{anchor:?}: a right corner's box must keep its own \
+                 leading letter at its own left edge as it slides, not \
+                 crop from the start too: {left_edge_chars:?}"
             );
         }
     }
