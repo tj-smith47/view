@@ -244,7 +244,16 @@ pub(super) fn native_window_closed(
             model.close_ai_panel();
             Vec::new()
         }
-        _ => Vec::new(),
+        NativeSurface::Notifications => {
+            model.close_message_history();
+            Vec::new()
+        }
+        // the palette's window is a paint target for state nvim owns
+        // (`Model::engine.cmdline`), never a thing view opened or closed on
+        // the user's behalf -- releasing the claim above is the whole of
+        // what a lost window owes it, and the next keystroke's own
+        // `CmdlineShow` reopens a tile if the placement still wants one
+        NativeSurface::Palette | NativeSurface::Tree => Vec::new(),
     }
 }
 
@@ -325,7 +334,13 @@ fn close_windowed_tree(model: &mut Model) -> Vec<Effect> {
 
 /// The call that opens `surface`'s window, or enters the one it already
 /// has, at the anchor and size this session resolved for it.
-fn open_native_window(model: &mut Model, surface: NativeSurface) -> RpcCall {
+///
+/// `pub(super)` rather than private: `ui_event::apply_ui_event`'s
+/// `CmdlineShow`/`CmdlineHide` arms call this directly for the windowed
+/// palette, which has no key of its own to toggle it open (see
+/// [`toggle_notifications_stream`]'s doc contrast) -- nvim's own cmdline
+/// arriving and leaving is its whole open/close signal.
+pub(super) fn open_native_window(model: &mut Model, surface: NativeSurface) -> RpcCall {
     let layout = model.surfaces.layout(surface);
     RpcCall::OpenNativeWindow {
         surface,
@@ -488,6 +503,68 @@ pub(super) fn open_message_history(model: &mut Model) -> Vec<Effect> {
     }
     model.dirty = true;
     Vec::new()
+}
+
+/// The windowed notification stream's own key handling, while its pane
+/// holds the cursor (`Focus::Pane(NativeSurface::Notifications)`).
+///
+/// [`history_mut`] reaches the same `MessageHistoryState` a float would, so
+/// [`message_history_key`]'s own dispatch answers every key here exactly as
+/// it does for the floating overlay -- the pane is a placement, not a
+/// different feature. `<Esc>` never reaches here (see the caller's guard in
+/// `update::mod::route_key`): it leaves the tile, the same as the tree's
+/// and the agent panel's own.
+pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Vec<Effect> {
+    message_history_key(model, notation)
+}
+
+/// `<leader>fm`/`:View notifications history`: opens the floating history
+/// overlay under the float placement, [`toggle_tree_sidebar`]'s own split.
+/// Under the windowed placement, opens the stream's own tile when none is
+/// claimed and closes it when one is, mirroring
+/// [`toggle_windowed_tree`]/[`toggle_windowed_agent`].
+pub(super) fn toggle_notifications_stream(model: &mut Model) -> Vec<Effect> {
+    if !model.notifications_is_windowed() {
+        return open_message_history(model);
+    }
+    if model.focus() == Focus::Pane(NativeSurface::Notifications) {
+        return close_windowed_notifications(model);
+    }
+    open_windowed_notifications(model)
+}
+
+/// Opens the notification stream's window, claiming a pane the same way
+/// [`open_windowed_agent`] does for the agent panel: the state already
+/// lives on the overlay stack once open (kept live every fold by
+/// `Model::refresh_message_history`), so opening a window is nothing more
+/// than seating that state, if it is not already there, plus the claim.
+fn open_windowed_notifications(model: &mut Model) -> Vec<Effect> {
+    if history(model).is_none() {
+        let state = MessageHistoryState::snapshot(&model.engine.toast_history);
+        model.push_overlay(OverlayBox::new(70, 60), OverlayKind::MessageHistory(state));
+    }
+    vec![Effect::Rpc(open_native_window(
+        model,
+        NativeSurface::Notifications,
+    ))]
+}
+
+/// Closes the window the notification stream sits in and drops its state,
+/// mirroring [`close_windowed_agent`].
+fn close_windowed_notifications(model: &mut Model) -> Vec<Effect> {
+    let win = model
+        .engine
+        .grids()
+        .native_window(NativeSurface::Notifications);
+    if let Some(win) = win {
+        model.engine.grids_mut().release_native_window(win);
+    }
+    model.close_message_history();
+    model.dirty = true;
+    match win {
+        Some(win) => vec![Effect::Rpc(RpcCall::CloseNativeWindow { win: win.0 })],
+        None => Vec::new(),
+    }
 }
 
 /// The rows the framed history overlay spends on everything that is not a
@@ -769,33 +846,51 @@ pub(super) fn message_history_key(model: &mut Model, notation: &str) -> Vec<Effe
 /// user can actually see. Floored at one: a frame with no room for entries
 /// at all still moves the selection rather than swallowing the key.
 fn history_page(model: &Model) -> isize {
-    let rows = model.focused_overlay().map_or(0, |overlay| {
+    let rows = if model.notifications_is_windowed() {
         model
-            .overlay_rect(overlay)
-            .height
-            .saturating_sub(HISTORY_CHROME_ROWS)
-    });
+            .engine
+            .grids()
+            .native_window_size(NativeSurface::Notifications)
+            .map_or(0, |(_, height)| height)
+    } else {
+        model.focused_overlay().map_or(0, |overlay| {
+            model
+                .overlay_rect(overlay)
+                .height
+                .saturating_sub(HISTORY_CHROME_ROWS)
+        })
+    };
     isize::try_from(rows.div_ceil(2))
         .unwrap_or(isize::MAX)
         .max(1)
 }
 
-/// The open history overlay's state, or `None` when the focused overlay is
-/// something else -- which the caller's own match has already ruled out,
-/// and which this answers without panicking anyway.
+/// The open history overlay's state, wherever it sits: on top of the
+/// float's own stack question ([`Model::focused_overlay`]) while it draws
+/// as one, or scanned directly off [`Model::overlays`] once it is windowed
+/// -- [`Model::focused_overlay`] skips a windowed `MessageHistory` on
+/// purpose (see `model/focus.rs`'s `takes_focus_now`), since its keys route
+/// through `Focus::Pane(Notifications)` instead of the overlay stack's own
+/// dispatch.
 fn history(model: &Model) -> Option<&MessageHistoryState> {
-    match model.focused_overlay().map(|overlay| &overlay.kind) {
-        Some(OverlayKind::MessageHistory(state)) => Some(state),
-        _ => None,
-    }
+    model
+        .overlays()
+        .iter()
+        .find_map(|overlay| match &overlay.kind {
+            OverlayKind::MessageHistory(state) => Some(state),
+            _ => None,
+        })
 }
 
 /// [`history`], for the keys that move the selection.
 fn history_mut(model: &mut Model) -> Option<&mut MessageHistoryState> {
-    match model.focused_overlay_mut().map(|overlay| &mut overlay.kind) {
-        Some(OverlayKind::MessageHistory(state)) => Some(state),
-        _ => None,
-    }
+    model
+        .overlays_mut()
+        .iter_mut()
+        .find_map(|overlay| match &mut overlay.kind {
+            OverlayKind::MessageHistory(state) => Some(state),
+            _ => None,
+        })
 }
 
 /// Copies the selected entry's line, through the identical pair of effects

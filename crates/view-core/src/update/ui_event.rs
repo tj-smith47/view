@@ -283,6 +283,27 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // same rect (`CmdlineState::bare_colon`), so the frame that
             // installs the real line moves nothing on screen
             crate::native::speculate::withdraw_cmdline_speculation(model);
+            // a windowed palette has no key of its own that opens it --
+            // nvim's cmdline arriving is the whole signal -- and never
+            // claims a tile over a Prompt overlay, mirroring the floating
+            // placement's own `prompt_open` skip in `view-surface::render`
+            let prompt_open = matches!(
+                model.focused_overlay().map(|overlay| &overlay.kind),
+                Some(OverlayKind::Prompt(_))
+            );
+            if model.palette_is_windowed()
+                && !prompt_open
+                && model
+                    .engine
+                    .grids()
+                    .native_window(NativeSurface::Palette)
+                    .is_none()
+            {
+                return vec![Effect::Rpc(super::surfaces::open_native_window(
+                    model,
+                    NativeSurface::Palette,
+                ))];
+            }
             Vec::new()
         }
         UiEvent::CmdlinePos { pos, level } => {
@@ -309,6 +330,15 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             {
                 super::dismiss_top_prompt(model);
                 model.dirty = true;
+            }
+            // the windowed palette's own close: the tile is a paint target
+            // for the state just cleared above, so there is nothing left
+            // for it to show once nvim's cmdline itself is gone
+            let win = model.engine.grids().native_window(NativeSurface::Palette);
+            if let Some(win) = win {
+                model.engine.grids_mut().release_native_window(win);
+                model.dirty = true;
+                return vec![Effect::Rpc(RpcCall::CloseNativeWindow { win: win.0 })];
             }
             Vec::new()
         }

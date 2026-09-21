@@ -808,89 +808,6 @@ impl Model {
     /// annunciator that consumed them would turn a slow operation into lost
     /// work. It answers its own choice keys, and every other key routes as
     /// though it were not there.
-    pub(crate) const fn takes_focus(kind: &OverlayKind) -> bool {
-        !matches!(kind, OverlayKind::EngineBusy(_) | OverlayKind::Ai)
-    }
-
-    /// Whether `kind` takes the keyboard right now, on this model -- what
-    /// every focus-resolution method below actually wants.
-    ///
-    /// Identical to [`Self::takes_focus`] for every kind but
-    /// [`OverlayKind::Ai`]: the panel is non-modal by design (see that
-    /// variant's own doc), so its mere presence on the stack must not
-    /// redirect the engine's own keystrokes. It takes the keyboard only
-    /// once the user has deliberately entered it -- `ai_entered`, read from
-    /// [`crate::native::ai_panel::AiPanelState::focused`] -- never by side
-    /// effect of an agent auto-opening it. Takes the flag as a plain `bool`
-    /// rather than `&self`, so [`Self::focused_overlay_mut`] and
-    /// [`Self::pop_focused_overlay`] can read `ai_panel.focused` once,
-    /// ahead of borrowing `overlays` mutably, instead of needing both
-    /// borrows live at the same time.
-    const fn takes_focus_now(
-        kind: &OverlayKind,
-        ai_entered: bool,
-        tree_windowed: bool,
-        agent_windowed: bool,
-    ) -> bool {
-        match kind {
-            // a windowed agent panel is a pane nvim's own cursor moves
-            // into, the same as the tree below: its keys and pastes route
-            // through `Focus::Pane(Agent)` instead, so the overlay must
-            // never claim focus out from under that
-            OverlayKind::Ai if agent_windowed => false,
-            OverlayKind::Ai => ai_entered,
-            // a windowed tree is a pane nvim's own cursor moves into, so
-            // its state riding the overlay stack must not redirect a key
-            // the user aimed at the buffer
-            OverlayKind::Tree(_) => !tree_windowed,
-            other => Self::takes_focus(other),
-        }
-    }
-
-    /// Whether the overlay carrying `kind` is drawn as a float. False for
-    /// the tree and the agent panel while either is windowed: their state
-    /// rides the overlay stack in both placements, and the compositor
-    /// paints them into their pane instead.
-    #[must_use]
-    pub fn draws_as_overlay(&self, kind: &OverlayKind) -> bool {
-        use crate::native::geometry::NativeSurface;
-        match kind {
-            OverlayKind::Tree(_) => !self.surfaces.windowed(NativeSurface::Tree),
-            OverlayKind::Ai => !self.surfaces.windowed(NativeSurface::Agent),
-            _ => true,
-        }
-    }
-
-    /// The overlay [`Self::focus`] names, or `None` while the engine owns
-    /// the keyboard.
-    ///
-    /// The kind-carrying form of [`Self::focus`], for a caller that has to
-    /// know *which* feature holds the keys rather than merely that some
-    /// overlay does -- `view-surface` places the real terminal caret in the
-    /// surface that owns input, and an `OverlayId` alone cannot say which
-    /// surface that is.
-    #[must_use]
-    pub fn focused_overlay(&self) -> Option<&Overlay> {
-        let ai_entered = self.ai_panel.focused;
-        let tree_windowed = self.tree_is_windowed();
-        let agent_windowed = self.agent_is_windowed();
-        self.overlays.iter().rev().find(|overlay| {
-            Self::takes_focus_now(&overlay.kind, ai_entered, tree_windowed, agent_windowed)
-        })
-    }
-
-    /// The topmost focus-taking overlay, for a feature that needs to fold
-    /// its own state forward as input arrives.
-    #[must_use]
-    pub fn focused_overlay_mut(&mut self) -> Option<&mut Overlay> {
-        let ai_entered = self.ai_panel.focused;
-        let tree_windowed = self.tree_is_windowed();
-        let agent_windowed = self.agent_is_windowed();
-        self.overlays.iter_mut().rev().find(|overlay| {
-            Self::takes_focus_now(&overlay.kind, ai_entered, tree_windowed, agent_windowed)
-        })
-    }
-
     /// Removes the overlay at `pos` and hands it back, releasing the mouse
     /// capture it held.
     ///
@@ -908,59 +825,20 @@ impl Model {
         removed
     }
 
-    /// Closes the overlay [`Model::focus`] names, wherever it sits in the
-    /// stack, and returns it.
-    ///
-    /// Not the top of the stack: a non-focus-taking overlay may be sitting
-    /// above it, and popping that instead would close an annunciator the
-    /// user never addressed while leaving the overlay they did address open.
-    pub fn pop_focused_overlay(&mut self) -> Option<Overlay> {
-        let ai_entered = self.ai_panel.focused;
-        let tree_windowed = self.tree_is_windowed();
-        let agent_windowed = self.agent_is_windowed();
-        let pos = self.overlays.iter().rposition(|overlay| {
-            Self::takes_focus_now(&overlay.kind, ai_entered, tree_windowed, agent_windowed)
-        })?;
-        Some(self.take_overlay_at(pos))
-    }
-
-    /// The topmost overlay covering the terminal cell at `(row, col)`, or
-    /// `None` when the cell belongs to the engine grid.
-    ///
-    /// Mouse input routes through this rather than through [`Model::focus`]:
-    /// an open overlay owns the keyboard outright, but it owns only the
-    /// cells it covers, so a click on visible grid outside it still reaches
-    /// the engine.
-    #[must_use]
-    pub fn overlay_at(&self, row: u16, col: u16) -> Option<OverlayId> {
-        self.overlays
-            .iter()
-            .rev()
-            .find(|overlay| {
-                self.draws_as_overlay(&overlay.kind)
-                    && self.overlay_rect(overlay).contains(row, col)
-            })
-            .map(|overlay| overlay.id)
-    }
-
-    /// Whether the file tree takes a window in nvim's layout this session.
-    #[must_use]
-    pub fn tree_is_windowed(&self) -> bool {
-        self.surfaces
-            .windowed(crate::native::geometry::NativeSurface::Tree)
-    }
-
-    /// Whether the agent panel takes a window in nvim's layout this session.
-    #[must_use]
-    pub fn agent_is_windowed(&self) -> bool {
-        self.surfaces
-            .windowed(crate::native::geometry::NativeSurface::Agent)
-    }
-
     /// The open overlays, bottom of the stack first.
     #[must_use]
     pub fn overlays(&self) -> &[Overlay] {
         &self.overlays
+    }
+
+    /// [`Self::overlays`], for a feature that reaches its own overlay
+    /// directly rather than through [`Self::focused_overlay_mut`] -- what a
+    /// windowed surface's own key handling needs, since that lookup skips
+    /// an overlay whose placement has moved its keys onto `Focus::Pane`
+    /// instead (see `model/focus.rs`'s `takes_focus_now`).
+    #[must_use]
+    pub fn overlays_mut(&mut self) -> &mut [Overlay] {
+        &mut self.overlays
     }
 
     /// The open picker's state, wherever it sits in the stack -- not only
@@ -2151,6 +2029,7 @@ impl CmdlineState {
 }
 
 mod buffers;
+mod focus;
 mod look;
 mod messages;
 mod rows;

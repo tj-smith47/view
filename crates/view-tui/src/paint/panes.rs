@@ -24,6 +24,7 @@ use ratatui::layout::Rect as TermRect;
 use view_core::grid::registry::{GridId, Pane, PaneKind, GLOBAL_GRID};
 use view_core::model::{Model, OverlayKind, Panes};
 use view_core::native::geometry::NativeSurface;
+use view_core::native::palette::PaletteState;
 use view_core::theme::{ChromeGroup, Theme};
 use view_surface::overlay::BorderSet;
 use view_surface::{Layer, LayerKind, Rect};
@@ -183,6 +184,30 @@ fn native_pane_content(
                 )
             })
         }),
+        // the tile is a paint target for state nvim owns
+        // (`Model::engine.cmdline`), the same state the floating palette
+        // reads in `view-surface::render` -- `_ = height`/`width`, since a
+        // palette's view has no page to derive from either placement's room
+        NativeSurface::Palette => {
+            let cmdline = model.engine.cmdline.as_ref()?;
+            let completion = model
+                .engine
+                .popupmenu
+                .as_ref()
+                .filter(|pm| pm.is_cmdline_sourced())
+                .cloned();
+            let state = PaletteState::new(cmdline.clone(), completion);
+            Some(LayerKind::Palette(state.view()))
+        }
+        NativeSurface::Notifications => model.overlays().iter().find_map(|overlay| match &overlay
+            .kind
+        {
+            OverlayKind::MessageHistory(state) => Some(LayerKind::Palette(state.view())),
+            _ => None,
+        }),
+        // `NativeSurface` is `#[non_exhaustive]`: every variant this crate
+        // knows about is matched above, so a future one paints nothing
+        // until its own arm lands here.
         _ => None,
     }
 }

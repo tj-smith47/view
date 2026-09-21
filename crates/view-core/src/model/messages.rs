@@ -270,6 +270,13 @@ pub struct Messages {
     /// Whether the pause key is holding the stack open. See
     /// [`Self::toggle_pause`].
     paused: bool,
+    /// Whether the windowed notification stream's own pane currently holds
+    /// the cursor -- a second, independent reason the stack is held open.
+    /// Kept apart from `paused` so entering or leaving the stream never
+    /// overwrites a standing manual pause: [`Self::paused`] answers the OR
+    /// of the two, and only the edge each one takes on its own resets the
+    /// armed timer (see [`Self::after_pause_change`]).
+    pane_held: bool,
     /// Whether this session left the messages surface with nvim, which is
     /// what `[native] notifications = false` asks for. See
     /// [`Self::hand_back`].
@@ -292,6 +299,7 @@ impl Default for Messages {
             armed_slot: None,
             armed_lines: Vec::new(),
             paused: false,
+            pane_held: false,
             handed_back: false,
             foreign_notifier: false,
             now: SystemTime::UNIX_EPOCH,
@@ -612,7 +620,7 @@ impl Messages {
         // the bookkeeping above still runs while paused -- which entry holds
         // the slot keeps changing under a frozen stack, and `departed_toast`
         // and the unpause both read it -- but no timer is handed out
-        if self.paused {
+        if self.paused() {
             return None;
         }
         // the queue holds only entries `route` calls `Route::Transient`,
@@ -621,24 +629,26 @@ impl Messages {
         Some(crate::msg::Effect::ScheduleToastExpiry { id, after })
     }
 
-    /// Whether the pause key is holding the toast stack open.
+    /// Whether the pause key, the windowed notification stream's own
+    /// focus, or both are holding the toast stack open.
     ///
     /// Read by the painter as well as by the update loop: a freeze the user
     /// cannot see is indistinguishable from a stuck editor, so the top box
-    /// carries a mark for as long as this is set.
+    /// carries a mark for as long as either is set.
     #[must_use]
     pub fn paused(&self) -> bool {
-        self.paused
+        self.paused || self.pane_held
     }
 
     /// Flips the pause key.
     ///
-    /// While it is on, [`Self::arm_top_slot`] hands out no dismissal timer
-    /// and `Msg::ToastExpired` obeys none -- the same timer, held, rather
-    /// than a second mechanism (spec 7.1, motion rule 5). Turning it off
-    /// forgets which slot was armed, which is what makes the next
-    /// [`Self::arm_top_slot`] give the top slot a whole timeout rather than
-    /// the remainder of one: a notice paused mid-read has not been read yet.
+    /// While [`Self::paused`] is on, [`Self::arm_top_slot`] hands out no
+    /// dismissal timer and `Msg::ToastExpired` obeys none -- the same
+    /// timer, held, rather than a second mechanism (spec 7.1, motion rule
+    /// 5). The edge that takes `paused()` false forgets which slot was
+    /// armed, which is what makes the next [`Self::arm_top_slot`] give the
+    /// top slot a whole timeout rather than the remainder of one: a notice
+    /// paused mid-read has not been read yet.
     ///
     /// Only the timing is frozen. A motion already in flight plays to its
     /// end and new notices still arrive; nothing leaves on its own, since
@@ -646,8 +656,34 @@ impl Messages {
     /// holds it. The deliberate exits -- an `msg_clear`, a sticky
     /// dismissal, a replace -- still apply.
     pub fn toggle_pause(&mut self) {
+        let was_paused = self.paused();
         self.paused = !self.paused;
-        if !self.paused {
+        self.after_pause_change(was_paused);
+    }
+
+    /// Sets whether the windowed notification stream's own pane holds the
+    /// cursor, idempotent when the state already matches. Driven every fold
+    /// from a focus comparison (`update::mod::update`) rather than a
+    /// keypress, so it is kept apart from the manual pause key's own
+    /// `paused` field: entering the pane always holds the stack open and
+    /// leaving it always drops that hold, but neither may stomp a standing
+    /// manual pause the user set independently of where the cursor is.
+    /// [`Self::paused`] answers the OR of the two.
+    pub(crate) fn set_pane_held(&mut self, held: bool) {
+        if self.pane_held == held {
+            return;
+        }
+        let was_paused = self.paused();
+        self.pane_held = held;
+        self.after_pause_change(was_paused);
+    }
+
+    /// The armed-slot reset [`Self::toggle_pause`] and [`Self::set_pane_held`]
+    /// both owe [`Self::paused`]'s own falling edge: forgotten only when the
+    /// OR of the two reasons actually drops, not on an edge of either one
+    /// alone that the other is still holding up.
+    fn after_pause_change(&mut self, was_paused: bool) {
+        if was_paused && !self.paused() {
             self.armed_slot = None;
         }
     }
@@ -832,6 +868,7 @@ impl Messages {
     /// | `startup_hold` | back to `Pending`: the replacement's first redraw batch is the one the hold exists to catch |
     /// | `held` | drained or discarded as the dead engine's deadline would have, never carried into a hold whose outcome a different engine's probe decides |
     /// | `entries`, `next_message_id`, `armed_slot`, `armed_lines`, `paused` | kept: the toast stack and the scrollback outlive the connection, and an id stamped once is never reissued |
+    /// | `pane_held` | untouched here, but not stale: `update()`'s own focus comparison sets it fresh on the very next fold regardless of what a restart left standing |
     /// | `handed_back` | kept: it is the session's `[native]` answer, and the replacement attaches with the same `ext_*` set |
     /// | `foreign_notifier` | cleared: it named a `vim.notify` inside a process that is gone, and a notice raised in the restart window would be spoken to it |
     /// | `now` (`Self::set_now`) | kept: it is the loop thread's wall clock, not a fact about the dead connection, and the very next fold stamps it again regardless |

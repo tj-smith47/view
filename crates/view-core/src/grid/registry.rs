@@ -960,6 +960,23 @@ impl GridRegistry {
             .map(|window| window.win)
     }
 
+    /// `surface`'s own window, sized as nvim last laid it out -- what a
+    /// windowed surface's own paging keys (the notification stream's
+    /// `<C-d>`/`<C-u>`) need to derive a page from the room the tile
+    /// actually has, mirroring [`Self::native_window`]'s lookup but
+    /// answering the grid's `(width, height)` instead of its handle.
+    #[must_use]
+    pub fn native_window_size(&self, surface: NativeSurface) -> Option<(u16, u16)> {
+        self.slots
+            .iter()
+            .find(|slot| {
+                slot.placed
+                    .as_ref()
+                    .is_some_and(|placed| placed.kind.native_surface() == Some(surface))
+            })
+            .map(|slot| slot.grid.size())
+    }
+
     /// The surface `grid`'s pane was placed for, if it is a native one.
     #[must_use]
     pub(crate) fn native_surface(&self, grid: GridId) -> Option<NativeSurface> {

@@ -84,8 +84,8 @@ use supervision::{note_engine_liveness, note_supervision_choice};
 pub use surface_conflict::FLOAT_SCAN_THROTTLE;
 use surfaces::{
     message_history_key, notice_ai_disabled, notice_clipboard_unavailable, open_ai_panel,
-    open_message_history, open_picker, picker_preview_request, picker_source_for_verb,
-    toggle_ai_panel, toggle_tree_sidebar, tree_git_refresh_effect,
+    open_picker, picker_preview_request, picker_source_for_verb, toggle_ai_panel,
+    toggle_notifications_stream, toggle_tree_sidebar, tree_git_refresh_effect,
 };
 use theme::{on_colorscheme_missing, on_vim_enter};
 use ui_event::apply_ui_event;
@@ -148,6 +148,17 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         .engine
         .messages
         .departed_toast(entries_before, armed_before);
+    // the windowed notification stream is a live view of the same ring the
+    // floating stack reads (`Model::refresh_message_history`, below), so a
+    // reader's attention already sitting in its pane is the one signal that
+    // beats an idle timeout: entering it holds the stack open, leaving it
+    // drops that hold, independent of any standing manual pause
+    // (`Messages::set_pane_held`'s own doc). Idempotent, so this costs one
+    // enum comparison on every fold that is not itself a focus transition.
+    model.engine.messages.set_pane_held(matches!(
+        model.focus(),
+        Focus::Pane(NativeSurface::Notifications)
+    ));
     // the toast stack's dismissal timer belongs to its top slot, and the
     // ways an entry leaves that slot are spread across a dozen arms below
     // -- an expiry, a keypress, a deliberate sticky dismissal, an
@@ -252,8 +263,14 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::Paste(text) => match model.focus() {
             // never replayed as nvim_input keystrokes: one undo unit, no
-            // mapping interference, matching nvim_paste's own contract
-            Focus::Engine => vec![Effect::Rpc(RpcCall::Paste { text })],
+            // mapping interference, matching nvim_paste's own contract.
+            // `Focus::Pane(Palette)` reads the same as engine focus here for
+            // the reason `route_key`'s own arm does: a windowed palette's
+            // cursor sitting in its own pane does not change what nvim's
+            // cmdline paste target is.
+            Focus::Engine | Focus::Pane(NativeSurface::Palette) => {
+                vec![Effect::Rpc(RpcCall::Paste { text })]
+            }
             // the windowed agent panel's overlay never claims focus (see
             // `Model::draws_as_overlay`'s doc), so `focused_overlay_mut`
             // would find nothing here -- the composer is reached directly
@@ -542,7 +559,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 return toggle_tree_sidebar(model);
             }
             if feature == "notifications" && verb == "history" {
-                return open_message_history(model);
+                return toggle_notifications_stream(model);
             }
             if feature == "notifications" && verb == "pause" {
                 // no notice of its own: raising one would push an entry onto
@@ -1353,7 +1370,13 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
         return vec![Effect::PickerClose];
     }
     match model.focus() {
-        Focus::Engine => {
+        // A windowed palette's cursor sits in its own pane once the tile is
+        // open (the `:split` that made room for it is what put it there),
+        // but typing into the command line is nvim's own input-capturing
+        // mode and answers exactly the same keys wherever the cursor is --
+        // so this reads as engine focus, the same arm a floating palette's
+        // typing already goes through.
+        Focus::Engine | Focus::Pane(NativeSurface::Palette) => {
             // A sticky error outlives every incidental keypress by design
             // (`MessageEntry::is_persistent`), which without a way out is a
             // box that occludes the buffer until some later error happens to
@@ -1408,9 +1431,9 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
         }
         Focus::Pane(NativeSurface::Tree) => surfaces::tree_key(model, &notation),
         Focus::Pane(NativeSurface::Agent) => surfaces::agent_pane_key(model, &notation),
-        // a surface with no windowed placement yet: the cursor cannot be in
-        // a pane of it, and a key arriving here is one nvim would answer
-        Focus::Pane(_) => vec![Effect::Rpc(RpcCall::Input { notation })],
+        Focus::Pane(NativeSurface::Notifications) => {
+            surfaces::notifications_pane_key(model, &notation)
+        }
         Focus::Native(_) => match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
             // an nvim-relayed prompt answers by feeding the engine a
             // keystroke -- the engine is blocked in its own input

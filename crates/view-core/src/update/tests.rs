@@ -13854,3 +13854,547 @@ fn native_window_taken_from_the_agent_panel_leaves_its_session_untouched() {
          {effects:?}"
     );
 }
+
+/// Two surfaces windowed on the same anchor must not fight over the
+/// registry's one claim slot: opening the second must leave the first's
+/// claim and window handle standing, which is the whole of what view owes
+/// the Lua stacking already generic across every surface and split axis
+/// (`crates/view-engine/src/nvim_api/native_window.rs`'s `is_ours`/close
+/// arms) -- the actual left-to-right order on screen is nvim's `:split`
+/// decision, outside what this crate computes.
+#[test]
+fn two_sidebars_on_one_edge_stack_vertically_when_windowed() {
+    let mut m = windowed_tree_model();
+    m.ai_trusted = true;
+    m.surfaces.set_layout(
+        crate::native::geometry::NativeSurface::Agent,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Windowed,
+            crate::native::geometry::Anchor::Left,
+            30,
+        ),
+    );
+
+    let tree_effects = update(&mut m, tree_toggle());
+    let tree_generation = opened_generation(&tree_effects);
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation: tree_generation,
+            surface: crate::native::geometry::NativeSurface::Tree,
+            win: TREE_WIN,
+        },
+    );
+    let _ = update(&mut m, tree_window_placed());
+
+    let agent_effects = update(&mut m, agent_toggle());
+    let agent_generation = opened_generation(&agent_effects);
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation: agent_generation,
+            surface: crate::native::geometry::NativeSurface::Agent,
+            win: AGENT_WIN,
+        },
+    );
+    let _ = update(&mut m, agent_window_placed());
+
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        2,
+        "opening the second same-edge surface must not release the first's claim"
+    );
+    assert_eq!(
+        m.engine
+            .grids()
+            .native_window(crate::native::geometry::NativeSurface::Tree),
+        Some(TREE_WIN),
+        "the tree's window handle was lost when the agent panel opened beside it"
+    );
+    assert_eq!(
+        m.engine
+            .grids()
+            .native_window(crate::native::geometry::NativeSurface::Agent),
+        Some(AGENT_WIN)
+    );
+    for effects in [&tree_effects, &agent_effects] {
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Rpc(RpcCall::OpenNativeWindow {
+                    split: crate::msg::WinSplit::Left,
+                    ..
+                })
+            )),
+            "a surface anchored left must ask nvim to split toward that edge: {effects:?}"
+        );
+    }
+}
+
+const NOTIFICATIONS_WIN: crate::events::WinHandle = crate::events::WinHandle(6464);
+
+/// nvim's own grid id for the notification stream's pane in the fixtures
+/// below.
+const NOTIFICATIONS_GRID: u64 = 9;
+
+/// A model with the notification stream configured windowed, sized and
+/// resized once so a window can actually be requested.
+fn windowed_notifications_model() -> Model {
+    let mut m = model();
+    m.surfaces.set_layout(
+        crate::native::geometry::NativeSurface::Notifications,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Windowed,
+            crate::native::geometry::Anchor::Left,
+            30,
+        ),
+    );
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    m
+}
+
+/// The `<leader>fm`/`:View notifications history` verb, as the mapping
+/// sends it.
+fn notifications_toggle() -> Msg {
+    Msg::FeatureInvoke {
+        feature: "notifications".to_string(),
+        verb: "history".to_string(),
+    }
+}
+
+/// nvim placing the notification stream's window and putting the cursor in
+/// it, which is the whole of what makes a windowed surface focused.
+fn notifications_window_placed() -> Msg {
+    Msg::Redraw(vec![
+        UiEvent::GridResize {
+            grid: NOTIFICATIONS_GRID,
+            width: 24,
+            height: 24,
+        },
+        UiEvent::WinPos {
+            grid: NOTIFICATIONS_GRID,
+            win: NOTIFICATIONS_WIN,
+            startrow: 0,
+            startcol: 0,
+            width: 24,
+            height: 24,
+        },
+        UiEvent::GridCursorGoto {
+            grid: NOTIFICATIONS_GRID,
+            row: 0,
+            col: 0,
+        },
+        UiEvent::Flush,
+    ])
+}
+
+/// A model with the notification stream open in its own window and the
+/// cursor inside it.
+fn focused_windowed_notifications() -> Model {
+    let mut m = windowed_notifications_model();
+    let effects = update(&mut m, notifications_toggle());
+    let generation = opened_generation(&effects);
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: crate::native::geometry::NativeSurface::Notifications,
+            win: NOTIFICATIONS_WIN,
+        },
+    );
+    let _ = update(&mut m, notifications_window_placed());
+    m
+}
+
+#[test]
+fn a_flush_whose_cursor_grid_is_the_notifications_pane_focuses_the_stream() {
+    let m = focused_windowed_notifications();
+    assert_eq!(
+        m.focus(),
+        Focus::Pane(crate::native::geometry::NativeSurface::Notifications),
+        "the cursor sitting in the stream's own pane did not name it"
+    );
+}
+
+#[test]
+fn leader_fm_from_inside_the_windowed_stream_closes_it() {
+    let mut m = focused_windowed_notifications();
+    let effects = update(&mut m, notifications_toggle());
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Rpc(RpcCall::CloseNativeWindow { win }) if *win == NOTIFICATIONS_WIN.0
+        )),
+        "the toggle did not close the window it was pressed in: {effects:?}"
+    );
+    assert!(
+        m.overlays()
+            .iter()
+            .all(|overlay| !matches!(overlay.kind, OverlayKind::MessageHistory(_))),
+        "the stream's state outlived its window"
+    );
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        0,
+        "the handle stayed claimed for the rest of the session"
+    );
+}
+
+/// The stream reuses `MessageHistoryState`, the same state a floating
+/// `<leader>fm` opens, so `HISTORY_KEYS`' own dispatch answers every one of
+/// them inside the windowed pane -- proving the routing
+/// (`Focus::Pane(Notifications)` -> `notifications_pane_key` ->
+/// `message_history_key`) rather than the dispatch table itself, which
+/// `every_documented_history_key_answers_a_real_keystroke` already covers
+/// for the floating placement.
+#[test]
+fn every_history_key_works_inside_the_windowed_stream() {
+    for (key, what) in crate::update::surfaces::HISTORY_KEYS {
+        let mut m = windowed_notifications_model();
+        let _ = m
+            .engine
+            .messages
+            .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+        for i in 0..40 {
+            let family = format!("view: line {i} ");
+            let _ = m
+                .engine
+                .record_native_notice_once(&family, format!("{family}is standing."));
+        }
+        let effects = update(&mut m, notifications_toggle());
+        let generation = opened_generation(&effects);
+        let _ = update(
+            &mut m,
+            Msg::NativeWindowOpened {
+                generation,
+                surface: crate::native::geometry::NativeSurface::Notifications,
+                win: NOTIFICATIONS_WIN,
+            },
+        );
+        let _ = update(&mut m, notifications_window_placed());
+        assert_eq!(
+            m.focus(),
+            Focus::Pane(crate::native::geometry::NativeSurface::Notifications),
+            "the fixture must land in the stream's own pane for this to prove \
+             the windowed routing"
+        );
+
+        let _ = press(&mut m, "<C-d>");
+        let before = history_view(&m).selected;
+        m.dirty = false;
+
+        let mut effects = Vec::new();
+        for notation in real_key_events(key) {
+            effects = press(&mut m, notation);
+        }
+
+        let after = history_view(&m).selected;
+        assert!(
+            before != after || !effects.is_empty() || m.dirty,
+            "`{key}` ({what}) is documented but does nothing when pressed \
+             inside the windowed stream"
+        );
+    }
+}
+
+/// The transient toast timer, which is what an unread notice's own
+/// dismissal clock is, freezes the instant the reader's cursor lands in the
+/// stream -- the same effect the manual pause key has, driven by focus
+/// instead of a keypress.
+#[test]
+fn focus_in_the_stream_pauses_the_transient_timer() {
+    let mut m = windowed_notifications_model();
+    let _ = m
+        .engine
+        .messages
+        .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+    let effects = update(&mut m, notifications_toggle());
+    let generation = opened_generation(&effects);
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: crate::native::geometry::NativeSurface::Notifications,
+            win: NOTIFICATIONS_WIN,
+        },
+    );
+    let _ = update(&mut m, notifications_window_placed());
+    assert_eq!(
+        m.focus(),
+        Focus::Pane(crate::native::geometry::NativeSurface::Notifications)
+    );
+    assert!(
+        m.engine.messages.paused(),
+        "entering the stream's pane must hold the toast stack open"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::ColorSchemeMissing {
+            name: "nonesuch".to_string(),
+        },
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ScheduleToastExpiry { .. })),
+        "a notice raised while the stream holds focus must not get a dismissal \
+         timer: {effects:?}"
+    );
+}
+
+/// The other half of the pause: leaving the stream's pane re-arms the timer,
+/// the same as an explicit unpause would, so a notice does not sit frozen
+/// forever because a reader once looked at it.
+#[test]
+fn leaving_the_stream_rearms_it() {
+    let mut m = focused_windowed_notifications();
+    let _ = m
+        .engine
+        .messages
+        .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+    assert!(m.engine.messages.paused());
+
+    // the cursor leaves the stream's pane for the engine's own grid
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridCursorGoto {
+                grid: GLOBAL_GRID.0,
+                row: 0,
+                col: 0,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    drop(effects);
+    assert_eq!(m.focus(), Focus::Engine);
+    assert!(
+        !m.engine.messages.paused(),
+        "leaving the stream must drop the hold it put on the stack"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::ColorSchemeMissing {
+            name: "nonesuch".to_string(),
+        },
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ScheduleToastExpiry { .. })),
+        "a notice raised after leaving the stream must get a real dismissal \
+         timer: {effects:?}"
+    );
+}
+
+/// The focus-driven hold must never stomp a manual pause the user set for a
+/// reason that has nothing to do with where the cursor sits -- the fold
+/// that recomputes the hold runs on every message, including the one right
+/// after the pause key itself, and an unconditional assignment (rather than
+/// the OR the two reasons are kept under) would silently undo the key on
+/// the very next unrelated keystroke.
+#[test]
+fn a_manual_pause_survives_an_unrelated_fold_outside_the_stream() {
+    let mut m = model();
+    let _ = m
+        .engine
+        .messages
+        .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+    m.engine.messages.toggle_pause();
+    assert!(m.engine.messages.paused());
+
+    let effects = update(
+        &mut m,
+        Msg::ColorSchemeMissing {
+            name: "nonesuch".to_string(),
+        },
+    );
+
+    assert!(
+        m.engine.messages.paused(),
+        "an unrelated fold with the stream unfocused cleared a manual pause"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ScheduleToastExpiry { .. })),
+        "the manual pause stopped holding the stack open: {effects:?}"
+    );
+}
+
+const PALETTE_WIN: crate::events::WinHandle = crate::events::WinHandle(7474);
+
+/// nvim's own grid id for the palette's pane in the fixtures below.
+const PALETTE_GRID: u64 = 10;
+
+/// A model with the command palette configured windowed, sized and resized
+/// once so a window can actually be requested.
+fn windowed_palette_model() -> Model {
+    let mut m = model();
+    m.surfaces.set_layout(
+        crate::native::geometry::NativeSurface::Palette,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Windowed,
+            crate::native::geometry::Anchor::Bottom,
+            30,
+        ),
+    );
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    m
+}
+
+/// nvim opening its command line, the whole of what a windowed palette
+/// watches to know when to claim its tile.
+fn cmdline_show() -> Msg {
+    Msg::Redraw(vec![UiEvent::CmdlineShow {
+        content: vec![(0, String::new())],
+        pos: 0,
+        firstc: ":".to_string(),
+        prompt: String::new(),
+        indent: 0,
+        level: 1,
+    }])
+}
+
+/// nvim placing the palette's window, which is what turns a claimed handle
+/// into a pane [`Model::engine`]'s registry can actually answer
+/// `native_window` for -- claiming alone (`NativeWindowOpened`) only binds
+/// the handle to the surface, the same two-step every other windowed
+/// surface's own placement fixture follows (`tree_window_placed`,
+/// `agent_window_placed`, `notifications_window_placed`).
+fn palette_window_placed() -> Msg {
+    Msg::Redraw(vec![
+        UiEvent::GridResize {
+            grid: PALETTE_GRID,
+            width: 24,
+            height: 3,
+        },
+        UiEvent::WinPos {
+            grid: PALETTE_GRID,
+            win: PALETTE_WIN,
+            startrow: 21,
+            startcol: 0,
+            width: 24,
+            height: 3,
+        },
+        UiEvent::GridCursorGoto {
+            grid: PALETTE_GRID,
+            row: 0,
+            col: 0,
+        },
+        UiEvent::Flush,
+    ])
+}
+
+/// The windowed palette has no key of its own that opens or closes it --
+/// nvim's own cmdline arriving and leaving is the whole signal, matching
+/// `CmdlineShow`/`CmdlineHide`'s doc in `update::ui_event`.
+#[test]
+fn the_windowed_palette_opens_and_closes_with_the_palette() {
+    let mut m = windowed_palette_model();
+
+    let effects = update(&mut m, cmdline_show());
+    let generation = opened_generation(&effects);
+    assert!(
+        matches!(
+            effects.iter().find_map(|effect| match effect {
+                Effect::Rpc(RpcCall::OpenNativeWindow { split, .. }) => Some(*split),
+                _ => None,
+            }),
+            Some(crate::msg::WinSplit::Below)
+        ),
+        "a palette anchored to the bottom must split toward it: {effects:?}"
+    );
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: crate::native::geometry::NativeSurface::Palette,
+            win: PALETTE_WIN,
+        },
+    );
+    let _ = update(&mut m, palette_window_placed());
+    assert_eq!(
+        m.engine
+            .grids()
+            .native_window(crate::native::geometry::NativeSurface::Palette),
+        Some(PALETTE_WIN)
+    );
+
+    // a second `CmdlineShow` (a re-arm after an unmatched key) must not ask
+    // for a second window while the first one still stands
+    let effects = update(&mut m, cmdline_show());
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Rpc(RpcCall::OpenNativeWindow { .. }))),
+        "a standing palette window was asked for again: {effects:?}"
+    );
+
+    let effects = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide]));
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Rpc(RpcCall::CloseNativeWindow { win }) if *win == PALETTE_WIN.0
+        )),
+        "hiding the cmdline did not close the palette's window: {effects:?}"
+    );
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        0,
+        "the handle stayed claimed after the cmdline it was drawing closed"
+    );
+    assert!(
+        m.engine.cmdline.is_none(),
+        "the cmdline state must clear the same as it does under the floating placement"
+    );
+}
+
+/// A windowed palette's cursor sits in its own pane once the tile is open
+/// (see `route_key`'s doc), but typing into the command line is nvim's
+/// input either way, so a key must reach the engine rather than being eaten
+/// by the pane routing a windowed tree or agent panel gets.
+#[test]
+fn a_key_in_the_windowed_palette_reaches_the_engine() {
+    let mut m = windowed_palette_model();
+    let effects = update(&mut m, cmdline_show());
+    let generation = opened_generation(&effects);
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: crate::native::geometry::NativeSurface::Palette,
+            win: PALETTE_WIN,
+        },
+    );
+    let _ = update(&mut m, palette_window_placed());
+    assert_eq!(
+        m.focus(),
+        Focus::Pane(crate::native::geometry::NativeSurface::Palette),
+        "the cursor sitting in the palette's own pane did not name it"
+    );
+
+    let effects = update(&mut m, key("x"));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "x"
+        ),
+        "a key typed into the windowed palette was eaten instead of reaching \
+         nvim's own cmdline: {effects:?}"
+    );
+}
