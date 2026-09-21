@@ -1797,6 +1797,42 @@ fn native_window_row(engine: &mut view_oracle::EngineSession, id: &str) -> Optio
     out.trim().split(',').next()?.parse().ok()
 }
 
+/// A surface's own window, as `getwininfo()` reports it: 1-based `row`/
+/// `col` and cell `width`/`height`, or `None` while it holds no window.
+#[derive(Debug, Clone, Copy)]
+struct NativeWindowRect {
+    row: i64,
+    col: i64,
+    width: i64,
+    height: i64,
+}
+
+/// [`native_window_row`], reading `wincol`/`width`/`height` alongside
+/// `winrow`, for a live pin that reads back an edge rather than a row
+/// alone: a default windowed position (a left or right column, a top or
+/// bottom band) is a column and an extent, not a single coordinate.
+fn native_window_rect(
+    engine: &mut view_oracle::EngineSession,
+    id: &str,
+) -> Option<NativeWindowRect> {
+    let out = engine
+        .eval_str(&format!(
+            "join(map(filter(getwininfo(), \
+             'getbufvar(v:val.bufnr, \"&filetype\") ==# \"view-{id}\"'), \
+             'v:val.winrow . \",\" . v:val.wincol . \",\" . v:val.width . \",\" . v:val.height'), \
+             \";\")"
+        ))
+        .expect("nvim answers for its own windows");
+    let first = out.trim().split(';').next()?;
+    let mut parts = first.split(',');
+    Some(NativeWindowRect {
+        row: parts.next()?.parse().ok()?,
+        col: parts.next()?.parse().ok()?,
+        width: parts.next()?.parse().ok()?,
+        height: parts.next()?.parse().ok()?,
+    })
+}
+
 /// C2 + I11, against real nvim: the tree, the agent panel and the
 /// notification stream are open as overlays (the ring's `config` stop),
 /// with the keyboard in the buffer throughout -- nothing here ever enters
@@ -1950,5 +1986,249 @@ fn the_tree_stacks_above_the_agent_panel_however_they_open_against_real_nvim() {
         tree_row < agent_row,
         "the tree must sit above the agent panel on a shared edge \
          whichever one opened first: tree={tree_row} agent={agent_row}"
+    );
+}
+
+/// Against real nvim, from a default session with no `[ui.surfaces]` table
+/// touched: one ring step to `windowed` (`<F10>` from a fresh
+/// `Model::new()`) opens the tree, the agent panel and the notification
+/// stream at the position `default_windowed_anchor` names for each --
+/// nothing here sets a surface's layout by hand, so a stale fallback that
+/// silently mapped every anchor onto a left sidebar (the defect a config
+/// word could not reach either) would land all three on the same edge
+/// instead of the tree alone on the left. A following `:` opens the
+/// palette's own tile, at the bottom edge its own default names.
+#[test]
+fn a_ring_step_opens_every_default_surface_at_its_designed_windowed_position_against_real_nvim() {
+    let work = common::ScratchPaths::new("close-battery-ring-default-positions");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = overlay_session(&dir);
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the tree opens as an overlay");
+    engine.trust_ai();
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        })
+        .expect("the agent panel opens as an overlay");
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "history".to_string(),
+        })
+        .expect("the notification stream opens as an overlay");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "<F10>".to_string(),
+        }))
+        .expect("the ring answers a plain key");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    let tree = native_window_rect(&mut engine, "tree").expect("the tree claims a window");
+    let agent = native_window_rect(&mut engine, "agent").expect("the agent panel claims a window");
+    let stream =
+        native_window_rect(&mut engine, "notifications").expect("the stream claims a window");
+    assert_eq!(
+        tree.col, 1,
+        "the tree's default windowed anchor is the left edge: {tree:?}"
+    );
+    // the outer ring and the frame's own gap already sit inside `COLS`
+    // (`docs/tiled-ui.md` names up to six columns of that gap), so a right
+    // edge is graded against a margin of ten rather than the raw terminal
+    // width
+    let right_margin = 10;
+    assert!(
+        agent.col + agent.width >= i64::from(COLS) - right_margin,
+        "the agent panel's default windowed anchor is the right edge: \
+         {agent:?} against {COLS} columns"
+    );
+    assert!(
+        stream.col + stream.width >= i64::from(COLS) - right_margin,
+        "the notification stream's default windowed anchor is the right \
+         edge, stacked with the agent panel: {stream:?} against {COLS} \
+         columns"
+    );
+
+    engine.arm_and_input(":").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    let palette = native_window_rect(&mut engine, "palette").expect("the palette claims a window");
+    // the statusline and the cmdline row nvim always reserves sit below the
+    // last window row `getwininfo()` reports, the same margin the right
+    // edge check above grants the outer ring and the frame's own gap
+    assert!(
+        palette.row + palette.height >= i64::from(ROWS) - right_margin,
+        "the palette's default windowed anchor is the bottom edge: \
+         {palette:?} against {ROWS} rows"
+    );
+}
+
+/// The ticker's own tile, against real nvim under `panes = "tiles"` at the
+/// battery's own geometry: `<leader>fm` opening it (`enter = true`, the
+/// toggle a person pressed) both claims the model's overlay and lands the
+/// cursor in a bottom-anchored window nvim pins with `winfixheight`;
+/// closing it drops both the window and the model's claim, and hands the
+/// keyboard back to whatever was nvim's current window before the ticker
+/// ever opened, never left dangling on the tile's own closed handle.
+#[test]
+fn the_ticker_opens_and_closes_its_own_window_against_real_nvim() {
+    let work = common::ScratchPaths::new("close-battery-ticker-live");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = overlay_session(&dir);
+    engine.set_surface(
+        view_core::native::geometry::NativeSurface::Notifications,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Bottom,
+            30,
+        ),
+    );
+    let before_current = engine.eval_str("win_getid()").unwrap().trim().to_string();
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "history".to_string(),
+        })
+        .expect("the ticker's window opens");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    assert!(
+        engine.notifications_is_open(),
+        "the model must claim the ticker's overlay once it is open"
+    );
+    let rect =
+        native_window_rect(&mut engine, "notifications").expect("the ticker claims a window");
+    assert!(
+        rect.row + rect.height <= i64::from(ROWS),
+        "a bottom-anchored ticker must sit inside the terminal's own rows: \
+         {rect:?} against {ROWS} rows"
+    );
+    let ticker_id = engine.eval_str("win_getid()").unwrap().trim().to_string();
+    assert_eq!(
+        engine.eval_str("&winfixheight").unwrap().trim(),
+        "1",
+        "the ticker's own window must pin its height so a sibling split \
+         cannot steal its rows"
+    );
+    assert_eq!(
+        engine.eval_str("&filetype").unwrap().trim(),
+        "view-notifications",
+        "the toggle that opened the ticker must have entered it, the same \
+         way the tree and the agent panel's own toggle keys do"
+    );
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "history".to_string(),
+        })
+        .expect("the ticker's window closes");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    assert!(
+        !engine.notifications_is_open(),
+        "the model's claim must not outlive the window it named"
+    );
+    assert!(
+        native_window_rect(&mut engine, "notifications").is_none(),
+        "the ticker's window must be gone from nvim too"
+    );
+    let after_current = engine.eval_str("win_getid()").unwrap().trim().to_string();
+    assert_eq!(
+        after_current, before_current,
+        "the close must hand the keyboard back to the window the ticker \
+         was opened from, not leave it on the tile's own closed handle: \
+         {ticker_id} closed"
+    );
+}
+
+/// The agent panel and the notification stream stacked on the same right
+/// edge: a resize key pressed in the focused one (the stream, entered
+/// last) has to carry its new share to the sibling too -- in the model,
+/// which [`sync_stacked_siblings`] owns, and in nvim, where the two
+/// windows share one column because `retile_open_surface`'s own split
+/// opens the second inside the first's own window (see
+/// [`sync_stacked_siblings`]'s doc for why nvim's own width already moves
+/// on either window's resize and only the model's copy can drift).
+#[test]
+fn resizing_one_windowed_sidebar_carries_its_width_to_a_sibling_stacked_beside_it_against_real_nvim(
+) {
+    let work = common::ScratchPaths::new("close-battery-stacked-resize");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = overlay_session(&dir);
+    engine.set_surface(
+        view_core::native::geometry::NativeSurface::Agent,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Right,
+            30,
+        ),
+    );
+    engine.set_surface(
+        view_core::native::geometry::NativeSurface::Notifications,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Right,
+            30,
+        ),
+    );
+    engine.trust_ai();
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        })
+        .expect("the agent panel opens its own window");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "history".to_string(),
+        })
+        .expect("the stream opens its own window, stacked with the agent panel's");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.eval_str("&filetype").unwrap().trim(),
+        "view-notifications",
+        "the stream's own toggle must have entered its window"
+    );
+
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "<S-Right>".to_string(),
+        }))
+        .expect("the resize key reaches the focused stream");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    let agent = native_window_rect(&mut engine, "agent").expect("the agent panel claims a window");
+    let stream =
+        native_window_rect(&mut engine, "notifications").expect("the stream claims a window");
+    assert_eq!(
+        agent.width, stream.width,
+        "nvim's own column is shared, so both windows must report the same \
+         width after either one resizes: agent {agent:?}, stream {stream:?}"
+    );
+
+    // nvim's own column stays shared mechanically whatever the model
+    // does, so the width equality above holds even when the model's own
+    // copy of the agent panel's share goes stale -- the layout read here
+    // is what would drift and feed a reopen the wrong number, which is
+    // the half only `sync_stacked_siblings` guards
+    let agent_layout = engine.surface_layout(view_core::native::geometry::NativeSurface::Agent);
+    let stream_layout =
+        engine.surface_layout(view_core::native::geometry::NativeSurface::Notifications);
+    assert_eq!(
+        agent_layout.size, stream_layout.size,
+        "the model's own layout for the sibling must follow the resized \
+         share too, not just nvim's window: agent {agent_layout:?}, stream \
+         {stream_layout:?}"
     );
 }

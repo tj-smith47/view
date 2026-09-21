@@ -23,35 +23,15 @@ const PLACEMENT_EXPECTED: &str = "overlay or windowed";
 /// What a `size` that is not a whole number of percent is answered with.
 const SIZE_EXPECTED: &str = "a whole number of percent";
 
-/// The anchors `surface` may be pinned to under `placement`. A float and a
-/// tile answer a different question -- "where on the buffer" against
-/// "which edge of the tile" -- so the same surface can accept a centred
-/// float and refuse a centred window: the tree or the agent panel takes a
-/// side in both placements, the palette floats anywhere the design allows
-/// but tiles only at the top or bottom edge, and notifications float at a
-/// corner but tile at any one of the four edges the stream/ticker split
-/// opens along.
+/// The anchors `surface` may be pinned to under `placement`.
+/// [`view_core::native::geometry::SurfaceLayout::accepted_anchors`] is the
+/// one table this and the ring step both read; see its own doc for what
+/// each placement's vocabulary is and why the two differ per surface.
 pub(super) const fn anchors(
     surface: NativeSurface,
     placement: SurfacePlacement,
 ) -> &'static [Anchor] {
-    match (surface, placement) {
-        (NativeSurface::Palette, Overlay) => &[Anchor::Center, Anchor::Top, Anchor::Bottom],
-        (NativeSurface::Palette, Windowed) => &[Anchor::Top, Anchor::Bottom],
-        (NativeSurface::Notifications, Overlay) => &[
-            Anchor::TopLeft,
-            Anchor::TopRight,
-            Anchor::BottomLeft,
-            Anchor::BottomRight,
-        ],
-        (NativeSurface::Notifications, Windowed) => {
-            &[Anchor::Left, Anchor::Right, Anchor::Top, Anchor::Bottom]
-        }
-        (NativeSurface::Tree | NativeSurface::Agent, _) => &[Anchor::Left, Anchor::Right],
-        // `NativeSurface` is `#[non_exhaustive]`; a sideways side is the
-        // sane fallback for a surface this crate does not yet know.
-        _ => &[Anchor::Left, Anchor::Right],
-    }
+    SurfaceLayout::accepted_anchors(surface, placement)
 }
 
 /// The anchors `surface` accepts under `placement`, spelled the way a

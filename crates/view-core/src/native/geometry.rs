@@ -505,6 +505,45 @@ impl SurfaceLayout {
         }
     }
 
+    /// The anchors `surface` accepts under `placement`. A float and a tile
+    /// answer a different question -- "where on the buffer" against "which
+    /// edge of the tile" -- so the same surface can accept a centred float
+    /// and refuse a centred window: the tree or the agent panel takes a
+    /// side in both placements, the palette floats anywhere the design
+    /// allows but tiles only at the top or bottom edge, and notifications
+    /// float at a corner but tile at any one of the four edges the
+    /// stream/ticker split opens along.
+    ///
+    /// The one table `view-native`'s config reader and
+    /// [`crate::native::placement::SurfaceState::advance_ring`] both read:
+    /// a config value outside it is a startup notice (`view-native`), and a
+    /// ring step landing a surface on an anchor outside it re-resolves to
+    /// [`Self::default_for`]'s or [`Self::default_windowed_anchor`]'s own
+    /// answer instead (`advance_ring`) -- the anchor a placement's own
+    /// vocabulary has never has to invent one nvim cannot open.
+    #[must_use]
+    pub const fn accepted_anchors(
+        surface: NativeSurface,
+        placement: SurfacePlacement,
+    ) -> &'static [Anchor] {
+        match (surface, placement) {
+            (NativeSurface::Palette, SurfacePlacement::Overlay) => {
+                &[Anchor::Center, Anchor::Top, Anchor::Bottom]
+            }
+            (NativeSurface::Palette, SurfacePlacement::Windowed) => &[Anchor::Top, Anchor::Bottom],
+            (NativeSurface::Notifications, SurfacePlacement::Overlay) => &[
+                Anchor::TopLeft,
+                Anchor::TopRight,
+                Anchor::BottomLeft,
+                Anchor::BottomRight,
+            ],
+            (NativeSurface::Notifications, SurfacePlacement::Windowed) => {
+                &[Anchor::Left, Anchor::Right, Anchor::Top, Anchor::Bottom]
+            }
+            (NativeSurface::Tree | NativeSurface::Agent, _) => &[Anchor::Left, Anchor::Right],
+        }
+    }
+
     /// Every surface at [`Self::default_for`], indexed by
     /// [`NativeSurface::index`].
     #[must_use]

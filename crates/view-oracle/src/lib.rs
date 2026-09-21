@@ -666,6 +666,17 @@ impl EngineSession {
         self.model.surfaces.set_layout(surface, layout);
     }
 
+    /// Reads a surface's own layout back -- the share a resize key just
+    /// stepped, or the anchor a ring step just resolved -- the way
+    /// [`Self::set_surface`] writes one.
+    #[must_use]
+    pub fn surface_layout(
+        &self,
+        surface: view_core::native::geometry::NativeSurface,
+    ) -> view_core::native::geometry::SurfaceLayout {
+        self.model.surfaces.layout(surface)
+    }
+
     /// Drives one [`Msg`] through `update()` and carries out every effect
     /// it answers with, the way the production loop does.
     ///
@@ -697,6 +708,19 @@ impl EngineSession {
     #[must_use]
     pub fn agent_is_open(&self) -> bool {
         self.model.ai_panel_overlay_open()
+    }
+
+    /// Whether this session's model still holds the notification stream or
+    /// ticker open -- the same `MessageHistory` overlay a floating history
+    /// view and a windowed tile both keep on `model.overlays()`.
+    #[must_use]
+    pub fn notifications_is_open(&self) -> bool {
+        self.model.overlays().iter().any(|overlay| {
+            matches!(
+                overlay.kind,
+                view_core::model::OverlayKind::MessageHistory(_)
+            )
+        })
     }
 
     /// Whether this session's model still shows nvim's own cmdline as

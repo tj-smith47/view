@@ -6,7 +6,7 @@
 //! it because every surface reads the same four, and a field per surface
 //! would be four facts that have to agree.
 
-use crate::native::geometry::{NativeSurface, SurfaceLayout, SurfacePlacement};
+use crate::native::geometry::{Anchor, NativeSurface, SurfaceLayout, SurfacePlacement};
 
 /// The placement of every surface, and the generation the next window-open
 /// carries.
@@ -20,6 +20,16 @@ pub struct SurfaceState {
     /// always returns to, whatever the ring has done to
     /// [`Self::layouts`] since.
     configured: [SurfacePlacement; 4],
+    /// The anchor `view.toml` put each surface at, captured alongside
+    /// [`Self::configured`] and read by [`Self::advance_ring`] to resolve
+    /// the anchor a ring step lands a surface on: a config anchor is only
+    /// ever valid for the one placement it was written for (a corner is
+    /// not a tile edge, a tile edge is not a float position), so the stop
+    /// that placement was not configured for needs its own answer, and the
+    /// stop it was falls straight back to this rather than to a generic
+    /// default that could silently replace a real config value equal to
+    /// it.
+    configured_anchor: [Anchor; 4],
     /// The shared three-position ring's own position: 0 is `config`, 1 is
     /// `windowed`, 2 is `overlay`. Starts at 0 -- every surface begins at
     /// its configured placement, so the first `cycle_surfaces` press has
@@ -50,6 +60,7 @@ impl Default for SurfaceState {
         let layouts = SurfaceLayout::defaults();
         Self {
             configured: layouts.map(|layout| layout.placement),
+            configured_anchor: layouts.map(|layout| layout.anchor),
             layouts,
             ring: 0,
             generation: [0; 4],
@@ -82,6 +93,7 @@ impl SurfaceState {
     /// ring's `config` stop along with everything else.
     pub fn set_layouts(&mut self, layouts: [SurfaceLayout; 4]) {
         self.configured = layouts.map(|layout| layout.placement);
+        self.configured_anchor = layouts.map(|layout| layout.anchor);
         self.layouts = layouts;
     }
 
@@ -103,6 +115,19 @@ impl SurfaceState {
     /// surfaces at the one shared position: a per-surface ring would let
     /// two surfaces drift out of step with a press that names no surface at
     /// all to aim it at.
+    ///
+    /// The anchor moves with the placement: `view.toml` wrote one anchor
+    /// for the one placement it configured, and that word is not always in
+    /// the other placement's own vocabulary (a corner is not a tile edge,
+    /// a tile edge is not a float position -- see
+    /// [`SurfaceLayout::accepted_anchors`]). The stop this surface was
+    /// configured for gets `configured_anchor` back exactly; either other
+    /// stop gets that anchor when the vocabulary there already accepts it
+    /// (a sidebar's edge holds across both), and its own placement default
+    /// otherwise. Left unresolved, a ring step landing a surface on an
+    /// anchor its own placement refuses fell through
+    /// `WinSplit::for_anchor`'s wildcard arm and opened a window at the
+    /// left edge no config or ring position asked for.
     pub fn advance_ring(&mut self) -> [(NativeSurface, SurfacePlacement, bool); 4] {
         self.ring = (self.ring + 1) % 3;
         let ring = self.ring;
@@ -115,6 +140,8 @@ impl SurfaceState {
             };
             let changed = self.layouts[index].placement != target;
             self.layouts[index].placement = target;
+            self.layouts[index].anchor =
+                resolved_anchor(surface, target, self.configured_anchor[index]);
             (surface, target, changed)
         })
     }
@@ -151,6 +178,21 @@ impl SurfaceState {
     /// reply's window handle was ultimately claimed.
     pub fn clear_pending(&mut self, surface: NativeSurface) {
         self.pending[surface.index()] = false;
+    }
+}
+
+/// The anchor a ring step lands `surface` on at `target`: `configured`
+/// (the anchor `view.toml`, or [`SurfaceLayout::defaults`] with nothing
+/// configured, put it at) when `target`'s own vocabulary still accepts it,
+/// that placement's own default otherwise. See [`SurfaceState::advance_ring`]'s
+/// doc for why a stale anchor cannot simply carry over.
+fn resolved_anchor(surface: NativeSurface, target: SurfacePlacement, configured: Anchor) -> Anchor {
+    if SurfaceLayout::accepted_anchors(surface, target).contains(&configured) {
+        return configured;
+    }
+    match target {
+        SurfacePlacement::Windowed => SurfaceLayout::default_windowed_anchor(surface),
+        _ => SurfaceLayout::default_for(surface).anchor,
     }
 }
 
