@@ -739,6 +739,15 @@ impl EngineSession {
         self.model.ai_trusted = true;
     }
 
+    /// Marks this session's model as having the command palette on, the way
+    /// `[native] palette = false` being absent from a user's `view.toml`
+    /// does (`enabled()`'s own default is on unless disabled). This driver
+    /// builds its model directly rather than through that config layer, so
+    /// a caller after the shipped default has to say so explicitly.
+    pub fn enable_palette(&mut self) {
+        self.model.palette_enabled = true;
+    }
+
     /// Puts the listed-buffer set and what the pill names with it into this
     /// session's model, through the same `update()` arm the bridge's
     /// `buffers` notification takes.

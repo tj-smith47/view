@@ -193,8 +193,15 @@ fn native_pane_content(
         // the tile is a paint target for state nvim owns
         // (`Model::engine.cmdline`), the same state the floating palette
         // reads in `view-surface::render` -- `_ = height`/`width`, since a
-        // palette's view has no page to derive from either placement's room
+        // palette's view has no page to derive from either placement's room.
+        // Gated on `palette_windowed_active` (not just the tile existing)
+        // so `[native] palette = false` leaves this arm painting nothing
+        // even in the frame between `CmdlineShow`'s window request going
+        // stale and nvim actually tearing the tile back down.
         NativeSurface::Palette => {
+            if !model.palette_windowed_active() {
+                return None;
+            }
             let cmdline = model.engine.cmdline.as_ref()?;
             let completion = model
                 .engine

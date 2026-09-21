@@ -1022,15 +1022,34 @@ fn composer_lines(rows: &[String]) -> Vec<Line> {
 /// first interior cell is then the frame's own bottom edge -- a real cell, which is what
 /// `CursorSpec` requires, and inside the surface that holds the keys.
 pub(crate) fn ai_caret(view: &AiPanelView, width: u16, height: u16) -> Option<(u16, u16)> {
-    if width == 0 || height == 0 {
-        return None;
-    }
+    let (row_off, col_off) = interior_origin(width, height);
     let interior = if width < 2 || height < 2 {
         height
     } else {
         height - 2
     };
-    let (row_off, col_off) = interior_origin(width, height);
+    ai_caret_at(view, width, height, interior, row_off, col_off)
+}
+
+/// [`ai_caret`] for a windowed tile: the tile's own frame is drawn by the
+/// pane compositor, not [`rows`], so there is no border row or pad column
+/// of this function's own to skip past -- the caret lands at row/col 0 of
+/// whatever room `width`/`height` already are.
+pub(crate) fn ai_caret_unframed(view: &AiPanelView, width: u16, height: u16) -> Option<(u16, u16)> {
+    ai_caret_at(view, width, height, height, 0, 0)
+}
+
+fn ai_caret_at(
+    view: &AiPanelView,
+    width: u16,
+    height: u16,
+    interior: u16,
+    row_off: u16,
+    col_off: u16,
+) -> Option<(u16, u16)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
     let (index, cells) = ai_caret_target(view);
     let col = u16::try_from(cells)
         .unwrap_or(u16::MAX)

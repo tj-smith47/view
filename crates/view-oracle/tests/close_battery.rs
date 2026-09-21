@@ -1787,6 +1787,11 @@ fn overlay_session(dir: &Path) -> view_oracle::EngineSession {
         .set_panes("tiles")
         .expect("the tiled look is reachable");
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    // this driver builds its model directly rather than through a
+    // `view.toml`, whose absent `[native] palette` key still means "on"
+    // (`enabled()`'s own default) -- the same default `view_session`'s
+    // comment above names for the PTY-driven tests
+    engine.enable_palette();
     engine
 }
 

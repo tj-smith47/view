@@ -194,6 +194,22 @@ impl Model {
         self.surfaces.windowed(NativeSurface::Palette)
     }
 
+    /// Whether the palette actually takes a window this frame: windowed
+    /// placement configured, and the palette itself not turned off with
+    /// `[native] palette = false`.
+    ///
+    /// The one predicate `render`, `cursor_spec` (`view-surface`) and
+    /// `CmdlineShow`'s open guard (`update::ui_event`) all read, so a
+    /// disabled palette cannot open a window, paint a tile, or place its
+    /// caret in one while a config that only turned the placement to
+    /// `windowed` leaves `palette_enabled` untouched -- `palette_is_windowed`
+    /// alone answered that placement question and let every one of those
+    /// three treat a disabled palette as if it were live.
+    #[must_use]
+    pub fn palette_windowed_active(&self) -> bool {
+        self.palette_enabled && self.palette_is_windowed()
+    }
+
     /// Whether the notification stream takes a window in nvim's layout
     /// this session.
     #[must_use]

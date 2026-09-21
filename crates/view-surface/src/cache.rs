@@ -538,6 +538,7 @@ mod tests {
     fn a_render_that_reads_panes_must_key_the_cache_on_them() {
         const RESOLVED_EVERY_FRAME: &[&str] = &[
             "cursor_spec",
+            "pane_cursor",
             "refresh_statusline",
             "refresh_speculated",
             "speculated_layer",

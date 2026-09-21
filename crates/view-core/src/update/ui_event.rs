@@ -302,7 +302,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                 model.focused_overlay().map(|overlay| &overlay.kind),
                 Some(OverlayKind::Prompt(_))
             );
-            if model.palette_is_windowed()
+            if model.palette_windowed_active()
                 && !prompt_open
                 && model
                     .engine

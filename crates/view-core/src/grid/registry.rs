@@ -945,6 +945,20 @@ impl GridRegistry {
         self.native_surface(self.cursor_grid()?)
     }
 
+    /// `surface`'s own painted rect, `(row, col, width, height)` in the
+    /// global grid's coordinate space -- the same space [`Self::pane_origin`]
+    /// answers in, and what [`Self::panes_in_z_order`] paints the tile at.
+    /// `None` while no pane of that surface is placed, which is what a
+    /// caret in a windowed surface with no window open yet has to fall
+    /// back past.
+    #[must_use]
+    pub fn native_pane_rect(&self, surface: NativeSurface) -> Option<(u16, u16, u16, u16)> {
+        self.panes_in_z_order()
+            .into_iter()
+            .find(|pane| pane.kind.native_surface() == Some(surface))
+            .map(|pane| pane.slot)
+    }
+
     /// The window view opened for `surface`, as nvim addresses it, or
     /// `None` while no pane of that surface is placed.
     #[must_use]

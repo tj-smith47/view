@@ -18,7 +18,9 @@ use view_core::grid::registry::GridId;
 #[cfg(test)]
 use view_core::grid::registry::GLOBAL_GRID;
 use view_core::grid::Grid;
-use view_core::model::{CmdlineState, Model, Overlay, OverlayKind, PopupmenuState, TermCaps};
+use view_core::model::{
+    CmdlineState, Focus, Model, Overlay, OverlayKind, PopupmenuState, TermCaps,
+};
 use view_core::native::geometry::{Anchor, NativeSurface, OverlayBox, OverlayRect};
 use view_core::native::palette::PaletteState;
 use view_core::native::prompt::PromptState;
@@ -549,7 +551,7 @@ pub fn render(model: &Model) -> Surface {
     if let Some(cmdline) = painted.as_deref() {
         if prompt_open {
             // nothing to add: the Prompt overlay already covers this
-        } else if model.palette_is_windowed() {
+        } else if model.palette_windowed_active() {
             // the pane compositor paints this cmdline state into the
             // palette's own tile (`native_pane_content`'s `Palette` arm, in
             // `view-tui`), the same split every other windowed surface's
@@ -1189,6 +1191,9 @@ fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<Cu
     if let Some(spec) = overlay_cursor(model, layers) {
         return Some(spec);
     }
+    if let Some(spec) = pane_cursor(model, origin) {
+        return Some(spec);
+    }
     let shape = shape_from_mode(model);
     // each branch below already resolves in, and adds in, exactly the
     // coordinate space its own source rect came from -- a shared tail add
@@ -1197,13 +1202,34 @@ fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<Cu
     // terminal's own space rather than the grid's.
     let painted = painted_cmdline(model);
     let (row, col) = if let Some(cmdline) = painted.as_deref() {
-        if model.palette_enabled {
+        if model.palette_windowed_active() {
+            // the palette never becomes nvim's curwin (see `pending_open`'s
+            // doc), so `Focus::Pane(Palette)` never fires and `pane_cursor`
+            // cannot be the one that catches this -- the placement is read
+            // here instead, off the same `palette_enabled` gate the box and
+            // the raw-row fallback already branch on.
+            match model
+                .engine
+                .grids()
+                .native_pane_rect(NativeSurface::Palette)
+            {
+                Some((prow, pcol, pwidth, _)) => {
+                    let (local_row, local_col) = palette_cursor_unframed(cmdline, pwidth);
+                    (
+                        prow.saturating_add(local_row).saturating_add(origin.0),
+                        pcol.saturating_add(local_col).saturating_add(origin.1),
+                    )
+                }
+                // the open is still in flight (`CmdlineShow` landed, the
+                // tile's own `win_pos` has not): the raw bottom row, same as
+                // a session with the palette off, rather than a caret that
+                // vanishes for the gap
+                None => raw_cmdline_row(cmdline, width, height, origin),
+            }
+        } else if model.palette_enabled {
             palette_cursor(model, model.chrome_rows(), cmdline)
         } else {
-            let col = cmdline_cursor_col(cmdline)
-                .min(width.saturating_sub(1))
-                .saturating_add(origin.1);
-            (height.saturating_sub(1).saturating_add(origin.0), col)
+            raw_cmdline_row(cmdline, width, height, origin)
         }
     } else if !model.chrome_painted {
         // the buffer caret belongs to the grid this frame is not painting
@@ -1301,6 +1327,70 @@ fn palette_cursor(model: &Model, offset: u16, cmdline: &CmdlineState) -> (u16, u
         .saturating_add(cmdline_cursor_col(cmdline))
         .min(rect.col.saturating_add(rect.width).saturating_sub(1));
     (row, col)
+}
+
+/// The caret for a surface that holds the keyboard through its own window
+/// tile (`Focus::Pane`) rather than a floating overlay.
+///
+/// [`overlay_cursor`] answers for a float; this is its windowed sibling and
+/// reads the same [`Model::focus`] `route_key` dispatches keys by, so the
+/// caret cannot land somewhere a keystroke does not. Only the palette and
+/// the agent panel take typed text as a windowed pane -- the tree and the
+/// notification stream are selection surfaces with no insertion point, the
+/// same reason [`overlay_cursor`] answers `None` for their overlay forms.
+///
+/// Reads the pane's own painted rect off the grid registry
+/// (`GridRegistry::native_pane_rect`) instead of the frame's `layers`: a
+/// windowed pane is placed by nvim's own window layout, not by
+/// [`Model::overlay_rect`], so there is no layer rect to reuse the way
+/// [`ai_cursor`] does for the floating panel.
+fn pane_cursor(model: &Model, origin: (u16, u16)) -> Option<CursorSpec> {
+    if model.focus() != Focus::Pane(NativeSurface::Agent) {
+        return None;
+    }
+    let (row, col, width, height) = model
+        .engine
+        .grids()
+        .native_pane_rect(NativeSurface::Agent)?;
+    let view = model
+        .ai_panel()
+        .view(usize::from(height), usize::from(width), true);
+    let (local_row, local_col) = overlay::ai_caret_unframed(&view, width, height)?;
+    Some(CursorSpec {
+        row: row.saturating_add(local_row).saturating_add(origin.0),
+        col: col.saturating_add(local_col).saturating_add(origin.1),
+        shape: text_field_shape(model),
+    })
+}
+
+/// The raw cmdline caret: the typed position on the grid's own bottom row,
+/// with no palette box (or tile) of any kind to place it against -- what a
+/// user who turned the palette off entirely gets, and what a windowed
+/// palette falls back to for the one frame between its `CmdlineShow` and
+/// the tile's own `win_pos` landing.
+fn raw_cmdline_row(
+    cmdline: &CmdlineState,
+    width: u16,
+    height: u16,
+    origin: (u16, u16),
+) -> (u16, u16) {
+    let col = cmdline_cursor_col(cmdline)
+        .min(width.saturating_sub(1))
+        .saturating_add(origin.1);
+    (height.saturating_sub(1).saturating_add(origin.0), col)
+}
+
+/// [`palette_cursor`] for a windowed tile: no border, no pad, so the caret
+/// sits at row 0 of the tile past the fixed `"> "` prefix and the typed
+/// text, the same layout [`native_pane_content`][crate's `view-tui` caller]
+/// paints the palette's header row at through `unframed_rows`.
+fn palette_cursor_unframed(cmdline: &CmdlineState, width: u16) -> (u16, u16) {
+    let prefix_cols =
+        u16::try_from(format!("{} ", overlay::PROMPT_MARK).chars().count()).unwrap_or(2);
+    let col = prefix_cols
+        .saturating_add(cmdline_cursor_col(cmdline))
+        .min(width.saturating_sub(1));
+    (0, col)
 }
 
 /// The shape a caret in a view-owned text field takes: a bar, the one nvim
@@ -3732,14 +3822,108 @@ mod tests {
         assert_eq!(cursor.col, 31 + 2 + 2);
     }
 
-    /// A windowed palette's cmdline state is painted by the pane compositor
-    /// into its own tile (`native_pane_content`'s `Palette` arm, in
-    /// `view-tui`), so `render()` must add neither the floating `Palette`
-    /// layer nor the bare bottom-row `Cmdline` echo for it -- either one
-    /// would be a second copy of the same typed text standing beside the
-    /// tile. Shipped without the guard: a windowed palette's golden carried
-    /// a stray `:e file.txt` echo on the grid's last row underneath the
-    /// tiles.
+    /// A cmdline-sourced popupmenu's candidates show in exactly one place,
+    /// whatever `palette_enabled` and the palette's placement are: inline in
+    /// the floating `Palette` layer, inline in the windowed tile (so neither
+    /// `Palette` nor a standalone `Popupmenu` layer reaches `render()`), or,
+    /// with the palette off, its own standalone `Popupmenu` layer. I9
+    /// shipped `consumed_by_palette` reading `palette_enabled` alone, so a
+    /// windowed-and-disabled palette (case (windowed, false) below) suppressed
+    /// the standalone layer for a tile that was itself gated off by the same
+    /// finding, leaving the candidates painted nowhere. A buffer-anchored
+    /// popupmenu never touches the palette at all, so its own `Popupmenu`
+    /// layer shows unconditionally across every combination.
+    #[test]
+    fn a_cmdline_sourced_popupmenus_candidates_show_in_exactly_one_place() {
+        for palette_enabled in [false, true] {
+            for windowed in [false, true] {
+                for cmdline_sourced in [false, true] {
+                    let mut model = model_with_grid(80, 24);
+                    model.term_width = 80;
+                    model.term_height = 24;
+                    model.palette_enabled = palette_enabled;
+                    if windowed {
+                        model.surfaces.set_layout(
+                            NativeSurface::Palette,
+                            view_core::native::geometry::SurfaceLayout::new(
+                                view_core::native::geometry::SurfacePlacement::Windowed,
+                                Anchor::Bottom,
+                                30,
+                            ),
+                        );
+                    }
+                    apply(
+                        &mut model,
+                        UiEvent::CmdlineShow {
+                            content: vec![(0, "set nu".to_string())],
+                            pos: 6,
+                            firstc: ":".to_string(),
+                            prompt: String::new(),
+                            indent: 0,
+                            level: 1,
+                        },
+                    );
+                    apply(
+                        &mut model,
+                        UiEvent::PopupmenuShow {
+                            items: vec![view_core::events::PmItem {
+                                word: "number".into(),
+                                ..Default::default()
+                            }],
+                            selected: -1,
+                            row: 0,
+                            col: 0,
+                            grid: if cmdline_sourced { -1 } else { 1 },
+                        },
+                    );
+
+                    let surface = render(&model);
+                    let has_palette = surface
+                        .layers
+                        .iter()
+                        .any(|l| matches!(l.kind, LayerKind::Palette(_)));
+                    let has_popupmenu = surface
+                        .layers
+                        .iter()
+                        .any(|l| matches!(l.kind, LayerKind::Popupmenu(_)));
+                    let windowed_active = model.palette_windowed_active();
+
+                    if cmdline_sourced {
+                        let shown_count = usize::from(has_palette)
+                            + usize::from(has_popupmenu)
+                            + usize::from(windowed_active);
+                        assert_eq!(
+                            shown_count, 1,
+                            "palette_enabled={palette_enabled}, windowed={windowed}: \
+                             a cmdline-sourced popupmenu must show in exactly one place \
+                             (palette={has_palette}, popupmenu={has_popupmenu}, tile={windowed_active})"
+                        );
+                    } else {
+                        assert!(
+                            has_popupmenu,
+                            "palette_enabled={palette_enabled}, windowed={windowed}: \
+                             a buffer-anchored popupmenu always shows its own layer"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// An enabled windowed palette's cmdline state is painted by the pane
+    /// compositor into its own tile (`native_pane_content`'s `Palette` arm,
+    /// in `view-tui`), so `render()` must add neither the floating
+    /// `Palette` layer nor the bare bottom-row `Cmdline` echo for it --
+    /// either one would be a second copy of the same typed text standing
+    /// beside the tile. Shipped without the guard: a windowed palette's
+    /// golden carried a stray `:e file.txt` echo on the grid's last row
+    /// underneath the tiles.
+    ///
+    /// `[native] palette = false` (I9) leaves no tile painting at all
+    /// (`palette_windowed_active`), so the placement being `windowed` must
+    /// not also suppress `render()`'s own fallback: a disabled palette
+    /// shows the plain bottom-row `Cmdline` echo, the same as a session
+    /// that never configured windowed placement in the first place.
     #[test]
     fn a_windowed_palette_paints_no_floating_cmdline_layer() {
         for palette_enabled in [false, true] {
@@ -3772,9 +3956,20 @@ mod tests {
                 !surface
                     .layers
                     .iter()
-                    .any(|l| matches!(l.kind, LayerKind::Palette(_) | LayerKind::Cmdline(_))),
-                "a windowed palette (palette_enabled={palette_enabled}) must \
-                 paint through its tile alone: {:?}",
+                    .any(|l| matches!(l.kind, LayerKind::Palette(_))),
+                "a windowed palette (palette_enabled={palette_enabled}) must never \
+                 paint the floating Palette layer beside its tile: {:?}",
+                surface.layers.iter().map(|l| &l.kind).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                surface
+                    .layers
+                    .iter()
+                    .any(|l| matches!(l.kind, LayerKind::Cmdline(_))),
+                !palette_enabled,
+                "a disabled windowed palette must fall back to the plain cmdline \
+                 echo, since nothing else paints it; an enabled one paints \
+                 through its tile alone: {:?}",
                 surface.layers.iter().map(|l| &l.kind).collect::<Vec<_>>()
             );
         }

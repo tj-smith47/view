@@ -2363,6 +2363,11 @@ fn palette_in_the_bottom_band(gaps: bool) -> Tiles {
         (main_height + 1, 0, grid_width, band_height),
     ];
     let mut model = tiled_model(gaps, TILED_HEIGHT, &slots);
+    // a windowed tile with the palette turned off paints nothing
+    // (`palette_windowed_active`), so this fixture -- built to show the
+    // enabled shape -- has to say so explicitly rather than lean on the
+    // model's own default.
+    model.palette_enabled = true;
     model.surfaces.set_layout(
         view_core::native::geometry::NativeSurface::Palette,
         view_core::native::geometry::SurfaceLayout::new(
@@ -2436,6 +2441,147 @@ fn palette_windowed() {
             &tiles_dump(tier, palette_in_the_bottom_band(true)),
         );
     }
+}
+
+/// I3: the caret is where the text goes, for every native surface that
+/// takes typed text -- the palette and the agent panel; the tree and the
+/// notification stream are selection surfaces with no insertion point of
+/// their own, the same reason `overlay_cursor` answers `None` for their
+/// overlay forms -- under both placements each surface can be painted in.
+///
+/// Windowed halves reuse the two fixtures the goldens above already build
+/// (`agent_in_the_right_tile`, `palette_in_the_bottom_band`), plus one
+/// `GridCursorGoto` onto the agent's own grid: opening a surface leaves the
+/// keyboard in it (`enter = true`, see `open_native_window`'s doc), which is
+/// nvim's own cursor move, so the fixture has to make it too rather than
+/// leave the cursor where `tiled()` first put it. The palette never becomes
+/// nvim's curwin at all (see `pending_open`'s doc), so its cursor stays
+/// wherever `tiled()` left it and needs no such move.
+#[test]
+fn every_text_taking_native_surface_puts_its_caret_inside_its_own_painted_rect() {
+    let mut agent = agent_in_the_right_tile(true);
+    drive(
+        &mut agent.model,
+        vec![
+            UiEvent::GridCursorGoto {
+                grid: LEFT + 1,
+                row: 0,
+                col: 0,
+            },
+            UiEvent::Flush,
+        ],
+    );
+    assert_caret_inside_rect(
+        &agent.model,
+        chrome_shifted(&agent.model, agent.slots[1]),
+        "windowed agent",
+    );
+
+    let palette = palette_in_the_bottom_band(true);
+    assert_caret_inside_rect(
+        &palette.model,
+        chrome_shifted(&palette.model, palette.slots[1]),
+        "windowed palette",
+    );
+
+    let mut model = tiled(true).model;
+    model.ai_trusted = true;
+    let _ = update(
+        &mut model,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    model.ai_panel_mut().transcript.echo_user_prompt("hi");
+    let overlay = model
+        .focused_overlay()
+        .expect("the agent panel opened as the top overlay");
+    let rect = model.overlay_rect(overlay);
+    assert_caret_inside_rect(
+        &model,
+        (rect.row, rect.col, rect.width, rect.height),
+        "overlay agent",
+    );
+
+    // the floating palette is not tracked in `model.overlays()` at all --
+    // `render` derives its box straight from `model.engine.cmdline` plus
+    // `palette_enabled` -- so its own painted rect has to come from the
+    // layer `render` actually produced, not from `Model::overlay_rect`.
+    let mut model = tiled(true).model;
+    model.palette_enabled = true;
+    drive(
+        &mut model,
+        vec![UiEvent::CmdlineShow {
+            content: vec![(0, "e file.txt".to_string())],
+            pos: 11,
+            firstc: ":".to_string(),
+            prompt: String::new(),
+            indent: 0,
+            level: 1,
+        }],
+    );
+    let surface = view_surface::render(&model);
+    let rect = surface
+        .layers
+        .iter()
+        .find_map(|l| matches!(l.kind, view_surface::LayerKind::Palette(_)).then_some(l.rect))
+        .expect("the palette opened as a floating layer");
+    assert_caret_inside_rect(
+        &model,
+        (rect.row, rect.col, rect.width, rect.height),
+        "overlay palette",
+    );
+}
+
+/// Renders `model` and asserts the caret it puts on screen lands inside
+/// `rect`, `(row, col, width, height)` in terminal cells -- the same rect
+/// the compositor painted `label`'s content into, so a caret outside it
+/// names a surface whose text and whose cursor disagree about where they
+/// are.
+/// `slot` shifted by the same chrome offset the compositor paints that tile
+/// at: `WinPos`'s `startrow`/`startcol` are grid-local, the coordinate space
+/// [`GridRegistry::native_pane_rect`] answers in and `tiled_model`'s own
+/// `slots` are written in, but a caret is a terminal cell -- exactly the
+/// distinction `pane_cursor` (`view-surface`'s own windowed caret arm) has
+/// to add `origin` back in for. Read off the rendered `EngineGrid` layer's
+/// own rect rather than re-deriving `grid_origin`, since that layer is
+/// built at that offset by [`view_surface::render`] itself.
+fn chrome_shifted(model: &Model, slot: (u16, u16, u16, u16)) -> (u16, u16, u16, u16) {
+    let (row, col, width, height) = slot;
+    let (orow, ocol) = view_surface::render(model)
+        .layers
+        .iter()
+        .find_map(|l| {
+            matches!(l.kind, view_surface::LayerKind::EngineGrid)
+                .then_some((l.rect.row, l.rect.col))
+        })
+        .unwrap_or((0, 0));
+    (
+        row.saturating_add(orow),
+        col.saturating_add(ocol),
+        width,
+        height,
+    )
+}
+
+fn assert_caret_inside_rect(model: &Model, rect: (u16, u16, u16, u16), label: &str) {
+    let (row, col, width, height) = rect;
+    let cursor = view_surface::render(model)
+        .cursor
+        .unwrap_or_else(|| panic!("{label}: a surface holding the keyboard always has a caret"));
+    assert!(
+        cursor.row >= row && cursor.row < row.saturating_add(height),
+        "{label}: caret row {} outside its own rows {row}..{}",
+        cursor.row,
+        row.saturating_add(height)
+    );
+    assert!(
+        cursor.col >= col && cursor.col < col.saturating_add(width),
+        "{label}: caret col {} outside its own columns {col}..{}",
+        cursor.col,
+        col.saturating_add(width)
+    );
 }
 
 /// The notification stream windowed into the left tile, one history entry

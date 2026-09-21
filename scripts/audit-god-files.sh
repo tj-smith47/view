@@ -199,6 +199,109 @@ count_prod_lines() {
     ' "$@"
 }
 
+# Resolve `mod NAME;` declared in DECL_FILE to the file that provides it, into
+# the global RESOLVED (empty when the module has no file). rustc looks in the
+# declaring module's directory: lib.rs/main.rs/mod.rs declare into their OWN
+# directory, src/foo.rs into the sibling src/foo/.
+#
+# Defined ahead of the per-file fast path (moved up from the tree-wide
+# section below, which is its only other caller) so `is_test_only_via_parent`
+# can share it rather than re-deriving the same rustc directory convention a
+# second time.
+resolve_mod_file() {
+    local decl_file="$1" name="$2" dir base cand_dir c
+    dir="${decl_file%/*}"
+    base="${decl_file##*/}"
+    base="${base%.rs}"
+    case "$base" in
+        mod | lib | main) cand_dir="$dir" ;;
+        *) cand_dir="$dir/$base" ;;
+    esac
+    RESOLVED=""
+    for c in "$cand_dir/$name.rs" "$cand_dir/$name/mod.rs"; do
+        if [[ -f "$c" ]]; then
+            RESOLVED="$c"
+            return 0
+        fi
+    done
+}
+
+# Every `mod NAME;` in the tree in one awk pass as "<file>\t<gated>\t<name>",
+# gated=1 when a test-only cfg attribute precedes (or shares the line with) it.
+collect_mod_decls() {
+    awk '
+        # anchored, matching the counter above: unanchored, a doc comment that
+        # merely MENTIONS `#[cfg(test)]` above a `mod NAME;` marked that
+        # module test-only and excluded its whole file from the census.
+        # `not(...)` is production-only, as in the counter.
+        function is_test_only_cfg(l) {
+            if (l !~ /^[[:space:]]*#!?\[cfg\(/) return 0
+            if (l ~ /\(any\(/) return 0
+            if (l ~ /not[[:space:]]*\(/) return 0
+            return (l ~ /(^|[(,[:space:]])test([),]|$)/)
+        }
+        FNR == 1 { pend = 0 }
+        { line = $0 }
+        is_test_only_cfg(line) { pend = 1 }
+        match(line, /^[[:space:]]*(pub[[:space:]]*(\([^)]*\)[[:space:]]*)?)?mod[[:space:]]+[A-Za-z_][A-Za-z_0-9]*[[:space:]]*;/) {
+            name = substr(line, RSTART, RLENGTH)
+            sub(/[[:space:]]*;[[:space:]]*$/, "", name)
+            sub(/^.*[[:space:]]/, "", name)
+            printf("%s\t%d\t%s\n", FILENAME, pend, name)
+            pend = 0
+            next
+        }
+        /^[[:space:]]*(#|\/\/)/ { next }
+        /^[[:space:]]*$/        { next }
+        { pend = 0 }
+    ' "$@"
+}
+
+# Whether F is wholly test code because its own parent reaches it through a
+# `#[cfg(test)] mod NAME;` declaration -- the shape the tree-wide pass finds
+# by resolving every `mod` declaration in the tree, and the fast path used to
+# miss because it never reads any file but F itself. F's own path carries no
+# sign of that: it names the parent(s) rustc's own convention allows (a
+# sibling `name.rs` for `dir/name/tests.rs`, or `dir/mod.rs` for the
+# mod.rs-style directory case), confirms with `resolve_mod_file` that the
+# candidate actually names F, then asks `collect_mod_decls` -- the tree-wide
+# gate's own classifier, not a second copy of its predicate -- whether that
+# declaration is gated. Recurses one parent at a time (depth-capped, this
+# tree nests nowhere near it) so a module reached only transitively through a
+# test-only grandparent is still caught, matching the tree-wide pass's own
+# closure.
+is_test_only_via_parent() {
+    local f="$1" depth="${2:-0}" dir name mod_name parent_dir parent_base
+    local cand1 cand2 cand hit
+    [[ "$depth" -lt 8 ]] || return 1
+    dir="${f%/*}"
+    name="$(basename "$f" .rs)"
+    parent_dir="${dir%/*}"
+    if [[ "$name" == mod ]]; then
+        mod_name="${dir##*/}"
+        cand1="$parent_dir/$mod_name.rs"
+        cand2="$parent_dir/mod.rs"
+    else
+        mod_name="$name"
+        parent_base="${dir##*/}"
+        cand1="$parent_dir/$parent_base.rs"
+        cand2="$dir/mod.rs"
+    fi
+    for cand in "$cand1" "$cand2"; do
+        [[ -f "$cand" && "$cand" != "$f" ]] || continue
+        resolve_mod_file "$cand" "$mod_name"
+        [[ "$RESOLVED" == "$f" ]] || continue
+        hit="$(collect_mod_decls "$cand" | grep -Fc "$(printf '%s\t1\t%s' "$cand" "$mod_name")")"
+        if [[ "${hit:-0}" -gt 0 ]]; then
+            return 0
+        fi
+        if is_test_only_via_parent "$cand" $((depth + 1)); then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ── per-file fast path ─────────────────────────────────────────────────────
 if [[ $# -gt 0 ]]; then
     fail=0
@@ -217,6 +320,7 @@ if [[ $# -gt 0 ]]; then
             *crates/*/tests/* | *crates/*/benches/*) continue ;;
         esac
         grep -qE '^[[:space:]]*#!\[cfg\(test\)\]' -- "$f" && continue
+        is_test_only_via_parent "$f" && continue
         count="$(count_prod_lines "$f" | cut -f1)"
         if [[ "${count:-0}" -gt "$GOD_FILE_LIMIT" ]]; then
             echo "GOD FILE: $f has $count production code lines (ceiling $GOD_FILE_LIMIT)."
@@ -342,59 +446,6 @@ refuse_unkeyable() { # usage: refuse_unkeyable <path> <where it came from>
 for _f in "${ALL_RS[@]}"; do
     refuse_unkeyable "$_f" "the tracked crates/**/*.rs set"
 done
-
-# Resolve `mod NAME;` declared in DECL_FILE to the file that provides it, into
-# the global RESOLVED (empty when the module has no file). rustc looks in the
-# declaring module's directory: lib.rs/main.rs/mod.rs declare into their OWN
-# directory, src/foo.rs into the sibling src/foo/.
-resolve_mod_file() {
-    local decl_file="$1" name="$2" dir base cand_dir c
-    dir="${decl_file%/*}"
-    base="${decl_file##*/}"
-    base="${base%.rs}"
-    case "$base" in
-        mod | lib | main) cand_dir="$dir" ;;
-        *) cand_dir="$dir/$base" ;;
-    esac
-    RESOLVED=""
-    for c in "$cand_dir/$name.rs" "$cand_dir/$name/mod.rs"; do
-        if [[ -f "$c" ]]; then
-            RESOLVED="$c"
-            return 0
-        fi
-    done
-}
-
-# Every `mod NAME;` in the tree in one awk pass as "<file>\t<gated>\t<name>",
-# gated=1 when a test-only cfg attribute precedes (or shares the line with) it.
-collect_mod_decls() {
-    awk '
-        # anchored, matching the counter above: unanchored, a doc comment that
-        # merely MENTIONS `#[cfg(test)]` above a `mod NAME;` marked that
-        # module test-only and excluded its whole file from the census.
-        # `not(...)` is production-only, as in the counter.
-        function is_test_only_cfg(l) {
-            if (l !~ /^[[:space:]]*#!?\[cfg\(/) return 0
-            if (l ~ /\(any\(/) return 0
-            if (l ~ /not[[:space:]]*\(/) return 0
-            return (l ~ /(^|[(,[:space:]])test([),]|$)/)
-        }
-        FNR == 1 { pend = 0 }
-        { line = $0 }
-        is_test_only_cfg(line) { pend = 1 }
-        match(line, /^[[:space:]]*(pub[[:space:]]*(\([^)]*\)[[:space:]]*)?)?mod[[:space:]]+[A-Za-z_][A-Za-z_0-9]*[[:space:]]*;/) {
-            name = substr(line, RSTART, RLENGTH)
-            sub(/[[:space:]]*;[[:space:]]*$/, "", name)
-            sub(/^.*[[:space:]]/, "", name)
-            printf("%s\t%d\t%s\n", FILENAME, pend, name)
-            pend = 0
-            next
-        }
-        /^[[:space:]]*(#|\/\/)/ { next }
-        /^[[:space:]]*$/        { next }
-        { pend = 0 }
-    ' "$@"
-}
 
 WORKLIST=()
 IS_TEST_COUNT=0

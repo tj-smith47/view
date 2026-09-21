@@ -62,6 +62,9 @@ fn two_window_palette_session(dir: &Path) -> view_oracle::EngineSession {
             30,
         ),
     );
+    // this driver builds its model directly rather than through a
+    // `view.toml`, whose absent `[native] palette` key still means "on"
+    engine.enable_palette();
     engine
 }
 
@@ -307,6 +310,9 @@ fn the_cost_of_pressing_colon_windowed_versus_off() {
     ))
     .unwrap();
     assert!(off.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    // otherwise this measures the bare bottom-row cmdline echo, not the
+    // floating palette the doc comment above names
+    off.enable_palette();
     let floating = median_colon_latency(&mut off);
 
     eprintln!(

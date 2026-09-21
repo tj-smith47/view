@@ -14321,6 +14321,11 @@ const PALETTE_GRID: u64 = 10;
 /// once so a window can actually be requested.
 fn windowed_palette_model() -> Model {
     let mut m = model();
+    // `[native] palette = false` (the default) leaves `palette_windowed_active`
+    // false even with the layout below set to windowed (I9): this fixture is
+    // about the *enabled* windowed palette, so it says so explicitly rather
+    // than lean on a default that would silently stop opening a window.
+    m.palette_enabled = true;
     m.surfaces.set_layout(
         crate::native::geometry::NativeSurface::Palette,
         crate::native::geometry::SurfaceLayout::new(
@@ -14456,6 +14461,31 @@ fn the_windowed_palette_opens_and_closes_with_the_palette() {
     assert!(
         m.engine.cmdline.is_none(),
         "the cmdline state must clear the same as it does under the floating placement"
+    );
+}
+
+/// `[native] palette = false` with the placement still `windowed` must open
+/// no window: I9 shipped `CmdlineShow`'s guard checking only the placement
+/// (`palette_is_windowed`), so a plugin that owns the command line and turns
+/// the palette off entirely still got a window and a pane on every `:`.
+#[test]
+fn a_disabled_palette_opens_no_window_even_when_windowed() {
+    let mut m = windowed_palette_model();
+    m.palette_enabled = false;
+
+    let effects = update(&mut m, cmdline_show());
+
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Rpc(RpcCall::OpenNativeWindow { .. }))),
+        "a disabled palette must never ask for a window: {effects:?}"
+    );
+    assert_eq!(
+        m.engine
+            .grids()
+            .native_window(crate::native::geometry::NativeSurface::Palette),
+        None
     );
 }
 
