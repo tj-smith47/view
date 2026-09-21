@@ -7606,6 +7606,69 @@ fn ai_panel_toggle_while_engine_busy_is_topmost_opens_beneath_it_without_occludi
 }
 
 #[test]
+fn ai_panel_overlay_opens_at_the_edge_its_own_surfaces_anchor_names() {
+    let mut left = model();
+    left.ai_trusted = true;
+    left.surfaces.set_layout(
+        crate::native::geometry::NativeSurface::Agent,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Overlay,
+            crate::native::geometry::Anchor::Left,
+            30,
+        ),
+    );
+    let _ = update(
+        &mut left,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    let _ = update(
+        &mut left,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    let left_overlay = left.overlays().last().expect("panel opened");
+    let left_rect = left.overlay_rect(left_overlay);
+
+    let mut right = model();
+    right.ai_trusted = true;
+    right.surfaces.set_layout(
+        crate::native::geometry::NativeSurface::Agent,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Overlay,
+            crate::native::geometry::Anchor::Right,
+            30,
+        ),
+    );
+    let _ = update(
+        &mut right,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    let _ = update(
+        &mut right,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    let right_overlay = right.overlays().last().expect("panel opened");
+    let right_rect = right.overlay_rect(right_overlay);
+
+    assert!(
+        left_rect.col < right_rect.col,
+        "[ui.surfaces.agent] anchor must move the overlay's own column, \
+             not just a windowed open's: left {left_rect:?}, right {right_rect:?}"
+    );
+}
+
+#[test]
 fn ai_panel_open_is_a_no_op_when_the_panel_is_already_open() {
     let mut m = model();
     m.ai_trusted = true;

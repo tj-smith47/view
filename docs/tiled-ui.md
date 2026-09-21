@@ -185,30 +185,39 @@ each have their own `[ui.surfaces.<id>]` table, with a `placement`, an
 your buffer. `"windowed"` gives it a window of its own in nvim's layout,
 so your buffers make room for it and every window command reaches it.
 `anchor` is the edge, or for the notification stream's toast stack the
-corner, it opens at. `size` is its share of the terminal.
+corner, it opens at, and its own accepted words and default change with
+`placement`: a centred float has no centred window to become, and a
+corner toast stack has no corner tile. `size` is its share of the
+terminal, the same number in both placements.
 
 ```toml
 [ui.surfaces.tree]
 placement = "overlay"      # default: "overlay". "windowed" opens it as a
                             # window of its own
-anchor = "left"             # default: "left". left | right
+anchor = "left"             # default: "left", both placements. left | right
 size = 30                   # percent of the terminal width. Default: 30
 
 [ui.surfaces.agent]
 placement = "overlay"
-anchor = "right"             # default: "right". left | right
+anchor = "right"             # default: "right", both placements. left | right
 size = 30
 
 [ui.surfaces.palette]
 placement = "overlay"
-anchor = "center"            # default: "center". center | top
-size = 30                    # percent of the terminal height under "top"
+anchor = "center"            # default: "center" overlay, "bottom" windowed.
+                              # overlay: center | top | bottom
+                              # windowed: top | bottom
+size = 40                    # percent of the terminal height, both
+                              # placements. Default: 40
 
 [ui.surfaces.notifications]
 placement = "overlay"
-anchor = "top-right"         # default: "top-right". top-left | top-right |
-                              # bottom-left | bottom-right
-size = 30
+anchor = "top-right"         # default: "top-right" overlay, "right" windowed.
+                              # overlay: top-left | top-right | bottom-left |
+                              # bottom-right
+                              # windowed: left | right | top | bottom
+size = 30                    # percent of the terminal width (left/right) or
+                              # height (top/bottom), both placements
 ```
 
 `[native] tree_width` is `[ui.surfaces.tree] size` under its older name,

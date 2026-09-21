@@ -27,6 +27,7 @@ use std::sync::mpsc;
 use std::time::Instant;
 use view_core::model::{Look, Model, Panes, TermCaps, Tier};
 use view_core::msg::Effect;
+use view_core::native::geometry::{NativeSurface, SurfaceLayout};
 use view_core::theme::Theme;
 use view_engine::process::{stdin_operands, BundledEngine, EngineConfig, RemoteSpec};
 use view_native::config::{
@@ -858,6 +859,22 @@ fn seed_ai_enabled(
         Ok(cfg) => {
             model.ai_enabled = cfg.enabled();
             model.ai_panel_width_pct = cfg.panel_width();
+            // I6: `view-native` cannot fold `[ai] panel_width` into the
+            // agent's own `SurfaceLayout` -- `[ai]` is `view-ai`'s table,
+            // and the two crates never name each other -- so the one place
+            // both numbers can agree is here, where both are already in
+            // hand. Without this the overlay draws `cfg.panel_width()` and
+            // a windowed open still asks for whatever `[ui.surfaces.agent]
+            // size` alone resolved to, the split this fixes.
+            let agent_layout = model.surfaces.layout(NativeSurface::Agent);
+            model.surfaces.set_layout(
+                NativeSurface::Agent,
+                SurfaceLayout::new(
+                    agent_layout.placement,
+                    agent_layout.anchor,
+                    cfg.panel_width(),
+                ),
+            );
             model.ai_review_open_target = cfg.review_open_target();
             let agent = cfg.agent_spec().clone();
             // a width or an open target that could not be read never fails
@@ -3515,6 +3532,42 @@ mod tests {
             shown.contains(&path.display().to_string()),
             "the toast must name the file that failed to parse: {shown}"
         );
+    }
+
+    /// I6: `[ai] panel_width` alone used to size the overlay draw
+    /// (`model.ai_panel_width_pct`) without ever reaching the windowed
+    /// open's own number (`model.surfaces.layout(Agent).size`), so the two
+    /// diverged the moment a user wrote only the older key. One config
+    /// value, one number in both placements.
+    #[test]
+    fn panel_width_seeds_both_the_overlay_draw_and_the_windowed_layout() {
+        let dir = view_test_support::ScratchDir::new("seed-ai-panel-width-one-number").unwrap();
+        let path = dir.join("view.toml");
+        std::fs::write(&path, "[ai]\npanel_width = 45\n").unwrap();
+        let mut model = Model::with_term_size(80, 24);
+        let (_effects, _agent) = seed_ai_enabled(Some(&path), false, &mut model);
+        assert_eq!(
+            model.ai_panel_width_pct, 45,
+            "the overlay draw's own number"
+        );
+        assert_eq!(
+            model.surfaces.layout(NativeSurface::Agent).size,
+            45,
+            "the windowed open's own number must agree with the overlay's"
+        );
+    }
+
+    /// The same claim from the surfaces table's own key, so the sync holds
+    /// whichever of the two names a config actually writes.
+    #[test]
+    fn surfaces_agent_size_seeds_both_the_overlay_draw_and_the_windowed_layout() {
+        let dir = view_test_support::ScratchDir::new("seed-ai-surfaces-size-one-number").unwrap();
+        let path = dir.join("view.toml");
+        std::fs::write(&path, "[ui.surfaces.agent]\nsize = 55\n").unwrap();
+        let mut model = Model::with_term_size(80, 24);
+        let (_effects, _agent) = seed_ai_enabled(Some(&path), false, &mut model);
+        assert_eq!(model.ai_panel_width_pct, 55);
+        assert_eq!(model.surfaces.layout(NativeSurface::Agent).size, 55);
     }
 
     #[test]

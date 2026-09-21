@@ -7,7 +7,7 @@
 
 use crate::model::{Focus, Model, OverlayKind};
 use crate::msg::{Effect, RegisterType, RpcCall, WinSplit};
-use crate::native::geometry::{Anchor, NativeSurface, OverlayBox};
+use crate::native::geometry::{NativeSurface, OverlayBox};
 use crate::native::keys::{Action, Resolved};
 use crate::native::palette::MessageHistoryState;
 
@@ -486,7 +486,7 @@ pub(super) fn open_native_window(
     let layout = model.surfaces.layout(surface);
     RpcCall::OpenNativeWindow {
         surface,
-        split: WinSplit::for_anchor(layout.anchor).unwrap_or(WinSplit::Left),
+        split: WinSplit::for_anchor(layout.anchor),
         size: layout.size,
         generation: model.surfaces.next_generation(surface),
         enter,
@@ -608,7 +608,13 @@ pub(super) fn open_ai_panel(model: &mut Model) -> Vec<Effect> {
     let insert_beneath = model.overlays().last().is_some_and(|overlay| {
         Model::takes_focus(&overlay.kind) || matches!(overlay.kind, OverlayKind::EngineBusy(_))
     });
-    let geometry = OverlayBox::new(model.ai_panel_width_pct, 100).with_anchor(Anchor::Right);
+    // I8: `Anchor::Right` was hard-coded here, so `[ui.surfaces.agent]
+    // anchor` had no effect on the overlay placement the vast majority of
+    // sessions actually run -- only a windowed open read it. The overlay
+    // now opens at whichever edge the surfaces table (or its default)
+    // names, the same anchor a windowed open already resolves.
+    let geometry = OverlayBox::new(model.ai_panel_width_pct, 100)
+        .with_anchor(model.surfaces.layout(NativeSurface::Agent).anchor);
     if insert_beneath {
         model.insert_overlay_beneath_top(geometry, OverlayKind::Ai);
     } else {

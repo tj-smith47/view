@@ -1647,7 +1647,9 @@ mod tests {
             let value = match key {
                 "placement" => "\"windowed\"",
                 "anchor" => {
-                    let word = super::surfaces::anchors(surface)[0].label();
+                    let word =
+                        super::surfaces::anchors(surface, geometry::SurfacePlacement::Overlay)[0]
+                            .label();
                     return format!("[{table}]\n{key} = \"{word}\"\n");
                 }
                 "size" => "25",

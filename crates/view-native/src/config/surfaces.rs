@@ -12,6 +12,7 @@ use view_core::config::discarded_file;
 use view_core::native::geometry::{
     clamp_panel_width, Anchor, NativeSurface, SurfaceLayout, SurfacePlacement,
 };
+use SurfacePlacement::{Overlay, Windowed};
 
 use super::resolve::alias_notice;
 use super::{SurfaceSize, SurfaceTable, ViewConfig, TREE_WIDTH_KEY};
@@ -22,28 +23,60 @@ const PLACEMENT_EXPECTED: &str = "overlay or windowed";
 /// What a `size` that is not a whole number of percent is answered with.
 const SIZE_EXPECTED: &str = "a whole number of percent";
 
-/// The anchors each surface may be pinned to. A surface draws at one edge
-/// of the screen and the set is what a sideways surface can honestly
-/// answer: a tree or an agent panel at a side, the palette in the middle,
-/// notifications at one of the four corners the toast stack grows away
-/// from and leaves toward.
-pub(super) const fn anchors(surface: NativeSurface) -> &'static [Anchor] {
-    match surface {
-        NativeSurface::Palette => &[Anchor::Center, Anchor::Top],
-        NativeSurface::Notifications => &[
+/// The anchors `surface` may be pinned to under `placement`. A float and a
+/// tile answer a different question -- "where on the buffer" against
+/// "which edge of the tile" -- so the same surface can accept a centred
+/// float and refuse a centred window: the tree or the agent panel takes a
+/// side in both placements, the palette floats anywhere the design allows
+/// but tiles only at the top or bottom edge, and notifications float at a
+/// corner but tile at any one of the four edges the stream/ticker split
+/// opens along.
+pub(super) const fn anchors(
+    surface: NativeSurface,
+    placement: SurfacePlacement,
+) -> &'static [Anchor] {
+    match (surface, placement) {
+        (NativeSurface::Palette, Overlay) => &[Anchor::Center, Anchor::Top, Anchor::Bottom],
+        (NativeSurface::Palette, Windowed) => &[Anchor::Top, Anchor::Bottom],
+        (NativeSurface::Notifications, Overlay) => &[
             Anchor::TopLeft,
             Anchor::TopRight,
             Anchor::BottomLeft,
             Anchor::BottomRight,
         ],
+        (NativeSurface::Notifications, Windowed) => {
+            &[Anchor::Left, Anchor::Right, Anchor::Top, Anchor::Bottom]
+        }
+        (NativeSurface::Tree | NativeSurface::Agent, _) => &[Anchor::Left, Anchor::Right],
+        // `NativeSurface` is `#[non_exhaustive]`; a sideways side is the
+        // sane fallback for a surface this crate does not yet know.
         _ => &[Anchor::Left, Anchor::Right],
     }
 }
 
-/// The anchors `surface` accepts, spelled the way a notice lists them.
-pub(super) fn anchors_expected(surface: NativeSurface) -> String {
-    let words: Vec<&str> = anchors(surface).iter().map(|a| a.label()).collect();
+/// The anchors `surface` accepts under `placement`, spelled the way a
+/// notice lists them.
+pub(super) fn anchors_expected(surface: NativeSurface, placement: SurfacePlacement) -> String {
+    let words: Vec<&str> = anchors(surface, placement)
+        .iter()
+        .map(|a| a.label())
+        .collect();
     words.join(" or ")
+}
+
+/// The anchor `surface` opens at under `placement` with no `anchor` key
+/// written. Overlay keeps each surface's shipped float edge
+/// ([`SurfaceLayout::default_for`]); windowed reads its own default
+/// ([`SurfaceLayout::default_windowed_anchor`]) because a windowed surface's
+/// vocabulary excludes the overlay default for the palette (`center` is not
+/// a tile edge).
+pub(super) const fn default_anchor(surface: NativeSurface, placement: SurfacePlacement) -> Anchor {
+    match placement {
+        Overlay => SurfaceLayout::default_for(surface).anchor,
+        Windowed => SurfaceLayout::default_windowed_anchor(surface),
+        // `SurfacePlacement` is `#[non_exhaustive]`.
+        _ => SurfaceLayout::default_windowed_anchor(surface),
+    }
 }
 
 /// Every surface's placement, anchor and size, with a line for each value
@@ -61,19 +94,17 @@ pub fn surfaces(file: &ViewConfig, notices: &mut Vec<String>) -> [SurfaceLayout;
         let Some(layout) = layouts.get_mut(surface.index()) else {
             continue;
         };
-        *layout = read(surface, table, layout.anchor, notices);
+        *layout = read(surface, table, notices);
     }
     alias(file, &mut layouts, notices);
     layouts
 }
 
-/// One surface's table read through its own vocabulary.
-fn read(
-    surface: NativeSurface,
-    table: &SurfaceTable,
-    fallback: Anchor,
-    notices: &mut Vec<String>,
-) -> SurfaceLayout {
+/// One surface's table read through its own vocabulary, the anchor set
+/// picked from the placement this same table resolved to -- a windowed
+/// palette never sees `center` in its allowed set or its fallback, because
+/// neither is a word the windowed vocabulary carries.
+fn read(surface: NativeSurface, table: &SurfaceTable, notices: &mut Vec<String>) -> SurfaceLayout {
     let name = surface.dotted_table();
     let placement = match table.placement.as_deref().map(str::trim) {
         Some(word) => SurfacePlacement::parse(word).unwrap_or_else(|| {
@@ -82,15 +113,16 @@ fn read(
         }),
         None => SurfacePlacement::default(),
     };
+    let fallback = default_anchor(surface, placement);
     let anchor = match table.anchor.as_deref().map(str::trim) {
-        Some(word) => anchors(surface)
+        Some(word) => anchors(surface, placement)
             .iter()
             .copied()
             .find(|allowed| allowed.label() == word)
             .unwrap_or_else(|| {
                 notices.push(discarded_file(
                     word,
-                    &anchors_expected(surface),
+                    &anchors_expected(surface, placement),
                     name,
                     "anchor",
                 ));
@@ -214,22 +246,61 @@ mod tests {
     }
 
     #[test]
-    fn a_notifications_anchor_names_all_four_corners() {
+    fn a_notifications_anchor_names_all_four_corners_overlay_and_all_four_edges_windowed() {
         assert_eq!(
-            anchors(NativeSurface::Notifications),
+            anchors(NativeSurface::Notifications, SurfacePlacement::Overlay),
             &[
                 Anchor::TopLeft,
                 Anchor::TopRight,
                 Anchor::BottomLeft,
                 Anchor::BottomRight
             ],
-            "the geometry layer supports all four corners; the allow-list \
-             left it at top/bottom after the first dispatch landed the \
-             corners"
+            "the overlay toast stack floats at a corner"
         );
         assert_eq!(
-            anchors_expected(NativeSurface::Notifications),
+            anchors_expected(NativeSurface::Notifications, SurfacePlacement::Overlay),
             "top-left or top-right or bottom-left or bottom-right"
+        );
+        assert_eq!(
+            anchors(NativeSurface::Notifications, SurfacePlacement::Windowed),
+            &[Anchor::Left, Anchor::Right, Anchor::Top, Anchor::Bottom],
+            "a windowed stream/ticker tiles at any one of the four edges"
+        );
+        assert_eq!(
+            anchors_expected(NativeSurface::Notifications, SurfacePlacement::Windowed),
+            "left or right or top or bottom"
+        );
+    }
+
+    #[test]
+    fn the_palette_floats_at_center_top_or_bottom_and_tiles_at_top_or_bottom() {
+        assert_eq!(
+            anchors(NativeSurface::Palette, SurfacePlacement::Overlay),
+            &[Anchor::Center, Anchor::Top, Anchor::Bottom],
+            "the design gives the overlay palette a third float position"
+        );
+        assert_eq!(
+            anchors(NativeSurface::Palette, SurfacePlacement::Windowed),
+            &[Anchor::Top, Anchor::Bottom],
+            "a windowed palette has no centred tile to take"
+        );
+        let (layouts, notices) = read_toml("[ui.surfaces.palette]\nplacement = \"windowed\"\n");
+        assert_eq!(
+            layouts[NativeSurface::Palette.index()].anchor,
+            Anchor::Bottom,
+            "the design's windowed default is the bottom edge"
+        );
+        assert!(notices.is_empty(), "the default anchor owes no notice");
+        let (layouts, notices) =
+            read_toml("[ui.surfaces.palette]\nplacement = \"windowed\"\nanchor = \"bottom\"\n");
+        assert_eq!(
+            layouts[NativeSurface::Palette.index()].anchor,
+            Anchor::Bottom,
+            "the design's own windowed default word was refused"
+        );
+        assert!(
+            notices.is_empty(),
+            "a word the windowed vocabulary carries owes no notice"
         );
     }
 
@@ -255,11 +326,12 @@ mod tests {
     #[test]
     fn every_surfaces_own_placement_anchor_and_size_is_read() {
         for surface in NativeSurface::ALL {
+            let windowed = anchors(surface, SurfacePlacement::Windowed);
             for anchor in [
-                anchors(surface)[0],
-                *anchors(surface)
+                windowed[0],
+                *windowed
                     .last()
-                    .expect("every surface accepts at least one anchor"),
+                    .expect("every surface accepts at least one windowed anchor"),
             ] {
                 let (layouts, notices) = read_toml(&document_for(surface, anchor.label()));
                 assert!(
@@ -277,6 +349,73 @@ mod tests {
                 assert_eq!(layout.anchor, anchor, "{}", surface.id());
                 assert_eq!(layout.size, 42, "{}", surface.id());
             }
+        }
+    }
+
+    #[test]
+    fn every_surface_every_placement_every_accepted_anchor_word_is_read_with_no_notice() {
+        for surface in NativeSurface::ALL {
+            for placement in [SurfacePlacement::Overlay, SurfacePlacement::Windowed] {
+                for anchor in anchors(surface, placement) {
+                    let document = format!(
+                        "[{}]\nplacement = \"{}\"\nanchor = \"{}\"\n",
+                        surface.dotted_table(),
+                        placement.label(),
+                        anchor.label(),
+                    );
+                    let (layouts, notices) = read_toml(&document);
+                    assert!(
+                        notices.is_empty(),
+                        "{} {} accepts {} per the design's own table: {notices:?}",
+                        surface.id(),
+                        placement.label(),
+                        anchor.label(),
+                    );
+                    let layout = layouts[surface.index()];
+                    assert_eq!(layout.placement, placement, "{}", surface.id());
+                    assert_eq!(layout.anchor, *anchor, "{}", surface.id());
+                    if placement == SurfacePlacement::Windowed {
+                        // I1: `WinSplit::for_anchor` is total over exactly the
+                        // words a windowed surface's own vocabulary carries.
+                        let split = view_core::msg::WinSplit::for_anchor(layout.anchor);
+                        let expected = match layout.anchor {
+                            Anchor::Right => view_core::msg::WinSplit::Right,
+                            Anchor::Top => view_core::msg::WinSplit::Above,
+                            Anchor::Bottom => view_core::msg::WinSplit::Below,
+                            _ => view_core::msg::WinSplit::Left,
+                        };
+                        assert_eq!(
+                            split,
+                            expected,
+                            "{} at {} did not resolve to the split it named",
+                            surface.id(),
+                            anchor.label()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_untouched_config_reaches_the_designs_default_positions() {
+        let (layouts, notices) = read_toml("");
+        assert!(notices.is_empty());
+        let at = |s: NativeSurface| layouts[s.index()];
+        assert_eq!(at(NativeSurface::Tree).anchor, Anchor::Left);
+        assert_eq!(at(NativeSurface::Tree).size, 30);
+        assert_eq!(at(NativeSurface::Agent).anchor, Anchor::Right);
+        assert_eq!(at(NativeSurface::Agent).size, 30);
+        assert_eq!(at(NativeSurface::Palette).anchor, Anchor::Center);
+        assert_eq!(
+            at(NativeSurface::Palette).size,
+            40,
+            "the palette's own default is 40 percent of rows"
+        );
+        assert_eq!(at(NativeSurface::Notifications).anchor, Anchor::TopRight);
+        assert_eq!(at(NativeSurface::Notifications).size, 30);
+        for surface in NativeSurface::ALL {
+            assert_eq!(at(surface).placement, SurfacePlacement::Overlay);
         }
     }
 

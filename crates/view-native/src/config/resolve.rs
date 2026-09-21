@@ -774,19 +774,19 @@ fn resolve_surfaces(
             spelled("placement").then_some(from_file.placement),
             SurfacePlacement::default(),
         );
-        let allowed = super::surfaces::anchors(surface);
+        let allowed = super::surfaces::anchors(surface, placement.value);
         let anchor = layer(
             None,
             env_read(
                 env,
                 table,
                 "anchor",
-                &super::surfaces::anchors_expected(surface),
+                &super::surfaces::anchors_expected(surface, placement.value),
                 |value| parse_anchor(allowed, value),
                 notices,
             ),
             spelled("anchor").then_some(from_file.anchor),
-            SurfaceLayout::default_for(surface).anchor,
+            super::surfaces::default_anchor(surface, placement.value),
         );
         let tree_width_env = (surface == NativeSurface::Tree && tree_width.source == Source::Env)
             .then_some(tree_width.value);
@@ -796,7 +796,7 @@ fn resolve_surfaces(
             (spelled("size")
                 || (surface == NativeSurface::Tree && file.spells("native", "tree_width")))
             .then_some(from_file.size),
-            geometry::DEFAULT_PANEL_WIDTH_PCT,
+            SurfaceLayout::default_for(surface).size,
         );
         if let Some(layout) = surfaces.get_mut(index) {
             *layout = SurfaceLayout::new(placement.value, anchor.value, size.value);
@@ -939,18 +939,33 @@ mod tests {
         keys()
             .iter()
             .find(|row| env_name(row) == name)
-            .map(|row| env_fixture(row).to_string())
+            .map(|row| env_fixture(row, true).to_string())
     }
 
     /// A legal environment value for one key, per its own type.
-    fn env_fixture(row: &ConfigKey) -> &'static str {
+    ///
+    /// `windowed` is the placement this fixture's own env layer resolves
+    /// to for the row's surface: `true` from [`every_key_set`], which
+    /// always answers `placement` with `"windowed"` too, `false` from the
+    /// one-key-at-a-time walk, which leaves every other key at its file/
+    /// derived answer -- `SurfacePlacement::default()`, `Overlay`. An
+    /// anchor fixture has to stay inside whichever vocabulary its own
+    /// placement will actually resolve to, since a windowed-only word
+    /// (notifications' `left`/`right`/`top`/`bottom`) is not one the
+    /// overlay corners answer, and the reverse holds for the corners.
+    fn env_fixture(row: &ConfigKey, windowed: bool) -> &'static str {
         if let Some(surface) = NativeSurface::ALL
             .into_iter()
             .find(|surface| surface.dotted_table() == row.table)
         {
+            let placement = if windowed {
+                SurfacePlacement::Windowed
+            } else {
+                SurfacePlacement::Overlay
+            };
             return match row.key {
                 "placement" => "windowed",
-                "anchor" => super::super::surfaces::anchors(surface)
+                "anchor" => super::super::surfaces::anchors(surface, placement)
                     .last()
                     .map_or("right", |anchor| anchor.label()),
                 _ => "40",
@@ -1193,7 +1208,7 @@ mod tests {
     fn every_resolved_key_reads_its_own_environment_name() {
         for key in keys().iter().filter(|key| !is_ai(key)) {
             let name = env_name(key);
-            let env = |asked: &str| (asked == name).then(|| env_fixture(key).to_string());
+            let env = |asked: &str| (asked == name).then(|| env_fixture(key, false).to_string());
             let resolved = resolve_with(&ViewConfig::defaults(), &Overrides::default(), &env);
             let (value, source) = row(&resolved, key.table, key.key);
             assert_eq!(
@@ -1205,7 +1220,7 @@ mod tests {
             );
             assert_eq!(
                 value,
-                env_fixture(key),
+                env_fixture(key, false),
                 "{name} resolved to something other than what it said"
             );
         }

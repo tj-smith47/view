@@ -2347,14 +2347,22 @@ fn agent_windowed() {
     }
 }
 
-/// The palette windowed into the left tile, the same claim-the-tile
-/// recipe as the tree and the agent panel: nvim's own `CmdlineShow` is the
-/// whole signal a windowed palette watches (see `ui_event.rs`'s own doc),
-/// so there is no `FeatureInvoke` to send here.
-fn palette_in_the_left_tile(gaps: bool) -> Tiles {
-    let tiles = tiled(gaps);
-    let slots = tiles.slots;
-    let mut model = tiles.model;
+/// `anchor = "bottom"` splits the terminal into a full-width main window
+/// on top and a full-width band along the bottom edge, the shape
+/// `nvim_open_win(split = "below")` actually produces. The prior fixture
+/// fed the palette a left-half vsplit `WinPos` under this same anchor --
+/// a position that anchor's own split direction can never place a window
+/// at -- so this builds the band the anchor really opens instead of
+/// reusing `tiled()`'s vsplit slots.
+fn palette_in_the_bottom_band(gaps: bool) -> Tiles {
+    let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
+    let band_height = 6;
+    let main_height = grid_height - 2 - band_height;
+    let slots = vec![
+        (0, 0, grid_width, main_height),
+        (main_height + 1, 0, grid_width, band_height),
+    ];
+    let mut model = tiled_model(gaps, TILED_HEIGHT, &slots);
     model.surfaces.set_layout(
         view_core::native::geometry::NativeSurface::Palette,
         view_core::native::geometry::SurfaceLayout::new(
@@ -2363,6 +2371,9 @@ fn palette_in_the_left_tile(gaps: bool) -> Tiles {
             30,
         ),
     );
+    // nvim's own `CmdlineShow` is the whole signal a windowed palette
+    // watches (see `ui_event.rs`'s own doc), so there is no `FeatureInvoke`
+    // to send here.
     let effects = update(
         &mut model,
         Msg::Redraw(vec![UiEvent::CmdlineShow {
@@ -2389,16 +2400,20 @@ fn palette_in_the_left_tile(gaps: bool) -> Tiles {
         Msg::NativeWindowOpened {
             generation,
             surface: view_core::native::geometry::NativeSurface::Palette,
-            win: WinHandle(1000),
+            win: WinHandle(1001),
         },
     );
-    let (row, col, width, height) = slots[0];
+    // claims the band's own existing window (grid LEFT+1, win 1001), the
+    // same window `tiled_model` already placed at slots[1] -- reusing a
+    // different slot/win pairing than the one it was assigned would put two
+    // windows on top of each other.
+    let (row, col, width, height) = slots[1];
     drive(
         &mut model,
         vec![
             UiEvent::WinPos {
-                grid: LEFT,
-                win: WinHandle(1000),
+                grid: LEFT + 1,
+                win: WinHandle(1001),
                 startrow: u64::from(row),
                 startcol: u64::from(col),
                 width: u64::from(width),
@@ -2410,15 +2425,15 @@ fn palette_in_the_left_tile(gaps: bool) -> Tiles {
     Tiles { slots, model }
 }
 
-/// The committed picture of the palette in a tile of its own: nvim's
-/// command line inside the left frame, the buffer's text inside the right
+/// The committed picture of the palette in a band of its own: nvim's
+/// command line inside the bottom frame, the buffer's text inside the top
 /// one.
 #[test]
 fn palette_windowed() {
     for tier in TIERS {
         assert_golden(
             &format!("{}-palette-windowed", tier.0),
-            &tiles_dump(tier, palette_in_the_left_tile(true)),
+            &tiles_dump(tier, palette_in_the_bottom_band(true)),
         );
     }
 }

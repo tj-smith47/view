@@ -133,6 +133,11 @@ impl Anchor {
 /// no key written, so an absent config is the width view has always drawn.
 pub const DEFAULT_PANEL_WIDTH_PCT: u16 = 30;
 
+/// The share of rows the palette takes when nothing says otherwise. Measured
+/// in rows rather than columns, so it keeps its own default distinct from a
+/// sidebar's.
+pub const DEFAULT_PALETTE_HEIGHT_PCT: u16 = 40;
+
 /// The narrowest a sidebar may be driven, in percent. Below this a
 /// transcript line or a file name has no room left to say anything.
 pub const MIN_PANEL_WIDTH_PCT: u16 = 15;
@@ -473,7 +478,30 @@ impl SurfaceLayout {
                 NativeSurface::Palette => Anchor::Center,
                 NativeSurface::Notifications => Anchor::TopRight,
             },
-            size: DEFAULT_PANEL_WIDTH_PCT,
+            size: match surface {
+                NativeSurface::Palette => DEFAULT_PALETTE_HEIGHT_PCT,
+                NativeSurface::Tree | NativeSurface::Agent | NativeSurface::Notifications => {
+                    DEFAULT_PANEL_WIDTH_PCT
+                }
+            },
+        }
+    }
+
+    /// The anchor `surface` opens at, windowed, with nothing configured.
+    ///
+    /// Distinct from [`Self::default_for`]'s overlay anchor because a
+    /// windowed surface's vocabulary is its own per placement: the palette's
+    /// overlay default is a centred float, but a centred window is not a
+    /// tile edge, so windowed falls back to the design's own windowed
+    /// default (the bottom edge) instead. A sidebar keeps the same edge in
+    /// both placements.
+    #[must_use]
+    pub const fn default_windowed_anchor(surface: NativeSurface) -> Anchor {
+        match surface {
+            NativeSurface::Tree => Anchor::Left,
+            NativeSurface::Agent => Anchor::Right,
+            NativeSurface::Palette => Anchor::Bottom,
+            NativeSurface::Notifications => Anchor::Right,
         }
     }
 

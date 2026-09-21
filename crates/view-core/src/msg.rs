@@ -1809,16 +1809,22 @@ impl WinSplit {
         matches!(self, Self::Left | Self::Right)
     }
 
-    /// The split that puts a surface at `anchor`, or `None` for an anchor
-    /// no edge answers.
+    /// The split that puts a surface at `anchor`.
+    ///
+    /// Total over every anchor a windowed surface's own vocabulary can
+    /// produce (`view-native`'s `config::surfaces::anchors` restricts each
+    /// surface to `Left`/`Right`/`Top`/`Bottom` under
+    /// `SurfacePlacement::Windowed`, never `Center` or a corner), so this
+    /// never has to invent a split for a word a windowed surface could not
+    /// have been configured with. The wildcard arm exists only because
+    /// `Anchor` is `#[non_exhaustive]`.
     #[must_use]
-    pub fn for_anchor(anchor: crate::native::geometry::Anchor) -> Option<Self> {
+    pub const fn for_anchor(anchor: crate::native::geometry::Anchor) -> Self {
         match anchor {
-            crate::native::geometry::Anchor::Left => Some(Self::Left),
-            crate::native::geometry::Anchor::Right => Some(Self::Right),
-            crate::native::geometry::Anchor::Top => Some(Self::Above),
-            crate::native::geometry::Anchor::Bottom => Some(Self::Below),
-            _ => None,
+            crate::native::geometry::Anchor::Right => Self::Right,
+            crate::native::geometry::Anchor::Top => Self::Above,
+            crate::native::geometry::Anchor::Bottom => Self::Below,
+            _ => Self::Left,
         }
     }
 }

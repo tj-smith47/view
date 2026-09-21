@@ -866,8 +866,15 @@ fn popupmenu_width(items: &[PmItem]) -> u16 {
 /// inside it) both have to resolve to the exact same rect; two separately
 /// written `OverlayBox::new(..)` calls are two chances for that number to
 /// drift apart the next time either one is edited.
-fn palette_box() -> OverlayBox {
-    OverlayBox::new(70, 50)
+/// I8: `[ui.surfaces.palette] anchor`/`size` used to size and place this
+/// box under `windowed` alone -- an overlay palette always drew at a fixed
+/// 70x50 box regardless of what the table said, so the documented keys did
+/// nothing for the placement most users actually run. `size` is rows, per
+/// the design table (`docs/tiled-ui.md`'s own placement section); width
+/// stays the fixed 70 percent the design leaves unconfigured.
+fn palette_box(model: &Model) -> OverlayBox {
+    let layout = model.surfaces.layout(NativeSurface::Palette);
+    OverlayBox::new(70, layout.size).with_anchor(layout.anchor)
 }
 
 /// [`palette_box`] resolved against the terminal, then shifted down by
@@ -879,7 +886,7 @@ fn palette_box() -> OverlayBox {
 /// inside it) both resolve through this one function, so the two can never
 /// disagree about where the box actually is.
 fn palette_rect(model: &Model, offset: u16) -> Rect {
-    let rect = palette_box().rect(model.term_width, model.term_height.saturating_sub(offset));
+    let rect = palette_box(model).rect(model.term_width, model.term_height.saturating_sub(offset));
     Rect::new(
         rect.row.saturating_add(offset),
         rect.col,
@@ -3633,13 +3640,13 @@ mod tests {
         );
 
         // palette_box() on an 80x24 terminal with no chrome offset centers
-        // to row 6, col 12 (see
+        // to row 7, col 12 (see
         // the_palette_cursor_lands_inside_its_own_box_not_on_the_grids_bottom_row).
         // interior_origin adds (1, 2). The "> " prefix is 2 cells, then
         // cmdline_cursor_col counts the full 10-char "New file: " prompt
         // plus pos=3.
         let cursor = surface.cursor.expect("cmdline open, cursor must be Some");
-        assert_eq!(cursor.row, 6 + 1);
+        assert_eq!(cursor.row, 7 + 1);
         assert_eq!(cursor.col, 12 + 2 + 2 + 10 + 3);
     }
 
@@ -3964,17 +3971,18 @@ mod tests {
 
         let surface = render(&model);
 
-        // palette_box() is OverlayBox::new(70, 50), centered, on an 80x24
-        // terminal with no chrome offset: width = 80*70/100 = 56,
-        // height = 24*50/100 = 12, row = (24 - 12) / 2 = 6,
-        // col = (80 - 56) / 2 = 12. interior_origin for a 56x12 rect is
-        // (1, 2) (border row, border + one pad column). The header line is
-        // "> hello" -- prefix "> " is 2 cells, then
+        // palette_box() is OverlayBox::new(70, layout.size), layout.size
+        // defaulting to 40 (design's own default, `[ui.surfaces.palette]
+        // size`), centered, on an 80x24 terminal with no chrome offset:
+        // width = 80*70/100 = 56, height = 24*40/100 = 9,
+        // row = (24 - 9) / 2 = 7, col = (80 - 56) / 2 = 12. interior_origin
+        // for a 56x9 rect is (1, 2) (border row, border + one pad column).
+        // The header line is "> hello" -- prefix "> " is 2 cells, then
         // cmdline_cursor_col(":", "", pos=5) = 6.
         let cursor = surface.cursor.expect("cmdline open, cursor must be Some");
         assert_eq!(
             cursor.row,
-            6 + 1,
+            7 + 1,
             "cursor must sit on the palette's header row, not the grid's bottom row"
         );
         assert_eq!(cursor.col, 12 + 2 + 2 + 6);
@@ -4026,10 +4034,11 @@ mod tests {
             .find(|l| matches!(l.kind, LayerKind::Palette(_)))
             .expect("palette layer present");
         // one row reserved for the tabline: the box's terminal-relative
-        // height budget shrinks to 23 rows before centering, then the
-        // whole box shifts down by that one reserved row --
-        // row = (23 - 11) / 2 + 1 = 7.
-        assert_eq!(palette_layer.rect.row, 7);
+        // height budget shrinks to 23 rows before centering (height =
+        // 23*40/100 = 9, the design's own default `[ui.surfaces.palette]
+        // size`), then the whole box shifts down by that one reserved row
+        // -- row = (23 - 9) / 2 + 1 = 8.
+        assert_eq!(palette_layer.rect.row, 8);
 
         let cursor = surface.cursor.expect("cmdline open, cursor must be Some");
         assert_eq!(
@@ -4037,6 +4046,57 @@ mod tests {
             palette_layer.rect.row + 1,
             "cursor must land on the palette's header row, in the same \
              chrome-shifted coordinate space as the box it sits inside"
+        );
+    }
+
+    /// `[ui.surfaces.palette] anchor` and `size` used to reach only a
+    /// windowed open: `palette_box` drew a fixed 70x50 box under `overlay`
+    /// regardless of what the table said. Both now move the overlay box
+    /// itself.
+    #[test]
+    fn palette_overlay_anchor_and_size_move_the_boxs_own_rect() {
+        let mut model = model_with_grid(80, 24);
+        model.term_width = 80;
+        model.term_height = 24;
+        model.palette_enabled = true;
+        model.surfaces.set_layout(
+            NativeSurface::Palette,
+            view_core::native::geometry::SurfaceLayout::new(
+                view_core::native::geometry::SurfacePlacement::Overlay,
+                Anchor::Top,
+                20,
+            ),
+        );
+        apply(
+            &mut model,
+            UiEvent::CmdlineShow {
+                content: vec![(0, "hello".to_string())],
+                pos: 5,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+        );
+
+        let surface = render(&model);
+        let palette_layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Palette(_)))
+            .expect("palette layer present");
+
+        // anchor = "top", size = 20: height = 24*20/100 = 4, row = 0
+        // (flush against the top edge rather than centered).
+        assert_eq!(
+            palette_layer.rect.row, 0,
+            "anchor = \"top\" must move the overlay palette's own box, not \
+             just a windowed open's"
+        );
+        assert_eq!(
+            palette_layer.rect.height, 4,
+            "size must resize the overlay palette's own box, not just a \
+             windowed open's"
         );
     }
 

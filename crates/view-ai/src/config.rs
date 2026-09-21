@@ -115,11 +115,14 @@ impl AiConfig {
         if let Some(notice) = surface_size_notice {
             notices.push(notice.to_string());
         }
-        // a notice only where the two could disagree: a document naming
-        // just the older key needs no warning that it has a newer name,
-        // and the shipped example spells only `panel_width` for exactly
-        // that reason -- a genuinely silent, notice-free baseline
-        if panel_width_spelled && surface_size_spelled {
+        // one notice whenever the older key is spelled at all, whether or
+        // not the surfaces table also names it -- the same rule
+        // `view-native`'s own tree alias holds itself to (`config::
+        // surfaces::alias`), so `[native] tree_width` and `[ai]
+        // panel_width` tell a user the same thing under the same
+        // condition rather than one warning on both keys written and the
+        // other staying silent on the older key alone
+        if panel_width_spelled {
             notices.push(view_core::config::alias_notice(
                 "ai",
                 "panel_width",
@@ -848,6 +851,28 @@ agent = "claude-code"
         );
     }
 
+    /// Minor 2: `[native] tree_width` alone tells the user it now has a
+    /// newer name (`config::surfaces::alias` in `view-native`), and `[ai]
+    /// panel_width` owes the same notice under the same condition --
+    /// spelled at all, not only spelled alongside the surfaces table.
+    #[test]
+    fn the_panel_width_alias_notices_even_when_spelled_alone() {
+        let cfg = AiConfig::from_toml_str("[ai]\npanel_width = 20\n")
+            .expect("[ai] panel_width alone must parse");
+        assert_eq!(cfg.panel_width(), 20, "the older key still answers alone");
+        assert_eq!(
+            cfg.notices(),
+            [view_core::config::alias_notice(
+                "ai",
+                "panel_width",
+                "ui.surfaces.agent",
+                "size"
+            )],
+            "the older key's own name change owes a notice the moment it is \
+             spelled, the same rule [native] tree_width holds itself to"
+        );
+    }
+
     #[test]
     fn a_panel_width_outside_the_range_is_clamped_rather_than_refused() {
         for (written, resolved) in [
@@ -1081,8 +1106,9 @@ agent = "claude-code"
         // walk). The one field this loader borrows from it,
         // `[ui.surfaces.agent] size`, is real but left commented out in the
         // shipped example: `[ai] panel_width` is the field this walk forces
-        // live, and spelling both there would owe the alias notice this
-        // test refuses
+        // live, spelled the same way the example spells `[native]
+        // tree_width` beside `[ui.surfaces.tree] size`, so the alias
+        // notice below is expected, not refused
         let ConfigFile { ai: _, ui: _ } =
             toml::from_str(EXAMPLE_TOML).expect("the shipped example must parse as the wire shape");
         assert_example_sets_every_field(&doc, "ai");
@@ -1107,7 +1133,19 @@ agent = "claude-code"
                 "the example spells [{table}] {key}, so the file answered it"
             );
         }
-        assert!(cfg.notices().is_empty(), "{:?}", cfg.notices());
+        assert_eq!(
+            cfg.notices(),
+            [view_core::config::alias_notice(
+                "ai",
+                "panel_width",
+                "ui.surfaces.agent",
+                "size"
+            )],
+            "the shipped example spells the older key, which owes its own \
+             alias notice on every start, the same as [native] tree_width \
+             does: {:?}",
+            cfg.notices()
+        );
     }
 
     /// An environment naming every key this crate reads, so a test about a
@@ -1129,7 +1167,8 @@ agent = "claude-code"
         let path = dir.join("view.toml");
         std::fs::write(
             &path,
-            "[ai]\nenabled = true\nagent = \"claude-code\"\npanel_width = 20\n\n\
+            "[ai]\nenabled = true\nagent = \"claude-code\"\n\n\
+             [ui.surfaces.agent]\nsize = 20\n\n\
              [ai.review]\nopen_target = \"current\"\n",
         )
         .expect("the fixture must be written");
