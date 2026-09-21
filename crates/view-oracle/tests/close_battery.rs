@@ -1522,3 +1522,111 @@ fn a_file_put_in_the_trees_window_takes_it_back_from_view() {
         "the next `<leader>e` opened no tree at all"
     );
 }
+
+/// The window the close hands back is the person's, and the callback the
+/// open armed has no business firing in it again. It outlived the close
+/// once: the next file opened there walked the whole hand-back, wrote
+/// nvim's global values into a window view no longer owned, and reported
+/// a surface that had no window.
+///
+/// The options themselves are not the reading here. nvim drops a
+/// `setlocal` window value when the window takes another buffer, so what
+/// a stale hand-back writes and what nvim writes cannot be told apart
+/// from the option alone. The group's absence can.
+///
+/// Disconfirm: dropping the `nvim_del_augroup_by_name` call from
+/// `CLOSE_NATIVE_WINDOW_CHUNK` leaves the group armed, which fails on the
+/// group still existing after the close.
+#[test]
+fn the_close_takes_the_trees_autocommand_with_it() {
+    let work = common::ScratchPaths::new("close-battery-handed-back-look");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = windowed_tree_session(&dir);
+    engine.arm_and_input(":e README.md<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    close_the_tree_alone_on_its_tabpage(&mut engine);
+    assert_ordinary_window(&mut engine);
+    assert_eq!(
+        engine
+            .eval_str("exists('#view_native_tree') . ':' . len(get(g:, 'view_native_windows', {}))")
+            .unwrap()
+            .trim(),
+        "0:0",
+        "the close left the tree's own autocommand armed in a window that \
+         is the person's again"
+    );
+
+    engine.arm_and_input(":edit notes.txt<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine
+            .eval_str("expand('%:t') . ':' . &winfixwidth . ':' . winnr('$')")
+            .unwrap()
+            .trim(),
+        "notes.txt:0:1",
+        "view touched a window it had handed back"
+    );
+    assert!(
+        !engine.tree_is_open(),
+        "a window that is nobody's surface reported itself taken"
+    );
+    assert_eq!(
+        view_buffers(&mut engine),
+        "",
+        "the tree came back in a window the person is reading a file in"
+    );
+}
+
+/// A file whose filetype carries a look of its own, opened in the tree's
+/// window. nvim fires `FileType` while the buffer loads, before the
+/// window is handed back, so the hand-back's restore from the globals had
+/// the last word and the person read the file without the look their own
+/// config gives that filetype.
+///
+/// Disconfirm: dropping the `nvim_exec_autocmds('FileType', ...)` call
+/// from the chunks' shared helper leaves the window reading the global
+/// value, which fails against the control window beside it.
+#[test]
+fn a_file_taken_into_the_trees_window_keeps_its_filetypes_look() {
+    let work = common::ScratchPaths::new("close-battery-ftplugin-look");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = windowed_tree_session(&dir);
+    engine.arm_and_input(":e README.md<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    // what an ftplugin does, in the one line a test can type
+    engine
+        .arm_and_input(":autocmd FileType text setlocal nonumber<CR>")
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine.arm_and_input(":set number<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    open_the_tree(&mut engine);
+
+    engine.arm_and_input(":edit notes.txt<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine
+            .eval_str("&filetype . ':' . &number . ':' . &g:number")
+            .unwrap()
+            .trim(),
+        "text:0:1",
+        "the file is read with nvim's global value over the one the \
+         person's config gives its filetype"
+    );
+
+    // the same filetype in a window that was never the tree's: a second
+    // file, because `FileType` fires as a buffer loads and a window on an
+    // already-loaded one takes its neighbour's values instead
+    engine
+        .arm_and_input(":call writefile(['plain'], 'other.txt')<CR>")
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine.arm_and_input(":vsplit other.txt<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.eval_str("&filetype . ':' . &number").unwrap().trim(),
+        "text:0",
+        "the control window disagrees with the handed-back one, so this \
+         leg is measuring something other than the hand-back"
+    );
+}

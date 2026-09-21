@@ -20,6 +20,66 @@ use view_core::msg::WinSplit;
 /// wedged, not slow.
 const OPEN_NATIVE_WINDOW_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The three things both chunks have to agree on, as the Lua they are
+/// built from: whether a window is still the surface's, how the size pins
+/// come off, and how the look goes back. Written once and expanded into
+/// each chunk, because a rule spelled twice drifts: the close chunk and
+/// the open chunk's callback asked the same question in two different
+/// ways once, and the weaker spelling let the next open enter a window
+/// holding the person's file.
+///
+/// `is_ours` answers by identity: the buffer the open recorded is still
+/// view's own scratch (`is_scratch`) and still the one the window shows.
+/// `:edit` inside the window reuses the scratch buffer itself, since it
+/// is unnamed and unmodified, which is nvim's own condition for reusing a
+/// buffer, so the recorded number alone says nothing.
+///
+/// `hand_back_look` re-fires the buffer's `FileType` autocommands inside
+/// the window after restoring the globals. `FileType` runs during
+/// `BufReadPost`, before the window is handed back, so an ftplugin's
+/// `setlocal number` had already been written and the restore from the
+/// globals wiped it: the person read their file without the look their
+/// own config gives that filetype. `modeline = false`, because a file's
+/// own modeline has already been applied and applying it twice is not
+/// what a hand-back owes.
+macro_rules! native_window_helpers {
+    () => {
+        "\
+local function is_scratch(buf)
+  return vim.api.nvim_buf_is_valid(buf)
+    and vim.api.nvim_get_option_value('buftype', { buf = buf }) == 'nofile'
+end
+local function is_ours(entry)
+  return entry ~= nil
+    and vim.api.nvim_win_is_valid(entry.win)
+    and is_scratch(entry.buf)
+    and vim.api.nvim_win_get_buf(entry.win) == entry.buf
+end
+local function unpin_size(win)
+  for _, opt in ipairs({ 'winfixwidth', 'winfixheight' }) do
+    vim.api.nvim_set_option_value(opt, false, { win = win, scope = 'local' })
+  end
+end
+local function hand_back_look(win)
+  unpin_size(win)
+  local buf = vim.api.nvim_win_get_buf(win)
+  for _, opt in ipairs({ 'number', 'relativenumber', 'signcolumn',
+    'foldcolumn', 'wrap' }) do
+    vim.api.nvim_set_option_value(opt,
+      vim.api.nvim_get_option_value(opt, { scope = 'global' }),
+      { win = win, scope = 'local' })
+  end
+  if vim.api.nvim_get_option_value('filetype', { buf = buf }) ~= '' then
+    vim.api.nvim_win_call(win, function()
+      vim.api.nvim_exec_autocmds('FileType',
+        { buffer = buf, modeline = false })
+    end)
+  end
+end
+"
+    };
+}
+
 /// The lua chunk [`EngineHandle::open_native_window`] runs inside nvim,
 /// taking the surface id, the split word, the size in percent and view's
 /// own channel id.
@@ -52,22 +112,21 @@ const OPEN_NATIVE_WINDOW_TIMEOUT: Duration = Duration::from_secs(5);
 /// `signcolumn` and `wrap` away from every window they opened afterwards
 /// for the rest of the session.
 ///
-/// The window stops being view's the moment nvim puts another buffer in
-/// it, or turns the one view put there into a file, which the
-/// `BufWinEnter` autocommand the open registers is what notices. Both
-/// spellings, because `:edit` inside the window reuses the scratch buffer
-/// itself -- it is unnamed and unmodified, which is nvim's own condition
-/// for reusing a buffer rather than making one -- and comes back under
-/// the same number with the file's name, `buftype` and contents. The
-/// window is the surface's while it shows the recorded buffer and that
-/// buffer is still `buftype = nofile`, which is the same identity the
-/// close chunk keeps. It reports the surface over the bridge as
+/// The window stops being view's the moment `is_ours` stops answering for
+/// it, which the `BufWinEnter` autocommand the open registers is what
+/// notices. It reports the surface over the bridge as
 /// `native_window_taken`, hands the window's look back, forgets the
 /// surface's entry so a later close finds nothing to do, and deletes
 /// itself, so one taken window costs one message. Without it view went on
 /// painting the surface's rows over the file the person had just opened
 /// there, and they could not see what they were editing until the next
 /// toggle.
+///
+/// The callback's first question is whether the entry still names this
+/// window, and it deletes itself when the answer is no: the close chunk
+/// deletes the augroup, but a firing that reaches a window view has
+/// already handed back would write the globals over the person's own
+/// window-local look.
 ///
 /// The window is made with `:split` rather than `nvim_open_win`, which
 /// allocates a second grid under `ext_multigrid` and leaves it behind: view
@@ -77,12 +136,13 @@ const OPEN_NATIVE_WINDOW_TIMEOUT: Duration = Duration::from_secs(5);
 /// `Msg::NativeWindowOpened`.
 ///
 /// [`EngineHandle::open_native_window`]: super::EngineHandle::open_native_window
-pub(crate) const OPEN_NATIVE_WINDOW_CHUNK: &str = "\
-local id, split, pct, channel = ...
+pub(crate) const OPEN_NATIVE_WINDOW_CHUNK: &str = concat!(
+    "local id, split, pct, channel = ...\n",
+    native_window_helpers!(),
+    "\
 local wins = vim.g.view_native_windows or {}
 local live = wins[id]
-if live and vim.api.nvim_win_is_valid(live.win)
-  and vim.api.nvim_win_get_buf(live.win) == live.buf then
+if is_ours(live) then
   vim.api.nvim_set_current_win(live.win)
   return live.win
 end
@@ -129,33 +189,26 @@ vim.api.nvim_create_autocmd('BufWinEnter', {
   group = vim.api.nvim_create_augroup('view_native_' .. id,
     { clear = true }),
   callback = function()
-    local scratch = vim.api.nvim_buf_is_valid(buf)
-      and vim.api.nvim_get_option_value('buftype', { buf = buf }) == 'nofile'
-    if vim.api.nvim_get_current_win() ~= win
-      or (scratch and vim.api.nvim_win_get_buf(win) == buf) then
+    local held = vim.g.view_native_windows or {}
+    local entry = held[id]
+    if entry == nil or entry.win ~= win then
+      return true
+    end
+    if vim.api.nvim_get_current_win() ~= win or is_ours(entry) then
       return
     end
-    local held = vim.g.view_native_windows or {}
     held[id] = nil
     vim.g.view_native_windows = held
-    for _, opt in ipairs({ 'winfixwidth', 'winfixheight' }) do
-      vim.api.nvim_set_option_value(opt, false,
-        { win = win, scope = 'local' })
-    end
-    for _, opt in ipairs({ 'number', 'relativenumber', 'signcolumn',
-      'foldcolumn', 'wrap' }) do
-      vim.api.nvim_set_option_value(opt,
-        vim.api.nvim_get_option_value(opt, { scope = 'global' }),
-        { win = win, scope = 'local' })
-    end
-    if scratch and vim.fn.bufwinid(buf) == -1 then
+    hand_back_look(win)
+    if is_scratch(buf) and vim.fn.bufwinid(buf) == -1 then
       pcall(vim.api.nvim_buf_delete, buf, { force = true })
     end
     pcall(vim.rpcnotify, channel, 'view_bridge', 'native_window_taken', id)
     return true
   end,
 })
-return win";
+return win"
+);
 
 /// The lua chunk [`EngineHandle::close_native_window`] runs inside nvim,
 /// taking the window handle as its single vararg.
@@ -204,9 +257,12 @@ return win";
 /// tabpage with it.
 ///
 /// The surface's entry in `vim.g.view_native_windows` goes whichever way
-/// the close runs. A window that survives it is nvim's again, and a later
-/// open that found the handle still listed there would take the person's
-/// window for the tree.
+/// the close runs, and the `view_native_<id>` augroup the open registered
+/// goes with it. A window that survives the close is nvim's again: a
+/// later open that found the handle still listed would take the person's
+/// window for the tree, and a `BufWinEnter` callback left armed would
+/// rewrite their window-local look with the globals the next time they
+/// opened a file there.
 ///
 /// The whole body runs under one `pcall`, and the chunk runs as a
 /// notification, whose error nvim reports to its log and not to the
@@ -219,41 +275,29 @@ return win";
 /// and a message would arrive after a close they watched succeed.
 ///
 /// [`EngineHandle::close_native_window`]: super::EngineHandle::close_native_window
-pub(crate) const CLOSE_NATIVE_WINDOW_CHUNK: &str = "\
-local win = ...
+pub(crate) const CLOSE_NATIVE_WINDOW_CHUNK: &str = concat!(
+    "local win = ...\n",
+    native_window_helpers!(),
+    "\
 local ok, err = pcall(function()
-  if not vim.api.nvim_win_is_valid(win) then
-    return
-  end
   local wins = vim.g.view_native_windows or {}
-  local scratch = 0
-  for id, entry in pairs(wins) do
-    if entry.win == win then
-      scratch = entry.buf
+  local entry = nil
+  for id, held in pairs(wins) do
+    if held.win == win then
+      entry = held
       wins[id] = nil
+      pcall(vim.api.nvim_del_augroup_by_name, 'view_native_' .. id)
     end
   end
   vim.g.view_native_windows = wins
-  local function unpin()
-    for _, opt in ipairs({ 'winfixwidth', 'winfixheight' }) do
-      vim.api.nvim_set_option_value(opt, false, { win = win, scope = 'local' })
-    end
-  end
-  if scratch == 0 then
+  if entry == nil or not vim.api.nvim_win_is_valid(win) then
     return
   end
-  if not vim.api.nvim_buf_is_valid(scratch)
-    or vim.api.nvim_get_option_value('buftype', { buf = scratch }) ~= 'nofile'
-    or vim.api.nvim_win_get_buf(win) ~= scratch then
-    unpin()
-    for _, opt in ipairs({ 'number', 'relativenumber', 'signcolumn',
-      'foldcolumn', 'wrap' }) do
-      vim.api.nvim_set_option_value(opt,
-        vim.api.nvim_get_option_value(opt, { scope = 'global' }),
-        { win = win, scope = 'local' })
-    end
+  if not is_ours(entry) then
+    hand_back_look(win)
     return
   end
+  local scratch = entry.buf
   local tab = vim.api.nvim_win_get_tabpage(win)
   local alone = #vim.api.nvim_tabpage_list_wins(tab) == 1
     and #vim.api.nvim_list_tabpages() == 1
@@ -275,17 +319,18 @@ local ok, err = pcall(function()
       target = vim.api.nvim_create_buf(true, false)
     end
   end
-  unpin()
+  unpin_size(win)
   if target ~= 0 then
     vim.api.nvim_win_set_buf(win, target)
   end
-  if vim.api.nvim_buf_is_valid(scratch) then
+  if is_scratch(scratch) then
     pcall(vim.api.nvim_buf_delete, scratch, { force = true })
   end
 end)
 if not ok then
   vim.api.nvim_echo({ { tostring(err), 'ErrorMsg' } }, true, {})
-end";
+end"
+);
 
 /// The lua chunk [`EngineHandle::set_window_size`] runs inside nvim,
 /// taking the window handle, a width and a height, either of which may be
@@ -473,6 +518,9 @@ mod tests {
 
     use super::*;
 
+    /// The helpers as both chunks carry them, for the walks below.
+    const NATIVE_WINDOW_HELPERS: &str = native_window_helpers!();
+
     /// The buffer behind a windowed surface holds nothing and takes no
     /// text. A keystroke reaches nvim before view has claimed the window,
     /// and a writable scratch buffer would take it.
@@ -559,11 +607,12 @@ mod tests {
             .find("vim.api.nvim_echo({ { tostring(err), 'ErrorMsg' } }, true, {})")
             .expect("a refusal reaches the screen");
         assert!(
-            body < echo && CLOSE_NATIVE_WINDOW_CHUNK.matches("pcall(").count() == 2,
+            body < echo && CLOSE_NATIVE_WINDOW_CHUNK.matches("pcall(").count() == 3,
             "an arm outside the body's pcall reports its refusal to nvim's \
              log alone, which is where this chunk's errors are invisible, \
-             and the wipe keeps one of its own so a refusal there says \
-             nothing after a close the person watched succeed"
+             and the wipe and the augroup delete keep one each so a \
+             refusal there says nothing after a close the person watched \
+             succeed"
         );
         assert!(
             CLOSE_NATIVE_WINDOW_CHUNK
@@ -571,10 +620,9 @@ mod tests {
             "the wipe no longer names the buffer the open chunk recorded"
         );
         for line in [
-            "scratch = entry.buf",
-            "if scratch == 0 then",
-            "vim.api.nvim_get_option_value('buftype', { buf = scratch }) ~= 'nofile'",
-            "vim.api.nvim_win_get_buf(win) ~= scratch",
+            "local scratch = entry.buf",
+            "if not is_ours(entry) then",
+            "if entry == nil or not vim.api.nvim_win_is_valid(win) then",
         ] {
             assert!(
                 CLOSE_NATIVE_WINDOW_CHUNK.contains(line),
@@ -583,6 +631,24 @@ mod tests {
                  unsaved edits in it: {line}"
             );
         }
+        assert!(
+            CLOSE_NATIVE_WINDOW_CHUNK
+                .contains("pcall(vim.api.nvim_del_augroup_by_name, 'view_native_' .. id)"),
+            "the callback the open armed outlives the close, and the next \
+             file the person opens in their own window is read with the \
+             globals written over their window-local look"
+        );
+        let dropped = CLOSE_NATIVE_WINDOW_CHUNK
+            .find("pcall(vim.api.nvim_del_augroup_by_name")
+            .expect("the chunk deletes the surface's augroup");
+        let arms = CLOSE_NATIVE_WINDOW_CHUNK
+            .find("if not is_ours(entry) then")
+            .expect("the chunk asks whether the window is still view's");
+        assert!(
+            dropped < arms,
+            "an arm that returns before the augroup goes leaves the \
+             callback armed on a window view has handed back"
+        );
         let listed = CLOSE_NATIVE_WINDOW_CHUNK
             .find("wins[id] = nil")
             .expect("the chunk forgets the surface's window");
@@ -630,7 +696,7 @@ mod tests {
         }
         for line in [
             "wins[id] = { win = win, buf = buf }",
-            "and vim.api.nvim_win_get_buf(live.win) == live.buf then",
+            "if is_ours(live) then",
         ] {
             assert!(
                 OPEN_NATIVE_WINDOW_CHUNK.contains(line),
@@ -650,11 +716,10 @@ mod tests {
     fn the_open_chunk_reports_a_window_nvim_gives_to_something_else() {
         for line in [
             "vim.api.nvim_create_autocmd('BufWinEnter', {",
-            "if vim.api.nvim_get_current_win() ~= win",
-            "or (scratch and vim.api.nvim_win_get_buf(win) == buf) then",
-            "and vim.api.nvim_get_option_value('buftype', { buf = buf }) == 'nofile'",
+            "if entry == nil or entry.win ~= win then",
+            "if vim.api.nvim_get_current_win() ~= win or is_ours(entry) then",
             "held[id] = nil",
-            "if scratch and vim.fn.bufwinid(buf) == -1 then",
+            "if is_scratch(buf) and vim.fn.bufwinid(buf) == -1 then",
             "pcall(vim.rpcnotify, channel, 'view_bridge', 'native_window_taken', id)",
             "return true",
         ] {
@@ -679,6 +744,58 @@ mod tests {
             "the entry outlives the report, so a close that follows acts \
              on a window that is the person's"
         );
+    }
+
+    /// One spelling of "is this window still the surface's", expanded
+    /// into both chunks and read at all three sites. The open chunk's
+    /// re-entry guard tested the recorded buffer number alone, which a
+    /// `:edit` with autocommands suppressed turns into the person's own
+    /// file, and the next open then entered their window and painted the
+    /// tree over it.
+    #[test]
+    fn one_identity_rule_answers_for_every_window_view_opened() {
+        for chunk in [OPEN_NATIVE_WINDOW_CHUNK, CLOSE_NATIVE_WINDOW_CHUNK] {
+            assert_eq!(
+                chunk.matches("local function is_ours(entry)").count(),
+                1,
+                "a chunk carrying the rule twice can carry two of them"
+            );
+            assert!(
+                chunk.contains(NATIVE_WINDOW_HELPERS),
+                "a chunk spelling the rule its own way drifts from the other"
+            );
+        }
+        assert_eq!(
+            OPEN_NATIVE_WINDOW_CHUNK.matches("is_ours(").count()
+                + CLOSE_NATIVE_WINDOW_CHUNK.matches("is_ours(").count(),
+            5,
+            "the rule is defined twice and asked at three sites: the \
+             re-entry guard, the callback and the close"
+        );
+        assert!(
+            NATIVE_WINDOW_HELPERS.contains("vim.api.nvim_exec_autocmds('FileType',"),
+            "the hand-back writes the globals over an ftplugin's own \
+             `setlocal`, and the person reads their file without the look \
+             their config gives that filetype"
+        );
+        let restored = NATIVE_WINDOW_HELPERS
+            .find("{ scope = 'global' }")
+            .expect("the hand-back restores the globals");
+        let refired = NATIVE_WINDOW_HELPERS
+            .find("nvim_exec_autocmds('FileType',")
+            .expect("the hand-back re-fires the buffer's FileType");
+        assert!(
+            restored < refired,
+            "the globals are written after the filetype's own values, \
+             which is the overwrite this re-fire exists to undo"
+        );
+        for chunk in [OPEN_NATIVE_WINDOW_CHUNK, CLOSE_NATIVE_WINDOW_CHUNK] {
+            assert!(
+                chunk.contains("hand_back_look(win)"),
+                "a hand-back arm that writes the look itself is a second \
+                 spelling of the rule"
+            );
+        }
     }
 
     #[test]
