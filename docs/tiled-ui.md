@@ -229,6 +229,13 @@ near box sits flush against it and every later box sits farther away. A
 dismissed box leaves by sliding toward that corner, or by shrinking where
 a left corner leaves it no column to slide into.
 
+Windowed, the notification stream takes two shapes from the same edge its
+`anchor` names. Left or right opens a tall, narrow list: every notice you
+have seen, newest at the top. Top or bottom opens a short, wide ticker
+instead, `winfixheight`-pinned so a split beside it cannot steal its rows.
+Either shape shortens each entry's timestamp to `HH:MM:SS` once its own
+tile is too narrow for the full date to fit beside the message.
+
 ## The placement ring
 
 `<F10>` (`cycle_surfaces`) steps the tree, the agent panel, the palette

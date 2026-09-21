@@ -738,6 +738,7 @@ fn body(kind: &LayerKind) -> Option<Body> {
         LayerKind::Statusline(view) => Some(statusline_body(view)),
         LayerKind::Prompt(view) => Some(prompt_body(view)),
         LayerKind::Palette(view) => Some(palette_body(view)),
+        LayerKind::Stream(view) => Some(stream_body(view)),
         LayerKind::Ai(view) => Some(ai_body(view)),
         LayerKind::EngineGrid
         | LayerKind::Cmdline(_)
@@ -865,6 +866,22 @@ fn palette_body(view: &PaletteView) -> Body {
         header_keep_tail: false,
         items_keep_tail: false,
         rule: true,
+    }
+}
+
+/// A windowed stream or ticker's rows: the same items [`palette_body`]
+/// lists, with no query header and no rule -- the tile's own frame already
+/// marks the surface's edge, and a query row with nothing typed into it
+/// would be chrome for an input the stream never takes.
+fn stream_body(view: &PaletteView) -> Body {
+    Body {
+        title: view.title.clone(),
+        header: Vec::new(),
+        items: view.rows.iter().map(palette_row_line).collect(),
+        selected: view.selected,
+        header_keep_tail: false,
+        items_keep_tail: false,
+        rule: false,
     }
 }
 

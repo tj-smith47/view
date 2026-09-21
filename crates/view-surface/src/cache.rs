@@ -390,6 +390,7 @@ fn kind_name(kind: &crate::LayerKind) -> &'static str {
         crate::LayerKind::Statusline(_) => "Statusline",
         crate::LayerKind::Prompt(_) => "Prompt",
         crate::LayerKind::Palette(_) => "Palette",
+        crate::LayerKind::Stream(_) => "Stream",
         crate::LayerKind::Speculated(_) => "Speculated",
         crate::LayerKind::Ai(_) => "Ai",
         crate::LayerKind::Pill(_) => "Pill",

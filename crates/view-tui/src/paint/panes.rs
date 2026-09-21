@@ -199,10 +199,18 @@ fn native_pane_content(
             let state = PaletteState::new(cmdline.clone(), completion);
             Some(LayerKind::Palette(state.view()))
         }
+        // left/right (a tall, narrow stream) and top/bottom (a short, wide
+        // ticker) are the same entry list at two aspect ratios -- the split
+        // direction nvim opened the window with already decided which one
+        // `pane_area` is, and `view_for_width` reads the room this call was
+        // actually handed to shorten the stamp in a narrow tile of either
+        // shape
         NativeSurface::Notifications => model.overlays().iter().find_map(|overlay| match &overlay
             .kind
         {
-            OverlayKind::MessageHistory(state) => Some(LayerKind::Palette(state.view())),
+            OverlayKind::MessageHistory(state) => {
+                Some(LayerKind::Stream(state.view_for_width(width)))
+            }
             _ => None,
         }),
         // `NativeSurface` is `#[non_exhaustive]`: every variant this crate

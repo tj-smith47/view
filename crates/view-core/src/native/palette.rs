@@ -182,10 +182,22 @@ impl MessageHistoryState {
 
     #[must_use]
     pub fn view(&self) -> PaletteView {
+        self.view_for_width(u16::MAX)
+    }
+
+    /// The same rows [`Self::view`] builds, with the timestamp shortened to
+    /// `HH:MM:SS` below [`NARROW_STREAM_STAMP_WIDTH`] -- the windowed
+    /// notification stream and ticker's tile can be narrower than the full
+    /// `YYYY-MM-DD HH:MM:SS` stamp leaves room for a message beside, while
+    /// the history overlay always has the whole terminal width and keeps
+    /// the full stamp by calling [`Self::view`].
+    #[must_use]
+    pub fn view_for_width(&self, width: u16) -> PaletteView {
+        let short = width < NARROW_STREAM_STAMP_WIDTH;
         let rows: Vec<PaletteRow> = self
             .entries
             .iter()
-            .map(|entry| PaletteRow::new(entry_label(entry)))
+            .map(|entry| PaletteRow::new(entry_label_for(entry, short)))
             .collect();
         let view = PaletteView::new(MESSAGE_HISTORY_TITLE).with_rows(rows);
         if self.entries.is_empty() {
@@ -247,8 +259,8 @@ impl MessageHistoryState {
 /// One history entry's text, verbatim: its `content` chunks joined the same
 /// way `typed_text` joins a cmdline's -- nothing downstream repaints a
 /// history row's internal highlighting either. What [`Self::selected_text`]
-/// hands the copy key, byte for byte; see [`entry_label`] for the row the
-/// overlay actually draws.
+/// hands the copy key, byte for byte; see [`entry_label_for`] for the row
+/// the overlay actually draws.
 fn entry_text(entry: &MessageEntry) -> String {
     entry
         .content
@@ -257,13 +269,23 @@ fn entry_text(entry: &MessageEntry) -> String {
         .collect()
 }
 
-/// One history row's full label: `entry_text` with its timestamp in front,
-/// which is what [`MessageHistoryState::view`] draws and nothing else
-/// reads -- a copy takes [`entry_text`] alone, so a path or a message
-/// containing today's date is never mistaken for one this label
+/// The tile width below which a windowed stream or ticker row shortens its
+/// stamp to `HH:MM:SS`: twice the full `YYYY-MM-DD HH:MM:SS` stamp's own 20
+/// columns (19 characters plus the space before the message), so the stamp
+/// never costs half a narrow tile's row or more.
+const NARROW_STREAM_STAMP_WIDTH: u16 = 40;
+
+/// One history row's label: `entry_text` with its timestamp in front, full
+/// (`YYYY-MM-DD HH:MM:SS`) or `short` (`HH:MM:SS`, the last 8 characters of
+/// the same rendering). [`MessageHistoryState::view`] and
+/// [`MessageHistoryState::view_for_width`] are what draw this and nothing
+/// else reads it -- a copy takes [`entry_text`] alone, so a path or a
+/// message containing today's date is never mistaken for one this label
 /// prepended.
-fn entry_label(entry: &MessageEntry) -> String {
-    format!("{} {}", format_at(entry.at()), entry_text(entry))
+fn entry_label_for(entry: &MessageEntry, short: bool) -> String {
+    let stamp = format_at(entry.at());
+    let stamp = if short { &stamp[11..] } else { &stamp[..] };
+    format!("{stamp} {}", entry_text(entry))
 }
 
 #[cfg(test)]

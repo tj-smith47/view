@@ -166,6 +166,11 @@ pub enum LayerKind {
     Prompt(PromptView),
     /// A command palette's prompt line, commands, and their bindings.
     Palette(PaletteView),
+    /// The windowed notification stream or ticker's entries: the same rows
+    /// a [`LayerKind::Palette`] message-history view carries, with no query
+    /// row and no rule -- a tile is not a floating command palette, and its
+    /// frame is already the tile's own border.
+    Stream(PaletteView),
     /// The display-only glyphs
     /// [`view_core::native::speculate::SpeculateState::pending`] is holding
     /// ahead of the engine, painted over [`LayerKind::EngineGrid`] at the
@@ -241,6 +246,7 @@ impl LayerKind {
             | Self::Statusline(_)
             | Self::Prompt(_)
             | Self::Palette(_)
+            | Self::Stream(_)
             | Self::Ai(_) => true,
             Self::EngineGrid
             | Self::Cmdline(_)

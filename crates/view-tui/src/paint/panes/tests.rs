@@ -2513,6 +2513,87 @@ fn notifications_windowed() {
     }
 }
 
+/// The notification stream windowed into a full-width band at the bottom
+/// edge -- the ticker, [`notifications_in_the_left_tile`]'s horizontal-split
+/// sibling, over the same real two-window vertical split
+/// [`palette_in_the_bottom_band`] draws its own band on.
+fn notifications_in_the_bottom_band(gaps: bool) -> Tiles {
+    let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
+    let band_height = 6;
+    let main_height = grid_height - 2 - band_height;
+    let slots = vec![
+        (0, 0, grid_width, main_height),
+        (main_height + 1, 0, grid_width, band_height),
+    ];
+    let mut model = tiled_model(gaps, TILED_HEIGHT, &slots);
+    model.surfaces.set_layout(
+        view_core::native::geometry::NativeSurface::Notifications,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Bottom,
+            30,
+        ),
+    );
+    let _ = model.engine.record_message(
+        "echomsg".to_string(),
+        vec![(0, "3 files saved".to_string())],
+        false,
+    );
+    let effects = update(
+        &mut model,
+        Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "history".to_string(),
+        },
+    );
+    let mut generation = 0;
+    for effect in &effects {
+        if let view_core::msg::Effect::Rpc(view_core::msg::RpcCall::OpenNativeWindow {
+            generation: g,
+            ..
+        }) = effect
+        {
+            generation = *g;
+        }
+    }
+    let _ = update(
+        &mut model,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: view_core::native::geometry::NativeSurface::Notifications,
+            win: WinHandle(1001),
+        },
+    );
+    let (row, col, width, height) = slots[1];
+    drive(
+        &mut model,
+        vec![
+            UiEvent::WinPos {
+                grid: LEFT + 1,
+                win: WinHandle(1001),
+                startrow: u64::from(row),
+                startcol: u64::from(col),
+                width: u64::from(width),
+                height: u64::from(height),
+            },
+            UiEvent::Flush,
+        ],
+    );
+    Tiles { slots, model }
+}
+
+/// The committed picture of the ticker: the recorded message inside a
+/// full-width band at the bottom, the buffer's text inside the top one.
+#[test]
+fn notifications_ticker_windowed() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-notifications-ticker-windowed", tier.0),
+            &tiles_dump(tier, notifications_in_the_bottom_band(true)),
+        );
+    }
+}
+
 /// A toast stack anchored to one of the four corners, over the same two-tile
 /// scene every other golden here uses -- toasts float over the tiles rather
 /// than claiming one, so this needs none of the native-window machinery the

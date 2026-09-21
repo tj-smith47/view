@@ -836,6 +836,7 @@ fn composite_layers(
             | LayerKind::Statusline(_)
             | LayerKind::Prompt(_)
             | LayerKind::Palette(_)
+            | LayerKind::Stream(_)
             | LayerKind::Ai(_) => {
                 let laid = layouts.and_then(|shadow| shadow.laid_for(index, layer));
                 paint_native_overlay(layer, laid, &theme, area, damage, buf);
