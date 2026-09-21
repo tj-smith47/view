@@ -288,6 +288,42 @@ Both are optional, and neither can fail your config: a whole number
 outside the range opens at the nearest end, and a fractional or
 non-numeric value opens at the default and tells you so.
 
+With `placement = "windowed"` a sidebar's resize keys move nvim's own
+window width, the same `<C-w>>`/`<C-w><` command it would answer directly.
+The percent it moved to is what the session remembers, so the next
+`<leader>e` or `<leader>ai` reopens it at that width. Under the default
+`placement = "overlay"` there is no window to resize, so the keys still
+step `tree_width`/`panel_width`, and a reopened float honours the new
+number.
+
+## Gaps and the placement ring
+
+| key | does |
+| --- | --- |
+| `<F9>` | toggles `[ui] gaps` for the session |
+| `<F10>` | steps every surface through the placement ring |
+
+`<F9>` is `toggle_gaps` under `[keys]`, working only under `panes = "tiles"`:
+the outer grid re-attaches at its new size and every open window is
+asked for a fresh inner size, gapped or flush against its neighbours.
+See [tiled-ui.md](tiled-ui.md#choosing-a-mode) for what a gap is.
+
+`<F10>` is `cycle_surfaces`, and moves the tree, the agent panel, the
+palette and the notification stream together, one ring position at a
+time: `config` (what `view.toml` gave each of them) `->` `windowed` `->`
+`overlay` `->` back to `config`. A surface open when the ring steps moves
+with it: the tree keeps its cursor row, the agent panel keeps its
+transcript. See [tiled-ui.md](tiled-ui.md#placing-a-surface) for what
+each position looks like.
+
+Rebind either one the way every other `[keys]` action is rebound:
+
+```toml
+[keys]
+toggle_gaps = "<F9>"        # the default
+cycle_surfaces = "<F10>"    # the default
+```
+
 ## Dismissing an error
 
 An error or warning is sticky: it stays on screen until you have read it,

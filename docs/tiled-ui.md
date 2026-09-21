@@ -177,6 +177,70 @@ The active tile's frame takes the first of these that resolves:
 The two highlight groups are read from the engine when a colorscheme
 loads.
 
+## Placing a surface
+
+The file tree, the agent panel, the palette and the notification stream
+each answer to a `placement`, an `anchor` and a `size`. `placement`
+`"overlay"` floats the surface over your buffer; `"windowed"` gives it a
+window of its own in nvim's layout, so your buffers make room for it and
+every window command reaches it. `anchor` is the edge (or, for the
+notification stream's toast stack, the corner) it opens at, and `size` is
+its share of the terminal.
+
+The tree is the one surface `view.toml` places directly:
+
+```toml
+[ui.surfaces.tree]
+placement = "overlay"      # default: "overlay". "windowed" opens it as a
+                            # window of its own
+anchor = "left"             # default: "left". left | right
+size = 30                   # default: 30 -- percent of the terminal width
+```
+
+`[native] tree_width` is `[ui.surfaces.tree] size` under its older name;
+write either one. The agent panel shares the same split for its width
+alone:
+
+```toml
+[ui.surfaces.agent]
+size = 30                   # default: 30 -- percent of the terminal width
+
+[ai]
+panel_width = 30            # the older name for the same value
+```
+
+The agent panel's own `placement`, and the palette's and the notification
+stream's `placement` and `anchor`, are not `view.toml` keys yet: the
+notification stream opens at its own default corner, top-right, and the
+only lever over any of the three surfaces' placement this session is the
+placement ring below. The four corners a toast stack can open at (top-left,
+top-right, bottom-left, bottom-right) and the direction each grows in are
+real regardless: the stack's near box sits flush against its own corner and
+every later one sits farther away, and a dismissed box leaves by sliding, or
+by shrinking where a left corner has left it no column to slide into, toward
+that same corner.
+
+## The placement ring
+
+`<F10>` (`cycle_surfaces`) steps the tree, the agent panel, the palette
+and the notification stream together through one shared, three-position
+ring:
+
+```
+config -> windowed -> overlay -> config
+```
+
+`config` is what `view.toml` gave each surface at startup: `overlay` for
+every surface but a tree you placed windowed yourself. The ring's
+`windowed` and `overlay` stops move every surface to that placement at
+once, whatever `view.toml` said. A third press returns every surface to
+its own configured placement, the loop's only three stops. A surface
+already open when the ring steps keeps what it was showing: the tree
+keeps its cursor row, the agent panel keeps its transcript, and the
+notification stream keeps what it was displaying. See
+[keymaps.md](keymaps.md#gaps-and-the-placement-ring) for the key itself
+and `<F9>`, the gaps toggle beside it.
+
 ## Width a surface has to work with
 
 The tree, the agent panel and the other surfaces size themselves as a
@@ -184,3 +248,10 @@ percentage of the outer grid. Under gapped tiles the outer grid is already
 two columns narrower than the terminal, and a tile spends four more on its
 frame and gaps. A windowed surface has up to six columns less text width
 than the same percentage of the terminal.
+
+Inside its own pane, a windowed surface draws unframed: the tile around it
+is already a box, so a border of the surface's own would be a second one
+where a person sees one. Its content spans the full width nvim gave the
+tile. A floating surface draws its own border and, at six columns wide or
+more, a one-cell pad inside it on both sides. Its windowed counterpart keeps
+those four columns for content.
