@@ -513,13 +513,11 @@ impl GridRegistry {
     #[inline]
     pub(crate) fn apply_cells(&mut self, grid: GridId, op: GridOp) {
         if let GridOp::CursorGoto { .. } = op {
-            // `pane_theme` (view-tui) reads `cursor` to decide which pane
-            // dims through `NormalNC`, so a cursor move between two grids
-            // changes what every cell of both panes paints even though
-            // neither grid's own cells changed. `placement_dirty` is the
-            // existing "something outside `GridOp::Cells` changed" signal
-            // (see `apply` below); a bare `CursorGoto` bypasses it because
-            // it never reaches `apply`, so it forced no repaint and a
+            // a cursor move between grids changes what every cell of both
+            // panes and their frames paints even though neither grid's own
+            // cells changed, and `placement_dirty` is the one signal that
+            // names no cells: a bare `CursorGoto` bypasses it because it
+            // never reaches `apply`, so it forced no repaint and a
             // damage-clipped composite left the old dim/undim colors
             // standing.
             if self.cursor != Some(grid) {

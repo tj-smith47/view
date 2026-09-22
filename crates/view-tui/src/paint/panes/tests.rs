@@ -269,9 +269,7 @@ fn the_active_pane_is_distinguishable_from_the_inactive_one() {
 /// opens no overlay: the registry's `cursor` field moves without marking
 /// anything dirty. A damage-clipped composite built from `GridDamage` and
 /// overlay rows alone therefore skips both panes and leaves the frame
-/// before the move standing, which is the debug panic filed 2026-09-22
-/// (`damage-clipped composite diverged from a full recomposite`) under a
-/// tree sidebar, stacked startup notices, `:vsplit`, `<C-w>l`.
+/// before the move standing.
 #[test]
 fn a_focus_move_with_no_text_change_repaints_both_panes_dimming() {
     let mut model = vsplit();
