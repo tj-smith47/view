@@ -6,7 +6,7 @@
 //! runtime's jobs; nothing here does I/O or speaks RPC.
 
 use view_core::msg::RpcCall;
-use view_core::native::mappings::{command_only_forms, default_maps};
+use view_core::native::mappings::default_maps;
 
 use crate::config::NativeConfig;
 
@@ -19,23 +19,16 @@ use crate::config::NativeConfig;
 /// The `:View` command carries no spec and registers unconditionally, so a
 /// user who turned every default key off keeps a way in.
 ///
-/// A row also survives when its `(feature, verb)` names a
-/// [`command_only_forms`] row: `ui gaps` is one of `REGISTRY_EXEMPT_FEATURES`
-/// (`native::mappings`) and has no `[native]` switch of its own -- its off
-/// switch is the `[keys]` rebind, not a disable bit `cfg.enabled` could ever
-/// see -- so a row naming one of these forms is kept whatever `cfg.enabled`
-/// answers for its feature.
+/// `ui gaps` survives this filter without help: `ui` is one of
+/// `REGISTRY_EXEMPT_FEATURES` (`native::mappings`) and has no `[native]`
+/// switch, so `cfg.enabled("ui")` reads `is_reachable_feature` alone and is
+/// always true.
 #[must_use]
 pub fn register_plan(cfg: &NativeConfig, channel_id: u64) -> RpcCall {
     RpcCall::RegisterMappings {
         specs: default_maps()
             .iter()
-            .filter(|spec| {
-                cfg.enabled(spec.feature)
-                    || command_only_forms()
-                        .iter()
-                        .any(|form| form.feature == spec.feature && form.verb == spec.verb)
-            })
+            .filter(|spec| cfg.enabled(spec.feature))
             .cloned()
             .collect(),
         channel_id,
@@ -109,12 +102,10 @@ mod tests {
     /// `both_docs_pages_render_the_review_keys_this_build_installs` pins the
     /// review-key table on it, since that table is generated where the
     /// review keys live.
-    /// `ui` has no `[native]` switch (it fails config parsing outright --
-    /// `registry::features()` carries no `ui` row), so its two default keys
-    /// can never be filtered out by `cfg.enabled` alone. The widened filter
-    /// (`cfg.enabled(..) || command_only_forms` names the row) is the reason
-    /// this stays true even for a feature `[native]` structurally cannot
-    /// gate.
+    /// `ui` has no `[native]` switch (`registry::features()` carries no `ui`
+    /// row), so its two default keys can never be filtered out by
+    /// `cfg.enabled` alone -- `is_reachable_feature("ui")` answers true
+    /// through `REGISTRY_EXEMPT_FEATURES` whatever the config says.
     #[test]
     fn the_ui_gaps_row_survives_the_enabled_filter() {
         let plan = register_plan(&NativeConfig::all_enabled(), 7);
