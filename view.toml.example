@@ -76,7 +76,9 @@ tree_width = 30            # default: 30 -- percent of the terminal width,
 [keys]
 sidebar_wider = ["<S-Right>", "<C-w>>"]
 sidebar_narrower = ["<S-Left>", "<C-w><"]
-composer_newline = ["<S-CR>", "<M-CR>"]
+composer_newline = ["<S-CR>", "<M-CR>"]   # <M-CR> is also new_tile's alt
+                                           # spelling below; a press reaches
+                                           # whichever of the two is focused
 toggle_gaps = "<leader>ug"
 cycle_surfaces = "<leader>uw"
 
@@ -104,7 +106,9 @@ move_up      = "<S-D-Up>"
 move_down    = "<S-D-Down>"
 close        = "<D-w>"
 close_alt    = "<D-q>"
-new_tile     = "<D-CR>"
+new_tile     = "<D-CR>"    # <M-CR> is also composer_newline's second
+                           # default above; a press reaches whichever of
+                           # the two is focused
 zoom         = "<D-f>"
 full_width   = "<M-D-f>"
 flip_split   = "<D-j>"

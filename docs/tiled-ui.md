@@ -116,6 +116,11 @@ decided it:
 ui.panes = nvim (HYPRLAND_INSTANCE_SIGNATURE)
 ```
 
+`[keys] profile` is a choice of its own, alongside `[ui] panes`: it picks
+whether a session answers the omarchy desktop's own chords. `<D-Left>`
+reaches the same `<C-w>h` under either look mode. See
+[keymaps.md](keymaps.md#key-profiles).
+
 ## Flipping the mode in a running session
 
 ```

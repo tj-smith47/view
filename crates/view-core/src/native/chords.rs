@@ -734,6 +734,40 @@ pub fn unbound() -> &'static [(&'static str, &'static str)] {
     &UNBOUND
 }
 
+/// [`DESKTOP_CHORDS`] as a markdown table, so `docs/keymaps.md` and the
+/// chords this build actually registers cannot disagree: both read
+/// [`desktop_chords`]. The same reason [`super::mappings::render_table`]
+/// exists for [`super::mappings::default_maps`].
+#[must_use]
+pub fn render_chord_table() -> String {
+    let mut out = String::from(
+        "| omarchy chord | `[keys.desktop]` row | super | alt | reaches | twin |\n\
+         | --- | --- | --- | --- | --- | --- |\n",
+    );
+    for chord in desktop_chords() {
+        let reaches = match chord.rhs {
+            Rhs::Invoke => format!(":View {} {}", chord.feature, chord.verb),
+            Rhs::Keys(keys) => keys.to_string(),
+        };
+        out.push_str(&format!(
+            "| `{}` | `{}` | `{}` | `{}` | `{reaches}` | `{}` |\n",
+            chord.omarchy, chord.id, chord.with_super, chord.with_alt, chord.twin
+        ));
+    }
+    out
+}
+
+/// [`UNBOUND`] as a markdown table, for the same reason
+/// [`render_chord_table`] exists.
+#[must_use]
+pub fn render_unbound_table() -> String {
+    let mut out = String::from("| omarchy chord | unbound on |\n| --- | --- |\n");
+    for (chord, why) in unbound() {
+        out.push_str(&format!("| `{chord}` | {why} |\n"));
+    }
+    out
+}
+
 /// The omarchy chord `bindings.txt` spells with the xkb digit-row code this
 /// table's own [`DesktopChord::omarchy`] and [`UNBOUND`] cells spell as the
 /// plain digit (`SUPER + 1` for the fixture's `SUPER + code:10`), or `None`
@@ -920,5 +954,26 @@ mod tests {
     fn desktop_chord_finds_a_row_by_id_and_nothing_by_a_stranger() {
         assert!(desktop_chord("focus_left").is_some());
         assert!(desktop_chord("does-not-exist").is_none());
+    }
+
+    /// The keys page carries the same two generated tables this build
+    /// walks, for the reason `view-native`'s
+    /// `the_keys_page_renders_the_table_this_build_registers` pins
+    /// `render_table`: a chord added here and not to the page is a key a
+    /// reader presses with no documentation of it.
+    #[test]
+    fn the_generated_chord_table_matches_the_chord_walk() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/keymaps.md");
+        let page = std::fs::read_to_string(&path).expect("docs/keymaps.md must be readable");
+        let chords = render_chord_table();
+        assert!(
+            page.contains(&chords),
+            "docs/keymaps.md is stale, it must carry:\n{chords}"
+        );
+        let unbound_table = render_unbound_table();
+        assert!(
+            page.contains(&unbound_table),
+            "docs/keymaps.md is stale, it must carry:\n{unbound_table}"
+        );
     }
 }

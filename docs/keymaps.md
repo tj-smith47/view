@@ -100,6 +100,259 @@ view exactly where it fires in nvim:
 :nnoremap <C-]> <Cmd>lua vim.lsp.buf.definition()<CR>
 ```
 
+## Key profiles
+
+view answers the omarchy desktop's own chords on a machine with no desktop
+of its own, and nvim's leader keys on a machine that has one:
+
+```toml
+[keys]
+profile          = "auto"   # "auto" | "desktop" | "editor"
+desktop_modifier = "auto"   # "auto" | "super" | "alt"
+```
+
+`"auto"` reads the environment, first match wins:
+
+| marker | value |
+| --- | --- |
+| `SSH_CONNECTION` set | `desktop` |
+| `SSH_TTY` set | `desktop` |
+| `WAYLAND_DISPLAY` set | `editor` |
+| `DISPLAY` set | `editor` |
+| macOS, no ssh marker | `editor` |
+| Windows, no ssh marker | `editor` |
+| anything else | `desktop` |
+
+`:View keys profile` reports the profile and the modifier, each with the
+marker that decided it. `:View keys profile desktop|editor|auto` flips the
+profile for the running session: every key the new profile takes from a
+mapping of your own is reported the way the picker example above reports
+one, and every key the old profile had taken is given back.
+
+The chords are `Super` chords, and a terminal reports `Super` only under
+the kitty keyboard protocol. `desktop_modifier = "auto"` answers `super`
+where the protocol is in force and `alt` everywhere else; `alt` reaches
+view from every terminal, as the `Esc`-prefixed spelling every terminal
+sends for it.
+
+From a macOS client over ssh, `desktop_modifier = "alt"` together with the
+terminal's Option-as-Alt setting is the pair to use: Terminal, iTerm and
+kitty on macOS hold `Cmd` for themselves before the pty sees it.
+
+### The chords
+
+46 chords, one row per `[keys.desktop]` key. `super` and `alt` are the two
+spellings `desktop_modifier` picks between; `twin` is the key that reaches
+the same result under the editor profile, and stays bound under both:
+
+<!-- generated from desktop_chords() -->
+| omarchy chord | `[keys.desktop]` row | super | alt | reaches | twin |
+| --- | --- | --- | --- | --- | --- |
+| `SUPER + LEFT` | `focus_left` | `<D-Left>` | `<M-Left>` | `<C-w>h` | `<C-w>h` |
+| `SUPER + RIGHT` | `focus_right` | `<D-Right>` | `<M-Right>` | `<C-w>l` | `<C-w>l` |
+| `SUPER + UP` | `focus_up` | `<D-Up>` | `<M-Up>` | `<C-w>k` | `<C-w>k` |
+| `SUPER + DOWN` | `focus_down` | `<D-Down>` | `<M-Down>` | `<C-w>j` | `<C-w>j` |
+| `SUPER + SHIFT + LEFT` | `move_left` | `<S-D-Left>` | `<S-M-Left>` | `<C-w>H` | `<C-w>H` |
+| `SUPER + SHIFT + RIGHT` | `move_right` | `<S-D-Right>` | `<S-M-Right>` | `<C-w>L` | `<C-w>L` |
+| `SUPER + SHIFT + UP` | `move_up` | `<S-D-Up>` | `<S-M-Up>` | `<C-w>K` | `<C-w>K` |
+| `SUPER + SHIFT + DOWN` | `move_down` | `<S-D-Down>` | `<S-M-Down>` | `<C-w>J` | `<C-w>J` |
+| `SUPER + W` | `close` | `<D-w>` | `<M-w>` | `<C-w>c` | `<C-w>c` |
+| `SUPER + Q` | `close_alt` | `<D-q>` | `<M-q>` | `<C-w>c` | `<C-w>c` |
+| `SUPER + RETURN` | `new_tile` | `<D-CR>` | `<M-CR>` | `:View window new` | `<leader>wn` |
+| `SUPER + F` | `zoom` | `<D-f>` | `<M-f>` | `:View window zoom` | `<leader>wz` |
+| `SUPER + ALT + F` | `full_width` | `<M-D-f>` | `<C-M-f>` | `<C-w>|` | `<C-w>|` |
+| `SUPER + J` | `flip_split` | `<D-j>` | `<M-j>` | `:View window flip` | `<leader>ws` |
+| `SUPER + T` | `float` | `<D-t>` | `<M-t>` | `:View window float` | `<leader>uf` |
+| `SUPER + SPACE` | `palette` | `<D-Space>` | `<M-Space>` | `:View palette open` | `<leader><leader>` |
+| `SUPER + ALT + SPACE` | `files` | `<M-D-Space>` | `<C-M-Space>` | `:View picker files` | `<leader>ff` |
+| `SUPER + SHIFT + F` | `tree` | `<S-D-f>` | `<M-F>` | `:View tree toggle` | `<leader>e` |
+| `SUPER + 1` | `tabpage_1` | `<D-1>` | `<M-1>` | `1gt` | `1gt` |
+| `SUPER + 2` | `tabpage_2` | `<D-2>` | `<M-2>` | `2gt` | `2gt` |
+| `SUPER + 3` | `tabpage_3` | `<D-3>` | `<M-3>` | `3gt` | `3gt` |
+| `SUPER + 4` | `tabpage_4` | `<D-4>` | `<M-4>` | `4gt` | `4gt` |
+| `SUPER + 5` | `tabpage_5` | `<D-5>` | `<M-5>` | `5gt` | `5gt` |
+| `SUPER + 6` | `tabpage_6` | `<D-6>` | `<M-6>` | `6gt` | `6gt` |
+| `SUPER + 7` | `tabpage_7` | `<D-7>` | `<M-7>` | `7gt` | `7gt` |
+| `SUPER + 8` | `tabpage_8` | `<D-8>` | `<M-8>` | `8gt` | `8gt` |
+| `SUPER + 9` | `tabpage_9` | `<D-9>` | `<M-9>` | `9gt` | `9gt` |
+| `SUPER + SHIFT + 1` | `to_tabpage_1` | `<S-D-1>` | `<M-!>` | `:View window to_tabpage_1` | `<leader>w1` |
+| `SUPER + SHIFT + 2` | `to_tabpage_2` | `<S-D-2>` | `<M-@>` | `:View window to_tabpage_2` | `<leader>w2` |
+| `SUPER + SHIFT + 3` | `to_tabpage_3` | `<S-D-3>` | `<M-#>` | `:View window to_tabpage_3` | `<leader>w3` |
+| `SUPER + SHIFT + 4` | `to_tabpage_4` | `<S-D-4>` | `<M-$>` | `:View window to_tabpage_4` | `<leader>w4` |
+| `SUPER + SHIFT + 5` | `to_tabpage_5` | `<S-D-5>` | `<M-%>` | `:View window to_tabpage_5` | `<leader>w5` |
+| `SUPER + SHIFT + 6` | `to_tabpage_6` | `<S-D-6>` | `<M-^>` | `:View window to_tabpage_6` | `<leader>w6` |
+| `SUPER + SHIFT + 7` | `to_tabpage_7` | `<S-D-7>` | `<M-&>` | `:View window to_tabpage_7` | `<leader>w7` |
+| `SUPER + SHIFT + 8` | `to_tabpage_8` | `<S-D-8>` | `<M-*>` | `:View window to_tabpage_8` | `<leader>w8` |
+| `SUPER + SHIFT + 9` | `to_tabpage_9` | `<S-D-9>` | `<M-(>` | `:View window to_tabpage_9` | `<leader>w9` |
+| `SUPER + TAB` | `tabpage_next` | `<D-Tab>` | `<M-Tab>` | `gt` | `gt` |
+| `SUPER + SHIFT + TAB` | `tabpage_prev` | `<S-D-Tab>` | `<S-M-Tab>` | `gT` | `gT` |
+| `SUPER + code:20` | `narrower` | `<D-->` | `<M-->` | `<C-w><lt>` | `<C-w><` |
+| `SUPER + code:21` | `wider` | `<D-=>` | `<M-=>` | `<C-w>>` | `<C-w>>` |
+| `SUPER + SHIFT + code:20` | `shorter` | `<S-D-->` | `<M-_>` | `<C-w>-` | `<C-w>-` |
+| `SUPER + SHIFT + code:21` | `taller` | `<S-D-=>` | `<M-+>` | `<C-w>+` | `<C-w>+` |
+| `SUPER + SHIFT + BACKSPACE` | `gaps` | `<S-D-BS>` | `<C-M-g>` | `:View ui gaps` | `<leader>ug` |
+| `SUPER + SHIFT + ALT + comma` | `messages` | `<S-M-D-,>` | `<C-M-n>` | `:View notifications history` | `<leader>fm` |
+| `SUPER + comma` | `dismiss` | `<D-,>` | `<M-,>` | `:View notifications dismiss` | `<leader>fd` |
+| `SUPER + SHIFT + CTRL + A` | `agent` | `<C-S-D-a>` | `<C-M-a>` | `:View ai toggle` | `<leader>ai` |
+
+### Chords with no editor meaning
+
+The omarchy desktop binds more chords than a terminal session has a use
+for; each row below names what it would have to reach for:
+
+<!-- generated from unbound() -->
+| omarchy chord | unbound on |
+| --- | --- |
+| `CTRL + ALT + DELETE` | menus |
+| `SUPER + P` | the Hyprland layout modes |
+| `SUPER + CTRL + F` | compositor surface properties |
+| `SUPER + O` | compositor surface properties |
+| `SUPER + ALT + Home` | the saved window width |
+| `SUPER + Home` | the saved window width |
+| `SUPER + L` | the Hyprland layout modes |
+| `SUPER + SHIFT + ALT + code:10` | menus |
+| `SUPER + SHIFT + ALT + code:11` | menus |
+| `SUPER + SHIFT + ALT + code:12` | menus |
+| `SUPER + SHIFT + ALT + code:13` | menus |
+| `SUPER + SHIFT + ALT + code:14` | menus |
+| `SUPER + SHIFT + ALT + code:15` | menus |
+| `SUPER + SHIFT + ALT + code:16` | menus |
+| `SUPER + SHIFT + ALT + code:17` | menus |
+| `SUPER + SHIFT + ALT + code:18` | menus |
+| `SUPER + code:19` | menus |
+| `SUPER + SHIFT + code:19` | menus |
+| `SUPER + SHIFT + ALT + code:19` | menus |
+| `SUPER + S` | the scratchpad |
+| `SUPER + ALT + S` | the scratchpad |
+| `SUPER + grave` | the scratchpad |
+| `SUPER + SHIFT + grave` | the scratchpad |
+| `SUPER + CTRL + TAB` | the Hyprland layout modes |
+| `SUPER + SHIFT + ALT + LEFT` | monitors |
+| `SUPER + SHIFT + ALT + RIGHT` | monitors |
+| `SUPER + SHIFT + ALT + UP` | monitors |
+| `SUPER + SHIFT + ALT + DOWN` | monitors |
+| `ALT + TAB` | ALT + TAB |
+| `ALT + SHIFT + TAB` | ALT + TAB |
+| `CTRL + ALT + TAB` | monitors |
+| `CTRL + ALT + SHIFT + TAB` | monitors |
+| `SUPER + ALT + code:20` | menus |
+| `SUPER + ALT + code:21` | menus |
+| `SUPER + SHIFT + ALT + code:20` | menus |
+| `SUPER + SHIFT + ALT + code:21` | menus |
+| `SUPER + CTRL + code:20` | menus |
+| `SUPER + CTRL + code:21` | menus |
+| `SUPER + CTRL + SHIFT + code:20` | menus |
+| `SUPER + CTRL + SHIFT + code:21` | menus |
+| `SUPER + mouse_down` | the Hyprland layout modes |
+| `SUPER + mouse_up` | the Hyprland layout modes |
+| `SUPER + mouse:272` | compositor surface properties |
+| `SUPER + mouse:273` | compositor surface properties |
+| `SUPER + G` | window groups |
+| `SUPER + ALT + G` | window groups |
+| `SUPER + ALT + LEFT` | window groups |
+| `SUPER + ALT + RIGHT` | window groups |
+| `SUPER + ALT + UP` | window groups |
+| `SUPER + ALT + DOWN` | window groups |
+| `SUPER + ALT + TAB` | window groups |
+| `SUPER + ALT + SHIFT + TAB` | window groups |
+| `SUPER + CTRL + LEFT` | window groups |
+| `SUPER + CTRL + RIGHT` | window groups |
+| `SUPER + ALT + mouse_down` | window groups |
+| `SUPER + ALT + mouse_up` | window groups |
+| `SUPER + ALT + code:10` | window groups |
+| `SUPER + ALT + code:11` | window groups |
+| `SUPER + ALT + code:12` | window groups |
+| `SUPER + ALT + code:13` | window groups |
+| `SUPER + ALT + code:14` | window groups |
+| `SUPER + SLASH` | monitors |
+| `SUPER + ALT + SLASH` | monitors |
+| `SUPER + CTRL + E` | menus |
+| `SUPER + CTRL + C` | capture and media |
+| `SUPER + CTRL + O` | menus |
+| `SUPER + CTRL + H` | menus |
+| `SUPER + SHIFT + code:201` | menus |
+| `SUPER + ESCAPE` | menus |
+| `XF86PowerOff` | menus |
+| `SUPER + K` | menus |
+| `SUPER + ALT + K` | menus |
+| `SUPER + CTRL + K` | menus |
+| `SUPER + CTRL + Q` | application launching |
+| `XF86Calculator` | application launching |
+| `SUPER + SHIFT + SPACE` | menus |
+| `SUPER + CTRL + SPACE` | menus |
+| `SUPER + SHIFT + CTRL + SPACE` | menus |
+| `SUPER + BACKSPACE` | compositor surface properties |
+| `SUPER + CTRL + BACKSPACE` | compositor surface properties |
+| `SUPER + CTRL + ALT + F` | compositor surface properties |
+| `SUPER + SHIFT + comma` | menus |
+| `SUPER + CTRL + comma` | menus |
+| `SUPER + ALT + comma` | menus |
+| `SUPER + CTRL + I` | menus |
+| `SUPER + CTRL + N` | monitors |
+| `SUPER + CTRL + Delete` | monitors |
+| `SUPER + CTRL + ALT + Delete` | monitors |
+| `switch:on:Lid Switch` | menus |
+| `switch:off:Lid Switch` | menus |
+| `PRINT` | capture and media |
+| `ALT + PRINT` | capture and media |
+| `SUPER + ALT + code:34` | capture and media |
+| `SUPER + ALT + code:35` | capture and media |
+| `SUPER + PRINT` | capture and media |
+| `SUPER + CTRL + PRINT` | capture and media |
+| `SUPER + CTRL + S` | menus |
+| `SUPER + CTRL + PERIOD` | capture and media |
+| `SUPER + CTRL + R` | menus |
+| `SUPER + CTRL + ALT + R` | menus |
+| `SUPER + SHIFT + CTRL + R` | menus |
+| `SUPER + CTRL + ALT + T` | menus |
+| `SUPER + CTRL + ALT + B` | menus |
+| `SUPER + CTRL + ALT + W` | menus |
+| `SUPER + CTRL + A` | menus |
+| `SUPER + CTRL + B` | menus |
+| `SUPER + CTRL + D` | menus |
+| `SUPER + CTRL + ALT + D` | menus |
+| `SUPER + CTRL + W` | menus |
+| `SUPER + CTRL + P` | menus |
+| `SUPER + CTRL + T` | menus |
+| `SUPER + CTRL + Z` | compositor surface properties |
+| `SUPER + CTRL + ALT + Z` | compositor surface properties |
+| `SUPER + CTRL + L` | menus |
+| `SUPER + SHIFT + RETURN` | application launching |
+| `SUPER + ALT + SHIFT + F` | application launching |
+| `SUPER + SHIFT + B` | application launching |
+| `SUPER + SHIFT + ALT + B` | application launching |
+| `SUPER + SHIFT + N` | application launching |
+| `SUPER + ALT + RETURN` | application launching |
+| `SUPER + CTRL + RETURN` | application launching |
+| `SUPER + SHIFT + M` | application launching |
+| `SUPER + SHIFT + ALT + M` | application launching |
+| `SUPER + SHIFT + D` | application launching |
+| `SUPER + SHIFT + G` | application launching |
+| `SUPER + SHIFT + O` | application launching |
+| `SUPER + SHIFT + W` | application launching |
+| `SUPER + SHIFT + SLASH` | application launching |
+| `SUPER + SHIFT + A` | application launching |
+| `SUPER + SHIFT + ALT + A` | application launching |
+| `SUPER + SHIFT + C` | application launching |
+| `SUPER + SHIFT + E` | application launching |
+| `SUPER + SHIFT + ALT + E` | application launching |
+| `SUPER + SHIFT + Y` | application launching |
+| `SUPER + SHIFT + ALT + G` | application launching |
+| `SUPER + SHIFT + CTRL + G` | application launching |
+| `SUPER + SHIFT + P` | application launching |
+| `SUPER + SHIFT + S` | application launching |
+| `SUPER + SHIFT + X` | application launching |
+| `SUPER + SHIFT + ALT + X` | application launching |
+| `SUPER + CTRL + code:10` | menus |
+| `SUPER + CTRL + code:11` | menus |
+| `SUPER + CTRL + code:12` | menus |
+| `SUPER + CTRL + code:13` | menus |
+| `SUPER + CTRL + code:14` | menus |
+| `SUPER + CTRL + code:15` | menus |
+| `SUPER + CTRL + code:16` | menus |
+| `SUPER + CTRL + code:17` | menus |
+| `SUPER + CTRL + code:18` | menus |
+
 ## Turning them off
 
 A default key is registered only for a feature that is on, and only for
@@ -128,6 +381,22 @@ it off) and `:View ai …` answers with a notice. The same first-run notice
 the picker example above gets applies here too: if `<leader>ai` was already
 yours, taking it is reported, and the line above is what the notice names
 to give it back.
+
+The desktop chords turn off together, with the profile:
+
+```toml
+[keys]
+profile = "editor"
+```
+
+With that line, view registers none of the desktop chords, and every
+`<C-w>`-shaped twin keeps working. A single chord unbinds on its own row,
+with an empty value:
+
+```toml
+[keys.desktop]
+close_alt = ""
+```
 
 ## Answering an agent's permission request
 
