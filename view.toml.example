@@ -91,9 +91,11 @@ profile = "auto"            # "auto" | "desktop" | "editor"
 desktop_modifier = "auto"   # "auto" | "super" | "alt"
 
 # [keys.desktop] is one row per chord, each named at its default (the super
-# spelling; alt is substituted when desktop_modifier answers alt this run),
-# commented out below -- a row is written only to override its chord's own
-# spelling. Each is a registry key like any other, so each takes an
+# spelling, which desktop_modifier respells to alt for you when left
+# commented out), commented out below -- a row written here is taken
+# exactly as written, on any desktop_modifier, so uncommenting one without
+# also changing its spelling opts that chord out of the alt respelling.
+# Each is a registry key like any other, so each takes an
 # environment layer too: VIEW_KEYS_DESKTOP_FOCUS_LEFT and 45 siblings. An
 # empty value unbinds the chord.
 [keys.desktop]

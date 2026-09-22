@@ -215,11 +215,11 @@ fn a_profile_flip_stops_the_chord_while_ctrl_w_h_still_moves_focus() {
     );
 }
 
-/// Plants the desktop profile with `notifications` left on (every other
-/// registry feature off, for the same reason [`plant_desktop_profile`]
-/// turns them off), so this leg's chord reaches a real `Rhs::Invoke`
+/// Plants `notifications` on (every other registry feature off, for the
+/// same reason [`plant_desktop_profile`] turns them off) and `profile`
+/// asked for by `profile`, so this leg's chord reaches a real `Rhs::Invoke`
 /// dispatch rather than the `Rhs::Keys` `focus_left` both legs above press.
-fn plant_desktop_profile_with_notifications(home: &std::path::Path) {
+fn plant_notifications_under(home: &std::path::Path, profile: &str) {
     let dir = common::xdg_home(home, "XDG_CONFIG_HOME").join("view");
     std::fs::create_dir_all(&dir).expect("the isolated config home must be creatable");
     let mut text = String::from("[native]\n");
@@ -229,17 +229,25 @@ fn plant_desktop_profile_with_notifications(home: &std::path::Path) {
             text.push_str(" = false\n");
         }
     }
-    text.push_str("\n[keys]\nprofile = \"desktop\"\n");
+    text.push_str(&format!("\n[keys]\nprofile = \"{profile}\"\n"));
     std::fs::write(dir.join("view.toml"), text).expect("the isolated view.toml must be writable");
 }
 
 /// `notifications dismiss` (`<M-,>`) end to end: a real toast raised, a real
-/// chord byte sent, the toast gone. `focus_left`, the chord both legs above
-/// press, is `Rhs::Keys` -- it sets an existing nvim key and costs nothing
-/// beyond what typing that key already costs. This is the table's other
-/// shape: `Rhs::Invoke` sends `rpcnotify` to view's own bridge, which
-/// `Msg::FeatureInvoke` dispatches to `Messages::dismiss_newest`
-/// (`update/mod.rs`), a path no `Keys` chord exercises.
+/// chord byte sent, the toast gone -- and, first, the same byte sent under
+/// the editor profile, where `chord_plan` registers no desktop chord at
+/// all, proving the toast survives the keystroke on its own rather than
+/// happening to time out against whatever `wait_for_screen`'s own budget
+/// is. Without that leg, a chord that had silently stopped reaching
+/// `Rhs::Invoke` at all -- registered, but never firing -- would pass this
+/// test exactly as a working one does: nothing here would tell the two
+/// apart from a toast that dismissed itself. `focus_left`, the chord both
+/// legs above press, is `Rhs::Keys` -- it sets an existing nvim key and
+/// costs nothing beyond what typing that key already costs. This is the
+/// table's other shape: `Rhs::Invoke` sends `rpcnotify` to view's own
+/// bridge, which `Msg::FeatureInvoke` dispatches to
+/// `Messages::dismiss_newest` (`update/mod.rs`), a path no `Keys` chord
+/// exercises.
 #[test]
 fn an_invoke_chord_reaches_its_verb_end_to_end() {
     let paths = common::ScratchPaths::new("chord-invoke");
@@ -251,7 +259,7 @@ fn an_invoke_chord_reaches_its_verb_end_to_end() {
             .expect("the scratch file always sits inside the scratch root"),
     );
     common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
-    plant_desktop_profile_with_notifications(&paths.isolated_home);
+    plant_notifications_under(&paths.isolated_home, "editor");
 
     let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, QueryPolicy::AnswerDa1)
         .expect("PtySession::spawn_configured_with against target/debug/view");
@@ -269,11 +277,30 @@ fn an_invoke_chord_reaches_its_verb_end_to_end() {
     );
 
     session.send(ALT_COMMA).unwrap();
+    // a negative wait: give the (unregistered, under editor) chord a real
+    // chance to fire before concluding it did not
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        session.screen().contains("chordinvoketoken"),
+        "the toast must still stand under the editor profile, where no \
+         desktop chord is registered at all; screen:\n{}",
+        session.screen()
+    );
+
+    session.send(b"\x1b:View keys profile desktop\r").unwrap();
+    // the reissue is an asynchronous RegisterMappings call, and nothing on
+    // screen changes when it lands, so there is no predicate to wait on --
+    // a fixed pause stands in for the round trip before the chord below
+    // relies on it having landed.
+    std::thread::sleep(Duration::from_millis(800));
+
+    session.send(ALT_COMMA).unwrap();
     assert!(
         session.wait_for_screen(BUDGET, |screen| !screen
             .contents()
             .contains("chordinvoketoken")),
-        "notifications dismiss (<M-,>) never took the toast down; screen:\n{}",
+        "notifications dismiss (<M-,>) never took the toast down once the \
+         desktop profile was live; screen:\n{}",
         session.screen()
     );
 }
