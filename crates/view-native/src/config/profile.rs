@@ -11,8 +11,10 @@
 
 use std::borrow::Cow;
 
-use view_core::native::chords::{desktop_chords, DesktopModifier, KeyProfile, ModifierChoice};
-use view_core::native::mappings::{command_only_forms, MappingSpec};
+use view_core::native::chords::{
+    desktop_chords, DesktopModifier, KeyProfile, ModifierChoice, DESKTOP_CHORD_COUNT,
+};
+use view_core::native::mappings::MappingSpec;
 
 use super::resolve::Resolved;
 use crate::config::NativeConfig;
@@ -102,33 +104,13 @@ pub fn modifier_for(
     }
 }
 
-/// `(feature, verb)` pairs [`desktop_chords`] carries whose dispatch arm
-/// `update::mod`'s `Msg::FeatureInvoke` has not shipped yet: registering one
-/// of these would bind a key to a `rpcnotify` nothing answers.
-const AWAITING_DISPATCH: [(&str, &str); 14] = [
-    ("window", "new"),
-    ("window", "zoom"),
-    ("window", "flip"),
-    ("window", "float"),
-    ("window", "to_tabpage_1"),
-    ("window", "to_tabpage_2"),
-    ("window", "to_tabpage_3"),
-    ("window", "to_tabpage_4"),
-    ("window", "to_tabpage_5"),
-    ("window", "to_tabpage_6"),
-    ("window", "to_tabpage_7"),
-    ("window", "to_tabpage_8"),
-    ("window", "to_tabpage_9"),
-    ("notifications", "dismiss"),
-];
-
 /// Every chord of `profile`, spelled with `modifier` and with each resolved
 /// `[keys.desktop]` row applied. Empty under [`KeyProfile::Editor`].
 ///
 /// `desktop` is [`ResolvedConfig`](super::resolve::ResolvedConfig)'s answer
-/// for the 46 rows, in [`desktop_chords`] order. A row whose resolved value
-/// is empty yields no spec, and a row still in [`AWAITING_DISPATCH`] yields
-/// none either.
+/// for the 46 rows, in [`desktop_chords`] order -- the fixed length is what
+/// rules out a shorter slice silently dropping trailing chords under
+/// `.zip`. A row whose resolved value is empty yields no spec.
 ///
 /// A row whose [`Resolved::source`] is [`Source::Derived`] carries the
 /// chord's own `with_super` spelling verbatim (see `resolve_desktop_row`),
@@ -137,13 +119,12 @@ const AWAITING_DISPATCH: [(&str, &str); 14] = [
 /// the override the user wrote, applied as-is.
 ///
 /// `cfg` filters exactly as [`crate::mappings::register_plan`] filters its
-/// own rows: a chord whose feature `cfg` turned off contributes nothing, and
-/// a chord naming a [`command_only_forms`] pair survives regardless -- the
-/// same rule, so a feature disabled in `[native]` stays disabled whether its
-/// key comes from `DEFAULT_MAPS` or from a desktop chord.
+/// own rows: a chord whose feature `cfg` turned off contributes nothing, so
+/// a feature disabled in `[native]` stays disabled whether its key comes
+/// from `DEFAULT_MAPS` or from a desktop chord.
 #[must_use]
 pub fn chord_plan(
-    desktop: &[Resolved<String>],
+    desktop: &[Resolved<String>; DESKTOP_CHORD_COUNT],
     profile: KeyProfile,
     modifier: DesktopModifier,
     cfg: &NativeConfig,
@@ -154,13 +135,7 @@ pub fn chord_plan(
     desktop_chords()
         .iter()
         .zip(desktop)
-        .filter(|(chord, _)| !AWAITING_DISPATCH.contains(&(chord.feature, chord.verb)))
-        .filter(|(chord, _)| {
-            cfg.enabled(chord.feature)
-                || command_only_forms()
-                    .iter()
-                    .any(|form| form.feature == chord.feature && form.verb == chord.verb)
-        })
+        .filter(|(chord, _)| cfg.enabled(chord.feature))
         .filter_map(|(chord, resolved)| {
             let lhs = if resolved.source == super::resolve::Source::Derived {
                 chord.lhs(modifier).to_string()
@@ -292,14 +267,11 @@ mod tests {
         assert_eq!(row, "alt ([keys] desktop_modifier)");
     }
 
-    fn derived_desktop() -> Vec<Resolved<String>> {
-        desktop_chords()
-            .iter()
-            .map(|chord| Resolved {
-                value: chord.with_super.to_string(),
-                source: super::super::resolve::Source::Derived,
-            })
-            .collect()
+    fn derived_desktop() -> [Resolved<String>; DESKTOP_CHORD_COUNT] {
+        std::array::from_fn(|i| Resolved {
+            value: desktop_chords()[i].with_super.to_string(),
+            source: super::super::resolve::Source::Derived,
+        })
     }
 
     #[test]
@@ -313,22 +285,23 @@ mod tests {
         );
         assert_eq!(
             plan.len(),
-            desktop_chords().len() - AWAITING_DISPATCH.len(),
-            "every chord whose dispatch has shipped must reach the plan"
+            desktop_chords().len(),
+            "every chord must reach the plan"
         );
-        for spec in &plan {
+        for chord in desktop_chords() {
             assert!(
-                !AWAITING_DISPATCH.contains(&(spec.feature, spec.verb)),
-                "{} {} has no dispatch arm yet and must not be registered",
-                spec.feature,
-                spec.verb
+                plan.iter()
+                    .any(|spec| spec.feature == chord.feature && spec.verb == chord.verb),
+                "{} {} never reached the plan",
+                chord.feature,
+                chord.verb
             );
         }
     }
 
     /// A chord for a registry feature the config turned off must not
     /// register, the same way a `DEFAULT_MAPS` row for that feature does
-    /// not: `chord_plan` reads `cfg.enabled`, not only `AWAITING_DISPATCH`.
+    /// not: `chord_plan` reads `cfg.enabled`.
     #[test]
     fn every_feature_disabled_drops_a_registry_chord_from_the_plan() {
         let desktop = derived_desktop();

@@ -164,17 +164,23 @@ fn a_flip_gives_back_the_user_mapping_it_took() {
 fn every_chord_spelling_registers_as_its_own_key() {
     let (engine, channel, rx, _pump, _cutover) = spawn_attached();
 
+    // built with `DesktopChord::lhs`, the same call `view-native`'s
+    // `chord_plan` makes to respell a derived row under a settled modifier
+    // -- view-engine cannot depend on view-native (dependency direction),
+    // so this reads the production spelling function directly rather than
+    // the compiled-in `with_super`/`with_alt` fields.
+    use view_core::native::chords::DesktopModifier;
     let mut specs = Vec::new();
     for chord in view_core::native::chords::desktop_chords() {
         specs.push(MappingSpec {
             feature: chord.feature,
-            lhs: Cow::Borrowed(chord.with_super),
+            lhs: Cow::Borrowed(chord.lhs(DesktopModifier::Super)),
             verb: chord.verb,
             rhs: chord.rhs,
         });
         specs.push(MappingSpec {
             feature: chord.feature,
-            lhs: Cow::Borrowed(chord.with_alt),
+            lhs: Cow::Borrowed(chord.lhs(DesktopModifier::Alt)),
             verb: chord.verb,
             rhs: chord.rhs,
         });
