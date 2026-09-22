@@ -52,6 +52,13 @@ pub struct Model {
     /// session that never flipped starts in -- so [`KeyProfile`] itself
     /// carries the flip, not a nested option.
     pub key_profile_override: Option<crate::native::chords::KeyProfile>,
+    /// `:View keys profile` with no argument: `update()` sets this rather
+    /// than touching [`Self::key_profile_override`], since a bare report
+    /// asks what is live and changes nothing. `view::native::NativeSession`
+    /// is what actually knows the profile and the modifier row to report,
+    /// so it reads and clears this the same way it reads and applies a
+    /// flip.
+    pub key_profile_report_requested: bool,
     /// The toast stack's dismissal motion while one is playing, `None` at
     /// rest -- which is every frame outside the six a dismissal costs.
     ///
@@ -408,6 +415,7 @@ impl Model {
             mouse_capture: None,
             caps: TermCaps::default(),
             key_profile_override: None,
+            key_profile_report_requested: false,
             toast_motion: None,
             dirty: false,
             running: true,

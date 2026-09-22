@@ -1632,8 +1632,11 @@ fn dismiss_top_prompt(model: &mut Model) {
 /// `:View keys profile [desktop|editor|auto]`: records the flip on the
 /// model, with no report and no RPC of its own -- `NativeSession::follow_up`
 /// (`view/src/native.rs`) watches this field through `Stage::ProfileFlip`
-/// and is where the actual restore-and-reissue happens. An unrecognized or
-/// missing name changes nothing, the same "typo does nothing" answer
+/// and is where the actual restore-and-reissue happens. A bare
+/// `:View keys profile` sets [`Model::key_profile_report_requested`]
+/// instead, since it asks what is live rather than changing it, and
+/// `NativeSession` is what knows the profile and modifier to report. An
+/// unrecognized name changes nothing, the same "typo does nothing" answer
 /// `look::invoke` gives an unrecognized `ui panes` argument.
 fn keys_invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
     let mut words = verb.split_whitespace();
@@ -1644,6 +1647,10 @@ fn keys_invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
         Some("desktop") => Some(crate::native::chords::KeyProfile::Desktop),
         Some("editor") => Some(crate::native::chords::KeyProfile::Editor),
         Some("auto") => None,
+        None => {
+            model.key_profile_report_requested = true;
+            return Vec::new();
+        }
         _ => return Vec::new(),
     };
     model.key_profile_override = profile;

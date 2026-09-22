@@ -120,6 +120,13 @@ pub(crate) struct NativeSession {
     /// This session's current profile: [`Self::initial_profile`] until a
     /// live flip (`:View keys profile ...`) moves it.
     profile: KeyProfile,
+    /// The marker that decided [`Self::initial_profile`] under `"auto"`,
+    /// for `:View keys profile`'s bare-verb report. Not re-derived after a
+    /// live flip: a flip names its profile explicitly, so no marker
+    /// decided it, and the report says so the same way
+    /// [`view_native::config::ResolvedConfig::rows`] does for an explicit
+    /// `view.toml`/environment answer.
+    profile_marker: Option<&'static str>,
     /// `[keys] desktop_modifier`, still the raw choice -- the modifier a
     /// takeover actually spells its chords with also needs `model.caps`,
     /// which only exists once the terminal has answered.
@@ -158,6 +165,7 @@ impl NativeSession {
     ) -> (Self, Vec<Effect>) {
         let mut effects = Vec::new();
         let initial_profile = resolved.profile.value;
+        let profile_marker = resolved.profile_marker;
         let desktop_modifier_choice = resolved.desktop_modifier.value;
         let desktop = resolved.desktop.clone();
         let resolved = resolved.tables;
@@ -229,6 +237,7 @@ impl NativeSession {
             look,
             initial_profile,
             profile: initial_profile,
+            profile_marker,
             desktop_modifier_choice,
             desktop,
         };
@@ -294,13 +303,45 @@ impl NativeSession {
     /// unmapped the call before, so resending it is the whole of "give the
     /// old plan back, then apply the new one."
     fn reissue_mappings(&mut self, model: &mut Model, stage: Stage) -> Vec<Effect> {
+        if stage == Stage::ProfileFlip && model.key_profile_report_requested {
+            model.key_profile_report_requested = false;
+            return self.report_profile(model);
+        }
         if !self.handed_over {
             return Vec::new();
         }
         if stage == Stage::ProfileFlip {
-            self.profile = model.key_profile_override.unwrap_or(self.initial_profile);
+            let flipped = model.key_profile_override.unwrap_or(self.initial_profile);
+            if flipped == self.profile {
+                // a `:View keys ...` invoke with no profile in it (a typo, or
+                // the same profile named twice) reaches this stage the same
+                // way a real flip does; nothing changed, so nothing reissues.
+                return Vec::new();
+            }
+            self.profile = flipped;
         }
-        vec![Effect::Rpc(self.build_mapping_call(model))]
+        let (mapping_call, mut effects) = self.build_mapping_call(model);
+        effects.insert(0, Effect::Rpc(mapping_call));
+        effects
+    }
+
+    /// `:View keys profile` with no argument: reports the live profile and
+    /// modifier rather than changing either, on the same wording
+    /// [`view_native::config::ResolvedConfig::rows`] renders for the
+    /// `keys.profile` config row. The marker is shown only while the live
+    /// profile is still the one `"auto"` derived at startup -- a flip
+    /// named its profile explicitly, so no marker decided it.
+    fn report_profile(&self, model: &mut Model) -> Vec<Effect> {
+        let marker = (self.profile == self.initial_profile)
+            .then_some(self.profile_marker)
+            .flatten();
+        let (_, modifier_row, _) =
+            profile::modifier_for(self.desktop_modifier_choice, model.caps.kitty_kbd);
+        let text = format!(
+            "view: keys.profile = {}; keys.desktop_modifier = {modifier_row}",
+            view_native::config::profile_report_value(self.profile, marker)
+        );
+        model.engine.record_native_notice(text, false)
     }
 
     /// Builds this session's default-map registration: the plan's own
@@ -311,8 +352,11 @@ impl NativeSession {
     /// Shared by [`Self::take_over`] and [`Self::reissue_mappings`], so a
     /// chord respelled once the terminal's kitty keyboard protocol probe
     /// answers, or a profile flipped mid-session, both travel through the
-    /// one place that turns `self`'s resolved answers into a spec list.
-    fn build_mapping_call(&self, model: &Model) -> RpcCall {
+    /// one place that turns `self`'s resolved answers into a spec list. The
+    /// second element is the notice [`profile::modifier_for`] owes when
+    /// `[keys] desktop_modifier = "super"` is unreachable this run, empty
+    /// otherwise.
+    fn build_mapping_call(&self, model: &mut Model) -> (RpcCall, Vec<Effect>) {
         let mut mapping_call = mappings::register_plan(&self.cfg, self.channel_id);
         // `[keys] toggle_gaps`/`cycle_surfaces`: `view-native` already
         // validated the override (`resolve_ui_lhs`). `MappingSpec::lhs` is
@@ -348,8 +392,12 @@ impl NativeSession {
                 }
             }
         }
-        let (modifier, _, _) =
+        let (modifier, _, super_notice) =
             profile::modifier_for(self.desktop_modifier_choice, model.caps.kitty_kbd);
+        let notice_effects = match super_notice {
+            Some(text) => model.engine.record_native_notice(text.to_string(), false),
+            None => Vec::new(),
+        };
         if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
             specs.extend(profile::chord_plan(
                 &self.desktop,
@@ -370,7 +418,7 @@ impl NativeSession {
                 specs.retain(|spec| spec.feature != "ai");
             }
         }
-        mapping_call
+        (mapping_call, notice_effects)
     }
 
     /// Every takeover this session performs, then the one registration that
@@ -406,7 +454,8 @@ impl NativeSession {
         // (`Supersession::rpc`); it is in the plan to be reported, not to be
         // performed
         effects.extend(self.plan.iter().filter_map(|entry| entry.rpc.clone()));
-        effects.push(self.build_mapping_call(model));
+        let (mapping_call, mapping_notices) = self.build_mapping_call(model);
+        effects.push(mapping_call);
         effects.push(RpcCall::RegisterClipboard {
             channel_id: self.channel_id,
         });
@@ -442,6 +491,7 @@ impl NativeSession {
         // `ui_send` delivery without the startup query and keystroke-eating
         // wait that finding it earlier would have cost
         effects.push(Effect::Rpc(RpcCall::ClaimStdoutTty));
+        effects.extend(mapping_notices);
         effects
     }
 
@@ -566,6 +616,7 @@ impl NativeSession {
             profile: KeyProfile::Editor,
             desktop_modifier_choice: ModifierChoice::Auto,
             desktop: default_desktop(),
+            profile_marker: None,
         }
     }
 
@@ -590,6 +641,7 @@ impl NativeSession {
             profile: KeyProfile::Editor,
             desktop_modifier_choice: ModifierChoice::Auto,
             desktop: default_desktop(),
+            profile_marker: None,
         }
     }
 }
@@ -904,6 +956,7 @@ mod tests {
             profile: KeyProfile::Editor,
             desktop_modifier_choice: ModifierChoice::Auto,
             desktop: default_desktop(),
+            profile_marker: None,
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -977,6 +1030,7 @@ mod tests {
             profile: KeyProfile::Editor,
             desktop_modifier_choice: ModifierChoice::Auto,
             desktop: default_desktop(),
+            profile_marker: None,
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -1044,6 +1098,7 @@ mod tests {
             profile: KeyProfile::Editor,
             desktop_modifier_choice: ModifierChoice::Auto,
             desktop: default_desktop(),
+            profile_marker: None,
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -1392,6 +1447,31 @@ cycle_surfaces = \"gz\"
         assert_eq!(session.profile, KeyProfile::Desktop);
     }
 
+    /// A `:View keys ...` invoke that never touched `key_profile_override`
+    /// (a typo, or the current profile named again) still reaches
+    /// `Stage::ProfileFlip` -- `feature == "keys"` alone decides the stage,
+    /// before `keys_invoke` has parsed the verb -- but must reissue nothing:
+    /// the plan is already live under the profile that would have resulted.
+    #[test]
+    fn a_no_op_flip_reissues_nothing() {
+        let mut session = NativeSession {
+            handed_over: true,
+            profile: KeyProfile::Desktop,
+            initial_profile: KeyProfile::Desktop,
+            desktop_modifier_choice: ModifierChoice::Auto,
+            desktop: default_desktop(),
+            ..NativeSession::all_enabled(7, None)
+        };
+        let mut m = model();
+        m.key_profile_override = None;
+        let effects = unbatched(session.follow_up(&mut m, Stage::ProfileFlip));
+        assert!(
+            effects.is_empty(),
+            "a flip that settles on the profile already live must reissue nothing: {effects:?}"
+        );
+        assert_eq!(session.profile, KeyProfile::Desktop);
+    }
+
     /// The kitty keyboard protocol probe answers after the takeover already
     /// spelled the desktop chords under the Alt fallback. `Stage::CapsUpgraded`
     /// must reissue the same chords respelled with the terminal's real
@@ -1450,8 +1530,8 @@ cycle_surfaces = \"gz\"
             desktop: default_desktop(),
             ..NativeSession::all_enabled(7, None)
         };
-        let m = model();
-        let call = session.build_mapping_call(&m);
+        let mut m = model();
+        let (call, _) = session.build_mapping_call(&mut m);
         let specs = match call {
             RpcCall::RegisterMappings { specs, .. } => specs,
             other => panic!("build_mapping_call built {other:?}"),

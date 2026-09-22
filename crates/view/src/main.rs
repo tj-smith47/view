@@ -215,10 +215,11 @@ struct Cli {
     /// differently than nvim would.
     #[arg(long)]
     single_grid: bool,
-    /// Report the terminal capabilities this session resolved and where
-    /// they came from, as a notice inside the session rather than a line on
-    /// the screen it is about to take over. Implied by `--tier`, whose whole
-    /// point is to change what that notice says.
+    /// Reports the terminal capabilities this session resolved and where
+    /// they came from, the whole config registry and the desktop chord
+    /// modifier row, to stdout, and exits without opening a session.
+    /// `--tier` alone (without this flag) shows the one-line capability
+    /// notice inside the session it changed.
     #[arg(long)]
     print_caps: bool,
     /// Spawns the bundled engine with no user config at all: `view.toml`
@@ -1430,9 +1431,18 @@ fn main() -> Result<()> {
     // a message, not a write: this runs with the alternate screen up, where
     // a bare stderr line is invisible until teardown scrolls it back --
     // which is where the unconditional capability line used to surface,
-    // long after the session it described
-    if let Some(notice) = caps_notice(&cli, &resolved, model.caps, term.caps_source()) {
-        pre_executor_effects.extend(model.engine.record_native_notice(notice, false));
+    // long after the session it described. `--print-caps`'s full row table
+    // is the one exception -- it is printed to stdout and the process exits
+    // once the engine is up enough to tear down cleanly, below, rather than
+    // going through this notice at all: a multi-row table pushed onto the
+    // toast stack paints as ~60 physical rows on screen and the history
+    // overlay flattens it to one line, so no toast shape ever renders it
+    // legibly.
+    let print_caps_report = caps_notice(&cli, &resolved, model.caps, term.caps_source());
+    if !cli.print_caps {
+        if let Some(notice) = &print_caps_report {
+            pre_executor_effects.extend(model.engine.record_native_notice(notice.clone(), false));
+        }
     }
 
     // strictly after the probe has stopped reading the terminal, and
@@ -1506,6 +1516,19 @@ fn main() -> Result<()> {
                 .context("engine attach failed or timed out after nvim started"),
         }
     })?;
+
+    // `--print-caps`: the report is written to stdout and the process exits
+    // here, before the pump starts or any takeover runs -- the earliest
+    // point the engine exists to be torn down cleanly, the same drop then
+    // restore-then-exit order the ordinary quit path below uses.
+    if cli.print_caps {
+        if let Some(report) = print_caps_report {
+            drop(engine);
+            term.restore_now();
+            println!("{report}");
+            std::process::exit(0);
+        }
+    }
 
     // attach_sink -- the only code path that connects the engine's pump to
     // msg_tx at all -- runs here, strictly after EngineReady was already

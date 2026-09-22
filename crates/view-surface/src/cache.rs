@@ -77,10 +77,11 @@ impl Frame {
 ///
 /// - not state at all: `dirty`, `running`, `fatal_reason`, `config_was_read`,
 ///   `checktime_generation`, `pending_file_gone_probes`, `speculate`,
-///   `supervision`, `claimed_keys`, `key_bindings`, `key_profile_override`
-///   (`update()` only records a `:View keys profile` flip here;
-///   `NativeSession` is what reissues the registration, and no layer reads
-///   which profile is live), `cwd`, `colorscheme`,
+///   `supervision`, `claimed_keys`, `key_bindings`, `key_profile_override`,
+///   `key_profile_report_requested`
+///   (`update()` only records a `:View keys profile` flip or bare report
+///   request here; `NativeSession` is what reissues the registration or
+///   reports, and no layer reads which profile is live), `cwd`, `colorscheme`,
 ///   `detected_look` (what `panes = "auto"` answered and the variable that
 ///   decided it, read by the `:View ui panes` notice and the config report),
 ///   `mouse_capture`, `mouse_on`, `colon_mapped` (it gates whether a `:` is

@@ -1053,6 +1053,7 @@ impl Messages {
     /// down the newest thing read cannot be the thing that un-states it.
     /// `update`'s own `arm_top_slot` call, run after every fold, re-arms the
     /// dismissal timer if the entry that left held the top slot.
+    #[must_use]
     pub fn dismiss_newest(&mut self) -> bool {
         let Some(index) = self.entries.iter().rposition(|e| !e.condition) else {
             return false;
