@@ -235,6 +235,27 @@ mod tests {
         );
     }
 
+    /// A desktop chord's feature is `window`, a [`view_core::native::mappings::exempt_feature`]
+    /// row rather than a registry one, so the claim must still reach the
+    /// exempt-feature fallback `report` falls back to and print that row's
+    /// own off switch, not a `[native]` line `window` structurally cannot
+    /// carry.
+    #[test]
+    fn a_chord_over_a_user_mapping_is_claimed_and_reported() {
+        let report = report(
+            &[],
+            &[claim("window", "<D-Left>", true)],
+            registry::features(),
+        );
+        assert_eq!(report.len(), 1, "the claimed chord must be reported");
+        assert_eq!(
+            report[0].notice(),
+            "view took <D-Left> for the window (your desktop's own \
+             window-management chords still loads). Turn it off with \
+             keys.profile = \"editor\""
+        );
+    }
+
     #[test]
     fn a_key_that_landed_on_nothing_is_not_news() {
         let report = report(

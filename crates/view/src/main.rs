@@ -1078,7 +1078,6 @@ fn main() -> Result<()> {
     let config_path = resolve_config_path(&cli);
     let (file, config_error) = load_view_config(config_path.as_deref());
     let resolved = resolve_session_config(&cli, &file);
-    let view_config = resolved.tables.clone();
     let cfg = engine_config(&cli, &resolved.engine);
     // read off the config rather than re-derived from `cli`: the client this
     // resolves is the client the spawn below runs, and the spec is gone once
@@ -1545,7 +1544,7 @@ fn main() -> Result<()> {
     // already fired `VimEnter` into the presink by now, and that message is
     // what triggers this session's takeover and key registration
     let (mut native, load_effects) = native::NativeSession::load(
-        view_config,
+        resolved.clone(),
         config_path.clone(),
         engine.api_info.channel_id,
         &mut model,
@@ -2178,7 +2177,6 @@ mod tests {
                 "load_view_config",
                 "as_deref",
                 "resolve_session_config",
-                "clone",
                 "engine_config",
                 "remote",
                 "cloned",

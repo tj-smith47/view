@@ -273,6 +273,13 @@ pub fn disable_native_features_except(home: &Path, keep: &[&str]) {
             " = false\n"
         });
     }
+    // `[native]` off has no bearing on `[keys] profile`: a headless CI host
+    // still derives `KeyProfile::Desktop` (no display marker), so an
+    // "every native feature off" plant still registered all 46 desktop
+    // chords through the modifier/profile path `[native]` does not gate.
+    // The isolation this helper promises -- no view-owned key survives --
+    // needs the editor profile said explicitly.
+    text.push_str("\n[keys]\nprofile = \"editor\"\n");
     plant_view_config(home, &text);
 }
 

@@ -6,7 +6,7 @@
 //! runtime's jobs; nothing here does I/O or speaks RPC.
 
 use view_core::msg::RpcCall;
-use view_core::native::mappings::default_maps;
+use view_core::native::mappings::{command_only_forms, default_maps};
 
 use crate::config::NativeConfig;
 
@@ -18,13 +18,25 @@ use crate::config::NativeConfig;
 /// whatever the user's own config mapped to that key is what is still there.
 /// The `:View` command carries no spec and registers unconditionally, so a
 /// user who turned every default key off keeps a way in.
+///
+/// A row also survives when its `(feature, verb)` names a
+/// [`command_only_forms`] row: `ui gaps` is one of `REGISTRY_EXEMPT_FEATURES`
+/// (`native::mappings`) and has no `[native]` switch of its own -- its off
+/// switch is the `[keys]` rebind, not a disable bit `cfg.enabled` could ever
+/// see -- so a row naming one of these forms is kept whatever `cfg.enabled`
+/// answers for its feature.
 #[must_use]
 pub fn register_plan(cfg: &NativeConfig, channel_id: u64) -> RpcCall {
     RpcCall::RegisterMappings {
         specs: default_maps()
             .iter()
-            .filter(|spec| cfg.enabled(spec.feature))
-            .copied()
+            .filter(|spec| {
+                cfg.enabled(spec.feature)
+                    || command_only_forms()
+                        .iter()
+                        .any(|form| form.feature == spec.feature && form.verb == spec.verb)
+            })
+            .cloned()
             .collect(),
         channel_id,
     }
@@ -36,9 +48,11 @@ mod tests {
 
     use super::*;
 
-    fn specs_of(call: &RpcCall) -> Vec<&'static str> {
+    fn specs_of(call: &RpcCall) -> Vec<String> {
         match call {
-            RpcCall::RegisterMappings { specs, .. } => specs.iter().map(|s| s.lhs).collect(),
+            RpcCall::RegisterMappings { specs, .. } => {
+                specs.iter().map(|s| s.lhs.to_string()).collect()
+            }
             other => panic!("register_plan built {other:?}"),
         }
     }
@@ -52,7 +66,7 @@ mod tests {
                 let claimed: Vec<&str> = specs
                     .iter()
                     .filter(|s| s.feature == "picker")
-                    .map(|s| s.lhs)
+                    .map(|s| s.lhs.as_ref())
                     .collect();
                 assert!(
                     claimed.is_empty(),
@@ -69,7 +83,7 @@ mod tests {
         let registered = specs_of(&plan);
         for spec in default_maps() {
             assert!(
-                registered.contains(&spec.lhs),
+                registered.iter().any(|lhs| lhs == spec.lhs.as_ref()),
                 "{} is enabled but {} never reached the plan",
                 spec.feature,
                 spec.lhs
@@ -95,6 +109,26 @@ mod tests {
     /// `both_docs_pages_render_the_review_keys_this_build_installs` pins the
     /// review-key table on it, since that table is generated where the
     /// review keys live.
+    /// `ui` has no `[native]` switch (it fails config parsing outright --
+    /// `registry::features()` carries no `ui` row), so its two default keys
+    /// can never be filtered out by `cfg.enabled` alone. The widened filter
+    /// (`cfg.enabled(..) || command_only_forms` names the row) is the reason
+    /// this stays true even for a feature `[native]` structurally cannot
+    /// gate.
+    #[test]
+    fn the_ui_gaps_row_survives_the_enabled_filter() {
+        let plan = register_plan(&NativeConfig::all_enabled(), 7);
+        let registered = specs_of(&plan);
+        let ui_gaps = default_maps()
+            .iter()
+            .find(|s| s.feature == "ui" && s.verb == "gaps")
+            .expect("ui gaps is a shipped default map");
+        assert!(
+            registered.iter().any(|lhs| lhs == ui_gaps.lhs.as_ref()),
+            "ui gaps must survive the enabled filter: {registered:?}"
+        );
+    }
+
     #[test]
     fn the_keys_page_renders_the_table_this_build_registers() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/keymaps.md");

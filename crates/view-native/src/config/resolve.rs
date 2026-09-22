@@ -43,6 +43,17 @@ pub struct Resolved<T> {
     pub source: Source,
 }
 
+impl<T> Resolved<T> {
+    /// Builds a resolved answer directly, for a caller outside this crate
+    /// that needs one of its own -- a test fixture, chiefly -- since
+    /// `#[non_exhaustive]` refuses the struct literal past this crate's own
+    /// boundary.
+    #[must_use]
+    pub fn new(value: T, source: Source) -> Self {
+        Self { value, source }
+    }
+}
+
 /// Which rendering tier a user asked for. There is no `Auto` variant:
 /// "auto" is the absence of a choice, carried as `None`, so this layer
 /// never has to name a value it cannot compute -- only a caller holding a

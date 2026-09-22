@@ -43,6 +43,15 @@ pub struct Model {
     /// down; see [`Model::mouse_capture`].
     mouse_capture: Option<MouseCapture>,
     pub caps: TermCaps,
+    /// `:View keys profile <name>` while the session is running, `None`
+    /// until a flip is asked for. `update()` only records the choice here;
+    /// `view::native::NativeSession` is what reads it, restores the
+    /// previous registration and reissues the new one, since that is
+    /// engine I/O this pure crate cannot perform. `Some(None)` is not a
+    /// representable state -- "auto" resets to `None`, the same absence a
+    /// session that never flipped starts in -- so [`KeyProfile`] itself
+    /// carries the flip, not a nested option.
+    pub key_profile_override: Option<crate::native::chords::KeyProfile>,
     /// The toast stack's dismissal motion while one is playing, `None` at
     /// rest -- which is every frame outside the six a dismissal costs.
     ///
@@ -398,6 +407,7 @@ impl Model {
             next_overlay_id: 1,
             mouse_capture: None,
             caps: TermCaps::default(),
+            key_profile_override: None,
             toast_motion: None,
             dirty: false,
             running: true,

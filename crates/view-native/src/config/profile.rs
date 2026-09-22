@@ -1,16 +1,21 @@
 //! `[keys] profile` and `[keys] desktop_modifier`, derived where a user
 //! writes neither (spec section 9).
 //!
-//! This module carries the two pure derivations only: what `"auto"`
-//! resolves to for the profile, from the environment, and what `"auto"`
-//! resolves to for the modifier, from the kitty keyboard protocol probe.
-//! Layering an explicit `view.toml`/environment override on top of the
-//! profile derivation, and building a takeover's [`chord_plan`] from the
-//! result, are `resolve_with`'s and the takeover site's own job.
-//!
-//! [`chord_plan`]: view_core::native::chords::DesktopChord
+//! This module carries the two pure derivations -- what `"auto"` resolves to
+//! for the profile, from the environment, and what `"auto"` resolves to for
+//! the modifier, from the kitty keyboard protocol probe -- and [`chord_plan`],
+//! which turns [`ResolvedConfig`](super::resolve::ResolvedConfig)'s 46
+//! `[keys.desktop]` answers into the specs a takeover registers. Layering an
+//! explicit `view.toml`/environment override on top of the profile
+//! derivation is `resolve_with`'s own job.
 
-use view_core::native::chords::{DesktopModifier, KeyProfile, ModifierChoice};
+use std::borrow::Cow;
+
+use view_core::native::chords::{desktop_chords, DesktopModifier, KeyProfile, ModifierChoice};
+use view_core::native::mappings::{command_only_forms, MappingSpec};
+
+use super::resolve::Resolved;
+use crate::config::NativeConfig;
 
 /// The `SSH_CONNECTION` marker: an ssh session resolves [`KeyProfile::Desktop`]
 /// because the chords a remote desktop holds are held on the client, not on
@@ -95,6 +100,84 @@ pub fn modifier_for(
             (DesktopModifier::Alt, "alt ([keys] desktop_modifier)", None)
         }
     }
+}
+
+/// `(feature, verb)` pairs [`desktop_chords`] carries whose dispatch arm
+/// `update::mod`'s `Msg::FeatureInvoke` has not shipped yet: registering one
+/// of these would bind a key to a `rpcnotify` nothing answers.
+const AWAITING_DISPATCH: [(&str, &str); 14] = [
+    ("window", "new"),
+    ("window", "zoom"),
+    ("window", "flip"),
+    ("window", "float"),
+    ("window", "to_tabpage_1"),
+    ("window", "to_tabpage_2"),
+    ("window", "to_tabpage_3"),
+    ("window", "to_tabpage_4"),
+    ("window", "to_tabpage_5"),
+    ("window", "to_tabpage_6"),
+    ("window", "to_tabpage_7"),
+    ("window", "to_tabpage_8"),
+    ("window", "to_tabpage_9"),
+    ("notifications", "dismiss"),
+];
+
+/// Every chord of `profile`, spelled with `modifier` and with each resolved
+/// `[keys.desktop]` row applied. Empty under [`KeyProfile::Editor`].
+///
+/// `desktop` is [`ResolvedConfig`](super::resolve::ResolvedConfig)'s answer
+/// for the 46 rows, in [`desktop_chords`] order. A row whose resolved value
+/// is empty yields no spec, and a row still in [`AWAITING_DISPATCH`] yields
+/// none either.
+///
+/// A row whose [`Resolved::source`] is [`Source::Derived`] carries the
+/// chord's own `with_super` spelling verbatim (see `resolve_desktop_row`),
+/// not the modifier this session actually settled on, so such a row is
+/// re-spelled through [`DesktopChord::lhs`] here; any other source carries
+/// the override the user wrote, applied as-is.
+///
+/// `cfg` filters exactly as [`crate::mappings::register_plan`] filters its
+/// own rows: a chord whose feature `cfg` turned off contributes nothing, and
+/// a chord naming a [`command_only_forms`] pair survives regardless -- the
+/// same rule, so a feature disabled in `[native]` stays disabled whether its
+/// key comes from `DEFAULT_MAPS` or from a desktop chord.
+#[must_use]
+pub fn chord_plan(
+    desktop: &[Resolved<String>],
+    profile: KeyProfile,
+    modifier: DesktopModifier,
+    cfg: &NativeConfig,
+) -> Vec<MappingSpec> {
+    if profile != KeyProfile::Desktop {
+        return Vec::new();
+    }
+    desktop_chords()
+        .iter()
+        .zip(desktop)
+        .filter(|(chord, _)| !AWAITING_DISPATCH.contains(&(chord.feature, chord.verb)))
+        .filter(|(chord, _)| {
+            cfg.enabled(chord.feature)
+                || command_only_forms()
+                    .iter()
+                    .any(|form| form.feature == chord.feature && form.verb == chord.verb)
+        })
+        .filter_map(|(chord, resolved)| {
+            let lhs = if resolved.source == super::resolve::Source::Derived {
+                chord.lhs(modifier).to_string()
+            } else {
+                resolved.value.clone()
+            };
+            if lhs.is_empty() {
+                return None;
+            }
+            Some(MappingSpec {
+                feature: chord.feature,
+                lhs: Cow::Owned(lhs),
+                verb: chord.verb,
+                rhs: chord.rhs,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -207,5 +290,129 @@ mod tests {
         assert_eq!(row, "alt ([keys] desktop_modifier)");
         let (_, row, _) = modifier_for(ModifierChoice::Alt, false);
         assert_eq!(row, "alt ([keys] desktop_modifier)");
+    }
+
+    fn derived_desktop() -> Vec<Resolved<String>> {
+        desktop_chords()
+            .iter()
+            .map(|chord| Resolved {
+                value: chord.with_super.to_string(),
+                source: super::super::resolve::Source::Derived,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_desktop_session_registers_every_chord() {
+        let desktop = derived_desktop();
+        let plan = chord_plan(
+            &desktop,
+            KeyProfile::Desktop,
+            DesktopModifier::Super,
+            &NativeConfig::all_enabled(),
+        );
+        assert_eq!(
+            plan.len(),
+            desktop_chords().len() - AWAITING_DISPATCH.len(),
+            "every chord whose dispatch has shipped must reach the plan"
+        );
+        for spec in &plan {
+            assert!(
+                !AWAITING_DISPATCH.contains(&(spec.feature, spec.verb)),
+                "{} {} has no dispatch arm yet and must not be registered",
+                spec.feature,
+                spec.verb
+            );
+        }
+    }
+
+    /// A chord for a registry feature the config turned off must not
+    /// register, the same way a `DEFAULT_MAPS` row for that feature does
+    /// not: `chord_plan` reads `cfg.enabled`, not only `AWAITING_DISPATCH`.
+    #[test]
+    fn every_feature_disabled_drops_a_registry_chord_from_the_plan() {
+        let desktop = derived_desktop();
+        let cfg = NativeConfig {
+            disabled: view_core::native::registry::features()
+                .iter()
+                .map(|f| f.id)
+                .collect(),
+            ..NativeConfig::all_enabled()
+        };
+        let plan = chord_plan(&desktop, KeyProfile::Desktop, DesktopModifier::Super, &cfg);
+        assert!(
+            !plan.iter().any(|s| s.feature == "notifications"),
+            "notifications is a registry feature disabled by cfg, its chord must not register: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn an_editor_session_registers_none() {
+        let desktop = derived_desktop();
+        let plan = chord_plan(
+            &desktop,
+            KeyProfile::Editor,
+            DesktopModifier::Super,
+            &NativeConfig::all_enabled(),
+        );
+        assert!(plan.is_empty(), "the editor profile registers no chords");
+    }
+
+    #[test]
+    fn a_derived_row_is_respelled_under_the_settled_modifier() {
+        let desktop = derived_desktop();
+        let super_plan = chord_plan(
+            &desktop,
+            KeyProfile::Desktop,
+            DesktopModifier::Super,
+            &NativeConfig::all_enabled(),
+        );
+        let alt_plan = chord_plan(
+            &desktop,
+            KeyProfile::Desktop,
+            DesktopModifier::Alt,
+            &NativeConfig::all_enabled(),
+        );
+        let chord = desktop_chords()
+            .iter()
+            .find(|c| c.id == "focus_left")
+            .expect("focus_left is a shipped chord");
+        assert_eq!(
+            super_plan
+                .iter()
+                .find(|s| s.verb == "focus_left")
+                .map(|s| s.lhs.as_ref()),
+            Some(chord.with_super)
+        );
+        assert_eq!(
+            alt_plan
+                .iter()
+                .find(|s| s.verb == "focus_left")
+                .map(|s| s.lhs.as_ref()),
+            Some(chord.with_alt)
+        );
+    }
+
+    #[test]
+    fn an_empty_resolved_row_yields_no_spec() {
+        let mut desktop = derived_desktop();
+        let focus_left = desktop_chords()
+            .iter()
+            .position(|c| c.id == "focus_left")
+            .expect("focus_left is a shipped chord");
+        desktop[focus_left] = Resolved {
+            value: String::new(),
+            source: super::super::resolve::Source::File,
+        };
+        let plan = chord_plan(
+            &desktop,
+            KeyProfile::Desktop,
+            DesktopModifier::Super,
+            &NativeConfig::all_enabled(),
+        );
+        assert!(
+            !plan.iter().any(|s| s.verb == "focus_left"),
+            "an empty override must unbind rather than register an empty lhs"
+        );
     }
 }

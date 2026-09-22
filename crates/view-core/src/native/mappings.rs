@@ -7,6 +7,8 @@
 //! into a real nvim mapping so user remaps, key browsers and plugin
 //! introspection all see view's keys the way they see any other plugin's.
 
+use std::borrow::Cow;
+
 /// The ex-command every feature is reachable through, registered regardless
 /// of any feature's enabled bit so a user who turned the default keys off
 /// still has a path in. Rendered into the command a mapping's help text
@@ -45,7 +47,7 @@ pub enum Rhs {
 // Constructible by design (no `#[non_exhaustive]`): this is the payload
 // callers assemble for `RpcCall::RegisterMappings`, and a test that cannot
 // build a spec cannot exercise the registration path with one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MappingSpec {
     /// The [`registry`](super::registry) feature id this key reaches. The
     /// same id the `[native]` table keys on, so the key a user loses and the
@@ -55,10 +57,17 @@ pub struct MappingSpec {
     /// unresolved for nvim to expand at registration time, which is why
     /// registration waits for `VimEnter`: before it, `mapleader` is still
     /// nvim's default rather than the user's.
-    pub lhs: &'static str,
+    ///
+    /// Owned because a `[keys.desktop]` row supplies it for a chord: the
+    /// resolved override (or the derived spelling under whichever modifier
+    /// the session settled on) has nowhere `'static` to live the way a
+    /// compiled-in [`DEFAULT_MAPS`] row does.
+    pub lhs: Cow<'static, str>,
     /// Which of the feature's entry points the key invokes, e.g. `files`.
     /// Also the second word of the ex-command form (`:View picker files`).
     pub verb: &'static str,
+    /// What the key does once registered.
+    pub rhs: Rhs,
 }
 
 /// A default key that view set over an existing user mapping: what was
@@ -82,43 +91,51 @@ pub struct MappingClaim {
 static DEFAULT_MAPS: [MappingSpec; 10] = [
     MappingSpec {
         feature: "picker",
-        lhs: "<leader>ff",
+        lhs: Cow::Borrowed("<leader>ff"),
         verb: "files",
+        rhs: Rhs::Invoke,
     },
     MappingSpec {
         feature: "picker",
-        lhs: "<leader>fb",
+        lhs: Cow::Borrowed("<leader>fb"),
         verb: "buffers",
+        rhs: Rhs::Invoke,
     },
     MappingSpec {
         feature: "picker",
-        lhs: "<leader>fg",
+        lhs: Cow::Borrowed("<leader>fg"),
         verb: "grep",
+        rhs: Rhs::Invoke,
     },
     MappingSpec {
         feature: "tree",
-        lhs: "<leader>e",
+        lhs: Cow::Borrowed("<leader>e"),
         verb: "toggle",
+        rhs: Rhs::Invoke,
     },
     MappingSpec {
         feature: "notifications",
-        lhs: "<leader>fm",
+        lhs: Cow::Borrowed("<leader>fm"),
         verb: "history",
+        rhs: Rhs::Invoke,
     },
     MappingSpec {
         feature: "notifications",
-        lhs: "<leader>fp",
+        lhs: Cow::Borrowed("<leader>fp"),
         verb: "pause",
+        rhs: Rhs::Invoke,
     },
     MappingSpec {
         feature: "ai",
-        lhs: "<leader>ai",
+        lhs: Cow::Borrowed("<leader>ai"),
         verb: "toggle",
+        rhs: Rhs::Invoke,
     },
     MappingSpec {
         feature: "palette",
-        lhs: "<leader><leader>",
+        lhs: Cow::Borrowed("<leader><leader>"),
         verb: "open",
+        rhs: Rhs::Invoke,
     },
     // routed through the claimed-mapping path (nvim's own multi-key
     // mapping tree) rather than the raw terminal-keystroke `KeyBindings`
@@ -127,13 +144,15 @@ static DEFAULT_MAPS: [MappingSpec; 10] = [
     // here are three (`<leader>`, `u`, `g`/`w`).
     MappingSpec {
         feature: "ui",
-        lhs: "<leader>ug",
+        lhs: Cow::Borrowed("<leader>ug"),
         verb: "gaps",
+        rhs: Rhs::Invoke,
     },
     MappingSpec {
         feature: "ui",
-        lhs: "<leader>uw",
+        lhs: Cow::Borrowed("<leader>uw"),
         verb: "cycle_surfaces",
+        rhs: Rhs::Invoke,
     },
 ];
 
@@ -310,7 +329,14 @@ pub fn review_keys() -> &'static [ReviewKey] {
 /// engine accepts any spec a caller builds.
 #[must_use]
 pub fn is_spellable(spec: &MappingSpec) -> bool {
-    is_token(spec.feature) && is_token(spec.verb) && lhs_is_spellable(spec.lhs)
+    let keys_ok = match spec.rhs {
+        Rhs::Invoke => true,
+        // the chunk spells `spec.keys` into the same generated command form
+        // as `spec.verb`, so a chord's own key sequence needs the same
+        // vetting a feature or verb token gets
+        Rhs::Keys(keys) => lhs_is_spellable(keys),
+    };
+    is_token(spec.feature) && is_token(spec.verb) && lhs_is_spellable(spec.lhs.as_ref()) && keys_ok
 }
 
 /// Whether `lhs` is safe to hand nvim as a mapping's left-hand side: the
@@ -588,23 +614,33 @@ mod tests {
         let hostile = [
             MappingSpec {
                 feature: "picker",
-                lhs: "<leader>ff",
+                lhs: Cow::Borrowed("<leader>ff"),
                 verb: "files', 'x')|call system('id",
+                rhs: Rhs::Invoke,
             },
             MappingSpec {
                 feature: "pick'er",
-                lhs: "<leader>ff",
+                lhs: Cow::Borrowed("<leader>ff"),
                 verb: "files",
+                rhs: Rhs::Invoke,
             },
             MappingSpec {
                 feature: "picker",
-                lhs: "<leader>'ff",
+                lhs: Cow::Borrowed("<leader>'ff"),
                 verb: "files",
+                rhs: Rhs::Invoke,
             },
             MappingSpec {
                 feature: "",
-                lhs: "<leader>ff",
+                lhs: Cow::Borrowed("<leader>ff"),
                 verb: "files",
+                rhs: Rhs::Invoke,
+            },
+            MappingSpec {
+                feature: "window",
+                lhs: Cow::Borrowed("<D-h>"),
+                verb: "focus_left",
+                rhs: Rhs::Keys("<C-w>h'"),
             },
         ];
         for spec in &hostile {
@@ -724,7 +760,9 @@ mod tests {
     fn no_review_key_shadows_a_default_key() {
         for key in review_keys() {
             assert!(
-                !default_maps().iter().any(|spec| spec.lhs == key.lhs),
+                !default_maps()
+                    .iter()
+                    .any(|spec| spec.lhs.as_ref() == key.lhs),
                 "{} is both a default key and a review key",
                 key.lhs
             );
@@ -771,7 +809,7 @@ mod tests {
         let table = render_table();
         for spec in default_maps() {
             assert!(
-                table.contains(spec.lhs),
+                table.contains(spec.lhs.as_ref()),
                 "{} is missing from the rendered table",
                 spec.lhs
             );

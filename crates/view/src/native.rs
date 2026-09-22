@@ -15,9 +15,13 @@ use std::path::PathBuf;
 use view_core::model::{Look, Model};
 use view_core::msg::{Effect, EngineRequest, Msg, RpcCall, TakeoverStep};
 use view_core::native::channels::{self, Channel};
+use view_core::native::chords::{KeyProfile, ModifierChoice, DESKTOP_CHORD_COUNT};
 use view_core::native::registry;
 use view_core::native::surfaces;
-use view_native::config::{NativeConfig, ViewConfig};
+use view_native::config::profile;
+#[cfg(test)]
+use view_native::config::Source;
+use view_native::config::{NativeConfig, Resolved, ResolvedConfig};
 use view_native::report::report;
 use view_native::supersede::{plan, Supersession};
 use view_native::{mappings, paths, toast};
@@ -38,6 +42,14 @@ pub(crate) enum Stage {
     /// The registration answered with what it claimed, which is the last
     /// fact the first-run notice was waiting on.
     Claims,
+    /// The terminal answered the kitty keyboard protocol probe after the
+    /// takeover already ran with `kitty_kbd` unknown (assumed `false`): the
+    /// chords it registered may be spelled with the wrong modifier now that
+    /// the true answer is in.
+    CapsUpgraded,
+    /// `Msg::FeatureInvoke { feature: "keys", .. }` reached `update()`,
+    /// which may have moved `model.key_profile_override`.
+    ProfileFlip,
 }
 
 /// The step `msg` owes, or [`Stage::None`].
@@ -45,6 +57,8 @@ pub(crate) fn stage(msg: &Msg) -> Stage {
     match msg {
         Msg::EngineRequest(EngineRequest::VimEnter { .. }) => Stage::VimEnter,
         Msg::MappingsClaimed { .. } => Stage::Claims,
+        Msg::CapsUpgraded(_) => Stage::CapsUpgraded,
+        Msg::FeatureInvoke { feature, .. } if feature == "keys" => Stage::ProfileFlip,
         _ => Stage::None,
     }
 }
@@ -92,12 +106,27 @@ pub(crate) struct NativeSession {
     look: Look,
     /// `[keys] toggle_gaps`/`cycle_surfaces`: the left-hand side to
     /// register `ui gaps`/`ui cycle_surfaces` under, applied to the built
-    /// `RegisterMappings` spec in [`Self::take_over`] the same way
+    /// `RegisterMappings` spec in [`Self::build_mapping_call`] the same way
     /// `ai_enabled` is -- `view-native` resolves the override
     /// (`ResolvedConfig::tables.keys`), but the spec it hands back always
-    /// carries `default_maps()`'s own compile-time `lhs`, since a
-    /// `MappingSpec` is a `&'static str` by construction.
+    /// carries `default_maps()`'s own compile-time `lhs`, which
+    /// [`MappingSpec::lhs`](view_core::native::mappings::MappingSpec)'s
+    /// `Cow<'static, str>` lets this override without leaking a `Box`.
     ui_keys_lhs: (String, String),
+    /// `[keys] profile`, resolved once at startup: what `Stage::ProfileFlip`
+    /// falls back to when `model.key_profile_override` is `None`, i.e. a
+    /// flip back to `"auto"`.
+    initial_profile: KeyProfile,
+    /// This session's current profile: [`Self::initial_profile`] until a
+    /// live flip (`:View keys profile ...`) moves it.
+    profile: KeyProfile,
+    /// `[keys] desktop_modifier`, still the raw choice -- the modifier a
+    /// takeover actually spells its chords with also needs `model.caps`,
+    /// which only exists once the terminal has answered.
+    desktop_modifier_choice: ModifierChoice,
+    /// `[keys.desktop]`'s 46 resolved rows, in `chords::desktop_chords()`
+    /// order, read once at startup the way every other field here is.
+    desktop: [Resolved<String>; DESKTOP_CHORD_COUNT],
 }
 
 impl NativeSession {
@@ -122,12 +151,16 @@ impl NativeSession {
     /// executor exists at all" -- this method has no opinion on which and
     /// must not silently drop the effect deciding it does not apply yet.
     pub(crate) fn load(
-        resolved: ViewConfig,
+        resolved: ResolvedConfig,
         config_path: Option<PathBuf>,
         channel_id: u64,
         model: &mut Model,
     ) -> (Self, Vec<Effect>) {
         let mut effects = Vec::new();
+        let initial_profile = resolved.profile.value;
+        let desktop_modifier_choice = resolved.desktop_modifier.value;
+        let desktop = resolved.desktop.clone();
+        let resolved = resolved.tables;
         let cfg = resolved.native;
         model.statusline_enabled = cfg.enabled("statusline");
         model.palette_enabled = cfg.enabled("palette");
@@ -194,6 +227,10 @@ impl NativeSession {
             ui_keys_lhs,
             ai_enabled: model.ai_enabled,
             look,
+            initial_profile,
+            profile: initial_profile,
+            desktop_modifier_choice,
+            desktop,
         };
         (session, effects)
     }
@@ -239,7 +276,101 @@ impl NativeSession {
                 crate::vlog::log_takeover("answered");
                 self.announce(model)
             }
+            Stage::CapsUpgraded | Stage::ProfileFlip => self.reissue_mappings(model, stage),
         }
+    }
+
+    /// Rebuilds and resends this session's default-map registration outside
+    /// the one-shot takeover, for the two moments the plan `take_over` sent
+    /// can go stale after `VimEnter`: the kitty keyboard protocol probe
+    /// answering late (`Stage::CapsUpgraded`), and a live `:View keys
+    /// profile` flip (`Stage::ProfileFlip`, which also moves
+    /// [`Self::profile`] first). Nothing to redo before the takeover has
+    /// run once, since no registration exists yet for either to correct.
+    ///
+    /// The reissue is a second `RegisterMappings` on its own, not folded
+    /// into a `Takeover` batch: `REGISTER_MAPPINGS_CHUNK`
+    /// (`view-engine`'s `nvim_api/mappings.rs`) restores whatever it
+    /// unmapped the call before, so resending it is the whole of "give the
+    /// old plan back, then apply the new one."
+    fn reissue_mappings(&mut self, model: &mut Model, stage: Stage) -> Vec<Effect> {
+        if !self.handed_over {
+            return Vec::new();
+        }
+        if stage == Stage::ProfileFlip {
+            self.profile = model.key_profile_override.unwrap_or(self.initial_profile);
+        }
+        vec![Effect::Rpc(self.build_mapping_call(model))]
+    }
+
+    /// Builds this session's default-map registration: the plan's own
+    /// enabled features, minus `ai` when the feature is off, the
+    /// `[keys] toggle_gaps`/`cycle_surfaces` overrides, and the desktop
+    /// chords this session's live profile and modifier put in play.
+    ///
+    /// Shared by [`Self::take_over`] and [`Self::reissue_mappings`], so a
+    /// chord respelled once the terminal's kitty keyboard protocol probe
+    /// answers, or a profile flipped mid-session, both travel through the
+    /// one place that turns `self`'s resolved answers into a spec list.
+    fn build_mapping_call(&self, model: &Model) -> RpcCall {
+        let mut mapping_call = mappings::register_plan(&self.cfg, self.channel_id);
+        // `[keys] toggle_gaps`/`cycle_surfaces`: `view-native` already
+        // validated the override (`resolve_ui_lhs`). `MappingSpec::lhs` is
+        // `Cow<'static, str>`, so the session-resolved value replaces the
+        // compile-time default in place rather than needing the `Box::leak`
+        // `view-native`'s own `keys.rs` config registry still pays for a
+        // resolved value with nowhere `'static` to live.
+        //
+        // Applied to `register_plan`'s own specs before the desktop chords
+        // join the list: a chord's `(feature, verb)` names the same `ui`
+        // `gaps`/`cycle_surfaces` pair its default-map twin does, spelled
+        // under the OS chord it always keeps, so running this loop after
+        // the chords were appended rewrote the chord's own `lhs` to the
+        // default map's -- two specs claiming the one `lhs` in the same
+        // registration, which left `REGISTER_MAPPINGS_CHUNK`'s pre-set
+        // `maparg` snapshot for the second of them holding the first's own
+        // fresh mapping rather than nothing, and a later reissue read that
+        // snapshot back as a user mapping view had taken.
+        if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
+            let (gaps_lhs, cycle_lhs) = &self.ui_keys_lhs;
+            for spec in specs.iter_mut() {
+                if spec.feature == "ui"
+                    && spec.verb == "gaps"
+                    && gaps_lhs.as_str() != spec.lhs.as_ref()
+                {
+                    spec.lhs = std::borrow::Cow::Owned(gaps_lhs.clone());
+                }
+                if spec.feature == "ui"
+                    && spec.verb == "cycle_surfaces"
+                    && cycle_lhs.as_str() != spec.lhs.as_ref()
+                {
+                    spec.lhs = std::borrow::Cow::Owned(cycle_lhs.clone());
+                }
+            }
+        }
+        let (modifier, _, _) =
+            profile::modifier_for(self.desktop_modifier_choice, model.caps.kitty_kbd);
+        if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
+            specs.extend(profile::chord_plan(
+                &self.desktop,
+                self.profile,
+                modifier,
+                &self.cfg,
+            ));
+        }
+        // `NativeConfig::enabled("ai")` is unconditionally `true` -- `[ai]`
+        // has no `[native]` switch by design, so `register_plan` alone would
+        // always register the key. `model.ai_enabled` is the bit `[native]`
+        // structurally cannot carry for this one feature, so it is applied
+        // here instead, once, after the desktop chords have joined the list
+        // too, rather than teaching `view-native` a feature name it has no
+        // other reason to know.
+        if !self.ai_enabled {
+            if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
+                specs.retain(|spec| spec.feature != "ai");
+            }
+        }
+        mapping_call
     }
 
     /// Every takeover this session performs, then the one registration that
@@ -275,40 +406,7 @@ impl NativeSession {
         // (`Supersession::rpc`); it is in the plan to be reported, not to be
         // performed
         effects.extend(self.plan.iter().filter_map(|entry| entry.rpc.clone()));
-        let mut mapping_call = mappings::register_plan(&self.cfg, self.channel_id);
-        // `NativeConfig::enabled("ai")` is unconditionally `true` -- `[ai]`
-        // has no `[native]` switch by design, so `register_plan` alone would
-        // always register the key. `model.ai_enabled` is the bit `[native]`
-        // structurally cannot carry for this one feature, so it is applied
-        // here instead, once, rather than teaching `view-native` a feature
-        // name it has no other reason to know.
-        if !self.ai_enabled {
-            if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
-                specs.retain(|spec| spec.feature != "ai");
-            }
-        }
-        // `[keys] toggle_gaps`/`cycle_surfaces`: `view-native` already
-        // validated the override (`resolve_ui_lhs`), but a `MappingSpec`'s
-        // `lhs` is `&'static str` by construction, so the only way to hand
-        // a session-resolved value to one built from `default_maps()` is to
-        // leak it -- a one-time cost paid once per session, the same
-        // `Box::leak` precedent `view-native`'s own `keys.rs` config
-        // registry uses for a resolved value with nowhere `'static` to live.
-        if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
-            let (gaps_lhs, cycle_lhs) = &self.ui_keys_lhs;
-            for spec in specs.iter_mut() {
-                if spec.feature == "ui" && spec.verb == "gaps" && gaps_lhs.as_str() != spec.lhs {
-                    spec.lhs = Box::leak(gaps_lhs.clone().into_boxed_str());
-                }
-                if spec.feature == "ui"
-                    && spec.verb == "cycle_surfaces"
-                    && cycle_lhs.as_str() != spec.lhs
-                {
-                    spec.lhs = Box::leak(cycle_lhs.clone().into_boxed_str());
-                }
-            }
-        }
-        effects.push(mapping_call);
+        effects.push(self.build_mapping_call(model));
         effects.push(RpcCall::RegisterClipboard {
             channel_id: self.channel_id,
         });
@@ -441,6 +539,15 @@ fn default_ui_keys_lhs() -> (String, String) {
 }
 
 #[cfg(test)]
+/// Every desktop chord left to derive from [`chords::DesktopChord::lhs`]
+/// under whatever modifier a takeover settles on, the same starting point
+/// [`view_native::config::resolve`] gives a config that names no
+/// `[keys.desktop]` overrides.
+fn default_desktop() -> [Resolved<String>; DESKTOP_CHORD_COUNT] {
+    std::array::from_fn(|_| Resolved::new(String::new(), Source::Derived))
+}
+
+#[cfg(test)]
 impl NativeSession {
     /// A session that hands nothing over, for the tests whose subject is the
     /// dispatch path itself rather than what a native feature does on it.
@@ -455,6 +562,10 @@ impl NativeSession {
             ai_enabled: true,
             look: Look::default(),
             ui_keys_lhs: default_ui_keys_lhs(),
+            initial_profile: KeyProfile::Editor,
+            profile: KeyProfile::Editor,
+            desktop_modifier_choice: ModifierChoice::Auto,
+            desktop: default_desktop(),
         }
     }
 
@@ -475,13 +586,17 @@ impl NativeSession {
             ai_enabled: true,
             look: Look::default(),
             ui_keys_lhs: default_ui_keys_lhs(),
+            initial_profile: KeyProfile::Editor,
+            profile: KeyProfile::Editor,
+            desktop_modifier_choice: ModifierChoice::Auto,
+            desktop: default_desktop(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
     use view_core::msg::OptionValue;
@@ -519,7 +634,9 @@ mod tests {
         channel_id: u64,
         model: &mut Model,
     ) -> (NativeSession, Vec<Effect>) {
-        let resolved = ViewConfig::load(config_path.as_deref()).unwrap();
+        let file = view_native::config::ViewConfig::load(config_path.as_deref()).unwrap();
+        let resolved =
+            view_native::config::resolve(&file, &view_native::config::Overrides::default());
         NativeSession::load(resolved, config_path, channel_id, model)
     }
 
@@ -783,6 +900,10 @@ mod tests {
             ai_enabled: false,
             look: Look::default(),
             ui_keys_lhs: default_ui_keys_lhs(),
+            initial_profile: KeyProfile::Editor,
+            profile: KeyProfile::Editor,
+            desktop_modifier_choice: ModifierChoice::Auto,
+            desktop: default_desktop(),
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -852,6 +973,10 @@ mod tests {
             ai_enabled: true,
             look: Look::default(),
             ui_keys_lhs: default_ui_keys_lhs(),
+            initial_profile: KeyProfile::Editor,
+            profile: KeyProfile::Editor,
+            desktop_modifier_choice: ModifierChoice::Auto,
+            desktop: default_desktop(),
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -915,6 +1040,10 @@ mod tests {
             ai_enabled: true,
             look: Look::default(),
             ui_keys_lhs: default_ui_keys_lhs(),
+            initial_profile: KeyProfile::Editor,
+            profile: KeyProfile::Editor,
+            desktop_modifier_choice: ModifierChoice::Auto,
+            desktop: default_desktop(),
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -1187,7 +1316,7 @@ cycle_surfaces = \"gz\"
             specs
                 .iter()
                 .find(|spec| spec.feature == "ui" && spec.verb == verb)
-                .map(|spec| spec.lhs)
+                .map(|spec| spec.lhs.as_ref())
         };
         assert_eq!(
             lhs_for("gaps"),
@@ -1220,6 +1349,127 @@ cycle_surfaces = \"gz\"
         assert_eq!(
             m.tree_width_pct, 22,
             "the surfaces table's size was read back over by [native] tree_width"
+        );
+    }
+
+    /// A session that starts under the editor profile and reads no desktop
+    /// chords registers only `default_maps()`. A live `:View keys profile
+    /// desktop` flip must reissue with the desktop chords folded in beside
+    /// it, not a partial or a stale set.
+    #[test]
+    fn a_profile_flip_reissues_every_default_map() {
+        let mut session = NativeSession {
+            handed_over: true,
+            profile: KeyProfile::Editor,
+            initial_profile: KeyProfile::Editor,
+            desktop_modifier_choice: ModifierChoice::Auto,
+            desktop: default_desktop(),
+            ..NativeSession::all_enabled(7, None)
+        };
+        let mut m = model();
+        m.key_profile_override = Some(KeyProfile::Desktop);
+        let effects = unbatched(session.follow_up(&mut m, Stage::ProfileFlip));
+        let specs = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Rpc(RpcCall::RegisterMappings { specs, .. }) => Some(specs),
+                _ => None,
+            })
+            .expect("a profile flip must reissue a RegisterMappings call");
+        for spec in view_core::native::mappings::default_maps() {
+            assert!(
+                specs.iter().any(|s| s.lhs.as_ref() == spec.lhs.as_ref()),
+                "the reissue dropped a default map key: {spec:?} missing from {specs:?}"
+            );
+        }
+        assert!(
+            specs
+                .iter()
+                .any(|s| s.feature == "window" && s.verb == "focus_left"),
+            "the reissue must fold the desktop chords in once the flip lands \
+             on Desktop: {specs:?}"
+        );
+        assert_eq!(session.profile, KeyProfile::Desktop);
+    }
+
+    /// The kitty keyboard protocol probe answers after the takeover already
+    /// spelled the desktop chords under the Alt fallback. `Stage::CapsUpgraded`
+    /// must reissue the same chords respelled with the terminal's real
+    /// answer, without moving `profile` -- only the modifier changed.
+    #[test]
+    fn a_late_caps_upgrade_reissues_the_plan() {
+        let mut session = NativeSession {
+            handed_over: true,
+            profile: KeyProfile::Desktop,
+            initial_profile: KeyProfile::Desktop,
+            desktop_modifier_choice: ModifierChoice::Auto,
+            desktop: default_desktop(),
+            ..NativeSession::all_enabled(7, None)
+        };
+        let mut m = model();
+        m.caps.kitty_kbd = true;
+        let effects = unbatched(session.follow_up(&mut m, Stage::CapsUpgraded));
+        let specs = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Rpc(RpcCall::RegisterMappings { specs, .. }) => Some(specs),
+                _ => None,
+            })
+            .expect("a caps upgrade must reissue a RegisterMappings call");
+        let focus_left = specs
+            .iter()
+            .find(|s| s.feature == "window" && s.verb == "focus_left")
+            .expect("the desktop chord table must still carry focus_left");
+        assert_eq!(
+            focus_left.lhs.as_ref(),
+            "<D-Left>",
+            "kitty_kbd=true must respell the chord with the super modifier \
+             now that the terminal has actually answered: {specs:?}"
+        );
+        assert_eq!(
+            session.profile,
+            KeyProfile::Desktop,
+            "a caps upgrade never moves the profile, only the modifier a chord is spelled with"
+        );
+    }
+
+    /// The desktop chord for `ui gaps` shares its `(feature, verb)` with the
+    /// default map's own `ui gaps` row, so a `[keys] toggle_gaps` override
+    /// that matched on that pair alone once rewrote the chord's own `lhs`
+    /// to the default map's, leaving two specs claiming the same key in one
+    /// `RegisterMappings` call -- and the second one's pre-set snapshot
+    /// then read as the first one's own fresh mapping rather than nothing,
+    /// so a later reissue reported it as a user mapping view had taken.
+    #[test]
+    fn the_gaps_chord_keeps_its_own_spelling_under_the_toggle_gaps_override() {
+        let session = NativeSession {
+            handed_over: true,
+            profile: KeyProfile::Desktop,
+            initial_profile: KeyProfile::Desktop,
+            desktop_modifier_choice: ModifierChoice::Auto,
+            desktop: default_desktop(),
+            ..NativeSession::all_enabled(7, None)
+        };
+        let m = model();
+        let call = session.build_mapping_call(&m);
+        let specs = match call {
+            RpcCall::RegisterMappings { specs, .. } => specs,
+            other => panic!("build_mapping_call built {other:?}"),
+        };
+        let gaps: Vec<_> = specs
+            .iter()
+            .filter(|s| s.feature == "ui" && s.verb == "gaps")
+            .collect();
+        assert_eq!(
+            gaps.len(),
+            2,
+            "the default map's own gaps row and the desktop chord's must both register: {specs:?}"
+        );
+        let lhss: std::collections::BTreeSet<&str> = gaps.iter().map(|s| s.lhs.as_ref()).collect();
+        assert_eq!(
+            lhss.len(),
+            2,
+            "the chord and the default map must not collapse onto the same lhs: {specs:?}"
         );
     }
 }

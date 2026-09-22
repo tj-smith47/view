@@ -7,6 +7,7 @@
 mod accent;
 mod buffers;
 mod decode;
+mod mappings;
 pub(crate) mod native_window;
 mod window_status;
 
@@ -21,9 +22,9 @@ use view_core::msg::{
 use view_core::native::ai_context::{
     CurrentBufferRead, CursorRead, DiagnosticEntry, QuickfixEntry, SelectionRead,
 };
-use view_core::native::mappings::{
-    command_only_forms, default_maps, is_spellable, review_keys, MappingSpec, COMMAND,
-};
+use view_core::native::mappings::review_keys;
+#[cfg(test)]
+use view_core::native::mappings::{command_only_forms, default_maps, MappingSpec, COMMAND};
 
 pub(crate) use buffers::REGISTER_BUFFERS_CHUNK;
 // the two switch calls live beside their chunks; their own pin reads them
@@ -36,6 +37,8 @@ use decode::{
     option_value, value_to_string,
 };
 pub(crate) use decode::{decode_ai_fs_reply, decode_checktime_reply};
+use mappings::mapping_args;
+pub(crate) use mappings::{MAPPINGS_CLAIMS_KEY, MAPPINGS_COLON_KEY, REGISTER_MAPPINGS_CHUNK};
 pub(crate) use window_status::REGISTER_WINDOW_STATUS_CHUNK;
 
 /// Upper bound on how long each of [`EngineHandle::read_current_buffer_text`],
@@ -501,173 +504,6 @@ pub const OPTION_HOLD_CHUNK: &str = HOLD_OPTION_CHUNK;
 /// reason [`HIDDEN_LOAD_CHUNK`] is.
 #[cfg(any(test, feature = "test-support"))]
 pub const NOTIFY_HOLD_CHUNK: &str = HOLD_NOTIFY_CHUNK;
-
-/// The lua chunk [`EngineHandle::register_mappings`] runs inside nvim,
-/// taking view's channel id, the specs to register, every feature/verb pair
-/// the command can complete, and the command's own name as its four
-/// varargs. Constant by construction for the same reason as
-/// [`FEED_KEYS_CHUNK`]: no caller data is interpolated into the Lua source.
-///
-/// One chunk rather than a call per key, and it answers with the whole claim
-/// list: what view claimed is one fact a user is told once, so it is
-/// established in one atomic pass over the specs rather than reassembled
-/// from replies that interleave with startup traffic.
-///
-/// It answers with one more reading beside the claims: whether the user's
-/// config maps `:` in normal or visual mode
-/// ([`MAPPINGS_COLON_KEY`]). The palette speculates the command line open on
-/// that keystroke (`view_core::native::speculate::may_speculate_cmdline`)
-/// and needs the answer on every `:`, which is not a question to put on the
-/// wire per keystroke; the snapshot this chunk already takes has it.
-///
-/// Three `vim.fn.maparg(':', mode)` calls, for `n`, `x` and `v`, and no
-/// keymap walk: `maparg` answers for the current buffer's own mappings as
-/// well as the global ones, and the current buffer is the one the `:` is
-/// going to. It reads a Lua-callback mapping as well as a string one (the
-/// rhs comes back as `<Lua 42: ...>`, which is not the empty string
-/// `maparg` returns for no mapping at all). The cost per fire is those
-/// three calls -- the walk it replaces materialised every mapping of three
-/// modes, globally and for every loaded buffer, on every event below.
-///
-/// Re-read on four events, reported on the `view_bridge` `colon_mapped`
-/// event only when the answer moved. `User LazyLoad`, so a plugin that
-/// loads late and maps `:` closes the gate for the rest of the session --
-/// and `BufEnter`, `FileType` and `BufWinEnter` beside it, because a config
-/// that loads no plugin lazily fires the first one never, and because a
-/// buffer-local `:` map belongs to whichever buffer is current: an ftplugin
-/// mapping `:` in a file opened later is seen at the moment its buffer
-/// becomes the one being typed into, and leaving that buffer is reported
-/// the same way. `BufEnter` is what carries the window switch, which is the
-/// change of current buffer the other two say nothing about: moving into a
-/// window whose buffer maps `:` -- `<C-w>w`, a jump back out of a file
-/// tree -- would otherwise leave the reading `false` and speculate a
-/// palette for a key that reaches the mapping.
-///
-/// Those listeners get an augroup of their own (`view_colon_map`) rather
-/// than joining another that retires itself: a group that stops listening
-/// part way through a session leaves every plugin loaded after that free
-/// to map `:` unobserved.
-///
-/// What the user's config already mapped is snapshotted BEFORE the first key
-/// is set, since setting it is what destroys the answer. The snapshot spans
-/// the global table and every loaded buffer's own, because
-/// `vim.fn.maparg(lhs, 'n')` answers only for the current buffer: a
-/// buffer-local mapping elsewhere -- an ftplugin's, most commonly -- beats
-/// view's global one wherever it applies, so a claim report built from
-/// `maparg` alone would say a key was free while the user watches it keep
-/// doing what it always did. Keys are compared after
-/// `nvim_replace_termcodes`, which is what turns `<leader>ff` into the bytes
-/// a registered mapping is actually stored under.
-///
-/// The right-hand side is a plain `<Cmd>rpcnotify(...)<CR>` string rather
-/// than a Lua callback so that `:map`, `maparg()`, and every plugin that
-/// introspects mappings show exactly what view did, in a form a user can
-/// read and copy. It is built with `string.format` from the spec's own
-/// fields inside the chunk, never interpolated into the chunk source, and
-/// every token reaching it is `[a-z0-9_-]` by
-/// [`is_spellable`](view_core::native::mappings::is_spellable), applied in
-/// [`register_mappings`](EngineHandle::register_mappings).
-///
-/// Normal mode is the whole scope of the *claims*, matching
-/// [`MappingSpec`](view_core::native::mappings::MappingSpec)'s own
-/// normal-mode-only contract: the snapshot reads `'n'` maps, globally and
-/// per loaded buffer, and every key is set with `vim.keymap.set('n', ...)`.
-/// A spec carries no mode to vary that by, so every `'n'` literal in the
-/// chunk below is the scope, not a default some caller may override. The
-/// `:` reading beside them is the one thing that spans `n`, `x` and `v`,
-/// because a `:` typed in visual mode opens a command line too.
-///
-/// The command registers unconditionally, outside the spec loop: a user who
-/// turned every default key off, or every feature, still has a way in.
-const REGISTER_MAPPINGS_CHUNK: &str = "\
-local channel, specs, entries, command = ...
-local taken = {}
-local function note(maps)
-  for _, m in ipairs(maps) do
-    if m.lhsraw then taken[m.lhsraw] = true end
-    taken[m.lhs] = true
-  end
-end
-note(vim.api.nvim_get_keymap('n'))
-for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-  if vim.api.nvim_buf_is_loaded(buf) then
-    note(vim.api.nvim_buf_get_keymap(buf, 'n'))
-  end
-end
-local function colon_mapped()
-  for _, mode in ipairs({ 'n', 'x', 'v' }) do
-    if vim.fn.maparg(':', mode) ~= '' then return true end
-  end
-  return false
-end
-local colon = colon_mapped()
-local group = vim.api.nvim_create_augroup('view_colon_map', { clear = true })
-local function reread()
-  local now = colon_mapped()
-  if now ~= colon then
-    colon = now
-    pcall(vim.rpcnotify, channel, 'view_bridge', 'colon_mapped', now)
-  end
-end
-vim.api.nvim_create_autocmd('User', {
-  group = group,
-  pattern = 'LazyLoad',
-  callback = reread,
-})
-vim.api.nvim_create_autocmd({ 'BufEnter', 'FileType', 'BufWinEnter' }, {
-  group = group,
-  callback = reread,
-})
-local claimed = {}
-for _, spec in ipairs(specs) do
-  local resolved = vim.api.nvim_replace_termcodes(spec.lhs, true, true, true)
-  local rhs = string.format(
-    \"<Cmd>call rpcnotify(%d, 'view_invoke', '%s', '%s')<CR>\",
-    channel, spec.feature, spec.verb)
-  vim.keymap.set('n', spec.lhs, rhs, {
-    desc = string.format('view: %s %s', spec.feature, spec.verb),
-    silent = true,
-  })
-  claimed[#claimed + 1] = {
-    feature = spec.feature,
-    lhs = spec.lhs,
-    had_user_mapping = (taken[resolved] or taken[spec.lhs]) == true,
-  }
-end
-vim.api.nvim_create_user_command(command, function(opts)
-  local verb = table.concat(vim.list_slice(opts.fargs, 2), ' ')
-  vim.rpcnotify(channel, 'view_invoke', opts.fargs[1] or '', verb)
-end, {
-  nargs = '*',
-  desc = 'invoke a view native feature',
-  complete = function(lead, line)
-    local words = vim.split(vim.trim(line), '%s+')
-    local at = #words - 1 + ((line:sub(-1) == ' ') and 1 or 0)
-    local seen, out = {}, {}
-    for _, entry in ipairs(entries) do
-      local word = nil
-      if at <= 1 then
-        word = entry.feature
-      elseif entry.feature == words[2] then
-        word = entry.verb
-      end
-      if word and not seen[word] and vim.startswith(word, lead) then
-        seen[word] = true
-        out[#out + 1] = word
-      end
-    end
-    table.sort(out)
-    return out
-  end,
-})
-return { claims = claimed, colon_mapped = colon }";
-
-/// The two keys [`REGISTER_MAPPINGS_CHUNK`] answers under: the claim rows,
-/// and its reading of whether `:` carries a user mapping. Pinned against the
-/// chunk's own source by
-/// `the_mapping_reply_names_the_keys_its_decoder_reads`.
-pub(crate) const MAPPINGS_CLAIMS_KEY: &str = "claims";
-pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
 
 /// The lua chunk [`EngineHandle::register_bridge`] runs inside nvim, taking
 /// view's channel id as its single vararg. Constant by construction for the
@@ -3660,54 +3496,6 @@ impl EngineHandle {
             generation,
         )
     }
-    /// Registers `specs` as real nvim mappings and the `:View` command in
-    /// one [`REGISTER_MAPPINGS_CHUNK`] pass, notifying back to `channel_id`
-    /// when either is used.
-    ///
-    /// Async by construction, like [`probe_default_hl`](Self::probe_default_hl):
-    /// this issues the request through
-    /// [`EngineHandle::request_mappings`] and returns immediately, and the
-    /// claim list crosses back as `Msg::MappingsClaimed` through the
-    /// connection's pump. The caller is the runtime loop, which never awaits
-    /// an RPC reply.
-    ///
-    /// A request rather than a notification, unlike the other calls the loop
-    /// emits: the reply is the claim list, and an error reply is how a chunk
-    /// nvim refused surfaces at all instead of as keys that silently never
-    /// registered.
-    ///
-    /// The `:View` completion candidates come from
-    /// [`default_maps`](view_core::native::mappings::default_maps) rather
-    /// than from `specs`: the command is registered whatever the user has
-    /// turned off, so what it completes is every entry point this build
-    /// has, not the subset this session mapped a key to.
-    ///
-    /// A spec whose tokens
-    /// [cannot be spelled](view_core::native::mappings::is_spellable) inside
-    /// the mapping the chunk generates is dropped here rather than sent: this
-    /// method takes any `&[MappingSpec]`, and the table's own vetting in
-    /// `view-core` cannot speak for a spec a future caller assembles.
-    /// Dropping is the safe direction -- view registers nothing, so the key
-    /// stays whatever the user's config made it -- and the omission is
-    /// visible, since a dropped spec returns no claim either.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::Closed` if the connection is already closed or
-    /// the writer thread has already exited.
-    pub fn register_mappings(
-        &self,
-        specs: &[MappingSpec],
-        channel_id: u64,
-    ) -> Result<(), EngineError> {
-        self.request_mappings(
-            "nvim_exec_lua",
-            vec![
-                Value::from(REGISTER_MAPPINGS_CHUNK),
-                Value::Array(mapping_args(specs, channel_id)),
-            ],
-        )
-    }
 
     /// Every takeover call in `steps` as one `nvim_exec_lua` request
     /// ([`TAKEOVER_CHUNK`]), answering with the mapping claims and nvim's
@@ -4543,43 +4331,6 @@ impl EngineHandle {
     }
 }
 
-/// [`REGISTER_MAPPINGS_CHUNK`]'s four arguments, shared by the call that
-/// sends it alone and the takeover that batches it.
-fn mapping_args(specs: &[MappingSpec], channel_id: u64) -> Vec<Value> {
-    let specs = specs
-        .iter()
-        .filter(|spec| is_spellable(spec))
-        .map(|spec| {
-            Value::Map(vec![
-                (Value::from("feature"), Value::from(spec.feature)),
-                (Value::from("lhs"), Value::from(spec.lhs)),
-                (Value::from("verb"), Value::from(spec.verb)),
-            ])
-        })
-        .collect();
-    let entries = default_maps()
-        .iter()
-        .map(|spec| (spec.feature, spec.verb))
-        .chain(
-            command_only_forms()
-                .iter()
-                .map(|form| (form.feature, form.verb)),
-        )
-        .map(|(feature, verb)| {
-            Value::Map(vec![
-                (Value::from("feature"), Value::from(feature)),
-                (Value::from("verb"), Value::from(verb)),
-            ])
-        })
-        .collect();
-    vec![
-        Value::from(channel_id),
-        Value::Array(specs),
-        Value::Array(entries),
-        Value::from(COMMAND),
-    ]
-}
-
 /// One [`TakeoverStep`] as the `{ src, args, out }` table
 /// [`TAKEOVER_CHUNK`] runs.
 ///
@@ -5303,13 +5054,15 @@ mod tests {
         let hostile = [
             MappingSpec {
                 feature: "picker",
-                lhs: "<leader>ff",
+                lhs: std::borrow::Cow::Borrowed("<leader>ff"),
                 verb: "files', 'x')|call system('id",
+                rhs: view_core::native::mappings::Rhs::Invoke,
             },
             MappingSpec {
                 feature: "picker",
-                lhs: "<leader>fb",
+                lhs: std::borrow::Cow::Borrowed("<leader>fb"),
                 verb: "buffers",
+                rhs: view_core::native::mappings::Rhs::Invoke,
             },
         ];
         h.register_mappings(&hostile, 7).unwrap();

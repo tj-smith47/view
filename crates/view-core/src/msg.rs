@@ -2760,8 +2760,9 @@ mod tests {
             RpcCall::RegisterMappings {
                 specs: vec![MappingSpec {
                     feature: "picker",
-                    lhs: "<leader>ff",
+                    lhs: std::borrow::Cow::Borrowed("<leader>ff"),
                     verb: "files",
+                    rhs: crate::native::mappings::Rhs::Invoke,
                 }],
                 channel_id: 7,
             },

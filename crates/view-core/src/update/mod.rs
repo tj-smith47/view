@@ -605,6 +605,14 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             if feature == "ui" {
                 return look::invoke(model, &verb);
             }
+            // `keys` names the session's whole key vocabulary, not a
+            // registry feature: this pure crate only records the flip on
+            // the model, since restoring the previous registration and
+            // reissuing the new one is engine I/O only `NativeSession`
+            // (view/src/native.rs, outside this crate) can perform.
+            if feature == "keys" {
+                return keys_invoke(model, &verb);
+            }
             // a bare `:View` (both tokens empty) is the discoverability
             // entry point: nothing was asked for, so nothing was invoked,
             // but nvim's own command-line completion for `:View` already
@@ -1595,6 +1603,27 @@ fn dismiss_top_prompt(model: &mut Model) {
         model.pop_focused_overlay();
         let _ = model.engine.messages.dismiss_answered_prompt();
     }
+}
+
+/// `:View keys profile [desktop|editor|auto]`: records the flip on the
+/// model, with no report and no RPC of its own -- `NativeSession::follow_up`
+/// (`view/src/native.rs`) watches this field through `Stage::ProfileFlip`
+/// and is where the actual restore-and-reissue happens. An unrecognized or
+/// missing name changes nothing, the same "typo does nothing" answer
+/// `look::invoke` gives an unrecognized `ui panes` argument.
+fn keys_invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
+    let mut words = verb.split_whitespace();
+    if words.next() != Some("profile") {
+        return Vec::new();
+    }
+    let profile = match words.next() {
+        Some("desktop") => Some(crate::native::chords::KeyProfile::Desktop),
+        Some("editor") => Some(crate::native::chords::KeyProfile::Editor),
+        Some("auto") => None,
+        _ => return Vec::new(),
+    };
+    model.key_profile_override = profile;
+    Vec::new()
 }
 
 /// The notice text for a `Msg::FeatureInvoke` this build has nothing behind:

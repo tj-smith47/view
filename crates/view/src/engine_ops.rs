@@ -1142,7 +1142,7 @@ impl EngineOps for FakeOps {
         Ok(())
     }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
-        let keys: Vec<&str> = specs.iter().map(|s| s.lhs).collect();
+        let keys: Vec<&str> = specs.iter().map(|s| s.lhs.as_ref()).collect();
         self.record(format!(
             "register_mappings({},{channel_id})",
             keys.join(" ")

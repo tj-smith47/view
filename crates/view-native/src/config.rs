@@ -800,7 +800,7 @@ fn default_ui_lhs(verb: &str) -> &'static str {
     view_core::native::mappings::default_maps()
         .iter()
         .find(|spec| spec.feature == "ui" && spec.verb == verb)
-        .map_or("", |spec| spec.lhs)
+        .map_or("", |spec| spec.lhs.as_ref())
 }
 
 /// Which keys perform which action.
