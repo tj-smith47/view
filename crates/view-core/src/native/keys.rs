@@ -225,7 +225,8 @@ const MODIFIERS: [&str; 5] = ["S-", "C-", "M-", "A-", "D-"];
 /// it replaces the action's defaults with a key nothing will ever send,
 /// leaving the user with no way to perform it at all and nothing on screen
 /// saying why.
-pub(crate) fn well_formed(key: &str) -> bool {
+#[must_use]
+pub fn well_formed(key: &str) -> bool {
     let Some(inner) = key.strip_prefix('<').and_then(|k| k.strip_suffix('>')) else {
         return true;
     };

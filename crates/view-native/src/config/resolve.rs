@@ -21,7 +21,7 @@ use view_core::native::chords::{
 };
 use view_core::native::geometry;
 use view_core::native::geometry::{Anchor, NativeSurface, SurfaceLayout, SurfacePlacement};
-use view_core::native::keys::{Action, Direction, KeyBindings};
+use view_core::native::keys::{well_formed, Action, Direction, KeyBindings};
 use view_core::native::mappings;
 use view_core::native::pill::TablineShows;
 use view_core::native::registry;
@@ -877,7 +877,7 @@ fn resolve_desktop_row(
         source: Source::Derived,
     };
     if let Some(raw) = file.keys.desktop().get(chord.id) {
-        if raw.is_empty() || mappings::lhs_is_spellable(raw) {
+        if raw.is_empty() || (mappings::lhs_is_spellable(raw) && well_formed(raw)) {
             resolved = Resolved {
                 value: raw.clone(),
                 source: Source::File,
@@ -891,8 +891,8 @@ fn resolve_desktop_row(
             ));
         }
     }
-    if let Some(raw) = env_value(env, "keys.desktop", chord.id) {
-        if mappings::lhs_is_spellable(&raw) {
+    if let Some(raw) = env_value_desktop(env, chord.id) {
+        if raw.is_empty() || (mappings::lhs_is_spellable(&raw) && well_formed(&raw)) {
             resolved = Resolved {
                 value: raw,
                 source: Source::Env,
@@ -978,6 +978,18 @@ const fn profile_label(profile: KeyProfile) -> &'static str {
     match profile {
         KeyProfile::Editor => "editor",
         _ => "desktop",
+    }
+}
+
+/// The value [`ResolvedConfig::rows`] would print for `keys.profile`, for a
+/// caller that already holds the profile and its marker (`:View keys
+/// profile`'s bare-verb report) and has no `ResolvedConfig` left to read it
+/// from.
+#[must_use]
+pub fn profile_report_value(profile: KeyProfile, marker: Option<&'static str>) -> String {
+    match marker {
+        Some(marker) => format!("{} ({marker})", profile_label(profile)),
+        None => profile_label(profile).to_string(),
     }
 }
 
@@ -1197,6 +1209,17 @@ fn env_value(env: &dyn Fn(&str) -> Option<String>, table: &str, key: &str) -> Op
     let value = env(&env_name(row))?;
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// [`env_value`] for one `[keys.desktop]` row, with empty kept rather than
+/// read as absent: a `[keys.desktop]` value that is empty is a real answer
+/// (leave the chord unbound, [`resolve_desktop_row`]'s own doc comment),
+/// not the "no value" `env_value` reads it as for every other key.
+fn env_value_desktop(env: &dyn Fn(&str) -> Option<String>, chord_id: &str) -> Option<String> {
+    let row = keys()
+        .iter()
+        .find(|row| row.table == "keys.desktop" && row.key == chord_id)?;
+    env(&env_name(row)).map(|value| value.trim().to_string())
 }
 
 /// A switch's value, or `None` for text that is not one.
@@ -2317,6 +2340,41 @@ mod tests {
             row(&resolved, "keys.desktop", "focus_left"),
             (String::new(), Source::File),
             "an empty file row is the way to leave a chord unbound, not an invalid value"
+        );
+        assert!(
+            resolved.notices().is_empty(),
+            "leaving a chord unbound owes no notice: {:?}",
+            resolved.notices()
+        );
+    }
+
+    #[test]
+    fn a_malformed_desktop_override_notices_and_keeps_the_default() {
+        let file = ViewConfig::from_toml_str("[keys.desktop]\nfocus_left = \"<D-left>\"\n")
+            .expect("the fixture must parse");
+        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+        assert_eq!(
+            row(&resolved, "keys.desktop", "focus_left"),
+            ("<D-Left>".to_string(), Source::Derived),
+            "<D-left> is not a key nvim will ever send; the chord's own spelling stands"
+        );
+        let notices = resolved.notices().join("\n");
+        for fact in ["keys.desktop", "focus_left"] {
+            assert!(notices.contains(fact), "{fact} is missing from {notices:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_env_desktop_row_binds_nothing_over_a_bound_file_row() {
+        let file = ViewConfig::from_toml_str("[keys.desktop]\nfocus_left = \"<M-h>\"\n")
+            .expect("the fixture must parse");
+        let env = |name: &str| (name == "VIEW_KEYS_DESKTOP_FOCUS_LEFT").then(String::new);
+        let resolved = resolve_with(&file, &Overrides::default(), &env);
+        assert_eq!(
+            row(&resolved, "keys.desktop", "focus_left"),
+            (String::new(), Source::Env),
+            "an empty env row unbinds the chord the same way an empty file row does, \
+             outranking the file's own bound value"
         );
         assert!(
             resolved.notices().is_empty(),
