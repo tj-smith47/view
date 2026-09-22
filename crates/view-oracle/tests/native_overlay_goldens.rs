@@ -52,7 +52,10 @@ const AT_COL: u16 = 2;
 const DRAWS_BOX_GLYPHS: bool = true;
 const NO_BOX_GLYPHS: bool = false;
 
-/// Renders one framed overlay to a screen dump.
+/// Renders one framed overlay to a screen dump, at the layer's own rect
+/// `(AT_ROW, AT_COL)` plus `width`/`height`: every overlay but the toast
+/// corner family (which needs a rect per corner -- see [`dump_at`]) calls
+/// this.
 ///
 /// The surface is the overlay alone, with no engine grid under it: the
 /// canvas is the union of the layer rects, so what a golden shows is
@@ -61,18 +64,27 @@ const NO_BOX_GLYPHS: bool = false;
 /// oracle's own differential legs, and putting it here would make every
 /// golden churn on fixture changes that say nothing about framing.
 fn dump(tier: Tier, unicode_boxes: bool, width: u16, height: u16, kind: LayerKind) -> String {
+    dump_at(
+        tier,
+        unicode_boxes,
+        Rect::new(AT_ROW, AT_COL, width, height),
+        kind,
+    )
+}
+
+/// [`dump`], taking the layer's rect directly rather than deriving it from
+/// `(AT_ROW, AT_COL)` and a size: what the toast corner family needs, since
+/// its whole subject is that the box's rect differs by corner.
+fn dump_at(tier: Tier, unicode_boxes: bool, rect: Rect, kind: LayerKind) -> String {
     let probed = match tier {
         Tier::Full => TermCaps::from_probe(true, true, true),
         Tier::Standard => TermCaps::from_probe(false, true, false),
         _ => TermCaps::from_probe(false, false, false),
     };
     assert_eq!(probed.tier, tier, "fixture must land on the tier it names");
-    let layer = Layer::new(
-        Rect::new(AT_ROW, AT_COL, width, height),
-        kind,
-        probed.with_unicode_boxes(unicode_boxes),
-    );
-    view_oracle::raster::screen_text(&Surface::from_layers(vec![layer]), &Grid::new())
+    let caps = probed.with_unicode_boxes(unicode_boxes);
+    let layer = Layer::new(rect, kind, caps);
+    view_oracle::raster::screen_text(&Surface::from_layers(vec![layer]), &Grid::new(), caps)
 }
 
 fn golden_path(name: &str) -> PathBuf {
@@ -653,6 +665,17 @@ fn every_standard_golden_is_byte_identical_to_its_full_sibling() {
 const TOAST_WIDTH: u16 = 15;
 const TOAST_HEIGHT: u16 = 3;
 
+/// The reference canvas the four corner scenes place their box on: wide and
+/// tall enough that a corner's own near-edge margin (`AT_ROW`/`AT_COL`,
+/// matching what [`dump`] already pins for every other family: a nonzero
+/// offset from the canvas origin, so a golden proves the box lands at its
+/// own rect rather than at `(0, 0)`) still leaves each corner's box at a
+/// distinct rect from every other corner's -- a canvas sized tight to
+/// `TOAST_WIDTH`/`TOAST_HEIGHT` plus twice the margin would solve the same
+/// column for both the left and the right corner.
+const CORNER_CANVAS_WIDTH: u16 = 40;
+const CORNER_CANVAS_HEIGHT: u16 = 10;
+
 /// One toast, settled (no exit slide in flight), the subject a corner
 /// golden pins: the box's own framing, not the stack's slide, which
 /// `notifications_corner_scenes` in `view-tui` already pins end to end.
@@ -666,30 +689,58 @@ fn notification_corner(left_corner: bool) -> LayerKind {
     }
 }
 
+/// The toast box's rect for one named corner, mirroring the placement
+/// `view-surface::toast_layer` and its `to_row` closure compute for a real
+/// session (`crates/view-surface/src/lib.rs:733-739` for the row, `:841-847`
+/// for the column): a left corner sits flush against column 0 and a top
+/// corner against row 0 in production, generalized here to `AT_COL`/
+/// `AT_ROW` margins instead of 0 so the pin (see [`dump`]) still holds.
+fn corner_rect(left_corner: bool, top_corner: bool) -> Rect {
+    let row = if top_corner {
+        AT_ROW
+    } else {
+        CORNER_CANVAS_HEIGHT - AT_ROW - TOAST_HEIGHT
+    };
+    let col = if left_corner {
+        AT_COL
+    } else {
+        CORNER_CANVAS_WIDTH - AT_COL - TOAST_WIDTH
+    };
+    Rect::new(row, col, TOAST_WIDTH, TOAST_HEIGHT)
+}
+
+/// Every corner a settled toast's own framing is pinned at -- name,
+/// `left_corner`, `top_corner` -- the one table both
+/// `notifications_corner_scenes` (which writes each corner's golden) and
+/// `every_overlay_scene_has_a_golden_at_every_tier` (which checks every one
+/// of them exists at every tier) read. A corner added here is a stem both
+/// tests already know about: the writer generates its golden and the
+/// coverage check demands it, with no second, hand-kept stem list that
+/// could fall out of step with the scenes that actually run.
+const CORNERS: [(&str, bool, bool); 4] = [
+    ("top-left", true, true),
+    ("top-right", false, true),
+    ("bottom-left", true, false),
+    ("bottom-right", false, false),
+];
+
 /// The four committed pictures of one toast, one per named corner, three
 /// tiers each.
 #[test]
 fn notifications_corner_scenes() {
-    let corners = [
-        ("top-left", true),
-        ("top-right", false),
-        ("bottom-left", true),
-        ("bottom-right", false),
-    ];
     let tiers = [
         (Tier::Full, "full", DRAWS_BOX_GLYPHS),
         (Tier::Standard, "standard", DRAWS_BOX_GLYPHS),
         (Tier::Basic, "basic", NO_BOX_GLYPHS),
     ];
-    for (name, left_corner) in corners {
+    for (name, left_corner, top_corner) in CORNERS {
         for (tier, tier_name, unicode_boxes) in tiers {
             assert_golden(
                 &format!("{tier_name}-notifications-corner-{name}"),
-                &dump(
+                &dump_at(
                     tier,
                     unicode_boxes,
-                    TOAST_WIDTH,
-                    TOAST_HEIGHT,
+                    corner_rect(left_corner, top_corner),
                     notification_corner(left_corner),
                 ),
             );
@@ -697,23 +748,14 @@ fn notifications_corner_scenes() {
     }
 }
 
-/// Every stem the overlay family owns: a scene added later without its
-/// three tier files fails by the stem's own name instead of shipping an
-/// unpinned picture.
-const OVERLAY_STEMS: [&str; 4] = [
-    "notifications-corner-top-left",
-    "notifications-corner-top-right",
-    "notifications-corner-bottom-left",
-    "notifications-corner-bottom-right",
-];
-
 #[test]
 fn every_overlay_scene_has_a_golden_at_every_tier() {
     let dir = golden_path("full-picker")
         .parent()
         .expect("goldens live in a directory")
         .to_path_buf();
-    for stem in OVERLAY_STEMS {
+    for (name, ..) in CORNERS {
+        let stem = format!("notifications-corner-{name}");
         for tier_name in ["full", "standard", "basic"] {
             let path = dir.join(format!("{tier_name}-{stem}.txt"));
             assert!(

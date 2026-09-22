@@ -507,7 +507,7 @@ impl SpecSession {
     /// [`masked_rows`] states in its own doc: one `render()` feeds both the
     /// mask and the row text, so the two can never be a frame apart.
     fn rows(&self, surface: &Surface) -> Vec<String> {
-        raster::screen_rows(surface, self.model.engine.grid())
+        raster::screen_rows(surface, self.model.engine.grid(), self.model.caps)
     }
 
     /// The rows the `Speculated` layer currently occupies, in surface

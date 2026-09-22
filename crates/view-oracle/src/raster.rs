@@ -19,7 +19,9 @@ use std::borrow::Cow;
 
 use view_core::grid::Grid;
 use view_core::hl::HlTable;
-use view_surface::{Layer, LayerKind, Surface};
+use view_core::model::TermCaps;
+use view_surface::overlay::BorderSet;
+use view_surface::{Layer, LayerKind, Rect, Surface};
 
 use crate::attr::{row_fingerprint, ResolvedAttr};
 
@@ -30,8 +32,8 @@ use crate::attr::{row_fingerprint, ResolvedAttr};
 /// callers (test assertions, printed diagnostics) want one string, not a
 /// `Vec`.
 #[must_use]
-pub fn screen_text(surface: &Surface, grid: &Grid) -> String {
-    screen_rows(surface, grid).join("\n")
+pub fn screen_text(surface: &Surface, grid: &Grid, caps: TermCaps) -> String {
+    screen_rows(surface, grid, caps).join("\n")
 }
 
 /// Renders `surface` to one `String` per canvas row, in row order --
@@ -54,8 +56,19 @@ pub fn screen_text(surface: &Surface, grid: &Grid) -> String {
 /// reference side's [`crate::ReferenceSession::screen_rows`], which
 /// concatenates the same cells -- turning any wide glyph into a divergence,
 /// and padding the two back to equal width would instead hide a real one.
+///
+/// `caps` is only ever spent on a toast's own border: every other layer
+/// either carries its charset already resolved into `Layer::borders`
+/// (`Layer::new` derives it from the caps the layer was built with) or
+/// draws no frame at all. A toast is neither -- `LayerKind::Toast` is not a
+/// native overlay (`LayerKind::is_native_overlay`), so `Layer::borders` is
+/// always `None` for one, and `view-tui`'s own composite loop instead
+/// recomputes `BorderSet::for_caps(model.caps)` fresh every frame
+/// (`crates/view-tui/src/paint.rs`'s `composite_layers`) rather than
+/// reading a per-layer field. This raster has no `Model` to read that from,
+/// so its caller passes the same caps the `Surface` was built under.
 #[must_use]
-pub fn screen_rows(surface: &Surface, grid: &Grid) -> Vec<String> {
+pub fn screen_rows(surface: &Surface, grid: &Grid, caps: TermCaps) -> Vec<String> {
     let (width, height) = canvas_size(surface);
     if width == 0 || height == 0 {
         return Vec::new();
@@ -63,7 +76,7 @@ pub fn screen_rows(surface: &Surface, grid: &Grid) -> Vec<String> {
     let mut canvas = vec![vec![Cow::Borrowed(" "); usize::from(width)]; usize::from(height)];
     let offset = chrome_offset(surface);
     for layer in &surface.layers {
-        paint_layer(&mut canvas, layer, grid, offset);
+        paint_layer(&mut canvas, layer, grid, offset, caps);
     }
     canvas.into_iter().map(|row| row.concat()).collect()
 }
@@ -208,7 +221,13 @@ fn chrome_offset(surface: &Surface) -> u16 {
 /// grid-space arms need -- and it is resolved once per frame by the caller
 /// because computing it per arm would re-scan the layer list. A second such
 /// parameter belongs in a frame-context struct instead of beside this one.
-fn paint_layer<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid, offset: u16) {
+fn paint_layer<'a>(
+    canvas: &mut Canvas<'a>,
+    layer: &Layer,
+    grid: &'a Grid,
+    offset: u16,
+    caps: TermCaps,
+) {
     match &layer.kind {
         LayerKind::EngineGrid => paint_grid(canvas, layer, grid),
         // painted here, and identically to `view-tui`'s own arm, because a
@@ -230,7 +249,7 @@ fn paint_layer<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid, offse
         LayerKind::Shell => {}
         LayerKind::Pill(view) => paint_pill(canvas, layer, view),
         LayerKind::Cmdline(state) => paint_cmdline(canvas, layer, state),
-        LayerKind::Toast { lines, .. } => paint_toast(canvas, layer, lines),
+        LayerKind::Toast { lines, paused, .. } => paint_toast(canvas, layer, lines, *paused, caps),
         LayerKind::Popupmenu(state) => paint_popupmenu(canvas, layer, state),
         LayerKind::Picker(_)
         | LayerKind::Tree(_)
@@ -361,27 +380,107 @@ fn blank_row(canvas: &mut Canvas<'_>, row: u16, col: u16, width: u16) {
 
 /// `lines` is already the exact visible set `Messages::visible_toasts`
 /// selected for this one notice -- one physical line per row, in display
-/// order -- so this only
-/// has to blank each row (mirroring the real painter's own toast-box clear;
-/// without it a row's cells past a shorter line's text would keep showing
-/// whatever an earlier layer painted there) and write each line.
+/// order -- so this only has to blank each row (mirroring the real
+/// painter's own toast-box clear; without it a row's cells past a shorter
+/// line's text would keep showing whatever an earlier layer painted there),
+/// frame it, and write each line into the framed interior.
+///
+/// `layer.rect` already carries the frame: `view-surface`'s `toast_box`
+/// grows the box by two cells on each axis before this ever runs, the same
+/// contract `view-tui`'s `paint_toast` doc comment states for its own
+/// `area`. So the border is drawn on `layer.rect`'s own edge and content
+/// lands one cell inside it, mirroring `inset_by_one` in
+/// `crates/view-tui/src/paint/toast.rs`.
 fn paint_toast(
     canvas: &mut Canvas<'_>,
     layer: &Layer,
     lines: &[Vec<view_core::native::views::Span>],
+    paused: bool,
+    caps: TermCaps,
 ) {
     for r in 0..layer.rect.height {
         blank_row(canvas, layer.rect.row + r, layer.rect.col, layer.rect.width);
     }
+    paint_toast_border(canvas, layer.rect, BorderSet::for_caps(caps), paused);
+    let inner = inset_by_one(layer.rect);
     for (i, spans) in lines.iter().enumerate() {
         let Ok(r) = u16::try_from(i) else { break };
+        if r >= inner.height {
+            break;
+        }
         paint_text(
             canvas,
-            layer.rect.row.saturating_add(r),
-            layer.rect.col,
+            inner.row.saturating_add(r),
+            inner.col,
             &view_surface::overlay::line_text(spans),
         );
     }
+}
+
+/// `rect` shrunk by one cell on every edge: the interior a one-cell frame
+/// leaves for content. Mirrors `inset_by_one` in
+/// `crates/view-tui/src/paint/toast.rs`, which this raster has no
+/// dependency on (see this module's own doc comment on why it does not
+/// reuse `view-tui`'s painters).
+fn inset_by_one(rect: Rect) -> Rect {
+    Rect::new(
+        rect.row.saturating_add(1),
+        rect.col.saturating_add(1),
+        rect.width.saturating_sub(2),
+        rect.height.saturating_sub(2),
+    )
+}
+
+/// Draws `borders` on all four edges of `rect`, mirroring
+/// `paint_toast_border` in `crates/view-tui/src/paint/toast.rs`: the four
+/// corners, the two runs between them, and (when `paused` and the box is
+/// wide enough to spare a cell for it) the pause mark one cell in from the
+/// top-right corner.
+///
+/// A toast's border charset is not carried on `Layer::borders` -- see
+/// [`screen_rows`]'s doc comment -- so this takes `borders` already
+/// resolved, the same shape `view-tui`'s own function takes it in.
+///
+/// A degenerate rect narrower or shorter than 2 cells has no distinct edge
+/// cells to draw and paints nothing, matching the real painter's guard.
+fn paint_toast_border(canvas: &mut Canvas<'_>, rect: Rect, borders: BorderSet, paused: bool) {
+    if rect.width < 2 || rect.height < 2 {
+        return;
+    }
+    let last_col = rect.width - 1;
+    let mark = (paused && rect.width >= 3).then_some(last_col - 1);
+    let last_row = rect.height - 1;
+    for col in 0..rect.width {
+        let (top, bottom) = match col {
+            0 => (borders.top_left, borders.bottom_left),
+            c if c == last_col => (borders.top_right, borders.bottom_right),
+            c if mark == Some(c) => (borders.pause, borders.horizontal),
+            _ => (borders.horizontal, borders.horizontal),
+        };
+        paint_char(canvas, rect.row, rect.col + col, top);
+        paint_char(canvas, rect.row + last_row, rect.col + col, bottom);
+    }
+    for row in 1..last_row {
+        paint_char(canvas, rect.row + row, rect.col, borders.vertical);
+        paint_char(
+            canvas,
+            rect.row + row,
+            rect.col + last_col,
+            borders.vertical,
+        );
+    }
+}
+
+/// Writes one border glyph into `canvas`, the single-char counterpart of
+/// [`paint_text`] a frame's own corner/run cells are drawn with.
+fn paint_char(canvas: &mut Canvas<'_>, row: u16, col: u16, ch: char) {
+    let Some(row_cells) = canvas.get_mut(usize::from(row)) else {
+        return;
+    };
+    let Some(slot) = row_cells.get_mut(usize::from(col)) else {
+        return;
+    };
+    *slot = Cow::Owned(ch.to_string());
 }
 
 fn paint_popupmenu(
@@ -456,7 +555,7 @@ mod tests {
             .is_some());
         let surface = view_surface::render(&model);
 
-        let rows = screen_rows(&surface, model.engine.grid());
+        let rows = screen_rows(&surface, model.engine.grid(), model.caps);
 
         assert_eq!(
             rows[2].chars().nth(3),
@@ -475,7 +574,7 @@ mod tests {
         });
         let surface = view_surface::render(&model);
 
-        let text = screen_text(&surface, model.engine.grid());
+        let text = screen_text(&surface, model.engine.grid(), model.caps);
 
         assert_eq!(text, "hi   \n     ");
     }
@@ -507,14 +606,17 @@ mod tests {
         });
         let surface = view_surface::render(&model);
 
-        assert_eq!(screen_text(&surface, model.engine.grid()), "a界b ");
+        assert_eq!(
+            screen_text(&surface, model.engine.grid(), model.caps),
+            "a界b "
+        );
     }
 
     #[test]
     fn empty_grid_renders_empty_string() {
         let model = Model::new();
         let surface = view_surface::render(&model);
-        assert_eq!(screen_text(&surface, model.engine.grid()), "");
+        assert_eq!(screen_text(&surface, model.engine.grid(), model.caps), "");
     }
 
     #[test]
@@ -533,7 +635,7 @@ mod tests {
         );
         let surface = view_surface::render(&model);
 
-        let text = screen_text(&surface, model.engine.grid());
+        let text = screen_text(&surface, model.engine.grid(), model.caps);
 
         let last_row = text.lines().next_back().unwrap();
         assert!(
@@ -572,7 +674,7 @@ mod tests {
         );
         let surface = view_surface::render(&model);
 
-        let text = screen_text(&surface, model.engine.grid());
+        let text = screen_text(&surface, model.engine.grid(), model.caps);
 
         let last_row = text.lines().next_back().unwrap();
         assert_eq!(
@@ -601,11 +703,16 @@ mod tests {
         );
         let surface = view_surface::render(&model);
 
-        let text = screen_text(&surface, model.engine.grid());
+        let text = screen_text(&surface, model.engine.grid(), model.caps);
 
+        // every toast is framed (see `paint_toast`'s own doc comment), so
+        // the message text sits one cell inside the border's own vertical
+        // glyph on both sides rather than at the row's raw end
+        let vertical = BorderSet::for_caps(model.caps).vertical;
+        let framed = format!("{vertical}hi{vertical}");
         assert!(
-            text.lines().any(|l| l.trim_end().ends_with("hi")),
-            "expected a row ending in the message text; screen:\n{text}"
+            text.lines().any(|l| l.trim_end().ends_with(&framed)),
+            "expected a framed row ending in the message text; screen:\n{text}"
         );
     }
 
@@ -624,7 +731,7 @@ mod tests {
         model.chrome_painted = false;
         let surface = view_surface::render(&model);
 
-        let rows = screen_rows(&surface, model.engine.grid());
+        let rows = screen_rows(&surface, model.engine.grid(), model.caps);
 
         assert_eq!(
             rows.len(),

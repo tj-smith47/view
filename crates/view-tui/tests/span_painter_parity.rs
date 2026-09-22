@@ -98,7 +98,7 @@ fn painted_rows(caps: TermCaps, width: u16, height: u16, kind: LayerKind) -> Vec
 fn rastered_rows(caps: TermCaps, width: u16, height: u16, kind: LayerKind) -> Vec<String> {
     let layer = Layer::new(Rect::new(AT_ROW, AT_COL, width, height), kind, caps);
     let surface = Surface::from_layers(vec![layer]);
-    view_oracle::raster::screen_rows(&surface, &Grid::new())
+    view_oracle::raster::screen_rows(&surface, &Grid::new(), caps)
         .into_iter()
         .skip(usize::from(AT_ROW))
         .take(usize::from(height))
