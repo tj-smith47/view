@@ -4056,6 +4056,28 @@ mod tests {
         }
     }
 
+    /// `window zoom`'s own floor, off the same two-argument shape `buffer`
+    /// and `diagnostics` use: a sibling reader takes width before height,
+    /// the order `relay_min_pane_size` sends them in.
+    #[test]
+    fn a_bridge_min_pane_size_event_decodes_width_then_height() {
+        let decoded = decode_bridge_event(&[
+            Value::from("min_pane_size"),
+            Value::from(5u64),
+            Value::from(2u64),
+        ]);
+        assert!(
+            matches!(
+                decoded,
+                Some(Msg::MinPaneSizeChanged {
+                    width: 5,
+                    height: 2
+                })
+            ),
+            "got {decoded:?}"
+        );
+    }
+
     /// The scan's end marker, which carries no argument at all -- the one
     /// bridge event that does, and the reason the decoder answers it ahead
     /// of the split every other event's payload needs.

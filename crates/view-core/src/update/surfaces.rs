@@ -204,18 +204,20 @@ fn focused_tile_rect(model: &Model) -> Option<(u16, u16, u16, u16)> {
 
 /// Whether the tiled pane holding `cursor` is already zoomed: `<C-w>_<C-w>|`
 /// leaves every other tiled pane squeezed to its layout minimum
-/// (`winminwidth`/`winminheight` default to 1, plus the one-cell separator
-/// a real vsplit still draws), so a sibling at `width <= 1` or
-/// `height <= 1` is nvim's own answer to "already maximized", never the
-/// focused rect matching some computed outer bound nvim's real geometry
-/// rarely produces exactly (a sibling keeps its own separator column/row,
-/// so the focused window is never quite the full tiled area). A lone tile
-/// counts as zoomed too, vacuously, where `<C-w>=` is already a no-op.
+/// (`model.native_min_pane_size`, the bridge's own reading of
+/// `winminwidth`/`winminheight`, plus the one-cell separator a real vsplit
+/// still draws), so a sibling at or under that floor is nvim's own answer
+/// to "already maximized", never the focused rect matching some computed
+/// outer bound nvim's real geometry rarely produces exactly (a sibling
+/// keeps its own separator column/row, so the focused window is never
+/// quite the full tiled area). A lone tile counts as zoomed too,
+/// vacuously, where `<C-w>=` is already a no-op.
 fn tile_is_zoomed(model: &Model, cursor: crate::grid::registry::GridId) -> bool {
+    let (min_width, min_height) = model.native_min_pane_size;
     tiled_panes(model)
         .into_iter()
         .filter(|pane| pane.id != cursor)
-        .all(|pane| pane.slot.2 <= 1 || pane.slot.3 <= 1)
+        .all(|pane| pane.slot.2 <= min_width || pane.slot.3 <= min_height)
 }
 
 /// The notice a `window` verb raises when it has nothing to act on: no

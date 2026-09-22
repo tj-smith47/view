@@ -246,6 +246,16 @@ pub struct Model {
     /// tabline event: a session that reserved no row and then found it
     /// wanted one would shift every window down a frame later.
     pub showtabline: u8,
+    /// nvim's own `winminwidth`/`winminheight`, as the bridge last relayed
+    /// them: the floor `<C-w>_<C-w>|` squeezes a tiled sibling to, which
+    /// `update::surfaces::tile_is_zoomed` reads a sibling against instead
+    /// of assuming nvim's own default of `1`.
+    ///
+    /// Holds nvim's default until the bridge's first reading arrives, the
+    /// same way [`Self::showtabline`] does: `window zoom` reads real
+    /// layout from the first press on, so the floor it compares against
+    /// has to be real from the first press too.
+    pub native_min_pane_size: (u16, u16),
     /// Whether `[native] tabline` is still the value the look derived, so
     /// a later `:View ui panes` flip derives it again.
     ///
@@ -440,6 +450,7 @@ impl Model {
             buffers: Vec::new(),
             tabline_shows: crate::native::pill::TablineShows::default(),
             showtabline: crate::native::pill::DEFAULT_SHOWTABLINE,
+            native_min_pane_size: (1, 1),
             tabline_follows_look: true,
             colorscheme: None,
             ai_trusted: false,

@@ -645,6 +645,12 @@ pub const NOTIFY_HOLD_CHUNK: &str = HOLD_NOTIFY_CHUNK;
 /// so a session that set it in its config must be heard without waiting
 /// for the user to set it again. The payload is the option's own number,
 /// floored at zero because nvim takes a negative value as "off".
+///
+/// `winminwidth`/`winminheight` ride the same three relays for a different
+/// reader: `window zoom`'s second press (`view_core::update::surfaces::
+/// tile_is_zoomed`) tells a maximized tile from an equal split by how far
+/// `<C-w>_<C-w>|` squeezed the sibling, and the squeeze floor is these two
+/// options, not the `1` nvim's own defaults happen to answer.
 pub(crate) const REGISTER_BRIDGE_CHUNK: &str = "\
 local channel, float_throttle = ...
 local group = vim.api.nvim_create_augroup('view_bridge', { clear = true })
@@ -739,13 +745,19 @@ local function relay_showtabline()
   vim.rpcnotify(channel, 'view_bridge', 'showtabline',
     math.max(vim.o.showtabline, 0))
 end
+local function relay_min_pane_size()
+  vim.rpcnotify(channel, 'view_bridge', 'min_pane_size',
+    math.max(vim.o.winminwidth, 0), math.max(vim.o.winminheight, 0))
+end
 relay_ttimeout()
 relay_showtabline()
+relay_min_pane_size()
 vim.api.nvim_create_autocmd('VimEnter', {
   group = group,
   callback = function()
     relay_ttimeout()
     relay_showtabline()
+    relay_min_pane_size()
   end,
 })
 vim.api.nvim_create_autocmd('OptionSet', {
@@ -757,6 +769,11 @@ vim.api.nvim_create_autocmd('OptionSet', {
   group = group,
   pattern = 'showtabline',
   callback = relay_showtabline,
+})
+vim.api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = { 'winminwidth', 'winminheight' },
+  callback = relay_min_pane_size,
 })
 vim.api.nvim_create_autocmd('VimLeavePre', {
   group = group,
@@ -4934,11 +4951,11 @@ mod tests {
             REGISTER_BRIDGE_CHUNK
                 .matches("channel, 'view_bridge'")
                 .count(),
-            8,
+            9,
             "colorscheme through the shared relay, plus diagnostics, git, \
-             buffer, float, the escape timing and the tab-row option each \
-             sending their own richer payload instead of a bare match, and \
-             the marker that closes a float scan"
+             buffer, float, the escape timing, the tab-row option and the \
+             pane-size floor each sending their own richer payload instead \
+             of a bare match, and the marker that closes a float scan"
         );
     }
 

@@ -92,6 +92,14 @@ pub(super) fn on_showtabline(model: &mut Model, value: u8) -> Vec<Effect> {
     vec![Effect::Rpc(RpcCall::TryResize { width, height })]
 }
 
+/// Nothing paints on this one: `window zoom` reads
+/// [`Model::native_min_pane_size`] the next time it runs, not off a
+/// repaint, so a reading that only moves the floor changes no cell.
+pub(super) fn on_min_pane_size(model: &mut Model, width: u16, height: u16) -> Vec<Effect> {
+    model.native_min_pane_size = (width, height);
+    Vec::new()
+}
+
 /// One window's own status, which is what its tile's frame edge reads.
 ///
 /// Compared before it is stored: the trigger fires per event-loop tick the

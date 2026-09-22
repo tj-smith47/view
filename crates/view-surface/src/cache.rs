@@ -93,9 +93,11 @@ impl Frame {
 ///   `attached` (it decides
 ///   only when the UI goes on, and the frame that follows is what flips
 ///   `chrome_painted`, which is here), `stdin_relay` (an attach option
-///   the session was started with) and `tabline_follows_look` (it decides
+///   the session was started with), `tabline_follows_look` (it decides
 ///   whether a look flip moves `ext_surfaces`, and the move itself reaches
-///   a layer through `offset`)
+///   a layer through `offset`) and `native_min_pane_size` (`window zoom`
+///   reads it to choose which notation to send, and neither the choice
+///   nor the option it is read from changes what any layer paints)
 /// - read through a field already here: `engine` (this destructures it),
 ///   `grids` (via `grid`, which is the global grid's size -- the panes it
 ///   also holds reach no layer while the compositor paints that grid

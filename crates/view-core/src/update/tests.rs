@@ -15870,6 +15870,81 @@ fn zoom_fills_the_screen_and_the_second_press_equalizes() {
     );
 }
 
+/// The same second press against a `winminwidth = 5` config: the bridge's
+/// `Msg::MinPaneSizeChanged` moves the floor `tile_is_zoomed` reads a
+/// sibling against, so a sibling nvim only squeezed to 5 (never reaching
+/// the hardcoded `1` the fixed floor would have required) is read as
+/// maximized, and a wider one is not.
+#[test]
+fn zoom_reads_its_floor_off_a_raised_winminwidth() {
+    let mut m = vsplit_model();
+    let _ = update(
+        &mut m,
+        Msg::MinPaneSizeChanged {
+            width: 5,
+            height: 1,
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::GridCursorGoto {
+            grid: 6,
+            row: 0,
+            col: 0,
+        }]),
+    );
+
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::WinPos {
+                grid: 6,
+                win: crate::events::WinHandle(1003),
+                startrow: 0,
+                startcol: 0,
+                width: 74,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: 5,
+                win: crate::events::WinHandle(1002),
+                startrow: 0,
+                startcol: 75,
+                width: 5,
+                height: 24,
+            },
+        ]),
+    );
+    let effects = update(&mut m, window_invoke("zoom"));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-w>="
+        ),
+        "a sibling squeezed to the raised winminwidth must equalize back: {effects:?}"
+    );
+
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::WinPos {
+            grid: 5,
+            win: crate::events::WinHandle(1002),
+            startrow: 0,
+            startcol: 70,
+            width: 10,
+            height: 24,
+        }]),
+    );
+    let effects = update(&mut m, window_invoke("zoom"));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-w>_<C-w>|"
+        ),
+        "a sibling wider than the raised winminwidth must not read as maximized: {effects:?}"
+    );
+}
+
 /// `window flip` turns a side-by-side pair into a stacked one and back,
 /// read off the two tiled panes' own rects.
 #[test]
@@ -16142,4 +16217,41 @@ fn every_twin_that_reaches_a_verb_is_a_default_map_row_or_a_keys_action() {
             chord.verb
         );
     }
+}
+
+/// A bare `:View keys profile` (no argument) asks what is live rather than
+/// changing it, so it must set the report flag `view/src/native.rs` watches
+/// through `Stage::ProfileFlip` and move nothing else -- naming a profile
+/// still flips `key_profile_override` and leaves the flag alone.
+#[test]
+fn a_bare_keys_profile_invoke_requests_a_report_and_flips_nothing() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "keys".to_string(),
+            verb: "profile".to_string(),
+        },
+    );
+    assert!(
+        m.key_profile_report_requested,
+        "a bare profile invoke must request the report"
+    );
+    assert_eq!(
+        m.key_profile_override, None,
+        "a bare profile invoke must not move the override"
+    );
+
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "keys".to_string(),
+            verb: "profile desktop".to_string(),
+        },
+    );
+    assert!(
+        !m.key_profile_report_requested,
+        "naming a profile must not request the report"
+    );
 }

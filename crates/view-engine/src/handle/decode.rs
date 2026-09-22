@@ -153,6 +153,14 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
         "showtabline" => Some(Msg::ShowTablineChanged {
             value: u8::try_from(first.as_u64()?).unwrap_or(u8::MAX),
         }),
+        // both floored non-negative in the chunk itself, and clamped
+        // rather than refused for the same reason `showtabline` is: a
+        // config that raised either past u16 still reads as "wide enough
+        // to never be squeezed"
+        "min_pane_size" => Some(Msg::MinPaneSizeChanged {
+            width: u16::try_from(first.as_u64()?).unwrap_or(u16::MAX),
+            height: u16::try_from(rest.first()?.as_u64()?).unwrap_or(u16::MAX),
+        }),
         "float" => decode_float_observed(params),
         // the window view opened for one of its own surfaces holding a
         // buffer view did not put there: the surface id is the whole

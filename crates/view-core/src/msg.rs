@@ -430,6 +430,16 @@ pub enum Msg {
     ShowTablineChanged {
         value: u8,
     },
+    /// The bridge relayed nvim's own `winminwidth`/`winminheight`: its
+    /// reading at registration, and every `OptionSet` on either after it.
+    ///
+    /// `update::surfaces::tile_is_zoomed` reads a sibling squeezed to this
+    /// floor as "already maximized" rather than trusting nvim's default of
+    /// `1`, which a user's own config is free to raise.
+    MinPaneSizeChanged {
+        width: u16,
+        height: u16,
+    },
     /// The bridge's float watcher saw a floating window, or saw one it had
     /// already reported move: geometry, anchor and whatever identity the
     /// window carries, in the grid's own cells.
