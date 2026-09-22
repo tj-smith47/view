@@ -202,22 +202,20 @@ fn focused_tile_rect(model: &Model) -> Option<(u16, u16, u16, u16)> {
         .map(|pane| pane.slot)
 }
 
-/// The union of every tiled pane's rect: the outer grid `window zoom` reads
-/// a window's fill against. Not the global grid's own size, which includes
-/// the tabline and cmdline rows no window ever draws into.
-fn tiled_bounds(model: &Model) -> Option<(u16, u16, u16, u16)> {
-    let panes = tiled_panes(model);
-    let first = panes.first()?.slot;
-    let (mut min_row, mut min_col) = (first.0, first.1);
-    let (mut max_row, mut max_col) = (first.0 + first.3, first.1 + first.2);
-    for pane in &panes[1..] {
-        let (row, col, width, height) = pane.slot;
-        min_row = min_row.min(row);
-        min_col = min_col.min(col);
-        max_row = max_row.max(row + height);
-        max_col = max_col.max(col + width);
-    }
-    Some((min_row, min_col, max_col - min_col, max_row - min_row))
+/// Whether the tiled pane holding `cursor` is already zoomed: `<C-w>_<C-w>|`
+/// leaves every other tiled pane squeezed to its layout minimum
+/// (`winminwidth`/`winminheight` default to 1, plus the one-cell separator
+/// a real vsplit still draws), so a sibling at `width <= 1` or
+/// `height <= 1` is nvim's own answer to "already maximized", never the
+/// focused rect matching some computed outer bound nvim's real geometry
+/// rarely produces exactly (a sibling keeps its own separator column/row,
+/// so the focused window is never quite the full tiled area). A lone tile
+/// counts as zoomed too, vacuously, where `<C-w>=` is already a no-op.
+fn tile_is_zoomed(model: &Model, cursor: crate::grid::registry::GridId) -> bool {
+    tiled_panes(model)
+        .into_iter()
+        .filter(|pane| pane.id != cursor)
+        .all(|pane| pane.slot.2 <= 1 || pane.slot.3 <= 1)
 }
 
 /// The notice a `window` verb raises when it has nothing to act on: no
@@ -247,15 +245,18 @@ pub(crate) fn window_new(model: &mut Model) -> Vec<Effect> {
 }
 
 /// `Msg::FeatureInvoke { feature: "window", verb: "zoom" }`: a window
-/// already filling [`tiled_bounds`] equalizes back (`<C-w>=`); any other
-/// window fills it (`<C-w>_<C-w>|`). No flag is held between presses --
-/// "back" is reading the layout the second press lands on, the same way
+/// already [`tile_is_zoomed`] equalizes back (`<C-w>=`); any other window
+/// fills the tiled area (`<C-w>_<C-w>|`). No flag is held between presses
+/// -- "back" is reading the layout the second press lands on, the same way
 /// the first press read the one before it.
 pub(crate) fn window_zoom(model: &mut Model) -> Vec<Effect> {
-    let (Some(focused), Some(bounds)) = (focused_tile_rect(model), tiled_bounds(model)) else {
+    let Some(cursor) = model.engine.grids().cursor_grid() else {
         return no_target_notice(model, "zoom");
     };
-    let notation = if focused == bounds {
+    if focused_tile_rect(model).is_none() {
+        return no_target_notice(model, "zoom");
+    }
+    let notation = if tile_is_zoomed(model, cursor) {
         "<C-w>="
     } else {
         "<C-w>_<C-w>|"

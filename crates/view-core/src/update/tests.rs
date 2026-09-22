@@ -15808,9 +15808,17 @@ fn a_new_tile_splits_the_longer_side() {
     );
 }
 
-/// `window zoom` fills whichever tile is focused when it does not already
-/// fill the outer tiled bounds, and equalizes back once it does -- no flag
-/// held between presses, only the layout read fresh each time.
+/// `window zoom` fills whichever tile is focused when its sibling is not
+/// already squeezed to its layout minimum, and equalizes back once it is --
+/// no flag held between presses, only the layout read fresh each time.
+///
+/// The second press's `WinPos` pair is a real nvim's own answer to
+/// `<C-w>_<C-w>|` against an 80-column, 24-row `vsplit` (`nvim --headless
+/// -u NONE -i NONE --cmd 'set lines=24 columns=80' -c vsplit -c 'wincmd _'
+/// -c 'wincmd |'`, then `winwidth()`/`winheight()` on each window): the
+/// sibling keeps its own one-cell separator column and is squeezed to
+/// `winminwidth`'s default of 1, so the focused window lands at 78, never
+/// the 80 a `focused == tiled_bounds` reading would require.
 #[test]
 fn zoom_fills_the_screen_and_the_second_press_equalizes() {
     let mut m = vsplit_model();
@@ -15828,12 +15836,9 @@ fn zoom_fills_the_screen_and_the_second_press_equalizes() {
             effects.as_slice(),
             [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-w>_<C-w>|"
         ),
-        "a window short of the outer bounds must fill it: {effects:?}"
+        "a window whose sibling is not yet squeezed to its minimum must fill: {effects:?}"
     );
 
-    // The second press: nvim answered the maximize by squeezing the
-    // sibling to a sliver still inside the focused window's own new rect,
-    // so the focused rect now equals the tiled bounds.
     let _ = update(
         &mut m,
         Msg::Redraw(vec![
@@ -15842,16 +15847,16 @@ fn zoom_fills_the_screen_and_the_second_press_equalizes() {
                 win: crate::events::WinHandle(1003),
                 startrow: 0,
                 startcol: 0,
-                width: 80,
+                width: 78,
                 height: 24,
             },
             UiEvent::WinPos {
                 grid: 5,
                 win: crate::events::WinHandle(1002),
                 startrow: 0,
-                startcol: 0,
+                startcol: 79,
                 width: 1,
-                height: 1,
+                height: 24,
             },
         ]),
     );
@@ -15861,7 +15866,7 @@ fn zoom_fills_the_screen_and_the_second_press_equalizes() {
             effects.as_slice(),
             [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-w>="
         ),
-        "a window already filling the outer bounds must equalize back: {effects:?}"
+        "a sibling already squeezed to its minimum must equalize back: {effects:?}"
     );
 }
 
