@@ -20,6 +20,7 @@
 //! unspellable in config.
 
 mod keys;
+pub mod profile;
 mod resolve;
 mod surfaces;
 
