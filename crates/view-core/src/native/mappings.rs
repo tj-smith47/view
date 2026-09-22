@@ -13,6 +13,23 @@
 /// names and into the docs table, from here, once.
 pub const COMMAND: &str = "View";
 
+/// What a mapping does when its key is pressed.
+///
+/// `Keys` is the desktop chords' shape (`native::chords`): the omarchy
+/// table binds most of its rows straight to an existing nvim key (`<C-w>h`,
+/// `1gt`), and setting that key with no remapping costs the chord nothing
+/// beyond what typing those keys already costs. Every [`MappingSpec`] built
+/// before the chords existed is `Invoke`, the bridge call every registered
+/// key used to be the only shape of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Rhs {
+    /// `<Cmd>call rpcnotify(channel, 'view_invoke', feature, verb)<CR>`.
+    #[default]
+    Invoke,
+    /// nvim keys, set with no remapping.
+    Keys(&'static str),
+}
+
 /// One default key view registers for a feature, and the entry point that
 /// key invokes.
 ///
@@ -427,7 +444,7 @@ pub struct ExemptFeatureDesc {
 /// Features that reach a key in [`DEFAULT_MAPS`] without a
 /// [`registry::FeatureDesc`] row -- see [`is_reachable_feature`]'s doc on why
 /// a feature lands here.
-static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 2] = [
+static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 3] = [
     ExemptFeatureDesc {
         id: "ai",
         supersedes: Some("your own AI chat plugin"),
@@ -441,6 +458,15 @@ static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 2] = [
         id: "ui",
         supersedes: None,
         off_switch: "keys.toggle_gaps / keys.cycle_surfaces in view.toml",
+    },
+    // `window` carries the whole desktop chord table (`native::chords`)
+    // plus its own tile-management `DEFAULT_MAPS` rows, and none of it is a
+    // `[native]`-gated surface -- the off switch is the profile, not a
+    // per-key toggle.
+    ExemptFeatureDesc {
+        id: "window",
+        supersedes: Some("your desktop's own window-management chords"),
+        off_switch: "keys.profile = \"editor\"",
     },
 ];
 

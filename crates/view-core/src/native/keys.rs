@@ -209,7 +209,11 @@ const NAMED_KEYS: [&str; 16] = [
 ];
 
 /// The modifier prefixes a notation may open with, in any combination.
-const MODIFIERS: [&str; 4] = ["S-", "C-", "M-", "A-"];
+///
+/// `D-` (`Cmd`/`Super`) joins the other three for the desktop chords
+/// (`native::chords`): a terminal speaking the kitty keyboard protocol
+/// reports it as its own bit, distinct from `M-` (Alt).
+const MODIFIERS: [&str; 5] = ["S-", "C-", "M-", "A-", "D-"];
 
 /// Whether `key` is a notation this build could ever be handed.
 ///
@@ -221,7 +225,7 @@ const MODIFIERS: [&str; 4] = ["S-", "C-", "M-", "A-"];
 /// it replaces the action's defaults with a key nothing will ever send,
 /// leaving the user with no way to perform it at all and nothing on screen
 /// saying why.
-fn well_formed(key: &str) -> bool {
+pub(crate) fn well_formed(key: &str) -> bool {
     let Some(inner) = key.strip_prefix('<').and_then(|k| k.strip_suffix('>')) else {
         return true;
     };
