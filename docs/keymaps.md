@@ -203,25 +203,25 @@ for; each row below names what it would have to reach for:
 <!-- generated from unbound() -->
 | omarchy chord | unbound on |
 | --- | --- |
-| `CTRL + ALT + DELETE` | menus |
+| `CTRL + ALT + DELETE` | power and session |
 | `SUPER + P` | the Hyprland layout modes |
 | `SUPER + CTRL + F` | compositor surface properties |
 | `SUPER + O` | compositor surface properties |
 | `SUPER + ALT + Home` | the saved window width |
 | `SUPER + Home` | the saved window width |
 | `SUPER + L` | the Hyprland layout modes |
-| `SUPER + SHIFT + ALT + code:10` | menus |
-| `SUPER + SHIFT + ALT + code:11` | menus |
-| `SUPER + SHIFT + ALT + code:12` | menus |
-| `SUPER + SHIFT + ALT + code:13` | menus |
-| `SUPER + SHIFT + ALT + code:14` | menus |
-| `SUPER + SHIFT + ALT + code:15` | menus |
-| `SUPER + SHIFT + ALT + code:16` | menus |
-| `SUPER + SHIFT + ALT + code:17` | menus |
-| `SUPER + SHIFT + ALT + code:18` | menus |
-| `SUPER + code:19` | menus |
-| `SUPER + SHIFT + code:19` | menus |
-| `SUPER + SHIFT + ALT + code:19` | menus |
+| `SUPER + SHIFT + ALT + code:10` | workspace moves that skip the switch |
+| `SUPER + SHIFT + ALT + code:11` | workspace moves that skip the switch |
+| `SUPER + SHIFT + ALT + code:12` | workspace moves that skip the switch |
+| `SUPER + SHIFT + ALT + code:13` | workspace moves that skip the switch |
+| `SUPER + SHIFT + ALT + code:14` | workspace moves that skip the switch |
+| `SUPER + SHIFT + ALT + code:15` | workspace moves that skip the switch |
+| `SUPER + SHIFT + ALT + code:16` | workspace moves that skip the switch |
+| `SUPER + SHIFT + ALT + code:17` | workspace moves that skip the switch |
+| `SUPER + SHIFT + ALT + code:18` | workspace moves that skip the switch |
+| `SUPER + code:19` | the tenth workspace has no digit key |
+| `SUPER + SHIFT + code:19` | the tenth workspace has no digit key |
+| `SUPER + SHIFT + ALT + code:19` | the tenth workspace has no digit key |
 | `SUPER + S` | the scratchpad |
 | `SUPER + ALT + S` | the scratchpad |
 | `SUPER + grave` | the scratchpad |
@@ -235,14 +235,14 @@ for; each row below names what it would have to reach for:
 | `ALT + SHIFT + TAB` | ALT + TAB |
 | `CTRL + ALT + TAB` | monitors |
 | `CTRL + ALT + SHIFT + TAB` | monitors |
-| `SUPER + ALT + code:20` | menus |
-| `SUPER + ALT + code:21` | menus |
-| `SUPER + SHIFT + ALT + code:20` | menus |
-| `SUPER + SHIFT + ALT + code:21` | menus |
-| `SUPER + CTRL + code:20` | menus |
-| `SUPER + CTRL + code:21` | menus |
-| `SUPER + CTRL + SHIFT + code:20` | menus |
-| `SUPER + CTRL + SHIFT + code:21` | menus |
+| `SUPER + ALT + code:20` | the fine and coarse resize steps |
+| `SUPER + ALT + code:21` | the fine and coarse resize steps |
+| `SUPER + SHIFT + ALT + code:20` | the fine and coarse resize steps |
+| `SUPER + SHIFT + ALT + code:21` | the fine and coarse resize steps |
+| `SUPER + CTRL + code:20` | the fine and coarse resize steps |
+| `SUPER + CTRL + code:21` | the fine and coarse resize steps |
+| `SUPER + CTRL + SHIFT + code:20` | the fine and coarse resize steps |
+| `SUPER + CTRL + SHIFT + code:21` | the fine and coarse resize steps |
 | `SUPER + mouse_down` | the Hyprland layout modes |
 | `SUPER + mouse_up` | the Hyprland layout modes |
 | `SUPER + mouse:272` | compositor surface properties |
@@ -272,7 +272,7 @@ for; each row below names what it would have to reach for:
 | `SUPER + CTRL + H` | menus |
 | `SUPER + SHIFT + code:201` | menus |
 | `SUPER + ESCAPE` | menus |
-| `XF86PowerOff` | menus |
+| `XF86PowerOff` | power and session |
 | `SUPER + K` | menus |
 | `SUPER + ALT + K` | menus |
 | `SUPER + CTRL + K` | menus |
@@ -284,15 +284,15 @@ for; each row below names what it would have to reach for:
 | `SUPER + BACKSPACE` | compositor surface properties |
 | `SUPER + CTRL + BACKSPACE` | compositor surface properties |
 | `SUPER + CTRL + ALT + F` | compositor surface properties |
-| `SUPER + SHIFT + comma` | menus |
-| `SUPER + CTRL + comma` | menus |
-| `SUPER + ALT + comma` | menus |
-| `SUPER + CTRL + I` | menus |
-| `SUPER + CTRL + N` | monitors |
+| `SUPER + SHIFT + comma` | notification chords with no verb yet: dismiss all |
+| `SUPER + CTRL + comma` | notification chords with no verb yet: silence |
+| `SUPER + ALT + comma` | notification chords with no verb yet: invoke last |
+| `SUPER + CTRL + I` | power and session |
+| `SUPER + CTRL + N` | power and session |
 | `SUPER + CTRL + Delete` | monitors |
 | `SUPER + CTRL + ALT + Delete` | monitors |
-| `switch:on:Lid Switch` | menus |
-| `switch:off:Lid Switch` | menus |
+| `switch:on:Lid Switch` | power and session |
+| `switch:off:Lid Switch` | power and session |
 | `PRINT` | capture and media |
 | `ALT + PRINT` | capture and media |
 | `SUPER + ALT + code:34` | capture and media |
@@ -316,7 +316,7 @@ for; each row below names what it would have to reach for:
 | `SUPER + CTRL + T` | menus |
 | `SUPER + CTRL + Z` | compositor surface properties |
 | `SUPER + CTRL + ALT + Z` | compositor surface properties |
-| `SUPER + CTRL + L` | menus |
+| `SUPER + CTRL + L` | power and session |
 | `SUPER + SHIFT + RETURN` | application launching |
 | `SUPER + ALT + SHIFT + F` | application launching |
 | `SUPER + SHIFT + B` | application launching |

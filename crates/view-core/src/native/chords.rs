@@ -53,9 +53,9 @@ pub struct DesktopChord {
     /// The omarchy chord it answers to, spelled as
     /// `default/hypr/bindings/*.lua` spells it (a digit-row chord written as
     /// the digit rather than the xkb `code:N` the source binds, the one
-    /// place this table's own spelling and the fixture's diverge --
-    /// [`the_desktop_table_matches_omarchy_by_chord`] carries the
-    /// normalization).
+    /// place this table's own spelling and the fixture's diverge -- the
+    /// `#[cfg(test)]` `the_desktop_table_matches_omarchy_by_chord` carries
+    /// the normalization).
     pub omarchy: &'static str,
     /// Its spelling under [`DesktopModifier::Super`], in nvim notation.
     pub with_super: &'static str,
@@ -561,27 +561,63 @@ static DESKTOP_CHORDS: [DesktopChord; DESKTOP_CHORD_COUNT] = [
 /// layout modes, the saved window width (`[ui.surfaces]` holds a width that
 /// outlives a session), compositor surface properties, monitors (one
 /// terminal is one screen), `ALT + TAB` (terminals hand it to the desktop
-/// first), menus, application launching, and capture and media.
+/// first), menus, application launching, capture and media, workspace moves
+/// that skip the switch, the tenth workspace having no digit key, the fine
+/// and coarse resize steps, notification chords with no verb yet, and power
+/// and session.
 static UNBOUND: [(&str, &str); 149] = [
-    ("CTRL + ALT + DELETE", "menus"),
+    ("CTRL + ALT + DELETE", "power and session"),
     ("SUPER + P", "the Hyprland layout modes"),
     ("SUPER + CTRL + F", "compositor surface properties"),
     ("SUPER + O", "compositor surface properties"),
     ("SUPER + ALT + Home", "the saved window width"),
     ("SUPER + Home", "the saved window width"),
     ("SUPER + L", "the Hyprland layout modes"),
-    ("SUPER + SHIFT + ALT + code:10", "menus"),
-    ("SUPER + SHIFT + ALT + code:11", "menus"),
-    ("SUPER + SHIFT + ALT + code:12", "menus"),
-    ("SUPER + SHIFT + ALT + code:13", "menus"),
-    ("SUPER + SHIFT + ALT + code:14", "menus"),
-    ("SUPER + SHIFT + ALT + code:15", "menus"),
-    ("SUPER + SHIFT + ALT + code:16", "menus"),
-    ("SUPER + SHIFT + ALT + code:17", "menus"),
-    ("SUPER + SHIFT + ALT + code:18", "menus"),
-    ("SUPER + code:19", "menus"),
-    ("SUPER + SHIFT + code:19", "menus"),
-    ("SUPER + SHIFT + ALT + code:19", "menus"),
+    (
+        "SUPER + SHIFT + ALT + code:10",
+        "workspace moves that skip the switch",
+    ),
+    (
+        "SUPER + SHIFT + ALT + code:11",
+        "workspace moves that skip the switch",
+    ),
+    (
+        "SUPER + SHIFT + ALT + code:12",
+        "workspace moves that skip the switch",
+    ),
+    (
+        "SUPER + SHIFT + ALT + code:13",
+        "workspace moves that skip the switch",
+    ),
+    (
+        "SUPER + SHIFT + ALT + code:14",
+        "workspace moves that skip the switch",
+    ),
+    (
+        "SUPER + SHIFT + ALT + code:15",
+        "workspace moves that skip the switch",
+    ),
+    (
+        "SUPER + SHIFT + ALT + code:16",
+        "workspace moves that skip the switch",
+    ),
+    (
+        "SUPER + SHIFT + ALT + code:17",
+        "workspace moves that skip the switch",
+    ),
+    (
+        "SUPER + SHIFT + ALT + code:18",
+        "workspace moves that skip the switch",
+    ),
+    ("SUPER + code:19", "the tenth workspace has no digit key"),
+    (
+        "SUPER + SHIFT + code:19",
+        "the tenth workspace has no digit key",
+    ),
+    (
+        "SUPER + SHIFT + ALT + code:19",
+        "the tenth workspace has no digit key",
+    ),
     ("SUPER + S", "the scratchpad"),
     ("SUPER + ALT + S", "the scratchpad"),
     ("SUPER + grave", "the scratchpad"),
@@ -595,14 +631,26 @@ static UNBOUND: [(&str, &str); 149] = [
     ("ALT + SHIFT + TAB", "ALT + TAB"),
     ("CTRL + ALT + TAB", "monitors"),
     ("CTRL + ALT + SHIFT + TAB", "monitors"),
-    ("SUPER + ALT + code:20", "menus"),
-    ("SUPER + ALT + code:21", "menus"),
-    ("SUPER + SHIFT + ALT + code:20", "menus"),
-    ("SUPER + SHIFT + ALT + code:21", "menus"),
-    ("SUPER + CTRL + code:20", "menus"),
-    ("SUPER + CTRL + code:21", "menus"),
-    ("SUPER + CTRL + SHIFT + code:20", "menus"),
-    ("SUPER + CTRL + SHIFT + code:21", "menus"),
+    ("SUPER + ALT + code:20", "the fine and coarse resize steps"),
+    ("SUPER + ALT + code:21", "the fine and coarse resize steps"),
+    (
+        "SUPER + SHIFT + ALT + code:20",
+        "the fine and coarse resize steps",
+    ),
+    (
+        "SUPER + SHIFT + ALT + code:21",
+        "the fine and coarse resize steps",
+    ),
+    ("SUPER + CTRL + code:20", "the fine and coarse resize steps"),
+    ("SUPER + CTRL + code:21", "the fine and coarse resize steps"),
+    (
+        "SUPER + CTRL + SHIFT + code:20",
+        "the fine and coarse resize steps",
+    ),
+    (
+        "SUPER + CTRL + SHIFT + code:21",
+        "the fine and coarse resize steps",
+    ),
     ("SUPER + mouse_down", "the Hyprland layout modes"),
     ("SUPER + mouse_up", "the Hyprland layout modes"),
     ("SUPER + mouse:272", "compositor surface properties"),
@@ -632,7 +680,7 @@ static UNBOUND: [(&str, &str); 149] = [
     ("SUPER + CTRL + H", "menus"),
     ("SUPER + SHIFT + code:201", "menus"),
     ("SUPER + ESCAPE", "menus"),
-    ("XF86PowerOff", "menus"),
+    ("XF86PowerOff", "power and session"),
     ("SUPER + K", "menus"),
     ("SUPER + ALT + K", "menus"),
     ("SUPER + CTRL + K", "menus"),
@@ -644,15 +692,24 @@ static UNBOUND: [(&str, &str); 149] = [
     ("SUPER + BACKSPACE", "compositor surface properties"),
     ("SUPER + CTRL + BACKSPACE", "compositor surface properties"),
     ("SUPER + CTRL + ALT + F", "compositor surface properties"),
-    ("SUPER + SHIFT + comma", "menus"),
-    ("SUPER + CTRL + comma", "menus"),
-    ("SUPER + ALT + comma", "menus"),
-    ("SUPER + CTRL + I", "menus"),
-    ("SUPER + CTRL + N", "monitors"),
+    (
+        "SUPER + SHIFT + comma",
+        "notification chords with no verb yet: dismiss all",
+    ),
+    (
+        "SUPER + CTRL + comma",
+        "notification chords with no verb yet: silence",
+    ),
+    (
+        "SUPER + ALT + comma",
+        "notification chords with no verb yet: invoke last",
+    ),
+    ("SUPER + CTRL + I", "power and session"),
+    ("SUPER + CTRL + N", "power and session"),
     ("SUPER + CTRL + Delete", "monitors"),
     ("SUPER + CTRL + ALT + Delete", "monitors"),
-    ("switch:on:Lid Switch", "menus"),
-    ("switch:off:Lid Switch", "menus"),
+    ("switch:on:Lid Switch", "power and session"),
+    ("switch:off:Lid Switch", "power and session"),
     ("PRINT", "capture and media"),
     ("ALT + PRINT", "capture and media"),
     ("SUPER + ALT + code:34", "capture and media"),
@@ -676,7 +733,7 @@ static UNBOUND: [(&str, &str); 149] = [
     ("SUPER + CTRL + T", "menus"),
     ("SUPER + CTRL + Z", "compositor surface properties"),
     ("SUPER + CTRL + ALT + Z", "compositor surface properties"),
-    ("SUPER + CTRL + L", "menus"),
+    ("SUPER + CTRL + L", "power and session"),
     ("SUPER + SHIFT + RETURN", "application launching"),
     ("SUPER + ALT + SHIFT + F", "application launching"),
     ("SUPER + SHIFT + B", "application launching"),
@@ -838,12 +895,9 @@ mod tests {
     }
 
     /// The twin is either an nvim key view registers nothing for (starts
-    /// with `<C-w>` or is a bare `gt`/`gT`/digit-prefixed `gt`), an existing
-    /// [`default_maps`] row, or -- for the rows whose `DEFAULT_MAPS` entry
-    /// is a later commit's job (the window verbs and `notifications
-    /// dismiss`) -- a `<leader>` spelling well_formed can decode, so a chord
-    /// naming a twin that could never become a key fails here instead of at
-    /// registration time.
+    /// with `<C-w>` or is a bare `gt`/`gT`/digit-prefixed `gt`) or an
+    /// existing [`default_maps`] row, so a chord naming a twin that could
+    /// never become a key fails here instead of at registration time.
     #[test]
     fn every_desktop_chord_has_an_editor_twin() {
         for chord in desktop_chords() {
@@ -853,10 +907,9 @@ mod tests {
                 || (chord.twin.ends_with("gt")
                     && chord.twin[..chord.twin.len() - 2].parse::<u32>().is_ok());
             let default_map_row = default_maps().iter().any(|spec| spec.lhs == chord.twin);
-            let future_leader_key = chord.twin.starts_with("<leader>") && well_formed(chord.twin);
             assert!(
-                native_key || default_map_row || future_leader_key,
-                "{}'s twin {} is neither an nvim key, a default_maps() row, nor a spellable leader key",
+                native_key || default_map_row,
+                "{}'s twin {} is neither an nvim key nor a default_maps() row",
                 chord.id,
                 chord.twin
             );
@@ -865,13 +918,10 @@ mod tests {
 
     /// Every chord's feature is reachable through the registry or
     /// [`crate::native::mappings::REGISTRY_EXEMPT_FEATURES`] -- the off
-    /// switch a claim notice needs exists the moment the chord does, even
-    /// before a later commit gives an `Rhs::Invoke` row its own
-    /// `default_maps()`/`command_only_forms()` entry
-    /// (`every_registered_feature_invoke_has_a_dispatch_handler` in
+    /// switch a claim notice needs exists the moment the chord does.
+    /// `every_registered_feature_invoke_has_a_dispatch_handler` in
     /// `view-core::update::tests` is the pin that refuses a form with
-    /// nothing behind it, so a chord's own form is proven there once its
-    /// verb is wired rather than here).
+    /// nothing behind it.
     #[test]
     fn every_chord_names_a_reachable_feature_or_a_command_only_form() {
         for chord in desktop_chords() {
