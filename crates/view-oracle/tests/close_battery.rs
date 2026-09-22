@@ -2601,3 +2601,102 @@ fn resizing_one_windowed_sidebar_carries_its_width_to_a_sibling_stacked_beside_i
          {stream_layout:?}"
     );
 }
+
+/// A terminal with no room for the tree's own vertical split beside the
+/// user's window, which raises E36 ("No room") from `topleft vsplit`
+/// partway through the open chunk's body.
+fn tiny_windowed_tree_session(dir: &Path) -> view_oracle::EngineSession {
+    let mut engine =
+        view_oracle::EngineSession::spawn_with_ext(12, 3, view_oracle::UI_EXT_OPTIONS_MULTIGRID)
+            .expect("EngineSession::spawn_with_ext against real nvim");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine
+        .arm_and_input(&format!(":cd {}<CR>", dir.display()))
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    engine.set_surface(
+        view_core::native::geometry::NativeSurface::Tree,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Bottom,
+            30,
+        ),
+    );
+    engine
+}
+
+/// N2: a split nvim refuses for lack of room used to leave `eventignore`
+/// set for the rest of the session, since the option was written before
+/// the `vim.cmd` that could raise and restored only on the success path.
+/// The open chunk now runs the whole split-and-configure step under one
+/// `pcall`, so the refusal still restores it.
+#[test]
+fn opening_a_windowed_surface_with_no_room_for_the_split_leaves_eventignore_untouched_against_real_nvim(
+) {
+    let work = common::ScratchPaths::new("close-battery-no-room-open");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = tiny_windowed_tree_session(&dir);
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the toggle sends its own open request into a terminal with no room for it");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        1,
+        "nvim split its own window even though there was no room for the tree's"
+    );
+    assert_eq!(
+        engine.eval_str("&eventignore").unwrap().trim(),
+        "",
+        "a split nvim refused left eventignore set for the rest of the session"
+    );
+}
+
+/// N2's other reachable path: a ring step or a mapped key can fire
+/// `OpenNativeWindow` while the user is inside the command-line window
+/// (`q:`), where `botright split` raises E11 rather than E36. The chunk
+/// refuses outright (`getcmdwintype() ~= ''`) before it ever sets
+/// `eventignore`, so this leg never even reaches the pcall the one above
+/// does.
+#[test]
+fn opening_a_windowed_surface_from_inside_the_command_line_window_leaves_eventignore_untouched_against_real_nvim(
+) {
+    let work = common::ScratchPaths::new("close-battery-cmdwin-open");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = windowed_tree_session(&dir);
+    engine.arm_and_input("q:").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.eval_str("getcmdwintype()").unwrap().trim(),
+        ":",
+        "the session never entered the command-line window"
+    );
+    let before = nvim_window_sizes(&mut engine).len();
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the toggle sends its own open request from inside the command-line window");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        before,
+        "the tree's window opened inside the command-line window"
+    );
+
+    engine.arm_and_input(":q<CR>").unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        engine.eval_str("&eventignore").unwrap().trim(),
+        "",
+        "a refused open left eventignore set for the rest of the session"
+    );
+}

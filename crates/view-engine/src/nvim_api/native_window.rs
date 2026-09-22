@@ -135,20 +135,28 @@ end
 /// The returned value is the window handle, which the reply decodes into
 /// `Msg::NativeWindowOpened`.
 ///
-/// `enter` false is a surface nobody asked to visit -- the palette's own
-/// tile, or a ring step carrying an already-open surface to `windowed`.
-/// The split, and every option write and buffer swap it takes to make the
-/// window, run under `eventignore` so none of the four `Win*` events or
-/// nvim's own `Buf*` ones reach a user autocommand, and `curwin` and the
-/// `wincmd p` target are restored to what they were before the chunk ran,
-/// in the same chunk: the two-hop restore (leave through the window that
-/// was previous, then arrive at the window that was current) is what
-/// makes `nvim_set_current_win` -- which always overwrites the previous-
-/// window record with the window it is leaving -- land on the original
-/// previous window rather than on the surface's own. Without this a
-/// windowed palette took `curwin` on every `:` and `/`: `:q` closed its
-/// scratch window instead of the person's, and a search ran against its
-/// empty buffer instead of theirs.
+/// `enter` false is a ring step carrying an already-open surface to
+/// `windowed`, a surface nobody asked to visit. The split, and every
+/// option write and buffer swap it takes to make the window, run under
+/// `eventignore` so none of the four `Win*` events or nvim's own `Buf*`
+/// ones reach a user autocommand, and `curwin` and the `wincmd p` target
+/// are restored to what they were before the chunk ran, in the same
+/// chunk: the two-hop restore (leave through the window that was
+/// previous, then arrive at the window that was current) is what makes
+/// `nvim_set_current_win` -- which always overwrites the previous-window
+/// record with the window it is leaving -- land on the original previous
+/// window rather than on the surface's own. Without this a windowed
+/// surface carried in by a ring step took `curwin` on the next `:` or
+/// `/`: `:q` closed its scratch window instead of the person's, and a
+/// search ran against its empty buffer instead of theirs.
+///
+/// The body runs under one `pcall` from the moment `eventignore` is
+/// overridden to the moment it is put back, so a split that fails (no
+/// room for the window, or `getcmdwintype()` catches the rarer case of
+/// running from inside the command-line window) never leaves the option
+/// set for the rest of the session; the scratch buffer it had already
+/// created is deleted on that path too, since nothing else will ever
+/// pick it up.
 ///
 /// [`EngineHandle::open_native_window`]: super::EngineHandle::open_native_window
 pub(crate) const OPEN_NATIVE_WINDOW_CHUNK: &str = concat!(
@@ -159,7 +167,7 @@ pub(crate) const OPEN_NATIVE_WINDOW_CHUNK: &str = concat!(
 -- closer to the edge, whichever one opened second -- design puts the
 -- tree above the agent panel, a rule this table states once rather than
 -- letting the open order of two `OpenNativeWindow` calls decide it
-local stack_order = { tree = 1, agent = 2, notifications = 3, palette = 4 }
+local stack_order = { tree = 1, agent = 2, notifications = 3 }
 local wins = vim.g.view_native_windows or {}
 local live = wins[id]
 if is_ours(live) then
@@ -168,136 +176,133 @@ if is_ours(live) then
   end
   return live.win
 end
+-- a split issued from inside the command-line window raises E11 before
+-- it ever reaches `eventignore`; refusing here rather than inside the
+-- pcall below is one fewer error a caller has to decode
+if vim.fn.getcmdwintype() ~= '' then
+  return nil
+end
 local win_before = vim.api.nvim_get_current_win()
 local prev_before = vim.fn.win_getid(vim.fn.winnr('#'))
 local ei = vim.o.eventignore
--- `enter == false` is a surface nobody asked to visit (a ring step
--- carrying an already-open surface to `windowed`, or the palette's own
--- tile): the split, and the restore below, must cost the user's own
--- WinEnter/WinLeave/WinNew/WinClosed and Buf* autocmds nothing, since
--- from their side nothing happened
+-- `enter == false` is a ring step carrying an already-open surface to
+-- `windowed`, a surface nobody asked to visit: the split, and the
+-- restore below, must cost the user's own WinEnter/WinLeave/WinNew/
+-- WinClosed and Buf* autocmds nothing, since from their side nothing
+-- happened
 if not enter then
   vim.o.eventignore =
     'WinEnter,WinLeave,WinNew,WinClosed,BufEnter,BufLeave,BufWinEnter'
 end
-local buf = vim.api.nvim_create_buf(false, true)
-vim.bo[buf].buftype = 'nofile'
-vim.bo[buf].bufhidden = 'wipe'
-vim.bo[buf].buflisted = false
-vim.bo[buf].swapfile = false
-vim.bo[buf].filetype = 'view-' .. id
-local vertical = split == 'left' or split == 'right'
-local total = vertical and vim.o.columns or vim.o.lines
-local cells = math.max(1, math.floor(total * pct / 100))
-local commands = {
-  left = 'topleft vsplit',
-  right = 'botright vsplit',
-  above = 'topleft split',
-  below = 'botright split',
-}
--- a second surface anchored at an edge another already holds stacks
--- under it instead of claiming a further column or row of its own:
--- split the edge's own window, across the axis a shared column stacks
--- on (rows for a left/right edge, columns for an above/below one)
-local stack_win = nil
-local stack_other = nil
-for other, held in pairs(wins) do
-  if other ~= id and held.edge == split and is_ours(held) then
-    stack_win = held.win
-    stack_other = other
-    break
+-- the whole split-and-configure step runs under one pcall so a failure
+-- partway through (no room for the window is the reachable one) still
+-- restores `eventignore` below rather than leaving it set for the rest
+-- of the session; `buf` is declared outside the closure so the buffer a
+-- failed attempt already created can be cleaned up too
+local buf = nil
+local ok, result = pcall(function()
+  buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].buftype = 'nofile'
+  vim.bo[buf].bufhidden = 'wipe'
+  vim.bo[buf].buflisted = false
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = 'view-' .. id
+  local vertical = split == 'left' or split == 'right'
+  local total = vertical and vim.o.columns or vim.o.lines
+  local cells = math.max(1, math.floor(total * pct / 100))
+  local commands = {
+    left = 'topleft vsplit',
+    right = 'botright vsplit',
+    above = 'topleft split',
+    below = 'botright split',
+  }
+  -- a second surface anchored at an edge another already holds stacks
+  -- under it instead of claiming a further column or row of its own:
+  -- split the edge's own window, across the axis a shared column stacks
+  -- on (rows for a left/right edge, columns for an above/below one)
+  local stack_win = nil
+  local stack_other = nil
+  for other, held in pairs(wins) do
+    if other ~= id and held.edge == split and is_ours(held) then
+      stack_win = held.win
+      stack_other = other
+      break
+    end
   end
-end
-if stack_win then
-  vim.api.nvim_set_current_win(stack_win)
-  local before = (stack_order[id] or 99) < (stack_order[stack_other] or 99)
-  local after_cmd = vertical and 'belowright split' or 'belowright vsplit'
-  local before_cmd = vertical and 'aboveleft split' or 'aboveleft vsplit'
-  vim.cmd(before and before_cmd or after_cmd)
-else
-  vim.cmd(commands[split] or 'topleft vsplit')
-end
-local win = vim.api.nvim_get_current_win()
-vim.api.nvim_win_set_buf(win, buf)
-if vertical then
-  vim.api.nvim_win_set_width(win, cells)
-else
-  vim.api.nvim_win_set_height(win, cells)
-end
-local look = {
-  winfixwidth = true,
-  winfixheight = true,
-  number = false,
-  relativenumber = false,
-  signcolumn = 'no',
-  foldcolumn = '0',
-  wrap = false,
-}
-for opt, value in pairs(look) do
-  vim.api.nvim_set_option_value(opt, value, { win = win, scope = 'local' })
-end
-vim.bo[buf].modifiable = false
-vim.bo[buf].readonly = true
-wins[id] = { win = win, buf = buf, edge = split, entered = enter }
-vim.g.view_native_windows = wins
-local group = vim.api.nvim_create_augroup(
-  'view_native_' .. id, { clear = true })
-vim.api.nvim_create_autocmd('BufWinEnter', {
-  group = group,
-  callback = function()
-    local held = vim.g.view_native_windows or {}
-    local entry = held[id]
-    if entry == nil or entry.win ~= win then
-      return true
-    end
-    if vim.api.nvim_get_current_win() ~= win or is_ours(entry) then
-      return
-    end
-    held[id] = nil
-    vim.g.view_native_windows = held
-    hand_back_look(win)
-    if is_scratch(buf) and vim.fn.bufwinid(buf) == -1 then
-      pcall(vim.api.nvim_buf_delete, buf, { force = true })
-    end
-    pcall(vim.rpcnotify, channel, 'view_bridge', 'native_window_taken', id)
-    return true
-  end,
-})
-if id == 'palette' and not enter then
-  -- the palette's own window is never entered, so nothing else notices
-  -- it needs to go; the ordinary async `CloseNativeWindow` reply would
-  -- otherwise race the command the cmdline is about to run (`:q` with
-  -- this the only other window closes the user's own and leaves the
-  -- palette's invisible tile as nvim's last one) -- `CmdlineLeave` runs
-  -- synchronously, inside nvim, before that command executes, so the
-  -- window is already gone by the time it does
-  vim.api.nvim_create_autocmd('CmdlineLeave', {
+  if stack_win then
+    vim.api.nvim_set_current_win(stack_win)
+    local before = (stack_order[id] or 99) < (stack_order[stack_other] or 99)
+    local after_cmd = vertical and 'belowright split' or 'belowright vsplit'
+    local before_cmd = vertical and 'aboveleft split' or 'aboveleft vsplit'
+    vim.cmd(before and before_cmd or after_cmd)
+  else
+    vim.cmd(commands[split] or 'topleft vsplit')
+  end
+  local win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(win, buf)
+  if vertical then
+    vim.api.nvim_win_set_width(win, cells)
+  else
+    vim.api.nvim_win_set_height(win, cells)
+  end
+  local look = {
+    winfixwidth = true,
+    winfixheight = true,
+    number = false,
+    relativenumber = false,
+    signcolumn = 'no',
+    foldcolumn = '0',
+    wrap = false,
+  }
+  for opt, value in pairs(look) do
+    vim.api.nvim_set_option_value(opt, value, { win = win, scope = 'local' })
+  end
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].readonly = true
+  wins[id] = { win = win, buf = buf, edge = split, entered = enter }
+  vim.g.view_native_windows = wins
+  local group = vim.api.nvim_create_augroup(
+    'view_native_' .. id, { clear = true })
+  vim.api.nvim_create_autocmd('BufWinEnter', {
     group = group,
-    once = true,
     callback = function()
       local held = vim.g.view_native_windows or {}
       local entry = held[id]
-      if entry == nil or entry.win ~= win or not is_ours(entry) then
+      if entry == nil or entry.win ~= win then
+        return true
+      end
+      if vim.api.nvim_get_current_win() ~= win or is_ours(entry) then
         return
       end
       held[id] = nil
       vim.g.view_native_windows = held
-      local close_ei = vim.o.eventignore
-      vim.o.eventignore = 'WinEnter,WinLeave,WinNew,WinClosed,BufEnter,BufLeave'
-      pcall(vim.api.nvim_win_close, win, true)
-      vim.o.eventignore = close_ei
+      hand_back_look(win)
+      if is_scratch(buf) and vim.fn.bufwinid(buf) == -1 then
+        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+      end
+      pcall(vim.rpcnotify, channel, 'view_bridge', 'native_window_taken', id)
+      return true
     end,
   })
-end
-if not enter then
-  if prev_before > 0 and prev_before ~= win_before
-    and vim.api.nvim_win_is_valid(prev_before) then
-    vim.api.nvim_set_current_win(prev_before)
+  if not enter then
+    if prev_before > 0 and prev_before ~= win_before
+      and vim.api.nvim_win_is_valid(prev_before) then
+      vim.api.nvim_set_current_win(prev_before)
+    end
+    vim.api.nvim_set_current_win(win_before)
   end
-  vim.api.nvim_set_current_win(win_before)
+  return win
+end)
+if not enter then
   vim.o.eventignore = ei
 end
-return win"
+if not ok then
+  if buf then
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+  end
+  error(result)
+end
+return result"
 );
 
 /// The lua chunk [`EngineHandle::close_native_window`] runs inside nvim,
@@ -879,11 +884,10 @@ mod tests {
         assert_eq!(
             OPEN_NATIVE_WINDOW_CHUNK.matches("is_ours(").count()
                 + CLOSE_NATIVE_WINDOW_CHUNK.matches("is_ours(").count(),
-            7,
-            "the rule is defined twice and asked at five sites: the \
+            6,
+            "the rule is defined twice and asked at four sites: the \
              re-entry guard, the shared-edge stacking scan, the \
-             `BufWinEnter` callback, the palette's own `CmdlineLeave` \
-             close and the close chunk's own arm"
+             `BufWinEnter` callback and the close chunk's own arm"
         );
         assert!(
             NATIVE_WINDOW_HELPERS.contains("vim.api.nvim_exec_autocmds('FileType',"),
@@ -909,6 +913,68 @@ mod tests {
                  spelling of the rule"
             );
         }
+    }
+
+    /// N2: a split nvim refuses (no room, or an `E11` from inside the
+    /// command-line window) used to leave `eventignore` set for the rest
+    /// of the session, since the option was written before the `vim.cmd`
+    /// that could raise and restored only on the path where it did not.
+    /// The whole split-and-configure step now runs under one `pcall`
+    /// between the write and the restore, and a refusal deletes the
+    /// scratch buffer it had already created rather than leaving it
+    /// behind for nothing to ever open.
+    #[test]
+    fn a_refused_open_restores_eventignore_and_deletes_its_own_buffer() {
+        let guard = OPEN_NATIVE_WINDOW_CHUNK
+            .find("if vim.fn.getcmdwintype() ~= '' then")
+            .expect("the chunk refuses to split from inside the command-line window");
+        let written = OPEN_NATIVE_WINDOW_CHUNK
+            .find("local ei = vim.o.eventignore")
+            .expect("the chunk still saves eventignore before overriding it");
+        assert!(
+            guard < written,
+            "the command-line-window guard runs after eventignore is \
+             already overridden, so the one caller it exists for still \
+             pays for a value never restored"
+        );
+        let pcall_open = OPEN_NATIVE_WINDOW_CHUNK
+            .find("local ok, result = pcall(function()")
+            .expect("the split-and-configure step runs under one pcall");
+        assert!(
+            written < pcall_open,
+            "eventignore is overridden outside the pcall it is meant to \
+             be undone by"
+        );
+        let restore = OPEN_NATIVE_WINDOW_CHUNK
+            .rfind("vim.o.eventignore = ei")
+            .expect("the chunk restores eventignore after the pcall");
+        assert!(
+            pcall_open < restore,
+            "the restore runs before the pcall it is supposed to follow"
+        );
+        assert!(
+            OPEN_NATIVE_WINDOW_CHUNK.contains("if not ok then"),
+            "the chunk no longer tells a failed open from a successful one"
+        );
+        let ok_check = OPEN_NATIVE_WINDOW_CHUNK
+            .find("if not ok then")
+            .expect("the chunk checks the pcall's own result");
+        assert!(
+            restore < ok_check,
+            "the failure branch runs before eventignore is put back, so a \
+             caller that reads it there still finds the override standing"
+        );
+        assert!(
+            OPEN_NATIVE_WINDOW_CHUNK
+                .contains("pcall(vim.api.nvim_buf_delete, buf, { force = true })")
+                && OPEN_NATIVE_WINDOW_CHUNK
+                    .matches("nvim_buf_delete, buf, { force = true })")
+                    .count()
+                    == 2,
+            "a failed open no longer deletes the scratch buffer it had \
+             already created -- one instance in the BufWinEnter callback's \
+             own cleanup and one in the failure branch"
+        );
     }
 
     /// Two surfaces anchored to the same edge split that edge's own window

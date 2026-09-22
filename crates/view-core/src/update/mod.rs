@@ -222,17 +222,11 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         )
         // a windowed surface holds no overlay for the check above to find
         // (`focused_overlay` answers only `Focus::Native`), so a chord
-        // armed inside a windowed tree, agent panel, stream or palette
-        // needs its own clause or `<C-w>>`/`<C-w><` could never resolve
-        // there at all
+        // armed inside a windowed tree, agent panel or stream needs its
+        // own clause or `<C-w>>`/`<C-w><` could never resolve there at all
         && !matches!(
             model.focus(),
-            Focus::Pane(
-                NativeSurface::Tree
-                    | NativeSurface::Agent
-                    | NativeSurface::Notifications
-                    | NativeSurface::Palette
-            )
+            Focus::Pane(NativeSurface::Tree | NativeSurface::Agent | NativeSurface::Notifications)
         )
     {
         model.pending_chord = None;
@@ -278,11 +272,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Paste(text) => match model.focus() {
             // never replayed as nvim_input keystrokes: one undo unit, no
             // mapping interference, matching nvim_paste's own contract.
-            // `Focus::Pane(Palette)` reads the same as engine focus here for
-            // the reason `route_key`'s own arm does: a windowed palette's
-            // cursor sitting in its own pane does not change what nvim's
-            // cmdline paste target is.
-            Focus::Engine | Focus::Pane(NativeSurface::Palette) => {
+            Focus::Engine => {
                 vec![Effect::Rpc(RpcCall::Paste { text })]
             }
             // the windowed agent panel's overlay never claims focus (see
@@ -1403,13 +1393,12 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
         return vec![Effect::PickerClose];
     }
     match model.focus() {
-        // The palette's own tile is never entered (its open passes
-        // `enter = false`), so `native_pane_focus()` should never name it
-        // and this arm should never see `Focus::Pane(Palette)` in
-        // practice; it is kept here as the same fallback a floating
-        // palette's typing already goes through, since typing into the
-        // command line is nvim's own input-capturing mode and answers
-        // exactly the same keys either way.
+        // `native_pane_focus()` reads nvim's own cursor grid, and the
+        // palette carries no grid of its own to put that cursor on (R2a),
+        // so this arm never actually sees `Focus::Pane(Palette)`; it is
+        // grouped with the engine because typing into the command line is
+        // nvim's own input-capturing mode either way, and the match needs
+        // every `NativeSurface` named somewhere.
         Focus::Engine | Focus::Pane(NativeSurface::Palette) => {
             // A sticky error outlives every incidental keypress by design
             // (`MessageEntry::is_persistent`), which without a way out is a
