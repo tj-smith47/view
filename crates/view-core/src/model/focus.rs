@@ -210,6 +210,29 @@ impl Model {
         self.palette_enabled && self.palette_is_windowed()
     }
 
+    /// The command palette's own rect this frame, in terminal-absolute
+    /// cells: the windowed band [`Self::palette_windowed_active`] names, or
+    /// the centred float otherwise (including a windowed band with no room
+    /// for its own floor -- see [`crate::native::geometry::palette_rect`]'s
+    /// doc).
+    ///
+    /// The one function `view_surface::render` (which paints the palette),
+    /// `view_surface::palette_cursor` (which places the caret inside it)
+    /// and mouse hit-testing all resolve through, so a click can never miss
+    /// a cell the other two agree is inside the palette.
+    #[must_use]
+    pub fn palette_rect(&self) -> crate::native::geometry::OverlayRect {
+        let layout = self.surfaces.layout(NativeSurface::Palette);
+        let bounds_h = self.term_height.saturating_sub(self.chrome_rows());
+        crate::native::geometry::palette_rect(
+            layout,
+            self.palette_windowed_active(),
+            self.look.gaps,
+            self.term_width,
+            bounds_h,
+        )
+    }
+
     /// Whether the notification stream takes a window in nvim's layout
     /// this session.
     #[must_use]

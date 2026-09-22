@@ -2385,13 +2385,74 @@ fn palette_in_the_bottom_band(gaps: bool) -> Tiles {
 
 /// The committed picture of the windowed palette in a band of its own along
 /// the bottom edge: the buffer's text above, nvim's command line inside the
-/// full-width band below, no frame drawn around either.
+/// full-width band below, framed through the same tile-frame primitive
+/// every other tile draws with.
 #[test]
 fn palette_windowed() {
     for tier in TIERS {
         assert_golden(
             &format!("{}-palette-windowed", tier.0),
             &tiles_dump(tier, palette_in_the_bottom_band(true)),
+        );
+    }
+}
+
+/// [`palette_in_the_bottom_band`]'s own mirror with `gaps = false`: no
+/// exempted golden covered this leg, and a band with no gap taken out of
+/// its own rows is exactly the shape the floor's arithmetic changes.
+#[test]
+fn palette_windowed_gapless() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-palette-windowed-gapless", tier.0),
+            &tiles_dump(tier, palette_in_the_bottom_band(false)),
+        );
+    }
+}
+
+/// [`palette_in_the_bottom_band`]'s own mirror at a `size` whose share
+/// resolves to the band's own floor: `size = 20` on this fixture's 24-row
+/// terminal shares to four rows before the gap, which used to lose two of
+/// those four to the gap taken out of the band's own content and paint an
+/// emptied frame with the typed command nowhere on it. The floor now
+/// comes out of the rows around the band instead, so the input row stays
+/// visible at the same `size`.
+fn palette_in_the_bottom_band_at_the_floor(gaps: bool) -> Tiles {
+    let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
+    let slots = vec![(0, 0, grid_width, grid_height - 1)];
+    let mut model = tiled_model(gaps, TILED_HEIGHT, &slots);
+    model.palette_enabled = true;
+    model.surfaces.set_layout(
+        view_core::native::geometry::NativeSurface::Palette,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Bottom,
+            10,
+        ),
+    );
+    drive(
+        &mut model,
+        vec![
+            UiEvent::CmdlineShow {
+                content: vec![(0, "ec".to_string())],
+                pos: 2,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+            UiEvent::Flush,
+        ],
+    );
+    Tiles { slots, model }
+}
+
+#[test]
+fn palette_windowed_at_the_floor_still_shows_the_typed_command() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-palette-windowed-floor", tier.0),
+            &tiles_dump(tier, palette_in_the_bottom_band_at_the_floor(true)),
         );
     }
 }

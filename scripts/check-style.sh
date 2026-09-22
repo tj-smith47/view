@@ -202,7 +202,14 @@ check_content() {
   # instead. A re-review round appends a lettered suffix to its own tag
   # (R2a, R2a-2), which needs its own shape since the bare-digit pattern
   # above would miss the letter, and collides with no real word here.
-  if grep -rnE "\b[IMN][0-9]+('s)?\b|\bR[0-9]+[a-z](-[0-9]+)?\b" "$target" "${includes[@]}"; then
+  # `C` stays split from the other three letters: `C0`/`C1` name real
+  # terminal control-byte ranges this tree writes often, but a Critical
+  # finding never lands below `C2`, so `C[2-9][0-9]*` catches the finding
+  # shape while leaving the two control-byte ranges alone. A `%`
+  # immediately before it is excluded too: `view-native`'s config-key
+  # encoding spells a literal percent-escaped byte as `%C3`, which reads
+  # like a `C3` tag by pattern alone and is neither.
+  if grep -rnE "\b[IMN][0-9]+('s)?\b|(^|[^%[:alnum:]])C[2-9][0-9]*('s)?\b|\bR[0-9]+[a-z](-[0-9]+)?\b" "$target" "${includes[@]}"; then
     echo "STYLE FAIL: review-finding tag in comment"; fail=1
   fi
   # the two word-shaped citations the tag pattern above cannot reach: "Minor

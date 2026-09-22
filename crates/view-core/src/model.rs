@@ -2248,6 +2248,11 @@ pub enum MouseCapture {
     Engine(crate::grid::registry::GridId),
     /// The named overlay received the press.
     Overlay(OverlayId),
+    /// The command palette received the press: it carries no [`OverlayId`]
+    /// of its own (it paints straight off `engine.cmdline` in either
+    /// placement, never through the overlay stack), so its capture is its
+    /// own variant rather than a fabricated overlay id.
+    Palette,
 }
 
 /// Detected terminal capabilities.

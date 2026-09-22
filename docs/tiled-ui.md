@@ -185,9 +185,10 @@ each have their own `[ui.surfaces.<id>]` table, with a `placement`, an
 your buffer. `"windowed"` gives it a window of its own in nvim's layout,
 so your buffers make room for it and every window command reaches it. The
 palette is the one surface that takes its own band without a window
-number: your buffers still make room for it, but a window command lands
-on the buffer you were already in, and `:` opens the band the same way it
-opens the centred palette. `anchor` is the edge, or for the notification
+number: it covers the rows at its anchored edge while `:` is open, and
+your buffers stay exactly where they were under it. A window command
+lands on the buffer you were already in, and `:` opens the band the same
+way it opens the centred palette. `anchor` is the edge, or for the notification
 stream's toast stack the corner, it opens at, and its own accepted words
 and default change with `placement`: a centred float has no centred
 window to become, and a corner toast stack has no corner tile. `size` is

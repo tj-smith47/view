@@ -286,6 +286,12 @@ pub(super) fn agent_pane_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     let armed_before = model.pending_chord.as_deref() == Some("<C-w>");
     let binding = take_binding(model, notation);
     if armed_before && !matches!(binding, Some(Resolved::Act(Action::Resize(_)))) {
+        // `take_binding` re-arms `pending_chord` for a follower that
+        // completes nothing (nvim's own doubled `<C-w>` among them, see
+        // `tree_key`'s matching arm), but the pair below is forwarded to
+        // nvim as its own chord here, so nothing is left waiting for a
+        // second follower that already went out.
+        model.pending_chord = None;
         return vec![
             Effect::Rpc(RpcCall::Input {
                 notation: "<C-w>".to_string(),
@@ -331,11 +337,16 @@ pub(super) fn close_windowed_agent(model: &mut Model) -> Vec<Effect> {
     let win = model.engine.grids().native_window(NativeSurface::Agent);
     if let Some(win) = win {
         model.engine.grids_mut().release_native_window(win);
-    } else if model.surfaces.pending_open(NativeSurface::Agent) {
+    }
+    if model.surfaces.pending_open(NativeSurface::Agent) {
         // `:View ai close` reaches here whether or not the window it is
         // closing has been claimed yet -- unlike the toggle, which only
         // runs once focus proves it has (see `retile_open_surface`'s own
-        // pending arm for why the open in flight has to be retired here)
+        // pending arm for why the open in flight has to be retired here).
+        // A reopen already claimed (`win` was `Some`) still carries a
+        // reply in flight of its own (a retile's re-enter, say): retiring
+        // it here too is what keeps that reply from landing after this
+        // close and reclaiming the handle the release above just gave up.
         model.surfaces.cancel_pending_open(NativeSurface::Agent);
     }
     model.close_ai_panel();
@@ -567,11 +578,16 @@ fn close_windowed_tree(model: &mut Model) -> Vec<Effect> {
     let win = model.engine.grids().native_window(NativeSurface::Tree);
     if let Some(win) = win {
         model.engine.grids_mut().release_native_window(win);
-    } else if model.surfaces.pending_open(NativeSurface::Tree) {
+    }
+    if model.surfaces.pending_open(NativeSurface::Tree) {
         // a close reached before the open it is closing was ever claimed
         // retires that open here (see `retile_open_surface`'s own pending
         // arm for why), rather than leaving it to land and claim a window
-        // this close already said it did not want
+        // this close already said it did not want. A reopen already
+        // claimed (`win` was `Some`) still carries a reply in flight of
+        // its own: retiring it here too is what keeps that reply from
+        // landing after this close and reclaiming the handle the release
+        // above just gave up.
         model.surfaces.cancel_pending_open(NativeSurface::Tree);
     }
     let closed = model.close_tree();
@@ -682,6 +698,18 @@ pub(super) fn native_window_opened(
     win: crate::events::WinHandle,
 ) -> Vec<Effect> {
     if generation != model.surfaces.generation(surface) {
+        // A stale reply closes only a window nothing else still wants: an
+        // open already in flight for the current generation may answer
+        // with this same handle (nvim's `is_ours(live)` re-enter hands
+        // back a window it never closed), and closing it here first would
+        // pull it out from under that in-flight call before its own reply
+        // ever lands. The claimed-handle check covers the reply that
+        // lands after the in-flight one already claimed it.
+        if model.surfaces.pending_open(surface)
+            || model.engine.grids().native_window(surface) == Some(win)
+        {
+            return Vec::new();
+        }
         return vec![Effect::Rpc(RpcCall::CloseNativeWindow { win: win.0 })];
     }
     // a re-enter of a window the open chunk's `is_ours(live)` branch found
@@ -855,6 +883,20 @@ pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Vec<E
         Some(Resolved::Act(Action::Resize(direction))) => {
             return resize_windowed_stream(model, direction.widens());
         }
+        // See `tree_key`'s matching arm: a follower that re-arms an
+        // already-armed prefix is nvim's own doubled `<C-w>`, unarmed
+        // and forwarded as the pair instead of swallowed.
+        Some(Resolved::Pending) if armed_before => {
+            model.pending_chord = None;
+            return vec![
+                Effect::Rpc(RpcCall::Input {
+                    notation: "<C-w>".to_string(),
+                }),
+                Effect::Rpc(RpcCall::Input {
+                    notation: "<C-w>".to_string(),
+                }),
+            ];
+        }
         Some(Resolved::Pending) => return Vec::new(),
         _ => {}
     }
@@ -916,11 +958,16 @@ fn close_windowed_notifications(model: &mut Model) -> Vec<Effect> {
         .native_window(NativeSurface::Notifications);
     if let Some(win) = win {
         model.engine.grids_mut().release_native_window(win);
-    } else if model.surfaces.pending_open(NativeSurface::Notifications) {
+    }
+    if model.surfaces.pending_open(NativeSurface::Notifications) {
         // a close reached before the open it is closing was ever claimed
         // retires that open here (see `retile_open_surface`'s own pending
         // arm for why), rather than leaving it to land and claim a window
-        // this close already said it did not want
+        // this close already said it did not want. A reopen already
+        // claimed (`win` was `Some`) still carries a reply in flight of
+        // its own: retiring it here too is what keeps that reply from
+        // landing after this close and reclaiming the handle the release
+        // above just gave up.
         model
             .surfaces
             .cancel_pending_open(NativeSurface::Notifications);
@@ -979,7 +1026,23 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         // The chord's first key waits here rather than moving
         // the selection or closing the sidebar; the follower
         // that completes nothing falls straight through to the
-        // arms below on its own next pass.
+        // arms below on its own next pass. A follower that re-arms an
+        // already-armed prefix is nvim's own doubled `<C-w>` (next
+        // window): the resolver re-arms `pending_chord` for muscle
+        // memory, but this pane owns no share for either tap to step,
+        // so the pair is unarmed and forwarded as nvim's own chord
+        // instead of being swallowed a second time.
+        Some(Resolved::Pending) if armed_before => {
+            model.pending_chord = None;
+            return vec![
+                Effect::Rpc(RpcCall::Input {
+                    notation: "<C-w>".to_string(),
+                }),
+                Effect::Rpc(RpcCall::Input {
+                    notation: "<C-w>".to_string(),
+                }),
+            ];
+        }
         Some(Resolved::Pending) => return Vec::new(),
         None => {}
     }

@@ -4253,6 +4253,14 @@ printf '// a C0 control byte never reaches the grid; C1 bytes are stripped\nfn a
 expect_tag 0 'real control-byte terminology (C0/C1), left out of the tag class'
 
 new_tag_case
+printf '// fixed the empty frame C2 named at a short terminal\nfn a() {}\n' > "$CASE/lib.rs"
+expect_tag 1 'a bare Critical finding tag (C2) in a comment'
+
+new_tag_case
+printf '// a path spelling the literal text %%C3 reaches the same key\nfn a() {}\n' > "$CASE/lib.rs"
+expect_tag 0 'a percent-escaped byte (%C3), left out of the tag class'
+
+new_tag_case
 printf 'fn resize(width: u16) -> u16 {\n    width\n}\n' > "$CASE/lib.rs"
 expect_tag 0 'a file with no comment at all'
 

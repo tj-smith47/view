@@ -13224,6 +13224,71 @@ fn a_reenter_of_an_already_placed_tree_window_clears_pending_with_no_new_win_pos
     );
 }
 
+/// A ring step away and back opens the surface twice before either reply
+/// lands: the first call's own reply arrives after a second one is already
+/// in flight for the same window. `native_window_opened` must never close
+/// a window a still-pending open may hand back.
+#[test]
+fn a_stale_reply_during_a_pending_reopen_closes_nothing() {
+    use crate::native::geometry::NativeSurface;
+
+    let mut m = focused_windowed_tree();
+    let stale = m.surfaces.generation(NativeSurface::Tree);
+    m.surfaces.cancel_pending_open(NativeSurface::Tree);
+    let _ = m.surfaces.next_generation(NativeSurface::Tree);
+
+    let effects = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation: stale,
+            surface: NativeSurface::Tree,
+            win: TREE_WIN,
+        },
+    );
+
+    assert!(
+        effects.is_empty(),
+        "a stale reply landing while its surface's reopen is still in \
+         flight must close nothing the reopen may still want: {effects:?}"
+    );
+}
+
+/// A toggle press re-enters the tree's window (a fresh open call, answered
+/// with the same handle) and a second toggle closes it again before that
+/// reply lands. The close has to retire the in-flight open as well, or the
+/// late reply reads as current and reclaims the handle the close just gave
+/// up.
+#[test]
+fn closing_a_windowed_tree_with_a_reopen_in_flight_retires_that_reopen_too() {
+    use crate::native::geometry::NativeSurface;
+
+    let mut m = focused_windowed_tree();
+    let in_flight = m.surfaces.next_generation(NativeSurface::Tree);
+
+    let _ = update(&mut m, tree_toggle());
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        0,
+        "the close must release the claim it just sent CloseNativeWindow for"
+    );
+
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation: in_flight,
+            surface: NativeSurface::Tree,
+            win: TREE_WIN,
+        },
+    );
+
+    assert_eq!(
+        m.engine.grids().native_claims(),
+        0,
+        "the reopen's reply landing after its own close must not reclaim \
+         the handle the close already released"
+    );
+}
+
 #[test]
 fn a_flush_whose_cursor_grid_is_the_tree_pane_focuses_the_tree() {
     let m = focused_windowed_tree();
@@ -14388,6 +14453,35 @@ fn cmdline_show() -> Msg {
     }])
 }
 
+/// A press inside the windowed palette's own band never reaches the engine
+/// grid it paints over: the band carries no `OverlayId` (it paints straight
+/// off `engine.cmdline`, never through the overlay stack), so its mouse
+/// ownership is a direct rect test in `update::mouse::position_owner`
+/// rather than a hit against `overlay_at`.
+#[test]
+fn a_press_inside_the_windowed_palette_band_reaches_no_engine_grid() {
+    let mut m = windowed_palette_model();
+    let _ = update(&mut m, cmdline_show());
+    let rect = m.palette_rect();
+
+    let effects = update(
+        &mut m,
+        Msg::Mouse(MouseInput {
+            button: "left".into(),
+            action: "press".into(),
+            modifier: String::new(),
+            row: rect.row,
+            col: rect.col,
+        }),
+    );
+
+    assert!(
+        effects.is_empty(),
+        "a press on the palette band's own top-left cell must not become \
+         an InputMouse effect: {effects:?}"
+    );
+}
+
 /// The windowed palette costs no `OpenNativeWindow`/`CloseNativeWindow`
 /// round trip at all -- nvim's own cmdline arriving and leaving is
 /// still the whole open/close signal (`CmdlineShow`/`CmdlineHide`'s doc in
@@ -15368,6 +15462,29 @@ fn ctrl_w_prefix_and_follower_travel_together_for_every_windowed_surface() {
             follower: "p",
             resolved_in_view: false,
         },
+        // nvim's own next-window chord, typed the way muscle memory
+        // types it: the resolver re-arms `pending_chord` for a follower
+        // that completes nothing rather than dropping the prefix, and
+        // each pane owns no share for either tap to step, so the pair
+        // must reach nvim together and leave nothing armed behind it.
+        Case {
+            name: "tree next window",
+            model: focused_windowed_tree,
+            follower: "<C-w>",
+            resolved_in_view: false,
+        },
+        Case {
+            name: "agent next window",
+            model: focused_windowed_agent,
+            follower: "<C-w>",
+            resolved_in_view: false,
+        },
+        Case {
+            name: "stream next window",
+            model: focused_windowed_notifications,
+            follower: "<C-w>",
+            resolved_in_view: false,
+        },
     ];
     for case in cases {
         let mut m = (case.model)();
@@ -15401,12 +15518,19 @@ fn ctrl_w_prefix_and_follower_travel_together_for_every_windowed_surface() {
                 case.name
             );
         }
+        assert!(
+            m.pending_chord.is_none(),
+            "{}: nothing may stay armed once the follower has been \
+             resolved: {:?}",
+            case.name,
+            m.pending_chord
+        );
     }
 }
 
-/// The palette has no share of its own for the chord to step -- it is a
-/// real nvim window with no [`resize_windowed_stream`]-style sidebar
-/// geometry behind it -- so its own contract is narrower: the chord must
+/// The palette has no share of its own for the chord to step -- it paints
+/// a cover tile with no nvim window and no [`resize_windowed_stream`]-style
+/// sidebar geometry behind it -- so its own contract is narrower: the chord must
 /// not be eaten by the dispatch guard the way a stale prefix from another
 /// surface would be. Both keys reach nvim as ordinary input, the same path
 /// [`a_key_in_the_windowed_palette_reaches_the_engine`] proves for a plain

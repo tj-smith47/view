@@ -577,11 +577,116 @@ impl SurfaceLayout {
     }
 }
 
+/// The fewest rows a windowed command-palette band needs before there is
+/// anywhere left to paint the typed command inside it: the frame's top and
+/// bottom rows, the input row nvim's own command line paints, and the
+/// separator between it and any completion rows under it.
+pub const PALETTE_BAND_MIN_ROWS: u16 = 4;
+
+/// The command palette's rect on a `term_w` by `bounds_h` terminal
+/// (`bounds_h` already shrunk by the reserved chrome rows): the full-width
+/// band `layout` names while `windowed` holds, the centred float
+/// otherwise.
+///
+/// `gaps` comes out of the rows around the band, never out of the band's
+/// own content: the band's height floors at [`PALETTE_BAND_MIN_ROWS`]
+/// first, and the gap is added on top of that floor rather than carved out
+/// of it, which is what keeps a small `size` from painting an emptied
+/// frame with the typed text nowhere to land. A terminal too short to hold
+/// the floor plus its own gap has nowhere left to shrink, so this open
+/// falls back to the centred float instead.
+#[must_use]
+pub fn palette_rect(
+    layout: SurfaceLayout,
+    windowed: bool,
+    gaps: bool,
+    term_w: u16,
+    bounds_h: u16,
+) -> OverlayRect {
+    let centred = || {
+        OverlayBox::new(70, layout.size)
+            .with_anchor(layout.anchor)
+            .rect(term_w, bounds_h)
+    };
+    if !windowed {
+        return centred();
+    }
+    let band = OverlayBox::new(100, layout.size)
+        .with_anchor(layout.anchor)
+        .rect(term_w, bounds_h);
+    let content_height = band.height.max(PALETTE_BAND_MIN_ROWS);
+    let reserved_height = if gaps {
+        content_height.saturating_add(2)
+    } else {
+        content_height
+    };
+    if reserved_height > bounds_h {
+        return centred();
+    }
+    let row = match layout.anchor {
+        Anchor::Bottom => bounds_h.saturating_sub(reserved_height),
+        _ => 0,
+    };
+    let rect = OverlayRect {
+        row,
+        col: band.col,
+        width: band.width,
+        height: reserved_height,
+    };
+    if gaps {
+        rect.shrink_one()
+    } else {
+        rect
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// Every `size` a config can carry (`clamp_panel_width`'s own range,
+    /// the same one `[ui.surfaces.palette] size` is clamped through) on
+    /// every terminal height from unusably short to generous: a windowed
+    /// band always holds at least its own floor, and never claims a row
+    /// the terminal does not have.
+    #[test]
+    fn a_windowed_palette_band_never_shrinks_below_its_own_floor() {
+        for size in MIN_PANEL_WIDTH_PCT..=MAX_PANEL_WIDTH_PCT {
+            for bounds_h in 8..=50u16 {
+                let layout = SurfaceLayout::new(SurfacePlacement::Windowed, Anchor::Bottom, size);
+                for gaps in [false, true] {
+                    let rect = palette_rect(layout, true, gaps, 100, bounds_h);
+                    assert!(
+                        rect.height >= PALETTE_BAND_MIN_ROWS.min(bounds_h),
+                        "size={size} bounds_h={bounds_h} gaps={gaps}: rect height \
+                         {rect_height} held no room for the input row",
+                        rect_height = rect.height,
+                    );
+                    assert!(
+                        rect.row.saturating_add(rect.height) <= bounds_h,
+                        "size={size} bounds_h={bounds_h} gaps={gaps}: rect \
+                         {rect:?} reaches past the terminal it was resolved against"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A terminal too short to hold the floor plus its own gap has nowhere
+    /// left to shrink the band into, so this open falls back to the
+    /// centred float (`70` percent wide) instead of an emptied frame.
+    #[test]
+    fn a_terminal_too_short_for_the_floor_falls_back_to_the_centred_float() {
+        let layout = SurfaceLayout::new(SurfacePlacement::Windowed, Anchor::Bottom, 10);
+        let rect = palette_rect(layout, true, true, 100, 5);
+        assert_eq!(
+            rect.width, 70,
+            "a band with no room for its floor plus its gap must fall back \
+             to the centred float's own width: {rect:?}"
+        );
+    }
 
     #[test]
     fn a_full_share_covers_the_whole_terminal_from_the_origin() {

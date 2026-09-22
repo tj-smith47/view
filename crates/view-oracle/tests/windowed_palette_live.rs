@@ -529,12 +529,12 @@ fn no_win_or_bufenter_autocmd_fires_for_the_palettes_own_open_or_close() {
 /// full open-close cycles, tile versus the centred overlay -- with
 /// `LATENCY_SILENCE` and a no-op baseline the way
 /// `the_cost_of_one_ring_step_with_all_four_surfaces_open`
-/// (`close_battery.rs`) measures its own floor.
-///
-/// An earlier measurement timed one open in thirty and divided by thirty,
-/// and 29 of those 30 presses opened no window at all, since the
-/// nvim-window mechanism the palette used to open through never actually
-/// placed one -- this measurement times every press on its own instead.
+/// (`close_battery.rs`) measures its own floor. `baseline` is printed for
+/// context but asserted on nowhere: the three medians are the harness's
+/// silence window plus one round trip, close enough together that a
+/// direction-only compare against it is noise, not signal. The tile is
+/// bounded against the overlay it stands beside instead, with headroom for
+/// scheduling jitter, and both against the frame budget a person can feel.
 #[test]
 fn the_cost_of_pressing_colon_windowed_versus_off() {
     let work = common::ScratchPaths::new("windowed-palette-latency");
@@ -566,15 +566,20 @@ fn the_cost_of_pressing_colon_windowed_versus_off() {
          {baseline:?}, windowed tile = {windowed:?}, floating overlay = \
          {floating:?}"
     );
+    let frame_budget = Duration::from_millis(16);
+    let headroom = Duration::from_millis(2);
     assert!(
-        windowed >= baseline,
-        "a :<Esc> cycle through the windowed tile read faster than doing \
-         nothing: {windowed:?} < {baseline:?}"
+        windowed < frame_budget,
+        "windowed tile latency exceeds a frame's worth of budget: {windowed:?}"
     );
     assert!(
-        floating >= baseline,
-        "a :<Esc> cycle through the floating overlay read faster than \
-         doing nothing: {floating:?} < {baseline:?}"
+        floating < frame_budget,
+        "floating overlay latency exceeds a frame's worth of budget: {floating:?}"
+    );
+    assert!(
+        windowed <= floating + headroom,
+        "windowed tile costs more than the floating overlay plus headroom: \
+         {windowed:?} > {floating:?} + {headroom:?}"
     );
 }
 

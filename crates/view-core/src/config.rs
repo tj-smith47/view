@@ -110,12 +110,16 @@ pub fn alias_notice(old_table: &str, old_key: &str, new_table: &str, new_key: &s
 
 /// What a key that only ever reaches one placement owes the user who wrote
 /// it under the other: the value is not discarded and not an alias, it
-/// simply answers nothing this run, so a silent read would leave the file
-/// looking honored when it is not.
+/// simply answers nothing under the placement the file currently names, so
+/// a silent read would leave the file looking honored when it is not. A
+/// ring step can still move the surface into the placement that reads it
+/// later in the same run, so the notice never claims the value goes
+/// unused for the run as a whole -- only under the placement it opened
+/// with.
 #[must_use]
 pub fn placement_only_notice(table: &str, key: &str, only: &str) -> String {
     format!(
-        "view: [{table}] {key} has no effect outside {only}; the value is kept but unused this run"
+        "view: [{table}] {key} has no effect outside {only}; the value is kept but unused under the current placement"
     )
 }
 

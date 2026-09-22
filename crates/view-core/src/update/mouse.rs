@@ -54,16 +54,19 @@ pub(super) fn route(model: &mut Model, input: MouseInput) -> Vec<Effect> {
         _ => position_owner(model, &input),
     };
     match owner {
-        // no overlay carries a mouse handler, so an overlay claiming the
-        // event is the whole of that routing; nothing claiming it at all is
-        // a cell view's own chrome owns and the engine has no window under
-        None | Some(MouseCapture::Overlay(_)) => Vec::new(),
+        // no overlay carries a mouse handler, so an overlay (or the
+        // palette, which paints through the same cmdline arm rather than
+        // the overlay stack) claiming the event is the whole of that
+        // routing; nothing claiming it at all is a cell view's own chrome
+        // owns and the engine has no window under
+        None | Some(MouseCapture::Overlay(_) | MouseCapture::Palette) => Vec::new(),
         Some(MouseCapture::Engine(grid)) => effect(model, input, grid),
     }
 }
 
 /// Which surface the pointer is over: the topmost overlay covering the
-/// cell, the grid whose pane covers it, or nothing at all.
+/// cell, the palette's own rect while a cmdline is open, the grid whose
+/// pane covers it, or nothing at all.
 ///
 /// Nothing is the answer for a row the pill reserved -- a press there is
 /// already answered by [`pill_press`] before this runs -- and for a cell
@@ -75,6 +78,22 @@ pub(super) fn route(model: &mut Model, input: MouseInput) -> Vec<Effect> {
 fn position_owner(model: &Model, input: &MouseInput) -> Option<MouseCapture> {
     if let Some(id) = model.overlay_at(input.row, input.col) {
         return Some(MouseCapture::Overlay(id));
+    }
+    // the palette carries no `OverlayId` (see `MouseCapture::Palette`'s
+    // doc), so its own rect is tested by hand rather than through
+    // `overlay_at`: a press inside it must never reach the buffer window
+    // the band paints over, the same way a press on any other overlay
+    // never reaches the grid under it
+    // the palette carries no `OverlayId` (see `MouseCapture::Palette`'s
+    // doc), so its own rect is tested by hand rather than through
+    // `overlay_at`: a press inside it must never reach the buffer window
+    // the band paints over, the same way a press on any other overlay
+    // never reaches the grid under it
+    if model.engine.cmdline.is_some()
+        && model.palette_enabled
+        && model.palette_rect().contains(input.row, input.col)
+    {
+        return Some(MouseCapture::Palette);
     }
     let offset = model.look.grid_offset();
     let row = input

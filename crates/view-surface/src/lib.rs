@@ -21,7 +21,9 @@ use view_core::grid::Grid;
 use view_core::model::{
     CmdlineState, Focus, Model, Overlay, OverlayKind, PopupmenuState, TermCaps,
 };
-use view_core::native::geometry::{Anchor, NativeSurface, OverlayBox, OverlayRect};
+#[cfg(test)]
+use view_core::native::geometry::OverlayBox;
+use view_core::native::geometry::{Anchor, NativeSurface, OverlayRect};
 use view_core::native::palette::PaletteState;
 use view_core::native::prompt::PromptState;
 use view_core::native::speculate::PredictedCell;
@@ -560,8 +562,8 @@ pub fn render(model: &Model) -> Surface {
         } else if model.palette_enabled {
             // A windowed palette paints through this same arm, at
             // `palette_rect`'s full-width band instead of its centred box
-            // (`palette_box`'s own doc) -- one `PaletteView` and one push,
-            // whichever placement is live, so the tile and the float can
+            // (`Model::palette_rect`'s own doc) -- one `PaletteView` and
+            // one push, whichever placement is live, so the tile and the float can
             // never carry two different pictures of the same command line
             // only a cmdline-sourced popupmenu (`is_cmdline_sourced`) ever
             // renders inside the palette; a buffer-anchored completion
@@ -869,60 +871,15 @@ fn popupmenu_width(items: &[PmItem]) -> u16 {
         .unwrap_or(u16::MAX)
 }
 
-/// The command palette's placement: a wide box pinned near the top of the
-/// terminal, wide enough to hold a typed command plus its completion rows
-/// without wrapping, short enough to leave the buffer grid visible under
-/// it.
-///
-/// One function rather than a literal at each call site, because [`render`]
-/// (which paints the box) and [`cursor_spec`] (which places the caret
-/// inside it) both have to resolve to the exact same rect; two separately
-/// written `OverlayBox::new(..)` calls are two chances for that number to
-/// drift apart the next time either one is edited.
-/// `[ui.surfaces.palette] anchor`/`size` used to size and place this
-/// box under `windowed` alone -- an overlay palette always drew at a fixed
-/// 70x50 box regardless of what the table said, so the documented keys did
-/// nothing for the placement most users actually run. `size` is rows, per
-/// the design table (`docs/tiled-ui.md`'s own placement section); width
-/// stays the fixed 70 percent the design leaves unconfigured for the
-/// centred placement.
-///
-/// A windowed palette spans the whole width instead: it carries no nvim
-/// window of its own (a split opened from cmdline mode never gets one), so
-/// [`render`] paints a tile itself, at the full-width band
-/// [`SurfaceLayout::accepted_anchors`] already limits a windowed palette's
-/// `anchor` to (`top`/`bottom`, never a side).
-fn palette_box(model: &Model) -> OverlayBox {
-    let layout = model.surfaces.layout(NativeSurface::Palette);
-    if model.palette_windowed_active() {
-        OverlayBox::new(100, layout.size).with_anchor(layout.anchor)
-    } else {
-        OverlayBox::new(70, layout.size).with_anchor(layout.anchor)
-    }
-}
-
-/// [`palette_box`] resolved against the terminal, then shifted down by
-/// `offset` (the reserved chrome rows): resolving against a terminal
-/// already shrunk by `offset` before centering, rather than centering
-/// against the full terminal and adding `offset` on top, keeps the box
-/// clear of the tabline row instead of centering through it. [`render`]
-/// (which paints the box) and [`palette_cursor`] (which places the caret
-/// inside it) both resolve through this one function, so the two can never
+/// [`Model::palette_rect`] shifted down by `offset` (the reserved chrome
+/// rows): `Model::palette_rect` resolves against a terminal already shrunk
+/// by `offset`, so the absolute terminal position adds it back on top.
+/// [`render`] (which paints the box), [`palette_cursor`] (which places the
+/// caret inside it) and mouse hit-testing (`view-core`'s `position_owner`)
+/// all resolve through `Model::palette_rect`, so none of the three can
 /// disagree about where the box actually is.
-///
-/// A windowed tile carries no nvim window of its own for `Look::inset` to
-/// apply to (see `Look::inset`'s doc, whose two-cell figure counts a global
-/// ring this rect never sits inside), so `[ui] gaps` is read here instead,
-/// pulling the tile one cell in from every edge it resolved to; gapless
-/// leaves it flush the way a gapless tile's frame sits flush against its
-/// neighbours.
 fn palette_rect(model: &Model, offset: u16) -> Rect {
-    let rect = palette_box(model).rect(model.term_width, model.term_height.saturating_sub(offset));
-    let rect = if model.palette_windowed_active() && model.look.gaps {
-        rect.shrink_one()
-    } else {
-        rect
-    };
+    let rect = model.palette_rect();
     Rect::new(
         rect.row.saturating_add(offset),
         rect.col,
@@ -1241,7 +1198,7 @@ fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<Cu
         if model.palette_enabled {
             // `palette_cursor` resolves through `palette_rect`, which
             // already answers the windowed tile's own full-width band (see
-            // `palette_box`'s doc) -- the palette never becomes nvim's
+            // `Model::palette_rect`'s doc) -- the palette never becomes nvim's
             // curwin (`pending_open`'s doc), so there is no separate pane
             // rect to read a second caret out of here.
             palette_cursor(model, model.chrome_rows(), cmdline)
@@ -3745,8 +3702,8 @@ mod tests {
             "the prompt label must show in the palette, not just factor into the cursor math"
         );
 
-        // palette_box() on an 80x24 terminal with no chrome offset centers
-        // to row 7, col 12 (see
+        // Model::palette_rect() on an 80x24 terminal with no chrome offset
+        // centers to row 7, col 12 (see
         // the_palette_cursor_lands_inside_its_own_box_not_on_the_grids_bottom_row).
         // interior_origin adds (1, 2). The "> " prefix is 2 cells, then
         // cmdline_cursor_col counts the full 10-char "New file: " prompt
@@ -4179,7 +4136,7 @@ mod tests {
 
         let surface = render(&model);
 
-        // palette_box() is OverlayBox::new(70, layout.size), layout.size
+        // Model::palette_rect() centres a 70-percent-wide box, layout.size
         // defaulting to 40 (design's own default, `[ui.surfaces.palette]
         // size`), centered, on an 80x24 terminal with no chrome offset:
         // width = 80*70/100 = 56, height = 24*40/100 = 9,
@@ -4258,7 +4215,7 @@ mod tests {
     }
 
     /// `[ui.surfaces.palette] anchor` and `size` used to reach only a
-    /// windowed open: `palette_box` drew a fixed 70x50 box under `overlay`
+    /// windowed open: the centred box under `overlay` was fixed at 70x50
     /// regardless of what the table said. Both now move the overlay box
     /// itself.
     #[test]
