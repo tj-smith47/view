@@ -1,22 +1,63 @@
 //! The host's UTC offset, for [`crate::runtime::dispatch`] to hand
-//! [`view_core::model::Model::set_utc_offset`] ahead of every fold (I12):
+//! [`view_core::model::Model::set_utc_offset`] ahead of every fold:
 //! `view-core` stays pure, so it never asks the platform for this itself,
 //! and every message stamp rendered UTC with nothing on screen or in the
 //! docs saying so.
 //!
-//! Read once and cached: a host's offset changes only across a DST flip a
-//! running session is unlikely to straddle, and every fold re-reading it
-//! from the OS would be a syscall this loop otherwise never pays per
-//! message.
+//! Read fresh on every fold rather than cached once: a session that
+//! straddles a DST change must stamp the new offset from the fold after
+//! the flip, not after a restart. `localtime_r` and
+//! `GetTimeZoneInformation` already read the zone the OS keeps parsed, so
+//! this costs the one syscall `dispatch` already pays each fold for
+//! `SystemTime::now`, not a zone parse.
 
-use std::sync::OnceLock;
+#[cfg(test)]
+use std::cell::Cell;
 
-static OFFSET_SECS: OnceLock<i64> = OnceLock::new();
+#[cfg(test)]
+thread_local! {
+    /// A pin's own offset, standing in for the host's whenever it is set.
+    static TEST_OFFSET_SECS: Cell<Option<i64>> = const { Cell::new(None) };
+}
 
-/// Seconds east of UTC on this host, cached after the first call.
+/// Seconds east of UTC on this host, or a pin's injected stand-in for one.
 #[must_use]
 pub(crate) fn utc_offset_secs() -> i64 {
-    *OFFSET_SECS.get_or_init(platform_offset_secs)
+    #[cfg(test)]
+    if let Some(secs) = TEST_OFFSET_SECS.with(Cell::get) {
+        return secs;
+    }
+    platform_offset_secs()
+}
+
+/// Stands the next [`utc_offset_secs`] call in for the host's own reading,
+/// or clears the stand-in on `None`. Test-only: what a pin uses to prove
+/// `dispatch` re-reads the offset on every fold rather than caching it.
+#[cfg(test)]
+pub(crate) fn set_test_offset_secs(secs: Option<i64>) {
+    TEST_OFFSET_SECS.with(|cell| cell.set(secs));
+}
+
+/// Arms [`set_test_offset_secs`] for the guard's own scope and clears it on
+/// drop, so a test thread the harness reuses afterward reads the host's
+/// own offset again rather than a stale pin -- including when the test
+/// panics, since `Drop` still runs on unwind.
+#[cfg(test)]
+pub(crate) struct TestOffsetGuard;
+
+#[cfg(test)]
+impl TestOffsetGuard {
+    pub(crate) fn new(secs: i64) -> Self {
+        set_test_offset_secs(Some(secs));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestOffsetGuard {
+    fn drop(&mut self) {
+        set_test_offset_secs(None);
+    }
 }
 
 #[cfg(unix)]

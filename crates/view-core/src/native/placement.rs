@@ -179,6 +179,18 @@ impl SurfaceState {
     pub fn clear_pending(&mut self, surface: NativeSurface) {
         self.pending[surface.index()] = false;
     }
+
+    /// Retires `surface`'s in-flight open without starting a new one: a
+    /// close or a retile moved the surface on before the open's own reply
+    /// landed. Bumps the generation so that reply reads as stale when it
+    /// arrives (`native_window_opened` closes the window it names instead
+    /// of claiming it) and clears `pending`, since nothing here is waiting
+    /// on the retired call's outcome any more.
+    pub fn cancel_pending_open(&mut self, surface: NativeSurface) {
+        let slot = &mut self.generation[surface.index()];
+        *slot = slot.wrapping_add(1);
+        self.pending[surface.index()] = false;
+    }
 }
 
 /// The anchor a ring step lands `surface` on at `target`: `configured`

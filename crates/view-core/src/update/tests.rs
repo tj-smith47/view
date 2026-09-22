@@ -14753,6 +14753,114 @@ fn an_open_panel_keeps_its_transcript_across_a_cycle() {
     }
 }
 
+/// A cycle step taken while the tree's open is still pending retires that
+/// open rather than leaving it to land later: the generation moves, so the
+/// stale reply below reads as one, and `pending_open` clears since nothing
+/// here is waiting on the retired call's outcome any more.
+#[test]
+fn a_cycle_step_retires_a_pending_open_instead_of_leaving_it_to_land() {
+    use crate::native::geometry::NativeSurface;
+
+    let mut m = windowed_tree_model();
+    // the shared ring starts at its own `config` stop, which this fixture's
+    // explicit `Windowed` layout already sits at (`advance_ring`'s doc);
+    // one throwaway step first moves the ring itself to the `windowed`
+    // stop with nothing to retile yet, so the step under test is the one
+    // that actually steps the tree on to `overlay`
+    let _ = update(&mut m, cycle_surfaces_invoke());
+
+    let effects = update(&mut m, tree_toggle());
+    let stale_generation = opened_generation(&effects);
+    assert!(
+        m.surfaces.pending_open(NativeSurface::Tree),
+        "the open must be pending before the window it asked for lands"
+    );
+
+    let _ = update(&mut m, cycle_surfaces_invoke());
+    assert_ne!(
+        m.surfaces.generation(NativeSurface::Tree),
+        stale_generation,
+        "a retile taken mid-open must retire the open in flight"
+    );
+    assert!(
+        !m.surfaces.pending_open(NativeSurface::Tree),
+        "nothing is waiting on the retired open's own reply any more"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation: stale_generation,
+            surface: NativeSurface::Tree,
+            win: TREE_WIN,
+        },
+    );
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::CloseNativeWindow { win })] if *win == TREE_WIN.0
+        ),
+        "the retired open's own late reply must close the window it names: {effects:?}"
+    );
+    assert!(
+        m.engine
+            .grids()
+            .native_window(NativeSurface::Tree)
+            .is_none(),
+        "a stale reply must never claim the window it names"
+    );
+}
+
+/// [`a_cycle_step_retires_a_pending_open_instead_of_leaving_it_to_land`],
+/// through `:View ai close` rather than a ring step: the one close a
+/// windowed surface answers with no live focus to gate it on, since
+/// `close_windowed_agent` is reachable the moment the panel is windowed at
+/// all, pending open included.
+#[test]
+fn closing_a_pending_windowed_agent_retires_its_open_instead_of_leaving_it_to_land() {
+    use crate::native::geometry::NativeSurface;
+
+    let mut m = windowed_agent_model();
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    let stale_generation = opened_generation(&effects);
+    assert!(m.surfaces.pending_open(NativeSurface::Agent));
+
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "close".to_string(),
+        },
+    );
+    assert_ne!(
+        m.surfaces.generation(NativeSurface::Agent),
+        stale_generation
+    );
+    assert!(!m.surfaces.pending_open(NativeSurface::Agent));
+
+    let effects = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation: stale_generation,
+            surface: NativeSurface::Agent,
+            win: crate::events::WinHandle(9001),
+        },
+    );
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::CloseNativeWindow { win })] if *win == 9001
+        ),
+        "the retired open's own late reply must close the window it names: {effects:?}"
+    );
+}
+
 /// A gaps flip changes what every window owes, not just the ones whose slot
 /// moved: [`GridRegistry::pending_inner_request`] keys its guard on
 /// `(slot, look, margin_top)`, so the look half of that key alone is enough
@@ -14923,6 +15031,84 @@ fn resizing_a_windowed_sidebar_carries_its_new_width_to_a_sibling_stacked_on_the
     );
 }
 
+/// The sibling sync above carries a resized sidebar's new share into the
+/// other windowed surface's `layout.size`; it has to carry the same number
+/// into that surface's own loose field too (`tree_width_pct` or
+/// `ai_panel_width_pct`), since that field, not the layout, is what its own
+/// resize key steps from and what an overlay open of it reads.
+#[test]
+fn resizing_a_windowed_sidebar_carries_its_new_width_into_a_siblings_own_loose_field() {
+    let mut m = focused_windowed_tree();
+    m.surfaces.set_layout(
+        crate::native::geometry::NativeSurface::Agent,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Windowed,
+            m.surfaces
+                .layout(crate::native::geometry::NativeSurface::Tree)
+                .anchor,
+            m.ai_panel_width_pct,
+        ),
+    );
+    let before = m.ai_panel_width_pct;
+    let _ = update(&mut m, key("<S-Right>"));
+    assert_ne!(
+        m.ai_panel_width_pct, before,
+        "the sibling's own loose copy of its share must follow the resize too"
+    );
+    assert_eq!(
+        m.ai_panel_width_pct,
+        m.surfaces
+            .layout(crate::native::geometry::NativeSurface::Agent)
+            .size,
+        "the loose field and the layout must agree after the carry"
+    );
+}
+
+/// A width stepped while the tree floats has to survive the next ring step
+/// to windowed: `open_native_window` reads `layout.size` alone, so a resize
+/// taken as an overlay that never wrote it back would open the window at
+/// whatever share the config or the last windowed spell left there instead
+/// of the one the user just chose.
+#[test]
+fn a_width_stepped_while_the_tree_floats_survives_the_next_ring_step_to_windowed() {
+    use crate::native::geometry::NativeSurface;
+
+    let mut m = model();
+    m.surfaces.set_layout(
+        NativeSurface::Tree,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Overlay,
+            crate::native::geometry::Anchor::Left,
+            30,
+        ),
+    );
+    let _ = update(&mut m, tree_toggle());
+    let before = m.tree_width_pct;
+    let _ = update(&mut m, key("<S-Right>"));
+    let stepped = m.tree_width_pct;
+    assert_ne!(stepped, before, "the key must step the float's own share");
+    assert_eq!(
+        m.surfaces.layout(NativeSurface::Tree).size,
+        stepped,
+        "the stepped share must already sit in the layout, not just in tree_width_pct"
+    );
+
+    let effects = update(&mut m, cycle_surfaces_invoke());
+    let opened = effects.iter().find_map(|effect| match effect {
+        Effect::Rpc(RpcCall::OpenNativeWindow { surface, size, .. })
+            if *surface == NativeSurface::Tree =>
+        {
+            Some(*size)
+        }
+        _ => None,
+    });
+    assert_eq!(
+        opened,
+        Some(stepped),
+        "the ring step must open the window at the width the user left the float at"
+    );
+}
+
 /// `<C-w>>`/`<C-w><` -- nvim's own window-resize chord, not the single
 /// `<S-Right>`/`<S-Left>` the tests above press -- resolves inside a
 /// windowed tree exactly as the single key does: the chord's first key
@@ -15019,6 +15205,111 @@ fn the_resize_chord_resolves_inside_a_windowed_stream() {
     );
 }
 
+/// Every windowed surface that owns a `<C-w>` resize chord of its own
+/// (tree, agent panel, stream) against every shape a follower can take:
+/// one this build resolves as its own resize, which must never reach nvim
+/// at all, and one it does not, which must reach nvim as the prefix and
+/// the follower together -- never the prefix alone, with the follower left
+/// to complete a window command nvim is still waiting on.
+#[test]
+fn ctrl_w_prefix_and_follower_travel_together_for_every_windowed_surface() {
+    struct Case {
+        name: &'static str,
+        model: fn() -> Model,
+        follower: &'static str,
+        resolved_in_view: bool,
+    }
+    let cases = [
+        Case {
+            name: "tree resize",
+            model: focused_windowed_tree,
+            follower: ">",
+            resolved_in_view: true,
+        },
+        Case {
+            name: "tree switch",
+            model: focused_windowed_tree,
+            follower: "w",
+            resolved_in_view: false,
+        },
+        Case {
+            name: "tree jump to previous",
+            model: focused_windowed_tree,
+            follower: "p",
+            resolved_in_view: false,
+        },
+        Case {
+            name: "agent resize",
+            model: focused_windowed_agent,
+            follower: ">",
+            resolved_in_view: true,
+        },
+        Case {
+            name: "agent switch",
+            model: focused_windowed_agent,
+            follower: "w",
+            resolved_in_view: false,
+        },
+        Case {
+            name: "agent jump to previous",
+            model: focused_windowed_agent,
+            follower: "p",
+            resolved_in_view: false,
+        },
+        Case {
+            name: "stream resize",
+            model: focused_windowed_notifications,
+            follower: "<lt>",
+            resolved_in_view: true,
+        },
+        Case {
+            name: "stream switch",
+            model: focused_windowed_notifications,
+            follower: "w",
+            resolved_in_view: false,
+        },
+        Case {
+            name: "stream jump to previous",
+            model: focused_windowed_notifications,
+            follower: "p",
+            resolved_in_view: false,
+        },
+    ];
+    for case in cases {
+        let mut m = (case.model)();
+        let armed = update(&mut m, key("<C-w>"));
+        assert!(
+            armed.is_empty(),
+            "{}: the prefix alone must reach nvim nothing at all: {armed:?}",
+            case.name
+        );
+        let effects = update(&mut m, key(case.follower));
+        if case.resolved_in_view {
+            assert!(
+                !effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::Rpc(RpcCall::Input { .. }))),
+                "{}: a follower this build resolves as its own must never \
+                 reach nvim: {effects:?}",
+                case.name
+            );
+        } else {
+            assert!(
+                matches!(
+                    &effects[..],
+                    [
+                        Effect::Rpc(RpcCall::Input { notation: a }),
+                        Effect::Rpc(RpcCall::Input { notation: b }),
+                    ] if a == "<C-w>" && b == case.follower
+                ),
+                "{}: the prefix and the follower must reach nvim together: \
+                 {effects:?}",
+                case.name
+            );
+        }
+    }
+}
+
 /// The palette has no share of its own for the chord to step -- it is a
 /// real nvim window with no [`resize_windowed_stream`]-style sidebar
 /// geometry behind it -- so its own contract is narrower: the chord must
@@ -15078,9 +15369,12 @@ fn the_resize_chords_first_key_survives_inside_a_windowed_palette() {
 }
 
 /// Unlike the resize chord, `<C-w>w` (switch to the next window) names no
-/// action this build claims -- both keys have to reach nvim raw, or the
-/// windowed stream would swallow an ordinary window command as a no-op
-/// history keystroke instead of letting nvim answer it. See
+/// action this build claims -- both keys have to reach nvim raw, together,
+/// or the windowed stream would swallow an ordinary window command as a
+/// no-op history keystroke instead of letting nvim answer it. The prefix
+/// is held rather than sent on its own: nvim must never be told a window
+/// command is coming and then be left without a follower, which is what
+/// the resize chord below would do to it. See
 /// [`the_resize_chord_resolves_inside_a_windowed_stream`] for the sibling
 /// chord this same `<C-w>` prefix also has to still resolve.
 #[test]
@@ -15089,18 +15383,19 @@ fn a_window_command_the_resize_chord_does_not_claim_still_reaches_nvim_from_the_
 
     let effects = update(&mut m, key("<C-w>"));
     assert!(
-        matches!(
-            &effects[..],
-            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-w>"
-        ),
-        "the prefix must reach nvim so it knows a window command is coming: {effects:?}"
+        effects.is_empty(),
+        "the prefix alone must reach nvim nothing until its follower is known: {effects:?}"
     );
     let effects = update(&mut m, key("w"));
     assert!(
         matches!(
             &effects[..],
-            [Effect::Rpc(RpcCall::Input { notation })] if notation == "w"
+            [
+                Effect::Rpc(RpcCall::Input { notation: a }),
+                Effect::Rpc(RpcCall::Input { notation: b }),
+            ] if a == "<C-w>" && b == "w"
         ),
-        "the follower must reach nvim too, not be lost to history navigation: {effects:?}"
+        "the prefix and the follower must reach nvim together, not be lost \
+         to history navigation: {effects:?}"
     );
 }

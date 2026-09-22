@@ -74,15 +74,15 @@ rustix = { version = "1", default-features = false, features = [
     "event",
     "pipe",
 ] }
-# src/localtime.rs's `localtime_r`/`tm_gmtoff`: the host's UTC offset (I12),
-# with no timezone crate's soundness caveats around env vars in a
-# multithreaded process -- a plain POSIX call already vetted elsewhere in
-# this workspace (view-bench).
+# src/localtime.rs's `localtime_r`/`tm_gmtoff`: the host's UTC offset, with
+# no timezone crate's soundness caveats around env vars in a multithreaded
+# process -- a plain POSIX call already vetted elsewhere in this workspace
+# (view-bench).
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-# src/localtime.rs's `GetTimeZoneInformation`: the same host offset (I12),
-# on the platform `libc::tm` carries no `tm_gmtoff` for. Already a vetted
+# src/localtime.rs's `GetTimeZoneInformation`: the same host offset, on the
+# platform `libc::tm` carries no `tm_gmtoff` for. Already a vetted
 # dependency in this workspace (view-engine's named-pipe transport).
 windows-sys = { version = "0.61.2", features = ["Win32_System_Time"] }
 

@@ -3543,6 +3543,62 @@ mod tests {
         );
     }
 
+    /// `dispatch` reads the host's UTC offset fresh on every fold rather
+    /// than caching the first reading, proven by swapping the injected
+    /// reading between two folds and reading each stamp's own offset back
+    /// off the model.
+    #[test]
+    fn the_runtime_rereads_the_utc_offset_on_every_fold() {
+        let _guard = crate::localtime::TestOffsetGuard::new(3600);
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        let _ = model
+            .engine
+            .messages
+            .resolve_startup_hold(view_core::native::toast::HoldOutcome::Release);
+        let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None, None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let _ = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::Redraw(vec![view_core::events::UiEvent::MsgShow {
+                kind: "echomsg".to_string(),
+                content: vec![(0, "before the flip".to_string())],
+                replace_last: false,
+            }]),
+        );
+        assert_eq!(
+            model.utc_offset_secs(),
+            3600,
+            "the fold before the flip must stamp the offset standing then"
+        );
+
+        crate::localtime::set_test_offset_secs(Some(7200));
+        let _ = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::Redraw(vec![view_core::events::UiEvent::MsgShow {
+                kind: "echomsg".to_string(),
+                content: vec![(0, "after the flip".to_string())],
+                replace_last: false,
+            }]),
+        );
+        assert_eq!(
+            model.utc_offset_secs(),
+            7200,
+            "a fold after the flip must re-read the offset rather than \
+             answer the first fold's cached reading"
+        );
+    }
+
     /// The boundary proof this suite actually needs, driven through
     /// `dispatch` -- the real production entry point -- rather than
     /// `Executor::run` in isolation: an executor with no `toast_timer`

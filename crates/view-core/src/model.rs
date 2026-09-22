@@ -474,9 +474,7 @@ impl Model {
     /// Sets the offset (seconds east of UTC) a message stamp renders
     /// through, the sibling [`Self::set_now`]'s own caller sets ahead of
     /// the same fold. `view-core` stays pure (see the crate dependency
-    /// direction), so it never asks the platform for this itself -- I12
-    /// shipped with no such setter at all, and every stamp rendered UTC
-    /// with nothing on screen or in the docs saying so.
+    /// direction), so it never asks the platform for this itself.
     pub fn set_utc_offset(&mut self, secs: i64) {
         self.engine.messages.set_utc_offset(secs);
     }

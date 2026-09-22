@@ -2519,6 +2519,94 @@ fn a_windowed_stream_leaves_focus_on_escape_and_forwards_a_window_command_agains
     );
 }
 
+/// The windowed tree against real nvim: `<C-w>w`, which the tree's own
+/// resize chord does not claim, must still leave the tree's window and
+/// cycle nvim's own -- the tree used to swallow the whole chord with
+/// nothing reaching nvim, so the cursor never left.
+#[test]
+fn a_windowed_tree_forwards_an_unclaimed_window_command_against_real_nvim() {
+    let work = common::ScratchPaths::new("close-battery-tree-window-cmds");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = windowed_tree_session(&dir);
+
+    open_the_tree(&mut engine);
+    let tree_id = engine.eval_str("win_getid()").unwrap().trim().to_string();
+
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "<C-w>".to_string(),
+        }))
+        .expect("the window-command prefix is held, not swallowed");
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "w".to_string(),
+        }))
+        .expect("the follower reaches nvim together with the prefix");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    assert_ne!(
+        engine.eval_str("&filetype").unwrap().trim(),
+        "view-tree",
+        "<C-w>w must leave the tree's own window"
+    );
+    assert_ne!(
+        engine.eval_str("win_getid()").unwrap().trim(),
+        tree_id,
+        "<C-w>w is not the tree's own resize chord, so nvim must have \
+         cycled the window itself"
+    );
+}
+
+/// [`a_windowed_tree_forwards_an_unclaimed_window_command_against_real_nvim`],
+/// for the agent panel.
+#[test]
+fn a_windowed_agent_panel_forwards_an_unclaimed_window_command_against_real_nvim() {
+    let work = common::ScratchPaths::new("close-battery-agent-window-cmds");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = overlay_session(&dir);
+    engine.set_surface(
+        view_core::native::geometry::NativeSurface::Agent,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Right,
+            30,
+        ),
+    );
+    engine.trust_ai();
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        })
+        .expect("the agent panel's window opens");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    let agent_id = engine.eval_str("win_getid()").unwrap().trim().to_string();
+
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "<C-w>".to_string(),
+        }))
+        .expect("the window-command prefix is held, not swallowed");
+    engine
+        .feed(view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "w".to_string(),
+        }))
+        .expect("the follower reaches nvim together with the prefix");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    assert_ne!(
+        engine.eval_str("&filetype").unwrap().trim(),
+        "view-agent",
+        "<C-w>w must leave the agent panel's own window"
+    );
+    assert_ne!(
+        engine.eval_str("win_getid()").unwrap().trim(),
+        agent_id,
+        "<C-w>w is not the agent panel's own resize chord, so nvim must \
+         have cycled the window itself"
+    );
+}
+
 /// The agent panel and the notification stream stacked on the same right
 /// edge: a resize key pressed in the focused one (the stream, entered
 /// last) has to carry its new share to the sibling too -- in the model,

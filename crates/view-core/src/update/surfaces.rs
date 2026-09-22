@@ -193,11 +193,11 @@ fn retile_open_surface(
     target: crate::native::geometry::SurfacePlacement,
 ) -> Vec<Effect> {
     use crate::native::geometry::SurfacePlacement;
-    // R2a: the palette carries no window of nvim's own under either
-    // placement any more -- `view_surface::render` reads
-    // `palette_windowed_active()` straight off the model on the next paint,
-    // so a ring step that changes its placement needs no `OpenNativeWindow`/
-    // `CloseNativeWindow` pair to move it, unlike the other three surfaces.
+    // The palette carries no window of nvim's own under either placement --
+    // `view_surface::render` reads `palette_windowed_active()` straight off
+    // the model on the next paint, so a ring step that changes its
+    // placement needs no `OpenNativeWindow`/`CloseNativeWindow` pair to
+    // move it, unlike the other three surfaces.
     if surface == NativeSurface::Palette {
         return Vec::new();
     }
@@ -208,11 +208,17 @@ fn retile_open_surface(
             }
             // the ring carries a surface's state across a placement step
             // the user aimed at the whole set, never at this one surface,
-            // so the keyboard stays where the step found it (I11)
+            // so the keyboard stays where the step found it
             vec![Effect::Rpc(open_native_window(model, surface, false))]
         }
         SurfacePlacement::Overlay => {
             let Some(win) = model.engine.grids().native_window(surface) else {
+                // still mid-open: there is no window yet to release, but
+                // this step has already moved the surface off windowed, so
+                // the open in flight is retired here rather than left to
+                // land later and claim a window nothing wants any more
+                // (see `native_window_opened`'s own stale-generation arm)
+                model.surfaces.cancel_pending_open(surface);
                 return Vec::new();
             };
             model.engine.grids_mut().release_native_window(win);
@@ -272,7 +278,23 @@ pub(super) fn agent_pane_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     if notation == "<Esc>" && model.ai_panel().pending_permission.is_none() {
         return vec![Effect::Rpc(RpcCall::FocusPreviousWindow)];
     }
+    // A windowed agent panel's own `<C-w>` chord is held the same way the
+    // tree's and the notification stream's are: the prefix waits here, and
+    // reaches nvim together with its follower only once the follower is
+    // known not to be the panel's own resize chord (see
+    // `notifications_pane_key`).
+    let armed_before = model.pending_chord.as_deref() == Some("<C-w>");
     let binding = take_binding(model, notation);
+    if armed_before && !matches!(binding, Some(Resolved::Act(Action::Resize(_)))) {
+        return vec![
+            Effect::Rpc(RpcCall::Input {
+                notation: "<C-w>".to_string(),
+            }),
+            Effect::Rpc(RpcCall::Input {
+                notation: notation.to_string(),
+            }),
+        ];
+    }
     super::ai::ai_panel_key(model, notation, binding)
 }
 
@@ -309,6 +331,12 @@ pub(super) fn close_windowed_agent(model: &mut Model) -> Vec<Effect> {
     let win = model.engine.grids().native_window(NativeSurface::Agent);
     if let Some(win) = win {
         model.engine.grids_mut().release_native_window(win);
+    } else if model.surfaces.pending_open(NativeSurface::Agent) {
+        // `:View ai close` reaches here whether or not the window it is
+        // closing has been claimed yet -- unlike the toggle, which only
+        // runs once focus proves it has (see `retile_open_surface`'s own
+        // pending arm for why the open in flight has to be retired here)
+        model.surfaces.cancel_pending_open(NativeSurface::Agent);
     }
     model.close_ai_panel();
     model.dirty = true;
@@ -387,6 +415,13 @@ pub(super) fn native_window_taken(model: &mut Model, surface: NativeSurface) -> 
 /// surfaces' own `layout.size`, each written only by its own resize key.
 /// Left unsynced, a ring step or a later resize of the sibling reads its
 /// stale share and asks nvim for a size the column is not actually at.
+///
+/// The sibling's own loose copy of its share (`tree_width_pct` or
+/// `ai_panel_width_pct` -- whichever `NativeSurface` it is) is written back
+/// too, the same field its own resize key steps: left at the pre-sync
+/// value, a later overlay resize of the sibling would read that stale
+/// number and step from it instead of from the share this sync just gave
+/// it, silently discarding the carry the moment the sibling floats.
 fn sync_stacked_siblings(model: &mut Model, resized: NativeSurface, anchor: Anchor, size: u16) {
     for surface in NativeSurface::ALL {
         if surface == resized || !model.surfaces.windowed(surface) {
@@ -400,6 +435,11 @@ fn sync_stacked_siblings(model: &mut Model, resized: NativeSurface, anchor: Anch
             surface,
             crate::native::geometry::SurfaceLayout::new(sibling.placement, sibling.anchor, size),
         );
+        match surface {
+            NativeSurface::Tree => model.tree_width_pct = size,
+            NativeSurface::Agent => model.ai_panel_width_pct = size,
+            NativeSurface::Notifications | NativeSurface::Palette => {}
+        }
     }
 }
 
@@ -407,14 +447,14 @@ fn sync_stacked_siblings(model: &mut Model, resized: NativeSurface, anchor: Anch
 /// sits in, in the cells it works out to against the grid nvim lays its
 /// windows in.
 ///
-/// The stepped share is written back into the layout as well, so a tree
-/// closed and reopened comes back at the width the user left it at rather
-/// than at the one the config names. A float needs neither: `resize_tree`
-/// has already re-widthed its own box.
+/// The stepped share is written back into the layout whether or not the
+/// tree is windowed right now: `layout.size` is what a later ring step
+/// reads to open the window at, so a width stepped while the tree floats
+/// must already be there when that step arrives, not just in
+/// `tree_width_pct`'s own copy (which `resize_tree` has already re-widthed
+/// the open float from). Only the live `SetWindowSize` RPC is a windowed
+/// surface's own.
 fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
-    if !model.tree_is_windowed() {
-        return Vec::new();
-    }
     let layout = model.surfaces.layout(NativeSurface::Tree);
     let stepped = model.tree_width_pct;
     model.surfaces.set_layout(
@@ -422,6 +462,9 @@ fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
         crate::native::geometry::SurfaceLayout::new(layout.placement, layout.anchor, stepped),
     );
     sync_stacked_siblings(model, NativeSurface::Tree, layout.anchor, stepped);
+    if !model.tree_is_windowed() {
+        return Vec::new();
+    }
     let Some(win) = model.engine.grids().native_window(NativeSurface::Tree) else {
         return Vec::new();
     };
@@ -435,15 +478,11 @@ fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
 }
 
 /// [`resize_windowed_tree`], for the agent panel: carries the share
-/// `resize_ai_panel` just stepped to the window it sits in, and writes it
-/// back into the layout so a panel closed and reopened comes back at the
-/// width the user left it at. `pub(super)` rather than private: the
+/// `resize_ai_panel` just stepped to the layout, windowed or not, and to
+/// the window it sits in when it is. `pub(super)` rather than private: the
 /// resize key lives on `update::ai::ai_panel_key`'s own composer match,
 /// not here, the same split `tree_key`'s own module keeps for the sidebar.
 pub(super) fn resize_windowed_agent(model: &mut Model) -> Vec<Effect> {
-    if !model.agent_is_windowed() {
-        return Vec::new();
-    }
     let layout = model.surfaces.layout(NativeSurface::Agent);
     let stepped = model.ai_panel_width_pct;
     model.surfaces.set_layout(
@@ -451,6 +490,9 @@ pub(super) fn resize_windowed_agent(model: &mut Model) -> Vec<Effect> {
         crate::native::geometry::SurfaceLayout::new(layout.placement, layout.anchor, stepped),
     );
     sync_stacked_siblings(model, NativeSurface::Agent, layout.anchor, stepped);
+    if !model.agent_is_windowed() {
+        return Vec::new();
+    }
     let Some(win) = model.engine.grids().native_window(NativeSurface::Agent) else {
         return Vec::new();
     };
@@ -525,6 +567,12 @@ fn close_windowed_tree(model: &mut Model) -> Vec<Effect> {
     let win = model.engine.grids().native_window(NativeSurface::Tree);
     if let Some(win) = win {
         model.engine.grids_mut().release_native_window(win);
+    } else if model.surfaces.pending_open(NativeSurface::Tree) {
+        // a close reached before the open it is closing was ever claimed
+        // retires that open here (see `retile_open_surface`'s own pending
+        // arm for why), rather than leaving it to land and claim a window
+        // this close already said it did not want
+        model.surfaces.cancel_pending_open(NativeSurface::Tree);
     }
     let closed = model.close_tree();
     model.dirty = true;
@@ -610,12 +658,15 @@ fn open_tree_state(model: &mut Model, beneath_top: bool) -> Vec<Effect> {
 /// what makes the next `win_pos` for that handle place a pane view paints.
 ///
 /// A reply for a generation older than the one `surface`'s own last open
-/// carried is dropped: that surface has been closed and reopened since the
-/// call, and the handle it names belongs to a window that is already gone.
-/// Read off `surface`'s own counter, never a counter every surface shares --
-/// a ring step that opens two surfaces in one fold issues two calls before
-/// either reply lands, and a shared counter would answer only the second
-/// (see [`crate::native::placement::SurfaceState::generation`]'s doc).
+/// carried names a window a close or a retile has since moved the surface
+/// past ([`crate::native::placement::SurfaceState::cancel_pending_open`]):
+/// nothing claims it, and closing it here is the only place left that
+/// still knows which handle to name, or it would sit open in nvim with
+/// nothing on view's side ever pointing at it again. Read off `surface`'s
+/// own counter, never a counter every surface shares -- a ring step that
+/// opens two surfaces in one fold issues two calls before either reply
+/// lands, and a shared counter would answer only the second (see
+/// [`crate::native::placement::SurfaceState::generation`]'s doc).
 pub(super) fn native_window_opened(
     model: &mut Model,
     generation: u64,
@@ -623,7 +674,7 @@ pub(super) fn native_window_opened(
     win: crate::events::WinHandle,
 ) -> Vec<Effect> {
     if generation != model.surfaces.generation(surface) {
-        return Vec::new();
+        return vec![Effect::Rpc(RpcCall::CloseNativeWindow { win: win.0 })];
     }
     // `pending_open` stays true past this claim -- it is what
     // `native_window()` will answer once the `win_pos` this claim is
@@ -773,26 +824,28 @@ pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Vec<E
     }
     // `<C-w>` opens a real nvim window-command prefix, and this pane's own
     // resize chord (`<C-w>>`/`<C-w><`) is only two of the followers nvim
-    // itself answers (`w`, `s`, `q`, ...); the raw keys have to reach nvim
-    // for those to still work, so the prefix is forwarded on arming and its
-    // follower is forwarded too whenever it did not complete the resize
-    // chord this build claims.
+    // itself answers (`w`, `s`, `q`, ...). The prefix is held here, not
+    // forwarded on arming: nvim must never be told about a `<C-w>` whose
+    // follower turns out to be this build's own resize chord, so the
+    // prefix and its follower reach nvim together, and only once the
+    // follower is known to belong to nvim rather than this pane.
     let armed_before = model.pending_chord.as_deref() == Some("<C-w>");
     match take_binding(model, notation) {
         Some(Resolved::Act(Action::Resize(direction))) => {
             return resize_windowed_stream(model, direction.widens());
         }
-        Some(Resolved::Pending) => {
-            return vec![Effect::Rpc(RpcCall::Input {
-                notation: notation.to_string(),
-            })];
-        }
+        Some(Resolved::Pending) => return Vec::new(),
         _ => {}
     }
     if armed_before {
-        return vec![Effect::Rpc(RpcCall::Input {
-            notation: notation.to_string(),
-        })];
+        return vec![
+            Effect::Rpc(RpcCall::Input {
+                notation: "<C-w>".to_string(),
+            }),
+            Effect::Rpc(RpcCall::Input {
+                notation: notation.to_string(),
+            }),
+        ];
     }
     message_history_key(model, notation)
 }
@@ -842,6 +895,14 @@ fn close_windowed_notifications(model: &mut Model) -> Vec<Effect> {
         .native_window(NativeSurface::Notifications);
     if let Some(win) = win {
         model.engine.grids_mut().release_native_window(win);
+    } else if model.surfaces.pending_open(NativeSurface::Notifications) {
+        // a close reached before the open it is closing was ever claimed
+        // retires that open here (see `retile_open_surface`'s own pending
+        // arm for why), rather than leaving it to land and claim a window
+        // this close already said it did not want
+        model
+            .surfaces
+            .cancel_pending_open(NativeSurface::Notifications);
     }
     model.close_message_history();
     model.dirty = true;
@@ -874,6 +935,11 @@ const HISTORY_CHROME_ROWS: u16 = 4;
 /// keep `model` borrowed across the `pop_focused_overlay` and `close_tree`
 /// calls the `<CR>` and `<Esc>` arms need.
 pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
+    // A windowed tree's own `<C-w>` chord is held the same way the
+    // notification stream's is (see `notifications_pane_key`): the prefix
+    // waits here rather than reaching nvim on arming, so a follower this
+    // build resolves as its own resize never leaves nvim mid-chord.
+    let armed_before = model.tree_is_windowed() && model.pending_chord.as_deref() == Some("<C-w>");
     // Ahead of the tree's own keys and resolved through the one
     // shared set, so neither sidebar can drift onto a key the
     // other does not answer (see [`take_binding`]).
@@ -895,6 +961,16 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         // arms below on its own next pass.
         Some(Resolved::Pending) => return Vec::new(),
         None => {}
+    }
+    if armed_before {
+        return vec![
+            Effect::Rpc(RpcCall::Input {
+                notation: "<C-w>".to_string(),
+            }),
+            Effect::Rpc(RpcCall::Input {
+                notation: notation.to_string(),
+            }),
+        ];
     }
     match notation {
         // leaving a windowed tree is leaving its window, and the tile
