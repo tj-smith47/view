@@ -20,6 +20,12 @@ const SSH_TTY: &str = "SSH_TTY";
 const WAYLAND_DISPLAY: &str = "WAYLAND_DISPLAY";
 const DISPLAY: &str = "DISPLAY";
 
+/// The four names above, for the sibling test that proves the resolver
+/// reads no environment name outside its own registry and this module's own
+/// vocabulary.
+#[cfg(test)]
+pub(crate) const PROFILE_MARKERS: [&str; 4] = [SSH_CONNECTION, SSH_TTY, WAYLAND_DISPLAY, DISPLAY];
+
 /// What `[keys] profile = "auto"` derives, read in the order spec section 9
 /// states, first match wins. The marker names which environment variable
 /// decided it, for the report row; the bare-tty fallback and the two

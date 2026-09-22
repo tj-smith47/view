@@ -36,6 +36,7 @@ pub use resolve::{
 use serde::{Deserialize, Serialize};
 pub use surfaces::surfaces;
 use view_core::model::Panes;
+use view_core::native::chords;
 use view_core::native::ext::{self, Ext};
 use view_core::native::geometry;
 use view_core::native::geometry::NativeSurface;
@@ -666,6 +667,23 @@ struct KeysTable {
     toggle_gaps: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cycle_surfaces: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    desktop_modifier: Option<String>,
+    /// One entry per `[keys.desktop]` row the file spells, keyed by
+    /// [`view_core::native::chords::DesktopChord::id`]. Untyped for the
+    /// reason the other four fields stay `toml::Value`: a serde map cannot
+    /// refuse a key it has never heard of, so an id naming no chord reaches
+    /// [`resolve::resolve_with`] as data rather than failing the table.
+    ///
+    /// Non-`Option`, unlike its five siblings above: `[keys.desktop]` is its
+    /// own table header, not a bare key, and only a field that always
+    /// renders (`UiTokensTable`'s own pattern) reaches `loaded_tables`'s
+    /// reflection walk, which is how the example pin knows this table is
+    /// read rather than merely documented.
+    #[serde(default)]
+    desktop: BTreeMap<String, String>,
 }
 
 /// What a `sidebar_wider` naming no key this build can match is answered
@@ -793,6 +811,20 @@ pub struct KeysConfig {
     notices: Vec<&'static str>,
     gaps_lhs: String,
     cycle_lhs: String,
+    /// `[keys] profile`'s raw file answer, carried for
+    /// [`resolve::resolve_with`] to layer an environment value and a
+    /// derivation over -- the same role `gaps_lhs` fills already, except
+    /// this key's vocabulary (`auto`/`desktop`/`editor`) is resolved at
+    /// that layer rather than here, since the "auto" answer needs the
+    /// environment this struct is not handed.
+    profile: Option<String>,
+    /// [`Self::profile`]'s own for `[keys] desktop_modifier`.
+    desktop_modifier: Option<String>,
+    /// `[keys.desktop]` as the file wrote it, unvalidated: which ids exist
+    /// and which values are spellable keys are both
+    /// [`resolve::resolve_with`]'s own check, since a 46-row map answers
+    /// through the same env/file/derived chain every other key does.
+    desktop: BTreeMap<String, String>,
 }
 
 impl Default for KeysConfig {
@@ -802,6 +834,9 @@ impl Default for KeysConfig {
             notices: Vec::new(),
             gaps_lhs: default_ui_lhs("gaps").to_string(),
             cycle_lhs: default_ui_lhs("cycle_surfaces").to_string(),
+            profile: None,
+            desktop_modifier: None,
+            desktop: BTreeMap::new(),
         }
     }
 }
@@ -833,6 +868,28 @@ impl KeysConfig {
     #[must_use]
     pub fn cycle_lhs(&self) -> &str {
         &self.cycle_lhs
+    }
+
+    /// `[keys] profile` exactly as the file wrote it, or `None` for a
+    /// silent key -- `"auto"` included, since collapsing it here would lose
+    /// the difference between a file that spelled `"auto"` and one that
+    /// said nothing.
+    #[must_use]
+    pub fn profile(&self) -> Option<&str> {
+        self.profile.as_deref()
+    }
+
+    /// [`Self::profile`]'s own for `[keys] desktop_modifier`.
+    #[must_use]
+    pub fn desktop_modifier(&self) -> Option<&str> {
+        self.desktop_modifier.as_deref()
+    }
+
+    /// `[keys.desktop]` exactly as the file wrote it, id to key notation,
+    /// ids the registry does not recognize included.
+    #[must_use]
+    pub fn desktop(&self) -> &BTreeMap<String, String> {
+        &self.desktop
     }
 }
 
@@ -928,6 +985,9 @@ impl ViewConfig {
                 notices,
                 gaps_lhs,
                 cycle_lhs,
+                profile: file.keys.profile.clone(),
+                desktop_modifier: file.keys.desktop_modifier.clone(),
+                desktop: file.keys.desktop.clone(),
             },
             engine: EngineFile {
                 nvim_bin: file.engine.nvim_bin.as_deref().and_then(parse_nvim_bin),
@@ -1196,6 +1256,17 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
             spelled.push(("keys", key));
         }
     }
+    if file.keys.profile.is_some() {
+        spelled.push(("keys", "profile"));
+    }
+    if file.keys.desktop_modifier.is_some() {
+        spelled.push(("keys", "desktop_modifier"));
+    }
+    for chord in chords::desktop_chords() {
+        if file.keys.desktop.contains_key(chord.id) {
+            spelled.push(("keys.desktop", chord.id));
+        }
+    }
     if file.supervision.auto_restart.is_some() {
         spelled.push(("supervision", "auto_restart"));
     }
@@ -1457,9 +1528,10 @@ mod tests {
     /// Hand-written, and unavoidably so: it is a transcription of the spec,
     /// which no build artifact carries. What is *not* hand-written is which
     /// of them this build reads -- see [`loaded_tables`].
-    static SPECIFIED_TABLES: [&str; 13] = [
+    static SPECIFIED_TABLES: [&str; 14] = [
         "native",
         "keys",
+        "keys.desktop",
         "supervision",
         "engine",
         "ui",
@@ -1741,6 +1813,7 @@ mod tests {
             ("native", TREE_WIDTH_KEY) => "25",
             ("native", _) => "false",
             ("keys", _) => "[\"<C-w>>\"]",
+            ("keys.desktop", _) => "\"<M-x>\"",
             ("supervision", _) => "false",
             ("ui", "tier") => "\"basic\"",
             ("ui", "theme") => "\"gruvbox\"",
@@ -2412,17 +2485,28 @@ mod tests {
     /// `[keys]` table, read off the serialized shape rather than restated.
     #[test]
     fn the_walked_actions_are_exactly_the_keys_table() {
+        // the profile derivation's own three fields, not a rebindable
+        // action, and so outside the population this walk covers
+        const NON_ACTION: [&str; 3] = ["profile", "desktop_modifier", "desktop"];
         let all = toml::Value::try_from(KeysTable {
             sidebar_wider: Some("<S-Right>".into()),
             sidebar_narrower: Some("<S-Left>".into()),
             composer_newline: Some("<M-CR>".into()),
             toggle_gaps: Some("<leader>ug".into()),
             cycle_surfaces: Some("<leader>uw".into()),
+            profile: None,
+            desktop_modifier: None,
+            desktop: BTreeMap::new(),
         })
         .expect("the keys table serializes");
         let fields: BTreeSet<&str> = all
             .as_table()
-            .map(|t| t.keys().map(String::as_str).collect())
+            .map(|t| {
+                t.keys()
+                    .map(String::as_str)
+                    .filter(|key| !NON_ACTION.contains(key))
+                    .collect()
+            })
             .unwrap_or_default();
         let walked: BTreeSet<&str> = KEYS_ACTIONS.iter().map(|(field, _)| *field).collect();
         assert_eq!(
@@ -2434,7 +2518,12 @@ mod tests {
         let shown = toml::Value::try_from(example.keys).expect("the keys table serializes");
         let shown: BTreeSet<&str> = shown
             .as_table()
-            .map(|t| t.keys().map(String::as_str).collect())
+            .map(|t| {
+                t.keys()
+                    .map(String::as_str)
+                    .filter(|key| !NON_ACTION.contains(key))
+                    .collect()
+            })
             .unwrap_or_default();
         assert_eq!(
             shown, walked,
@@ -2563,10 +2652,28 @@ mod tests {
     /// empty, so a user copying it keeps exactly what an untouched build
     /// gives them -- including the bare `<` the encoder itself spells
     /// `<lt>`.
+    ///
+    /// `profile`, `desktop_modifier` and `desktop` are the one exception:
+    /// the example spells `"auto"` and every chord's own `with_super`
+    /// spelling out loud, the same way `[ui] tier`/`theme`/`panes` spell
+    /// `"auto"` rather than shipping absent, so their raw fields differ from
+    /// [`KeysConfig::default`]'s `None`/empty even though they resolve to
+    /// the identical answer.
     #[test]
     fn the_example_configs_keys_block_is_the_shipped_default() {
         let cfg = ViewConfig::from_toml_str(EXAMPLE_TOML).expect("the example must parse");
-        assert_eq!(cfg.keys, KeysConfig::default());
+        assert_eq!(
+            cfg.keys,
+            KeysConfig {
+                profile: Some("auto".to_string()),
+                desktop_modifier: Some("auto".to_string()),
+                desktop: view_core::native::chords::desktop_chords()
+                    .iter()
+                    .map(|chord| (chord.id.to_string(), chord.with_super.to_string()))
+                    .collect(),
+                ..KeysConfig::default()
+            }
+        );
     }
 
     #[test]

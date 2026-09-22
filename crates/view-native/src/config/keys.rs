@@ -10,6 +10,7 @@
 
 use std::sync::OnceLock;
 
+use view_core::native::chords;
 use view_core::native::geometry::{NativeSurface, SurfaceLayout};
 use view_core::native::registry;
 
@@ -203,6 +204,34 @@ pub fn keys() -> &'static [ConfigKey] {
                 derived: Some("<leader>uw"),
             },
             ConfigKey {
+                table: "keys",
+                key: "profile",
+                flag: None,
+                // the pill's switch follows `[ui] panes`, for the same
+                // reason: what "auto" derives depends on the environment
+                // this session resolved, so no fixed text names it
+                derived: None,
+            },
+            ConfigKey {
+                table: "keys",
+                key: "desktop_modifier",
+                flag: None,
+                derived: None,
+            },
+        ]);
+        // the 46 `[keys.desktop]` rows, walked from `desktop_chords()` the
+        // way `[native]`'s rows are walked from the feature registry: a
+        // chord this build ships is a config key by construction, and the
+        // default each row derives depends on the modifier this session
+        // resolves, which is not text a user could write down
+        rows.extend(chords::desktop_chords().iter().map(|chord| ConfigKey {
+            table: "keys.desktop",
+            key: chord.id,
+            flag: None,
+            derived: None,
+        }));
+        rows.extend([
+            ConfigKey {
                 table: "supervision",
                 key: "auto_restart",
                 flag: None,
@@ -349,6 +378,7 @@ mod tests {
                 "engine",
                 "native",
                 "keys",
+                "keys.desktop",
                 "supervision",
                 "ai",
                 "ai.review"

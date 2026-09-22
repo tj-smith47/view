@@ -32,7 +32,7 @@ use view_core::native::geometry::{NativeSurface, SurfaceLayout};
 use view_core::theme::Theme;
 use view_engine::process::{stdin_operands, BundledEngine, EngineConfig, RemoteSpec};
 use view_native::config::{
-    Overrides, Resolved, ResolvedConfig, ResolvedEngine, Source, TierChoice, ViewConfig,
+    Overrides, ResolvedConfig, ResolvedEngine, Source, TierChoice, ViewConfig,
 };
 use view_tui::terminal::Term;
 use view_tui::tiers::CapsSource;
@@ -919,23 +919,64 @@ fn seed_ai_enabled(
 /// got exactly like one that named it on the command line -- and is told
 /// which of the three layers named it, which is the half a user needs to
 /// go and change it.
+///
+/// `--print-caps` owes more than the tier override does: every key this
+/// build resolves, from [`ResolvedConfig::rows`], plus the one row `rows`
+/// cannot answer on its own -- `keys.desktop_modifier`, whose real value
+/// needs the terminal's own kitty keyboard protocol probe this function is
+/// the first caller to hold.
 fn caps_notice(
     cli: &Cli,
-    tier: &Resolved<Option<TierChoice>>,
+    resolved: &ResolvedConfig,
     caps: TermCaps,
     source: CapsSource,
 ) -> Option<String> {
+    let tier = &resolved.ui.tier;
     (cli.print_caps || tier.value.is_some()).then(|| {
         // rendered from the capability register, so the line a user reads
         // and the table the build enforces are one thing: a capability that
         // gains a row is printed here with no edit, and one printed here
         // without a row cannot exist
-        format!(
+        let capability_line = format!(
             "view: terminal capabilities: tier={:?} {} ({})",
             caps.tier,
             view_tui::tiers::resolved(&caps),
             caps_source_label(source, tier.source)
-        )
+        );
+        if !cli.print_caps {
+            return capability_line;
+        }
+        let (_, modifier_row, _) = view_native::config::profile::modifier_for(
+            resolved.desktop_modifier.value,
+            caps.kitty_kbd,
+        );
+        let mut rows: Vec<(String, String, &'static str)> = resolved
+            .rows()
+            .into_iter()
+            .map(|(key, value, row_source)| {
+                (
+                    format!("{}.{}", key.table, key.key),
+                    value,
+                    row_source.label(),
+                )
+            })
+            .collect();
+        rows.push((
+            "keys.desktop_modifier".to_string(),
+            modifier_row.to_string(),
+            resolved.desktop_modifier.source.label(),
+        ));
+        let key_width = rows.iter().map(|(key, _, _)| key.len()).max().unwrap_or(0);
+        let value_width = rows
+            .iter()
+            .map(|(_, value, _)| value.len())
+            .max()
+            .unwrap_or(0);
+        let mut lines = vec![capability_line];
+        for (key, value, label) in rows {
+            lines.push(format!("{key:key_width$} {value:value_width$} {label}"));
+        }
+        lines.join("\n")
     })
 }
 
@@ -1391,7 +1432,7 @@ fn main() -> Result<()> {
     // a bare stderr line is invisible until teardown scrolls it back --
     // which is where the unconditional capability line used to surface,
     // long after the session it described
-    if let Some(notice) = caps_notice(&cli, &resolved.ui.tier, model.caps, term.caps_source()) {
+    if let Some(notice) = caps_notice(&cli, &resolved, model.caps, term.caps_source()) {
         pre_executor_effects.extend(model.engine.record_native_notice(notice, false));
     }
 
@@ -2489,20 +2530,11 @@ mod tests {
     fn print_caps_flag_emits_exactly_one_notice() {
         let mut model = Model::new();
         let cli = Cli::parse_from(["view", "--print-caps"]);
-        let notice = caps_notice(
-            &cli,
-            &resolved_for(&cli).ui.tier,
-            model.caps,
-            CapsSource::Probed,
-        )
-        .expect("--print-caps asks for the capability line");
+        let notice = caps_notice(&cli, &resolved_for(&cli), model.caps, CapsSource::Probed)
+            .expect("--print-caps asks for the capability line");
         assert!(
             notice.contains("tier=") && notice.contains("(probed)"),
             "the notice must carry the tier and where it came from, got {notice:?}"
-        );
-        assert!(
-            !notice.contains('\n'),
-            "the notice is one message line, got {notice:?}"
         );
         model.engine.record_native_notice(notice, false);
         assert_eq!(
@@ -2513,18 +2545,47 @@ mod tests {
         );
 
         // the second way to ask: `--tier` changes what this line would have
-        // said, so the session that overrides is shown what it got
+        // said, so the session that overrides is shown what it got, and this
+        // is the one-line override path, not `--print-caps`'s table
         let cli = Cli::parse_from(["view", "--tier", "basic"]);
-        let overridden = caps_notice(
-            &cli,
-            &resolved_for(&cli).ui.tier,
-            model.caps,
-            CapsSource::Override,
-        )
-        .expect("--tier implies the capability line");
+        let overridden = caps_notice(&cli, &resolved_for(&cli), model.caps, CapsSource::Override)
+            .expect("--tier implies the capability line");
         assert!(
             overridden.contains("(--tier flag)"),
             "an overridden session is told which layer overrode it, got {overridden:?}"
+        );
+        assert!(
+            !overridden.contains('\n'),
+            "the tier-override notice is one message line, got {overridden:?}"
+        );
+    }
+
+    /// `--print-caps` owes the whole registry, not the one tier line: every
+    /// row [`ResolvedConfig::rows`] answers, plus the `keys.desktop_modifier`
+    /// row that needs this session's own kitty keyboard protocol probe to
+    /// answer at all.
+    #[test]
+    fn print_caps_prints_every_resolved_row_and_the_modifier_row() {
+        let cli = Cli::parse_from(["view", "--print-caps"]);
+        let resolved = resolved_for(&cli);
+        let mut caps = Model::new().caps;
+        caps.kitty_kbd = true;
+        let notice = caps_notice(&cli, &resolved, caps, CapsSource::Probed)
+            .expect("--print-caps asks for the capability line");
+        for (key, _, _) in resolved.rows() {
+            let needle = format!("{}.{}", key.table, key.key);
+            assert!(
+                notice.contains(&needle),
+                "{needle} is missing from the printed table:\n{notice}"
+            );
+        }
+        assert!(
+            notice.contains("keys.desktop_modifier"),
+            "the modifier row, which rows() cannot answer on its own, is missing:\n{notice}"
+        );
+        assert!(
+            notice.contains("super (kitty keyboard protocol)"),
+            "the modifier row's own answer, from this session's probe, is missing:\n{notice}"
         );
     }
 
@@ -2543,7 +2604,7 @@ mod tests {
         );
         let notice = caps_notice(
             &cli,
-            &from_env.ui.tier,
+            &from_env,
             model.caps,
             view_tui::tiers::CapsSource::Override,
         )
@@ -2557,7 +2618,7 @@ mod tests {
         // stands in for the word `override`, never for `probed`
         let probed = caps_notice(
             &Cli::parse_from(["view", "--print-caps"]),
-            &from_env.ui.tier,
+            &from_env,
             model.caps,
             view_tui::tiers::CapsSource::Probed,
         )
@@ -2572,12 +2633,7 @@ mod tests {
     fn print_caps_is_silent_without_the_flag() {
         let model = Model::new();
         let cli = Cli::parse_from(["view", "notes.md"]);
-        let notice = caps_notice(
-            &cli,
-            &resolved_for(&cli).ui.tier,
-            model.caps,
-            CapsSource::Probed,
-        );
+        let notice = caps_notice(&cli, &resolved_for(&cli), model.caps, CapsSource::Probed);
         assert!(
             notice.is_none(),
             "an ordinary session says nothing about its own capabilities, got {notice:?}"

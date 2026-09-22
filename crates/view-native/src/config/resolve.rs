@@ -12,20 +12,25 @@ use std::path::PathBuf;
 
 pub use view_core::config::Source;
 use view_core::config::{
-    BOOL_EXPECTED, COLOR_EXPECTED, KEYS_EXPECTED, PANES_EXPECTED, TABLINE_SHOWS_EXPECTED,
-    TIER_EXPECTED, WIDTH_EXPECTED,
+    discarded_file, BOOL_EXPECTED, COLOR_EXPECTED, KEYS_EXPECTED, PANES_EXPECTED,
+    TABLINE_SHOWS_EXPECTED, TIER_EXPECTED, WIDTH_EXPECTED,
 };
 use view_core::model::{Panes, Tier};
+use view_core::native::chords::{
+    self, DesktopChord, KeyProfile, ModifierChoice, DESKTOP_CHORD_COUNT,
+};
 use view_core::native::geometry;
 use view_core::native::geometry::{Anchor, NativeSurface, SurfaceLayout, SurfacePlacement};
 use view_core::native::keys::{Action, Direction, KeyBindings};
+use view_core::native::mappings;
 use view_core::native::pill::TablineShows;
 use view_core::native::registry;
 
 use super::keys::{env_name, keys, ConfigKey};
+use super::profile;
 use super::{
-    parse_color, parse_nvim_bin, parse_panes, parse_theme, parse_tier, KeysConfig, NativeConfig,
-    SupervisionConfig, UiTokens, ViewConfig, AUTO, BUNDLED,
+    parse_color, parse_nvim_bin, parse_panes, parse_theme, parse_tier, read_key, KeysConfig,
+    NativeConfig, SupervisionConfig, UiTokens, ViewConfig, AUTO, BUNDLED,
 };
 
 /// One resolved answer and the reason it is that answer.
@@ -142,6 +147,23 @@ pub struct ResolvedConfig {
     pub ui: ResolvedUi,
     /// The `[engine]` answers.
     pub engine: ResolvedEngine,
+    /// `[keys] profile`, `"auto"` derived through [`profile::detect_profile`]
+    /// where nothing named one.
+    pub profile: Resolved<KeyProfile>,
+    /// The marker that decided [`Self::profile`] under `"auto"`, on the
+    /// terms [`ResolvedUi::panes_marker`] states.
+    pub profile_marker: Option<&'static str>,
+    /// `[keys] desktop_modifier`, still the raw choice: turning it into the
+    /// modifier this session's chords are actually spelled with needs the
+    /// terminal's own answer ([`profile::modifier_for`]), which a caller
+    /// holding `model.caps` supplies at takeover.
+    pub desktop_modifier: Resolved<ModifierChoice>,
+    /// `[keys.desktop]`'s 46 rows, in [`chords::desktop_chords`] order. A
+    /// row whose source is [`Source::Derived`] carries no override --
+    /// [`chords::DesktopChord::lhs`] is this session's answer for it -- and
+    /// a row from any other layer carries the override verbatim, empty
+    /// included, which is how a chord is left unbound.
+    pub desktop: [Resolved<String>; DESKTOP_CHORD_COUNT],
     /// The tables this crate parses, with every layer applied: what a
     /// session attaches, binds keys and supervises from. Whole configs
     /// rather than a value per key, so a consumer that already takes a
@@ -442,9 +464,34 @@ pub fn resolve_with(
             .then_some(file.supervision.auto_restart),
         SupervisionConfig::default().auto_restart,
     );
+    let (profile, profile_marker) = resolve_profile(file, env, &mut notices);
+    let desktop_modifier = layer(
+        None,
+        env_read(
+            env,
+            "keys",
+            "desktop_modifier",
+            DESKTOP_MODIFIER_EXPECTED,
+            parse_modifier_choice,
+            &mut notices,
+        ),
+        read_key(
+            file.keys.desktop_modifier(),
+            ("keys", "desktop_modifier"),
+            DESKTOP_MODIFIER_EXPECTED,
+            parse_modifier_choice,
+            &mut notices,
+        ),
+        ModifierChoice::Auto,
+    );
+    let desktop = resolve_desktop(file, env, &mut notices);
     ResolvedConfig {
         ui,
         engine,
+        profile,
+        profile_marker,
+        desktop_modifier,
+        desktop,
         surfaces,
         surfaces_source,
         tables: ViewConfig {
@@ -466,6 +513,9 @@ pub fn resolve_with(
                 notices: file.keys.notices().to_vec(),
                 gaps_lhs: gaps_lhs.clone(),
                 cycle_lhs: cycle_lhs.clone(),
+                profile: file.keys.profile().map(str::to_string),
+                desktop_modifier: file.keys.desktop_modifier().map(str::to_string),
+                desktop: file.keys.desktop().clone(),
             },
             engine: file.engine.clone(),
             ui: file.ui.clone(),
@@ -548,9 +598,13 @@ impl ResolvedConfig {
     /// came from, in registry order. The doctor's config section is this
     /// walk; nothing re-derives the list.
     ///
-    /// Every registry row whose table is not `[ai]`, and no others: that
-    /// table is parsed and resolved by the crate that owns it, and a caller
-    /// that can name both crates appends its answers to these.
+    /// Every registry row whose table is not `[ai]`, minus `keys.desktop_modifier`,
+    /// and no others: `[ai]` is parsed and resolved by the crate that owns
+    /// it, and a caller that can name both crates appends its answers to
+    /// these; `keys.desktop_modifier`'s real answer needs the terminal's
+    /// own probe, which this resolver is never handed, so the caller that
+    /// holds it (`crates/view/src/main.rs`'s `caps_notice`) prints that one
+    /// row itself, beside this walk.
     #[must_use]
     pub fn rows(&self) -> Vec<(&'static ConfigKey, String, Source)> {
         keys()
@@ -667,6 +721,23 @@ impl ResolvedConfig {
             ("keys", "cycle_surfaces") => {
                 (self.tables.keys.cycle_lhs().to_string(), self.ui_cycle_key)
             }
+            ("keys", "profile") => (
+                match self.profile_marker {
+                    Some(marker) => format!("{} ({marker})", profile_label(self.profile.value)),
+                    None => profile_label(self.profile.value).to_string(),
+                },
+                self.profile.source,
+            ),
+            // the real answer needs the terminal's own probe, which this
+            // resolver never holds -- the caller that does prints it beside
+            // this walk rather than through it (`crates/view/src/main.rs`'s
+            // `caps_notice`)
+            ("keys", "desktop_modifier") => return None,
+            ("keys.desktop", id) => {
+                let index = chords::desktop_chords().iter().position(|c| c.id == id)?;
+                let row = &self.desktop[index];
+                (row.value.clone(), row.source)
+            }
             ("keys", name) => {
                 let index = KEY_ACTIONS.iter().position(|(key, _)| *key == name)?;
                 (
@@ -761,6 +832,188 @@ const fn panes_label(panes: Panes) -> &'static str {
         // every other arm is `Panes::Nvim`, and a mode added later reads as
         // the picture nvim paints for itself until this table names it
         _ => "nvim",
+    }
+}
+
+/// What a `[keys] profile` outside the vocabulary is answered with.
+const PROFILE_EXPECTED: &str = "one of auto, desktop or editor";
+
+/// [`PROFILE_EXPECTED`]'s own for `[keys] desktop_modifier`.
+const DESKTOP_MODIFIER_EXPECTED: &str = "one of auto, super or alt";
+
+/// What a `[keys.desktop]` value that cannot be a chord's left-hand side is
+/// answered with. Empty is not that case: it is the way to leave a chord
+/// unbound, on the terms [`resolve_desktop_row`] states.
+const DESKTOP_KEY_EXPECTED: &str =
+    "a key notation with no quote, backslash or newline in it, spelled as nvim spells it, or \
+     empty to leave the chord unbound";
+
+/// One `[keys.desktop]` row, file and environment layered over the row's
+/// own `with_super` spelling -- which is this row's *placeholder* answer
+/// under [`Source::Derived`] rather than the value a caller should bind: a
+/// derived row carries no override at all, and [`chords::DesktopChord::lhs`]
+/// run against this session's real modifier is the answer for it. A row
+/// from any other layer is the override verbatim, empty included, which is
+/// how a chord is left unbound.
+fn resolve_desktop_row(
+    chord: &DesktopChord,
+    file: &ViewConfig,
+    env: &dyn Fn(&str) -> Option<String>,
+    notices: &mut Vec<String>,
+) -> Resolved<String> {
+    let mut resolved = Resolved {
+        value: chord.with_super.to_string(),
+        source: Source::Derived,
+    };
+    if let Some(raw) = file.keys.desktop().get(chord.id) {
+        if raw.is_empty() || mappings::lhs_is_spellable(raw) {
+            resolved = Resolved {
+                value: raw.clone(),
+                source: Source::File,
+            };
+        } else {
+            notices.push(discarded_file(
+                raw,
+                DESKTOP_KEY_EXPECTED,
+                "keys.desktop",
+                chord.id,
+            ));
+        }
+    }
+    if let Some(raw) = env_value(env, "keys.desktop", chord.id) {
+        if mappings::lhs_is_spellable(&raw) {
+            resolved = Resolved {
+                value: raw,
+                source: Source::Env,
+            };
+        } else {
+            notices.push(discarded(
+                "keys.desktop",
+                chord.id,
+                &raw,
+                DESKTOP_KEY_EXPECTED,
+            ));
+        }
+    }
+    resolved
+}
+
+/// What a `[keys.desktop]` id naming no chord this build knows is answered
+/// with: the id is ignored, and any chord it might have meant to override
+/// answers as if the file had said nothing.
+fn desktop_unknown_notice(id: &str, value: &str) -> String {
+    format!(
+        "view: [keys.desktop] {id} = {value} names no chord this build knows; the id is ignored"
+    )
+}
+
+/// Every `[keys.desktop]` row, in [`chords::desktop_chords`] order, with a
+/// notice for every id the file wrote that names no chord row.
+fn resolve_desktop(
+    file: &ViewConfig,
+    env: &dyn Fn(&str) -> Option<String>,
+    notices: &mut Vec<String>,
+) -> [Resolved<String>; DESKTOP_CHORD_COUNT] {
+    for (id, raw) in file.keys.desktop() {
+        if chords::desktop_chord(id).is_none() {
+            notices.push(desktop_unknown_notice(id, raw));
+        }
+    }
+    let mut rows = chords::desktop_chords().iter();
+    std::array::from_fn(|_| {
+        rows.next().map_or_else(
+            || Resolved {
+                value: String::new(),
+                source: Source::Derived,
+            },
+            |chord| resolve_desktop_row(chord, file, env, notices),
+        )
+    })
+}
+
+/// A profile a user named, `Some(None)` for the word that names the absence
+/// of a choice, and `None` for text that names neither -- which falls
+/// through to the layer below, the way [`parse_tier`] does.
+fn parse_profile_choice(value: &str) -> Option<Option<KeyProfile>> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        AUTO => Some(None),
+        "desktop" => Some(Some(KeyProfile::Desktop)),
+        "editor" => Some(Some(KeyProfile::Editor)),
+        _ => None,
+    }
+}
+
+/// A modifier choice a user named, or `None` for text that names none.
+/// Unlike [`parse_profile_choice`], `"auto"` is one of [`ModifierChoice`]'s
+/// own variants rather than a second `Option` layer -- the enum already
+/// carries the absence of a choice.
+fn parse_modifier_choice(value: &str) -> Option<ModifierChoice> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        AUTO => Some(ModifierChoice::Auto),
+        "super" => Some(ModifierChoice::Super),
+        "alt" => Some(ModifierChoice::Alt),
+        _ => None,
+    }
+}
+
+/// The word a profile is written as, in every layer that carries one.
+///
+/// `KeyProfile` is `#[non_exhaustive]`, read from another crate; a variant
+/// this build has never heard of answers the way the one that binds every
+/// omarchy chord does, since a build that cannot name the new variant
+/// cannot know it is safe to bind fewer keys either.
+#[must_use]
+const fn profile_label(profile: KeyProfile) -> &'static str {
+    match profile {
+        KeyProfile::Editor => "editor",
+        _ => "desktop",
+    }
+}
+
+/// `[keys] profile`, `"auto"` derived through [`profile::detect_profile`]
+/// where nothing named one, on the terms [`detect_panes`]/`ui.panes`
+/// resolves under: an explicit `"auto"` reads exactly like an absent key,
+/// since neither layer left a concrete choice standing.
+fn resolve_profile(
+    file: &ViewConfig,
+    env: &dyn Fn(&str) -> Option<String>,
+    notices: &mut Vec<String>,
+) -> (Resolved<KeyProfile>, Option<&'static str>) {
+    let asked = layer(
+        None,
+        env_read(
+            env,
+            "keys",
+            "profile",
+            PROFILE_EXPECTED,
+            parse_profile_choice,
+            notices,
+        ),
+        read_key(
+            file.keys.profile(),
+            ("keys", "profile"),
+            PROFILE_EXPECTED,
+            parse_profile_choice,
+            notices,
+        ),
+        None,
+    );
+    let (derived, derived_marker) = profile::detect_profile(env);
+    match asked.value {
+        Some(value) => (
+            Resolved {
+                value,
+                source: asked.source,
+            },
+            None,
+        ),
+        None => (
+            Resolved {
+                value: derived,
+                source: Source::Derived,
+            },
+            derived_marker,
+        ),
     }
 }
 
@@ -984,6 +1237,13 @@ mod tests {
         row.table == "ai" || row.table.starts_with("ai.")
     }
 
+    /// Whether `rows()` answers `row` at all: every key but `[ai]`'s and
+    /// `keys.desktop_modifier`, whose real answer needs the terminal's own
+    /// probe (see `rows`'s own rustdoc).
+    fn answered_by_rows(row: &ConfigKey) -> bool {
+        !is_ai(row) && !(row.table == "keys" && row.key == "desktop_modifier")
+    }
+
     /// An environment carrying a legal value for every key this crate
     /// resolves, so a test that must show a layer being *suppressed* has
     /// something to suppress.
@@ -1032,6 +1292,9 @@ mod tests {
             ("engine", "appname") => "work",
             ("native", "tree_width") => "40",
             ("native", "tabline_shows") => "buffers",
+            ("keys", "profile") => "desktop",
+            ("keys", "desktop_modifier") => "super",
+            ("keys.desktop", _) => "<M-x>",
             ("keys", _) => "<C-w>>",
             _ => "false",
         }
@@ -1258,7 +1521,7 @@ mod tests {
     /// answer forever, with nothing to say so.
     #[test]
     fn every_resolved_key_reads_its_own_environment_name() {
-        for key in keys().iter().filter(|key| !is_ai(key)) {
+        for key in keys().iter().filter(|key| answered_by_rows(key)) {
             let name = env_name(key);
             let env = |asked: &str| (asked == name).then(|| env_fixture(key, false).to_string());
             let resolved = resolve_with(&ViewConfig::defaults(), &Overrides::default(), &env);
@@ -1298,10 +1561,13 @@ mod tests {
         for name in asked.borrow().iter() {
             // the look-mode detection is the other reader of names outside
             // the namespace: a window manager announces itself under its
-            // own name, and nothing view could generate would find it
+            // own name, and nothing view could generate would find it. The
+            // profile derivation reads its own four markers the same way --
+            // `profile::detect_profile`'s own vocabulary, not view's
             if name == INHERITED_APPNAME_ENV
                 || name == XDG_CURRENT_DESKTOP
                 || TILING_MARKERS.contains(&name.as_str())
+                || profile::PROFILE_MARKERS.contains(&name.as_str())
             {
                 continue;
             }
@@ -1367,16 +1633,17 @@ mod tests {
             .collect();
         let owed: Vec<(&str, &str)> = keys()
             .iter()
-            .filter(|key| !is_ai(key))
+            .filter(|key| answered_by_rows(key))
             .map(|key| (key.table, key.key))
             .collect();
         assert_eq!(
             answered, owed,
-            "every registry key but the ones `view-ai` resolves owes a row here"
+            "every registry key but the ones `view-ai` resolves, and \
+             `keys.desktop_modifier`, owes a row here"
         );
         assert!(
             answered.len() < keys().len(),
-            "the `[ai]` rows are another crate's to answer"
+            "the `[ai]` rows and `keys.desktop_modifier` are answered elsewhere"
         );
     }
 
@@ -1927,5 +2194,123 @@ mod tests {
         }
         assert!(state.layout(NativeSurface::Agent).windowed());
         assert!(state.layout(NativeSurface::Palette).windowed());
+    }
+
+    #[test]
+    fn an_explicit_profile_beats_the_derivation() {
+        let file = ViewConfig::from_toml_str("[keys]\nprofile = \"editor\"\n")
+            .expect("the fixture must parse");
+        let env = |name: &str| (name == "SSH_CONNECTION").then(|| "10.0.0.1 1 2 22".to_string());
+        let resolved = resolve_with(&file, &Overrides::default(), &env);
+        assert_eq!(
+            resolved.profile,
+            Resolved {
+                value: KeyProfile::Editor,
+                source: Source::File
+            },
+            "an explicit editor profile outranks the ssh session's own desktop derivation"
+        );
+        assert_eq!(resolved.profile_marker, None);
+    }
+
+    #[test]
+    fn the_profile_row_reports_its_marker() {
+        let file = ViewConfig::from_toml_str("").expect("an empty file must parse");
+        let env = |name: &str| (name == "SSH_TTY").then(|| "/dev/pts/0".to_string());
+        let resolved = resolve_with(&file, &Overrides::default(), &env);
+        assert_eq!(
+            row(&resolved, "keys", "profile"),
+            ("desktop (SSH_TTY)".to_string(), Source::Derived)
+        );
+    }
+
+    #[test]
+    fn every_desktop_chord_is_a_registry_key_and_an_example_key() {
+        let registry: Vec<&str> = keys()
+            .iter()
+            .filter(|row| row.table == "keys.desktop")
+            .map(|row| row.key)
+            .collect();
+        for chord in chords::desktop_chords() {
+            assert!(
+                registry.contains(&chord.id),
+                "{} has no [keys.desktop] row in the registry",
+                chord.id
+            );
+        }
+        assert_eq!(
+            registry.len(),
+            DESKTOP_CHORD_COUNT,
+            "the registry carries a different count of [keys.desktop] rows than the chord table"
+        );
+    }
+
+    #[test]
+    fn a_desktop_row_takes_its_env_and_file_layers() {
+        let file = ViewConfig::from_toml_str("[keys.desktop]\nfocus_left = \"<M-h>\"\n")
+            .expect("the fixture must parse");
+        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+        assert_eq!(
+            row(&resolved, "keys.desktop", "focus_left"),
+            ("<M-h>".to_string(), Source::File)
+        );
+        let env =
+            |name: &str| (name == "VIEW_KEYS_DESKTOP_FOCUS_LEFT").then(|| "<M-y>".to_string());
+        let resolved = resolve_with(&file, &Overrides::default(), &env);
+        assert_eq!(
+            row(&resolved, "keys.desktop", "focus_left"),
+            ("<M-y>".to_string(), Source::Env),
+            "the environment outranks the file for a desktop row exactly as it does elsewhere"
+        );
+    }
+
+    #[test]
+    fn a_desktop_override_that_is_not_a_key_notices_and_keeps_the_default() {
+        let file = ViewConfig::from_toml_str("[keys.desktop]\nfocus_left = 'has \" a quote'\n")
+            .expect("the fixture must parse");
+        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+        assert_eq!(
+            row(&resolved, "keys.desktop", "focus_left"),
+            ("<D-Left>".to_string(), Source::Derived),
+            "an unspellable override falls through to the chord's own with_super spelling"
+        );
+        let notices = resolved.notices().join("\n");
+        for fact in ["a quote", "keys.desktop", "focus_left"] {
+            assert!(notices.contains(fact), "{fact} is missing from {notices:?}");
+        }
+    }
+
+    #[test]
+    fn a_desktop_row_naming_no_chord_notices_and_is_ignored() {
+        let file = ViewConfig::from_toml_str("[keys.desktop]\nnot_a_real_chord = \"<M-z>\"\n")
+            .expect("the fixture must parse");
+        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+        let notices = resolved.notices().join("\n");
+        assert!(
+            notices.contains("not_a_real_chord"),
+            "the unknown id is missing from {notices:?}"
+        );
+        assert_eq!(
+            row(&resolved, "keys.desktop", "focus_left"),
+            ("<D-Left>".to_string(), Source::Derived),
+            "a sibling row this file never named is untouched by the unknown id"
+        );
+    }
+
+    #[test]
+    fn an_empty_desktop_row_binds_nothing() {
+        let file = ViewConfig::from_toml_str("[keys.desktop]\nfocus_left = \"\"\n")
+            .expect("the fixture must parse");
+        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+        assert_eq!(
+            row(&resolved, "keys.desktop", "focus_left"),
+            (String::new(), Source::File),
+            "an empty file row is the way to leave a chord unbound, not an invalid value"
+        );
+        assert!(
+            resolved.notices().is_empty(),
+            "leaving a chord unbound owes no notice: {:?}",
+            resolved.notices()
+        );
     }
 }

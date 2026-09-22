@@ -66,6 +66,12 @@ fn the_ai_registry_rows_and_view_ais_own_rows_are_the_same_keys() {
 /// exactly one of them, with no count written down on either side -- a key
 /// added to the registry has to land in one resolver or the other before
 /// this is green again.
+///
+/// `keys.desktop_modifier` is the one row neither crate answers:
+/// [`view_native::config::ResolvedConfig::rows`]'s own doc states why --
+/// its real value needs the terminal's own kitty keyboard protocol probe,
+/// which neither resolver holds, so `view`'s own `caps_notice` prints it
+/// beside this walk rather than through it.
 #[test]
 fn the_two_resolvers_answer_the_whole_registry_between_them() {
     let resolved = resolve_with(&ViewConfig::defaults(), &Overrides::default(), &|_| None);
@@ -80,10 +86,14 @@ fn the_two_resolvers_answer_the_whole_registry_between_them() {
         .map(|(table, key, _, _)| (table, key))
         .collect();
     let together: Vec<(&str, &str)> = native.iter().chain(ai.iter()).copied().collect();
-    let registered: Vec<(&str, &str)> = keys().iter().map(|row| (row.table, row.key)).collect();
+    let registered: Vec<(&str, &str)> = keys()
+        .iter()
+        .map(|row| (row.table, row.key))
+        .filter(|row| *row != ("keys", "desktop_modifier"))
+        .collect();
     assert_eq!(
         together, registered,
-        "every registry row is answered by exactly one of the two crates, in registry order"
+        "every registry row but keys.desktop_modifier is answered by exactly one of the two crates, in registry order"
     );
     assert!(
         native.iter().all(|row| !ai.contains(row)),
