@@ -2347,7 +2347,7 @@ fn agent_windowed() {
     }
 }
 
-/// R2a: the band a windowed palette paints carries no nvim window or frame
+/// The band a windowed palette paints carries no nvim window or frame
 /// of its own (`view_surface::render` pushes its `Layer` straight from the
 /// anchor and the cmdline state, with no `OpenNativeWindow`/`WinPos` round
 /// trip to simulate), so the fixture is one full-width window rather than
@@ -2439,7 +2439,7 @@ fn palette_windowed_top() {
     }
 }
 
-/// I3: the caret is where the text goes, for every native surface that
+/// The caret is where the text goes, for every native surface that
 /// takes typed text -- the palette and the agent panel; the tree and the
 /// notification stream are selection surfaces with no insertion point of
 /// their own, the same reason `overlay_cursor` answers `None` for their
@@ -2453,8 +2453,7 @@ fn palette_windowed_top() {
 /// first put it. The palette never becomes nvim's curwin at all under
 /// either placement (see `pending_open`'s doc), so its own windowed rect is
 /// read off `render`'s `Layer` output below, the same way the overlay
-/// placement's already was (R2a: it carries no nvim window to derive one
-/// from any more).
+/// placement's already was: it carries no nvim window to derive one from.
 #[test]
 fn every_text_taking_native_surface_puts_its_caret_inside_its_own_painted_rect() {
     let mut agent = agent_in_the_right_tile(true);
@@ -2830,7 +2829,7 @@ fn notifications_corner_scenes() {
 /// every frame; a left corner's box cannot move that column at all, so the
 /// text painted there has to slide instead -- the letter shown at its fixed
 /// left edge has to change as the box narrows, or the box is merely
-/// shrinking in place with a frozen header (the bug this pins, F4/Minor 8).
+/// shrinking in place with a frozen header.
 #[test]
 fn a_dismissed_toasts_own_text_slides_at_every_corner() {
     use view_core::native::geometry::Anchor;

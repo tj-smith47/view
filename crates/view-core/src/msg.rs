@@ -1811,20 +1811,25 @@ impl WinSplit {
 
     /// The split that puts a surface at `anchor`.
     ///
-    /// Total over every anchor a windowed surface's own vocabulary can
-    /// produce (`view-native`'s `config::surfaces::anchors` restricts each
+    /// `view-native`'s `config::surfaces::anchors` restricts a windowed
     /// surface to `Left`/`Right`/`Top`/`Bottom` under
-    /// `SurfacePlacement::Windowed`, never `Center` or a corner), so this
-    /// never has to invent a split for a word a windowed surface could not
-    /// have been configured with. The wildcard arm exists only because
-    /// `Anchor` is `#[non_exhaustive]`.
+    /// `SurfacePlacement::Windowed`, never `Center` or a corner, so those
+    /// five arms below are never reached by a windowed open; each still
+    /// names its own split (`Left`, matching the sidebar `Left` already
+    /// gets) rather than falling out of a wildcard, since a wildcard arm
+    /// stops the compiler from catching a real anchor `Anchor` gains later.
     #[must_use]
     pub const fn for_anchor(anchor: crate::native::geometry::Anchor) -> Self {
         match anchor {
             crate::native::geometry::Anchor::Right => Self::Right,
             crate::native::geometry::Anchor::Top => Self::Above,
             crate::native::geometry::Anchor::Bottom => Self::Below,
-            _ => Self::Left,
+            crate::native::geometry::Anchor::Left
+            | crate::native::geometry::Anchor::Center
+            | crate::native::geometry::Anchor::TopLeft
+            | crate::native::geometry::Anchor::TopRight
+            | crate::native::geometry::Anchor::BottomLeft
+            | crate::native::geometry::Anchor::BottomRight => Self::Left,
         }
     }
 }

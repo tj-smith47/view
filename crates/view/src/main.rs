@@ -860,13 +860,13 @@ fn seed_ai_enabled(
         Ok(cfg) => {
             model.ai_enabled = cfg.enabled();
             model.ai_panel_width_pct = cfg.panel_width();
-            // I6: `view-native` cannot fold `[ai] panel_width` into the
+            // `view-native` cannot fold `[ai] panel_width` into the
             // agent's own `SurfaceLayout` -- `[ai]` is `view-ai`'s table,
             // and the two crates never name each other -- so the one place
             // both numbers can agree is here, where both are already in
             // hand. Without this the overlay draws `cfg.panel_width()` and
             // a windowed open still asks for whatever `[ui.surfaces.agent]
-            // size` alone resolved to, the split this fixes.
+            // size` alone resolved to.
             let agent_layout = model.surfaces.layout(NativeSurface::Agent);
             model.surfaces.set_layout(
                 NativeSurface::Agent,
@@ -3535,7 +3535,7 @@ mod tests {
         );
     }
 
-    /// I6: `[ai] panel_width` alone used to size the overlay draw
+    /// `[ai] panel_width` alone used to size the overlay draw
     /// (`model.ai_panel_width_pct`) without ever reaching the windowed
     /// open's own number (`model.surfaces.layout(Agent).size`), so the two
     /// diverged the moment a user wrote only the older key. One config

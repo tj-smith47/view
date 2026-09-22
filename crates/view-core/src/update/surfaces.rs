@@ -591,7 +591,7 @@ fn close_windowed_tree(model: &mut Model) -> Vec<Effect> {
 /// The call that opens `surface`'s window, or enters the one it already
 /// has, at the anchor and size this session resolved for it.
 ///
-/// Never called for [`NativeSurface::Palette`] (R2a): a windowed palette
+/// Never called for [`NativeSurface::Palette`]: a windowed palette
 /// carries no window of nvim's own, so [`retile_open_surface`] returns
 /// before reaching here for it and nothing else asks this function to open
 /// one.
@@ -667,6 +667,14 @@ fn open_tree_state(model: &mut Model, beneath_top: bool) -> Vec<Effect> {
 /// opens two surfaces in one fold issues two calls before either reply
 /// lands, and a shared counter would answer only the second (see
 /// [`crate::native::placement::SurfaceState::generation`]'s doc).
+///
+/// An open onto an edge a windowed sibling already holds sets the shared
+/// nvim column's width to this surface's own size exactly as the open
+/// chunk's stacking branch does (`nvim_win_set_width` on either window in
+/// the column resizes both), so this reply carries the same sync a resize
+/// key carries: [`sync_stacked_siblings`] runs here too, or the sibling's
+/// `layout.size`/`tree_width_pct`/`ai_panel_width_pct` reads a share the
+/// column is no longer at until its own resize key happens to run.
 pub(super) fn native_window_opened(
     model: &mut Model,
     generation: u64,
@@ -676,6 +684,12 @@ pub(super) fn native_window_opened(
     if generation != model.surfaces.generation(surface) {
         return vec![Effect::Rpc(RpcCall::CloseNativeWindow { win: win.0 })];
     }
+    // a re-enter of a window the open chunk's `is_ours(live)` branch found
+    // already open hands back that same handle instead of opening a new
+    // one, and nvim never fires a fresh `win_pos` for a window whose
+    // position has not moved -- read before the claim below overwrites it,
+    // since that is what tells this reply apart from a genuine new open
+    let reentered = model.engine.grids().native_window(surface) == Some(win);
     // `pending_open` stays true past this claim -- it is what
     // `native_window()` will answer once the `win_pos` this claim is
     // waiting on places it, and that is a separate redraw event, not
@@ -683,8 +697,15 @@ pub(super) fn native_window_opened(
     // to close: a keystroke landing between this claim and that `win_pos`
     // would read "no window yet" and "nothing pending" and open a second
     // one. `ui_event::WinPos`'s handler clears it once the placement the
-    // guard is actually waiting for has happened.
+    // guard is actually waiting for has happened -- except on a re-enter,
+    // where that event is never coming and this is the only place left
+    // that can still tell `pending_open` the wait is over.
     model.engine.grids_mut().claim_native_window(win, surface);
+    let layout = model.surfaces.layout(surface);
+    sync_stacked_siblings(model, surface, layout.anchor, layout.size);
+    if reentered {
+        model.surfaces.clear_pending(surface);
+    }
     model.dirty = true;
     Vec::new()
 }
@@ -732,7 +753,7 @@ pub(super) fn open_ai_panel(model: &mut Model) -> Vec<Effect> {
     let insert_beneath = model.overlays().last().is_some_and(|overlay| {
         Model::takes_focus(&overlay.kind) || matches!(overlay.kind, OverlayKind::EngineBusy(_))
     });
-    // I8: `Anchor::Right` was hard-coded here, so `[ui.surfaces.agent]
+    // `Anchor::Right` was hard-coded here, so `[ui.surfaces.agent]
     // anchor` had no effect on the overlay placement the vast majority of
     // sessions actually run -- only a windowed open read it. The overlay
     // now opens at whichever edge the surfaces table (or its default)

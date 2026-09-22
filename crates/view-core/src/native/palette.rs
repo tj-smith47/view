@@ -277,8 +277,8 @@ const NARROW_STREAM_STAMP_WIDTH: u16 = 40;
 
 /// One history row's label: `entry_text` with its timestamp in front, full
 /// (`YYYY-MM-DD HH:MM:SS`) or `short` (`HH:MM:SS`, the last 8 characters of
-/// the same rendering), local to the viewer per `utc_offset_secs` (I12; see
-/// [`crate::model::Model::set_utc_offset`]). [`MessageHistoryState::view`]
+/// the same rendering), local to the viewer per `utc_offset_secs`
+/// (see [`crate::model::Model::set_utc_offset`]). [`MessageHistoryState::view`]
 /// and [`MessageHistoryState::view_for_width`] are what draw this and
 /// nothing else reads it -- a copy takes [`entry_text`] alone, so a path or
 /// a message containing today's date is never mistaken for one this label

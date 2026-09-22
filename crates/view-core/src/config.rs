@@ -108,6 +108,17 @@ pub fn alias_notice(old_table: &str, old_key: &str, new_table: &str, new_key: &s
     )
 }
 
+/// What a key that only ever reaches one placement owes the user who wrote
+/// it under the other: the value is not discarded and not an alias, it
+/// simply answers nothing this run, so a silent read would leave the file
+/// looking honored when it is not.
+#[must_use]
+pub fn placement_only_notice(table: &str, key: &str, only: &str) -> String {
+    format!(
+        "view: [{table}] {key} has no effect outside {only}; the value is kept but unused this run"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

@@ -2808,8 +2808,8 @@ mod tests {
     /// The Cancel-shaped half of `ai_effect_forwards_to_the_wired_worker`:
     /// an `Effect::Ai(AiCommand::Cancel)` reaching an idle worker (`[ai]`
     /// wired but no session ever started) proves the effect really carries
-    /// through to `AiWorker::dispatch`'s own I4 handling -- "no active AI
-    /// session for this command", never a spawn attempt -- rather than only
+    /// through to `AiWorker::dispatch`'s own "no active AI session for this
+    /// command" handling, never a spawn attempt -- rather than only
     /// exercising the `Prompt` shape the sibling test above already covers.
     #[test]
     fn ai_effect_forwards_a_cancel_to_the_wired_worker_with_no_session_running() {
@@ -2942,7 +2942,7 @@ mod tests {
         }
     }
 
-    /// I4: `Effect::AiPromptSubmit` must return well before the context
+    /// `Effect::AiPromptSubmit` must return well before the context
     /// worker's four reads resolve, since those reads run on the worker's
     /// own thread, never this one -- `SlowOps` blocked for 2s on every read
     /// is the falsifiable disconfirm, the same "slow resolver" shape
@@ -2983,7 +2983,7 @@ mod tests {
         );
     }
 
-    /// I7, path one: with no context worker wired at all, `Effect::Ai`'s
+    /// With no context worker wired at all, `Effect::Ai`'s
     /// failed queue attempt degrades through the same local-error path a
     /// genuine session crash reports through -- and that synthesized
     /// message, fed through `update()` exactly as the real loop would, must
@@ -3021,10 +3021,11 @@ mod tests {
         );
     }
 
-    /// I7, path two: `ai_context` IS wired, but the worker thread is
-    /// already gone (its receiver dropped) -- a real, if rare, shutdown
-    /// race, not merely "never configured." The send itself fails, and
-    /// must degrade exactly the same way the unwired case above does.
+    /// [`ai_effect_with_no_context_worker_wired_surfaces_a_local_error_that_clears_turn_in_flight`],
+    /// for the case `ai_context` IS wired but the worker thread is already
+    /// gone (its receiver dropped) -- a real, if rare, shutdown race, not
+    /// merely "never configured." The send itself fails, and must degrade
+    /// exactly the same way the unwired case above does.
     #[test]
     fn ai_prompt_submit_effect_with_a_dead_context_worker_surfaces_a_local_error_that_clears_turn_in_flight(
     ) {

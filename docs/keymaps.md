@@ -313,10 +313,11 @@ every keystroke while it is open reaches nvim's own command line.
 | `<leader>ug` | toggles `[ui] gaps` for the session |
 | `<leader>uw` | steps every surface through the placement ring |
 
-`<leader>ug` is a real nvim mapping (`:View ui gaps`) and answers wherever
-the keyboard is aimed, working only under `panes = "tiles"`: the outer grid
-re-attaches at its new size and every open window is asked for a fresh
-inner size, gapped or flush against its neighbours. See
+`<leader>ug` is a real nvim mapping (`:View ui gaps`), registered in normal
+mode only: insert mode, a windowed surface's own key table and the composer
+each bind the same keys first. It works only under `panes = "tiles"`: the
+outer grid re-attaches at its new size and every open window is asked for a
+fresh inner size, gapped or flush against its neighbours. See
 [tiled-ui.md](tiled-ui.md#choosing-a-mode) for what a gap is.
 
 `<leader>uw` is `:View ui cycle_surfaces`, and moves the tree, the agent

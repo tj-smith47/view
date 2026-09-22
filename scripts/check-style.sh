@@ -182,15 +182,35 @@ check_content() {
   if grep -rnE '\bP[0-9]\b' "$target" "${includes[@]}"; then
     echo "STYLE FAIL: roadmap-phase tag in comment"; fail=1
   fi
-  # review-finding tags (C2, I1, M3, and their possessive form C2's): a
+  # review-finding tags (I1, M3, N4, and their possessive form N4's): a
   # comment must state what the code does, never which review finding
   # prompted it. Case-sensitive (not -i), matching this file's existing
   # P[0-9] check above: the review's own tag convention is always
   # uppercase-letter-plus-digit, and a case-insensitive match would also
   # catch lowercase tokens like "i2"/"m1" that read as ordinary identifiers
-  # rather than finding tags, with no matches like that anywhere in this
-  # tree today.
-  if grep -rnE "\b[CIM][0-9]+\`?'s?\b" "$target" "${includes[@]}"; then
+  # rather than finding tags. The apostrophe-plus-s in the possessive form
+  # is grouped and optional (`('s)?`) rather than the apostrophe alone
+  # being mandatory before an optional "s": the earlier, ungrouped
+  # `\`?'s?` could only ever match a tag already carrying an apostrophe, so
+  # every bare tag this tree actually shipped (`I8`, `N4`, no possessive)
+  # read as clean. Two letters stay out of the class: `F1`-`F12` name real
+  # keyboard keys throughout `view-tui`, and `C0`/`C1` name real terminal
+  # control-byte ranges throughout `view-tui`, `view` and `view-native` --
+  # each reads exactly like a finding tag and neither has a phrasing this
+  # gate can tell apart from one by pattern alone, so a `C`-tagged finding
+  # (this review's own severity class) is caught by hand at review time
+  # instead. A re-review round appends a lettered suffix to its own tag
+  # (R2a, R2a-2), which needs its own shape since the bare-digit pattern
+  # above would miss the letter, and collides with no real word here.
+  if grep -rnE "\b[IMN][0-9]+('s)?\b|\bR[0-9]+[a-z](-[0-9]+)?\b" "$target" "${includes[@]}"; then
+    echo "STYLE FAIL: review-finding tag in comment"; fail=1
+  fi
+  # the two word-shaped citations the tag pattern above cannot reach: "Minor
+  # 8" (the review's own severity-plus-number label, spelled as words
+  # rather than a letter tag) and "rereview"/"re-review" (naming the review
+  # round itself). Case-insensitive: neither has a legitimate lowercase
+  # reading as an ordinary identifier the way "i2"/"m1" do above.
+  if grep -rniE "\bMinor [0-9]+\b|\bre-?review\b" "$target" "${includes[@]}"; then
     echo "STYLE FAIL: review-finding tag in comment"; fail=1
   fi
   # TDD/session-narrative markers one synonym past the existing "this task"/

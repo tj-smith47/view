@@ -219,19 +219,32 @@ local ok, result = pcall(function()
   -- a second surface anchored at an edge another already holds stacks
   -- under it instead of claiming a further column or row of its own:
   -- split the edge's own window, across the axis a shared column stacks
-  -- on (rows for a left/right edge, columns for an above/below one)
-  local stack_win = nil
-  local stack_other = nil
+  -- on (rows for a left/right edge, columns for an above/below one).
+  -- `pairs()` visits a table in no defined order, so with three surfaces
+  -- already sharing an edge the first one it happens to yield is not
+  -- necessarily this one's actual neighbor in `stack_order`; splitting
+  -- against the nearest ranked neighbor instead (the closest sibling
+  -- already before this one, or failing that the closest already after
+  -- it) inserts this window at the right point in the stack regardless of
+  -- which order the table gives them in
+  local id_rank = stack_order[id] or 99
+  local pred_win, pred_rank = nil, -1
+  local succ_win, succ_rank = nil, 100
   for other, held in pairs(wins) do
     if other ~= id and held.edge == split and is_ours(held) then
-      stack_win = held.win
-      stack_other = other
-      break
+      local rank = stack_order[other] or 99
+      if rank < id_rank and rank > pred_rank then
+        pred_win, pred_rank = held.win, rank
+      end
+      if rank > id_rank and rank < succ_rank then
+        succ_win, succ_rank = held.win, rank
+      end
     end
   end
+  local stack_win = pred_win or succ_win
   if stack_win then
     vim.api.nvim_set_current_win(stack_win)
-    local before = (stack_order[id] or 99) < (stack_order[stack_other] or 99)
+    local before = pred_win == nil
     local after_cmd = vertical and 'belowright split' or 'belowright vsplit'
     local before_cmd = vertical and 'aboveleft split' or 'aboveleft vsplit'
     vim.cmd(before and before_cmd or after_cmd)
@@ -915,7 +928,7 @@ mod tests {
         }
     }
 
-    /// N2: a split nvim refuses (no room, or an `E11` from inside the
+    /// A split nvim refuses (no room, or an `E11` from inside the
     /// command-line window) used to leave `eventignore` set for the rest
     /// of the session, since the option was written before the `vim.cmd`
     /// that could raise and restored only on the path where it did not.
@@ -1011,6 +1024,33 @@ mod tests {
             scan < split,
             "the split command runs before the scan that decides which one \
              to use, so a shared edge is never stacked"
+        );
+    }
+
+    /// A third surface sharing an edge with two already-open ones has to
+    /// land at its own `stack_order` position among all of them, not
+    /// beside whichever one `pairs()` (an unordered table walk) happens to
+    /// yield first: the scan keeps the nearest ranked neighbor on each
+    /// side rather than breaking on the first match, so the stack order is
+    /// the same regardless of Lua's own table iteration order.
+    #[test]
+    fn a_third_surface_on_one_edge_stacks_by_rank_not_table_order() {
+        assert!(
+            !OPEN_NATIVE_WINDOW_CHUNK.contains("      break\n"),
+            "the scan still stops at the first sibling `pairs()` yields \
+             instead of finding the nearest ranked neighbor"
+        );
+        for needle in ["pred_win", "succ_win", "pred_rank", "succ_rank"] {
+            assert!(
+                OPEN_NATIVE_WINDOW_CHUNK.contains(needle),
+                "the chunk no longer tracks a nearest predecessor/successor \
+                 by stack_order ({needle} missing)"
+            );
+        }
+        assert!(
+            OPEN_NATIVE_WINDOW_CHUNK.contains("local stack_win = pred_win or succ_win"),
+            "the chosen neighbor no longer prefers a nearer-ranked \
+             predecessor over an arbitrary sibling"
         );
     }
 

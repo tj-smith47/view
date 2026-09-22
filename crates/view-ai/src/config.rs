@@ -851,7 +851,7 @@ agent = "claude-code"
         );
     }
 
-    /// Minor 2: `[native] tree_width` alone tells the user it now has a
+    /// `[native] tree_width` alone tells the user it now has a
     /// newer name (`config::surfaces::alias` in `view-native`), and `[ai]
     /// panel_width` owes the same notice under the same condition --
     /// spelled at all, not only spelled alongside the surfaces table.

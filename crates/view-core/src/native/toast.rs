@@ -195,7 +195,7 @@ pub struct ToastMotion {
 ///
 /// One variant, because the spec gives the stack one motion: the top slot's
 /// notice leaving is also the whole stack sliding up, over one interval,
-/// on one clock (amended 2026-08-21, C4).
+/// on one clock.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MotionPhase {

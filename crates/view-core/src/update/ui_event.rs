@@ -294,10 +294,10 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // same rect (`CmdlineState::bare_colon`), so the frame that
             // installs the real line moves nothing on screen
             crate::native::speculate::withdraw_cmdline_speculation(model);
-            // R2a: a windowed palette carries no window of nvim's own any
-            // more (rereview N1 -- a split opened from cmdline mode never
-            // gets its `win_pos`, so the old mechanism could never place
-            // it). `view_surface::render` reads `model.engine.cmdline` and
+            // A windowed palette carries no window of nvim's own: a split
+            // opened from cmdline mode never gets its `win_pos`, so a
+            // mechanism that opened one could never place it.
+            // `view_surface::render` reads `model.engine.cmdline` and
             // `palette_windowed_active()` straight off this model on the
             // very next paint, so nvim's cmdline arriving is still the
             // palette's whole open signal and costs no `OpenNativeWindow`,
@@ -329,8 +329,8 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                 super::dismiss_top_prompt(model);
                 model.dirty = true;
             }
-            // R2a: the windowed palette's own close costs no
-            // `CloseNativeWindow` any more -- it is a paint target for
+            // The windowed palette's own close costs no
+            // `CloseNativeWindow` -- it is a paint target for
             // `model.engine.cmdline`, just cleared above, and carries no
             // window of nvim's own to release (see `CmdlineShow`'s own
             // doc).

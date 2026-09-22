@@ -189,7 +189,7 @@ fn native_pane_content(
                 ))
             })
         }),
-        // R2a: the palette carries no window of nvim's own any more, so no
+        // The palette carries no window of nvim's own, so no
         // pane this compositor iterates is ever `NativeSurface::Palette`
         // (`view-surface::render` paints the windowed tile itself, through
         // the same `LayerKind::Palette` push the centred placement uses).

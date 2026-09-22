@@ -14,6 +14,8 @@ use view_core::native::geometry::{
 };
 use SurfacePlacement::{Overlay, Windowed};
 
+use view_core::config::placement_only_notice;
+
 use super::resolve::alias_notice;
 use super::{SurfaceSize, SurfaceTable, ViewConfig, TREE_WIDTH_KEY};
 
@@ -111,7 +113,20 @@ fn read(surface: NativeSurface, table: &SurfaceTable, notices: &mut Vec<String>)
         None => fallback,
     };
     let size = match table.size.as_ref() {
-        Some(SurfaceSize::Percent(pct)) => clamp_panel_width(*pct),
+        Some(SurfaceSize::Percent(pct)) => {
+            // the notification history's overlay is a fixed `OverlayBox`
+            // (`open_message_history`), so a `size` written under `overlay`
+            // is kept in the layout but never reaches a window or a box --
+            // silently reading it would tell the user their number took.
+            if surface == NativeSurface::Notifications && placement == Overlay {
+                notices.push(placement_only_notice(
+                    name,
+                    "size",
+                    "the windowed placement",
+                ));
+            }
+            clamp_panel_width(*pct)
+        }
         Some(SurfaceSize::Other(written)) => {
             notices.push(discarded_file(written, SIZE_EXPECTED, name, "size"));
             SurfaceLayout::default_for(surface).size
@@ -355,7 +370,7 @@ mod tests {
                     assert_eq!(layout.placement, placement, "{}", surface.id());
                     assert_eq!(layout.anchor, *anchor, "{}", surface.id());
                     if placement == SurfacePlacement::Windowed {
-                        // I1: `WinSplit::for_anchor` is total over exactly the
+                        // `WinSplit::for_anchor` is total over exactly the
                         // words a windowed surface's own vocabulary carries.
                         let split = view_core::msg::WinSplit::for_anchor(layout.anchor);
                         let expected = match layout.anchor {
@@ -414,6 +429,48 @@ mod tests {
                     notices[0].contains(&format!("[{name}] {key}")),
                     "{name} {key}'s notice does not name its own key: {}",
                     notices[0]
+                );
+            }
+        }
+    }
+
+    /// Every surface's `size`, written under both placements: the number
+    /// always lands in the layout, so the placement/anchor/size triple the
+    /// design's own table promises is answered every time. What the
+    /// notification stream's overlay history never reads is the one case
+    /// silent storage would misreport -- so a written `size` there owes a
+    /// notice, and every other surface/placement pair owes none.
+    #[test]
+    fn every_surfaces_size_is_stored_and_notices_only_where_it_has_no_effect() {
+        for surface in NativeSurface::ALL {
+            for placement in [SurfacePlacement::Overlay, SurfacePlacement::Windowed] {
+                let name = surface.dotted_table();
+                let document = format!(
+                    "[{name}]\nplacement = \"{}\"\nsize = 55\n",
+                    placement.label()
+                );
+                let (layouts, notices) = read_toml(&document);
+                assert_eq!(
+                    layouts[surface.index()].size,
+                    55,
+                    "{name} under {}: the written size never reached the layout",
+                    placement.label()
+                );
+                let size_notice = notices
+                    .iter()
+                    .find(|notice| notice.contains(&format!("[{name}] size")));
+                let effectless = surface == NativeSurface::Notifications
+                    && placement == SurfacePlacement::Overlay;
+                assert_eq!(
+                    size_notice.is_some(),
+                    effectless,
+                    "{name} under {}: {}",
+                    placement.label(),
+                    if effectless {
+                        format!("a size with no reader owed a notice: {notices:?}")
+                    } else {
+                        format!("a size the surface reads owed no notice: {notices:?}")
+                    }
                 );
             }
         }

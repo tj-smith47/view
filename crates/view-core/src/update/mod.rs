@@ -1394,7 +1394,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
     }
     match model.focus() {
         // `native_pane_focus()` reads nvim's own cursor grid, and the
-        // palette carries no grid of its own to put that cursor on (R2a),
+        // palette carries no grid of its own to put that cursor on,
         // so this arm never actually sees `Focus::Pane(Palette)`; it is
         // grouped with the engine because typing into the command line is
         // nvim's own input-capturing mode either way, and the match needs

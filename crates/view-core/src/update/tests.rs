@@ -13188,6 +13188,42 @@ fn focused_windowed_tree() -> Model {
     m
 }
 
+/// A re-enter of an already-open windowed tree -- the open chunk's
+/// `is_ours(live)` branch, which hands back the same window instead of
+/// opening a new one -- never gets a fresh `win_pos` from nvim, since the
+/// window's position has not moved. `native_window_opened` has to notice
+/// that and clear `pending_open` itself, or the flag sticks set for the
+/// rest of the session with nothing left to clear it.
+#[test]
+fn a_reenter_of_an_already_placed_tree_window_clears_pending_with_no_new_win_pos() {
+    use crate::native::geometry::NativeSurface;
+
+    let mut m = focused_windowed_tree();
+    assert!(
+        !m.surfaces.pending_open(NativeSurface::Tree),
+        "the fixture's own open must already be settled before the re-enter"
+    );
+
+    // the same call `open_native_window` issues on a second toggle: a
+    // fresh generation, and `pending` set exactly as a genuine new open
+    // sets it
+    let generation = m.surfaces.next_generation(NativeSurface::Tree);
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: NativeSurface::Tree,
+            win: TREE_WIN,
+        },
+    );
+
+    assert!(
+        !m.surfaces.pending_open(NativeSurface::Tree),
+        "a re-enter that names the window already placed for this surface \
+         must clear pending_open itself, since no win_pos is coming to do it"
+    );
+}
+
 #[test]
 fn a_flush_whose_cursor_grid_is_the_tree_pane_focuses_the_tree() {
     let m = focused_windowed_tree();
@@ -14317,7 +14353,7 @@ fn a_manual_pause_survives_an_unrelated_fold_outside_the_stream() {
 fn windowed_palette_model() -> Model {
     let mut m = model();
     // `[native] palette = false` (the default) leaves `palette_windowed_active`
-    // false even with the layout below set to windowed (I9): this fixture is
+    // false even with the layout below set to windowed: this fixture is
     // about the *enabled* windowed palette, so it says so explicitly rather
     // than lean on a default that would silently stop opening a window.
     m.palette_enabled = true;
@@ -14352,8 +14388,8 @@ fn cmdline_show() -> Msg {
     }])
 }
 
-/// R2a: the windowed palette costs no `OpenNativeWindow`/`CloseNativeWindow`
-/// round trip at all any more -- nvim's own cmdline arriving and leaving is
+/// The windowed palette costs no `OpenNativeWindow`/`CloseNativeWindow`
+/// round trip at all -- nvim's own cmdline arriving and leaving is
 /// still the whole open/close signal (`CmdlineShow`/`CmdlineHide`'s doc in
 /// `update::ui_event`), but it is answered by nothing but a repaint, since
 /// `view_surface::render` reads `model.engine.cmdline` and
@@ -14434,9 +14470,9 @@ fn the_windowed_palette_opens_and_closes_with_no_rpc() {
 }
 
 /// `[native] palette = false` with the placement still `windowed` must open
-/// no window: I9 shipped `CmdlineShow`'s guard checking only the placement
-/// (`palette_is_windowed`), so a plugin that owns the command line and turns
-/// the palette off entirely still got a window and a pane on every `:`.
+/// no window: a guard checking only the placement (`palette_is_windowed`)
+/// would let a plugin that owns the command line and turns the palette off
+/// entirely still get a window and a pane on every `:`.
 #[test]
 fn a_disabled_palette_opens_no_window_even_when_windowed() {
     let mut m = windowed_palette_model();
@@ -14458,8 +14494,8 @@ fn a_disabled_palette_opens_no_window_even_when_windowed() {
     );
 }
 
-/// A windowed palette carries no pane of its own for nvim's cursor to enter
-/// (R2a), so `model.focus()` never names it and typing into the command
+/// A windowed palette carries no pane of its own for nvim's cursor to enter,
+/// so `model.focus()` never names it and typing into the command
 /// line stays nvim's own ordinary input, whichever placement is showing it.
 #[test]
 fn a_key_in_the_windowed_palette_reaches_the_engine() {
@@ -15106,6 +15142,64 @@ fn a_width_stepped_while_the_tree_floats_survives_the_next_ring_step_to_windowed
         opened,
         Some(stepped),
         "the ring step must open the window at the width the user left the float at"
+    );
+}
+
+/// A second windowed surface opening onto an edge a first one already
+/// holds sets the shared nvim column's width to its own size (the open
+/// chunk's stacking branch: `nvim_win_set_width`/`nvim_win_set_height` on
+/// either window in a shared column resizes both), so the reply that
+/// claims its window has to carry that width into the sibling's own loose
+/// field exactly as a resize key does. Left unsynced, the tree's model
+/// share stays at whatever it opened with while the column nvim actually
+/// drew is at the agent panel's own newly opened share.
+#[test]
+fn a_second_surface_opening_onto_a_shared_edge_carries_its_size_into_the_first_ones_model_share() {
+    let mut m = focused_windowed_tree();
+    let anchor = m
+        .surfaces
+        .layout(crate::native::geometry::NativeSurface::Tree)
+        .anchor;
+    let before = m.tree_width_pct;
+    let newcomer_size = if before < 50 { before + 7 } else { before - 7 };
+    m.surfaces.set_layout(
+        crate::native::geometry::NativeSurface::Agent,
+        crate::native::geometry::SurfaceLayout::new(
+            crate::native::geometry::SurfacePlacement::Windowed,
+            anchor,
+            newcomer_size,
+        ),
+    );
+    m.ai_trusted = true;
+
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    let generation = opened_generation(&effects);
+    let _ = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation,
+            surface: crate::native::geometry::NativeSurface::Agent,
+            win: AGENT_WIN,
+        },
+    );
+
+    assert_eq!(
+        m.tree_width_pct, newcomer_size,
+        "the tree's own loose share must follow the agent panel's open onto \
+         the same edge"
+    );
+    assert_eq!(
+        m.surfaces
+            .layout(crate::native::geometry::NativeSurface::Tree)
+            .size,
+        newcomer_size,
+        "the tree's layout must agree with the loose field after the carry"
     );
 }
 

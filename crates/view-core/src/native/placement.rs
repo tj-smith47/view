@@ -125,9 +125,9 @@ impl SurfaceState {
     /// stop gets that anchor when the vocabulary there already accepts it
     /// (a sidebar's edge holds across both), and its own placement default
     /// otherwise. Left unresolved, a ring step landing a surface on an
-    /// anchor its own placement refuses fell through
-    /// `WinSplit::for_anchor`'s wildcard arm and opened a window at the
-    /// left edge no config or ring position asked for.
+    /// anchor its own placement refuses reached `WinSplit::for_anchor` with
+    /// a corner or `Center`, both of which resolve to `Left`, and opened a
+    /// window at the left edge no config or ring position asked for.
     pub fn advance_ring(&mut self) -> [(NativeSurface, SurfacePlacement, bool); 4] {
         self.ring = (self.ring + 1) % 3;
         let ring = self.ring;
@@ -236,7 +236,7 @@ mod tests {
         assert_ne!(state.next_generation(NativeSurface::Tree), first);
     }
 
-    // C2: a ring step opening the tree and the agent panel in the same
+    // A ring step opening the tree and the agent panel in the same
     // fold issues one `next_generation` call per surface before either
     // reply lands -- a shared counter answers only the last call, and the
     // other surface's reply is dropped as stale, orphaning its window.

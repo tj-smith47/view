@@ -1,6 +1,6 @@
-//! R2a-2, against real nvim v0.12.4: the windowed palette carries no nvim
-//! window of its own any more (commit `aa769fb`), so every leg here proves
-//! the replacement -- a tile [`view_surface::render`] paints itself, off
+//! Against real nvim v0.12.4: the windowed palette carries no nvim
+//! window of its own, so every leg here proves the replacement -- a tile
+//! [`view_surface::render`] paints itself, off
 //! `model.engine.cmdline` alone -- against the painted cells nvim actually
 //! sends, not the model that describes them. Each leg types `:`, waits for
 //! the round trip a real keystroke always leaves room for, reads the typed
@@ -417,8 +417,8 @@ fn input_paints_the_tile_and_leaves_the_user_in_their_own_window() {
     assert_palette_closed_cleanly(&mut engine);
 }
 
-/// A key mapped to a whole `:...<CR>` command (N3's own shape: a person's
-/// own `nnoremap`) must run the same as typing it by hand -- the tile
+/// A key mapped to a whole `:...<CR>` command (a person's own `nnoremap`)
+/// must run the same as typing it by hand -- the tile
 /// opens, paints, and closes for a mapping-driven command exactly as it
 /// does for one the user typed a character at a time.
 #[test]
@@ -453,7 +453,7 @@ fn a_mapped_colon_command_paints_the_tile_and_closes_it() {
 /// still open must never open a second palette layer, resize anything, or
 /// leave `eventignore` standing -- the tile paints off `model.engine.cmdline`
 /// alone, which a ring step never touches, so this leg has nothing left to
-/// race (N3's own finding was specific to the deleted RPC-open mechanism).
+/// race: the RPC-open mechanism that could race is gone.
 #[test]
 fn a_ring_step_with_the_cmdline_open_touches_neither_nvim_nor_the_tile() {
     let work = common::ScratchPaths::new("windowed-palette-ring-step");
@@ -532,9 +532,9 @@ fn no_win_or_bufenter_autocmd_fires_for_the_palettes_own_open_or_close() {
 /// (`close_battery.rs`) measures its own floor.
 ///
 /// An earlier measurement timed one open in thirty and divided by thirty,
-/// and 29 of those 30 presses opened no window at all (N1: the old
-/// nvim-window mechanism never actually placed one) -- this measurement
-/// times every press on its own instead.
+/// and 29 of those 30 presses opened no window at all, since the
+/// nvim-window mechanism the palette used to open through never actually
+/// placed one -- this measurement times every press on its own instead.
 #[test]
 fn the_cost_of_pressing_colon_windowed_versus_off() {
     let work = common::ScratchPaths::new("windowed-palette-latency");
@@ -565,6 +565,16 @@ fn the_cost_of_pressing_colon_windowed_versus_off() {
         "median :<Esc> latency over 30 presses: no-op baseline = \
          {baseline:?}, windowed tile = {windowed:?}, floating overlay = \
          {floating:?}"
+    );
+    assert!(
+        windowed >= baseline,
+        "a :<Esc> cycle through the windowed tile read faster than doing \
+         nothing: {windowed:?} < {baseline:?}"
+    );
+    assert!(
+        floating >= baseline,
+        "a :<Esc> cycle through the floating overlay read faster than \
+         doing nothing: {floating:?} < {baseline:?}"
     );
 }
 

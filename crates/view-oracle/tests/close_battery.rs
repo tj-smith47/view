@@ -1850,10 +1850,10 @@ fn native_window_rect(
     })
 }
 
-/// R2a: the palette's own tile, as the view-computed layer paints it -- no
-/// nvim window backs it any more (see [`native_window_rect`]'s doc for the
-/// other three surfaces, which still open real ones), so its rect is read
-/// off the same [`view_surface::Surface`] the terminal paints from.
+/// The palette's own tile, as the view-computed layer paints it -- no
+/// nvim window backs it (see [`native_window_rect`]'s doc for the other
+/// three surfaces, which still open real ones), so its rect is read off
+/// the same [`view_surface::Surface`] the terminal paints from.
 ///
 /// `LayerKind::Palette` is also what the notification stream's history
 /// overlay paints through (`layer_kind`'s own doc in `view-surface`), so a
@@ -1874,7 +1874,7 @@ fn palette_layer_rect(engine: &mut view_oracle::EngineSession) -> Option<view_su
         })
 }
 
-/// C2 + I11, against real nvim: the tree, the agent panel and the
+/// Against real nvim: the tree, the agent panel and the
 /// notification stream are open as overlays (the ring's `config` stop),
 /// with the keyboard in the buffer throughout -- nothing here ever enters
 /// any of the three. One `cycle_surfaces` invoke to `windowed` opens all
@@ -1975,7 +1975,7 @@ fn a_ring_step_opens_and_closes_three_surfaces_windows_against_real_nvim() {
     );
 }
 
-/// Minor 5, against real nvim: the tree and the agent panel share an edge
+/// Against real nvim: the tree and the agent panel share an edge
 /// (`anchor = "left"` on both), windowed in an order that puts the agent
 /// panel's window in nvim before the tree's -- the case a stacking rule
 /// keyed on open order alone gets backwards, since design puts the tree
@@ -2713,7 +2713,7 @@ fn tiny_windowed_tree_session(dir: &Path) -> view_oracle::EngineSession {
     engine
 }
 
-/// N2: a split nvim refuses for lack of room used to leave `eventignore`
+/// A split nvim refuses for lack of room used to leave `eventignore`
 /// set for the rest of the session, since the option was written before
 /// the `vim.cmd` that could raise and restored only on the success path.
 /// The open chunk now runs the whole split-and-configure step under one
@@ -2745,7 +2745,7 @@ fn opening_a_windowed_surface_with_no_room_for_the_split_leaves_eventignore_unto
     );
 }
 
-/// N2's other reachable path: a ring step or a mapped key can fire
+/// The other reachable path to the same leak: a ring step or a mapped key can fire
 /// `OpenNativeWindow` while the user is inside the command-line window
 /// (`q:`), where `botright split` raises E11 rather than E36. The chunk
 /// refuses outright (`getcmdwintype() ~= ''`) before it ever sets

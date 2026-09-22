@@ -191,7 +191,8 @@ opens the centred palette. `anchor` is the edge, or for the notification
 stream's toast stack the corner, it opens at, and its own accepted words
 and default change with `placement`: a centred float has no centred
 window to become, and a corner toast stack has no corner tile. `size` is
-its share of the terminal, the same number in both placements.
+its share of the terminal; whether the same number reaches both placements
+or windowed alone depends on the surface, named below.
 
 ```toml
 [ui.surfaces.tree]
@@ -220,7 +221,8 @@ anchor = "top-right"         # default: "top-right" overlay, "right" windowed.
                               # bottom-right
                               # windowed: left | right | top | bottom
 size = 30                    # percent of the terminal width (left/right) or
-                              # height (top/bottom), both placements
+                              # height (top/bottom). Windowed only: the
+                              # overlay history opens at a fixed size
 ```
 
 `[native] tree_width` is `[ui.surfaces.tree] size` under its older name,

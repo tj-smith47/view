@@ -4195,5 +4195,66 @@ new_joiner_case
 } > "$CASE/$NOTICE"
 expect_joiners 0 'exempt1 exempt2 exempt3' 'a fixture below the test boundary carrying the dash'
 
+# check_content's review-finding-tag ban, graded through --file mode: the
+# post-edit-rs.sh hook's own single-file entry point, which the bare-tag
+# fix (the apostrophe grouped as optional rather than mandatory) and the
+# word-shaped citation check ("Minor 8", "rereview") never had a case for
+# before either was written.
+new_tag_case() {
+  n=$((n + 1))
+  CASE="$WORK/tagcase$n"
+  mkdir -p "$CASE"
+}
+
+expect_tag() {
+  want_rc="$1"
+  desc="$2"
+  out=$(bash "$CHECKER" --file "$CASE/lib.rs" 2>&1)
+  rc=$?
+  if [ "$rc" = "$want_rc" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=%s\n  got  rc=%s\n%s\n' \
+    "$n" "$desc" "$want_rc" "$rc" "$out"
+}
+
+new_tag_case
+printf '// leaves the window where N4 forwarded the chord\nfn a() {}\n' > "$CASE/lib.rs"
+expect_tag 1 'a bare finding tag (N4) in a comment'
+
+new_tag_case
+printf '// I8 says the size field is unread under overlay\nfn a() {}\n' > "$CASE/lib.rs"
+expect_tag 1 'a bare finding tag (I8) in a comment'
+
+new_tag_case
+printf '// closed the same way in the re-review round (R2a)\nfn a() {}\n' > "$CASE/lib.rs"
+expect_tag 1 'a lettered re-review-round tag (R2a)'
+
+new_tag_case
+printf '// carried into R2a-2 once the generation bump landed\nfn a() {}\n' > "$CASE/lib.rs"
+expect_tag 1 'a re-review-round tag with its own suffix (R2a-2)'
+
+new_tag_case
+printf '// Minor 8 asked for a real assertion here\nfn a() {}\n' > "$CASE/lib.rs"
+expect_tag 1 'a word-shaped severity citation (Minor 8)'
+
+new_tag_case
+printf '// fixed after the rereview turned up a stale generation\nfn a() {}\n' > "$CASE/lib.rs"
+expect_tag 1 'a bare mention of the review round (rereview)'
+
+new_tag_case
+printf '// sends the byte for F1 through F12 as the terminal names them\nfn a() {}\n' > "$CASE/lib.rs"
+expect_tag 0 'a real function-key name (F1-F12), left out of the tag class'
+
+new_tag_case
+printf '// a C0 control byte never reaches the grid; C1 bytes are stripped\nfn a() {}\n' > "$CASE/lib.rs"
+expect_tag 0 'real control-byte terminology (C0/C1), left out of the tag class'
+
+new_tag_case
+printf 'fn resize(width: u16) -> u16 {\n    width\n}\n' > "$CASE/lib.rs"
+expect_tag 0 'a file with no comment at all'
+
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

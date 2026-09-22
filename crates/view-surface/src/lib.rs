@@ -558,7 +558,7 @@ pub fn render(model: &Model) -> Surface {
         if prompt_open {
             // nothing to add: the Prompt overlay already covers this
         } else if model.palette_enabled {
-            // R2a: a windowed palette paints through this same arm, at
+            // A windowed palette paints through this same arm, at
             // `palette_rect`'s full-width band instead of its centred box
             // (`palette_box`'s own doc) -- one `PaletteView` and one push,
             // whichever placement is live, so the tile and the float can
@@ -879,7 +879,7 @@ fn popupmenu_width(items: &[PmItem]) -> u16 {
 /// inside it) both have to resolve to the exact same rect; two separately
 /// written `OverlayBox::new(..)` calls are two chances for that number to
 /// drift apart the next time either one is edited.
-/// I8: `[ui.surfaces.palette] anchor`/`size` used to size and place this
+/// `[ui.surfaces.palette] anchor`/`size` used to size and place this
 /// box under `windowed` alone -- an overlay palette always drew at a fixed
 /// 70x50 box regardless of what the table said, so the documented keys did
 /// nothing for the placement most users actually run. `size` is rows, per
@@ -887,11 +887,11 @@ fn popupmenu_width(items: &[PmItem]) -> u16 {
 /// stays the fixed 70 percent the design leaves unconfigured for the
 /// centred placement.
 ///
-/// A windowed palette spans the whole width instead: R2a replaced its old
-/// nvim-window mechanism (a split opened from cmdline mode, which nvim
-/// never answers -- rereview N1) with a tile [`render`] paints itself, at
-/// the full-width band [`SurfaceLayout::accepted_anchors`] already limits
-/// a windowed palette's `anchor` to (`top`/`bottom`, never a side).
+/// A windowed palette spans the whole width instead: it carries no nvim
+/// window of its own (a split opened from cmdline mode never gets one), so
+/// [`render`] paints a tile itself, at the full-width band
+/// [`SurfaceLayout::accepted_anchors`] already limits a windowed palette's
+/// `anchor` to (`top`/`bottom`, never a side).
 fn palette_box(model: &Model) -> OverlayBox {
     let layout = model.surfaces.layout(NativeSurface::Palette);
     if model.palette_windowed_active() {
@@ -1209,6 +1209,12 @@ fn painted_cmdline(model: &Model) -> Option<Cow<'_, CmdlineState>> {
 /// Takes the frame's own `layers` so the agent panel's caret lands on the
 /// row this frame painted its composer on, rather than on a second resolve
 /// of the panel's rect and a second render of its view.
+///
+/// Runs once per paint, never per keystroke on the round trip to the
+/// engine: every branch below reads state this frame already carries
+/// (`layers`, the grid registry, `model`'s own fields), issuing no RPC of
+/// its own, and the panel/palette rect lookups below scan the frame's own
+/// small, fixed-size layer list rather than the buffer's contents.
 fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<CursorSpec> {
     let (width, height) = model.engine.grid().size();
     if width == 0 || height == 0 {
@@ -1233,7 +1239,7 @@ fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<Cu
     let painted = painted_cmdline(model);
     let (row, col) = if let Some(cmdline) = painted.as_deref() {
         if model.palette_enabled {
-            // R2a: `palette_cursor` resolves through `palette_rect`, which
+            // `palette_cursor` resolves through `palette_rect`, which
             // already answers the windowed tile's own full-width band (see
             // `palette_box`'s doc) -- the palette never becomes nvim's
             // curwin (`pending_open`'s doc), so there is no separate pane
@@ -1490,6 +1496,12 @@ fn query_cursor(rect: OverlayRect, query: &str) -> (u16, u16) {
 ///
 /// Adds no `offset` of its own: the layer's rect came from
 /// [`Model::overlay_rect`], which has already put the chrome rows into it.
+///
+/// `find_map` over `layers` costs a scan of this frame's own overlay stack
+/// (at most a handful of entries, never the buffer), replacing what used
+/// to be a plain field read; the trade is one bounded scan per paint for a
+/// caret that lands inside the panel's own tile instead of wherever the
+/// engine's grid cursor last happened to sit.
 fn ai_cursor(model: &Model, layers: &[Layer]) -> Option<CursorSpec> {
     let (rect, view) = layers.iter().find_map(|layer| match &layer.kind {
         LayerKind::Ai(view) => Some((layer.rect, view)),
@@ -3822,12 +3834,12 @@ mod tests {
 
     /// A cmdline-sourced popupmenu's candidates show in exactly one place,
     /// whatever `palette_enabled` and the palette's placement are: inline in
-    /// the `Palette` layer (windowed or centred -- R2a routes both through
+    /// the `Palette` layer (windowed or centred both route through
     /// the one push), or, with the palette off, its own standalone
-    /// `Popupmenu` layer. I9 shipped `consumed_by_palette` reading
-    /// `palette_enabled` alone, so a windowed-and-disabled palette (case
-    /// (windowed, false) below) suppressed the standalone layer for a tile
-    /// that was itself gated off by the same finding, leaving the
+    /// `Popupmenu` layer. `consumed_by_palette` reading `palette_enabled`
+    /// alone would let a windowed-and-disabled palette (case
+    /// (windowed, false) below) suppress the standalone layer for a tile
+    /// that is itself gated off, leaving the
     /// candidates painted nowhere. A buffer-anchored popupmenu never
     /// touches the palette at all, so its own `Popupmenu` layer shows
     /// unconditionally across every combination.
@@ -3905,14 +3917,14 @@ mod tests {
         }
     }
 
-    /// R2a: an enabled windowed palette's cmdline state paints through the
+    /// An enabled windowed palette's cmdline state paints through the
     /// same `Palette` layer the centred placement pushes, at
     /// `palette_rect`'s full-width band instead of its centred box, so
     /// `render()` must add that layer and never the bare bottom-row
     /// `Cmdline` echo beside it -- the two would be a second copy of the
     /// same typed text.
     ///
-    /// `[native] palette = false` (I9) leaves no tile painting at all
+    /// `[native] palette = false` leaves no tile painting at all
     /// (`palette_windowed_active`), so the placement being `windowed` must
     /// not also suppress `render()`'s own fallback: a disabled palette
     /// shows the plain bottom-row `Cmdline` echo, the same as a session
