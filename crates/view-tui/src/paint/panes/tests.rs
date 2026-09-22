@@ -3149,3 +3149,190 @@ fn a_gapless_native_panes_edge_keeps_the_name_and_drops_the_segments() {
         "the gapless edge claims a cursor position: {edge:?}"
     );
 }
+
+/// A tiled lattice with the pill above it: three tabpages, the second
+/// current, a remote host at the left edge and the agent's `running` word
+/// at the right -- the row a person doing agentic work over ssh sees above
+/// their own split.
+fn pill_tabs_scene() -> Tiles {
+    let mut tiles = tiled(true);
+    let mut surfaces = view_core::native::ext::shipped_multigrid();
+    surfaces.push(view_core::native::ext::Ext::Tabline);
+    tiles.model.attach_surfaces(surfaces);
+    tiles.model.remote = Some("deploy@prod-box".to_string());
+    tiles.model.ai_trusted = true;
+    tiles.model.ai_panel_mut().session_id = Some("s-1".to_string());
+    drive(
+        &mut tiles.model,
+        vec![UiEvent::TablineUpdate {
+            current: view_core::events::TabHandle(2),
+            tabs: ["work", "docs", "notes"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| view_core::events::TabEntry {
+                    tab: view_core::events::TabHandle(index as u64 + 1),
+                    name: name.to_string(),
+                })
+                .collect(),
+        }],
+    );
+    tiles
+}
+
+/// The same lattice with the pill in `"buffers"` mode: one tabpage, four
+/// buffers, the second both unsaved and current.
+fn pill_buffers_scene() -> Tiles {
+    let mut tiles = tiled(true);
+    let mut surfaces = view_core::native::ext::shipped_multigrid();
+    surfaces.push(view_core::native::ext::Ext::Tabline);
+    tiles.model.attach_surfaces(surfaces);
+    tiles.model.tabline_shows = view_core::native::pill::TablineShows::Buffers;
+    drive(
+        &mut tiles.model,
+        vec![UiEvent::TablineUpdate {
+            current: view_core::events::TabHandle(1),
+            tabs: vec![view_core::events::TabEntry {
+                tab: view_core::events::TabHandle(1),
+                name: "work".to_string(),
+            }],
+        }],
+    );
+    tiles.model.buffers = ["main.rs", "model.rs", "paint.rs", "update.rs"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            view_core::model::BufferEntry::new(
+                index as u64 + 1,
+                name.to_string(),
+                name == "model.rs",
+                index == 0,
+            )
+        })
+        .collect();
+    tiles
+}
+
+/// The committed pictures of the pill above a tiled lattice, one per tier:
+/// the tabpage row and the buffer row, each pinned separately since the
+/// pill reads `tabline_shows` to choose between them.
+#[test]
+fn pill_tabs() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-pill-tabs", tier.0),
+            &tiles_dump(tier, pill_tabs_scene()),
+        );
+    }
+}
+
+#[test]
+fn pill_buffers() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-pill-buffers", tier.0),
+            &tiles_dump(tier, pill_buffers_scene()),
+        );
+    }
+}
+
+/// The `"nvim"` mode bar over a real grid: view's own bottom row, with
+/// background, accent mode and filetype, over the window nvim painted
+/// under `panes = "nvim"` -- the other look mode, which keeps no lattice
+/// of its own for the bar to sit under.
+fn nvim_statusline_bar_scene() -> Model {
+    let look = view_core::model::Look::new(view_core::model::Panes::Nvim, true);
+    let mut model = Model::new().with_look(look);
+    model.term_width = TILED_WIDTH;
+    model.term_height = TILED_HEIGHT;
+    model.statusline_enabled = true;
+    let grid_height = u64::from(TILED_HEIGHT - model.statusline_rows());
+    drive(
+        &mut model,
+        vec![
+            UiEvent::GridResize {
+                grid: 1,
+                width: u64::from(TILED_WIDTH),
+                height: grid_height,
+            },
+            line(1, 0, "pub fn paint_pill(pill: &PillView) {", 0),
+            UiEvent::Flush,
+        ],
+    );
+    model.engine.set_accent_token(Some(ACCENT_FG));
+    model
+        .engine
+        .statusline
+        .apply(SegmentUpdate::Mode("-- INSERT --".to_string()));
+    model.engine.statusline.apply(SegmentUpdate::Buffer {
+        name: "pill.rs".to_string(),
+        modified: true,
+        filetype: "rust".to_string(),
+    });
+    model
+        .engine
+        .statusline
+        .apply(SegmentUpdate::GitBranch("dev/p6-polish".to_string()));
+    model.engine.statusline.apply(SegmentUpdate::Diagnostics {
+        errors: 2,
+        warnings: 1,
+    });
+    model
+        .engine
+        .statusline
+        .apply(SegmentUpdate::Ruler("1:1".to_string()));
+    model
+}
+
+fn nvim_bar_dump(tier: (&str, bool, bool, bool, bool)) -> String {
+    let (_, sync, truecolor, kitty, unicode_boxes) = tier;
+    let mut model = nvim_statusline_bar_scene();
+    model.caps = view_core::model::TermCaps::from_probe(sync, truecolor, kitty)
+        .with_unicode_boxes(unicode_boxes);
+    screen_dump(&tiled_frame(&model))
+}
+
+/// The committed picture of the `"nvim"`-mode bar over a real window, one
+/// per tier.
+#[test]
+fn nvim_statusline_bar() {
+    for tier in TIERS {
+        assert_golden(
+            &format!("{}-nvim-statusline-bar", tier.0),
+            &nvim_bar_dump(tier),
+        );
+    }
+}
+
+/// Every stem the tiled family owns: a scene added later without its three
+/// tier files fails by the stem's own name instead of shipping an unpinned
+/// picture.
+const COMPOSITOR_STEMS: [&str; 10] = [
+    "vsplit-tiles",
+    "vsplit-gapless",
+    "vsplit-tiles-nested",
+    "pill-tabs",
+    "pill-buffers",
+    "tree-windowed",
+    "agent-windowed",
+    "palette-windowed",
+    "notifications-windowed",
+    "nvim-statusline-bar",
+];
+
+#[test]
+fn every_tiled_scene_has_a_golden_at_every_tier() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("goldens");
+    for stem in COMPOSITOR_STEMS {
+        for tier in TIERS {
+            let path = dir.join(format!("{}-{stem}.txt", tier.0));
+            assert!(
+                path.exists(),
+                "{stem} has no {} golden at {}",
+                tier.0,
+                path.display()
+            );
+        }
+    }
+}

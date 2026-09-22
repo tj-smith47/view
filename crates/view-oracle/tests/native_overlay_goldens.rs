@@ -647,3 +647,80 @@ fn every_standard_golden_is_byte_identical_to_its_full_sibling() {
     }
     assert!(pairs >= 8, "only {pairs} standard goldens were walked");
 }
+
+/// The box a single settled toast paints, wide enough for its own text plus
+/// the border on both edges.
+const TOAST_WIDTH: u16 = 15;
+const TOAST_HEIGHT: u16 = 3;
+
+/// One toast, settled (no exit slide in flight), the subject a corner
+/// golden pins: the box's own framing, not the stack's slide, which
+/// `notifications_corner_scenes` in `view-tui` already pins end to end.
+fn notification_corner(left_corner: bool) -> LayerKind {
+    LayerKind::Toast {
+        lines: vec![vec![Span::plain("3 files saved".to_string())]],
+        slot: 0,
+        x_offset: 0,
+        left_corner,
+        paused: false,
+    }
+}
+
+/// The four committed pictures of one toast, one per named corner, three
+/// tiers each.
+#[test]
+fn notifications_corner_scenes() {
+    let corners = [
+        ("top-left", true),
+        ("top-right", false),
+        ("bottom-left", true),
+        ("bottom-right", false),
+    ];
+    let tiers = [
+        (Tier::Full, "full", DRAWS_BOX_GLYPHS),
+        (Tier::Standard, "standard", DRAWS_BOX_GLYPHS),
+        (Tier::Basic, "basic", NO_BOX_GLYPHS),
+    ];
+    for (name, left_corner) in corners {
+        for (tier, tier_name, unicode_boxes) in tiers {
+            assert_golden(
+                &format!("{tier_name}-notifications-corner-{name}"),
+                &dump(
+                    tier,
+                    unicode_boxes,
+                    TOAST_WIDTH,
+                    TOAST_HEIGHT,
+                    notification_corner(left_corner),
+                ),
+            );
+        }
+    }
+}
+
+/// Every stem the overlay family owns: a scene added later without its
+/// three tier files fails by the stem's own name instead of shipping an
+/// unpinned picture.
+const OVERLAY_STEMS: [&str; 4] = [
+    "notifications-corner-top-left",
+    "notifications-corner-top-right",
+    "notifications-corner-bottom-left",
+    "notifications-corner-bottom-right",
+];
+
+#[test]
+fn every_overlay_scene_has_a_golden_at_every_tier() {
+    let dir = golden_path("full-picker")
+        .parent()
+        .expect("goldens live in a directory")
+        .to_path_buf();
+    for stem in OVERLAY_STEMS {
+        for tier_name in ["full", "standard", "basic"] {
+            let path = dir.join(format!("{tier_name}-{stem}.txt"));
+            assert!(
+                path.exists(),
+                "{stem} has no {tier_name} golden at {}",
+                path.display()
+            );
+        }
+    }
+}
