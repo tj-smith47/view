@@ -394,17 +394,19 @@ impl NativeSession {
         }
         let (modifier, _, super_notice) =
             profile::modifier_for(self.desktop_modifier_choice, model.caps.kitty_kbd);
+        let chords = profile::chord_plan(&self.desktop, self.profile, modifier, &self.cfg);
+        // Only raised when this call actually registers a desktop chord
+        // under the fallback: a flip to `editor` (no chords at all) or a
+        // reissue that keeps carrying the same fallback would otherwise
+        // repeat the same notice on every one of them.
         let notice_effects = match super_notice {
-            Some(text) => model.engine.record_native_notice(text.to_string(), false),
-            None => Vec::new(),
+            Some(text) if !chords.is_empty() => {
+                model.engine.record_native_notice(text.to_string(), false)
+            }
+            _ => Vec::new(),
         };
         if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
-            specs.extend(profile::chord_plan(
-                &self.desktop,
-                self.profile,
-                modifier,
-                &self.cfg,
-            ));
+            specs.extend(chords);
         }
         // `NativeConfig::enabled("ai")` is unconditionally `true` -- `[ai]`
         // has no `[native]` switch by design, so `register_plan` alone would
@@ -1550,6 +1552,105 @@ cycle_surfaces = \"gz\"
             lhss.len(),
             2,
             "the chord and the default map must not collapse onto the same lhs: {specs:?}"
+        );
+    }
+
+    /// `[keys] desktop_modifier = "super"` with no kitty keyboard protocol
+    /// falls back to Alt, and [`profile::modifier_for`] owes a notice
+    /// saying so -- `build_mapping_call` must actually record it. Under the
+    /// desktop profile, which is the one that actually registers a chord
+    /// under the fallback (see
+    /// [`a_super_choice_under_the_editor_profile_notices_nothing`]).
+    #[test]
+    fn a_super_choice_with_no_protocol_notices_the_fallback() {
+        let session = NativeSession {
+            desktop_modifier_choice: ModifierChoice::Super,
+            profile: KeyProfile::Desktop,
+            ..NativeSession::all_enabled(7, None)
+        };
+        let mut m = model();
+        m.caps.kitty_kbd = false;
+        let _ = session.build_mapping_call(&mut m);
+        let raised = format!("{:?}", m.engine.messages.entries);
+        assert!(
+            raised.contains("desktop_modifier = super needs the kitty keyboard protocol"),
+            "a Super choice with no protocol must notice the alt fallback: {raised}"
+        );
+    }
+
+    /// A session under the editor profile registers no desktop chord at
+    /// all, so a `Super` choice with no protocol has nothing to fall back
+    /// for -- the notice must not fire on a call that carries no chord,
+    /// which is what every `Stage::CapsUpgraded`/`Stage::ProfileFlip`
+    /// reissue after the first would otherwise repeat it on.
+    #[test]
+    fn a_super_choice_under_the_editor_profile_notices_nothing() {
+        let session = NativeSession {
+            desktop_modifier_choice: ModifierChoice::Super,
+            profile: KeyProfile::Editor,
+            ..NativeSession::all_enabled(7, None)
+        };
+        let mut m = model();
+        m.caps.kitty_kbd = false;
+        let _ = session.build_mapping_call(&mut m);
+        assert!(
+            m.engine.messages.entries.is_empty(),
+            "a call that registers no desktop chord must notice nothing: {:?}",
+            m.engine.messages.entries
+        );
+    }
+
+    /// The mirror of [`a_super_choice_with_no_protocol_notices_the_fallback`]:
+    /// once the protocol answers, `Super` is reachable and
+    /// [`profile::modifier_for`] owes no notice.
+    #[test]
+    fn a_super_choice_with_the_protocol_notices_nothing() {
+        let session = NativeSession {
+            desktop_modifier_choice: ModifierChoice::Super,
+            ..NativeSession::all_enabled(7, None)
+        };
+        let mut m = model();
+        m.caps.kitty_kbd = true;
+        let _ = session.build_mapping_call(&mut m);
+        assert!(
+            m.engine.messages.entries.is_empty(),
+            "a Super choice with the protocol answered must notice nothing: {:?}",
+            m.engine.messages.entries
+        );
+    }
+
+    /// A bare `:View keys profile` sets [`Model::key_profile_report_requested`]
+    /// (`view-core`'s `keys_invoke`); `Stage::ProfileFlip` with that flag set
+    /// must report the live profile and modifier instead of reissuing a
+    /// registration.
+    #[test]
+    fn a_profile_flip_with_the_report_flag_reports_instead_of_reissuing() {
+        let mut session = NativeSession {
+            handed_over: true,
+            profile: KeyProfile::Desktop,
+            initial_profile: KeyProfile::Desktop,
+            desktop_modifier_choice: ModifierChoice::Auto,
+            desktop: default_desktop(),
+            ..NativeSession::all_enabled(7, None)
+        };
+        let mut m = model();
+        m.key_profile_override = None;
+        m.key_profile_report_requested = true;
+        let effects = unbatched(session.follow_up(&mut m, Stage::ProfileFlip));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Rpc(RpcCall::RegisterMappings { .. }))),
+            "the report flag must take the report path, not a reissue: {effects:?}"
+        );
+        let raised = format!("{:?}", m.engine.messages.entries);
+        assert!(
+            raised.contains("keys.profile") && raised.contains("keys.desktop_modifier"),
+            "the report path must record the profile and modifier: {raised}"
+        );
+        assert!(
+            !m.key_profile_report_requested,
+            "the flag must be cleared once the report is recorded"
         );
     }
 }
