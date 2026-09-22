@@ -15933,6 +15933,46 @@ fn flip_turns_a_side_by_side_pair_into_a_stacked_one_and_back() {
     );
 }
 
+/// A windowed tree sidebar is chrome, not a tile: `new`, `zoom` and `flip`
+/// all read [`tiled_panes`](super::surfaces) off buffer windows alone, so
+/// none of the three ever act on the sidebar or count it toward the pair
+/// `flip` answers to.
+#[test]
+fn window_verbs_treat_a_windowed_sidebar_as_no_tile() {
+    let mut cursor_in_sidebar = focused_windowed_tree();
+    let effects = update(&mut cursor_in_sidebar, window_invoke("new"));
+    assert!(
+        visible_texts(&cursor_in_sidebar)
+            .iter()
+            .any(|line| line.contains("window new")),
+        "the cursor sits in the sidebar, not a tile: {effects:?} {:?}",
+        visible_texts(&cursor_in_sidebar)
+    );
+
+    let mut zoom_from_sidebar = focused_windowed_tree();
+    let effects = update(&mut zoom_from_sidebar, window_invoke("zoom"));
+    assert!(
+        visible_texts(&zoom_from_sidebar)
+            .iter()
+            .any(|line| line.contains("window zoom")),
+        "the cursor sits in the sidebar, not a tile: {effects:?} {:?}",
+        visible_texts(&zoom_from_sidebar)
+    );
+
+    // the sidebar plus its one buffer window is two panes in
+    // `panes_in_z_order`, exactly `flip`'s pair shape, so this is the case
+    // most likely to slip through counting the sidebar as a tile
+    let mut sidebar_and_one_buffer = focused_windowed_tree();
+    let effects = update(&mut sidebar_and_one_buffer, window_invoke("flip"));
+    assert!(
+        visible_texts(&sidebar_and_one_buffer)
+            .iter()
+            .any(|line| line.contains("window flip")),
+        "one buffer window is not a pair to flip: {effects:?} {:?}",
+        visible_texts(&sidebar_and_one_buffer)
+    );
+}
+
 /// `window float` with no view surface under the cursor moves nothing and
 /// says so.
 #[test]

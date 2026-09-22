@@ -166,12 +166,14 @@ pub(crate) fn cycle_placements(model: &mut Model) -> Vec<Effect> {
     effects
 }
 
-/// Every pane nvim's own window tree lays out: an ordinary window and a
-/// window view opened for one of its own surfaces, never a float or the
-/// message area, which nvim positions outside that tree. What the four
-/// `window` verbs below read rects off, since a chord or a leader key
-/// presses on whichever tile the cursor sits in or names by rect, never on
-/// a compositor layer nvim's `<C-w>` vocabulary has no key for.
+/// Every ordinary buffer window nvim's own window tree lays out, never a
+/// float, the message area (both outside that tree), or a window view
+/// opened for one of view's own surfaces (`PaneKind::Native`, the tree
+/// sidebar under `[ui] panes = "tiles"`): the four `window` verbs below
+/// read rects off this list, and a sidebar counted as a tile makes `new`
+/// and `zoom` act on it when the cursor happens to sit there and makes
+/// `flip` treat a sidebar-plus-one-buffer layout as the two-pane pair it
+/// answers to, when the pair it means is two buffers.
 fn tiled_panes(model: &Model) -> Vec<Pane> {
     model
         .engine
@@ -185,8 +187,7 @@ fn tiled_panes(model: &Model) -> Vec<Pane> {
         // rects they read regardless, so its absence here costs nothing a
         // session without multigrid could have used
         .filter(|pane| {
-            pane.id != crate::grid::registry::GLOBAL_GRID
-                && matches!(pane.kind, PaneKind::Window | PaneKind::Native { .. })
+            pane.id != crate::grid::registry::GLOBAL_GRID && pane.kind == PaneKind::Window
         })
         .collect()
 }
