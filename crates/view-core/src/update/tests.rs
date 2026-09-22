@@ -14482,6 +14482,78 @@ fn a_press_inside_the_windowed_palette_band_reaches_no_engine_grid() {
     );
 }
 
+/// The same band, with a tabline row reserved above it (`chrome_rows() > 0`):
+/// `Model::palette_rect` used to answer in the shrunk space it resolves the
+/// band's layout against, and only `view_surface::palette_rect` added the
+/// chrome rows back on for painting, so a click and the painted band
+/// disagreed by exactly that many rows whenever one was reserved. The
+/// band's true terminal-absolute position is computed straight off
+/// `crate::native::geometry::palette_rect` (the same layout primitive
+/// `Model::palette_rect` calls) plus `chrome_rows()` added by hand here --
+/// the painted truth neither `Model::palette_rect`'s buggy nor fixed answer
+/// changes -- so this pin cannot pass by the fix and the assertion sharing
+/// one buggy source the way a pin reading `Model::palette_rect()` on both
+/// sides would. A press on the band's own bottom row must still land on
+/// it, and a press on the buffer row just above the band -- what used to
+/// read as inside the band under the old offset -- must reach the engine
+/// instead.
+#[test]
+fn a_press_inside_the_windowed_palette_band_reaches_it_under_a_reserved_tabline_row() {
+    use crate::events::{TabEntry, TabHandle};
+    let mut m = windowed_palette_model();
+    m.attach_surfaces(crate::native::ext::ALL_MULTIGRID.to_vec());
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::TablineUpdate {
+            current: TabHandle(1),
+            tabs: vec![
+                TabEntry {
+                    tab: TabHandle(1),
+                    name: "a".into(),
+                },
+                TabEntry {
+                    tab: TabHandle(2),
+                    name: "b".into(),
+                },
+            ],
+        }]),
+    );
+    assert_eq!(m.chrome_rows(), 1, "fixture: the tabline must be reserved");
+    let _ = update(&mut m, cmdline_show());
+
+    let layout = m
+        .surfaces
+        .layout(crate::native::geometry::NativeSurface::Palette);
+    let bounds_h = m.term_height.saturating_sub(m.chrome_rows());
+    let raw = crate::native::geometry::palette_rect(
+        layout,
+        m.palette_windowed_active(),
+        m.look.gaps,
+        m.term_width,
+        bounds_h,
+    );
+    let top = raw.row.saturating_add(m.chrome_rows());
+    let bottom = top.saturating_add(raw.height).saturating_sub(1);
+
+    let on_band = update(&mut m, mouse("press", bottom, raw.col));
+    assert!(
+        on_band.is_empty(),
+        "a press on the band's own bottom row must not become an \
+         InputMouse effect: {on_band:?}"
+    );
+
+    m.release_mouse();
+    let above_band = update(&mut m, mouse("press", top.saturating_sub(1), raw.col));
+    assert!(
+        matches!(
+            above_band.as_slice(),
+            [Effect::Rpc(RpcCall::InputMouse { .. })]
+        ),
+        "a press on the buffer row just above the band must reach the \
+         engine, not be swallowed as inside the palette: {above_band:?}"
+    );
+}
+
 /// The windowed palette costs no `OpenNativeWindow`/`CloseNativeWindow`
 /// round trip at all -- nvim's own cmdline arriving and leaving is
 /// still the whole open/close signal (`CmdlineShow`/`CmdlineHide`'s doc in

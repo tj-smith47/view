@@ -307,9 +307,6 @@ local ok, result = pcall(function()
   end
   return win
 end)
-if not enter then
-  vim.o.eventignore = ei
-end
 if not ok then
   if win and vim.api.nvim_win_is_valid(win) then
     pcall(vim.api.nvim_win_close, win, true)
@@ -317,7 +314,13 @@ if not ok then
   if buf then
     pcall(vim.api.nvim_buf_delete, buf, { force = true })
   end
+  if not enter then
+    vim.o.eventignore = ei
+  end
   error(result)
+end
+if not enter then
+  vim.o.eventignore = ei
 end
 return result"
 );
@@ -939,7 +942,11 @@ mod tests {
     /// The whole split-and-configure step now runs under one `pcall`
     /// between the write and the restore, and a refusal deletes the
     /// scratch buffer it had already created rather than leaving it
-    /// behind for nothing to ever open.
+    /// behind for nothing to ever open. The failure branch's own close and
+    /// delete run before its own restore, so the window it undoes still
+    /// closes under the same ignore its (never-fired) open would have --
+    /// restoring first left a real `WinClosed` autocmd firing for a window
+    /// whose `WinNew` had been suppressed.
     #[test]
     fn a_refused_open_restores_eventignore_and_deletes_its_own_buffer() {
         let guard = OPEN_NATIVE_WINDOW_CHUNK
@@ -962,13 +969,6 @@ mod tests {
             "eventignore is overridden outside the pcall it is meant to \
              be undone by"
         );
-        let restore = OPEN_NATIVE_WINDOW_CHUNK
-            .rfind("vim.o.eventignore = ei")
-            .expect("the chunk restores eventignore after the pcall");
-        assert!(
-            pcall_open < restore,
-            "the restore runs before the pcall it is supposed to follow"
-        );
         assert!(
             OPEN_NATIVE_WINDOW_CHUNK.contains("if not ok then"),
             "the chunk no longer tells a failed open from a successful one"
@@ -976,11 +976,6 @@ mod tests {
         let ok_check = OPEN_NATIVE_WINDOW_CHUNK
             .find("if not ok then")
             .expect("the chunk checks the pcall's own result");
-        assert!(
-            restore < ok_check,
-            "the failure branch runs before eventignore is put back, so a \
-             caller that reads it there still finds the override standing"
-        );
         assert!(
             OPEN_NATIVE_WINDOW_CHUNK
                 .contains("pcall(vim.api.nvim_buf_delete, buf, { force = true })")
@@ -1004,10 +999,40 @@ mod tests {
             "the window close runs before the chunk even knows the open \
              failed"
         );
+        let restore_on_failure = OPEN_NATIVE_WINDOW_CHUNK
+            .find("vim.o.eventignore = ei")
+            .expect("the failure branch restores eventignore before re-raising");
         assert!(
-            win_close < OPEN_NATIVE_WINDOW_CHUNK.rfind("error(result)").unwrap(),
+            pcall_open < restore_on_failure,
+            "the restore runs before the pcall it is supposed to follow"
+        );
+        assert!(
+            win_close < restore_on_failure,
+            "eventignore is restored before the failure branch closes the \
+             window it just opened, so that close fires a WinClosed \
+             autocmd for a window whose WinNew was ignored"
+        );
+        let error_call = OPEN_NATIVE_WINDOW_CHUNK
+            .rfind("error(result)")
+            .expect("a failed open still re-raises its own error");
+        assert!(
+            win_close < error_call,
             "the window close runs after the failure is already re-raised, \
              so it never runs at all"
+        );
+        assert!(
+            restore_on_failure < error_call,
+            "the failure is re-raised before eventignore is put back, so a \
+             caller catching it still finds the override standing"
+        );
+        let restore_on_success = OPEN_NATIVE_WINDOW_CHUNK
+            .rfind("vim.o.eventignore = ei")
+            .expect("the success path restores eventignore too");
+        assert!(
+            error_call < restore_on_success,
+            "the success-path restore is not its own statement past the \
+             failure branch, so it never runs when the open actually \
+             succeeded"
         );
     }
 

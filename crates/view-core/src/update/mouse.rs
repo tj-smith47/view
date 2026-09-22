@@ -84,11 +84,6 @@ fn position_owner(model: &Model, input: &MouseInput) -> Option<MouseCapture> {
     // `overlay_at`: a press inside it must never reach the buffer window
     // the band paints over, the same way a press on any other overlay
     // never reaches the grid under it
-    // the palette carries no `OverlayId` (see `MouseCapture::Palette`'s
-    // doc), so its own rect is tested by hand rather than through
-    // `overlay_at`: a press inside it must never reach the buffer window
-    // the band paints over, the same way a press on any other overlay
-    // never reaches the grid under it
     if model.engine.cmdline.is_some()
         && model.palette_enabled
         && model.palette_rect().contains(input.row, input.col)

@@ -2500,6 +2500,48 @@ fn palette_windowed_top() {
     }
 }
 
+/// The windowed band's own caret lands one cell past the last character of
+/// the query it is drawn beside, in every anchor and gap mode: the band's
+/// content has no pad column of its own (`overlay::windowed_interior_origin`),
+/// unlike a floating overlay's, so a caret computed with the padded offset
+/// used to sit one column past that -- on top of the next cell instead of
+/// after the one just typed.
+#[test]
+fn a_windowed_palette_caret_lands_one_past_the_last_typed_character() {
+    for gaps in [true, false] {
+        for band in [
+            palette_in_the_bottom_band(gaps),
+            palette_in_the_top_band(gaps),
+        ] {
+            let surface = view_surface::render(&band.model);
+            let rect = surface
+                .layers
+                .iter()
+                .find_map(|l| {
+                    matches!(l.kind, view_surface::LayerKind::Palette(_)).then_some(l.rect)
+                })
+                .expect("the windowed palette painted its own tile layer");
+            let cursor = surface
+                .cursor
+                .expect("the windowed palette holds the caret while `:` is open");
+            // query text is `:e file.txt` (firstc `:` plus the typed content,
+            // `pos = 11`), preceded on its row by the border (no pad, one
+            // cell) and the `"> "` prompt mark (two cells): the caret sits
+            // right after the `t` of `.txt`.
+            let expected_col = rect.col + 1 + 2 + 12;
+            assert_eq!(
+                cursor.row,
+                rect.row + 1,
+                "windowed palette caret row not on the band's own input row"
+            );
+            assert_eq!(
+                cursor.col, expected_col,
+                "windowed palette caret column not right after the last typed character"
+            );
+        }
+    }
+}
+
 /// The caret is where the text goes, for every native surface that
 /// takes typed text -- the palette and the agent panel; the tree and the
 /// notification stream are selection surfaces with no insertion point of

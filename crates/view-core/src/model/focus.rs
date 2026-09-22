@@ -219,18 +219,28 @@ impl Model {
     /// The one function `view_surface::render` (which paints the palette),
     /// `view_surface::palette_cursor` (which places the caret inside it)
     /// and mouse hit-testing all resolve through, so a click can never miss
-    /// a cell the other two agree is inside the palette.
+    /// a cell the other two agree is inside the palette. Adds the chrome
+    /// rows back on top itself, the same shape [`Self::overlay_rect`] already
+    /// has: `crate::native::geometry::palette_rect` places the band against
+    /// a terminal already shrunk by them, so a caller reading this rect as
+    /// terminal-absolute (the doc's own claim) must not have to know that
+    /// and re-add the offset a second time.
     #[must_use]
     pub fn palette_rect(&self) -> crate::native::geometry::OverlayRect {
+        let top = self.chrome_rows();
         let layout = self.surfaces.layout(NativeSurface::Palette);
-        let bounds_h = self.term_height.saturating_sub(self.chrome_rows());
-        crate::native::geometry::palette_rect(
+        let bounds_h = self.term_height.saturating_sub(top);
+        let rect = crate::native::geometry::palette_rect(
             layout,
             self.palette_windowed_active(),
             self.look.gaps,
             self.term_width,
             bounds_h,
-        )
+        );
+        crate::native::geometry::OverlayRect {
+            row: rect.row.saturating_add(top),
+            ..rect
+        }
     }
 
     /// Whether the notification stream takes a window in nvim's layout

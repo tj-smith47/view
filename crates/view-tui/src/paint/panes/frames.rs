@@ -679,6 +679,11 @@ fn screen(row: u16, col: u16, area: Rect, damage: &Damage) -> Option<(u16, u16)>
 /// rect by `palette_rect` itself, so the border is drawn flush with
 /// `area`'s own edges here, exactly where a real tile's `box_edge` call
 /// draws one cell inside its already-gapped slot.
+///
+/// The border is always `theme.accent()`, never `quiet_style`: a real tile
+/// only earns the active colour while the user is in it, but the band holds
+/// the caret every frame it is open at all, so it is never the unfocused
+/// tile a quiet frame would mean.
 pub(crate) fn paint_windowed_palette(
     layer: &view_surface::Layer,
     theme: &Theme,
@@ -715,9 +720,11 @@ pub(crate) fn paint_windowed_palette(
             buf,
         );
     }
+    let (row_off, col_off) =
+        view_surface::overlay::windowed_interior_origin(area.width, area.height);
     let interior = Rect::new(
-        area.x.saturating_add(1),
-        area.y.saturating_add(1),
+        area.x.saturating_add(col_off),
+        area.y.saturating_add(row_off),
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );

@@ -575,7 +575,7 @@ pub fn render(model: &Model) -> Surface {
                 .filter(|pm| pm.is_cmdline_sourced())
                 .cloned();
             let state = PaletteState::new(cmdline.clone(), completion);
-            let rect = palette_rect(model, offset);
+            let rect = palette_rect(model);
             layers.push(Layer::new(
                 Rect::new(rect.row, rect.col, rect.width, rect.height),
                 LayerKind::Palette(state.view()),
@@ -871,21 +871,15 @@ fn popupmenu_width(items: &[PmItem]) -> u16 {
         .unwrap_or(u16::MAX)
 }
 
-/// [`Model::palette_rect`] shifted down by `offset` (the reserved chrome
-/// rows): `Model::palette_rect` resolves against a terminal already shrunk
-/// by `offset`, so the absolute terminal position adds it back on top.
-/// [`render`] (which paints the box), [`palette_cursor`] (which places the
-/// caret inside it) and mouse hit-testing (`view-core`'s `position_owner`)
-/// all resolve through `Model::palette_rect`, so none of the three can
-/// disagree about where the box actually is.
-fn palette_rect(model: &Model, offset: u16) -> Rect {
+/// `Model::palette_rect` as a [`Rect`]: that call already answers in
+/// terminal-absolute cells (the chrome rows are baked in there, not added
+/// here a second time). [`render`] (which paints the box), [`palette_cursor`]
+/// (which places the caret inside it) and mouse hit-testing (`view-core`'s
+/// `position_owner`) all resolve through `Model::palette_rect`, so none of
+/// the three can disagree about where the box actually is.
+fn palette_rect(model: &Model) -> Rect {
     let rect = model.palette_rect();
-    Rect::new(
-        rect.row.saturating_add(offset),
-        rect.col,
-        rect.width,
-        rect.height,
-    )
+    Rect::new(rect.row, rect.col, rect.width, rect.height)
 }
 
 /// Where a cmdline-sourced popupmenu (`pm.grid < 0`) paints when the
@@ -1201,7 +1195,7 @@ fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<Cu
             // `Model::palette_rect`'s doc) -- the palette never becomes nvim's
             // curwin (`pending_open`'s doc), so there is no separate pane
             // rect to read a second caret out of here.
-            palette_cursor(model, model.chrome_rows(), cmdline)
+            palette_cursor(model, cmdline)
         } else {
             raw_cmdline_row(cmdline, width, height, origin)
         }
@@ -1281,16 +1275,22 @@ fn speculated_col(model: &Model, grid: GridId, size: (u16, u16), row: u16, col: 
 
 /// The palette's own cursor position: past its box's frame and pad (see
 /// [`overlay::interior_origin`], the same arithmetic [`overlay::rows`]
-/// frames every layer's content with), past the fixed `"> "` prefix the
-/// palette's header row always draws before the query, then
+/// frames every layer's content with, or [`overlay::windowed_interior_origin`]
+/// for the windowed band, which the painter frames through
+/// [`overlay::unframed_rows`] and grants no pad), past the fixed `"> "`
+/// prefix the palette's header row always draws before the query, then
 /// [`cmdline_cursor_col`] cells further in -- the same column the raw
 /// bottom-line cmdline placed its cursor at, measured from the palette
 /// box's own origin instead of the grid's. Resolves through [`palette_rect`],
 /// the same call [`render`] paints the box through, so the caret can never
 /// land somewhere the box itself was not drawn.
-fn palette_cursor(model: &Model, offset: u16, cmdline: &CmdlineState) -> (u16, u16) {
-    let rect = palette_rect(model, offset);
-    let (row_off, col_off) = overlay::interior_origin(rect.width, rect.height);
+fn palette_cursor(model: &Model, cmdline: &CmdlineState) -> (u16, u16) {
+    let rect = palette_rect(model);
+    let (row_off, col_off) = if model.palette_windowed_active() {
+        overlay::windowed_interior_origin(rect.width, rect.height)
+    } else {
+        overlay::interior_origin(rect.width, rect.height)
+    };
     let prefix_cols =
         u16::try_from(format!("{} ", overlay::PROMPT_MARK).chars().count()).unwrap_or(2);
     let row = rect.row.saturating_add(row_off);

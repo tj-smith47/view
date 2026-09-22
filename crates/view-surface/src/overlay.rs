@@ -253,6 +253,26 @@ pub(crate) fn interior_origin(width: u16, height: u16) -> (u16, u16) {
     (1, 1 + pad)
 }
 
+/// Where the windowed palette band's first content cell lands relative to
+/// the band's own origin, once `paint_windowed_palette`-shaped painting (a
+/// `box_edge` border, content laid out through [`unframed_rows`]) has
+/// framed it: the row past the top border, and the column past the left
+/// border with no pad -- `unframed_rows` grants none, unlike [`rows`]' one-
+/// cell pad at `width >= 6`, because the border is already drawn by a
+/// separate call there rather than baked into the laid rows.
+///
+/// The palette's own cursor placement and the band's painter both read this
+/// instead of each re-deriving the same two size thresholds, so a caret
+/// placed against one border convention can never sit behind a border
+/// drawn under the other.
+#[must_use]
+pub fn windowed_interior_origin(width: u16, height: u16) -> (u16, u16) {
+    if width < 2 || height < 2 {
+        return (0, 0);
+    }
+    (1, 1)
+}
+
 /// The lowest interior width, in display cells, a picker's preview pane is
 /// worth splitting off a column for. Below this, the results list and a
 /// sliver of preview would both be unreadable, so the picker falls back to

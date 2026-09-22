@@ -197,11 +197,10 @@ check_content() {
   # keyboard keys throughout `view-tui`, and `C0`/`C1` name real terminal
   # control-byte ranges throughout `view-tui`, `view` and `view-native` --
   # each reads exactly like a finding tag and neither has a phrasing this
-  # gate can tell apart from one by pattern alone, so a `C`-tagged finding
-  # (this review's own severity class) is caught by hand at review time
-  # instead. A re-review round appends a lettered suffix to its own tag
-  # (R2a, R2a-2), which needs its own shape since the bare-digit pattern
-  # above would miss the letter, and collides with no real word here.
+  # gate can tell apart from one by pattern alone. A re-review round appends
+  # a lettered suffix to its own tag (R2a, R2a-2), which needs its own
+  # shape since the bare-digit pattern above would miss the letter, and
+  # collides with no real word here.
   # `C` stays split from the other three letters: `C0`/`C1` name real
   # terminal control-byte ranges this tree writes often, but a Critical
   # finding never lands below `C2`, so `C[2-9][0-9]*` catches the finding
