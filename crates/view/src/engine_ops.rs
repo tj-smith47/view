@@ -138,6 +138,10 @@ pub trait EngineOps {
     ) -> Result<(), EngineError>;
     /// Moves the cursor back to the window it was in before this one.
     fn focus_previous_window(&self) -> Result<(), EngineError>;
+    /// Moves a window to a tabpage, splitting the destination along its
+    /// longer side and keeping the window's buffer, cursor and scroll
+    /// view. See `view_engine::nvim_api::EngineHandle::move_window_to_tabpage`.
+    fn move_window_to_tabpage(&self, win: u64, destination: u32) -> Result<(), EngineError>;
     /// Resolves the picker preview pane's text for `path`, tagged
     /// `generation`; never blocks, and never itself returns the answer (see
     /// `Msg::PickerPreviewReply`).
@@ -415,6 +419,9 @@ impl EngineOps for EngineHandle {
     fn focus_previous_window(&self) -> Result<(), EngineError> {
         self.focus_previous_window()
     }
+    fn move_window_to_tabpage(&self, win: u64, destination: u32) -> Result<(), EngineError> {
+        self.move_window_to_tabpage(win, destination)
+    }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.preview_buffer(path, generation)
     }
@@ -647,6 +654,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn focus_previous_window(&self) -> Result<(), EngineError> {
         (**self).focus_previous_window()
+    }
+    fn move_window_to_tabpage(&self, win: u64, destination: u32) -> Result<(), EngineError> {
+        (**self).move_window_to_tabpage(win, destination)
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
@@ -883,6 +893,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn focus_previous_window(&self) -> Result<(), EngineError> {
         (**self).focus_previous_window()
+    }
+    fn move_window_to_tabpage(&self, win: u64, destination: u32) -> Result<(), EngineError> {
+        (**self).move_window_to_tabpage(win, destination)
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
@@ -1185,6 +1198,9 @@ impl EngineOps for FakeOps {
     fn focus_previous_window(&self) -> Result<(), EngineError> {
         self.record("focus_previous_window()".to_string())
     }
+    fn move_window_to_tabpage(&self, win: u64, destination: u32) -> Result<(), EngineError> {
+        self.record(format!("move_window_to_tabpage({win},{destination})"))
+    }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.record(format!("preview_buffer({path},{generation})"))
     }
@@ -1475,6 +1491,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn focus_previous_window(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn move_window_to_tabpage(&self, _win: u64, _destination: u32) -> Result<(), EngineError> {
         Ok(())
     }
     fn preview_buffer(&self, _path: &str, _generation: u64) -> Result<(), EngineError> {

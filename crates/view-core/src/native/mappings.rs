@@ -88,7 +88,7 @@ pub struct MappingClaim {
 // switching user already has them in muscle memory; a claim over a user's
 // own `<leader>f` or `<leader>e` prefix is reported rather than avoided by
 // picking keys nobody uses.
-static DEFAULT_MAPS: [MappingSpec; 10] = [
+static DEFAULT_MAPS: [MappingSpec; 24] = [
     MappingSpec {
         feature: "picker",
         lhs: Cow::Borrowed("<leader>ff"),
@@ -152,6 +152,94 @@ static DEFAULT_MAPS: [MappingSpec; 10] = [
         feature: "ui",
         lhs: Cow::Borrowed("<leader>uw"),
         verb: "cycle_surfaces",
+        rhs: Rhs::Invoke,
+    },
+    // the five window verbs and the nine `to_tabpage_<N>` rows are every
+    // `Rhs::Invoke` desktop chord's own twin (`native::chords::DESKTOP_CHORDS`)
+    // that names no row above: `full_width`'s twin is the raw `<C-w>|` and
+    // `gaps`'s is the `ui`/`gaps` row already here, so neither needs one.
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>wn"),
+        verb: "new",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>wz"),
+        verb: "zoom",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>ws"),
+        verb: "flip",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>uf"),
+        verb: "float",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "notifications",
+        lhs: Cow::Borrowed("<leader>fd"),
+        verb: "dismiss",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>w1"),
+        verb: "to_tabpage_1",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>w2"),
+        verb: "to_tabpage_2",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>w3"),
+        verb: "to_tabpage_3",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>w4"),
+        verb: "to_tabpage_4",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>w5"),
+        verb: "to_tabpage_5",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>w6"),
+        verb: "to_tabpage_6",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>w7"),
+        verb: "to_tabpage_7",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>w8"),
+        verb: "to_tabpage_8",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>w9"),
+        verb: "to_tabpage_9",
         rhs: Rhs::Invoke,
     },
 ];

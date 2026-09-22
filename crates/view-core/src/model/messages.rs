@@ -1042,6 +1042,25 @@ impl Messages {
         self.entries.len() != before
     }
 
+    /// `:View notifications dismiss`: takes down the newest entry on the
+    /// stack, whatever its class -- transient toast, sticky notice, nvim's
+    /// own wire message -- unlike [`Self::dismiss_sticky`], which only ever
+    /// reaches the persistent ones. The transient slot goes down the same
+    /// way when it is the newest, since it is an entry like any other here.
+    ///
+    /// A raised condition is excepted on [`Self::dismiss_sticky`]'s own
+    /// terms: it states something that is still true, so a key that takes
+    /// down the newest thing read cannot be the thing that un-states it.
+    /// `update`'s own `arm_top_slot` call, run after every fold, re-arms the
+    /// dismissal timer if the entry that left held the top slot.
+    pub fn dismiss_newest(&mut self) -> bool {
+        let Some(index) = self.entries.iter().rposition(|e| !e.condition) else {
+            return false;
+        };
+        self.entries.remove(index);
+        true
+    }
+
     /// Drops every standing family notice that has already had its reading
     /// window -- the one way down those notices have, and the one every
     /// input takes.

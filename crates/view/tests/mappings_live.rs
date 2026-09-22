@@ -312,20 +312,50 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
             "<leader>ai".to_string(),
             "<leader>ug".to_string(),
             "<leader>uw".to_string(),
+            "<leader>wn".to_string(),
+            "<leader>wz".to_string(),
+            "<leader>ws".to_string(),
+            "<leader>uf".to_string(),
+            "<leader>w1".to_string(),
+            "<leader>w2".to_string(),
+            "<leader>w3".to_string(),
+            "<leader>w4".to_string(),
+            "<leader>w5".to_string(),
+            "<leader>w6".to_string(),
+            "<leader>w7".to_string(),
+            "<leader>w8".to_string(),
+            "<leader>w9".to_string(),
         ],
         "a disabled feature must contribute no key of its own; the survivors \
-             are ai's default key and the two ui actions, neither of which \
-             [native] has a switch for, got {registered:?}"
+             are ai's default key, the two ui actions and window's own tile \
+             keys, none of which [native] has a switch for, got {registered:?}"
     );
     let claimed = session.claims();
     assert_eq!(
         claimed.len(),
-        3,
+        16,
         "only the keys no [native] entry here names may be claimed: {claimed:?}"
     );
     assert_eq!(
         claimed.iter().map(|c| c.lhs.as_str()).collect::<Vec<_>>(),
-        vec!["<leader>ai", "<leader>ug", "<leader>uw"]
+        vec![
+            "<leader>ai",
+            "<leader>ug",
+            "<leader>uw",
+            "<leader>wn",
+            "<leader>wz",
+            "<leader>ws",
+            "<leader>uf",
+            "<leader>w1",
+            "<leader>w2",
+            "<leader>w3",
+            "<leader>w4",
+            "<leader>w5",
+            "<leader>w6",
+            "<leader>w7",
+            "<leader>w8",
+            "<leader>w9",
+        ]
     );
 
     let rhs = session.eval("maparg('<leader>ff', 'n')");
@@ -357,9 +387,10 @@ fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
     session.register(&cfg);
     assert_eq!(
         session.claims().len(),
-        3,
-        "only ai's key and the two ui actions, none of which [native] can \
-             turn off, survive every other feature being disabled"
+        16,
+        "only ai's key, the two ui actions and window's own tile keys, \
+             none of which [native] can turn off, survive every other \
+             feature being disabled"
     );
 
     assert_eq!(

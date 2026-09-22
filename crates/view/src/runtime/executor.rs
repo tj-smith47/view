@@ -354,6 +354,9 @@ impl<E: EngineOps> Executor<E> {
                         self.ops.set_window_size(win, width, height)
                     }
                     RpcCall::FocusPreviousWindow => self.ops.focus_previous_window(),
+                    RpcCall::MoveWindowToTabpage { win, destination } => {
+                        self.ops.move_window_to_tabpage(win, destination)
+                    }
                     RpcCall::PreviewBuffer { path, generation } => {
                         self.ops.preview_buffer(&path, generation)
                     }

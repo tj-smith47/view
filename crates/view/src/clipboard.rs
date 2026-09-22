@@ -981,6 +981,13 @@ mod tests {
         fn focus_previous_window(&self) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn move_window_to_tabpage(
+            &self,
+            _win: u64,
+            _destination: u32,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn preview_buffer(
             &self,
             _path: &str,

@@ -494,6 +494,57 @@ end";
 pub(crate) const FOCUS_PREVIOUS_WINDOW_CHUNK: &str = "\
 pcall(vim.cmd, 'wincmd p')";
 
+/// The lua chunk [`EngineHandle::move_window_to_tabpage`] runs inside nvim,
+/// for `:View window to_tabpage <N>`.
+///
+/// Everything the source window carries -- its buffer, its cursor, its
+/// scroll view -- is read off `win` before any navigation runs, because
+/// once the destination tabpage takes focus `win` is no longer the current
+/// window and nothing about it can be read through a command that acts on
+/// "the current window" any more. `tabpagenr('$')` is read in the same
+/// breath, ahead of the close that can shrink it: closing `win` may take
+/// its own tabpage with it (the last window of a tabpage always does),
+/// which renumbers every tabpage after it, and a count read after that
+/// would be answering about a layout the destination was never chosen
+/// against. The destination window's own width and height, read once it is
+/// current, decide the split the way `window new` decides one: a wide
+/// window splits beside itself, a tall one below.
+///
+/// [`EngineHandle::move_window_to_tabpage`]: super::EngineHandle::move_window_to_tabpage
+pub(crate) const MOVE_WINDOW_TO_TABPAGE_CHUNK: &str = "\
+local win, destination = ...
+if not vim.api.nvim_win_is_valid(win) then
+  return
+end
+local ok, err = pcall(function()
+  local buf = vim.api.nvim_win_get_buf(win)
+  local cursor = vim.api.nvim_win_get_cursor(win)
+  local view = vim.api.nvim_win_call(win, vim.fn.winsaveview)
+  local last = vim.fn.tabpagenr('$')
+  if destination > last then
+    vim.cmd('$tabnew')
+  else
+    vim.cmd(destination .. 'tabnext')
+  end
+  local base = vim.api.nvim_get_current_win()
+  local width = vim.api.nvim_win_get_width(base)
+  local height = vim.api.nvim_win_get_height(base)
+  vim.cmd(width >= height and 'vsplit' or 'split')
+  local placed = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(placed, buf)
+  vim.api.nvim_win_set_cursor(placed, cursor)
+  vim.api.nvim_win_call(placed, function()
+    vim.fn.winrestview(view)
+  end)
+  vim.api.nvim_win_close(win, false)
+end)
+if not ok then
+  vim.notify(
+    'view: window to_tabpage failed: ' .. tostring(err),
+    vim.log.levels.ERROR
+  )
+end";
+
 impl super::EngineHandle {
     /// Opens a window for `surface`, or enters the one it already has, and
     /// routes the handle back as `Msg::NativeWindowOpened` tagged with
@@ -629,6 +680,26 @@ impl super::EngineHandle {
             vec![
                 Value::from(FOCUS_PREVIOUS_WINDOW_CHUNK),
                 Value::Array(Vec::new()),
+            ],
+        )
+    }
+
+    /// Moves `win` to tabpage `destination` (one-based, `tabpagenr('$')`'s
+    /// own numbering, past the last tabpage creates a new one at the end),
+    /// splitting the destination along its longer side and keeping the
+    /// window's buffer, cursor and scroll view. A notify on
+    /// [`close_native_window`](Self::close_native_window)'s terms.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn move_window_to_tabpage(&self, win: u64, destination: u32) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(MOVE_WINDOW_TO_TABPAGE_CHUNK),
+                Value::Array(vec![Value::from(win), Value::from(destination)]),
             ],
         )
     }

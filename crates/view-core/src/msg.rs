@@ -2330,6 +2330,17 @@ pub enum RpcCall {
     /// Moves the cursor back to the window it was in before this one
     /// (`:wincmd p`), which is what leaving a windowed surface means.
     FocusPreviousWindow,
+    /// `:View window to_tabpage <N>`: moves `win` to tabpage `destination`,
+    /// keeping its buffer, cursor and scroll view (see
+    /// `view_engine::nvim_api::move_window_to_tabpage`'s own doc for the
+    /// choreography and why the order matters).
+    MoveWindowToTabpage {
+        /// The window, as nvim addresses it.
+        win: u64,
+        /// One-based, `tabpagenr('$')`'s own numbering. Past the last
+        /// tabpage creates a new one at the end.
+        destination: u32,
+    },
     /// Renames the file at `old_path` to `new_path` and, when a buffer is
     /// open for `old_path`, retargets that buffer onto the new path in the
     /// same call rather than leaving it pointing at a path that no longer

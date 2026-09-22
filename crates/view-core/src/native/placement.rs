@@ -180,6 +180,27 @@ impl SurfaceState {
         self.pending[surface.index()] = false;
     }
 
+    /// Flips `surface` alone between [`SurfacePlacement::Windowed`] and
+    /// [`SurfacePlacement::Overlay`], leaving the shared ring position and
+    /// every other surface untouched -- `window float`'s own step, distinct
+    /// from [`Self::advance_ring`], which moves all four together.
+    ///
+    /// Answers with the placement `surface` now has and whether that is a
+    /// change, on [`Self::advance_ring`]'s own terms, so a caller can reuse
+    /// the same `retile_open_surface` a ring step already drives through.
+    pub fn toggle_placement(&mut self, surface: NativeSurface) -> (SurfacePlacement, bool) {
+        let index = surface.index();
+        let target = match self.layouts[index].placement {
+            SurfacePlacement::Windowed => SurfacePlacement::Overlay,
+            SurfacePlacement::Overlay => SurfacePlacement::Windowed,
+        };
+        let changed = self.layouts[index].placement != target;
+        self.layouts[index].placement = target;
+        self.layouts[index].anchor =
+            resolved_anchor(surface, target, self.configured_anchor[index]);
+        (target, changed)
+    }
+
     /// Retires `surface`'s in-flight open without starting a new one: a
     /// close or a retile moved the surface on before the open's own reply
     /// landed. Bumps the generation so that reply reads as stale when it

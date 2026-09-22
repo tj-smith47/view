@@ -21,6 +21,20 @@ The table below is generated from `default_maps()` in
 | `<leader><leader>` | `palette` | `:View palette open` |
 | `<leader>ug` | `ui` | `:View ui gaps` |
 | `<leader>uw` | `ui` | `:View ui cycle_surfaces` |
+| `<leader>wn` | `window` | `:View window new` |
+| `<leader>wz` | `window` | `:View window zoom` |
+| `<leader>ws` | `window` | `:View window flip` |
+| `<leader>uf` | `window` | `:View window float` |
+| `<leader>fd` | `notifications` | `:View notifications dismiss` |
+| `<leader>w1` | `window` | `:View window to_tabpage_1` |
+| `<leader>w2` | `window` | `:View window to_tabpage_2` |
+| `<leader>w3` | `window` | `:View window to_tabpage_3` |
+| `<leader>w4` | `window` | `:View window to_tabpage_4` |
+| `<leader>w5` | `window` | `:View window to_tabpage_5` |
+| `<leader>w6` | `window` | `:View window to_tabpage_6` |
+| `<leader>w7` | `window` | `:View window to_tabpage_7` |
+| `<leader>w8` | `window` | `:View window to_tabpage_8` |
+| `<leader>w9` | `window` | `:View window to_tabpage_9` |
 
 ## `<leader>ai` reads the panel before it acts
 

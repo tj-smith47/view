@@ -262,6 +262,9 @@ fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) -> 
                 handle.set_window_size(*win, *width, *height)
             }
             RpcCall::FocusPreviousWindow => handle.focus_previous_window(),
+            RpcCall::MoveWindowToTabpage { win, destination } => {
+                handle.move_window_to_tabpage(*win, *destination)
+            }
             // RpcCall is #[non_exhaustive]: a future call kind degrades to a
             // no-op here rather than fail to compile, matching
             // Executor::run's own fallback arm.

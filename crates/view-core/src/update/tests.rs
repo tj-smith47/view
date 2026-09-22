@@ -15689,3 +15689,412 @@ fn a_window_command_the_resize_chord_does_not_claim_still_reaches_nvim_from_the_
          to history navigation: {effects:?}"
     );
 }
+
+/// `Msg::FeatureInvoke { feature: "window", .. }`, as a chord or a leader
+/// key sends it.
+fn window_invoke(verb: &str) -> Msg {
+    Msg::FeatureInvoke {
+        feature: "window".to_string(),
+        verb: verb.to_string(),
+    }
+}
+
+/// A lone window filling the whole editor area, wide -- `window new`'s
+/// vertical-split case.
+fn wide_single_window_model() -> Model {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 1,
+                width: 80,
+                height: 24,
+            },
+            UiEvent::GridResize {
+                grid: 2,
+                width: 80,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: 2,
+                win: crate::events::WinHandle(2000),
+                startrow: 0,
+                startcol: 0,
+                width: 80,
+                height: 24,
+            },
+            UiEvent::GridCursorGoto {
+                grid: 2,
+                row: 0,
+                col: 0,
+            },
+        ]),
+    );
+    m
+}
+
+/// The same lone window, narrow and tall -- `window new`'s
+/// horizontal-split case.
+fn tall_single_window_model() -> Model {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 10,
+            height: 24,
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 1,
+                width: 10,
+                height: 24,
+            },
+            UiEvent::GridResize {
+                grid: 2,
+                width: 10,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: 2,
+                win: crate::events::WinHandle(2001),
+                startrow: 0,
+                startcol: 0,
+                width: 10,
+                height: 24,
+            },
+            UiEvent::GridCursorGoto {
+                grid: 2,
+                row: 0,
+                col: 0,
+            },
+        ]),
+    );
+    m
+}
+
+/// `window new` reads the focused tile's own rect: a wide tile splits
+/// beside itself, a tall one below.
+#[test]
+fn a_new_tile_splits_the_longer_side() {
+    let mut wide = wide_single_window_model();
+    let effects = update(&mut wide, window_invoke("new"));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-w>v"
+        ),
+        "a wide tile must split vertically: {effects:?}"
+    );
+
+    let mut tall = tall_single_window_model();
+    let effects = update(&mut tall, window_invoke("new"));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-w>s"
+        ),
+        "a tall tile must split horizontally: {effects:?}"
+    );
+}
+
+/// `window zoom` fills whichever tile is focused when it does not already
+/// fill the outer tiled bounds, and equalizes back once it does -- no flag
+/// held between presses, only the layout read fresh each time.
+#[test]
+fn zoom_fills_the_screen_and_the_second_press_equalizes() {
+    let mut m = vsplit_model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::GridCursorGoto {
+            grid: 6,
+            row: 0,
+            col: 0,
+        }]),
+    );
+    let effects = update(&mut m, window_invoke("zoom"));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-w>_<C-w>|"
+        ),
+        "a window short of the outer bounds must fill it: {effects:?}"
+    );
+
+    // The second press: nvim answered the maximize by squeezing the
+    // sibling to a sliver still inside the focused window's own new rect,
+    // so the focused rect now equals the tiled bounds.
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::WinPos {
+                grid: 6,
+                win: crate::events::WinHandle(1003),
+                startrow: 0,
+                startcol: 0,
+                width: 80,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: 5,
+                win: crate::events::WinHandle(1002),
+                startrow: 0,
+                startcol: 0,
+                width: 1,
+                height: 1,
+            },
+        ]),
+    );
+    let effects = update(&mut m, window_invoke("zoom"));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-w>="
+        ),
+        "a window already filling the outer bounds must equalize back: {effects:?}"
+    );
+}
+
+/// `window flip` turns a side-by-side pair into a stacked one and back,
+/// read off the two tiled panes' own rects.
+#[test]
+fn flip_turns_a_side_by_side_pair_into_a_stacked_one_and_back() {
+    let mut side_by_side = vsplit_model();
+    let effects = update(&mut side_by_side, window_invoke("flip"));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-w>t<C-w>K"
+        ),
+        "a side-by-side pair must stack: {effects:?}"
+    );
+
+    let mut stacked = model();
+    let _ = update(
+        &mut stacked,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    let _ = update(
+        &mut stacked,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 1,
+                width: 80,
+                height: 24,
+            },
+            UiEvent::GridResize {
+                grid: 6,
+                width: 80,
+                height: 11,
+            },
+            UiEvent::GridResize {
+                grid: 5,
+                width: 80,
+                height: 12,
+            },
+            UiEvent::WinPos {
+                grid: 6,
+                win: crate::events::WinHandle(1003),
+                startrow: 0,
+                startcol: 0,
+                width: 80,
+                height: 11,
+            },
+            UiEvent::WinPos {
+                grid: 5,
+                win: crate::events::WinHandle(1002),
+                startrow: 12,
+                startcol: 0,
+                width: 80,
+                height: 12,
+            },
+        ]),
+    );
+    let effects = update(&mut stacked, window_invoke("flip"));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-w>t<C-w>H"
+        ),
+        "a stacked pair must go side by side: {effects:?}"
+    );
+}
+
+/// `window float` with no view surface under the cursor moves nothing and
+/// says so.
+#[test]
+fn float_with_no_surface_focused_notices_and_moves_nothing() {
+    let mut m = vsplit_model();
+    let effects = update(&mut m, window_invoke("float"));
+    assert!(
+        visible_texts(&m)
+            .iter()
+            .any(|line| line.contains("window float")),
+        "no focused surface must raise a notice: {effects:?} {:?}",
+        visible_texts(&m)
+    );
+}
+
+/// `window float` flips whichever of view's own surfaces the cursor sits
+/// in between windowed and overlay.
+#[test]
+fn float_moves_the_focused_surface_between_placements() {
+    use crate::native::geometry::NativeSurface;
+
+    let mut m = focused_windowed_tree();
+    assert!(
+        m.surfaces.windowed(NativeSurface::Tree),
+        "the fixture must start the tree windowed"
+    );
+    let effects = update(&mut m, window_invoke("float"));
+    assert!(
+        !m.surfaces.windowed(NativeSurface::Tree),
+        "the toggle must move the tree off windowed"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::CloseNativeWindow { .. }))),
+        "moving off windowed must close its window: {effects:?}"
+    );
+}
+
+/// `window to_tabpage_<N>` hands the focused window's own handle and the
+/// destination straight to the engine; the choreography that keeps its
+/// buffer, cursor and view runs there (see
+/// `view_engine::nvim_api::native_window::MOVE_WINDOW_TO_TABPAGE_CHUNK`).
+#[test]
+fn to_tabpage_asks_the_engine_for_the_focused_window_and_the_destination() {
+    let mut m = wide_single_window_model();
+    let effects = update(&mut m, window_invoke("to_tabpage_3"));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::MoveWindowToTabpage { win, destination })]
+                if *win == 2000 && *destination == 3
+        ),
+        "to_tabpage_3 must move the focused window's handle to tabpage 3: {effects:?}"
+    );
+}
+
+/// `window to_tabpage_<N>` with no focused window moves nothing and says
+/// so, on every other `window` verb's own terms.
+#[test]
+fn to_tabpage_with_no_focused_window_notices() {
+    let mut m = model();
+    let effects = update(&mut m, window_invoke("to_tabpage_1"));
+    assert!(
+        visible_texts(&m)
+            .iter()
+            .any(|line| line.contains("window to_tabpage")),
+        "no focused window must raise a notice: {effects:?}"
+    );
+}
+
+/// `notifications dismiss` takes down the newest entry on the stack,
+/// whatever its class, and nothing older.
+#[test]
+fn dismiss_takes_down_the_newest_toast_and_nothing_else() {
+    let mut m = model();
+    let _ = m
+        .engine
+        .record_native_notice("first entry".to_string(), false);
+    let _ = m
+        .engine
+        .record_native_notice("second entry".to_string(), false);
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "dismiss".to_string(),
+        },
+    );
+    let _ = effects;
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains("first entry")),
+        "{texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|line| line.contains("second entry")),
+        "{texts:?}"
+    );
+}
+
+/// `notifications dismiss` leaves a standing condition alone: it states
+/// something that is still true, on [`Messages::dismiss_sticky`]'s own
+/// terms.
+#[test]
+fn dismiss_leaves_a_standing_condition_alone() {
+    let mut m = model();
+    let _ = m.engine.messages.set_native_condition(Some("gaps are off"));
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "dismiss".to_string(),
+        },
+    );
+    let _ = effects;
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains("gaps are off")),
+        "a standing condition must survive a dismiss: {texts:?}"
+    );
+}
+
+/// Every [`crate::native::chords::DESKTOP_CHORDS`] row that reaches a verb
+/// (`Rhs::Invoke`, so a press sends [`Msg::FeatureInvoke`] rather than raw
+/// keys) has to actually be pressable: its `twin` -- the key bound under
+/// both profiles -- is either a [`crate::native::mappings::default_maps`]
+/// row naming the same `(feature, verb)`, or one of the two `[keys]`
+/// single-notation actions (`toggle_gaps`, `cycle_surfaces`) a `view.toml`
+/// override reaches through `view-native`'s own registration path instead
+/// of this table. Every row ships as a `DEFAULT_MAPS` entry today, so
+/// `KEYS_ACTION_TWINS` is empty; it exists so a chord added later that
+/// deliberately reaches its twin through that other path fails by name
+/// here instead of silently falling through to a `Cow`-empty row nothing
+/// registers.
+#[test]
+fn every_twin_that_reaches_a_verb_is_a_default_map_row_or_a_keys_action() {
+    use crate::native::chords::desktop_chords;
+    use crate::native::mappings::{default_maps, Rhs};
+
+    const KEYS_ACTION_TWINS: &[(&str, &str, &str)] = &[];
+
+    for chord in desktop_chords() {
+        if !matches!(chord.rhs, Rhs::Invoke) {
+            continue;
+        }
+        let carried_by_default_maps = default_maps().iter().any(|spec| {
+            spec.feature == chord.feature
+                && spec.verb == chord.verb
+                && spec.lhs.as_ref() == chord.twin
+        });
+        let carried_by_keys_action = KEYS_ACTION_TWINS.iter().any(|(feature, verb, twin)| {
+            *feature == chord.feature && *verb == chord.verb && *twin == chord.twin
+        });
+        assert!(
+            carried_by_default_maps || carried_by_keys_action,
+            "{}'s twin {} reaches ({}, {}) but is neither a default_maps row nor a \
+             declared keys action",
+            chord.id,
+            chord.twin,
+            chord.feature,
+            chord.verb
+        );
+    }
+}

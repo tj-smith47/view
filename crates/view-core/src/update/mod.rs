@@ -589,6 +589,30 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 model.dirty = true;
                 return Vec::new();
             }
+            if feature == "notifications" && verb == "dismiss" {
+                // no notice of its own, on `pause`'s own terms above: the
+                // entry leaving the stack is the feedback.
+                if model.engine.messages.dismiss_newest() {
+                    model.dirty = true;
+                }
+                return Vec::new();
+            }
+            if feature == "window" {
+                match verb.as_str() {
+                    "new" => return surfaces::window_new(model),
+                    "zoom" => return surfaces::window_zoom(model),
+                    "flip" => return surfaces::window_flip(model),
+                    "float" => return surfaces::window_float(model),
+                    _ => {
+                        if let Some(destination) = verb
+                            .strip_prefix("to_tabpage_")
+                            .and_then(|n| n.parse().ok())
+                        {
+                            return surfaces::window_to_tabpage(model, destination);
+                        }
+                    }
+                }
+            }
             // The open review's own vocabulary, arriving from the
             // buffer-local mappings `RpcCall::ReviewShow` installs on the
             // file under review (and from `:View review <verb>` typed by

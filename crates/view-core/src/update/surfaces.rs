@@ -5,6 +5,7 @@
 //! raises instead of opening anything. One family, split out of `update`
 //! so the router keeps to routing.
 
+use crate::grid::registry::{Pane, PaneKind};
 use crate::model::{Focus, Model, OverlayKind};
 use crate::msg::{Effect, RegisterType, RpcCall, WinSplit};
 use crate::native::geometry::{Anchor, NativeSurface, OverlayBox};
@@ -163,6 +164,169 @@ pub(crate) fn cycle_placements(model: &mut Model) -> Vec<Effect> {
     }
     model.dirty = true;
     effects
+}
+
+/// Every pane nvim's own window tree lays out: an ordinary window and a
+/// window view opened for one of its own surfaces, never a float or the
+/// message area, which nvim positions outside that tree. What the four
+/// `window` verbs below read rects off, since a chord or a leader key
+/// presses on whichever tile the cursor sits in or names by rect, never on
+/// a compositor layer nvim's `<C-w>` vocabulary has no key for.
+fn tiled_panes(model: &Model) -> Vec<Pane> {
+    model
+        .engine
+        .grids()
+        .panes_in_z_order()
+        .into_iter()
+        // the global grid always sorts first in `panes_in_z_order` and
+        // always carries `PaneKind::Window`, standing for the chrome under
+        // every real window rather than a tile of its own -- the desktop
+        // chords and the `window` verbs both need `ext_multigrid` for the
+        // rects they read regardless, so its absence here costs nothing a
+        // session without multigrid could have used
+        .filter(|pane| {
+            pane.id != crate::grid::registry::GLOBAL_GRID
+                && matches!(pane.kind, PaneKind::Window | PaneKind::Native { .. })
+        })
+        .collect()
+}
+
+/// The focused tile's own rect, `None` while the cursor sits somewhere
+/// [`tiled_panes`] does not cover (a float, the message area).
+fn focused_tile_rect(model: &Model) -> Option<(u16, u16, u16, u16)> {
+    let grid = model.engine.grids().cursor_grid()?;
+    tiled_panes(model)
+        .into_iter()
+        .find(|pane| pane.id == grid)
+        .map(|pane| pane.slot)
+}
+
+/// The union of every tiled pane's rect: the outer grid `window zoom` reads
+/// a window's fill against. Not the global grid's own size, which includes
+/// the tabline and cmdline rows no window ever draws into.
+fn tiled_bounds(model: &Model) -> Option<(u16, u16, u16, u16)> {
+    let panes = tiled_panes(model);
+    let first = panes.first()?.slot;
+    let (mut min_row, mut min_col) = (first.0, first.1);
+    let (mut max_row, mut max_col) = (first.0 + first.3, first.1 + first.2);
+    for pane in &panes[1..] {
+        let (row, col, width, height) = pane.slot;
+        min_row = min_row.min(row);
+        min_col = min_col.min(col);
+        max_row = max_row.max(row + height);
+        max_col = max_col.max(col + width);
+    }
+    Some((min_row, min_col, max_col - min_col, max_row - min_row))
+}
+
+/// The notice a `window` verb raises when it has nothing to act on: no
+/// tiled pane holds the cursor, or (`flip`) the layout is not the
+/// two-pane shape the verb answers to.
+fn no_target_notice(model: &mut Model, verb: &str) -> Vec<Effect> {
+    model.dirty = true;
+    model
+        .engine
+        .record_native_notice(format!("view: window {verb} has nothing to act on"), false)
+}
+
+/// `Msg::FeatureInvoke { feature: "window", verb: "new" }`: splits the
+/// focused tile along its longer side -- a wide tile beside itself
+/// (`<C-w>v`), a tall one below (`<C-w>s`) -- read off the rect
+/// [`GridRegistry`](crate::grid::registry::GridRegistry) already holds, so
+/// this costs no round trip to ask nvim which way its own window already
+/// is.
+pub(crate) fn window_new(model: &mut Model) -> Vec<Effect> {
+    let Some((_, _, width, height)) = focused_tile_rect(model) else {
+        return no_target_notice(model, "new");
+    };
+    let notation = if width >= height { "<C-w>v" } else { "<C-w>s" };
+    vec![Effect::Rpc(RpcCall::Input {
+        notation: notation.to_string(),
+    })]
+}
+
+/// `Msg::FeatureInvoke { feature: "window", verb: "zoom" }`: a window
+/// already filling [`tiled_bounds`] equalizes back (`<C-w>=`); any other
+/// window fills it (`<C-w>_<C-w>|`). No flag is held between presses --
+/// "back" is reading the layout the second press lands on, the same way
+/// the first press read the one before it.
+pub(crate) fn window_zoom(model: &mut Model) -> Vec<Effect> {
+    let (Some(focused), Some(bounds)) = (focused_tile_rect(model), tiled_bounds(model)) else {
+        return no_target_notice(model, "zoom");
+    };
+    let notation = if focused == bounds {
+        "<C-w>="
+    } else {
+        "<C-w>_<C-w>|"
+    };
+    vec![Effect::Rpc(RpcCall::Input {
+        notation: notation.to_string(),
+    })]
+}
+
+/// `Msg::FeatureInvoke { feature: "window", verb: "flip" }`: turns a
+/// side-by-side pair into a stacked one and back, read off the two tiled
+/// panes' own rects -- sharing a row is side by side, sharing a column is
+/// stacked. `<C-w>t` first so the move always runs from the same one of
+/// the pair regardless of which tile is focused. Answers with
+/// [`no_target_notice`] for any layout other than exactly two tiled panes,
+/// since neither spelling below means anything for one window or four.
+pub(crate) fn window_flip(model: &mut Model) -> Vec<Effect> {
+    let panes = tiled_panes(model);
+    let [a, b] = panes.as_slice() else {
+        return no_target_notice(model, "flip");
+    };
+    let side_by_side = a.slot.0 == b.slot.0;
+    let notation = if side_by_side {
+        "<C-w>t<C-w>K"
+    } else {
+        "<C-w>t<C-w>H"
+    };
+    vec![Effect::Rpc(RpcCall::Input {
+        notation: notation.to_string(),
+    })]
+}
+
+/// `Msg::FeatureInvoke { feature: "window", verb: "float" }`: flips
+/// whichever of view's own surfaces the cursor sits in between
+/// [`SurfacePlacement::Windowed`](crate::native::geometry::SurfacePlacement::Windowed)
+/// and [`SurfacePlacement::Overlay`](crate::native::geometry::SurfacePlacement::Overlay),
+/// through the same [`retile_open_surface`] a ring step drives, on
+/// [`SurfaceState::toggle_placement`](crate::native::placement::SurfaceState::toggle_placement)'s
+/// own terms rather than [`cycle_placements`]'s shared ring: this verb
+/// names one surface, and moving the ring for it would carry the other
+/// three along with a press that never named them.
+pub(crate) fn window_float(model: &mut Model) -> Vec<Effect> {
+    let Some(surface) = model.engine.grids().native_pane_focus() else {
+        return no_target_notice(model, "float");
+    };
+    let (target, changed) = model.surfaces.toggle_placement(surface);
+    if !changed {
+        return Vec::new();
+    }
+    model.dirty = true;
+    retile_open_surface(model, surface, target)
+}
+
+/// `Msg::FeatureInvoke { feature: "window", verb: "to_tabpage_<N>" }`:
+/// hands the focused window's handle and the destination to
+/// [`RpcCall::MoveWindowToTabpage`], whose engine-side lua chunk does the
+/// actual choreography -- capturing the buffer, cursor and view is
+/// nvim-side work no pure `update()` can do without a round trip, so this
+/// arm only resolves which window and issues the call.
+pub(crate) fn window_to_tabpage(model: &mut Model, destination: u32) -> Vec<Effect> {
+    let Some(win) = model
+        .engine
+        .grids()
+        .cursor_grid()
+        .and_then(|grid| model.engine.grids().window_handle(grid))
+    else {
+        return no_target_notice(model, "to_tabpage");
+    };
+    vec![Effect::Rpc(RpcCall::MoveWindowToTabpage {
+        win: win.0,
+        destination,
+    })]
 }
 
 /// Whether `surface` has anything open right now, on whichever placement it
