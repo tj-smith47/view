@@ -30,8 +30,8 @@ use std::path::{Path, PathBuf};
 
 pub use keys::{env_name, keys, ConfigKey};
 pub use resolve::{
-    resolve, resolve_with, Overrides, Resolved, ResolvedConfig, ResolvedEngine, ResolvedUi, Source,
-    TierChoice,
+    profile_report_value, resolve, resolve_with, Overrides, Resolved, ResolvedConfig,
+    ResolvedEngine, ResolvedUi, Source, TierChoice,
 };
 use serde::{Deserialize, Serialize};
 pub use surfaces::surfaces;
@@ -2653,12 +2653,13 @@ mod tests {
     /// gives them -- including the bare `<` the encoder itself spells
     /// `<lt>`.
     ///
-    /// `profile`, `desktop_modifier` and `desktop` are the one exception:
-    /// the example spells `"auto"` and every chord's own `with_super`
-    /// spelling out loud, the same way `[ui] tier`/`theme`/`panes` spell
-    /// `"auto"` rather than shipping absent, so their raw fields differ from
-    /// [`KeysConfig::default`]'s `None`/empty even though they resolve to
-    /// the identical answer.
+    /// `profile` and `desktop_modifier` are the one exception: the example
+    /// spells `"auto"` out loud, the same way `[ui] tier`/`theme`/`panes`
+    /// spell `"auto"` rather than shipping absent, so their raw fields
+    /// differ from [`KeysConfig::default`]'s `None` even though they
+    /// resolve to the identical answer. Every `[keys.desktop]` row ships
+    /// commented out, so `desktop` itself parses empty: a row is written
+    /// only to override its chord's own derived spelling.
     #[test]
     fn the_example_configs_keys_block_is_the_shipped_default() {
         let cfg = ViewConfig::from_toml_str(EXAMPLE_TOML).expect("the example must parse");
@@ -2667,10 +2668,6 @@ mod tests {
             KeysConfig {
                 profile: Some("auto".to_string()),
                 desktop_modifier: Some("auto".to_string()),
-                desktop: view_core::native::chords::desktop_chords()
-                    .iter()
-                    .map(|chord| (chord.id.to_string(), chord.with_super.to_string()))
-                    .collect(),
                 ..KeysConfig::default()
             }
         );
