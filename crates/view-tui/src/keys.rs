@@ -16,7 +16,11 @@ use view_core::msg::{Key, Msg};
 /// `<C-...>`, `<M-...>`, or `<C-M-...>`. `Shift` is folded into the
 /// wrapper for named keys (`<C-S-CR>`) but dropped for plain characters,
 /// since crossterm already reports the shifted character itself (`A`
-/// rather than `a` with `SHIFT` set).
+/// rather than `a` with `SHIFT` set). `Super` (a kitty-protocol-only bit,
+/// spelled `D-` after nvim's own `<D-...>` cmd-key notation) always wraps
+/// and always keeps `Shift` explicit, since a desktop chord's Shift is
+/// part of its own spelling rather than something the terminal already
+/// folded into the character.
 ///
 /// `BackTab` (crossterm's dedicated code for Shift+Tab, always reachable
 /// on the legacy parser on both Unix and Windows) maps to `<S-Tab>`. The
@@ -66,15 +70,25 @@ pub(crate) fn encode_key(ev: &KeyEvent) -> Option<String> {
     // SHIFT bit on the event, which would otherwise double up the prefix.
     let shift_baked_in = matches!(ev.code, KeyCode::BackTab);
 
+    // While Super is held, kitty_key stops folding a shifted char into
+    // itself (a desktop chord's Shift is part of its own spelling), so the
+    // Shift bit needs spelling out here even for a plain character.
+    let super_held = ev.modifiers.contains(KeyModifiers::SUPER);
+
     let mut prefix = String::new();
     if ev.modifiers.contains(KeyModifiers::CONTROL) {
         prefix.push_str("C-");
     }
-    if shift_baked_in || (!is_plain_char && ev.modifiers.contains(KeyModifiers::SHIFT)) {
+    if shift_baked_in
+        || ((!is_plain_char || super_held) && ev.modifiers.contains(KeyModifiers::SHIFT))
+    {
         prefix.push_str("S-");
     }
     if ev.modifiers.contains(KeyModifiers::ALT) {
         prefix.push_str("M-");
+    }
+    if super_held {
+        prefix.push_str("D-");
     }
 
     let wrap = always_bracketed || !prefix.is_empty();
@@ -571,7 +585,13 @@ fn saturate_u16(value: u32) -> u16 {
 fn kitty_key(fields: &[Vec<u32>]) -> Option<(KeyCode, KeyModifiers)> {
     let mods = modifiers(field(fields, 1));
     match fields.first()?.get(1) {
-        Some(&shifted) if mods.contains(KeyModifiers::SHIFT) => {
+        // While Super is held, a desktop chord's own Shift is part of the
+        // chord's spelling (`<S-D-f>`), not something the base:shifted pair
+        // already folds away -- so the base key and the Shift bit both
+        // survive for `encode_key` to spell explicitly.
+        Some(&shifted)
+            if mods.contains(KeyModifiers::SHIFT) && !mods.contains(KeyModifiers::SUPER) =>
+        {
             Some((char_key(shifted)?, mods.difference(KeyModifiers::SHIFT)))
         }
         _ => Some((char_key(field(fields, 0)?)?, mods)),
@@ -819,6 +839,9 @@ fn modifiers(field: Option<u32>) -> KeyModifiers {
     }
     if bits & 0b100 != 0 {
         mods |= KeyModifiers::CONTROL;
+    }
+    if bits & 0b1000 != 0 {
+        mods |= KeyModifiers::SUPER;
     }
     mods
 }
@@ -1349,6 +1372,67 @@ mod tests {
             (b"\x1b[126;5u", "<C-^>"),
         ] {
             assert_eq!(encode_residue_bytes(report), vec![nvim.to_string()]);
+        }
+    }
+
+    /// `Super` is a kitty-protocol-only bit (field bit `0b1000`), so the
+    /// only way it reaches this decoder is the protocol's own `u`-terminated
+    /// form, and it always wraps as `<D-...>`.
+    #[test]
+    fn a_super_chord_decodes_with_its_modifier() {
+        assert_eq!(
+            encode_residue_bytes(b"\x1b[102;9u"),
+            vec!["<D-f>".to_string()]
+        );
+    }
+
+    /// Under `Shift`, `kitty_key` folds a `base:shifted` pair into the
+    /// shifted character alone; while `Super` is held that fold stops (a
+    /// desktop chord's own Shift is part of its spelling, not the
+    /// terminal's), so the base key survives and the two spellings for a
+    /// chord differ only by their `S-`.
+    #[test]
+    fn a_shifted_super_chord_keeps_its_base_key() {
+        for (report, unshifted, shifted) in [
+            (&b"\x1b[102:70"[..], "<D-f>", "<S-D-f>"),
+            (b"\x1b[49:33", "<D-1>", "<S-D-1>"),
+            (b"\x1b[45:95", "<D-->", "<S-D-->"),
+        ] {
+            let base = [report, b";9u"].concat();
+            let with_shift = [report, b";10u"].concat();
+            assert_eq!(encode_residue_bytes(&base), vec![unshifted.to_string()]);
+            assert_eq!(encode_residue_bytes(&with_shift), vec![shifted.to_string()]);
+        }
+    }
+
+    /// The existing behaviour a `Super`-free shifted pair keeps: the
+    /// shifted character stands for itself and `Shift` folds away, exactly
+    /// as an unmodified terminal report already behaved before `Super`
+    /// existed.
+    #[test]
+    fn a_shifted_key_with_no_super_still_folds() {
+        assert_eq!(
+            encode_residue_bytes(b"\x1b[102:70;2u"),
+            vec!["F".to_string()]
+        );
+    }
+
+    /// The field this decoder reads `Super` off of is one only the kitty
+    /// keyboard protocol's `u`-terminated report ever carries; the legacy
+    /// `ESC`-prefixed spelling every other terminal sends has no field to
+    /// carry it in; at the modifier bits `alt_key` ORs in there, so a
+    /// chord decoded off that path never comes out `D-`-prefixed.
+    #[test]
+    fn a_super_chord_on_a_terminal_with_no_protocol_never_arrives() {
+        for byte in 0x20u8..=0x7e {
+            let run = [0x1b, byte];
+            for notation in encode_residue_bytes(&run) {
+                assert!(
+                    !notation.contains("D-"),
+                    "legacy Alt+{} decoded as {notation}",
+                    byte as char
+                );
+            }
         }
     }
 
