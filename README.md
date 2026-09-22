@@ -51,17 +51,25 @@ gap between them and your accent colour on the one you are working in. Turn
 it off with one config key, or let view read your desktop and decide. See
 [`docs/tiled-ui.md`](docs/tiled-ui.md).
 
+![two windows, each in its own frame and gap](assets/tapes/tiled-panes.gif)
+
 **Agents in the editor.** An agent panel that speaks ACP, an agent that
 sees the file, selection and diagnostics you are looking at, and every
 proposed change reviewed as a diff in the file itself.
+
+![the agent panel open beside a buffer, reviewing a proposed change](assets/tapes/agent-panel.gif)
 
 **Remote editing.** `view --remote host:path` edits files on another
 machine over SSH with the same editor, config and clipboard as at home.
 What typing over a link feels like is under [Performance](#performance).
 
+![view opening a file on a remote host over SSH](assets/tapes/remote-editing.gif)
+
 **Your work survives a crash.** If Neovim hangs or crashes underneath
 view, it is interrupted or restarted with your buffers restored, and the
 screen never goes blank.
+
+![the hang banner, then the same buffer back after a restart](assets/tapes/engine-restart.gif)
 
 **Fast where you feel it.** Launch, keypress and scroll are measured with
 your config loaded. See [Performance](#performance).

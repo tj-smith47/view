@@ -74,7 +74,7 @@ command -v tmux >/dev/null 2>&1 || { echo "cap.sh: tmux is not on PATH" >&2; exi
 # a socket of its own, so a capture never attaches to, resizes or kills the
 # server the user is working in
 SOCKET=view-cap-$$
-cleanup() { tmux -L "$SOCKET" kill-server 2>/dev/null || true; }
+. "$HERE/lib.sh"
 trap cleanup EXIT INT TERM
 
 mkdir -p -- "$(dirname -- "$OUT")"

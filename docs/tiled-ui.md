@@ -282,3 +282,43 @@ where a person sees one. Its content spans the full width nvim gave the
 tile. A floating surface draws its own border and, at six columns wide or
 more, a one-cell pad inside it on both sides. Its windowed counterpart keeps
 those four columns for content.
+
+## Screen regions, by crate
+
+For each region on screen, which crate decides what goes there and which
+crate paints it. `view-core` holds the `Model` and the surface tables that
+decide content; `view-surface::render` turns that `Model` into an ordered
+layer list; `view-tui` is the only crate that turns a layer into terminal
+cells. See `docs/surface-ownership.md` for the fuller policy table (what a
+plugin drawing over a region gets told, and the `view.toml` line that hands
+each one back).
+
+```mermaid
+flowchart TB
+    nvim["Neovim: owns the buffer grid"]
+    core["view-core: Model, Surface table, ui.surfaces config"]
+    ai["view-ai: ACP session state"]
+    surf["view-surface: render() -> ordered layer list"]
+    tui["view-tui: the only crate that writes terminal cells"]
+    term["your terminal"]
+
+    nvim -- "ext_* attach, redraw events" --> core
+    ai -- "panel content" --> core
+    core --> surf
+    surf --> tui
+    nvim -- "grid cells, under view's frames" --> tui
+    tui --> term
+```
+
+| region | decided by | painted by |
+| --- | --- | --- |
+| the buffer grid | Neovim | `view-tui` composites nvim's own cells in, unchanged |
+| view frames (tile borders) | `view-core`'s `Surface::Frame` | `view-tui::paint::panes` |
+| the pill (top row) | `view-core`'s `Surface::Tabline` | `view-tui::paint::pill` |
+| toasts | `view-core`'s `Surface::Messages` | `view-tui::paint::toast` |
+| the palette | `view-core`'s `Surface::Cmdline`, `Surface::Popupmenu` | `view-tui::paint` |
+| the file tree | `view-core`'s `[ui.surfaces.tree]`, `native::tree` | `view-tui::paint` |
+| the agent panel | `view-ai`'s ACP session, held in `view-core`'s `AiPanelView` | `view-tui::paint` |
+
+The buffer grid is the one region nvim keeps for itself: view frames it and
+draws every other region around it, but the cells inside stay nvim's.
