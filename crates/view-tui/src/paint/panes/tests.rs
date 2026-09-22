@@ -2371,7 +2371,7 @@ fn palette_in_the_bottom_band(gaps: bool) -> Tiles {
         vec![
             UiEvent::CmdlineShow {
                 content: vec![(0, "e file.txt".to_string())],
-                pos: 11,
+                pos: 10,
                 firstc: ":".to_string(),
                 prompt: String::new(),
                 indent: 0,
@@ -2476,7 +2476,7 @@ fn palette_in_the_top_band(gaps: bool) -> Tiles {
         vec![
             UiEvent::CmdlineShow {
                 content: vec![(0, "e file.txt".to_string())],
-                pos: 11,
+                pos: 10,
                 firstc: ":".to_string(),
                 prompt: String::new(),
                 indent: 0,
@@ -2525,10 +2525,11 @@ fn a_windowed_palette_caret_lands_one_past_the_last_typed_character() {
                 .cursor
                 .expect("the windowed palette holds the caret while `:` is open");
             // query text is `:e file.txt` (firstc `:` plus the typed content,
-            // `pos = 11`), preceded on its row by the border (no pad, one
-            // cell) and the `"> "` prompt mark (two cells): the caret sits
-            // right after the `t` of `.txt`.
-            let expected_col = rect.col + 1 + 2 + 12;
+            // `pos = 10`, one past the last typed character), preceded on
+            // its row by the border (no pad, one cell) and the `"> "`
+            // prompt mark (two cells): the caret sits right after the `t`
+            // of `.txt`.
+            let expected_col = rect.col + 1 + 2 + 11;
             assert_eq!(
                 cursor.row,
                 rect.row + 1,
