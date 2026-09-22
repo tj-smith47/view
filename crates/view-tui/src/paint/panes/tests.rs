@@ -1264,54 +1264,6 @@ const TIERS: [(&str, bool, bool, bool, bool); 3] = [
     ("basic", false, false, false, NO_BOX_GLYPHS),
 ];
 
-/// The gapped split: a frame around each window with a clear cell between
-/// the two frames and around the outside.
-#[test]
-fn vsplit_tiles() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-vsplit-tiles", tier.0),
-            &tiles_dump(tier, tiled(true)),
-        );
-    }
-}
-
-/// The same split with `gaps = false`: one shared line between the windows
-/// and no clear cell anywhere.
-#[test]
-fn vsplit_gapless() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-vsplit-gapless", tier.0),
-            &tiles_dump(tier, tiled(false)),
-        );
-    }
-}
-
-/// The gapped split with a float across the gap: the float's own cells,
-/// border included, stand where the frames and the gap band would be.
-#[test]
-fn vsplit_tiles_float() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-vsplit-tiles-float", tier.0),
-            &tiles_dump(tier, tiled_float(true)),
-        );
-    }
-}
-
-/// A layout nvim built in two steps: three tiles, each framed inside its
-/// own slot, with the two on the right stacked.
-#[test]
-fn vsplit_tiles_nested() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-vsplit-tiles-nested", tier.0),
-            &tiles_dump(tier, tiled_nested(true)),
-        );
-    }
-}
-
 #[test]
 fn full_vsplit() {
     assert_golden("full-vsplit", &dump(true, true, true, DRAWS_BOX_GLYPHS));
@@ -2340,18 +2292,6 @@ fn the_tree_view_paints_into_its_native_panes_rect() {
     );
 }
 
-/// The committed picture of the tree in a tile of its own: its rows inside
-/// the left frame, the buffer's text inside the right one.
-#[test]
-fn tree_windowed() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-tree-windowed", tier.0),
-            &tiles_dump(tier, tree_in_the_left_tile(true)),
-        );
-    }
-}
-
 /// The agent panel windowed into the right tile, mirroring
 /// `tree_in_the_left_tile`: claims the existing tile's window (same grid,
 /// same handle) rather than asking nvim to open a fresh one, and carries one
@@ -2416,19 +2356,6 @@ fn agent_in_the_right_tile(gaps: bool) -> Tiles {
     Tiles { slots, model }
 }
 
-/// The committed picture of the agent panel in a tile of its own: its
-/// transcript line inside the right frame, the buffer's text inside the left
-/// one.
-#[test]
-fn agent_windowed() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-agent-windowed", tier.0),
-            &tiles_dump(tier, agent_in_the_right_tile(true)),
-        );
-    }
-}
-
 /// The band a windowed palette paints carries no nvim window or frame
 /// of its own (`view_surface::render` pushes its `Layer` straight from the
 /// anchor and the cmdline state, with no `OpenNativeWindow`/`WinPos` round
@@ -2463,33 +2390,6 @@ fn palette_in_the_bottom_band(gaps: bool) -> Tiles {
         ],
     );
     Tiles { slots, model }
-}
-
-/// The committed picture of the windowed palette in a band of its own along
-/// the bottom edge: the buffer's text above, nvim's command line inside the
-/// full-width band below, framed through the same tile-frame primitive
-/// every other tile draws with.
-#[test]
-fn palette_windowed() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-palette-windowed", tier.0),
-            &tiles_dump(tier, palette_in_the_bottom_band(true)),
-        );
-    }
-}
-
-/// [`palette_in_the_bottom_band`]'s own mirror with `gaps = false`: no
-/// exempted golden covered this leg, and a band with no gap taken out of
-/// its own rows is exactly the shape the floor's arithmetic changes.
-#[test]
-fn palette_windowed_gapless() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-palette-windowed-gapless", tier.0),
-            &tiles_dump(tier, palette_in_the_bottom_band(false)),
-        );
-    }
 }
 
 /// [`palette_in_the_bottom_band`]'s own mirror at a `size` whose share
@@ -2529,16 +2429,6 @@ fn palette_in_the_bottom_band_at_the_floor(gaps: bool) -> Tiles {
     Tiles { slots, model }
 }
 
-#[test]
-fn palette_windowed_at_the_floor_still_shows_the_typed_command() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-palette-windowed-floor", tier.0),
-            &tiles_dump(tier, palette_in_the_bottom_band_at_the_floor(true)),
-        );
-    }
-}
-
 /// [`palette_in_the_bottom_band`]'s own mirror for `anchor = "top"`.
 fn palette_in_the_top_band(gaps: bool) -> Tiles {
     let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
@@ -2568,18 +2458,6 @@ fn palette_in_the_top_band(gaps: bool) -> Tiles {
         ],
     );
     Tiles { slots, model }
-}
-
-/// The committed picture of the palette anchored to the top instead: nvim's
-/// command line inside the full-width band above, the buffer's text below.
-#[test]
-fn palette_windowed_top() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-palette-windowed-top", tier.0),
-            &tiles_dump(tier, palette_in_the_top_band(true)),
-        );
-    }
 }
 
 /// The windowed band's own caret lands one cell past the last character of
@@ -2853,19 +2731,6 @@ fn notifications_in_the_left_tile(gaps: bool) -> Tiles {
         ],
     );
     Tiles { slots, model }
-}
-
-/// The committed picture of the notification stream in a tile of its own:
-/// the recorded message inside the left frame, the buffer's text inside the
-/// right one.
-#[test]
-fn notifications_windowed() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-notifications-windowed", tier.0),
-            &tiles_dump(tier, notifications_in_the_left_tile(true)),
-        );
-    }
 }
 
 /// The notification stream windowed into a full-width band at the bottom
@@ -3212,29 +3077,6 @@ fn pill_buffers_scene() -> Tiles {
     tiles
 }
 
-/// The committed pictures of the pill above a tiled lattice, one per tier:
-/// the tabpage row and the buffer row, each pinned separately since the
-/// pill reads `tabline_shows` to choose between them.
-#[test]
-fn pill_tabs() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-pill-tabs", tier.0),
-            &tiles_dump(tier, pill_tabs_scene()),
-        );
-    }
-}
-
-#[test]
-fn pill_buffers() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-pill-buffers", tier.0),
-            &tiles_dump(tier, pill_buffers_scene()),
-        );
-    }
-}
-
 /// The `"nvim"` mode bar over a real grid: view's own bottom row, with
 /// background, accent mode and filetype, over the window nvim painted
 /// under `panes = "nvim"` -- the other look mode, which keeps no lattice
@@ -3291,40 +3133,70 @@ fn nvim_bar_dump(tier: (&str, bool, bool, bool, bool)) -> String {
     screen_dump(&tiled_frame(&model))
 }
 
-/// The committed picture of the `"nvim"`-mode bar over a real window, one
-/// per tier.
+/// One scene's dump function, `TIERS`' own row in, a screen dump out.
+type SceneDump = fn((&'static str, bool, bool, bool, bool)) -> String;
+
+/// The tiled family's own scene registry: a stem beside the dump it
+/// produces at a given tier. Both the golden test and
+/// `every_tiled_scene_has_a_golden_at_every_tier` read this one table, the
+/// same shape `CORNERS` closes in `native_overlay_goldens.rs`, so a scene
+/// missing an entry here never runs and never passes the coverage check --
+/// there is no second, hand-kept stem list either one could fall out of
+/// step with.
+const TILED_SCENES: &[(&str, SceneDump)] = &[
+    ("vsplit-tiles", |tier| tiles_dump(tier, tiled(true))),
+    ("vsplit-gapless", |tier| tiles_dump(tier, tiled(false))),
+    ("vsplit-tiles-float", |tier| {
+        tiles_dump(tier, tiled_float(true))
+    }),
+    ("vsplit-tiles-nested", |tier| {
+        tiles_dump(tier, tiled_nested(true))
+    }),
+    ("tree-windowed", |tier| {
+        tiles_dump(tier, tree_in_the_left_tile(true))
+    }),
+    ("agent-windowed", |tier| {
+        tiles_dump(tier, agent_in_the_right_tile(true))
+    }),
+    ("palette-windowed", |tier| {
+        tiles_dump(tier, palette_in_the_bottom_band(true))
+    }),
+    ("palette-windowed-gapless", |tier| {
+        tiles_dump(tier, palette_in_the_bottom_band(false))
+    }),
+    ("palette-windowed-floor", |tier| {
+        tiles_dump(tier, palette_in_the_bottom_band_at_the_floor(true))
+    }),
+    ("palette-windowed-top", |tier| {
+        tiles_dump(tier, palette_in_the_top_band(true))
+    }),
+    ("notifications-windowed", |tier| {
+        tiles_dump(tier, notifications_in_the_left_tile(true))
+    }),
+    ("pill-tabs", |tier| tiles_dump(tier, pill_tabs_scene())),
+    ("pill-buffers", |tier| {
+        tiles_dump(tier, pill_buffers_scene())
+    }),
+    ("nvim-statusline-bar", nvim_bar_dump),
+];
+
+/// The committed picture of every tiled-family scene, one per tier, driven
+/// from [`TILED_SCENES`] rather than one `#[test]` fn per stem.
 #[test]
-fn nvim_statusline_bar() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-nvim-statusline-bar", tier.0),
-            &nvim_bar_dump(tier),
-        );
+fn tiled_scene_goldens() {
+    for (stem, dump) in TILED_SCENES {
+        for tier in TIERS {
+            assert_golden(&format!("{}-{stem}", tier.0), &dump(tier));
+        }
     }
 }
-
-/// Every stem the tiled family owns: a scene added later without its three
-/// tier files fails by the stem's own name instead of shipping an unpinned
-/// picture.
-const COMPOSITOR_STEMS: [&str; 10] = [
-    "vsplit-tiles",
-    "vsplit-gapless",
-    "vsplit-tiles-nested",
-    "pill-tabs",
-    "pill-buffers",
-    "tree-windowed",
-    "agent-windowed",
-    "palette-windowed",
-    "notifications-windowed",
-    "nvim-statusline-bar",
-];
 
 #[test]
 fn every_tiled_scene_has_a_golden_at_every_tier() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("goldens");
-    for stem in COMPOSITOR_STEMS {
+    for (stem, _) in TILED_SCENES {
         for tier in TIERS {
             let path = dir.join(format!("{}-{stem}.txt", tier.0));
             assert!(
