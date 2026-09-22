@@ -195,12 +195,12 @@ fn a_profile_flip_stops_the_chord_while_ctrl_w_h_still_moves_focus() {
     // there is no predicate to wait on -- a fixed pause stands in for the
     // round trip before the negative assertion below relies on it having
     // landed.
-    std::thread::sleep(Duration::from_millis(800));
+    std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(800)));
 
     session.send(SUPER_LEFT).unwrap();
     // a negative wait: give the (now unregistered) chord a real chance to
     // fire before concluding it did not
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(500)));
     assert!(
         !wait_for_focus_side(&mut session, true, Duration::from_millis(200)),
         "the chord must not move focus once the editor profile is live; screen:\n{}",

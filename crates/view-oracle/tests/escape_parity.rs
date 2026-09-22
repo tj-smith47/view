@@ -187,7 +187,7 @@ fn write_as_one_read(session: &mut PtySession, bytes: &[u8]) {
             "pid {pid} never stopped, so the run below would be read in \
              whatever splits the host chose"
         );
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(1)));
     }
     session.send(bytes).unwrap();
     signal(pid, "CONT");

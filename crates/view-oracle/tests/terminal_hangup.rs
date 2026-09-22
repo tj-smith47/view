@@ -164,7 +164,7 @@ fn a_session_whose_pty_master_closed_ends_instead_of_spinning() {
             "the session never came up; screen:\n{}",
             screen.screen().contents()
         );
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(10)));
     };
     let rendered = screen.screen().contents();
 
@@ -181,7 +181,7 @@ fn a_session_whose_pty_master_closed_ends_instead_of_spinning() {
              hung-up pty answers EIO forever, and crossterm's own event source \
              retries it rather than reporting it, so nothing ends the process"
         );
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(10)));
     };
     assert_eq!(
         status.code(),
@@ -203,7 +203,7 @@ fn a_session_whose_pty_master_closed_ends_instead_of_spinning() {
                 "the session left its engine behind: pid {engine} is still in \
                  the process table"
             );
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(10)));
         }
     }
     #[cfg(not(target_os = "linux"))]

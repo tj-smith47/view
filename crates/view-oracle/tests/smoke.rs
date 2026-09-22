@@ -428,7 +428,7 @@ fn wait_for_child_pid(parent_pid: u32, comm: &str, timeout: Duration) -> Option<
                 return Some(candidate);
             }
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(20)));
     }
     None
 }
@@ -501,7 +501,7 @@ fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries
     // than a fix for it. This file's own module doc already documents fixed
     // sleeps over a deterministic "settled" signal as this suite's
     // tradeoff.
-    std::thread::sleep(STARTUP_SETTLE);
+    std::thread::sleep(view_test_support::host_deadline(STARTUP_SETTLE));
     let quit_at = start.elapsed();
     session.send(b"\x1b:wq\r").unwrap();
 
@@ -589,7 +589,7 @@ fn view_survives_a_promptly_replying_terminal_bursting_past_the_probes_chunk_siz
     // A fixed sleep, not a screen-content wait, bridges to the save: see
     // the deadline-path test above for why a screen-content signal would
     // itself become part of the race here.
-    std::thread::sleep(STARTUP_SETTLE);
+    std::thread::sleep(view_test_support::host_deadline(STARTUP_SETTLE));
     let quit_at = start.elapsed();
     session.send(b"\x1b:wq\r").unwrap();
 
@@ -1721,7 +1721,7 @@ fn watch_screen(
         if Instant::now() >= deadline {
             return (false, seen);
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(25)));
     }
 }
 
@@ -1818,7 +1818,7 @@ fn plant_swap_truncated_to(
 
     let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(30));
     while Instant::now() < deadline && !ready.exists() {
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(25)));
     }
     let planted = ready.exists();
     let _ = child.kill();
@@ -2079,7 +2079,9 @@ fn a_stack_of_toasts_expires_one_slot_at_a_time_rather_than_all_at_once() {
         // timeouts is a full timeout short of the moment the fifth slot's own
         // timer even starts, and three past the moment a timer-per-toast
         // design would have taken it down with the rest.
-        std::thread::sleep(TRANSIENT_TOAST_TIMEOUT * 3);
+        std::thread::sleep(view_test_support::host_deadline(
+            TRANSIENT_TOAST_TIMEOUT * 3,
+        ));
         let screen = session.screen();
         // the window this round had to land inside, timed from the dispatch
         // and never from the start of the wait: the fifth slot reaches the
@@ -2141,7 +2143,9 @@ fn a_persistent_emsg_survives_the_same_idle_wait_a_transient_toast_does_not() {
         session.screen()
     );
 
-    std::thread::sleep(view_core::native::toast::TRANSIENT_TOAST_TIMEOUT + Duration::from_secs(4));
+    std::thread::sleep(view_test_support::host_deadline(
+        view_core::native::toast::TRANSIENT_TOAST_TIMEOUT + Duration::from_secs(4),
+    ));
     let screen = session.screen();
     assert!(
         toast_shows(&screen, "errtoken"),
@@ -2696,7 +2700,7 @@ fn wait_for_replayed_cell(
         if Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(100)));
     }
 }
 
@@ -2721,7 +2725,7 @@ fn wait_bounded(
             let _ = child.wait();
             return None;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(50)));
     }
 }
 
@@ -2781,7 +2785,7 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
     // Fixed sleep, not a screen-content wait: see the module doc and the
     // Silent-policy tests above for the same tradeoff this suite always
     // makes when there is no settled-redraw signal to wait on instead.
-    std::thread::sleep(Duration::from_millis(800));
+    std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(800)));
     // `nvim - <scratch>` (per `docs/stdin-relay-wire-capture.md`'s captured
     // `:help -`) opens the piped content into buffer 1 (current, unnamed)
     // and `<scratch>` as a separate buffer 2 -- it does not name the piped
@@ -2957,7 +2961,7 @@ fn a_session_writes_nothing_to_its_own_stderr() {
 
     // Fixed sleep, not a screen-content wait: see the module doc for the
     // same tradeoff every test in this file makes.
-    std::thread::sleep(Duration::from_millis(800));
+    std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(800)));
     master
         .write_all(b"\x1b:qa!\r")
         .expect("write :qa! to the pty master");
@@ -3537,7 +3541,7 @@ fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
     // at the cutover instant
     for _ in 0..150 {
         session.send(b"x").unwrap();
-        std::thread::sleep(Duration::from_millis(3));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(3)));
     }
     // the engine-attached half of the ordering asserted above: the
     // placeholder was observed without this content, and now the content
@@ -3778,7 +3782,7 @@ fn settle_late_answer(policy: QueryPolicy) {
         // that lands here fails its own assertion instead.
         _ => return,
     };
-    std::thread::sleep(delay * 3);
+    std::thread::sleep(view_test_support::host_deadline(delay * 3));
 }
 
 /// One `view` session's own `VIEW_LOG`, taken from a child that started

@@ -115,7 +115,7 @@ fn wait_for_cached_scheme(home: &Path) -> bool {
         if cache_carries_scheme(home) {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(50)));
     }
     false
 }

@@ -85,7 +85,7 @@ fn wait_for_bytes(session: &mut view_oracle::PtySession, needle: &[u8], timeout:
         if Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(20)));
     }
 }
 

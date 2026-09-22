@@ -262,7 +262,7 @@ fn warm_the_home(dir: &Path, home: &Path) {
     // state directory and paint the fallback notice over its content rows
     let deadline = Instant::now() + view_test_support::host_deadline(BUDGET);
     while !theme_cache_written(home) && Instant::now() < deadline {
-        std::thread::sleep(POLL);
+        std::thread::sleep(view_test_support::host_deadline(POLL));
     }
     assert!(
         theme_cache_written(home),
@@ -415,7 +415,7 @@ fn screen_and_recording(session: &mut PtySession) -> Frame {
         }
         // a child still writing would otherwise hold a core for the whole
         // deadline re-reading a grid this size
-        std::thread::sleep(POLL);
+        std::thread::sleep(view_test_support::host_deadline(POLL));
     }
 }
 
@@ -436,7 +436,7 @@ fn settle_together(under_test: &mut PtySession, reference: &mut PtySession) -> b
         } else {
             agreed = 0;
         }
-        std::thread::sleep(POLL);
+        std::thread::sleep(view_test_support::host_deadline(POLL));
     }
     false
 }

@@ -131,7 +131,7 @@ fn watch(
 ) {
     let window = view_test_support::host_deadline(SILENCE);
     while view_at.elapsed() < window || nvim_at.elapsed() < window {
-        std::thread::sleep(POLL);
+        std::thread::sleep(view_test_support::host_deadline(POLL));
         let _ = under_test.raw_output();
         let _ = reference.raw_output();
     }

@@ -86,7 +86,7 @@ fn wait_for_osc52(session: &mut view_oracle::PtySession, timeout: Duration) -> O
         if Instant::now() >= deadline {
             return None;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(20)));
     }
 }
 

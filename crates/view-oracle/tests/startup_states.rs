@@ -372,7 +372,7 @@ fn warm_out(home: &std::path::Path, mut session: PtySession) {
     };
     let deadline = std::time::Instant::now() + view_test_support::host_deadline(BUDGET);
     while !written() && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(25)));
     }
     assert!(
         written(),
@@ -559,7 +559,7 @@ fn the_content_line_is_written_for_the_frame_carrying_window_text() {
     let read_log = || std::fs::read_to_string(&view_log).unwrap_or_default();
     let deadline = std::time::Instant::now() + view_test_support::host_deadline(BUDGET);
     while !read_log().contains(CHROME_FRAME) && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(10)));
     }
     let at_the_chrome_frame = read_log();
     assert!(
@@ -581,7 +581,7 @@ fn the_content_line_is_written_for_the_frame_carrying_window_text() {
 
     let deadline = std::time::Instant::now() + view_test_support::host_deadline(BUDGET);
     while !read_log().contains(CONTENT_FRAME) && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(10)));
     }
     let log = read_log();
     let line = log

@@ -105,7 +105,7 @@ fn warm_the_home(home: &std::path::Path) {
     };
     let deadline = std::time::Instant::now() + view_test_support::host_deadline(BUDGET);
     while !written() && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(25)));
     }
     assert!(
         written(),
@@ -167,7 +167,7 @@ fn a_superseded_claimants_float_reaches_the_history_and_never_the_terminal() {
             .expect("the pty under test accepts a scroll key");
         let deadline = std::time::Instant::now() + view_test_support::host_deadline(BUDGET);
         while under_test.raw_output().len() == before && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(5)));
         }
         let written = under_test.raw_output()[before..].to_vec();
         assert!(

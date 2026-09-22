@@ -107,7 +107,7 @@ fn engine_session_ignores_an_intrusive_user_config() {
     let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(10));
     let mut leaked = leaky.handle.eval_str(BUFFER_PROBE).unwrap();
     while !leaked.contains(MARKER) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(25)));
         leaked = leaky.handle.eval_str(BUFFER_PROBE).unwrap();
     }
     assert!(

@@ -414,7 +414,7 @@ pub fn wait_for_log_line(path: &Path, needle: &str) -> std::time::Instant {
             "view never logged {needle:?} within {budget}; log:\n{}",
             std::fs::read_to_string(path).unwrap_or_default()
         );
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(5)));
     }
 }
 

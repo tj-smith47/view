@@ -180,7 +180,7 @@ fn a_system_clipboard_yank_is_independently_visible_to_a_fresh_process() {
                 return;
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(100)));
     }
 
     // durability, not just a momentary echo: arboard's own X11 backend
@@ -193,7 +193,7 @@ fn a_system_clipboard_yank_is_independently_visible_to_a_fresh_process() {
     // through a connection the worker holds open" from "wrote, then tore
     // the connection down a moment later" -- the defect this test exists
     // to catch.
-    std::thread::sleep(Duration::from_millis(400));
+    std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(400)));
     let durable = matches!(
         read_system_clipboard(&bin, '+', &display),
         ClipboardProbe::Text(text) if text == EXPECTED_LINEWISE_TEXT

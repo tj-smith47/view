@@ -122,7 +122,7 @@ fn a_paste_through_the_users_own_osc52_provider_returns_the_yanked_text() {
             "the yank's own escape never reached the terminal, so the copy \
              never happened and this leg would prove nothing about the paste"
         );
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(20)));
     }
 
     let started = Instant::now();

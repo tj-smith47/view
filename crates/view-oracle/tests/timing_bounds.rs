@@ -160,6 +160,22 @@ const DECLARED_ABSOLUTES: &[DeclaredAbsolute] = &[
         grounds: "it is the deadline quiesce itself was handed, which the \
                   assertion exists to prove was not exhausted",
     },
+    DeclaredAbsolute {
+        file: "view-oracle/tests/escape_parity.rs",
+        line: "std::thread::sleep(common::PROBE_HARD_CAP.saturating_sub(armed.elapsed()));",
+        grounds: "it places the next byte exactly past the guard window \
+                  view-tui's own tiers.rs defines as a real wall clock, and \
+                  widening it for the host's load would place the byte on \
+                  the wrong side of the boundary this test exists to cross",
+    },
+    DeclaredAbsolute {
+        file: "view-oracle/tests/control_byte_parity.rs",
+        line: "std::thread::sleep(common::PROBE_HARD_CAP.saturating_sub(armed.elapsed()));",
+        grounds: "it places the next byte exactly past the guard window \
+                  view-tui's own tiers.rs defines as a real wall clock, and \
+                  widening it for the host's load would place the byte on \
+                  the wrong side of the boundary this test exists to cross",
+    },
 ];
 
 #[test]
@@ -213,6 +229,29 @@ fn no_timing_test_bounds_a_measured_span_with_an_undeclared_absolute() {
          -- if the wall clock really does mean something other than how fast \
          the host is -- add it to DECLARED_ABSOLUTES with the grounds that \
          make it one",
+        undeclared.join("\n  ")
+    );
+}
+
+#[test]
+fn no_view_oracle_test_sleeps_an_undeclared_absolute() {
+    let mut undeclared = Vec::new();
+    for (name, source) in view_oracle_test_sources() {
+        for found in sleep_bounds(&source, &common::whole_source(&name)) {
+            if is_declared(&name, &found) {
+                continue;
+            }
+            undeclared.push(format!("{name}:{}: {}", found.number, found.line));
+        }
+    }
+    assert!(
+        undeclared.is_empty(),
+        "these sleeps spend a wall clock nothing widens for the host's load, \
+         the same shape BLOCKING_WAITS already refuses for recv_timeout and \
+         wait_timeout:\n  {}\nWrap the argument in \
+         view_test_support::host_deadline, or -- if the delay is real and \
+         fixed rather than a guess at host speed -- add it to \
+         DECLARED_ABSOLUTES with the grounds that make it one",
         undeclared.join("\n  ")
     );
 }
@@ -398,6 +437,17 @@ const SCALERS: [&str; 3] = ["host_deadline", "HostBudget", "rpc_deadline"];
 /// method with the same prefix is not read as one.
 const BLOCKING_WAITS: [&str; 2] = ["recv_timeout(", "wait_timeout("];
 
+/// `std::thread::sleep`, read the same way [`BLOCKING_WAITS`] are: a call
+/// whose argument is an absolute duration spends the same wall clock on a
+/// loaded host it would on an idle one. Kept out of `BLOCKING_WAITS` and
+/// graded only against [`view_oracle_test_sources`] rather than the whole
+/// workspace: the dozens of `sleep` calls in every other crate's tests and
+/// fixtures have not been read against this rule yet, and a workspace-wide
+/// add here would fail them on a rule they never agreed to.
+/// `desktop_chords_live.rs:198` and `:203` shipped this shape twice before
+/// this list existed to catch it.
+const SLEEP_WAITS: [&str; 1] = ["std::thread::sleep("];
+
 /// One place a measured span is bounded by a wall clock nothing scales.
 struct AbsoluteBound {
     number: usize,
@@ -456,6 +506,47 @@ fn absolute_span_bounds(source: &str, declarations: &str) -> Vec<AbsoluteBound> 
             }
         }
         for waiter in BLOCKING_WAITS {
+            for at in offsets_of(&statement.text, waiter) {
+                let open = at + waiter.len() - 1;
+                if is_absolute(call_arguments(&statement.text[open..]), &consts) {
+                    push(open, statement);
+                }
+            }
+        }
+    }
+    found.sort_by_key(|bound| bound.number);
+    found.dedup_by_key(|bound| bound.number);
+    found
+}
+
+/// This crate's own test files, and not the rest of the workspace --
+/// [`SLEEP_WAITS`]'s population, kept narrow for the reason named there.
+fn view_oracle_test_sources() -> Vec<(String, String)> {
+    common::workspace_test_sources()
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("view-oracle/tests/") && !name.ends_with(SELF_SOURCE))
+        .collect()
+}
+
+/// Every [`SLEEP_WAITS`] call in `source` whose argument is an absolute
+/// duration, read the same way [`absolute_span_bounds`] reads
+/// [`BLOCKING_WAITS`].
+fn sleep_bounds(source: &str, declarations: &str) -> Vec<AbsoluteBound> {
+    let lines: Vec<&str> = source.lines().collect();
+    let consts = absolute_constants(&statements(declarations));
+    let statements = statements(source);
+    let mut found = Vec::new();
+    let mut push = |at: usize, statement: &Statement| {
+        let number = statement.lines.get(at).copied().unwrap_or(1);
+        let line = lines
+            .get(number.saturating_sub(1))
+            .unwrap_or(&"")
+            .trim()
+            .to_owned();
+        found.push(AbsoluteBound { number, line });
+    };
+    for statement in &statements {
+        for waiter in SLEEP_WAITS {
             for at in offsets_of(&statement.text, waiter) {
                 let open = at + waiter.len() - 1;
                 if is_absolute(call_arguments(&statement.text[open..]), &consts) {
