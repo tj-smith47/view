@@ -37,6 +37,10 @@ const CTRL_W_H: &[u8] = b"\x17h";
 /// `<C-w>l`, the mirror of [`CTRL_W_H`].
 const CTRL_W_L: &[u8] = b"\x17l";
 
+/// `<M-,>`, the legacy escape-prefixed spelling of `Alt`+`comma` -- the
+/// `notifications`/`dismiss` chord's alt spelling, and every terminal's own.
+const ALT_COMMA: &[u8] = b"\x1b,";
+
 /// Plants `[ui] panes = "nvim"`, every registry `[native]` feature off, and
 /// `[keys] profile = "desktop"`: the desktop profile forced rather than
 /// derived, so this leg proves the chord itself rather than the
@@ -207,6 +211,69 @@ fn a_profile_flip_stops_the_chord_while_ctrl_w_h_still_moves_focus() {
     assert!(
         wait_for_focus_side(&mut session, true, BUDGET),
         "<C-w>h must still move focus under the editor profile; screen:\n{}",
+        session.screen()
+    );
+}
+
+/// Plants the desktop profile with `notifications` left on (every other
+/// registry feature off, for the same reason [`plant_desktop_profile`]
+/// turns them off), so this leg's chord reaches a real `Rhs::Invoke`
+/// dispatch rather than the `Rhs::Keys` `focus_left` both legs above press.
+fn plant_desktop_profile_with_notifications(home: &std::path::Path) {
+    let dir = common::xdg_home(home, "XDG_CONFIG_HOME").join("view");
+    std::fs::create_dir_all(&dir).expect("the isolated config home must be creatable");
+    let mut text = String::from("[native]\n");
+    for feature in view_core::native::registry::features() {
+        if feature.id != "notifications" {
+            text.push_str(feature.id);
+            text.push_str(" = false\n");
+        }
+    }
+    text.push_str("\n[keys]\nprofile = \"desktop\"\n");
+    std::fs::write(dir.join("view.toml"), text).expect("the isolated view.toml must be writable");
+}
+
+/// `notifications dismiss` (`<M-,>`) end to end: a real toast raised, a real
+/// chord byte sent, the toast gone. `focus_left`, the chord both legs above
+/// press, is `Rhs::Keys` -- it sets an existing nvim key and costs nothing
+/// beyond what typing that key already costs. This is the table's other
+/// shape: `Rhs::Invoke` sends `rpcnotify` to view's own bridge, which
+/// `Msg::FeatureInvoke` dispatches to `Messages::dismiss_newest`
+/// (`update/mod.rs`), a path no `Keys` chord exercises.
+#[test]
+fn an_invoke_chord_reaches_its_verb_end_to_end() {
+    let paths = common::ScratchPaths::new("chord-invoke");
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.cwd(
+        paths
+            .scratch
+            .parent()
+            .expect("the scratch file always sits inside the scratch root"),
+    );
+    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+    plant_desktop_profile_with_notifications(&paths.isolated_home);
+
+    let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, QueryPolicy::AnswerDa1)
+        .expect("PtySession::spawn_configured_with against target/debug/view");
+    assert!(
+        session.wait_for("~", BUDGET),
+        "view never painted its startup shell; screen:\n{}",
+        session.screen()
+    );
+
+    session.send(b"\x1b:echoerr 'chordinvoketoken'\r").unwrap();
+    assert!(
+        session.wait_for("chordinvoketoken", BUDGET),
+        "the echoerr toast never appeared; screen:\n{}",
+        session.screen()
+    );
+
+    session.send(ALT_COMMA).unwrap();
+    assert!(
+        session.wait_for_screen(BUDGET, |screen| !screen
+            .contents()
+            .contains("chordinvoketoken")),
+        "notifications dismiss (<M-,>) never took the toast down; screen:\n{}",
         session.screen()
     );
 }
