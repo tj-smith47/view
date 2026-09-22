@@ -2692,8 +2692,20 @@ fn resizing_one_windowed_sidebar_carries_its_width_to_a_sibling_stacked_beside_i
 
 /// A terminal with no room for the tree's own vertical split beside the
 /// user's window, which raises E36 ("No room") from `topleft vsplit`
-/// partway through the open chunk's body.
-fn tiny_windowed_tree_session(dir: &Path) -> view_oracle::EngineSession {
+/// partway through the open chunk's body. Left at the tree's default
+/// (overlay) placement: the toggle below opens it with no nvim window of
+/// its own, so the only `OpenNativeWindow` this session ever sends is the
+/// one a later ring step raises with `enter = false`.
+///
+/// The ring's own anchor for the tree is always `left` or `right`
+/// (`accepted_anchors`), never `bottom`, so this terminal's 12x3 shape
+/// alone does not starve a vertical split of room the way it does the
+/// horizontal one the old toggle-driven leg forced through an anchor the
+/// tree never actually accepts. `winminwidth` is what a real "no room"
+/// vertical split comes from instead: raised past half the terminal's own
+/// width, `topleft vsplit` cannot satisfy it for either side and refuses
+/// with the same E36 the horizontal case raised.
+fn tiny_overlay_tree_session(dir: &Path) -> view_oracle::EngineSession {
     let mut engine =
         view_oracle::EngineSession::spawn_with_ext(12, 3, view_oracle::UI_EXT_OPTIONS_MULTIGRID)
             .expect("EngineSession::spawn_with_ext against real nvim");
@@ -2702,14 +2714,10 @@ fn tiny_windowed_tree_session(dir: &Path) -> view_oracle::EngineSession {
         .arm_and_input(&format!(":cd {}<CR>", dir.display()))
         .unwrap();
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
-    engine.set_surface(
-        view_core::native::geometry::NativeSurface::Tree,
-        view_core::native::geometry::SurfaceLayout::new(
-            view_core::native::geometry::SurfacePlacement::Windowed,
-            view_core::native::geometry::Anchor::Bottom,
-            30,
-        ),
-    );
+    engine
+        .arm_and_input(":set winwidth=99 winminwidth=99<CR>")
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     engine
 }
 
@@ -2718,19 +2726,39 @@ fn tiny_windowed_tree_session(dir: &Path) -> view_oracle::EngineSession {
 /// the `vim.cmd` that could raise and restored only on the success path.
 /// The open chunk now runs the whole split-and-configure step under one
 /// `pcall`, so the refusal still restores it.
+///
+/// The toggle only opens the tree as an overlay (`enter = true` never
+/// writes `eventignore` at all, see `native_window.rs`'s own `if not
+/// enter` guard) -- it is here for the window-count baseline. The ring
+/// step that follows is the one path that actually reaches the guarded
+/// `enter = false` open this leg exists to prove: a retile from overlay
+/// to windowed, into a terminal with no room for the split.
 #[test]
 fn opening_a_windowed_surface_with_no_room_for_the_split_leaves_eventignore_untouched_against_real_nvim(
 ) {
     let work = common::ScratchPaths::new("close-battery-no-room-open");
     let dir = build_fixture(&work.isolated_home);
-    let mut engine = tiny_windowed_tree_session(&dir);
+    let mut engine = tiny_overlay_tree_session(&dir);
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
-        .expect("the toggle sends its own open request into a terminal with no room for it");
+        .expect("the toggle opens the tree as an overlay, no window of its own");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        1,
+        "an overlay tree must draw over the buffer, never split a window for it"
+    );
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "ui".to_string(),
+            verb: "cycle_surfaces".to_string(),
+        })
+        .expect("the ring step sends its own open request into a terminal with no room for it");
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
 
     assert_eq!(
@@ -2751,12 +2779,27 @@ fn opening_a_windowed_surface_with_no_room_for_the_split_leaves_eventignore_unto
 /// refuses outright (`getcmdwintype() ~= ''`) before it ever sets
 /// `eventignore`, so this leg never even reaches the pcall the one above
 /// does.
+///
+/// The tree opens as an overlay before the command-line window is
+/// entered, the same as the E36 leg above: the toggle's `enter = true`
+/// open never writes `eventignore` at all, so only the ring step's
+/// `enter = false` retile, taken from inside `q:`, actually exercises the
+/// guard this leg is named for.
 #[test]
 fn opening_a_windowed_surface_from_inside_the_command_line_window_leaves_eventignore_untouched_against_real_nvim(
 ) {
     let work = common::ScratchPaths::new("close-battery-cmdwin-open");
     let dir = build_fixture(&work.isolated_home);
-    let mut engine = windowed_tree_session(&dir);
+    let mut engine = overlay_session(&dir);
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the toggle opens the tree as an overlay, no window of its own");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
     engine.arm_and_input("q:").unwrap();
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     assert_eq!(
@@ -2768,10 +2811,10 @@ fn opening_a_windowed_surface_from_inside_the_command_line_window_leaves_eventig
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
-            feature: "tree".to_string(),
-            verb: "toggle".to_string(),
+            feature: "ui".to_string(),
+            verb: "cycle_surfaces".to_string(),
         })
-        .expect("the toggle sends its own open request from inside the command-line window");
+        .expect("the ring step sends its own open request from inside the command-line window");
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
 
     assert_eq!(
@@ -2786,5 +2829,45 @@ fn opening_a_windowed_surface_from_inside_the_command_line_window_leaves_eventig
         engine.eval_str("&eventignore").unwrap().trim(),
         "",
         "a refused open left eventignore set for the rest of the session"
+    );
+}
+
+/// E36 and E11 both refuse the split itself, before the chunk ever holds a
+/// window handle. This leg forces the other shape: a split that succeeds,
+/// then a failure on the window the split just made -- `winfixbuf`, primed
+/// by a one-shot `WinNew` autocmd on the new window before the chunk's own
+/// `nvim_win_set_buf` runs, raises `E1513` deterministically. A window a
+/// failure like this leaves behind is what `native_window.rs`'s failure arm
+/// now closes.
+#[test]
+fn a_post_split_failure_on_the_new_window_leaves_no_window_behind_against_real_nvim() {
+    let work = common::ScratchPaths::new("close-battery-post-split-failure");
+    let dir = build_fixture(&work.isolated_home);
+    let mut engine = windowed_tree_session(&dir);
+    let before = nvim_window_sizes(&mut engine).len();
+
+    engine
+        .arm_and_input(":autocmd WinNew * ++once setlocal winfixbuf<CR>")
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    engine
+        .feed(view_core::msg::Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        })
+        .expect("the toggle sends its own open request into the primed autocmd");
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
+
+    assert_eq!(
+        nvim_window_sizes(&mut engine).len(),
+        before,
+        "the split the chunk could not finish configuring must not survive \
+         the failure that stopped it"
+    );
+    assert_eq!(
+        engine.eval_str("winnr('$')").unwrap().trim(),
+        before.to_string(),
+        "winnr('$') must read exactly what it did before the failed open"
     );
 }

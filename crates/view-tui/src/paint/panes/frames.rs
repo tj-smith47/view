@@ -664,3 +664,67 @@ fn screen(row: u16, col: u16, area: Rect, damage: &Damage) -> Option<(u16, u16)>
     }
     Some((x, y))
 }
+
+/// Paints the windowed command palette's band through this same primitive
+/// rather than the float style every other overlay uses, so the band
+/// joins the one family of tiles instead of reading as a different kind
+/// of box: a plain `box_edge` border (no gapless lattice, since the band
+/// has no neighbouring slot to share a junction with), the surface's own
+/// title on the top edge in the surface's own style, and an empty bottom
+/// edge, matching a real windowed tile's own footer with no window
+/// status to state.
+///
+/// `area` is already the band's own rect (`Model::palette_rect`'s
+/// `windowed` answer): the caller's gap ring, if any, is baked into that
+/// rect by `palette_rect` itself, so the border is drawn flush with
+/// `area`'s own edges here, exactly where a real tile's `box_edge` call
+/// draws one cell inside its already-gapped slot.
+pub(crate) fn paint_windowed_palette(
+    layer: &view_surface::Layer,
+    theme: &Theme,
+    borders: BorderSet,
+    area: Rect,
+    damage: &Damage,
+    buf: &mut Buffer,
+) {
+    let view_surface::LayerKind::Palette(view) = &layer.kind else {
+        return;
+    };
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let style = ratatui_style(theme.accent());
+    box_edge(
+        0,
+        0,
+        area.width,
+        area.height,
+        borders,
+        style,
+        area,
+        damage,
+        buf,
+    );
+    if damage.covers_row_of(area, 0) {
+        let top_edge = Rect::new(area.x, area.y, area.width, 1);
+        write_edge(
+            &[vec![Span::new(view.title.clone(), StyleRole::Title)]],
+            style,
+            theme,
+            top_edge,
+            buf,
+        );
+    }
+    let interior = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    if interior.width == 0 || interior.height == 0 {
+        return;
+    }
+    let laid =
+        view_surface::overlay::unframed_rows(interior.width, interior.height, &layer.kind, borders);
+    super::super::paint_native_overlay(layer, Some(&laid), theme, interior, damage, buf);
+}

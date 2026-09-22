@@ -104,10 +104,30 @@ fn palette_layer_rect(engine: &mut view_oracle::EngineSession) -> Option<view_su
 /// tile this frame -- the actual glyphs [`view_oracle::EngineSession::screen_rows`]
 /// renders, never the model's own copy of what it meant to draw. `None`
 /// (no tile painted) reads as `false`.
+///
+/// Every call also asserts the band's own shape: centred across the full
+/// terminal width, anchored to the bottom edge, by the same ring gap on
+/// every side (`palette_rect`'s doc -- zero under `gaps = false`, two rows
+/// and columns under the default `gaps = true`). A windowed palette painted
+/// off to one side, narrowed, or anchored somewhere other than the bottom
+/// still contains `needle` and would otherwise read as a pass here -- this
+/// is the one place every leg that confirms the tile is up reads its rect.
 fn tile_shows(engine: &mut view_oracle::EngineSession, needle: &str) -> bool {
     let Some(rect) = palette_layer_rect(engine) else {
         return false;
     };
+    let right_margin = COLS.saturating_sub(rect.col).saturating_sub(rect.width);
+    assert_eq!(
+        rect.col, right_margin,
+        "the windowed palette band must be centred across the full \
+         terminal width, the same ring gap on its left and right"
+    );
+    let bottom_margin = ROWS.saturating_sub(rect.row).saturating_sub(rect.height);
+    assert_eq!(
+        rect.col, bottom_margin,
+        "the windowed palette band must be anchored to the bottom edge, \
+         the same ring gap below it as beside it"
+    );
     let rows = engine.screen_rows();
     (rect.row..rect.row.saturating_add(rect.height)).any(|r| {
         rows.get(usize::from(r)).is_some_and(|row| {

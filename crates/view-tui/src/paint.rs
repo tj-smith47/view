@@ -849,6 +849,9 @@ fn composite_layers(
             LayerKind::Speculated(cells) => {
                 paint_speculated(cells, view_surface::grid_origin(model), damage, buf);
             }
+            LayerKind::Palette(_) if model.palette_windowed_active() => {
+                panes::frames::paint_windowed_palette(layer, &theme, borders, area, damage, buf);
+            }
             LayerKind::Picker(_)
             | LayerKind::Tree(_)
             | LayerKind::Statusline(_)

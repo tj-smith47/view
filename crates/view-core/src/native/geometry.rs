@@ -595,6 +595,12 @@ pub const PALETTE_BAND_MIN_ROWS: u16 = 4;
 /// frame with the typed text nowhere to land. A terminal too short to hold
 /// the floor plus its own gap has nowhere left to shrink, so this open
 /// falls back to the centred float instead.
+///
+/// Under gaps the band sits two rings in from the terminal edge, the same
+/// two `frames::paint_frames` draws around a real tile (the outer one
+/// view's own window layout leaves around a split, the inner one the
+/// frame's own `box_edge` inset draws), so the band's border lines up with
+/// a buffer tile's rather than sitting one column short of it.
 #[must_use]
 pub fn palette_rect(
     layout: SurfaceLayout,
@@ -615,11 +621,8 @@ pub fn palette_rect(
         .with_anchor(layout.anchor)
         .rect(term_w, bounds_h);
     let content_height = band.height.max(PALETTE_BAND_MIN_ROWS);
-    let reserved_height = if gaps {
-        content_height.saturating_add(2)
-    } else {
-        content_height
-    };
+    let rings: u16 = if gaps { 2 } else { 0 };
+    let reserved_height = content_height.saturating_add(rings.saturating_mul(2));
     if reserved_height > bounds_h {
         return centred();
     }
@@ -633,11 +636,7 @@ pub fn palette_rect(
         width: band.width,
         height: reserved_height,
     };
-    if gaps {
-        rect.shrink_one()
-    } else {
-        rect
-    }
+    (0..rings).fold(rect, |rect, _| rect.shrink_one())
 }
 
 #[cfg(test)]

@@ -197,9 +197,10 @@ end
 -- the whole split-and-configure step runs under one pcall so a failure
 -- partway through (no room for the window is the reachable one) still
 -- restores `eventignore` below rather than leaving it set for the rest
--- of the session; `buf` is declared outside the closure so the buffer a
--- failed attempt already created can be cleaned up too
+-- of the session; `buf` and `win` are declared outside the closure so a
+-- buffer or window a failed attempt already created can be cleaned up too
 local buf = nil
+local win = nil
 local ok, result = pcall(function()
   buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype = 'nofile'
@@ -251,7 +252,7 @@ local ok, result = pcall(function()
   else
     vim.cmd(commands[split] or 'topleft vsplit')
   end
-  local win = vim.api.nvim_get_current_win()
+  win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, buf)
   if vertical then
     vim.api.nvim_win_set_width(win, cells)
@@ -310,6 +311,9 @@ if not enter then
   vim.o.eventignore = ei
 end
 if not ok then
+  if win and vim.api.nvim_win_is_valid(win) then
+    pcall(vim.api.nvim_win_close, win, true)
+  end
   if buf then
     pcall(vim.api.nvim_buf_delete, buf, { force = true })
   end
@@ -987,6 +991,23 @@ mod tests {
             "a failed open no longer deletes the scratch buffer it had \
              already created -- one instance in the BufWinEnter callback's \
              own cleanup and one in the failure branch"
+        );
+        let win_close = OPEN_NATIVE_WINDOW_CHUNK
+            .find("pcall(vim.api.nvim_win_close, win, true)")
+            .expect(
+                "a failed open no longer closes the split it had already \
+                 made before the failure -- an option written on the new \
+                 window after the split is the reachable case",
+            );
+        assert!(
+            ok_check < win_close,
+            "the window close runs before the chunk even knows the open \
+             failed"
+        );
+        assert!(
+            win_close < OPEN_NATIVE_WINDOW_CHUNK.rfind("error(result)").unwrap(),
+            "the window close runs after the failure is already re-raised, \
+             so it never runs at all"
         );
     }
 
