@@ -1436,6 +1436,134 @@ mod tests {
         }
     }
 
+    /// Reads a bracketed notation's leading `<C-…><S-…><M-…><D-…>` prefix
+    /// (any subset, table order) off into modifier bits, leaving the base
+    /// token -- the desktop chord table's own vocabulary (an arrow, `CR`,
+    /// `Tab`, `BS`, `Space`, or one printable character), read back
+    /// independent of `encode_key`/`encode_residue_bytes` so building an
+    /// event or a byte run from it and running that through the real
+    /// encoder is a check on the table, not a tautology.
+    fn split_notation(notation: &str) -> (KeyModifiers, &str) {
+        let inner = notation
+            .strip_prefix('<')
+            .and_then(|n| n.strip_suffix('>'))
+            .expect("every desktop chord spelling is bracketed");
+        let mut mods = KeyModifiers::empty();
+        let mut rest = inner;
+        loop {
+            rest = if let Some(r) = rest.strip_prefix("C-") {
+                mods |= KeyModifiers::CONTROL;
+                r
+            } else if let Some(r) = rest.strip_prefix("S-") {
+                mods |= KeyModifiers::SHIFT;
+                r
+            } else if let Some(r) = rest.strip_prefix("M-") {
+                mods |= KeyModifiers::ALT;
+                r
+            } else if let Some(r) = rest.strip_prefix("D-") {
+                mods |= KeyModifiers::SUPER;
+                r
+            } else {
+                break;
+            };
+        }
+        (mods, rest)
+    }
+
+    /// The crossterm event the kitty keyboard protocol reports for a
+    /// bracketed notation.
+    fn kitty_event_for(notation: &str) -> KeyEvent {
+        let (mods, base) = split_notation(notation);
+        let code = match base {
+            "Left" => KeyCode::Left,
+            "Right" => KeyCode::Right,
+            "Up" => KeyCode::Up,
+            "Down" => KeyCode::Down,
+            "CR" => KeyCode::Enter,
+            "Tab" => KeyCode::Tab,
+            "BS" => KeyCode::Backspace,
+            "Space" => KeyCode::Char(' '),
+            _ => KeyCode::Char(base.chars().next().expect("single-char base token")),
+        };
+        KeyEvent::new(code, mods)
+    }
+
+    fn arrow_bytes(letter: char, shift: bool) -> Vec<u8> {
+        if shift {
+            format!("\x1b[1;2{letter}").into_bytes()
+        } else {
+            format!("\x1b[{letter}").into_bytes()
+        }
+    }
+
+    /// The raw bytes a terminal with no kitty keyboard protocol sends for a
+    /// bracketed notation: `Alt` is a leading `ESC` over whatever
+    /// `Ctrl`/`Shift`/the base key send on their own, the same composition
+    /// [`alt_key`] reads back on the decode side.
+    fn legacy_bytes_for(notation: &str) -> Vec<u8> {
+        let (mods, base) = split_notation(notation);
+        let ctrl = mods.contains(KeyModifiers::CONTROL);
+        let shift = mods.contains(KeyModifiers::SHIFT);
+        let mut bytes = match base {
+            "Left" => arrow_bytes('D', shift),
+            "Right" => arrow_bytes('C', shift),
+            "Up" => arrow_bytes('A', shift),
+            "Down" => arrow_bytes('B', shift),
+            "Tab" if shift => b"\x1b[Z".to_vec(),
+            "Tab" => b"\t".to_vec(),
+            "CR" => b"\r".to_vec(),
+            "Space" if ctrl => vec![0x00],
+            "Space" => b" ".to_vec(),
+            base => {
+                let c = base.chars().next().expect("single-char base token");
+                if ctrl {
+                    vec![c.to_ascii_lowercase() as u8 - b'a' + 1]
+                } else {
+                    c.to_string().into_bytes()
+                }
+            }
+        };
+        if mods.contains(KeyModifiers::ALT) {
+            let mut escaped = vec![0x1b];
+            escaped.append(&mut bytes);
+            bytes = escaped;
+        }
+        bytes
+    }
+
+    /// Every `with_super` spelling in the desktop chord table is the
+    /// protocol's own report for that chord, run through `encode_key`: the
+    /// 92 table spellings are bytes the encoder actually emits, not prose
+    /// the table only asserts.
+    #[test]
+    fn a_super_chord_is_spelled_the_way_the_table_spells_it() {
+        for chord in view_core::native::chords::desktop_chords() {
+            assert_eq!(
+                encode_key(&kitty_event_for(chord.with_super)),
+                Some(chord.with_super.to_string()),
+                "chord {} with_super {}",
+                chord.id,
+                chord.with_super
+            );
+        }
+    }
+
+    /// Every `with_alt` spelling is reachable on a terminal with no kitty
+    /// keyboard protocol at all: the legacy `ESC`-prefixed bytes for that
+    /// chord, decoded independent of the table, come back byte-equal.
+    #[test]
+    fn every_alt_spelling_is_one_the_legacy_path_delivers() {
+        for chord in view_core::native::chords::desktop_chords() {
+            assert_eq!(
+                encode_residue_bytes(&legacy_bytes_for(chord.with_alt)),
+                vec![chord.with_alt.to_string()],
+                "chord {} with_alt {}",
+                chord.id,
+                chord.with_alt
+            );
+        }
+    }
+
     /// The Alt chord an `ESC` in front of anything spells, which is the
     /// engine's own reading of the pair (termkey recurses past the escape
     /// and ors `KEYMOD_ALT` into whatever it finds). A user whose mapping
