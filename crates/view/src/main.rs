@@ -981,6 +981,29 @@ fn caps_notice(
     })
 }
 
+/// `--print-caps`: resolves the terminal's own capabilities and exits,
+/// touching nothing an editing session needs -- no engine spawn, no shell
+/// frame, nothing painted before the table itself reaches stdout. The
+/// report reads the terminal alone through [`Term::init`] and
+/// [`Term::settle_probe`], the same two calls the ordinary startup path
+/// makes, called here on their own instead of in the middle of it.
+fn print_caps_and_exit(cli: &Cli, resolved: &ResolvedConfig) -> Result<()> {
+    let mut term = Term::init(resolved.ui.tier.value.map(Tier::from))
+        .context("failed to initialize terminal backend")?;
+    let _probe = term
+        .settle_probe()
+        .context("failed to take the terminal capability probe off the terminal")?;
+    // `caps_notice` answers `None` only when neither `cli.print_caps` nor a
+    // tier override is set, and `cli.print_caps` is this function's own
+    // reason for running -- the fallback line covers the branch the type
+    // still requires without asserting the one this call site never sees.
+    let report = caps_notice(cli, resolved, term.caps(), term.caps_source())
+        .unwrap_or_else(|| String::from("view: terminal capabilities: unavailable"));
+    term.restore_now();
+    println!("{report}");
+    std::process::exit(0);
+}
+
 /// Where the capabilities came from, with an override named down to the
 /// layer that set it.
 ///
@@ -1079,6 +1102,13 @@ fn main() -> Result<()> {
     let config_path = resolve_config_path(&cli);
     let (file, config_error) = load_view_config(config_path.as_deref());
     let resolved = resolve_session_config(&cli, &file);
+    // ahead of every step below that exists to run an editing session: the
+    // report reads the terminal alone, and running the engine spawn and the
+    // shell frame around it only to throw both away was the flash and the
+    // spawn a diagnostic flag never asked for.
+    if cli.print_caps {
+        return print_caps_and_exit(&cli, &resolved);
+    }
     let cfg = engine_config(&cli, &resolved.engine);
     // read off the config rather than re-derived from `cli`: the client this
     // resolves is the client the spawn below runs, and the spec is gone once
@@ -1431,18 +1461,12 @@ fn main() -> Result<()> {
     // a message, not a write: this runs with the alternate screen up, where
     // a bare stderr line is invisible until teardown scrolls it back --
     // which is where the unconditional capability line used to surface,
-    // long after the session it described. `--print-caps`'s full row table
-    // is the one exception -- it is printed to stdout and the process exits
-    // once the engine is up enough to tear down cleanly, below, rather than
-    // going through this notice at all: a multi-row table pushed onto the
-    // toast stack paints as ~60 physical rows on screen and the history
-    // overlay flattens it to one line, so no toast shape ever renders it
-    // legibly.
-    let print_caps_report = caps_notice(&cli, &resolved, model.caps, term.caps_source());
-    if !cli.print_caps {
-        if let Some(notice) = &print_caps_report {
-            pre_executor_effects.extend(model.engine.record_native_notice(notice.clone(), false));
-        }
+    // long after the session it described. `cli.print_caps` is always false
+    // here: that flag's own report is printed and the process exits before
+    // any of this runs (see `print_caps_and_exit`), so `caps_notice` only
+    // ever answers its other case, the one-line `--tier` override notice.
+    if let Some(notice) = caps_notice(&cli, &resolved, model.caps, term.caps_source()) {
+        pre_executor_effects.extend(model.engine.record_native_notice(notice, false));
     }
 
     // strictly after the probe has stopped reading the terminal, and
@@ -1516,19 +1540,6 @@ fn main() -> Result<()> {
                 .context("engine attach failed or timed out after nvim started"),
         }
     })?;
-
-    // `--print-caps`: the report is written to stdout and the process exits
-    // here, before the pump starts or any takeover runs -- the earliest
-    // point the engine exists to be torn down cleanly, the same drop then
-    // restore-then-exit order the ordinary quit path below uses.
-    if cli.print_caps {
-        if let Some(report) = print_caps_report {
-            drop(engine);
-            term.restore_now();
-            println!("{report}");
-            std::process::exit(0);
-        }
-    }
 
     // attach_sink -- the only code path that connects the engine's pump to
     // msg_tx at all -- runs here, strictly after EngineReady was already
@@ -2182,6 +2193,11 @@ mod tests {
     ///
     /// Both have to precede the first tied spawn, and the first tied spawn
     /// is the engine's.
+    ///
+    /// `print_caps_and_exit` is the eighth, and it is the one entry here
+    /// that is never followed by a spawn at all: `--print-caps` answers
+    /// from the terminal alone and exits the process before `engine_config`
+    /// even runs, so there is no startup for it to be ahead of.
     #[test]
     fn only_the_config_prologue_runs_before_the_engine_spawn() {
         assert_eq!(
@@ -2200,6 +2216,7 @@ mod tests {
                 "load_view_config",
                 "as_deref",
                 "resolve_session_config",
+                "print_caps_and_exit",
                 "engine_config",
                 "remote",
                 "cloned",
