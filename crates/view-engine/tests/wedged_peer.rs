@@ -39,8 +39,10 @@ fn request_timeout_bounds_write_phase_against_wedged_peer() {
     // the caller's timeout is the engine's to honour, and the slack around
     // it is the same round trip every other test here waits on -- a write
     // that leaks blocks on a pipe nobody drains, so the leak this bounds is
-    // unbounded rather than merely late
-    let slack = common::rpc_deadline();
+    // unbounded rather than merely late. Bound once: `HostBudget` reads the
+    // host's load factor per call, so a second `rpc_deadline()` call at the
+    // assertion can read a different value than the one this message names.
+    let bound = timeout + common::rpc_deadline();
     let start = Instant::now();
     let result = handle.request_timeout("nvim_eval", vec![huge], timeout);
     let elapsed = start.elapsed();
@@ -50,10 +52,10 @@ fn request_timeout_bounds_write_phase_against_wedged_peer() {
         "expected Timeout, got {result:?}"
     );
     assert!(
-        elapsed < timeout + common::rpc_deadline(),
+        elapsed < bound,
         "request_timeout took {elapsed:?} against its own {timeout:?} timeout \
-         plus {slack:?} of round trip; the write phase is leaking outside the \
-         timeout again"
+         plus round-trip slack, the {bound:?} bound; the write phase is \
+         leaking outside the timeout again"
     );
 
     let _ = child.kill();

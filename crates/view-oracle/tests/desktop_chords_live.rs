@@ -279,7 +279,7 @@ fn an_invoke_chord_reaches_its_verb_end_to_end() {
     session.send(ALT_COMMA).unwrap();
     // a negative wait: give the (unregistered, under editor) chord a real
     // chance to fire before concluding it did not
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(500)));
     assert!(
         session.screen().contains("chordinvoketoken"),
         "the toast must still stand under the editor profile, where no \
@@ -292,7 +292,7 @@ fn an_invoke_chord_reaches_its_verb_end_to_end() {
     // screen changes when it lands, so there is no predicate to wait on --
     // a fixed pause stands in for the round trip before the chord below
     // relies on it having landed.
-    std::thread::sleep(Duration::from_millis(800));
+    std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(800)));
 
     session.send(ALT_COMMA).unwrap();
     assert!(

@@ -41,7 +41,7 @@ use view_surface::{CursorShape, Surface};
 /// chain a second, redundant hook and re-enter the alternate screen on top
 /// of this one).
 #[must_use = "dropping the guard restores the terminal immediately"]
-pub struct TerminalGuard;
+pub struct TerminalGuard(bool);
 
 impl TerminalGuard {
     /// Enables raw mode, installs a panic hook that restores the terminal
@@ -80,6 +80,27 @@ impl TerminalGuard {
     /// Returns the underlying `std::io::Error` if raw mode or the alternate
     /// screen cannot be entered.
     pub fn enter() -> std::io::Result<Self> {
+        Self::enter_raw(true)
+    }
+
+    /// Raw mode and the panic hook alone, with the alternate screen left
+    /// down: `--print-caps` needs raw mode for the capability probe's CSI
+    /// replies but touches nothing an editing session paints, so entering
+    /// the alternate screen only to leave it again blinks the host
+    /// terminal for a flag that never draws a frame, and teardown then
+    /// writes `EnterAlternateScreen`/`LeaveAlternateScreen` and the rest of
+    /// [`restore_bytes`]'s frame-shaped bytes into whatever `--print-caps`'s
+    /// stdout is redirected to, ahead of the capability table.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `std::io::Error` if raw mode cannot be
+    /// entered.
+    pub fn enter_bare() -> std::io::Result<Self> {
+        Self::enter_raw(false)
+    }
+
+    fn enter_raw(alt_screen: bool) -> std::io::Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
         // a panic must restore the terminal before the message prints, or the
         // user is left with a broken shell and an invisible error; installed
@@ -87,13 +108,14 @@ impl TerminalGuard {
         // panic during capability detection is covered too
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            restore();
+            restore(alt_screen);
             prev(info);
         }));
-        // the value first: from here the alternate screen is this guard's to
-        // undo, and a failed write leaves a dropped guard to undo it
-        let guard = Self;
-        enter_bytes(&mut std::io::stdout())?;
+        // the value first: from here the alternate screen (when entered) is
+        // this guard's to undo, and a failed write leaves a dropped guard to
+        // undo it
+        let guard = Self(alt_screen);
+        enter_bytes_if(&mut std::io::stdout(), alt_screen)?;
         Ok(guard)
     }
 
@@ -133,13 +155,13 @@ impl TerminalGuard {
     /// alternate screen and disabling raw mode a second time on an already
     /// restored terminal is a no-op, not an error.
     pub fn restore_now(&self) {
-        restore();
+        restore(self.0);
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        restore();
+        restore(self.0);
     }
 }
 
@@ -221,6 +243,18 @@ fn enter_bytes<W: Write>(out: &mut W) -> std::io::Result<()> {
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableBracketedPaste
     )
+}
+
+/// [`enter_bytes`] when `alt_screen` is set, and nothing at all otherwise --
+/// the alternate-screen-optional half of
+/// [`TerminalGuard::enter_raw`](TerminalGuard::enter), factored out so a
+/// bare entry's silence is provable against a `Vec<u8>` the same way the
+/// entry bytes themselves are.
+fn enter_bytes_if<W: Write>(out: &mut W, alt_screen: bool) -> std::io::Result<()> {
+    if alt_screen {
+        enter_bytes(out)?;
+    }
+    Ok(())
 }
 
 /// Writes the keyboard-protocol push when the terminal speaks it and has
@@ -349,7 +383,21 @@ fn restore_bytes_once<W: Write>(out: &mut W, rows: u16) -> std::io::Result<()> {
     restore_bytes(out, rows)
 }
 
-fn restore() {
+/// [`restore_bytes_once`] when `alt_screen` is set, and nothing at all
+/// otherwise, so it never touches [`RESTORED`] for a guard that entered no
+/// alternate screen to undo -- the exit-side mirror of [`enter_bytes_if`].
+fn restore_bytes_once_if<W: Write>(
+    out: &mut W,
+    rows: u16,
+    alt_screen: bool,
+) -> std::io::Result<()> {
+    if alt_screen {
+        restore_bytes_once(out, rows)?;
+    }
+    Ok(())
+}
+
+fn restore(alt_screen: bool) {
     let mut out = std::io::stdout();
     // asked here rather than carried on the guard: `restore` is a free
     // function the panic hook runs with no value in scope, and a terminal
@@ -360,7 +408,11 @@ fn restore() {
     // size parks at column 0 of the row it is already on, which is what
     // this path did before the park existed.
     let rows = crossterm::terminal::window_size().map_or(1, |size| size.rows);
-    let _ = restore_bytes_once(&mut out, rows);
+    // a guard that never entered the alternate screen (`--print-caps`, via
+    // TerminalGuard::enter_bare) has nothing `restore_bytes`' frame-shaped
+    // teardown undoes, and writing it anyway would land those bytes in
+    // whatever the flag's stdout is redirected to, ahead of the table.
+    let _ = restore_bytes_once_if(&mut out, rows, alt_screen);
     set_kitty_keyboard_pushed(false);
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = out.flush();
@@ -627,9 +679,32 @@ impl Term {
     /// screen cannot be entered, if capability detection's I/O fails, or if
     /// the backend terminal cannot be built.
     pub fn init(tier_override: Option<Tier>) -> std::io::Result<Self> {
-        let guard = TerminalGuard::enter()?;
+        Self::init_with_guard(TerminalGuard::enter()?, tier_override, true)
+    }
+
+    /// [`Term::init`] without the alternate screen: raw mode and capability
+    /// detection alone, with no keyboard-protocol push, for a caller that
+    /// never draws a frame or reads a key -- `--print-caps` is the one.
+    /// See [`TerminalGuard::enter_bare`] for why the alternate screen is
+    /// skipped rather than entered and immediately left.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `std::io::Error` if raw mode cannot be
+    /// entered or capability detection's I/O fails.
+    pub fn init_bare(tier_override: Option<Tier>) -> std::io::Result<Self> {
+        Self::init_with_guard(TerminalGuard::enter_bare()?, tier_override, false)
+    }
+
+    fn init_with_guard(
+        guard: TerminalGuard,
+        tier_override: Option<Tier>,
+        push_keyboard_protocol: bool,
+    ) -> std::io::Result<Self> {
         let (caps, probe, caps_source) = tiers::resolve(tier_override)?;
-        guard.push_keyboard_protocol(caps.kitty_kbd)?;
+        if push_keyboard_protocol {
+            guard.push_keyboard_protocol(caps.kitty_kbd)?;
+        }
         let frame_buf = Rc::new(RefCell::new(Vec::new()));
         let inner = ratatui::backend::CrosstermBackend::new(FrameBuf(Rc::clone(&frame_buf)));
         Ok(Self {
@@ -1058,7 +1133,7 @@ impl Term {
         let frame_buf = Rc::new(RefCell::new(Vec::new()));
         let inner = ratatui::backend::CrosstermBackend::new(FrameBuf(Rc::clone(&frame_buf)));
         std::mem::ManuallyDrop::new(Self {
-            guard: TerminalGuard,
+            guard: TerminalGuard(true),
             inner,
             frame_buf,
             last_cursor_shape: None,
@@ -1361,6 +1436,37 @@ mod tests {
                 String::from_utf8_lossy(&wire[leave_alt..])
             );
         }
+    }
+
+    /// [`TerminalGuard::enter_bare`]'s side of the wire: no `EnterAlternateScreen`,
+    /// no bracketed paste, and teardown writes nothing either -- the two
+    /// gates [`Term::init_bare`] rides so `--print-caps`'s stdout carries
+    /// only the capability table, never the frame-shaped bytes a session
+    /// that draws would owe the screen it painted on.
+    #[test]
+    fn a_bare_entry_writes_no_escape_at_all() {
+        let mut entry = Vec::new();
+        enter_bytes_if(&mut entry, false).unwrap();
+        assert!(
+            entry.is_empty(),
+            "a bare entry must never switch to the alternate screen: {:?}",
+            String::from_utf8_lossy(&entry)
+        );
+
+        let mut teardown = Vec::new();
+        restore_bytes_once_if(&mut teardown, 24, false).unwrap();
+        assert!(
+            teardown.is_empty(),
+            "a bare entry has no alternate screen to leave, so its teardown must write nothing: {:?}",
+            String::from_utf8_lossy(&teardown)
+        );
+
+        let mut real_entry = Vec::new();
+        enter_bytes_if(&mut real_entry, true).unwrap();
+        assert!(
+            !real_entry.is_empty(),
+            "the gate must still let an ordinary session enter the alternate screen"
+        );
     }
 
     /// The probe's `╭` is printed and erased inside the alternate screen

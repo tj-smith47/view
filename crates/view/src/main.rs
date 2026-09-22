@@ -983,12 +983,13 @@ fn caps_notice(
 
 /// `--print-caps`: resolves the terminal's own capabilities and exits,
 /// touching nothing an editing session needs -- no engine spawn, no shell
-/// frame, nothing painted before the table itself reaches stdout. The
-/// report reads the terminal alone through [`Term::init`] and
-/// [`Term::settle_probe`], the same two calls the ordinary startup path
-/// makes, called here on their own instead of in the middle of it.
+/// frame, no alternate screen, nothing painted before the table itself
+/// reaches stdout. The report reads the terminal alone through
+/// [`Term::init_bare`] and [`Term::settle_probe`], the capability-detection
+/// half of the two calls the ordinary startup path makes through
+/// [`Term::init`], called here on their own instead of in the middle of it.
 fn print_caps_and_exit(cli: &Cli, resolved: &ResolvedConfig) -> Result<()> {
-    let mut term = Term::init(resolved.ui.tier.value.map(Tier::from))
+    let mut term = Term::init_bare(resolved.ui.tier.value.map(Tier::from))
         .context("failed to initialize terminal backend")?;
     let _probe = term
         .settle_probe()
