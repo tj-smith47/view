@@ -12,7 +12,7 @@ use view_core::native::statusline::SegmentUpdate;
 use view_core::update::update;
 use view_surface::Surface;
 
-use crate::paint::{composite_into, Damage};
+use crate::paint::{composite_into, Damage, Shadow};
 
 /// The `:vsplit` the wire capture records, scaled to a canvas a dump can be
 /// read at: grid 1 is the whole screen, the two window grids are 9 and 10
@@ -260,6 +260,90 @@ fn the_active_pane_is_distinguishable_from_the_inactive_one() {
         inactive.fg,
         Some(ratatui::style::Color::Rgb(0x33, 0x33, 0x33)),
         "the pane the cursor is not in did not resolve through NormalNC"
+    );
+}
+
+/// A pure focus move -- `GridCursorGoto` onto the other window, no cell of
+/// either grid touched -- flips which pane's cells resolve through
+/// `NormalNC` in [`super::pane_theme`], but carries no `GridDamage` row and
+/// opens no overlay: the registry's `cursor` field moves without marking
+/// anything dirty. A damage-clipped composite built from `GridDamage` and
+/// overlay rows alone therefore skips both panes and leaves the frame
+/// before the move standing, which is the debug panic filed 2026-09-22
+/// (`damage-clipped composite diverged from a full recomposite`) under a
+/// tree sidebar, stacked startup notices, `:vsplit`, `<C-w>l`.
+#[test]
+fn a_focus_move_with_no_text_change_repaints_both_panes_dimming() {
+    let mut model = vsplit();
+    drive(
+        &mut model,
+        vec![
+            UiEvent::HlAttrDefine {
+                id: 7,
+                fg: Some(0x0033_3333),
+                bg: Some(0x0011_1111),
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+            UiEvent::HlGroupSet {
+                name: "NormalNC".to_string(),
+                hl_id: 7,
+            },
+            UiEvent::Flush,
+        ],
+    );
+
+    let area = ratatui::layout::Rect::new(0, 0, WIDTH, HEIGHT);
+    let mut shadow = Shadow::new();
+    shadow.resize(area);
+    let surface = view_surface::render(&model);
+    let _ = shadow.overlay_damage(&surface);
+    let _ = model.take_paint_damage();
+    shadow.compose(&model, &surface, &Damage::full());
+    shadow.commit();
+
+    // a settled frame first: `Shadow::compose` unions this frame's damage
+    // with the one before it, so a first paint straight into the cursor
+    // move would still union against its own full damage and never exercise
+    // the clip this bug is in. One unrelated row redraw carries the shadow
+    // to the steady state a real session reaches after its first paint.
+    drive(
+        &mut model,
+        vec![line(LEFT, 4, "settled", 0), UiEvent::Flush],
+    );
+    let grid_damage = model.take_paint_damage();
+    let surface = view_surface::render(&model);
+    let overlay_damage = shadow.overlay_damage(&surface);
+    let damage = Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, false);
+    shadow.compose(&model, &surface, &damage);
+    shadow.commit();
+
+    // left holds the cursor going in (`vsplit`'s own setup); move it right
+    drive(
+        &mut model,
+        vec![
+            UiEvent::GridCursorGoto {
+                grid: RIGHT,
+                row: 0,
+                col: 0,
+            },
+            UiEvent::Flush,
+        ],
+    );
+    let grid_damage = model.take_paint_damage();
+    let surface = view_surface::render(&model);
+    let overlay_damage = shadow.overlay_damage(&surface);
+    let damage = Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, false);
+    shadow.compose(&model, &surface, &damage);
+    shadow.commit();
+
+    assert_eq!(
+        shadow.front(),
+        &frame(&model),
+        "a focus move with no cell change left a stale dim/undim color \
+         behind in the clipped composite"
     );
 }
 
