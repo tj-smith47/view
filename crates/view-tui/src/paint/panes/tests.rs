@@ -2347,183 +2347,11 @@ fn agent_windowed() {
     }
 }
 
-/// `anchor = "bottom"` splits the terminal into a full-width main window
-/// on top and a full-width band along the bottom edge, the shape
-/// `nvim_open_win(split = "below")` actually produces. The prior fixture
-/// fed the palette a left-half vsplit `WinPos` under this same anchor --
-/// a position that anchor's own split direction can never place a window
-/// at -- so this builds the band the anchor really opens instead of
-/// reusing `tiled()`'s vsplit slots.
-fn palette_in_the_bottom_band(gaps: bool) -> Tiles {
-    let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
-    let band_height = 6;
-    let main_height = grid_height - 2 - band_height;
-    let slots = vec![
-        (0, 0, grid_width, main_height),
-        (main_height + 1, 0, grid_width, band_height),
-    ];
-    let mut model = tiled_model(gaps, TILED_HEIGHT, &slots);
-    // a windowed tile with the palette turned off paints nothing
-    // (`palette_windowed_active`), so this fixture -- built to show the
-    // enabled shape -- has to say so explicitly rather than lean on the
-    // model's own default.
-    model.palette_enabled = true;
-    model.surfaces.set_layout(
-        view_core::native::geometry::NativeSurface::Palette,
-        view_core::native::geometry::SurfaceLayout::new(
-            view_core::native::geometry::SurfacePlacement::Windowed,
-            view_core::native::geometry::Anchor::Bottom,
-            30,
-        ),
-    );
-    // nvim's own `CmdlineShow` is the whole signal a windowed palette
-    // watches (see `ui_event.rs`'s own doc), so there is no `FeatureInvoke`
-    // to send here.
-    let effects = update(
-        &mut model,
-        Msg::Redraw(vec![UiEvent::CmdlineShow {
-            content: vec![(0, "e file.txt".to_string())],
-            pos: 11,
-            firstc: ":".to_string(),
-            prompt: String::new(),
-            indent: 0,
-            level: 1,
-        }]),
-    );
-    let mut generation = 0;
-    for effect in &effects {
-        if let view_core::msg::Effect::Rpc(view_core::msg::RpcCall::OpenNativeWindow {
-            generation: g,
-            ..
-        }) = effect
-        {
-            generation = *g;
-        }
-    }
-    let _ = update(
-        &mut model,
-        Msg::NativeWindowOpened {
-            generation,
-            surface: view_core::native::geometry::NativeSurface::Palette,
-            win: WinHandle(1001),
-        },
-    );
-    // claims the band's own existing window (grid LEFT+1, win 1001), the
-    // same window `tiled_model` already placed at slots[1] -- reusing a
-    // different slot/win pairing than the one it was assigned would put two
-    // windows on top of each other.
-    let (row, col, width, height) = slots[1];
-    drive(
-        &mut model,
-        vec![
-            UiEvent::WinPos {
-                grid: LEFT + 1,
-                win: WinHandle(1001),
-                startrow: u64::from(row),
-                startcol: u64::from(col),
-                width: u64::from(width),
-                height: u64::from(height),
-            },
-            UiEvent::Flush,
-        ],
-    );
-    Tiles { slots, model }
-}
-
-/// The committed picture of the palette in a band of its own: nvim's
-/// command line inside the bottom frame, the buffer's text inside the top
-/// one.
-#[test]
-fn palette_windowed() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-palette-windowed", tier.0),
-            &tiles_dump(tier, palette_in_the_bottom_band(true)),
-        );
-    }
-}
-
-/// [`palette_in_the_bottom_band`]'s own mirror for `anchor = "top"`: the
-/// band `nvim_open_win(split = "above")` opens, at the top edge instead of
-/// the bottom. Only the bottom shape had a committed picture (Minor 9);
-/// this is the other one `[ui.surfaces.palette] anchor` can configure.
-fn palette_in_the_top_band(gaps: bool) -> Tiles {
-    let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
-    let band_height = 6;
-    let main_height = grid_height - 2 - band_height;
-    let slots = vec![
-        (band_height + 1, 0, grid_width, main_height),
-        (0, 0, grid_width, band_height),
-    ];
-    let mut model = tiled_model(gaps, TILED_HEIGHT, &slots);
-    model.palette_enabled = true;
-    model.surfaces.set_layout(
-        view_core::native::geometry::NativeSurface::Palette,
-        view_core::native::geometry::SurfaceLayout::new(
-            view_core::native::geometry::SurfacePlacement::Windowed,
-            view_core::native::geometry::Anchor::Top,
-            30,
-        ),
-    );
-    let effects = update(
-        &mut model,
-        Msg::Redraw(vec![UiEvent::CmdlineShow {
-            content: vec![(0, "e file.txt".to_string())],
-            pos: 11,
-            firstc: ":".to_string(),
-            prompt: String::new(),
-            indent: 0,
-            level: 1,
-        }]),
-    );
-    let mut generation = 0;
-    for effect in &effects {
-        if let view_core::msg::Effect::Rpc(view_core::msg::RpcCall::OpenNativeWindow {
-            generation: g,
-            ..
-        }) = effect
-        {
-            generation = *g;
-        }
-    }
-    let _ = update(
-        &mut model,
-        Msg::NativeWindowOpened {
-            generation,
-            surface: view_core::native::geometry::NativeSurface::Palette,
-            win: WinHandle(1001),
-        },
-    );
-    let (row, col, width, height) = slots[1];
-    drive(
-        &mut model,
-        vec![
-            UiEvent::WinPos {
-                grid: LEFT + 1,
-                win: WinHandle(1001),
-                startrow: u64::from(row),
-                startcol: u64::from(col),
-                width: u64::from(width),
-                height: u64::from(height),
-            },
-            UiEvent::Flush,
-        ],
-    );
-    Tiles { slots, model }
-}
-
-/// The committed picture of the palette anchored to the top instead: nvim's
-/// command line inside the top frame, the buffer's text inside the bottom
-/// one.
-#[test]
-fn palette_windowed_top() {
-    for tier in TIERS {
-        assert_golden(
-            &format!("{}-palette-windowed-top", tier.0),
-            &tiles_dump(tier, palette_in_the_top_band(true)),
-        );
-    }
-}
+// R2a: the windowed palette carries no nvim window of its own any
+// more, so it has no `OpenNativeWindow`/`WinPos` round trip left for a
+// `Tiles` fixture to simulate -- its own picture is proven directly off
+// `view_surface::render`'s `Layer` output, in `view-surface`'s own test
+// module and in the oracle's `windowed_palette_live` battery, not here.
 
 /// I3: the caret is where the text goes, for every native surface that
 /// takes typed text -- the palette and the agent panel; the tree and the
@@ -2531,14 +2359,16 @@ fn palette_windowed_top() {
 /// their own, the same reason `overlay_cursor` answers `None` for their
 /// overlay forms -- under both placements each surface can be painted in.
 ///
-/// Windowed halves reuse the two fixtures the goldens above already build
-/// (`agent_in_the_right_tile`, `palette_in_the_bottom_band`), plus one
-/// `GridCursorGoto` onto the agent's own grid: opening a surface leaves the
-/// keyboard in it (`enter = true`, see `open_native_window`'s doc), which is
-/// nvim's own cursor move, so the fixture has to make it too rather than
-/// leave the cursor where `tiled()` first put it. The palette never becomes
-/// nvim's curwin at all (see `pending_open`'s doc), so its cursor stays
-/// wherever `tiled()` left it and needs no such move.
+/// Windowed halves reuse the agent's own golden fixture
+/// (`agent_in_the_right_tile`), plus one `GridCursorGoto` onto its grid:
+/// opening a surface leaves the keyboard in it (`enter = true`, see
+/// `open_native_window`'s doc), which is nvim's own cursor move, so the
+/// fixture has to make it too rather than leave the cursor where `tiled()`
+/// first put it. The palette never becomes nvim's curwin at all under
+/// either placement (see `pending_open`'s doc), so its own windowed rect is
+/// read off `render`'s `Layer` output below, the same way the overlay
+/// placement's already was (R2a: it carries no nvim window to derive one
+/// from any more).
 #[test]
 fn every_text_taking_native_surface_puts_its_caret_inside_its_own_painted_rect() {
     let mut agent = agent_in_the_right_tile(true);
@@ -2559,10 +2389,36 @@ fn every_text_taking_native_surface_puts_its_caret_inside_its_own_painted_rect()
         "windowed agent",
     );
 
-    let palette = palette_in_the_bottom_band(true);
+    let mut model = tiled(true).model;
+    model.palette_enabled = true;
+    model.surfaces.set_layout(
+        view_core::native::geometry::NativeSurface::Palette,
+        view_core::native::geometry::SurfaceLayout::new(
+            view_core::native::geometry::SurfacePlacement::Windowed,
+            view_core::native::geometry::Anchor::Bottom,
+            30,
+        ),
+    );
+    drive(
+        &mut model,
+        vec![UiEvent::CmdlineShow {
+            content: vec![(0, "e file.txt".to_string())],
+            pos: 11,
+            firstc: ":".to_string(),
+            prompt: String::new(),
+            indent: 0,
+            level: 1,
+        }],
+    );
+    let surface = view_surface::render(&model);
+    let rect = surface
+        .layers
+        .iter()
+        .find_map(|l| matches!(l.kind, view_surface::LayerKind::Palette(_)).then_some(l.rect))
+        .expect("the windowed palette painted its own tile layer");
     assert_caret_inside_rect(
-        &palette.model,
-        chrome_shifted(&palette.model, palette.slots[1]),
+        &model,
+        (rect.row, rect.col, rect.width, rect.height),
         "windowed palette",
     );
 

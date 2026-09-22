@@ -1850,6 +1850,30 @@ fn native_window_rect(
     })
 }
 
+/// R2a: the palette's own tile, as the view-computed layer paints it -- no
+/// nvim window backs it any more (see [`native_window_rect`]'s doc for the
+/// other three surfaces, which still open real ones), so its rect is read
+/// off the same [`view_surface::Surface`] the terminal paints from.
+///
+/// `LayerKind::Palette` is also what the notification stream's history
+/// overlay paints through (`layer_kind`'s own doc in `view-surface`), so a
+/// `Palette` layer titled anything but the cmdline's own is that overlay's,
+/// not the command palette's.
+fn palette_layer_rect(engine: &mut view_oracle::EngineSession) -> Option<view_surface::Rect> {
+    engine
+        .surface()
+        .layers
+        .into_iter()
+        .find_map(|layer| match layer.kind {
+            view_surface::LayerKind::Palette(view)
+                if view.title != view_core::native::palette::MESSAGE_HISTORY_TITLE =>
+            {
+                Some(layer.rect)
+            }
+            _ => None,
+        })
+}
+
 /// C2 + I11, against real nvim: the tree, the agent panel and the
 /// notification stream are open as overlays (the ring's `config` stop),
 /// with the keyboard in the buffer throughout -- nothing here ever enters
@@ -2080,12 +2104,12 @@ fn a_ring_step_opens_every_default_surface_at_its_designed_windowed_position_aga
 
     engine.arm_and_input(":").unwrap();
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
-    let palette = native_window_rect(&mut engine, "palette").expect("the palette claims a window");
+    let palette = palette_layer_rect(&mut engine).expect("the palette claims a tile");
     // the statusline and the cmdline row nvim always reserves sit below the
-    // last window row `getwininfo()` reports, the same margin the right
+    // last row the tile's own rect reaches, the same margin the right
     // edge check above grants the outer ring and the frame's own gap
     assert!(
-        palette.row + palette.height >= i64::from(ROWS) - right_margin,
+        i64::from(palette.row) + i64::from(palette.height) >= i64::from(ROWS) - right_margin,
         "the palette's default windowed anchor is the bottom edge: \
          {palette:?} against {ROWS} rows"
     );
@@ -2095,17 +2119,16 @@ fn a_ring_step_opens_every_default_surface_at_its_designed_windowed_position_aga
 /// overlay, back to each one's own configured placement -- against real
 /// nvim, with the keyboard never once landing in any of the four. At every
 /// stop this asserts both halves of a surface's claim: the model's own
-/// `*_is_open()` and nvim's own window (present at the windowed stop, gone
-/// at the other two, since `panes = "tiles"` configures every surface as
-/// an overlay by default). The tree, the agent panel and the stream are
-/// held open across every stop; the palette is opened fresh at each one
-/// and left with `<Esc>` before the ring moves again -- its own tile
-/// closes only on `CmdlineLeave`, run synchronously inside nvim so it
-/// cannot race the command the cmdline is about to run (see
-/// `OPEN_NATIVE_WINDOW_CHUNK`'s `id == 'palette'` branch), which a ring
-/// step's ordinary async `CloseNativeWindow` never fires while a command
-/// is still being typed. The close at the end must leave nothing behind:
-/// no surface open, no window but the user's own buffer.
+/// `*_is_open()`, and either nvim's own window (present at the windowed
+/// stop, gone at the other two, since `panes = "tiles"` configures every
+/// surface as an overlay by default) or, for the palette, the placement its
+/// own view-computed tile paints at. The tree, the agent panel and the
+/// stream are held open across every stop; the palette is opened fresh at
+/// each one and left with `<Esc>` before the ring moves again -- its own
+/// tile paints for exactly as long as nvim's cmdline stays open, so nothing
+/// here races a `CloseNativeWindow` the palette no longer issues. The close
+/// at the end must leave nothing behind: no surface open, no window but the
+/// user's own buffer.
 #[test]
 fn a_ring_cycles_all_four_surfaces_through_every_position_against_real_nvim() {
     let work = common::ScratchPaths::new("close-battery-ring-all-four");
@@ -2182,9 +2205,9 @@ fn a_ring_cycles_all_four_surfaces_through_every_position_against_real_nvim() {
              windowed stop"
         );
         assert_eq!(
-            native_window_rect(&mut engine, "palette").is_some(),
+            engine.palette_windowed_active(),
             windowed,
-            "{stop}: the palette's own nvim window must exist only at the \
+            "{stop}: the palette's own tile must paint windowed only at the \
              windowed stop"
         );
 
@@ -2213,9 +2236,9 @@ fn a_ring_cycles_all_four_surfaces_through_every_position_against_real_nvim() {
              other surface uses"
         );
         assert!(
-            native_window_rect(&mut engine, "palette").is_none(),
-            "{stop}: escape's own `CmdlineLeave` close must take the \
-             palette's window with it"
+            palette_layer_rect(&mut engine).is_none(),
+            "{stop}: escape must take the palette's tile off the next \
+             painted frame"
         );
     }
 

@@ -294,40 +294,14 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // same rect (`CmdlineState::bare_colon`), so the frame that
             // installs the real line moves nothing on screen
             crate::native::speculate::withdraw_cmdline_speculation(model);
-            // a windowed palette has no key of its own that opens it --
-            // nvim's cmdline arriving is the whole signal -- and never
-            // claims a tile over a Prompt overlay, mirroring the floating
-            // placement's own `prompt_open` skip in `view-surface::render`
-            let prompt_open = matches!(
-                model.focused_overlay().map(|overlay| &overlay.kind),
-                Some(OverlayKind::Prompt(_))
-            );
-            if model.palette_windowed_active()
-                && !prompt_open
-                && model
-                    .engine
-                    .grids()
-                    .native_window(NativeSurface::Palette)
-                    .is_none()
-                && !model.surfaces.pending_open(NativeSurface::Palette)
-            {
-                // a redraw batch can carry two `cmdline_show` events
-                // before either's `OpenNativeWindow` reply has been
-                // applied to `grids()`, so the guard above alone reads
-                // both as "not open yet" and opens the palette twice;
-                // `pending_open` closes that window between the request
-                // and its reply landing
-                //
-                // never entered (C1): the palette tile is a paint target
-                // over nvim's own cmdline, not a place the keyboard goes,
-                // so `:q`, `/pat`, `:only` and `wincmd p` keep acting on
-                // the window the user was already in
-                return vec![Effect::Rpc(super::surfaces::open_native_window(
-                    model,
-                    NativeSurface::Palette,
-                    false,
-                ))];
-            }
+            // R2a: a windowed palette carries no window of nvim's own any
+            // more (rereview N1 -- a split opened from cmdline mode never
+            // gets its `win_pos`, so the old mechanism could never place
+            // it). `view_surface::render` reads `model.engine.cmdline` and
+            // `palette_windowed_active()` straight off this model on the
+            // very next paint, so nvim's cmdline arriving is still the
+            // palette's whole open signal and costs no `OpenNativeWindow`,
+            // no `pending`, and no generation to say so.
             Vec::new()
         }
         UiEvent::CmdlinePos { pos, level } => {
@@ -355,15 +329,11 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                 super::dismiss_top_prompt(model);
                 model.dirty = true;
             }
-            // the windowed palette's own close: the tile is a paint target
-            // for the state just cleared above, so there is nothing left
-            // for it to show once nvim's cmdline itself is gone
-            let win = model.engine.grids().native_window(NativeSurface::Palette);
-            if let Some(win) = win {
-                model.engine.grids_mut().release_native_window(win);
-                model.dirty = true;
-                return vec![Effect::Rpc(RpcCall::CloseNativeWindow { win: win.0 })];
-            }
+            // R2a: the windowed palette's own close costs no
+            // `CloseNativeWindow` any more -- it is a paint target for
+            // `model.engine.cmdline`, just cleared above, and carries no
+            // window of nvim's own to release (see `CmdlineShow`'s own
+            // doc).
             Vec::new()
         }
         UiEvent::MsgShow {

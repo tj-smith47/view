@@ -193,6 +193,14 @@ fn retile_open_surface(
     target: crate::native::geometry::SurfacePlacement,
 ) -> Vec<Effect> {
     use crate::native::geometry::SurfacePlacement;
+    // R2a: the palette carries no window of nvim's own under either
+    // placement any more -- `view_surface::render` reads
+    // `palette_windowed_active()` straight off the model on the next paint,
+    // so a ring step that changes its placement needs no `OpenNativeWindow`/
+    // `CloseNativeWindow` pair to move it, unlike the other three surfaces.
+    if surface == NativeSurface::Palette {
+        return Vec::new();
+    }
     match target {
         SurfacePlacement::Windowed => {
             if model.engine.grids().native_window(surface).is_some() {
@@ -535,16 +543,14 @@ fn close_windowed_tree(model: &mut Model) -> Vec<Effect> {
 /// The call that opens `surface`'s window, or enters the one it already
 /// has, at the anchor and size this session resolved for it.
 ///
-/// `pub(super)` rather than private: `ui_event::apply_ui_event`'s
-/// `CmdlineShow`/`CmdlineHide` arms call this directly for the windowed
-/// palette, which has no key of its own to toggle it open (see
-/// [`toggle_notifications_stream`]'s doc contrast) -- nvim's own cmdline
-/// arriving and leaving is its whole open/close signal.
+/// Never called for [`NativeSurface::Palette`] (R2a): a windowed palette
+/// carries no window of nvim's own, so [`retile_open_surface`] returns
+/// before reaching here for it and nothing else asks this function to open
+/// one.
 ///
 /// `enter` is `true` for a call a user's own toggle key made -- they asked
 /// to go there -- and `false` for a ring step carrying an already-open
-/// surface to `windowed` and for the palette's own open, neither of which
-/// is a place the keyboard should move to.
+/// surface to `windowed`, which is not a place the keyboard should move to.
 pub(super) fn open_native_window(
     model: &mut Model,
     surface: NativeSurface,

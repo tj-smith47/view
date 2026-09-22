@@ -724,12 +724,21 @@ impl EngineSession {
     }
 
     /// Whether this session's model still shows nvim's own cmdline as
-    /// open, which is what the windowed palette's own tile answers for
-    /// (see `open_native_window`'s doc: the palette has no overlay of its
-    /// own on `model.overlays()`).
+    /// open, which is what the palette's own tile answers for -- the
+    /// palette has no overlay of its own on `model.overlays()`, windowed or
+    /// not.
     #[must_use]
     pub fn palette_is_open(&self) -> bool {
         self.model.engine.cmdline.is_some()
+    }
+
+    /// Whether the palette's tile paints at its windowed placement (full
+    /// width, anchored at an edge) rather than its overlay one (70% wide,
+    /// centred) this frame -- the same predicate `view_surface::render`
+    /// reads to decide which of the two it paints.
+    #[must_use]
+    pub fn palette_windowed_active(&self) -> bool {
+        self.model.palette_windowed_active()
     }
 
     /// Marks this session's model as trusting AI, the way a real session's

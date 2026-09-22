@@ -334,6 +334,20 @@ impl OverlayRect {
             && row < self.row.saturating_add(self.height)
             && col < self.col.saturating_add(self.width)
     }
+
+    /// This rect pulled in one cell on every side, floored at a zero-sized
+    /// rect rather than an underflow -- what a windowed tile with no nvim
+    /// window of its own draws under `[ui] gaps`, one cell in from the band
+    /// [`OverlayBox::rect`] resolved (`view-surface`'s `palette_rect`).
+    #[must_use]
+    pub const fn shrink_one(self) -> Self {
+        Self {
+            row: self.row.saturating_add(1),
+            col: self.col.saturating_add(1),
+            width: self.width.saturating_sub(2),
+            height: self.height.saturating_sub(2),
+        }
+    }
 }
 
 /// One of view's own surfaces: a feature that draws beside the buffer

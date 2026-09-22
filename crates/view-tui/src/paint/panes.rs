@@ -24,7 +24,6 @@ use ratatui::layout::Rect as TermRect;
 use view_core::grid::registry::{GridId, Pane, PaneKind, GLOBAL_GRID};
 use view_core::model::{Focus, Model, OverlayKind, Panes};
 use view_core::native::geometry::NativeSurface;
-use view_core::native::palette::PaletteState;
 use view_core::theme::{ChromeGroup, Theme};
 use view_surface::overlay::BorderSet;
 use view_surface::{Layer, LayerKind, Rect};
@@ -190,28 +189,10 @@ fn native_pane_content(
                 ))
             })
         }),
-        // the tile is a paint target for state nvim owns
-        // (`Model::engine.cmdline`), the same state the floating palette
-        // reads in `view-surface::render` -- `_ = height`/`width`, since a
-        // palette's view has no page to derive from either placement's room.
-        // Gated on `palette_windowed_active` (not just the tile existing)
-        // so `[native] palette = false` leaves this arm painting nothing
-        // even in the frame between `CmdlineShow`'s window request going
-        // stale and nvim actually tearing the tile back down.
-        NativeSurface::Palette => {
-            if !model.palette_windowed_active() {
-                return None;
-            }
-            let cmdline = model.engine.cmdline.as_ref()?;
-            let completion = model
-                .engine
-                .popupmenu
-                .as_ref()
-                .filter(|pm| pm.is_cmdline_sourced())
-                .cloned();
-            let state = PaletteState::new(cmdline.clone(), completion);
-            Some(LayerKind::Palette(state.view()))
-        }
+        // R2a: the palette carries no window of nvim's own any more, so no
+        // pane this compositor iterates is ever `NativeSurface::Palette`
+        // (`view-surface::render` paints the windowed tile itself, through
+        // the same `LayerKind::Palette` push the centred placement uses).
         // left/right (a tall, narrow stream) and top/bottom (a short, wide
         // ticker) are the same entry list at two aspect ratios -- the split
         // direction nvim opened the window with already decided which one

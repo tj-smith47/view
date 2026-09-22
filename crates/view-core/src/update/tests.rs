@@ -14312,11 +14312,6 @@ fn a_manual_pause_survives_an_unrelated_fold_outside_the_stream() {
     );
 }
 
-const PALETTE_WIN: crate::events::WinHandle = crate::events::WinHandle(7474);
-
-/// nvim's own grid id for the palette's pane in the fixtures below.
-const PALETTE_GRID: u64 = 10;
-
 /// A model with the command palette configured windowed, sized and resized
 /// once so a window can actually be requested.
 fn windowed_palette_model() -> Model {
@@ -14357,106 +14352,80 @@ fn cmdline_show() -> Msg {
     }])
 }
 
-/// nvim placing the palette's window, which is what turns a claimed handle
-/// into a pane [`Model::engine`]'s registry can actually answer
-/// `native_window` for -- claiming alone (`NativeWindowOpened`) only binds
-/// the handle to the surface, the same two-step every other windowed
-/// surface's own placement fixture follows (`tree_window_placed`,
-/// `agent_window_placed`, `notifications_window_placed`).
-fn palette_window_placed() -> Msg {
-    Msg::Redraw(vec![
-        UiEvent::GridResize {
-            grid: PALETTE_GRID,
-            width: 24,
-            height: 3,
-        },
-        UiEvent::WinPos {
-            grid: PALETTE_GRID,
-            win: PALETTE_WIN,
-            startrow: 21,
-            startcol: 0,
-            width: 24,
-            height: 3,
-        },
-        UiEvent::GridCursorGoto {
-            grid: PALETTE_GRID,
-            row: 0,
-            col: 0,
-        },
-        UiEvent::Flush,
-    ])
-}
-
-/// The windowed palette has no key of its own that opens or closes it --
-/// nvim's own cmdline arriving and leaving is the whole signal, matching
-/// `CmdlineShow`/`CmdlineHide`'s doc in `update::ui_event`.
+/// R2a: the windowed palette costs no `OpenNativeWindow`/`CloseNativeWindow`
+/// round trip at all any more -- nvim's own cmdline arriving and leaving is
+/// still the whole open/close signal (`CmdlineShow`/`CmdlineHide`'s doc in
+/// `update::ui_event`), but it is answered by nothing but a repaint, since
+/// `view_surface::render` reads `model.engine.cmdline` and
+/// `palette_windowed_active()` straight off the model it already has. A
+/// second `CmdlineShow` in the same batch (an unmatched key's re-arm) and a
+/// `CmdlineHide` both carry the same guarantee: no RPC, no claim, no
+/// generation touched.
 #[test]
-fn the_windowed_palette_opens_and_closes_with_the_palette() {
+fn the_windowed_palette_opens_and_closes_with_no_rpc() {
     let mut m = windowed_palette_model();
+    let before = m
+        .surfaces
+        .generation(crate::native::geometry::NativeSurface::Palette);
 
-    let effects = update(&mut m, cmdline_show());
-    let generation = opened_generation(&effects);
-    assert!(
-        matches!(
-            effects.iter().find_map(|effect| match effect {
-                Effect::Rpc(RpcCall::OpenNativeWindow { split, .. }) => Some(*split),
-                _ => None,
-            }),
-            Some(crate::msg::WinSplit::Below)
-        ),
-        "a palette anchored to the bottom must split toward it: {effects:?}"
-    );
-    // C1: the palette's tile is never a place the keyboard goes -- `:q`,
-    // `/pat` and `:only` must keep acting on the user's own window, which
-    // the open chunk only guarantees while `enter` is false
-    assert!(
-        matches!(
-            effects.iter().find_map(|effect| match effect {
-                Effect::Rpc(RpcCall::OpenNativeWindow { enter, .. }) => Some(*enter),
-                _ => None,
-            }),
-            Some(false)
-        ),
-        "the palette must never be entered: {effects:?}"
-    );
-    let _ = update(
+    let effects = update(
         &mut m,
-        Msg::NativeWindowOpened {
-            generation,
-            surface: crate::native::geometry::NativeSurface::Palette,
-            win: PALETTE_WIN,
-        },
+        Msg::Redraw(vec![
+            UiEvent::CmdlineShow {
+                content: vec![(0, String::new())],
+                pos: 0,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+            UiEvent::CmdlineShow {
+                content: vec![(0, String::new())],
+                pos: 0,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+        ]),
     );
-    let _ = update(&mut m, palette_window_placed());
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Rpc(RpcCall::OpenNativeWindow { .. } | RpcCall::TryResize { .. })
+        )),
+        "a windowed palette must open no window and resize nothing: {effects:?}"
+    );
     assert_eq!(
         m.engine
             .grids()
             .native_window(crate::native::geometry::NativeSurface::Palette),
-        Some(PALETTE_WIN)
+        None,
+        "the palette must claim no window handle"
     );
-
-    // a second `CmdlineShow` (a re-arm after an unmatched key) must not ask
-    // for a second window while the first one still stands
-    let effects = update(&mut m, cmdline_show());
     assert!(
-        !effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::Rpc(RpcCall::OpenNativeWindow { .. }))),
-        "a standing palette window was asked for again: {effects:?}"
+        !m.surfaces
+            .pending_open(crate::native::geometry::NativeSurface::Palette),
+        "no open was ever issued for `pending` to track"
+    );
+    assert_eq!(
+        m.surfaces
+            .generation(crate::native::geometry::NativeSurface::Palette),
+        before,
+        "no open was ever issued for a generation to advance"
     );
 
     let effects = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide]));
     assert!(
-        effects.iter().any(|effect| matches!(
-            effect,
-            Effect::Rpc(RpcCall::CloseNativeWindow { win }) if *win == PALETTE_WIN.0
-        )),
-        "hiding the cmdline did not close the palette's window: {effects:?}"
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Rpc(RpcCall::CloseNativeWindow { .. }))),
+        "hiding the cmdline must close no window that was never opened: {effects:?}"
     );
     assert_eq!(
         m.engine.grids().native_claims(),
         0,
-        "the handle stayed claimed after the cmdline it was drawing closed"
+        "no handle was ever claimed for the close to release"
     );
     assert!(
         m.engine.cmdline.is_none(),
@@ -14489,70 +14458,17 @@ fn a_disabled_palette_opens_no_window_even_when_windowed() {
     );
 }
 
-/// One redraw batch can carry two `cmdline_show` events (an unmatched key
-/// re-arms the cmdline within the same `update` call that saw the first
-/// one open it) before either request's `NativeWindowOpened` reply has
-/// been applied -- `grids().native_window` alone stays `None` for both,
-/// so only `pending_open` tells the second event that an open is already
-/// in flight.
-#[test]
-fn two_cmdline_shows_in_one_batch_ask_for_one_window() {
-    let mut m = windowed_palette_model();
-
-    let effects = update(
-        &mut m,
-        Msg::Redraw(vec![
-            UiEvent::CmdlineShow {
-                content: vec![(0, String::new())],
-                pos: 0,
-                firstc: ":".to_string(),
-                prompt: String::new(),
-                indent: 0,
-                level: 1,
-            },
-            UiEvent::CmdlineShow {
-                content: vec![(0, String::new())],
-                pos: 0,
-                firstc: ":".to_string(),
-                prompt: String::new(),
-                indent: 0,
-                level: 1,
-            },
-        ]),
-    );
-    assert_eq!(
-        effects
-            .iter()
-            .filter(|effect| matches!(effect, Effect::Rpc(RpcCall::OpenNativeWindow { .. })))
-            .count(),
-        1,
-        "a second `cmdline_show` in the same batch must not ask for a \
-         second window while the first request is still pending: {effects:?}"
-    );
-}
-
-/// A windowed palette's cursor sits in its own pane once the tile is open
-/// (see `route_key`'s doc), but typing into the command line is nvim's
-/// input either way, so a key must reach the engine rather than being eaten
-/// by the pane routing a windowed tree or agent panel gets.
+/// A windowed palette carries no pane of its own for nvim's cursor to enter
+/// (R2a), so `model.focus()` never names it and typing into the command
+/// line stays nvim's own ordinary input, whichever placement is showing it.
 #[test]
 fn a_key_in_the_windowed_palette_reaches_the_engine() {
     let mut m = windowed_palette_model();
-    let effects = update(&mut m, cmdline_show());
-    let generation = opened_generation(&effects);
-    let _ = update(
-        &mut m,
-        Msg::NativeWindowOpened {
-            generation,
-            surface: crate::native::geometry::NativeSurface::Palette,
-            win: PALETTE_WIN,
-        },
-    );
-    let _ = update(&mut m, palette_window_placed());
+    let _ = update(&mut m, cmdline_show());
     assert_eq!(
         m.focus(),
-        Focus::Pane(crate::native::geometry::NativeSurface::Palette),
-        "the cursor sitting in the palette's own pane did not name it"
+        Focus::Engine,
+        "a windowed palette carries no pane for nvim's cursor to sit in"
     );
 
     let effects = update(&mut m, key("x"));
@@ -15121,20 +15037,11 @@ fn the_resize_chord_resolves_inside_a_windowed_stream() {
 #[test]
 fn the_resize_chords_first_key_survives_inside_a_windowed_palette() {
     let mut m = windowed_palette_model();
-    let effects = update(&mut m, cmdline_show());
-    let generation = opened_generation(&effects);
-    let _ = update(
-        &mut m,
-        Msg::NativeWindowOpened {
-            generation,
-            surface: crate::native::geometry::NativeSurface::Palette,
-            win: PALETTE_WIN,
-        },
-    );
-    let _ = update(&mut m, palette_window_placed());
+    let _ = update(&mut m, cmdline_show());
     assert_eq!(
         m.focus(),
-        Focus::Pane(crate::native::geometry::NativeSurface::Palette),
+        Focus::Engine,
+        "a windowed palette carries no pane for nvim's cursor to sit in"
     );
     assert!(
         m.pending_chord.is_none(),
