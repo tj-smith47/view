@@ -288,7 +288,7 @@ for; each row below names what it would have to reach for:
 | `SUPER + CTRL + comma` | notification chords with no verb yet: silence |
 | `SUPER + ALT + comma` | notification chords with no verb yet: invoke last |
 | `SUPER + CTRL + I` | power and session |
-| `SUPER + CTRL + N` | power and session |
+| `SUPER + CTRL + N` | compositor surface properties |
 | `SUPER + CTRL + Delete` | monitors |
 | `SUPER + CTRL + ALT + Delete` | monitors |
 | `switch:on:Lid Switch` | power and session |
