@@ -1191,7 +1191,7 @@ mod tests {
             ran.len(),
             view_engine::REMOTE_RECONNECT_MAX_ATTEMPTS
         );
-        let slack = std::time::Duration::from_secs(2);
+        let slack = view_test_support::host_deadline(std::time::Duration::from_secs(2));
         let mut previous = armed;
         for (index, at) in ran.iter().enumerate() {
             let attempt = u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1);

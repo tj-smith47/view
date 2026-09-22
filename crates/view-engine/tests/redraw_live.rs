@@ -276,7 +276,7 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
     let mut model = Model::new();
     let mut compacted: Vec<UiEvent> = Vec::new();
     let overall_deadline = Instant::now() + common::rpc_deadline_for(2);
-    let settle = Duration::from_millis(500);
+    let settle = view_test_support::host_deadline(Duration::from_millis(500));
     loop {
         if Instant::now() >= overall_deadline {
             break;

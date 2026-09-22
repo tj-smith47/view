@@ -50,7 +50,7 @@ fn request_timeout_bounds_write_phase_against_wedged_peer() {
         "expected Timeout, got {result:?}"
     );
     assert!(
-        elapsed < timeout + slack,
+        elapsed < timeout + common::rpc_deadline(),
         "request_timeout took {elapsed:?} against its own {timeout:?} timeout \
          plus {slack:?} of round trip; the write phase is leaking outside the \
          timeout again"

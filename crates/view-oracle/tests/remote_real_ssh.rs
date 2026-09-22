@@ -181,7 +181,7 @@ fn a_real_batch_mode_rejection_reports_instead_of_prompting() {
     let Some(host) = target() else {
         return;
     };
-    let handshake = Duration::from_secs(30);
+    let handshake = view_test_support::host_deadline(Duration::from_secs(30));
     let refused = EngineConfig::isolated()
         .with_remote(spec(&host).with_ssh_opt("PreferredAuthentications=none"))
         .with_handshake_timeout(handshake);
@@ -206,7 +206,7 @@ fn a_real_batch_mode_rejection_reports_instead_of_prompting() {
     // bounded well below the handshake budget on purpose: a bound of the
     // budget itself would pass a client that sat on a prompt until just
     // short of it, which is the failure this test exists to catch
-    let prompt = Duration::from_secs(10);
+    let prompt = view_test_support::host_deadline(Duration::from_secs(10));
     assert!(
         elapsed < prompt && prompt < handshake,
         "the refusal took {elapsed:?}: a batch-mode client must be told no \

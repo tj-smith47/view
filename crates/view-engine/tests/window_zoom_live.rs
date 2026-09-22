@@ -1,8 +1,8 @@
 //! Live-nvim proof that `window zoom`'s second press reads real vsplit
 //! geometry: `tile_is_zoomed` squeezes a sibling to its layout minimum, not
-//! a fixture's guess at what `<C-w>_<C-w>|` leaves behind (2026-09-22
-//! review finding B2). Drives the actual `update()` dispatch against redraw
-//! traffic a real spawned nvim sends, the same path the runtime loop uses.
+//! a fixture's guess at what `<C-w>_<C-w>|` leaves behind. Drives the
+//! actual `update()` dispatch against redraw traffic a real spawned nvim
+//! sends, the same path the runtime loop uses.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
@@ -26,7 +26,7 @@ use view_engine::ui_events::UiEvent;
 fn drain(rx: &mpsc::Receiver<Msg>, pump: &view_engine::damage::DamagePump) -> Vec<UiEvent> {
     let mut events = Vec::new();
     let deadline = Instant::now() + common::rpc_deadline_for(2);
-    let settle = Duration::from_millis(150);
+    let settle = view_test_support::host_deadline(Duration::from_millis(150));
     loop {
         if Instant::now() >= deadline {
             return events;

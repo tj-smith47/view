@@ -449,7 +449,7 @@ fn a_missing_remote_editor_fails_loudly_instead_of_hanging() {
     // bounded well below the handshake timeout on purpose: a bound of the
     // timeout itself would pass a regression that hangs until just short of
     // it, which is the failure this test exists to catch
-    let prompt = Duration::from_secs(2);
+    let prompt = view_test_support::host_deadline(Duration::from_secs(2));
     assert!(
         elapsed < prompt && prompt < handshake,
         "the failure took {elapsed:?}: the far side's own refusal must reach \

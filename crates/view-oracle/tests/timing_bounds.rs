@@ -234,6 +234,12 @@ mod tests {
     }
 
     #[test]
+    fn a_let_bound_duration_is_still_a_hand_picked_bound() {
+        let settle = Duration::from_millis(150);
+        let answer = rx.recv_timeout(settle);
+    }
+
+    #[test]
     fn rustfmt_wrapping_hides_nothing() {
         assert!(
             elapsed
@@ -307,13 +313,13 @@ fn the_walk_sees_every_shape_a_line_at_a_time_reader_missed() {
         .iter()
         .map(|found| found.number)
         .collect();
-    // the ten deliberately wrong lines: the named constant, the
-    // rustfmt-wrapped comparison, the deadline built from `now`, the
-    // inclusive bound, the same bound written backwards, the floor with
-    // its sides swapped, the floor on a span the list names beyond the
-    // two it started with, the one whose span is converted to a number
-    // first, and the two waits handed a wall clock they spend rather
-    // than compare.
+    // the eleven deliberately wrong lines: the named constant, the
+    // let-bound duration, the rustfmt-wrapped comparison, the deadline
+    // built from `now`, the inclusive bound, the same bound written
+    // backwards, the floor with its sides swapped, the floor on a span
+    // the list names beyond the two it started with, the one whose span
+    // is converted to a number first, and the two waits handed a wall
+    // clock they spend rather than compare.
     //
     // The tail of the fixture is the other half of the pin: no line from
     // `these_are_the_shapes_the_rule_asks_for` or from the unlisted span
@@ -321,7 +327,7 @@ fn the_walk_sees_every_shape_a_line_at_a_time_reader_missed() {
     // walk reporting a shape the rule allows.
     assert_eq!(
         found,
-        vec![9, 16, 23, 29, 34, 39, 44, 49, 54, 55],
+        vec![9, 15, 22, 29, 35, 40, 45, 50, 55, 60, 61],
         "the walk read {found:?} of the fixture. Every line it missed is a \
          shape the population can carry unnoticed; every extra line is a \
          shape the rule asks for being reported as a violation"
@@ -499,29 +505,47 @@ fn names_a_measured_span(text: &str) -> bool {
     MEASURED_SPANS.iter().any(|name| text.contains(name))
 }
 
-/// The names of every `const NAME: Duration` in `statements` whose value is
-/// an absolute duration.
+/// The names of every `const NAME: Duration` or `let NAME = <duration>` in
+/// `statements` whose value is an absolute duration.
 ///
 /// One level of resolution, which is all this tree's tests use: a constant
 /// declared from another constant is read as whatever its own text says.
+///
+/// A `let` binding carries no `: Duration` to key on the way a `const` does,
+/// so it is read the same way a bound's own right-hand side is: a literal
+/// `Duration::from_*` with digits in place, and never a scaled one --
+/// `is_absolute` already refuses a value that names a [`SCALERS`] entry.
+/// `let settle = Duration::from_millis(150);` naming the bound this way
+/// instead of writing the ceiling into the comparison escaped the walk the
+/// same way a fresh literal would have.
 fn absolute_constants(statements: &[Statement]) -> HashSet<String> {
     let mut named = HashSet::new();
     for statement in statements {
         let text = statement.text.trim();
-        let Some(rest) = text
+        if let Some(rest) = text
             .strip_prefix("const ")
             .or(text.strip_prefix("pub const "))
-        else {
+        {
+            let Some((name, value)) = rest.split_once('=') else {
+                continue;
+            };
+            let Some((name, kind)) = name.split_once(':') else {
+                continue;
+            };
+            if kind.contains("Duration") && is_absolute(value, &HashSet::new()) {
+                named.insert(name.trim().to_owned());
+            }
+            continue;
+        }
+        let Some(rest) = text.strip_prefix("let mut ").or(text.strip_prefix("let ")) else {
             continue;
         };
         let Some((name, value)) = rest.split_once('=') else {
             continue;
         };
-        let Some((name, kind)) = name.split_once(':') else {
-            continue;
-        };
-        if kind.contains("Duration") && is_absolute(value, &HashSet::new()) {
-            named.insert(name.trim().to_owned());
+        let name = name.split(':').next().unwrap_or(name).trim();
+        if value.contains("Duration") && is_absolute(value, &HashSet::new()) {
+            named.insert(name.to_owned());
         }
     }
     named
