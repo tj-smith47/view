@@ -340,7 +340,8 @@ Compat has three classes; only the first is "by construction":
 
 - **Supersession is runtime-only and reversible.** Applied
   post-`VimEnter`, only while the native feature is enabled: statusline →
-  `laststatus=0` (lualine still loads; its surface goes unused);
+  `laststatus=0` under `[ui] panes = "nvim"` (lualine still loads; its
+  surface goes unused);
   notifications → `vim.notify` re-pointed at the engine default, held
   against a plugin re-patching it later, so messages flow through
   `ext_messages` into view's toasts; tree/picker → view claims its
@@ -348,6 +349,18 @@ Compat has three classes; only the first is "by construction":
   edited, and nothing needs to be removed or disabled in `init.lua` for
   native features to win.** Superseded plugins keep loading; their cost
   is memory, not conflict.
+- **A hold the look needs is kept whatever the feature switch says
+  (amended 2026-09-23, tiled UI).** Under `[ui] panes = "tiles"` view
+  holds `laststatus = 2` whether `[native] statusline` is on or off.
+  Every window then has a status row, and view paints each tile's frame
+  edge over it; the tile geometry counts that row as the bottom of the
+  frame, so a user's `laststatus` of 0, 1 or 3 would leave some tiles a
+  row shorter at the bottom than the gap around them. The hold is keyed
+  on the look: `statusline = false` empties the status segments in the
+  frame edges and leaves the hold standing, and only a switch to
+  `panes = "nvim"` hands the user's own `laststatus` back (restored from
+  the value nvim held before the takeover). `docs/surface-ownership.md`
+  and `docs/tiled-ui.md` carry the user-facing statement.
 - **Externalization follows the `[native]` switches (amended 2026-08-21,
   C2; tab line amended 2026-09-04).** The `ext_*` set view requests at
   `nvim_ui_attach` is not a constant: `ext_cmdline`/`ext_popupmenu` are
@@ -764,6 +777,7 @@ engine state drift).
 | Statusline | lualine | mode (`msg_showmode`, incl. macro `recording @q`), pending `showcmd`, file, diagnostics (RPC), git branch, ruler/position; single-line |
 | Notifications | nvim-notify / noice messages | `ext_messages` with kind-aware routing (table below), `vim.notify` re-pointed at the engine default (§5.5) so a plugin's own float never composites over view's chrome; a slot-timed toast stack, a pause key, and a scrollable history with per-entry copy and dismissal (§7.1 motion, table below); kills "Press ENTER" without ever eating a prompt |
 | Command palette | noice cmdline | `ext_cmdline` → centered floating palette with completion rendering (`ext_popupmenu` when sourced from cmdline) |
+| Key profiles (amended 2026-09-23, tiled UI) | a tiling desktop's window keys (omarchy's chords) | `[keys] profile = "auto" \| "desktop" \| "editor"`. `desktop` registers the 46 omarchy chords as view's window, surface and tabpage keys, on `Super` where the terminal speaks the kitty keyboard protocol and `Alt` everywhere else (`[keys] desktop_modifier`); `editor` leaves those chords to the desktop and keeps nvim's leader keys. `auto` derives `desktop` on an ssh session or a bare tty and `editor` on a GUI desktop, macOS or Windows. Each chord is a `[keys.desktop]` row; an empty value unbinds it. Chords are registered behind the takeover's claims, and input typed during launch is held until they are, up to a bound (`docs/keymaps.md`, Key profiles) |
 
 Invented capabilities — also v0.1 core (ruled 2026-08-05; plans authored at
 the P4 exit, supervision and remote editing sequenced first). These are not
@@ -883,13 +897,42 @@ experience.
 [ui]
 tier = "auto"              # auto | full | standard | basic
 theme = "auto"             # auto = derive from nvim colorscheme
+panes = "auto"             # auto | tiles | nvim -- tiles: a frame per
+                           # window with its status in the bottom edge and
+                           # the top row; nvim: nvim's separators and view's
+                           # bar. auto = nvim under a tiling window manager,
+                           # else tiles (amended 2026-09-23, tiled UI)
+gaps = true                # false: neighbouring frames share their edges
 
+[ui.tokens]
+accent = "auto"            # the active tile's frame colour; auto = derive
+                           # from the colorscheme, or a hex colour
+
+# placement, anchor and size for each of view's own surfaces; overlay is a
+# float, windowed a window of its own in nvim's layout
 [ui.surfaces.tree]
-placement = "overlay"      # overlay | windowed -- a float, or a window of
-                           # its own in nvim's layout
+placement = "overlay"      # overlay | windowed
 anchor = "left"            # left | right
 size = 30                  # share of the terminal width, 15..70;
                            # [native] tree_width is this key's older name
+
+[ui.surfaces.agent]
+placement = "overlay"      # overlay | windowed
+anchor = "right"           # left | right
+size = 30                  # [ai] panel_width is this key's older name
+
+[ui.surfaces.palette]
+placement = "overlay"      # overlay | windowed
+anchor = "center"          # overlay: center | top | bottom;
+                           # windowed: top | bottom (default bottom)
+size = 40                  # share of the terminal height
+
+[ui.surfaces.notifications]
+placement = "overlay"      # overlay | windowed -- toasts, or the message
+                           # stream (a ticker at top/bottom) in a window
+anchor = "top-right"       # overlay: the toast stack's corner;
+                           # windowed: left | right | top | bottom
+size = 30                  # share of the width (left/right) or height
 
 [engine]
 nvim_bin = "bundled"       # "bundled" | absolute path
@@ -902,12 +945,28 @@ tree = true
 statusline = true
 notifications = true       # false also detaches ext_messages (§5.5)
 palette = true             # false also detaches ext_cmdline/ext_popupmenu (§5.5)
+# tabline                  # no fixed default: on under panes = "tiles", off
+                           # under "nvim"; a written value wins. On, view
+                           # draws the top row; off detaches ext_tabline
+tabline_shows = "tabs"     # tabs | buffers -- what the top row names while
+                           # one tabpage is open
 tree_width = 30            # tree sidebar's share of the terminal width, 15..70
 
 [keys]
 sidebar_wider = ["<S-Right>", "<C-w>>"]     # resize the focused sidebar; one
 sidebar_narrower = ["<S-Left>", "<C-w><"]   # notation or a list, chords of two
 composer_newline = ["<S-CR>", "<M-CR>"]     # break a line in the AI composer
+toggle_gaps = "<leader>ug"                  # gaps on and off, live
+cycle_surfaces = "<leader>uw"               # step the tree, agent panel,
+                                            # palette and notifications
+                                            # together: config -> windowed
+                                            # -> overlay -> config
+profile = "auto"           # auto | desktop | editor (§9, Key profiles)
+desktop_modifier = "auto"  # auto | super | alt -- auto = super where the
+                           # terminal speaks the kitty keyboard protocol
+
+[keys.desktop]             # one row per chord, 46 rows, each at its default
+# focus_left = "<D-Left>"  # a written row is taken as written; "" unbinds
 
 [supervision]
 auto_restart = true        # false: surface a dead engine and wait for a manual restart

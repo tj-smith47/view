@@ -37,8 +37,9 @@ config, plugins, LSP servers and treesitter setup run unchanged. See
 
 **Your config, unchanged.** telescope, lualine, noice, nvim-cmp, treesitter,
 mini.nvim and the rest load on day one. Where a plugin already draws
-something view also draws, the plugin wins. Plugin messages show up in view's
-notifications, and everything holds up over SSH and inside tmux.
+something view also draws, view draws it, and one config key hands it back.
+Plugin messages show up in view's notifications, and everything holds up
+over SSH and inside tmux.
 
 **One design system.** The parts of the screen view draws (picker, file tree,
 statusline, command palette, notifications, tabline) share one look, themed
@@ -52,6 +53,26 @@ it off with one config key, or let view read your desktop and decide. See
 [`docs/tiled-ui.md`](docs/tiled-ui.md).
 
 ![two windows, each in its own frame and gap](assets/tapes/tiled-panes.gif)
+
+**Status in every frame.** Each window carries its own status along the
+bottom of its frame: the mode in the window you are working in, and the
+branch, diagnostics and cursor position in every window.
+
+**Your tabs in the top row.** The row names what you have open, with the
+host when you are editing remotely. Click a name to switch.
+
+**The tree and the agent in windows of their own.** The file tree and the
+agent panel can open beside your code as windows of their own, and your
+buffers make room for them.
+
+**Beside your code or floating over it.** The tree, the agent panel, the
+command palette and the notifications each open as a window beside your code
+or float over it. One key moves all four between the two.
+
+**Desktop keys where there is no desktop.** Over SSH or on a bare console,
+view answers omarchy's window keys: move between windows, zoom one, open the
+tree or the palette. On a desktop that already owns those keys, view keeps
+to leader keys. See [`docs/keymaps.md`](docs/keymaps.md).
 
 **Agents in the editor.** An agent panel that speaks ACP, an agent that
 sees the file, selection and diagnostics you are looking at, and every
