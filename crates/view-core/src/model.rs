@@ -2085,7 +2085,7 @@ mod window_status;
 pub use buffers::BufferEntry;
 pub use look::{Detected, Look, Panes, MIN_FRAMED_SLOT};
 pub use messages::{format_at, MessageEntry, MessageId, Messages};
-pub use rows::{grid_target_for, ENGINE_MIN_SIZE, SIZE_FLOOR};
+pub use rows::{grid_room_for, grid_target_for, ENGINE_MIN_SIZE, SIZE_FLOOR};
 pub use window_status::WindowStatus;
 
 /// The open tabs, present once nvim has sent at least one `tabline_update`.
@@ -3037,7 +3037,12 @@ mod tests {
 
         m.look = Look::new(Panes::Tiles, true);
         assert_eq!(m.statusline_rows(), 0, "no bar row stands under tiles");
-        assert_eq!(m.grid_target(), (78, 22));
+        assert_eq!(
+            m.grid_target(),
+            (78, 23),
+            "the ring's top row alone comes off the height: the bottom tiles' \
+             status rows stand where its bottom row would"
+        );
 
         m.look = Look::new(Panes::Tiles, false);
         assert_eq!(m.grid_target(), (79, 23));

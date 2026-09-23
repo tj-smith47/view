@@ -1390,8 +1390,8 @@ fn tiled_nested(gaps: bool) -> Tiles {
 /// The size of grid 1 under a look, which is the terminal less the ring the
 /// look spends on its outer frame.
 fn outer_grid(gaps: bool, height: u16) -> (u16, u16) {
-    let ring = if gaps { 2 } else { 1 };
-    (TILED_WIDTH - ring, height - ring)
+    let look = view_core::model::Look::new(view_core::model::Panes::Tiles, gaps);
+    view_core::model::grid_target_for((TILED_WIDTH, height), 0, false, look.ring())
 }
 
 /// Hands the command line back to nvim, which is the session nvim keeps a
@@ -1625,6 +1625,52 @@ fn only_the_active_tiles_frame_carries_the_accent_fg() {
     );
 }
 
+/// The empty band between the frames and the terminal edge is as wide on
+/// every side. The ring's bottom row used to be reserved as well as the
+/// bottom tiles' status rows, which left three empty rows under the frames
+/// against two on every other side.
+#[test]
+fn a_gapped_layout_leaves_the_same_margin_on_every_side() {
+    for tiles in [tiled(true), tiled_nested(true)] {
+        let buf = tiled_frame(&tiles.model);
+        let frame_cells: Vec<(u16, u16)> = (0..TILED_HEIGHT)
+            .flat_map(|y| (0..TILED_WIDTH).map(move |x| (x, y)))
+            .filter(|&(x, y)| ["╭", "╮", "╰", "╯", "│", "─"].contains(&buf[(x, y)].symbol()))
+            .collect();
+        let top = frame_cells
+            .iter()
+            .map(|c| c.1)
+            .min()
+            .expect("a frame was drawn");
+        let bottom = frame_cells
+            .iter()
+            .map(|c| c.1)
+            .max()
+            .expect("a frame was drawn");
+        let left = frame_cells
+            .iter()
+            .map(|c| c.0)
+            .min()
+            .expect("a frame was drawn");
+        let right = frame_cells
+            .iter()
+            .map(|c| c.0)
+            .max()
+            .expect("a frame was drawn");
+        let margins = (
+            top,
+            TILED_HEIGHT - 1 - bottom,
+            left,
+            TILED_WIDTH - 1 - right,
+        );
+        assert_eq!(
+            margins,
+            (2, 2, 2, 2),
+            "(top, bottom, left, right) empty cells between the frames and the edge"
+        );
+    }
+}
+
 /// The fixture's `Normal` states no background, which is what a
 /// transparent colorscheme sends: an inactive frame blended toward a
 /// background nobody named went halfway to black and vanished on the
@@ -1797,7 +1843,7 @@ fn no_bar_row_stands_under_tiles() {
             );
             assert_eq!(
                 model.grid_target().1,
-                TILED_HEIGHT - look.ring() - bar,
+                TILED_HEIGHT - look.ring().min(1) - bar,
                 "the outer grid's height ({panes:?}, gaps {gaps})"
             );
             assert_eq!(

@@ -620,9 +620,13 @@ fn closing_each_window_of_a_split_leaves_no_residue_on_a_widening_terminal() {
     }
 }
 
-/// What a gapped tile spends on each axis of the outer grid: a frame cell
-/// on each of the two sides.
-const OUTER_RING: u16 = 2;
+/// What a gapped tile spends on the outer grid's width: a ring cell on each
+/// of the two sides.
+const OUTER_RING_COLS: u16 = 2;
+
+/// What it spends on the height: the ring's top row alone, since the bottom
+/// tiles' status rows stand where a bottom ring row would.
+const OUTER_RING_ROWS: u16 = 1;
 
 /// The row the pill takes off the top of the outer grid under tiles.
 const PILL_ROW: u16 = 1;
@@ -908,8 +912,8 @@ fn every_tile_keeps_its_own_windows_size_as_the_windows_of_a_split_close() {
     assert_eq!(
         outer,
         (
-            usize::from(COLS - OUTER_RING),
-            usize::from(ROWS - OUTER_RING - PILL_ROW)
+            usize::from(COLS - OUTER_RING_COLS),
+            usize::from(ROWS - OUTER_RING_ROWS - PILL_ROW)
         ),
         "the tiled look takes its ring and the pill's row out of the outer grid"
     );
@@ -965,7 +969,7 @@ fn the_pill_holds_its_row_as_tabpages_and_buffers_come_and_go() {
             .map(|(_, screen)| screen.rows.len())
             .expect("the global grid is always named")
     };
-    let reserved = usize::from(ROWS - OUTER_RING - PILL_ROW);
+    let reserved = usize::from(ROWS - OUTER_RING_ROWS - PILL_ROW);
 
     for (step, keys) in [
         ("file", ":e README.md<CR>"),

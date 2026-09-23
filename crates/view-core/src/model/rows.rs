@@ -76,8 +76,12 @@ impl Model {
 /// on every side, and, when `statusline` is on, view's own bottom bar.
 ///
 /// `ring` is what tiles mode spends framing the screen itself: two cells
-/// gapped, one gapless, none under `panes = "nvim"`. It comes off both axes,
-/// and the grid is then placed one cell in from the terminal's own edge.
+/// gapped, one gapless, none under `panes = "nvim"`. It comes off the width
+/// whole, and the grid is placed one cell in from the terminal's left edge.
+/// Only the ring's top row comes off the height: every window keeps a
+/// status row under `laststatus = 2`, and the bottom tiles' status rows
+/// already stand between their frames and the terminal's bottom edge where
+/// the ring's bottom row would.
 ///
 /// A free function because the spawn needs the answer before there is a
 /// [`Model`] to ask. The child is started `--headless` with this size on a
@@ -105,16 +109,29 @@ pub fn grid_target_for(
     } else {
         size
     };
-    // once per axis, not once per side: the grid sits one cell in from the
-    // top and left, and what is left over goes to the right and bottom,
-    // where a gapped tile's own gap already stands between its frame and
-    // the terminal edge
+    let (width, height) = grid_room_for(size, chrome_rows, statusline, ring);
+    (width.max(ENGINE_MIN_SIZE.0), height.max(ENGINE_MIN_SIZE.1))
+}
+
+/// What [`grid_target_for`] leaves the engine before any floor or clamp:
+/// the terminal less the chrome, the bar and the ring. A spawn whose
+/// target differs from this was clamped, and that is the one question the
+/// caller asks of it.
+#[must_use]
+pub fn grid_room_for(
+    size: (u16, u16),
+    chrome_rows: u16,
+    statusline: bool,
+    ring: u16,
+) -> (u16, u16) {
+    // the width loses a cell on each side; the height loses only the top
+    // row, since the bottom tiles' status rows stand where a bottom ring
+    // row would and a second one left three empty rows under the frames
     (
-        size.0.saturating_sub(ring).max(ENGINE_MIN_SIZE.0),
+        size.0.saturating_sub(ring),
         size.1
             .saturating_sub(chrome_rows + u16::from(statusline))
-            .saturating_sub(ring)
-            .max(ENGINE_MIN_SIZE.1),
+            .saturating_sub(ring.min(1)),
     )
 }
 

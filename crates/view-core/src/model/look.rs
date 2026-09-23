@@ -60,7 +60,9 @@ impl Look {
         Self { panes, gaps }
     }
 
-    /// Cells the outer ring takes off each axis: 0, 1 gapless, 2 gapped.
+    /// Cells the outer ring takes off the width: 0, 1 gapless, 2 gapped.
+    /// The height loses only its top row, for the reason
+    /// [`grid_target_for`](crate::model::grid_target_for) gives.
     #[must_use]
     pub const fn ring(self) -> u16 {
         match (self.panes, self.gaps) {
@@ -73,7 +75,7 @@ impl Look {
     /// Where the outer grid sits inside the terminal, on both axes.
     ///
     /// The ring takes one cell at the top and the left, and whatever else
-    /// it costs is the margin on the right and the bottom. Everything
+    /// it costs is the margin on the right. Everything
     /// mapping a terminal cell to a grid cell, or the other way, spends
     /// this one number.
     #[must_use]

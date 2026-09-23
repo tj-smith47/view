@@ -1209,14 +1209,8 @@ fn main() -> Result<()> {
     // `view_core::model::ENGINE_MIN_SIZE` -- and for none it accepted. A
     // session clamped on either axis paints clipped against a terminal
     // smaller than its grid, and nothing else on screen says why
-    let clamped_geometry = spawn_size
-        != (
-            width.saturating_sub(ring),
-            height
-                .saturating_sub(chrome)
-                .saturating_sub(u16::from(statusline))
-                .saturating_sub(ring),
-        );
+    let clamped_geometry =
+        spawn_size != view_core::model::grid_room_for((width, height), chrome, statusline, ring);
     // the log line here and the notice below are the same report at the two
     // points it can be made: this runs before the terminal is entered, where
     // `VIEW_LOG` is the only sink a session has, and the notice needs a
@@ -2238,11 +2232,7 @@ mod tests {
                 "view_core::native::pill::shows_under",
                 "contains",
                 "view_core::model::grid_target_for",
-                "saturating_sub",
-                "saturating_sub",
-                "saturating_sub",
-                "u16::from",
-                "saturating_sub",
+                "view_core::model::grid_room_for",
                 "vlog::log_with",
                 "with_late_attach",
                 "stdin_relay_requested",
