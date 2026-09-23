@@ -2005,11 +2005,11 @@ mod tests {
         );
     }
 
-    /// A single-grid session is sent no sign of the prompt, and the bound
-    /// on the hold is what releases the Enter.
+    /// A single-grid session is sent no sign of the prompt, and the
+    /// ceiling on the hold is what releases the Enter.
     #[cfg(unix)]
     #[test]
-    fn a_prompt_raised_during_launch_on_a_single_grid_ends_at_the_bound() {
+    fn a_prompt_raised_during_launch_on_a_single_grid_ends_at_the_ceiling() {
         let (answered, seen) = launch_behind_a_prompt(view_core::native::ext::shipped(), true);
         assert!(
             answered,
@@ -2055,6 +2055,45 @@ mod tests {
             colon_mapped: false,
             generation: 0,
         }
+    }
+
+    /// A chord typed after the first bound expired, into a takeover that has
+    /// not answered yet, still reaches nvim behind its mapping: 350 ms into
+    /// a takeover that answers at 400 ms, the expiry at 300 ms arms the
+    /// bound again and the chord waits for the registration's reply.
+    #[test]
+    fn a_chord_typed_into_a_slow_takeover_reaches_nvim_after_its_mapping() {
+        let (modifier, _, _) = view_native::config::profile::modifier_for(
+            view_core::native::chords::ModifierChoice::Auto,
+            Model::with_term_size(80, 24).caps.kitty_kbd,
+        );
+        let chord = view_core::native::chords::desktop_chords()[0].lhs(modifier);
+        let ops = crate::engine_ops::FakeOps::default();
+        let flows = dispatch_desktop(
+            &ops,
+            vec![
+                vim_enter(),
+                Msg::ChordHoldExpired { generation: 1 },
+                Msg::Key(key(chord)),
+                claims(),
+                claims(),
+            ],
+            |_| {},
+        );
+        assert!(flows.iter().all(|f| *f == crate::runtime::Flow::Continue));
+        let calls = ops.calls.borrow().clone();
+        let typed = format!("input({chord})");
+        let registers_chord = |c: &String| {
+            c.strip_prefix("register_mappings(")
+                .and_then(|rest| rest.rsplit_once(','))
+                .is_some_and(|(keys, _)| keys.split(' ').any(|lhs| lhs == chord))
+        };
+        let mapped = calls.iter().position(registers_chord);
+        let sent = calls.iter().position(|c| *c == typed);
+        assert!(
+            matches!((mapped, sent), (Some(m), Some(s)) if m < s),
+            "the chord reached nvim ahead of its mapping: {calls:?}"
+        );
     }
 
     /// A resize made while input is held for the desktop chords goes out

@@ -60,10 +60,17 @@ pub(crate) enum Stage {
 /// round trips behind `VimEnter` plus whatever startup work nvim has queued
 /// ahead of it, and this leaves that wait a wide margin under a login
 /// config while keeping a freeze behind a prompt nvim cannot leave short.
-/// Once the takeover answers, the bound is armed again from that reply with
-/// the takeover's own round trip added, so an engine across a slow link is
-/// given the round trip it still owes.
+/// An expiry that finds the takeover still unanswered arms the bound again,
+/// up to [`CHORD_HOLD_CEILING`]. Once the takeover answers, the bound is
+/// armed again from that reply with the takeover reply time added, so an
+/// engine across a slow link is given the time the registration still owes.
 const CHORD_HOLD_BOUND: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// How long after `VimEnter` input may wait for a takeover that has not
+/// answered. A single-grid session sends no sign of a prompt, so this is
+/// how long a key typed into a prompt raised ahead of the takeover's reply
+/// can be held.
+const CHORD_HOLD_CEILING: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The step `msg` owes, or [`Stage::None`].
 pub(crate) fn stage(msg: &Msg) -> Stage {
@@ -178,7 +185,8 @@ pub(crate) struct NativeSession {
     /// so a timer armed for a replaced engine releases nothing.
     hold_generation: u64,
     /// When the pass that started the hold sent the takeover, until the
-    /// takeover's reply measures the connection's round trip from it.
+    /// takeover's reply measures the takeover reply time from it: the link
+    /// both ways plus whatever startup work nvim ran ahead of the reply.
     takeover_sent: Option<std::time::Instant>,
     /// The first-run record keys this session has already shown a notice
     /// for. Every `MappingsClaimed` reruns [`Self::announce`], and the chord
@@ -350,7 +358,7 @@ impl NativeSession {
     /// key that would is one this hold keeps. A scrolled message area is
     /// the one sign of the prompt a UI that leaves messages to nvim is
     /// sent under multigrid. A single-grid session sends none, and its
-    /// hold ends at [`CHORD_HOLD_BOUND`].
+    /// hold ends at [`CHORD_HOLD_CEILING`].
     pub(crate) fn note_redraw(&mut self, events: &[view_core::events::UiEvent]) {
         if !self.holds_input() {
             return;
@@ -391,15 +399,16 @@ impl NativeSession {
     /// engine.
     #[must_use]
     pub(crate) fn follow_up(&mut self, model: &mut Model, stage: Stage) -> Vec<Effect> {
-        self.follow_up_at(model, stage, std::time::Instant::now())
+        self.follow_up_at(model, stage, std::time::Instant::now)
     }
 
-    /// [`Self::follow_up`] with the pass's clock reading passed in.
+    /// [`Self::follow_up`] reading the time from `clock`, which only the
+    /// passes that arm or end a hold call, so a key never pays for it.
     fn follow_up_at(
         &mut self,
         model: &mut Model,
         stage: Stage,
-        now: std::time::Instant,
+        clock: impl Fn() -> std::time::Instant,
     ) -> Vec<Effect> {
         let holding = self.holds_input();
         let mut effects = self.follow_up_stage(model, stage);
@@ -409,14 +418,22 @@ impl NativeSession {
         let takeover_answered = matches!(stage, Stage::Claims)
             .then(|| self.takeover_sent.take())
             .flatten();
+        let expired = matches!(
+            stage,
+            Stage::HoldExpired { generation } if generation == self.hold_generation
+        );
         // last, so the takeover batch still leads the pass that starts a
         // hold (`runtime::dispatch` splits the attach off at the first
         // effect that is not one)
         let bound = if !holding && self.holds_input() {
-            self.takeover_sent = Some(now);
+            self.takeover_sent = Some(clock());
             Some(CHORD_HOLD_BOUND)
-        } else if holding && self.holds_input() {
-            takeover_answered.map(|sent| CHORD_HOLD_BOUND + now.saturating_duration_since(sent))
+        } else if !self.holds_input() {
+            None
+        } else if let Some(sent) = takeover_answered {
+            Some(CHORD_HOLD_BOUND + clock().saturating_duration_since(sent))
+        } else if expired {
+            self.bound_after_expiry(clock())
         } else {
             None
         };
@@ -457,13 +474,23 @@ impl NativeSession {
                 effects
             }
             Stage::CapsUpgraded | Stage::ProfileFlip => self.reissue_mappings(model, stage),
-            Stage::HoldExpired { generation } => {
-                if generation == self.hold_generation {
-                    self.lift_hold("bound elapsed");
-                }
-                Vec::new()
-            }
+            Stage::HoldExpired { .. } => Vec::new(),
         }
+    }
+
+    /// What the bound's expiry at `now` arms next. A takeover still
+    /// unanswered is a slow engine or a slow link, so the hold waits on
+    /// under a new bound until [`CHORD_HOLD_CEILING`] after `VimEnter`. An
+    /// answered one has had its registration's time, and the hold lifts.
+    fn bound_after_expiry(&mut self, now: std::time::Instant) -> Option<std::time::Duration> {
+        let left = self
+            .takeover_sent
+            .map(|sent| CHORD_HOLD_CEILING.saturating_sub(now.saturating_duration_since(sent)))
+            .filter(|left| !left.is_zero());
+        if left.is_none() {
+            self.lift_hold("bound elapsed");
+        }
+        left.map(|left| left.min(CHORD_HOLD_BOUND))
     }
 
     /// The desktop chords `Self::take_over` left out of its own
@@ -1878,34 +1905,69 @@ cycle_surfaces = \"gz\"
         assert!(!session.holds_input());
     }
 
+    /// Delivers each bound's expiry on time to a session whose takeover
+    /// went out at `sent` and never answers, until the hold lifts. Returns
+    /// how long after `sent` the expiry that lifted it arrived, and the
+    /// generation it carried.
+    fn expire_until_lifted(
+        session: &mut NativeSession,
+        m: &mut Model,
+        sent: std::time::Instant,
+        first: &[Effect],
+    ) -> (std::time::Duration, u64) {
+        let mut due = first.to_vec();
+        let mut offset = std::time::Duration::ZERO;
+        loop {
+            let Some(&Effect::ScheduleChordHold { after, generation }) = due.last() else {
+                panic!("a hold still in force arms its next bound: {due:?}");
+            };
+            assert!(after <= CHORD_HOLD_BOUND, "armed {after:?}");
+            offset += after;
+            assert!(
+                offset <= CHORD_HOLD_CEILING,
+                "the hold outlived the ceiling: {offset:?}"
+            );
+            due = session.follow_up_at(m, Stage::HoldExpired { generation }, || sent + offset);
+            if !session.holds_input() {
+                return (offset, generation);
+            }
+        }
+    }
+
     /// The pass that starts the hold arms its bound last, behind the
-    /// takeover's own calls, and the expiry of that bound releases the held
-    /// input with the registration still unanswered. An expiry armed for an
-    /// earlier hold releases nothing.
+    /// takeover's own calls. While the takeover stays unanswered each
+    /// expiry arms the bound again, and the one that reaches
+    /// `CHORD_HOLD_CEILING` after `VimEnter` releases the held input. An
+    /// expiry armed for an earlier hold releases nothing.
     #[test]
-    fn the_bound_expiring_releases_input_held_for_the_chords() {
+    fn the_ceiling_releases_input_held_for_an_unanswered_takeover() {
         let mut session = NativeSession::desktop(7, None);
         let mut m = model();
-        let take_over = session.follow_up(&mut m, Stage::VimEnter);
-        let Some(Effect::ScheduleChordHold { after, generation }) = take_over.last() else {
+        let sent = std::time::Instant::now();
+        let take_over = session.follow_up_at(&mut m, Stage::VimEnter, || sent);
+        let Some(&Effect::ScheduleChordHold { after, generation }) = take_over.last() else {
             panic!("the pass that starts the hold arms its bound last: {take_over:?}");
         };
-        assert_eq!(*after, CHORD_HOLD_BOUND);
-        let generation = *generation;
+        assert_eq!(after, CHORD_HOLD_BOUND);
         session.hold_input(Effect::Rpc(RpcCall::Input {
             notation: "<CR>".to_string(),
         }));
-        let _ = session.follow_up(
+        let _ = session.follow_up_at(
             &mut m,
             Stage::HoldExpired {
                 generation: generation - 1,
             },
+            || sent + CHORD_HOLD_CEILING,
         );
         assert!(
             session.release_input().is_empty(),
             "a bound armed for another hold released this one"
         );
-        let _ = session.follow_up(&mut m, Stage::HoldExpired { generation });
+        let (lifted_at, _) = expire_until_lifted(&mut session, &mut m, sent, &take_over);
+        assert_eq!(
+            lifted_at, CHORD_HOLD_CEILING,
+            "the unanswered takeover's hold lifted at the wrong time"
+        );
         let released = session.release_input();
         assert!(
             matches!(
@@ -1928,17 +1990,28 @@ cycle_surfaces = \"gz\"
         );
     }
 
+    /// A pass that neither arms nor ends a hold reads no clock, so a key or
+    /// a redraw dispatched during a hold costs no more than one outside it.
+    #[test]
+    fn a_pass_that_moves_no_bound_reads_no_clock() {
+        let mut session = NativeSession::desktop(7, None);
+        let mut m = model();
+        let _ = session.follow_up(&mut m, Stage::VimEnter);
+        assert!(session.holds_input());
+        let _ = session.follow_up_at(&mut m, Stage::None, || {
+            panic!("a pass that moves no bound read the clock")
+        });
+    }
+
     /// A replacement engine started after a lifted hold holds input for its
     /// own chords again, under a bound of its own.
     #[test]
     fn a_restart_after_a_lifted_hold_holds_input_again() {
         let mut session = NativeSession::desktop(7, None);
         let mut m = model();
-        let take_over = session.follow_up(&mut m, Stage::VimEnter);
-        let Some(&Effect::ScheduleChordHold { generation, .. }) = take_over.last() else {
-            panic!("the pass that starts the hold arms its bound last: {take_over:?}");
-        };
-        let _ = session.follow_up(&mut m, Stage::HoldExpired { generation });
+        let sent = std::time::Instant::now();
+        let take_over = session.follow_up_at(&mut m, Stage::VimEnter, || sent);
+        let (_, generation) = expire_until_lifted(&mut session, &mut m, sent, &take_over);
         assert!(!session.holds_input());
         session.rebind(8);
         let take_over = session.follow_up(&mut m, Stage::VimEnter);
@@ -1956,15 +2029,36 @@ cycle_surfaces = \"gz\"
         );
     }
 
-    /// The bound armed again when the takeover answers, read from that
-    /// reply: `CHORD_HOLD_BOUND` plus the takeover's round trip from the
-    /// pass that sent it.
-    fn rearmed_after(round_trip: std::time::Duration) -> std::time::Duration {
+    /// Runs a desktop launch whose takeover answers `reply_time` after the
+    /// pass that sent it, delivering every bound's expiry on time up to that
+    /// reply. Returns the bound the reply arms and the generation it carries,
+    /// with the session and the instant the reply arrived.
+    fn rearmed_after(
+        reply_time: std::time::Duration,
+    ) -> (
+        std::time::Duration,
+        u64,
+        NativeSession,
+        Model,
+        std::time::Instant,
+    ) {
         let mut session = NativeSession::desktop(7, None);
         let mut m = model();
         let sent = std::time::Instant::now();
-        let _ = session.follow_up_at(&mut m, Stage::VimEnter, sent);
-        let answered = session.follow_up_at(&mut m, Stage::Claims, sent + round_trip);
+        let mut due = session.follow_up_at(&mut m, Stage::VimEnter, || sent);
+        let mut offset = std::time::Duration::ZERO;
+        while let Some(&Effect::ScheduleChordHold { after, generation }) = due.last() {
+            if offset + after > reply_time {
+                break;
+            }
+            offset += after;
+            due = session.follow_up_at(&mut m, Stage::HoldExpired { generation }, || sent + offset);
+            assert!(
+                session.holds_input(),
+                "the expiry at {offset:?} lifted the hold with the takeover unanswered"
+            );
+        }
+        let answered = session.follow_up_at(&mut m, Stage::Claims, || sent + reply_time);
         assert!(
             session.holds_input(),
             "the chord registration is still owed"
@@ -1972,27 +2066,53 @@ cycle_surfaces = \"gz\"
         let Some(&Effect::ScheduleChordHold { after, generation }) = answered.last() else {
             panic!("the takeover's reply arms the bound again: {answered:?}");
         };
-        assert_eq!(generation, 2, "the bound armed at VimEnter is superseded");
-        after
+        (after, generation, session, m, sent + reply_time)
     }
 
-    /// An engine across a slow link still owes the chord registration's own
-    /// round trip when the takeover answers, so the bound grows by the round
-    /// trip the takeover measured. A local engine's round trip leaves it
-    /// where it was.
+    /// A takeover that answers after the first bound expired still has its
+    /// hold: the expiry arms the bound again, the reply arms it once more
+    /// with the takeover reply time added, and only that last generation
+    /// lifts it. A takeover that answers at once leaves the bound where it
+    /// was.
     #[test]
-    fn a_slow_takeover_extends_the_bound_by_its_round_trip() {
+    fn a_slow_takeover_extends_the_bound_by_its_reply_time() {
         let slow = std::time::Duration::from_millis(400);
+        let (after, generation, mut session, mut m, answered) = rearmed_after(slow);
         assert_eq!(
-            rearmed_after(slow),
+            after,
             CHORD_HOLD_BOUND + slow,
-            "a 400 ms link owes the registration's round trip past the reply"
+            "a 400 ms takeover reply owes the registration its time past the reply"
         );
+        assert_eq!(
+            generation, 3,
+            "the VimEnter bound and its expiry's re-arm are both superseded"
+        );
+        let _ = session.follow_up_at(
+            &mut m,
+            Stage::HoldExpired {
+                generation: generation - 1,
+            },
+            || answered + CHORD_HOLD_BOUND,
+        );
+        assert!(
+            session.holds_input(),
+            "the bound armed before the reply lifted the hold"
+        );
+        let _ = session.follow_up_at(&mut m, Stage::HoldExpired { generation }, || {
+            answered + after
+        });
+        assert!(
+            !session.holds_input(),
+            "the bound the reply armed did not lift the hold"
+        );
+
         let fast = std::time::Duration::from_micros(500);
-        let from_vim_enter = fast + rearmed_after(fast);
+        let (after, generation, ..) = rearmed_after(fast);
+        assert_eq!(generation, 2, "the bound armed at VimEnter is superseded");
+        let from_vim_enter = fast + after;
         assert!(
             from_vim_enter <= CHORD_HOLD_BOUND + std::time::Duration::from_millis(1),
-            "a local round trip moved the bound to {from_vim_enter:?} after VimEnter"
+            "an immediate reply moved the bound to {from_vim_enter:?} after VimEnter"
         );
     }
 
