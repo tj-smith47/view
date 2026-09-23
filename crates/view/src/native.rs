@@ -50,7 +50,17 @@ pub(crate) enum Stage {
     /// `Msg::FeatureInvoke { feature: "keys", .. }` reached `update()`,
     /// which may have moved `model.key_profile_override`.
     ProfileFlip,
+    /// The bound on input held for the desktop chords elapsed, for the hold
+    /// armed with `generation`.
+    HoldExpired { generation: u64 },
 }
+
+/// How long typed input may wait for nvim to run the desktop chord
+/// registration before it goes to nvim unmapped. The registration waits two
+/// round trips behind `VimEnter` plus whatever startup work nvim has queued
+/// ahead of it, and this leaves that wait a wide margin under a login
+/// config while keeping a freeze behind a prompt nvim cannot leave short.
+const CHORD_HOLD_BOUND: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// The step `msg` owes, or [`Stage::None`].
 pub(crate) fn stage(msg: &Msg) -> Stage {
@@ -59,6 +69,9 @@ pub(crate) fn stage(msg: &Msg) -> Stage {
         Msg::MappingsClaimed { .. } => Stage::Claims,
         Msg::CapsUpgraded(_) => Stage::CapsUpgraded,
         Msg::FeatureInvoke { feature, .. } if feature == "keys" => Stage::ProfileFlip,
+        Msg::ChordHoldExpired { generation } => Stage::HoldExpired {
+            generation: *generation,
+        },
         _ => Stage::None,
     }
 }
@@ -153,6 +166,14 @@ pub(crate) struct NativeSession {
     /// would otherwise reach nvim ahead of its own mapping and run as nvim's
     /// bare keys ([`Self::hold_input`], [`Self::release_input`]).
     held_input: Vec<Effect>,
+    /// Set when the hold ends before the registration answered: the bound
+    /// elapsed, or nvim raised a message prompt it leaves only on a key.
+    /// Input then goes to nvim as typed until a replacement engine's own
+    /// takeover.
+    hold_lifted: bool,
+    /// The generation the newest [`CHORD_HOLD_BOUND`] timer was armed with,
+    /// so a timer armed for a replaced engine releases nothing.
+    hold_generation: u64,
     /// The first-run record keys this session has already shown a notice
     /// for. Every `MappingsClaimed` reruns [`Self::announce`], and the chord
     /// follow-up adds one to every desktop startup, so a session with no
@@ -267,6 +288,8 @@ impl NativeSession {
             chords_pending: false,
             claims_owed: 0,
             held_input: Vec::new(),
+            hold_lifted: false,
+            hold_generation: 0,
             announced: Vec::new(),
         };
         (session, effects)
@@ -290,13 +313,49 @@ impl NativeSession {
         self.chords_pending = false;
         self.claims_owed = 0;
         self.held_input.clear();
+        self.hold_lifted = false;
     }
 
     /// Whether engine-bound input has to wait: from the takeover that left
     /// the desktop chords out until nvim has answered the registration that
-    /// carries them.
+    /// carries them, or until the hold is lifted ([`CHORD_HOLD_BOUND`],
+    /// [`Self::note_redraw`]).
     pub(crate) fn holds_input(&self) -> bool {
-        self.chords_pending || self.claims_owed > 0
+        !self.hold_lifted && (self.chords_pending || self.claims_owed > 0)
+    }
+
+    /// Ends the hold with the registration still unanswered, so the held
+    /// input goes to nvim at the end of this pass and later input is not
+    /// held. A chord among it runs as nvim's own keys, which is how every
+    /// key reached nvim before the hold existed.
+    fn lift_hold(&mut self, why: &str) {
+        if self.holds_input() {
+            self.hold_lifted = true;
+            crate::vlog::log_with("native", || {
+                format!("input hold lifted: {why} claims_owed={}", self.claims_owed)
+            });
+        }
+    }
+
+    /// Lifts the hold when `events` show nvim raising a hit-enter or more
+    /// prompt: nvim runs no registration until a key dismisses it, and the
+    /// key that would is one this hold keeps. A scrolled message area is
+    /// the one sign of the prompt a UI that leaves messages to nvim is
+    /// sent under multigrid. A single-grid session sends none, and its
+    /// hold ends at [`CHORD_HOLD_BOUND`].
+    pub(crate) fn note_redraw(&mut self, events: &[view_core::events::UiEvent]) {
+        if !self.holds_input() {
+            return;
+        }
+        let prompt = events.iter().any(|event| {
+            matches!(
+                event,
+                view_core::events::UiEvent::MsgSetPos { scrolled: true, .. }
+            )
+        });
+        if prompt {
+            self.lift_hold("nvim raised a message prompt");
+        }
     }
 
     /// Queues `effect`, which input produced while [`Self::holds_input`],
@@ -325,9 +384,19 @@ impl NativeSession {
     #[must_use]
     pub(crate) fn follow_up(&mut self, model: &mut Model, stage: Stage) -> Vec<Effect> {
         let holding = self.holds_input();
-        let effects = self.follow_up_stage(model, stage);
+        let mut effects = self.follow_up_stage(model, stage);
         if holding || self.holds_input() {
             self.claims_owed += effects.iter().filter(|e| answers_with_claims(e)).count();
+        }
+        // last, so the takeover batch still leads the pass that starts a
+        // hold (`runtime::dispatch` splits the attach off at the first
+        // effect that is not one)
+        if !holding && self.holds_input() {
+            self.hold_generation += 1;
+            effects.push(Effect::ScheduleChordHold {
+                after: CHORD_HOLD_BOUND,
+                generation: self.hold_generation,
+            });
         }
         effects
     }
@@ -351,7 +420,6 @@ impl NativeSession {
                 effects
             }
             Stage::Claims => {
-                // replies come back in the order the registrations went out
                 self.claims_owed = self.claims_owed.saturating_sub(1);
                 crate::vlog::log("startup", "takeover answered");
                 crate::vlog::log_takeover("answered");
@@ -360,6 +428,12 @@ impl NativeSession {
                 effects
             }
             Stage::CapsUpgraded | Stage::ProfileFlip => self.reissue_mappings(model, stage),
+            Stage::HoldExpired { generation } => {
+                if generation == self.hold_generation {
+                    self.lift_hold("bound elapsed");
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -653,11 +727,13 @@ impl NativeSession {
     /// (`std::fs::read_to_string`/`create_dir_all`/`write` in
     /// `view-native`'s `toast.rs`) synchronously, on whatever thread calls
     /// this -- the same `dispatch` thread every `Msg` runs through, since
-    /// this follow-up fires from `Stage::Claims`. That stage fires exactly
-    /// once per session, right after nvim reports its key claims during
-    /// startup, so the blocking disk I/O lands on time-to-first-paint at
-    /// most once and never recurs on the per-frame steady-state path this
-    /// crate's performance budgets actually gate.
+    /// this follow-up fires from `Stage::Claims`. That stage fires once per
+    /// registration reply, two or more in a desktop session, and a reply
+    /// that claims nothing past `Self::announced` returns before the record
+    /// is touched. So the record is read and written at most once at
+    /// startup and again only when a later registration claims a new key,
+    /// and never on the per-frame steady-state path this crate's
+    /// performance budgets gate.
     fn announce(&mut self, model: &mut Model) -> Vec<Effect> {
         let mut handovers = report(&self.plan, model.claimed_keys(), registry::features());
         handovers.retain(|h| !self.announced.contains(&h.record_key()));
@@ -779,6 +855,8 @@ impl NativeSession {
             chords_pending: false,
             claims_owed: 0,
             held_input: Vec::new(),
+            hold_lifted: false,
+            hold_generation: 0,
             announced: Vec::new(),
         }
     }
@@ -808,6 +886,8 @@ impl NativeSession {
             chords_pending: false,
             claims_owed: 0,
             held_input: Vec::new(),
+            hold_lifted: false,
+            hold_generation: 0,
             announced: Vec::new(),
         }
     }
@@ -900,7 +980,8 @@ mod tests {
         assert!(
             stage(&Msg::MappingsClaimed {
                 claimed: Vec::new(),
-                colon_mapped: false
+                colon_mapped: false,
+                generation: 0,
             }) == Stage::Claims
         );
         assert!(stage(&Msg::RedrawReady) == Stage::None);
@@ -1137,6 +1218,8 @@ mod tests {
             chords_pending: false,
             claims_owed: 0,
             held_input: Vec::new(),
+            hold_lifted: false,
+            hold_generation: 0,
             announced: Vec::new(),
         };
         let mut m = model();
@@ -1215,6 +1298,8 @@ mod tests {
             chords_pending: false,
             claims_owed: 0,
             held_input: Vec::new(),
+            hold_lifted: false,
+            hold_generation: 0,
             announced: Vec::new(),
         };
         let mut m = model();
@@ -1287,6 +1372,8 @@ mod tests {
             chords_pending: false,
             claims_owed: 0,
             held_input: Vec::new(),
+            hold_lifted: false,
+            hold_generation: 0,
             announced: Vec::new(),
         };
         let mut m = model();
@@ -1755,6 +1842,88 @@ cycle_surfaces = \"gz\"
             "the chord registration answered, so the held input goes out: {released:?}"
         );
         assert!(!session.holds_input());
+    }
+
+    /// The pass that starts the hold arms its bound last, behind the
+    /// takeover's own calls, and the expiry of that bound releases the held
+    /// input with the registration still unanswered. An expiry armed for an
+    /// earlier hold releases nothing.
+    #[test]
+    fn the_bound_expiring_releases_input_held_for_the_chords() {
+        let mut session = NativeSession::desktop(7, None);
+        let mut m = model();
+        let take_over = session.follow_up(&mut m, Stage::VimEnter);
+        let Some(Effect::ScheduleChordHold { after, generation }) = take_over.last() else {
+            panic!("the pass that starts the hold arms its bound last: {take_over:?}");
+        };
+        assert_eq!(*after, CHORD_HOLD_BOUND);
+        let generation = *generation;
+        session.hold_input(Effect::Rpc(RpcCall::Input {
+            notation: "<CR>".to_string(),
+        }));
+        let _ = session.follow_up(
+            &mut m,
+            Stage::HoldExpired {
+                generation: generation - 1,
+            },
+        );
+        assert!(
+            session.release_input().is_empty(),
+            "a bound armed for another hold released this one"
+        );
+        let _ = session.follow_up(&mut m, Stage::HoldExpired { generation });
+        let released = session.release_input();
+        assert!(
+            matches!(
+                released.as_slice(),
+                [Effect::Rpc(RpcCall::Input { notation })] if notation == "<CR>"
+            ),
+            "the bound elapsed, so the held input goes out: {released:?}"
+        );
+        assert!(!session.holds_input());
+        let chords = session.follow_up(&mut m, Stage::Claims);
+        assert!(
+            chords
+                .iter()
+                .any(|e| matches!(e, Effect::Rpc(RpcCall::RegisterMappings { .. }))),
+            "a lifted hold still sends the chords once the takeover answers: {chords:?}"
+        );
+        assert!(
+            !session.holds_input(),
+            "the chord registration sent after the hold was lifted holds nothing"
+        );
+    }
+
+    /// A scrolled message area while input is held is nvim at a hit-enter
+    /// or more prompt, which it leaves only on a key, so the hold ends at
+    /// once. An unscrolled one is an ordinary message and changes nothing.
+    #[test]
+    fn a_message_prompt_releases_input_held_for_the_chords() {
+        let msg_set_pos = |scrolled| view_core::events::UiEvent::MsgSetPos {
+            grid: 3,
+            row: 20,
+            scrolled,
+            sep_char: " ".to_string(),
+            zindex: 200,
+            compindex: 1,
+        };
+        let mut session = NativeSession::desktop(7, None);
+        let mut m = model();
+        let _ = session.follow_up(&mut m, Stage::VimEnter);
+        session.hold_input(Effect::Rpc(RpcCall::Input {
+            notation: "<CR>".to_string(),
+        }));
+        session.note_redraw(&[msg_set_pos(false)]);
+        assert!(
+            session.holds_input(),
+            "a message that fits raised no prompt"
+        );
+        session.note_redraw(&[msg_set_pos(true)]);
+        assert_eq!(
+            session.release_input().len(),
+            1,
+            "the key that dismisses the prompt must reach nvim"
+        );
     }
 
     /// A desktop profile whose every chord row resolves to no key has no

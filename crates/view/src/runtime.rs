@@ -166,6 +166,7 @@ pub(crate) fn dispatch<E: EngineOps>(
     // the one call site that legitimately needs redraw content: what the
     // engine just said is the only thing a prediction can be judged against
     let withdrawn = if let Msg::Redraw(events) = &msg {
+        follow_ups.native.note_redraw(events);
         reconcile_speculation(model, events, follow_ups.speculate)
     } else {
         Vec::new()
@@ -177,10 +178,7 @@ pub(crate) fn dispatch<E: EngineOps>(
     // still runs as nvim's own keys. A resize waits with the input so it
     // stays behind the keys typed before it. Only what goes to nvim waits,
     // so a modal answered while the engine is down is still answered
-    let holding = matches!(
-        msg,
-        Msg::Key(_) | Msg::Mouse(_) | Msg::Paste(_) | Msg::Resized { .. }
-    ) && follow_ups.native.holds_input();
+    let holding = is_held_kind(&msg) && follow_ups.native.holds_input();
     let mut flow = Flow::Continue;
     // ahead of the fold's own effects: what a guess this batch took back
     // owes is a window somebody else's plugin is waiting to draw in again
@@ -322,6 +320,30 @@ pub(crate) fn dispatch<E: EngineOps>(
         follow_ups.native.drop_held_input();
     }
     flow
+}
+
+/// Whether `msg` is one of the messages whose engine-bound effects wait
+/// while the native session holds input.
+fn is_held_kind(msg: &Msg) -> bool {
+    matches!(
+        msg,
+        Msg::Key(_) | Msg::Mouse(_) | Msg::Paste(_) | Msg::Resized { .. }
+    )
+}
+
+/// Re-attempts the pump's parked reports when `msg` is input the session is
+/// holding. The claims reply that ends a hold may be parked behind a channel
+/// that was full when it arrived, and only the reader's next routing attempt
+/// carries it. Input makes none, so held input would otherwise wait for
+/// whatever the engine sends next.
+fn retry_parked_claims(
+    msg: &Msg,
+    native: &crate::native::NativeSession,
+    pump: &view_engine::DamagePump,
+) {
+    if is_held_kind(msg) && native.holds_input() {
+        pump.retry_deferred();
+    }
 }
 
 /// Runs `effects` in the order they go on the wire, stamping each on the
@@ -857,6 +879,18 @@ fn intake(
             crate::vlog::log_with("engine", || {
                 format!(
                     "dropped a stop from replaced engine generation {generation} (running {})",
+                    engine.generation()
+                )
+            });
+            return None;
+        }
+        // a registration reply from a replaced connection answers a
+        // registration the replacement never sent, and counted against the
+        // replacement's own it would release held input early
+        Ok(Msg::MappingsClaimed { generation, .. }) if generation != engine.generation() => {
+            crate::vlog::log_with("native", || {
+                format!(
+                    "dropped claims from replaced engine generation {generation} (running {})",
                     engine.generation()
                 )
             });
@@ -1464,15 +1498,7 @@ pub fn run(
         // session ending: from here the supervision fold owns this
         // connection, and `WedgeKind::Dead` is a verdict it may reach
         state.connection_lost |= matches!(msg, Msg::EngineStopped { .. });
-        // the claims reply that ends an input hold may be parked behind a
-        // channel that was full when it arrived, and only the reader's next
-        // routing attempt carries it; typing makes none, so held keys would
-        // wait for whatever the engine sends next
-        if matches!(msg, Msg::Key(_) | Msg::Mouse(_) | Msg::Paste(_))
-            && follow_ups.native.holds_input()
-        {
-            pump.retry_deferred();
-        }
+        retry_parked_claims(&msg, follow_ups.native, &pump);
         let mut queue = vec![msg];
         let mut drained_residue = false;
         while let Some(msg) = queue.pop() {
@@ -5756,6 +5782,78 @@ mod tests {
         assert!(
             !exit.by_signal,
             "an engine that exited on its own instruction died of no signal"
+        );
+    }
+
+    /// A claims reply parked behind a full channel reaches the loop on the
+    /// next held input, a resize included, with no engine traffic to carry
+    /// it. Input that is not held asks for nothing.
+    #[test]
+    fn held_input_carries_a_parked_claims_reply_to_the_loop() {
+        let (tx, rx) = mpsc::sync_channel::<Msg>(1);
+        let pump = view_engine::DamagePump::attached_for_test(tx.clone());
+        let mut native = crate::native::NativeSession::desktop(7, None);
+        let mut model = Model::with_term_size(80, 24);
+        let _ = native.follow_up(&mut model, crate::native::Stage::VimEnter);
+        assert!(native.holds_input());
+        let parked = || {
+            tx.try_send(Msg::FloatSweep)
+                .expect("the channel has room for the fill");
+            pump.route_claims_for_test(Msg::MappingsClaimed {
+                claimed: Vec::new(),
+                colon_mapped: false,
+                generation: 1,
+            });
+            assert!(matches!(rx.try_recv(), Ok(Msg::FloatSweep)));
+        };
+        for held in [
+            Msg::Key(view_core::msg::Key {
+                notation: "x".to_string(),
+            }),
+            Msg::Resized {
+                width: 90,
+                height: 30,
+            },
+        ] {
+            parked();
+            retry_parked_claims(&Msg::FloatSweep, &native, &pump);
+            assert!(
+                rx.try_recv().is_err(),
+                "a message that is not held input retried the parked report"
+            );
+            retry_parked_claims(&held, &native, &pump);
+            assert!(
+                matches!(rx.try_recv(), Ok(Msg::MappingsClaimed { .. })),
+                "{held:?} typed while holding left the claims reply parked"
+            );
+        }
+    }
+
+    /// A registration reply stamped by a replaced connection never reaches
+    /// the dispatch, where it would count against the replacement's own
+    /// registrations and release held input early. One stamped by the
+    /// running connection passes through.
+    #[test]
+    fn claims_from_a_replaced_engine_are_dropped_at_intake() {
+        let mut engine = Engine::spawn(view_engine::process::EngineConfig::isolated()).unwrap();
+        let (tx, _rx) = mpsc::sync_channel::<Msg>(64);
+        let (pump, _cutover) = engine.start_pump(tx);
+        let mut model = Model::with_term_size(80, 24);
+        let claims = |generation| Msg::MappingsClaimed {
+            claimed: Vec::new(),
+            colon_mapped: false,
+            generation,
+        };
+        let live = engine.generation();
+        let stale = intake(Ok(claims(live + 1)), &mut engine, &pump, &mut model);
+        assert!(
+            stale.is_none(),
+            "claims from another connection reached the dispatch: {stale:?}"
+        );
+        let current = intake(Ok(claims(live)), &mut engine, &pump, &mut model);
+        assert!(
+            matches!(current, Some(Msg::MappingsClaimed { generation, .. }) if generation == live),
+            "claims from the running connection must pass, got {current:?}"
         );
     }
 

@@ -7135,6 +7135,7 @@ fn claimed_keys_are_recorded_for_the_handover_report() {
         Msg::MappingsClaimed {
             claimed: claimed.clone(),
             colon_mapped: false,
+            generation: 0,
         },
     );
     assert!(effects.is_empty(), "{effects:?}");
@@ -12593,6 +12594,7 @@ fn the_colon_mapping_reading_is_recorded_and_replaced_by_the_late_re_read() {
         Msg::MappingsClaimed {
             claimed: Vec::new(),
             colon_mapped: true,
+            generation: 0,
         },
     );
     assert!(m.colon_mapped());

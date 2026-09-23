@@ -359,6 +359,7 @@ fn the_takeover_reply_carries_the_registrations_colon_reading() {
                 Ok(Msg::MappingsClaimed {
                     claimed,
                     colon_mapped,
+                    ..
                 }) => read = Some((claimed, colon_mapped)),
                 Ok(_) => {}
                 Err(_) => break,

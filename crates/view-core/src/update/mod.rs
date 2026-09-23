@@ -682,6 +682,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::MappingsClaimed {
             claimed,
             colon_mapped,
+            ..
         } => {
             model.record_claimed_keys(claimed);
             model.record_colon_mapped(colon_mapped);
@@ -726,6 +727,9 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty |= model.expire_startup_hold(generation);
             Vec::new()
         }
+        // the input hold belongs to the binary's native session, which
+        // reads this message at the same dispatch
+        Msg::ChordHoldExpired { .. } => Vec::new(),
         // The key-dispatch-path arm: one event per keystroke in an attached
         // buffer, folded into the open review's hunks and nothing else. The
         // work is O(open hunks) and allocation-free for an edit outside

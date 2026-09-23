@@ -1789,30 +1789,14 @@ mod tests {
             "the replayed chord went out before its mapping existed: {:?}",
             ops.calls.borrow()
         );
-        let flow = crate::runtime::dispatch(
-            &mut model,
-            &executor,
-            &mut follow_ups,
-            Msg::MappingsClaimed {
-                claimed: Vec::new(),
-                colon_mapped: false,
-            },
-        );
+        let flow = crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, claims());
         assert!(flow == crate::runtime::Flow::Continue);
         assert!(
             !ops.calls.borrow().contains(&typed),
             "the chord went out behind a registration nvim has not run yet: {:?}",
             ops.calls.borrow()
         );
-        let flow = crate::runtime::dispatch(
-            &mut model,
-            &executor,
-            &mut follow_ups,
-            Msg::MappingsClaimed {
-                claimed: Vec::new(),
-                colon_mapped: false,
-            },
-        );
+        let flow = crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, claims());
         assert!(flow == crate::runtime::Flow::Continue);
 
         let calls = ops.calls.borrow().clone();
@@ -1913,6 +1897,126 @@ mod tests {
         let _ = engine.wait_exit();
     }
 
+    /// A config that prints a multi-line message from a `vim.schedule`
+    /// queued at `VimEnter` puts a live nvim at a hit-enter prompt ahead of
+    /// the chord registration, in a desktop session that leaves messages to
+    /// nvim. nvim runs the registration only once a key dismisses the
+    /// prompt, so the Enter typed during launch has to reach it while the
+    /// chords are still unmapped. Returns whether nvim answered the
+    /// registration, which it can only do once it has left the prompt, and
+    /// what the session saw.
+    #[cfg(unix)]
+    fn launch_behind_a_prompt(
+        surfaces: Vec<view_core::native::ext::Ext>,
+        bound: bool,
+    ) -> (bool, Vec<String>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(256);
+        let mut engine = Engine::spawn(
+            EngineConfig::isolated()
+                .with_late_attach(80, 24)
+                .with_arg("--cmd")
+                .with_arg(
+                    "autocmd VimEnter * lua vim.schedule(function() \
+                     print('one\\ntwo\\nthree') end)",
+                ),
+        )
+        .unwrap();
+        let (pump, cutover) = engine.start_pump(tx.clone());
+        let mut executor = crate::runtime::Executor::new(engine.handle.clone());
+        if bound {
+            executor = executor.with_toast_timer(crate::wake::LoopSender::new(tx));
+        }
+        let mut model = Model::with_term_size(80, 24);
+        model.attach_surfaces(
+            surfaces
+                .into_iter()
+                .filter(|ext| *ext != view_core::native::ext::Ext::Messages)
+                .collect(),
+        );
+        let mut native = crate::native::NativeSession::desktop(engine.api_info.channel_id, None);
+        let mut theme = crate::bridge::ThemeBridge::new(None, None);
+        let mut follow_ups = crate::runtime::FollowUps {
+            native: &mut native,
+            theme: &mut theme,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+
+        let deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(5));
+        let mut incoming = cutover.presink.into_iter();
+        let mut typed = false;
+        let mut claims = 0;
+        let mut seen = Vec::new();
+        let answered = loop {
+            let msg = match incoming.next() {
+                Some(msg) => msg,
+                None => match rx
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                {
+                    Ok(msg) => msg,
+                    Err(_) => break false,
+                },
+            };
+            seen.push(format!("{msg:?}").chars().take(80).collect::<String>());
+            if matches!(msg, Msg::MappingsClaimed { .. }) {
+                claims += 1;
+            }
+            let vim_enter = matches!(
+                msg,
+                Msg::EngineRequest(view_core::msg::EngineRequest::VimEnter { .. })
+            );
+            let msg = match msg {
+                Msg::RedrawReady => Msg::Redraw(pump.take_damage()),
+                msg => msg,
+            };
+            let flow = crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, msg);
+            assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
+            if claims == 2 {
+                break true;
+            }
+            if vim_enter && !typed {
+                typed = true;
+                let flow = crate::runtime::dispatch(
+                    &mut model,
+                    &executor,
+                    &mut follow_ups,
+                    Msg::Key(key("<CR>")),
+                );
+                assert_eq!(flow, crate::runtime::Flow::Continue);
+            }
+        };
+        assert!(typed, "nvim never asked for its VimEnter answer: {seen:?}");
+        let _ = engine.wait_exit();
+        (answered, seen)
+    }
+
+    /// Under multigrid the prompt shows as a scrolled message area, and the
+    /// session releases the Enter on that alone, with no bound armed.
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_raised_during_launch_takes_the_key_typed_into_it() {
+        let (answered, seen) =
+            launch_behind_a_prompt(view_core::native::ext::shipped_multigrid(), false);
+        assert!(
+            answered,
+            "the Enter typed at the hit-enter prompt was held, so nvim never \
+             left it to run the chord registration; saw {seen:?}"
+        );
+    }
+
+    /// A single-grid session is sent no sign of the prompt, and the bound
+    /// on the hold is what releases the Enter.
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_raised_during_launch_on_a_single_grid_ends_at_the_bound() {
+        let (answered, seen) = launch_behind_a_prompt(view_core::native::ext::shipped(), true);
+        assert!(
+            answered,
+            "the Enter typed at the hit-enter prompt was held past the bound, \
+             so nvim never left it to run the chord registration; saw {seen:?}"
+        );
+    }
+
     /// Dispatches `msgs` through a desktop session on `ops`, returning each
     /// pass's flow.
     fn dispatch_desktop(
@@ -1948,6 +2052,7 @@ mod tests {
         Msg::MappingsClaimed {
             claimed: Vec::new(),
             colon_mapped: false,
+            generation: 0,
         }
     }
 

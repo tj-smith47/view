@@ -670,6 +670,7 @@ impl EngineHandle {
                                     pump.route_claims(Msg::MappingsClaimed {
                                         claimed: report.claimed,
                                         colon_mapped: report.colon_mapped,
+                                        generation: pump.generation(),
                                     });
                                 }
                             }
@@ -705,6 +706,7 @@ impl EngineHandle {
                                     pump.route_claims(Msg::MappingsClaimed {
                                         claimed: reading.claimed,
                                         colon_mapped: reading.colon_mapped,
+                                        generation: pump.generation(),
                                     });
                                 }
                             }

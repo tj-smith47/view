@@ -309,6 +309,7 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
         Msg::MappingsClaimed {
             claimed,
             colon_mapped,
+            ..
         } => {
             log_with("native", || {
                 let keys: Vec<String> = claimed

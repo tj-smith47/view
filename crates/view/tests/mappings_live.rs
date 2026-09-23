@@ -133,6 +133,7 @@ impl Session {
             Msg::MappingsClaimed {
                 claimed,
                 colon_mapped,
+                ..
             } => Some((claimed.clone(), *colon_mapped)),
             _ => None,
         })

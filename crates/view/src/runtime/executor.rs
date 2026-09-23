@@ -624,6 +624,17 @@ impl<E: EngineOps> Executor<E> {
                 }
                 Flow::Continue
             }
+            // the same one-shot thread, and the degrade `msg.rs` states
+            Effect::ScheduleChordHold { after, generation } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    spawn_or_log("chord-hold", move || {
+                        std::thread::sleep(after);
+                        let _ = tx.send(Msg::ChordHoldExpired { generation });
+                    });
+                }
+                Flow::Continue
+            }
             // the same one-shot thread again, and the degrade `msg.rs`
             // states: an unwired channel leaves the grace open, which is a
             // take-down bounded by the complaint signature alone

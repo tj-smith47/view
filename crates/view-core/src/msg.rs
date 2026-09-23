@@ -271,6 +271,11 @@ pub enum Msg {
         /// ([`crate::native::speculate::may_speculate_cmdline`]) needs the
         /// answer per keystroke, which is not a thing to ask the engine for.
         colon_mapped: bool,
+        /// The generation of the connection that answered, on the terms
+        /// [`Msg::EngineStopped`] carries one: a reply the replaced engine's
+        /// reader routed just before teardown must not count against the
+        /// replacement's registrations.
+        generation: u64,
     },
     /// The same reading taken again after a plugin loaded late, sent only
     /// when it disagrees with the last one.
@@ -513,6 +518,17 @@ pub enum Msg {
     /// (`SurfaceConflicts::engine_generation`), or the dead engine's clock
     /// would release the replacement's hold early.
     StartupHoldExpired {
+        generation: u64,
+    },
+    /// The bound on input held for the desktop chords elapsed
+    /// ([`Effect::ScheduleChordHold`]). Releases the held input whether or
+    /// not nvim has run the registration yet, so an engine that cannot run
+    /// it until a key arrives (a hit-enter prompt) still gets the key.
+    ///
+    /// `generation` is the arming effect's own, echoed back: a hold armed
+    /// for a replaced engine must not release the hold its replacement
+    /// armed.
+    ChordHoldExpired {
         generation: u64,
     },
     /// The complaint grace elapsed
@@ -1457,6 +1473,18 @@ pub enum Effect {
     /// `generation` names the engine the deadline is armed for, and the
     /// expiry carries it back unchanged ([`Msg::StartupHoldExpired`]).
     ScheduleStartupHold {
+        after: Duration,
+        generation: u64,
+    },
+    /// Arms the bound on input held for the desktop chords: after `after`
+    /// elapses the timer worker sends [`Msg::ChordHoldExpired`] into the
+    /// loop. The same one-shot thread and the same shape as
+    /// [`Effect::ScheduleStartupHold`].
+    ///
+    /// The degrade when a runtime or harness drops this effect: the hold
+    /// ends only on nvim's reply to the registration, or on a message
+    /// prompt nvim raises while it is held.
+    ScheduleChordHold {
         after: Duration,
         generation: u64,
     },

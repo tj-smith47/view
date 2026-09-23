@@ -469,10 +469,10 @@ struct Route {
     /// are mapped. Every one queued here must eventually be delivered, not
     /// merely the newest.
     ///
-    /// One queue for both kinds rather than one each: what they share is
-    /// the "never drop, never reorder" contract, and a second queue would
-    /// only let a message in one overtake a message in the other, which
-    /// nothing wants.
+    /// One queue for all three kinds rather than one each: what they share
+    /// is the "never drop, never reorder" contract, and a queue of its own
+    /// would only let a message in one overtake a message in another,
+    /// which nothing wants.
     deferred_queued: VecDeque<Msg>,
 }
 
@@ -776,10 +776,11 @@ impl PumpShared {
     /// [`route_probe_reply`](Self::route_probe_reply).
     ///
     /// Its own slot: it arrives from the same reply as the claim report
-    /// and the notify-sink reading, so a slot shared with either would hold
-    /// one and then have another write over it. A dropped startup dump is silent and
-    /// permanent -- nvim is asked once, at `VimEnter` -- and the standing
-    /// notice would go on promising a history that never got them.
+    /// and the notify-sink reading, so a slot shared with either would
+    /// hold one and then have another write over it. A dropped startup
+    /// dump is silent and permanent -- nvim is asked once, at `VimEnter`
+    /// -- and the standing notice would go on promising a history that
+    /// never got them.
     pub(crate) fn route_startup_messages(&self, msg: Msg) {
         self.route_held(msg, Held::StartupMessages);
     }
@@ -1076,6 +1077,21 @@ impl DamagePump {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retry_deferred();
+    }
+
+    /// A pump on a connection of its own with `sink` attached, for a test
+    /// that drives routing with no engine behind it.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn attached_for_test(sink: impl MsgSink + Send + Sync + 'static) -> Self {
+        PumpShared::new().attach_sink(sink).0
+    }
+
+    /// Routes `msg` as the reader routes a registration reply, parking it
+    /// when the sink is full.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn route_claims_for_test(&self, msg: Msg) {
+        self.shared.route_claims(msg);
     }
 }
 
@@ -1737,6 +1753,7 @@ mod tests {
         let claims = |colon_mapped| Msg::MappingsClaimed {
             claimed: Vec::new(),
             colon_mapped,
+            generation: 1,
         };
         shared.route_claims(claims(false));
         shared.route_claims(claims(true));
