@@ -1363,7 +1363,7 @@ fn tiled(gaps: bool) -> Tiles {
 }
 
 /// The same vsplit with the right-hand column split again, so a frame meets
-/// three neighbours instead of one and the lattice has an interior crossing.
+/// three neighbours and the lattice has an interior crossing.
 fn tiled_nested(gaps: bool) -> Tiles {
     let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
     let left_width = (grid_width - 1) / 2;
@@ -1417,7 +1417,7 @@ fn tiled_model(gaps: bool, height: u16, slots: &[(u16, u16, u16, u16)]) -> Model
     model.statusline_enabled = true;
     // the shipped attach: view owns the command line and the message area,
     // so the takeover holds `cmdheight` at 0 and the grid's last row is a
-    // window's status row rather than nvim's own. The tab line is left with
+    // window's status row. The tab line is left with
     // nvim, which is what keeps the lattice at the top of the screen: the
     // row the pill takes is `the_lattice_sits_under_the_pills_row`'s
     // question, and every slot here would otherwise be one row lower for a
@@ -1814,8 +1814,8 @@ fn shell_frame(look: view_core::model::Look) -> Buffer {
 }
 
 /// The rect the bar claims on that frame, or `None` where the look gives
-/// it no row. Read off the surface rather than off the picture, since an
-/// empty bar paints no glyph either way.
+/// it no row. Read off the surface, since an empty bar paints no glyph
+/// either way.
 fn shell_bar_rect(look: view_core::model::Look) -> Option<view_surface::Rect> {
     view_surface::render(&shell_model(look))
         .layers
@@ -1936,8 +1936,8 @@ fn edge_rows(model: &Model, slot: (u16, u16, u16, u16)) -> (u16, u16) {
     }
 }
 
-/// The mode is the session's, not the window's, so it belongs only to the
-/// tile the user is typing into. Two tiles both claiming `-- INSERT --`
+/// The mode belongs to the session, so it shows only on the tile the user
+/// is typing into. Two tiles both claiming `-- INSERT --`
 /// would say the user is in both at once.
 #[test]
 fn an_inactive_tile_shows_no_mode_segment() {
@@ -2093,7 +2093,7 @@ fn a_segment_change_repaints_every_tiles_edge() {
 }
 
 /// A gapped tile's name is in the top edge, where the buffer it holds is
-/// read as a title rather than mixed in with the counts.
+/// read as a title, apart from the counts.
 #[test]
 fn a_gapped_tile_names_its_buffer_in_the_top_edge() {
     let tiles = tiled(true);
@@ -2129,7 +2129,7 @@ fn a_gapless_tile_puts_the_name_and_the_segments_in_one_row() {
     );
 }
 
-/// A name is measured in the cells it draws, not in characters. A script
+/// A name is measured in the cells it draws. A script
 /// that draws two cells to the character fits the edge by count and runs
 /// past the closing blank and over the corner.
 ///
@@ -2485,8 +2485,8 @@ fn the_tree_view_paints_into_its_native_panes_rect() {
 
 /// The agent panel windowed into the right tile, mirroring
 /// `tree_in_the_left_tile`: claims the existing tile's window (same grid,
-/// same handle) rather than asking nvim to open a fresh one, and carries one
-/// transcript line so the golden shows painted content, not an empty box.
+/// same handle), and carries one transcript line so the golden shows
+/// painted content.
 fn agent_in_the_right_tile(gaps: bool) -> Tiles {
     let tiles = tiled(gaps);
     let slots = tiles.slots;
@@ -2550,8 +2550,7 @@ fn agent_in_the_right_tile(gaps: bool) -> Tiles {
 /// The band a windowed palette paints carries no nvim window or frame
 /// of its own (`view_surface::render` pushes its `Layer` straight from the
 /// anchor and the cmdline state, with no `OpenNativeWindow`/`WinPos` round
-/// trip to simulate), so the fixture is one full-width window rather than
-/// the two-slot scenes the other windowed goldens split into -- the shape
+/// trip to simulate), so the fixture is one full-width window -- the shape
 /// a person actually sees while editing a single file and pressing `:`.
 fn palette_in_the_bottom_band(gaps: bool) -> Tiles {
     let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
@@ -2655,8 +2654,7 @@ fn palette_in_the_top_band(gaps: bool) -> Tiles {
 /// the query it is drawn beside, in every anchor and gap mode: the band's
 /// content has no pad column of its own (`overlay::windowed_interior_origin`),
 /// unlike a floating overlay's, so a caret computed with the padded offset
-/// used to sit one column past that -- on top of the next cell instead of
-/// after the one just typed.
+/// used to sit one column past that, on top of the next cell.
 #[test]
 fn a_windowed_palette_caret_lands_one_past_the_last_typed_character() {
     for gaps in [true, false] {
@@ -2704,7 +2702,7 @@ fn a_windowed_palette_caret_lands_one_past_the_last_typed_character() {
 /// (`agent_in_the_right_tile`), plus one `GridCursorGoto` onto its grid:
 /// opening a surface leaves the keyboard in it (`enter = true`, see
 /// `open_native_window`'s doc), which is nvim's own cursor move, so the
-/// fixture has to make it too rather than leave the cursor where `tiled()`
+/// fixture has to make it too, moving the cursor from where `tiled()`
 /// first put it. The palette never becomes nvim's curwin at all under
 /// either placement (see `pending_open`'s doc), so its own windowed rect is
 /// read off `render`'s `Layer` output below, the same way the overlay
@@ -2785,7 +2783,7 @@ fn every_text_taking_native_surface_puts_its_caret_inside_its_own_painted_rect()
     // the floating palette is not tracked in `model.overlays()` at all --
     // `render` derives its box straight from `model.engine.cmdline` plus
     // `palette_enabled` -- so its own painted rect has to come from the
-    // layer `render` actually produced, not from `Model::overlay_rect`.
+    // layer `render` actually produced.
     let mut model = tiled(true).model;
     model.palette_enabled = true;
     drive(
@@ -2823,7 +2821,7 @@ fn every_text_taking_native_surface_puts_its_caret_inside_its_own_painted_rect()
 /// `slots` are written in, but a caret is a terminal cell -- exactly the
 /// distinction `pane_cursor` (`view-surface`'s own windowed caret arm) has
 /// to add `origin` back in for. Read off the rendered `EngineGrid` layer's
-/// own rect rather than re-deriving `grid_origin`, since that layer is
+/// own rect, since that layer is
 /// built at that offset by [`view_surface::render`] itself.
 fn chrome_shifted(model: &Model, slot: (u16, u16, u16, u16)) -> (u16, u16, u16, u16) {
     let (row, col, width, height) = slot;
@@ -3063,7 +3061,7 @@ fn notifications_corner_scenes() {
     }
 }
 
-/// The exit slide's own paint, not just its rect (`view-surface`'s
+/// The exit slide's own paint, beside its rect (`view-surface`'s
 /// `a_toast_stack_leaves_toward_its_own_corner` already pins that a left
 /// corner's rect narrows from column 0 and a right corner's slides): a
 /// right corner's box keeps its own leading text at a moving column, so the
@@ -3094,10 +3092,9 @@ fn a_dismissed_toasts_own_text_slides_at_every_corner() {
         let mut left_edge_chars = Vec::new();
         // only while the departing box is still standing: once it settles
         // (`toast_motion` gone) the next box takes slot 0 in its place,
-        // which is a different box's own first letter, not a further frame
-        // of this one's exit; a sliver too narrow to hold an interior
-        // column (border cells only) carries nothing this pin can read
-        // either, so both are excluded rather than misread as the slide.
+        // which is a different box's own first letter; a sliver too narrow
+        // to hold an interior column (border cells only) carries nothing
+        // this pin can read either, so both are excluded from the slide.
         while model.toast_motion.is_some() {
             let surface = view_surface::render(&model);
             let departing = surface
@@ -3178,7 +3175,7 @@ fn a_native_panes_frame_carries_its_surfaces_name() {
 }
 
 /// The gapless look has one edge row and no top run, so the name leads the
-/// segments there rather than sitting above them. The surface's name still
+/// segments there. The surface's name still
 /// has to be on it, and the segments still have to be gone.
 #[test]
 fn a_gapless_native_panes_edge_keeps_the_name_and_drops_the_segments() {
@@ -3372,7 +3369,7 @@ const TILED_SCENES: &[(&str, SceneDump)] = &[
 ];
 
 /// The committed picture of every tiled-family scene, one per tier, driven
-/// from [`TILED_SCENES`] rather than one `#[test]` fn per stem.
+/// from [`TILED_SCENES`].
 #[test]
 fn tiled_scene_goldens() {
     for (stem, dump) in TILED_SCENES {

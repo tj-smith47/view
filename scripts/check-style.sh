@@ -2511,6 +2511,89 @@ check_script_comment_width() {
   return 1
 }
 
+# A contrast frame in a Rust comment (`rather than`, `instead of`, `, not `,
+# `not X but`) is counted per crate against scripts/comment-frames.ceiling.
+# The tree carried thousands before the rule, so a crate's count may fall and
+# may not rise. A crate over its ceiling fails naming the lines its working
+# tree added, and a crate under it fails until the ceiling comes down to it,
+# so the next rise is measured from what the tree holds.
+COMMENT_FRAME_RE='//.*(rather than|instead of|, not |(^|[^a-z])not( [^ ,.;]+){1,3} but )'
+check_comment_frames() {
+  local ceiling=scripts/comment-frames.ceiling hits rc counts verdict
+  if [ ! -f "$ceiling" ]; then
+    echo "STYLE FAIL: $ceiling is missing, so the contrast-frame ratchet has no ceiling"
+    return 1
+  fi
+  rc=0
+  hits=$(LC_ALL=C grep -rniE --include='*.rs' "$COMMENT_FRAME_RE" crates) || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    echo "STYLE FAIL: the contrast-frame count exited $rc instead of reading crates/"
+    return 1
+  fi
+  counts=$(printf '%s\n' "$hits" | awk -F/ 'NF > 2 { n[$2]++ } END { for (c in n) print c, n[c] }')
+  # one verdict per crate either file names: a crate the ceiling omits is
+  # held at zero, and a ceiling row whose crate has no hit left must fall to
+  # zero with it
+  verdict=$(printf '%s\n%s\n' "$counts" "--" | cat - "$ceiling" | awk '
+    $0 == "--" { reading = 1; next }
+    NF != 2 || $1 ~ /^#/ { next }
+    !reading { now[$1] = $2; seen[$1] = 1; next }
+    { cap[$1] = $2; seen[$1] = 1 }
+    END {
+      for (c in seen) {
+        a = (c in now) ? now[c] : 0
+        b = (c in cap) ? cap[c] : 0
+        if (a > b) print "over", c, a, b
+        else if (a < b) print "under", c, a, b
+      }
+    }')
+  if [ -z "$verdict" ]; then
+    return 0
+  fi
+  printf '%s\n' "$verdict" | while read -r kind crate now cap; do
+    if [ "$kind" = over ]; then
+      echo "crates/$crate: $now contrast-frame comment lines, ceiling $cap"
+      comment_frames_added "$crate" "$hits"
+      echo "STYLE FAIL: a crate's contrast-frame comments rose past its ceiling"
+      echo "  State what the code does in the comment, and drop the alternative"
+      echo "  it does not do."
+    else
+      echo "crates/$crate: $now contrast-frame comment lines, ceiling $cap"
+      echo "STYLE FAIL: a crate's contrast-frame count fell under its ceiling"
+      echo "  Lower its row in $ceiling to $now in the same change."
+    fi
+  done
+  return 1
+}
+
+# The frame lines a crate's working tree added against HEAD, or every frame
+# line the crate holds where git cannot say which are new.
+comment_frames_added() {
+  local crate="$1" hits="$2" added
+  added=$(git diff -U0 HEAD -- "crates/$crate" 2>/dev/null | awk '
+    /^\+\+\+ b\// { file = substr($0, 7); next }
+    /^@@/ { split($3, at, ","); line = substr(at[1], 2) + 0; next }
+    /^\+/ { print file ":" line ":" substr($0, 2); line++ }
+  ' | LC_ALL=C grep -iE ":[0-9]+:.*$COMMENT_FRAME_RE") || true
+  if [ -n "$added" ]; then
+    printf '%s\n' "$added"
+  else
+    printf '%s\n' "$hits" | awk -F/ -v c="$crate" '$2 == c'
+  fi
+}
+
+# The contrast-frame ratchet alone, graded the same way as the walks below.
+if [ "${1:-}" = "--comment-frames" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --comment-frames ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  check_comment_frames
+  exit $?
+fi
+
 # The two width walks alone, run against a scratch crate root rather than
 # this tree: the walks read only crates/view-engine, so grading them does
 # not need the README, the scripts directory or the god-file classifier the
@@ -2867,6 +2950,9 @@ for dir in compat corpus; do
 done
 if [ -d scripts ]; then
   check_script_comment_rules || fail=1
+fi
+if [ -d crates ]; then
+  check_comment_frames || fail=1
 fi
 check_acceptance_expectations || fail=1
 check_notice_joiners || fail=1

@@ -182,7 +182,7 @@ fn tiled_panes(model: &Model) -> Vec<Pane> {
         .into_iter()
         // the global grid always sorts first in `panes_in_z_order` and
         // always carries `PaneKind::Window`, standing for the chrome under
-        // every real window rather than a tile of its own -- the desktop
+        // every real window and owning no tile -- the desktop
         // chords and the `window` verbs both need `ext_multigrid` for the
         // rects they read regardless, so its absence here costs nothing a
         // session without multigrid could have used
@@ -297,7 +297,7 @@ pub(crate) fn window_flip(model: &mut Model) -> Vec<Effect> {
 /// and [`SurfacePlacement::Overlay`](crate::native::geometry::SurfacePlacement::Overlay),
 /// through the same [`retile_open_surface`] a ring step drives, on
 /// [`SurfaceState::toggle_placement`](crate::native::placement::SurfaceState::toggle_placement)'s
-/// own terms rather than [`cycle_placements`]'s shared ring: this verb
+/// own terms, apart from [`cycle_placements`]'s shared ring: this verb
 /// names one surface, and moving the ring for it would carry the other
 /// three along with a press that never named them.
 pub(crate) fn window_float(model: &mut Model) -> Vec<Effect> {
@@ -383,8 +383,8 @@ fn retile_open_surface(
             let Some(win) = model.engine.grids().native_window(surface) else {
                 // still mid-open: there is no window yet to release, but
                 // this step has already moved the surface off windowed, so
-                // the open in flight is retired here rather than left to
-                // land later and claim a window nothing wants any more
+                // the open in flight is retired here, so it cannot land
+                // later and claim a window nothing wants any more
                 // (see `native_window_opened`'s own stale-generation arm)
                 model.surfaces.cancel_pending_open(surface);
                 return Vec::new();
@@ -599,8 +599,8 @@ pub(super) fn native_window_taken(model: &mut Model, surface: NativeSurface) -> 
 /// `ai_panel_width_pct` -- whichever `NativeSurface` it is) is written back
 /// too, the same field its own resize key steps: left at the pre-sync
 /// value, a later overlay resize of the sibling would read that stale
-/// number and step from it instead of from the share this sync just gave
-/// it, silently discarding the carry the moment the sibling floats.
+/// number and step from it, silently discarding the share this sync just
+/// gave it the moment the sibling floats.
 fn sync_stacked_siblings(model: &mut Model, resized: NativeSurface, anchor: Anchor, size: u16) {
     for surface in NativeSurface::ALL {
         if surface == resized || !model.surfaces.windowed(surface) {
@@ -629,7 +629,7 @@ fn sync_stacked_siblings(model: &mut Model, resized: NativeSurface, anchor: Anch
 /// The stepped share is written back into the layout whether or not the
 /// tree is windowed right now: `layout.size` is what a later ring step
 /// reads to open the window at, so a width stepped while the tree floats
-/// must already be there when that step arrives, not just in
+/// must already be there when that step arrives, as well as in
 /// `tree_width_pct`'s own copy (which `resize_tree` has already re-widthed
 /// the open float from). Only the live `SetWindowSize` RPC is a windowed
 /// surface's own.
@@ -658,9 +658,9 @@ fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
 
 /// [`resize_windowed_tree`], for the agent panel: carries the share
 /// `resize_ai_panel` just stepped to the layout, windowed or not, and to
-/// the window it sits in when it is. `pub(super)` rather than private: the
-/// resize key lives on `update::ai::ai_panel_key`'s own composer match,
-/// not here, the same split `tree_key`'s own module keeps for the sidebar.
+/// the window it sits in when it is. `pub(super)`, since the resize key
+/// lives on `update::ai::ai_panel_key`'s own composer match, the same split
+/// `tree_key`'s own module keeps for the sidebar.
 pub(super) fn resize_windowed_agent(model: &mut Model) -> Vec<Effect> {
     let layout = model.surfaces.layout(NativeSurface::Agent);
     let stepped = model.ai_panel_width_pct;
@@ -694,8 +694,7 @@ pub(super) fn resize_windowed_agent(model: &mut Model) -> Vec<Effect> {
 /// placement never reads `layout.size` at all -- `open_message_history`
 /// opens the history overlay at a fixed `OverlayBox::new(70, 60)`, the same
 /// box on every open -- so `model.surfaces`'s own layout is the only copy
-/// of this surface's share there is, and this steps it directly rather than
-/// stepping a second field and copying it across the way the sidebars do.
+/// of this surface's share there is, and this steps it directly.
 ///
 /// The axis follows the anchor: a left or right tile resizes in columns,
 /// top or bottom in rows, per [`crate::native::geometry::SurfaceLayout`]'s
@@ -734,7 +733,7 @@ pub(super) fn resize_windowed_stream(model: &mut Model, widen: bool) -> Vec<Effe
 
 /// Closes the window the tree sits in and drops its state.
 ///
-/// The claim goes here rather than on the `win_close` the close produces,
+/// The claim goes here, ahead of the `win_close` the close produces,
 /// because nvim can refuse the close and then send nothing: `:only` from
 /// inside the tree leaves its window the last one, and `nvim_win_close`
 /// answers E444. Waiting for an event that never comes left the handle
@@ -750,8 +749,8 @@ fn close_windowed_tree(model: &mut Model) -> Vec<Effect> {
     if model.surfaces.pending_open(NativeSurface::Tree) {
         // a close reached before the open it is closing was ever claimed
         // retires that open here (see `retile_open_surface`'s own pending
-        // arm for why), rather than leaving it to land and claim a window
-        // this close already said it did not want. A reopen already
+        // arm for why), so it cannot land and claim a window this close
+        // already said it did not want. A reopen already
         // claimed (`win` was `Some`) still carries a reply in flight of
         // its own: retiring it here too is what keeps that reply from
         // landing after this close and reclaiming the handle the release
@@ -881,10 +880,10 @@ pub(super) fn native_window_opened(
         return vec![Effect::Rpc(RpcCall::CloseNativeWindow { win: win.0 })];
     }
     // a re-enter of a window the open chunk's `is_ours(live)` branch found
-    // already open hands back that same handle instead of opening a new
-    // one, and nvim never fires a fresh `win_pos` for a window whose
-    // position has not moved -- read before the claim below overwrites it,
-    // since that is what tells this reply apart from a genuine new open
+    // already open hands back that same handle, and nvim never fires a
+    // fresh `win_pos` for a window whose position has not moved -- read
+    // before the claim below overwrites it, since that is what tells this
+    // reply apart from a genuine new open
     let reentered = model.engine.grids().native_window(surface) == Some(win);
     // `pending_open` stays true past this claim -- it is what
     // `native_window()` will answer once the `win_pos` this claim is
@@ -906,10 +905,9 @@ pub(super) fn native_window_opened(
     Vec::new()
 }
 
-/// An `OpenNativeWindow` call answered with an error rather than a window
-/// handle: nothing to claim, but `pending_open` still has to clear, or a
-/// guard gated on it refuses every later open of `surface` for the rest of
-/// the session.
+/// An `OpenNativeWindow` call answered with an error: nothing to claim,
+/// but `pending_open` still has to clear, or a guard gated on it refuses
+/// every later open of `surface` for the rest of the session.
 pub(super) fn native_window_open_failed(
     model: &mut Model,
     generation: u64,
@@ -1034,7 +1032,7 @@ pub(super) fn open_message_history(model: &mut Model) -> Vec<Effect> {
 /// unchanged. Past that, [`history_mut`] reaches the same
 /// `MessageHistoryState` a float would, so [`message_history_key`]'s own
 /// dispatch answers every key here exactly as it does for the floating
-/// overlay -- the pane is a placement, not a different feature.
+/// overlay -- the pane is a placement of the same feature.
 pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     if notation == "<Esc>" {
         return vec![Effect::Rpc(RpcCall::FocusPreviousWindow)];
@@ -1045,7 +1043,7 @@ pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Vec<E
     // forwarded on arming: nvim must never be told about a `<C-w>` whose
     // follower turns out to be this build's own resize chord, so the
     // prefix and its follower reach nvim together, and only once the
-    // follower is known to belong to nvim rather than this pane.
+    // follower is known to belong to nvim.
     let armed_before = model.pending_chord.as_deref() == Some("<C-w>");
     match take_binding(model, notation) {
         Some(Resolved::Act(Action::Resize(direction))) => {
@@ -1053,7 +1051,7 @@ pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Vec<E
         }
         // See `tree_key`'s matching arm: a follower that re-arms an
         // already-armed prefix is nvim's own doubled `<C-w>`, unarmed
-        // and forwarded as the pair instead of swallowed.
+        // and forwarded as the pair.
         Some(Resolved::Pending) if armed_before => {
             model.pending_chord = None;
             return vec![
@@ -1130,8 +1128,8 @@ fn close_windowed_notifications(model: &mut Model) -> Vec<Effect> {
     if model.surfaces.pending_open(NativeSurface::Notifications) {
         // a close reached before the open it is closing was ever claimed
         // retires that open here (see `retile_open_surface`'s own pending
-        // arm for why), rather than leaving it to land and claim a window
-        // this close already said it did not want. A reopen already
+        // arm for why), so it cannot land and claim a window this close
+        // already said it did not want. A reopen already
         // claimed (`win` was `Some`) still carries a reply in flight of
         // its own: retiring it here too is what keeps that reply from
         // landing after this close and reclaiming the handle the release
@@ -1173,7 +1171,7 @@ const HISTORY_CHROME_ROWS: u16 = 4;
 pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     // A windowed tree's own `<C-w>` chord is held the same way the
     // notification stream's is (see `notifications_pane_key`): the prefix
-    // waits here rather than reaching nvim on arming, so a follower this
+    // waits here after arming, so a follower this
     // build resolves as its own resize never leaves nvim mid-chord.
     let armed_before = model.tree_is_windowed() && model.pending_chord.as_deref() == Some("<C-w>");
     // Ahead of the tree's own keys and resolved through the one
@@ -1191,15 +1189,14 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         // and the tree answers it the way it answers any key no
         // binding of its own names.
         Some(Resolved::Act(Action::ComposerNewline)) => {}
-        // The chord's first key waits here rather than moving
-        // the selection or closing the sidebar; the follower
+        // The chord's first key waits here, moving no selection
+        // and closing no sidebar; the follower
         // that completes nothing falls straight through to the
         // arms below on its own next pass. A follower that re-arms an
         // already-armed prefix is nvim's own doubled `<C-w>` (next
         // window): the resolver re-arms `pending_chord` for muscle
         // memory, but this pane owns no share for either tap to step,
-        // so the pair is unarmed and forwarded as nvim's own chord
-        // instead of being swallowed a second time.
+        // so the pair is unarmed and forwarded as nvim's own chord.
         Some(Resolved::Pending) if armed_before => {
             model.pending_chord = None;
             return vec![
@@ -1290,8 +1287,8 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         // opens the blocked-engine Prompt overlay through
         // the entry's own RpcCall (`vim.fn.input` primed
         // with a `kind = "confirm"` `nvim_echo`, see
-        // `RpcCall::TreeCreatePrompt`'s doc) rather than any
-        // new local input state: the reply routes back as
+        // `RpcCall::TreeCreatePrompt`'s doc), with no local
+        // input state of its own: the reply routes back as
         // `Msg::TreeCreatePromptReply` and resolves the
         // actual file write from there, once nvim has
         // answered. Any selection, including none at all
@@ -1310,9 +1307,8 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         // renaming a directory has no backing effect --
         // `RpcCall::RenameFile` and the `Effect::Tree*File`
         // pair are file-only by their own doc contracts --
-        // so a directory selection is a silent no-op here
-        // rather than opening a prompt whose answer nothing
-        // could act on.
+        // so a directory selection is a silent no-op here:
+        // a prompt's answer would have nothing to act on.
         "r" => {
             let Some(t) = model.tree_mut() else {
                 return Vec::new();
@@ -1482,8 +1478,7 @@ fn history_page(model: &Model) -> isize {
 /// as one, or scanned directly off [`Model::overlays`] once it is windowed
 /// -- [`Model::focused_overlay`] skips a windowed `MessageHistory` on
 /// purpose (see `model/focus.rs`'s `takes_focus_now`), since its keys route
-/// through `Focus::Pane(Notifications)` instead of the overlay stack's own
-/// dispatch.
+/// through `Focus::Pane(Notifications)`.
 fn history(model: &Model) -> Option<&MessageHistoryState> {
     model
         .overlays()

@@ -138,7 +138,7 @@ static DEFAULT_MAPS: [MappingSpec; 24] = [
         rhs: Rhs::Invoke,
     },
     // routed through the claimed-mapping path (nvim's own multi-key
-    // mapping tree) rather than the raw terminal-keystroke `KeyBindings`
+    // mapping tree), past the raw terminal-keystroke `KeyBindings`
     // intercept: that intercept can resolve at most a two-raw-keystroke
     // chord ([`split_keys`](super::keys)), and the design's own defaults
     // here are three (`<leader>`, `u`, `g`/`w`).
@@ -569,9 +569,8 @@ static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 3] = [
         off_switch: "ai.enabled = false",
     },
     // `ui` has no on/off switch of its own (see the `Msg::FeatureInvoke`
-    // "ui" arm) -- its two `DEFAULT_MAPS` keys are rebound, not disabled,
-    // so the line a claim notice offers is the `[keys]` rebind rather than
-    // a `[native]` switch.
+    // "ui" arm) -- its two `DEFAULT_MAPS` keys are rebound and never
+    // disabled, so the line a claim notice offers is the `[keys]` rebind.
     ExemptFeatureDesc {
         id: "ui",
         supersedes: None,
@@ -579,7 +578,7 @@ static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 3] = [
     },
     // `window` carries the whole desktop chord table (`native::chords`)
     // plus its own tile-management `DEFAULT_MAPS` rows, and none of it is a
-    // `[native]`-gated surface -- the off switch is the profile, not a
+    // `[native]`-gated surface -- the off switch is the profile, with no
     // per-key toggle.
     ExemptFeatureDesc {
         id: "window",

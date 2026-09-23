@@ -5,8 +5,8 @@
 //! (`scripts/audit-god-files.sh`): every windowed surface `Model` learns to
 //! draw adds a branch to [`Model::takes_focus_now`] and
 //! [`Model::draws_as_overlay`], and both belong beside the accessors that
-//! feed them rather than inflating the file that also carries buffer and
-//! engine bookkeeping.
+//! feed them, apart from the file that also carries buffer and engine
+//! bookkeeping.
 
 use super::{Model, Overlay, OverlayId, OverlayKind};
 use crate::native::geometry::NativeSurface;
@@ -25,8 +25,8 @@ impl Model {
     /// [`Self::takes_focus_now`] instead, which layers the panel's own
     /// state on top of this for `Ai`.
     ///
-    /// `EngineBusy` is raised by view noticing something rather than by the
-    /// user asking for it, and is on screen precisely when the engine may
+    /// `EngineBusy` is raised by view noticing something, with no request
+    /// from the user, and is on screen precisely when the engine may
     /// be slow to answer. A user who keeps typing at a long operation has
     /// always had those keystrokes queued and applied on catch-up, so an
     /// annunciator that consumed them would turn a slow operation into lost
@@ -46,10 +46,10 @@ impl Model {
     /// once the user has deliberately entered it -- `ai_entered`, read from
     /// [`crate::native::ai_panel::AiPanelState::focused`] -- never by side
     /// effect of an agent auto-opening it. Takes the flag as a plain `bool`
-    /// rather than `&self`, so [`Self::focused_overlay_mut`] and
+    /// with no `&self`, so [`Self::focused_overlay_mut`] and
     /// [`Self::pop_focused_overlay`] can read `ai_panel.focused` once,
-    /// ahead of borrowing `overlays` mutably, instead of needing both
-    /// borrows live at the same time.
+    /// ahead of borrowing `overlays` mutably, and never hold both borrows
+    /// live at the same time.
     const fn takes_focus_now(
         kind: &OverlayKind,
         ai_entered: bool,
@@ -93,7 +93,7 @@ impl Model {
     /// the keyboard.
     ///
     /// The kind-carrying form of [`Self::focus`], for a caller that has to
-    /// know *which* feature holds the keys rather than merely that some
+    /// know *which* feature holds the keys, beyond the fact that some
     /// overlay does -- `view-surface` places the real terminal caret in the
     /// surface that owns input, and an `OverlayId` alone cannot say which
     /// surface that is.
@@ -159,7 +159,7 @@ impl Model {
     /// The topmost overlay covering the terminal cell at `(row, col)`, or
     /// `None` when the cell belongs to the engine grid.
     ///
-    /// Mouse input routes through this rather than through [`Model::focus`]:
+    /// Mouse input routes through this, and never [`Model::focus`]:
     /// an open overlay owns the keyboard outright, but it owns only the
     /// cells it covers, so a click on visible grid outside it still reaches
     /// the engine.

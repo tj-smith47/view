@@ -1,7 +1,7 @@
 //! What view keeps for itself out of the terminal, and the engine grid size
 //! that leaves.
 //!
-//! Beside [`Model`] rather than inside it: the spawn needs the same
+//! Beside [`Model`], outside it: the spawn needs the same
 //! arithmetic before a `Model` exists, so the free function and the two
 //! bounds it holds to belong with the methods that call it.
 
@@ -23,8 +23,8 @@ impl Model {
 
     /// Terminal rows reserved for the bottom-row statusline bar: one while
     /// the `statusline` native feature is enabled, zero otherwise. Distinct
-    /// from [`Model::chrome_rows`] (a top-row offset for the tabline, not a
-    /// total reservation) -- `view-surface::render` uses both together to
+    /// from [`Model::chrome_rows`] (a top-row offset for the tabline alone)
+    /// -- `view-surface::render` uses both together to
     /// find the engine grid's target size and the statusline layer's row.
     ///
     /// Under tiles the answer is zero whatever the switch says: each frame
@@ -95,9 +95,9 @@ impl Model {
 /// A terminal reporting a zero on either axis is answered with
 /// [`SIZE_FLOOR`], and the pair this returns is then held to
 /// [`ENGINE_MIN_SIZE`] on each axis -- after the chrome, because what the
-/// geometry `--cmd` and the attach spend is this pair, not the terminal's
-/// own reading, and a 4-row terminal with a tabline and a statusline leaves
-/// 2.
+/// geometry `--cmd` and the attach spend is this pair, smaller than the
+/// terminal's own reading, and a 4-row terminal with a tabline and a
+/// statusline leaves 2.
 #[must_use]
 pub fn grid_target_for(
     size: (u16, u16),
@@ -141,7 +141,7 @@ pub fn grid_room_for(
 /// `E593`, and either aborts the geometry `--cmd`'s whole chunk (measured
 /// against the pinned engine, which takes 12 and 3 and refuses 11 and 2).
 ///
-/// Per axis rather than a fallback to [`SIZE_FLOOR`] because that is what
+/// Per axis, with no fallback to [`SIZE_FLOOR`], because that is what
 /// nvim's own TUI does with a positive-but-refused reading: on a pty sized
 /// 40x5 it lays out at 12 columns and keeps 40 lines, and on one sized
 /// 1x100 it keeps 100 columns and takes 3 lines. Only a non-positive axis
@@ -156,8 +156,8 @@ pub const ENGINE_MIN_SIZE: (u16, u16) = (12, 3);
 ///
 /// A zero is not a hypothetical: a pty nothing has sized reports 0x0, and
 /// so does a real terminal for the first instant of a session still
-/// negotiating its size. Carrying one into the spawn is what makes it fatal
-/// rather than merely small -- the geometry `--cmd` opens with
+/// negotiating its size. Carrying one into the spawn is what makes it
+/// fatal -- the geometry `--cmd` opens with
 /// `vim.o.columns`, whose minimum is [`ENGINE_MIN_SIZE`], and the `E594`
 /// that raises aborts the whole chunk, taking the `VimEnter` hook the
 /// attach waits on with it.

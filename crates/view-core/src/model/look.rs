@@ -1,7 +1,7 @@
 //! What the window layout looks like: tiles with their own frames, or the
 //! picture nvim paints for itself.
 //!
-//! The arithmetic lives here rather than in the painter because three
+//! The arithmetic lives here, outside the painter, because three
 //! places need the same answers and none of them can reach the others: the
 //! spawn's geometry `--cmd`, the registry's inner-size requests, and the
 //! compositor's frame.

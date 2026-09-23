@@ -528,8 +528,8 @@ impl NativeSession {
     /// [`Self::profile`] first). Nothing to redo before the takeover has
     /// run once, since no registration exists yet for either to correct.
     ///
-    /// The reissue is a second `RegisterMappings` on its own, not folded
-    /// into a `Takeover` batch: `REGISTER_MAPPINGS_CHUNK`
+    /// The reissue is a second `RegisterMappings` on its own, outside any
+    /// `Takeover` batch: `REGISTER_MAPPINGS_CHUNK`
     /// (`view-engine`'s `nvim_api/mappings.rs`) restores whatever it
     /// unmapped the call before, so resending it is the whole of "give the
     /// old plan back, then apply the new one."
@@ -561,7 +561,7 @@ impl NativeSession {
     }
 
     /// `:View keys profile` with no argument: reports the live profile and
-    /// modifier rather than changing either, on the same wording
+    /// modifier and changes neither, on the same wording
     /// [`view_native::config::ResolvedConfig::rows`] renders for the
     /// `keys.profile` config row. The marker is shown only while the live
     /// profile is still the one `"auto"` derived at startup -- a flip
@@ -610,7 +610,7 @@ impl NativeSession {
         // `[keys] toggle_gaps`/`cycle_surfaces`: `view-native` already
         // validated the override (`resolve_ui_lhs`). `MappingSpec::lhs` is
         // `Cow<'static, str>`, so the session-resolved value replaces the
-        // compile-time default in place rather than needing the `Box::leak`
+        // compile-time default in place, with no `Box::leak` of the kind
         // `view-native`'s own `keys.rs` config registry still pays for a
         // resolved value with nowhere `'static` to live.
         //
@@ -622,8 +622,8 @@ impl NativeSession {
         // default map's -- two specs claiming the one `lhs` in the same
         // registration, which left `REGISTER_MAPPINGS_CHUNK`'s pre-set
         // `maparg` snapshot for the second of them holding the first's own
-        // fresh mapping rather than nothing, and a later reissue read that
-        // snapshot back as a user mapping view had taken.
+        // fresh mapping where it should hold nothing, and a later reissue
+        // read that snapshot back as a user mapping view had taken.
         if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
             let (gaps_lhs, cycle_lhs) = &self.ui_keys_lhs;
             for spec in specs.iter_mut() {
@@ -666,9 +666,8 @@ impl NativeSession {
         // has no `[native]` switch by design, so `register_plan` alone would
         // always register the key. `model.ai_enabled` is the bit `[native]`
         // structurally cannot carry for this one feature, so it is applied
-        // here instead, once, after the desktop chords have joined the list
-        // too, rather than teaching `view-native` a feature name it has no
-        // other reason to know.
+        // here, once, after the desktop chords have joined the list too.
+        // `view-native` has no other reason to know the feature's name.
         if !self.ai_enabled {
             if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
                 specs.retain(|spec| spec.feature != "ai");
@@ -1680,7 +1679,7 @@ composer_newline = \"<A-x>\"
     /// two-key ceiling: this rebinds one to a bare function key and the
     /// other to a two-character chord and checks both land on the spec
     /// `take_over` actually registers, the way `mappings_live.rs` checks a
-    /// registered `lhs` against a real nvim rather than the plan alone.
+    /// registered `lhs` against a real nvim beside the plan.
     #[test]
     fn load_carries_a_ui_key_rebind_of_either_shape_into_the_registered_mapping() {
         let dir = view_test_support::ScratchDir::new("native-ui-keys").unwrap();
@@ -2229,8 +2228,8 @@ cycle_surfaces = \"gz\"
 
     /// A session that starts under the editor profile and reads no desktop
     /// chords registers only `default_maps()`. A live `:View keys profile
-    /// desktop` flip must reissue with the desktop chords folded in beside
-    /// it, not a partial or a stale set.
+    /// desktop` flip must reissue the whole current set, with the desktop
+    /// chords folded in beside it.
     #[test]
     fn a_profile_flip_reissues_every_default_map() {
         let mut session = NativeSession {
@@ -2338,8 +2337,9 @@ cycle_surfaces = \"gz\"
     /// that matched on that pair alone once rewrote the chord's own `lhs`
     /// to the default map's, leaving two specs claiming the same key in one
     /// `RegisterMappings` call -- and the second one's pre-set snapshot
-    /// then read as the first one's own fresh mapping rather than nothing,
-    /// so a later reissue reported it as a user mapping view had taken.
+    /// then read as the first one's own fresh mapping where it should hold
+    /// nothing, so a later reissue reported it as a user mapping view had
+    /// taken.
     #[test]
     fn the_gaps_chord_keeps_its_own_spelling_under_the_toggle_gaps_override() {
         let session = NativeSession {
@@ -2439,7 +2439,7 @@ cycle_surfaces = \"gz\"
 
     /// A bare `:View keys profile` sets [`Model::key_profile_report_requested`]
     /// (`view-core`'s `keys_invoke`); `Stage::ProfileFlip` with that flag set
-    /// must report the live profile and modifier instead of reissuing a
+    /// must report the live profile and modifier and reissue no
     /// registration.
     #[test]
     fn a_profile_flip_with_the_report_flag_reports_instead_of_reissuing() {

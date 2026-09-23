@@ -120,8 +120,7 @@ impl AiConfig {
         // `view-native`'s own tree alias holds itself to (`config::
         // surfaces::alias`), so `[native] tree_width` and `[ai]
         // panel_width` tell a user the same thing under the same
-        // condition rather than one warning on both keys written and the
-        // other staying silent on the older key alone
+        // condition, whether both keys are written or the older key alone
         if panel_width_spelled {
             notices.push(view_core::config::alias_notice(
                 "ai",
@@ -463,7 +462,7 @@ const SURFACE_AGENT_SIZE_NOTICE: &str = "view: [ui.surfaces.agent] size must be 
 
 /// `[ui.surfaces.agent] size`, the newer key `panel_width` has become: read
 /// the same way [`resolve_panel_width`] reads the older one, and answered
-/// with `None` rather than a default when it is absent, so the caller can
+/// with `None` when it is absent, with no default, so the caller can
 /// tell "not written" from "written at the shared default" and fall back to
 /// the older key.
 fn resolve_surface_agent_size(value: Option<toml::Value>) -> (Option<u16>, Option<&'static str>) {
@@ -854,7 +853,7 @@ agent = "claude-code"
     /// `[native] tree_width` alone tells the user it now has a
     /// newer name (`config::surfaces::alias` in `view-native`), and `[ai]
     /// panel_width` owes the same notice under the same condition --
-    /// spelled at all, not only spelled alongside the surfaces table.
+    /// spelled at all, with or without the surfaces table beside it.
     #[test]
     fn the_panel_width_alias_notices_even_when_spelled_alone() {
         let cfg = AiConfig::from_toml_str("[ai]\npanel_width = 20\n")
@@ -1108,7 +1107,7 @@ agent = "claude-code"
         // shipped example: `[ai] panel_width` is the field this walk forces
         // live, spelled the same way the example spells `[native]
         // tree_width` beside `[ui.surfaces.tree] size`, so the alias
-        // notice below is expected, not refused
+        // notice below is expected
         let ConfigFile { ai: _, ui: _ } =
             toml::from_str(EXAMPLE_TOML).expect("the shipped example must parse as the wire shape");
         assert_example_sets_every_field(&doc, "ai");

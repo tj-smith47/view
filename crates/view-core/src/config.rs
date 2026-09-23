@@ -97,7 +97,7 @@ pub fn discarded_file(value: &str, expected: &str, table: &str, key: &str) -> St
 /// older one: which key it became, spelled once whether or not the newer
 /// key also answered this run.
 ///
-/// Shared rather than one copy per resolver, for [`discarded_env`]'s own
+/// One copy shared by both resolvers, for [`discarded_env`]'s own
 /// reason: `[native] tree_width` and `[ai] panel_width` are both aliases
 /// for a `[ui.surfaces.<id>] size` key, read by `view-native` and `view-ai`
 /// respectively, and those two crates may not depend on each other.

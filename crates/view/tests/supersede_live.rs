@@ -898,7 +898,7 @@ fn a_disabled_statusline_leaves_the_users_own_setting_alone() {
 /// takes the guard down with it. A gaps-only flip re-issues the same hold
 /// while it is already in force (the `before[name] == nil` guard in
 /// `HOLD_OPTION_CHUNK`), and a hold issued again after a release has to
-/// stash the value then in force, not the one from before.
+/// stash the value then in force.
 #[test]
 fn a_disabled_statusline_under_tiles_is_held_at_two_until_released() {
     let dir = fixture("tiles-disabled");

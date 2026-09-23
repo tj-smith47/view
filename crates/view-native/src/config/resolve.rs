@@ -406,9 +406,8 @@ pub fn resolve_with(
             file.spells("native", feature.id)
                 .then(|| !file.native.disabled.contains(&feature.id)),
             // the pill is the tiled look's own row and nvim's tab line is
-            // the other look's, so the switch nobody set follows `panes`
-            // rather than the registry bit, which stays the answer for
-            // every other feature
+            // the other look's, so the switch nobody set follows `panes`;
+            // the registry bit stays the answer for every other feature
             if feature.id == "tabline" {
                 ui.panes.value == Panes::Tiles
             } else {
@@ -741,7 +740,7 @@ impl ResolvedConfig {
             ),
             // the real answer needs the terminal's own probe, which this
             // resolver never holds -- the caller that does prints it beside
-            // this walk rather than through it (`crates/view/src/main.rs`'s
+            // this walk, outside it (`crates/view/src/main.rs`'s
             // `caps_notice`)
             ("keys", "desktop_modifier") => return None,
             ("keys.desktop", id) => {
@@ -861,7 +860,7 @@ const DESKTOP_KEY_EXPECTED: &str =
 
 /// One `[keys.desktop]` row, file and environment layered over the row's
 /// own `with_super` spelling -- which is this row's *placeholder* answer
-/// under [`Source::Derived`] rather than the value a caller should bind: a
+/// under [`Source::Derived`], and no value a caller should bind: a
 /// derived row carries no override at all, and [`chords::DesktopChord::lhs`]
 /// run against this session's real modifier is the answer for it. A row
 /// from any other layer is the override verbatim, empty included, which is
@@ -956,8 +955,8 @@ fn parse_profile_choice(value: &str) -> Option<Option<KeyProfile>> {
 
 /// A modifier choice a user named, or `None` for text that names none.
 /// Unlike [`parse_profile_choice`], `"auto"` is one of [`ModifierChoice`]'s
-/// own variants rather than a second `Option` layer -- the enum already
-/// carries the absence of a choice.
+/// own variants, with no second `Option` layer -- the enum already carries
+/// the absence of a choice.
 fn parse_modifier_choice(value: &str) -> Option<ModifierChoice> {
     match value.trim().to_ascii_lowercase().as_str() {
         AUTO => Some(ModifierChoice::Auto),
@@ -1211,8 +1210,8 @@ fn env_value(env: &dyn Fn(&str) -> Option<String>, table: &str, key: &str) -> Op
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// [`env_value`] for one `[keys.desktop]` row, with empty kept rather than
-/// read as absent: a `[keys.desktop]` value that is empty is a real answer
+/// [`env_value`] for one `[keys.desktop]` row, with empty kept as a value
+/// of its own: a `[keys.desktop]` value that is empty is a real answer
 /// (leave the chord unbound, [`resolve_desktop_row`]'s own doc comment),
 /// not the "no value" `env_value` reads it as for every other key.
 fn env_value_desktop(env: &dyn Fn(&str) -> Option<String>, chord_id: &str) -> Option<String> {
@@ -1597,7 +1596,7 @@ mod tests {
             // the namespace: a window manager announces itself under its
             // own name, and nothing view could generate would find it. The
             // profile derivation reads its own four markers the same way --
-            // `profile::detect_profile`'s own vocabulary, not view's
+            // `profile::detect_profile`'s own vocabulary
             if name == INHERITED_APPNAME_ENV
                 || name == XDG_CURRENT_DESKTOP
                 || TILING_MARKERS.contains(&name.as_str())
@@ -1899,7 +1898,7 @@ mod tests {
             nvim_bin: Some(PathBuf::from("/opt/nvim/bin/nvim")),
             appname: Some("work".to_string()),
             single_grid: Some(true),
-            // nvim rather than tiles: without multigrid there are no window
+            // nvim wins over tiles: without multigrid there are no window
             // placements to draw tiles from, so `--single-grid --panes
             // tiles` is a contradiction view resolves by ignoring the
             // second, and a fixture that spelled it could not show the
@@ -2050,7 +2049,7 @@ mod tests {
             ("false".to_string(), Source::Derived)
         );
         // `--panes` is a layer above the file, and the derivation follows
-        // whatever answer won rather than the one the file wrote
+        // whatever answer won, whatever the file wrote
         let flagged = resolve_with(
             &tiles,
             &Overrides {

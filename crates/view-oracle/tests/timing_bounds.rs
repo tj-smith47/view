@@ -358,7 +358,7 @@ fn the_walk_sees_every_shape_a_line_at_a_time_reader_missed() {
     // backwards, the floor with its sides swapped, the floor on a span
     // the list names beyond the two it started with, the one whose span
     // is converted to a number first, and the two waits handed a wall
-    // clock they spend rather than compare.
+    // clock they spend with no comparison.
     //
     // The tail of the fixture is the other half of the pin: no line from
     // `these_are_the_shapes_the_rule_asks_for` or from the unlisted span
@@ -440,8 +440,8 @@ const BLOCKING_WAITS: [&str; 2] = ["recv_timeout(", "wait_timeout("];
 /// `std::thread::sleep`, read the same way [`BLOCKING_WAITS`] are: a call
 /// whose argument is an absolute duration spends the same wall clock on a
 /// loaded host it would on an idle one. Kept out of `BLOCKING_WAITS` and
-/// graded only against [`view_oracle_test_sources`] rather than the whole
-/// workspace: the dozens of `sleep` calls in every other crate's tests and
+/// graded only against [`view_oracle_test_sources`], and nowhere else in
+/// the workspace: the dozens of `sleep` calls in every other crate's tests and
 /// fixtures have not been read against this rule yet, and a workspace-wide
 /// add here would fail them on a rule they never agreed to.
 /// `desktop_chords_live.rs:198` and `:203` shipped this shape twice before
@@ -606,9 +606,9 @@ fn names_a_measured_span(text: &str) -> bool {
 /// so it is read the same way a bound's own right-hand side is: a literal
 /// `Duration::from_*` with digits in place, and never a scaled one --
 /// `is_absolute` already refuses a value that names a [`SCALERS`] entry.
-/// `let settle = Duration::from_millis(150);` naming the bound this way
-/// instead of writing the ceiling into the comparison escaped the walk the
-/// same way a fresh literal would have.
+/// `let settle = Duration::from_millis(150);` naming the bound this way,
+/// with the ceiling kept out of the comparison, escaped the walk the same
+/// way a fresh literal would have.
 fn absolute_constants(statements: &[Statement]) -> HashSet<String> {
     let mut named = HashSet::new();
     for statement in statements {

@@ -642,12 +642,12 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 return review::review_verb(model, &verb);
             }
             // the one form whose first token is not a feature id: the look
-            // is a session-wide setting rather than a surface with a key,
-            // so it has no registry row for the dispatch above to match
+            // is a session-wide setting with no surface of its own, so it
+            // has no registry row for the dispatch above to match
             if feature == "ui" {
                 return look::invoke(model, &verb);
             }
-            // `keys` names the session's whole key vocabulary, not a
+            // `keys` names the session's whole key vocabulary and no
             // registry feature: this pure crate only records the flip on
             // the model, since restoring the previous registration and
             // reissuing the new one is engine I/O only `NativeSession`
@@ -1657,7 +1657,7 @@ fn dismiss_top_prompt(model: &mut Model) {
 /// (`view/src/native.rs`) watches this field through `Stage::ProfileFlip`
 /// and is where the actual restore-and-reissue happens. A bare
 /// `:View keys profile` sets [`Model::key_profile_report_requested`]
-/// instead, since it asks what is live rather than changing it, and
+/// alone, since it asks what is live and changes nothing, and
 /// `NativeSession` is what knows the profile and modifier to report. An
 /// unrecognized name changes nothing, the same "typo does nothing" answer
 /// `look::invoke` gives an unrecognized `ui panes` argument.

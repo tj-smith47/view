@@ -9,14 +9,14 @@
 //!
 //! `BufEnter` fires on every window the user steps through, so a `:bufdo`
 //! or a quickfix walk fires it as fast as nvim can run. Every trigger arms
-//! a `vim.schedule` callback instead of notifying, and the callback sends
-//! the list once and disarms, the way the window group collapses a
+//! a `vim.schedule` callback and notifies nothing itself, and the callback
+//! sends the list once and disarms, the way the window group collapses a
 //! `CursorMoved` burst. Nothing on the key path waits for it.
 //!
 //! # Why the whole list
 //!
 //! nvim answers "which buffers are listed" in full or not at all, and the
-//! pill names the set rather than a change to it. A per-buffer event would
+//! pill names the whole set each time. A per-buffer event would
 //! leave view holding a set it had to keep true against every event it
 //! might have missed.
 
@@ -30,8 +30,8 @@
 /// The payload is `(list)`, one entry per listed buffer as
 /// `(buf, name, modified, current)`, decoded by `handle::decode`'s
 /// `"buffers"` arm. `name` is the buffer's tail, the same `:t` modifier the
-/// `window` trigger takes, because the row names a file rather than a path
-/// it has no room for.
+/// `window` trigger takes, because the row names a file. A whole path
+/// would not fit.
 ///
 /// `BufModifiedSet` is in the trigger list beside the three that change the
 /// set itself: the row draws an unsaved marker, and without it the marker
@@ -98,7 +98,7 @@ arm()";
 ///
 /// The validity check is the click's own race: the tabpage a row named can
 /// be closed between the frame that drew it and the press that reaches
-/// nvim, and an invalid handle raises rather than doing nothing.
+/// nvim, and an invalid handle raises.
 ///
 /// [`EngineHandle::select_tab`]: super::EngineHandle::select_tab
 pub(crate) const SELECT_TAB_CHUNK: &str = "\
@@ -121,7 +121,7 @@ end";
 impl super::EngineHandle {
     /// Switches nvim to `tab`, for a click on a pill tab.
     ///
-    /// A notify rather than a request, for
+    /// A notify, with no reply awaited, for
     /// [`register_bridge`](Self::register_bridge)'s reason: the answer a
     /// caller wants is the `tabline` event nvim sends when the tabpage
     /// changed, and the paint loop must never wait on a reply.

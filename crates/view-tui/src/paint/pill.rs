@@ -28,8 +28,8 @@ use super::{ratatui_style, rgb};
 pub(super) fn paint_pill(pill: &PillView, theme: &Theme, area: Rect, buf: &mut Buffer) {
     let fill = ratatui_style(theme.chrome(ChromeGroup::TabLineFill));
     fill_run(buf, area, 0, area.width, fill);
-    // the accent over the row's own background, not `TabLineFill`'s
-    // foreground: the host is the one thing here that says which machine
+    // the accent over the row's own background, whatever `TabLineFill`'s
+    // foreground is: the host is the one thing here that says which machine
     // the session is on, and a colorscheme that dims the tab row would
     // take it down with the rest
     let edge = theme.accent().fg.map_or(fill, |fg| fill.fg(rgb(fg)));
@@ -97,7 +97,7 @@ mod tests {
     use crate::paint::{ratatui_style, rgb, ChromeGroup, Theme};
 
     /// The accent this fixture names, which is what the host cell has to
-    /// carry rather than the row's own foreground.
+    /// carry over the row's own foreground.
     const ACCENT: u32 = 0x44_44_44;
 
     /// A session on a remote host with two tabpages on a terminal `width`

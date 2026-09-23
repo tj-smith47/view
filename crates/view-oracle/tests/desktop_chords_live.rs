@@ -42,14 +42,14 @@ const CTRL_W_L: &[u8] = b"\x17l";
 const ALT_COMMA: &[u8] = b"\x1b,";
 
 /// Plants `[ui] panes = "nvim"`, every registry `[native]` feature off, and
-/// `[keys] profile = "desktop"`: the desktop profile forced rather than
-/// derived, so this leg proves the chord itself rather than the
-/// environment guess `detect_profile` makes (already pinned in
+/// `[keys] profile = "desktop"`: the desktop profile is forced, so this leg
+/// checks the chord itself, apart from the environment guess
+/// `detect_profile` makes (already pinned in
 /// `view-native::config::profile`). The registry features are off so no
 /// native chrome (the statusline, a picker overlay) parks the terminal's
 /// real cursor somewhere this leg's column read does not expect -- this
 /// leg's subject is nvim's own window focus, which `cursor_position` reads
-/// directly only when nvim, not a native surface, owns the cursor.
+/// directly only when nvim owns the cursor.
 fn plant_desktop_profile(home: &std::path::Path) {
     let dir = common::xdg_home(home, "XDG_CONFIG_HOME").join("view");
     std::fs::create_dir_all(&dir).expect("the isolated config home must be creatable");
@@ -105,13 +105,13 @@ fn spawn_split(label: &str, policy: QueryPolicy) -> (common::ScratchPaths, PtySe
 /// columns 0..38, right window 40..79 -- so this reads focus on either
 /// side of it without needing the exact column nvim chose for the text.
 ///
-/// The last row (`ROWS - 1`) is nvim's own cmdline, not a window: its
+/// The last row (`ROWS - 1`) is nvim's own cmdline and no window: its
 /// cursor sits wherever the last typed command ended, a column that can
 /// coincidentally fall in either window's range while the row itself never
 /// moved for either -- a `:View keys profile editor` flip once read as
 /// "focus moved left" purely because its cursor happened to land at
 /// column 25 on that row. Excluding it is what makes this predicate a
-/// window-focus read rather than a column coincidence.
+/// window-focus read.
 fn wait_for_focus_side(session: &mut PtySession, want_left: bool, timeout: Duration) -> bool {
     session.wait_for_screen(timeout, |screen| {
         let (row, col) = screen.cursor_position();
@@ -218,7 +218,7 @@ fn a_profile_flip_stops_the_chord_while_ctrl_w_h_still_moves_focus() {
 /// Plants `notifications` on (every other registry feature off, for the
 /// same reason [`plant_desktop_profile`] turns them off) and `profile`
 /// asked for by `profile`, so this leg's chord reaches a real `Rhs::Invoke`
-/// dispatch rather than the `Rhs::Keys` `focus_left` both legs above press.
+/// dispatch, where both legs above press the `Rhs::Keys` `focus_left`.
 fn plant_notifications_under(home: &std::path::Path, profile: &str) {
     let dir = common::xdg_home(home, "XDG_CONFIG_HOME").join("view");
     std::fs::create_dir_all(&dir).expect("the isolated config home must be creatable");
@@ -236,9 +236,9 @@ fn plant_notifications_under(home: &std::path::Path, profile: &str) {
 /// `notifications dismiss` (`<M-,>`) end to end: a real toast raised, a real
 /// chord byte sent, the toast gone -- and, first, the same byte sent under
 /// the editor profile, where `chord_plan` registers no desktop chord at
-/// all, proving the toast survives the keystroke on its own rather than
-/// happening to time out against whatever `wait_for_screen`'s own budget
-/// is. Without that leg, a chord that had silently stopped reaching
+/// all, showing the toast survives the keystroke on its own, so its going
+/// is no timeout against whatever `wait_for_screen`'s own budget is.
+/// Without that leg, a chord that had silently stopped reaching
 /// `Rhs::Invoke` at all -- registered, but never firing -- would pass this
 /// test exactly as a working one does: nothing here would tell the two
 /// apart from a toast that dismissed itself. `focus_left`, the chord both

@@ -54,8 +54,8 @@ impl<'a> Iterator for Clusters<'a> {
 /// The cells one grapheme cluster takes, which is both what a fit check
 /// counts and what a run advances by.
 ///
-/// A cluster rather than a character because a name reaches view in
-/// whatever form the filesystem holds it: macOS hands back `café.rs` as
+/// A cluster, whatever its count of characters, because a name reaches
+/// view in whatever form the filesystem holds it: macOS hands back `café.rs` as
 /// `cafe` and a combining mark, and a mark given a cell of its own both
 /// moves every character behind it and reads as a stray accent. `max(1)`
 /// is what keeps a cluster that measures nothing from leaving the run
@@ -79,7 +79,7 @@ pub fn text_width(text: &str) -> u16 {
 }
 
 /// One group of spans' width in terminal cells, which is what a row has
-/// room for rather than its count of characters.
+/// room for, whatever its count of characters.
 #[must_use]
 pub fn group_width(group: &[Span]) -> u16 {
     group
@@ -93,7 +93,7 @@ mod tests {
     use super::*;
 
     /// The case the measure exists for: a decomposed accent is one cluster
-    /// of one cell, not two cells, and not a cell of its own.
+    /// of one cell, and takes no cell of its own.
     #[test]
     fn a_decomposed_accent_takes_no_cell_of_its_own() {
         assert_eq!(text_width("cafe\u{301}.rs"), 7);

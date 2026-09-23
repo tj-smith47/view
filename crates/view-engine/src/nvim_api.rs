@@ -677,7 +677,7 @@ pub const NOTIFY_HOLD_CHUNK: &str = HOLD_NOTIFY_CHUNK;
 /// reader: `window zoom`'s second press (`view_core::update::surfaces::
 /// tile_is_zoomed`) tells a maximized tile from an equal split by how far
 /// `<C-w>_<C-w>|` squeezed the sibling, and the squeeze floor is these two
-/// options, not the `1` nvim's own defaults happen to answer.
+/// options, whatever `1` nvim's own defaults happen to answer.
 pub(crate) const REGISTER_BRIDGE_CHUNK: &str = "\
 local channel, float_throttle = ...
 local group = vim.api.nvim_create_augroup('view_bridge', { clear = true })
@@ -2784,8 +2784,8 @@ impl EngineHandle {
     /// Registers the `view_bridge` autocmd group -- the one channel every
     /// editor-state change view reacts to arrives on -- and, beside it, the
     /// per-window group of [`REGISTER_WINDOW_STATUS_CHUNK`]. What each
-    /// hooks, and why the session-wide triggers are one group rather than
-    /// three, is in [`REGISTER_BRIDGE_CHUNK`]. Each trigger answers asynchronously with a
+    /// hooks, and why the session-wide triggers share one group, is in
+    /// [`REGISTER_BRIDGE_CHUNK`]. Each trigger answers asynchronously with a
     /// `view_bridge` notification carrying an event name and the event's
     /// `match`; `colorscheme` becomes `Msg::ColorSchemeChanged`.
     ///
@@ -3147,7 +3147,7 @@ impl EngineHandle {
     /// cannot be restarted to say so. `ext_tabline_toggle.rs` is the live
     /// proof that the pinned engine honours the change after the attach.
     ///
-    /// A notification, not a request, for
+    /// A notification, with no reply awaited, for
     /// [`claim_stdout_tty`](Self::claim_stdout_tty)'s reason: the runtime
     /// loop issues it and the answer it wants is the redraw traffic that
     /// follows. The connection orders it ahead of the resize issued behind

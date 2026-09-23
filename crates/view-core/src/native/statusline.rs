@@ -134,8 +134,8 @@ impl StatuslineState {
     ///
     /// The other five ([`Self::file`], [`Self::modified`],
     /// [`Self::filetype`], [`Self::diagnostics`], [`Self::git_branch`]) are
-    /// kept: they come from view's own bridge rather than from a redraw
-    /// event, they still describe the buffers a restart recovers, and the
+    /// kept: they come from view's own bridge with no redraw event behind
+    /// them, they still describe the buffers a restart recovers, and the
     /// replacement's bridge install re-fires them.
     ///
     /// [`Self::dirty`] is set here, because this clears four segments the
@@ -190,7 +190,7 @@ impl StatuslineState {
             if self.modified {
                 spans.push(Span::new(" [+]", StyleRole::Modified));
             }
-            // in the file's own candidate rather than beside it: a
+            // inside the file's own candidate: a
             // filetype with no file name in front of it names nothing, so
             // the two are dropped together when the row runs out of room
             if !self.filetype.is_empty() {
@@ -275,16 +275,16 @@ impl StatuslineState {
     /// and come from the bridge's `window` trigger. The git branch is the
     /// session's lookup and reads the same on every tile.
     ///
-    /// The position comes from `status` rather than from the ruler text:
+    /// The position comes from `status`, and never from the ruler text:
     /// nvim stops emitting `msg_ruler` the moment `laststatus` is 2, which
     /// is what tiles mode holds it at, so under tiles that segment has no
     /// other source.
     ///
     /// No truncation here. A frame edge is as wide as its tile and the
     /// painter is what knows how many cells are left, so it drops whole
-    /// groups off the end rather than this composing against a width it
-    /// would have to be told. A group is what has to arrive whole: half a
-    /// diagnostic count reads as the other half being zero.
+    /// groups off the end. This composer would have to be told the width. A
+    /// group is what has to arrive whole: half a diagnostic count reads as
+    /// the other half being zero.
     #[must_use]
     pub fn tile_segments(
         &self,

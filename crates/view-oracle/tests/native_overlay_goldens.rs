@@ -72,7 +72,7 @@ fn dump(tier: Tier, unicode_boxes: bool, width: u16, height: u16, kind: LayerKin
     )
 }
 
-/// [`dump`], taking the layer's rect directly rather than deriving it from
+/// [`dump`], taking the layer's rect directly with no derivation from
 /// `(AT_ROW, AT_COL)` and a size: what the toast corner family needs, since
 /// its whole subject is that the box's rect differs by corner.
 fn dump_at(tier: Tier, unicode_boxes: bool, rect: Rect, kind: LayerKind) -> String {
@@ -159,12 +159,11 @@ fn statusline() -> LayerKind {
 
 /// The width the `nvim`-mode bar is dumped at: wide enough for every
 /// segment a session has at once, since the composer drops whole segments
-/// to fit and a narrower dump would show the truncation rather than the
-/// row.
+/// to fit and a narrower dump would show the truncation.
 const NVIM_BAR_WIDTH: u16 = 72;
 
 /// The bar under `panes = "nvim"`, composed by [`StatuslineState`] itself
-/// rather than written out span by span like [`statusline`]: what this dump
+/// where [`statusline`] is written out span by span: what this dump
 /// pins is the segments a real session gives the composer and the order and
 /// widths it lays them out in, the filetype behind the file name included.
 fn nvim_statusline() -> LayerKind {
@@ -669,7 +668,7 @@ const TOAST_HEIGHT: u16 = 3;
 /// tall enough that a corner's own near-edge margin (`AT_ROW`/`AT_COL`,
 /// matching what [`dump`] already pins for every other family: a nonzero
 /// offset from the canvas origin, so a golden proves the box lands at its
-/// own rect rather than at `(0, 0)`) still leaves each corner's box at a
+/// own rect, away from `(0, 0)`) still leaves each corner's box at a
 /// distinct rect from every other corner's -- a canvas sized tight to
 /// `TOAST_WIDTH`/`TOAST_HEIGHT` plus twice the margin would solve the same
 /// column for both the left and the right corner.
@@ -677,8 +676,8 @@ const CORNER_CANVAS_WIDTH: u16 = 40;
 const CORNER_CANVAS_HEIGHT: u16 = 10;
 
 /// One toast, settled (no exit slide in flight), the subject a corner
-/// golden pins: the box's own framing, not the stack's slide, which
-/// `notifications_corner_scenes` in `view-tui` already pins end to end.
+/// golden pins: the box's own framing. The stack's slide is pinned end to
+/// end by `notifications_corner_scenes` in `view-tui`.
 fn notification_corner(left_corner: bool) -> LayerKind {
     LayerKind::Toast {
         lines: vec![vec![Span::plain("3 files saved".to_string())]],
@@ -694,7 +693,7 @@ fn notification_corner(left_corner: bool) -> LayerKind {
 /// session (`crates/view-surface/src/lib.rs:733-739` for the row, `:841-847`
 /// for the column): a left corner sits flush against column 0 and a top
 /// corner against row 0 in production, generalized here to `AT_COL`/
-/// `AT_ROW` margins instead of 0 so the pin (see [`dump`]) still holds.
+/// `AT_ROW` margins so the pin (see [`dump`]) still holds.
 fn corner_rect(left_corner: bool, top_corner: bool) -> Rect {
     let row = if top_corner {
         AT_ROW

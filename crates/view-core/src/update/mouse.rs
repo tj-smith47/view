@@ -55,8 +55,8 @@ pub(super) fn route(model: &mut Model, input: MouseInput) -> Vec<Effect> {
     };
     match owner {
         // no overlay carries a mouse handler, so an overlay (or the
-        // palette, which paints through the same cmdline arm rather than
-        // the overlay stack) claiming the event is the whole of that
+        // palette, which paints through the same cmdline arm, outside the
+        // overlay stack) claiming the event is the whole of that
         // routing; nothing claiming it at all is a cell view's own chrome
         // owns and the engine has no window under
         None | Some(MouseCapture::Overlay(_) | MouseCapture::Palette) => Vec::new(),
@@ -80,10 +80,10 @@ fn position_owner(model: &Model, input: &MouseInput) -> Option<MouseCapture> {
         return Some(MouseCapture::Overlay(id));
     }
     // the palette carries no `OverlayId` (see `MouseCapture::Palette`'s
-    // doc), so its own rect is tested by hand rather than through
-    // `overlay_at`: a press inside it must never reach the buffer window
-    // the band paints over, the same way a press on any other overlay
-    // never reaches the grid under it
+    // doc), so its own rect is tested by hand, past `overlay_at`: a press
+    // inside it must never reach the buffer window the band paints over,
+    // the same way a press on any other overlay never reaches the grid
+    // under it
     if model.engine.cmdline.is_some()
         && model.palette_enabled
         && model.palette_rect().contains(input.row, input.col)

@@ -253,11 +253,11 @@ mod tests {
         );
     }
 
-    /// A desktop chord's feature is `window`, a [`view_core::native::mappings::exempt_feature`]
-    /// row rather than a registry one, so the claim must still reach the
-    /// exempt-feature fallback `report` falls back to and print that row's
-    /// own off switch, not a `[native]` line `window` structurally cannot
-    /// carry.
+    /// A desktop chord's feature is `window`, a
+    /// [`view_core::native::mappings::exempt_feature`] row with no registry
+    /// row, so the claim must still reach the exempt-feature fallback
+    /// `report` falls back to and print that row's own off switch. `window`
+    /// structurally cannot carry a `[native]` line.
     #[test]
     fn a_chord_over_a_user_mapping_is_claimed_and_reported() {
         let report = report(

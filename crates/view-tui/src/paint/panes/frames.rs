@@ -31,11 +31,11 @@ type Cell = (u16, u16);
 /// Paints the tiles' frames over the window panes already composited into
 /// `buf`, and under every float the caller paints after it.
 ///
-/// `panes` is the compositor's own z-ordered list, read here rather than
-/// collected again; the window panes are the tiles and everything else is
-/// skipped. `area` is the engine-grid layer's rect, the same one the panes
-/// were painted inside, so a slot's coordinates are applied within it
-/// exactly once. A look other than tiles paints nothing at all.
+/// `panes` is the compositor's own z-ordered list, read here as it stands;
+/// the window panes are the tiles and everything else is skipped. `area` is
+/// the engine-grid layer's rect, the same one the panes were painted
+/// inside, so a slot's coordinates are applied within it exactly once. A
+/// look other than tiles paints nothing at all.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_frames(
     model: &Model,
@@ -72,7 +72,7 @@ pub(crate) fn paint_frames(
 }
 
 /// Whether a pane is one of the tiles a frame is drawn around: the global
-/// grid carries chrome rather than a window, and a float or a message grid
+/// grid carries chrome and no window, and a float or a message grid
 /// has no slot of its own.
 fn is_tile(pane: &Pane) -> bool {
     pane.id != GLOBAL_GRID && pane.kind.is_window()
@@ -313,8 +313,8 @@ fn edge_style(active: bool, theme: &Theme) -> Style {
 /// names none.
 ///
 /// `StatusLine` is the bar's own group, and under tiles there is no bar, so
-/// a role resolving to it reads as unnamed here rather than painting a
-/// frame edge in the colours of a row that is not on screen.
+/// a role resolving to it reads as unnamed here, so no frame edge is
+/// painted in the colours of a row that is not on screen.
 fn span_style(role: StyleRole, base: Style, theme: &Theme) -> Style {
     match role.chrome_group() {
         None | Some(ChromeGroup::StatusLine) => base,
@@ -330,7 +330,7 @@ fn span_style(role: StyleRole, base: Style, theme: &Theme) -> Style {
 /// so is everything after it: the composer knows what a segment means and a
 /// column count does not, so half a diagnostic count is worse than none.
 ///
-/// Width is counted in cells rather than in characters, and the run places
+/// Width is counted in cells, and the run places
 /// one grapheme cluster per cell: a buffer named in a script that draws
 /// two cells to the character would otherwise run past the closing blank
 /// and over the corner, and one carrying a combining mark would show the
@@ -665,13 +665,12 @@ fn screen(row: u16, col: u16, area: Rect, damage: &Damage) -> Option<(u16, u16)>
     Some((x, y))
 }
 
-/// Paints the windowed command palette's band through this same primitive
-/// rather than the float style every other overlay uses, so the band
-/// joins the one family of tiles instead of reading as a different kind
-/// of box: a plain `box_edge` border (no gapless lattice, since the band
-/// has no neighbouring slot to share a junction with), the surface's own
-/// title on the top edge in the surface's own style, and an empty bottom
-/// edge, matching a real windowed tile's own footer with no window
+/// Paints the windowed command palette's band through this same primitive,
+/// apart from the float style every other overlay uses, so the band joins
+/// the one family of tiles: a plain `box_edge` border (no gapless lattice,
+/// since the band has no neighbouring slot to share a junction with), the
+/// surface's own title on the top edge in the surface's own style, and an
+/// empty bottom edge, matching a real windowed tile's own footer with no window
 /// status to state.
 ///
 /// `area` is already the band's own rect (`Model::palette_rect`'s

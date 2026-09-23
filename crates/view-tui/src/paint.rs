@@ -2516,7 +2516,7 @@ mod tests {
     #[test]
     fn the_top_row_is_reserved_and_never_covers_resting_grid_text() {
         let mut model = owning_the_tabline();
-        // the row is laid out on the terminal, not on the engine's grid,
+        // the row is laid out on the terminal, outside the engine's grid,
         // so a fixture that left the terminal at zero would centre the
         // names nowhere, and the agent's word would take six of these ten
         // columns off the names this samples
@@ -3886,8 +3886,8 @@ mod tests {
             (ring, top)
         };
 
-        // a whole horizontal edge rather than the two verticals a ring
-        // starting a row higher leaves on this row, since the pill paints
+        // a whole horizontal edge, where a ring starting a row higher
+        // leaves two verticals on this row, since the pill paints
         // over row 0 either way and the edge is the only thing that says
         // where the frame starts
         let (tiles, top) = ringed(view_core::model::Panes::Tiles);
@@ -7074,7 +7074,7 @@ mod tests {
         for span in &laid.lines[0] {
             let span_width = u16::try_from(UnicodeWidthStr::width(span.text.as_str())).unwrap();
             if let Some(group) = span.role.chrome_group() {
-                // the bar's mode takes the accent rather than its group,
+                // the bar's mode takes the accent over its group's colour,
                 // so what it owes here is the accent's own colour
                 let expected = if span.role == StyleRole::Mode {
                     ratatui_style(theme.accent())
@@ -7459,8 +7459,8 @@ mod tests {
     /// Every native text writer in this crate places a grapheme cluster.
     /// The two cell primitives are reached from a loop, and a loop over
     /// `chars()` is what puts a combining mark in a cell of its own, so a
-    /// new writer that iterates characters fails here by name rather than
-    /// on whichever surface a user opens a decomposed name on.
+    /// new writer that iterates characters fails here by name, ahead of any
+    /// surface a user opens a decomposed name on.
     ///
     /// `clusters` is the one walk that produces a cluster, so a body that
     /// places a cell without calling it took its cells from somewhere

@@ -103,7 +103,7 @@ fn a_tiled_split_agrees_with_bare_nvim_inside_every_inner_rect() {
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
 
     // the bare side attaches at the size the ring left view's outer grid,
-    // read off the live session rather than recomputed here, so the two
+    // read off the live session with nothing recomputed here, so the two
     // global grids are the same picture drawn by the same nvim
     let (outer_cols, outer_rows) = engine
         .grid_screens()
@@ -155,7 +155,7 @@ fn a_tiled_split_agrees_with_bare_nvim_inside_every_inner_rect() {
     );
     for divergence in &divergences {
         // exhaustive, no wildcard: a divergence kind added later has to be
-        // classified here rather than passing as a window grid's size
+        // classified here, or it would pass as a window grid's size
         let named = match divergence {
             Divergence::PaneGrid { grid, .. } | Divergence::PaneAttr { grid, .. } => Some(*grid),
             Divergence::State { .. } | Divergence::Grid { .. } | Divergence::Attr { .. } => None,

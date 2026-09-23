@@ -50,10 +50,10 @@ pub struct Model {
     /// engine I/O this pure crate cannot perform. `Some(None)` is not a
     /// representable state -- "auto" resets to `None`, the same absence a
     /// session that never flipped starts in -- so [`KeyProfile`] itself
-    /// carries the flip, not a nested option.
+    /// carries the flip, with no nested option.
     pub key_profile_override: Option<crate::native::chords::KeyProfile>,
-    /// `:View keys profile` with no argument: `update()` sets this rather
-    /// than touching [`Self::key_profile_override`], since a bare report
+    /// `:View keys profile` with no argument: `update()` sets this and
+    /// leaves [`Self::key_profile_override`] alone, since a bare report
     /// asks what is live and changes nothing. `view::native::NativeSession`
     /// is what actually knows the profile and the modifier row to report,
     /// so it reads and clears this the same way it reads and applies a
@@ -242,8 +242,8 @@ pub struct Model {
     /// second tabpage is open, `2` always.
     ///
     /// Holds nvim's default until the bridge's first reading arrives, for
-    /// the reason the row is reserved off the attach rather than off a
-    /// tabline event: a session that reserved no row and then found it
+    /// the reason the row is reserved off the attach, ahead of any tabline
+    /// event: a session that reserved no row and then found it
     /// wanted one would shift every window down a frame later.
     pub showtabline: u8,
     /// nvim's own `winminwidth`/`winminheight`, as the bridge last relayed
@@ -879,7 +879,7 @@ impl Model {
     }
 
     /// [`Self::overlays`], for a feature that reaches its own overlay
-    /// directly rather than through [`Self::focused_overlay_mut`] -- what a
+    /// directly, past [`Self::focused_overlay_mut`] -- what a
     /// windowed surface's own key handling needs, since that lookup skips
     /// an overlay whose placement has moved its keys onto `Focus::Pane`
     /// instead (see `model/focus.rs`'s `takes_focus_now`).
@@ -2280,7 +2280,7 @@ pub enum MouseCapture {
     /// The command palette received the press: it carries no [`OverlayId`]
     /// of its own (it paints straight off `engine.cmdline` in either
     /// placement, never through the overlay stack), so its capture is its
-    /// own variant rather than a fabricated overlay id.
+    /// own variant, with no fabricated overlay id.
     Palette,
 }
 

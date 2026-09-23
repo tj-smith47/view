@@ -52,7 +52,7 @@ pub struct DesktopChord {
     pub id: &'static str,
     /// The omarchy chord it answers to, spelled as
     /// `default/hypr/bindings/*.lua` spells it (a digit-row chord written as
-    /// the digit rather than the xkb `code:N` the source binds, the one
+    /// the digit where the source binds the xkb `code:N`, the one
     /// place this table's own spelling and the fixture's diverge -- the
     /// `#[cfg(test)]` `the_desktop_table_matches_omarchy_by_chord` carries
     /// the normalization).
@@ -897,7 +897,7 @@ mod tests {
     /// The twin is either an nvim key view registers nothing for (starts
     /// with `<C-w>` or is a bare `gt`/`gT`/digit-prefixed `gt`) or an
     /// existing [`default_maps`] row, so a chord naming a twin that could
-    /// never become a key fails here instead of at registration time.
+    /// never become a key fails here, ahead of registration time.
     #[test]
     fn every_desktop_chord_has_an_editor_twin() {
         for chord in desktop_chords() {

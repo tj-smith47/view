@@ -409,8 +409,8 @@ pub enum Msg {
     /// One window per message: the tiles each draw their own bottom edge,
     /// and a whole-layout sweep would cost a message per window on every
     /// cursor move. The trigger is throttled in Lua to one message per
-    /// event-loop tick, so a held-down key costs one of these per tick
-    /// rather than one per keystroke.
+    /// event-loop tick, so a held-down key costs one of these per tick,
+    /// however many keystrokes the tick carried.
     WindowStatus {
         win: crate::events::WinHandle,
         status: crate::model::WindowStatus,
@@ -439,8 +439,8 @@ pub enum Msg {
     /// reading at registration, and every `OptionSet` on either after it.
     ///
     /// `update::surfaces::tile_is_zoomed` reads a sibling squeezed to this
-    /// floor as "already maximized" rather than trusting nvim's default of
-    /// `1`, which a user's own config is free to raise.
+    /// floor as "already maximized". nvim's default of `1` is no answer,
+    /// since a user's own config is free to raise it.
     MinPaneSizeChanged {
         width: u16,
         height: u16,
@@ -1856,7 +1856,7 @@ impl WinSplit {
     /// `SurfacePlacement::Windowed`, never `Center` or a corner, so those
     /// five arms below are never reached by a windowed open; each still
     /// names its own split (`Left`, matching the sidebar `Left` already
-    /// gets) rather than falling out of a wildcard, since a wildcard arm
+    /// gets) with no wildcard arm, since a wildcard arm
     /// stops the compiler from catching a real anchor `Anchor` gains later.
     #[must_use]
     pub const fn for_anchor(anchor: crate::native::geometry::Anchor) -> Self {
@@ -1920,7 +1920,7 @@ pub enum RpcCall {
     },
     /// `nvim_set_current_tabpage`, for a click on a pill tab.
     ///
-    /// The call rather than `:tabnext`: the pill names a handle, an ex
+    /// The call, and never `:tabnext`: the pill names a handle, an ex
     /// command names an ordinal, and an ordinal read off a row drawn one
     /// frame ago selects the wrong tabpage the moment one closed in
     /// between. Fire-and-forget -- nvim's own `tabline_update` is what
@@ -2341,7 +2341,7 @@ pub enum RpcCall {
     /// back as [`Msg::NativeWindowOpened`] carrying the same `generation`,
     /// and that reply is what binds the handle to the surface. A call
     /// naming a surface whose window is already open enters that window
-    /// instead of opening a second one, so one message is both "open it"
+    /// and opens no second one, so one message is both "open it"
     /// and "go to it".
     OpenNativeWindow {
         /// The surface the window is for.
@@ -2368,9 +2368,9 @@ pub enum RpcCall {
         win: u64,
     },
     /// Sets a window's width, its height, or both, in cells. The axis a
-    /// windowed surface does not own is left alone rather than set to what
-    /// it already is, which is what nvim's own layout would otherwise
-    /// re-flow around.
+    /// windowed surface does not own is left alone, because nvim's own
+    /// layout re-flows around every set, even one to the value it already
+    /// holds.
     SetWindowSize {
         /// The window, as nvim addresses it.
         win: u64,

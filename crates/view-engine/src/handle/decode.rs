@@ -147,14 +147,14 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
             let within: u64 = first.as_str()?.parse().ok()?;
             Some(Msg::EscapeTimeout(Duration::from_millis(within)))
         }
-        // nvim's own number, clamped rather than refused: the option is a
+        // nvim's own number, clamped and still accepted: the option is a
         // small count, and a build that read a wider one would still draw
         // the row the highest reading asks for
         "showtabline" => Some(Msg::ShowTablineChanged {
             value: u8::try_from(first.as_u64()?).unwrap_or(u8::MAX),
         }),
-        // both floored non-negative in the chunk itself, and clamped
-        // rather than refused for the same reason `showtabline` is: a
+        // both floored non-negative in the chunk itself, and clamped and
+        // still accepted for the same reason `showtabline` is: a
         // config that raised either past u16 still reads as "wide enough
         // to never be squeezed"
         "min_pane_size" => Some(Msg::MinPaneSizeChanged {
@@ -196,8 +196,8 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
 /// Decodes the `buffers` trigger's list of `(buf, name, modified, current)`
 /// tuples, or `None` for a payload that is not a list.
 ///
-/// An entry the chunk could not have produced is dropped rather than
-/// failing the list: the set nvim just sent is a better answer than the set
+/// An entry the chunk could not have produced is dropped, and the rest of
+/// the list stands: the set nvim just sent is a better answer than the set
 /// view already held, whichever one entry of it decoded badly.
 fn decode_buffer_entries(list: &Value) -> Option<Vec<BufferEntry>> {
     Some(
@@ -234,7 +234,7 @@ fn decode_window_status(params: &[Value]) -> Option<Msg> {
     let [_, win, buf, name, modified, row, col, errors, warnings] = params else {
         return None;
     };
-    // field by field off a default rather than as one struct expression:
+    // field by field off a default, with no single struct expression:
     // `WindowStatus` is `#[non_exhaustive]`, so a field added to it stays
     // additive for every crate that builds one
     let mut status = WindowStatus::default();

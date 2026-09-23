@@ -9,8 +9,8 @@
 /// One window's buffer identity, cursor position and diagnostic counts, as
 /// the bridge's `window` trigger group reports them.
 ///
-/// Keyed by [`WinHandle`](crate::events::WinHandle) rather than by grid,
-/// because the trigger runs in Lua where a window handle is the only
+/// Keyed by [`WinHandle`](crate::events::WinHandle), with no grid in the
+/// key, because the trigger runs in Lua where a window handle is the only
 /// identity nvim offers. The painter maps a grid to its handle through
 /// [`GridRegistry::window_handle`](crate::grid::registry::GridRegistry::window_handle).
 #[non_exhaustive]

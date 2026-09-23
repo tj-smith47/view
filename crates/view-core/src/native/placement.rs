@@ -2,8 +2,8 @@
 //! that tells one window-open from the next.
 //!
 //! The layouts are config, read once at startup and re-read when a user
-//! changes one mid-session. They live beside the model rather than inside
-//! it because every surface reads the same four, and a field per surface
+//! changes one mid-session. They live beside the model, outside it,
+//! because every surface reads the same four, and a field per surface
 //! would be four facts that have to agree.
 
 use crate::native::geometry::{Anchor, NativeSurface, SurfaceLayout, SurfacePlacement};
@@ -26,9 +26,8 @@ pub struct SurfaceState {
     /// ever valid for the one placement it was written for (a corner is
     /// not a tile edge, a tile edge is not a float position), so the stop
     /// that placement was not configured for needs its own answer, and the
-    /// stop it was falls straight back to this rather than to a generic
-    /// default that could silently replace a real config value equal to
-    /// it.
+    /// stop it was falls straight back to this. A generic default could
+    /// silently replace a real config value equal to it.
     configured_anchor: [Anchor; 4],
     /// The shared three-position ring's own position: 0 is `config`, 1 is
     /// `windowed`, 2 is `overlay`. Starts at 0 -- every surface begins at
@@ -79,8 +78,8 @@ impl SurfaceState {
             .unwrap_or_else(|| SurfaceLayout::default_for(surface))
     }
 
-    /// Whether `surface` takes a window in nvim's layout rather than
-    /// floating over the buffer.
+    /// Whether `surface` takes a window in nvim's layout. A surface that
+    /// does not floats over the buffer.
     #[must_use]
     pub fn windowed(&self, surface: NativeSurface) -> bool {
         matches!(self.layout(surface).placement, SurfacePlacement::Windowed)
@@ -89,7 +88,7 @@ impl SurfaceState {
     /// Replaces every layout, which is what a config read answers with, and
     /// re-captures [`Self::configured`] from it -- a config reload
     /// (`:View` has none today, but a session that gains one owes the ring
-    /// the new file's own answer, not the one it booted with) moves the
+    /// the new file's own answer) moves the
     /// ring's `config` stop along with everything else.
     pub fn set_layouts(&mut self, layouts: [SurfaceLayout; 4]) {
         self.configured = layouts.map(|layout| layout.placement);
@@ -166,7 +165,7 @@ impl SurfaceState {
 
     /// Whether `surface`'s current generation is still waiting on its
     /// `OpenNativeWindow` reply -- the guard a caller that reacts to a
-    /// redraw event (rather than a single keystroke) must add to "is there
+    /// redraw event (where a keystroke would come once) must add to "is there
     /// a window already", since the latter stays false until the reply is
     /// applied, several steps after the request that answers it was sent.
     #[must_use]
@@ -337,7 +336,7 @@ mod tests {
             back[NativeSurface::Agent.index()].1,
             SurfacePlacement::Overlay
         );
-        // windowed again: the ring wraps rather than stopping at `config`
+        // windowed again: the ring wraps past `config`
         for (_, placement, _) in state.advance_ring() {
             assert_eq!(placement, SurfacePlacement::Windowed);
         }

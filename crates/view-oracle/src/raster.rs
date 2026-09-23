@@ -64,8 +64,8 @@ pub fn screen_text(surface: &Surface, grid: &Grid, caps: TermCaps) -> String {
 /// native overlay (`LayerKind::is_native_overlay`), so `Layer::borders` is
 /// always `None` for one, and `view-tui`'s own composite loop instead
 /// recomputes `BorderSet::for_caps(model.caps)` fresh every frame
-/// (`crates/view-tui/src/paint.rs`'s `composite_layers`) rather than
-/// reading a per-layer field. This raster has no `Model` to read that from,
+/// (`crates/view-tui/src/paint.rs`'s `composite_layers`), with no
+/// per-layer field. This raster has no `Model` to read that from,
 /// so its caller passes the same caps the `Surface` was built under.
 #[must_use]
 pub fn screen_rows(surface: &Surface, grid: &Grid, caps: TermCaps) -> Vec<String> {
@@ -318,8 +318,8 @@ fn paint_grid<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid) {
 /// [`view_core::native::pill::PillView::row_slots`] placed them, and the
 /// agent's word at the right.
 ///
-/// The placement is the painter's own answer rather than a second layout,
-/// so the columns a golden shows are the columns a session draws into.
+/// The placement is the painter's own answer, with no second layout, so
+/// the columns a golden shows are the columns a session draws into.
 fn paint_pill(canvas: &mut Canvas<'_>, layer: &Layer, view: &view_core::native::pill::PillView) {
     use view_core::native::pill::edge_cells;
 
@@ -707,7 +707,7 @@ mod tests {
 
         // every toast is framed (see `paint_toast`'s own doc comment), so
         // the message text sits one cell inside the border's own vertical
-        // glyph on both sides rather than at the row's raw end
+        // glyph on both sides, in from the row's raw end
         let vertical = BorderSet::for_caps(model.caps).vertical;
         let framed = format!("{vertical}hi{vertical}");
         assert!(

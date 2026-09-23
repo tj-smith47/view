@@ -655,7 +655,7 @@ const QUIESCE_SILENCE: Duration = Duration::from_millis(200);
 const QUIESCE_DEADLINE: Duration = Duration::from_secs(10);
 /// The silence window the two latency measurements below settle on --
 /// every other leg in this file uses [`QUIESCE_SILENCE`] because it is
-/// quiescing between steps whose correctness matters, not timing them. A
+/// quiescing between steps whose correctness matters. A
 /// stopwatch that never returns before 200ms of quiet has passed cannot
 /// tell a fast ring step from a slow one; it reads the floor.
 const LATENCY_SILENCE: Duration = Duration::from_millis(5);
@@ -705,8 +705,8 @@ fn all_window_sizes(engine: &mut view_oracle::EngineSession) -> Vec<(usize, usiz
     sizes
 }
 
-/// The size of every window grid view holds. The global grid is chrome
-/// rather than a window and is left out.
+/// The size of every window grid view holds. The global grid is chrome and
+/// is left out.
 fn window_grid_sizes(engine: &view_oracle::EngineSession) -> Vec<(usize, usize)> {
     let mut sizes: Vec<(usize, usize)> = engine
         .grid_screens()
@@ -866,10 +866,10 @@ fn assert_ordinary_window(engine: &mut view_oracle::EngineSession) {
 }
 
 /// The same splits and closes as the battery above, under
-/// `panes = "tiles"` at the same geometry, as an assertion rather than a
-/// capture: at every step view holds one grid per open window, each the
-/// size nvim itself reports for that window, so neither a grid outliving
-/// the window that owned it nor one left at a stale size survives a close.
+/// `panes = "tiles"` at the same geometry, as an assertion: at every step
+/// view holds one grid per open window, each the size nvim itself reports
+/// for that window, so neither a grid outliving the window that owned it
+/// nor one left at a stale size survives a close.
 ///
 /// Driven through [`view_oracle::EngineSession::set_panes`]. That driver
 /// builds its own `Model` and never runs `view-native`'s resolver, so
@@ -1702,7 +1702,7 @@ fn a_file_taken_into_the_trees_window_keeps_its_filetypes_look() {
 /// that carries it to `overlay`, and the tree's own state -- what
 /// `engine.tree_is_open()` answers for -- never closes with it.
 ///
-/// The invoke, not the raw `<leader>uw` chord: this crate has no real
+/// The invoke stands in for the raw `<leader>uw` chord: this crate has no real
 /// terminal to encode a keystroke from, so the chord's own arrival is
 /// `view-core`'s `Msg::FeatureInvoke { feature: "ui", verb: "cycle_surfaces" }`
 /// -- the message the registered nvim mapping sends back, and the one
@@ -1797,8 +1797,8 @@ fn overlay_session(dir: &Path) -> view_oracle::EngineSession {
         .set_panes("tiles")
         .expect("the tiled look is reachable");
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
-    // this driver builds its model directly rather than through a
-    // `view.toml`, whose absent `[native] palette` key still means "on"
+    // this driver builds its model directly, with no `view.toml`, whose
+    // absent `[native] palette` key still means "on"
     // (`enabled()`'s own default) -- the same default `view_session`'s
     // comment above names for the PTY-driven tests
     engine.enable_palette();
@@ -1829,9 +1829,9 @@ struct NativeWindowRect {
 }
 
 /// [`native_window_row`], reading `wincol`/`width`/`height` alongside
-/// `winrow`, for a live pin that reads back an edge rather than a row
-/// alone: a default windowed position (a left or right column, a top or
-/// bottom band) is a column and an extent, not a single coordinate.
+/// `winrow`, for a live pin that reads back a whole edge: a default
+/// windowed position (a left or right column, a top or bottom band) is a
+/// column and an extent.
 fn native_window_rect(
     engine: &mut view_oracle::EngineSession,
     id: &str,
@@ -2044,7 +2044,7 @@ fn the_tree_stacks_above_the_agent_panel_however_they_open_against_real_nvim() {
 /// nothing here sets a surface's layout by hand, so a stale fallback that
 /// silently mapped every anchor onto a left sidebar (the defect a config
 /// word could not reach either) would land all three on the same edge
-/// instead of the tree alone on the left. A following `:` opens the
+/// where the tree alone belongs on the left. A following `:` opens the
 /// palette's own tile, at the bottom edge its own default names.
 #[test]
 fn a_ring_step_opens_every_default_surface_at_its_designed_windowed_position_against_real_nvim() {
@@ -2091,8 +2091,7 @@ fn a_ring_step_opens_every_default_surface_at_its_designed_windowed_position_aga
     );
     // the outer ring and the frame's own gap already sit inside `COLS`
     // (`docs/tiled-ui.md` names up to six columns of that gap), so a right
-    // edge is graded against a margin of ten rather than the raw terminal
-    // width
+    // edge is graded against a margin of ten from the terminal width
     let right_margin = 10;
     assert!(
         agent.col + agent.width >= i64::from(COLS) - right_margin,
@@ -2292,7 +2291,7 @@ fn a_ring_cycles_all_four_surfaces_through_every_position_against_real_nvim() {
 /// four surfaces open at the ring's `config` stop (the heaviest of the
 /// three: every surface an overlay, so a step to `windowed` opens four
 /// real windows in one fold) -- since a step's own close-then-reopen work
-/// scales with how many surfaces it carries, not just whether one moved.
+/// scales with how many surfaces it carries.
 #[test]
 fn the_cost_of_one_ring_step_with_all_four_surfaces_open() {
     let work = common::ScratchPaths::new("close-battery-ring-step-latency");
@@ -2443,7 +2442,7 @@ fn the_ticker_opens_and_closes_its_own_window_against_real_nvim() {
 /// that held focus before it opened, the same `wincmd p` the design names,
 /// without closing the stream's own window; and a window command the
 /// stream's own resize chord does not claim (`<C-w>w`, cycling back in)
-/// still reaches nvim rather than being swallowed by
+/// still reaches nvim past
 /// [`view_core::update::surfaces::notifications_pane_key`]'s message-key
 /// fallback.
 #[test]
@@ -2779,7 +2778,7 @@ fn opening_a_windowed_surface_with_no_room_for_the_split_leaves_eventignore_unto
 
 /// The other reachable path to the same leak: a ring step or a mapped key can fire
 /// `OpenNativeWindow` while the user is inside the command-line window
-/// (`q:`), where `botright split` raises E11 rather than E36. The chunk
+/// (`q:`), where `botright split` raises E11. The chunk
 /// refuses outright (`getcmdwintype() ~= ''`) before it ever sets
 /// `eventignore`, so this leg never even reaches the pcall the one above
 /// does.

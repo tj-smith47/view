@@ -2878,8 +2878,8 @@ mod tests {
     /// an `Effect::Ai(AiCommand::Cancel)` reaching an idle worker (`[ai]`
     /// wired but no session ever started) proves the effect really carries
     /// through to `AiWorker::dispatch`'s own "no active AI session for this
-    /// command" handling, never a spawn attempt -- rather than only
-    /// exercising the `Prompt` shape the sibling test above already covers.
+    /// command" handling, never a spawn attempt. The sibling test above
+    /// covers the `Prompt` shape.
     #[test]
     fn ai_effect_forwards_a_cancel_to_the_wired_worker_with_no_session_running() {
         let ops = FakeOps::default();

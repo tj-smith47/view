@@ -987,7 +987,7 @@ fn caps_notice(
 /// reaches stdout. The report reads the terminal alone through
 /// [`Term::init_bare`] and [`Term::settle_probe`], the capability-detection
 /// half of the two calls the ordinary startup path makes through
-/// [`Term::init`], called here on their own instead of in the middle of it.
+/// [`Term::init`], called here on their own.
 fn print_caps_and_exit(cli: &Cli, resolved: &ResolvedConfig) -> Result<()> {
     let mut term = Term::init_bare(resolved.ui.tier.value.map(Tier::from))
         .context("failed to initialize terminal backend")?;
@@ -1184,7 +1184,7 @@ fn main() -> Result<()> {
     // attach will ask for
     let look = Look::new(resolved.ui.panes.value, resolved.ui.gaps.value);
     let ring = look.ring();
-    // through `Look::bar_rows` rather than off the switch alone: under
+    // through `Look::bar_rows`, since the switch alone is not enough: under
     // tiles the segments sit in each frame's own bottom edge, so no row is
     // reserved for a bar and `Model::statusline_rows` answers the same
     let statusline = look.bar_rows(resolved.tables.native.enabled("statusline")) > 0;
@@ -1317,7 +1317,7 @@ fn main() -> Result<()> {
     for notice in resolved.notices() {
         pre_executor_effects.extend(model.engine.record_native_notice(notice.clone(), false));
     }
-    // read here rather than in `NativeSession::load`: the placements come
+    // read here, outside `NativeSession::load`: the placements come
     // off the resolved `[ui.surfaces]` tables, and that session is handed
     // the file's own tables
     model.surfaces.set_layouts(resolved.surfaces);
@@ -1856,7 +1856,7 @@ mod tests {
             "--appname",
             "work",
             "--single-grid",
-            // nvim rather than tiles for the reason `resolve.rs`'s own flag
+            // nvim wins over tiles for the reason `resolve.rs`'s own flag
             // fixture states: the two flags contradict each other any other
             // way round, and view resolves that by ignoring `--panes`
             "--panes",
@@ -2150,11 +2150,11 @@ mod tests {
     /// The grid the spawn is seeded with is the fourth, and rides the size
     /// read above: the rows view's own chrome takes are not the child's to
     /// lay windows out in, so the spawn is handed the grid the attach will
-    /// ask for rather than the terminal's own. The ring tiles mode frames
-    /// the screen with is part of that grid, as is the row the pill takes,
-    /// and both come out of the `[ui]` and `[native]` answers the chain
-    /// above already resolved. Every call is arithmetic over values in
-    /// hand.
+    /// ask for, which is smaller than the terminal's own. The ring tiles
+    /// mode frames the screen with is part of that grid, as is the row the
+    /// pill takes, and both come out of the `[ui]` and `[native]` answers
+    /// the chain above already resolved. Every call is arithmetic over
+    /// values in hand.
     ///
     /// The geometry notice is the fifth, and it is not a read at all: it
     /// reports the reading the line above stood a geometry in for, on every
@@ -2575,7 +2575,7 @@ mod tests {
 
         // the second way to ask: `--tier` changes what this line would have
         // said, so the session that overrides is shown what it got, and this
-        // is the one-line override path, not `--print-caps`'s table
+        // is the one-line override path, apart from `--print-caps`'s table
         let cli = Cli::parse_from(["view", "--tier", "basic"]);
         let overridden = caps_notice(&cli, &resolved_for(&cli), model.caps, CapsSource::Override)
             .expect("--tier implies the capability line");
@@ -2589,7 +2589,7 @@ mod tests {
         );
     }
 
-    /// `--print-caps` owes the whole registry, not the one tier line: every
+    /// `--print-caps` owes the whole registry beyond the one tier line: every
     /// row [`ResolvedConfig::rows`] answers, plus the `keys.desktop_modifier`
     /// row that needs this session's own kitty keyboard protocol probe to
     /// answer at all.

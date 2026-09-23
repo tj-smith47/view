@@ -254,8 +254,7 @@ fn leader_leader_opens_the_palette() {
     // `update`'s own ("palette", "open") arm answers the invoke with the
     // same `:` a typed colon sends; feeding it here, the way the production
     // executor would once it applied that effect, proves the round trip
-    // actually opens nvim's own command line rather than stopping at the
-    // invoke arriving
+    // actually opens nvim's own command line, past the invoke arriving
     session.press(":");
     assert_eq!(
         session.eval("getcmdtype()"),

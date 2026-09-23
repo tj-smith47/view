@@ -609,7 +609,7 @@ pub struct Term {
     /// bracketed paste alone, so reporting is known to be off when the
     /// terminal is entered, and a first frame that states it anyway writes a
     /// disable. On Windows crossterm serves both mouse commands through the
-    /// console API instead of escape bytes, and the disable reads a console
+    /// console API with no escape bytes, and the disable reads a console
     /// mode that only the enable stores, so a disable ahead of the first
     /// enable fails the frame.
     ///
@@ -686,7 +686,7 @@ impl Term {
     /// detection alone, with no keyboard-protocol push, for a caller that
     /// never draws a frame or reads a key -- `--print-caps` is the one.
     /// See [`TerminalGuard::enter_bare`] for why the alternate screen is
-    /// skipped rather than entered and immediately left.
+    /// skipped outright.
     ///
     /// # Errors
     ///

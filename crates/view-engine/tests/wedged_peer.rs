@@ -39,7 +39,7 @@ fn request_timeout_bounds_write_phase_against_wedged_peer() {
     // the caller's timeout is the engine's to honour, and the slack around
     // it is the same round trip every other test here waits on -- a write
     // that leaks blocks on a pipe nobody drains, so the leak this bounds is
-    // unbounded rather than merely late. Bound once: `HostBudget` reads the
+    // unbounded, with no end to wait for. Bound once: `HostBudget` reads the
     // host's load factor per call, so a second `rpc_deadline()` call at the
     // assertion can read a different value than the one this message names.
     let bound = timeout + common::rpc_deadline();

@@ -71,7 +71,7 @@ fn the_ai_registry_rows_and_view_ais_own_rows_are_the_same_keys() {
 /// [`view_native::config::ResolvedConfig::rows`]'s own doc states why --
 /// its real value needs the terminal's own kitty keyboard protocol probe,
 /// which neither resolver holds, so `view`'s own `caps_notice` prints it
-/// beside this walk rather than through it.
+/// beside this walk, outside it.
 #[test]
 fn the_two_resolvers_answer_the_whole_registry_between_them() {
     let resolved = resolve_with(&ViewConfig::defaults(), &Overrides::default(), &|_| None);

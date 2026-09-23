@@ -762,9 +762,8 @@ impl EngineHandle {
                                     // an error reply degrades to no
                                     // handle, the same safe default
                                     // decode_buffer_list_reply takes: the
-                                    // surface draws nothing rather than
-                                    // binding a pane to a window that may
-                                    // not exist
+                                    // surface draws nothing and binds no
+                                    // pane to a window that may not exist
                                     let win = if error == Value::Nil {
                                         crate::nvim_api::native_window::decode_native_window_reply(
                                             &result,
@@ -3929,7 +3928,7 @@ mod tests {
 
     /// The name the open chunk sends the taken window under, and the
     /// surface id it carries: a payload naming no surface of view's own
-    /// decodes to nothing rather than releasing a pane at random.
+    /// decodes to nothing, so no pane is released at random.
     #[test]
     fn a_bridge_native_window_taken_event_decodes_the_surface() {
         let decoded =
@@ -4013,8 +4012,7 @@ mod tests {
     }
 
     /// A payload one field short is a chunk this build does not know,
-    /// which drops rather than decoding a position out of the wrong
-    /// argument.
+    /// which drops, so no position is decoded out of the wrong argument.
     #[test]
     fn a_short_window_trigger_payload_decodes_to_nothing() {
         let decoded = decode_bridge_event(&[

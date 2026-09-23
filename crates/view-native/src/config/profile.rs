@@ -20,8 +20,8 @@ use super::resolve::Resolved;
 use crate::config::NativeConfig;
 
 /// The `SSH_CONNECTION` marker: an ssh session resolves [`KeyProfile::Desktop`]
-/// because the chords a remote desktop holds are held on the client, not on
-/// the box this session runs on.
+/// because the chords a remote desktop holds are held on the client, away
+/// from the box this session runs on.
 const SSH_CONNECTION: &str = "SSH_CONNECTION";
 const SSH_TTY: &str = "SSH_TTY";
 const WAYLAND_DISPLAY: &str = "WAYLAND_DISPLAY";

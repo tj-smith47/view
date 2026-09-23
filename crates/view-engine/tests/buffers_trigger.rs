@@ -1,5 +1,5 @@
 //! Live-nvim proof that the bridge's `buffers` trigger reports the listed
-//! set, replaces it rather than adding to it, and collapses a burst to one
+//! set, replaces it whole each time, and collapses a burst to one
 //! report per turn of nvim's event loop.
 //!
 //! Only a live nvim runs the chunk: `nvim_api.rs`'s

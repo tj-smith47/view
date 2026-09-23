@@ -99,9 +99,9 @@ impl Anchor {
         }
     }
 
-    /// Whether this anchor names one of the four corners rather than a
-    /// centered axis or a single edge -- the toast stack's own vocabulary
-    /// ([`Self::label`]'s four `*-*` words).
+    /// Whether this anchor names one of the four corners, where a centered
+    /// axis or a single edge answers `false` -- the toast stack's own
+    /// vocabulary ([`Self::label`]'s four `*-*` words).
     #[must_use]
     pub const fn is_corner(self) -> bool {
         matches!(
@@ -111,7 +111,7 @@ impl Anchor {
     }
 
     /// Whether this corner sits on the terminal's top edge (`TopLeft`,
-    /// `TopRight`) rather than the bottom one. Only meaningful for a corner;
+    /// `TopRight`). Only meaningful for a corner;
     /// a non-corner anchor answers `true` (nothing reads it in that case).
     #[must_use]
     pub const fn is_top_corner(self) -> bool {
@@ -119,7 +119,7 @@ impl Anchor {
     }
 
     /// Whether this corner sits on the terminal's left edge (`TopLeft`,
-    /// `BottomLeft`) rather than the right one. Only meaningful for a
+    /// `BottomLeft`). Only meaningful for a
     /// corner; a non-corner anchor answers `true` (nothing reads it in that
     /// case).
     #[must_use]
@@ -134,8 +134,8 @@ impl Anchor {
 pub const DEFAULT_PANEL_WIDTH_PCT: u16 = 30;
 
 /// The share of rows the palette takes when nothing says otherwise. Measured
-/// in rows rather than columns, so it keeps its own default distinct from a
-/// sidebar's.
+/// in rows, where a sidebar's is in columns, so it keeps a default of its
+/// own.
 pub const DEFAULT_PALETTE_HEIGHT_PCT: u16 = 40;
 
 /// The narrowest a sidebar may be driven, in percent. Below this a
@@ -336,7 +336,7 @@ impl OverlayRect {
     }
 
     /// This rect pulled in one cell on every side, floored at a zero-sized
-    /// rect rather than an underflow -- what a windowed tile with no nvim
+    /// rect with no underflow -- what a windowed tile with no nvim
     /// window of its own draws under `[ui] gaps`, one cell in from the band
     /// [`OverlayBox::rect`] resolved (`view-surface`'s `palette_rect`).
     #[must_use]
@@ -350,10 +350,9 @@ impl OverlayRect {
     }
 }
 
-/// One of view's own surfaces: a feature that draws beside the buffer
-/// rather than inside it.
+/// One of view's own surfaces: a feature that draws beside the buffer.
 ///
-/// Named rather than derived from [`crate::model::OverlayKind`] because a
+/// Named on its own, apart from [`crate::model::OverlayKind`], because a
 /// surface exists whether or not it is open, and the placement a user
 /// configures for it is read before anything opens.
 #[non_exhaustive]
@@ -590,9 +589,9 @@ pub const PALETTE_BAND_MIN_ROWS: u16 = 4;
 ///
 /// `gaps` comes out of the rows around the band, never out of the band's
 /// own content: the band's height floors at [`PALETTE_BAND_MIN_ROWS`]
-/// first, and the gap is added on top of that floor rather than carved out
-/// of it, which is what keeps a small `size` from painting an emptied
-/// frame with the typed text nowhere to land. A terminal too short to hold
+/// first, and the gap is added on top of that floor, which is what keeps a
+/// small `size` from painting an emptied frame with the typed text nowhere
+/// to land. A terminal too short to hold
 /// the floor plus its own gap has nowhere left to shrink, so this open
 /// falls back to the centred float instead.
 ///
@@ -600,7 +599,7 @@ pub const PALETTE_BAND_MIN_ROWS: u16 = 4;
 /// two `frames::paint_frames` draws around a real tile (the outer one
 /// view's own window layout leaves around a split, the inner one the
 /// frame's own `box_edge` inset draws), so the band's border lines up with
-/// a buffer tile's rather than sitting one column short of it.
+/// a buffer tile's to the column.
 #[must_use]
 pub fn palette_rect(
     layout: SurfaceLayout,
@@ -675,7 +674,8 @@ mod tests {
 
     /// A terminal too short to hold the floor plus its own gap has nowhere
     /// left to shrink the band into, so this open falls back to the
-    /// centred float (`70` percent wide) instead of an emptied frame.
+    /// centred float (`70` percent wide), which still has room for the
+    /// typed text.
     #[test]
     fn a_terminal_too_short_for_the_floor_falls_back_to_the_centred_float() {
         let layout = SurfaceLayout::new(SurfacePlacement::Windowed, Anchor::Bottom, 10);

@@ -95,15 +95,14 @@ struct ViewFile {
 
 /// The `[ui]` table's wire shape: which rendering tier a session paints at,
 /// which colorscheme it runs, how window layout is drawn, and the colours a
-/// user names for themselves. Unknown keys are refused rather than ignored,
-/// for the reason `[supervision]`'s own check states.
+/// user names for themselves. Unknown keys are refused, for the reason
+/// `[supervision]`'s own check states.
 ///
-/// `tier`, `theme` and `panes` stay `String`-typed here rather than parsed
-/// by serde, for the reason [`EngineTable`]'s own do: each vocabulary
-/// includes a word that means *no choice* (`"auto"`), which is a resolution
-/// answer rather than a type, and the same word has to read the same way
-/// when it arrives through the environment or a flag instead. `gaps` has no
-/// such word: it is the boolean it looks like.
+/// `tier`, `theme` and `panes` stay `String`-typed here, for the reason
+/// [`EngineTable`]'s own do: each vocabulary includes a word that means *no
+/// choice* (`"auto"`), which resolution answers, and the same word has to
+/// read the same way when it arrives through the environment or a flag.
+/// `gaps` has no such word: it is the boolean it looks like.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct UiTable {
@@ -145,7 +144,7 @@ struct SurfacesTable {
 impl SurfacesTable {
     /// `surface`'s own table.
     ///
-    /// Matched on [`NativeSurface::index`] rather than on the enum itself:
+    /// Matched on [`NativeSurface::index`]:
     /// `NativeSurface` is `#[non_exhaustive]` (it is read from another
     /// crate), which would force a catch-all arm here that a fifth surface
     /// could fall through silently. `index`'s own match, and every other
@@ -167,7 +166,7 @@ impl SurfacesTable {
 ///
 /// `placement` and `anchor` stay `String`-typed for the reason
 /// [`UiTable`]'s own words do: the vocabulary is view's, a word outside it
-/// is a notice rather than a refused file, and the same word has to read
+/// is a notice and the file still loads, and the same word has to read
 /// the same way wherever it was written. `size` is a `toml::Value` for
 /// `[native] tree_width`'s reason: a percentage written as `30.0` names a
 /// width a person meant, and refusing the document over it would revert
@@ -186,9 +185,9 @@ struct SurfaceTable {
 /// A `size` as the file wrote it: the whole number of percent it names, or
 /// the text it wrote instead, which owes a notice.
 ///
-/// Read off a `toml::Value` rather than typed as an integer for
-/// `[native] tree_width`'s reason: refusing the document over a width
-/// written `30.0` would revert every other key in the file for the run.
+/// Read off a `toml::Value` for `[native] tree_width`'s reason: refusing
+/// the document over a width written `30.0` would revert every other key in
+/// the file for the run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 enum SurfaceSize {
@@ -254,8 +253,7 @@ struct UiFile {
     tokens: Option<UiTokens>,
     /// The `[ui.surfaces]` tables as the file wrote them. Unparsed here:
     /// the words are read by [`surfaces::surfaces`], whose notices reach
-    /// the user through the session that asks for the layouts rather than
-    /// through this table's own list.
+    /// the user through the session that asks for the layouts.
     surfaces: SurfacesTable,
     /// What each value this build could not read owes the user, on the same
     /// terms `[native] tree_width` answers under: never a reason to refuse
@@ -484,7 +482,7 @@ struct NativeTable {
     tree_width_notice: Option<&'static str>,
     /// Optional for [`NativeTable::tree_width`]'s reason, and never
     /// serialized because the type it holds is this crate's reading of the
-    /// word rather than the word itself.
+    /// word.
     #[serde(skip_serializing)]
     tabline_shows: Option<TablineShows>,
     #[serde(skip_serializing)]
@@ -675,13 +673,12 @@ struct KeysTable {
     /// [`view_core::native::chords::DesktopChord::id`]. Untyped for the
     /// reason the other four fields stay `toml::Value`: a serde map cannot
     /// refuse a key it has never heard of, so an id naming no chord reaches
-    /// [`resolve::resolve_with`] as data rather than failing the table.
+    /// [`resolve::resolve_with`] as data and the table still loads.
     ///
     /// Non-`Option`, unlike its five siblings above: `[keys.desktop]` is its
-    /// own table header, not a bare key, and only a field that always
-    /// renders (`UiTokensTable`'s own pattern) reaches `loaded_tables`'s
-    /// reflection walk, which is how the example pin knows this table is
-    /// read rather than merely documented.
+    /// own table header, and only a field that always renders
+    /// (`UiTokensTable`'s own pattern) reaches `loaded_tables`'s reflection
+    /// walk, which is how the example pin knows this table is read.
     #[serde(default)]
     desktop: BTreeMap<String, String>,
 }
@@ -710,7 +707,7 @@ const COMPOSER_NEWLINE_NOTICE: &str =
 /// answered with: unlike the raw intercept the other three actions still
 /// resolve through, this key is a real nvim mapping (the claimed-mapping
 /// path, `Msg::FeatureInvoke { feature: "ui", verb: "gaps" }`), so its
-/// value is one notation, not a list, and any nvim left-hand side view can
+/// value is one notation, and any nvim left-hand side view can
 /// register is well-formed here -- there is no two-raw-keystroke ceiling
 /// to fail against.
 const TOGGLE_GAPS_NOTICE: &str =
@@ -775,7 +772,7 @@ fn resolve_key_bindings(table: &KeysTable) -> (KeyBindings, Vec<&'static str>) {
 /// (`crates/view/src/native.rs`'s `take_over`) mutating the built
 /// `RegisterMappings` spec in place.
 ///
-/// One notation, not a list this build picks from: unlike the raw
+/// One notation: unlike the raw
 /// `KeyBindings` intercept the other three `[keys]` actions still resolve
 /// through, this key is a real nvim mapping, so there is no ceiling on how
 /// many raw keystrokes it may carry ([`view_core::native::mappings::
@@ -794,8 +791,7 @@ fn resolve_ui_lhs(
 
 /// The `[keys] toggle_gaps`/`cycle_surfaces` value the file named no
 /// override for: `default_maps()`'s own row for `ui gaps`/`ui
-/// cycle_surfaces`, read back rather than restated so the two can never
-/// drift apart.
+/// cycle_surfaces`, read back so the two can never drift apart.
 fn default_ui_lhs(verb: &str) -> &'static str {
     view_core::native::mappings::default_maps()
         .iter()
@@ -815,8 +811,8 @@ pub struct KeysConfig {
     /// [`resolve::resolve_with`] to layer an environment value and a
     /// derivation over -- the same role `gaps_lhs` fills already, except
     /// this key's vocabulary (`auto`/`desktop`/`editor`) is resolved at
-    /// that layer rather than here, since the "auto" answer needs the
-    /// environment this struct is not handed.
+    /// that layer, since the "auto" answer needs the environment this struct
+    /// is not handed.
     profile: Option<String>,
     /// [`Self::profile`]'s own for `[keys] desktop_modifier`.
     desktop_modifier: Option<String>,
@@ -1710,8 +1706,7 @@ mod tests {
 
     /// The other half of dropping the indentation skip: prose that wraps
     /// onto its own comment line and ends in one word and `= true` is a
-    /// key by text alone, so the failure names the line rather than
-    /// sending the reader to the registry.
+    /// key by text alone, so the failure names the line.
     #[test]
     fn a_wrapped_comment_read_as_a_key_is_named_by_its_line() {
         let planted = "[native]\n# the switch above and the one below it\n# and = true\n";
@@ -2485,8 +2480,8 @@ mod tests {
     /// `[keys]` table, read off the serialized shape rather than restated.
     #[test]
     fn the_walked_actions_are_exactly_the_keys_table() {
-        // the profile derivation's own three fields, not a rebindable
-        // action, and so outside the population this walk covers
+        // the profile derivation's own three fields, which bind no action
+        // and so stand outside the population this walk covers
         const NON_ACTION: [&str; 3] = ["profile", "desktop_modifier", "desktop"];
         let all = toml::Value::try_from(KeysTable {
             sidebar_wider: Some("<S-Right>".into()),
@@ -2655,7 +2650,7 @@ mod tests {
     ///
     /// `profile` and `desktop_modifier` are the one exception: the example
     /// spells `"auto"` out loud, the same way `[ui] tier`/`theme`/`panes`
-    /// spell `"auto"` rather than shipping absent, so their raw fields
+    /// spell `"auto"`, so their raw fields
     /// differ from [`KeysConfig::default`]'s `None` even though they
     /// resolve to the identical answer. Every `[keys.desktop]` row ships
     /// commented out, so `desktop` itself parses empty: a row is written

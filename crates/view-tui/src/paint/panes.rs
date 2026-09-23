@@ -41,7 +41,7 @@ use super::{clip_to_frame, paint_grid, ratatui_style, set_border_cell, Damage};
 /// reserved chrome rows are accounted for exactly once.
 ///
 /// Under tiles the frames take the separators' place at the same boundary,
-/// so a float paints over a finished frame instead of being cut by one.
+/// so a float paints over a finished frame and no frame cuts it.
 pub(super) fn paint_panes(
     model: &Model,
     theme: &Theme,
@@ -209,8 +209,8 @@ fn native_pane_content(
                 // the floating placement's `focused` never sets for this
                 // placement (nvim's own cursor move is what "entered"
                 // means here, see `AiPanelState::focused`'s doc), so the
-                // hint rows read the placement's own keyboard-holder
-                // instead of a field that stays false for it
+                // hint rows read the placement's own keyboard-holder; the
+                // field stays false for it
                 let has_keyboard = model.focus() == Focus::Pane(NativeSurface::Agent);
                 LayerKind::Ai(model.ai_panel().view(
                     usize::from(height),

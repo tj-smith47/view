@@ -15,12 +15,12 @@ use view_core::msg::{Key, Msg};
 /// When `Ctrl` and/or `Alt` are held, the result is wrapped as
 /// `<C-...>`, `<M-...>`, or `<C-M-...>`. `Shift` is folded into the
 /// wrapper for named keys (`<C-S-CR>`) but dropped for plain characters,
-/// since crossterm already reports the shifted character itself (`A`
-/// rather than `a` with `SHIFT` set). `Super` (a kitty-protocol-only bit,
+/// since crossterm already reports the shifted character itself (`A`,
+/// with no `SHIFT` bit on an `a`). `Super` (a kitty-protocol-only bit,
 /// spelled `D-` after nvim's own `<D-...>` cmd-key notation) always wraps
 /// and always keeps `Shift` explicit, since a desktop chord's Shift is
-/// part of its own spelling rather than something the terminal already
-/// folded into the character.
+/// part of its own spelling, which the terminal has not folded into the
+/// character.
 ///
 /// `BackTab` (crossterm's dedicated code for Shift+Tab, always reachable
 /// on the legacy parser on both Unix and Windows) maps to `<S-Tab>`. The
@@ -586,8 +586,8 @@ fn kitty_key(fields: &[Vec<u32>]) -> Option<(KeyCode, KeyModifiers)> {
     let mods = modifiers(field(fields, 1));
     match fields.first()?.get(1) {
         // While Super is held, a desktop chord's own Shift is part of the
-        // chord's spelling (`<S-D-f>`), not something the base:shifted pair
-        // already folds away -- so the base key and the Shift bit both
+        // chord's spelling (`<S-D-f>`), which the base:shifted pair must
+        // not fold away -- so the base key and the Shift bit both
         // survive for `encode_key` to spell explicitly.
         Some(&shifted)
             if mods.contains(KeyModifiers::SHIFT) && !mods.contains(KeyModifiers::SUPER) =>
@@ -1388,9 +1388,9 @@ mod tests {
 
     /// Under `Shift`, `kitty_key` folds a `base:shifted` pair into the
     /// shifted character alone; while `Super` is held that fold stops (a
-    /// desktop chord's own Shift is part of its spelling, not the
-    /// terminal's), so the base key survives and the two spellings for a
-    /// chord differ only by their `S-`.
+    /// desktop chord's own Shift is part of its own spelling), so the base
+    /// key survives and the two spellings for a chord differ only by their
+    /// `S-`.
     #[test]
     fn a_shifted_super_chord_keeps_its_base_key() {
         for (report, unshifted, shifted) in [
@@ -1442,7 +1442,7 @@ mod tests {
     /// `Tab`, `BS`, `Space`, or one printable character), read back
     /// independent of `encode_key`/`encode_residue_bytes` so building an
     /// event or a byte run from it and running that through the real
-    /// encoder is a check on the table, not a tautology.
+    /// encoder is an independent check on the table.
     fn split_notation(notation: &str) -> (KeyModifiers, &str) {
         let inner = notation
             .strip_prefix('<')
@@ -1533,8 +1533,7 @@ mod tests {
 
     /// Every `with_super` spelling in the desktop chord table is the
     /// protocol's own report for that chord, run through `encode_key`: the
-    /// 92 table spellings are bytes the encoder actually emits, not prose
-    /// the table only asserts.
+    /// 92 table spellings are bytes the encoder actually emits.
     #[test]
     fn a_super_chord_is_spelled_the_way_the_table_spells_it() {
         for chord in view_core::native::chords::desktop_chords() {

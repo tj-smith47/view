@@ -167,8 +167,8 @@ fn every_chord_spelling_registers_as_its_own_key() {
     // built with `DesktopChord::lhs`, the same call `view-native`'s
     // `chord_plan` makes to respell a derived row under a settled modifier
     // -- view-engine cannot depend on view-native (dependency direction),
-    // so this reads the production spelling function directly rather than
-    // the compiled-in `with_super`/`with_alt` fields.
+    // so this reads the production spelling function directly, past the
+    // compiled-in `with_super`/`with_alt` fields.
     use view_core::native::chords::DesktopModifier;
     let mut specs = Vec::new();
     for chord in view_core::native::chords::desktop_chords() {

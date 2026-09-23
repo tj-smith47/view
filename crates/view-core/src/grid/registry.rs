@@ -44,8 +44,8 @@ pub enum PaneKind {
         anchor_grid: GridId,
     },
     /// A window view opened for one of its own surfaces. Laid out by nvim
-    /// like any other window, and painted by view rather than from the
-    /// cells nvim sends for it.
+    /// like any other window, and painted by view. The cells nvim sends for
+    /// it are never drawn.
     Native {
         /// The surface view opened the window for.
         surface: NativeSurface,
@@ -910,7 +910,7 @@ impl GridRegistry {
 
     /// Binds the window handle `nvim_open_win` answered with to the surface
     /// view opened it for, so the next `win_pos` for it places a `Native`
-    /// pane rather than a `Window` one.
+    /// pane.
     pub fn claim_native_window(&mut self, win: WinHandle, surface: NativeSurface) {
         if let Some(entry) = self.claims.iter_mut().find(|(handle, _)| *handle == win) {
             entry.1 = surface;
@@ -922,8 +922,8 @@ impl GridRegistry {
     /// Forgets the claim on `win` and puts any pane placed under that
     /// claim back to an ordinary window.
     ///
-    /// The placement is rewritten here rather than left to the next
-    /// `win_pos`, because a window that outlives the claim keeps the slot
+    /// The placement is rewritten here, ahead of the next `win_pos`,
+    /// because a window that outlives the claim keeps the slot
     /// it already had and nvim names no event for it. A pane still marked
     /// `Native` paints the surface's own rows over a window that is nvim's
     /// again, and a surface whose state is gone paints nothing at all,
@@ -999,7 +999,7 @@ impl GridRegistry {
     /// windowed surface's own paging keys (the notification stream's
     /// `<C-d>`/`<C-u>`) need to derive a page from the room the tile
     /// actually has, mirroring [`Self::native_window`]'s lookup but
-    /// answering the grid's `(width, height)` instead of its handle.
+    /// answering the grid's `(width, height)`.
     #[must_use]
     pub fn native_window_size(&self, surface: NativeSurface) -> Option<(u16, u16)> {
         self.slots
@@ -1160,7 +1160,7 @@ impl GridRegistry {
     /// that grid itself.
     ///
     /// A tile's frame edge stands on one of those rows, and what it says
-    /// comes from view's own bridge rather than from a redraw event, so
+    /// comes from view's own bridge with no redraw event behind it, so
     /// nothing else in the frame's damage covers it.
     pub fn mark_global_row(&mut self, row: u16) {
         self.global.mark_row(row);
@@ -1183,7 +1183,8 @@ impl GridRegistry {
     /// since the last request this registry answered for it under this
     /// `look` and this top margin.
     ///
-    /// Keyed on `(slot, look, margin_top)` rather than the slot alone: a
+    /// Keyed on `(slot, look, margin_top)`, since the slot alone is not
+    /// enough: a
     /// gaps flip changes what every window owes while leaving slots whose
     /// neighbours absorb the ring change exactly where they were, and a
     /// slot-only key would drop the re-send that flip exists to make.

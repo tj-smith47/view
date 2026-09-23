@@ -17,7 +17,7 @@ use view_core::msg::WinSplit;
 /// How long [`EngineHandle::open_native_window_sync`] waits for nvim to
 /// answer. The same five seconds every other blocking call in this crate
 /// allows: an engine that has not answered a window open in that long is
-/// wedged, not slow.
+/// wedged.
 const OPEN_NATIVE_WINDOW_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The three things both chunks have to agree on, as the Lua they are
@@ -86,9 +86,9 @@ end
 ///
 /// One window per surface, kept in a table on the module's own upvalue: a
 /// second call for a surface that already has a live window enters that
-/// window instead of opening another, which is what makes one message both
-/// "open it" and "go to it". The table is written into `vim.g` rather than
-/// a Lua local because each `nvim_exec_lua` call is its own chunk.
+/// window, which is what makes one message both "open it" and "go to it".
+/// The table is written into `vim.g` because each `nvim_exec_lua` call is
+/// its own chunk, and a Lua local dies with it.
 ///
 /// Each entry carries the window and the buffer view put in it, and the
 /// window counts as the surface's only while it still shows that buffer.
@@ -128,9 +128,9 @@ end
 /// already handed back would write the globals over the person's own
 /// window-local look.
 ///
-/// The window is made with `:split` rather than `nvim_open_win`, which
-/// allocates a second grid under `ext_multigrid` and leaves it behind: view
-/// then holds one more grid than nvim has windows.
+/// The window is made with `:split`. `nvim_open_win` allocates a second
+/// grid under `ext_multigrid` and leaves it behind, and view then holds one
+/// more grid than nvim has windows.
 ///
 /// The returned value is the window handle, which the reply decodes into
 /// `Msg::NativeWindowOpened`.
@@ -145,10 +145,9 @@ end
 /// previous, then arrive at the window that was current) is what makes
 /// `nvim_set_current_win` -- which always overwrites the previous-window
 /// record with the window it is leaving -- land on the original previous
-/// window rather than on the surface's own. Without this a windowed
-/// surface carried in by a ring step took `curwin` on the next `:` or
-/// `/`: `:q` closed its scratch window instead of the person's, and a
-/// search ran against its empty buffer instead of theirs.
+/// window. Without this a windowed surface carried in by a ring step took
+/// `curwin` on the next `:` or `/`: `:q` closed its scratch window, and a
+/// search ran against its empty buffer.
 ///
 /// The body runs under one `pcall` from the moment `eventignore` is
 /// overridden to the moment it is put back, so a split that fails (no
@@ -331,7 +330,7 @@ return result"
 /// Guarded for the reason
 /// [`SELECT_TAB_CHUNK`](super::buffers::SELECT_TAB_CHUNK) is: the window
 /// can be gone by the time the key that closes it reaches nvim, and an
-/// invalid handle raises rather than doing nothing.
+/// invalid handle raises.
 ///
 /// The chunk touches nothing it did not open. It takes the buffer number
 /// the open chunk recorded beside the window, and goes on only while that
@@ -358,15 +357,15 @@ return result"
 /// back to the person: the alternate buffer if one is listed, else the
 /// most recently used listed buffer, else an empty listed one, with the
 /// scratch buffer wiped and the window options the open chunk set put
-/// back. `nvim_create_buf` rather than `:enew`, which reuses an unnamed
-/// unmodified buffer and would leave the person typing into the scratch
+/// back. `nvim_create_buf`, since `:enew` reuses an unnamed unmodified
+/// buffer and would leave the person typing into the scratch
 /// buffer the tree was drawn over. Of the options the open chunk wrote,
 /// only `winfixwidth` and `winfixheight` are put back: nvim remembers the
 /// rest per buffer, so a buffer this window has not shown takes the
 /// person's own value from the switch itself, and a buffer it has shown
-/// takes what they left it at. Both counts are read here rather than in
-/// the model, whose own reading would be a round trip old by the time the
-/// close ran.
+/// takes what they left it at. Both counts are read here, since the
+/// model's own reading would be a round trip old by the time the close
+/// ran.
 ///
 /// The last window of any other tabpage closes as `:q` would, taking the
 /// tabpage with it.
@@ -468,8 +467,8 @@ end"
 /// taking the window handle, a width and a height, either of which may be
 /// nil.
 ///
-/// The axis a surface does not own is left alone rather than set to what it
-/// already is, because nvim re-flows the layout around every set.
+/// The axis a surface does not own is left alone, because nvim re-flows
+/// the layout around every set, even one to the value it already holds.
 ///
 /// [`EngineHandle::set_window_size`]: super::EngineHandle::set_window_size
 pub(crate) const SET_WINDOW_SIZE_CHUNK: &str = "\
@@ -587,7 +586,7 @@ impl super::EngineHandle {
     /// with no pump to route the async reply through.
     ///
     /// The differential oracle is that caller: it drives `update()` from a
-    /// list of effects rather than from a live loop, so an answer that
+    /// list of effects with no live loop, so an answer that
     /// comes back through the connection's pump reaches nothing. Every
     /// other caller uses
     /// [`open_native_window`](Self::open_native_window), which never
@@ -1012,8 +1011,8 @@ mod tests {
     /// that could raise and restored only on the path where it did not.
     /// The whole split-and-configure step now runs under one `pcall`
     /// between the write and the restore, and a refusal deletes the
-    /// scratch buffer it had already created rather than leaving it
-    /// behind for nothing to ever open. The failure branch's own close and
+    /// scratch buffer it had already created, which nothing would ever
+    /// open. The failure branch's own close and
     /// delete run before its own restore, so the window it undoes still
     /// closes under the same ignore its (never-fired) open would have --
     /// restoring first left a real `WinClosed` autocmd firing for a window
@@ -1107,8 +1106,8 @@ mod tests {
         );
     }
 
-    /// Two surfaces anchored to the same edge split that edge's own window
-    /// rather than each claiming a further column or row of the tabpage:
+    /// Two surfaces anchored to the same edge split that edge's own window,
+    /// so the tabpage gives up one column or row between them:
     /// the second one's open scans the table for a live window sharing its
     /// `edge` and, when it finds one, enters it and splits across the axis
     /// that puts the two windows one above the other on a vertical edge
@@ -1148,7 +1147,7 @@ mod tests {
     /// land at its own `stack_order` position among all of them, not
     /// beside whichever one `pairs()` (an unordered table walk) happens to
     /// yield first: the scan keeps the nearest ranked neighbor on each
-    /// side rather than breaking on the first match, so the stack order is
+    /// side, walking past the first match, so the stack order is
     /// the same regardless of Lua's own table iteration order.
     #[test]
     fn a_third_surface_on_one_edge_stacks_by_rank_not_table_order() {

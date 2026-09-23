@@ -47,8 +47,8 @@ fn zoom_invoke() -> Msg {
 }
 
 /// The second `window zoom` press equalizes only once nvim's own layout
-/// says the focused window is maximized -- proved against a real `vsplit`
-/// rather than a hand-built `WinPos` pair.
+/// says the focused window is maximized -- checked against a real `vsplit`
+/// with no hand-built `WinPos` pair.
 #[test]
 fn a_live_vsplit_zooms_then_equalizes_on_the_second_press() {
     let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();

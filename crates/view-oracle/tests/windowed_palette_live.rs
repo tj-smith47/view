@@ -2,7 +2,7 @@
 //! window of its own, so every leg here proves the replacement -- a tile
 //! [`view_surface::render`] paints itself, off
 //! `model.engine.cmdline` alone -- against the painted cells nvim actually
-//! sends, not the model that describes them. Each leg types `:`, waits for
+//! sends, past the model that describes them. Each leg types `:`, waits for
 //! the round trip a real keystroke always leaves room for, reads the typed
 //! text off the tile's own painted rect, checks that `winnr('$')` and
 //! nvim's own grid height never moved for it, types the rest of the
@@ -23,7 +23,7 @@ const QUIESCE_SILENCE: Duration = Duration::from_millis(200);
 const QUIESCE_DEADLINE: Duration = Duration::from_secs(10);
 /// The silence window the latency measurement settles on -- every other
 /// leg in this file uses [`QUIESCE_SILENCE`] because it is quiescing
-/// between steps whose correctness matters, not timing them. A stopwatch
+/// between steps whose correctness matters. A stopwatch
 /// that never returns before 200ms of quiet has passed cannot tell a 1ms
 /// round trip from a 50ms one; it reads the floor. This window still
 /// waits for real quiet on a local pty, just a shorter stretch of it.
@@ -64,8 +64,8 @@ fn two_window_palette_session(dir: &Path) -> view_oracle::EngineSession {
             30,
         ),
     );
-    // this driver builds its model directly rather than through a
-    // `view.toml`, whose absent `[native] palette` key still means "on"
+    // this driver builds its model directly, with no `view.toml`, whose
+    // absent `[native] palette` key still means "on"
     engine.enable_palette();
     engine
 }
@@ -447,8 +447,8 @@ fn a_mapped_colon_command_paints_the_tile_and_closes_it() {
     let dir = build_fixture(&work.isolated_home);
     let mut engine = two_window_palette_session(&dir);
     // `<lt>CR>` types the four literal characters `<CR>` into the RHS
-    // text nvim stores for the mapping, rather than letting this driver's
-    // own notation parser turn it into the keypress that submits the
+    // text nvim stores for the mapping, so this driver's own notation
+    // parser never turns it into the keypress that submits the
     // `:nnoremap` command line early -- the trailing `<CR>` is that
     // keypress
     engine
@@ -552,8 +552,8 @@ fn no_win_or_bufenter_autocmd_fires_for_the_palettes_own_open_or_close() {
 /// (`close_battery.rs`) measures its own floor. `baseline` is printed for
 /// context but asserted on nowhere: the three medians are the harness's
 /// silence window plus one round trip, close enough together that a
-/// direction-only compare against it is noise, not signal. The tile is
-/// bounded against the overlay it stands beside instead, with headroom for
+/// direction-only compare against it is noise. The tile is bounded against
+/// the overlay it stands beside, with headroom for
 /// scheduling jitter, and both against the frame budget a person can feel.
 #[test]
 fn the_cost_of_pressing_colon_windowed_versus_off() {

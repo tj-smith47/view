@@ -72,7 +72,7 @@ fn a_cursor_burst_collapses_to_one_message_per_tick() {
     };
 
     // the registration reports every window it finds and `VimEnter` repeats
-    // the sweep, which is the session's own startup rather than a burst
+    // the sweep, which is the session's own startup and no burst
     let settled = drain_window_status(&rx);
     assert!(
         !settled.is_empty(),
@@ -85,7 +85,7 @@ fn a_cursor_burst_collapses_to_one_message_per_tick() {
         .to_string());
     let _ = drain_window_status(&rx);
 
-    // real motions rather than raised autocommands: what the collapse may
+    // real motions, with no autocommand raised by hand: what the collapse may
     // not lose is the position the burst ended on
     lua(format!(
         "vim.cmd('normal! gg') for _ = 1, {BURST} do vim.cmd('normal! j') end"

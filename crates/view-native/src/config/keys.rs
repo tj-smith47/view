@@ -91,12 +91,12 @@ pub fn keys() -> &'static [ConfigKey] {
             },
         ];
         // every surface's own placement, anchor and size, walked off
-        // `NativeSurface::ALL` and its own default layout rather than one
+        // `NativeSurface::ALL` and its own default layout, with no
         // hand-written row per surface, so a fifth surface's rows exist
         // here the moment it exists in `geometry.rs`
         rows.extend(NativeSurface::ALL.into_iter().flat_map(|surface| {
             let default = SurfaceLayout::default_for(surface);
-            // leaked rather than formatted into a stack buffer: `derived`
+            // leaked, since a stack buffer cannot outlive this: `derived`
             // is `&'static str`, and this table is built once at startup,
             // so the leak is the one-time cost of the same size string the
             // config crate already keeps constant elsewhere

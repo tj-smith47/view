@@ -80,8 +80,7 @@ pub struct HlTable {
     /// what `Theme::from_hl` does.
     confirmed: Option<ProbedDefaults>,
     /// What the accent role resolves from. nvim broadcasts neither of the
-    /// two syntax groups, so both arrive by probe rather than through
-    /// `hl_group_set`.
+    /// two syntax groups through `hl_group_set`, so both arrive by probe.
     accent: AccentInputs,
     /// Whether any of the above changed since the last [`HlTable::take_dirty`].
     dirty: bool,

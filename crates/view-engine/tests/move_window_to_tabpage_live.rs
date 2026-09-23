@@ -216,8 +216,8 @@ fn to_tabpage_moves_the_window_and_keeps_its_view() {
     );
 }
 
-/// A destination past `tabpagenr('$')` creates one at the end rather than
-/// refusing or clamping to the last existing tabpage.
+/// A destination past `tabpagenr('$')` creates one at the end. The move is
+/// neither refused nor clamped to the last existing tabpage.
 #[test]
 fn to_tabpage_past_the_last_tabpage_creates_one() {
     let engine = spawn_attached();

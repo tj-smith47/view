@@ -1,7 +1,7 @@
 //! Where each of view's own surfaces sits: a float over the buffer, or a
 //! window in nvim's own layout.
 //!
-//! The words are read here rather than at parse time because the answer a
+//! The words are read here, after parse time, because the answer a
 //! surface needs is a whole [`SurfaceLayout`], which three keys and one
 //! older key between two tables decide together. A value view cannot read
 //! never refuses the document: one mistyped anchor would otherwise revert

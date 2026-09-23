@@ -240,8 +240,8 @@ fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) -> 
                 .map(|win| {
                     // a `None` here still has to clear `pending_open`, the
                     // same reason production's own async reply routes an
-                    // error to `NativeWindowOpenFailed` rather than
-                    // dropping it: this driver's own scripted sessions
+                    // error to `NativeWindowOpenFailed` and never drops
+                    // it: this driver's own scripted sessions
                     // reuse `SurfaceState`, and a call this arm dropped
                     // silently would leave a surface refusing every later
                     // open for the rest of the run
@@ -601,7 +601,7 @@ impl EngineSession {
         let mut engine = Engine::spawn(cfg)?;
         engine.handle.ui_attach(cols, rows, surfaces)?;
         // the damage this session paints from is polled off
-        // DamagePump::take_damage (leg (c) is harness-owned polling, not a
+        // DamagePump::take_damage (leg (c) is harness-owned polling with no
         // blocking recv on a sink); what arrives here is the engine's own
         // messages, which `pump_until_flush` folds. Dropping them left a
         // surface nvim had taken the window back from painting over the
@@ -736,8 +736,8 @@ impl EngineSession {
     }
 
     /// Whether the palette's tile paints at its windowed placement (full
-    /// width, anchored at an edge) rather than its overlay one (70% wide,
-    /// centred) this frame -- the same predicate `view_surface::render`
+    /// width, anchored at an edge), where its overlay one is 70% wide and
+    /// centred, this frame -- the same predicate `view_surface::render`
     /// reads to decide which of the two it paints.
     #[must_use]
     pub fn palette_windowed_active(&self) -> bool {
@@ -746,7 +746,7 @@ impl EngineSession {
 
     /// Marks this session's model as trusting AI, the way a real session's
     /// `.view/trust` marker does, so `Msg::FeatureInvoke { feature: "ai",
-    /// .. }` reaches the panel instead of the trust prompt.
+    /// .. }` reaches the panel past the trust prompt.
     pub fn trust_ai(&mut self) {
         self.model.ai_trusted = true;
     }
@@ -754,7 +754,7 @@ impl EngineSession {
     /// Marks this session's model as having the command palette on, the way
     /// `[native] palette = false` being absent from a user's `view.toml`
     /// does (`enabled()`'s own default is on unless disabled). This driver
-    /// builds its model directly rather than through that config layer, so
+    /// builds its model directly, with no config layer, so
     /// a caller after the shipped default has to say so explicitly.
     pub fn enable_palette(&mut self) {
         self.model.palette_enabled = true;

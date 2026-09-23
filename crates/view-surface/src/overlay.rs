@@ -259,10 +259,10 @@ pub(crate) fn interior_origin(width: u16, height: u16) -> (u16, u16) {
 /// framed it: the row past the top border, and the column past the left
 /// border with no pad -- `unframed_rows` grants none, unlike [`rows`]' one-
 /// cell pad at `width >= 6`, because the border is already drawn by a
-/// separate call there rather than baked into the laid rows.
+/// separate call there, outside the laid rows.
 ///
 /// The palette's own cursor placement and the band's painter both read this
-/// instead of each re-deriving the same two size thresholds, so a caret
+/// one derivation of the two size thresholds, so a caret
 /// placed against one border convention can never sit behind a border
 /// drawn under the other.
 #[must_use]
@@ -1052,7 +1052,7 @@ pub(crate) fn ai_caret(view: &AiPanelView, width: u16, height: u16) -> Option<(u
 }
 
 /// [`ai_caret`] for a windowed tile: the tile's own frame is drawn by the
-/// pane compositor, not [`rows`], so there is no border row or pad column
+/// pane compositor, outside [`rows`], so there is no border row or pad column
 /// of this function's own to skip past -- the caret lands at row/col 0 of
 /// whatever room `width`/`height` already are.
 pub(crate) fn ai_caret_unframed(view: &AiPanelView, width: u16, height: u16) -> Option<(u16, u16)> {

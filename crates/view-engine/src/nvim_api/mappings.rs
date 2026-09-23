@@ -4,7 +4,7 @@
 //!
 //! Beside [`super::buffers`] and [`super::window_status`] in shape (a
 //! constant Lua chunk plus the [`super::EngineHandle`] method that sends
-//! it), but with a method of its own rather than only data: the chunk's
+//! it), and with a method of its own beside the data: the chunk's
 //! four arguments are assembled from two different tables
 //! ([`default_maps`] and [`command_only_forms`]) and a caller-supplied spec
 //! list, which is [`mapping_args`]'s own job and belongs beside the chunk
@@ -24,10 +24,10 @@ use view_core::native::mappings::{
 /// [`FEED_KEYS_CHUNK`](super::FEED_KEYS_CHUNK): no caller data is
 /// interpolated into the Lua source.
 ///
-/// One chunk rather than a call per key, and it answers with the whole claim
-/// list: what view claimed is one fact a user is told once, so it is
-/// established in one atomic pass over the specs rather than reassembled
-/// from replies that interleave with startup traffic.
+/// One chunk for every key, and it answers with the whole claim list: what
+/// view claimed is one fact a user is told once, so it is established in one
+/// atomic pass over the specs. Replies to a call per key would interleave
+/// with startup traffic.
 ///
 /// It answers with one more reading beside the claims: whether the user's
 /// config maps `:` in normal or visual mode
@@ -72,7 +72,7 @@ use view_core::native::mappings::{
 /// this run is about to set is snapshotted again, right before it is set,
 /// into that same global for the *next* run to restore -- an empty dict
 /// means nothing preceded view there, and the restore deletes view's own
-/// mapping rather than setting an empty one back.
+/// mapping.
 ///
 /// What the user's config already mapped is snapshotted BEFORE the first key
 /// is set, since setting it is what destroys the answer. The snapshot spans
@@ -101,8 +101,8 @@ use view_core::native::mappings::{
 /// [`MappingSpec`]'s own normal-mode-only contract: the snapshot reads `'n'`
 /// maps, globally and per loaded buffer, and every key is set with
 /// `vim.keymap.set('n', ...)`. A spec carries no mode to vary that by, so
-/// every `'n'` literal in the chunk below is the scope, not a default some
-/// caller may override. The `:` reading beside them is the one thing that
+/// every `'n'` literal in the chunk below is the scope, and no caller
+/// overrides it. The `:` reading beside them is the one thing that
 /// spans `n`, `x` and `v`, because a `:` typed in visual mode opens a
 /// command line too.
 ///
@@ -226,19 +226,18 @@ impl super::EngineHandle {
     /// `Msg::MappingsClaimed` through the connection's pump. The caller is
     /// the runtime loop, which never awaits an RPC reply.
     ///
-    /// A request rather than a notification, unlike the other calls the loop
-    /// emits: the reply is the claim list, and an error reply is how a chunk
-    /// nvim refused surfaces at all instead of as keys that silently never
-    /// registered.
+    /// A request, unlike the other calls the loop emits, which are
+    /// notifications: the reply is the claim list, and an error reply is how
+    /// a chunk nvim refused is reported at all. Without it the keys would
+    /// silently never register.
     ///
-    /// The `:View` completion candidates come from
-    /// [`default_maps`] rather than from `specs`: the command is registered
-    /// whatever the user has turned off, so what it completes is every
-    /// entry point this build has, not the subset this session mapped a key
-    /// to.
+    /// The `:View` completion candidates come from [`default_maps`]: the
+    /// command is registered whatever the user has turned off, so what it
+    /// completes is every entry point this build has, including those this
+    /// session mapped no key to.
     ///
     /// A spec whose tokens [cannot be spelled](is_spellable) inside the
-    /// mapping the chunk generates is dropped here rather than sent: this
+    /// mapping the chunk generates is dropped here and never sent: this
     /// method takes any `&[MappingSpec]`, and the table's own vetting in
     /// `view-core` cannot speak for a spec a future caller assembles.
     /// Dropping is the safe direction -- view registers nothing, so the key
@@ -333,7 +332,7 @@ mod tests {
     /// A chord that stands in for a plain nvim keystroke (`<C-w>h` and
     /// its siblings) crosses with its own `keys` field, which is what
     /// `REGISTER_MAPPINGS_CHUNK`'s `if spec.keys then rhs = spec.keys`
-    /// branch reads instead of building the `rpcnotify` bridge call.
+    /// branch reads, and no `rpcnotify` bridge call is built for it.
     #[test]
     fn a_keys_row_sets_the_nvim_keys_with_no_remapping() {
         let specs = [spec("window", "focus_left", Rhs::Keys("<C-w>h"))];

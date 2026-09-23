@@ -4264,5 +4264,59 @@ new_tag_case
 printf 'fn resize(width: u16) -> u16 {\n    width\n}\n' > "$CASE/lib.rs"
 expect_tag 0 'a file with no comment at all'
 
+# The contrast-frame ratchet, graded through --comment-frames against a
+# scratch tree holding one crate and a ceiling file.
+new_frames_case() {
+  n=$((n + 1))
+  CASE="$WORK/framescase$n"
+  mkdir -p "$CASE/crates/demo/src" "$CASE/scripts"
+}
+
+expect_frames() {
+  want_rc="$1"
+  want_line="$2"
+  desc="$3"
+  out=$(bash "$CHECKER" --comment-frames "$CASE" 2>&1)
+  rc=$?
+  named=1
+  case "$out" in *"$want_line"*) ;; *) named=0 ;; esac
+  if [ "$rc" = "$want_rc" ] && [ "$named" = 1 ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=%s naming %s\n  got  rc=%s\n%s\n' \
+    "$n" "$desc" "$want_rc" "${want_line:-nothing}" "$rc" "$out"
+}
+
+new_frames_case
+printf '// reads the row rather than the column\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 1\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 0 '' 'a crate holding exactly its ceiling'
+
+new_frames_case
+printf '// reads the row rather than the column\n/// the tile, not the float\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 1\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 1 'lib.rs:2:/// the tile, not the float' 'a crate one frame over its ceiling, naming the line'
+
+new_frames_case
+printf '// reads the row\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 1\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 1 'Lower its row' 'a crate under its ceiling until the row comes down'
+
+new_frames_case
+printf 'fn a() -> &'"'"'static str {\n    "rather than, not this"\n}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 0 '' 'a frame in a string with no comment is not counted'
+
+new_frames_case
+printf '// it answers not the row but the column\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+: > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 1 'lib.rs:1:' 'a crate the ceiling omits is held at zero'
+
+new_frames_case
+printf 'fn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+expect_frames 1 'is missing' 'a missing ceiling file'
+
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

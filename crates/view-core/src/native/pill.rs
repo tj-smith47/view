@@ -4,7 +4,7 @@
 //! The row is one picture with two readers. The painter writes the names
 //! into cells and the mouse router answers which name a column names, and
 //! both spend [`PillView::row_slots`] so a click lands on the name under the
-//! pointer rather than on the one a second layout put there.
+//! pointer. A second layout could put a different name there.
 
 use super::ai_panel::AiPanelState;
 use super::ai_registry::SessionState;
@@ -98,7 +98,7 @@ pub struct PillView {
     /// the row out on two different widths. A painter handed a narrower
     /// area writes only the cells inside it and never re-flows, so the
     /// one frame between a resize reaching the model and reaching the
-    /// backend draws a clipped row rather than a differently placed one.
+    /// backend draws a clipped row, with every name where it was.
     pub width: u16,
 }
 
@@ -123,7 +123,7 @@ pub struct PillSlot {
 }
 
 /// The blank either side of a name, so two neighbouring names never touch
-/// and the selected one's own colour reads as a pill rather than as a word.
+/// and the selected one's own colour reads as a pill around the word.
 const PAD: u16 = 1;
 
 /// What a buffer with no file behind it is called, spelled the way nvim
@@ -162,7 +162,7 @@ impl PillView {
     /// the reason a frame edge drops a whole segment -- half a file name
     /// reads as a different file.
     ///
-    /// More names than fit are a window rather than a prefix, and the
+    /// More names than fit are shown as a window onto the list, and the
     /// window always holds the current name: a row that dropped it would
     /// leave the one name a person is looking for off the screen, and the
     /// hit test unable to reach it.
@@ -342,8 +342,8 @@ pub const DEFAULT_SHOWTABLINE: u8 = 1;
 
 /// Whether the pill takes the top row of this session's terminal.
 ///
-/// Read off the attach rather than off the arrival of a `tabline_update`,
-/// because the row is reserved from the frame the session starts drawing:
+/// Read off the attach, ahead of any `tabline_update`, because the row is
+/// reserved from the frame the session starts drawing:
 /// waiting for nvim's first tabline event would paint one frame a row
 /// taller and then shift everything down.
 ///

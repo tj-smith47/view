@@ -126,8 +126,7 @@ pub enum LayerKind {
     /// flush against 0 with nowhere further left a `u16` can express, so
     /// there `x_offset` instead tells the painter how many leading cells of
     /// each line's own text to leave behind -- the same slide read as a
-    /// shrinking window into text moving out from under it, rather than a
-    /// box shrinking in place.
+    /// shrinking window into text moving out from under it.
     ///
     /// Each row is a single [`view_core::native::views::StyleRole::Plain`]
     /// span (a toast has no per-segment structure to preserve), kept as a
@@ -147,9 +146,9 @@ pub enum LayerKind {
         paused: bool,
     },
     /// The top row: the tabpages or buffers across the middle, the host at
-    /// the left edge and the agent's state at the right. A view rather than
-    /// the model it was built from, so the row can be dumped and compared
-    /// without a session behind it.
+    /// the left edge and the agent's state at the right. A view built from
+    /// the model, so the row can be dumped and compared without a session
+    /// behind it.
     ///
     /// The one kind either look puts there. A second painter for
     /// `panes = "nvim"` drew the same names left-aligned from column 0,
@@ -482,13 +481,13 @@ pub fn render(model: &Model) -> Surface {
     // is the same answer: this layer's placement must never disagree with
     // the reservation `grid_target()` makes, or a row gets reserved with
     // nothing painted into it or the tab line paints over buffer content.
-    // Read off the model rather than off the arrival of a tabline event, so
-    // the host and the agent word stand on row 0 from the first frame
+    // Read off the model, so the host and the agent word stand on row 0
+    // from the first frame, before any tabline event arrives
     if view_core::native::pill::shows(model) {
         // the whole terminal width under either look, the ring included:
-        // the pill stands above the outer frame rather than inside it,
-        // which is what leaves the frame's own top edge unbroken, and it is
-        // the width the mouse router hit-tests the row at
+        // the pill stands above the outer frame, which is what leaves the
+        // frame's own top edge unbroken, and it is the width the mouse
+        // router hit-tests the row at
         layers.push(Layer::new(
             Rect::new(0, 0, model.term_width, 1),
             LayerKind::Pill(view_core::native::pill::PillView::from_model(model)),
@@ -561,8 +560,8 @@ pub fn render(model: &Model) -> Surface {
             // nothing to add: the Prompt overlay already covers this
         } else if model.palette_enabled {
             // A windowed palette paints through this same arm, at
-            // `palette_rect`'s full-width band instead of its centred box
-            // (`Model::palette_rect`'s own doc) -- one `PaletteView` and
+            // `palette_rect`'s full-width band (`Model::palette_rect`'s
+            // own doc) -- one `PaletteView` and
             // one push, whichever placement is live, so the tile and the float can
             // never carry two different pictures of the same command line
             // only a cmdline-sourced popupmenu (`is_cmdline_sourced`) ever
@@ -677,8 +676,8 @@ fn toast_box(lines: &[Vec<Span>], grid_w: u16) -> (u16, u16) {
 /// floor for a layout `[ui.surfaces.notifications] anchor` writes a
 /// non-corner value into (bottom/top/left/right, valid for a windowed
 /// placement but not a floating stack's corner), so a slot with no corner
-/// of its own still has to grow and exit somewhere rather than misreading
-/// `is_top_corner`'s "only meaningful for a corner" floor as a real answer.
+/// of its own still has to grow and exit somewhere, and `is_top_corner`'s
+/// "only meaningful for a corner" floor is no answer for it.
 fn notifications_corner(model: &Model) -> Anchor {
     let anchor = model.surfaces.layout(NativeSurface::Notifications).anchor;
     if anchor.is_corner() {
@@ -700,7 +699,7 @@ fn notifications_corner(model: &Model) -> Anchor {
 /// not move at all. `y_shift` runs from the departing box's full height
 /// down to nothing over the motion, which is the slide toward the corner,
 /// and the same eased fraction drives that box's own `x_offset` -- one
-/// motion, on one clock, not two that share a duration.
+/// motion, on one clock.
 ///
 /// The departing box is pushed last, so it composites over the stack
 /// arriving underneath it instead of being cleared by it.
@@ -792,8 +791,8 @@ fn toast_layers(model: &Model, bounds: (u16, u16), origin: (u16, u16)) -> Vec<La
             model.caps,
         );
         // a box that has travelled its own width is entirely past the edge
-        // it is leaving through; it leaves the stack rather than sitting in
-        // it as an empty rect the paint shadow still has to pair against
+        // it is leaving through; it leaves the stack, so the paint shadow
+        // has no empty rect to pair against
         if layer.rect.width > 0 {
             layers.push(layer);
         }
@@ -822,8 +821,8 @@ struct Placement {
 /// One toast box as a [`Layer`]: anchored to the grid edge its own corner
 /// names, shifted `x_offset` cells further toward that corner's side while
 /// it is on its way out. A left corner is already flush against column 0,
-/// so its exit shrinks the visible width from the right instead of moving
-/// the column past a bound `u16` cannot express as negative -- the same
+/// so its exit shrinks the visible width from the right, since a column
+/// past that bound is a negative `u16` cannot express -- the same
 /// clip a right corner gets for free from [`overlay_layer`]'s own bound,
 /// worked out by hand here so both directions read one rect.
 fn toast_layer(
@@ -872,11 +871,12 @@ fn popupmenu_width(items: &[PmItem]) -> u16 {
 }
 
 /// `Model::palette_rect` as a [`Rect`]: that call already answers in
-/// terminal-absolute cells (the chrome rows are baked in there, not added
-/// here a second time). [`render`] (which paints the box), [`palette_cursor`]
-/// (which places the caret inside it) and mouse hit-testing (`view-core`'s
-/// `position_owner`) all resolve through `Model::palette_rect`, so none of
-/// the three can disagree about where the box actually is.
+/// terminal-absolute cells (the chrome rows are baked in there, so nothing
+/// here adds them a second time). [`render`] (which paints the box),
+/// [`palette_cursor`] (which places the caret inside it) and mouse
+/// hit-testing (`view-core`'s `position_owner`) all resolve through
+/// `Model::palette_rect`, so none of the three can disagree about where the
+/// box actually is.
 fn palette_rect(model: &Model) -> Rect {
     let rect = model.palette_rect();
     Rect::new(rect.row, rect.col, rect.width, rect.height)
@@ -1165,7 +1165,7 @@ fn painted_cmdline(model: &Model) -> Option<Cow<'_, CmdlineState>> {
 /// engine: every branch below reads state this frame already carries
 /// (`layers`, the grid registry, `model`'s own fields), issuing no RPC of
 /// its own, and the panel/palette rect lookups below scan the frame's own
-/// small, fixed-size layer list rather than the buffer's contents.
+/// small, fixed-size layer list.
 fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<CursorSpec> {
     let (width, height) = model.engine.grid().size();
     if width == 0 || height == 0 {
@@ -1186,7 +1186,7 @@ fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<Cu
     // coordinate space its own source rect came from -- a shared tail add
     // here double-counts for the palette branch, whose rect (via
     // `palette_rect`) is chrome-offset-inclusive already and sits in the
-    // terminal's own space rather than the grid's.
+    // terminal's own space.
     let painted = painted_cmdline(model);
     let (row, col) = if let Some(cmdline) = painted.as_deref() {
         if model.palette_enabled {
@@ -1304,7 +1304,7 @@ fn palette_cursor(model: &Model, cmdline: &CmdlineState) -> (u16, u16) {
 }
 
 /// The caret for a surface that holds the keyboard through its own window
-/// tile (`Focus::Pane`) rather than a floating overlay.
+/// tile (`Focus::Pane`).
 ///
 /// [`overlay_cursor`] answers for a float; this is its windowed sibling and
 /// reads the same [`Model::focus`] `route_key` dispatches keys by, so the
@@ -1314,9 +1314,8 @@ fn palette_cursor(model: &Model, cmdline: &CmdlineState) -> (u16, u16) {
 /// same reason [`overlay_cursor`] answers `None` for their overlay forms.
 ///
 /// Reads the pane's own painted rect off the grid registry
-/// (`GridRegistry::native_pane_rect`) instead of the frame's `layers`: a
-/// windowed pane is placed by nvim's own window layout, not by
-/// [`Model::overlay_rect`], so there is no layer rect to reuse the way
+/// (`GridRegistry::native_pane_rect`): a windowed pane is placed by nvim's
+/// own window layout, so the frame's `layers` hold no rect to reuse the way
 /// [`ai_cursor`] does for the floating panel.
 fn pane_cursor(model: &Model, origin: (u16, u16)) -> Option<CursorSpec> {
     if model.focus() != Focus::Pane(NativeSurface::Agent) {
@@ -1457,8 +1456,7 @@ fn query_cursor(rect: OverlayRect, query: &str) -> (u16, u16) {
 /// `find_map` over `layers` costs a scan of this frame's own overlay stack
 /// (at most a handful of entries, never the buffer), replacing what used
 /// to be a plain field read; the trade is one bounded scan per paint for a
-/// caret that lands inside the panel's own tile instead of wherever the
-/// engine's grid cursor last happened to sit.
+/// caret that lands inside the panel's own tile.
 fn ai_cursor(model: &Model, layers: &[Layer]) -> Option<CursorSpec> {
     let (rect, view) = layers.iter().find_map(|layer| match &layer.kind {
         LayerKind::Ai(view) => Some((layer.rect, view)),
@@ -2094,7 +2092,7 @@ mod tests {
 
     #[test]
     fn the_top_row_spans_the_terminal_whatever_the_grid_holds() {
-        // the row stands above the engine's grid rather than inside it, so
+        // the row stands above the engine's grid, so
         // a grid narrower than the terminal leaves the names centred on the
         // terminal, which is the width the mouse router hit-tests at
         let mut model = model_with_grid(3, 4);
@@ -2208,8 +2206,8 @@ mod tests {
     /// that place it each sit exactly `grid_offset()` in from where nvim
     /// mode puts them.
     ///
-    /// Every grid-space layer the scene opens is read off the surface
-    /// rather than listed here, so a layer kind added later is walked by
+    /// Every grid-space layer the scene opens is read off the surface, so a
+    /// layer kind added later is walked by
     /// this test without being added to it.
     ///
     /// Disconfirm: add only `chrome_rows()` to any of them and that one
@@ -2245,7 +2243,7 @@ mod tests {
 
         /// An open command line with its own completion menu (`grid < 0`,
         /// the cmdline source) and a notice standing in the toast stack.
-        /// The caret is the plain-cmdline branch's here, not the buffer's.
+        /// The caret is the plain-cmdline branch's here.
         fn cmdline_scene() -> Model {
             let mut model = model_with_grid(40, 12);
             model.term_width = 44;
@@ -3876,7 +3874,7 @@ mod tests {
 
     /// An enabled windowed palette's cmdline state paints through the
     /// same `Palette` layer the centred placement pushes, at
-    /// `palette_rect`'s full-width band instead of its centred box, so
+    /// `palette_rect`'s full-width band, so
     /// `render()` must add that layer and never the bare bottom-row
     /// `Cmdline` echo beside it -- the two would be a second copy of the
     /// same typed text.
@@ -4252,7 +4250,7 @@ mod tests {
             .expect("palette layer present");
 
         // anchor = "top", size = 20: height = 24*20/100 = 4, row = 0
-        // (flush against the top edge rather than centered).
+        // (flush against the top edge).
         assert_eq!(
             palette_layer.rect.row, 0,
             "anchor = \"top\" must move the overlay palette's own box, not \

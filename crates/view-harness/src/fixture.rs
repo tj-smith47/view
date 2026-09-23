@@ -869,7 +869,7 @@ mod tests {
 
     /// Every bench and parity leg runs under nvim's own window picture, and
     /// the generated fixture gets it by copying the template's `view.toml`
-    /// rather than writing one of its own, so the line has to be in every
+    /// and writes none of its own, so the line has to be in every
     /// tracked template the generator might be pointed at.
     #[test]
     fn the_generated_user_fixture_carries_the_look_mode() {
@@ -1044,8 +1044,8 @@ mod tests {
 
     /// Asserts one racing generation came back whole, or said the cache is
     /// empty, and hands back the tree when there was one. Both outcomes
-    /// because the cache is populated by a compat or bench run, not by the
-    /// test suite.
+    /// because the cache is populated by a compat or bench run, and the test
+    /// suite never fills it.
     fn whole_or_empty_cache(result: Result<PathBuf, FixtureError>) -> Option<PathBuf> {
         match result {
             Ok(dir) => {

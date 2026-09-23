@@ -863,8 +863,8 @@ mod tests {
     }
 
     /// The bar's in-place refresh reads the width the frame around it was
-    /// built at, not the engine's own: while the startup hold is on there
-    /// is no grid to measure and the bar spans the terminal instead, so a
+    /// built at, whatever the engine's own is: while the startup hold is on
+    /// there is no grid to measure and the bar spans the terminal, so a
     /// refresh at the engine's width would hand back a frame that disagrees
     /// with a rebuild of the same model (the debug equivalence check inside
     /// `render` is what says so).

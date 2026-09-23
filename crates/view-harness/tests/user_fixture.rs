@@ -181,11 +181,10 @@ fn the_stall_knob_reaches_a_real_session() {
         receipt.display()
     );
 
-    // an unstalled generation writes a tree of its own rather than taking
-    // the stall back out of this one, which is the file a proof run beside
-    // it is measuring. Asked for outright rather than through
-    // `generate_user_fixture`, so the knob's own value cannot decide which
-    // of the two this is.
+    // an unstalled generation writes a tree of its own and leaves the stall
+    // in this one, which is the file a proof run beside it is measuring.
+    // Asked for outright, past `generate_user_fixture`, so the knob's own
+    // value cannot decide which of the two this is.
     let plain = generate_user_fixture_with_stall(0).unwrap();
     assert_ne!(plain, fixture);
     assert!(!plain.join("nvim").join("slow-init").exists());

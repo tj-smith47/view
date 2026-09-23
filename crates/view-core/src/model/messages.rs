@@ -288,7 +288,7 @@ pub struct Messages {
     /// [`Self::set_now`].
     now: SystemTime,
     /// Seconds east of UTC, applied by [`format_at`] when a stamp is
-    /// rendered rather than when an entry is stamped: a timestamp already
+    /// rendered, and never when an entry is stamped: a timestamp already
     /// on screen moves with a later DST flip the same way the clock in the
     /// corner of a real desktop does. See [`Self::set_utc_offset`].
     utc_offset_secs: i64,
@@ -324,7 +324,7 @@ impl Default for Messages {
 /// the civil-date conversion here is Howard Hinnant's `civil_from_days`,
 /// good over the whole range a `SystemTime` can represent on every
 /// platform view runs on. A clock before the epoch (an unset hardware
-/// clock) renders the epoch itself rather than panicking.
+/// clock) renders the epoch itself, with no panic.
 #[must_use]
 pub fn format_at(at: SystemTime, offset_secs: i64) -> String {
     let secs = at
@@ -668,10 +668,10 @@ impl Messages {
     ///
     /// While [`Self::paused`] is on, [`Self::arm_top_slot`] hands out no
     /// dismissal timer and `Msg::ToastExpired` obeys none -- the same
-    /// timer, held, rather than a second mechanism (spec 7.1, motion rule
+    /// timer, held, with no second mechanism (spec 7.1, motion rule
     /// 5). The edge that takes `paused()` false forgets which slot was
     /// armed, which is what makes the next [`Self::arm_top_slot`] give the
-    /// top slot a whole timeout rather than the remainder of one: a notice
+    /// top slot a whole timeout, from the start: a notice
     /// paused mid-read has not been read yet.
     ///
     /// Only the timing is frozen. A motion already in flight plays to its
@@ -687,8 +687,8 @@ impl Messages {
 
     /// Sets whether the windowed notification stream's own pane holds the
     /// cursor, idempotent when the state already matches. Driven every fold
-    /// from a focus comparison (`update::mod::update`) rather than a
-    /// keypress, so it is kept apart from the manual pause key's own
+    /// from a focus comparison (`update::mod::update`) with no keypress
+    /// behind it, so it is kept apart from the manual pause key's own
     /// `paused` field: entering the pane always holds the stack open and
     /// leaving it always drops that hold, but neither may stomp a standing
     /// manual pause the user set independently of where the cursor is.
@@ -704,8 +704,8 @@ impl Messages {
 
     /// The armed-slot reset [`Self::toggle_pause`] and [`Self::set_pane_held`]
     /// both owe [`Self::paused`]'s own falling edge: forgotten only when the
-    /// OR of the two reasons actually drops, not on an edge of either one
-    /// alone that the other is still holding up.
+    /// OR of the two reasons actually drops. An edge of either one alone
+    /// that the other is still holding up forgets nothing.
     fn after_pause_change(&mut self, was_paused: bool) {
         if was_paused && !self.paused() {
             self.armed_slot = None;
@@ -895,8 +895,8 @@ impl Messages {
     /// | `pane_held` | untouched here, but not stale: `update()`'s own focus comparison sets it fresh on the very next fold regardless of what a restart left standing |
     /// | `handed_back` | kept: it is the session's `[native]` answer, and the replacement attaches with the same `ext_*` set |
     /// | `foreign_notifier` | cleared: it named a `vim.notify` inside a process that is gone, and a notice raised in the restart window would be spoken to it |
-    /// | `now` (`Self::set_now`) | kept: it is the loop thread's wall clock, not a fact about the dead connection, and the very next fold stamps it again regardless |
-    /// | `utc_offset_secs` (`Self::set_utc_offset`) | kept: it is the host's own clock offset, not a fact about the dead connection, and the very next fold sets it again regardless |
+    /// | `now` (`Self::set_now`) | kept: it is the loop thread's wall clock and no fact about the dead connection, and the very next fold stamps it again regardless |
+    /// | `utc_offset_secs` (`Self::set_utc_offset`) | kept: it is the host's own clock offset and no fact about the dead connection, and the very next fold sets it again regardless |
     pub(crate) fn forget_engine(&mut self) {
         // the restart marks the model dirty on either outcome of the attach
         // that follows, and `update()` arms the top slot on the next fold

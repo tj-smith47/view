@@ -4,12 +4,11 @@
 //! and every message stamp rendered UTC with nothing on screen or in the
 //! docs saying so.
 //!
-//! Read fresh on every fold rather than cached once: a session that
-//! straddles a DST change must stamp the new offset from the fold after
-//! the flip, not after a restart. `localtime_r` and
-//! `GetTimeZoneInformation` already read the zone the OS keeps parsed, so
-//! this costs the one syscall `dispatch` already pays each fold for
-//! `SystemTime::now`, not a zone parse.
+//! Read fresh on every fold and never cached: a session that straddles a
+//! DST change must stamp the new offset from the fold after the flip, with
+//! no restart. `localtime_r` and `GetTimeZoneInformation` already read the
+//! zone the OS keeps parsed, so this costs the one syscall `dispatch`
+//! already pays each fold for `SystemTime::now`, with no zone parse.
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -32,7 +31,7 @@ pub(crate) fn utc_offset_secs() -> i64 {
 
 /// Stands the next [`utc_offset_secs`] call in for the host's own reading,
 /// or clears the stand-in on `None`. Test-only: what a pin uses to prove
-/// `dispatch` re-reads the offset on every fold rather than caching it.
+/// `dispatch` re-reads the offset on every fold.
 #[cfg(test)]
 pub(crate) fn set_test_offset_secs(secs: Option<i64>) {
     TEST_OFFSET_SECS.with(|cell| cell.set(secs));
@@ -40,7 +39,7 @@ pub(crate) fn set_test_offset_secs(secs: Option<i64>) {
 
 /// Arms [`set_test_offset_secs`] for the guard's own scope and clears it on
 /// drop, so a test thread the harness reuses afterward reads the host's
-/// own offset again rather than a stale pin -- including when the test
+/// own offset again, with no stale pin left -- including when the test
 /// panics, since `Drop` still runs on unwind.
 #[cfg(test)]
 pub(crate) struct TestOffsetGuard;

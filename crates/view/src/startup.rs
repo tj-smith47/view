@@ -2167,8 +2167,8 @@ mod tests {
     }
 
     /// A single-grid session whose takeover reply never arrives sends the
-    /// prompt no sign at all, so the ceiling on the hold, not the bound
-    /// armed from a reply, is what releases the Enter.
+    /// prompt no sign at all, so the ceiling on the hold is what releases
+    /// the Enter. No bound is ever armed from a reply.
     #[cfg(unix)]
     #[test]
     fn a_prompt_raised_during_launch_on_a_single_grid_ends_at_the_ceiling() {

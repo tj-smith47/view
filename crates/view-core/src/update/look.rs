@@ -118,7 +118,7 @@ fn follow_the_look_with_the_tabline(model: &mut Model) -> Vec<Effect> {
 /// drawing a status row the frame no longer paints over, or drops the one
 /// it does.
 ///
-/// Read off the channel table rather than named here, so the option a look
+/// Read off the channel table, with no name written here, so the option a look
 /// decides is stated once, and gated on the same `view_draws` predicate the
 /// takeover's own session-held walk uses -- a surface the user handed back
 /// is one view does not set options for, apart from the hold the tiles look
@@ -196,7 +196,7 @@ fn report(model: &Model) -> String {
     };
     // the row is the half of the flip a person sees before anything else
     // moves, and under an explicit `[native] tabline` it does not move at
-    // all, so the line says where it went rather than leaving them to look
+    // all, so the line says where it went
     let row = if crate::native::pill::shows(model) {
         "the top row is view's"
     } else {

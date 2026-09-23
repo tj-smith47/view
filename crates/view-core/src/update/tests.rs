@@ -12829,8 +12829,8 @@ fn a_panes_flip_leaves_a_spelled_tabline_where_the_user_put_it() {
 /// runs.
 ///
 /// Disconfirm: dropping the `forget_window_status` call from either arm
-/// leaves 1003's record in the map, and emptying the map instead of
-/// removing one key takes 1002's with it.
+/// leaves 1003's record in the map, and emptying the whole map takes
+/// 1002's with it.
 #[test]
 fn a_closed_windows_status_is_dropped() {
     for ev in [
@@ -12929,9 +12929,8 @@ fn pill_model(shows: crate::native::pill::TablineShows) -> Model {
     m
 }
 
-/// The set nvim sends replaces the set view held, rather than merging into
-/// it: a buffer wiped between two reports is gone from the list and must be
-/// gone from the row.
+/// The set nvim sends replaces the set view held whole: a buffer wiped
+/// between two reports is gone from the list and must be gone from the row.
 #[test]
 fn a_buffer_trigger_replaces_the_listed_buffer_set() {
     let mut m = model();
@@ -13136,7 +13135,7 @@ const TREE_WIN: crate::events::WinHandle = crate::events::WinHandle(4242);
 /// The grid nvim draws the tree's scratch buffer into.
 const TREE_GRID: u64 = 7;
 
-/// A model whose tree opens as a window rather than as a float.
+/// A model whose tree opens as a window of its own.
 fn windowed_tree_model() -> Model {
     let mut m = model();
     m.surfaces.set_layout(
@@ -13261,11 +13260,11 @@ fn focused_windowed_tree() -> Model {
 }
 
 /// A re-enter of an already-open windowed tree -- the open chunk's
-/// `is_ours(live)` branch, which hands back the same window instead of
-/// opening a new one -- never gets a fresh `win_pos` from nvim, since the
-/// window's position has not moved. `native_window_opened` has to notice
-/// that and clear `pending_open` itself, or the flag sticks set for the
-/// rest of the session with nothing left to clear it.
+/// `is_ours(live)` branch, which hands back the same window -- never gets
+/// a fresh `win_pos` from nvim, since the window's position has not moved.
+/// `native_window_opened` has to notice that and clear `pending_open`
+/// itself, or the flag sticks set for the rest of the session with nothing
+/// left to clear it.
 #[test]
 fn a_reenter_of_an_already_placed_tree_window_clears_pending_with_no_new_win_pos() {
     use crate::native::geometry::NativeSurface;
@@ -13732,7 +13731,7 @@ fn an_nvim_side_close_of_the_tree_window_releases_it() {
 }
 
 /// The next `<leader>e` after such a close opens a fresh tree, with the
-/// scan its first frame needs, and claims one window rather than a second.
+/// scan its first frame needs, and claims exactly one window.
 #[test]
 fn reopening_after_an_nvim_close_rescans_and_claims_once() {
     let mut m = focused_windowed_tree();
@@ -13807,7 +13806,7 @@ fn reopening_after_an_nvim_close_rescans_and_claims_once() {
 /// A buffer nvim put in the window the tree was drawn into takes the
 /// window with it. The pane goes back to an ordinary window, the claim
 /// goes, and the tree's state goes, so the person sees the file they
-/// opened rather than the tree painted over it.
+/// opened.
 #[test]
 fn a_foreign_buffer_in_the_trees_window_releases_the_pane() {
     let mut m = focused_windowed_tree();
@@ -13899,8 +13898,7 @@ const AGENT_WIN: crate::events::WinHandle = crate::events::WinHandle(5353);
 /// The grid nvim draws the agent panel's scratch buffer into.
 const AGENT_GRID: u64 = 8;
 
-/// A trusted model whose agent panel opens as a window rather than as a
-/// float.
+/// A trusted model whose agent panel opens as a window of its own.
 fn windowed_agent_model() -> Model {
     let mut m = model();
     m.ai_trusted = true;
@@ -14305,9 +14303,9 @@ fn leader_fm_from_inside_the_windowed_stream_closes_it() {
 /// `<leader>fm` opens, so `HISTORY_KEYS`' own dispatch answers every one of
 /// them inside the windowed pane -- proving the routing
 /// (`Focus::Pane(Notifications)` -> `notifications_pane_key` ->
-/// `message_history_key`) rather than the dispatch table itself, which
-/// `every_documented_history_key_answers_a_real_keystroke` already covers
-/// for the floating placement.
+/// `message_history_key`). The dispatch table itself is
+/// `every_documented_history_key_answers_a_real_keystroke`'s, for the
+/// floating placement.
 #[test]
 fn every_history_key_works_inside_the_windowed_stream() {
     for (key, what) in crate::update::surfaces::HISTORY_KEYS {
@@ -14360,8 +14358,7 @@ fn every_history_key_works_inside_the_windowed_stream() {
 
 /// The transient toast timer, which is what an unread notice's own
 /// dismissal clock is, freezes the instant the reader's cursor lands in the
-/// stream -- the same effect the manual pause key has, driven by focus
-/// instead of a keypress.
+/// stream -- the same effect the manual pause key has, driven by focus.
 #[test]
 fn focus_in_the_stream_pauses_the_transient_timer() {
     let mut m = windowed_notifications_model();
@@ -14453,8 +14450,8 @@ fn leaving_the_stream_rearms_it() {
 /// The focus-driven hold must never stomp a manual pause the user set for a
 /// reason that has nothing to do with where the cursor sits -- the fold
 /// that recomputes the hold runs on every message, including the one right
-/// after the pause key itself, and an unconditional assignment (rather than
-/// the OR the two reasons are kept under) would silently undo the key on
+/// after the pause key itself, and an unconditional assignment in place of
+/// the OR the two reasons are kept under would silently undo the key on
 /// the very next unrelated keystroke.
 #[test]
 fn a_manual_pause_survives_an_unrelated_fold_outside_the_stream() {
@@ -14528,8 +14525,7 @@ fn cmdline_show() -> Msg {
 /// A press inside the windowed palette's own band never reaches the engine
 /// grid it paints over: the band carries no `OverlayId` (it paints straight
 /// off `engine.cmdline`, never through the overlay stack), so its mouse
-/// ownership is a direct rect test in `update::mouse::position_owner`
-/// rather than a hit against `overlay_at`.
+/// ownership is a direct rect test in `update::mouse::position_owner`.
 #[test]
 fn a_press_inside_the_windowed_palette_band_reaches_no_engine_grid() {
     let mut m = windowed_palette_model();
@@ -14791,8 +14787,7 @@ fn resizing_a_windowed_sidebar_sets_the_nvim_window_width() {
 
 /// The percent `[ui.surfaces.agent]` would read back after a restart moves
 /// with the resize key, so a panel closed and reopened -- or a session
-/// restarted -- comes back at the width the user actually left it, not the
-/// one the config on disk still names.
+/// restarted -- comes back at the width the user actually left it.
 #[test]
 fn resizing_a_windowed_sidebar_moves_the_surfaces_size_percent() {
     let mut m = focused_windowed_agent();
@@ -14841,9 +14836,8 @@ fn resizing_an_overlay_sidebar_still_steps_tree_width_pct() {
 /// The gaps toggle answers wherever the keyboard is aimed -- a plain engine
 /// focus, a focused windowed tree, a focused windowed agent panel -- because
 /// its `("ui", "gaps")` invoke is dispatched ahead of every sidebar's own
-/// key table rather than through it. A key that reached the engine as
-/// ordinary text instead of the gaps toggle would leave `m.look.gaps`
-/// exactly where it started.
+/// key table. A key that reached the engine as ordinary text would leave
+/// `m.look.gaps` exactly where it started.
 #[test]
 fn the_two_new_key_actions_resolve_through_the_same_chain() {
     for mut m in [model(), focused_windowed_tree(), focused_windowed_agent()] {
@@ -14906,8 +14900,7 @@ fn leader_leader_invoke_opens_the_command_line() {
 /// falls through to [`feature_invoke_notice`]'s "no handler" text instead
 /// of doing anything, which is the same as a key nobody ever finishes
 /// wiring up. Walked so a row added to any of the three tables without a
-/// matching arm here fails this test by the row's own name rather than
-/// shipping a key that prints an apology.
+/// matching arm here fails this test by the row's own name.
 #[test]
 fn every_registered_feature_invoke_has_a_dispatch_handler() {
     use crate::native::mappings::{command_only_forms, default_maps, review_keys};
@@ -14960,7 +14953,7 @@ fn an_open_tree_keeps_its_cursor_row_across_a_cycle() {
     // the fixture starts the tree windowed with nothing configured, so the
     // ring's three stops actually move it (windowed -> overlay -> overlay,
     // the unconfigured floor) -- named here so a ring stuck on one
-    // placement fails this test instead of passing it silently.
+    // placement fails this test.
     let expected_placement = [
         SurfacePlacement::Windowed,
         SurfacePlacement::Overlay,
@@ -15028,7 +15021,7 @@ fn an_open_panel_keeps_its_transcript_across_a_cycle() {
 }
 
 /// A cycle step taken while the tree's open is still pending retires that
-/// open rather than leaving it to land later: the generation moves, so the
+/// open: the generation moves, so the
 /// stale reply below reads as one, and `pending_open` clears since nothing
 /// here is waiting on the retired call's outcome any more.
 #[test]
@@ -15086,7 +15079,7 @@ fn a_cycle_step_retires_a_pending_open_instead_of_leaving_it_to_land() {
 }
 
 /// [`a_cycle_step_retires_a_pending_open_instead_of_leaving_it_to_land`],
-/// through `:View ai close` rather than a ring step: the one close a
+/// through `:View ai close`: the one close a
 /// windowed surface answers with no live focus to gate it on, since
 /// `close_windowed_agent` is reachable the moment the panel is windowed at
 /// all, pending open included.
@@ -15135,8 +15128,8 @@ fn closing_a_pending_windowed_agent_retires_its_open_instead_of_leaving_it_to_la
     );
 }
 
-/// A gaps flip changes what every window owes, not just the ones whose slot
-/// moved: [`GridRegistry::pending_inner_request`] keys its guard on
+/// A gaps flip changes what every window owes, including those whose slot
+/// stayed: [`GridRegistry::pending_inner_request`] keys its guard on
 /// `(slot, look, margin_top)`, so the look half of that key alone is enough
 /// to force a resend. A flip to gapless sends `(0, 0)` -- nvim reads a
 /// non-positive request as none at all and hands the window its whole slot
@@ -15234,8 +15227,8 @@ fn a_resize_key_in_the_windowed_stream_resizes_its_width_on_a_side_anchor() {
 
 /// The same key, with the stream pinned to the bottom edge instead: the
 /// stepped share now has to reach nvim as a height, since
-/// [`resize_windowed_stream`] follows `WinSplit::for_anchor(anchor).is_vertical()`
-/// rather than always writing a width the way the sidebars do.
+/// [`resize_windowed_stream`] follows
+/// `WinSplit::for_anchor(anchor).is_vertical()`.
 #[test]
 fn a_resize_key_in_the_windowed_ticker_resizes_its_height_on_a_top_or_bottom_anchor() {
     let mut m = focused_windowed_notifications();
@@ -15308,8 +15301,8 @@ fn resizing_a_windowed_sidebar_carries_its_new_width_to_a_sibling_stacked_on_the
 /// The sibling sync above carries a resized sidebar's new share into the
 /// other windowed surface's `layout.size`; it has to carry the same number
 /// into that surface's own loose field too (`tree_width_pct` or
-/// `ai_panel_width_pct`), since that field, not the layout, is what its own
-/// resize key steps from and what an overlay open of it reads.
+/// `ai_panel_width_pct`), since that field is what its own resize key
+/// steps from and what an overlay open of it reads.
 #[test]
 fn resizing_a_windowed_sidebar_carries_its_new_width_into_a_siblings_own_loose_field() {
     let mut m = focused_windowed_tree();
@@ -15441,8 +15434,8 @@ fn a_second_surface_opening_onto_a_shared_edge_carries_its_size_into_the_first_o
     );
 }
 
-/// `<C-w>>`/`<C-w><` -- nvim's own window-resize chord, not the single
-/// `<S-Right>`/`<S-Left>` the tests above press -- resolves inside a
+/// `<C-w>>`/`<C-w><` -- nvim's own window-resize chord, two keys where the
+/// tests above press one -- resolves inside a
 /// windowed tree exactly as the single key does: the chord's first key
 /// arms `model.pending_chord` and the dispatch guard has to let it survive
 /// `Focus::Pane(Tree)`, which holds no [`OverlayKind`] for the guard's
@@ -15608,7 +15601,7 @@ fn ctrl_w_prefix_and_follower_travel_together_for_every_windowed_surface() {
         },
         // nvim's own next-window chord, typed the way muscle memory
         // types it: the resolver re-arms `pending_chord` for a follower
-        // that completes nothing rather than dropping the prefix, and
+        // that completes nothing, keeping the prefix, and
         // each pane owns no share for either tap to step, so the pair
         // must reach nvim together and leave nothing armed behind it.
         Case {
@@ -15733,8 +15726,8 @@ fn the_resize_chords_first_key_survives_inside_a_windowed_palette() {
 /// Unlike the resize chord, `<C-w>w` (switch to the next window) names no
 /// action this build claims -- both keys have to reach nvim raw, together,
 /// or the windowed stream would swallow an ordinary window command as a
-/// no-op history keystroke instead of letting nvim answer it. The prefix
-/// is held rather than sent on its own: nvim must never be told a window
+/// no-op history keystroke. The prefix is held until its follower arrives:
+/// nvim must never be told a window
 /// command is coming and then be left without a follower, which is what
 /// the resize chord below would do to it. See
 /// [`the_resize_chord_resolves_inside_a_windowed_stream`] for the sibling
@@ -16085,7 +16078,7 @@ fn flip_turns_a_side_by_side_pair_into_a_stacked_one_and_back() {
     );
 }
 
-/// A windowed tree sidebar is chrome, not a tile: `new`, `zoom` and `flip`
+/// A windowed tree sidebar is chrome and no tile: `new`, `zoom` and `flip`
 /// all read [`tiled_panes`](super::surfaces) off buffer windows alone, so
 /// none of the three ever act on the sidebar or count it toward the pair
 /// `flip` answers to.
@@ -16249,8 +16242,8 @@ fn dismiss_leaves_a_standing_condition_alone() {
 }
 
 /// Every [`crate::native::chords::DESKTOP_CHORDS`] row that reaches a verb
-/// (`Rhs::Invoke`, so a press sends [`Msg::FeatureInvoke`] rather than raw
-/// keys) has to actually be pressable: its `twin` -- the key bound under
+/// (`Rhs::Invoke`, so a press sends [`Msg::FeatureInvoke`]) has to
+/// actually be pressable: its `twin` -- the key bound under
 /// both profiles -- is either a [`crate::native::mappings::default_maps`]
 /// row naming the same `(feature, verb)`, or one of the two `[keys]`
 /// single-notation actions (`toggle_gaps`, `cycle_surfaces`) a `view.toml`
@@ -16258,7 +16251,7 @@ fn dismiss_leaves_a_standing_condition_alone() {
 /// of this table. Every row ships as a `DEFAULT_MAPS` entry today, so
 /// `KEYS_ACTION_TWINS` is empty; it exists so a chord added later that
 /// deliberately reaches its twin through that other path fails by name
-/// here instead of silently falling through to a `Cow`-empty row nothing
+/// here, where it would otherwise fall through to a `Cow`-empty row nothing
 /// registers.
 #[test]
 fn every_twin_that_reaches_a_verb_is_a_default_map_row_or_a_keys_action() {
@@ -16291,10 +16284,10 @@ fn every_twin_that_reaches_a_verb_is_a_default_map_row_or_a_keys_action() {
     }
 }
 
-/// A bare `:View keys profile` (no argument) asks what is live rather than
-/// changing it, so it must set the report flag `view/src/native.rs` watches
-/// through `Stage::ProfileFlip` and move nothing else -- naming a profile
-/// still flips `key_profile_override` and leaves the flag alone.
+/// A bare `:View keys profile` (no argument) asks what is live, so it must
+/// set the report flag `view/src/native.rs` watches through
+/// `Stage::ProfileFlip` and move nothing else -- naming a profile still
+/// flips `key_profile_override` and leaves the flag alone.
 #[test]
 fn a_bare_keys_profile_invoke_requests_a_report_and_flips_nothing() {
     let mut m = model();

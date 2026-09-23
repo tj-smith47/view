@@ -1,5 +1,5 @@
 //! What `nvim_ui_try_resize_grid` does to a split window, read from a live
-//! engine rather than from the source.
+//! engine.
 //!
 //! The tiled look rests on one claim: a window grid can be made smaller
 //! than the layout slot nvim keeps for it, so the difference is the UI's to
@@ -37,7 +37,7 @@ const RING: u64 = 4;
 /// How long a step's redraw traffic may keep arriving before the reader
 /// calls it settled, and how long it waits for the first `flush` that says
 /// the step produced traffic at all. Both host-scaled, and each is a
-/// ceiling on a wait rather than a discriminator between two events.
+/// ceiling on a wait, and neither tells two events apart.
 const QUIET: Duration = Duration::from_millis(80);
 const FLUSH_WAIT: Duration = Duration::from_secs(10);
 

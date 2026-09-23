@@ -1,7 +1,7 @@
 //! The bridge's `window` trigger: one report per window whose own status
 //! segments changed.
 //!
-//! Beside the `view_bridge` chunk rather than inside it because this group
+//! Beside the `view_bridge` chunk, outside it, because this group
 //! answers a different question: the session-wide segments there are one
 //! value each, and these are one value per window.
 //!
@@ -9,9 +9,9 @@
 //!
 //! `CursorMoved` fires once per cursor motion, so a held-down `j` fires it
 //! as fast as nvim can redraw. Every trigger arms a `vim.schedule`
-//! callback instead of notifying, and the callback reports each armed
-//! window once and disarms. `vim.schedule` defers to the next turn of
-//! nvim's event loop rather than to a redraw, so a burst inside one turn
+//! callback and notifies nothing itself, and the callback reports each
+//! armed window once and disarms. `vim.schedule` defers to the next turn of
+//! nvim's event loop, whatever redraws it holds, so a burst inside one turn
 //! collapses to one message per window and the segment lags the cursor by
 //! at most a tick. Nothing on the key path waits for it: the trigger runs
 //! in nvim, the notification arrives on view's reader thread, and the
@@ -37,7 +37,7 @@
 /// The payload is `(win, buf, name, modified, row, col, errors, warnings)`,
 /// decoded field for field by `handle::decode`'s `"window"` arm. `name` is
 /// the buffer's tail, the same `:t` modifier the `buffer` trigger takes, so
-/// a tile's edge names a file rather than a path it has no room for.
+/// a tile's edge names a file. A whole path would not fit.
 /// `nvim_win_get_cursor` answers a 1-based line and a 0-based column, and
 /// the column is put on the wire 1-based because that is the number a user
 /// reads off a ruler.
@@ -46,7 +46,7 @@
 /// that armed it and the tick that flushes it, and an error raised on the
 /// first of two windows would otherwise lose the second. The `pcall` covers
 /// the notify too, which is the one call here that can land after a channel
-/// teardown, since it is scheduled rather than inline.
+/// teardown, since it is scheduled.
 ///
 /// The registration reports every window it finds, so a session whose user
 /// never moves the cursor still has segments to draw. `VimEnter` repeats
