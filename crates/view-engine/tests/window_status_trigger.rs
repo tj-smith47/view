@@ -191,3 +191,53 @@ fn a_cursor_burst_collapses_to_one_message_per_tick() {
         "the burst after the close reported a window that is gone"
     );
 }
+
+/// The startup sweep reports every window without loading `vim.diagnostic`,
+/// which costs about a millisecond on nvim's startup clock, and the first
+/// diagnostic a producer sets still reaches the window's report.
+#[test]
+fn the_startup_sweep_leaves_the_diagnostic_module_unloaded_and_counts_still_arrive() {
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+    let channel = engine.api_info.channel_id;
+    let (tx, rx) = mpsc::sync_channel(256);
+    let (_pump, _cutover) = engine.start_pump(tx);
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+    engine.handle.register_bridge(channel).unwrap();
+    let lua = |chunk: &str| {
+        engine
+            .handle
+            .request(
+                "nvim_exec_lua",
+                vec![rmpv::Value::from(chunk), rmpv::Value::Array(Vec::new())],
+            )
+            .unwrap()
+    };
+
+    let settled = drain_window_status(&rx);
+    assert!(
+        !settled.is_empty(),
+        "the registration reported no window at all"
+    );
+    assert_eq!(
+        lua("return package.loaded['vim.diagnostic'] ~= nil"),
+        rmpv::Value::Boolean(false),
+        "the startup sweep loaded vim.diagnostic"
+    );
+
+    lua("local d = vim.diagnostic \
+         local ns = vim.api.nvim_create_namespace('view_test') \
+         d.set(ns, 0, { \
+           { lnum = 0, col = 0, severity = d.severity.ERROR, message = 'e' }, \
+           { lnum = 0, col = 0, severity = d.severity.WARN, message = 'w' }, \
+         })");
+    let reported = drain_window_status(&rx);
+    assert!(
+        reported
+            .iter()
+            .any(|(_, status)| status.errors == 1 && status.warnings == 1),
+        "the first diagnostic set never reached the window's report: {reported:?}"
+    );
+}

@@ -52,23 +52,36 @@
 /// never moves the cursor still has segments to draw. `VimEnter` repeats
 /// that sweep, because the windows a config opens are not open yet when
 /// this runs off the spawn's own `--cmd`.
+///
+/// The counts are read only once a `DiagnosticChanged` has fired, or when
+/// `vim.diagnostic` was already reached before this registration ran.
+/// Touching `vim.diagnostic` loads the module, which costs about a
+/// millisecond, and the startup sweep runs inside nvim's blocked `VimEnter`,
+/// so that load landed on every launch's startup clock. Every diagnostic a
+/// producer sets or clears fires `DiagnosticChanged`, and this group is
+/// registered off the spawn's `--cmd`, ahead of any config, so a session
+/// that has not fired it holds no diagnostics to count.
 pub(crate) const REGISTER_WINDOW_STATUS_CHUNK: &str = "\
 local channel = ...
 local group = vim.api.nvim_create_augroup('view_window_status',
   { clear = true })
 local pending, armed = {}, false
+local counted = rawget(vim, 'diagnostic') ~= nil
 local function report(win)
   if not vim.api.nvim_win_is_valid(win) then
     return
   end
   local buf = vim.api.nvim_win_get_buf(win)
   local cursor = vim.api.nvim_win_get_cursor(win)
-  local counts = vim.diagnostic.count(buf)
+  local errors, warnings = 0, 0
+  if counted then
+    local counts = vim.diagnostic.count(buf)
+    errors = counts[vim.diagnostic.severity.ERROR] or 0
+    warnings = counts[vim.diagnostic.severity.WARN] or 0
+  end
   vim.rpcnotify(channel, 'view_bridge', 'window', win, buf,
     vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ':t'),
-    vim.bo[buf].modified, cursor[1], cursor[2] + 1,
-    counts[vim.diagnostic.severity.ERROR] or 0,
-    counts[vim.diagnostic.severity.WARN] or 0)
+    vim.bo[buf].modified, cursor[1], cursor[2] + 1, errors, warnings)
 end
 local function flush()
   armed = false
@@ -102,6 +115,7 @@ vim.api.nvim_create_autocmd({ 'WinEnter', 'BufEnter', 'BufModifiedSet',
 vim.api.nvim_create_autocmd('DiagnosticChanged', {
   group = group,
   callback = function(args)
+    counted = true
     for _, win in ipairs(vim.api.nvim_list_wins()) do
       if vim.api.nvim_win_get_buf(win) == args.buf then
         arm(win)
