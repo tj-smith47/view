@@ -250,10 +250,22 @@ pub fn start(session: &mut BenchSession, cwd: &Path) -> Result<LiveTurn, BenchEr
             // the first Esc leaves the panel (returning focus to the
             // engine), the second clears any operator the keys above left
             // pending in nvim, and `i` restores the insert mode the
-            // sampling loops type into
+            // sampling loops type into -- each paced behind `quiet()`
+            // rather than written back to back: view's own decoder holds a
+            // fast run of bytes for nvim's `ttimeoutlen` (50ms) before
+            // deciding what it spells, and three keys with no gap between
+            // them fold into one `<M-i>` Alt chord (`view-tui/src/keys.rs`
+            // `encode_residue_bytes(b"\x1b\x1bi")` -> `<M-i>`), which the
+            // panel's composer does not bind and silently swallows,
+            // leaving the panel entered and every sample keystroke after
+            // it typed into the composer instead of reaching nvim
+            // (gh-dev-linux, `ai_session_active`/`ai_streaming` desync).
             session.send(b"\x1b")?;
+            quiet(session);
             session.send(b"\x1b")?;
+            quiet(session);
             session.send(b"i")?;
+            quiet(session);
             return Ok(LiveTurn {
                 progress,
                 at_start: written,

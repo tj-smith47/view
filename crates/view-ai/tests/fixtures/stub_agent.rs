@@ -616,6 +616,12 @@ fn stall_until_gone() {
 /// in the background rather than a flood the row would end up measuring.
 const SUSTAINED_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// Chunks one streamed message holds before `stream-forever` starts a new
+/// one. At ~9 bytes a chunk this keeps one entry's text a few hundred bytes
+/// under `ai_panel::transcript::ROW_PAINT_CEILING` (8 KiB), so a sampling
+/// run long enough to reach the ceiling under one id never does.
+const SUSTAINED_ROLL_CHUNKS: u64 = 400;
+
 /// Ceiling on how long `stream-forever` keeps streaming. The loop's real
 /// end is the client going away, which the write below sees; this is what
 /// stops a fixture whose client died without closing the pipe from
@@ -655,9 +661,24 @@ fn stream_sustained(stdout: &mut std::io::Stdout) {
     let progress = sustained_progress();
     let start = std::time::Instant::now();
     let mut written: u64 = 0;
+    let mut message = 1u64;
     while start.elapsed() < SUSTAINED_CEILING {
         written += 1;
-        let frame = chunk_frame("agent_message_chunk", &format!("chunk {written} "));
+        // A real agent turn breaks its own output into more than one
+        // message; folding every chunk under one id would let a session
+        // this bench holds open for a while paint one transcript entry
+        // straight into `ai_panel::transcript::ROW_PAINT_CEILING`, after
+        // which the entry the ceiling froze stops changing and the panel
+        // stops answering later chunks with a repaint at all -- a live turn
+        // a sampling run could then wait on forever.
+        if written.is_multiple_of(SUSTAINED_ROLL_CHUNKS) {
+            message += 1;
+        }
+        let frame = chunk_frame(
+            "agent_message_chunk",
+            &format!("msg_{message}"),
+            &format!("chunk {written} "),
+        );
         if writeln!(stdout, "{frame}")
             .and_then(|()| stdout.flush())
             .is_err()
@@ -900,12 +921,12 @@ fn propose_diff(stdout: &mut std::io::Stdout, suffix: &str) {
 }
 
 fn chunk(stdout: &mut std::io::Stdout, discriminant: &str, text: &str) {
-    send(stdout, &chunk_frame(discriminant, text));
+    send(stdout, &chunk_frame(discriminant, "msg_1", text));
 }
 
 /// One chunk frame, built apart from writing it so the sustained stream can
 /// write it through a path that reports the broken pipe `send` swallows.
-fn chunk_frame(discriminant: &str, text: &str) -> serde_json::Value {
+fn chunk_frame(discriminant: &str, message_id: &str, text: &str) -> serde_json::Value {
     serde_json::json!({
         "jsonrpc": "2.0",
         "method": "session/update",
@@ -913,7 +934,7 @@ fn chunk_frame(discriminant: &str, text: &str) -> serde_json::Value {
             "sessionId": "sess_stub",
             "update": {
                 "sessionUpdate": discriminant,
-                "messageId": "msg_1",
+                "messageId": message_id,
                 "content": { "type": "text", "text": text }
             }
         }
