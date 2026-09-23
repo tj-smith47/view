@@ -99,10 +99,10 @@ pub(crate) struct NativeSession {
     /// feature is off, keeping `view-native` itself unaware of any feature
     /// beyond the generic registry/exemption predicate it already reads.
     ai_enabled: bool,
-    /// The look this session was loaded under, taken from the `[ui]`
-    /// answers `load` already receives, so every hold and every hand-back
-    /// resolves its look-keyed value without reading the config a second
-    /// time.
+    /// The look the last takeover was built for: the one this session was
+    /// loaded under until a `VimEnter` reads `model.look` again, so an
+    /// engine restarted after a `:View ui` flip is held for the look on
+    /// screen.
     look: Look,
     /// `[keys] toggle_gaps`/`cycle_surfaces`: the left-hand side to
     /// register `ui gaps`/`ui cycle_surfaces` under, applied to the built
@@ -573,6 +573,10 @@ impl NativeSession {
             return Vec::new();
         }
         self.handed_over = true;
+        // a restarted engine is taken over for the look on screen, which a
+        // `:View ui` flip may have moved since load
+        self.look = model.look;
+        self.plan = plan(&self.cfg, registry::features(), self.look);
         let mut effects: Vec<RpcCall> = Vec::new();
         // a plan entry with no call is a surface the attach already took
         // (`Supersession::rpc`); it is in the plan to be reported, not to be
@@ -605,8 +609,14 @@ impl NativeSession {
             }
         }
         crate::vlog::log_with("native", || {
-            let taken: Vec<&str> = self.plan.iter().map(|e| e.feature).collect();
-            format!("takeover options={taken:?} channel={}", self.channel_id)
+            let (taken, look_held): (Vec<&Supersession>, Vec<&Supersession>) =
+                self.plan.iter().partition(|e| e.announced);
+            let taken: Vec<&str> = taken.iter().map(|e| e.feature).collect();
+            let look_held: Vec<&str> = look_held.iter().map(|e| e.feature).collect();
+            format!(
+                "takeover options={taken:?} look_held={look_held:?} channel={}",
+                self.channel_id
+            )
         });
         // after every call above: nvim applies one connection's traffic in
         // the order it arrives, so the frame the attach produces is drawn
@@ -1682,6 +1692,33 @@ cycle_surfaces = \"gz\"
         assert!(
             !session.holds_input(),
             "the reissue that carried the chords has answered"
+        );
+    }
+
+    /// An engine restarted after a `:View ui panes` flip is taken over for
+    /// the look on screen, where the plan built at load would hold
+    /// `laststatus` for the startup look.
+    #[test]
+    fn a_restarted_engine_is_taken_over_for_the_look_on_screen() {
+        use view_core::model::Panes;
+
+        let mut session = NativeSession::all_enabled(7, None);
+        let mut m = model();
+        assert_eq!(m.look.panes, Panes::Nvim);
+        let _ = session.follow_up(&mut m, Stage::VimEnter);
+        m.look = Look::new(Panes::Tiles, true);
+        session.rebind(8);
+        let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
+        let held = effects.iter().find_map(|e| match e {
+            Effect::Rpc(RpcCall::HoldOption { name, value }) if name == "laststatus" => {
+                Some(value.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            held,
+            Some(OptionValue::Int(2)),
+            "the restart held laststatus for the startup look: {effects:?}"
         );
     }
 
