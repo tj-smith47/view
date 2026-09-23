@@ -1,0 +1,9 @@
+#!/bin/sh
+# The delay relay at a fixed 250 ms each way, for a test whose engine config
+# forwards its environment to the far side and leaves the client's own
+# environment as the test process found it.
+set -eu
+
+DELAY_RELAY_MS=${DELAY_RELAY_MS:-250}
+export DELAY_RELAY_MS
+exec "$(dirname "$0")/delay-relay" "$@"

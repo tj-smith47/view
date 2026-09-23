@@ -2014,6 +2014,115 @@ mod tests {
         let _ = engine.wait_exit();
     }
 
+    /// The same chord over a real slow link: a remote engine reached
+    /// through the delay relay at 250 ms each way, so every reply the
+    /// takeover waits on crosses the link twice. The chord is typed past
+    /// the first hold bound with the claims reply still out, and has to
+    /// run view's desktop action.
+    #[cfg(unix)]
+    #[test]
+    fn a_chord_typed_over_a_slow_link_before_the_claims_reply_runs_its_desktop_action() {
+        const TYPED_AT: std::time::Duration = std::time::Duration::from_millis(350);
+        const _: () = assert!(TYPED_AT.as_millis() > crate::native::CHORD_HOLD_BOUND.as_millis());
+        let relay = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/test-fixtures/delay-relay-slow")
+            .canonicalize()
+            .expect("the test fixtures are committed alongside the crate");
+        let cfg = EngineConfig::isolated()
+            .with_remote(view_engine::RemoteSpec::new("view-test-host").with_ssh_bin(relay))
+            .with_handshake_timeout(std::time::Duration::from_secs(10))
+            .with_late_attach(80, 24);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(256);
+        let mut engine = Engine::spawn(cfg).expect("a remote spawn through the relay");
+        assert!(
+            engine.is_remote(),
+            "the engine under test must be a remote one"
+        );
+        let (_pump, cutover) = engine.start_pump(tx.clone());
+        let executor = crate::runtime::Executor::new(engine.handle.clone())
+            .with_toast_timer(crate::wake::LoopSender::new(tx));
+        let mut model = Model::with_term_size(80, 24);
+        let mut native = crate::native::NativeSession::desktop(engine.api_info.channel_id, None);
+        let mut theme = crate::bridge::ThemeBridge::new(None, None);
+        let mut follow_ups = crate::runtime::FollowUps {
+            native: &mut native,
+            theme: &mut theme,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let (modifier, _, _) = view_native::config::profile::modifier_for(
+            view_core::native::chords::ModifierChoice::Auto,
+            model.caps.kitty_kbd,
+        );
+        let chord = view_core::native::chords::desktop_chord("zoom")
+            .expect("the zoom chord is a shipped row")
+            .lhs(modifier);
+
+        let deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(20));
+        let mut incoming = cutover.presink.into_iter();
+        let mut vim_enter_at: Option<std::time::Instant> = None;
+        let mut typed = false;
+        let mut claimed_before_typing = false;
+        let mut seen = Vec::new();
+        let invoked = loop {
+            let now = std::time::Instant::now();
+            let type_at = vim_enter_at.filter(|_| !typed).map(|at| at + TYPED_AT);
+            if type_at.is_some_and(|at| at <= now) {
+                typed = true;
+                seen.push(format!("typed {chord}"));
+                let flow = crate::runtime::dispatch(
+                    &mut model,
+                    &executor,
+                    &mut follow_ups,
+                    Msg::Key(key(chord)),
+                );
+                assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
+                continue;
+            }
+            let wait = type_at.map_or(deadline, |at| at.min(deadline));
+            let msg = match incoming.next() {
+                Some(msg) => msg,
+                None => match rx.recv_timeout(wait.saturating_duration_since(now)) {
+                    Ok(msg) => msg,
+                    Err(_) if std::time::Instant::now() < deadline => continue,
+                    Err(_) => break false,
+                },
+            };
+            if let Msg::FeatureInvoke { feature, verb } = &msg {
+                if feature == "window" && verb == "zoom" {
+                    break true;
+                }
+            }
+            if matches!(msg, Msg::MappingsClaimed { .. }) && !typed {
+                claimed_before_typing = true;
+            }
+            if matches!(msg, Msg::RedrawReady) {
+                continue;
+            }
+            seen.push(format!("{msg:?}").chars().take(80).collect::<String>());
+            if matches!(
+                msg,
+                Msg::EngineRequest(view_core::msg::EngineRequest::VimEnter { .. })
+            ) {
+                vim_enter_at = Some(std::time::Instant::now());
+            }
+            let flow = crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, msg);
+            assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
+        };
+        assert!(typed, "nvim never asked for its VimEnter answer: {seen:?}");
+        assert!(
+            !claimed_before_typing,
+            "the claims reply crossed the link before the chord was typed, so \
+             the hold was never live: {seen:?}"
+        );
+        assert!(
+            invoked,
+            "{chord} typed over a slow link ahead of the claims reply ran as \
+             nvim's own keys; saw {seen:?}"
+        );
+        let _ = engine.wait_exit();
+    }
+
     /// A config that prints a multi-line message from a `vim.schedule`
     /// queued at `VimEnter` puts a live nvim at a hit-enter prompt ahead of
     /// the chord registration, in a desktop session that leaves messages to
