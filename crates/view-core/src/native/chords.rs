@@ -2,11 +2,11 @@
 //! deliberately does not.
 //!
 //! View's keys are omarchy's keys on a machine with no desktop of its own,
-//! and nvim's leader keys on a machine that has one (user ruling
-//! 2026-09-20, spec section 9). [`DESKTOP_CHORDS`] is the 46-row table that
-//! decision produces: every chord a session under [`KeyProfile::Desktop`]
-//! registers, both the `Super`-modifier spelling a kitty-protocol terminal
-//! delivers and the `Alt`-modifier spelling every terminal delivers.
+//! and nvim's leader keys on one that has one (`docs/keymaps.md`, Key
+//! profiles). [`DESKTOP_CHORDS`] is the 46-row table that decision produces:
+//! every chord a session under [`KeyProfile::Desktop`] registers, both the
+//! `Super`-modifier spelling a kitty-protocol terminal delivers and the
+//! `Alt`-modifier spelling every terminal delivers.
 //! [`UNBOUND`] is every remaining omarchy chord, with the reason a terminal
 //! session has nothing to bind it to.
 
