@@ -134,6 +134,14 @@ pub(crate) struct NativeSession {
     /// `[keys.desktop]`'s 46 resolved rows, in `chords::desktop_chords()`
     /// order, read once at startup the way every other field here is.
     desktop: [Resolved<String>; DESKTOP_CHORD_COUNT],
+    /// Set by `take_over` when this session's profile carries desktop
+    /// chords it left out of the takeover's own `RegisterMappings` call:
+    /// nvim's own startup clock is still running while that call is
+    /// in flight (it rides the batch ahead of the reply that frees
+    /// `VimEnter`), and a Super-chord is not a key a user's fingers can
+    /// reach before the frame nvim draws once `VimEnter` returns. Cleared
+    /// the moment `Stage::Claims` sends the follow-up that folds them in.
+    chords_pending: bool,
 }
 
 impl NativeSession {
@@ -240,6 +248,7 @@ impl NativeSession {
             profile_marker,
             desktop_modifier_choice,
             desktop,
+            chords_pending: false,
         };
         (session, effects)
     }
@@ -283,10 +292,35 @@ impl NativeSession {
             Stage::Claims => {
                 crate::vlog::log("startup", "takeover answered");
                 crate::vlog::log_takeover("answered");
-                self.announce(model)
+                let mut effects = self.announce(model);
+                effects.extend(self.follow_up_chords(model));
+                effects
             }
             Stage::CapsUpgraded | Stage::ProfileFlip => self.reissue_mappings(model, stage),
         }
+    }
+
+    /// The desktop chords `Self::take_over` left out of its own
+    /// `RegisterMappings` call, sent now that nvim's `VimEnter` has already
+    /// returned: `Stage::Claims` fires once the takeover's registration has
+    /// already replied, which is strictly after the reply that freed nvim's
+    /// own blocked `vim.rpcrequest`, so nothing sent from here can ever
+    /// again reach nvim's own startup clock. Resends the whole live set,
+    /// defaults included, the same "give the old plan back, then apply the
+    /// new one" restore [`REGISTER_MAPPINGS_CHUNK`] performs on every
+    /// [`Self::reissue_mappings`] call.
+    ///
+    /// A no-op once `Self::chords_pending` is false: nothing to send for an
+    /// editor-profile session (`Self::take_over` never sets it), and nothing
+    /// left to send once this has already fired once, or a
+    /// [`Stage::CapsUpgraded`]/[`Stage::ProfileFlip`] reissue beat it to it.
+    fn follow_up_chords(&mut self, model: &mut Model) -> Vec<Effect> {
+        if !std::mem::take(&mut self.chords_pending) {
+            return Vec::new();
+        }
+        let (mapping_call, mut effects) = self.build_mapping_call(model, true);
+        effects.insert(0, Effect::Rpc(mapping_call));
+        effects
     }
 
     /// Rebuilds and resends this session's default-map registration outside
@@ -320,7 +354,11 @@ impl NativeSession {
             }
             self.profile = flipped;
         }
-        let (mapping_call, mut effects) = self.build_mapping_call(model);
+        // this call already carries the live set whole, chords included, so
+        // the deferred first-startup follow-up (`Self::follow_up_chords`)
+        // owes nothing more if it has not fired yet
+        self.chords_pending = false;
+        let (mapping_call, mut effects) = self.build_mapping_call(model, true);
         effects.insert(0, Effect::Rpc(mapping_call));
         effects
     }
@@ -349,14 +387,28 @@ impl NativeSession {
     /// `[keys] toggle_gaps`/`cycle_surfaces` overrides, and the desktop
     /// chords this session's live profile and modifier put in play.
     ///
-    /// Shared by [`Self::take_over`] and [`Self::reissue_mappings`], so a
-    /// chord respelled once the terminal's kitty keyboard protocol probe
-    /// answers, or a profile flipped mid-session, both travel through the
-    /// one place that turns `self`'s resolved answers into a spec list. The
-    /// second element is the notice [`profile::modifier_for`] owes when
-    /// `[keys] desktop_modifier = "super"` is unreachable this run, empty
-    /// otherwise.
-    fn build_mapping_call(&self, model: &mut Model) -> (RpcCall, Vec<Effect>) {
+    /// Shared by [`Self::take_over`], [`Self::follow_up_chords`] and
+    /// [`Self::reissue_mappings`], so a chord respelled once the terminal's
+    /// kitty keyboard protocol probe answers, or a profile flipped
+    /// mid-session, both travel through the one place that turns `self`'s
+    /// resolved answers into a spec list. The second element is the notice
+    /// [`profile::modifier_for`] owes when `[keys] desktop_modifier =
+    /// "super"` is unreachable this run, empty otherwise.
+    ///
+    /// `include_chords = false` is [`Self::take_over`]'s own call: the
+    /// desktop chords ride behind nvim's blocked `VimEnter` reply exactly as
+    /// long as this call takes to run, so leaving them out of the batch that
+    /// call sends is what keeps a 46-chord desktop profile from stretching
+    /// nvim's own startup clock (`view-bench`'s `startup` scenario's
+    /// `server_delta_ms`) by however long registering them costs. Every
+    /// other caller passes `true`: a reissue always resends the live set
+    /// whole, chords included, the way [`Self::reissue_mappings`]'s own doc
+    /// comment states.
+    fn build_mapping_call(
+        &self,
+        model: &mut Model,
+        include_chords: bool,
+    ) -> (RpcCall, Vec<Effect>) {
         let mut mapping_call = mappings::register_plan(&self.cfg, self.channel_id);
         // `[keys] toggle_gaps`/`cycle_surfaces`: `view-native` already
         // validated the override (`resolve_ui_lhs`). `MappingSpec::lhs` is
@@ -394,11 +446,16 @@ impl NativeSession {
         }
         let (modifier, _, super_notice) =
             profile::modifier_for(self.desktop_modifier_choice, model.caps.kitty_kbd);
-        let chords = profile::chord_plan(&self.desktop, self.profile, modifier, &self.cfg);
+        let chords = if include_chords {
+            profile::chord_plan(&self.desktop, self.profile, modifier, &self.cfg)
+        } else {
+            Vec::new()
+        };
         // Only raised when this call actually registers a desktop chord
         // under the fallback: a flip to `editor` (no chords at all) or a
         // reissue that keeps carrying the same fallback would otherwise
-        // repeat the same notice on every one of them.
+        // repeat the same notice on every one of them, and the deferred
+        // first call raises it once the follow-up that carries them does.
         let notice_effects = match super_notice {
             Some(text) if !chords.is_empty() => {
                 model.engine.record_native_notice(text.to_string(), false)
@@ -456,7 +513,15 @@ impl NativeSession {
         // (`Supersession::rpc`); it is in the plan to be reported, not to be
         // performed
         effects.extend(self.plan.iter().filter_map(|entry| entry.rpc.clone()));
-        let (mapping_call, mapping_notices) = self.build_mapping_call(model);
+        // desktop chords ride behind the reply that frees `VimEnter`
+        // (`Self::follow_up_chords`, fired from `Stage::Claims`), never in
+        // the batch this call sends: this batch is in force before nvim's
+        // own startup clock stops, so a 46-chord desktop profile folded in
+        // here would stretch that clock by however long registering them
+        // costs, felt as `view-bench`'s `startup` scenario's
+        // `server_delta_ms` and `settled_ratio_p50`.
+        self.chords_pending = self.profile == KeyProfile::Desktop;
+        let (mapping_call, mapping_notices) = self.build_mapping_call(model, false);
         effects.push(mapping_call);
         effects.push(RpcCall::RegisterClipboard {
             channel_id: self.channel_id,
@@ -619,6 +684,7 @@ impl NativeSession {
             desktop_modifier_choice: ModifierChoice::Auto,
             desktop: default_desktop(),
             profile_marker: None,
+            chords_pending: false,
         }
     }
 
@@ -644,6 +710,7 @@ impl NativeSession {
             desktop_modifier_choice: ModifierChoice::Auto,
             desktop: default_desktop(),
             profile_marker: None,
+            chords_pending: false,
         }
     }
 }
@@ -959,6 +1026,7 @@ mod tests {
             desktop_modifier_choice: ModifierChoice::Auto,
             desktop: default_desktop(),
             profile_marker: None,
+            chords_pending: false,
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -1033,6 +1101,7 @@ mod tests {
             desktop_modifier_choice: ModifierChoice::Auto,
             desktop: default_desktop(),
             profile_marker: None,
+            chords_pending: false,
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -1101,6 +1170,7 @@ mod tests {
             desktop_modifier_choice: ModifierChoice::Auto,
             desktop: default_desktop(),
             profile_marker: None,
+            chords_pending: false,
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -1409,6 +1479,65 @@ cycle_surfaces = \"gz\"
         );
     }
 
+    /// A desktop-profile session's `VimEnter` takeover carries no desktop
+    /// chord at all: they cost nvim's own blocked startup clock exactly as
+    /// long as registering them takes (`view-bench`'s `startup` scenario's
+    /// `server_delta_ms`), so `Self::take_over` leaves them for the
+    /// follow-up `Stage::Claims` fires once that clock has already been
+    /// freed. This is the pin for that split: a chord in the `VimEnter`
+    /// batch is a regression back onto nvim's own startup path.
+    #[test]
+    fn the_vim_enter_takeover_carries_no_desktop_chord_and_claims_fills_them_in() {
+        let mut session = NativeSession {
+            profile: KeyProfile::Desktop,
+            initial_profile: KeyProfile::Desktop,
+            desktop_modifier_choice: ModifierChoice::Auto,
+            desktop: default_desktop(),
+            ..NativeSession::all_enabled(7, None)
+        };
+        let mut m = model();
+        let specs_of = |effects: &[Effect]| -> Vec<view_core::native::mappings::MappingSpec> {
+            effects
+                .iter()
+                .find_map(|e| match e {
+                    Effect::Rpc(RpcCall::RegisterMappings { specs, .. }) => Some(specs.clone()),
+                    _ => None,
+                })
+                .expect("a RegisterMappings call must ride this stage")
+        };
+        let vim_enter = unbatched(session.follow_up(&mut m, Stage::VimEnter));
+        let vim_enter_specs = specs_of(&vim_enter);
+        assert!(
+            !vim_enter_specs
+                .iter()
+                .any(|s| s.feature == "window" && s.verb == "focus_left"),
+            "the VimEnter batch must carry no desktop chord: {vim_enter_specs:?}"
+        );
+        assert!(
+            vim_enter_specs
+                .iter()
+                .any(|s| s.lhs.as_ref()
+                    == view_core::native::mappings::default_maps()[0].lhs.as_ref()),
+            "the VimEnter batch must still carry the default maps: {vim_enter_specs:?}"
+        );
+        let claims = unbatched(session.follow_up(&mut m, Stage::Claims));
+        let claims_specs = specs_of(&claims);
+        assert!(
+            claims_specs
+                .iter()
+                .any(|s| s.feature == "window" && s.verb == "focus_left"),
+            "Stage::Claims must fold the desktop chords in once nvim's VimEnter is already free: \
+             {claims_specs:?}"
+        );
+        let again = unbatched(session.follow_up(&mut m, Stage::Claims));
+        assert!(
+            !again
+                .iter()
+                .any(|e| matches!(e, Effect::Rpc(RpcCall::RegisterMappings { .. }))),
+            "a second Stage::Claims must resend nothing: the chords already went out once: {again:?}"
+        );
+    }
+
     /// A session that starts under the editor profile and reads no desktop
     /// chords registers only `default_maps()`. A live `:View keys profile
     /// desktop` flip must reissue with the desktop chords folded in beside
@@ -1533,7 +1662,7 @@ cycle_surfaces = \"gz\"
             ..NativeSession::all_enabled(7, None)
         };
         let mut m = model();
-        let (call, _) = session.build_mapping_call(&mut m);
+        let (call, _) = session.build_mapping_call(&mut m, true);
         let specs = match call {
             RpcCall::RegisterMappings { specs, .. } => specs,
             other => panic!("build_mapping_call built {other:?}"),
@@ -1570,7 +1699,7 @@ cycle_surfaces = \"gz\"
         };
         let mut m = model();
         m.caps.kitty_kbd = false;
-        let _ = session.build_mapping_call(&mut m);
+        let _ = session.build_mapping_call(&mut m, true);
         let raised = format!("{:?}", m.engine.messages.entries);
         assert!(
             raised.contains("desktop_modifier = super needs the kitty keyboard protocol"),
@@ -1592,7 +1721,7 @@ cycle_surfaces = \"gz\"
         };
         let mut m = model();
         m.caps.kitty_kbd = false;
-        let _ = session.build_mapping_call(&mut m);
+        let _ = session.build_mapping_call(&mut m, true);
         assert!(
             m.engine.messages.entries.is_empty(),
             "a call that registers no desktop chord must notice nothing: {:?}",
@@ -1611,7 +1740,7 @@ cycle_surfaces = \"gz\"
         };
         let mut m = model();
         m.caps.kitty_kbd = true;
-        let _ = session.build_mapping_call(&mut m);
+        let _ = session.build_mapping_call(&mut m, true);
         assert!(
             m.engine.messages.entries.is_empty(),
             "a Super choice with the protocol answered must notice nothing: {:?}",
