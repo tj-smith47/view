@@ -63,48 +63,7 @@ pub fn rpc_poll_deadline_for(round_trips: u32) -> Instant {
 /// child and nothing waits for it until the restart.
 #[must_use]
 pub fn pid_running(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        // the state letter is the field after the last `)`: a process name
-        // can hold both spaces and parentheses, and every field ahead of
-        // the state sits inside it
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            return false;
-        };
-        !matches!(
-            stat.rsplit(')')
-                .next()
-                .and_then(|rest| rest.split_whitespace().next()),
-            None | Some("Z")
-        )
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // a `ps` that could not run must not report "not running", for the
-        // reason `pid_in_process_table` gives: that reads as a crash that
-        // happened and turns a broken probe into a silent pass
-        let listing = std::process::Command::new("/bin/ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .expect("/bin/ps must run for the process table to be observable at all");
-        let state = String::from_utf8_lossy(&listing.stdout);
-        let state = state.trim();
-        !state.is_empty() && !state.starts_with('Z')
-    }
-    #[cfg(windows)]
-    {
-        // Windows has no zombie: a terminated process holds no table entry
-        // of its own, only the handles nothing closed yet
-        pid_in_process_table(pid)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        // reports not running for the reason the sibling probe reports no
-        // entry: with no way to look, an inert assertion beats one that
-        // fails on the absence of one
-        let _ = pid;
-        false
-    }
+    view_test_support::pid_running(pid)
 }
 
 /// Whether the OS still holds a process-table entry for `pid`.

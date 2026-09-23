@@ -176,6 +176,25 @@ const DECLARED_ABSOLUTES: &[DeclaredAbsolute] = &[
                   widening it for the host's load would place the byte on \
                   the wrong side of the boundary this test exists to cross",
     },
+    DeclaredAbsolute {
+        file: "view-oracle/tests/smoke.rs",
+        line: "std::thread::sleep((TRANSIENT_TOAST_TIMEOUT * 2).saturating_sub(dispatched.elapsed()));",
+        grounds: "it aims inside the window from one timeout to four after \
+                  the dispatch, and the round's retry absorbs an overshoot",
+    },
+    DeclaredAbsolute {
+        file: "view-oracle/tests/smoke.rs",
+        line: "std::thread::sleep(STARTUP_SETTLE);",
+        grounds: "startup_budget counts this settle in its fixed part \
+                  unscaled, so a scaled sleep spends the host's share of \
+                  the budget it sits inside",
+    },
+    DeclaredAbsolute {
+        file: "view-oracle/tests/smoke.rs",
+        line: "std::thread::sleep(STARTUP_SETTLE); // unscaled, as in the deadline-path test",
+        grounds: "the same settle inside the same unscaled fixed part, on \
+                  the multi-chunk path",
+    },
 ];
 
 #[test]

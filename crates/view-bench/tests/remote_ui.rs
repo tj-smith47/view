@@ -235,13 +235,15 @@ fn a_control_server_dies_with_a_harness_that_was_killed_outright() {
         assert!(
             std::time::Instant::now() < deadline,
             "the control server {server} outlived the harness that started it, with no \
-             terminal and no socket peer left to end it"
+             terminal and no socket peer left to end it (process state {:?})",
+            view_test_support::process_state(server)
         );
         std::thread::sleep(POLL);
     }
 }
 
-/// Whether the operating system still holds a process-table entry for `pid`.
+/// Whether `pid` still runs. A killed orphan keeps its table entry until a
+/// reaper the host's load may starve collects it.
 fn live(pid: u32) -> bool {
-    view_test_support::pid_in_process_table(pid)
+    view_test_support::pid_running(pid)
 }

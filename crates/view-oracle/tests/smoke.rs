@@ -501,7 +501,7 @@ fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries
     // than a fix for it. This file's own module doc already documents fixed
     // sleeps over a deterministic "settled" signal as this suite's
     // tradeoff.
-    std::thread::sleep(view_test_support::host_deadline(STARTUP_SETTLE));
+    std::thread::sleep(STARTUP_SETTLE);
     let quit_at = start.elapsed();
     session.send(b"\x1b:wq\r").unwrap();
 
@@ -589,7 +589,7 @@ fn view_survives_a_promptly_replying_terminal_bursting_past_the_probes_chunk_siz
     // A fixed sleep, not a screen-content wait, bridges to the save: see
     // the deadline-path test above for why a screen-content signal would
     // itself become part of the race here.
-    std::thread::sleep(view_test_support::host_deadline(STARTUP_SETTLE));
+    std::thread::sleep(STARTUP_SETTLE); // unscaled, as in the deadline-path test
     let quit_at = start.elapsed();
     session.send(b"\x1b:wq\r").unwrap();
 
@@ -2178,13 +2178,14 @@ fn a_stack_of_toasts_expires_one_slot_at_a_time_rather_than_all_at_once() {
             session.screen()
         );
 
-        // no further input: every expiry from here is a timer's doing. Three
-        // timeouts is a full timeout short of the moment the fifth slot's own
-        // timer even starts, and three past the moment a timer-per-toast
-        // design would have taken it down with the rest.
-        std::thread::sleep(view_test_support::host_deadline(
-            TRANSIENT_TOAST_TIMEOUT * 3,
-        ));
+        // no further input: every expiry from here is a timer's doing. The
+        // read aims at two timeouts after the dispatch, the middle of the
+        // window from one timeout (a timer-per-toast design has taken the
+        // whole stack down) to four (the fifth slot reaches the top). The
+        // aim is a moment in that window, so it is unscaled: a host-scaled
+        // sleep lands past the window's end once the load factor reaches
+        // 4/3, and the stalled-round retry below absorbs an overshoot.
+        std::thread::sleep((TRANSIENT_TOAST_TIMEOUT * 2).saturating_sub(dispatched.elapsed()));
         let screen = session.screen();
         // the window this round had to land inside, timed from the dispatch
         // and never from the start of the wait: the fifth slot reaches the

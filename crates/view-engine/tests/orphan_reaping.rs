@@ -129,7 +129,7 @@ fn a_wedged_engine_is_ended_by(end: fn(&mut std::process::Child), ending: &str) 
     let engine_pid = pid_after(PID_MARKER);
     let untied = EndedOnDrop(pid_after(UNTIED_MARKER));
     assert!(
-        common::pid_in_process_table(engine_pid),
+        common::pid_running(engine_pid),
         "the engine was already gone before its parent was \
          ended, so nothing below is evidence about the ending"
     );
@@ -137,21 +137,25 @@ fn a_wedged_engine_is_ended_by(end: fn(&mut std::process::Child), ending: &str) 
     end(&mut parent);
     parent.wait().unwrap();
 
+    // asks whether the engine still runs: once killed it is reparented, and
+    // its table entry stands until a reaper the host's load may starve
+    // collects it
     let deadline = std::time::Instant::now() + view_test_support::host_deadline(REAPED);
-    while common::pid_in_process_table(engine_pid) {
+    while common::pid_running(engine_pid) {
         assert!(
             std::time::Instant::now() < deadline,
-            "the engine outlived the parent that owned it ({ending}): a \
-             child wedged in synchronous Lua reads no closed pipe and \
-             ignores SIGTERM, so without a tie it spins until something \
-             kills it"
+            "the engine outlived the parent that owned it ({ending}, process \
+             state {:?}): a child wedged in synchronous Lua reads no closed \
+             pipe and ignores SIGTERM, so without a tie it spins until \
+             something kills it",
+            view_test_support::process_state(engine_pid)
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     // read before the guard ends it, asserted after: the reading is the
     // evidence and the ending is the cleanup, and one of them has to run
     // whether the other passes or not
-    let untied_alive = common::pid_in_process_table(untied.0);
+    let untied_alive = common::pid_running(untied.0);
     assert!(
         untied_alive,
         "a child the parent spawned without a tie went with it ({ending}): \

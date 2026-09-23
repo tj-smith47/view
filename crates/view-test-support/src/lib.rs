@@ -618,18 +618,7 @@ pub fn pid_in_process_table(pid: u32) -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        // a `ps` that could not run reports an entry, never a reaping: the
-        // negative reads as a successfully reaped child and turns a broken
-        // probe into a silent pass. Only an empty listing from a `ps` that
-        // did run is the real negative (`ps` also exits nonzero for an
-        // unknown pid, so its status is not the signal)
-        match std::process::Command::new("/bin/ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-        {
-            Ok(listing) => !listing.stdout.is_empty(),
-            Err(_) => true,
-        }
+        process_state(pid).is_some()
     }
     #[cfg(windows)]
     {
@@ -651,6 +640,76 @@ pub fn pid_in_process_table(pid: u32) -> bool {
         // absence of a way to look
         let _ = pid;
         false
+    }
+}
+
+/// Whether `pid` is still executing.
+///
+/// A process killed and not yet waited for is already dead, with only its
+/// exit status left to collect. An orphan killed by its parent-death signal
+/// is reparented first, so its entry stands until init or the nearest
+/// subreaper collects it, and a reaper starved by a loaded host can take
+/// longer than any deadline a case would set. A case asking whether a kill
+/// happened asks this; a case asking whether someone waited asks
+/// [`pid_in_process_table`].
+#[must_use]
+pub fn pid_running(pid: u32) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        match process_state(pid) {
+            None => false,
+            // `X` is the instant between the reap and the entry going
+            Some(state) => !state.starts_with('Z') && !state.starts_with('X'),
+        }
+    }
+    #[cfg(windows)]
+    {
+        // a terminated Windows process holds no entry of its own, only the
+        // handles nothing closed yet
+        pid_in_process_table(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// The state letter the OS reports for `pid` (`R`, `S`, `Z` and so on), or
+/// `None` where the process has no entry.
+///
+/// A `ps` that could not run answers `Some("?")`: an absent answer reads as
+/// a process that is gone, which turns a broken probe into a silent pass.
+#[must_use]
+pub fn process_state(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        // the state is the field after the last `)`, since a process name
+        // can hold both spaces and parentheses
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next().map(String::from))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // a `ps` that could not run reports an entry, since a missing one
+        // reads as a reaped child. Only an empty listing from a `ps` that
+        // did run is the real negative (`ps` also exits nonzero for an
+        // unknown pid, so its status is not the signal)
+        match std::process::Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+        {
+            Ok(listing) => {
+                let state = String::from_utf8_lossy(&listing.stdout).trim().to_owned();
+                (!state.is_empty()).then_some(state)
+            }
+            Err(_) => Some(String::from("?")),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        pid_in_process_table(pid).then(|| String::from("?"))
     }
 }
 

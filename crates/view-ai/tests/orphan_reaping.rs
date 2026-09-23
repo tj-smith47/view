@@ -144,7 +144,7 @@ fn a_deaf_adapter_dies_with_an_owner_that_was_killed_outright() {
             panic!("the intermediate owner must report the pid of the adapter it stalled")
         });
     assert!(
-        live(agent),
+        view_test_support::pid_running(agent),
         "the adapter was already gone before its owner was killed, so nothing below is \
      evidence about the kill"
     );
@@ -152,9 +152,13 @@ fn a_deaf_adapter_dies_with_an_owner_that_was_killed_outright() {
     owner.kill().expect("kill the intermediate owner outright");
     owner.wait().expect("reap the intermediate owner");
 
+    // asks whether the adapter still runs: once killed it is reparented,
+    // and its table entry stands until a reaper the host's load may starve
+    // collects it
     let deadline = Instant::now() + view_test_support::host_deadline(REAPED);
-    while live(agent) {
+    while view_test_support::pid_running(agent) {
         if Instant::now() >= deadline {
+            let state = view_test_support::process_state(agent);
             // releases the stall so the stray ends itself: it reads its
             // stdin again, finds the owner's end of the pipe closed, and
             // exits. Killing it here would be this test signalling a
@@ -163,13 +167,14 @@ fn a_deaf_adapter_dies_with_an_owner_that_was_killed_outright() {
             // removed by its own guard on the way out.
             std::fs::write(&resume, b"").unwrap();
             let released = Instant::now() + view_test_support::host_deadline(REAPED);
-            while live(agent) && Instant::now() < released {
+            while view_test_support::pid_running(agent) && Instant::now() < released {
                 std::thread::sleep(Duration::from_millis(10));
             }
             panic!(
-                "the adapter {agent} outlived the owner that spawned it: an agent that has \
-             stopped reading its stdin sees no closed pipe, so without a parent-death \
-             signal it runs until something kills it"
+                "the adapter {agent} outlived the owner that spawned it (process state \
+             {state:?} at the deadline): an agent that has stopped reading its stdin sees \
+             no closed pipe, so without a parent-death signal it runs until something \
+             kills it"
             );
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -213,14 +218,9 @@ fn await_collection(pid: u32) -> Result<(), String> {
     let deadline = Instant::now() + view_test_support::host_deadline(REAPED);
     while live(pid) {
         if Instant::now() >= deadline {
-            let state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                .ok()
-                .and_then(|stat| {
-                    stat.rsplit_once(')')
-                        .and_then(|(_, rest)| rest.split_whitespace().next().map(String::from))
-                })
-                .unwrap_or_else(|| String::from("unreadable"));
-            return Err(state);
+            return Err(
+                view_test_support::process_state(pid).unwrap_or_else(|| String::from("unreadable"))
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -334,6 +334,7 @@ fn a_dropped_session_collects_the_adapter_it_signalled() {
 }
 
 /// Whether the operating system still holds a process-table entry for `pid`.
+#[cfg(target_os = "linux")]
 fn live(pid: u32) -> bool {
     view_test_support::pid_in_process_table(pid)
 }
