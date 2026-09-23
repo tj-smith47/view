@@ -1829,8 +1829,9 @@ mod tests {
     fn a_chord_typed_during_launch_runs_its_desktop_action_in_a_live_nvim() {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(256);
         let mut engine = Engine::spawn(EngineConfig::isolated().with_late_attach(80, 24)).unwrap();
-        let (_pump, cutover) = engine.start_pump(tx);
-        let executor = crate::runtime::Executor::new(engine.handle.clone());
+        let (_pump, cutover) = engine.start_pump(tx.clone());
+        let executor = crate::runtime::Executor::new(engine.handle.clone())
+            .with_toast_timer(crate::wake::LoopSender::new(tx));
         let mut model = Model::with_term_size(80, 24);
         let mut native = crate::native::NativeSession::desktop(engine.api_info.channel_id, None);
         let mut theme = crate::bridge::ThemeBridge::new(None, None);

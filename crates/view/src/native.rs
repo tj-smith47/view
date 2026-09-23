@@ -60,6 +60,9 @@ pub(crate) enum Stage {
 /// round trips behind `VimEnter` plus whatever startup work nvim has queued
 /// ahead of it, and this leaves that wait a wide margin under a login
 /// config while keeping a freeze behind a prompt nvim cannot leave short.
+/// Once the takeover answers, the bound is armed again from that reply with
+/// the takeover's own round trip added, so an engine across a slow link is
+/// given the round trip it still owes.
 const CHORD_HOLD_BOUND: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// The step `msg` owes, or [`Stage::None`].
@@ -174,6 +177,9 @@ pub(crate) struct NativeSession {
     /// The generation the newest [`CHORD_HOLD_BOUND`] timer was armed with,
     /// so a timer armed for a replaced engine releases nothing.
     hold_generation: u64,
+    /// When the pass that started the hold sent the takeover, until the
+    /// takeover's reply measures the connection's round trip from it.
+    takeover_sent: Option<std::time::Instant>,
     /// The first-run record keys this session has already shown a notice
     /// for. Every `MappingsClaimed` reruns [`Self::announce`], and the chord
     /// follow-up adds one to every desktop startup, so a session with no
@@ -290,6 +296,7 @@ impl NativeSession {
             held_input: Vec::new(),
             hold_lifted: false,
             hold_generation: 0,
+            takeover_sent: None,
             announced: Vec::new(),
         };
         (session, effects)
@@ -314,6 +321,7 @@ impl NativeSession {
         self.claims_owed = 0;
         self.held_input.clear();
         self.hold_lifted = false;
+        self.takeover_sent = None;
     }
 
     /// Whether engine-bound input has to wait: from the takeover that left
@@ -383,18 +391,39 @@ impl NativeSession {
     /// engine.
     #[must_use]
     pub(crate) fn follow_up(&mut self, model: &mut Model, stage: Stage) -> Vec<Effect> {
+        self.follow_up_at(model, stage, std::time::Instant::now())
+    }
+
+    /// [`Self::follow_up`] with the pass's clock reading passed in.
+    fn follow_up_at(
+        &mut self,
+        model: &mut Model,
+        stage: Stage,
+        now: std::time::Instant,
+    ) -> Vec<Effect> {
         let holding = self.holds_input();
         let mut effects = self.follow_up_stage(model, stage);
         if holding || self.holds_input() {
             self.claims_owed += effects.iter().filter(|e| answers_with_claims(e)).count();
         }
+        let takeover_answered = matches!(stage, Stage::Claims)
+            .then(|| self.takeover_sent.take())
+            .flatten();
         // last, so the takeover batch still leads the pass that starts a
         // hold (`runtime::dispatch` splits the attach off at the first
         // effect that is not one)
-        if !holding && self.holds_input() {
+        let bound = if !holding && self.holds_input() {
+            self.takeover_sent = Some(now);
+            Some(CHORD_HOLD_BOUND)
+        } else if holding && self.holds_input() {
+            takeover_answered.map(|sent| CHORD_HOLD_BOUND + now.saturating_duration_since(sent))
+        } else {
+            None
+        };
+        if let Some(after) = bound {
             self.hold_generation += 1;
             effects.push(Effect::ScheduleChordHold {
-                after: CHORD_HOLD_BOUND,
+                after,
                 generation: self.hold_generation,
             });
         }
@@ -857,6 +886,7 @@ impl NativeSession {
             held_input: Vec::new(),
             hold_lifted: false,
             hold_generation: 0,
+            takeover_sent: None,
             announced: Vec::new(),
         }
     }
@@ -888,6 +918,7 @@ impl NativeSession {
             held_input: Vec::new(),
             hold_lifted: false,
             hold_generation: 0,
+            takeover_sent: None,
             announced: Vec::new(),
         }
     }
@@ -1220,6 +1251,7 @@ mod tests {
             held_input: Vec::new(),
             hold_lifted: false,
             hold_generation: 0,
+            takeover_sent: None,
             announced: Vec::new(),
         };
         let mut m = model();
@@ -1300,6 +1332,7 @@ mod tests {
             held_input: Vec::new(),
             hold_lifted: false,
             hold_generation: 0,
+            takeover_sent: None,
             announced: Vec::new(),
         };
         let mut m = model();
@@ -1374,6 +1407,7 @@ mod tests {
             held_input: Vec::new(),
             hold_lifted: false,
             hold_generation: 0,
+            takeover_sent: None,
             announced: Vec::new(),
         };
         let mut m = model();
@@ -1891,6 +1925,88 @@ cycle_surfaces = \"gz\"
         assert!(
             !session.holds_input(),
             "the chord registration sent after the hold was lifted holds nothing"
+        );
+    }
+
+    /// A replacement engine started after a lifted hold holds input for its
+    /// own chords again, under a bound of its own.
+    #[test]
+    fn a_restart_after_a_lifted_hold_holds_input_again() {
+        let mut session = NativeSession::desktop(7, None);
+        let mut m = model();
+        let take_over = session.follow_up(&mut m, Stage::VimEnter);
+        let Some(&Effect::ScheduleChordHold { generation, .. }) = take_over.last() else {
+            panic!("the pass that starts the hold arms its bound last: {take_over:?}");
+        };
+        let _ = session.follow_up(&mut m, Stage::HoldExpired { generation });
+        assert!(!session.holds_input());
+        session.rebind(8);
+        let take_over = session.follow_up(&mut m, Stage::VimEnter);
+        assert!(
+            session.holds_input(),
+            "the replacement's chords are unmapped, so input typed during its launch waits"
+        );
+        assert!(
+            matches!(
+                take_over.last(),
+                Some(Effect::ScheduleChordHold { after, generation: next })
+                    if *after == CHORD_HOLD_BOUND && *next == generation + 1
+            ),
+            "the replacement's hold arms a bound under the next generation: {take_over:?}"
+        );
+    }
+
+    /// The bound armed again when the takeover answers, read from that
+    /// reply: `CHORD_HOLD_BOUND` plus the takeover's round trip from the
+    /// pass that sent it.
+    fn rearmed_after(round_trip: std::time::Duration) -> std::time::Duration {
+        let mut session = NativeSession::desktop(7, None);
+        let mut m = model();
+        let sent = std::time::Instant::now();
+        let _ = session.follow_up_at(&mut m, Stage::VimEnter, sent);
+        let answered = session.follow_up_at(&mut m, Stage::Claims, sent + round_trip);
+        assert!(
+            session.holds_input(),
+            "the chord registration is still owed"
+        );
+        let Some(&Effect::ScheduleChordHold { after, generation }) = answered.last() else {
+            panic!("the takeover's reply arms the bound again: {answered:?}");
+        };
+        assert_eq!(generation, 2, "the bound armed at VimEnter is superseded");
+        after
+    }
+
+    /// An engine across a slow link still owes the chord registration's own
+    /// round trip when the takeover answers, so the bound grows by the round
+    /// trip the takeover measured. A local engine's round trip leaves it
+    /// where it was.
+    #[test]
+    fn a_slow_takeover_extends_the_bound_by_its_round_trip() {
+        let slow = std::time::Duration::from_millis(400);
+        assert_eq!(
+            rearmed_after(slow),
+            CHORD_HOLD_BOUND + slow,
+            "a 400 ms link owes the registration's round trip past the reply"
+        );
+        let fast = std::time::Duration::from_micros(500);
+        let from_vim_enter = fast + rearmed_after(fast);
+        assert!(
+            from_vim_enter <= CHORD_HOLD_BOUND + std::time::Duration::from_millis(1),
+            "a local round trip moved the bound to {from_vim_enter:?} after VimEnter"
+        );
+    }
+
+    /// The bound sits at least twice above the slowest reply the chord
+    /// registration was measured at after `VimEnter`, the worst launch under
+    /// a login config on dev-linux, whose draws the commit that set the bound
+    /// records. A bound under it releases a chord typed during an ordinary
+    /// launch unmapped.
+    #[test]
+    fn the_bound_outlasts_the_slowest_measured_registration_reply() {
+        let slowest_reply = std::time::Duration::from_millis(125);
+        assert!(
+            CHORD_HOLD_BOUND >= slowest_reply * 2,
+            "{CHORD_HOLD_BOUND:?} leaves the {slowest_reply:?} reply no margin"
         );
     }
 

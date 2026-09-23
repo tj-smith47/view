@@ -469,10 +469,9 @@ struct Route {
     /// are mapped. Every one queued here must eventually be delivered, not
     /// merely the newest.
     ///
-    /// One queue for all three kinds rather than one each: what they share
-    /// is the "never drop, never reorder" contract, and a queue of its own
-    /// would only let a message in one overtake a message in another,
-    /// which nothing wants.
+    /// One queue for all three kinds: they share the never-drop,
+    /// never-reorder contract, and separate queues would let a message in
+    /// one overtake a message in another, which nothing wants.
     deferred_queued: VecDeque<Msg>,
 }
 
