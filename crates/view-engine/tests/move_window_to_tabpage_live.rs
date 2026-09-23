@@ -112,6 +112,110 @@ fn to_tabpage_from_a_lone_window_closes_its_tabpage_and_keeps_its_view() {
     );
 }
 
+/// A window moved off a tabpage that keeps another window leaves that
+/// tabpage standing, so nothing renumbers: three tabpages before and after,
+/// the moved window on tabpage 2 where it was sent, the one it shared a
+/// tabpage with still on tabpage 1, and the moved window's buffer, cursor
+/// and scrolled-to line crossing with it.
+#[test]
+fn to_tabpage_moves_the_window_and_keeps_its_view() {
+    let engine = spawn_attached();
+    let handle = &engine.handle;
+
+    let lines: Vec<String> = (1..=60).map(|n| format!("line {n}")).collect();
+    handle
+        .command(&format!(":call setline(1, {lines:?})"))
+        .unwrap();
+    handle.command(":40").unwrap();
+    handle.command(":normal! zt").unwrap();
+    handle.command(":vnew").unwrap();
+    let stays: u64 = handle.eval_str("win_getid()").unwrap().parse().unwrap();
+    handle.command(":wincmd l").unwrap();
+    handle.command(":tabnew").unwrap();
+    handle.command(":tabnew").unwrap();
+    handle.command(":tabfirst").unwrap();
+    handle.command(":wincmd l").unwrap();
+    assert_eq!(
+        handle.eval_str("tabpagewinnr(1, '$')").unwrap(),
+        "2",
+        "the fixture must leave two windows on the source tabpage"
+    );
+
+    let win: u64 = handle.eval_str("win_getid()").unwrap().parse().unwrap();
+    let buf: u64 = handle.eval_str("bufnr('%')").unwrap().parse().unwrap();
+    let want_line: i64 = handle.eval_str("line('.')").unwrap().parse().unwrap();
+    let want_col: i64 = handle.eval_str("col('.')").unwrap().parse().unwrap();
+    let want_topline: i64 = handle
+        .eval_str("winsaveview()['topline']")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(want_line, 40, "the fixture must land the cursor on line 40");
+
+    handle.move_window_to_tabpage(win, 2).unwrap();
+    let _ = handle.eval_str("1").unwrap();
+
+    assert_eq!(
+        handle.eval_str("tabpagenr('$')").unwrap(),
+        "3",
+        "the source tabpage kept a window, so no tabpage closed and none opened"
+    );
+    assert_eq!(
+        handle
+            .eval_str(&format!("win_id2tabwin({stays})[0]"))
+            .unwrap(),
+        "1",
+        "the window left behind must still stand on the source tabpage"
+    );
+    assert_eq!(
+        handle.eval_str("tabpagewinnr(1, '$')").unwrap(),
+        "1",
+        "the source tabpage must hold only the window left behind"
+    );
+    assert_eq!(
+        handle
+            .eval_str(&format!("len(win_findbuf({buf}))"))
+            .unwrap(),
+        "1",
+        "the buffer must be showing in exactly the one window it moved to"
+    );
+    let moved = format!("win_findbuf({buf})[0]");
+    assert_eq!(
+        handle
+            .eval_str(&format!("win_id2tabwin({moved})[0]"))
+            .unwrap(),
+        "2",
+        "the window must have landed on the tabpage it was sent to"
+    );
+    assert_eq!(
+        handle
+            .eval_str(&format!("line('.', {moved})"))
+            .unwrap()
+            .parse::<i64>()
+            .unwrap(),
+        want_line,
+        "the cursor line must have crossed with the window"
+    );
+    assert_eq!(
+        handle
+            .eval_str(&format!("col('.', {moved})"))
+            .unwrap()
+            .parse::<i64>()
+            .unwrap(),
+        want_col,
+        "the cursor column must have crossed with the window"
+    );
+    assert_eq!(
+        handle
+            .eval_str(&format!("getwininfo({moved})[0].topline"))
+            .unwrap()
+            .parse::<i64>()
+            .unwrap(),
+        want_topline,
+        "the scrolled-to line must have crossed with the window"
+    );
+}
+
 /// A destination past `tabpagenr('$')` creates one at the end rather than
 /// refusing or clamping to the last existing tabpage.
 #[test]

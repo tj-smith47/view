@@ -1898,6 +1898,122 @@ mod tests {
         let _ = engine.wait_exit();
     }
 
+    /// A desktop chord typed while the takeover's reply is still crossing a
+    /// slow link runs view's desktop action. The reply is delivered at
+    /// `REPLY_AT`, past the first bound, and the chord is typed at
+    /// `TYPED_AT`, after that bound expired with the reply still out, so the
+    /// hold's re-arm is what keeps the chord from reaching nvim before its
+    /// mapping does.
+    #[cfg(unix)]
+    #[test]
+    fn a_chord_typed_before_a_late_takeover_reply_runs_its_desktop_action() {
+        const TYPED_AT: std::time::Duration = std::time::Duration::from_millis(350);
+        const REPLY_AT: std::time::Duration = std::time::Duration::from_millis(400);
+        const _: () = assert!(
+            TYPED_AT.as_millis() > crate::native::CHORD_HOLD_BOUND.as_millis()
+                && REPLY_AT.as_millis() > TYPED_AT.as_millis()
+        );
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(256);
+        let mut engine = Engine::spawn(EngineConfig::isolated().with_late_attach(80, 24)).unwrap();
+        let (_pump, cutover) = engine.start_pump(tx.clone());
+        let executor = crate::runtime::Executor::new(engine.handle.clone())
+            .with_toast_timer(crate::wake::LoopSender::new(tx));
+        let mut model = Model::with_term_size(80, 24);
+        let mut native = crate::native::NativeSession::desktop(engine.api_info.channel_id, None);
+        let mut theme = crate::bridge::ThemeBridge::new(None, None);
+        let mut follow_ups = crate::runtime::FollowUps {
+            native: &mut native,
+            theme: &mut theme,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let (modifier, _, _) = view_native::config::profile::modifier_for(
+            view_core::native::chords::ModifierChoice::Auto,
+            model.caps.kitty_kbd,
+        );
+        let chord = view_core::native::chords::desktop_chord("zoom")
+            .expect("the zoom chord is a shipped row")
+            .lhs(modifier);
+
+        let deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(8));
+        let mut incoming = cutover.presink.into_iter();
+        let mut vim_enter_at: Option<std::time::Instant> = None;
+        let mut typed = false;
+        let mut withheld: Option<Msg> = None;
+        let mut delivered = false;
+        let mut seen = Vec::new();
+        let invoked = loop {
+            let now = std::time::Instant::now();
+            let type_at = vim_enter_at.filter(|_| !typed).map(|at| at + TYPED_AT);
+            let reply_at = vim_enter_at
+                .filter(|_| withheld.is_some())
+                .map(|at| at + REPLY_AT);
+            let pending = if type_at.is_some_and(|at| at <= now) {
+                typed = true;
+                Some(Msg::Key(key(chord)))
+            } else if reply_at.is_some_and(|at| at <= now) {
+                delivered = true;
+                withheld.take()
+            } else {
+                None
+            };
+            if let Some(msg) = pending {
+                seen.push(format!("{msg:?}").chars().take(80).collect::<String>());
+                let flow = crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, msg);
+                assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
+                continue;
+            }
+            let wait = [type_at, reply_at]
+                .into_iter()
+                .flatten()
+                .fold(deadline, std::cmp::min);
+            let msg = match incoming.next() {
+                Some(msg) => msg,
+                None => match rx.recv_timeout(wait.saturating_duration_since(now)) {
+                    Ok(msg) => msg,
+                    Err(_) if std::time::Instant::now() < deadline => continue,
+                    Err(_) => break false,
+                },
+            };
+            if let Msg::FeatureInvoke { feature, verb } = &msg {
+                if feature == "window" && verb == "zoom" {
+                    break true;
+                }
+            }
+            // the takeover's own reply, which nvim answers in milliseconds,
+            // held back until the link's delay is spent
+            if !delivered && withheld.is_none() && matches!(msg, Msg::MappingsClaimed { .. }) {
+                withheld = Some(msg);
+                continue;
+            }
+            seen.push(format!("{msg:?}").chars().take(80).collect::<String>());
+            if matches!(msg, Msg::RedrawReady) {
+                continue;
+            }
+            if matches!(
+                msg,
+                Msg::EngineRequest(view_core::msg::EngineRequest::VimEnter { .. })
+            ) {
+                vim_enter_at = Some(std::time::Instant::now());
+            }
+            let flow = crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, msg);
+            assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
+        };
+        assert!(typed, "nvim never asked for its VimEnter answer: {seen:?}");
+        assert!(
+            delivered,
+            "the takeover's reply was never held back, so the hold's re-arm \
+             went unexercised: {seen:?}"
+        );
+        assert!(
+            invoked,
+            "{chord} typed ahead of a late takeover reply ran as nvim's own \
+             keys, so the hold let it through before its mapping existed; \
+             saw {seen:?}"
+        );
+        let _ = engine.wait_exit();
+    }
+
     /// A config that prints a multi-line message from a `vim.schedule`
     /// queued at `VimEnter` puts a live nvim at a hit-enter prompt ahead of
     /// the chord registration, in a desktop session that leaves messages to
@@ -1985,11 +2101,13 @@ mod tests {
                 Msg::RedrawReady => Msg::Redraw(pump.take_damage()),
                 msg => msg,
             };
-            let flow = crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, msg);
-            assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
+            // taken ahead of the dispatch that stamps the takeover's send,
+            // so a lift at the ceiling never reads short of it
             if vim_enter {
                 vim_enter_at = Some(std::time::Instant::now());
             }
+            let flow = crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, msg);
+            assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
             if withheld.is_some() && !follow_ups.native.holds_input() {
                 if let (Some(at), None) = (vim_enter_at, lift_elapsed) {
                     lift_elapsed = Some(at.elapsed());

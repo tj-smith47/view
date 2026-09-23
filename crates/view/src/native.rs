@@ -64,7 +64,7 @@ pub(crate) enum Stage {
 /// up to [`CHORD_HOLD_CEILING`]. Once the takeover answers, the bound is
 /// armed again from that reply with the takeover reply time added, so an
 /// engine across a slow link is given the time the registration still owes.
-const CHORD_HOLD_BOUND: std::time::Duration = std::time::Duration::from_millis(300);
+pub(crate) const CHORD_HOLD_BOUND: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// How long after `VimEnter` input may wait for a takeover that has not
 /// answered. A single-grid session sends no sign of a prompt, so this is
