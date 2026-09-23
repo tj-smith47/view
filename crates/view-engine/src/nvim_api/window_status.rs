@@ -1,9 +1,9 @@
 //! The bridge's `window` trigger: one report per window whose own status
 //! segments changed.
 //!
-//! Beside the `view_bridge` chunk, outside it, because this group
-//! answers a different question: the session-wide segments there are one
-//! value each, and these are one value per window.
+//! A group of its own beside the `view_bridge` chunk, because it answers a
+//! different question: the session-wide segments there are one value each,
+//! and these are one value per window.
 //!
 //! # The throttle
 //!

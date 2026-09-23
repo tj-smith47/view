@@ -59,10 +59,10 @@ use view_core::native::mappings::{
 /// tree -- would otherwise leave the reading `false` and speculate a
 /// palette for a key that reaches the mapping.
 ///
-/// Those listeners get an augroup of their own (`view_colon_map`) rather
-/// than joining another that retires itself: a group that stops listening
-/// part way through a session leaves every plugin loaded after that free
-/// to map `:` unobserved.
+/// Those listeners get an augroup of their own (`view_colon_map`) that
+/// never retires itself: a group that stops listening part way through a
+/// session leaves every plugin loaded after that free to map `:`
+/// unobserved.
 ///
 /// A run first restores whatever the previous run left in
 /// `vim.g.view_registered_keys` -- a profile flip or a late kitty-protocol
@@ -237,9 +237,9 @@ impl super::EngineHandle {
     /// session mapped no key to.
     ///
     /// A spec whose tokens [cannot be spelled](is_spellable) inside the
-    /// mapping the chunk generates is dropped here and never sent: this
-    /// method takes any `&[MappingSpec]`, and the table's own vetting in
-    /// `view-core` cannot speak for a spec a future caller assembles.
+    /// mapping the chunk generates is dropped here: this method takes any
+    /// `&[MappingSpec]`, and the table's own vetting in `view-core` cannot
+    /// speak for a spec a future caller assembles.
     /// Dropping is the safe direction -- view registers nothing, so the key
     /// stays whatever the user's config made it -- and the omission is
     /// visible, since a dropped spec returns no claim either.

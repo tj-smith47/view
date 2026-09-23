@@ -529,10 +529,10 @@ impl NativeSession {
     /// run once, since no registration exists yet for either to correct.
     ///
     /// The reissue is a second `RegisterMappings` on its own, outside any
-    /// `Takeover` batch: `REGISTER_MAPPINGS_CHUNK`
-    /// (`view-engine`'s `nvim_api/mappings.rs`) restores whatever it
-    /// unmapped the call before, so resending it is the whole of "give the
-    /// old plan back, then apply the new one."
+    /// `Takeover` batch: `REGISTER_MAPPINGS_CHUNK` (`view-engine`'s
+    /// `nvim_api/mappings.rs`) restores whatever it unmapped the call before,
+    /// so resending it is the whole of "give the old plan back, then apply
+    /// the new one."
     fn reissue_mappings(&mut self, model: &mut Model, stage: Stage) -> Vec<Effect> {
         if stage == Stage::ProfileFlip && model.key_profile_report_requested {
             model.key_profile_report_requested = false;
@@ -1674,12 +1674,13 @@ composer_newline = \"<A-x>\"
         );
     }
 
-    /// `toggle_gaps`/`cycle_surfaces` are real nvim mappings, not
-    /// [`KeyBindings`] chords, so a `[keys]` override of either has no
-    /// two-key ceiling: this rebinds one to a bare function key and the
-    /// other to a two-character chord and checks both land on the spec
-    /// `take_over` actually registers, the way `mappings_live.rs` checks a
-    /// registered `lhs` against a real nvim beside the plan.
+    /// `toggle_gaps`/`cycle_surfaces` are real nvim mappings, and the
+    /// two-key ceiling is a [`KeyBindings`] chord's alone, so a `[keys]`
+    /// override of either may be any length: this rebinds one to a bare
+    /// function key and the other to a two-character chord and checks both
+    /// land on the spec `take_over` actually registers, the way
+    /// `mappings_live.rs` checks a registered `lhs` against a real nvim
+    /// beside the plan.
     #[test]
     fn load_carries_a_ui_key_rebind_of_either_shape_into_the_registered_mapping() {
         let dir = view_test_support::ScratchDir::new("native-ui-keys").unwrap();

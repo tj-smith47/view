@@ -111,17 +111,16 @@ impl Anchor {
     }
 
     /// Whether this corner sits on the terminal's top edge (`TopLeft`,
-    /// `TopRight`). Only meaningful for a corner;
-    /// a non-corner anchor answers `true` (nothing reads it in that case).
+    /// `TopRight`). Only meaningful for a corner; a non-corner anchor
+    /// answers `true` (nothing reads it in that case).
     #[must_use]
     pub const fn is_top_corner(self) -> bool {
         !matches!(self, Self::BottomLeft | Self::BottomRight)
     }
 
     /// Whether this corner sits on the terminal's left edge (`TopLeft`,
-    /// `BottomLeft`). Only meaningful for a
-    /// corner; a non-corner anchor answers `true` (nothing reads it in that
-    /// case).
+    /// `BottomLeft`). Only meaningful for a corner; a non-corner anchor
+    /// answers `true` (nothing reads it in that case).
     #[must_use]
     pub const fn is_left_corner(self) -> bool {
         !matches!(self, Self::TopRight | Self::BottomRight)
@@ -352,7 +351,7 @@ impl OverlayRect {
 
 /// One of view's own surfaces: a feature that draws beside the buffer.
 ///
-/// Named on its own, apart from [`crate::model::OverlayKind`], because a
+/// A type of its own beside [`crate::model::OverlayKind`], because a
 /// surface exists whether or not it is open, and the placement a user
 /// configures for it is read before anything opens.
 #[non_exhaustive]
@@ -591,9 +590,8 @@ pub const PALETTE_BAND_MIN_ROWS: u16 = 4;
 /// own content: the band's height floors at [`PALETTE_BAND_MIN_ROWS`]
 /// first, and the gap is added on top of that floor, which is what keeps a
 /// small `size` from painting an emptied frame with the typed text nowhere
-/// to land. A terminal too short to hold
-/// the floor plus its own gap has nowhere left to shrink, so this open
-/// falls back to the centred float instead.
+/// to land. A terminal too short to hold the floor plus its own gap has
+/// nowhere left to shrink, so this open falls back to the centred float.
 ///
 /// Under gaps the band sits two rings in from the terminal edge, the same
 /// two `frames::paint_frames` draws around a real tile (the outer one

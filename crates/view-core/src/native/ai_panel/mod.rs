@@ -2302,12 +2302,12 @@ mod tests {
         );
     }
 
-    /// The windowed placement's own case: `focused` never sets for it (see
-    /// its doc), so a caller with the keyboard passes `has_keyboard` as its
-    /// own true, whatever `self.focused` says. `view()` must read that
-    /// argument for the title and every hint -- the field
-    /// alone reading `false` here is what let a windowed, entered panel
-    /// draw `ENTER_HINT` and the verb-form dismiss hint over its own answer.
+    /// The windowed placement's own case: `focused` never sets for it (see its
+    /// doc), so a caller with the keyboard passes `has_keyboard` as its own
+    /// true, whatever `self.focused` says. `view()` must read that argument
+    /// for the title and every hint -- the field alone reading `false` here is
+    /// what let a windowed, entered panel draw `ENTER_HINT` and the verb-form
+    /// dismiss hint over its own answer.
     #[test]
     fn an_unfocused_panel_with_the_keyboard_renders_as_focused() {
         let mut state = AiPanelState::new();

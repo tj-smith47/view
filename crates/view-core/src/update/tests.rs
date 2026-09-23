@@ -14614,8 +14614,8 @@ fn windowed_palette_model() -> Model {
     let mut m = model();
     // `[native] palette = false` (the default) leaves `palette_windowed_active`
     // false even with the layout below set to windowed: this fixture is
-    // about the *enabled* windowed palette, so it says so explicitly rather
-    // than lean on a default that would silently stop opening a window.
+    // about the *enabled* windowed palette, so it says so explicitly: a
+    // default that changed would silently stop opening a window.
     m.palette_enabled = true;
     m.surfaces.set_layout(
         crate::native::geometry::NativeSurface::Palette,
@@ -15023,9 +15023,9 @@ fn leader_leader_invoke_opens_the_command_line() {
 /// [`crate::native::mappings::review_keys`] name is a `(feature, verb)`
 /// pair a key or a `:View` form can actually send as a
 /// [`Msg::FeatureInvoke`]; a row with no arm in this file's own dispatch
-/// falls through to [`feature_invoke_notice`]'s "no handler" text instead
-/// of doing anything, which is the same as a key nobody ever finishes
-/// wiring up. Walked so a row added to any of the three tables without a
+/// falls through to [`feature_invoke_notice`]'s "no handler" text and does
+/// nothing else, which is the same as a key nobody ever finishes wiring
+/// up. Walked so a row added to any of the three tables without a
 /// matching arm here fails this test by the row's own name.
 #[test]
 fn every_registered_feature_invoke_has_a_dispatch_handler() {
@@ -15147,9 +15147,9 @@ fn an_open_panel_keeps_its_transcript_across_a_cycle() {
 }
 
 /// A cycle step taken while the tree's open is still pending retires that
-/// open: the generation moves, so the
-/// stale reply below reads as one, and `pending_open` clears since nothing
-/// here is waiting on the retired call's outcome any more.
+/// open: the generation moves, so the stale reply below reads as one, and
+/// `pending_open` clears since nothing here is waiting on the retired call's
+/// outcome any more.
 #[test]
 fn a_cycle_step_retires_a_pending_open_instead_of_leaving_it_to_land() {
     use crate::native::geometry::NativeSurface;
@@ -15205,10 +15205,9 @@ fn a_cycle_step_retires_a_pending_open_instead_of_leaving_it_to_land() {
 }
 
 /// [`a_cycle_step_retires_a_pending_open_instead_of_leaving_it_to_land`],
-/// through `:View ai close`: the one close a
-/// windowed surface answers with no live focus to gate it on, since
-/// `close_windowed_agent` is reachable the moment the panel is windowed at
-/// all, pending open included.
+/// through `:View ai close`: the one close a windowed surface answers with
+/// no live focus to gate it on, since `close_windowed_agent` is reachable
+/// the moment the panel is windowed at all, pending open included.
 #[test]
 fn closing_a_pending_windowed_agent_retires_its_open_instead_of_leaving_it_to_land() {
     use crate::native::geometry::NativeSurface;
@@ -15460,8 +15459,8 @@ fn resizing_a_windowed_sidebar_carries_its_new_width_into_a_siblings_own_loose_f
 /// A width stepped while the tree floats has to survive the next ring step
 /// to windowed: `open_native_window` reads `layout.size` alone, so a resize
 /// taken as an overlay that never wrote it back would open the window at
-/// whatever share the config or the last windowed spell left there instead
-/// of the one the user just chose.
+/// whatever share the config or the last windowed spell left there, and the
+/// one the user just chose would be lost.
 #[test]
 fn a_width_stepped_while_the_tree_floats_survives_the_next_ring_step_to_windowed() {
     use crate::native::geometry::NativeSurface;
@@ -15561,11 +15560,10 @@ fn a_second_surface_opening_onto_a_shared_edge_carries_its_size_into_the_first_o
 }
 
 /// `<C-w>>`/`<C-w><` -- nvim's own window-resize chord, two keys where the
-/// tests above press one -- resolves inside a
-/// windowed tree exactly as the single key does: the chord's first key
-/// arms `model.pending_chord` and the dispatch guard has to let it survive
-/// `Focus::Pane(Tree)`, which holds no [`OverlayKind`] for the guard's
-/// original overlay-only check to find.
+/// tests above press one -- resolves inside a windowed tree exactly as the
+/// single key does: the chord's first key arms `model.pending_chord` and the
+/// dispatch guard has to let it survive `Focus::Pane(Tree)`, which holds no
+/// [`OverlayKind`] for the guard's original overlay-only check to find.
 #[test]
 fn the_resize_chord_resolves_inside_a_windowed_tree() {
     let mut m = focused_windowed_tree();
@@ -15727,9 +15725,9 @@ fn ctrl_w_prefix_and_follower_travel_together_for_every_windowed_surface() {
         },
         // nvim's own next-window chord, typed the way muscle memory
         // types it: the resolver re-arms `pending_chord` for a follower
-        // that completes nothing, keeping the prefix, and
-        // each pane owns no share for either tap to step, so the pair
-        // must reach nvim together and leave nothing armed behind it.
+        // that completes nothing, keeping the prefix, and each pane owns no
+        // share for either tap to step, so the pair must reach nvim
+        // together and leave nothing armed behind it.
         Case {
             name: "tree next window",
             model: focused_windowed_tree,
@@ -15853,11 +15851,10 @@ fn the_resize_chords_first_key_survives_inside_a_windowed_palette() {
 /// action this build claims -- both keys have to reach nvim raw, together,
 /// or the windowed stream would swallow an ordinary window command as a
 /// no-op history keystroke. The prefix is held until its follower arrives:
-/// nvim must never be told a window
-/// command is coming and then be left without a follower, which is what
-/// the resize chord below would do to it. See
-/// [`the_resize_chord_resolves_inside_a_windowed_stream`] for the sibling
-/// chord this same `<C-w>` prefix also has to still resolve.
+/// nvim must never be told a window command is coming and then be left
+/// without a follower, which is what the resize chord below would do to it.
+/// See [`the_resize_chord_resolves_inside_a_windowed_stream`] for the
+/// sibling chord this same `<C-w>` prefix also has to still resolve.
 #[test]
 fn a_window_command_the_resize_chord_does_not_claim_still_reaches_nvim_from_the_stream() {
     let mut m = focused_windowed_notifications();
@@ -16373,12 +16370,11 @@ fn dismiss_leaves_a_standing_condition_alone() {
 /// both profiles -- is either a [`crate::native::mappings::default_maps`]
 /// row naming the same `(feature, verb)`, or one of the two `[keys]`
 /// single-notation actions (`toggle_gaps`, `cycle_surfaces`) a `view.toml`
-/// override reaches through `view-native`'s own registration path instead
-/// of this table. Every row ships as a `DEFAULT_MAPS` entry today, so
-/// `KEYS_ACTION_TWINS` is empty; it exists so a chord added later that
-/// deliberately reaches its twin through that other path fails by name
-/// here, where it would otherwise fall through to a `Cow`-empty row nothing
-/// registers.
+/// override reaches through `view-native`'s own registration path. Every
+/// row ships as a `DEFAULT_MAPS` entry today, so `KEYS_ACTION_TWINS` is
+/// empty; it exists so a chord added later that deliberately reaches its
+/// twin through that other path fails by name here, where it would
+/// otherwise fall through to a `Cow`-empty row nothing registers.
 #[test]
 fn every_twin_that_reaches_a_verb_is_a_default_map_row_or_a_keys_action() {
     use crate::native::chords::desktop_chords;

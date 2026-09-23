@@ -1,8 +1,8 @@
 //! What view keeps for itself out of the terminal, and the engine grid size
 //! that leaves.
 //!
-//! Beside [`Model`], outside it: the spawn needs the same
-//! arithmetic before a `Model` exists, so the free function and the two
+//! A free function sits beside [`Model`]'s methods here: the spawn needs
+//! the same arithmetic before a `Model` exists, so the function and the two
 //! bounds it holds to belong with the methods that call it.
 
 use super::Model;
@@ -24,8 +24,8 @@ impl Model {
     /// Terminal rows reserved for the bottom-row statusline bar: one while
     /// the `statusline` native feature is enabled, zero otherwise. Distinct
     /// from [`Model::chrome_rows`] (a top-row offset for the tabline alone)
-    /// -- `view-surface::render` uses both together to
-    /// find the engine grid's target size and the statusline layer's row.
+    /// -- `view-surface::render` uses both together to find the engine grid's
+    /// target size and the statusline layer's row.
     ///
     /// Under tiles the answer is zero whatever the switch says: each frame
     /// carries its own segments in its bottom edge, and nvim is held at
@@ -154,13 +154,12 @@ pub const ENGINE_MIN_SIZE: (u16, u16) = (12, 3);
 /// started on a pty whose size was never set lays out at 80x24 (measured
 /// against the pinned engine, for 0x0, 0x40 and 100x0 alike).
 ///
-/// A zero is not a hypothetical: a pty nothing has sized reports 0x0, and
-/// so does a real terminal for the first instant of a session still
-/// negotiating its size. Carrying one into the spawn is what makes it
-/// fatal -- the geometry `--cmd` opens with
-/// `vim.o.columns`, whose minimum is [`ENGINE_MIN_SIZE`], and the `E594`
-/// that raises aborts the whole chunk, taking the `VimEnter` hook the
-/// attach waits on with it.
-/// The session then paints its shell frame and waits out the attach
-/// deadline against a child that is alive and never says it started.
+/// A zero is not a hypothetical: a pty nothing has sized reports 0x0, and so
+/// does a real terminal for the first instant of a session still negotiating
+/// its size. Carrying one into the spawn is what makes it fatal -- the
+/// geometry `--cmd` opens with `vim.o.columns`, whose minimum is
+/// [`ENGINE_MIN_SIZE`], and the `E594` that raises aborts the whole chunk,
+/// taking the `VimEnter` hook the attach waits on with it. The session then
+/// paints its shell frame and waits out the attach deadline against a child
+/// that is alive and never says it started.
 pub const SIZE_FLOOR: (u16, u16) = (80, 24);

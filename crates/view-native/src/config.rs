@@ -772,11 +772,11 @@ fn resolve_key_bindings(table: &KeysTable) -> (KeyBindings, Vec<&'static str>) {
 /// (`crates/view/src/native.rs`'s `take_over`) mutating the built
 /// `RegisterMappings` spec in place.
 ///
-/// One notation: unlike the raw
-/// `KeyBindings` intercept the other three `[keys]` actions still resolve
-/// through, this key is a real nvim mapping, so there is no ceiling on how
-/// many raw keystrokes it may carry ([`view_core::native::mappings::
-/// lhs_is_spellable`] is the whole of what a value must pass).
+/// One notation: unlike the raw `KeyBindings` intercept the other three
+/// `[keys]` actions still resolve through, this key is a real nvim mapping,
+/// so there is no ceiling on how many raw keystrokes it may carry
+/// ([`view_core::native::mappings::lhs_is_spellable`] is the whole of what a
+/// value must pass).
 fn resolve_ui_lhs(
     value: &Option<toml::Value>,
     default: &'static str,
@@ -2650,11 +2650,11 @@ mod tests {
     ///
     /// `profile` and `desktop_modifier` are the one exception: the example
     /// spells `"auto"` out loud, the same way `[ui] tier`/`theme`/`panes`
-    /// spell `"auto"`, so their raw fields
-    /// differ from [`KeysConfig::default`]'s `None` even though they
-    /// resolve to the identical answer. Every `[keys.desktop]` row ships
-    /// commented out, so `desktop` itself parses empty: a row is written
-    /// only to override its chord's own derived spelling.
+    /// spell `"auto"`, so their raw fields differ from
+    /// [`KeysConfig::default`]'s `None` even though they resolve to the
+    /// identical answer. Every `[keys.desktop]` row ships commented out, so
+    /// `desktop` itself parses empty: a row is written only to override its
+    /// chord's own derived spelling.
     #[test]
     fn the_example_configs_keys_block_is_the_shipped_default() {
         let cfg = ViewConfig::from_toml_str(EXAMPLE_TOML).expect("the example must parse");

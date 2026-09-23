@@ -1,14 +1,14 @@
 # Contrast-frame comment lines each crate may hold (scripts/check-style.sh,
 # check_comment_frames). A row only ever comes down.
-view 588
-view-ai 288
-view-bench 277
-view-core 1074
-view-engine 811
-view-harness 423
-view-native 207
-view-oracle 671
-view-proc 22
-view-surface 132
-view-test-support 35
-view-tui 374
+view 635
+view-ai 306
+view-bench 295
+view-core 1148
+view-engine 890
+view-harness 461
+view-native 228
+view-oracle 713
+view-proc 23
+view-surface 141
+view-test-support 37
+view-tui 407

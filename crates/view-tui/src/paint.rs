@@ -979,15 +979,14 @@ fn reset_damaged_rows(buf: &mut Buffer, damage: &Damage) {
 /// bounds-checking lives in exactly one place.
 ///
 /// Each grapheme cluster advances the column by its own display width (1
-/// for ordinary text, 2 for wide characters like CJK ideographs) rather
-/// than unconditionally by one cell: a fixed one-column advance would place
-/// a wide character's glyph in a single cell it does not fit, misaligning
-/// every character painted after it on the row. A wide cluster's second
-/// (shadow) cell is reset so no later cluster in this same call can draw
-/// into it, matching the convention `ratatui::buffer::Buffer::set_stringn`
-/// itself uses for multi-width graphemes. A cluster wider than the columns
-/// left before the buffer's own row ends is written as a blank instead (see
-/// [`fitted_symbol`]).
+/// for ordinary text, 2 for wide characters like CJK ideographs): a fixed
+/// one-column advance would place a wide character's glyph in a single
+/// cell it does not fit, misaligning every character painted after it on
+/// the row. A wide cluster's second (shadow) cell is reset so no later
+/// cluster in this same call can draw into it, matching the convention
+/// `ratatui::buffer::Buffer::set_stringn` itself uses for multi-width
+/// graphemes. A cluster wider than the columns left before the buffer's own
+/// row ends is written as a blank instead (see [`fitted_symbol`]).
 fn paint_text_row(
     text: &str,
     style: Style,
@@ -7502,8 +7501,7 @@ mod tests {
             // build the picture it asserts against
             let production = text.split("#[cfg(test)]").next().unwrap_or(text);
             // the module the two primitives live in is where a symbol
-            // reaches a cell at all, so its own writes are the rule rather
-            // than a breach of it
+            // reaches a cell at all, so its own writes are the rule
             let shared = name.ends_with("paint/text.rs") || name.ends_with("paint\\text.rs");
             for (function, body) in fn_bodies(production) {
                 // a comment naming a writer writes nothing

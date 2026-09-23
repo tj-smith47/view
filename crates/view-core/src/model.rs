@@ -50,7 +50,7 @@ pub struct Model {
     /// engine I/O this pure crate cannot perform. `Some(None)` is not a
     /// representable state -- "auto" resets to `None`, the same absence a
     /// session that never flipped starts in -- so [`KeyProfile`] itself
-    /// carries the flip, with no nested option.
+    /// carries the flip in a single `Option`.
     pub key_profile_override: Option<crate::native::chords::KeyProfile>,
     /// `:View keys profile` with no argument: `update()` sets this and
     /// leaves [`Self::key_profile_override`] alone, since a bare report
@@ -248,8 +248,8 @@ pub struct Model {
     pub showtabline: u8,
     /// nvim's own `winminwidth`/`winminheight`, as the bridge last relayed
     /// them: the floor `<C-w>_<C-w>|` squeezes a tiled sibling to, which
-    /// `update::surfaces::tile_is_zoomed` reads a sibling against instead
-    /// of assuming nvim's own default of `1`.
+    /// `update::surfaces::tile_is_zoomed` reads a sibling against. nvim's
+    /// own default is `1`.
     ///
     /// Holds nvim's default until the bridge's first reading arrives, the
     /// same way [`Self::showtabline`] does: `window zoom` reads real
@@ -2149,10 +2149,10 @@ pub enum Focus {
     /// rather than by focus.
     Native(OverlayId),
     /// A windowed surface owns the keyboard: the cursor sits in the window
-    /// view opened for it, so keys route to that surface's own view rather
-    /// than to the engine. Derived from the cursor's own grid, which nvim
-    /// moves with every window command, so a `<C-w>h` into the tree and a
-    /// click on it reach the same answer with nothing of view's involved.
+    /// view opened for it, so keys route to that surface's own view. It is
+    /// derived from the cursor's own grid, which nvim moves with every
+    /// window command, so a `<C-w>h` into the tree and a click on it reach
+    /// the same answer with nothing of view's involved.
     Pane(crate::native::geometry::NativeSurface),
 }
 
@@ -2280,7 +2280,7 @@ pub enum MouseCapture {
     /// The command palette received the press: it carries no [`OverlayId`]
     /// of its own (it paints straight off `engine.cmdline` in either
     /// placement, never through the overlay stack), so its capture is its
-    /// own variant, with no fabricated overlay id.
+    /// own variant, which needs no overlay id.
     Palette,
 }
 

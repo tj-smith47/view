@@ -191,9 +191,9 @@ mod tests {
     }
 
     /// A row too narrow for every name is a window into the list, so its
-    /// first run is not the first entry. Painting along the list instead
-    /// of by the index each run names put a neighbour's name under every
-    /// one of them.
+    /// first run is not the first entry. Each run paints the name at the
+    /// index it names; walking the list in order put a neighbour's name
+    /// under every one of them.
     #[test]
     fn a_row_too_narrow_for_the_list_paints_the_names_its_slots_name() {
         // room for two of the four names, so the window holds the current

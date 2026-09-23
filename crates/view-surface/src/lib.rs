@@ -561,13 +561,13 @@ pub fn render(model: &Model) -> Surface {
         } else if model.palette_enabled {
             // A windowed palette paints through this same arm, at
             // `palette_rect`'s full-width band (`Model::palette_rect`'s
-            // own doc) -- one `PaletteView` and
-            // one push, whichever placement is live, so the tile and the float can
-            // never carry two different pictures of the same command line
-            // only a cmdline-sourced popupmenu (`is_cmdline_sourced`) ever
-            // renders inside the palette; a buffer-anchored completion
-            // (insert-mode keyword/LSP completion) keeps its own
-            // `Popupmenu` layer below, at the cursor, never here
+            // own doc) -- one `PaletteView` and one push, whichever
+            // placement is live, so the tile and the float always carry the
+            // same picture of the command line; only a cmdline-sourced
+            // popupmenu (`is_cmdline_sourced`) renders inside the palette,
+            // and a buffer-anchored completion (insert-mode keyword/LSP
+            // completion) keeps its own `Popupmenu` layer below, at the
+            // cursor
             let completion = engine
                 .popupmenu
                 .as_ref()
@@ -1453,10 +1453,11 @@ fn query_cursor(rect: OverlayRect, query: &str) -> (u16, u16) {
 /// Adds no `offset` of its own: the layer's rect came from
 /// [`Model::overlay_rect`], which has already put the chrome rows into it.
 ///
-/// `find_map` over `layers` costs a scan of this frame's own overlay stack
-/// (at most a handful of entries, never the buffer), replacing what used
-/// to be a plain field read; the trade is one bounded scan per paint for a
-/// caret that lands inside the panel's own tile.
+/// `find_map` over `layers` costs one bounded scan per paint of this
+/// frame's own overlay stack (at most a handful of entries). The plain
+/// field read it replaced left the caret wherever the engine's grid cursor
+/// last happened to sit; the layer's rect puts it inside the panel's own
+/// tile.
 fn ai_cursor(model: &Model, layers: &[Layer]) -> Option<CursorSpec> {
     let (rect, view) = layers.iter().find_map(|layer| match &layer.kind {
         LayerKind::Ai(view) => Some((layer.rect, view)),
@@ -2092,9 +2093,9 @@ mod tests {
 
     #[test]
     fn the_top_row_spans_the_terminal_whatever_the_grid_holds() {
-        // the row stands above the engine's grid, so
-        // a grid narrower than the terminal leaves the names centred on the
-        // terminal, which is the width the mouse router hit-tests at
+        // the row stands above the engine's grid, so a grid narrower than
+        // the terminal leaves the names centred on the terminal, which is
+        // the width the mouse router hit-tests at
         let mut model = model_with_grid(3, 4);
         // seated wider than the grid: a terminal left at zero would let a
         // row laid out on the grid pass a pin about the terminal, and a
@@ -2207,8 +2208,8 @@ mod tests {
     /// mode puts them.
     ///
     /// Every grid-space layer the scene opens is read off the surface, so a
-    /// layer kind added later is walked by
-    /// this test without being added to it.
+    /// layer kind added later is walked by this test without being added to
+    /// it.
     ///
     /// Disconfirm: add only `chrome_rows()` to any of them and that one
     /// stops moving between the looks, which is the cell above and left of
@@ -3872,11 +3873,10 @@ mod tests {
         }
     }
 
-    /// An enabled windowed palette's cmdline state paints through the
-    /// same `Palette` layer the centred placement pushes, at
-    /// `palette_rect`'s full-width band, so
-    /// `render()` must add that layer and never the bare bottom-row
-    /// `Cmdline` echo beside it -- the two would be a second copy of the
+    /// An enabled windowed palette's cmdline state paints through the same
+    /// `Palette` layer the centred placement pushes, at `palette_rect`'s
+    /// full-width band, so `render()` adds that layer alone: the bare
+    /// bottom-row `Cmdline` echo beside it would be a second copy of the
     /// same typed text.
     ///
     /// `[native] palette = false` leaves no tile painting at all

@@ -240,11 +240,10 @@ fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) -> 
                 .map(|win| {
                     // a `None` here still has to clear `pending_open`, the
                     // same reason production's own async reply routes an
-                    // error to `NativeWindowOpenFailed` and never drops
-                    // it: this driver's own scripted sessions
-                    // reuse `SurfaceState`, and a call this arm dropped
-                    // silently would leave a surface refusing every later
-                    // open for the rest of the run
+                    // error to `NativeWindowOpenFailed`: this driver's own
+                    // scripted sessions reuse `SurfaceState`, and a call
+                    // this arm dropped silently would leave a surface
+                    // refusing every later open for the rest of the run
                     follow_ups.push(match win {
                         Some(win) => Msg::NativeWindowOpened {
                             generation: *generation,
@@ -754,8 +753,8 @@ impl EngineSession {
     /// Marks this session's model as having the command palette on, the way
     /// `[native] palette = false` being absent from a user's `view.toml`
     /// does (`enabled()`'s own default is on unless disabled). This driver
-    /// builds its model directly, with no config layer, so
-    /// a caller after the shipped default has to say so explicitly.
+    /// builds its model directly, with no config layer, so a caller after
+    /// the shipped default has to say so explicitly.
     pub fn enable_palette(&mut self) {
         self.model.palette_enabled = true;
     }

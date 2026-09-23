@@ -569,8 +569,8 @@ static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 3] = [
         off_switch: "ai.enabled = false",
     },
     // `ui` has no on/off switch of its own (see the `Msg::FeatureInvoke`
-    // "ui" arm) -- its two `DEFAULT_MAPS` keys are rebound and never
-    // disabled, so the line a claim notice offers is the `[keys]` rebind.
+    // "ui" arm) -- its two `DEFAULT_MAPS` keys can only be rebound, so the
+    // line a claim notice offers is the `[keys]` rebind.
     ExemptFeatureDesc {
         id: "ui",
         supersedes: None,
@@ -578,8 +578,7 @@ static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 3] = [
     },
     // `window` carries the whole desktop chord table (`native::chords`)
     // plus its own tile-management `DEFAULT_MAPS` rows, and none of it is a
-    // `[native]`-gated surface -- the off switch is the profile, with no
-    // per-key toggle.
+    // `[native]`-gated surface -- the off switch is the profile.
     ExemptFeatureDesc {
         id: "window",
         supersedes: Some("your desktop's own window-management chords"),

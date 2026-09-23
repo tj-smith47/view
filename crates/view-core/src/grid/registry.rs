@@ -1205,9 +1205,8 @@ impl GridRegistry {
     /// since the last request this registry answered for it under this
     /// `look` and this top margin.
     ///
-    /// Keyed on `(slot, look, margin_top)`, since the slot alone is not
-    /// enough: a
-    /// gaps flip changes what every window owes while leaving slots whose
+    /// Keyed on `(slot, look, margin_top)`, since the slot alone is not enough:
+    /// a gaps flip changes what every window owes while leaving slots whose
     /// neighbours absorb the ring change exactly where they were, and a
     /// slot-only key would drop the re-send that flip exists to make.
     ///

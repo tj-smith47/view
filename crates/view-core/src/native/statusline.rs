@@ -190,9 +190,9 @@ impl StatuslineState {
             if self.modified {
                 spans.push(Span::new(" [+]", StyleRole::Modified));
             }
-            // inside the file's own candidate: a
-            // filetype with no file name in front of it names nothing, so
-            // the two are dropped together when the row runs out of room
+            // inside the file's own candidate: a filetype with no file name
+            // in front of it names nothing, so the two are dropped together
+            // when the row runs out of room
             if !self.filetype.is_empty() {
                 spans.push(Span::plain(format!(" {}", self.filetype)));
             }
@@ -275,10 +275,9 @@ impl StatuslineState {
     /// and come from the bridge's `window` trigger. The git branch is the
     /// session's lookup and reads the same on every tile.
     ///
-    /// The position comes from `status`, and never from the ruler text:
-    /// nvim stops emitting `msg_ruler` the moment `laststatus` is 2, which
-    /// is what tiles mode holds it at, so under tiles that segment has no
-    /// other source.
+    /// The position comes from `status`: nvim stops emitting `msg_ruler` the
+    /// moment `laststatus` is 2, which is what tiles mode holds it at, so
+    /// under tiles that segment has no other source.
     ///
     /// No truncation here. A frame edge is as wide as its tile and the
     /// painter is what knows how many cells are left, so it drops whole

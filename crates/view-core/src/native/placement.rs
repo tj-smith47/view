@@ -2,9 +2,9 @@
 //! that tells one window-open from the next.
 //!
 //! The layouts are config, read once at startup and re-read when a user
-//! changes one mid-session. They live beside the model, outside it,
-//! because every surface reads the same four, and a field per surface
-//! would be four facts that have to agree.
+//! changes one mid-session. They live in a table of their own beside the
+//! model, because every surface reads the same four, and a field per
+//! surface would be four facts that have to agree.
 
 use crate::native::geometry::{Anchor, NativeSurface, SurfaceLayout, SurfacePlacement};
 
@@ -90,10 +90,10 @@ impl SurfaceState {
     }
 
     /// Replaces every layout, which is what a config read answers with, and
-    /// re-captures [`Self::configured`] from it -- a config reload
-    /// (`:View` has none today, but a session that gains one owes the ring
-    /// the new file's own answer) moves the
-    /// ring's `config` stop along with everything else.
+    /// re-captures [`Self::configured`] from it -- a config reload (`:View`
+    /// has none today, but a session that gains one owes the ring the new
+    /// file's own answer) moves the ring's `config` stop along with
+    /// everything else.
     pub fn set_layouts(&mut self, layouts: [SurfaceLayout; 4]) {
         self.configured = layouts.map(|layout| layout.placement);
         self.configured_anchor = layouts.map(|layout| layout.anchor);
@@ -207,8 +207,8 @@ impl SurfaceState {
     /// Retires `surface`'s in-flight open without starting a new one: a
     /// close or a retile moved the surface on before the open's own reply
     /// landed. Bumps the generation so that reply reads as stale when it
-    /// arrives (`native_window_opened` closes the window it names instead
-    /// of claiming it) and clears `pending`, since nothing here is waiting
+    /// arrives (`native_window_opened` closes the window it names and
+    /// claims nothing) and clears `pending`, since nothing here is waiting
     /// on the retired call's outcome any more.
     pub fn cancel_pending_open(&mut self, surface: NativeSurface) {
         let slot = &mut self.generation[surface.index()];

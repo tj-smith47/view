@@ -97,8 +97,8 @@ fn a_reissue_claims_no_key_from_itself() {
 
 /// A registration that lands on a user's own mapping, then a reissue that
 /// drops the chord (a flip to the editor profile), must give the user's
-/// mapping back -- `maparg` after the second run reads what the user wrote,
-/// not view's own bridge call.
+/// mapping back -- `maparg` after the second run reads what the user
+/// wrote.
 #[test]
 fn a_flip_gives_back_the_user_mapping_it_took() {
     let (engine, channel, rx, _pump, _cutover) = spawn_attached();

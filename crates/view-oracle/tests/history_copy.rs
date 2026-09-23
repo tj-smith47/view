@@ -202,10 +202,10 @@ fn a_copied_history_line_reaches_both_the_terminal_and_the_local_register() {
     );
 
     // closed as its own step and waited out, ahead of the burst below: a
-    // row carrying a timestamp is long enough that the
-    // overlay's close can still be in flight when the next key arrives, and
-    // a `<CR>`/`o` sent into a session still holding the overlay open
-    // reaches the overlay's own map and opens no line in the buffer
+    // row carrying a timestamp is long enough that the overlay's close can
+    // still be in flight when the next key arrives, and a `<CR>`/`o` sent
+    // into a session still holding the overlay open reaches the overlay's
+    // own map and opens no line in the buffer
     session
         .send(b"\x1b")
         .expect("the close key must reach the session");

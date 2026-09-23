@@ -43,13 +43,12 @@ const ALT_COMMA: &[u8] = b"\x1b,";
 
 /// Plants `[ui] panes = "nvim"`, every registry `[native]` feature off, and
 /// `[keys] profile = "desktop"`: the desktop profile is forced, so this leg
-/// checks the chord itself, apart from the environment guess
-/// `detect_profile` makes (already pinned in
-/// `view-native::config::profile`). The registry features are off so no
-/// native chrome (the statusline, a picker overlay) parks the terminal's
-/// real cursor somewhere this leg's column read does not expect -- this
-/// leg's subject is nvim's own window focus, which `cursor_position` reads
-/// directly only when nvim owns the cursor.
+/// checks the chord itself; the environment guess `detect_profile` makes is
+/// pinned in `view-native::config::profile`. The registry features are off
+/// so no native chrome (the statusline, a picker overlay) parks the
+/// terminal's real cursor somewhere this leg's column read does not expect --
+/// this leg's subject is nvim's own window focus, which `cursor_position`
+/// reads directly only when nvim owns the cursor.
 fn plant_desktop_profile(home: &std::path::Path) {
     let dir = common::xdg_home(home, "XDG_CONFIG_HOME").join("view");
     std::fs::create_dir_all(&dir).expect("the isolated config home must be creatable");

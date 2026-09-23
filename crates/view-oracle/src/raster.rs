@@ -318,8 +318,8 @@ fn paint_grid<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid) {
 /// [`view_core::native::pill::PillView::row_slots`] placed them, and the
 /// agent's word at the right.
 ///
-/// The placement is the painter's own answer, with no second layout, so
-/// the columns a golden shows are the columns a session draws into.
+/// The placement is the painter's own answer, so the columns a golden shows
+/// are the columns a session draws into.
 fn paint_pill(canvas: &mut Canvas<'_>, layer: &Layer, view: &view_core::native::pill::PillView) {
     use view_core::native::pill::edge_cells;
 

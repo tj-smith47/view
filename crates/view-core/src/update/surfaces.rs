@@ -297,8 +297,8 @@ pub(crate) fn window_flip(model: &mut Model) -> Vec<Effect> {
 /// and [`SurfacePlacement::Overlay`](crate::native::geometry::SurfacePlacement::Overlay),
 /// through the same [`retile_open_surface`] a ring step drives, on
 /// [`SurfaceState::toggle_placement`](crate::native::placement::SurfaceState::toggle_placement)'s
-/// own terms, apart from [`cycle_placements`]'s shared ring: this verb
-/// names one surface, and moving the ring for it would carry the other
+/// own terms, and leaves [`cycle_placements`]'s shared ring alone: this
+/// verb names one surface, and moving the ring for it would carry the other
 /// three along with a press that never named them.
 pub(crate) fn window_float(model: &mut Model) -> Vec<Effect> {
     let Some(surface) = model.engine.grids().native_pane_focus() else {
@@ -438,8 +438,8 @@ fn toggle_windowed_tree(model: &mut Model) -> Vec<Effect> {
 /// [`tree_key`]'s doc), and every other key is the panel's ordinary
 /// composer/permission handling.
 ///
-/// A pending permission's own `<Esc>` (which cancels the request rather
-/// than leaving) still reaches [`crate::update::ai::ai_panel_key`]
+/// A pending permission's own `<Esc>` (which cancels the request and
+/// stays in the panel) still reaches [`crate::update::ai::ai_panel_key`]
 /// unchanged: only the plain "nothing else owns this key" `<Esc>` is
 /// reinterpreted as a window command here.
 pub(super) fn agent_pane_key(model: &mut Model, notation: &str) -> Vec<Effect> {
@@ -807,11 +807,10 @@ fn close_windowed_tree(model: &mut Model) -> Vec<Effect> {
         // a close reached before the open it is closing was ever claimed
         // retires that open here (see `retile_open_surface`'s own pending
         // arm for why), so it cannot land and claim a window this close
-        // already said it did not want. A reopen already
-        // claimed (`win` was `Some`) still carries a reply in flight of
-        // its own: retiring it here too is what keeps that reply from
-        // landing after this close and reclaiming the handle the release
-        // above just gave up.
+        // already said it did not want. A reopen already claimed (`win`
+        // was `Some`) still carries a reply in flight of its own: retiring
+        // it here too is what keeps that reply from landing after this
+        // close and reclaiming the handle the release above just gave up.
         model.surfaces.cancel_pending_open(NativeSurface::Tree);
     }
     let closed = model.close_tree();
@@ -938,7 +937,7 @@ pub(super) fn native_window_opened(
     }
     // `pending_open` stays true past this claim -- it is what
     // `native_window()` will answer once the `win_pos` this claim is
-    // waiting on places it, and that is a separate redraw event, not
+    // waiting on places it, and that is a separate redraw event from
     // this reply. Clearing it here reopens the same gap the flag exists
     // to close: a keystroke landing between this claim and that `win_pos`
     // would read "no window yet" and "nothing pending" and open a second
@@ -1093,11 +1092,11 @@ pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Vec<E
     }
     // `<C-w>` opens a real nvim window-command prefix, and this pane's own
     // resize chord (`<C-w>>`/`<C-w><`) is only two of the followers nvim
-    // itself answers (`w`, `s`, `q`, ...). The prefix is held here, not
-    // forwarded on arming: nvim must never be told about a `<C-w>` whose
-    // follower turns out to be this build's own resize chord, so the
-    // prefix and its follower reach nvim together, and only once the
-    // follower is known to belong to nvim.
+    // itself answers (`w`, `s`, `q`, ...). The prefix is held here on
+    // arming: nvim must never be told about a `<C-w>` whose follower turns
+    // out to be this build's own resize chord, so the prefix and its
+    // follower reach nvim together, and only once the follower is known to
+    // belong to nvim.
     let armed_before = model.pending_chord.as_deref() == Some("<C-w>");
     match take_binding(model, notation) {
         Some(Resolved::Act(Action::Resize(direction))) => {
@@ -1183,11 +1182,10 @@ fn close_windowed_notifications(model: &mut Model) -> Vec<Effect> {
         // a close reached before the open it is closing was ever claimed
         // retires that open here (see `retile_open_surface`'s own pending
         // arm for why), so it cannot land and claim a window this close
-        // already said it did not want. A reopen already
-        // claimed (`win` was `Some`) still carries a reply in flight of
-        // its own: retiring it here too is what keeps that reply from
-        // landing after this close and reclaiming the handle the release
-        // above just gave up.
+        // already said it did not want. A reopen already claimed (`win`
+        // was `Some`) still carries a reply in flight of its own: retiring
+        // it here too is what keeps that reply from landing after this
+        // close and reclaiming the handle the release above just gave up.
         model
             .surfaces
             .cancel_pending_open(NativeSurface::Notifications);
@@ -1225,8 +1223,8 @@ const HISTORY_CHROME_ROWS: u16 = 4;
 pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     // A windowed tree's own `<C-w>` chord is held the same way the
     // notification stream's is (see `notifications_pane_key`): the prefix
-    // waits here after arming, so a follower this
-    // build resolves as its own resize never leaves nvim mid-chord.
+    // waits here after arming, so a follower this build resolves as its own
+    // resize never leaves nvim mid-chord.
     let armed_before = model.tree_is_windowed() && model.pending_chord.as_deref() == Some("<C-w>");
     // Ahead of the tree's own keys and resolved through the one
     // shared set, so neither sidebar can drift onto a key the
@@ -1243,14 +1241,14 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         // and the tree answers it the way it answers any key no
         // binding of its own names.
         Some(Resolved::Act(Action::ComposerNewline)) => {}
-        // The chord's first key waits here, moving no selection
-        // and closing no sidebar; the follower
-        // that completes nothing falls straight through to the
-        // arms below on its own next pass. A follower that re-arms an
-        // already-armed prefix is nvim's own doubled `<C-w>` (next
-        // window): the resolver re-arms `pending_chord` for muscle
-        // memory, but this pane owns no share for either tap to step,
-        // so the pair is unarmed and forwarded as nvim's own chord.
+        // The chord's first key waits here, moving no selection and
+        // closing no sidebar; the follower that completes nothing falls
+        // straight through to the arms below on its own next pass. A
+        // follower that re-arms an already-armed prefix is nvim's own
+        // doubled `<C-w>` (next window): the resolver re-arms
+        // `pending_chord` for muscle memory, but this pane owns no share
+        // for either tap to step, so the pair is unarmed and forwarded as
+        // nvim's own chord.
         Some(Resolved::Pending) if armed_before => {
             model.pending_chord = None;
             return vec![

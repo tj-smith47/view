@@ -4310,6 +4310,31 @@ printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
 expect_frames 0 '' 'a frame in a string with no comment is not counted'
 
 new_frames_case
+printf 'fn a() -> (&str, &str) {\n    ("https://x", "the tile, not the float")\n}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 0 '' 'a // inside a string opens no comment, so the frame after it is string text'
+
+new_frames_case
+printf 'fn a() -> &%sstatic str {\n    "https://x" // the tile, not the float\n}\n' "'" > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 1 'lib.rs:2:' 'a comment after a string holding // is still read'
+
+new_frames_case
+printf '// reads the row rather\n// than the column\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 1 'lib.rs:1:// reads the row rather' 'a frame split across two comment lines, one over the ceiling'
+
+new_frames_case
+printf '/// reads the row rather\n/// than the column\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 1\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 0 '' 'a split frame counts once, on the line it starts on'
+
+new_frames_case
+printf 'fn a() {\n    let rather = 1; // the row rather\n    let than = rather;\n}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 0 '' 'a comment is joined only with a comment line under it'
+
+new_frames_case
 printf '// it answers not the row but the column\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
 : > "$CASE/scripts/comment-frames.ceiling"
 expect_frames 1 'lib.rs:1:' 'a crate the ceiling omits is held at zero'

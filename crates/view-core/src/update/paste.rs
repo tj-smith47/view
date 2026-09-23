@@ -80,8 +80,7 @@ pub(super) fn paste_into_agent_composer(model: &mut Model, text: &str) -> Vec<Ef
     }
     model.dirty = true;
     // The only state left that owns the panel's keys, so the notice is
-    // named directly; see
-    // `AiPanelState::an_owner_holds_the_keys`.
+    // named directly; see `AiPanelState::an_owner_holds_the_keys`.
     model
         .engine
         .record_native_notice(PERMISSION_PASTE_NOTICE.to_string(), false)

@@ -708,8 +708,8 @@ impl super::EngineHandle {
 /// reply that named none.
 ///
 /// A reply view cannot read degrades to no handle, the same safe default
-/// `decode_buffer_list_reply` takes: the surface then draws nothing rather
-/// than binding a pane to a window that may not exist.
+/// `decode_buffer_list_reply` takes: the surface then draws nothing, and
+/// no pane is bound to a window that may not exist.
 #[must_use]
 pub(crate) fn decode_native_window_reply(result: &Value) -> Option<view_core::events::WinHandle> {
     match result {
@@ -1012,11 +1012,11 @@ mod tests {
     /// The whole split-and-configure step now runs under one `pcall`
     /// between the write and the restore, and a refusal deletes the
     /// scratch buffer it had already created, which nothing would ever
-    /// open. The failure branch's own close and
-    /// delete run before its own restore, so the window it undoes still
-    /// closes under the same ignore its (never-fired) open would have --
-    /// restoring first left a real `WinClosed` autocmd firing for a window
-    /// whose `WinNew` had been suppressed.
+    /// open. The failure branch's own close and delete run before its own
+    /// restore, so the window it undoes still closes under the same ignore
+    /// its (never-fired) open would have -- restoring first left a real
+    /// `WinClosed` autocmd firing for a window whose `WinNew` had been
+    /// suppressed.
     #[test]
     fn a_refused_open_restores_eventignore_and_deletes_its_own_buffer() {
         let guard = OPEN_NATIVE_WINDOW_CHUNK
@@ -1144,11 +1144,11 @@ mod tests {
     }
 
     /// A third surface sharing an edge with two already-open ones has to
-    /// land at its own `stack_order` position among all of them, not
-    /// beside whichever one `pairs()` (an unordered table walk) happens to
-    /// yield first: the scan keeps the nearest ranked neighbor on each
-    /// side, walking past the first match, so the stack order is
-    /// the same regardless of Lua's own table iteration order.
+    /// land at its own `stack_order` position among all of them, in
+    /// whatever order `pairs()` (an unordered table walk) yields them: the
+    /// scan keeps the nearest ranked neighbor on each side, walking past
+    /// the first match, so the stack order is the same whatever Lua's own
+    /// table iteration order.
     #[test]
     fn a_third_surface_on_one_edge_stacks_by_rank_not_table_order() {
         assert!(

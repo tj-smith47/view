@@ -759,8 +759,8 @@ pub enum Msg {
     /// (set the moment the call was made) never clears, and a guard that
     /// reads it -- the palette's own `CmdlineShow` open, which must never
     /// issue a second `OpenNativeWindow` while the first is still in
-    /// flight -- refuses every future open of that surface forever, not
-    /// just the failed one. Generation-gated on the same terms as
+    /// flight -- refuses every future open of that surface forever, the
+    /// failed one and all after it. Generation-gated on the same terms as
     /// `NativeWindowOpened`.
     NativeWindowOpenFailed {
         /// Echoed back from the call.
@@ -1853,11 +1853,11 @@ impl WinSplit {
     ///
     /// `view-native`'s `config::surfaces::anchors` restricts a windowed
     /// surface to `Left`/`Right`/`Top`/`Bottom` under
-    /// `SurfacePlacement::Windowed`, never `Center` or a corner, so those
-    /// five arms below are never reached by a windowed open; each still
-    /// names its own split (`Left`, matching the sidebar `Left` already
-    /// gets) with no wildcard arm, since a wildcard arm
-    /// stops the compiler from catching a real anchor `Anchor` gains later.
+    /// `SurfacePlacement::Windowed`, so the five arms below for `Center` and
+    /// the corners are never reached by a windowed open. Each still names
+    /// its own split (`Left`, matching the sidebar `Left` already gets)
+    /// because a wildcard arm stops the compiler from catching a real anchor
+    /// `Anchor` gains later.
     #[must_use]
     pub const fn for_anchor(anchor: crate::native::geometry::Anchor) -> Self {
         match anchor {
@@ -1920,11 +1920,11 @@ pub enum RpcCall {
     },
     /// `nvim_set_current_tabpage`, for a click on a pill tab.
     ///
-    /// The call, and never `:tabnext`: the pill names a handle, an ex
-    /// command names an ordinal, and an ordinal read off a row drawn one
-    /// frame ago selects the wrong tabpage the moment one closed in
-    /// between. Fire-and-forget -- nvim's own `tabline_update` is what
-    /// tells view the switch happened.
+    /// It selects by handle: the pill names a handle, while `:tabnext`
+    /// takes an ordinal, and an ordinal read off a row drawn one frame ago
+    /// selects the wrong tabpage the moment one closed in between.
+    /// Fire-and-forget -- nvim's own `tabline_update` is what tells view the
+    /// switch happened.
     SelectTab {
         tab: u64,
     },

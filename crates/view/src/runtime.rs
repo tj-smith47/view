@@ -2874,7 +2874,7 @@ mod tests {
     /// an `Effect::Ai(AiCommand::Cancel)` reaching an idle worker (`[ai]`
     /// wired but no session ever started) proves the effect really carries
     /// through to `AiWorker::dispatch`'s own "no active AI session for this
-    /// command" handling, never a spawn attempt. The sibling test above
+    /// command" handling, which spawns nothing. The sibling test above
     /// covers the `Prompt` shape.
     #[test]
     fn ai_effect_forwards_a_cancel_to_the_wired_worker_with_no_session_running() {
@@ -3088,9 +3088,9 @@ mod tests {
 
     /// [`ai_effect_with_no_context_worker_wired_surfaces_a_local_error_that_clears_turn_in_flight`],
     /// for the case `ai_context` IS wired but the worker thread is already
-    /// gone (its receiver dropped) -- a real, if rare, shutdown race, not
-    /// merely "never configured." The send itself fails, and must degrade
-    /// exactly the same way the unwired case above does.
+    /// gone (its receiver dropped) -- a real, if rare, shutdown race. The
+    /// send itself fails, and must degrade exactly the same way the unwired
+    /// case above does.
     #[test]
     fn ai_prompt_submit_effect_with_a_dead_context_worker_surfaces_a_local_error_that_clears_turn_in_flight(
     ) {
@@ -3609,10 +3609,9 @@ mod tests {
         );
     }
 
-    /// `dispatch` reads the host's UTC offset fresh on every fold rather
-    /// than caching the first reading, proven by swapping the injected
-    /// reading between two folds and reading each stamp's own offset back
-    /// off the model.
+    /// `dispatch` reads the host's UTC offset fresh on every fold, proven
+    /// by swapping the injected reading between two folds and reading each
+    /// stamp's own offset back off the model.
     #[test]
     fn the_runtime_rereads_the_utc_offset_on_every_fold() {
         let _guard = crate::localtime::TestOffsetGuard::new(3600);

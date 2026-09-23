@@ -1417,11 +1417,11 @@ fn tiled_model(gaps: bool, height: u16, slots: &[(u16, u16, u16, u16)]) -> Model
     model.statusline_enabled = true;
     // the shipped attach: view owns the command line and the message area,
     // so the takeover holds `cmdheight` at 0 and the grid's last row is a
-    // window's status row. The tab line is left with
-    // nvim, which is what keeps the lattice at the top of the screen: the
-    // row the pill takes is `the_lattice_sits_under_the_pills_row`'s
-    // question, and every slot here would otherwise be one row lower for a
-    // reason that has nothing to do with frames
+    // window's status row. The tab line is left with nvim, which is what
+    // keeps the lattice at the top of the screen: the row the pill takes is
+    // `the_lattice_sits_under_the_pills_row`'s question, and every slot here
+    // would otherwise be one row lower for a reason that has nothing to do
+    // with frames
     model.attach_surfaces(view_core::native::ext::shipped_multigrid());
     model.caps = model.caps.with_unicode_boxes(DRAWS_BOX_GLYPHS);
     let mut events = vec![
@@ -1937,8 +1937,8 @@ fn edge_rows(model: &Model, slot: (u16, u16, u16, u16)) -> (u16, u16) {
 }
 
 /// The mode belongs to the session, so it shows only on the tile the user
-/// is typing into. Two tiles both claiming `-- INSERT --`
-/// would say the user is in both at once.
+/// is typing into. Two tiles both claiming `-- INSERT --` would say the user
+/// is in both at once.
 #[test]
 fn an_inactive_tile_shows_no_mode_segment() {
     let tiles = tiled(true);
@@ -2093,7 +2093,7 @@ fn a_segment_change_repaints_every_tiles_edge() {
 }
 
 /// A gapped tile's name is in the top edge, where the buffer it holds is
-/// read as a title, apart from the counts.
+/// read as a title; the counts keep the bottom edge.
 #[test]
 fn a_gapped_tile_names_its_buffer_in_the_top_edge() {
     let tiles = tiled(true);
@@ -2129,9 +2129,9 @@ fn a_gapless_tile_puts_the_name_and_the_segments_in_one_row() {
     );
 }
 
-/// A name is measured in the cells it draws. A script
-/// that draws two cells to the character fits the edge by count and runs
-/// past the closing blank and over the corner.
+/// A name is measured in the cells it draws. A script that draws two cells
+/// to the character fits the edge by count and runs past the closing blank
+/// and over the corner.
 ///
 /// Disconfirm: counting `chars()` writes the 36-cell name into a 32-cell
 /// edge.
@@ -2815,14 +2815,15 @@ fn every_text_taking_native_surface_puts_its_caret_inside_its_own_painted_rect()
 /// the compositor painted `label`'s content into, so a caret outside it
 /// names a surface whose text and whose cursor disagree about where they
 /// are.
+///
 /// `slot` shifted by the same chrome offset the compositor paints that tile
 /// at: `WinPos`'s `startrow`/`startcol` are grid-local, the coordinate space
 /// [`GridRegistry::native_pane_rect`] answers in and `tiled_model`'s own
 /// `slots` are written in, but a caret is a terminal cell -- exactly the
 /// distinction `pane_cursor` (`view-surface`'s own windowed caret arm) has
 /// to add `origin` back in for. Read off the rendered `EngineGrid` layer's
-/// own rect, since that layer is
-/// built at that offset by [`view_surface::render`] itself.
+/// own rect, since that layer is built at that offset by
+/// [`view_surface::render`] itself.
 fn chrome_shifted(model: &Model, slot: (u16, u16, u16, u16)) -> (u16, u16, u16, u16) {
     let (row, col, width, height) = slot;
     let (orow, ocol) = view_surface::render(model)
@@ -3004,8 +3005,8 @@ fn notifications_ticker_windowed() {
 }
 
 /// A toast stack anchored to one of the four corners, over the same two-tile
-/// scene every other golden here uses -- toasts float over the tiles rather
-/// than claiming one, so this needs none of the native-window machinery the
+/// scene every other golden here uses -- toasts float over the tiles and
+/// claim none, so this needs none of the native-window machinery the
 /// windowed surfaces above do.
 fn toast_stack_in_the_corner(gaps: bool, anchor: view_core::native::geometry::Anchor) -> Tiles {
     let tiles = tiled(gaps);
@@ -3175,8 +3176,8 @@ fn a_native_panes_frame_carries_its_surfaces_name() {
 }
 
 /// The gapless look has one edge row and no top run, so the name leads the
-/// segments there. The surface's name still
-/// has to be on it, and the segments still have to be gone.
+/// segments there. The surface's name still has to be on it, and the
+/// segments still have to be gone.
 #[test]
 fn a_gapless_native_panes_edge_keeps_the_name_and_drops_the_segments() {
     let tiles = tree_in_the_left_tile(false);

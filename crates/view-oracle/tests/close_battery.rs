@@ -655,9 +655,9 @@ const QUIESCE_SILENCE: Duration = Duration::from_millis(200);
 const QUIESCE_DEADLINE: Duration = Duration::from_secs(10);
 /// The silence window the two latency measurements below settle on --
 /// every other leg in this file uses [`QUIESCE_SILENCE`] because it is
-/// quiescing between steps whose correctness matters. A
-/// stopwatch that never returns before 200ms of quiet has passed cannot
-/// tell a fast ring step from a slow one; it reads the floor.
+/// quiescing between steps whose correctness matters. A stopwatch that
+/// never returns before 200ms of quiet has passed cannot tell a fast ring
+/// step from a slow one; it reads the floor.
 const LATENCY_SILENCE: Duration = Duration::from_millis(5);
 
 /// The size of every window open in the engine, read off nvim itself.
@@ -1798,9 +1798,9 @@ fn overlay_session(dir: &Path) -> view_oracle::EngineSession {
         .expect("the tiled look is reachable");
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     // this driver builds its model directly, with no `view.toml`, whose
-    // absent `[native] palette` key still means "on"
-    // (`enabled()`'s own default) -- the same default `view_session`'s
-    // comment above names for the PTY-driven tests
+    // absent `[native] palette` key still means "on" (`enabled()`'s own
+    // default) -- the same default `view_session`'s comment above names for
+    // the PTY-driven tests
     engine.enable_palette();
     engine
 }
@@ -1861,8 +1861,8 @@ fn native_window_rect(
 ///
 /// `LayerKind::Palette` is also what the notification stream's history
 /// overlay paints through (`layer_kind`'s own doc in `view-surface`), so a
-/// `Palette` layer titled anything but the cmdline's own is that overlay's,
-/// not the command palette's.
+/// `Palette` layer titled anything but the cmdline's own is that
+/// overlay's.
 fn palette_layer_rect(engine: &mut view_oracle::EngineSession) -> Option<view_surface::Rect> {
     engine
         .surface()
@@ -2776,12 +2776,11 @@ fn opening_a_windowed_surface_with_no_room_for_the_split_leaves_eventignore_unto
     );
 }
 
-/// The other reachable path to the same leak: a ring step or a mapped key can fire
-/// `OpenNativeWindow` while the user is inside the command-line window
-/// (`q:`), where `botright split` raises E11. The chunk
-/// refuses outright (`getcmdwintype() ~= ''`) before it ever sets
-/// `eventignore`, so this leg never even reaches the pcall the one above
-/// does.
+/// The other reachable path to the same leak: a ring step or a mapped key
+/// can fire `OpenNativeWindow` while the user is inside the command-line
+/// window (`q:`), where `botright split` raises E11. The chunk refuses
+/// outright (`getcmdwintype() ~= ''`) before it ever sets `eventignore`, so
+/// this leg never even reaches the pcall the one above does.
 ///
 /// The tree opens as an overlay before the command-line window is
 /// entered, the same as the E36 leg above: the toggle's `enter = true`

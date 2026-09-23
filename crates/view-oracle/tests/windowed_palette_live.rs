@@ -23,10 +23,10 @@ const QUIESCE_SILENCE: Duration = Duration::from_millis(200);
 const QUIESCE_DEADLINE: Duration = Duration::from_secs(10);
 /// The silence window the latency measurement settles on -- every other
 /// leg in this file uses [`QUIESCE_SILENCE`] because it is quiescing
-/// between steps whose correctness matters. A stopwatch
-/// that never returns before 200ms of quiet has passed cannot tell a 1ms
-/// round trip from a 50ms one; it reads the floor. This window still
-/// waits for real quiet on a local pty, just a shorter stretch of it.
+/// between steps whose correctness matters. A stopwatch that never returns
+/// before 200ms of quiet has passed cannot tell a 1ms round trip from a 50ms
+/// one; it reads the floor. This window still waits for real quiet on a
+/// local pty, just a shorter stretch of it.
 const LATENCY_SILENCE: Duration = Duration::from_millis(5);
 
 fn build_fixture(root: &Path) -> std::path::PathBuf {
@@ -553,8 +553,8 @@ fn no_win_or_bufenter_autocmd_fires_for_the_palettes_own_open_or_close() {
 /// context but asserted on nowhere: the three medians are the harness's
 /// silence window plus one round trip, close enough together that a
 /// direction-only compare against it is noise. The tile is bounded against
-/// the overlay it stands beside, with headroom for
-/// scheduling jitter, and both against the frame budget a person can feel.
+/// the overlay it stands beside, with headroom for scheduling jitter, and
+/// both against the frame budget a person can feel.
 #[test]
 fn the_cost_of_pressing_colon_windowed_versus_off() {
     let work = common::ScratchPaths::new("windowed-palette-latency");
@@ -576,8 +576,8 @@ fn the_cost_of_pressing_colon_windowed_versus_off() {
     });
     let work_off = common::ScratchPaths::new("windowed-palette-latency-off");
     let floating = median_colon_latency(&work_off, |engine| {
-        // otherwise this measures the bare bottom-row cmdline echo, not
-        // the floating palette this leg names
+        // without it this measures the bare bottom-row cmdline echo, and
+        // the floating palette this leg names goes unmeasured
         engine.enable_palette();
     });
 

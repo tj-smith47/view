@@ -262,9 +262,8 @@ pub(crate) fn interior_origin(width: u16, height: u16) -> (u16, u16) {
 /// separate call there, outside the laid rows.
 ///
 /// The palette's own cursor placement and the band's painter both read this
-/// one derivation of the two size thresholds, so a caret
-/// placed against one border convention can never sit behind a border
-/// drawn under the other.
+/// one derivation of the two size thresholds, so a caret placed against one
+/// border convention can never sit behind a border drawn under the other.
 #[must_use]
 pub fn windowed_interior_origin(width: u16, height: u16) -> (u16, u16) {
     if width < 2 || height < 2 {

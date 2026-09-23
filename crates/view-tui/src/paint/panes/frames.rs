@@ -330,11 +330,10 @@ fn span_style(role: StyleRole, base: Style, theme: &Theme) -> Style {
 /// so is everything after it: the composer knows what a segment means and a
 /// column count does not, so half a diagnostic count is worse than none.
 ///
-/// Width is counted in cells, and the run places
-/// one grapheme cluster per cell: a buffer named in a script that draws
-/// two cells to the character would otherwise run past the closing blank
-/// and over the corner, and one carrying a combining mark would show the
-/// mark standing on its own.
+/// Width is counted in cells, and the run places one grapheme cluster per
+/// cell: a buffer named in a script that draws two cells to the character
+/// would otherwise run past the closing blank and over the corner, and one
+/// carrying a combining mark would show the mark standing on its own.
 fn write_edge(groups: &[Vec<Span>], base: Style, theme: &Theme, edge: Rect, buf: &mut Buffer) {
     // two corners, a blank either side and one character of text
     if edge.width < 5 {

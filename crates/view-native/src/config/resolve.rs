@@ -738,10 +738,9 @@ impl ResolvedConfig {
                 },
                 self.profile.source,
             ),
-            // the real answer needs the terminal's own probe, which this
-            // resolver never holds -- the caller that does prints it beside
-            // this walk, outside it (`crates/view/src/main.rs`'s
-            // `caps_notice`)
+            // the real answer needs the terminal's own probe, which only
+            // the caller holds, and that caller prints it
+            // (`crates/view/src/main.rs`'s `caps_notice`)
             ("keys", "desktop_modifier") => return None,
             ("keys.desktop", id) => {
                 let index = chords::desktop_chords().iter().position(|c| c.id == id)?;
@@ -955,8 +954,7 @@ fn parse_profile_choice(value: &str) -> Option<Option<KeyProfile>> {
 
 /// A modifier choice a user named, or `None` for text that names none.
 /// Unlike [`parse_profile_choice`], `"auto"` is one of [`ModifierChoice`]'s
-/// own variants, with no second `Option` layer -- the enum already carries
-/// the absence of a choice.
+/// own variants: the enum already carries the absence of a choice.
 fn parse_modifier_choice(value: &str) -> Option<ModifierChoice> {
     match value.trim().to_ascii_lowercase().as_str() {
         AUTO => Some(ModifierChoice::Auto),
@@ -1212,8 +1210,8 @@ fn env_value(env: &dyn Fn(&str) -> Option<String>, table: &str, key: &str) -> Op
 
 /// [`env_value`] for one `[keys.desktop]` row, with empty kept as a value
 /// of its own: a `[keys.desktop]` value that is empty is a real answer
-/// (leave the chord unbound, [`resolve_desktop_row`]'s own doc comment),
-/// not the "no value" `env_value` reads it as for every other key.
+/// (leave the chord unbound, [`resolve_desktop_row`]'s own doc comment).
+/// `env_value` reads an empty value as "no value" for every other key.
 fn env_value_desktop(env: &dyn Fn(&str) -> Option<String>, chord_id: &str) -> Option<String> {
     let row = keys()
         .iter()

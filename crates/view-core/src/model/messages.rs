@@ -55,8 +55,8 @@ pub struct MessageEntry {
     /// The clock [`Model::set_now`](crate::model::Model::set_now) held when
     /// the fold that pushed this entry ran. Never read from the entry's own
     /// wall clock, because a notice decoded off the wire carries no
-    /// timestamp of its own -- this is the instant view learned of it, not
-    /// the instant nvim raised it.
+    /// timestamp of its own -- this is the instant view learned of it,
+    /// which can trail the instant nvim raised it.
     at: SystemTime,
 }
 
@@ -287,10 +287,10 @@ pub struct Messages {
     /// The clock every entry pushed from here on stamps itself with. See
     /// [`Self::set_now`].
     now: SystemTime,
-    /// Seconds east of UTC, applied by [`format_at`] when a stamp is
-    /// rendered, and never when an entry is stamped: a timestamp already
-    /// on screen moves with a later DST flip the same way the clock in the
-    /// corner of a real desktop does. See [`Self::set_utc_offset`].
+    /// Seconds east of UTC, applied by [`format_at`] each time a stamp is
+    /// rendered: a timestamp already on screen moves with a later DST flip
+    /// the same way the clock in the corner of a real desktop does. See
+    /// [`Self::set_utc_offset`].
     utc_offset_secs: i64,
 }
 
@@ -667,12 +667,11 @@ impl Messages {
     /// Flips the pause key.
     ///
     /// While [`Self::paused`] is on, [`Self::arm_top_slot`] hands out no
-    /// dismissal timer and `Msg::ToastExpired` obeys none -- the same
-    /// timer, held, with no second mechanism (spec 7.1, motion rule
-    /// 5). The edge that takes `paused()` false forgets which slot was
-    /// armed, which is what makes the next [`Self::arm_top_slot`] give the
-    /// top slot a whole timeout, from the start: a notice
-    /// paused mid-read has not been read yet.
+    /// dismissal timer and `Msg::ToastExpired` obeys none -- the one timer,
+    /// held (spec 7.1, motion rule 5). The edge that takes `paused()` false
+    /// forgets which slot was armed, which is what makes the next
+    /// [`Self::arm_top_slot`] give the top slot a whole timeout, from the
+    /// start: a notice paused mid-read has not been read yet.
     ///
     /// Only the timing is frozen. A motion already in flight plays to its
     /// end and new notices still arrive; nothing leaves on its own, since

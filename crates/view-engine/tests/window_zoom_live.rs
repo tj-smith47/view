@@ -1,8 +1,8 @@
 //! Live-nvim proof that `window zoom`'s second press reads real vsplit
-//! geometry: `tile_is_zoomed` squeezes a sibling to its layout minimum, not
-//! a fixture's guess at what `<C-w>_<C-w>|` leaves behind. Drives the
-//! actual `update()` dispatch against redraw traffic a real spawned nvim
-//! sends, the same path the runtime loop uses.
+//! geometry: `tile_is_zoomed` squeezes a sibling to the layout minimum a
+//! real `<C-w>_<C-w>|` leaves behind. Drives the actual `update()`
+//! dispatch against redraw traffic a real spawned nvim sends, the same path
+//! the runtime loop uses.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;

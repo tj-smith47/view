@@ -114,7 +114,7 @@ pub fn modifier_for(
 ///
 /// A row whose [`Resolved::source`] is [`Source::Derived`] carries the
 /// chord's own `with_super` spelling verbatim (see `resolve_desktop_row`),
-/// not the modifier this session actually settled on, so such a row is
+/// whatever modifier this session actually settled on, so such a row is
 /// re-spelled through [`DesktopChord::lhs`] here; any other source carries
 /// the override the user wrote, applied as-is.
 ///

@@ -788,7 +788,7 @@ impl ReferenceSession {
     /// bookkeeping through the rule `view_core::model::Model::chrome_rows`
     /// spends.
     ///
-    /// The rule is called and never restated, which the grid-apply logic
+    /// The rule is called where it lives, which the grid-apply logic
     /// beside it does not do with `view_core::grid::Grid`: this is a
     /// UI-attach policy both sides must carry out identically or their
     /// grids differ by a row, where the applier's independence is the

@@ -1317,9 +1317,8 @@ fn main() -> Result<()> {
     for notice in resolved.notices() {
         pre_executor_effects.extend(model.engine.record_native_notice(notice.clone(), false));
     }
-    // read here, outside `NativeSession::load`: the placements come
-    // off the resolved `[ui.surfaces]` tables, and that session is handed
-    // the file's own tables
+    // read here: the placements come off the resolved `[ui.surfaces]`
+    // tables, and `NativeSession::load` is handed the file's own tables
     model.surfaces.set_layouts(resolved.surfaces);
     // the on-screen half of the geometry report above, raised here for the
     // same reason: the clamp was decided before the spawn, where the
@@ -2574,8 +2573,8 @@ mod tests {
         );
 
         // the second way to ask: `--tier` changes what this line would have
-        // said, so the session that overrides is shown what it got, and this
-        // is the one-line override path, apart from `--print-caps`'s table
+        // said, so the session that overrides is shown what it got on this
+        // one line; `--print-caps` prints the full table
         let cli = Cli::parse_from(["view", "--tier", "basic"]);
         let overridden = caps_notice(&cli, &resolved_for(&cli), model.caps, CapsSource::Override)
             .expect("--tier implies the capability line");

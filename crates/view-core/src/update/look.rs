@@ -118,13 +118,12 @@ fn follow_the_look_with_the_tabline(model: &mut Model) -> Vec<Effect> {
 /// drawing a status row the frame no longer paints over, or drops the one
 /// it does.
 ///
-/// Read off the channel table, with no name written here, so the option a look
-/// decides is stated once, and gated on the same `view_draws` predicate the
-/// takeover's own session-held walk uses -- a surface the user handed back
-/// is one view does not set options for, apart from the hold the tiles look
-/// keeps whatever the switch says ([`ChannelValue::held_by_look`]). That
-/// one is released when the look leaves tiles, which puts the user's own
-/// value back.
+/// Read off the channel table, so the option a look decides is named once,
+/// and gated on the same `view_draws` predicate the takeover's own
+/// session-held walk uses -- view sets no option for a surface the user
+/// handed back. The one exception is the hold the tiles look keeps whatever
+/// the switch says ([`ChannelValue::held_by_look`]). That one is released
+/// when the look leaves tiles, which puts the user's own value back.
 ///
 /// [`ChannelValue::held_by_look`]: crate::native::channels::ChannelValue::held_by_look
 fn look_keyed_holds(model: &Model, before: Look) -> Vec<Effect> {

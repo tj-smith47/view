@@ -466,8 +466,8 @@ struct Route {
     /// A `Msg::MappingsClaimed` waits here too: a session sends a
     /// registration at takeover, one for the desktop chords and one per
     /// reissue, and the runtime counts the replies to know when the chords
-    /// are mapped. Every one queued here must eventually be delivered, not
-    /// merely the newest.
+    /// are mapped. Every one queued here is eventually delivered, the
+    /// oldest as well as the newest.
     ///
     /// One queue for all three kinds: they share the never-drop,
     /// never-reorder contract, and separate queues would let a message in

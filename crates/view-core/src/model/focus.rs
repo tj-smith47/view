@@ -5,8 +5,8 @@
 //! (`scripts/audit-god-files.sh`): every windowed surface `Model` learns to
 //! draw adds a branch to [`Model::takes_focus_now`] and
 //! [`Model::draws_as_overlay`], and both belong beside the accessors that
-//! feed them, apart from the file that also carries buffer and engine
-//! bookkeeping.
+//! feed them. Kept here, they do not inflate the file that also carries
+//! buffer and engine bookkeeping.
 
 use super::{Model, Overlay, OverlayId, OverlayKind};
 use crate::native::geometry::NativeSurface;
@@ -25,13 +25,12 @@ impl Model {
     /// [`Self::takes_focus_now`] instead, which layers the panel's own
     /// state on top of this for `Ai`.
     ///
-    /// `EngineBusy` is raised by view noticing something, with no request
-    /// from the user, and is on screen precisely when the engine may
-    /// be slow to answer. A user who keeps typing at a long operation has
-    /// always had those keystrokes queued and applied on catch-up, so an
-    /// annunciator that consumed them would turn a slow operation into lost
-    /// work. It answers its own choice keys, and every other key routes as
-    /// though it were not there.
+    /// `EngineBusy` is raised by view noticing something on its own, and is
+    /// on screen precisely when the engine may be slow to answer. A user who
+    /// keeps typing at a long operation has always had those keystrokes
+    /// queued and applied on catch-up, so an annunciator that consumed them
+    /// would turn a slow operation into lost work. It answers its own choice
+    /// keys, and every other key routes as though it were not there.
     pub(crate) const fn takes_focus(kind: &OverlayKind) -> bool {
         !matches!(kind, OverlayKind::EngineBusy(_) | OverlayKind::Ai)
     }
@@ -45,11 +44,10 @@ impl Model {
     /// redirect the engine's own keystrokes. It takes the keyboard only
     /// once the user has deliberately entered it -- `ai_entered`, read from
     /// [`crate::native::ai_panel::AiPanelState::focused`] -- never by side
-    /// effect of an agent auto-opening it. Takes the flag as a plain `bool`
-    /// with no `&self`, so [`Self::focused_overlay_mut`] and
-    /// [`Self::pop_focused_overlay`] can read `ai_panel.focused` once,
-    /// ahead of borrowing `overlays` mutably, and never hold both borrows
-    /// live at the same time.
+    /// effect of an agent auto-opening it. Takes the flag as a plain
+    /// `bool`, so [`Self::focused_overlay_mut`] and
+    /// [`Self::pop_focused_overlay`] can read `ai_panel.focused` once and
+    /// release that borrow before borrowing `overlays` mutably.
     const fn takes_focus_now(
         kind: &OverlayKind,
         ai_entered: bool,
@@ -159,10 +157,9 @@ impl Model {
     /// The topmost overlay covering the terminal cell at `(row, col)`, or
     /// `None` when the cell belongs to the engine grid.
     ///
-    /// Mouse input routes through this, and never [`Model::focus`]:
-    /// an open overlay owns the keyboard outright, but it owns only the
-    /// cells it covers, so a click on visible grid outside it still reaches
-    /// the engine.
+    /// Mouse input routes through this: an open overlay owns the keyboard
+    /// outright ([`Model::focus`]), but it owns only the cells it covers, so
+    /// a click on visible grid outside it still reaches the engine.
     #[must_use]
     pub fn overlay_at(&self, row: u16, col: u16) -> Option<OverlayId> {
         self.overlays

@@ -2517,7 +2517,57 @@ check_script_comment_width() {
 # may not rise. A crate over its ceiling fails naming the lines its working
 # tree added, and a crate under it fails until the ceiling comes down to it,
 # so the next rise is measured from what the tree holds.
-COMMENT_FRAME_RE='//.*(rather than|instead of|, not |(^|[^a-z])not( [^ ,.;]+){1,3} but )'
+#
+# A comment starts at the first `//` outside a string literal, and each
+# comment line is read with the next line joined on when that line is a
+# comment too, since a wrap at the margin splits `rather` from `than`. A
+# frame is counted on the line it starts on, so a joined pair counts once.
+COMMENT_FRAME_ERE='rather than|instead of|, not |(^|[^a-z])not( [^ ,.;]+)( [^ ,.;]+)?( [^ ,.;]+)? but '
+comment_frame_hits() {
+  local files
+  files=$(find crates -name '*.rs' -type f | LC_ALL=C sort)
+  if [ -z "$files" ]; then
+    echo "comment_frame_hits: no Rust file under crates/" >&2
+    return 2
+  fi
+  printf '%s\n' "$files" | LC_ALL=C xargs awk -v re="$COMMENT_FRAME_ERE" '
+    function comment_at(s,   i, n, c, instr) {
+      n = length(s); instr = 0
+      for (i = 1; i < n; i++) {
+        c = substr(s, i, 1)
+        if (instr) {
+          if (c == bs) i++
+          else if (c == dq) instr = 0
+          continue
+        }
+        if (c == dq) { instr = 1; continue }
+        if (c == sq && substr(s, i + 1, 1) == bs && substr(s, i + 3, 1) == sq) { i += 3; continue }
+        if (c == sq && substr(s, i + 2, 1) == sq) { i += 2; continue }
+        if (c == "/" && substr(s, i + 1, 1) == "/") return i
+      }
+      return 0
+    }
+    function emit(follow,   joined) {
+      if (held == "") return
+      joined = held " " follow
+      if (match(joined, re) && RSTART <= length(held)) print hfile ":" hline ":" hraw
+      held = ""
+    }
+    BEGIN { bs = sprintf("%c", 92); dq = sprintf("%c", 34); sq = sprintf("%c", 39) }
+    FNR == 1 { emit("") }
+    {
+      at = comment_at($0)
+      text = ""
+      if (at > 0) {
+        text = tolower(substr($0, at))
+        sub(/^\/+!?[[:space:]]*/, "", text)
+      }
+      whole = (at > 0 && $0 ~ /^[[:space:]]*\/\//)
+      emit(whole ? text : "")
+      if (at > 0) { held = text; hfile = FILENAME; hline = FNR; hraw = $0 }
+    }
+    END { emit("") }'
+}
 check_comment_frames() {
   local ceiling=scripts/comment-frames.ceiling hits rc counts verdict
   if [ ! -f "$ceiling" ]; then
@@ -2525,9 +2575,9 @@ check_comment_frames() {
     return 1
   fi
   rc=0
-  hits=$(LC_ALL=C grep -rniE --include='*.rs' "$COMMENT_FRAME_RE" crates) || rc=$?
-  if [ "$rc" -gt 1 ]; then
-    echo "STYLE FAIL: the contrast-frame count exited $rc instead of reading crates/"
+  hits=$(comment_frame_hits) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "STYLE FAIL: the contrast-frame count exited $rc reading crates/"
     return 1
   fi
   counts=$(printf '%s\n' "$hits" | awk -F/ 'NF > 2 { n[$2]++ } END { for (c in n) print c, n[c] }')
@@ -2569,12 +2619,18 @@ check_comment_frames() {
 # The frame lines a crate's working tree added against HEAD, or every frame
 # line the crate holds where git cannot say which are new.
 comment_frames_added() {
-  local crate="$1" hits="$2" added
-  added=$(git diff -U0 HEAD -- "crates/$crate" 2>/dev/null | awk '
+  local crate="$1" hits="$2" lines added
+  lines=$(git diff -U0 HEAD -- "crates/$crate" 2>/dev/null | awk '
     /^\+\+\+ b\// { file = substr($0, 7); next }
     /^@@/ { split($3, at, ","); line = substr(at[1], 2) + 0; next }
-    /^\+/ { print file ":" line ":" substr($0, 2); line++ }
-  ' | LC_ALL=C grep -iE ":[0-9]+:.*$COMMENT_FRAME_RE") || true
+    /^\+/ { print file ":" line; line++ }
+  ') || true
+  added=""
+  if [ -n "$lines" ]; then
+    added=$(printf '%s\n' "$hits" | awk -v lines="$lines" '
+      BEGIN { n = split(lines, l, "\n"); for (i = 1; i <= n; i++) want[l[i]] = 1 }
+      { split($0, f, ":"); if ((f[1] ":" f[2]) in want) print }')
+  fi
   if [ -n "$added" ]; then
     printf '%s\n' "$added"
   else
