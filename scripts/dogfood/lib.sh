@@ -22,29 +22,44 @@ cleanup() {
 # same private socket the caller already attached its session to and
 # leaves the resulting gif at $2. $TAPE is a script global, not a local:
 # cleanup() above reads it after this function has returned. $4 and $5
-# are vhs's own pixel Width/Height, not the tmux session's columns and
-# rows: tmux resizes to whatever vhs attaches at (window-size=latest),
-# so a caller whose session was created at a given -x/-y needs a canvas
-# that maps to at least that many columns/rows or vhs's own recording
-# crops the far side of the pane -- not just a tile running off the edge
-# but, confirmed against engine-restart.sh's wedge banner, a right-anchored
-# floating notice that nvim still carries in its grid model but vhs never
-# captures a pixel of. Every tape script here opens its session at
-# `-x 220 -y 50`, so the default is sized for that (roughly 8.6px/col,
-# 15px/row at FontSize 14) with margin, and a caller opening a bigger
-# session passes its own width/height the same way tiled-panes.sh's two
-# tiles do.
+# are the tmux session's own columns and rows (its `-x`/`-y`), not vhs's
+# pixel Width/Height: tmux resizes to whatever vhs attaches at
+# (window-size=latest), so a canvas guessed in pixels drifts from the
+# session's actual shape -- confirmed against engine-restart.sh's wedge
+# banner, clipped at the right edge because the old fixed 2000x820
+# default carried no padding budget at all. The pixel canvas here is
+# derived from cols/rows instead: at `Set FontSize 14` (the only size
+# every tape script requests), vhs's own terminal grid measures out to
+# `cols = floor((Width - 147) / 9)` and `rows = floor((Height - 136) / 16)`
+# (probed with `tput cols`/`tput lines` against three Width/Height pairs
+# on this recorder's build of vhs 0.11.0 -- 1200x600 -> 117x29,
+# 2200x1000 -> 228x54, 3000x1400 -> 317x79 -- all three solve the same
+# 9px/16px cell and 147px/136px pad exactly). tmux's own status line
+# takes one more row than the pane itself, and MARGIN_COLS/MARGIN_ROWS
+# cover font-hinting drift across hosts and vhs versions this recorder
+# has not measured; a caller whose session was created at a given
+# `-x`/`-y` passes that same shape here, the way every tape script's
+# `-x 220 -y 50` becomes `record_gif ... 220 50`.
 record_gif() {
   socket=$1
   out=$2
   seconds=$3
-  width=${4:-2000}
-  height=${5:-820}
+  cols=${4:?record_gif: pass the tmux session -x columns}
+  rows=${5:?record_gif: pass the tmux session -y rows}
   command -v vhs >/dev/null 2>&1 || {
     echo "record_gif: vhs is not on PATH (go install" \
       "github.com/charmbracelet/vhs@latest)" >&2
     return 2
   }
+  cell_w=9
+  cell_h=16
+  pad_w=147
+  pad_h=136
+  status_rows=1
+  margin_cols=2
+  margin_rows=1
+  width=$(( (cols + margin_cols) * cell_w + pad_w ))
+  height=$(( (rows + status_rows + margin_rows) * cell_h + pad_h ))
   mkdir -p -- "$(dirname -- "$out")"
   tapedir="${XDG_CACHE_HOME:-$HOME/.cache}/view-dogfood-tapes"
   mkdir -p -- "$tapedir"

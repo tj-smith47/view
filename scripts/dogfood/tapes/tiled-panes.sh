@@ -6,6 +6,16 @@
 # drives its own tmux session the same way cap.sh does, and hands it to
 # record_gif in lib.sh for the recording.
 #
+# Startup leaves three "statusline/winbar/vim.notify was drawing ..."
+# notices standing over the right tile
+# (`crates/view-core/src/update/surface_conflict.rs`:
+# `record_native_notice_sticky_once` -- sticky by design, taken down by
+# `:View notifications dismiss` one at a time). This tape sends the
+# dismiss verb after both tiles are open so neither carries one; the next
+# notice only takes the top slot once the one ahead of it has cleared, so
+# the verb is repeated against the live pane rather than fired three times
+# on a fixed clock.
+#
 # Usage: scripts/dogfood/tapes/tiled-panes.sh [outfile]
 set -eu
 
@@ -28,8 +38,23 @@ tmux -L "$SOCKET" new-session -d -s cap -x 220 -y 50 "$BIN" README.md
   tmux -L "$SOCKET" send-keys -t cap ':View ui panes tiles' Enter
   sleep 1
   tmux -L "$SOCKET" send-keys -t cap ':vsplit docs/tiled-ui.md' Enter
+  sleep 1.5
+  n=0
+  while [ "$n" -lt 8 ]; do
+    pane=$(tmux -L "$SOCKET" capture-pane -p -t cap)
+    case "$pane" in
+      (*'still loads'*|*'which view owns'*)
+        tmux -L "$SOCKET" send-keys -t cap ':View notifications dismiss' Enter
+        sleep 0.8
+        ;;
+      (*)
+        break
+        ;;
+    esac
+    n=$((n + 1))
+  done
 ) &
 
-record_gif "$SOCKET" "$OUT" 8
+record_gif "$SOCKET" "$OUT" 14 220 50
 
 echo "tiled-panes.sh: recorded $OUT" >&2

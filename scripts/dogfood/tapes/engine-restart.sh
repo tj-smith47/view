@@ -46,6 +46,6 @@ tmux -L "$SOCKET" new-session -d -s cap -x 220 -y 50 "$BIN" README.md
   fi
 ) &
 
-record_gif "$SOCKET" "$OUT" 26
+record_gif "$SOCKET" "$OUT" 26 220 50
 
 echo "engine-restart.sh: recorded $OUT" >&2
