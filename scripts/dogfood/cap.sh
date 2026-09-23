@@ -75,7 +75,6 @@ command -v tmux >/dev/null 2>&1 || { echo "cap.sh: tmux is not on PATH" >&2; exi
 # server the user is working in
 SOCKET=view-cap-$$
 . "$HERE/lib.sh"
-trap cleanup EXIT INT TERM
 
 mkdir -p -- "$(dirname -- "$OUT")"
 
