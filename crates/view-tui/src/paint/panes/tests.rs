@@ -2414,6 +2414,46 @@ fn tree_in_the_left_tile(gaps: bool) -> Tiles {
     Tiles { slots, model }
 }
 
+/// A selection step in the windowed tree changes the tile's rows with no
+/// cell change from nvim, so the pane's own rows are the only damage that
+/// repaints them. Composing runs the debug guard against a from-scratch
+/// recomposite, and the front buffer is checked against one here too.
+#[test]
+fn a_windowed_trees_own_change_damages_its_pane_rows() {
+    let mut model = tree_in_the_left_tile(false).model;
+    let area = ratatui::layout::Rect::new(0, 0, model.term_width, model.term_height);
+    let mut shadow = Shadow::new();
+    assert!(shadow.resize(area));
+    let surface = view_surface::render(&model);
+    let _ = shadow.overlay_damage(&surface);
+    let _ = shadow.native_pane_damage(&model, &surface, area);
+    let _ = model.take_paint_damage();
+    shadow.compose(&model, &surface, &Damage::full());
+    shadow.commit();
+
+    model
+        .tree_mut()
+        .expect("the tree is open")
+        .move_selection(1);
+    let surface = view_surface::render(&model);
+    let mut rows = shadow.overlay_damage(&surface);
+    let pane = shadow.native_pane_damage(&model, &surface, area);
+    assert!(
+        !pane.is_empty(),
+        "the tree's selection moved and its pane named no row"
+    );
+    rows.extend(pane);
+    let offset = view_surface::grid_origin(&model).0;
+    let damage = Damage::from_frame(&model.take_paint_damage(), offset, &rows, false);
+    shadow.compose(&model, &surface, &damage);
+    shadow.commit();
+    assert_eq!(
+        shadow.front(),
+        &tiled_frame(&model),
+        "the tree's moved selection left stale rows on screen"
+    );
+}
+
 /// The windowed tree draws inside the rect nvim gave its window and
 /// nowhere else: its entries stand in the left tile's columns, and the
 /// right tile still carries the buffer text nvim painted there.

@@ -984,6 +984,8 @@ impl Term {
         #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_AREA_RESOLVED);
         let resized = self.shadow.resize(area);
+        let mut overlay_damage = overlay_damage;
+        overlay_damage.extend(self.shadow.native_pane_damage(model, surface, area));
         let force_full = resized || self.last_offset != Some(offset);
         if resized {
             // the terminal changed size: its on-screen contents are no longer

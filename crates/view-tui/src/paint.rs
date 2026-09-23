@@ -240,6 +240,9 @@ pub struct Shadow {
     /// The overlay stack as the terminal shows it, which answers both which
     /// overlay rows a frame damages and how the damaged ones lay out.
     overlays: OverlayShadow,
+    /// Each windowed surface's pane rect and content as the terminal shows
+    /// it, which answers which rows a surface's own state change repainted.
+    native_panes: Vec<(ratatui::layout::Rect, LayerKind)>,
     /// Frames composed, so the debug-build equivalence guard can name the
     /// frame a divergence appeared on.
     #[cfg(debug_assertions)]
@@ -355,7 +358,41 @@ impl Shadow {
         // on screen any more: keeping it would let an unchanged layer report
         // no rows for a terminal that is showing none of it
         self.overlays = OverlayShadow::default();
+        self.native_panes.clear();
         true
+    }
+
+    /// The terminal rows a windowed surface draws differently than the
+    /// frame on screen, for `surface`'s engine-grid layer inside `frame`.
+    ///
+    /// Call it once per frame, beside [`Shadow::overlay_damage`]. A pane
+    /// that moved is already whole-frame damage from the registry, so what
+    /// this adds is the surface's own rows changing in place.
+    pub fn native_pane_damage(
+        &mut self,
+        model: &Model,
+        surface: &Surface,
+        frame: ratatui::layout::Rect,
+    ) -> Vec<u16> {
+        let now = surface
+            .layers
+            .iter()
+            .find(|layer| matches!(layer.kind, LayerKind::EngineGrid))
+            .map_or_else(Vec::new, |grid| {
+                panes::native_panes(model, clip_to_frame(grid.rect, frame))
+            });
+        let mut rows = Vec::new();
+        for index in 0..now.len().max(self.native_panes.len()) {
+            let (was, is) = (self.native_panes.get(index), now.get(index));
+            if was == is {
+                continue;
+            }
+            for (rect, _) in was.into_iter().chain(is) {
+                rows.extend(rect.y..rect.y.saturating_add(rect.height));
+            }
+        }
+        self.native_panes = now;
+        rows
     }
 
     /// Folds `surface`'s overlay stack in, returning the terminal-space rows

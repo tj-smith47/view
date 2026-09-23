@@ -123,6 +123,36 @@ pub(super) fn paint_panes(
     }
 }
 
+/// Every windowed surface's pane rect and what it draws there, in the order
+/// [`paint_panes`] paints them, for the engine-grid layer at `area`.
+///
+/// A surface's rows come from view's own state, so nvim sends no cell
+/// change when they move: comparing this list across frames is the only
+/// record of which rows a tree scan or a selection step repainted.
+pub(super) fn native_panes(model: &Model, area: TermRect) -> Vec<(TermRect, LayerKind)> {
+    let registry = model.engine.grids();
+    if !registry.has_panes() {
+        return Vec::new();
+    }
+    registry
+        .panes_in_z_order()
+        .iter()
+        .filter_map(|pane| {
+            let surface = pane.kind.native_surface()?;
+            let (width, height) = registry.grid(pane.id)?.size();
+            let (top, left) = pane.origin;
+            let rect = clip_to_frame(Rect::new(top, left, width, height), area);
+            if rect.width == 0 || rect.height == 0 {
+                return None;
+            }
+            Some((
+                rect,
+                native_pane_content(model, surface, rect.height, rect.width)?,
+            ))
+        })
+        .collect()
+}
+
 /// Paints one of view's own surfaces into the pane nvim laid out for it.
 ///
 /// Unframed: the tile's frame is already drawn around this rect, and a
