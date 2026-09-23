@@ -521,9 +521,11 @@ pub enum Msg {
         generation: u64,
     },
     /// The bound on input held for the desktop chords elapsed
-    /// ([`Effect::ScheduleChordHold`]). Releases the held input whether or
-    /// not nvim has run the registration yet, so an engine that cannot run
-    /// it until a key arrives (a hit-enter prompt) still gets the key.
+    /// ([`Effect::ScheduleChordHold`]). Arms the bound again while the
+    /// takeover is unanswered and the ceiling has not passed; otherwise
+    /// releases the held input whether or not nvim has run the
+    /// registration yet, so an engine that cannot run it until a key
+    /// arrives (a hit-enter prompt) still gets the key.
     ///
     /// `generation` is the arming effect's own, echoed back: a hold armed
     /// for a replaced engine must not release the hold its replacement

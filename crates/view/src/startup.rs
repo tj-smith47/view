@@ -1910,7 +1910,8 @@ mod tests {
     fn launch_behind_a_prompt(
         surfaces: Vec<view_core::native::ext::Ext>,
         bound: bool,
-    ) -> (bool, Vec<String>) {
+        withhold_takeover_reply: bool,
+    ) -> (bool, Vec<String>, Option<std::time::Duration>) {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(256);
         let mut engine = Engine::spawn(
             EngineConfig::isolated()
@@ -1943,11 +1944,18 @@ mod tests {
         };
 
         let deadline = std::time::Instant::now()
-            + view_test_support::host_deadline(std::time::Duration::from_secs(5));
+            + view_test_support::host_deadline(if withhold_takeover_reply {
+                std::time::Duration::from_secs(8)
+            } else {
+                std::time::Duration::from_secs(5)
+            });
         let mut incoming = cutover.presink.into_iter();
         let mut typed = false;
         let mut claims = 0;
         let mut seen = Vec::new();
+        let mut withheld: Option<Msg> = None;
+        let mut vim_enter_at: Option<std::time::Instant> = None;
+        let mut lift_elapsed: Option<std::time::Duration> = None;
         let answered = loop {
             let msg = match incoming.next() {
                 Some(msg) => msg,
@@ -1958,6 +1966,13 @@ mod tests {
                     Err(_) => break false,
                 },
             };
+            if withhold_takeover_reply
+                && withheld.is_none()
+                && matches!(msg, Msg::MappingsClaimed { .. })
+            {
+                withheld = Some(msg);
+                continue;
+            }
             seen.push(format!("{msg:?}").chars().take(80).collect::<String>());
             if matches!(msg, Msg::MappingsClaimed { .. }) {
                 claims += 1;
@@ -1972,6 +1987,20 @@ mod tests {
             };
             let flow = crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, msg);
             assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
+            if vim_enter {
+                vim_enter_at = Some(std::time::Instant::now());
+            }
+            if withheld.is_some() && !follow_ups.native.holds_input() {
+                if let (Some(at), None) = (vim_enter_at, lift_elapsed) {
+                    lift_elapsed = Some(at.elapsed());
+                }
+                let pending = withheld.take().expect("checked Some above");
+                seen.push(format!("{pending:?}").chars().take(80).collect::<String>());
+                claims += 1;
+                let flow =
+                    crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, pending);
+                assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
+            }
             if claims == 2 {
                 break true;
             }
@@ -1988,7 +2017,7 @@ mod tests {
         };
         assert!(typed, "nvim never asked for its VimEnter answer: {seen:?}");
         let _ = engine.wait_exit();
-        (answered, seen)
+        (answered, seen, lift_elapsed)
     }
 
     /// Under multigrid the prompt shows as a scrolled message area, and the
@@ -1996,8 +2025,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_prompt_raised_during_launch_takes_the_key_typed_into_it() {
-        let (answered, seen) =
-            launch_behind_a_prompt(view_core::native::ext::shipped_multigrid(), false);
+        let (answered, seen, _) =
+            launch_behind_a_prompt(view_core::native::ext::shipped_multigrid(), false, false);
         assert!(
             answered,
             "the Enter typed at the hit-enter prompt was held, so nvim never \
@@ -2005,16 +2034,40 @@ mod tests {
         );
     }
 
-    /// A single-grid session is sent no sign of the prompt, and the
-    /// ceiling on the hold is what releases the Enter.
+    /// A single-grid session is sent no sign of the prompt, and the bound
+    /// armed from the takeover's reply releases the Enter.
     #[cfg(unix)]
     #[test]
-    fn a_prompt_raised_during_launch_on_a_single_grid_ends_at_the_ceiling() {
-        let (answered, seen) = launch_behind_a_prompt(view_core::native::ext::shipped(), true);
+    fn a_prompt_raised_during_launch_on_a_single_grid_ends_at_the_bound() {
+        let (answered, seen, _) =
+            launch_behind_a_prompt(view_core::native::ext::shipped(), true, false);
         assert!(
             answered,
             "the Enter typed at the hit-enter prompt was held past the bound, \
              so nvim never left it to run the chord registration; saw {seen:?}"
+        );
+    }
+
+    /// A single-grid session whose takeover reply never arrives sends the
+    /// prompt no sign at all, so the ceiling on the hold, not the bound
+    /// armed from a reply, is what releases the Enter.
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_raised_during_launch_on_a_single_grid_ends_at_the_ceiling() {
+        let (answered, seen, lift_elapsed) =
+            launch_behind_a_prompt(view_core::native::ext::shipped(), true, true);
+        assert!(
+            answered,
+            "the Enter typed at the hit-enter prompt was held past the ceiling, \
+             so nvim never left it to run the chord registration; saw {seen:?}"
+        );
+        assert!(lift_elapsed.is_some(), "the hold never lifted: {seen:?}");
+        let lift_elapsed = lift_elapsed.expect("checked above");
+        assert!(
+            lift_elapsed >= crate::native::CHORD_HOLD_CEILING,
+            "the hold lifted {lift_elapsed:?} after VimEnter, short of the \
+             {:?} ceiling; saw {seen:?}",
+            crate::native::CHORD_HOLD_CEILING,
         );
     }
 

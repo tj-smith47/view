@@ -70,7 +70,7 @@ const CHORD_HOLD_BOUND: std::time::Duration = std::time::Duration::from_millis(3
 /// answered. A single-grid session sends no sign of a prompt, so this is
 /// how long a key typed into a prompt raised ahead of the takeover's reply
 /// can be held.
-const CHORD_HOLD_CEILING: std::time::Duration = std::time::Duration::from_secs(3);
+pub(crate) const CHORD_HOLD_CEILING: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The step `msg` owes, or [`Stage::None`].
 pub(crate) fn stage(msg: &Msg) -> Stage {
@@ -335,7 +335,7 @@ impl NativeSession {
     /// Whether engine-bound input has to wait: from the takeover that left
     /// the desktop chords out until nvim has answered the registration that
     /// carries them, or until the hold is lifted ([`CHORD_HOLD_BOUND`],
-    /// [`Self::note_redraw`]).
+    /// [`CHORD_HOLD_CEILING`], [`Self::note_redraw`]).
     pub(crate) fn holds_input(&self) -> bool {
         !self.hold_lifted && (self.chords_pending || self.claims_owed > 0)
     }
@@ -357,8 +357,10 @@ impl NativeSession {
     /// prompt: nvim runs no registration until a key dismisses it, and the
     /// key that would is one this hold keeps. A scrolled message area is
     /// the one sign of the prompt a UI that leaves messages to nvim is
-    /// sent under multigrid. A single-grid session sends none, and its
-    /// hold ends at [`CHORD_HOLD_CEILING`].
+    /// sent under multigrid. A single-grid session sends none: its hold
+    /// ends at [`CHORD_HOLD_CEILING`] for a prompt raised ahead of the
+    /// takeover's reply, and at the bound armed from that reply once it
+    /// has come back.
     pub(crate) fn note_redraw(&mut self, events: &[view_core::events::UiEvent]) {
         if !self.holds_input() {
             return;
