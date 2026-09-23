@@ -140,11 +140,18 @@ pub(crate) struct NativeSession {
     /// `VimEnter` and so counts toward nvim's own startup clock. Cleared
     /// the moment the follow-up that folds them in is sent.
     chords_pending: bool,
-    /// The engine-bound effects of input that arrived while
-    /// [`Self::chords_pending`] was set, in arrival order. A chord typed
-    /// during launch would otherwise reach nvim ahead of its own mapping and
-    /// run as nvim's bare keys, so input waits behind the follow-up that
-    /// registers the chords ([`Self::hold_input`], [`Self::release_input`]).
+    /// How many `MappingsClaimed` replies are still owed for registrations
+    /// sent while input was held, the one carrying the chords among them.
+    /// nvim takes `nvim_input` into typeahead the moment it reads it and
+    /// runs a registration later, from its main loop, so a chord written
+    /// right behind the call that maps it still runs unmapped. Input waits
+    /// for the reply instead, which nvim sends only once the registration
+    /// has run.
+    claims_owed: usize,
+    /// The engine-bound effects of input and resizes that arrived while
+    /// [`Self::holds_input`], in arrival order. A chord typed during launch
+    /// would otherwise reach nvim ahead of its own mapping and run as nvim's
+    /// bare keys ([`Self::hold_input`], [`Self::release_input`]).
     held_input: Vec<Effect>,
     /// The first-run record keys this session has already shown a notice
     /// for. Every `MappingsClaimed` reruns [`Self::announce`], and the chord
@@ -258,6 +265,7 @@ impl NativeSession {
             desktop_modifier_choice,
             desktop,
             chords_pending: false,
+            claims_owed: 0,
             held_input: Vec::new(),
             announced: Vec::new(),
         };
@@ -280,18 +288,19 @@ impl NativeSession {
         // input held for the connection that died was addressed to it, and
         // the replacement's own takeover decides afresh whether to hold
         self.chords_pending = false;
+        self.claims_owed = 0;
         self.held_input.clear();
     }
 
-    /// Whether engine-bound input has to wait: set from the takeover that
-    /// left the desktop chords out until the follow-up that registers them
-    /// has been sent.
+    /// Whether engine-bound input has to wait: from the takeover that left
+    /// the desktop chords out until nvim has answered the registration that
+    /// carries them.
     pub(crate) fn holds_input(&self) -> bool {
-        self.chords_pending
+        self.chords_pending || self.claims_owed > 0
     }
 
     /// Queues `effect`, which input produced while [`Self::holds_input`],
-    /// behind the chord follow-up.
+    /// behind the chord registration's reply.
     pub(crate) fn hold_input(&mut self, effect: Effect) {
         self.held_input.push(effect);
     }
@@ -299,16 +308,31 @@ impl NativeSession {
     /// The held input, in arrival order, once nothing holds it any more;
     /// empty while [`Self::holds_input`].
     pub(crate) fn release_input(&mut self) -> Vec<Effect> {
-        if self.chords_pending {
+        if self.holds_input() {
             return Vec::new();
         }
         std::mem::take(&mut self.held_input)
+    }
+
+    /// Drops the held input: a pass that lost the connection or ended the
+    /// session leaves nobody to write it to.
+    pub(crate) fn drop_held_input(&mut self) {
+        self.held_input.clear();
     }
 
     /// Carries out `stage` against `model`, returning whatever it owes the
     /// engine.
     #[must_use]
     pub(crate) fn follow_up(&mut self, model: &mut Model, stage: Stage) -> Vec<Effect> {
+        let holding = self.holds_input();
+        let effects = self.follow_up_stage(model, stage);
+        if holding || self.holds_input() {
+            self.claims_owed += effects.iter().filter(|e| answers_with_claims(e)).count();
+        }
+        effects
+    }
+
+    fn follow_up_stage(&mut self, model: &mut Model, stage: Stage) -> Vec<Effect> {
         match stage {
             Stage::None => Vec::new(),
             Stage::VimEnter => {
@@ -327,6 +351,8 @@ impl NativeSession {
                 effects
             }
             Stage::Claims => {
+                // replies come back in the order the registrations went out
+                self.claims_owed = self.claims_owed.saturating_sub(1);
                 crate::vlog::log("startup", "takeover answered");
                 crate::vlog::log_takeover("answered");
                 let mut effects = self.announce(model);
@@ -659,6 +685,15 @@ impl NativeSession {
     }
 }
 
+/// Whether nvim answers `effect` with a `Msg::MappingsClaimed`: a takeover
+/// batch and a lone registration each answer with exactly one.
+fn answers_with_claims(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Rpc(RpcCall::Takeover { .. } | RpcCall::RegisterMappings { .. })
+    )
+}
+
 /// Folds `calls` into as few round trips as the vocabulary allows, keeping
 /// the order they were built in.
 ///
@@ -732,6 +767,7 @@ impl NativeSession {
             desktop: default_desktop(),
             profile_marker: None,
             chords_pending: false,
+            claims_owed: 0,
             held_input: Vec::new(),
             announced: Vec::new(),
         }
@@ -760,6 +796,7 @@ impl NativeSession {
             desktop: default_desktop(),
             profile_marker: None,
             chords_pending: false,
+            claims_owed: 0,
             held_input: Vec::new(),
             announced: Vec::new(),
         }
@@ -1088,6 +1125,7 @@ mod tests {
             desktop: default_desktop(),
             profile_marker: None,
             chords_pending: false,
+            claims_owed: 0,
             held_input: Vec::new(),
             announced: Vec::new(),
         };
@@ -1165,6 +1203,7 @@ mod tests {
             desktop: default_desktop(),
             profile_marker: None,
             chords_pending: false,
+            claims_owed: 0,
             held_input: Vec::new(),
             announced: Vec::new(),
         };
@@ -1236,6 +1275,7 @@ mod tests {
             desktop: default_desktop(),
             profile_marker: None,
             chords_pending: false,
+            claims_owed: 0,
             held_input: Vec::new(),
             announced: Vec::new(),
         };
@@ -1627,7 +1667,6 @@ cycle_surfaces = \"gz\"
                 .any(|e| matches!(e, Effect::Rpc(RpcCall::RegisterMappings { .. }))),
             "the reissue must resend the mappings: {reissue:?}"
         );
-        assert!(!session.holds_input(), "the reissue carried the chords");
         let claims = session.follow_up(&mut m, Stage::Claims);
         assert!(
             !claims
@@ -1635,6 +1674,50 @@ cycle_surfaces = \"gz\"
                 .any(|e| matches!(e, Effect::Rpc(RpcCall::RegisterMappings { .. }))),
             "Stage::Claims must not resend what the reissue already sent: {claims:?}"
         );
+        assert!(
+            session.holds_input(),
+            "the takeover's reply came back, the reissue's has not"
+        );
+        let _ = session.follow_up(&mut m, Stage::Claims);
+        assert!(
+            !session.holds_input(),
+            "the reissue that carried the chords has answered"
+        );
+    }
+
+    /// Input waits for nvim's answer to the registration that carries the
+    /// chords, and sending that registration is not enough: nvim puts
+    /// `nvim_input` into typeahead as it reads it and runs the registration
+    /// later, so a chord written right behind it runs unmapped.
+    #[test]
+    fn input_is_held_until_the_chord_registration_has_answered() {
+        let mut session = NativeSession::desktop(7, None);
+        let mut m = model();
+        let _ = session.follow_up(&mut m, Stage::VimEnter);
+        session.hold_input(Effect::Rpc(RpcCall::Input {
+            notation: "x".to_string(),
+        }));
+        let follow_up = session.follow_up(&mut m, Stage::Claims);
+        assert!(
+            follow_up
+                .iter()
+                .any(|e| matches!(e, Effect::Rpc(RpcCall::RegisterMappings { .. }))),
+            "the takeover's claims send the chords: {follow_up:?}"
+        );
+        assert!(
+            session.release_input().is_empty(),
+            "the chord registration was only sent, and nvim has not run it"
+        );
+        let _ = session.follow_up(&mut m, Stage::Claims);
+        let released = session.release_input();
+        assert!(
+            matches!(
+                released.as_slice(),
+                [Effect::Rpc(RpcCall::Input { notation })] if notation == "x"
+            ),
+            "the chord registration answered, so the held input goes out: {released:?}"
+        );
+        assert!(!session.holds_input());
     }
 
     /// A desktop profile whose every chord row resolves to no key has no

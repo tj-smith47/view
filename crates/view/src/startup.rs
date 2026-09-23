@@ -1740,11 +1740,11 @@ mod tests {
         );
     }
 
-    /// A desktop chord typed while view starts reaches nvim behind the
-    /// registration that maps it. The takeover leaves the chords for a
-    /// follow-up sent once the takeover's claims come back, which is after
-    /// the cutover replays buffered keys, so a replayed chord written
-    /// straight away would run as nvim's own keys.
+    /// A desktop chord typed while view starts reaches nvim only once the
+    /// registration that maps it has answered. The takeover leaves the
+    /// chords for a follow-up sent once the takeover's claims come back,
+    /// which is after the cutover replays buffered keys, and nvim runs a
+    /// key written right behind that follow-up before the follow-up itself.
     #[test]
     fn a_chord_typed_during_launch_reaches_nvim_after_its_mapping() {
         use view_core::msg::{EngineRequest, ReplyToken};
@@ -1799,6 +1799,21 @@ mod tests {
             },
         );
         assert!(flow == crate::runtime::Flow::Continue);
+        assert!(
+            !ops.calls.borrow().contains(&typed),
+            "the chord went out behind a registration nvim has not run yet: {:?}",
+            ops.calls.borrow()
+        );
+        let flow = crate::runtime::dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::MappingsClaimed {
+                claimed: Vec::new(),
+                colon_mapped: false,
+            },
+        );
+        assert!(flow == crate::runtime::Flow::Continue);
 
         let calls = ops.calls.borrow().clone();
         let registers_chord = |c: &String| {
@@ -1817,6 +1832,175 @@ mod tests {
         assert!(
             follow_up < sent,
             "the chord's mapping must precede the chord on the wire: {calls:?}"
+        );
+    }
+
+    /// A desktop chord typed while a live nvim is still starting runs view's
+    /// desktop action. The chord is typed in the window after the takeover
+    /// and before the chord registration exists, and the notification the
+    /// chord's mapping sends back is the proof its mapping ran: unmapped,
+    /// nvim takes the chord as its own keys and nothing comes back.
+    #[cfg(unix)]
+    #[test]
+    fn a_chord_typed_during_launch_runs_its_desktop_action_in_a_live_nvim() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(256);
+        let mut engine = Engine::spawn(EngineConfig::isolated().with_late_attach(80, 24)).unwrap();
+        let (_pump, cutover) = engine.start_pump(tx);
+        let executor = crate::runtime::Executor::new(engine.handle.clone());
+        let mut model = Model::with_term_size(80, 24);
+        let mut native = crate::native::NativeSession::desktop(engine.api_info.channel_id, None);
+        let mut theme = crate::bridge::ThemeBridge::new(None, None);
+        let mut follow_ups = crate::runtime::FollowUps {
+            native: &mut native,
+            theme: &mut theme,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let (modifier, _, _) = view_native::config::profile::modifier_for(
+            view_core::native::chords::ModifierChoice::Auto,
+            model.caps.kitty_kbd,
+        );
+        let chord = view_core::native::chords::desktop_chord("zoom")
+            .expect("the zoom chord is a shipped row")
+            .lhs(modifier);
+
+        let deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(5));
+        let mut incoming = cutover.presink.into_iter();
+        let mut typed = false;
+        let mut seen = Vec::new();
+        let invoked = loop {
+            let msg = match incoming.next() {
+                Some(msg) => msg,
+                None => match rx
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                {
+                    Ok(msg) => msg,
+                    Err(_) => break false,
+                },
+            };
+            if let Msg::FeatureInvoke { feature, verb } = &msg {
+                if feature == "window" && verb == "zoom" {
+                    break true;
+                }
+            }
+            seen.push(format!("{msg:?}").chars().take(80).collect::<String>());
+            if matches!(msg, Msg::RedrawReady) {
+                continue;
+            }
+            let vim_enter = matches!(
+                msg,
+                Msg::EngineRequest(view_core::msg::EngineRequest::VimEnter { .. })
+            );
+            let flow = crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, msg);
+            assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
+            if vim_enter && !typed {
+                typed = true;
+                let flow = crate::runtime::dispatch(
+                    &mut model,
+                    &executor,
+                    &mut follow_ups,
+                    Msg::Key(key(chord)),
+                );
+                assert_eq!(flow, crate::runtime::Flow::Continue);
+            }
+        };
+        assert!(typed, "nvim never asked for its VimEnter answer: {seen:?}");
+        assert!(
+            invoked,
+            "{chord} typed during launch ran as nvim's own keys, so its \
+             mapping did not exist when nvim read it; saw {seen:?}"
+        );
+        let _ = engine.wait_exit();
+    }
+
+    /// Dispatches `msgs` through a desktop session on `ops`, returning each
+    /// pass's flow.
+    fn dispatch_desktop(
+        ops: &crate::engine_ops::FakeOps,
+        msgs: Vec<Msg>,
+        between: impl Fn(usize),
+    ) -> Vec<crate::runtime::Flow> {
+        let executor = crate::runtime::Executor::new(ops);
+        let mut model = Model::with_term_size(80, 24);
+        let mut native = crate::native::NativeSession::desktop(7, None);
+        let mut theme = crate::bridge::ThemeBridge::new(None, None);
+        let mut follow_ups = crate::runtime::FollowUps {
+            native: &mut native,
+            theme: &mut theme,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        msgs.into_iter()
+            .enumerate()
+            .map(|(at, msg)| {
+                between(at);
+                crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, msg)
+            })
+            .collect()
+    }
+
+    fn vim_enter() -> Msg {
+        Msg::EngineRequest(view_core::msg::EngineRequest::VimEnter {
+            token: view_core::msg::ReplyToken { msgid: 1 },
+        })
+    }
+
+    fn claims() -> Msg {
+        Msg::MappingsClaimed {
+            claimed: Vec::new(),
+            colon_mapped: false,
+        }
+    }
+
+    /// A resize made while input is held for the desktop chords goes out
+    /// behind the keys typed before it, the order the terminal produced
+    /// them in.
+    #[test]
+    fn a_resize_during_the_input_hold_stays_behind_the_keys_typed_before_it() {
+        let ops = crate::engine_ops::FakeOps::default();
+        let flows = dispatch_desktop(
+            &ops,
+            vec![
+                vim_enter(),
+                Msg::Key(key("x")),
+                Msg::Resized {
+                    width: 100,
+                    height: 30,
+                },
+                claims(),
+                claims(),
+            ],
+            |_| {},
+        );
+        assert!(flows.iter().all(|f| *f == crate::runtime::Flow::Continue));
+        let calls = ops.calls.borrow().clone();
+        let typed = calls.iter().position(|c| c == "input(x)");
+        let resized = calls.iter().position(|c| c.starts_with("try_resize("));
+        assert!(
+            matches!((typed, resized), (Some(t), Some(r)) if t < r),
+            "the resize overtook a key typed before it: {calls:?}"
+        );
+    }
+
+    /// Input held when a pass loses the connection is dropped with it: a
+    /// claims reply already queued behind the failure must not write it to
+    /// the dead engine before the restart rebinds the session.
+    #[test]
+    fn input_held_when_a_pass_loses_the_connection_is_never_written() {
+        let ops = crate::engine_ops::FakeOps::default();
+        let flows = dispatch_desktop(
+            &ops,
+            vec![vim_enter(), Msg::Key(key("x")), claims(), claims()],
+            |at| {
+                if at == 2 {
+                    *ops.fail_next.borrow_mut() = true;
+                }
+            },
+        );
+        assert_eq!(flows[2], crate::runtime::Flow::EngineLost);
+        let calls = ops.calls.borrow().clone();
+        assert!(
+            !calls.iter().any(|c| c == "input(x)"),
+            "held input went to a connection already lost: {calls:?}"
         );
     }
 

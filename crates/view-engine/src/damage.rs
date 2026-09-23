@@ -361,14 +361,6 @@ struct Route {
     /// a discarded acknowledgement is indistinguishable from an engine that
     /// never answered, which is exactly the reading that raises a wedge.
     deferred_heartbeat: Option<Msg>,
-    /// The `Msg::MappingsClaimed` an attached-but-full sink refused, held
-    /// for the next routing attempt to retry.
-    ///
-    /// Its own slot rather than sharing [`Route::deferred_probe`]: a probe
-    /// reply is superseded by the next one, a claim report never is (it is
-    /// sent once per session), so one shared slot would let a probe reply
-    /// arriving a moment later evict the report for good.
-    deferred_claims: Option<Msg>,
     /// The `Msg::StartupMessages` an attached-but-full sink refused, held
     /// for the next routing attempt to retry.
     ///
@@ -471,8 +463,11 @@ struct Route {
     /// attach-generation entry is removed, this is the only remaining copy
     /// -- and a lost `Msg::AiFsReadReply`/`Msg::AiFsWriteReply` leaves the
     /// agent that asked blocked on a request nothing else will ever settle.
-    /// Every one queued here must eventually be delivered, not merely the
-    /// newest.
+    /// A `Msg::MappingsClaimed` waits here too: a session sends a
+    /// registration at takeover, one for the desktop chords and one per
+    /// reissue, and the runtime counts the replies to know when the chords
+    /// are mapped. Every one queued here must eventually be delivered, not
+    /// merely the newest.
     ///
     /// One queue for both kinds rather than one each: what they share is
     /// the "never drop, never reorder" contract, and a second queue would
@@ -486,7 +481,6 @@ struct Route {
 enum Held {
     Probe,
     Heartbeat,
-    Claims,
     StartupMessages,
     NotifySink,
     BufferList,
@@ -506,7 +500,6 @@ impl Route {
         match which {
             Held::Probe => &mut self.deferred_probe,
             Held::Heartbeat => &mut self.deferred_heartbeat,
-            Held::Claims => &mut self.deferred_claims,
             Held::StartupMessages => &mut self.deferred_startup_messages,
             Held::NotifySink => &mut self.deferred_notify_sink,
             Held::BufferList => &mut self.deferred_buffer_list,
@@ -529,7 +522,6 @@ impl Route {
         for which in [
             Held::Probe,
             Held::Heartbeat,
-            Held::Claims,
             Held::StartupMessages,
             Held::NotifySink,
             Held::BufferList,
@@ -767,25 +759,25 @@ impl PumpShared {
         self.route_held(msg, Held::Heartbeat);
     }
 
-    /// Routes a `Msg::MappingsClaimed` without ever dropping it on a full
-    /// sink, and without blocking, on the same terms as
-    /// [`route_probe_reply`](Self::route_probe_reply).
+    /// Routes a `Msg::MappingsClaimed` without ever dropping or reordering
+    /// it on a full sink, and without blocking, on the terms
+    /// [`route_buf_detached`](Self::route_buf_detached) states.
     ///
-    /// A dropped claim report is silent and permanent: mappings register
-    /// once per session, so nothing re-issues the answer, and a user whose
-    /// `<leader>ff` view has just taken over would never be told which
-    /// switch gives it back.
+    /// A dropped claim report is silent and permanent: nothing re-issues
+    /// the answer, a user whose `<leader>ff` view has just taken over would
+    /// never be told which switch gives it back, and input held until the
+    /// desktop chords are mapped would stay held.
     pub(crate) fn route_claims(&self, msg: Msg) {
-        self.route_held(msg, Held::Claims);
+        self.route_queued(msg);
     }
 
     /// Routes a `Msg::StartupMessages` without ever dropping it on a full
     /// sink, and without blocking, on the same terms as
     /// [`route_probe_reply`](Self::route_probe_reply).
     ///
-    /// Its own slot rather than sharing the claim report's: they arrive
-    /// from one reply, so a shared slot would hold the first and then have
-    /// the second write over it. A dropped startup dump is silent and
+    /// Its own slot: it arrives from the same reply as the claim report
+    /// and the notify-sink reading, so a slot shared with either would hold
+    /// one and then have another write over it. A dropped startup dump is silent and
     /// permanent -- nvim is asked once, at `VimEnter` -- and the standing
     /// notice would go on promising a history that never got them.
     pub(crate) fn route_startup_messages(&self, msg: Msg) {
@@ -1069,6 +1061,21 @@ impl DamagePump {
     #[must_use]
     pub fn staged(&self) -> bool {
         self.shared.staged()
+    }
+
+    /// Re-attempts every message a full channel refused, the way the
+    /// reader's next routing attempt would.
+    ///
+    /// For a loop waiting on one of them with no engine traffic due to
+    /// carry it: input held until the desktop chords are mapped waits on a
+    /// claims report, and keys the user types make no routing attempt of
+    /// their own. One lock acquisition, and never on the paint path.
+    pub fn retry_deferred(&self) {
+        self.shared
+            .route
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retry_deferred();
     }
 }
 
@@ -1708,6 +1715,49 @@ mod tests {
             "the probe reply was dropped by the full sink and never retried, \
              so this generation stays unconfirmed and a real black background \
              paints as unset for the rest of the session; saw {seen:?}"
+        );
+    }
+
+    /// Two claim reports a full channel refused both reach the loop, in the
+    /// order nvim answered them, once the loop asks for a retry with no
+    /// engine traffic of its own to carry them. A session counts these
+    /// replies to know its desktop chords are mapped, so one written over
+    /// by the next would hold typed input for good.
+    #[test]
+    fn claim_reports_refused_by_a_full_sink_all_arrive_in_order_on_a_loop_retry() {
+        let shared = PumpShared::new();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(1);
+        let (pump, _cutover) = shared.attach_sink(tx);
+        shared
+            .route_msg(Msg::Resized {
+                width: 9,
+                height: 9,
+            })
+            .expect("the channel has room for the fill");
+        let claims = |colon_mapped| Msg::MappingsClaimed {
+            claimed: Vec::new(),
+            colon_mapped,
+        };
+        shared.route_claims(claims(false));
+        shared.route_claims(claims(true));
+
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.extend(rx.try_recv().ok());
+            pump.retry_deferred();
+        }
+        let order: Vec<Option<bool>> = seen
+            .iter()
+            .map(|msg| match msg {
+                Msg::MappingsClaimed { colon_mapped, .. } => Some(*colon_mapped),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec![None, Some(false), Some(true)],
+            "every refused claim report must arrive, in order, from the \
+             loop's own retry; saw {seen:?}"
         );
     }
 

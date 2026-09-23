@@ -171,12 +171,16 @@ pub(crate) fn dispatch<E: EngineOps>(
         Vec::new()
     };
     // input read while the desktop chords are still unregistered waits for
-    // the follow-up that registers them: nvim reads one connection in
-    // arrival order, so a chord written ahead of its mapping runs as
-    // nvim's own keys. Only what goes to nvim waits, so a modal answered
-    // while the engine is down is still answered
-    let holding = matches!(msg, Msg::Key(_) | Msg::Mouse(_) | Msg::Paste(_))
-        && follow_ups.native.holds_input();
+    // nvim's reply to the registration that carries them: nvim puts
+    // `nvim_input` into typeahead as it reads it and runs a registration
+    // later from its main loop, so a chord written right behind its mapping
+    // still runs as nvim's own keys. A resize waits with the input so it
+    // stays behind the keys typed before it. Only what goes to nvim waits,
+    // so a modal answered while the engine is down is still answered
+    let holding = matches!(
+        msg,
+        Msg::Key(_) | Msg::Mouse(_) | Msg::Paste(_) | Msg::Resized { .. }
+    ) && follow_ups.native.holds_input();
     let mut flow = Flow::Continue;
     // ahead of the fold's own effects: what a guess this batch took back
     // owes is a window somebody else's plugin is waiting to draw in again
@@ -313,6 +317,9 @@ pub(crate) fn dispatch<E: EngineOps>(
                 break;
             }
         }
+    }
+    if flow != Flow::Continue {
+        follow_ups.native.drop_held_input();
     }
     flow
 }
@@ -1457,6 +1464,15 @@ pub fn run(
         // session ending: from here the supervision fold owns this
         // connection, and `WedgeKind::Dead` is a verdict it may reach
         state.connection_lost |= matches!(msg, Msg::EngineStopped { .. });
+        // the claims reply that ends an input hold may be parked behind a
+        // channel that was full when it arrived, and only the reader's next
+        // routing attempt carries it; typing makes none, so held keys would
+        // wait for whatever the engine sends next
+        if matches!(msg, Msg::Key(_) | Msg::Mouse(_) | Msg::Paste(_))
+            && follow_ups.native.holds_input()
+        {
+            pump.retry_deferred();
+        }
         let mut queue = vec![msg];
         let mut drained_residue = false;
         while let Some(msg) = queue.pop() {
