@@ -22,7 +22,7 @@ use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
 use view_surface::overlay::BorderSet;
 
 use super::super::text::{cluster_width, clusters, group_width, set_cluster};
-use super::super::{ratatui_style, rgb, set_border_cell, Damage};
+use super::super::{border_color, ratatui_style, rgb, set_border_cell, Damage};
 
 /// One cell of the lattice, as `(row, col)` in the engine layer's own
 /// coordinates.
@@ -79,25 +79,28 @@ fn is_tile(pane: &Pane) -> bool {
 }
 
 /// The frame colour of a tile the user is not working in: `WinSeparator`'s
-/// foreground, or the default one where the colorscheme states none,
-/// halfway to the background so the active tile's own frame is the one the
-/// eye lands on.
+/// foreground as the colorscheme states it, which is the colour it chose
+/// for the lines between windows, or the dimmed text colour a float border
+/// derives where the separator is only the text colour again (unset, or
+/// linked to `Normal` as nvim's default scheme does). The accent alone is
+/// what picks out the active tile.
+///
+/// A stated separator colour is never dimmed further. Colorschemes already
+/// give it a muted shade picked to read against their background, and
+/// halving it toward the background left an inactive frame the eye could
+/// not find: under a transparent `Normal` there is no background to blend
+/// toward, and Dracula's `#6272a4` went to `#313952` on a dark terminal.
 fn quiet_style(theme: &Theme) -> Style {
-    let separator = theme.chrome(ChromeGroup::WinSeparator);
-    let fg = separator.fg.or(theme.fg);
+    let normal = theme.normal();
+    let fg = theme
+        .chrome(ChromeGroup::WinSeparator)
+        .fg
+        .filter(|fg| Some(*fg) != normal.fg)
+        .unwrap_or_else(|| border_color(normal));
     ratatui_style(ResolvedStyle {
-        fg: fg.map(|fg| halfway(fg, theme.bg.unwrap_or(0))),
-        ..theme.normal()
+        fg: Some(fg),
+        ..normal
     })
-}
-
-/// `colour` halfway to `toward`, channel by channel.
-fn halfway(colour: u32, toward: u32) -> u32 {
-    let channel = |shift: u32| -> u32 {
-        let (from, to) = ((colour >> shift) & 0xFF, (toward >> shift) & 0xFF);
-        (from + to) / 2
-    };
-    (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 /// Whether the tile's grid sits inside its slot, which is what a frame

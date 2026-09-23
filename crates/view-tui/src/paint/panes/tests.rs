@@ -1625,6 +1625,42 @@ fn only_the_active_tiles_frame_carries_the_accent_fg() {
     );
 }
 
+/// The fixture's `Normal` states no background, which is what a
+/// transparent colorscheme sends: an inactive frame blended toward a
+/// background nobody named went halfway to black and vanished on the
+/// user's dark terminal.
+#[test]
+fn an_inactive_tiles_frame_is_the_separator_colour_the_colorscheme_states() {
+    for gaps in [true, false] {
+        let mut tiles = tiled(gaps);
+        // the right tile takes the cursor, so the left one's outer edge
+        // belongs to an inactive tile alone under both looks
+        drive(
+            &mut tiles.model,
+            vec![
+                UiEvent::GridCursorGoto {
+                    grid: LEFT + 1,
+                    row: 0,
+                    col: 0,
+                },
+                UiEvent::Flush,
+            ],
+        );
+        let buf = tiled_frame(&tiles.model);
+        let separator = rgb(VIEW_SEPARATOR_FG).expect("the separator resolves to a colour");
+        let (row, _, _, height) = tiles.slots[0];
+        // a gapped frame sits one cell inside its slot, which starts one
+        // cell in from the terminal; a gapless one is the ring's own column
+        let edge = if gaps { 2 } else { 0 };
+        let y = row + 1 + height / 2;
+        assert_eq!(
+            (buf[(edge, y)].symbol(), buf[(edge, y)].fg),
+            ("│", separator),
+            "gaps = {gaps}: the inactive tile's left edge is WinSeparator's own fg, undimmed"
+        );
+    }
+}
+
 #[test]
 fn a_grid_line_on_a_window_leaves_the_frame_rows_undamaged() {
     let mut tiles = tiled(true);

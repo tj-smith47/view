@@ -3,11 +3,12 @@
 ## What you see
 
 Under `panes = "tiles"` every nvim window gets a frame of its own. The
-window you are working in carries the accent colour on its frame, and every
-other frame is dimmed halfway toward the background. With `gaps = true`
-there is a clear cell between two frames and around the outside of the
-screen. With `gaps = false` two neighbouring tiles share one frame line, and
-the places where lines meet take a junction glyph.
+window you are working in carries the accent colour on its frame. Every
+other frame takes the colour your colorscheme gives the lines between
+windows (`WinSeparator`). With `gaps = true` there is a clear cell between
+two frames and around the outside of the screen. With `gaps = false` two
+neighbouring tiles share one frame line, and the places where lines meet
+take a junction glyph.
 
 Under `panes = "nvim"` the screen keeps the shape nvim draws: the `│`
 separator column between windows, restyled through `WinSeparator`.

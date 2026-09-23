@@ -5,7 +5,7 @@
 #
 # Usage:
 #   cap.sh [--size WIDTHxHEIGHT] [--keys NOTATION] [--submit]
-#          [--settle SECONDS] <outfile> [-- <view argument>...]
+#          [--settle SECONDS] [--ansi] <outfile> [-- <view argument>...]
 #
 # Examples:
 #   cap.sh caps/tiles-263x88.txt
@@ -14,6 +14,9 @@
 #
 # --keys reaches `tmux send-keys` as one argument, so a command line stays
 # open until something submits it: --submit sends the Enter after it.
+#
+# --ansi keeps the SGR escapes in the capture, because a colour defect (a
+# frame drawn in a shade the background swallows) is invisible in text.
 #
 # The caret is written beside the capture, as `<outfile>.cursor` holding
 # `column,row`. capture-pane prints no caret of its own, and a caret drawn on
@@ -29,6 +32,7 @@ ROOT=$(cd -- "$HERE/../.." && pwd)
 SIZE=263x88
 KEYS=
 SUBMIT=0
+ANSI=
 SETTLE=3
 OUT=
 
@@ -37,6 +41,7 @@ while [ $# -gt 0 ]; do
     (--size) SIZE="${2:?--size takes WIDTHxHEIGHT}"; shift 2 ;;
     (--keys) KEYS="${2:?--keys takes tmux send-keys notation}"; shift 2 ;;
     (--submit) SUBMIT=1; shift ;;
+    (--ansi) ANSI=-e; shift ;;
     (--settle) SETTLE="${2:?--settle takes whole seconds}"; shift 2 ;;
     (--) shift; break ;;
     (-*) echo "cap.sh: unknown option $1" >&2; exit 2 ;;
@@ -87,7 +92,7 @@ if [ -n "$KEYS" ]; then
   fi
   sleep "$SETTLE"
 fi
-tmux -L "$SOCKET" capture-pane -p -t cap >"$OUT"
+tmux -L "$SOCKET" capture-pane -p $ANSI -t cap >"$OUT"
 tmux -L "$SOCKET" display-message -p -t cap '#{cursor_x},#{cursor_y}' >"$OUT.cursor"
 
 echo "cap.sh: ${COLS}x${ROWS} capture of $BIN -> $OUT (caret in $OUT.cursor)" >&2
