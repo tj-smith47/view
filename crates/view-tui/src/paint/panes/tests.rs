@@ -1628,9 +1628,13 @@ fn only_the_active_tiles_frame_carries_the_accent_fg() {
 }
 
 /// The empty band between the frames and the terminal edge is as wide on
-/// every side, with the statusline feature on or off: the `laststatus = 2`
-/// hold under tiles does not follow the switch, so the fixtures' status
-/// rows stand either way.
+/// every side, with the statusline feature on or off. The hold that keeps
+/// `laststatus = 2` under tiles whatever the switch says is covered by
+/// `a_panes_flip_reissues_the_hold_the_look_decides` and the live test
+/// `a_disabled_statusline_under_tiles_is_held_at_two_until_released`; the
+/// painter reads no `laststatus` of its own, so this pass only checks that
+/// emptying the fixtures' status segments leaves the frames and the margin
+/// unchanged.
 #[test]
 fn a_gapped_layout_leaves_the_same_margin_on_every_side() {
     for (statusline, mut tiles) in [

@@ -925,3 +925,25 @@ impl<E: EngineOps> Executor<E> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use crate::engine_ops::FakeOps;
+
+    // The executor's arm table ends in a wildcard that degrades an
+    // unrecognized effect to a silent no-op -- so a `ReleaseOption` that
+    // fell out of the match would leave a flip from tiles to nvim holding
+    // `laststatus` forever, with nothing failing loudly.
+    #[test]
+    fn release_option_effect_reaches_the_engine_op() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::ReleaseOption {
+            name: "laststatus".into(),
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(*ops.calls.borrow(), vec!["release_option(laststatus)"]);
+    }
+}

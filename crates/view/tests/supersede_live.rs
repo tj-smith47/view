@@ -895,7 +895,10 @@ fn a_disabled_statusline_leaves_the_users_own_setting_alone() {
 
 /// Tiles keeps `laststatus = 2` with the statusline off, and the release a
 /// flip back to `panes = "nvim"` sends puts the config's own value back and
-/// takes the guard down with it.
+/// takes the guard down with it. A gaps-only flip re-issues the same hold
+/// while it is already in force (the `before[name] == nil` guard in
+/// `HOLD_OPTION_CHUNK`), and a hold issued again after a release has to
+/// stash the value then in force, not the one from before.
 #[test]
 fn a_disabled_statusline_under_tiles_is_held_at_two_until_released() {
     let dir = fixture("tiles-disabled");
@@ -912,20 +915,50 @@ fn a_disabled_statusline_under_tiles_is_held_at_two_until_released() {
     );
     assert_eq!(engine.handle.eval_str("&laststatus").unwrap(), "2");
 
+    engine
+        .handle
+        .hold_option("laststatus", &OptionValue::Int(2))
+        .unwrap();
+    assert_eq!(
+        engine.handle.eval_str("&laststatus").unwrap(),
+        "2",
+        "a second hold while the first is still in force must not move the value"
+    );
     engine.handle.release_option("laststatus").unwrap();
     assert_eq!(
         engine.handle.eval_str("&laststatus").unwrap(),
         FIXTURE_LASTSTATUS,
-        "the release must put back the value the config set"
+        "the release must put back the value the config set, not the value \
+         the second hold stashed"
     );
     engine
         .handle
         .eval_str("execute('set laststatus=1')")
         .unwrap();
+    engine
+        .handle
+        .hold_option("laststatus", &OptionValue::Int(2))
+        .unwrap();
+    assert_eq!(
+        engine.handle.eval_str("&laststatus").unwrap(),
+        "2",
+        "a hold issued after a release must still stash and hold the value"
+    );
+    engine.handle.release_option("laststatus").unwrap();
     assert_eq!(
         engine.handle.eval_str("&laststatus").unwrap(),
         "1",
-        "the release must take the guard down"
+        "the release after a re-hold must put back the value that was in \
+         force when that hold was issued"
+    );
+    engine
+        .handle
+        .eval_str("execute('set laststatus=4')")
+        .unwrap();
+    assert_eq!(
+        engine.handle.eval_str("&laststatus").unwrap(),
+        "4",
+        "the second release must take the guard down too"
     );
     assert_eq!(before, snapshot(&dir));
 }

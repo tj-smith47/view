@@ -633,6 +633,34 @@ mod tests {
         }
     }
 
+    /// `held_by_look` applies its rule to any `ByLook` row under tiles, on
+    /// grounds that hold for `laststatus` alone: the tiles geometry is
+    /// built on it, and the tiles painter covers the row it draws in. A
+    /// second look-keyed hold added to [`CHANNELS`] would inherit the same
+    /// past-the-switch behavior with no decision behind it, so this walks
+    /// the whole table and pins today's answer to the one member the
+    /// grounds were written for.
+    #[test]
+    fn held_by_look_under_tiles_covers_exactly_laststatus() {
+        let tiles = Look::new(Panes::Tiles, true);
+        let mut held: Vec<&'static str> = CHANNELS
+            .iter()
+            .flat_map(|entry| entry.channels)
+            .filter_map(|channel| match channel {
+                Channel::Hold { option, value, .. } if value.held_by_look(tiles) => Some(*option),
+                _ => None,
+            })
+            .collect();
+        held.sort_unstable();
+        held.dedup();
+        assert_eq!(
+            held,
+            vec!["laststatus"],
+            "a new look-keyed hold needs the same geometry grounds as laststatus \
+             before it joins this list"
+        );
+    }
+
     /// A look flip away from tiles hands a look-held option back with a
     /// global release, which puts back one session-wide value. A
     /// window-local option keyed by look would need a per-window release.

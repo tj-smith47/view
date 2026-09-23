@@ -451,10 +451,10 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_feature_supersedes_nothing() {
+    fn a_disabled_feature_supersedes_nothing_under_the_nvim_look() {
         let cfg = NativeConfig::from_toml_str("[native]\nstatusline = false\n")
             .expect("a known key must parse");
-        let plan = plan(&cfg, registry::features(), Look::default());
+        let plan = plan(&cfg, registry::features(), Look::new(Panes::Nvim, true));
         assert!(
             !plan.iter().any(|s| s.feature == "statusline"),
             "a disabled statusline must take over nothing, got {plan:?}"
@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_feature_supersedes_nothing_however_many_rows_it_has() {
+    fn a_disabled_feature_supersedes_nothing_however_many_rows_it_has_under_the_nvim_look() {
         let table = [
             Takeover {
                 feature: "statusline",
@@ -788,7 +788,12 @@ mod tests {
         ];
         let cfg = NativeConfig::from_toml_str("[native]\nstatusline = false\n")
             .expect("a known key must parse");
-        let entries = plan_from(&cfg, registry::features(), &table, Look::default());
+        let entries = plan_from(
+            &cfg,
+            registry::features(),
+            &table,
+            Look::new(Panes::Nvim, true),
+        );
         assert!(
             !entries.iter().any(|s| s.feature == "statusline"),
             "a disabled feature must take over nothing at all, got {entries:?}"
