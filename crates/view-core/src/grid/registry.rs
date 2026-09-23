@@ -834,6 +834,10 @@ impl GridRegistry {
     pub(crate) fn forget_grids(&mut self) {
         self.slots.clear();
         self.cursor = None;
+        // window handles restart from 1000 in the replacement, so a claim
+        // kept past the death would place the person's next split as a
+        // surface pane and paint the surface over their buffer
+        self.claims.clear();
         // every box those grids held is gone from the screen at once, and
         // no cell op will ever name the rows they occupied
         self.placement_dirty = true;
@@ -936,6 +940,13 @@ impl GridRegistry {
                 }
             }
         }
+    }
+
+    /// Every window handle view holds a surface claim on, with the surface
+    /// it was opened for.
+    #[must_use]
+    pub fn native_window_claims(&self) -> Vec<(WinHandle, NativeSurface)> {
+        self.claims.clone()
     }
 
     /// How many window handles view holds a surface claim on.
@@ -2108,6 +2119,28 @@ mod tests {
             registry.native_claims(),
             0,
             "the claim outlived its release"
+        );
+    }
+
+    /// The replacement engine numbers its windows from 1000 again, so the
+    /// person's first split after a restart can carry the handle a dead
+    /// engine's tree window had.
+    #[test]
+    fn a_restart_forgets_every_native_window_claim() {
+        let mut registry = GridRegistry::new();
+        claimed(&mut registry, GridId(1001), NativeSurface::Tree);
+        registry.forget_grids();
+        assert_eq!(
+            registry.native_claims(),
+            0,
+            "a claim outlived the engine that issued its handle"
+        );
+        resize(&mut registry, GridId(1001), 30, 20);
+        window(&mut registry, GridId(1001), 0, 0);
+        assert_eq!(
+            pane_of(&registry, GridId(1001)).kind,
+            PaneKind::Window,
+            "the replacement's window 1001 was placed as the dead tree's pane"
         );
     }
 

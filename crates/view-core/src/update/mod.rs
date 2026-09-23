@@ -103,6 +103,24 @@ fn path_to_wire(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Closes, in the model, every surface view had open in a window of the
+/// engine being replaced, returning what each close owes the executor.
+///
+/// The replacement has none of those windows, so a surface left reading
+/// open would hold `Focus::Pane`, its ring position and its open flag for a
+/// window nobody can reach. Runs before the grids are forgotten, since the
+/// claims are the only record of which surfaces were windowed.
+#[must_use]
+pub fn forget_native_windows(model: &mut Model) -> Vec<Effect> {
+    model
+        .engine
+        .grids()
+        .native_window_claims()
+        .into_iter()
+        .flat_map(|(win, surface)| ui_event::closed_native_pane(model, Some((surface, win))))
+        .collect()
+}
+
 /// Applies one message to `model`, returning the effects the executor must
 /// carry out. Never blocks and never performs I/O: every side effect crosses
 /// the boundary as a returned [`Effect`] instead of being performed here.

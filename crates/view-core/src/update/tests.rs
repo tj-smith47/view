@@ -10056,12 +10056,50 @@ fn armed_hold_generation(effects: &[Effect]) -> u64 {
     generations[0]
 }
 
-/// The restart the product performs: the dead engine's overlays and its
-/// conflict state are dropped together, before the replacement is spawned
-/// (`restart_engine`).
-fn restart(m: &mut Model) {
+/// The restart the product performs: the dead engine's windowed surfaces
+/// are closed, then its overlays and its conflict state are dropped
+/// together, before the replacement is spawned (`restart_engine`). Answers
+/// what the closes owe the executor.
+fn restart(m: &mut Model) -> Vec<Effect> {
+    let closed = super::forget_native_windows(m);
     m.engine.forget_overlays();
     m.forget_engine_conflicts();
+    closed
+}
+
+/// The replacement engine numbers its windows from 1000 again, so a
+/// handle the dead engine's tree window held comes back as the person's
+/// own split. The tree has to read closed, since the replacement has no
+/// window for it, and the recycled handle has to place an ordinary pane.
+#[test]
+fn a_restart_closes_the_windowed_tree_and_frees_its_handle() {
+    use crate::native::geometry::NativeSurface;
+
+    let mut m = focused_windowed_tree();
+    assert_eq!(m.focus(), Focus::Pane(NativeSurface::Tree));
+    let closed = restart(&mut m);
+    assert!(
+        closed
+            .iter()
+            .any(|effect| matches!(effect, Effect::TreeClose)),
+        "the tree's scan was left running for a closed tree: {closed:?}"
+    );
+    assert!(
+        m.tree_mut().is_none(),
+        "the tree reads open with no window in the replacement"
+    );
+    let _ = update(&mut m, tree_window_placed());
+    assert_ne!(
+        m.focus(),
+        Focus::Pane(NativeSurface::Tree),
+        "the replacement's window on the recycled handle was placed as the \
+         dead engine's tree"
+    );
+    assert_eq!(
+        m.engine.grids().native_surface(GridId(TREE_GRID)),
+        None,
+        "the replacement's window on the recycled handle paints the tree"
+    );
 }
 
 /// The deadline a dead engine's attach armed is still sleeping in its

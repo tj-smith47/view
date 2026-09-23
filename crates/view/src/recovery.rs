@@ -13,7 +13,7 @@
 use std::sync::mpsc;
 
 use view_core::model::Model;
-use view_core::msg::{ExitInfo, Msg};
+use view_core::msg::{Effect, ExitInfo, Msg};
 use view_core::native::supervision::ReconnectProgress;
 use view_engine::handle::EngineHandle;
 use view_engine::process::Engine;
@@ -298,6 +298,9 @@ pub(crate) struct Restarted {
     pub(crate) pump: view_engine::DamagePump,
     pub(crate) executor: Executor<EngineHandle>,
     pub(crate) staged: crate::startup::CutoverInput,
+    /// What closing the dead engine's windowed surfaces owes the executor
+    /// that started their work, run on it before it is replaced.
+    pub(crate) closed: Vec<Effect>,
 }
 
 /// Brings up a replacement engine and re-points everything bound to the one
@@ -347,6 +350,9 @@ pub(crate) fn restart_engine(
     ai_context_route: &crate::ai_context_worker::OpsRoute<EngineHandle>,
 ) -> Result<Restarted, crate::startup::AttachFailure> {
     let (width, height) = model.grid_target();
+    // ahead of the forget below, which drops the claims that record which
+    // surfaces the dead engine held windows for
+    let closed = view_core::update::forget_native_windows(model);
     // before the spawn rather than after the attach: the overlays belong to
     // the connection being torn down on the next line, and a failed attempt
     // leaves the caller painting with the dead engine's grid, which has no
@@ -397,6 +403,7 @@ pub(crate) fn restart_engine(
             resize: None,
             keys: Vec::new(),
         },
+        closed,
     })
 }
 

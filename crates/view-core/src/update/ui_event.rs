@@ -509,7 +509,7 @@ fn native_pane_at(model: &Model, grid: GridId) -> Option<(NativeSurface, WinHand
 /// `win_close` is followed by `grid_destroy` for the same grid, and a grid
 /// can be destroyed without either. The first of the two to arrive unplaces
 /// the pane, so the second reads no surface here and the close runs once.
-fn closed_native_pane(
+pub(super) fn closed_native_pane(
     model: &mut Model,
     native: Option<(NativeSurface, WinHandle)>,
 ) -> Vec<Effect> {

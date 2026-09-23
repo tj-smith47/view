@@ -812,6 +812,109 @@ fn view_recovers_its_own_engine_after_a_signal_death() {
     );
 }
 
+/// The line the windowed-tree restart leg's buffer holds.
+#[cfg(target_os = "linux")]
+const SPLIT_TEXT: &str = "SPLITBODYTEXT";
+
+/// A file only the tree names on screen, so its name on screen is the tree.
+#[cfg(target_os = "linux")]
+const TREE_ONLY: &str = "zmark.md";
+
+/// A replacement engine numbers its windows from 1000 again, so a split a
+/// person opens after a restart takes the handle the dead engine's tree
+/// window had. Every window of the split has to show the buffer, and the
+/// tree the replacement never opened must not be painted over any of them.
+///
+/// Disconfirm: dropping the claims clear from `forget_grids` and the
+/// `forget_native_windows` call from `restart_engine` paints the tree's
+/// rows over the window on the recycled handle.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_split_after_a_restart_with_the_tree_windowed_shows_its_buffer() {
+    let _isolation = shared_isolation();
+    let paths = common::ScratchPaths::new("smoke-tree-restart");
+    let work = paths.isolated_home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("split.txt"), format!("{SPLIT_TEXT}\n")).unwrap();
+    std::fs::write(work.join(TREE_ONLY), "x\n").unwrap();
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.cwd(&work);
+    cmd.arg("split.txt");
+    // ahead of the config below, which it would overwrite with its own
+    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+    let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view");
+    std::fs::create_dir_all(&config).unwrap();
+    let mut text = String::from("[ui]\npanes = \"tiles\"\n\n[native]\n");
+    for feature in view_core::native::registry::features() {
+        if feature.id != "tree" {
+            text.push_str(&format!("{} = false\n", feature.id));
+        }
+    }
+    text.push_str("\n[keys]\nprofile = \"editor\"\n");
+    text.push_str("\n[ui.surfaces.tree]\nplacement = \"windowed\"\n");
+    std::fs::write(config.join("view.toml"), text).unwrap();
+
+    let mut session =
+        PtySession::spawn_configured_with(cmd, 80, 24, QueryPolicy::AnswerDa1).unwrap();
+    assert!(
+        session.wait_for(SPLIT_TEXT, Duration::from_secs(20)),
+        "view never painted the buffer; screen:\n{}",
+        session.screen()
+    );
+
+    session.send(b"\\e").unwrap();
+    assert!(
+        session.wait_for(TREE_ONLY, Duration::from_secs(20)),
+        "the windowed tree never opened; screen:\n{}",
+        session.screen()
+    );
+
+    let view_pid = session.pid().expect("view exposes a pid");
+    let killed = wait_for_child_pid(view_pid, "nvim", Duration::from_secs(5))
+        .expect("view never spawned an nvim child");
+    let status = std::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(killed.to_string())
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill -KILL {killed} failed");
+    let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(30));
+    let mut replacement = None;
+    while Instant::now() < deadline && replacement.is_none() {
+        replacement = wait_for_child_pid(view_pid, "nvim", Duration::from_millis(25))
+            .filter(|pid| *pid != killed);
+    }
+    assert!(
+        replacement.is_some(),
+        "view never replaced the engine it lost; screen:\n{}",
+        session.screen()
+    );
+    session.send(b"\x1b:echo \"replaced\"\r").unwrap();
+    assert!(
+        session.wait_for("replaced", Duration::from_secs(15)),
+        "the replacement engine never painted through view; screen:\n{}",
+        session.screen()
+    );
+
+    // two splits, since the dead engine spent 1001 before the tree's window
+    // and the replacement hands out 1001 and then 1002
+    session.send(b"\x1b:vsplit\r\x1b:vsplit\r").unwrap();
+    let all = session.wait_for_screen(Duration::from_secs(15), |screen| {
+        screen.contents().matches(SPLIT_TEXT).count() >= 3
+    });
+    let screen = session.screen();
+    assert!(
+        all,
+        "a window of the split never showed its buffer; screen:\n{screen}"
+    );
+    assert!(
+        !screen.contains(TREE_ONLY),
+        "the dead engine's tree was painted over the split; screen:\n{screen}"
+    );
+    session.send(b"\x1b:qa!\r").unwrap();
+    expect_quit(&mut session);
+}
+
 /// nvim's own wording for a swap file it replayed. The engine is pinned, so
 /// this string is as fixed as any other screen text asserted here, and a
 /// restart that recovered nothing prints something else.
