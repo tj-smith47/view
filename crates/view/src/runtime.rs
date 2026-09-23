@@ -170,6 +170,13 @@ pub(crate) fn dispatch<E: EngineOps>(
     } else {
         Vec::new()
     };
+    // input read while the desktop chords are still unregistered waits for
+    // the follow-up that registers them: nvim reads one connection in
+    // arrival order, so a chord written ahead of its mapping runs as
+    // nvim's own keys. Only what goes to nvim waits, so a modal answered
+    // while the engine is down is still answered
+    let holding = matches!(msg, Msg::Key(_) | Msg::Mouse(_) | Msg::Paste(_))
+        && follow_ups.native.holds_input();
     let mut flow = Flow::Continue;
     // ahead of the fold's own effects: what a guess this batch took back
     // owes is a window somebody else's plugin is waiting to draw in again
@@ -192,6 +199,10 @@ pub(crate) fn dispatch<E: EngineOps>(
         };
     crate::vlog::log_layout(model, &layout);
     for eff in effects {
+        if holding && matches!(eff, Effect::Rpc(_)) {
+            follow_ups.native.hold_input(eff);
+            continue;
+        }
         // read off what is actually going to the engine rather than off the
         // message that produced it: a key a native overlay claimed never
         // reaches nvim at all, and a glyph predicted for one would stand
@@ -291,6 +302,17 @@ pub(crate) fn dispatch<E: EngineOps>(
     }
     if flow == Flow::Continue {
         flow = run_in_wire_order(executor, attach, taking_over);
+    }
+    if flow == Flow::Continue {
+        for eff in follow_ups.native.release_input() {
+            if let Effect::Rpc(call) = &eff {
+                note_engine_call(model, call, follow_ups.speculate);
+            }
+            flow = executor.run(eff);
+            if flow != Flow::Continue {
+                break;
+            }
+        }
     }
     flow
 }

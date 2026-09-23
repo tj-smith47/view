@@ -1740,6 +1740,86 @@ mod tests {
         );
     }
 
+    /// A desktop chord typed while view starts reaches nvim behind the
+    /// registration that maps it. The takeover leaves the chords for a
+    /// follow-up sent once the takeover's claims come back, which is after
+    /// the cutover replays buffered keys, so a replayed chord written
+    /// straight away would run as nvim's own keys.
+    #[test]
+    fn a_chord_typed_during_launch_reaches_nvim_after_its_mapping() {
+        use view_core::msg::{EngineRequest, ReplyToken};
+
+        let ops = crate::engine_ops::FakeOps::default();
+        let executor = crate::runtime::Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        let mut native = crate::native::NativeSession::desktop(7, None);
+        let mut theme = crate::bridge::ThemeBridge::new(None, None);
+        let mut follow_ups = crate::runtime::FollowUps {
+            native: &mut native,
+            theme: &mut theme,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let (modifier, _, _) = view_native::config::profile::modifier_for(
+            view_core::native::chords::ModifierChoice::Auto,
+            model.caps.kitty_kbd,
+        );
+        let chord = view_core::native::chords::desktop_chords()[0].lhs(modifier);
+
+        let outcome = run_cutover(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            CutoverInput {
+                presink: vec![Msg::EngineRequest(EngineRequest::VimEnter {
+                    token: ReplyToken { msgid: 1 },
+                })],
+                pending_redraw: vec![],
+                resize: None,
+                keys: vec![key(chord)],
+            },
+            || view_core::msg::ExitInfo {
+                code: None,
+                by_signal: false,
+            },
+        );
+        assert!(matches!(outcome, CutoverOutcome::Continue));
+        let typed = format!("input({chord})");
+        assert!(
+            !ops.calls.borrow().contains(&typed),
+            "the replayed chord went out before its mapping existed: {:?}",
+            ops.calls.borrow()
+        );
+        let flow = crate::runtime::dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::MappingsClaimed {
+                claimed: Vec::new(),
+                colon_mapped: false,
+            },
+        );
+        assert!(flow == crate::runtime::Flow::Continue);
+
+        let calls = ops.calls.borrow().clone();
+        let registers_chord = |c: &String| {
+            c.strip_prefix("register_mappings(")
+                .and_then(|rest| rest.rsplit_once(','))
+                .is_some_and(|(keys, _)| keys.split(' ').any(|lhs| lhs == chord))
+        };
+        let follow_up = calls
+            .iter()
+            .position(registers_chord)
+            .expect("the chord follow-up must reach the wire");
+        let sent = calls
+            .iter()
+            .position(|c| *c == typed)
+            .expect("the held chord must reach the wire once its mapping has");
+        assert!(
+            follow_up < sent,
+            "the chord's mapping must precede the chord on the wire: {calls:?}"
+        );
+    }
+
     /// A presink `Msg::EngineStopped` (nvim's reader thread detected the
     /// connection close before `main.rs` ever called `start_pump`) is
     /// translated to `Msg::EngineDown` and produces `Effect::Quit`, exactly
