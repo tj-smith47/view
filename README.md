@@ -70,9 +70,9 @@ command palette and the notifications each open as a window beside your code
 or float over it. One key moves all four between the two.
 
 **Desktop keys where there is no desktop.** Over SSH or on a bare console,
-view answers omarchy's window keys: move between windows, zoom one, open the
-tree or the palette. On a desktop that already owns those keys, view keeps
-to leader keys. See [`docs/keymaps.md`](docs/keymaps.md).
+view answers a tiling desktop's window keys: move between windows, zoom one,
+open the tree or the palette. On a desktop that already owns those keys,
+view keeps to leader keys. See [`docs/keymaps.md`](docs/keymaps.md).
 
 **Agents in the editor.** An agent panel that speaks ACP, an agent that
 sees the file, selection and diagnostics you are looking at, and every
@@ -136,7 +136,8 @@ machine's tree, an image, a website, a video.
 view brings together ideas from across the open-source community:
 
 - [Omarchy](https://omarchy.org) and [Hyprland](https://hypr.land): tiling
-  navigation and one config that propagates everywhere
+  navigation, the window keys view answers over SSH, and one config that
+  propagates everywhere
 - [qutebrowser](https://qutebrowser.org): a browser driven by vim motions
 - [tmux](https://github.com/tmux/tmux): sessions that outlive a connection
 - [herdr](https://github.com/herdrdev/herdr): a fleet of agents as an
