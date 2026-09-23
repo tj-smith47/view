@@ -542,11 +542,17 @@ pub(super) fn native_window_closed(
     win: crate::events::WinHandle,
 ) -> Vec<Effect> {
     model.engine.grids_mut().release_native_window(win);
-    model.dirty = true;
     // a window closed before its own `win_pos` ever placed it (open,
     // then closed again within the same round) would otherwise leave
     // `pending_open` stuck true with nothing left to clear it
     model.surfaces.clear_pending(surface);
+    close_windowed_state(model, surface)
+}
+
+/// Drops `surface`'s own state once its window is gone, returning what the
+/// close owes the executor (the tree's scan cancel).
+fn close_windowed_state(model: &mut Model, surface: NativeSurface) -> Vec<Effect> {
+    model.dirty = true;
     match surface {
         NativeSurface::Tree if model.close_tree() => vec![Effect::TreeClose],
         NativeSurface::Agent => {
@@ -580,6 +586,57 @@ pub(super) fn native_window_taken(model: &mut Model, surface: NativeSurface) -> 
         return Vec::new();
     };
     native_window_closed(model, surface, win)
+}
+
+/// Closes every surface the engine being replaced held a window for, or
+/// had a window open in flight for, and records each one for
+/// [`reopen_after_restart`].
+///
+/// An open in flight is retired first, so a reply the dead connection still
+/// delivers reads as stale and claims nothing. The palette is only retired:
+/// its tile reopens on the next `cmdline_show`.
+pub(super) fn forget_native_windows(model: &mut Model) -> Vec<Effect> {
+    let claims = model.engine.grids().native_window_claims();
+    let mut effects = Vec::new();
+    for surface in NativeSurface::ALL {
+        let claim = claims.iter().find(|(_, claimed)| *claimed == surface);
+        let pending = model.surfaces.pending_open(surface);
+        if pending {
+            model.surfaces.cancel_pending_open(surface);
+        }
+        if claim.is_none() && !pending {
+            continue;
+        }
+        if surface != NativeSurface::Palette && surface_is_open(model, surface) {
+            model.surfaces.mark_reopen(surface);
+        }
+        if let Some((win, _)) = claim {
+            model.engine.grids_mut().release_native_window(*win);
+        }
+        effects.extend(close_windowed_state(model, surface));
+    }
+    effects
+}
+
+/// Opens again every surface an engine restart closed, on the placement it
+/// has now, leaving the keyboard where it is.
+pub(super) fn reopen_after_restart(model: &mut Model) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    for surface in model.surfaces.take_reopen() {
+        if surface_is_open(model, surface) {
+            continue;
+        }
+        effects.extend(match surface {
+            NativeSurface::Tree => open_tree_state(model, false),
+            NativeSurface::Agent => open_ai_panel(model),
+            NativeSurface::Notifications => open_message_history(model),
+            NativeSurface::Palette => continue,
+        });
+        if model.surfaces.windowed(surface) {
+            effects.push(Effect::Rpc(open_native_window(model, surface, false)));
+        }
+    }
+    effects
 }
 
 /// Carries a resized sidebar's stepped share to every other windowed
@@ -879,12 +936,6 @@ pub(super) fn native_window_opened(
         }
         return vec![Effect::Rpc(RpcCall::CloseNativeWindow { win: win.0 })];
     }
-    // a re-enter of a window the open chunk's `is_ours(live)` branch found
-    // already open hands back that same handle, and nvim never fires a
-    // fresh `win_pos` for a window whose position has not moved -- read
-    // before the claim below overwrites it, since that is what tells this
-    // reply apart from a genuine new open
-    let reentered = model.engine.grids().native_window(surface) == Some(win);
     // `pending_open` stays true past this claim -- it is what
     // `native_window()` will answer once the `win_pos` this claim is
     // waiting on places it, and that is a separate redraw event, not
@@ -892,13 +943,16 @@ pub(super) fn native_window_opened(
     // to close: a keystroke landing between this claim and that `win_pos`
     // would read "no window yet" and "nothing pending" and open a second
     // one. `ui_event::WinPos`'s handler clears it once the placement the
-    // guard is actually waiting for has happened -- except on a re-enter,
-    // where that event is never coming and this is the only place left
-    // that can still tell `pending_open` the wait is over.
+    // guard is actually waiting for has happened. A window already placed
+    // when this reply lands gets no further `win_pos`: a re-enter of a
+    // window the open chunk's `is_ours(live)` branch found open, or a
+    // window opened while the engine started, whose placement the attach's
+    // redraw delivered first. The claim places that one as the surface's
+    // pane itself, and this is the only place left to end the wait.
     model.engine.grids_mut().claim_native_window(win, surface);
     let layout = model.surfaces.layout(surface);
     sync_stacked_siblings(model, surface, layout.anchor, layout.size);
-    if reentered {
+    if model.engine.grids().native_window(surface) == Some(win) {
         model.surfaces.clear_pending(surface);
     }
     model.dirty = true;

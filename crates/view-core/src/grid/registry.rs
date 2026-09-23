@@ -911,12 +911,34 @@ impl GridRegistry {
     /// Binds the window handle `nvim_open_win` answered with to the surface
     /// view opened it for, so the next `win_pos` for it places a `Native`
     /// pane.
+    ///
+    /// A window already placed is rewritten to the surface's pane here, the
+    /// mirror of [`Self::release_native_window`]: a window opened while the
+    /// engine was starting is placed by the attach's own redraw, which can
+    /// reach the loop ahead of this reply, and nvim sends no second
+    /// `win_pos` for a window that has not moved.
     pub fn claim_native_window(&mut self, win: WinHandle, surface: NativeSurface) {
         if let Some(entry) = self.claims.iter_mut().find(|(handle, _)| *handle == win) {
             entry.1 = surface;
-            return;
+        } else {
+            self.claims.push((win, surface));
         }
-        self.claims.push((win, surface));
+        for slot in &mut self.slots {
+            if slot.window.as_ref().is_none_or(|window| window.win != win) {
+                continue;
+            }
+            let Some(placed) = slot.placed.as_mut() else {
+                continue;
+            };
+            if placed.kind == (PaneKind::Native { surface }) {
+                continue;
+            }
+            placed.kind = PaneKind::Native { surface };
+            // the engine's cells for the scratch buffer stand under a pane
+            // view paints itself
+            slot.grid.apply(GridOp::Clear);
+            self.placement_dirty = true;
+        }
     }
 
     /// Forgets the claim on `win` and puts any pane placed under that
@@ -2142,6 +2164,44 @@ mod tests {
             pane_of(&registry, GridId(1001)).kind,
             PaneKind::Window,
             "the replacement's window 1001 was placed as the dead tree's pane"
+        );
+    }
+
+    /// A window opened while the engine starts is placed by the attach's
+    /// redraw, which can reach the registry ahead of the open's reply, and
+    /// nvim sends no second `win_pos` for it.
+    #[test]
+    fn a_claim_landing_after_its_windows_placement_makes_it_the_surfaces_pane() {
+        let mut registry = GridRegistry::new();
+        resize(&mut registry, GridId(1001), 30, 20);
+        window(&mut registry, GridId(1001), 0, 0);
+        registry.apply_cells(
+            GridId(1001),
+            GridOp::PutLine {
+                row: 0,
+                col_start: 0,
+                cells: vec![("~".to_string(), 0, 1)],
+            },
+        );
+        registry.claim_native_window(WinHandle(1001), NativeSurface::Tree);
+        assert_eq!(
+            pane_of(&registry, GridId(1001)).kind,
+            PaneKind::Native {
+                surface: NativeSurface::Tree
+            },
+            "the claimed window stayed an ordinary pane, so the surface is never painted"
+        );
+        assert_eq!(
+            registry.native_window(NativeSurface::Tree),
+            Some(WinHandle(1001)),
+            "the surface does not answer for its placed window"
+        );
+        assert_eq!(
+            registry
+                .grid(GridId(1001))
+                .map(|grid| grid.row_text(0).trim().to_string()),
+            Some(String::new()),
+            "the scratch buffer's engine cells stand under the surface's pane"
         );
     }
 

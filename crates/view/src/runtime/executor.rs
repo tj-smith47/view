@@ -149,6 +149,16 @@ impl<E: EngineOps> Executor<E> {
         }
     }
 
+    /// Whether a tree scan's cancel flag is still installed, which
+    /// `Effect::TreeClose` clears.
+    #[cfg(test)]
+    pub(crate) fn holds_tree_scan(&self) -> bool {
+        self.tree_scan_cancel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
     /// [`LoopMsgOutbox::route`](crate::loop_msgs::LoopMsgOutbox::route) for
     /// this executor's own outbox and loop channel.
     pub(super) fn route_loop_msg(&self, msg: Msg) {

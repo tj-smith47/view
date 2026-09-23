@@ -820,14 +820,15 @@ const SPLIT_TEXT: &str = "SPLITBODYTEXT";
 #[cfg(target_os = "linux")]
 const TREE_ONLY: &str = "zmark.md";
 
-/// A replacement engine numbers its windows from 1000 again, so a split a
-/// person opens after a restart takes the handle the dead engine's tree
-/// window had. Every window of the split has to show the buffer, and the
-/// tree the replacement never opened must not be painted over any of them.
+/// A replacement engine numbers its windows from 1000 again, so the handles
+/// the dead engine's tree window and splits held come back naming other
+/// windows. The tree the restart closed opens again in its own tile at the
+/// replacement's `VimEnter`, every window of a split opened afterwards shows
+/// the buffer, and the tree is painted once, in its tile.
 ///
-/// Disconfirm: dropping the claims clear from `forget_grids` and the
-/// `forget_native_windows` call from `restart_engine` paints the tree's
-/// rows over the window on the recycled handle.
+/// Disconfirm: dropping the reopen from `on_vim_enter` leaves the tree gone
+/// after the restart, and dropping the claims clear from `forget_grids`
+/// paints the tree's rows over a window on a recycled handle.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_split_after_a_restart_with_the_tree_windowed_shows_its_buffer() {
@@ -896,20 +897,34 @@ fn a_split_after_a_restart_with_the_tree_windowed_shows_its_buffer() {
         session.screen()
     );
 
-    // two splits, since the dead engine spent 1001 before the tree's window
-    // and the replacement hands out 1001 and then 1002
-    session.send(b"\x1b:vsplit\r\x1b:vsplit\r").unwrap();
+    assert!(
+        session.wait_for(TREE_ONLY, Duration::from_secs(15)),
+        "the tree the restart closed never came back in its tile; screen:\n{}",
+        session.screen()
+    );
+
+    // one split: beside the tree's tile, a second would wrap the line
+    session.send(b"\x1b:vsplit\r").unwrap();
     let all = session.wait_for_screen(Duration::from_secs(15), |screen| {
-        screen.contents().matches(SPLIT_TEXT).count() >= 3
+        screen.contents().matches(SPLIT_TEXT).count() >= 2
     });
     let screen = session.screen();
     assert!(
         all,
         "a window of the split never showed its buffer; screen:\n{screen}"
     );
+    assert_eq!(
+        screen.matches(TREE_ONLY).count(),
+        1,
+        "the tree was painted over a window of the split; screen:\n{screen}"
+    );
+    // the tree's tile sits at the left edge, 30 percent wide by default
     assert!(
-        !screen.contains(TREE_ONLY),
-        "the dead engine's tree was painted over the split; screen:\n{screen}"
+        screen
+            .lines()
+            .filter_map(|line| line.find(TREE_ONLY).map(|at| line[..at].chars().count()))
+            .all(|col| col < 40),
+        "the tree came back somewhere other than its tile; screen:\n{screen}"
     );
     session.send(b"\x1b:qa!\r").unwrap();
     expect_quit(&mut session);

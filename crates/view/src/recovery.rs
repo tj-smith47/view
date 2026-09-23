@@ -13,7 +13,7 @@
 use std::sync::mpsc;
 
 use view_core::model::Model;
-use view_core::msg::{Effect, ExitInfo, Msg};
+use view_core::msg::{ExitInfo, Msg};
 use view_core::native::supervision::ReconnectProgress;
 use view_engine::handle::EngineHandle;
 use view_engine::process::Engine;
@@ -298,9 +298,6 @@ pub(crate) struct Restarted {
     pub(crate) pump: view_engine::DamagePump,
     pub(crate) executor: Executor<EngineHandle>,
     pub(crate) staged: crate::startup::CutoverInput,
-    /// What closing the dead engine's windowed surfaces owes the executor
-    /// that started their work, run on it before it is replaced.
-    pub(crate) closed: Vec<Effect>,
 }
 
 /// Brings up a replacement engine and re-points everything bound to the one
@@ -348,11 +345,19 @@ pub(crate) fn restart_engine(
     channels: &LoopChannels,
     route: &crate::clipboard::ReplyRoute<EngineHandle>,
     ai_context_route: &crate::ai_context_worker::OpsRoute<EngineHandle>,
+    executor: &Executor<EngineHandle>,
 ) -> Result<Restarted, crate::startup::AttachFailure> {
     let (width, height) = model.grid_target();
     // ahead of the forget below, which drops the claims that record which
-    // surfaces the dead engine held windows for
-    let closed = view_core::update::forget_native_windows(model);
+    // surfaces the dead engine held windows for. The closes run on
+    // `executor`, the one that started their work, before the spawn can
+    // fail: a failed attempt leaves the model reading them closed, and the
+    // next attempt finds no claim left to close
+    for effect in view_core::update::forget_native_windows(model) {
+        // a close owes only local work (a tree scan's cancel), which
+        // answers no flow of its own
+        let _ = executor.run(effect);
+    }
     // before the spawn rather than after the attach: the overlays belong to
     // the connection being torn down on the next line, and a failed attempt
     // leaves the caller painting with the dead engine's grid, which has no
@@ -403,7 +408,6 @@ pub(crate) fn restart_engine(
             resize: None,
             keys: Vec::new(),
         },
-        closed,
     })
 }
 
@@ -894,6 +898,7 @@ mod tests {
              or the assertions below are vacuous: {}",
             painted(&model)
         );
+        let executor = channels.executor(engine.handle.clone(), route.epoch());
         let fresh = restart_engine(
             &mut engine,
             &respawn,
@@ -901,6 +906,7 @@ mod tests {
             &channels,
             &route,
             &ai_context_route,
+            &executor,
         )
         .expect("a crashed engine must be replaceable");
         assert!(
@@ -1019,6 +1025,101 @@ mod tests {
         );
     }
 
+    /// A restart whose spawn fails has already closed the windowed tree in
+    /// the model, and the next attempt finds no claim left to close, so the
+    /// scan the tree started is cancelled on this attempt or never.
+    #[test]
+    fn a_restart_that_cannot_spawn_still_cancels_the_windowed_trees_scan() {
+        use view_core::msg::Effect;
+        use view_core::native::geometry::{Anchor, NativeSurface, SurfaceLayout, SurfacePlacement};
+
+        let (msg_tx, _msg_rx) = std::sync::mpsc::sync_channel(64);
+        let (clipboard, _clipboard_jobs) = mpsc::channel();
+        let (osc52, _osc52_jobs) = mpsc::channel();
+        let (picker, _picker_requests) = mpsc::channel();
+        let (ai_context, _ai_context_jobs) = mpsc::channel();
+        let msg = crate::wake::LoopSender::new(msg_tx);
+        let channels = LoopChannels {
+            clipboard,
+            osc52,
+            picker,
+            ai: inert_ai_worker(&msg),
+            ai_context,
+            msg,
+        };
+        let mut engine = Engine::spawn(view_engine::process::EngineConfig::isolated()).unwrap();
+        let route = crate::clipboard::ReplyRoute::new(engine.handle.clone());
+        let ai_context_route = crate::ai_context_worker::OpsRoute::new(engine.handle.clone());
+        let respawn =
+            || view_engine::process::EngineConfig::isolated().with_nvim_bin("/nonexistent/nvim");
+        let executor = channels.executor(engine.handle.clone(), route.epoch());
+        let scratch = view_test_support::ScratchDir::new("restart-tree-scan").unwrap();
+
+        let mut model = Model::with_term_size(80, 24);
+        model.cwd = scratch.path().to_path_buf();
+        model.surfaces.set_layout(
+            NativeSurface::Tree,
+            SurfaceLayout::new(SurfacePlacement::Windowed, Anchor::Left, 30),
+        );
+        let _ = view_core::update::update(
+            &mut model,
+            Msg::Resized {
+                width: 80,
+                height: 24,
+            },
+        );
+        let mut generation = None;
+        for effect in view_core::update::update(
+            &mut model,
+            Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        ) {
+            match effect {
+                Effect::TreeScan { .. } => {
+                    let _ = executor.run(effect);
+                }
+                Effect::Rpc(view_core::msg::RpcCall::OpenNativeWindow {
+                    generation: opened,
+                    ..
+                }) => generation = Some(opened),
+                _ => {}
+            }
+        }
+        let _ = view_core::update::update(
+            &mut model,
+            Msg::NativeWindowOpened {
+                generation: generation.expect("the windowed toggle asks for a window"),
+                surface: NativeSurface::Tree,
+                win: view_core::events::WinHandle(1001),
+            },
+        );
+        assert!(
+            !model.engine.grids().native_window_claims().is_empty() && executor.holds_tree_scan(),
+            "the seed must hold a claimed tree window with its scan running, \
+             or the assertion below is vacuous"
+        );
+
+        let failed = restart_engine(
+            &mut engine,
+            &respawn,
+            &mut model,
+            &channels,
+            &route,
+            &ai_context_route,
+            &executor,
+        );
+        assert!(
+            matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),
+            "a restart that could not spawn must report it"
+        );
+        assert!(
+            !executor.holds_tree_scan(),
+            "the failed restart closed the windowed tree and left its scan running"
+        );
+    }
+
     /// Fails a restart the way a broken `--nvim-bin` would, which is the one
     /// failure mode with no second engine to report through.
     #[test]
@@ -1045,6 +1146,7 @@ mod tests {
         let mut model = Model::with_term_size(80, 24);
         model.dirty = false;
 
+        let executor = channels.executor(engine.handle.clone(), route.epoch());
         let failed = restart_engine(
             &mut engine,
             &respawn,
@@ -1052,6 +1154,7 @@ mod tests {
             &channels,
             &route,
             &ai_context_route,
+            &executor,
         );
         assert!(
             matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),
@@ -1317,6 +1420,7 @@ mod tests {
                 continue;
             }
             attempts += 1;
+            let executor = channels.executor(engine.handle.clone(), route.epoch());
             let failed = restart_engine(
                 &mut engine,
                 &respawn,
@@ -1324,6 +1428,7 @@ mod tests {
                 &channels,
                 &route,
                 &ai_context_route,
+                &executor,
             );
             assert!(
                 matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),
@@ -1389,6 +1494,7 @@ mod tests {
             schedule.take_due(std::time::Instant::now()),
             "a user who has already waited out the whole sequence waits no longer"
         );
+        let executor = channels.executor(engine.handle.clone(), route.epoch());
         let failed = restart_engine(
             &mut engine,
             &respawn,
@@ -1396,6 +1502,7 @@ mod tests {
             &channels,
             &route,
             &ai_context_route,
+            &executor,
         );
         assert!(
             matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),

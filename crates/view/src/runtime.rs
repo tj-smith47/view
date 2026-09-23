@@ -1216,14 +1216,10 @@ pub fn run(
                 &channels,
                 &clipboard_route,
                 &ai_context_route,
+                &executor,
             ) {
                 Ok(fresh) => {
                     reconnect.clear();
-                    for effect in fresh.closed {
-                        // a close owes only local work (a tree scan's
-                        // cancel), which answers no flow of its own
-                        let _ = executor.run(effect);
-                    }
                     engine = fresh.engine;
                     pump = fresh.pump;
                     executor = fresh.executor;

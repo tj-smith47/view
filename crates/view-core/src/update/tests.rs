@@ -10100,6 +10100,132 @@ fn a_restart_closes_the_windowed_tree_and_frees_its_handle() {
         None,
         "the replacement's window on the recycled handle paints the tree"
     );
+    let reopened = replacement_vim_enter(&mut m);
+    assert_reopened(&m, &reopened, NativeSurface::Tree);
+    assert!(
+        reopened
+            .iter()
+            .any(|effect| matches!(effect, Effect::TreeScan { .. })),
+        "the reopened tree lists nothing: {reopened:?}"
+    );
+}
+
+/// The replacement engine's `VimEnter`, which is where a surface the
+/// restart closed opens again.
+fn replacement_vim_enter(m: &mut Model) -> Vec<Effect> {
+    update(
+        m,
+        Msg::EngineRequest(EngineRequest::VimEnter {
+            token: ReplyToken { msgid: 99 },
+        }),
+    )
+}
+
+/// `surface` open again after a restart, in a window of its own, with the
+/// keyboard left where it was.
+fn assert_reopened(m: &Model, effects: &[Effect], surface: crate::native::geometry::NativeSurface) {
+    let opens: Vec<&Effect> = effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::Rpc(RpcCall::OpenNativeWindow { .. })))
+        .collect();
+    assert!(
+        matches!(
+            opens[..],
+            [Effect::Rpc(RpcCall::OpenNativeWindow { surface: asked, enter: false, .. })]
+                if *asked == surface
+        ),
+        "the restart closed the windowed {surface:?} and the replacement never \
+         asked for its window again: {effects:?}"
+    );
+    assert!(
+        m.surfaces.pending_open(surface),
+        "the reopen is not awaiting its reply"
+    );
+}
+
+/// The windowed agent panel comes back after a restart, the way the floating
+/// one stays open across it.
+#[test]
+fn a_restart_reopens_the_windowed_agent_panel_at_the_replacements_vim_enter() {
+    use crate::native::geometry::NativeSurface;
+
+    let mut m = focused_windowed_agent();
+    let _ = restart(&mut m);
+    assert!(
+        !m.ai_panel_overlay_open(),
+        "the agent panel reads open with no window in the replacement"
+    );
+    let reopened = replacement_vim_enter(&mut m);
+    assert_reopened(&m, &reopened, NativeSurface::Agent);
+    assert!(
+        m.ai_panel_overlay_open(),
+        "the panel's state was not seated"
+    );
+}
+
+/// The windowed notification stream comes back after a restart.
+#[test]
+fn a_restart_reopens_the_windowed_notification_stream_at_the_replacements_vim_enter() {
+    use crate::native::geometry::NativeSurface;
+
+    let mut m = focused_windowed_notifications();
+    let _ = restart(&mut m);
+    let reopened = replacement_vim_enter(&mut m);
+    assert_reopened(&m, &reopened, NativeSurface::Notifications);
+}
+
+/// A second `VimEnter` reopens nothing: the record is spent by the first.
+#[test]
+fn a_restarts_reopen_is_asked_for_once() {
+    let mut m = focused_windowed_tree();
+    let _ = restart(&mut m);
+    let _ = replacement_vim_enter(&mut m);
+    let again = replacement_vim_enter(&mut m);
+    assert!(
+        !again
+            .iter()
+            .any(|effect| matches!(effect, Effect::Rpc(RpcCall::OpenNativeWindow { .. }))),
+        "a second VimEnter opened the tree again: {again:?}"
+    );
+}
+
+/// An open still in flight when the engine dies is retired, so the dead
+/// connection's late reply claims nothing, and the surface it was opening
+/// comes back with the replacement.
+#[test]
+fn a_restart_retires_an_open_in_flight_and_reopens_its_surface() {
+    use crate::native::geometry::NativeSurface;
+
+    let mut m = windowed_tree_model();
+    let effects = update(&mut m, tree_toggle());
+    let stale = opened_generation(&effects);
+    assert!(m.surfaces.pending_open(NativeSurface::Tree));
+    let closed = restart(&mut m);
+    assert!(
+        !m.surfaces.pending_open(NativeSurface::Tree),
+        "the dead engine's open was left pending"
+    );
+    assert!(
+        closed
+            .iter()
+            .any(|effect| matches!(effect, Effect::TreeClose)),
+        "the tree's scan was left running for a closed tree: {closed:?}"
+    );
+    let late = update(
+        &mut m,
+        Msg::NativeWindowOpened {
+            generation: stale,
+            surface: NativeSurface::Tree,
+            win: TREE_WIN,
+        },
+    );
+    assert_eq!(
+        m.engine.grids().native_window(NativeSurface::Tree),
+        None,
+        "the dead engine's late reply claimed a window: {late:?}"
+    );
+    let reopened = replacement_vim_enter(&mut m);
+    assert_reopened(&m, &reopened, NativeSurface::Tree);
 }
 
 /// The deadline a dead engine's attach armed is still sleeping in its

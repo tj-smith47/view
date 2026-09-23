@@ -109,16 +109,12 @@ fn path_to_wire(path: &std::path::Path) -> String {
 /// The replacement has none of those windows, so a surface left reading
 /// open would hold `Focus::Pane`, its ring position and its open flag for a
 /// window nobody can reach. Runs before the grids are forgotten, since the
-/// claims are the only record of which surfaces were windowed.
+/// claims are the only record of which surfaces were windowed. Each closed
+/// surface opens again at the replacement's `VimEnter`, the way a floating
+/// one stays open across the restart.
 #[must_use]
 pub fn forget_native_windows(model: &mut Model) -> Vec<Effect> {
-    model
-        .engine
-        .grids()
-        .native_window_claims()
-        .into_iter()
-        .flat_map(|(win, surface)| ui_event::closed_native_pane(model, Some((surface, win))))
-        .collect()
+    surfaces::forget_native_windows(model)
 }
 
 /// Applies one message to `model`, returning the effects the executor must

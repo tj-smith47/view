@@ -52,6 +52,9 @@ pub struct SurfaceState {
     /// leaving the first orphaned once the second's reply overwrote the
     /// claim.
     pending: [bool; 4],
+    /// The surfaces an engine restart closed out of their windows, which
+    /// the replacement's `VimEnter` opens again.
+    reopen: [bool; 4],
 }
 
 impl Default for SurfaceState {
@@ -64,6 +67,7 @@ impl Default for SurfaceState {
             ring: 0,
             generation: [0; 4],
             pending: [false; 4],
+            reopen: [false; 4],
         }
     }
 }
@@ -210,6 +214,21 @@ impl SurfaceState {
         let slot = &mut self.generation[surface.index()];
         *slot = slot.wrapping_add(1);
         self.pending[surface.index()] = false;
+    }
+
+    /// Records that an engine restart closed `surface` out of its window,
+    /// so the replacement's `VimEnter` opens it again.
+    pub fn mark_reopen(&mut self, surface: NativeSurface) {
+        self.reopen[surface.index()] = true;
+    }
+
+    /// The surfaces [`Self::mark_reopen`] recorded, clearing the record.
+    pub fn take_reopen(&mut self) -> Vec<NativeSurface> {
+        let taken = std::mem::take(&mut self.reopen);
+        NativeSurface::ALL
+            .into_iter()
+            .filter(|surface| taken[surface.index()])
+            .collect()
     }
 }
 
