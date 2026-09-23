@@ -47,6 +47,9 @@ pub trait EngineOps {
     /// Sets one nvim option and keeps it there for the session, the durable
     /// takeover a superseded plugin cannot undo (see `RpcCall::HoldOption`).
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError>;
+    /// Takes down the hold on one nvim option and puts back the value the
+    /// first hold found (see `RpcCall::ReleaseOption`).
+    fn release_option(&self, name: &str) -> Result<(), EngineError>;
     /// Sets one window-local nvim option in every window and keeps it
     /// there for every window opened afterwards, reporting whatever each
     /// window was holding (see `RpcCall::HoldWindowOption`).
@@ -337,6 +340,9 @@ impl EngineOps for EngineHandle {
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         self.hold_option(name, value)
     }
+    fn release_option(&self, name: &str) -> Result<(), EngineError> {
+        self.release_option(name)
+    }
     fn hold_window_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         self.hold_window_option(name, value)
     }
@@ -573,6 +579,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         (**self).hold_option(name, value)
+    }
+    fn release_option(&self, name: &str) -> Result<(), EngineError> {
+        (**self).release_option(name)
     }
     fn hold_window_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         (**self).hold_window_option(name, value)
@@ -812,6 +821,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         (**self).hold_option(name, value)
+    }
+    fn release_option(&self, name: &str) -> Result<(), EngineError> {
+        (**self).release_option(name)
     }
     fn hold_window_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         (**self).hold_window_option(name, value)
@@ -1081,6 +1093,9 @@ impl EngineOps for FakeOps {
     }
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         self.record(format!("hold_option({name},{value:?})"))
+    }
+    fn release_option(&self, name: &str) -> Result<(), EngineError> {
+        self.record(format!("release_option({name})"))
     }
     fn hold_window_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         self.record(format!("hold_window_option({name},{value:?})"))
@@ -1406,6 +1421,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn hold_option(&self, _name: &str, _value: &OptionValue) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn release_option(&self, _name: &str) -> Result<(), EngineError> {
         Ok(())
     }
     fn hold_window_option(&self, _name: &str, _value: &OptionValue) -> Result<(), EngineError> {

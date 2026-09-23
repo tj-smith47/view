@@ -37,7 +37,8 @@ A segment that runs out of room in the edge is dropped whole, with
 everything after it.
 
 `[native] statusline = false` empties the segments and leaves the frames
-standing.
+standing. It gives `laststatus` back to your config only under
+`panes = "nvim"`. Under tiles view keeps `laststatus = 2`.
 
 ## The top row
 

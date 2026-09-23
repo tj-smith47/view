@@ -81,6 +81,19 @@ impl ChannelValue {
             },
         }
     }
+
+    /// Whether `look` holds this value whatever the owning feature's
+    /// `[native]` switch says.
+    ///
+    /// The tiles leg of a look-keyed hold: the frame geometry is built on
+    /// it, and the row nvim would draw for the user under it is one the
+    /// tiles painter covers in every case, so handing the option back
+    /// under tiles returns nothing the user can see. Under `panes = "nvim"`
+    /// the switch decides, as it does for every other hold.
+    #[must_use]
+    pub fn held_by_look(self, look: Look) -> bool {
+        matches!(self, Self::ByLook { .. }) && look.panes == Panes::Tiles
+    }
 }
 
 /// A region of the grid a floating window can be parked over.
@@ -238,7 +251,9 @@ pub const CHANNELS: &[SurfaceChannels] = &[
             // leg answers: under `nvim` view draws the one bottom bar and
             // nvim draws no status line at all, and under tiles every
             // window gets a status row for the frame's bottom edge to
-            // paint over
+            // paint over. The tiles leg is held with the feature off as
+            // well (`ChannelValue::held_by_look`), since the outer grid's
+            // height counts on that row under the bottom tiles
             Channel::Hold {
                 option: "laststatus",
                 scope: Scope::Global,
@@ -601,5 +616,43 @@ mod tests {
             !session_held().iter().any(|c| c.name() == "laststatus"),
             "a session-held laststatus is one no feature's off switch reverses"
         );
+    }
+
+    /// Only a look-keyed value under tiles is held past its feature's
+    /// switch.
+    #[test]
+    fn the_tiles_leg_of_a_look_keyed_hold_is_the_looks_own() {
+        let by_look = ChannelValue::ByLook {
+            nvim: &ChannelValue::Int(0),
+            tiles: &ChannelValue::Int(2),
+        };
+        for gaps in [true, false] {
+            assert!(by_look.held_by_look(Look::new(Panes::Tiles, gaps)));
+            assert!(!by_look.held_by_look(Look::new(Panes::Nvim, gaps)));
+            assert!(!ChannelValue::Int(2).held_by_look(Look::new(Panes::Tiles, gaps)));
+        }
+    }
+
+    /// A look flip away from tiles hands a look-held option back with a
+    /// global release, which puts back one session-wide value. A
+    /// window-local option keyed by look would need a per-window release.
+    #[test]
+    fn every_look_keyed_hold_is_global() {
+        for entry in CHANNELS {
+            for channel in entry.channels {
+                if let Channel::Hold {
+                    option,
+                    scope,
+                    value: ChannelValue::ByLook { .. },
+                } = channel
+                {
+                    assert_eq!(
+                        *scope,
+                        Scope::Global,
+                        "{option} is keyed by look at a scope the release cannot put back"
+                    );
+                }
+            }
+        }
     }
 }

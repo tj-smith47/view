@@ -874,6 +874,9 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn release_option(&self, _name: &str) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn hold_window_option(
             &self,
             _name: &str,

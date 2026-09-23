@@ -49,6 +49,13 @@ pub struct Supersession {
     /// `feature` is a second place the plan and its description can
     /// disagree about what was taken over.
     pub supersedes: Option<&'static str>,
+    /// Whether the first-run notice and doctor name this entry.
+    ///
+    /// `false` for a hold the look makes on a feature the user turned off
+    /// ([`ChannelValue::held_by_look`](channels::ChannelValue::held_by_look)):
+    /// `reverses_with` is already in their config, and the row the hold
+    /// takes is one the tiles painter covers.
+    pub announced: bool,
 }
 
 /// What one takeover row changes hands on.
@@ -173,6 +180,16 @@ struct Takeover {
     kind: TakeoverKind,
 }
 
+impl Takeover {
+    /// Whether `look` holds this row with its feature switched off.
+    fn held_by_look(&self, look: Look) -> bool {
+        match self.kind {
+            TakeoverKind::Option { value, .. } => value.held_by_look(look),
+            TakeoverKind::Notify => false,
+        }
+    }
+}
+
 /// Renders one row as the call that performs it: always a durable hold,
 /// never a plain set or assignment.
 ///
@@ -273,10 +290,11 @@ const NOTIFY_GLOBAL: &str = "vim.notify";
 /// The supersession plan for `cfg`: one entry per enabled feature in
 /// `features` that takes a surface over through RPC, in registry order.
 ///
-/// A disabled feature contributes nothing, and neither does an enabled
-/// feature whose takeover needs no runtime call (a picker claims its
-/// surface through mappings, not through an option), so an empty plan is an
-/// ordinary answer rather than a failure.
+/// A disabled feature contributes only the holds `look` makes whatever its
+/// switch says, unannounced ([`Supersession::announced`]). An enabled
+/// feature whose takeover needs no runtime call contributes nothing (a
+/// picker claims its surface through mappings), so an empty plan is an
+/// ordinary answer.
 ///
 /// Walks `features` rather than the takeover table so the plan's order is
 /// the registry's listing order, which is the order every consumer-facing
@@ -307,16 +325,18 @@ fn plan_from(
 ) -> Vec<Supersession> {
     features
         .iter()
-        .filter(|f| cfg.enabled(f.id))
         .flat_map(|f| {
+            let enabled = cfg.enabled(f.id);
             takeovers
                 .iter()
                 .filter(move |t| t.feature == f.id)
+                .filter(move |t| enabled || t.held_by_look(look))
                 .map(move |t| Supersession {
                     feature: f.id,
                     rpc: takeover_call(t, look),
                     reverses_with: f.off_switch,
                     supersedes: f.supersedes,
+                    announced: enabled,
                 })
         })
         .collect()
@@ -439,6 +459,35 @@ mod tests {
             !plan.iter().any(|s| s.feature == "statusline"),
             "a disabled statusline must take over nothing, got {plan:?}"
         );
+    }
+
+    /// The outer grid under tiles counts on a status row under every
+    /// bottom window, so `laststatus = 2` is held with the statusline off
+    /// too, and no notice names a switch the user already wrote.
+    #[test]
+    fn the_tiles_look_holds_laststatus_at_two_with_the_statusline_off() {
+        let cfg = NativeConfig::from_toml_str("[native]\nstatusline = false\n")
+            .expect("a known key must parse");
+        for gaps in [true, false] {
+            let plan = plan(&cfg, registry::features(), Look::new(Panes::Tiles, gaps));
+            let held: Vec<&Supersession> =
+                plan.iter().filter(|s| s.feature == "statusline").collect();
+            assert_eq!(held.len(), 1, "{plan:?}");
+            assert_eq!(
+                held[0].rpc,
+                Some(RpcCall::HoldOption {
+                    name: "laststatus".to_string(),
+                    value: OptionValue::Int(2),
+                })
+            );
+            assert!(!held[0].announced, "{:?}", held[0]);
+        }
+        let enabled = plan(
+            &NativeConfig::all_enabled(),
+            registry::features(),
+            Look::new(Panes::Tiles, true),
+        );
+        assert!(enabled.iter().all(|s| s.announced), "{enabled:?}");
     }
 
     #[test]

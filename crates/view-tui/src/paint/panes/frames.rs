@@ -85,11 +85,8 @@ fn is_tile(pane: &Pane) -> bool {
 /// linked to `Normal` as nvim's default scheme does). The accent alone is
 /// what picks out the active tile.
 ///
-/// A stated separator colour is never dimmed further. Colorschemes already
-/// give it a muted shade picked to read against their background, and
-/// halving it toward the background left an inactive frame the eye could
-/// not find: under a transparent `Normal` there is no background to blend
-/// toward, and Dracula's `#6272a4` went to `#313952` on a dark terminal.
+/// A stated separator colour is never dimmed further: colorschemes already
+/// pick it as their muted shade.
 fn quiet_style(theme: &Theme) -> Style {
     let normal = theme.normal();
     let fg = theme

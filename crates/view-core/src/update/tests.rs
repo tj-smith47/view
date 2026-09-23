@@ -12642,30 +12642,62 @@ fn the_ui_panes_form_completes_and_dispatches() {
 /// it once for the mode the session started in. Nothing else moves it, so a
 /// flip that did not re-issue it leaves nvim drawing a status row no frame
 /// paints over, or dropping the one a frame needs.
+///
+/// With `[native] statusline = false` tiles still holds 2, since the outer
+/// grid counts on a status row under the bottom tiles, and the flip back to
+/// `"nvim"` releases it so the user's own value is in force again.
 #[test]
 fn a_panes_flip_reissues_the_hold_the_look_decides() {
-    let mut m = model();
-    m.statusline_enabled = true;
-    m.look = crate::model::Look::new(crate::model::Panes::Nvim, true);
-    for (word, expected) in [("tiles", 2_i64), ("nvim", 0)] {
-        let effects = update(
-            &mut m,
-            Msg::FeatureInvoke {
-                feature: "ui".to_string(),
-                verb: format!("panes {word}"),
-            },
-        );
-        let held = effects.iter().find_map(|effect| match effect {
-            Effect::Rpc(RpcCall::HoldOption { name, value }) if name == "laststatus" => {
-                Some(value.clone())
-            }
-            _ => None,
-        });
-        assert_eq!(
-            held,
-            Some(crate::msg::OptionValue::Int(expected)),
-            "`:View ui panes {word}` re-issued {held:?}"
-        );
+    use crate::msg::OptionValue;
+    let cases = [
+        (
+            true,
+            [
+                ("tiles", Some(OptionValue::Int(2)), false),
+                ("nvim", Some(OptionValue::Int(0)), false),
+            ],
+        ),
+        (
+            false,
+            [
+                ("tiles", Some(OptionValue::Int(2)), false),
+                ("nvim", None, true),
+            ],
+        ),
+    ];
+    for (statusline, flips) in cases {
+        let mut m = model();
+        m.statusline_enabled = statusline;
+        m.look = crate::model::Look::new(crate::model::Panes::Nvim, true);
+        for (word, expected, released) in flips {
+            let effects = update(
+                &mut m,
+                Msg::FeatureInvoke {
+                    feature: "ui".to_string(),
+                    verb: format!("panes {word}"),
+                },
+            );
+            let held = effects.iter().find_map(|effect| match effect {
+                Effect::Rpc(RpcCall::HoldOption { name, value }) if name == "laststatus" => {
+                    Some(value.clone())
+                }
+                _ => None,
+            });
+            assert_eq!(
+                held, expected,
+                "statusline = {statusline}: `:View ui panes {word}` re-issued {held:?}"
+            );
+            let release = effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    Effect::Rpc(RpcCall::ReleaseOption { name }) if name == "laststatus"
+                )
+            });
+            assert_eq!(
+                release, released,
+                "statusline = {statusline}: `:View ui panes {word}` released {release}"
+            );
+        }
     }
 }
 

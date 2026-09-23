@@ -893,6 +893,43 @@ fn a_disabled_statusline_leaves_the_users_own_setting_alone() {
     assert_eq!(before, after);
 }
 
+/// Tiles keeps `laststatus = 2` with the statusline off, and the release a
+/// flip back to `panes = "nvim"` sends puts the config's own value back and
+/// takes the guard down with it.
+#[test]
+fn a_disabled_statusline_under_tiles_is_held_at_two_until_released() {
+    let dir = fixture("tiles-disabled");
+    let before = snapshot(&dir);
+    let engine = session(&dir);
+    let cfg = NativeConfig::from_toml_str("[native]\nstatusline = false\n").unwrap();
+    apply(
+        &engine.handle,
+        &plan(
+            &cfg,
+            registry::features(),
+            Look::new(view_core::model::Panes::Tiles, true),
+        ),
+    );
+    assert_eq!(engine.handle.eval_str("&laststatus").unwrap(), "2");
+
+    engine.handle.release_option("laststatus").unwrap();
+    assert_eq!(
+        engine.handle.eval_str("&laststatus").unwrap(),
+        FIXTURE_LASTSTATUS,
+        "the release must put back the value the config set"
+    );
+    engine
+        .handle
+        .eval_str("execute('set laststatus=1')")
+        .unwrap();
+    assert_eq!(
+        engine.handle.eval_str("&laststatus").unwrap(),
+        "1",
+        "the release must take the guard down"
+    );
+    assert_eq!(before, snapshot(&dir));
+}
+
 #[test]
 fn the_takeover_reverses_when_the_feature_is_turned_off() {
     let dir = fixture("reversal");

@@ -62,6 +62,7 @@ pub(crate) fn set_look(model: &mut Model, look: Look) -> Vec<Effect> {
     if model.look == look {
         return Vec::new();
     }
+    let before = model.look;
     model.engine.grids_mut().set_look(look);
     model.look = look;
     model.dirty = true;
@@ -71,7 +72,7 @@ pub(crate) fn set_look(model: &mut Model, look: Look) -> Vec<Effect> {
     let mut effects = follow_the_look_with_the_tabline(model);
     let (width, height) = model.grid_target();
     effects.push(Effect::Rpc(RpcCall::TryResize { width, height }));
-    effects.append(&mut look_keyed_holds(model));
+    effects.append(&mut look_keyed_holds(model, before));
     effects.append(&mut request_all(model));
     effects
 }
@@ -120,14 +121,17 @@ fn follow_the_look_with_the_tabline(model: &mut Model) -> Vec<Effect> {
 /// Read off the channel table rather than named here, so the option a look
 /// decides is stated once, and gated on the same `view_draws` predicate the
 /// takeover's own session-held walk uses -- a surface the user handed back
-/// is one view does not set options for.
-fn look_keyed_holds(model: &Model) -> Vec<Effect> {
+/// is one view does not set options for, apart from the hold the tiles look
+/// keeps whatever the switch says ([`ChannelValue::held_by_look`]). That
+/// one is released when the look leaves tiles, which puts the user's own
+/// value back.
+///
+/// [`ChannelValue::held_by_look`]: crate::native::channels::ChannelValue::held_by_look
+fn look_keyed_holds(model: &Model, before: Look) -> Vec<Effect> {
     use crate::native::channels::{Channel, ChannelValue, Scope, CHANNELS};
     let mut effects = Vec::new();
     for entry in CHANNELS {
-        if !crate::native::surfaces::view_draws(entry.surface, model) {
-            continue;
-        }
+        let drawn = crate::native::surfaces::view_draws(entry.surface, model);
         for channel in entry.channels {
             let Channel::Hold {
                 option,
@@ -138,6 +142,14 @@ fn look_keyed_holds(model: &Model) -> Vec<Effect> {
                 continue;
             };
             let name = option.to_string();
+            if !drawn && !value.held_by_look(model.look) {
+                // `every_look_keyed_hold_is_global` keeps the release to
+                // the one scope it can put back
+                if value.held_by_look(before) && scope == Scope::Global {
+                    effects.push(Effect::Rpc(RpcCall::ReleaseOption { name }));
+                }
+                continue;
+            }
             let value = value.wire(model.look);
             effects.push(Effect::Rpc(match scope {
                 Scope::Global => RpcCall::HoldOption { name, value },

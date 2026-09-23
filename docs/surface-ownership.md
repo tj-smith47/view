@@ -82,8 +82,9 @@ Under `[ui] panes = "tiles"` the hold is `laststatus = 2`. Every window then
 has a status row and each tile's frame is painted over its own, so the
 `statusline` channel covers nothing: nvim evaluates your expression once per
 window per status redraw and view draws over the result. The switch empties
-the segments in the frame edges and leaves the frames standing.
-`[ui] panes = "nvim"` is what gives the row back to nvim.
+the segments in the frame edges and leaves the frames standing, and the
+hold stays. Under `[ui] panes = "nvim"` the switch gives `laststatus` back,
+and a flip to that look puts your own value back.
 
 `[native] tabline` is the one switch with no fixed default. It follows
 `[ui] panes`: on under `"tiles"`, off under `"nvim"`, and a value you write

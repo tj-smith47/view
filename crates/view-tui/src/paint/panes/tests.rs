@@ -1345,9 +1345,10 @@ struct Tiles {
 
 fn tiled(gaps: bool) -> Tiles {
     let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
-    // tiles hold nvim at `laststatus = 2`, so every window has a status row
-    // of its own under it -- the row the frame's bottom edge is painted
-    // over -- and a session owning the command line keeps no row for it
+    // tiles hold nvim at `laststatus = 2` whatever `[native] statusline`
+    // says, so every window has a status row of its own under it -- the
+    // row the frame's bottom edge is painted over -- and a session owning
+    // the command line keeps no row for it
     let window_height = grid_height - 1;
     let left_width = (grid_width - 1) / 2;
     let right_col = left_width + 1;
@@ -1368,8 +1369,9 @@ fn tiled_nested(gaps: bool) -> Tiles {
     let left_width = (grid_width - 1) / 2;
     let right_col = left_width + 1;
     let right_width = grid_width - right_col;
-    // every window keeps a status row under `laststatus = 2`, so the right
-    // column spends two of its rows on them where the left spends one
+    // every window keeps a status row under the `laststatus = 2` hold, so
+    // the right column spends two of its rows on them where the left
+    // spends one
     let top_height = (grid_height - 2).div_ceil(2);
     let slots = vec![
         (0, 0, left_width, grid_height - 1),
@@ -1626,12 +1628,18 @@ fn only_the_active_tiles_frame_carries_the_accent_fg() {
 }
 
 /// The empty band between the frames and the terminal edge is as wide on
-/// every side. The ring's bottom row used to be reserved as well as the
-/// bottom tiles' status rows, which left three empty rows under the frames
-/// against two on every other side.
+/// every side, with the statusline feature on or off: the `laststatus = 2`
+/// hold under tiles does not follow the switch, so the fixtures' status
+/// rows stand either way.
 #[test]
 fn a_gapped_layout_leaves_the_same_margin_on_every_side() {
-    for tiles in [tiled(true), tiled_nested(true)] {
+    for (statusline, mut tiles) in [
+        (true, tiled(true)),
+        (true, tiled_nested(true)),
+        (false, tiled(true)),
+        (false, tiled_nested(true)),
+    ] {
+        tiles.model.statusline_enabled = statusline;
         let buf = tiled_frame(&tiles.model);
         let frame_cells: Vec<(u16, u16)> = (0..TILED_HEIGHT)
             .flat_map(|y| (0..TILED_WIDTH).map(move |x| (x, y)))
@@ -1666,15 +1674,15 @@ fn a_gapped_layout_leaves_the_same_margin_on_every_side() {
         assert_eq!(
             margins,
             (2, 2, 2, 2),
-            "(top, bottom, left, right) empty cells between the frames and the edge"
+            "statusline = {statusline}: (top, bottom, left, right) empty cells \
+             between the frames and the edge"
         );
     }
 }
 
 /// The fixture's `Normal` states no background, which is what a
-/// transparent colorscheme sends: an inactive frame blended toward a
-/// background nobody named went halfway to black and vanished on the
-/// user's dark terminal.
+/// transparent colorscheme sends, and the inactive frame is the stated
+/// `WinSeparator` fg with nothing blended into it.
 #[test]
 fn an_inactive_tiles_frame_is_the_separator_colour_the_colorscheme_states() {
     for gaps in [true, false] {
@@ -1704,6 +1712,63 @@ fn an_inactive_tiles_frame_is_the_separator_colour_the_colorscheme_states() {
             ("│", separator),
             "gaps = {gaps}: the inactive tile's left edge is WinSeparator's own fg, undimmed"
         );
+    }
+}
+
+/// Where `WinSeparator` states no colour of its own (unset, or the same
+/// fg as `Normal`, which is how nvim's default scheme links it), the
+/// inactive frame takes the float border's derivation: the dimmed text
+/// colour, or grey where `Normal` has no fg either.
+#[test]
+fn an_inactive_tiles_frame_without_a_separator_colour_is_the_dimmed_text_colour() {
+    const NORMAL_FG: u32 = 0x00A0_B0C0;
+    const DIMMED_NORMAL_FG: u32 = 0x0060_6973;
+    const GREY_FLOOR: u32 = 0x0080_8080;
+    let unset = UiEvent::HlGroupSet {
+        name: "WinSeparator".to_string(),
+        hl_id: 0,
+    };
+    let normal_fg = UiEvent::DefaultColorsSet {
+        fg: Some(NORMAL_FG),
+        bg: None,
+        sp: None,
+    };
+    let cases = [
+        ("unset, Normal with no fg", vec![unset.clone()], GREY_FLOOR),
+        (
+            "unset, Normal with an fg",
+            vec![unset, normal_fg.clone()],
+            DIMMED_NORMAL_FG,
+        ),
+        (
+            "the same fg as Normal",
+            vec![normal_fg, attr(VIEW_SEPARATOR_HL, NORMAL_FG)],
+            DIMMED_NORMAL_FG,
+        ),
+    ];
+    for (case, events, expected) in cases {
+        for gaps in [true, false] {
+            let mut tiles = tiled(gaps);
+            let mut events = events.clone();
+            events.extend([
+                UiEvent::GridCursorGoto {
+                    grid: LEFT + 1,
+                    row: 0,
+                    col: 0,
+                },
+                UiEvent::Flush,
+            ]);
+            drive(&mut tiles.model, events);
+            let buf = tiled_frame(&tiles.model);
+            let (row, _, _, height) = tiles.slots[0];
+            let edge = if gaps { 2 } else { 0 };
+            let y = row + 1 + height / 2;
+            assert_eq!(
+                (buf[(edge, y)].symbol(), buf[(edge, y)].fg),
+                ("│", rgb(expected).expect("a colour")),
+                "{case}, gaps = {gaps}: the inactive tile's left edge"
+            );
+        }
     }
 }
 

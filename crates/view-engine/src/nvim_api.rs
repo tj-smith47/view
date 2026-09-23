@@ -148,6 +148,11 @@ vim.fn.feedkeys(vim.api.nvim_replace_termcodes(..., true, true, true), 't')";
 /// `view_native`'s takeover table, whose `option` field states the same
 /// precondition and whose rows are checked against a live nvim's
 /// `nvim_get_option_info2` scope.
+///
+/// The value the first hold of an option finds is kept in `_G.view_held`,
+/// a table no config writes, so [`RELEASE_OPTION_CHUNK`] can put back the
+/// user's own value. A second hold of the same option leaves it alone: by
+/// then the option carries view's value.
 const HOLD_OPTION_CHUNK: &str = "\
 local name, value, channel, covered = ...
 local seen = {}
@@ -186,6 +191,11 @@ local function beside()
     end
   end
 end
+local before = _G.view_held or {}
+_G.view_held = before
+if before[name] == nil then
+  before[name] = { value = vim.api.nvim_get_option_value(name, {}) }
+end
 local group = vim.api.nvim_create_augroup(
   'view-hold-' .. name, { clear = true })
 local function hold()
@@ -206,6 +216,23 @@ vim.api.nvim_create_autocmd('SafeState', {
   group = group,
   callback = hold,
 })";
+
+/// The lua chunk that takes down [`HOLD_OPTION_CHUNK`]'s guard on one
+/// option and puts back the value its first hold found, taking the option
+/// name.
+///
+/// An option with no guard and no stashed value is left as it is, so a
+/// release of something nothing held changes nothing. The stash is
+/// cleared, so a later hold stashes whatever the option carries then.
+const RELEASE_OPTION_CHUNK: &str = "\
+local name = ...
+pcall(vim.api.nvim_del_augroup_by_name, 'view-hold-' .. name)
+local before = _G.view_held
+if before == nil or before[name] == nil then
+  return
+end
+vim.api.nvim_set_option_value(name, before[name].value, {})
+before[name] = nil";
 
 /// The lua chunk a window-local hold runs inside nvim, taking the option
 /// name, the value view keeps it at and view's own channel.
@@ -3237,6 +3264,27 @@ impl EngineHandle {
         )
     }
 
+    /// Takes down the hold [`hold_option`](Self::hold_option) installed on
+    /// `name` and puts back the value its first hold displaced: the
+    /// release [`crate::RpcCall::ReleaseOption`] describes. `name` rides
+    /// as an argument to the constant [`RELEASE_OPTION_CHUNK`].
+    ///
+    /// A notification, like the hold it undoes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn release_option(&self, name: &str) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(RELEASE_OPTION_CHUNK),
+                Value::Array(vec![Value::from(name)]),
+            ],
+        )
+    }
+
     /// Sets `name` to `value` in every window, keeps it there for every
     /// window that opens afterwards, and reports the value each window was
     /// holding: the window-scoped takeover
@@ -5240,6 +5288,23 @@ mod tests {
                 ]),
             ],
             "the covered channel a renderer actually writes must travel with the hold"
+        );
+    }
+
+    #[test]
+    fn release_option_sends_the_constant_chunk_with_the_name() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        h.release_option("laststatus").unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(method, "nvim_exec_lua");
+        assert_eq!(
+            params,
+            vec![
+                Value::from(RELEASE_OPTION_CHUNK),
+                Value::Array(vec![Value::from("laststatus")]),
+            ]
         );
     }
 

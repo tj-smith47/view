@@ -73,15 +73,16 @@ impl Model {
 
 /// The `(width, height)` an engine grid takes on a terminal of `size` with
 /// `chrome_rows` reserved at the top, `ring` cells of view's own outer frame
-/// on every side, and, when `statusline` is on, view's own bottom bar.
+/// across the width and one row of it at the top, and, when `statusline`
+/// is on, view's own bottom bar.
 ///
 /// `ring` is what tiles mode spends framing the screen itself: two cells
 /// gapped, one gapless, none under `panes = "nvim"`. It comes off the width
 /// whole, and the grid is placed one cell in from the terminal's left edge.
-/// Only the ring's top row comes off the height: every window keeps a
-/// status row under `laststatus = 2`, and the bottom tiles' status rows
-/// already stand between their frames and the terminal's bottom edge where
-/// the ring's bottom row would.
+/// Only the ring's top row comes off the height. Under tiles view holds
+/// `laststatus = 2` whatever `[native] statusline` says, so every bottom
+/// tile has a status row between its frame and the terminal's bottom edge
+/// where the ring's bottom row would be.
 ///
 /// A free function because the spawn needs the answer before there is a
 /// [`Model`] to ask. The child is started `--headless` with this size on a
@@ -125,8 +126,8 @@ pub fn grid_room_for(
     ring: u16,
 ) -> (u16, u16) {
     // the width loses a cell on each side; the height loses only the top
-    // row, since the bottom tiles' status rows stand where a bottom ring
-    // row would and a second one left three empty rows under the frames
+    // row, since the bottom tiles' held status rows stand where a bottom
+    // ring row would
     (
         size.0.saturating_sub(ring),
         size.1

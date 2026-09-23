@@ -75,9 +75,10 @@ impl Look {
     /// Where the outer grid sits inside the terminal, on both axes.
     ///
     /// The ring takes one cell at the top and the left, and whatever else
-    /// it costs is the margin on the right. Everything
-    /// mapping a terminal cell to a grid cell, or the other way, spends
-    /// this one number.
+    /// it costs is the margin on the right. The bottom margin is the bottom
+    /// tiles' status rows, which the `laststatus = 2` hold under tiles
+    /// keeps. Everything mapping a terminal cell to a grid cell, or the
+    /// other way, spends this one number.
     #[must_use]
     pub const fn grid_offset(self) -> u16 {
         // `ring() > 0` in a const fn: `u16::from(bool)` is not const

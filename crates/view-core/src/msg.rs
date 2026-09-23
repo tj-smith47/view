@@ -1940,11 +1940,23 @@ pub enum RpcCall {
     ///
     /// Reversible on exactly the same terms as every other call here: the
     /// hold is session state, never a config edit, so it is gone the moment
-    /// the session ends and it is never issued at all for a feature the
-    /// user has turned off.
+    /// the session ends and it is never issued for a feature the user has
+    /// turned off. The one exception is the tiles leg of a look-keyed hold
+    /// ([`ChannelValue::held_by_look`](crate::native::channels::ChannelValue::held_by_look)),
+    /// which [`ReleaseOption`](Self::ReleaseOption) gives back when the
+    /// look leaves tiles.
     HoldOption {
         name: String,
         value: OptionValue,
+    },
+    /// Takes down the hold [`HoldOption`](Self::HoldOption) installed on
+    /// `name` and puts back the value the first hold of it found.
+    ///
+    /// A look flip away from tiles sends it for an option only the tiles
+    /// look was holding, so the user's own value is in force again under
+    /// `panes = "nvim"`. An option nothing holds is left as it is.
+    ReleaseOption {
+        name: String,
     },
     /// Sets one window-local nvim option to `value` in every window, keeps
     /// it there, and reports each window that was holding something else.

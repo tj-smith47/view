@@ -318,6 +318,7 @@ impl<E: EngineOps> Executor<E> {
                         .ops
                         .input_mouse(&button, &action, &modifier, grid.0, row, col),
                     RpcCall::HoldOption { name, value } => self.ops.hold_option(&name, &value),
+                    RpcCall::ReleaseOption { name } => self.ops.release_option(&name),
                     RpcCall::HoldWindowOption { name, value } => {
                         self.ops.hold_window_option(&name, &value)
                     }

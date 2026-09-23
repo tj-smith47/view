@@ -108,7 +108,7 @@ pub fn report(
     features: &[FeatureDesc],
 ) -> Vec<Handover> {
     let mut out: Vec<Handover> = Vec::new();
-    for entry in plan {
+    for entry in plan.iter().filter(|entry| entry.announced) {
         // one line per feature, not per channel: a feature whose surface
         // changes hands on several channels says one thing to a user --
         // view draws it now, and one config line gives it back -- and its
@@ -205,6 +205,24 @@ mod tests {
             handover.notice(),
             "view is drawing the statusline (your own status line still \
              loads). Turn it off with native.statusline = false"
+        );
+    }
+
+    /// The hold tiles keeps on a switched-off statusline names no switch:
+    /// the user already wrote it.
+    #[test]
+    fn a_hold_the_look_keeps_on_a_disabled_feature_is_not_reported() {
+        let cfg = NativeConfig::from_toml_str("[native]\nstatusline = false\n").unwrap();
+        let plan = plan(
+            &cfg,
+            registry::features(),
+            Look::new(view_core::model::Panes::Tiles, true),
+        );
+        assert!(plan.iter().any(|s| s.feature == "statusline"), "{plan:?}");
+        let handovers = report(&plan, &[], registry::features());
+        assert!(
+            !handovers.iter().any(|h| h.feature == "statusline"),
+            "{handovers:?}"
         );
     }
 
