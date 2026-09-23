@@ -4334,6 +4334,41 @@ printf 'fn a() {\n    let rather = 1; // the row rather\n    let than = rather;\
 printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
 expect_frames 0 '' 'a comment is joined only with a comment line under it'
 
+# The ceiling file at HEAD bounds the working tree's rows, so these cases
+# commit a base into a scratch repository of their own.
+commit_frames_base() {
+  git -C "$CASE" init -q
+  git -C "$CASE" add -A
+  git -C "$CASE" -c user.name=cases -c user.email=cases@localhost \
+    -c commit.gpgsign=false commit -qm base
+}
+
+new_frames_case
+printf '// reads the row\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
+commit_frames_base
+printf '// reads the row rather than the column\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 1\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 1 'demo 1, above the 0 HEAD holds' 'a ceiling row raised above its value at HEAD'
+
+new_frames_case
+mkdir -p "$CASE/crates/other/src"
+printf '// reads the row\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+printf '// reads the row\nfn b() {}\n' > "$CASE/crates/other/src/lib.rs"
+printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
+commit_frames_base
+printf '// the tile, not the float\nfn b() {}\n' > "$CASE/crates/other/src/lib.rs"
+printf 'demo 0\nother 1\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 1 'other 1, above the 0 HEAD holds' 'a new ceiling row above zero'
+
+new_frames_case
+printf '// reads the row rather than the column\n// the tile, not the float\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 2\n' > "$CASE/scripts/comment-frames.ceiling"
+commit_frames_base
+printf '// reads the row rather than the column\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 1\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 0 '' 'a ceiling row lowered below its value at HEAD'
+
 new_frames_case
 printf '// it answers not the row but the column\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
 : > "$CASE/scripts/comment-frames.ceiling"

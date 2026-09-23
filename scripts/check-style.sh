@@ -2568,8 +2568,28 @@ comment_frame_hits() {
     }
     END { emit("") }'
 }
+# The ceiling rows the working tree holds above the committed file, as
+# `crate now was`, a row HEAD lacks counting as 0 there. Read only where the
+# root is a git work tree's top and HEAD carries the file, since a scratch
+# tree has no committed ceiling to compare against.
+comment_frames_raised() {
+  local ceiling="$1" top base
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  if [ "$top" != "$(pwd -P)" ]; then
+    return 0
+  fi
+  base=$(git show "HEAD:$ceiling" 2>/dev/null) || return 0
+  printf '%s\n%s\n' "$base" "--" | cat - "$ceiling" | awk '
+    $0 == "--" { reading = 1; next }
+    NF != 2 || $1 ~ /^#/ { next }
+    !reading { was[$1] = $2; next }
+    {
+      w = ($1 in was) ? was[$1] : 0
+      if ($2 + 0 > w + 0) print $1, $2, w
+    }'
+}
 check_comment_frames() {
-  local ceiling=scripts/comment-frames.ceiling hits rc counts verdict
+  local ceiling=scripts/comment-frames.ceiling hits rc counts verdict raised
   if [ ! -f "$ceiling" ]; then
     echo "STYLE FAIL: $ceiling is missing, so the contrast-frame ratchet has no ceiling"
     return 1
@@ -2578,6 +2598,15 @@ check_comment_frames() {
   hits=$(comment_frame_hits) || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "STYLE FAIL: the contrast-frame count exited $rc reading crates/"
+    return 1
+  fi
+  raised=$(comment_frames_raised "$ceiling")
+  if [ -n "$raised" ]; then
+    printf '%s\n' "$raised" | while read -r crate now was; do
+      echo "$ceiling: $crate $now, above the $was HEAD holds"
+    done
+    echo "STYLE FAIL: a contrast-frame ceiling row rose above its value at HEAD"
+    echo "  A row only comes down. Rewrite the new frames and keep the row."
     return 1
   fi
   counts=$(printf '%s\n' "$hits" | awk -F/ 'NF > 2 { n[$2]++ } END { for (c in n) print c, n[c] }')

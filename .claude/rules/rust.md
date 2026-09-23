@@ -482,3 +482,17 @@ paths: ["**/*.rs"] template-source: "rules/rust.md.tmpl"
   source under `crates/` and fails a new `Command::new("bash")` by name.
   Nothing mechanically fails a path argument that skips `bash_arg`, so this
   entry is the check for that half.
+
+- **A comment states what the code does, and the contrast frames comments
+  hold are counted per crate against `scripts/comment-frames.ceiling`.**
+  `check_comment_frames` in `scripts/check-style.sh` counts a comment line
+  holding `rather than`, `instead of`, `, not ` or a `not X but` with one to
+  three words between. A comment starts at the first `//` outside a string
+  literal, and each comment line is read with the comment line under it
+  joined on, so a frame a wrap splits across two lines counts once, on the
+  line it starts on. A crate over its row fails naming the lines its working
+  tree added. A crate under its row fails until the row is lowered to the
+  count in the same change. A row above the value
+  `git show HEAD:scripts/comment-frames.ceiling` holds is refused, so a row
+  only comes down. The tree held over five thousand frames when the count
+  began, and each one made a reader hold an alternative the code never takes.

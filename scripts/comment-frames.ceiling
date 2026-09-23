@@ -1,5 +1,7 @@
 # Contrast-frame comment lines each crate may hold (scripts/check-style.sh,
-# check_comment_frames). A row only ever comes down.
+# check_comment_frames). A row only ever comes down: a row above the value
+# this file holds at HEAD is refused, and a crate under its row fails until
+# the row is lowered in the same change.
 view 635
 view-ai 306
 view-bench 295
