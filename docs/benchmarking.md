@@ -209,9 +209,10 @@ Every felt row is recorded on the `user` fixture, and the matrix seats five
 cells there: `echo.user`, `echo_speculated.user`, `scroll.user`,
 `flood.user` and `startup.user`. dev-linux records all five.
 Four were taken 2026-09-06 in two quiet windows; `startup.user` was
-re-recorded 2026-09-15 in a quiet window of its own. The conditions those
-two runs were taken under, which no cell records and which a record run
-therefore leaves standing:
+re-recorded 2026-09-15 in a quiet window of its own; `echo.user`'s p99 pair
+and `flood.user`'s `pace_ratio` were retaken 2026-09-24 at `a836efa` in a
+quiet window of its own. The conditions those three runs were taken under,
+which no cell records and which a record run therefore leaves standing:
 
 ```text
 2026-09-06  echo.user, echo_speculated.user, scroll.user, flood.user
@@ -219,17 +220,20 @@ therefore leaves standing:
 2026-09-15  startup.user
             1-minute load 1.82 falling to 1.42 over the run
             null-pair calibration 3.4% at the start, 1.0% at the end
+2026-09-24  echo.user (view_p99_ms, nvim p99), flood.user (pace_ratio)
+            1-minute load 1.14 falling to 0.48 over the run
+            null-pair calibration 5.2% at the start, 13.3% at the end
 ```
 
-Both calibrations sit well inside the 15% floor that refuses a run.
+All three calibrations sit inside the 15% floor that refuses a run.
 
 | cell, `user` fixture | view | bare Neovim | reading |
 |---|---|---|---|
 | `startup.settled_ratio_p50` (`user`) | 53.929 ms p50 | 52.422 ms p50 | 1.029 against the 1.0 bar, unmet, re-recorded 2026-09-15 after the parked attach was fixed; the diagnostic `startup.server_delta_ms` reads 1.637 ms, the attach wait having moved inside the segment that metric measures |
-| `echo.ratio_p50`, `echo.view_p99_ms` (`user`) | 0.920 ms p50, `echo.view_p99_ms` 1.395 ms p99, re-recorded 2026-09-24 | 0.829 ms p50, 1.191 ms p99 | `echo.ratio_p50` 1.110 against the 1.10 bar, unmet; the tail is inside its 8 ms bar, `echo.paired_delta_p99_ms` 0.726 ms |
+| `echo.ratio_p50`, `echo.view_p99_ms` (`user`) | 0.920 ms p50 recorded 2026-09-06, `echo.view_p99_ms` 1.395 ms p99 re-recorded 2026-09-24 | 0.829 ms p50 recorded 2026-09-06, 1.191 ms p99 re-recorded 2026-09-24 | `echo.ratio_p50` 1.110 against the 1.10 bar, unmet; the tail is inside its 8 ms bar, `echo.paired_delta_p99_ms` 0.726 ms |
 | `echo_speculated.speculated_ratio_p50` (`user`) | 0.200 ms p50, `echo_speculated.speculated_paint_p99_ms` 0.318 ms p99 | 0.603 ms p50, 1.250 ms p99 | 0.332 against the 1.0 bar, met; a prediction answered 99.9% of the samples and the rest can only understate it |
 | `scroll.staleness_p99_ms` (`user`) | `scroll.staleness_p99_ms` 1.572 ms p99 | 0.951 ms p99 | inside the 16 ms bar; `scroll.ratio_p50` 1.717 and `scroll.ratio_p99` 1.664 are recorded on a shared class and not gated |
-| `flood.cadence_p99_ms` (`user`) | `flood.cadence_p99_ms` 16.914 ms p99 | 17.480 ms p99 | 0.9 ms past the 16 ms frame, recorded 2026-09-06, unmet on both sides; `flood.cadence_p99_ratio` 0.981, `flood.pace_ratio` 1.000 re-recorded 2026-09-24, worst no-paint gap 48.9 ms reported and not gated |
+| `flood.cadence_p99_ms` (`user`) | `flood.cadence_p99_ms` 16.914 ms p99, recorded 2026-09-06 | 17.480 ms p99, recorded 2026-09-06 | 0.9 ms past the 16 ms frame, unmet on both sides; `flood.cadence_p99_ratio` 0.981 recorded 2026-09-06, `flood.pace_ratio` 1.000 re-recorded 2026-09-24, worst no-paint gap 48.9 ms reported and not gated |
 
 The flood cell's plugin-free leg was re-recorded 2026-09-15 in a quiet
 window of its own, under conditions no cell records either:
