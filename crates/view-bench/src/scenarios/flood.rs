@@ -4,12 +4,12 @@
 //! over the span (the gaps between successive observed frame changes) and
 //! drain throughput (lines drained per second, paired: the pace ratio
 //! gates). A side samples for at least the window and on past it until it
-//! holds the gap floor, up to twice the window. A blocked UI thread shows up as a long no-paint gap
-//! while output is still pending, so the cadence percentile IS the coalescing
-//! invariant, observed from outside the process. The window (not a line
-//! count) bounds the run because hosts drain a fixed count at wildly
-//! different rates, which left a fixed-count flood with far too few cadence
-//! samples on fast hosts to form a percentile.
+//! holds the gap floor, up to twice the window. A blocked UI thread shows
+//! up as a long no-paint gap while output is still pending, so the cadence
+//! percentile IS the coalescing invariant, observed from outside the
+//! process. A wall-clock span bounds the run because hosts drain a fixed
+//! count at wildly different rates, which left a fixed-count flood with far
+//! too few cadence samples on fast hosts to form a percentile.
 
 use std::time::{Duration, Instant};
 
@@ -25,8 +25,8 @@ use crate::BenchError;
 /// order of magnitude slower or never finish; macOS ships an ancient
 /// slow-interactive bash),
 /// while a non-interactive `sh -c` is fast on every host. `yes | cat -n` is
-/// the producer: unbounded (the wall-clock window, not a line count, bounds
-/// the run so sample counts are comparable across hosts) and line-varying
+/// the producer: unbounded (a wall-clock span bounds the run so sample
+/// counts are comparable across hosts) and line-varying
 /// (`cat -n`'s incrementing counter changes the visible screen every scroll,
 /// where a bare `yes` would print identical rows and freeze the frame hash).
 /// The counter doubles as the drain-progress meter (see [`max_screen_line`]).
@@ -47,11 +47,12 @@ pub fn max_screen_line(screen_text: &str) -> Option<u64> {
         .max()
 }
 
-/// One side's flood measurement over the wall-clock window.
+/// One side's flood measurement over its wall-clock span.
 #[derive(Debug)]
 pub struct FloodSide {
-    /// Lines the producer drained through the terminal during the span
-    /// (the highest `cat -n` counter reached).
+    /// Lines the producer drained through the terminal during the span:
+    /// the highest `cat -n` counter at the span's end less the one on screen
+    /// when it began.
     pub lines_drained: f64,
     /// The span this side sampled, in milliseconds. Sides stop at different
     /// times once one runs past the window to reach the gap floor, so drain
@@ -60,7 +61,7 @@ pub struct FloodSide {
     /// Gaps between successive observed frame changes during the span, in
     /// milliseconds.
     pub cadence_gaps_ms: Vec<f64>,
-    /// Mean wall time one probe iteration took during the window, in
+    /// Mean wall time one probe iteration took during the span, in
     /// milliseconds: the resolution floor on every gap above, since a frame
     /// change is only ever observed on a probe.
     pub probe_period_ms: f64,
@@ -133,12 +134,22 @@ struct Sampled {
     elapsed: Duration,
 }
 
+/// The `cat -n` counter read as the span opened and as it closed.
+///
+/// Named fields so the two same-typed readings cannot be passed swapped,
+/// which would saturate the drained count to zero.
+#[derive(Debug, Clone, Copy)]
+struct Counters {
+    first: u64,
+    last: u64,
+}
+
 impl Sampled {
-    fn into_side(self, lines_drained: u64) -> FloodSide {
+    fn into_side(self, counters: Counters) -> FloodSide {
         let elapsed_ms = self.elapsed.as_secs_f64() * 1000.0;
         FloodSide {
             #[allow(clippy::cast_precision_loss)]
-            lines_drained: lines_drained as f64,
+            lines_drained: counters.last.saturating_sub(counters.first) as f64,
             elapsed_ms,
             cadence_gaps_ms: self.gaps_ms,
             probe_period_ms: elapsed_ms / f64::from(self.probes.max(1)),
@@ -183,11 +194,11 @@ where
 
 /// The highest `cat -n` counter currently on screen.
 ///
-/// Read once at the window's end rather than every probe: the counters only
-/// grow and the producer's output scrolls, so the final screen already holds
-/// the maximum, while building the whole screen's text on every iteration
-/// only widens the probe loop -- and the probe period is the floor on every
-/// cadence gap this loop can observe.
+/// Read once before the span and once at its end, and never inside the
+/// probe loop: the counters only grow and the producer's output scrolls, so
+/// the final screen already holds the maximum, while building the whole
+/// screen's text on every iteration only widens the probe loop. The probe
+/// period is the floor on every cadence gap this loop can observe.
 fn drained_lines(session: &mut BenchSession) -> Option<u64> {
     session.with_screen(|screen| max_screen_line(&crate::boundaries::screen_lines(screen)))
 }
@@ -228,7 +239,7 @@ fn flood_once(spec: &SpawnSpec, run_spec: &RunSpec<'_>) -> Result<FloodSide, Ben
     )?;
     session.send(flood_command().as_bytes())?;
 
-    // wait for the producer to begin scrolling before starting the window, so
+    // wait for the producer to begin scrolling before starting the span, so
     // it measures steady flood rather than the terminal-open transient
     let mut last_hash = session.with_screen(crate::boundaries::screen_hash);
     let armed = Instant::now();
@@ -253,14 +264,17 @@ fn flood_once(spec: &SpawnSpec, run_spec: &RunSpec<'_>) -> Result<FloodSide, Ben
         window: run_spec.window,
         min_gaps: run_spec.plan.min_gap_samples,
     };
+    // the lines the producer drained before the span opened would otherwise
+    // inflate the rate of whichever side stopped sooner
+    let first = drained_lines(&mut session).unwrap_or(0);
     let sampled = sample_cadence(span, Instant::now(), last_hash, || {
         let hash = session.with_screen(crate::boundaries::screen_hash);
         (Instant::now(), hash)
     });
-    let lines_drained = drained_lines(&mut session).unwrap_or(0);
+    let last = drained_lines(&mut session).unwrap_or(0);
 
     session.shutdown();
-    Ok(sampled.into_side(lines_drained))
+    Ok(sampled.into_side(Counters { first, last }))
 }
 
 /// One side's cadence distribution for one trial, in milliseconds.
@@ -301,7 +315,8 @@ pub struct FloodOutcome {
     /// lines drained per second of its own span. Lower is better: view
     /// keeping pace makes the two rates equal (~1.0); view falling behind
     /// drains fewer lines per second and lifts it. Where both sides stop at
-    /// the window the spans are equal and this is the ratio of line counts.
+    /// the window the spans are equal to within one probe period and this
+    /// is the ratio of line counts.
     pub gated_pace_ratio: f64,
     /// Median across trials of the view side's cadence-gap p99 (ms).
     pub gated_cadence_p99_ms: f64,
@@ -321,7 +336,7 @@ pub struct FloodOutcome {
     /// millisecond number cannot.
     ///
     /// A ratio of two p99s, not the p99 of a paired ratio: the two sides
-    /// run in sequence over one window each and their gaps have no
+    /// run in sequence over one span each and their gaps have no
     /// per-sample correspondence to pair. The name says which it is.
     pub gated_cadence_p99_ratio: f64,
     /// Worst single view-side no-paint gap observed across all trials
@@ -543,7 +558,7 @@ fn paired_trial(pair: TrialPair, min_gap_samples: usize) -> Result<FloodTrial, B
 }
 
 /// One side's cadence distribution for one trial, refused rather than
-/// returned when the window cannot support one.
+/// returned when the span cannot support one.
 ///
 /// # Errors
 ///
@@ -886,8 +901,9 @@ mod tests {
 
     #[test]
     fn a_refused_trial_ends_the_run_before_the_next_one_is_measured() {
-        // a flood trial is two 15-second windows, so producing them eagerly
-        // would spend the rest of the run on a result already thrown away
+        // a flood trial is two spans of 15 to 30 seconds, so producing them
+        // eagerly would spend the rest of the run on a result already thrown
+        // away
         let mut measured = 0_usize;
         let mut queue = vec![
             clean_pair(),
@@ -1213,7 +1229,10 @@ mod tests {
     fn a_side_still_short_at_the_cap_stops_there_and_is_refused_by_name() {
         let sampled = sample_every_ms(100, 500);
         assert_eq!(sampled.elapsed, Duration::from_millis(200));
-        let view = sampled.into_side(1000);
+        let view = sampled.into_side(Counters {
+            first: 0,
+            last: 1000,
+        });
         let nvim = side(&repeated(&[1.0, 2.0, 10.0], 200));
         let refused = paired_trial(TrialPair { view, nvim }, 500);
         assert!(
@@ -1227,6 +1246,16 @@ mod tests {
             ),
             "expected the view side refused at the cap, got {refused:?}"
         );
+    }
+
+    #[test]
+    fn lines_drained_counts_from_the_counter_on_screen_when_the_span_opened() {
+        let side = sample_every_ms(100, 10).into_side(Counters {
+            first: 400,
+            last: 1400,
+        });
+        assert!((side.lines_drained - 1000.0).abs() < 1e-12);
+        assert!((side.lines_per_s() - 10_000.0).abs() < 1e-9);
     }
 
     #[test]
