@@ -2016,14 +2016,20 @@ mod tests {
 
     /// The same chord over a real slow link: a remote engine reached
     /// through the delay relay at 250 ms each way, so every reply the
-    /// takeover waits on crosses the link twice. The chord is typed past
-    /// the first hold bound with the claims reply still out, and has to
-    /// run view's desktop action.
+    /// takeover waits on crosses the link twice. A `:vsplit` establishes a
+    /// real tiled pane first (the same shape `window_zoom_live.rs` drives
+    /// against a local engine), so the fold the chord reaches has a window
+    /// to act on. The split is itself a round trip over the same slow link,
+    /// so the takeover's claims reply is caught and held here, on purpose,
+    /// so the hold stays live no matter how long the split takes; the chord
+    /// types with the hold still up, and the reply is released only once it
+    /// has typed.
+    /// The chord then has to run view's real desktop action: the focused
+    /// window widens to fill the tiled area, `<C-w>_<C-w>|`'s own answer to
+    /// a fresh split.
     #[cfg(unix)]
     #[test]
     fn a_chord_typed_over_a_slow_link_before_the_claims_reply_runs_its_desktop_action() {
-        const TYPED_AT: std::time::Duration = std::time::Duration::from_millis(350);
-        const _: () = assert!(TYPED_AT.as_millis() > crate::native::CHORD_HOLD_BOUND.as_millis());
         let relay = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../scripts/test-fixtures/delay-relay-slow")
             .canonicalize()
@@ -2038,7 +2044,7 @@ mod tests {
             engine.is_remote(),
             "the engine under test must be a remote one"
         );
-        let (_pump, cutover) = engine.start_pump(tx.clone());
+        let (pump, cutover) = engine.start_pump(tx.clone());
         let executor = crate::runtime::Executor::new(engine.handle.clone())
             .with_toast_timer(crate::wake::LoopSender::new(tx));
         let mut model = Model::with_term_size(80, 24);
@@ -2060,19 +2066,84 @@ mod tests {
         let deadline = std::time::Instant::now()
             + view_test_support::host_deadline(std::time::Duration::from_secs(20));
         let mut incoming = cutover.presink.into_iter();
-        let mut vim_enter_at: Option<std::time::Instant> = None;
+        let mut split_sent = false;
+        let mut withheld: Option<Msg> = None;
         let mut typed = false;
+        let mut before_width: Option<u16> = None;
+        let mut zoomed = false;
         let mut seen = Vec::new();
         let invoked = loop {
             let now = std::time::Instant::now();
-            let type_at = vim_enter_at.filter(|_| !typed).map(|at| at + TYPED_AT);
-            if type_at.is_some_and(|at| at <= now) {
-                typed = true;
+            if now >= deadline {
+                break false;
+            }
+            let msg = match incoming.next() {
+                Some(msg) => msg,
+                None => match rx.recv_timeout(deadline.saturating_duration_since(now)) {
+                    Ok(msg) => msg,
+                    Err(_) => break false,
+                },
+            };
+            // grid state (window_grids/window_slot below) has to reflect
+            // what nvim actually placed, so damage is folded into a real
+            // `Msg::Redraw` here, which reads the real slot geometry a
+            // message-traffic-only test never needs
+            let msg = match msg {
+                Msg::RedrawReady => Msg::Redraw(pump.take_damage()),
+                msg => msg,
+            };
+            // caught here so its timing is this loop's own decision: the
+            // split below is its own round trip over the same link, and
+            // this reply lands whenever the relay finishes it, which is a
+            // point this test picks by releasing it itself, once typed
+            if withheld.is_none() && matches!(msg, Msg::MappingsClaimed { .. }) {
+                withheld = Some(msg);
+                continue;
+            }
+            seen.push(format!("{msg:?}").chars().take(80).collect::<String>());
+            let is_zoom_invoke = matches!(
+                &msg,
+                Msg::FeatureInvoke { feature, verb } if feature == "window" && verb == "zoom"
+            );
+            let vim_enter = matches!(
+                msg,
+                Msg::EngineRequest(view_core::msg::EngineRequest::VimEnter { .. })
+            );
+            let flow = crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, msg);
+            assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
+            if vim_enter && !split_sent {
+                split_sent = true;
+                engine
+                    .handle
+                    .command(":vsplit")
+                    .expect("the split crosses the same slow link as everything else here");
+            }
+            if split_sent && !typed && model.engine.grids().window_grids().len() > 1 {
                 assert!(
                     follow_ups.native.holds_input(),
-                    "the chord is typed with the claims reply still out, so the \
-                     hold must be live at this instant: {seen:?}"
+                    "the split's own round trip must not have outlasted the \
+                     claims reply held back for it: {seen:?}"
                 );
+                let cursor = model
+                    .engine
+                    .grids()
+                    .cursor_grid()
+                    .expect("a fresh vsplit leaves the cursor on a registered window");
+                let win = model
+                    .engine
+                    .grids()
+                    .window_handle(cursor)
+                    .expect("the cursor's own grid carries a placed window");
+                before_width = model
+                    .engine
+                    .grids()
+                    .window_slot(win)
+                    .map(|(_, _, width, _)| width);
+                assert!(
+                    before_width.is_some(),
+                    "the split's window has no slot yet: {seen:?}"
+                );
+                typed = true;
                 seen.push(format!("typed {chord}"));
                 let flow = crate::runtime::dispatch(
                     &mut model,
@@ -2081,70 +2152,34 @@ mod tests {
                     Msg::Key(key(chord)),
                 );
                 assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
+                let pending = withheld.take().expect("withheld above, still held here");
+                let flow =
+                    crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, pending);
+                assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
                 continue;
             }
-            let wait = type_at.map_or(deadline, |at| at.min(deadline));
-            let msg = match incoming.next() {
-                Some(msg) => msg,
-                None => match rx.recv_timeout(wait.saturating_duration_since(now)) {
-                    Ok(msg) => msg,
-                    Err(_) if std::time::Instant::now() < deadline => continue,
-                    Err(_) => break false,
-                },
-            };
-            if matches!(msg, Msg::RedrawReady) {
-                continue;
-            }
-            seen.push(format!("{msg:?}").chars().take(80).collect::<String>());
-            if matches!(
-                msg,
-                Msg::EngineRequest(view_core::msg::EngineRequest::VimEnter { .. })
-            ) {
-                vim_enter_at = Some(std::time::Instant::now());
-            }
-            // in this desktop session no window has yet registered a tiled
-            // pane (only the global grid has), so the fold this exact chord
-            // reaches answers "nothing to act on" -- the notice text this
-            // asserts against is `window_zoom`'s own, via `no_target_notice`
-            let is_zoom_invoke = matches!(
-                &msg,
-                Msg::FeatureInvoke { feature, verb } if feature == "window" && verb == "zoom"
-            );
-            let recorded_before =
-                model.engine.messages.entries.len() + model.engine.messages.held().len();
-            let flow = crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, msg);
-            assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
             if is_zoom_invoke {
-                let recorded_after =
-                    model.engine.messages.entries.len() + model.engine.messages.held().len();
-                assert!(
-                    recorded_after > recorded_before,
-                    "the chord's mapping ran but its fold left the message \
-                     history untouched: {seen:?}"
-                );
-                let last = model
-                    .engine
-                    .messages
-                    .entries
-                    .iter()
-                    .chain(model.engine.messages.held())
-                    .last()
-                    .expect("recorded_after > recorded_before");
-                assert!(
-                    last.content
-                        .iter()
-                        .any(|(_, text)| text.contains("zoom has nothing to act on")),
-                    "the chord's mapping ran but the model's zoom fold recorded \
-                     something other than its own no-target notice: {last:?}"
-                );
-                break true;
+                zoomed = true;
+            }
+            if zoomed {
+                let cursor = model.engine.grids().cursor_grid();
+                let width = cursor
+                    .and_then(|grid| model.engine.grids().window_handle(grid))
+                    .and_then(|win| model.engine.grids().window_slot(win))
+                    .map(|(_, _, width, _)| width);
+                if let (Some(before), Some(after)) = (before_width, width) {
+                    if after > before {
+                        break true;
+                    }
+                }
             }
         };
         assert!(typed, "nvim never asked for its VimEnter answer: {seen:?}");
         assert!(
             invoked,
-            "{chord} typed over a slow link ahead of the claims reply ran as \
-             nvim's own keys; saw {seen:?}"
+            "{chord} typed over a slow link ahead of the claims reply either \
+             ran as nvim's own keys or never widened the tiled window it \
+             zoomed; saw {seen:?}"
         );
         let _ = engine.wait_exit();
     }
