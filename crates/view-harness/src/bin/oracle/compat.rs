@@ -565,6 +565,24 @@ fn native_toml_override(state: &ScenarioStateEntry) -> Option<String> {
     }
 }
 
+/// The fixture's own `view.toml` with its `[native]` table replaced by
+/// `native` (a body [`render_native_toml`] produced) and every other table
+/// kept.
+///
+/// A state's `native` override is about who draws each surface. The
+/// fixture's `[ui] panes = "nvim"` is what keeps the screen nvim's own
+/// window picture, the one every cell a scenario reads was written
+/// against. Writing the override over the whole file dropped that line,
+/// and those states ran under the shipped tiles.
+fn with_native_table(fixture_toml: &str, native: &str) -> Result<String> {
+    let mut table: toml::Table = fixture_toml
+        .parse()
+        .context("parsing the fixture's view.toml")?;
+    table.remove("native");
+    let kept = toml::to_string(&table).context("serializing the fixture's other tables")?;
+    Ok(format!("{kept}\n{native}"))
+}
+
 /// The environment variable a fixture's `init.lua` reads to decide whether
 /// to apply its accommodations. Rides the same path [`run_scenario`] already
 /// proves reaches the nvim grandchild with `VIEW_COMPAT_SOCK`: set on the
@@ -911,7 +929,10 @@ fn run_scenario(
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        std::fs::write(&view_config_path, rendered)
+        let fixture_toml = std::fs::read_to_string(&view_config_path).unwrap_or_default();
+        let merged = with_native_table(&fixture_toml, &rendered)
+            .with_context(|| format!("merging [native] into {}", view_config_path.display()))?;
+        std::fs::write(&view_config_path, merged)
             .with_context(|| format!("writing {}", view_config_path.display()))?;
     }
 
@@ -1911,6 +1932,70 @@ mod tests {
         assert!(
             checked >= 17,
             "expected at least 17 committed scenario files, checked {checked}"
+        );
+    }
+
+    /// Replacing the `[native]` table keeps the fixture's `[ui]` table and
+    /// drops the fixture's own `[native]` keys.
+    #[test]
+    fn a_native_override_keeps_the_fixtures_other_tables() {
+        let fixture = "[ui]\npanes = \"nvim\"\n\n[native]\npicker = false\ntree = false\n";
+        let mut native = BTreeMap::new();
+        native.insert("statusline".to_string(), false);
+        let merged: toml::Table = with_native_table(fixture, &render_native_toml(&native))
+            .expect("merges")
+            .parse()
+            .expect("the merged file parses");
+        assert_eq!(merged["ui"]["panes"].as_str(), Some("nvim"), "{merged}");
+        let native = merged["native"].as_table().expect("a [native] table");
+        assert_eq!(native.len(), 1, "only the state's own keys: {native}");
+        assert_eq!(native["statusline"].as_bool(), Some(false));
+    }
+
+    /// Every state of every committed scenario runs under nvim's own window
+    /// picture, whatever `native` override it carries. The scenarios read
+    /// cells nvim draws at fixed rows and columns, and tiles move them.
+    /// Read through the same two functions `run_scenario` writes with, so
+    /// a new state or a new fixture is graded without a list to update.
+    #[test]
+    fn every_scenario_state_materializes_the_fixtures_look_mode() {
+        let scenarios_dir = workspace_root().join("compat").join("scenarios");
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&scenarios_dir).expect("reading compat/scenarios") {
+            let path = entry.expect("dir entry").path();
+            if !path.extension().is_some_and(|ext| ext == "toml") {
+                continue;
+            }
+            let scenario = scenario::load_file(&path).expect("scenario parses");
+            for state in &scenario.states {
+                let Some(fixture) = state.fixture.as_deref().or(scenario.fixture.as_deref()) else {
+                    continue;
+                };
+                let committed = std::fs::read_to_string(
+                    fixtures_root().join(fixture).join("view").join("view.toml"),
+                )
+                .unwrap_or_else(|e| panic!("{fixture}'s view.toml: {e}"));
+                let materialized = match native_toml_override(state) {
+                    Some(native) => with_native_table(&committed, &native).expect("merges"),
+                    None => committed,
+                };
+                let table: toml::Table = materialized.parse().expect("parses");
+                assert_eq!(
+                    table
+                        .get("ui")
+                        .and_then(|ui| ui.get("panes"))
+                        .and_then(toml::Value::as_str),
+                    Some("nvim"),
+                    "{} state {} on fixture {fixture} runs under tiles:\n{materialized}",
+                    path.display(),
+                    state_name(state.name),
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 40,
+            "expected every state to be read, read {checked}"
         );
     }
 }
