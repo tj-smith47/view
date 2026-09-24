@@ -1528,7 +1528,7 @@ mod tests {
     /// Regression pin for the `view-harness` `tab-cycle` corpus entry: a
     /// second tab crosses `Model::chrome_rows`' one-tab threshold, which
     /// production resolves with an `nvim_ui_try_resize` down by one row to
-    /// make room for the tabline (see `TablineUpdate`'s handling in
+    /// make room for the tabline (see the chrome row check at the tail of
     /// `view_core::update::update`). Both `EngineSession` (via
     /// its settle loop's effect forwarding) and `ReferenceSession` (via
     /// its own `chrome_rows`/`TablineUpdate` handling) must carry out that

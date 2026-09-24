@@ -913,9 +913,9 @@ fn every_tile_keeps_its_own_windows_size_as_the_windows_of_a_split_close() {
         outer,
         (
             usize::from(COLS - OUTER_RING_COLS),
-            usize::from(ROWS - OUTER_RING_ROWS - PILL_ROW)
+            usize::from(ROWS - OUTER_RING_ROWS)
         ),
-        "the tiled look takes its ring and the pill's row out of the outer grid"
+        "the tiled look takes its ring out of the outer grid, and one tab draws no top row"
     );
 
     for (step, keys) in TILED_STEPS {
@@ -936,13 +936,15 @@ fn every_tile_keeps_its_own_windows_size_as_the_windows_of_a_split_close() {
 /// The outer grid under tiles with the pill on, as tabpages open and close
 /// and as the row names buffers instead.
 ///
-/// The pill's row comes out of the grid nvim lays its windows in, so a row
-/// that appeared or went away without the grid following would leave every
-/// window a row taller or shorter than the screen has for it. Each step
-/// checks both: what the row names, and that view's window grids are still
-/// the windows nvim has open.
+/// Under tiles the row is drawn only while it names something the frames
+/// do not: a second tabpage here, and two listed buffers once the row names
+/// buffers. Its row comes out of the grid nvim lays its windows in, so a
+/// row that appeared or went away without the grid following would leave
+/// every window a row taller or shorter than the screen has for it. Each
+/// step checks both: whether the row is drawn, and that view's window grids
+/// are still the windows nvim has open.
 #[test]
-fn the_pill_holds_its_row_as_tabpages_and_buffers_come_and_go() {
+fn the_pill_row_comes_and_goes_with_its_tabpages_and_buffers() {
     let work = common::ScratchPaths::new("close-battery-pill");
     let dir = build_fixture(&work.isolated_home);
     let mut engine = view_oracle::EngineSession::spawn_with_ext(
@@ -969,16 +971,16 @@ fn the_pill_holds_its_row_as_tabpages_and_buffers_come_and_go() {
             .map(|(_, screen)| screen.rows.len())
             .expect("the global grid is always named")
     };
-    let reserved = usize::from(ROWS - OUTER_RING_ROWS - PILL_ROW);
+    let rows_for = |drawn: bool| usize::from(ROWS - OUTER_RING_ROWS - u16::from(drawn) * PILL_ROW);
 
-    for (step, keys) in [
-        ("file", ":e README.md<CR>"),
-        ("tab2", ":tabnew<CR>"),
-        ("tab3", ":tabnew<CR>"),
-        ("split", ":vsplit<CR>"),
-        ("close", ":q<CR>"),
-        ("tabclose", ":tabclose<CR>"),
-        ("tabonly", ":tabonly<CR>"),
+    for (step, keys, drawn) in [
+        ("file", ":e README.md<CR>", false),
+        ("tab2", ":tabnew<CR>", true),
+        ("tab3", ":tabnew<CR>", true),
+        ("split", ":vsplit<CR>", true),
+        ("close", ":q<CR>", true),
+        ("tabclose", ":tabclose<CR>", true),
+        ("tabonly", ":tabonly<CR>", false),
     ] {
         engine.arm_and_input(keys).unwrap();
         assert!(
@@ -987,8 +989,8 @@ fn the_pill_holds_its_row_as_tabpages_and_buffers_come_and_go() {
         );
         assert_eq!(
             outer_rows(&engine),
-            reserved,
-            "{step}: the pill's row left the outer grid"
+            rows_for(drawn),
+            "{step}: the outer grid does not follow the top row"
         );
         let wanted = all_window_sizes(&mut engine);
         assert_eq!(
@@ -1031,7 +1033,10 @@ fn the_pill_holds_its_row_as_tabpages_and_buffers_come_and_go() {
             )
         })
         .collect();
-    engine.seed_pill_buffers(view_core::native::pill::TablineShows::Buffers, listed);
+    engine
+        .seed_pill_buffers(view_core::native::pill::TablineShows::Buffers, listed)
+        .unwrap();
+    assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     let row = engine.screen().rows[0].clone();
     for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
         assert!(row.contains(name), "{name} is missing from the row: {row}");
@@ -1042,8 +1047,8 @@ fn the_pill_holds_its_row_as_tabpages_and_buffers_come_and_go() {
     );
     assert_eq!(
         outer_rows(&engine),
-        reserved,
-        "naming buffers instead of tabpages moved the grid"
+        rows_for(true),
+        "four listed buffers brought the row in without the grid following"
     );
 
     engine.arm_and_input(":qa!<CR>").unwrap();

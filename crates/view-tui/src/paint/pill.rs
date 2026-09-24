@@ -6,39 +6,57 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
-use view_core::native::pill::{edge_cells, PillView};
-use view_core::theme::{ChromeGroup, Theme};
+use ratatui::style::{Color, Style};
+use view_core::native::pill::{edge_cells, PillCaps, PillView};
+use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
 
 use super::text::{cluster_width, clusters, set_cluster};
 use super::{ratatui_style, rgb};
 
 /// Draws the pill across `area`, which is the terminal's own top row.
 ///
-/// The row is filled in `TabLineFill` first, so every column the names do
-/// not reach carries the group nvim names for exactly that: the row behind
-/// the tabs.
+/// The row is filled in `Normal` first, so the columns between pills read
+/// as the buffer's own background and each pill stands on it by its own
+/// colour.
 ///
 /// Laid out on [`PillView::width`], the terminal's own width, and written
 /// only into the cells `area` holds. An `area` the compositor clipped
-/// narrower -- the one frame between a resize reaching the model and
-/// reaching the backend -- loses the columns off its right edge and moves
+/// narrower (the one frame between a resize reaching the model and
+/// reaching the backend) loses the columns off its right edge and moves
 /// none of the others, so a name a click reaches is the name that was
 /// drawn under the pointer.
 pub(super) fn paint_pill(pill: &PillView, theme: &Theme, area: Rect, buf: &mut Buffer) {
-    let fill = ratatui_style(theme.chrome(ChromeGroup::TabLineFill));
-    fill_run(buf, area, 0, area.width, fill);
-    // the accent over the row's own background, whatever `TabLineFill`'s
-    // foreground is: the host is the one thing here that says which machine
-    // the session is on, and a colorscheme that dims the tab row would
-    // take it down with the rest
-    let edge = theme.accent().fg.map_or(fill, |fg| fill.fg(rgb(fg)));
-    write_at(buf, area, 1, &pill.host, edge);
-    let agent = pill.width.saturating_sub(edge_cells(pill.agent));
-    write_at(buf, area, agent.saturating_add(1), pill.agent, edge);
+    let normal = theme.normal();
+    fill_run(buf, area, 0, area.width, ratatui_style(normal));
+    let tab = theme.chrome(ChromeGroup::TabLine);
+    // a role's colour over the tab pill's own background, whatever
+    // `TabLine`'s foreground is: the host says which machine the session is
+    // on, and a colorscheme that dims the tab row would take it down with
+    // the rest
+    let edge = |fg: Option<u32>| ResolvedStyle {
+        fg: fg.or(tab.fg),
+        ..tab
+    };
+    let ends = Ends {
+        caps: pill.caps,
+        normal,
+    };
+    let host = edge_cells(&pill.host);
+    if host > 0 {
+        let style = edge(theme.accent().fg);
+        ends.draw(buf, area, (pill.host_col(), host), &pill.host, style);
+    }
+    let agent = edge_cells(pill.agent);
+    if agent > 0 {
+        let fg = match pill.agent {
+            "waiting" => theme.chrome(ChromeGroup::WarningMsg).fg,
+            "crashed" => theme.chrome(ChromeGroup::ErrorMsg).fg,
+            _ => theme.accent().fg,
+        };
+        ends.draw(buf, area, (pill.agent_col(), agent), pill.agent, edge(fg));
+    }
 
-    let tab = ratatui_style(theme.chrome(ChromeGroup::TabLine));
-    let selected = ratatui_style(theme.chrome(ChromeGroup::TabLineSel));
+    let selected = theme.chrome(ChromeGroup::TabLineSel);
     for slot in pill.row_slots() {
         // by the index the slot names, never by the loop's own count: a
         // list longer than the row is a window into it, and its first slot
@@ -47,8 +65,66 @@ pub(super) fn paint_pill(pill: &PillView, theme: &Theme, area: Rect, buf: &mut B
             continue;
         };
         let style = if slot.current { selected } else { tab };
-        fill_run(buf, area, slot.col, slot.cells, style);
-        write_at(buf, area, slot.col.saturating_add(1), &entry.label, style);
+        ends.draw(buf, area, (slot.col, slot.cells), &entry.label, style);
+    }
+}
+
+/// How a pill's two end cells are drawn on this row.
+struct Ends {
+    caps: PillCaps,
+    normal: ResolvedStyle,
+}
+
+impl Ends {
+    /// Draws one pill of `cells` columns from `col`: its body in `pill`,
+    /// the word two columns in, and an end cell at each side.
+    fn draw(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        (col, cells): (u16, u16),
+        text: &str,
+        pill: ResolvedStyle,
+    ) {
+        let body = ratatui_style(pill);
+        fill_run(buf, area, col, cells, body);
+        write_at(buf, area, col.saturating_add(2), text, body);
+        // a flat end is the blank the body fill already left
+        let Some(end) = self.round_end(pill) else {
+            return;
+        };
+        let (left, right) = self.caps.ends();
+        write_at(buf, area, col, left, end);
+        write_at(
+            buf,
+            area,
+            col.saturating_add(cells).saturating_sub(1),
+            right,
+            end,
+        );
+    }
+
+    /// The style a round end is drawn in: the pill's own visible
+    /// background as the glyph's colour, over the row's `Normal`
+    /// background. `None` under flat ends, and for a pill whose background
+    /// is the terminal's own default, which no foreground can name.
+    fn round_end(&self, pill: ResolvedStyle) -> Option<Style> {
+        if self.caps != PillCaps::Round {
+            return None;
+        }
+        // a reversed style shows its foreground as the background, and an
+        // unset one is the terminal's default foreground, which `Reset`
+        // names on the glyph as well
+        let fg = if pill.reverse {
+            pill.fg.map_or(Color::Reset, rgb)
+        } else {
+            rgb(pill.bg.or(self.normal.bg)?)
+        };
+        Some(
+            Style::default()
+                .fg(fg)
+                .bg(self.normal.bg.map_or(Color::Reset, rgb)),
+        )
     }
 }
 
@@ -93,32 +169,42 @@ mod tests {
     use ratatui::Terminal;
     use view_core::model::Model;
 
-    use super::{paint_pill, PillView};
+    use super::{paint_pill, Buffer, PillCaps, PillView, Rect};
     use crate::paint::{ratatui_style, rgb, ChromeGroup, Theme};
 
     /// The accent this fixture names, which is what the host cell has to
     /// carry over the row's own foreground.
     const ACCENT: u32 = 0x44_44_44;
 
+    /// The row's own background, which is `Normal`'s.
+    const NORMAL_BG: u32 = 0x0f_0f_0f;
+
     /// A session on a remote host with two tabpages on a terminal `width`
-    /// cells wide, its three pill groups three different colours so a cell
-    /// says which one painted it.
+    /// cells wide, `Normal` and the two pill groups three different colours
+    /// so a cell says which one painted it.
     ///
     /// The terminal's width is the row's own layout width, so a fixture
     /// that left it at zero would place every name nowhere.
     fn two_tabs(width: u16) -> Model {
         let mut model = Model::with_term_size(width, 24).with_remote(Some("prod".to_string()));
         model.engine.set_accent_token(Some(ACCENT));
-        for (id, group, fg) in [
-            (1_u64, ChromeGroup::TabLine, 0x11_11_11_u32),
-            (2, ChromeGroup::TabLineSel, 0x22_22_22),
-            (3, ChromeGroup::TabLineFill, 0x33_33_33),
+        let _ = view_core::update::update(
+            &mut model,
+            view_core::msg::Msg::Redraw(vec![view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0xee_ee_ee),
+                bg: Some(NORMAL_BG),
+                sp: None,
+            }]),
+        );
+        for (id, group, fg, bg) in [
+            (1_u64, ChromeGroup::TabLine, 0x11_11_11_u32, 0xa1_a1_a1_u32),
+            (2, ChromeGroup::TabLineSel, 0x22_22_22, 0xa2_a2_a2),
         ] {
             for event in [
                 view_core::events::UiEvent::HlAttrDefine {
                     id,
                     fg: Some(fg),
-                    bg: None,
+                    bg: Some(bg),
                     bold: false,
                     italic: false,
                     underline: false,
@@ -196,9 +282,9 @@ mod tests {
     /// under every one of them.
     #[test]
     fn a_row_too_narrow_for_the_list_paints_the_names_its_slots_name() {
-        // room for two of the four names, so the window holds the current
-        // one and the one before it
-        let width = 20;
+        // room for two of the four names beside the host's pill, so the
+        // window holds the current one and the one before it
+        let width = 28;
         let mut model = two_tabs(width);
         model.ai_enabled = false;
         let _ = view_core::update::update(
@@ -225,7 +311,7 @@ mod tests {
         let row: String = (0..width).map(|col| buf[(col, 0)].symbol()).collect();
         assert_eq!(
             row.trim(),
-            "prod  name3  name4",
+            "prod     name3     name4",
             "the row reads {row:?} where its slots name entries 2 and 3"
         );
     }
@@ -290,7 +376,6 @@ mod tests {
 
         let plain = ratatui_style(theme.chrome(ChromeGroup::TabLine)).fg;
         let lit = ratatui_style(theme.chrome(ChromeGroup::TabLineSel)).fg;
-        let fill = ratatui_style(theme.chrome(ChromeGroup::TabLineFill)).fg;
         assert_ne!(plain, lit, "the fixture gave the two groups one colour");
         for col in slots[0].col..slots[0].col + slots[0].cells {
             assert_eq!(fg_at(col), plain, "column {col} of the first name");
@@ -299,19 +384,182 @@ mod tests {
             assert_eq!(fg_at(col), lit, "column {col} of the current name");
         }
         assert_eq!(
-            fg_at(1),
+            fg_at(pill.host_col() + 2),
             Some(rgb(ACCENT)),
-            "the host carries the accent rather than the row's own foreground"
+            "the host's word is drawn in the accent"
         );
         assert_eq!(
-            fg_at(slots[0].col - 1),
-            fill,
-            "the gap before the first name is not the row behind the tabs"
+            buf[(slots[0].col - 1, 0)].style().bg,
+            Some(rgb(NORMAL_BG)),
+            "the gap before the first name is not Normal's background"
         );
         assert_eq!(
-            (buf[(1, 0)].symbol(), buf[(slots[1].col + 1, 0)].symbol()),
+            (
+                buf[(pill.host_col() + 2, 0)].symbol(),
+                buf[(slots[1].col + 2, 0)].symbol()
+            ),
             ("p", "t"),
             "the host and the current name are not where the slots put them"
         );
+    }
+
+    /// Paints `pill` into a buffer as wide as its own row.
+    fn painted(pill: &PillView, theme: &Theme) -> Buffer {
+        let area = Rect::new(0, 0, pill.width, 1);
+        let mut buf = Buffer::empty(area);
+        paint_pill(pill, theme, area, &mut buf);
+        buf
+    }
+
+    /// Which columns a pill painted: its body stands off `Normal`'s
+    /// background, and a round end stands on it as a glyph.
+    fn pill_cells(buf: &Buffer, width: u16) -> Vec<bool> {
+        let (left, right) = PillCaps::Round.ends();
+        (0..width)
+            .map(|col| {
+                let cell = &buf[(col, 0)];
+                cell.style().bg != Some(rgb(NORMAL_BG))
+                    || cell.symbol() == left
+                    || cell.symbol() == right
+            })
+            .collect()
+    }
+
+    /// Each run of painted cells, as its first column, its width and the
+    /// word drawn in it.
+    fn runs(buf: &Buffer, width: u16) -> Vec<(u16, u16, String)> {
+        let cells = pill_cells(buf, width);
+        let (left, right) = PillCaps::Round.ends();
+        let mut found = Vec::new();
+        let mut col = 0;
+        while col < width {
+            if !cells[usize::from(col)] {
+                col += 1;
+                continue;
+            }
+            let start = col;
+            let mut word = String::new();
+            while col < width && cells[usize::from(col)] {
+                let symbol = buf[(col, 0)].symbol();
+                if symbol != left && symbol != right {
+                    word.push_str(symbol);
+                }
+                col += 1;
+            }
+            found.push((start, col - start, word.trim().to_string()));
+        }
+        found
+    }
+
+    /// `count` tabpages named `n01`, `n02`, ... with handle `index + 1`,
+    /// the one at `current` the session's own.
+    fn listed(count: u64, current: u64) -> PillView {
+        let mut model = two_tabs(80);
+        let _ = view_core::update::update(
+            &mut model,
+            view_core::msg::Msg::Redraw(vec![view_core::events::UiEvent::TablineUpdate {
+                current: view_core::events::TabHandle(current + 1),
+                tabs: (0..count)
+                    .map(|at| view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(at + 1),
+                        name: format!("n{:02}", at + 1),
+                    })
+                    .collect(),
+            }]),
+        );
+        PillView::from_model(&model)
+    }
+
+    /// Every column of every row a person can see answers a click with
+    /// the name painted under it, or with nothing where no name is. A
+    /// router and a painter that each did their own arithmetic agreed on
+    /// the widths a fixture happened to pick and nowhere else.
+    #[test]
+    fn every_click_on_a_pill_selects_the_name_painted_under_it() {
+        let base = two_tabs(80);
+        let theme = Theme::from_hl(base.engine.hl());
+        let mut walked = 0_u32;
+        for count in 1..=12 {
+            for current in 0..count {
+                let listed = listed(count, current);
+                for (host, agent) in [("", ""), ("prod", ""), ("", "running"), ("prod", "waiting")]
+                {
+                    for caps in [PillCaps::Round, PillCaps::Flat] {
+                        for width in 10..=120 {
+                            let mut pill = listed.clone();
+                            pill.host = host.to_string();
+                            pill.agent = agent;
+                            pill.caps = caps;
+                            pill.width = width;
+                            let buf = painted(&pill, &theme);
+                            let mut owner = vec![None; usize::from(width)];
+                            for (start, cells, word) in runs(&buf, width) {
+                                let id = word.strip_prefix('n').and_then(|n| n.parse::<u64>().ok());
+                                for col in start..start + cells {
+                                    owner[usize::from(col)] = id;
+                                }
+                            }
+                            for col in 0..width {
+                                assert_eq!(
+                                    pill.hit(col),
+                                    owner[usize::from(col)],
+                                    "{count} names, current {current}, host {host:?}, agent \
+                                     {agent:?}, {caps:?}, width {width}: column {col}"
+                                );
+                            }
+                            walked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(walked, 78 * 4 * 2 * 111, "the walk skipped cases");
+    }
+
+    /// Flat ends are a blank in the pill's own colour where a round end is
+    /// a glyph, so switching the key moves no name and no click.
+    #[test]
+    fn flat_caps_take_the_cells_round_caps_take() {
+        let base = two_tabs(80);
+        let theme = Theme::from_hl(base.engine.hl());
+        let mut round = listed(3, 1);
+        round.agent = "running";
+        round.caps = PillCaps::Round;
+        let mut flat = round.clone();
+        flat.caps = PillCaps::Flat;
+        let (round_buf, flat_buf) = (painted(&round, &theme), painted(&flat, &theme));
+        assert_eq!(
+            pill_cells(&round_buf, 80),
+            pill_cells(&flat_buf, 80),
+            "the two cap modes painted different cells"
+        );
+        assert_eq!(round.row_slots(), flat.row_slots());
+        let (left, right) = PillCaps::Round.ends();
+        for slot in round.row_slots() {
+            let last = slot.col + slot.cells - 1;
+            assert_eq!(
+                (
+                    round_buf[(slot.col, 0)].symbol(),
+                    round_buf[(last, 0)].symbol()
+                ),
+                (left, right),
+                "round ends of the name at {}",
+                slot.col
+            );
+            assert_eq!(
+                (
+                    flat_buf[(slot.col, 0)].symbol(),
+                    flat_buf[(last, 0)].symbol()
+                ),
+                (" ", " "),
+                "flat ends of the name at {}",
+                slot.col
+            );
+            assert_eq!(
+                flat_buf[(slot.col, 0)].style().bg,
+                flat_buf[(slot.col + 2, 0)].style().bg,
+                "a flat end is not in its pill's colour"
+            );
+        }
     }
 }

@@ -1191,9 +1191,12 @@ fn main() -> Result<()> {
     // the pill's own row, reserved in the spawn's geometry for the reason
     // the ring is: a child laid out a row taller than the first frame
     // leaves makes the attach a relayout of every window on screen
-    let chrome = u16::from(view_core::native::pill::shows_under(
+    let chrome = u16::from(view_core::native::pill::row_shows(
         surfaces.contains(&view_core::native::ext::Ext::Tabline),
         look.panes,
+        // the one fact the row carries that exists before the engine does:
+        // a second tabpage, the buffer list and the agent all arrive later
+        cli.remote.is_some(),
         // no tabline event has arrived yet, and under nvim mode the row is
         // nvim's own until a second tabpage opens
         0,
@@ -1266,7 +1269,8 @@ fn main() -> Result<()> {
         // ssh's own destination as the user typed it, which is the only
         // thing on screen that says which machine the session is on
         .with_remote(pill_host(cli.remote.as_deref()))
-        .with_tabline_shows(resolved.tables.native.tabline_shows());
+        .with_tabline_shows(resolved.tables.native.tabline_shows())
+        .with_pill_caps(resolved.ui.pill_caps.value);
     // whether a `:View ui panes` flip derives `[native] tabline` again, or
     // leaves the value the user spelled where they put it
     model.tabline_follows_look = resolved.tabline_follows_look();
@@ -2228,8 +2232,9 @@ mod tests {
                 "bar_rows",
                 "enabled",
                 "u16::from",
-                "view_core::native::pill::shows_under",
+                "view_core::native::pill::row_shows",
                 "contains",
+                "is_some",
                 "view_core::model::grid_target_for",
                 "view_core::model::grid_room_for",
                 "vlog::log_with",

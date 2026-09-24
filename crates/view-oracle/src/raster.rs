@@ -314,17 +314,27 @@ fn paint_grid<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid) {
     }
 }
 
-/// Writes the pill's row: the host at the left edge, the names where
-/// [`view_core::native::pill::PillView::row_slots`] placed them, and the
-/// agent's word at the right.
+/// Writes the pill's row: the host pill at the left edge, the name pills
+/// where [`view_core::native::pill::PillView::row_slots`] placed them, and
+/// the agent pill at the right, each with its two end cells.
 ///
 /// The placement is the painter's own answer, so the columns a golden shows
 /// are the columns a session draws into.
 fn paint_pill(canvas: &mut Canvas<'_>, layer: &Layer, view: &view_core::native::pill::PillView) {
     use view_core::native::pill::edge_cells;
 
-    blank_row(canvas, layer.rect.row, layer.rect.col, layer.rect.width);
-    paint_text(canvas, layer.rect.row, layer.rect.col + 1, &view.host);
+    let (row, at) = (layer.rect.row, layer.rect.col);
+    let (left, right) = view.caps.ends();
+    blank_row(canvas, row, at, layer.rect.width);
+    let mut pill = |col: u16, cells: u16, text: &str| {
+        if cells == 0 {
+            return;
+        }
+        paint_text(canvas, row, at + col, left);
+        paint_text(canvas, row, at + col + 2, text);
+        paint_text(canvas, row, at + col + cells - 1, right);
+    };
+    pill(view.host_col(), edge_cells(&view.host), &view.host);
     for slot in view.row_slots() {
         // the entry the slot names, never the one beside it in the list: a
         // row too narrow for every name is a window into the list, and its
@@ -332,20 +342,9 @@ fn paint_pill(canvas: &mut Canvas<'_>, layer: &Layer, view: &view_core::native::
         let Some(entry) = view.entries.get(slot.entry) else {
             continue;
         };
-        paint_text(
-            canvas,
-            layer.rect.row,
-            layer.rect.col + slot.col + 1,
-            &entry.label,
-        );
+        pill(slot.col, slot.cells, &entry.label);
     }
-    let agent = view.width.saturating_sub(edge_cells(view.agent));
-    paint_text(
-        canvas,
-        layer.rect.row,
-        layer.rect.col + agent + 1,
-        view.agent,
-    );
+    pill(view.agent_col(), edge_cells(view.agent), view.agent);
 }
 
 fn paint_cmdline(canvas: &mut Canvas<'_>, layer: &Layer, state: &view_core::model::CmdlineState) {

@@ -196,7 +196,7 @@ fn report(model: &Model) -> String {
     // the row is the half of the flip a person sees before anything else
     // moves, and under an explicit `[native] tabline` it does not move at
     // all, so the line says where it went
-    let row = if crate::native::pill::shows(model) {
+    let row = if model.owns(crate::native::ext::Ext::Tabline) {
         "the top row is view's"
     } else {
         "the top row is nvim's"

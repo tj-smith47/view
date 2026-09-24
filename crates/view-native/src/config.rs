@@ -42,7 +42,7 @@ use view_core::native::geometry;
 use view_core::native::geometry::NativeSurface;
 use view_core::native::keys::{Action, Direction, KeyBindings};
 use view_core::native::mappings;
-use view_core::native::pill::TablineShows;
+use view_core::native::pill::{PillCaps, TablineShows};
 use view_core::native::registry;
 
 /// A resolved on/off answer for every feature in the registry.
@@ -114,6 +114,8 @@ struct UiTable {
     panes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     gaps: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pill_caps: Option<String>,
     #[serde(default)]
     tokens: UiTokensTable,
     #[serde(default)]
@@ -250,6 +252,9 @@ struct UiFile {
     /// carries.
     panes: Option<Option<Panes>>,
     gaps: Option<bool>,
+    /// `Some(None)` is the word `auto`, the same double meaning `tier`
+    /// carries.
+    pill_caps: Option<Option<PillCaps>>,
     tokens: Option<UiTokens>,
     /// The `[ui.surfaces]` tables as the file wrote them. Unparsed here:
     /// the words are read by [`surfaces::surfaces`], whose notices reach
@@ -307,6 +312,17 @@ fn parse_panes(value: &str) -> Option<Option<Panes>> {
     }
 }
 
+/// A pill end a user named, `Some(None)` for the word that names the
+/// absence of a choice, and `None` for text that names no end at all, which
+/// falls through to the layer below the way [`parse_tier`] does.
+fn parse_pill_caps(value: &str) -> Option<Option<PillCaps>> {
+    let word = value.trim().to_ascii_lowercase();
+    if word == AUTO {
+        return Some(None);
+    }
+    PillCaps::parse(&word).map(Some)
+}
+
 /// The colour a value names as `0x00RRGGBB`, `Some(None)` for the word that
 /// names the absence of a choice, and `None` for text that names no colour
 /// at all -- which falls through to the layer below, the way
@@ -345,6 +361,13 @@ fn resolve_ui(table: &UiTable) -> UiFile {
         parse_panes,
         &mut notices,
     );
+    let pill_caps = read_key(
+        table.pill_caps.as_deref(),
+        ("ui", "pill_caps"),
+        view_core::config::PILL_CAPS_EXPECTED,
+        parse_pill_caps,
+        &mut notices,
+    );
     let accent = read_key(
         table.tokens.accent.as_deref(),
         ("ui.tokens", "accent"),
@@ -357,6 +380,7 @@ fn resolve_ui(table: &UiTable) -> UiFile {
         theme: table.theme.as_deref().map(parse_theme),
         panes,
         gaps: table.gaps,
+        pill_caps,
         // the outer `Some` is the file naming the key at all, which is what
         // keeps a value this build could not read from reading as the file
         // declining the role
@@ -1290,6 +1314,9 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
     if file.ui.gaps.is_some() {
         spelled.push(("ui", "gaps"));
     }
+    if file.ui.pill_caps.is_some() {
+        spelled.push(("ui", "pill_caps"));
+    }
     if file.ui.tokens.accent.is_some() {
         spelled.push(("ui.tokens", "accent"));
     }
@@ -1814,6 +1841,7 @@ mod tests {
             ("ui", "theme") => "\"gruvbox\"",
             ("ui", "panes") => "\"nvim\"",
             ("ui", "gaps") => "false",
+            ("ui", "pill_caps") => "\"flat\"",
             ("ui.tokens", "accent") => "\"#89b4fa\"",
             ("engine", "nvim_bin") => "\"/opt/nvim/bin/nvim\"",
             ("engine", "appname") => "\"work\"",

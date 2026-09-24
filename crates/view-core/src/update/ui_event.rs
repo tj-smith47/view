@@ -403,18 +403,9 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             Vec::new()
         }
         UiEvent::TablineUpdate { current, tabs } => {
-            let before = model.chrome_rows();
+            // a row this moves is resized for in `update()`'s tail
             model.engine.tabline = Some(TablineState { current, tabs });
-            let after = model.chrome_rows();
-            if before == after {
-                Vec::new()
-            } else {
-                let (grid_width, grid_height) = model.grid_target();
-                vec![Effect::Rpc(RpcCall::TryResize {
-                    width: grid_width,
-                    height: grid_height,
-                })]
-            }
+            Vec::new()
         }
         UiEvent::PopupmenuShow {
             items,

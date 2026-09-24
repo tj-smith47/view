@@ -2567,13 +2567,14 @@ mod tests {
         terminal.draw(|f| composite(&model, &surface, f)).unwrap();
         let buf = terminal.backend().buffer().clone();
 
+        // ten columns hold one seven-cell pill, the current name's, centred
         assert_eq!(
             &buf[(0, 0)].symbol(),
             &" ",
-            "the first name starts with its own blank"
+            "the column left of the pill is the row's own blank"
         );
-        assert_eq!(&buf[(1, 0)].symbol(), &"o");
-        assert_eq!(&buf[(2, 0)].symbol(), &"n");
+        assert_eq!(&buf[(3, 0)].symbol(), &"o");
+        assert_eq!(&buf[(4, 0)].symbol(), &"n");
         assert_eq!(
             &buf[(0, 1)].symbol(),
             &"a",

@@ -144,6 +144,12 @@ fn session(dir: &Path, look: Look) -> EngineSession {
         engine.arm_and_input(":botright split c.txt<CR>").unwrap();
         settle(&mut engine, "bottom split");
     }
+    if pill {
+        // Under tiles the row is drawn only while it names something the
+        // frames do not, and a second tab is the one that holds still.
+        engine.arm_and_input(":tabnew<CR>:tabprevious<CR>").unwrap();
+        settle(&mut engine, "second tab");
+    }
     engine.set_panes("tiles").unwrap();
     settle(&mut engine, "tiles");
     if !gaps {

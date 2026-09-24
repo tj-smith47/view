@@ -1,4 +1,4 @@
- deploy@prod-box                   work  docs  notes                    running 
+   deploy@prod-box              work    docs    notes               running   
                                                                                 
  ╭ left.rs ───────────────────────────╮ ╭ right.rs ───────────────────────────╮ 
  │left                                │ │right                                │ 
@@ -23,7 +23,7 @@
  ╰ -- INSERT -- 1:1 ──────────────────╯ ╰ E 1 2:1 ────────────────────────────╯ 
                                                                                 
 --- fg ---
-ABBBBBBBBBBBBBBBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBBBA
+ABBBBBBBBBBBBBBBBBBBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA

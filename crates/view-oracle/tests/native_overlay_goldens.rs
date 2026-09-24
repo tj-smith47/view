@@ -211,9 +211,14 @@ fn open_tabs(model: &mut view_core::model::Model, current: u64, names: &[&str]) 
 /// A pill on a remote session with three tabpages open and an agent
 /// running: the destination at the left edge, the names centred with the
 /// current one lit, and the agent's word at the right.
-fn pill_tabs() -> LayerKind {
+///
+/// `boxes` is the tier's own box-glyph reading, which picks the ends when
+/// `pill_caps` is left to derive them.
+fn pill_tabs(boxes: bool, pill_caps: Option<view_core::native::pill::PillCaps>) -> LayerKind {
     let mut model = view_core::model::Model::with_term_size(PILL_WIDTH, 24)
-        .with_remote(Some("deploy@prod-box".to_string()));
+        .with_remote(Some("deploy@prod-box".to_string()))
+        .with_pill_caps(pill_caps);
+    model.caps = model.caps.with_unicode_boxes(boxes);
     model.ai_trusted = true;
     model.ai_panel_mut().session_id = Some("s-1".to_string());
     open_tabs(&mut model, 2, &["work", "docs", "notes"]);
@@ -222,9 +227,10 @@ fn pill_tabs() -> LayerKind {
 
 /// The same row on a local session naming buffers instead, one of them
 /// unsaved, while the agent waits on a permission.
-fn pill_buffers() -> LayerKind {
+fn pill_buffers(boxes: bool) -> LayerKind {
     let mut model = view_core::model::Model::with_term_size(PILL_WIDTH, 24)
         .with_tabline_shows(view_core::native::pill::TablineShows::Buffers);
+    model.caps = model.caps.with_unicode_boxes(boxes);
     model.ai_panel_mut().pending_permission =
         Some(view_core::native::ai_panel::PermissionPrompt::new(
             1,
@@ -253,7 +259,32 @@ fn pill_buffers() -> LayerKind {
 fn full_pill_tabs() {
     assert_golden(
         "full-pill-tabs",
-        &dump(Tier::Full, DRAWS_BOX_GLYPHS, PILL_WIDTH, 1, pill_tabs()),
+        &dump(
+            Tier::Full,
+            DRAWS_BOX_GLYPHS,
+            PILL_WIDTH,
+            1,
+            pill_tabs(DRAWS_BOX_GLYPHS, None),
+        ),
+    );
+}
+
+/// The full tier with `pill_caps = "flat"`: every pill keeps the columns
+/// the round ends took, each end a blank in the pill's own colour.
+#[test]
+fn full_pill_flat_caps() {
+    assert_golden(
+        "full-pill-flat-caps",
+        &dump(
+            Tier::Full,
+            DRAWS_BOX_GLYPHS,
+            PILL_WIDTH,
+            1,
+            pill_tabs(
+                DRAWS_BOX_GLYPHS,
+                Some(view_core::native::pill::PillCaps::Flat),
+            ),
+        ),
     );
 }
 
@@ -261,7 +292,13 @@ fn full_pill_tabs() {
 fn standard_pill_tabs() {
     assert_golden(
         "standard-pill-tabs",
-        &dump(Tier::Standard, DRAWS_BOX_GLYPHS, PILL_WIDTH, 1, pill_tabs()),
+        &dump(
+            Tier::Standard,
+            DRAWS_BOX_GLYPHS,
+            PILL_WIDTH,
+            1,
+            pill_tabs(DRAWS_BOX_GLYPHS, None),
+        ),
     );
 }
 
@@ -269,7 +306,13 @@ fn standard_pill_tabs() {
 fn basic_pill_tabs() {
     assert_golden(
         "basic-pill-tabs",
-        &dump(Tier::Basic, NO_BOX_GLYPHS, PILL_WIDTH, 1, pill_tabs()),
+        &dump(
+            Tier::Basic,
+            NO_BOX_GLYPHS,
+            PILL_WIDTH,
+            1,
+            pill_tabs(NO_BOX_GLYPHS, None),
+        ),
     );
 }
 
@@ -277,7 +320,13 @@ fn basic_pill_tabs() {
 fn full_pill_buffers() {
     assert_golden(
         "full-pill-buffers",
-        &dump(Tier::Full, DRAWS_BOX_GLYPHS, PILL_WIDTH, 1, pill_buffers()),
+        &dump(
+            Tier::Full,
+            DRAWS_BOX_GLYPHS,
+            PILL_WIDTH,
+            1,
+            pill_buffers(DRAWS_BOX_GLYPHS),
+        ),
     );
 }
 
@@ -290,7 +339,7 @@ fn standard_pill_buffers() {
             DRAWS_BOX_GLYPHS,
             PILL_WIDTH,
             1,
-            pill_buffers(),
+            pill_buffers(DRAWS_BOX_GLYPHS),
         ),
     );
 }
@@ -299,7 +348,13 @@ fn standard_pill_buffers() {
 fn basic_pill_buffers() {
     assert_golden(
         "basic-pill-buffers",
-        &dump(Tier::Basic, NO_BOX_GLYPHS, PILL_WIDTH, 1, pill_buffers()),
+        &dump(
+            Tier::Basic,
+            NO_BOX_GLYPHS,
+            PILL_WIDTH,
+            1,
+            pill_buffers(NO_BOX_GLYPHS),
+        ),
     );
 }
 
@@ -607,8 +662,18 @@ fn a_terminals_tier_never_reaches_its_frame() {
         ("statusline", 46, 3, statusline()),
         ("statusline-bar", 46, 1, statusline()),
         ("nvim-statusline-bar", NVIM_BAR_WIDTH, 1, nvim_statusline()),
-        ("pill-tabs", PILL_WIDTH, 1, pill_tabs()),
-        ("pill-buffers", PILL_WIDTH, 1, pill_buffers()),
+        (
+            "pill-tabs",
+            PILL_WIDTH,
+            1,
+            pill_tabs(DRAWS_BOX_GLYPHS, None),
+        ),
+        (
+            "pill-buffers",
+            PILL_WIDTH,
+            1,
+            pill_buffers(DRAWS_BOX_GLYPHS),
+        ),
         ("prompt", 32, 7, prompt()),
         ("palette", 38, 8, palette()),
         ("ai-panel", 30, 7, ai_panel()),

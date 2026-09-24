@@ -237,6 +237,9 @@ pub struct Model {
     /// What the pill names while one tabpage is open, set once at startup
     /// from `[native] tabline_shows` the same way `statusline_enabled` is.
     pub tabline_shows: crate::native::pill::TablineShows,
+    /// `[ui] pill_caps`: the pill ends the user forced, or `None` for
+    /// `"auto"`, which follows the probed `caps.unicode_boxes`.
+    pub pill_caps: Option<crate::native::pill::PillCaps>,
     /// nvim's own `showtabline`, as the bridge last relayed it: `0` never
     /// draws the top row under `panes = "nvim"`, `1` draws it once a
     /// second tabpage is open, `2` always.
@@ -449,6 +452,7 @@ impl Model {
             remote: None,
             buffers: Vec::new(),
             tabline_shows: crate::native::pill::TablineShows::default(),
+            pill_caps: None,
             showtabline: crate::native::pill::DEFAULT_SHOWTABLINE,
             native_min_pane_size: (1, 1),
             tabline_follows_look: true,
@@ -768,6 +772,13 @@ impl Model {
     #[must_use]
     pub fn with_tabline_shows(mut self, shows: crate::native::pill::TablineShows) -> Self {
         self.tabline_shows = shows;
+        self
+    }
+
+    /// The pill ends `[ui] pill_caps` forced, or `None` for `"auto"`.
+    #[must_use]
+    pub fn with_pill_caps(mut self, caps: Option<crate::native::pill::PillCaps>) -> Self {
+        self.pill_caps = caps;
         self
     }
 
@@ -2999,10 +3010,11 @@ mod tests {
         assert_eq!(m.grid_target(), (80, 23));
     }
 
-    /// Under tiles the row stands whatever is open: a pill naming one
-    /// workspace still carries the host and what the agent is doing.
+    /// Under tiles the row stands only while it carries something the
+    /// frames do not: one workspace with nothing else to say leaves the
+    /// ring on terminal row 0, and a remote host brings the row back.
     #[test]
-    fn chrome_rows_is_one_whenever_the_pill_is_on() {
+    fn chrome_rows_follows_unique_content_under_tiles() {
         let mut m = tabline_model();
         m.look = crate::model::Look::new(crate::model::Panes::Tiles, true);
         m.engine.tabline = Some(TablineState {
@@ -3012,7 +3024,11 @@ mod tests {
                 name: "a".into(),
             }],
         });
-        assert_eq!(m.chrome_rows(), 1);
+        assert_eq!(m.chrome_rows(), 0, "one workspace drew a banner");
+        let (_, full) = m.grid_target();
+        m.remote = Some("prod".into());
+        assert_eq!(m.chrome_rows(), 1, "a remote host left the row off");
+        assert_eq!(m.grid_target().1, full - 1);
         // the surface handed back takes the row with it, in either look
         m.attach_surfaces(crate::native::ext::shipped_multigrid());
         assert_eq!(m.chrome_rows(), 0);

@@ -89,8 +89,12 @@ and a flip to that look puts your own value back.
 `[native] tabline` is the one switch with no fixed default. It follows
 `[ui] panes`: on under `"tiles"`, off under `"nvim"`, and a value you write
 wins either way. On, the row is detached from nvim and view draws the top
-pill in it, under either mode. Off, nvim draws your own `tabline` into grid
-1 and the compositor paints that row like any other.
+pill in it, under either mode. Under `"tiles"` the row is drawn only while
+it names something the tiles' frames do not: a second tabpage, two or more
+listed buffers under `tabline_shows = "buffers"`, a `--remote` host, or an
+agent that is not idle. Under `"nvim"` it follows `showtabline`. Off, nvim
+draws your own `tabline` into grid 1 and the compositor paints that row like
+any other.
 
 The buffer grid is the one surface view never draws over. nvim owns it, and
 so does anything that wants to float above it, so a picker taking the screen

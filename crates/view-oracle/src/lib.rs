@@ -780,14 +780,21 @@ impl EngineSession {
     ///
     /// The driver registers no autocommands of view's own, so the trigger
     /// that sends that notification in a real session never fires here.
-    /// This is the front door it leaves.
+    /// This is the front door it leaves. The arm's effects are applied,
+    /// because a buffer list that brings the top row in resizes the grid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OracleError::PumpUnsettled`] if the effects it pumps are
+    /// still producing follow-ups after the bounded number of rounds.
     pub fn seed_pill_buffers(
         &mut self,
         shows: view_core::native::pill::TablineShows,
         buffers: Vec<view_core::model::BufferEntry>,
-    ) {
+    ) -> Result<(), OracleError> {
         self.model.tabline_shows = shows;
-        let _ = update(&mut self.model, Msg::BufferList { buffers });
+        let effects = update(&mut self.model, Msg::BufferList { buffers });
+        self.apply_effects(effects)
     }
 
     /// Queues the next quiesce marker's arm command and `notation` into

@@ -1,4 +1,4 @@
-                 main.rs  model.rs +  paint.rs  update.rs                  idle 
+               main.rs     model.rs +     paint.rs     update.rs                
                                                                                 
  + left.rs ---------------------------+ + right.rs ---------------------------+ 
  |left                                | |right                                | 
@@ -23,7 +23,7 @@
  + -- INSERT -- 1:1 ------------------+ + E 1 2:1 ----------------------------+ 
                                                                                 
 --- fg ---
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA

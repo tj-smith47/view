@@ -266,7 +266,7 @@ impl NativeSession {
         // reserve. Without this, `view_surface::render` places the
         // statusline at `offset + grid_h` using nvim's still-full grid
         // height and paints it one row below the terminal entirely, same
-        // shape as `UiEvent::TablineUpdate`'s resize-on-change below.
+        // shape as `update()`'s resize when the chrome row count moves.
         if model.statusline_rows() > 0 {
             let (grid_width, grid_height) = model.grid_target();
             effects.push(Effect::Rpc(RpcCall::TryResize {

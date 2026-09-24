@@ -23,8 +23,10 @@ fn row_text(screen: &vt100::Screen, row: u16) -> String {
         .collect()
 }
 
+/// Under tiles the row carries only what the frames do not, so one tabpage
+/// draws none and a second one brings it.
 #[test]
-fn a_panes_flip_brings_the_top_row_or_takes_it_away_on_screen() {
+fn a_tiled_top_row_comes_with_a_second_tabpage_and_leaves_with_it() {
     let paths = common::ScratchPaths::new("panes-flip");
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
     cmd.cwd(
@@ -60,10 +62,30 @@ fn a_panes_flip_brings_the_top_row_or_takes_it_away_on_screen() {
         session.screen()
     );
 
+    // the tile's frame names the file on row 1, and row 0 stays empty
+    let framed_alone = |screen: &vt100::Screen| {
+        row_text(screen, 1).contains(&name) && !row_text(screen, 0).contains(&name)
+    };
     session.send(b"\x1b:View ui panes tiles\r").unwrap();
     assert!(
+        session.wait_for_screen(BUDGET, framed_alone),
+        "one tabpage under tiles drew a top row; row 0: {:?}\nscreen:\n{}",
+        session.with_screen(|screen| row_text(screen, 0)),
+        session.screen()
+    );
+
+    session.send(b"\x1b:tabnew\r").unwrap();
+    assert!(
         session.wait_for_screen(BUDGET, |screen| row_text(screen, 0).contains(&name)),
-        "the flip to tiles never put the name on row 0; row 0: {:?}\nscreen:\n{}",
+        "a second tabpage never put the first one's name on row 0; row 0: {:?}\nscreen:\n{}",
+        session.with_screen(|screen| row_text(screen, 0)),
+        session.screen()
+    );
+
+    session.send(b"\x1b:tabclose\r").unwrap();
+    assert!(
+        session.wait_for_screen(BUDGET, framed_alone),
+        "closing the second tabpage left the row up; row 0: {:?}\nscreen:\n{}",
         session.with_screen(|screen| row_text(screen, 0)),
         session.screen()
     );

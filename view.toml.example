@@ -227,6 +227,12 @@ single_grid = false        # default: false -- view composites nvim's windows
 # gaps is about tiles only: true leaves a gap between neighbouring frames,
 # false has them share their edges.
 #
+# pill_caps is how each pill on the top row ends. "round" draws the half
+# circles a Nerd Font carries; "flat" draws one blank cell in the pill's
+# own colour, for a font without those glyphs or a terminal that draws them
+# two cells wide. Both take the same width. "auto" draws round ends where
+# the terminal draws box glyphs one cell wide, and flat ends elsewhere.
+#
 # [ui.tokens] is where you name a colour yourself instead of letting view
 # derive it. accent is the colour on the active tile's frame; left out, view
 # takes it from your colorscheme.
@@ -248,6 +254,9 @@ panes = "auto"             # default: "auto" -- tiles everywhere except under
                            # a tiling window manager. tiles | nvim force it
 gaps = true                # default: true -- a gap between neighbouring
                            # frames. false has them share their edges
+pill_caps = "auto"         # default: "auto" -- round ends where the
+                           # terminal draws box glyphs one cell wide, flat
+                           # elsewhere. round | flat force it
 
 [ui.tokens]
 accent = "auto"            # default: "auto" -- the active tile's frame

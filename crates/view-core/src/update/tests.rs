@@ -13296,6 +13296,177 @@ fn a_showtabline_reading_that_moves_the_row_resizes_the_engine() {
     }
 }
 
+/// Every message class that moves one of the row's unique facts, folded
+/// in turn: each fold that brings the row or takes it away asks for
+/// exactly one `TryResize`, at the grid the new row count leaves, and each
+/// fold that leaves it where it stands asks for none. The agent's state,
+/// the buffer list and the remote host move the row from arms that never
+/// compared it, which is why the comparison is `update()`'s own.
+#[test]
+fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
+    use crate::native::ai_event::AiEvent;
+    let tabs = |names: &[&str]| {
+        Msg::Redraw(vec![UiEvent::TablineUpdate {
+            current: crate::events::TabHandle(1),
+            tabs: names
+                .iter()
+                .enumerate()
+                .map(|(at, name)| crate::events::TabEntry {
+                    tab: crate::events::TabHandle(at as u64 + 1),
+                    name: (*name).to_string(),
+                })
+                .collect(),
+        }])
+    };
+    let buffers = |names: &[&str]| Msg::BufferList {
+        buffers: names
+            .iter()
+            .enumerate()
+            .map(|(at, name)| {
+                crate::model::BufferEntry::new(at as u64 + 1, (*name).to_string(), false, at == 0)
+            })
+            .collect(),
+    };
+    let key = |notation: &str| {
+        Msg::Key(Key {
+            notation: notation.to_string(),
+        })
+    };
+    let mut m = pill_model(crate::native::pill::TablineShows::Tabs);
+    m.engine
+        .tabline
+        .as_mut()
+        .expect("the fixture attaches a tabline")
+        .tabs
+        .truncate(1);
+    m.ai_trusted = true;
+    assert_eq!(m.chrome_rows(), 0, "one workspace under tiles drew a row");
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    assert_eq!(m.chrome_rows(), 0, "opening the idle agent drew a row");
+
+    type Setup = Box<dyn Fn(&mut Model)>;
+    let steps: Vec<(&str, Setup, Msg, u16)> = vec![
+        (
+            "a second tabpage",
+            Box::new(|_| {}),
+            tabs(&["work", "docs"]),
+            1,
+        ),
+        (
+            "a tabpage renamed",
+            Box::new(|_| {}),
+            tabs(&["work", "notes"]),
+            1,
+        ),
+        (
+            "the second tabpage closed",
+            Box::new(|_| {}),
+            tabs(&["work"]),
+            0,
+        ),
+        (
+            "a second listed buffer",
+            Box::new(|m| m.tabline_shows = crate::native::pill::TablineShows::Buffers),
+            buffers(&["a.rs", "b.rs"]),
+            1,
+        ),
+        (
+            "a buffer renamed",
+            Box::new(|_| {}),
+            buffers(&["a.rs", "c.rs"]),
+            1,
+        ),
+        ("a buffer wiped", Box::new(|_| {}), buffers(&["a.rs"]), 0),
+        (
+            "a permission asked of an idle agent",
+            Box::new(|m| m.tabline_shows = crate::native::pill::TablineShows::Tabs),
+            permission_requested_msg(7, everyday_options()),
+            1,
+        ),
+        ("the permission answered", Box::new(|_| {}), key("1"), 0),
+        (
+            "the session ready",
+            Box::new(|_| {}),
+            Msg::Ai(AiEvent::SessionReady {
+                session_id: "s-1".to_string(),
+            }),
+            1,
+        ),
+        (
+            "a permission asked of a running agent",
+            Box::new(|_| {}),
+            permission_requested_msg(8, everyday_options()),
+            1,
+        ),
+        (
+            "the session crashed",
+            Box::new(|_| {}),
+            Msg::Ai(AiEvent::SessionCrashed {
+                message: "gone".to_string(),
+            }),
+            1,
+        ),
+        (
+            "the session recovered",
+            Box::new(|_| {}),
+            Msg::Ai(AiEvent::SessionReady {
+                session_id: "s-2".to_string(),
+            }),
+            1,
+        ),
+        (
+            "showtabline=2 under the nvim look",
+            Box::new(|m| m.look = crate::model::Look::new(crate::model::Panes::Nvim, true)),
+            Msg::ShowTablineChanged { value: 2 },
+            1,
+        ),
+        (
+            "showtabline=2 again",
+            Box::new(|_| {}),
+            Msg::ShowTablineChanged { value: 2 },
+            1,
+        ),
+        (
+            "showtabline=0",
+            Box::new(|_| {}),
+            Msg::ShowTablineChanged { value: 0 },
+            0,
+        ),
+    ];
+    for (what, set, msg, rows) in steps {
+        set(&mut m);
+        let before = m.chrome_rows();
+        m.dirty = false;
+        let effects = update(&mut m, msg);
+        assert_eq!(m.chrome_rows(), rows, "{what}: the row count");
+        let resizes: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Rpc(RpcCall::TryResize { width, height }) => Some((*width, *height)),
+                _ => None,
+            })
+            .collect();
+        if before == rows {
+            assert!(
+                resizes.is_empty(),
+                "{what} left the row and sent {resizes:?}"
+            );
+        } else {
+            assert_eq!(resizes, vec![m.grid_target()], "{what} moved the row");
+            assert!(
+                m.dirty,
+                "{what} moved the row and nothing asked for a repaint"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_click_on_a_pill_buffer_selects_that_buffer() {
     let mut m = pill_model(crate::native::pill::TablineShows::Buffers);
@@ -13305,12 +13476,12 @@ fn a_click_on_a_pill_buffer_selects_that_buffer() {
         .expect("the fixture attaches a tabline")
         .tabs
         .truncate(1);
-    m.buffers = vec![crate::model::BufferEntry::new(
-        7,
-        "a.rs".into(),
-        false,
-        false,
-    )];
+    // two listed buffers, since one alone is what the frame already names
+    // and draws no row under tiles
+    m.buffers = vec![
+        crate::model::BufferEntry::new(7, "a.rs".into(), false, false),
+        crate::model::BufferEntry::new(8, "b.rs".into(), false, true),
+    ];
     let slots = crate::native::pill::PillView::from_model(&m).row_slots();
     let effects = update(&mut m, click(0, slots[0].col));
     assert!(

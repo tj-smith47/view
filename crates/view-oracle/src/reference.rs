@@ -803,11 +803,12 @@ impl ReferenceSession {
     /// [`chrome_rows`](Self::chrome_rows) from the three answers it reads,
     /// so a test can walk the rule against the model without a live
     /// engine. `Panes::Nvim` because this session is bare nvim and draws
-    /// none of view's own tiles.
+    /// none of view's own tiles, and no remote host because it runs local.
     fn chrome_rows_at(owns_tabline: bool, tab_count: usize, showtabline: u8) -> u16 {
-        u16::from(view_core::native::pill::shows_under(
+        u16::from(view_core::native::pill::row_shows(
             owns_tabline,
             view_core::model::Panes::Nvim,
+            false,
             tab_count,
             showtabline,
         ))

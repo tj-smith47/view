@@ -149,6 +149,8 @@ struct Inputs {
     buffers: Vec<view_core::model::BufferEntry>,
     remote: Option<String>,
     agent: &'static str,
+    // `[ui] pill_caps` as forced; `"auto"` follows `caps`, which is here
+    pill_caps: Option<view_core::native::pill::PillCaps>,
     cmdline: Option<view_core::model::CmdlineState>,
     // presence alone: what the speculated palette draws is one fixed state
     // (`CmdlineState::bare_colon`), so the only thing a frame can differ by
@@ -190,6 +192,7 @@ impl Inputs {
             tabline: engine.tabline.clone(),
             buffers: model.buffers.clone(),
             remote: model.remote.clone(),
+            pill_caps: model.pill_caps,
             agent: agent_of(model),
             cmdline: engine.cmdline.clone(),
             cmdline_speculated: engine.cmdline_speculated.is_some(),
@@ -217,6 +220,7 @@ impl Inputs {
             && self.tabline == engine.tabline
             && self.buffers == model.buffers
             && self.remote == model.remote
+            && self.pill_caps == model.pill_caps
             && self.agent == agent_of(model)
             && self.cmdline == engine.cmdline
             && self.cmdline_speculated == engine.cmdline_speculated.is_some()

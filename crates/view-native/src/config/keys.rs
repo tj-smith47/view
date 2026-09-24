@@ -84,6 +84,12 @@ pub fn keys() -> &'static [ConfigKey] {
                 derived: Some("true"),
             },
             ConfigKey {
+                table: "ui",
+                key: "pill_caps",
+                flag: None,
+                derived: Some(super::AUTO),
+            },
+            ConfigKey {
                 table: "ui.tokens",
                 key: "accent",
                 flag: None,

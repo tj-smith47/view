@@ -13,7 +13,7 @@ use std::path::PathBuf;
 pub use view_core::config::Source;
 use view_core::config::{
     discarded_file, BOOL_EXPECTED, COLOR_EXPECTED, KEYS_EXPECTED, PANES_EXPECTED,
-    TABLINE_SHOWS_EXPECTED, TIER_EXPECTED, WIDTH_EXPECTED,
+    PILL_CAPS_EXPECTED, TABLINE_SHOWS_EXPECTED, TIER_EXPECTED, WIDTH_EXPECTED,
 };
 use view_core::model::{Panes, Tier};
 use view_core::native::chords::{
@@ -23,14 +23,14 @@ use view_core::native::geometry;
 use view_core::native::geometry::{Anchor, NativeSurface, SurfaceLayout, SurfacePlacement};
 use view_core::native::keys::{well_formed, Action, Direction, KeyBindings};
 use view_core::native::mappings;
-use view_core::native::pill::TablineShows;
+use view_core::native::pill::{PillCaps, TablineShows};
 use view_core::native::registry;
 
 use super::keys::{env_name, keys, ConfigKey};
 use super::profile;
 use super::{
-    parse_color, parse_nvim_bin, parse_panes, parse_theme, parse_tier, read_key, KeysConfig,
-    NativeConfig, SupervisionConfig, UiTokens, ViewConfig, AUTO, BUNDLED,
+    parse_color, parse_nvim_bin, parse_panes, parse_pill_caps, parse_theme, parse_tier, read_key,
+    KeysConfig, NativeConfig, SupervisionConfig, UiTokens, ViewConfig, AUTO, BUNDLED,
 };
 
 /// One resolved answer and the reason it is that answer.
@@ -131,6 +131,9 @@ pub struct ResolvedUi {
     pub detected_panes: Panes,
     /// Whether a gap separates neighbouring frames under tiles.
     pub gaps: Resolved<bool>,
+    /// How the pill's ends are drawn, or `None` for `"auto"`, which the
+    /// model answers from the probed `unicode_boxes`.
+    pub pill_caps: Resolved<Option<PillCaps>>,
     /// The colours the user named for themselves.
     pub tokens: Resolved<UiTokens>,
 }
@@ -370,6 +373,19 @@ pub fn resolve_with(
             env_read(env, "ui", "gaps", BOOL_EXPECTED, parse_bool, &mut notices),
             file.ui.gaps,
             true,
+        ),
+        pill_caps: layer(
+            None,
+            env_read(
+                env,
+                "ui",
+                "pill_caps",
+                PILL_CAPS_EXPECTED,
+                parse_pill_caps,
+                &mut notices,
+            ),
+            file.ui.pill_caps,
+            None,
         ),
         tokens: layer(
             None,
@@ -670,6 +686,14 @@ impl ResolvedConfig {
                 self.ui.panes.source,
             ),
             ("ui", "gaps") => (self.ui.gaps.value.to_string(), self.ui.gaps.source),
+            ("ui", "pill_caps") => (
+                self.ui
+                    .pill_caps
+                    .value
+                    .map_or(AUTO, PillCaps::label)
+                    .to_string(),
+                self.ui.pill_caps.source,
+            ),
             ("ui.tokens", "accent") => (
                 self.ui
                     .tokens
@@ -1318,6 +1342,7 @@ mod tests {
             ("ui", "tier") => "basic",
             ("ui", "theme") => "gruvbox",
             ("ui", "panes") => "nvim",
+            ("ui", "pill_caps") => "flat",
             ("ui.tokens", "accent") => "#89b4fa",
             ("engine", "nvim_bin") => "/opt/nvim/bin/nvim",
             ("engine", "appname") => "work",

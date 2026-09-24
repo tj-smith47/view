@@ -53,6 +53,64 @@ impl TablineShows {
     }
 }
 
+/// How each pill's two ends are drawn.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PillCaps {
+    /// The Nerd Font half circles, U+E0B6 on the left and U+E0B4 on the
+    /// right.
+    #[default]
+    Round,
+    /// One blank cell in the pill's own background at each end, for a
+    /// font without those glyphs or a terminal that draws them two cells
+    /// wide. The row keeps the same width in both modes.
+    Flat,
+}
+
+impl PillCaps {
+    /// The word a user writes for this answer, and the word a report
+    /// prints.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Round => "round",
+            Self::Flat => "flat",
+        }
+    }
+
+    /// The answer `value` spells, or `None` for a word this build does not
+    /// know. `auto` is not an answer here: it is the absence of one.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "round" => Some(Self::Round),
+            "flat" => Some(Self::Flat),
+            _ => None,
+        }
+    }
+
+    /// What `"auto"` resolves to: round ends only where the terminal was
+    /// probed to draw box glyphs one cell wide, the only width fact view
+    /// has about the glyphs a font carries.
+    #[must_use]
+    pub const fn derived(unicode_boxes: bool) -> Self {
+        if unicode_boxes {
+            Self::Round
+        } else {
+            Self::Flat
+        }
+    }
+
+    /// The left and right end cells, each one column wide.
+    #[must_use]
+    pub const fn ends(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Round => ("\u{e0b6}", "\u{e0b4}"),
+            Self::Flat => (" ", " "),
+        }
+    }
+}
+
 /// One name on the pill and what selecting it switches to.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,8 +147,15 @@ pub struct PillView {
     pub entries: Vec<PillEntry>,
     /// Which handles [`PillView::entries`] carries.
     pub names: PillNames,
-    /// What the agent is doing, empty for a session with `[ai]` off.
+    /// What the agent is doing, empty while it is idle or `[ai]` is off:
+    /// an idle agent is nothing a person has to read.
     pub agent: &'static str,
+    /// How each pill's ends are drawn.
+    pub caps: PillCaps,
+    /// The blank columns at each end of the row, the look's own
+    /// [`grid_offset`](crate::model::Look::grid_offset), so the edge pills
+    /// line up with the tiles' frames under them.
+    pub margin: u16,
     /// The row's own width: the terminal's, which is what the layer the
     /// row is drawn into spans.
     ///
@@ -103,7 +168,7 @@ pub struct PillView {
 }
 
 /// Where one entry was placed: its own column and how many cells it took,
-/// the blank either side of the name included.
+/// both ends and the blank either side of the name included.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PillSlot {
@@ -122,9 +187,11 @@ pub struct PillSlot {
     pub current: bool,
 }
 
-/// The blank either side of a name, so two neighbouring names never touch
-/// and the selected one's own colour reads as a pill around the word.
-const PAD: u16 = 1;
+/// The cells a pill adds to its word: an end and a blank on each side.
+pub const PILL: u16 = 4;
+
+/// The blank column between two neighbouring pills.
+const SEP: u16 = 1;
 
 /// What a buffer with no file behind it is called, spelled the way nvim
 /// spells it on its own tab line.
@@ -143,9 +210,30 @@ impl PillView {
             host: model.remote.clone().unwrap_or_default(),
             entries,
             names,
-            agent: agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted),
+            agent: match agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted) {
+                "idle" => "",
+                word => word,
+            },
+            caps: model
+                .pill_caps
+                .unwrap_or(PillCaps::derived(model.caps.unicode_boxes)),
+            margin: model.look.grid_offset(),
             width: model.term_width,
         }
+    }
+
+    /// The column the host pill starts at.
+    #[must_use]
+    pub const fn host_col(&self) -> u16 {
+        self.margin
+    }
+
+    /// The column the agent pill starts at, on this session's own row.
+    #[must_use]
+    pub fn agent_col(&self) -> u16 {
+        self.width
+            .saturating_sub(self.margin)
+            .saturating_sub(edge_cells(self.agent))
     }
 
     /// Where each entry lands on this session's own row, which is the one
@@ -170,14 +258,29 @@ impl PillView {
     pub(crate) fn slots(&self, width: u16) -> Vec<PillSlot> {
         let host = edge_cells(&self.host);
         let agent = edge_cells(self.agent);
-        let Some(room) = width.checked_sub(host.saturating_add(agent)) else {
+        let left = self
+            .margin
+            .saturating_add(host)
+            .saturating_add(u16::from(host > 0));
+        let right = width
+            .saturating_sub(self.margin)
+            .saturating_sub(agent)
+            .saturating_sub(u16::from(agent > 0));
+        let Some(room) = right.checked_sub(left) else {
             return Vec::new();
         };
+        // each pill is measured with the separator after it, against a room
+        // one separator wider, so the last pill owes no trailing blank
         let widths: Vec<u16> = self
             .entries
             .iter()
-            .map(|entry| text_width(&entry.label).saturating_add(PAD * 2))
+            .map(|entry| {
+                text_width(&entry.label)
+                    .saturating_add(PILL)
+                    .saturating_add(SEP)
+            })
             .collect();
+        let room = room.saturating_add(SEP);
         let first = self.window_start(&widths, room);
         let mut shown = Vec::with_capacity(self.entries.len());
         let mut used = 0_u16;
@@ -186,12 +289,12 @@ impl PillView {
                 break;
             }
             used = used.saturating_add(*cells);
-            shown.push((index, *cells));
+            shown.push((index, cells.saturating_sub(SEP)));
         }
         // centred inside the room the two edges leave, never inside the
         // whole row: a long host name would otherwise push the names under
         // it
-        let mut col = host.saturating_add(room.saturating_sub(used) / 2);
+        let mut col = left.saturating_add(room.saturating_sub(used) / 2);
         let mut slots = Vec::with_capacity(shown.len());
         for (index, cells) in shown {
             let Some(entry) = self.entries.get(index) else {
@@ -204,7 +307,7 @@ impl PillView {
                 cells,
                 current: entry.current,
             });
-            col = col.saturating_add(cells);
+            col = col.saturating_add(cells).saturating_add(SEP);
         }
         slots
     }
@@ -255,14 +358,14 @@ impl PillView {
     }
 }
 
-/// The columns an edge word takes, its own blank either side included, or
-/// none at all when there is no word.
+/// The columns an edge pill takes, both ends included, or none at all when
+/// there is no word.
 #[must_use]
 pub fn edge_cells(text: &str) -> u16 {
     if text.is_empty() {
         0
     } else {
-        text_width(text).saturating_add(PAD * 2)
+        text_width(text).saturating_add(PILL)
     }
 }
 
@@ -342,20 +445,17 @@ pub const DEFAULT_SHOWTABLINE: u8 = 1;
 
 /// Whether the pill takes the top row of this session's terminal.
 ///
-/// Read off the attach, ahead of any `tabline_update`, because the row is
-/// reserved from the frame the session starts drawing:
-/// waiting for nvim's first tabline event would paint one frame a row
-/// taller and then shift everything down.
-///
-/// Under tiles the row stands whatever is open, because a pill with one
-/// workspace still carries the host and the agent word; under
+/// Under tiles the row stands only while it says something nothing else on
+/// screen says ([`has_unique_content`]): each tile's frame already carries
+/// its own buffer name, so a row naming one workspace is a banner. Under
 /// `panes = "nvim"` it is the row nvim itself would have drawn, so it
 /// follows the user's own `showtabline`.
 #[must_use]
 pub fn shows(model: &Model) -> bool {
-    shows_under(
+    row_shows(
         model.owns(crate::native::ext::Ext::Tabline),
         model.look.panes,
+        has_unique_content(model),
         model
             .engine
             .tabline
@@ -365,23 +465,50 @@ pub fn shows(model: &Model) -> bool {
     )
 }
 
-/// [`shows`] from the four answers it reads, for the one caller that has
+/// Whether the row carries anything a person cannot read elsewhere: a
+/// second tabpage, two or more listed buffers under `"buffers"`, a remote
+/// host, or an agent that is doing something.
+///
+/// O(1): counts and flags with no allocation, since `update()` reads it on
+/// every fold.
+#[must_use]
+pub fn has_unique_content(model: &Model) -> bool {
+    let tabs = model.engine.tabline.as_ref().map_or(0, |t| t.tabs.len());
+    tabs > 1
+        || (model.tabline_shows == TablineShows::Buffers && model.buffers.len() >= 2)
+        || model.remote.is_some()
+        || !matches!(
+            agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted),
+            "" | "idle"
+        )
+}
+
+/// [`shows`] from the five answers it reads, for the callers that have
 /// them before there is a model to ask: the spawn geometry, which is seeded
 /// a row shorter so the child is laid out against the grid the attach will
-/// ask for.
+/// ask for, and the oracle's reference session.
 ///
 /// `showtabline` is read the way nvim reads it: `0` keeps the row off, `1`
 /// shows it once a second tabpage is open, and anything from `2` up shows
-/// it always. Under tiles it decides nothing, because the row carries the
-/// host and the agent word whatever nvim would have drawn there.
+/// it always. Under tiles it decides nothing, and `unique` decides instead.
 #[must_use]
-pub fn shows_under(owns_tabline: bool, panes: Panes, tabs: usize, showtabline: u8) -> bool {
+pub fn row_shows(
+    owns_tabline: bool,
+    panes: Panes,
+    unique: bool,
+    tabs: usize,
+    showtabline: u8,
+) -> bool {
     let nvim_would_draw_it = match showtabline {
         0 => false,
         1 => tabs > 1,
         _ => true,
     };
-    owns_tabline && (panes == Panes::Tiles || nvim_would_draw_it)
+    owns_tabline
+        && match panes {
+            Panes::Tiles => unique,
+            _ => nvim_would_draw_it,
+        }
 }
 
 #[cfg(test)]
@@ -420,6 +547,8 @@ mod tests {
             entries,
             names: PillNames::Tabs,
             agent: "",
+            caps: PillCaps::Round,
+            margin: 0,
             width: 20,
         }
     }
@@ -438,12 +567,12 @@ mod tests {
                 current: true,
             },
         ]);
-        // two names of five cells each in a row of twenty: five blank
-        // columns either side
+        // two pills of seven cells and the blank between them in a row of
+        // twenty: two blank columns on the left, three on the right
         let slots = pill.slots(20);
         assert_eq!(slots.len(), 2);
-        assert_eq!((slots[0].col, slots[0].cells), (5, 5));
-        assert_eq!((slots[1].col, slots[1].cells), (10, 5));
+        assert_eq!((slots[0].col, slots[0].cells), (2, 7));
+        assert_eq!((slots[1].col, slots[1].cells), (10, 7));
         assert!(!slots[0].current && slots[1].current);
     }
 
@@ -460,18 +589,18 @@ mod tests {
                     .collect(),
             )
         };
-        // ten names of four cells each in a row of thirty: seven fit, and
-        // the last one is three names past the cut
-        let scrolled = names(9).slots(30);
-        assert_eq!(scrolled.len(), 7);
-        assert_eq!(scrolled.first().map(|slot| slot.id), Some(4));
+        // ten pills of six cells each in a row of 44: six fit with the
+        // blanks between them, and the last one is four names past the cut
+        let scrolled = names(9).slots(44);
+        assert_eq!(scrolled.len(), 6);
+        assert_eq!(scrolled.first().map(|slot| slot.id), Some(5));
         let last = scrolled.last().copied().unwrap();
         assert_eq!(last.id, 10);
         assert!(last.current);
 
         // a current name inside the run the first name starts leaves the
         // row where it was
-        let anchored = names(0).slots(30);
+        let anchored = names(0).slots(44);
         assert_eq!(anchored.first().map(|slot| slot.id), Some(1));
         assert!(anchored.first().copied().unwrap().current);
     }
@@ -504,8 +633,10 @@ mod tests {
                 current: false,
             },
         ]);
-        assert_eq!(pill.slots(9).len(), 1);
-        assert_eq!(pill.slots(5).len(), 0);
+        // two pills of eight need seventeen columns with the blank between
+        assert_eq!(pill.slots(17).len(), 2);
+        assert_eq!(pill.slots(16).len(), 1);
+        assert_eq!(pill.slots(7).len(), 0);
     }
 
     #[test]
@@ -518,12 +649,52 @@ mod tests {
                 current: true,
             }],
             names: PillNames::Tabs,
-            agent: "idle",
+            agent: "running",
+            caps: PillCaps::Round,
+            margin: 0,
             width: 30,
         };
         let slots = pill.slots(30);
-        // 5 for the host, 6 for the agent word, the name centred in 19
-        assert_eq!((slots[0].col, slots[0].cells), (12, 5));
+        // 7 for the host and 11 for the agent pill, each with a blank on
+        // its inner side, the name centred in the 10 between
+        assert_eq!((slots[0].col, slots[0].cells), (9, 7));
+    }
+
+    /// One row of 80 under tiles: the host pill `prod` on columns 1..=8,
+    /// the agent pill `running` on 68..=78, and the two names centred in
+    /// the 57 columns between the blanks beside them.
+    #[test]
+    fn an_eighty_column_row_places_every_pill_on_its_own_cells() {
+        let pill = PillView {
+            host: "prod".to_string(),
+            entries: vec![
+                PillEntry {
+                    id: 1,
+                    label: "a".to_string(),
+                    current: true,
+                },
+                PillEntry {
+                    id: 2,
+                    label: "bb".to_string(),
+                    current: false,
+                },
+            ],
+            names: PillNames::Tabs,
+            agent: "running",
+            caps: PillCaps::Round,
+            margin: 1,
+            width: 80,
+        };
+        assert_eq!((pill.host_col(), edge_cells(&pill.host)), (1, 8));
+        assert_eq!((pill.agent_col(), edge_cells(pill.agent)), (68, 11));
+        let slots = pill.row_slots();
+        let placed: Vec<_> = slots.iter().map(|slot| (slot.col, slot.cells)).collect();
+        assert_eq!(placed, vec![(32, 5), (38, 6)]);
+        assert_eq!(pill.hit(37), None, "the blank between two pills");
+        assert_eq!(pill.hit(32), Some(1), "the first pill's left end");
+        assert_eq!(pill.hit(43), Some(2), "the second pill's right end");
+        assert_eq!(pill.hit(4), None, "the host pill");
+        assert_eq!(pill.hit(70), None, "the agent pill");
     }
 
     #[test]
@@ -540,11 +711,13 @@ mod tests {
                 current: true,
             },
         ]);
-        assert_eq!(pill.hit(4), None);
-        assert_eq!(pill.hit(5), Some(7));
-        assert_eq!(pill.hit(9), Some(7));
+        assert_eq!(pill.hit(1), None);
+        assert_eq!(pill.hit(2), Some(7));
+        assert_eq!(pill.hit(8), Some(7));
+        assert_eq!(pill.hit(9), None);
         assert_eq!(pill.hit(10), Some(9));
-        assert_eq!(pill.hit(15), None);
+        assert_eq!(pill.hit(16), Some(9));
+        assert_eq!(pill.hit(17), None);
     }
 
     #[test]
@@ -554,7 +727,7 @@ mod tests {
             label: "cafe\u{301}.rs".to_string(),
             current: true,
         }]);
-        assert_eq!(pill.slots(20)[0].cells, 9);
+        assert_eq!(pill.slots(20)[0].cells, 11);
     }
 
     #[test]
@@ -624,35 +797,129 @@ mod tests {
         );
     }
 
-    /// Under `panes = "nvim"` the row is the one nvim itself would have
-    /// drawn, so the user's own `showtabline` decides it. A threshold
-    /// hardcoded to a second tabpage took the always-on row away from a
-    /// user who had set 2, and gave a row to one who had set 0.
+    /// What the agent is doing, as the walk below sets it up.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Agent {
+        Disabled,
+        Idle,
+        Running,
+        Waiting,
+        Crashed,
+    }
+
+    /// Under tiles the row stands exactly while it says something the
+    /// frames do not: a second tabpage, two listed buffers under
+    /// `"buffers"`, a remote host, or an agent word past `idle`. Under
+    /// `panes = "nvim"` the user's own `showtabline` decides it, since a
+    /// threshold hardcoded to a second tabpage took the always-on row away
+    /// from a user who had set 2 and gave a row to one who had set 0. A
+    /// session that left the tab line with nvim draws no row in either.
     #[test]
-    fn the_nvim_look_row_follows_showtabline() {
-        for (showtabline, tabs, under_nvim) in [
-            (0_u8, 1_usize, false),
-            (0, 2, false),
-            (1, 1, false),
-            (1, 2, true),
-            (2, 1, true),
-            (2, 2, true),
-        ] {
-            assert_eq!(
-                shows_under(true, Panes::Nvim, tabs, showtabline),
-                under_nvim,
-                "showtabline={showtabline} with {tabs} tabpage(s) under the nvim look"
-            );
-            assert!(
-                shows_under(true, Panes::Tiles, tabs, showtabline),
-                "showtabline={showtabline} with {tabs} tabpage(s) took the tiles row away"
-            );
-            assert!(
-                !shows_under(false, Panes::Nvim, tabs, showtabline)
-                    && !shows_under(false, Panes::Tiles, tabs, showtabline),
-                "a session that left the tab line with nvim drew a row anyway"
-            );
+    fn the_row_shows_exactly_when_it_carries_something_unique() {
+        let agents = [
+            Agent::Disabled,
+            Agent::Idle,
+            Agent::Running,
+            Agent::Waiting,
+            Agent::Crashed,
+        ];
+        let mut walked = 0;
+        for (tabs, buffers, shows_buffers, remote) in (0..=3_usize).flat_map(|tabs| {
+            (0..=3_u64).flat_map(move |buffers| {
+                [false, true].into_iter().flat_map(move |shows_buffers| {
+                    [false, true]
+                        .into_iter()
+                        .map(move |remote| (tabs, buffers, shows_buffers, remote))
+                })
+            })
+        }) {
+            for agent in agents {
+                let unique = tabs > 1
+                    || (shows_buffers && buffers >= 2)
+                    || remote
+                    || matches!(agent, Agent::Running | Agent::Waiting | Agent::Crashed);
+                for (panes, showtabline, owns) in
+                    [Panes::Tiles, Panes::Nvim].into_iter().flat_map(|panes| {
+                        (0..=2_u8).flat_map(move |showtabline| {
+                            [false, true]
+                                .into_iter()
+                                .map(move |owns| (panes, showtabline, owns))
+                        })
+                    })
+                {
+                    let model = walked_model(
+                        (tabs, buffers, shows_buffers, remote),
+                        agent,
+                        (panes, showtabline, owns),
+                    );
+                    let nvim_would = showtabline == 2 || (showtabline == 1 && tabs > 1);
+                    let expected = owns
+                        && if panes == Panes::Tiles {
+                            unique
+                        } else {
+                            nvim_would
+                        };
+                    let case = format!(
+                        "tabs={tabs} buffers={buffers} shows_buffers={shows_buffers} \
+                         remote={remote} agent={agent:?} panes={panes:?} \
+                         showtabline={showtabline} owns={owns}"
+                    );
+                    assert_eq!(shows(&model), expected, "{case}");
+                    assert_eq!(has_unique_content(&model), unique, "{case}");
+                    assert_eq!(model.chrome_rows(), u16::from(expected), "{case}");
+                    walked += 1;
+                }
+            }
         }
+        assert_eq!(walked, 4 * 4 * 2 * 2 * 5 * 2 * 3 * 2);
+    }
+
+    /// One model of the walk above, built from its three groups of answers.
+    fn walked_model(
+        (tabs, buffers, shows_buffers, remote): (usize, u64, bool, bool),
+        agent: Agent,
+        (panes, showtabline, owns): (Panes, u8, bool),
+    ) -> Model {
+        let shows = if shows_buffers {
+            TablineShows::Buffers
+        } else {
+            TablineShows::Tabs
+        };
+        let mut model = Model::with_term_size(80, 24)
+            .with_remote(remote.then(|| "prod".to_string()))
+            .with_tabline_shows(shows);
+        model.look = crate::model::Look::new(panes, true);
+        model.showtabline = showtabline;
+        model.attach_surfaces(if owns {
+            crate::native::ext::ALL_MULTIGRID.to_vec()
+        } else {
+            crate::native::ext::shipped_multigrid()
+        });
+        if tabs > 0 {
+            let names: Vec<String> = (1..=tabs).map(|at| format!("t{at}")).collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            model.engine.tabline = Some(tabline(1, &names));
+        }
+        model.buffers = (1..=buffers)
+            .map(|buf| buffer(buf, "a.rs", buf == 1))
+            .collect();
+        let panel = model.ai_panel_mut();
+        match agent {
+            Agent::Disabled | Agent::Idle => {}
+            Agent::Running => panel.session_id = Some("s-1".to_string()),
+            Agent::Waiting => {
+                panel.pending_permission = Some(crate::native::ai_panel::PermissionPrompt::new(
+                    1,
+                    "call-1",
+                    None,
+                    None,
+                    Vec::new(),
+                ));
+            }
+            Agent::Crashed => panel.local_error = Some("gone".to_string()),
+        }
+        model.ai_enabled = agent != Agent::Disabled;
+        model
     }
 
     /// The whole row is laid out once, on the terminal's own width, and

@@ -632,10 +632,8 @@ new_geometry_case() {
   plant_geometry 'crates/view-core/src/model.rs' 1
   plant_geometry 'crates/view-core/src/msg.rs' 3
   plant_release 'crates/view-core/src/update/ai_fs.rs' 4
-  plant_geometry 'crates/view-core/src/update/bridge.rs' 1
   plant_geometry 'crates/view-core/src/update/look.rs' 2
-  plant_geometry 'crates/view-core/src/update/mod.rs' 1
-  plant_geometry 'crates/view-core/src/update/ui_event.rs' 1
+  plant_geometry 'crates/view-core/src/update/mod.rs' 3
   plant_geometry 'crates/view-engine/src/nvim_api.rs' 11
   plant_geometry 'crates/view-engine/src/process.rs' 10
   # the render and the field read, the two spellings that carry the seed

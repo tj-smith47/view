@@ -753,10 +753,8 @@ GEOMETRY_SITES='
 crates/view-core/src/model.rs 1 the one RpcCall::UiAttach production builds, from Model::grid_target -- grid_target_for over the model own terminal size
 crates/view-core/src/msg.rs 3 the UiAttach, TryResize and TryResizeGrid variant declarations; the pair each variant carries is what its builder put in it
 crates/view-core/src/update/ai_fs.rs 4 an AI filesystem lock release and its own helper, no geometry anywhere
-crates/view-core/src/update/bridge.rs 1 the showtabline reading resizing the grid when the chrome row count moves, spending Model::grid_target
 crates/view-core/src/update/look.rs 2 the look change building one TryResize for the outer grid and one TryResizeGrid for a window, each pair from Look arithmetic over the slot the registry already holds
-crates/view-core/src/update/mod.rs 1 the fold resizing the grid when the paint area moves, spending Model::grid_target
-crates/view-core/src/update/ui_event.rs 1 the tabline fold resizing the grid when the chrome row count moves, spending Model::grid_target
+crates/view-core/src/update/mod.rs 3 the fold resizing the grid when the paint area moves, and the fold tail resizing it when the chrome row count moves unless the arm already asked, both spending Model::grid_target; the tail check line carries no pair
 crates/view-engine/src/nvim_api.rs 11 the handle three public attach entry points and its two resize entry points, the private attach two of them hand off to and both hand-off lines, and the three wire method-name strings, which name the call rather than a pair; the rest spend what the caller hands them
 crates/view-engine/src/process.rs 12 the spawn own geometry seed: the late_attach field and its None default, the builder and its assignment, the getter and its body, the attaches_late predicate, late_attach_cmd, and the two argv paths that destructure the field and render it into --cmd; the field, the default, the getter two lines and the predicate carry no pair, and the rest spend what main or recovery handed the config
 crates/view-oracle/src/hang.rs 5 the adversarial harness attaching its own engine at the fixture size it opened the session with and, on the restart leg, at Model::grid_target, plus the TryResize and TryResizeGrid effects it forwards and the resize call forwarding the first of them

@@ -157,7 +157,22 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // notice that is about to leave
     let entries_before = model.engine.messages.entries.len();
     let armed_before = model.engine.messages.armed_visible_slot(model.toast_rows());
+    let chrome_before = model.chrome_rows();
     let mut effects = dispatch(model, msg);
+    // the top row follows facts a dozen arms move (a tabpage, the buffer
+    // list, the agent's state, `showtabline`), so the one comparison lives
+    // here: a row that appears or leaves resizes the grid once, and a look
+    // flip has already asked for that resize itself
+    if model.chrome_rows() != chrome_before {
+        model.dirty = true;
+        let resized = effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Rpc(RpcCall::TryResize { .. })));
+        if !resized {
+            let (width, height) = model.grid_target();
+            effects.push(Effect::Rpc(RpcCall::TryResize { width, height }));
+        }
+    }
     let departed = model
         .engine
         .messages

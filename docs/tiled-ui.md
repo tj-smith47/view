@@ -42,12 +42,23 @@ standing. It gives `laststatus` back to your config only under
 
 ## The top row
 
-The top row names what you have open. Under tiles it is there from the
-moment the session starts. Under `panes = "nvim"` it follows your
-`showtabline`: `0` keeps the row off, `1` brings it up once a second
-tabpage is open, `2` keeps it up always. It is the same row in both modes.
-`:View ui panes` moves the row with the mode it switches to, and says which
-of the two now draws it.
+The top row names what you have open. Under tiles it is drawn only while it
+carries something the tiles' own frames do not show:
+
+- a second tabpage
+- two or more listed buffers, with `tabline_shows = "buffers"`
+- the host of a `--remote` session
+- an agent that is running, waiting on you, or has crashed
+
+With none of those the row is gone and the tiles take its line. Under
+`panes = "nvim"` it follows your `showtabline`: `0` keeps the row off, `1`
+brings it up once a second tabpage is open, `2` keeps it up always. It is
+the same row in both modes. `:View ui panes` moves the row with the mode it
+switches to, and says which of the two now draws it.
+
+Each name is its own pill, centred on the row, and the current one is lit.
+The host's pill sits at the left edge and the agent's at the right. Between
+the pills the row is your colorscheme's background.
 
 | where | what it carries |
 |---|---|
@@ -61,20 +72,30 @@ Clicking a name switches to it, in either mode.
 [native]
 # tabline = true          # follows [ui] panes: on under tiles, off under "nvim"
 tabline_shows = "tabs"    # "tabs" | "buffers"
+
+[ui]
+pill_caps = "auto"        # "auto" | "round" | "flat"
 ```
+
+`pill_caps` shapes the two ends of every pill. `round` draws the rounded
+Nerd Font end glyphs. `flat` draws each end as a blank cell in the pill's
+own colour. A pill is the same width in both, so switching moves no name.
+`auto` picks `round` on a terminal that draws box glyphs and `flat` on one
+that does not.
 
 With `tabline_shows = "buffers"` the middle names your open files instead,
 each with a `+` while it has unsaved changes. A second tabpage is named as
 tabpages either way.
 
-The agent's word is one of four:
+The agent's word is one of three:
 
 | what is happening | word |
 |---|---|
 | the agent is asking your permission | `waiting` |
 | a session is running | `running` |
 | the agent died | `crashed` |
-| anything else | `idle` |
+
+An idle agent draws no pill, and neither does an agent `[ai]` turns off.
 
 `[native] tabline = false` leaves the row to nvim, so your own tabline
 plugin keeps it.
