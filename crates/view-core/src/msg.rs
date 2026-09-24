@@ -402,15 +402,13 @@ pub enum Msg {
         filetype: String,
     },
     /// The bridge's `window` trigger group (`WinEnter`, `BufEnter`,
-    /// `BufModifiedSet`, `DiagnosticChanged`, `CursorMoved`,
-    /// `CursorMovedI`) fired for one window, carrying everything that
-    /// window's own status segments read.
+    /// `BufModifiedSet`, `DiagnosticChanged`, `VimEnter`) fired for one
+    /// window, carrying everything that window's own status segments read.
     ///
-    /// One window per message: the tiles each draw their own bottom edge,
-    /// and a whole-layout sweep would cost a message per window on every
-    /// cursor move. The trigger is throttled in Lua to one message per
-    /// event-loop tick, so a held-down key costs one of these per tick,
-    /// however many keystrokes the tick carried.
+    /// One window per message: the tiles each draw their own bottom edge.
+    /// The trigger is throttled in Lua to one message per window per
+    /// event-loop tick. A cursor motion sends none of these: the position
+    /// they carry is kept current by `win_viewport` between reports.
     WindowStatus {
         win: crate::events::WinHandle,
         status: crate::model::WindowStatus,

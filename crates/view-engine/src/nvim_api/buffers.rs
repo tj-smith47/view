@@ -10,8 +10,8 @@
 //! `BufEnter` fires on every window the user steps through, so a `:bufdo`
 //! or a quickfix walk fires it as fast as nvim can run. Every trigger arms
 //! a `vim.schedule` callback and notifies nothing itself, and the callback
-//! sends the list once and disarms, the way the window group collapses a
-//! `CursorMoved` burst. Nothing on the key path waits for it.
+//! sends the list once and disarms, the way the window group collapses its
+//! own bursts. Nothing on the key path waits for it.
 //!
 //! # Why the whole list
 //!

@@ -13010,6 +13010,61 @@ fn a_closed_windows_status_is_dropped() {
     }
 }
 
+fn viewport(curline: u64, curcol: u64) -> Msg {
+    Msg::Redraw(vec![UiEvent::WinViewport {
+        grid: 6,
+        win: crate::events::WinHandle(1003),
+        topline: 0,
+        botline: 24,
+        curline,
+        curcol,
+    }])
+}
+
+/// A window's status follows the cursor through `win_viewport`, and only a
+/// tile's frame reads it, so under `panes = "nvim"` a motion or a report
+/// is stored and paints nothing. A repaint there is one per keystroke that
+/// changes no cell.
+///
+/// Disconfirm: setting `dirty` outside the `Tiles` check reddens the first
+/// half; dropping the viewport arm leaves the position at 1:1.
+#[test]
+fn a_window_status_change_paints_only_under_tiles() {
+    for (panes, paints) in [
+        (crate::model::Panes::Nvim, false),
+        (crate::model::Panes::Tiles, true),
+    ] {
+        let mut m = vsplit_model();
+        m.look = crate::model::Look::new(panes, true);
+        let win = crate::events::WinHandle(1003);
+        m.dirty = false;
+        let _ = update(
+            &mut m,
+            Msg::WindowStatus {
+                win,
+                status: crate::model::WindowStatus {
+                    name: "left.rs".to_string(),
+                    row: 1,
+                    col: 1,
+                    ..crate::model::WindowStatus::default()
+                },
+            },
+        );
+        assert_eq!(m.dirty, paints, "{panes:?}: a new report");
+        m.dirty = false;
+        let _ = update(&mut m, viewport(4, 7));
+        assert_eq!(
+            (m.window_status[&win].row, m.window_status[&win].col),
+            (5, 8),
+            "{panes:?}: the viewport's cursor never reached the status"
+        );
+        assert_eq!(m.dirty, paints, "{panes:?}: a cursor motion");
+        m.dirty = false;
+        let _ = update(&mut m, viewport(4, 7));
+        assert!(!m.dirty, "{panes:?}: an unmoved cursor asked for a frame");
+    }
+}
+
 /// The report is the only way a user finds out why a session came up in a
 /// mode they did not ask for, so it names the marker that decided it.
 #[test]

@@ -5351,15 +5351,13 @@ mod tests {
 
     #[test]
     fn the_window_status_chunk_arms_every_event_of_its_group_and_defers_to_a_tick() {
-        // only `CursorMoved` and `BufModifiedSet` reach the live test, and a
-        // group that lost any other event still answers every message it is
-        // asked for -- the tile simply stops following the window
+        // only `BufModifiedSet` and `DiagnosticChanged` reach the live test,
+        // and a group that lost any other event still answers every message
+        // it is asked for: the tile simply stops following the window
         for event in [
             "WinEnter",
             "BufEnter",
             "BufModifiedSet",
-            "CursorMoved",
-            "CursorMovedI",
             "DiagnosticChanged",
             "VimEnter",
         ] {
@@ -5384,6 +5382,17 @@ mod tests {
                 .contains("vim.rpcnotify(channel, 'view_bridge', 'window', win, buf,"),
             "the payload is decoded field for field, so its order is the \
              wire contract"
+        );
+    }
+
+    #[test]
+    fn the_window_status_chunk_runs_nothing_per_keystroke() {
+        // the position comes from `win_viewport`; a cursor event here runs
+        // a Lua callback and a notification on every key under every look
+        assert!(
+            !REGISTER_WINDOW_STATUS_CHUNK.contains("CursorMoved"),
+            "the window group registers a cursor event, which fires on every \
+             keystroke"
         );
     }
 

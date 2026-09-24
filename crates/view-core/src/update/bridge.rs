@@ -1,13 +1,12 @@
 //! The `view_bridge` channel's arms.
 //!
-//! nvim raises no redraw event for a buffer's name, its filetype, its
-//! diagnostics or a window's cursor position, so view installs autocmds of
-//! its own and they arrive here. Most of them change text on screen and
-//! nothing else, so they return no RPC beyond the tree's git refresh; the
-//! tab-row option is the one that can move a row the engine's own grid is
-//! laid out against.
+//! nvim raises no redraw event for a buffer's name, its filetype or its
+//! diagnostics, so view installs autocmds of its own and they arrive here.
+//! Most of them change text on screen and nothing else, so they return no
+//! RPC beyond the tree's git refresh; the tab-row option is the one that
+//! can move a row the engine's own grid is laid out against.
 
-use crate::events::WinHandle;
+use crate::events::{saturate_u32, WinHandle};
 use crate::model::{BufferEntry, Model, WindowStatus};
 use crate::msg::{Effect, RpcCall};
 use crate::native::statusline::SegmentUpdate;
@@ -102,9 +101,8 @@ pub(super) fn on_min_pane_size(model: &mut Model, width: u16, height: u16) -> Ve
 
 /// One window's own status, which is what its tile's frame edge reads.
 ///
-/// Compared before it is stored: the trigger fires per event-loop tick the
-/// cursor moved in, and a tick that left the reported fields where they
-/// were is a repaint of an unchanged picture.
+/// Compared before it is stored, since a report that left the fields where
+/// they were is a repaint of an unchanged picture.
 pub(super) fn on_window_status(
     model: &mut Model,
     win: WinHandle,
@@ -115,21 +113,49 @@ pub(super) fn on_window_status(
     }
     model.window_status.insert(win, status);
     damage_frame_edges(model, win);
-    model.dirty = true;
     Vec::new()
 }
 
-/// Marks the rows a tile's frame edges stand on changed, so the frame that
-/// follows repaints the segments this update moved.
+/// The cursor position `win_viewport` carries, folded into the window's
+/// status so its tile's ruler follows every motion with no report from the
+/// bridge. A window the bridge has not reported yet is left alone: its
+/// first report reads the cursor itself.
+///
+/// `curline` and `curcol` are 0-based, `curcol` in bytes, which is what the
+/// report's `nvim_win_get_cursor` reads too, so both put the same number on
+/// the ruler.
+pub(super) fn on_window_cursor(model: &mut Model, win: WinHandle, curline: u64, curcol: u64) {
+    let Some(status) = model.window_status.get_mut(&win) else {
+        return;
+    };
+    let row = saturate_u32(curline.saturating_add(1));
+    let col = saturate_u32(curcol.saturating_add(1));
+    if (status.row, status.col) == (row, col) {
+        return;
+    }
+    status.row = row;
+    status.col = col;
+    damage_frame_edges(model, win);
+}
+
+/// Marks the rows a tile's frame edges stand on changed and asks for a
+/// frame, so the frame that follows repaints the segments this update
+/// moved.
+///
+/// Only a tile's frame reads a window's status, so under any other look
+/// the value is stored and nothing is painted: a cursor motion lands here
+/// on every keystroke, and a repaint that changes no cell doubles the
+/// paint work per key.
 ///
 /// nvim redraws nothing for a cursor that moved inside a window, and the
-/// edge rows lie outside the window's own grid, so without this the frame
-/// is painted with every edge row clipped out of its damage and the
-/// segments keep the reading they had.
+/// edge rows lie outside the window's own grid, so without the damage the
+/// frame is painted with every edge row clipped out and the segments keep
+/// the reading they had.
 fn damage_frame_edges(model: &mut Model, win: WinHandle) {
     if model.look.panes != crate::model::Panes::Tiles {
         return;
     }
+    model.dirty = true;
     let Some(slot) = model.engine.grids().window_slot(win) else {
         return;
     };

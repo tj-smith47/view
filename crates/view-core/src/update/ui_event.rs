@@ -451,10 +451,6 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             Vec::new()
         }
         UiEvent::UiSend { content } => forward_ui_send(&content),
-        // no cell content and no chrome state: the window's own cells arrive
-        // as `grid_line`, and the only reader of a viewport is
-        // `native::speculate`, which the host folds a batch through before
-        // this applier ever sees it
         // the margin is what nvim adds on top of any inner height view
         // asks for, so the registry keeps it and spends it in the request
         UiEvent::WinViewportMargins { grid, top, .. } => {
@@ -468,7 +464,16 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             );
             super::look::request_for(model, grid)
         }
-        UiEvent::WinViewport { .. } | UiEvent::Unknown { .. } => Vec::new(),
+        UiEvent::WinViewport {
+            win,
+            curline,
+            curcol,
+            ..
+        } => {
+            super::bridge::on_window_cursor(model, win, curline, curcol);
+            Vec::new()
+        }
+        UiEvent::Unknown { .. } => Vec::new(),
     }
 }
 

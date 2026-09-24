@@ -111,12 +111,14 @@ pub enum UiEvent {
     /// cursor's position in that buffer.
     ///
     /// Carries no cell content -- nvim sends the cells themselves as
-    /// `grid_line` -- so nothing that paints reads this. What does read it is
-    /// [`speculate`](crate::native::speculate): a window whose `topline`
-    /// moved is showing different buffer lines at the same screen rows, which
-    /// is the one relocation nvim announces without ever resending the
-    /// relocated cells, and so the one a per-cell reconciliation cannot see.
-    /// `botline`, `curline` and `curcol` are decoded for wire completeness.
+    /// `grid_line`. Two things read it. [`speculate`](crate::native::speculate)
+    /// reads `topline`: a window whose `topline` moved is showing different
+    /// buffer lines at the same screen rows, which is the one relocation
+    /// nvim announces without ever resending the relocated cells, and so the
+    /// one a per-cell reconciliation cannot see. The model reads
+    /// `curline`/`curcol` into the window's
+    /// [`WindowStatus`](crate::model::WindowStatus), which is what a tile's
+    /// ruler shows. `botline` is decoded for wire completeness.
     WinViewport {
         grid: u64,
         win: WinHandle,

@@ -5,27 +5,29 @@
 //! different question: the session-wide segments there are one value each,
 //! and these are one value per window.
 //!
+//! # No cursor event
+//!
+//! The group registers no `CursorMoved` or `CursorMovedI`. Either would run
+//! a Lua callback and a notification on every keystroke under every look,
+//! and nvim already sends the cursor's position with each redraw as
+//! `win_viewport`, which the model folds into the same record.
+//!
 //! # The throttle
 //!
-//! `CursorMoved` fires once per cursor motion, so a held-down `j` fires it
-//! as fast as nvim can redraw. Every trigger arms a `vim.schedule`
-//! callback and notifies nothing itself, and the callback reports each
-//! armed window once and disarms. `vim.schedule` defers to the next turn of
-//! nvim's event loop, whatever redraws it holds, so a burst inside one turn
-//! collapses to one message per window and the segment lags the cursor by
-//! at most a tick. Nothing on the key path waits for it: the trigger runs
-//! in nvim, the notification arrives on view's reader thread, and the
-//! paint that shows it is the next one view was going to draw anyway.
+//! Every trigger arms a `vim.schedule` callback and notifies nothing
+//! itself, and the callback reports each armed window once and disarms.
+//! `vim.schedule` defers to the next turn of nvim's event loop, whatever
+//! redraws it holds, so a burst inside one turn (a `:bufdo`, a `:windo`, a
+//! diagnostic producer setting a namespace per buffer) collapses to one
+//! message per window.
 //!
 //! # Which window a trigger names
 //!
-//! `WinEnter`, `BufEnter`, `BufModifiedSet`, `CursorMoved` and
-//! `CursorMovedI` are all about the window the user is in, so they arm the
-//! current one. `DiagnosticChanged` is about a buffer, which any number of
-//! windows may be showing, so it arms every window showing it -- a split
-//! over one file shows the same counts in both tiles, and arming only the
-//! current one would leave the other's count stale until its own cursor
-//! moved.
+//! `WinEnter`, `BufEnter` and `BufModifiedSet` are all about the window the
+//! user is in, so they arm the current one. `DiagnosticChanged` is about a
+//! buffer, which any number of windows may be showing, so it arms every
+//! window showing it: a split over one file shows the same counts in both
+//! tiles.
 
 /// The lua chunk [`register_window_status`] runs inside nvim, taking view's
 /// channel id as its single vararg.
@@ -107,8 +109,7 @@ local function arm_all()
     arm(win)
   end
 end
-vim.api.nvim_create_autocmd({ 'WinEnter', 'BufEnter', 'BufModifiedSet',
-  'CursorMoved', 'CursorMovedI' }, {
+vim.api.nvim_create_autocmd({ 'WinEnter', 'BufEnter', 'BufModifiedSet' }, {
   group = group,
   callback = arm_current,
 })
