@@ -1,9 +1,10 @@
 //! The flood scenario: a `:terminal` buffer draining an unbounded producer
-//! for a fixed wall-clock window, run paired against the same flood in bare
-//! nvim on the same fixture. Two things are measured, not assumed: paint
-//! cadence over the window (the gaps between successive observed frame
-//! changes) and drain throughput (lines drained in the window, paired: the
-//! pace ratio gates). A blocked UI thread shows up as a long no-paint gap
+//! for a wall-clock span, run paired against the same flood in bare nvim on
+//! the same fixture. Two things are measured, not assumed: paint cadence
+//! over the span (the gaps between successive observed frame changes) and
+//! drain throughput (lines drained per second, paired: the pace ratio
+//! gates). A side samples for at least the window and on past it until it
+//! holds the gap floor, up to twice the window. A blocked UI thread shows up as a long no-paint gap
 //! while output is still pending, so the cadence percentile IS the coalescing
 //! invariant, observed from outside the process. The window (not a line
 //! count) bounds the run because hosts drain a fixed count at wildly
@@ -49,17 +50,28 @@ pub fn max_screen_line(screen_text: &str) -> Option<u64> {
 /// One side's flood measurement over the wall-clock window.
 #[derive(Debug)]
 pub struct FloodSide {
-    /// Lines the producer drained through the terminal during the window
-    /// (the highest `cat -n` counter reached). The drain-throughput meter:
-    /// with the window fixed, more lines means the side kept pace better.
+    /// Lines the producer drained through the terminal during the span
+    /// (the highest `cat -n` counter reached).
     pub lines_drained: f64,
-    /// Gaps between successive observed frame changes during the window,
-    /// in milliseconds.
+    /// The span this side sampled, in milliseconds. Sides stop at different
+    /// times once one runs past the window to reach the gap floor, so drain
+    /// throughput is `lines_drained` over this span.
+    pub elapsed_ms: f64,
+    /// Gaps between successive observed frame changes during the span, in
+    /// milliseconds.
     pub cadence_gaps_ms: Vec<f64>,
     /// Mean wall time one probe iteration took during the window, in
     /// milliseconds: the resolution floor on every gap above, since a frame
     /// change is only ever observed on a probe.
     pub probe_period_ms: f64,
+}
+
+impl FloodSide {
+    /// Lines drained per second of this side's own span.
+    #[must_use]
+    pub fn lines_per_s(&self) -> f64 {
+        self.lines_drained * 1000.0 / self.elapsed_ms
+    }
 }
 
 /// How far above the probe loop's own period a cadence measurement must
@@ -95,6 +107,80 @@ fn cadence_is_measurable(cadence: CadenceResolution) -> bool {
 /// means the terminal command never produced output.
 const PRODUCER_START_DEADLINE: Duration = Duration::from_secs(15);
 
+/// How many windows a side may sample while it is still short of the gap
+/// floor. A host that coalesces the flood into few frames keeps sampling
+/// past the window, and this bounds the trial on a host that never reaches
+/// the floor; that side is then refused as [`BenchError::TooFewCadenceGaps`].
+const SPAN_CAP_FACTOR: u32 = 2;
+
+/// What ends one side's sample: the window it always runs, and the gap
+/// count it keeps sampling past the window to reach.
+///
+/// Named fields so the floor travels beside the window into the probe loop
+/// as one value, the same guard against a transposed call [`TrialPlan`]
+/// carries.
+#[derive(Debug, Clone, Copy)]
+struct SampleSpan {
+    window: Duration,
+    min_gaps: usize,
+}
+
+/// One side's probe loop output, before the drained line count is read.
+#[derive(Debug)]
+struct Sampled {
+    gaps_ms: Vec<f64>,
+    probes: u32,
+    elapsed: Duration,
+}
+
+impl Sampled {
+    fn into_side(self, lines_drained: u64) -> FloodSide {
+        let elapsed_ms = self.elapsed.as_secs_f64() * 1000.0;
+        FloodSide {
+            #[allow(clippy::cast_precision_loss)]
+            lines_drained: lines_drained as f64,
+            elapsed_ms,
+            cadence_gaps_ms: self.gaps_ms,
+            probe_period_ms: elapsed_ms / f64::from(self.probes.max(1)),
+        }
+    }
+}
+
+/// Probes the screen from `start` until `span` is satisfied, recording the
+/// gap between each pair of successive frame changes.
+///
+/// `probe` returns the instant of a reading and the screen hash read at it.
+/// Production hands in the session's screen and the wall clock; the tests
+/// hand in a synthetic clock so the stopping rule runs without an editor.
+fn sample_cadence<P>(span: SampleSpan, start: Instant, mut last_hash: u64, mut probe: P) -> Sampled
+where
+    P: FnMut() -> (Instant, u64),
+{
+    let window_end = start + span.window;
+    let cap_end = start + span.window * SPAN_CAP_FACTOR;
+    let mut last_change = start;
+    let mut gaps_ms = Vec::new();
+    let mut probes = 0_u32;
+    loop {
+        let (now, hash) = probe();
+        probes = probes.saturating_add(1);
+        if hash != last_hash {
+            gaps_ms.push(now.duration_since(last_change).as_secs_f64() * 1000.0);
+            last_change = now;
+            last_hash = hash;
+        }
+        let floor_met = gaps_ms.len() >= span.min_gaps;
+        if (now >= window_end && floor_met) || now >= cap_end {
+            return Sampled {
+                gaps_ms,
+                probes,
+                elapsed: now.duration_since(start),
+            };
+        }
+        std::thread::yield_now();
+    }
+}
+
 /// The highest `cat -n` counter currently on screen.
 ///
 /// Read once at the window's end rather than every probe: the counters only
@@ -107,18 +193,18 @@ fn drained_lines(session: &mut BenchSession) -> Option<u64> {
 }
 
 /// Spawns `spec`, opens `:terminal` on the pinned producer, and samples
-/// paint cadence plus drain throughput for one window of steady flood.
+/// paint cadence plus drain throughput over one span of steady flood, which
+/// [`sample_cadence`] ends.
 ///
-/// The window (not a line count) bounds the run, so the sample count is a
-/// property of duration and is comparable across hosts that drain at wildly
-/// different rates (the reason [`flood_command`] runs an unbounded producer).
+/// A wall-clock span bounds the run, so the sample count is a property of
+/// duration and is comparable across hosts that drain at wildly different
+/// rates (the reason [`flood_command`] runs an unbounded producer).
 ///
 /// Reads both durations off `run_spec` rather than taking them as adjacent
 /// parameters of the same type, which a caller can transpose silently: a
 /// settle deadline in the window's place measures nothing and a window in
 /// the deadline's place refuses every startup.
 fn flood_once(spec: &SpawnSpec, run_spec: &RunSpec<'_>) -> Result<FloodSide, BenchError> {
-    let window = run_spec.window;
     let mut session = BenchSession::spawn(spec)?;
     if !session.settle(SettleBound {
         quiet: Duration::from_secs(2),
@@ -163,37 +249,18 @@ fn flood_once(spec: &SpawnSpec, run_spec: &RunSpec<'_>) -> Result<FloodSide, Ben
         std::thread::yield_now();
     }
 
-    let start = Instant::now();
-    let deadline = start + window;
-    let mut last_change: Option<Instant> = Some(start);
-    let mut gaps_ms = Vec::new();
-    let mut probes = 0_u32;
-    let elapsed = loop {
-        let hash = session.with_screen(crate::boundaries::screen_hash);
-        let now = Instant::now();
-        probes = probes.saturating_add(1);
-        if hash != last_hash {
-            if let Some(previous) = last_change {
-                gaps_ms.push(now.duration_since(previous).as_secs_f64() * 1000.0);
-            }
-            last_change = Some(now);
-            last_hash = hash;
-        }
-        if now >= deadline {
-            break now.duration_since(start);
-        }
-        std::thread::yield_now();
+    let span = SampleSpan {
+        window: run_spec.window,
+        min_gaps: run_spec.plan.min_gap_samples,
     };
+    let sampled = sample_cadence(span, Instant::now(), last_hash, || {
+        let hash = session.with_screen(crate::boundaries::screen_hash);
+        (Instant::now(), hash)
+    });
     let lines_drained = drained_lines(&mut session).unwrap_or(0);
 
     session.shutdown();
-    Ok(FloodSide {
-        #[allow(clippy::cast_precision_loss)]
-        lines_drained: lines_drained as f64,
-        cadence_gaps_ms: gaps_ms,
-        #[allow(clippy::cast_lossless)]
-        probe_period_ms: elapsed.as_secs_f64() * 1000.0 / f64::from(probes.max(1)),
-    })
+    Ok(sampled.into_side(lines_drained))
 }
 
 /// One side's cadence distribution for one trial, in milliseconds.
@@ -219,7 +286,8 @@ pub struct FloodTrial {
     pub nvim: FloodSide,
     pub view_cadence: SideCadence,
     pub nvim_cadence: SideCadence,
-    /// nvim lines drained over view lines drained, this trial.
+    /// nvim lines drained per second over view lines drained per second,
+    /// this trial.
     pub pace_ratio: f64,
     /// `view_cadence.p99_ms / nvim_cadence.p99_ms`, this trial.
     pub cadence_p99_ratio: f64,
@@ -229,9 +297,11 @@ pub struct FloodTrial {
 #[derive(Debug)]
 pub struct FloodOutcome {
     pub trials: Vec<FloodTrial>,
-    /// Median across trials of nvim lines drained over view lines drained.
-    /// Lower is better: view keeping pace makes the two counts equal (~1.0);
-    /// view falling behind drains fewer lines in the window and lifts it.
+    /// Median across trials of nvim's drain rate over view's, each side's
+    /// lines drained per second of its own span. Lower is better: view
+    /// keeping pace makes the two rates equal (~1.0); view falling behind
+    /// drains fewer lines per second and lifts it. Where both sides stop at
+    /// the window the spans are equal and this is the ratio of line counts.
     pub gated_pace_ratio: f64,
     /// Median across trials of the view side's cadence-gap p99 (ms).
     pub gated_cadence_p99_ms: f64,
@@ -322,7 +392,9 @@ pub struct RunSpec<'a> {
     pub plan: TrialPlan,
     /// How long a side's startup has to go quiet before it is refused.
     pub settle_deadline: Duration,
-    /// The wall-clock span of steady flood each side is measured over.
+    /// The shortest wall-clock span of steady flood a side is measured
+    /// over. A side short of the gap floor at the window keeps sampling, up
+    /// to twice the window.
     pub window: Duration,
 }
 
@@ -432,8 +504,8 @@ where
 ///
 /// # Errors
 ///
-/// Returns [`BenchError::DegenerateBaselineSide`] if the view side drained
-/// no lines to pace against, or if the nvim side's percentile is not a
+/// Returns [`BenchError::DegenerateBaselineSide`] if the view side's drain
+/// rate is not a positive finite number to pace against, or if the nvim side's percentile is not a
 /// positive finite number to divide by; and propagates the per-side
 /// refusals [`side_cadence`] raises.
 ///
@@ -445,10 +517,11 @@ where
 /// zero percentile.
 fn paired_trial(pair: TrialPair, min_gap_samples: usize) -> Result<FloodTrial, BenchError> {
     let TrialPair { view, nvim } = pair;
-    if !(view.lines_drained.is_finite() && view.lines_drained > 0.0) {
+    let view_rate = view.lines_per_s();
+    if !(view_rate.is_finite() && view_rate > 0.0) {
         return Err(BenchError::DegenerateBaselineSide {
-            statistic: "lines_drained",
-            value: view.lines_drained,
+            statistic: "lines_per_s",
+            value: view_rate,
         });
     }
     let view_cadence = side_cadence(&view, VIEW_NAMES, min_gap_samples)?;
@@ -460,7 +533,7 @@ fn paired_trial(pair: TrialPair, min_gap_samples: usize) -> Result<FloodTrial, B
         });
     }
     Ok(FloodTrial {
-        pace_ratio: nvim.lines_drained / view.lines_drained,
+        pace_ratio: nvim.lines_per_s() / view_rate,
         cadence_p99_ratio: view_cadence.p99_ms / nvim_cadence.p99_ms,
         view,
         nvim,
@@ -547,6 +620,7 @@ mod tests {
     fn side_probing_every(gaps_ms: &[f64], probe_period_ms: f64) -> FloodSide {
         FloodSide {
             lines_drained: 1000.0,
+            elapsed_ms: 15_000.0,
             cadence_gaps_ms: gaps_ms.to_vec(),
             probe_period_ms,
         }
@@ -891,6 +965,7 @@ mod tests {
             } else {
                 2.0
             },
+            elapsed_ms: 1.0,
             cadence_gaps_ms: Vec::new(),
             probe_period_ms: 0.0,
         };
@@ -1098,5 +1173,73 @@ mod tests {
         // max token still comes from a whole lower line, never the fragment
         let screen = "34\ty\n   1201\ty\n   1202\ty\n";
         assert_eq!(max_screen_line(screen), Some(1202));
+    }
+
+    /// Runs the probe loop against a synthetic clock that advances one
+    /// millisecond per probe and changes the screen on every probe, so each
+    /// probe yields exactly one gap of one millisecond.
+    fn sample_every_ms(window_ms: u64, min_gaps: usize) -> Sampled {
+        let start = Instant::now();
+        let mut probe = 0_u64;
+        sample_cadence(
+            SampleSpan {
+                window: Duration::from_millis(window_ms),
+                min_gaps,
+            },
+            start,
+            0,
+            || {
+                probe += 1;
+                (start + Duration::from_millis(probe), probe)
+            },
+        )
+    }
+
+    #[test]
+    fn a_side_that_meets_the_floor_early_still_runs_the_whole_window() {
+        let sampled = sample_every_ms(100, 10);
+        assert_eq!(sampled.gaps_ms.len(), 100);
+        assert_eq!(sampled.elapsed, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_side_short_of_the_floor_at_the_window_samples_on_until_it_is_met() {
+        let sampled = sample_every_ms(100, 150);
+        assert_eq!(sampled.gaps_ms.len(), 150);
+        assert_eq!(sampled.elapsed, Duration::from_millis(150));
+    }
+
+    #[test]
+    fn a_side_still_short_at_the_cap_stops_there_and_is_refused_by_name() {
+        let sampled = sample_every_ms(100, 500);
+        assert_eq!(sampled.elapsed, Duration::from_millis(200));
+        let view = sampled.into_side(1000);
+        let nvim = side(&repeated(&[1.0, 2.0, 10.0], 200));
+        let refused = paired_trial(TrialPair { view, nvim }, 500);
+        assert!(
+            matches!(
+                refused,
+                Err(BenchError::TooFewCadenceGaps {
+                    side: "view",
+                    collected: 200,
+                    floor: 500,
+                })
+            ),
+            "expected the view side refused at the cap, got {refused:?}"
+        );
+    }
+
+    #[test]
+    fn pace_is_a_rate_so_equal_lines_over_different_spans_give_the_span_ratio() {
+        let view = clean_side();
+        let mut nvim = clean_side();
+        nvim.elapsed_ms = view.elapsed_ms * 2.0;
+        let expected = view.elapsed_ms / nvim.elapsed_ms;
+        let trial = paired_trial(TrialPair { view, nvim }, 100).unwrap();
+        assert!(
+            (trial.pace_ratio - expected).abs() < 1e-12,
+            "expected pace {expected}, got {}",
+            trial.pace_ratio
+        );
     }
 }

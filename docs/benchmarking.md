@@ -288,9 +288,10 @@ and cost as one `first_paint` cell. The other four spawn a session and drive it:
 (2 spawns) and drive `trials x (warmup + samples)` = 3300 samples per side,
 paced by the driver's own inter-sample sleep (5 ms on echo), so roughly 30 s
 each; `flood.user` spawns a session per side per trial (6 spawns) and runs the
-fixed 15 s flood window in each, so 1.5 min. The floor for a spawn is the
-class's own recorded `first_paint.marker_cold_ms`, and `startup.user` alone pays
-2200 of them:
+15 s flood window in each, so 1.5 min. A side still short of the 1000-gap floor
+at 15 s samples on until it holds the floor, up to 30 s. The floor for a spawn
+is the class's own recorded `first_paint.marker_cold_ms`, and `startup.user`
+alone pays 2200 of them:
 
 | leg | cold spawn | `startup.user` floor |
 |---|---|---|

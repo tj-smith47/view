@@ -45,7 +45,7 @@ pub fn paired_cell(
 ///
 /// ```text
 /// flood/minimal: view 41233 lines p50 12.40ms p90 14.90ms p99 16.43ms | nvim 41102 lines p50 12.35ms p90 14.85ms p99 16.45ms
-///       pace 0.997  cadence(p99) 0.999  gaps 1180/1190  probe 0.42/0.41ms (view/nvim)
+///       pace 0.997  cadence(p99) 0.999  gaps 1180/1190  probe 0.42/0.41ms  span 15.0/15.0s (view/nvim)
 /// ```
 ///
 /// Every number is read off the trial the run aggregates, so the log and
@@ -58,13 +58,15 @@ pub fn paired_cell(
 /// reason -- a low count on the view side alone points at view's painting,
 /// while a low count on both points at what the harness can observe through
 /// the pty on this host -- and each side's probe period prints because it is
-/// the resolution floor under that side's own percentiles.
+/// the resolution floor under that side's own percentiles. Each side's span
+/// prints so a log shows a side that sampled past the window to reach the
+/// gap floor.
 #[must_use]
 pub fn flood_trial(scenario: &str, fixture: &str, trial: &FloodTrial) -> String {
     format!(
         "{scenario}/{fixture}: view {:.0} lines p50 {:.2}ms p90 {:.2}ms p99 {:.2}ms | \
          nvim {:.0} lines p50 {:.2}ms p90 {:.2}ms p99 {:.2}ms\n      \
-         pace {:.3}  cadence(p99) {:.3}  gaps {}/{}  probe {:.2}/{:.2}ms (view/nvim)",
+         pace {:.3}  cadence(p99) {:.3}  gaps {}/{}  probe {:.2}/{:.2}ms  span {:.1}/{:.1}s (view/nvim)",
         trial.view.lines_drained,
         trial.view_cadence.p50_ms,
         trial.view_cadence.p90_ms,
@@ -79,6 +81,8 @@ pub fn flood_trial(scenario: &str, fixture: &str, trial: &FloodTrial) -> String 
         trial.nvim.cadence_gaps_ms.len(),
         trial.view.probe_period_ms,
         trial.nvim.probe_period_ms,
+        trial.view.elapsed_ms / 1000.0,
+        trial.nvim.elapsed_ms / 1000.0,
     )
 }
 
@@ -149,11 +153,13 @@ mod tests {
         let trial = FloodTrial {
             view: FloodSide {
                 lines_drained: 41233.0,
+                elapsed_ms: 15_000.4,
                 cadence_gaps_ms: vec![12.0, 13.0, 16.4],
                 probe_period_ms: 0.42,
             },
             nvim: FloodSide {
                 lines_drained: 41102.0,
+                elapsed_ms: 21_630.0,
                 cadence_gaps_ms: vec![12.0, 13.0, 16.5],
                 probe_period_ms: 0.41,
             },
@@ -181,7 +187,7 @@ mod tests {
         );
         assert_eq!(
             lines[1],
-            "      pace 0.997  cadence(p99) 0.999  gaps 3/3  probe 0.42/0.41ms (view/nvim)"
+            "      pace 0.997  cadence(p99) 0.999  gaps 3/3  probe 0.42/0.41ms  span 15.0/21.6s (view/nvim)"
         );
     }
 

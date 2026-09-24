@@ -230,10 +230,11 @@ const MIN_RECORDED_WARMUP: usize = 100;
 /// 3M-line flood took over ten seconds on dev-linux and under a second on
 /// mbp, two orders of magnitude apart in observed frame changes), so a line
 /// count cannot make the cadence sample count comparable across hosts, but
-/// a fixed window does by construction. Sized from measurement: at the UI's
-/// coalesced redraw cadence a twelve-second window fell just under the
-/// 1000-gap floor on a loaded dev-linux, and this length clears the floor
-/// with margin on both hosts.
+/// a window does by construction. The window is the shortest span a side
+/// samples. The gap floor is what ends the sample: a side still short of it
+/// at the window samples on until it holds the floor. Twice the window is
+/// the cap that bounds a host which cannot reach the floor, and a side
+/// short at the cap is refused.
 const FLOOD_WINDOW: Duration = Duration::from_secs(15);
 
 /// Null-pair calibration sampling: two instances of the pinned nvim
