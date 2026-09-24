@@ -151,6 +151,15 @@ The population is the whole directory. The release path runs
 on the macOS host the contract is about: five scripts `Taskfile.yml` never
 names, and a broken one there fails where nobody is watching for it.
 
+## A script's mode matches how it is run
+
+Every script under `scripts/` carries the executable bit unless it is a
+library, one under `scripts/lib/` or one whose first line names no shebang at
+all: a script run by path fails with `Permission denied` when the bit is
+missing, and a sourced library has no reason to carry one. `check_script_modes`
+in `scripts/check-style.sh` grades every tracked `scripts/**/*.sh` against
+that rule.
+
 ## A pipeline stage names the file it reads
 
 `grep`/`awk`/`sed` with no file argument reads stdin, so a stage whose file list

@@ -1511,6 +1511,66 @@ EOF
   return 1
 }
 
+# The mode every tracked scripts/**/*.sh carries. Taskfile.yml and the
+# workflows run a script by path (`bash scripts/foo.sh`), which needs the
+# executable bit only where the OS looks the shebang up itself; a run by
+# `bash scripts/foo.sh` never does, but a symlink or a direct exec does, and
+# this tree treats every non-library script as run that second way, so the
+# bit is required on all of them and refused on a library. A library is one
+# a caller only sources: everything under scripts/lib/, whatever its own
+# shebang says, plus any file elsewhere with no bash or sh shebang at all.
+# The walk grades the filesystem bit and not the mode `git ls-files -s`
+# still holds, because `task commit` runs this gate before it stages the
+# paths it is about to commit, and a chmod made this run has not reached the
+# index yet.
+check_script_modes() {
+  local fail=0 entries line path first lib
+  entries=$(git ls-files -s -- 'scripts/*.sh' 'scripts/**/*.sh' 2>&1) || {
+    echo "STYLE FAIL: git ls-files could not list scripts/**/*.sh"
+    printf '%s\n' "$entries"
+    return 1
+  }
+  if [ -z "$entries" ]; then
+    echo "STYLE FAIL: no tracked .sh file found under scripts/"
+    echo "  A walk handed an empty list reports nothing and reads like a"
+    echo "  tree whose scripts all carry the right mode."
+    return 1
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    path=$(printf '%s\n' "$line" | awk '{ print $4 }')
+    [ -n "$path" ] || continue
+    first=$(head -n 1 "$path" 2>/dev/null) || first=""
+    case "$path" in
+      (scripts/lib/*) lib=1 ;;
+      (*)
+        case "$first" in
+          ('#!'*bash | '#!'*/sh) lib=0 ;;
+          (*) lib=1 ;;
+        esac
+        ;;
+    esac
+    if [ "$lib" -eq 0 ] && [ ! -x "$path" ]; then
+      echo "$path: an entry point (its shebang names bash or sh) carries no executable bit"
+      fail=1
+    fi
+    if [ "$lib" -eq 1 ] && [ -x "$path" ]; then
+      echo "$path: a library (no shebang, or under scripts/lib/) carries the executable bit"
+      fail=1
+    fi
+  done <<EOF
+$entries
+EOF
+  if [ "$fail" -eq 0 ]; then
+    return 0
+  fi
+  echo "STYLE FAIL: a script under scripts/ carries the wrong mode bit"
+  echo "  A script run by path fails with Permission denied when its bit is"
+  echo "  missing; a sourced library has no reason to carry one. chmod +x"
+  echo "  an entry point, chmod -x a library."
+  return 1
+}
+
 check_written_programs() {
   local expected actual
   expected=$(printf '%s\n' "$WRITTEN_PROGRAM_SITES" | awk 'NF { print $1, $2 }' | LC_ALL=C sort)
@@ -2883,6 +2943,18 @@ if [ "${1:-}" = "--temp-roots" ]; then
   exit $?
 fi
 
+# The script-mode walk alone, graded the same way.
+if [ "${1:-}" = "--script-modes" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --script-modes ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  check_script_modes
+  exit $?
+fi
+
 fail=0
 # Every directory a walk below is guarded on, named once and required here:
 # a guard with no else reads as a pass when the tree it grades has moved, so
@@ -2907,6 +2979,7 @@ done
 if [ -d scripts ]; then
   check_temp_traps || fail=1
   check_temp_roots || fail=1
+  check_script_modes || fail=1
 fi
 if [ -d crates ]; then
   check_content crates '//|#' --include='*.rs' || fail=1
