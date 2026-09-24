@@ -35,7 +35,7 @@ config, plugins, LSP servers and treesitter setup run unchanged. See
 
 ## Features
 
-**Your config, unchanged.** telescope, lualine, noice, nvim-cmp, treesitter,
+**BYO Nvim config.** telescope, lualine, noice, nvim-cmp, treesitter,
 mini.nvim and the rest load on day one. Where a plugin already draws
 something view also draws, view draws it, and one config key hands it back.
 Plugin messages show up in view's notifications, and everything holds up
