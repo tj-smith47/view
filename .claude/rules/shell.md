@@ -153,12 +153,12 @@ names, and a broken one there fails where nobody is watching for it.
 
 ## A script's mode matches how it is run
 
-Every script under `scripts/` carries the executable bit unless it is a
-library, one under `scripts/lib/` or one whose first line names no shebang at
-all: a script run by path fails with `Permission denied` when the bit is
-missing, and a sourced library has no reason to carry one. `check_script_modes`
-in `scripts/check-style.sh` grades every tracked `scripts/**/*.sh` against
-that rule.
+A file with a bash or sh shebang outside `scripts/lib/` is an entry point and
+carries the executable bit; everything else under `scripts/` is a library and
+carries none. A script run by path fails with `Permission denied` when the bit
+is missing, and a sourced library has no reason to carry one.
+`check_script_modes` in `scripts/check-style.sh` grades every tracked
+`scripts/**/*.sh` against that rule.
 
 ## A pipeline stage names the file it reads
 

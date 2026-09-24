@@ -1538,7 +1538,7 @@ check_script_modes() {
   fi
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    path=$(printf '%s\n' "$line" | awk '{ print $4 }')
+    path=${line#*$'\t'}
     [ -n "$path" ] || continue
     first=$(head -n 1 "$path" 2>/dev/null) || first=""
     case "$path" in

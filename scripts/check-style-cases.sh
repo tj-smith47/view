@@ -4404,7 +4404,6 @@ git -C "$CASE" -c user.name=cases -c user.email=cases@localhost \
   -c commit.gpgsign=false commit -qm raise
 out=$(COMMENT_FRAMES_BASE=HEAD~1 bash "$CHECKER" --comment-frames "$CASE" 2>&1)
 rc=$?
-n=$((n + 1))
 desc='a ceiling raised and committed on top of its own base, caught via COMMENT_FRAMES_BASE=HEAD~1'
 named=1
 case "$out" in *'demo 1, above the 0 HEAD holds'*) ;; *) named=0 ;; esac
@@ -4453,6 +4452,35 @@ if [ "$rc" = 1 ] && [ "$named" = 1 ]; then
 else
   failures=$((failures + 1))
   printf 'FAIL %s - %s\n  want rc=1, helper.sh named\n  got  rc=%s\n%s\n' "$n" "$desc" "$rc" "$out"
+fi
+
+new_case_modes
+printf '#!/usr/bin/env bash\necho hi\n' > "$CASE/scripts/entry.sh"
+chmod +x "$CASE/scripts/entry.sh"
+printf '#!/usr/bin/env bash\nhelper() { :; }\n' > "$CASE/scripts/lib/helper.sh"
+git -C "$CASE" add -A
+out=$(bash "$CHECKER" --script-modes "$CASE" 2>&1)
+rc=$?
+desc='a correctly moded entry point and library together'
+if [ "$rc" = 0 ]; then
+  printf 'ok %s - %s\n' "$n" "$desc"
+else
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=0\n  got  rc=%s\n%s\n' "$n" "$desc" "$rc" "$out"
+fi
+
+new_case_modes
+printf '#!/usr/bin/env bash\necho hi\n' > "$CASE/scripts/my entry.sh"
+git -C "$CASE" add -A
+out=$(bash "$CHECKER" --script-modes "$CASE" 2>&1)
+rc=$?
+desc='a planted entry point whose name carries a space, missing its executable bit'
+case "$out" in (*'scripts/my entry.sh: an entry point'*) named=1 ;; (*) named=0 ;; esac
+if [ "$rc" = 1 ] && [ "$named" = 1 ]; then
+  printf 'ok %s - %s\n' "$n" "$desc"
+else
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=1, "my entry.sh" named\n  got  rc=%s\n%s\n' "$n" "$desc" "$rc" "$out"
 fi
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
