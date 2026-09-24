@@ -10100,8 +10100,9 @@ fn a_restart_closes_the_windowed_tree_and_frees_its_handle() {
         None,
         "the replacement's window on the recycled handle paints the tree"
     );
+    let focus_before = m.focus();
     let reopened = replacement_vim_enter(&mut m);
-    assert_reopened(&m, &reopened, NativeSurface::Tree);
+    assert_reopened(&m, &reopened, NativeSurface::Tree, focus_before);
     assert!(
         reopened
             .iter()
@@ -10123,7 +10124,12 @@ fn replacement_vim_enter(m: &mut Model) -> Vec<Effect> {
 
 /// `surface` open again after a restart, in a window of its own, with the
 /// keyboard left where it was.
-fn assert_reopened(m: &Model, effects: &[Effect], surface: crate::native::geometry::NativeSurface) {
+fn assert_reopened(
+    m: &Model,
+    effects: &[Effect],
+    surface: crate::native::geometry::NativeSurface,
+    focus_before: Focus,
+) {
     let opens: Vec<&Effect> = effects
         .iter()
         .filter(|effect| matches!(effect, Effect::Rpc(RpcCall::OpenNativeWindow { .. })))
@@ -10141,6 +10147,11 @@ fn assert_reopened(m: &Model, effects: &[Effect], surface: crate::native::geomet
         m.surfaces.pending_open(surface),
         "the reopen is not awaiting its reply"
     );
+    assert_eq!(
+        m.focus(),
+        focus_before,
+        "the reopen moved focus off {focus_before:?}"
+    );
 }
 
 /// The windowed agent panel comes back after a restart, the way the floating
@@ -10155,8 +10166,9 @@ fn a_restart_reopens_the_windowed_agent_panel_at_the_replacements_vim_enter() {
         !m.ai_panel_overlay_open(),
         "the agent panel reads open with no window in the replacement"
     );
+    let focus_before = m.focus();
     let reopened = replacement_vim_enter(&mut m);
-    assert_reopened(&m, &reopened, NativeSurface::Agent);
+    assert_reopened(&m, &reopened, NativeSurface::Agent, focus_before);
     assert!(
         m.ai_panel_overlay_open(),
         "the panel's state was not seated"
@@ -10170,8 +10182,9 @@ fn a_restart_reopens_the_windowed_notification_stream_at_the_replacements_vim_en
 
     let mut m = focused_windowed_notifications();
     let _ = restart(&mut m);
+    let focus_before = m.focus();
     let reopened = replacement_vim_enter(&mut m);
-    assert_reopened(&m, &reopened, NativeSurface::Notifications);
+    assert_reopened(&m, &reopened, NativeSurface::Notifications, focus_before);
 }
 
 /// A second `VimEnter` reopens nothing: the record is spent by the first.
@@ -10224,8 +10237,9 @@ fn a_restart_retires_an_open_in_flight_and_reopens_its_surface() {
         None,
         "the dead engine's late reply claimed a window: {late:?}"
     );
+    let focus_before = m.focus();
     let reopened = replacement_vim_enter(&mut m);
-    assert_reopened(&m, &reopened, NativeSurface::Tree);
+    assert_reopened(&m, &reopened, NativeSurface::Tree, focus_before);
 }
 
 /// The deadline a dead engine's attach armed is still sleeping in its

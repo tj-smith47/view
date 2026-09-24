@@ -22,8 +22,13 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # fetch-depth 0: check_comment_frames reads its base commit
+      # (COMMENT_FRAMES_BASE, set below) from history a shallow clone would
+      # not carry.
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -87,8 +92,18 @@ jobs:
           $pin = (Get-Content .engine-pin).Trim().TrimStart("v")
           if (-not ((nvim --version | Select-Object -First 1) -match [regex]::Escape($pin))) { exit 1 }
 
+      # the comment-frame ratchet's base is the commit before this push
+      # (github.event.before); a first push to a branch or a PR run carries
+      # no such sha, so it falls back to the immediate parent.
       - name: Run CI suite
-        run: task ci
+        env:
+          COMMENT_FRAMES_BASE: ${{ github.event.before }}
+        run: |
+          if [ -z "$COMMENT_FRAMES_BASE" ] || [ "$COMMENT_FRAMES_BASE" = "0000000000000000000000000000000000000000" ]; then
+            COMMENT_FRAMES_BASE=HEAD~1
+          fi
+          export COMMENT_FRAMES_BASE
+          task ci
 
       # One host, not three: the sweep reads the same tracked text on every
       # runner, and it costs two minutes a leg.

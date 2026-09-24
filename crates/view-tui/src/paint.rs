@@ -986,7 +986,7 @@ fn reset_damaged_rows(buf: &mut Buffer, damage: &Damage) {
 /// cluster in this same call can draw into it, matching the convention
 /// `ratatui::buffer::Buffer::set_stringn` itself uses for multi-width
 /// graphemes. A cluster wider than the columns left before the buffer's own
-/// row ends is written as a blank instead (see [`fitted_symbol`]).
+/// row ends is written as a blank (see [`fitted_symbol`]).
 fn paint_text_row(
     text: &str,
     style: Style,

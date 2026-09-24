@@ -2062,13 +2062,17 @@ mod tests {
         let mut incoming = cutover.presink.into_iter();
         let mut vim_enter_at: Option<std::time::Instant> = None;
         let mut typed = false;
-        let mut claimed_before_typing = false;
         let mut seen = Vec::new();
         let invoked = loop {
             let now = std::time::Instant::now();
             let type_at = vim_enter_at.filter(|_| !typed).map(|at| at + TYPED_AT);
             if type_at.is_some_and(|at| at <= now) {
                 typed = true;
+                assert!(
+                    follow_ups.native.holds_input(),
+                    "the chord is typed with the claims reply still out, so the \
+                     hold must be live at this instant: {seen:?}"
+                );
                 seen.push(format!("typed {chord}"));
                 let flow = crate::runtime::dispatch(
                     &mut model,
@@ -2088,14 +2092,6 @@ mod tests {
                     Err(_) => break false,
                 },
             };
-            if let Msg::FeatureInvoke { feature, verb } = &msg {
-                if feature == "window" && verb == "zoom" {
-                    break true;
-                }
-            }
-            if matches!(msg, Msg::MappingsClaimed { .. }) && !typed {
-                claimed_before_typing = true;
-            }
             if matches!(msg, Msg::RedrawReady) {
                 continue;
             }
@@ -2106,15 +2102,45 @@ mod tests {
             ) {
                 vim_enter_at = Some(std::time::Instant::now());
             }
+            // in this desktop session no window has yet registered a tiled
+            // pane (only the global grid has), so the fold this exact chord
+            // reaches answers "nothing to act on" -- the notice text this
+            // asserts against is `window_zoom`'s own, via `no_target_notice`
+            let is_zoom_invoke = matches!(
+                &msg,
+                Msg::FeatureInvoke { feature, verb } if feature == "window" && verb == "zoom"
+            );
+            let recorded_before =
+                model.engine.messages.entries.len() + model.engine.messages.held().len();
             let flow = crate::runtime::dispatch(&mut model, &executor, &mut follow_ups, msg);
             assert_eq!(flow, crate::runtime::Flow::Continue, "{seen:?}");
+            if is_zoom_invoke {
+                let recorded_after =
+                    model.engine.messages.entries.len() + model.engine.messages.held().len();
+                assert!(
+                    recorded_after > recorded_before,
+                    "the chord's mapping ran but its fold left the message \
+                     history untouched: {seen:?}"
+                );
+                let last = model
+                    .engine
+                    .messages
+                    .entries
+                    .iter()
+                    .chain(model.engine.messages.held())
+                    .last()
+                    .expect("recorded_after > recorded_before");
+                assert!(
+                    last.content
+                        .iter()
+                        .any(|(_, text)| text.contains("zoom has nothing to act on")),
+                    "the chord's mapping ran but the model's zoom fold recorded \
+                     something other than its own no-target notice: {last:?}"
+                );
+                break true;
+            }
         };
         assert!(typed, "nvim never asked for its VimEnter answer: {seen:?}");
-        assert!(
-            !claimed_before_typing,
-            "the claims reply crossed the link before the chord was typed, so \
-             the hold was never live: {seen:?}"
-        );
         assert!(
             invoked,
             "{chord} typed over a slow link ahead of the claims reply ran as \

@@ -2531,14 +2531,32 @@ comment_frame_hits() {
     return 2
   fi
   printf '%s\n' "$files" | LC_ALL=C xargs awk -v re="$COMMENT_FRAME_ERE" '
-    function comment_at(s,   i, n, c, instr) {
-      n = length(s); instr = 0
-      for (i = 1; i < n; i++) {
+    # instr and rawn (the open raw strings hash count, -1 when none is open)
+    # are globals: a `"` or `r#"` a line ends inside still owns the next line
+    # too, so a `//` on that continuation, or one after the matching close,
+    # has to be read with the string still in mind rather than reset at the
+    # line boundary.
+    function comment_at(s,   i, n, c, k) {
+      n = length(s)
+      for (i = 1; i <= n; i++) {
         c = substr(s, i, 1)
+        if (rawn >= 0) {
+          if (c == dq) {
+            k = 0
+            while (k < rawn && substr(s, i + 1 + k, 1) == "#") k++
+            if (k == rawn) { i += rawn; rawn = -1 }
+          }
+          continue
+        }
         if (instr) {
           if (c == bs) i++
           else if (c == dq) instr = 0
           continue
+        }
+        if (c == "r" && (substr(s, i + 1, 1) == dq || substr(s, i + 1, 1) == "#")) {
+          k = 0
+          while (substr(s, i + 1 + k, 1) == "#") k++
+          if (substr(s, i + 1 + k, 1) == dq) { rawn = k; i += k + 1; continue }
         }
         if (c == dq) { instr = 1; continue }
         if (c == sq && substr(s, i + 1, 1) == bs && substr(s, i + 3, 1) == sq) { i += 3; continue }
@@ -2553,8 +2571,8 @@ comment_frame_hits() {
       if (match(joined, re) && RSTART <= length(held)) print hfile ":" hline ":" hraw
       held = ""
     }
-    BEGIN { bs = sprintf("%c", 92); dq = sprintf("%c", 34); sq = sprintf("%c", 39) }
-    FNR == 1 { emit("") }
+    BEGIN { bs = sprintf("%c", 92); dq = sprintf("%c", 34); sq = sprintf("%c", 39); rawn = -1 }
+    FNR == 1 { emit(""); instr = 0; rawn = -1 }
     {
       at = comment_at($0)
       text = ""
@@ -2569,16 +2587,20 @@ comment_frame_hits() {
     END { emit("") }'
 }
 # The ceiling rows the working tree holds above the committed file, as
-# `crate now was`, a row HEAD lacks counting as 0 there. Read only where the
-# root is a git work tree's top and HEAD carries the file, since a scratch
-# tree has no committed ceiling to compare against.
+# `crate now was`, a row the base commit lacks counting as 0 there. The base
+# is COMMENT_FRAMES_BASE, defaulting to HEAD: on a checkout of a single
+# commit (CI's), HEAD equals the working tree, so a caller checking a push
+# against what came before it has to name the parent explicitly. Read only
+# where the root is a git work tree's top and the base carries the file,
+# since a scratch tree has no committed ceiling to compare against.
 comment_frames_raised() {
-  local ceiling="$1" top base
+  local ceiling="$1" top base ref
   top=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
   if [ "$top" != "$(pwd -P)" ]; then
     return 0
   fi
-  base=$(git show "HEAD:$ceiling" 2>/dev/null) || return 0
+  ref="${COMMENT_FRAMES_BASE:-HEAD}"
+  base=$(git show "$ref:$ceiling" 2>/dev/null) || return 0
   printf '%s\n%s\n' "$base" "--" | cat - "$ceiling" | awk '
     $0 == "--" { reading = 1; next }
     NF != 2 || $1 ~ /^#/ { next }

@@ -4320,6 +4320,18 @@ printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
 expect_frames 1 'lib.rs:2:' 'a comment after a string holding // is still read'
 
 new_frames_case
+printf 'fn a() -> &%sstatic str {\n    "opens here\n     // still open, not a comment"\n}\n' "'" \
+  > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 0 '' 'a // on the continuation line of a string still open from the line above is string text'
+
+new_frames_case
+printf 'fn a() -> &%sstatic str {\n    r#"before " // after, not a comment"#\n}\n' "'" \
+  > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
+expect_frames 0 '' 'a // inside a raw string, past an embedded quote a hash does not follow, is string text'
+
+new_frames_case
 printf '// reads the row rather\n// than the column\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
 printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
 expect_frames 1 'lib.rs:1:// reads the row rather' 'a frame split across two comment lines, one over the ceiling'
@@ -4377,6 +4389,31 @@ expect_frames 1 'lib.rs:1:' 'a crate the ceiling omits is held at zero'
 new_frames_case
 printf 'fn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
 expect_frames 1 'is missing' 'a missing ceiling file'
+
+# COMMENT_FRAMES_BASE: a checkout of a single commit puts HEAD at the commit
+# under test, so a ceiling raised and committed in that same commit reads as
+# no rise against HEAD. Naming the parent catches it (W-N1).
+new_frames_case
+printf '// reads the row\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
+commit_frames_base
+printf '// reads the row rather than the column\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 1\n' > "$CASE/scripts/comment-frames.ceiling"
+git -C "$CASE" add -A
+git -C "$CASE" -c user.name=cases -c user.email=cases@localhost \
+  -c commit.gpgsign=false commit -qm raise
+out=$(COMMENT_FRAMES_BASE=HEAD~1 bash "$CHECKER" --comment-frames "$CASE" 2>&1)
+rc=$?
+n=$((n + 1))
+desc='a ceiling raised and committed on top of its own base, caught via COMMENT_FRAMES_BASE=HEAD~1'
+named=1
+case "$out" in *'demo 1, above the 0 HEAD holds'*) ;; *) named=0 ;; esac
+if [ "$rc" = 1 ] && [ "$named" = 1 ]; then
+  printf 'ok %s - %s\n' "$n" "$desc"
+else
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=1\n  got  rc=%s\n%s\n' "$n" "$desc" "$rc" "$out"
+fi
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

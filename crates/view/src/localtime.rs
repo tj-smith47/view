@@ -4,11 +4,11 @@
 //! and every message stamp rendered UTC with nothing on screen or in the
 //! docs saying so.
 //!
-//! Read fresh on every fold: a session that straddles a DST change must
-//! stamp the new offset from the fold after the flip, with no restart.
-//! `localtime_r` and `GetTimeZoneInformation` already read the zone the OS
-//! keeps parsed, so this costs the one syscall `dispatch` already pays each
-//! fold for `SystemTime::now`, with no zone parse.
+//! Read fresh on every fold: a session that straddles a DST change stamps
+//! the new offset from the fold after the flip. `localtime_r` and
+//! `GetTimeZoneInformation` already read the zone the OS keeps parsed, so
+//! this costs the one syscall `dispatch` already pays each fold for
+//! `SystemTime::now`.
 
 #[cfg(test)]
 use std::cell::Cell;
