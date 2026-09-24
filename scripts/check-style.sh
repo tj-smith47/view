@@ -2660,6 +2660,10 @@ comment_frames_raised() {
     return 0
   fi
   ref="${COMMENT_FRAMES_BASE:-HEAD}"
+  if ! git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null; then
+    echo "STYLE FAIL: COMMENT_FRAMES_BASE names a ref this repository does not have: $ref"
+    return 1
+  fi
   base=$(git show "$ref:$ceiling" 2>/dev/null) || return 0
   printf '%s\n%s\n' "$base" "--" | cat - "$ceiling" | awk '
     $0 == "--" { reading = 1; next }
@@ -2682,7 +2686,10 @@ check_comment_frames() {
     echo "STYLE FAIL: the contrast-frame count exited $rc reading crates/"
     return 1
   fi
-  raised=$(comment_frames_raised "$ceiling")
+  if ! raised=$(comment_frames_raised "$ceiling"); then
+    printf '%s\n' "$raised"
+    return 1
+  fi
   if [ -n "$raised" ]; then
     printf '%s\n' "$raised" | while read -r crate now was; do
       echo "$ceiling: $crate $now, above the $was HEAD holds"

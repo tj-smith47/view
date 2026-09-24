@@ -70,6 +70,10 @@ PALETTE_RS=$REPO_ROOT/crates/view-core/src/native/palette.rs
 SURFACES_RS=$REPO_ROOT/crates/view-core/src/update/surfaces.rs
 OVERLAY_RS=$REPO_ROOT/crates/view-surface/src/overlay.rs
 NVIM_API_RS=$REPO_ROOT/crates/view-engine/src/nvim_api.rs
+# the mod file above is being split into sibling files under this directory;
+# an anchor that has moved between them (mappings.rs holds this one today) is
+# still found by searching both
+NVIM_API_DIR=$REPO_ROOT/crates/view-engine/src/nvim_api
 
 # The pane most legs read. The width is what the agent panel's own title
 # needs whole: the panel takes a fixed share of the terminal, and its
@@ -1285,13 +1289,13 @@ esac
 # driven config bound to the same key by this description, and a leg holding
 # a stale copy of it would read every entry point as the config's and skip
 # the lot while still reporting green.
-DESC_FORMAT=$(grep -oE "desc = string\\.format\\('[^']+'" "$NVIM_API_RS" |
+DESC_FORMAT=$(grep -rhoE "desc = string\\.format\\('[^']+'" "$NVIM_API_RS" "$NVIM_API_DIR" |
     sed -E "s/.*'(.*)'/\\1/" | head -1) || true
 case $DESC_FORMAT in
 *%s*%s*) ;;
 *)
     printf 'FAIL: %s no longer builds its mapping descriptions from a two-slot format (got %s), so no leg can tell view own key from the config own\n' \
-        "$NVIM_API_RS" "${DESC_FORMAT:-nothing}" >&2
+        "$NVIM_API_DIR" "${DESC_FORMAT:-nothing}" >&2
     exit 1
     ;;
 esac

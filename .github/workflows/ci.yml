@@ -96,6 +96,7 @@ jobs:
       # (github.event.before); a first push to a branch or a PR run carries
       # no such sha, so it falls back to the immediate parent.
       - name: Run CI suite
+        shell: bash
         env:
           COMMENT_FRAMES_BASE: ${{ github.event.before }}
         run: |

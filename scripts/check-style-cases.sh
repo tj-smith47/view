@@ -4276,7 +4276,7 @@ expect_frames() {
   want_rc="$1"
   want_line="$2"
   desc="$3"
-  out=$(bash "$CHECKER" --comment-frames "$CASE" 2>&1)
+  out=$(env -u COMMENT_FRAMES_BASE bash "$CHECKER" --comment-frames "$CASE" 2>&1)
   rc=$?
   named=1
   case "$out" in *"$want_line"*) ;; *) named=0 ;; esac
@@ -4407,6 +4407,26 @@ rc=$?
 desc='a ceiling raised and committed on top of its own base, caught via COMMENT_FRAMES_BASE=HEAD~1'
 named=1
 case "$out" in *'demo 1, above the 0 HEAD holds'*) ;; *) named=0 ;; esac
+if [ "$rc" = 1 ] && [ "$named" = 1 ]; then
+  printf 'ok %s - %s\n' "$n" "$desc"
+else
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=1\n  got  rc=%s\n%s\n' "$n" "$desc" "$rc" "$out"
+fi
+
+# a ref this repository has never heard of (CI's inherited base sha, inside a
+# scratch repo that never had that commit) must fail loudly naming the ref,
+# not read as though the ceiling never rose
+new_frames_case
+printf '// reads the row\nfn a() {}\n' > "$CASE/crates/demo/src/lib.rs"
+printf 'demo 0\n' > "$CASE/scripts/comment-frames.ceiling"
+commit_frames_base
+out=$(COMMENT_FRAMES_BASE=cd5bdcb91b97fd90f9a68e3ff9ed8258800e3104 \
+  bash "$CHECKER" --comment-frames "$CASE" 2>&1)
+rc=$?
+desc='a ref the repository does not have names itself in the failure'
+named=1
+case "$out" in *'does not have: cd5bdcb91b97fd90f9a68e3ff9ed8258800e3104'*) ;; *) named=0 ;; esac
 if [ "$rc" = 1 ] && [ "$named" = 1 ]; then
   printf 'ok %s - %s\n' "$n" "$desc"
 else
