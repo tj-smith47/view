@@ -1,5 +1,5 @@
                                 
-  +- Explorer -----------------+
+  + Explorer ------------------+
   |   - crates                 |
   |     + view-core            |
   |     - view-tui             |

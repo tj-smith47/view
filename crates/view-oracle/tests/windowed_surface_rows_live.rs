@@ -107,9 +107,22 @@ fn settle(engine: &mut EngineSession, step: &str) {
     );
 }
 
+/// One session the walk opens every case in.
+#[derive(Clone, Copy, Debug)]
+struct Look {
+    gaps: bool,
+    pill: bool,
+    bottom_split: bool,
+}
+
 /// The tape's layout: two files side by side under tiles, with a
 /// full-width window under them when `bottom_split` holds.
-fn session(dir: &Path, gaps: bool, pill: bool, bottom_split: bool) -> EngineSession {
+fn session(dir: &Path, look: Look) -> EngineSession {
+    let Look {
+        gaps,
+        pill,
+        bottom_split,
+    } = look;
     let ext: Vec<&str> = UI_EXT_OPTIONS_MULTIGRID
         .iter()
         .copied()
@@ -139,8 +152,8 @@ fn session(dir: &Path, gaps: bool, pill: bool, bottom_split: bool) -> EngineSess
     }
     let model = engine.model();
     assert_eq!(
-        (model.chrome_rows(), model.look.gaps),
-        (u16::from(pill), gaps),
+        (model.chrome_rows(), model.look.gaps, model.cmdline_rows()),
+        (u16::from(pill), gaps, 0),
         "the session is not the one the walk names"
     );
     engine
@@ -252,46 +265,14 @@ fn a_windowed_surface_frames_on_its_neighbours_ring_rows() {
     for gaps in [true, false] {
         for pill in [false, true] {
             for bottom_split in [false, true] {
-                let mut engine = session(&work, gaps, pill, bottom_split);
-                for &(surface, placement, anchor) in CASES {
-                    let label = format!(
-                        "{surface:?} {placement:?} {anchor:?} gaps={gaps} pill={pill} \
-                         bottom_split={bottom_split}"
-                    );
-                    engine.set_surface(surface, SurfaceLayout::new(placement, anchor, 30));
-                    toggle(&mut engine, surface, true);
-                    settle(&mut engine, &label);
-                    let (own, tiles, dump) = measure(&mut engine, surface);
-                    eprintln!("{label}\n  own {own:?}\n{dump}");
-                    assert!(
-                        !tiles.is_empty(),
-                        "{label}: no tile beside the surface\n{dump}"
-                    );
-                    let across = matches!(anchor, Anchor::Top | Anchor::Bottom);
-                    let (own_ends, tile_ends) = if across {
-                        (
-                            (own.2, own.3),
-                            (
-                                tiles.iter().map(|t| t.2).min().unwrap(),
-                                tiles.iter().map(|t| t.3).max().unwrap(),
-                            ),
-                        )
-                    } else {
-                        (
-                            (own.0, own.1),
-                            (
-                                tiles.iter().map(|t| t.0).min().unwrap(),
-                                tiles.iter().map(|t| t.1).max().unwrap(),
-                            ),
-                        )
-                    };
-                    if own_ends != tile_ends {
-                        found.push(format!(
-                            "{label}: frame edges {own_ends:?}, tiles' {tile_ends:?}\n{dump}"
-                        ));
-                    }
-                    toggle(&mut engine, surface, false);
-                    settle(&mut engine, &label);
+                let look = Look {
+                    gaps,
+                    pill,
+                    bottom_split,
+                };
+                let mut engine = session(&work, look);
+                for &case in CASES {
+                    found.extend(walk_case(&mut engine, look, case));
                 }
             }
         }
@@ -301,4 +282,65 @@ fn a_windowed_surface_frames_on_its_neighbours_ring_rows() {
         "surfaces off their neighbours' frame lines:\n{}",
         found.join("\n")
     );
+}
+
+/// Opens one case in `engine`, measures it and closes it again, answering
+/// each way its frame misses the tiles' lines.
+fn walk_case(
+    engine: &mut EngineSession,
+    look: Look,
+    (surface, placement, anchor): (NativeSurface, SurfacePlacement, Anchor),
+) -> Vec<String> {
+    let label = format!("{surface:?} {placement:?} {anchor:?} {look:?}");
+    engine.set_surface(surface, SurfaceLayout::new(placement, anchor, 30));
+    toggle(engine, surface, true);
+    settle(engine, &label);
+    let (own, tiles, dump) = measure(engine, surface);
+    eprintln!("{label}\n  own {own:?}\n{dump}");
+    assert!(
+        !tiles.is_empty(),
+        "{label}: no tile beside the surface\n{dump}"
+    );
+    let mut found = Vec::new();
+    let across = matches!(anchor, Anchor::Top | Anchor::Bottom);
+    let (own_ends, tile_ends) = if across {
+        (
+            (own.2, own.3),
+            (
+                tiles.iter().map(|t| t.2).min().unwrap(),
+                tiles.iter().map(|t| t.3).max().unwrap(),
+            ),
+        )
+    } else {
+        (
+            (own.0, own.1),
+            (
+                tiles.iter().map(|t| t.0).min().unwrap(),
+                tiles.iter().map(|t| t.1).max().unwrap(),
+            ),
+        )
+    };
+    if own_ends != tile_ends {
+        found.push(format!(
+            "{label}: frame edges {own_ends:?}, tiles' {tile_ends:?}\n{dump}"
+        ));
+    }
+    if !across {
+        // the ring is as wide on both sides, so a side surface's outer
+        // column mirrors the tiles' outermost frame column on the far side
+        let last = i32::from(COLS) - 1;
+        let (outer, expected) = if anchor == Anchor::Left {
+            (own.2, last - tiles.iter().map(|t| t.3).max().unwrap())
+        } else {
+            (own.3, last - tiles.iter().map(|t| t.2).min().unwrap())
+        };
+        if outer != expected {
+            found.push(format!(
+                "{label}: outer column {outer}, the tiles' ring {expected}\n{dump}"
+            ));
+        }
+    }
+    toggle(engine, surface, false);
+    settle(engine, &label);
+    found
 }

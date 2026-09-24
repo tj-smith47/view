@@ -1750,8 +1750,8 @@ fn a_gapless_junction_takes_the_crossing_glyph() {
     );
     assert_eq!(
         buf[(TILED_WIDTH - 1, row + height + 1)].symbol(),
-        "─",
-        "that row ends at the terminal edge, which draws no line of its own"
+        "┤",
+        "that row ends on the ring's right column"
     );
 }
 
@@ -2330,7 +2330,7 @@ fn a_two_cell_name_is_measured_in_cells_and_not_in_chars() {
 /// one that does not, over the corner and past the buffer.
 #[test]
 fn a_decomposed_name_stops_inside_the_edge() {
-    let slots = vec![(0, 0, TILED_WIDTH - 1, TILED_HEIGHT - 2)];
+    let slots = vec![(0, 0, TILED_WIDTH - 2, TILED_HEIGHT - 2)];
     let plain = edge_with_name(&slots, "left.rs".to_string());
     // two combining marks, which take no cell of their own
     for (cells, fits) in [(76_usize, true), (77, false)] {
@@ -2359,7 +2359,7 @@ fn a_decomposed_name_stops_inside_the_edge() {
 /// accent standing after the letter.
 #[test]
 fn a_decomposed_name_paints_as_its_composed_form() {
-    let slots = vec![(0, 0, TILED_WIDTH - 1, TILED_HEIGHT - 2)];
+    let slots = vec![(0, 0, TILED_WIDTH - 2, TILED_HEIGHT - 2)];
     let cells = |name: &str| {
         let mut model = tiled_model(false, TILED_HEIGHT, &slots);
         let _ = update(
@@ -3404,12 +3404,39 @@ fn every_windowed_surface_frames_on_the_tile_ring_rows() {
         for gaps in [true, false] {
             for pill in [0u16, 1] {
                 for bottom_split in [false, true] {
-                    for case in cases {
-                        surface_frames_on_the_tile_rows(size, gaps, pill, bottom_split, case);
+                    for keeps_cmdline in [false, true] {
+                        for case in cases {
+                            surface_frames_on_the_tile_rows(
+                                size,
+                                gaps,
+                                pill,
+                                (bottom_split, keeps_cmdline),
+                                case,
+                            );
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/// Gapless tiles close on the right as they do on the left: the rightmost
+/// tile's frame runs down the column past its slot, on every row it spans.
+#[test]
+fn a_gapless_rightmost_tile_closes_its_frame_on_the_right() {
+    let tiles = tiled(false);
+    let buf = tiled_frame(&tiles.model);
+    let (origin_row, origin_col) = view_surface::grid_origin(&tiles.model);
+    let (row, col, width, height) = tiles.slots[1];
+    let right = origin_col + col + width;
+    assert!(right < buf.area.width, "the right edge column is on screen");
+    for r in origin_row + row - 1..=origin_row + row + height {
+        assert!(
+            "╮┤╯│".contains(buf[(right, r)].symbol()),
+            "row {r}: the right edge at column {right} is {:?}",
+            buf[(right, r)].symbol()
+        );
     }
 }
 
@@ -3419,31 +3446,48 @@ fn surface_frames_on_the_tile_rows(
     size: (u16, u16),
     gaps: bool,
     pill: u16,
-    bottom_split: bool,
+    (bottom_split, keeps_cmdline): (bool, bool),
     (surface, placement, anchor): (
         view_core::native::geometry::NativeSurface,
         view_core::native::geometry::SurfacePlacement,
         view_core::native::geometry::Anchor,
     ),
 ) {
+    use view_core::native::ext::Ext;
     use view_core::native::geometry::{Anchor, SurfacePlacement};
     let label = format!(
         "{size:?} gaps={gaps} pill={pill} bottom_split={bottom_split} \
-                             {surface:?} {placement:?} {anchor:?}"
+         keeps_cmdline={keeps_cmdline} {surface:?} {placement:?} {anchor:?}"
     );
     let windowed = placement == SurfacePlacement::Windowed;
-    let grid = outer_grid_at(gaps, size, pill);
-    let (slots, own) = walk_layout(grid, bottom_split, windowed.then_some(anchor));
+    let (grid_width, grid_height) = outer_grid_at(gaps, size, pill);
+    // nvim's command-line row is the grid's last, under every window
+    let windows = (grid_width, grid_height - u16::from(keeps_cmdline));
+    let (slots, own_slot) = walk_layout(windows, bottom_split, windowed.then_some(anchor));
     let mut model = tiled_model_at(gaps, size, pill, &slots);
     if pill == 1 {
         with_the_pill(&mut model);
     }
+    if keeps_cmdline {
+        // `with_nvims_command_line` alone would take the pill's tab line
+        // back as well
+        let mut surfaces = vec![Ext::LineGrid, Ext::Messages];
+        if pill == 1 {
+            surfaces.push(Ext::Tabline);
+        }
+        model.attach_surfaces(surfaces);
+    }
+    assert_eq!(
+        (model.chrome_rows(), model.cmdline_rows()),
+        (pill, u16::from(keeps_cmdline)),
+        "{label}: the fixture's own rows"
+    );
     open_surface(
         &mut model,
         surface,
         placement,
         anchor,
-        own.map(|index| (index, slots[index])),
+        own_slot.map(|index| (index, slots[index])),
     );
     // the surface's box on the terminal, as inclusive
     // (top, bottom, left, right)
@@ -3490,6 +3534,42 @@ fn surface_frames_on_the_tile_rows(
         own, tiles,
         "{label}: the surface's frame line at {facing} ends on {own:?}, \
          the tiles' frames on {tiles:?}"
+    );
+    if across {
+        return;
+    }
+    // the ring is as wide on both sides, so the edge column a side surface
+    // frames on mirrors the outermost frame column on the far side
+    let (_, origin_col) = view_surface::grid_origin(&model);
+    let frame_cols = slots
+        .iter()
+        .enumerate()
+        .filter(|&(index, _)| Some(index) != own_slot)
+        .map(|(_, &(_, col, width, _))| {
+            let left = origin_col + col;
+            if gaps {
+                (left, left + width - 1)
+            } else {
+                (left - 1, left + width)
+            }
+        });
+    let (outer, expected) = if anchor == Anchor::Left {
+        let far = frame_cols.map(|(_, right)| right).max();
+        (left, far.map(|far| size.0 - 1 - far))
+    } else {
+        let far = frame_cols.map(|(left, _)| left).min();
+        (right, far.map(|far| size.0 - 1 - far))
+    };
+    assert_eq!(
+        Some(outer),
+        expected,
+        "{label}: the surface's outer column against the tiles' ring"
+    );
+    let row = (top + bottom) / 2;
+    assert!(
+        "│┤├".contains(buf[(outer, row)].symbol()),
+        "{label}: the surface's outer column {outer} is painted {:?} at row {row}",
+        buf[(outer, row)].symbol()
     );
 }
 

@@ -1256,8 +1256,9 @@ const MARKER_ROWS: usize = 1;
 
 /// The entered panel's title: the border is the one surface that shows in
 /// every state, so it carries the fact that keys now belong to the panel
-/// and names the way back out.
-const FOCUSED_TITLE: &str = "AI Agent -- focused, Esc returns";
+/// and names the way back out. It spells none of the transcript's entry
+/// marks, which the acceptance scripts find on screen.
+const FOCUSED_TITLE: &str = "AI Agent: focused, Esc returns";
 
 /// Named after the verb it points at (`update::mod`'s `feature == "ai" &&
 /// (verb == "open" || verb == "focus")` arm) -- shown beneath a pending

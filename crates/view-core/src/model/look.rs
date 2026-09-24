@@ -61,15 +61,16 @@ impl Look {
         Self { panes, gaps }
     }
 
-    /// Cells the outer ring takes off the width: 0, 1 gapless, 2 gapped.
-    /// The height loses only its top row, for the reason
-    /// [`grid_target_for`](crate::model::grid_target_for) gives.
+    /// Cells the outer ring takes off the width: 0 under nvim, 2 under
+    /// either tiled look, one column on each side, so the rightmost tile
+    /// has a column to close its frame on. The height loses only its top
+    /// row, for the reason [`grid_target_for`](crate::model::grid_target_for)
+    /// gives.
     #[must_use]
     pub const fn ring(self) -> u16 {
-        match (self.panes, self.gaps) {
-            (Panes::Nvim, _) => 0,
-            (Panes::Tiles, false) => 1,
-            (Panes::Tiles, true) => 2,
+        match self.panes {
+            Panes::Nvim => 0,
+            Panes::Tiles => 2,
         }
     }
 
@@ -127,9 +128,11 @@ impl Look {
     /// judged by [`Look::frames`].
     ///
     /// The frame painter and the edge text read this box. The windowed
-    /// palette band insets one ring where [`Look::inset`] is non-zero,
-    /// which is exactly where this answers `Some`, so its border lands on
-    /// the same rows and columns.
+    /// palette band and every overlay
+    /// [`Model::overlay_rect`](crate::model::Model::overlay_rect) resolves
+    /// inset one ring where [`Look::inset`] is non-zero, which is exactly
+    /// where this answers `Some`, so their borders land on the same rows
+    /// and columns.
     #[must_use]
     pub const fn frame_box(self, slot: (u16, u16, u16, u16)) -> Option<(u16, u16, u16, u16)> {
         match (self.panes, self.gaps) {

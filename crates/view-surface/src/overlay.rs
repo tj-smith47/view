@@ -405,20 +405,17 @@ const TRUNCATION_MARK: char = '…';
 /// the row's only readable text, painted in the row's least readable style.
 fn top_edge(width: u16, borders: BorderSet, title: &str) -> Vec<Span> {
     let span = width - 2;
-    // the title needs a horizontal glyph on each side of it to read as set
-    // into the edge rather than as replacing it, and the blank column
-    // [`title_label`] puts inside each of those: four cells of the run are
-    // never the title's to spend
-    let (label, label_cells) = title_label(&sanitized(title), span.saturating_sub(4));
+    let (first, last) = title_cells(width);
+    let (label, label_cells) = title_label(
+        &sanitized(title),
+        last.saturating_add(1).saturating_sub(first),
+    );
     if label_cells > 0 {
-        let mut lead = String::new();
-        lead.push(borders.top_left);
-        lead.push(borders.horizontal);
+        let lead = borders.top_left.to_string();
         let mut tail = String::new();
         // no wrap: every non-empty label is at most the budget above plus
-        // its own two blank columns, which leaves the glyph on each side of
-        // it and never reaches into them
-        push_run(&mut tail, borders.horizontal, span - label_cells - 1);
+        // its own two blank columns, which is the whole run at most
+        push_run(&mut tail, borders.horizontal, span - label_cells);
         tail.push(borders.top_right);
         vec![
             Span::plain(lead),
@@ -432,6 +429,17 @@ fn top_edge(width: u16, borders: BorderSet, title: &str) -> Vec<Span> {
         edge.push(borders.top_right);
         vec![Span::plain(edge)]
     }
+}
+
+/// The first and last cell a name set into a frame edge `width` cells wide
+/// may take, as offsets from the edge's left corner: the corner and one
+/// blank cell stand on each side of it.
+///
+/// An overlay's title and a tile's buffer name both read this, so the two
+/// names sit the same way when they stand on one row.
+#[must_use]
+pub const fn title_cells(width: u16) -> (u16, u16) {
+    (2, width.saturating_sub(3))
 }
 
 /// The label [`top_edge`] sets into an edge with `budget` cells to spare

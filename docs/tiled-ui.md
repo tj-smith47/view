@@ -164,8 +164,9 @@ so view leaves its grid at the slot size and draws the tile bare.
 
 Gapless tiles need no room at all. The one cell between two windows is the
 cell nvim already paints its separator column and status row into, and view
-restyles those cells as the frame. The screen's top row and left column come
-from the outer grid attaching one row and one column short.
+restyles those cells as the frame. The screen's top row and its left and
+right columns come from the outer grid attaching one row and two columns
+short.
 
 Where view draws the command line it holds `cmdheight` at 0, so the lowest
 window's status row is the outer grid's last row. Under gapped tiles that
@@ -193,18 +194,18 @@ each have their own `[ui.surfaces.<id>]` table, with a `placement`, an
 `anchor` and a `size`. `placement` `"overlay"` floats the surface over
 your buffer. `"windowed"` gives it a window of its own in nvim's layout,
 so your buffers make room for it and every window command reaches it.
-Under tiles, a surface at a side edge frames on the same rows as the tiles
-beside it in both placements. The palette is the one surface that takes
-its own band without a window number: it covers the rows at its anchored
-edge while `:` is open, and your buffers stay exactly where they were
-under it. A window command lands on the buffer you were already in, and
-`:` opens the band the same way it opens the centred palette. `anchor` is
-the edge, or for the notification stream's toast stack the corner, it
-opens at, and its own accepted words and default change with `placement`:
-a centred float has no centred window to become, and a corner toast stack
-has no corner tile. `size` is its share of the terminal; whether the same
-number reaches both placements or windowed alone depends on the surface,
-named below.
+Under tiles, a surface at a side edge frames on the same rows and edge
+column as the tiles beside it in both placements. The palette is the one
+surface that takes its own band without a window number: it covers the
+rows at its anchored edge while `:` is open, and your buffers stay exactly
+where they were under it. A window command lands on the buffer you were
+already in, and `:` opens the band the same way it opens the centred
+palette. `anchor` is the edge, or for the notification stream's toast
+stack the corner, it opens at, and its own accepted words and default
+change with `placement`: a centred float has no centred window to become,
+and a corner toast stack has no corner tile. `size` is its share of the
+terminal; whether the same number reaches both placements or windowed alone
+depends on the surface, named below.
 
 ```toml
 [ui.surfaces.tree]

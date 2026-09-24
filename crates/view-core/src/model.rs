@@ -1216,18 +1216,25 @@ impl Model {
     /// -- the ruler and the search count among it. The share stays a share
     /// of what an overlay may actually have.
     ///
-    /// Under gapped tiles those rows lose one ring on every side as well,
-    /// the ring [`Look::inset`] leaves around
-    /// the outermost frames, so a full-height side panel's border stands on
-    /// the rows and the edge column the tiles beside it frame on.
+    /// Under tiles the band also loses the command-line row nvim keeps at
+    /// the foot, since the frames stop above it. Under gapped tiles it
+    /// loses the one-cell ring [`Look::inset`] leaves around the outermost
+    /// frames as well, so a full-height side panel's border stands on the
+    /// rows and the edge column the tiles beside it frame on.
     #[must_use]
     pub fn overlay_rect(&self, overlay: &Overlay) -> OverlayRect {
         let top = self.chrome_rows();
         let (ring_rows, ring_cols) = self.look.inset();
+        let foot = if self.look.panes == Panes::Tiles {
+            self.cmdline_rows()
+        } else {
+            0
+        };
         let content = self
             .term_height
             .saturating_sub(top)
-            .saturating_sub(self.statusline_rows());
+            .saturating_sub(self.statusline_rows())
+            .saturating_sub(foot);
         let rect = overlay.geometry.rect(
             self.term_width.saturating_sub(ring_cols * 2),
             content.saturating_sub(ring_rows * 2),
@@ -3055,7 +3062,7 @@ mod tests {
         );
 
         m.look = Look::new(Panes::Tiles, false);
-        assert_eq!(m.grid_target(), (79, 23));
+        assert_eq!(m.grid_target(), (78, 23));
     }
 
     /// Which sessions nvim keeps a row at the grid's foot for. The row

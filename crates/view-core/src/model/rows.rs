@@ -77,7 +77,7 @@ impl Model {
 /// is on, view's own bottom bar.
 ///
 /// `ring` is what tiles mode spends framing the screen itself: two cells
-/// gapped, one gapless, none under `panes = "nvim"`. It comes off the width
+/// under tiles, none under `panes = "nvim"`. It comes off the width
 /// whole, and the grid is placed one cell in from the terminal's left edge.
 /// Only the ring's top row comes off the height. Under tiles view holds
 /// `laststatus = 2` whatever `[native] statusline` says, so every bottom

@@ -1,5 +1,5 @@
                                                                                 
- ╭ left.rs ───────────────────────────╮ ╭ right.rs ─────╭─ AI Agent -- focu… ─╮ 
+ ╭ left.rs ───────────────────────────╮ ╭ right.rs ─────╭ AI Agent: focused,… ╮ 
  │left                                │ │right          │ >                   │ 
  │                                    │ │               │ ─────────────────── │ 
  │                                    │ │               │   ⠋ what does the g │ 
@@ -24,7 +24,7 @@
                                                                                 
 --- fg ---
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCDDAAAAAAAAAAAAAAAAAAADDA
+ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCDAAAAAAAAAAAAAAAAAAAAADA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAAADA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAAADA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAAADA

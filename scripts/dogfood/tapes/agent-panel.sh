@@ -97,7 +97,7 @@ tmux -L "$SOCKET" new-session -d -s cap -x 220 -y 50 "$BIN" --config "$CFG" view
   tmux -L "$SOCKET" send-keys -t cap 'propose' Enter
   sleep 8
   # the AI panel still has focus after submitting the turn (docs/keymaps.md:
-  # "AI Agent -- focused, Esc returns"), and ':' typed there goes into its
+  # "AI Agent: focused, Esc returns"), and ':' typed there goes into its
   # own input box rather than opening the command line -- Esc first, so the
   # dismiss verb below actually reaches `:View notifications dismiss`.
   tmux -L "$SOCKET" send-keys -t cap Escape

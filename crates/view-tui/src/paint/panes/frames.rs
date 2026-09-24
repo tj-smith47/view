@@ -216,7 +216,8 @@ fn gapless_edge(pane: &Pane, area: Rect, foot: u16, screen: Rect) -> Option<Rect
     let left = area.x.saturating_add(col).saturating_sub(1);
     let right = area
         .x
-        .saturating_add(col.saturating_add(width).min(area.width.saturating_sub(1)));
+        .saturating_add(col.saturating_add(width))
+        .min(screen.x.saturating_add(screen.width).saturating_sub(1));
     clipped(
         Rect::new(
             left,
@@ -336,8 +337,8 @@ fn write_edge(groups: &[Vec<Span>], base: Style, theme: &Theme, edge: Rect, buf:
     if edge.width < 5 {
         return;
     }
-    let first = edge.x.saturating_add(2);
-    let last = edge.x.saturating_add(edge.width).saturating_sub(3);
+    let (first, last) = view_surface::overlay::title_cells(edge.width);
+    let (first, last) = (edge.x.saturating_add(first), edge.x.saturating_add(last));
     // the closing blank's own cell, and the last cell inside the edge that
     // any write below may reach: `set_border_cell` indexes the buffer with
     // no bounds of its own, so a run that walked past this would panic
@@ -537,9 +538,9 @@ fn paint_gapless(
 
 /// Every screen cell the gapless lattice runs through: the column right of
 /// each tile and the row under it, which are the cells nvim draws its
-/// separator and status row into, plus the ring's top row and left column,
-/// which are the edges the topmost and leftmost tiles have no neighbour to
-/// share.
+/// separator and status row into, plus the ring's top row and its left and
+/// right columns, which are the edges the outermost tiles have no
+/// neighbour to share.
 fn lattice(panes: &[Pane], area: Rect, foot: u16, screen: Rect) -> BTreeSet<Cell> {
     let mut cells = BTreeSet::new();
     // a row nvim keeps for its command line is where the mode message and
@@ -563,11 +564,15 @@ fn lattice(panes: &[Pane], area: Rect, foot: u16, screen: Rect) -> BTreeSet<Cell
         return cells;
     };
     let bottom = cells.iter().map(|&(row, _)| row).max().unwrap_or(top);
-    for col in left..area.x.saturating_add(area.width).min(screen.width) {
+    let right = area.x.saturating_add(area.width);
+    for col in left..=right.min(screen.width.saturating_sub(1)) {
         cells.insert((top, col));
     }
     for row in top..=bottom {
         cells.insert((row, left));
+        if right < screen.width {
+            cells.insert((row, right));
+        }
     }
     cells
 }

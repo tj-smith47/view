@@ -7287,10 +7287,11 @@ mod tests {
             let layer = Layer::new(rect, native_picker(), model.caps);
             let buf = paint_layer_alone(&model, layer, 30, 10);
 
-            // the top edge is `<corner><rule> Files <rule...><corner>` on
-            // every tier, so the title's own glyphs start three columns
-            // into the rect whichever charset drew it
-            let title_cell = &buf[(rect.col + 3, rect.row)];
+            // the top edge is `<corner> Files <rule...><corner>` on every
+            // tier, so the title's own glyphs start where a tile's name
+            // does whichever charset drew it
+            let (first, _) = view_surface::overlay::title_cells(rect.width);
+            let title_cell = &buf[(rect.col + first, rect.row)];
             let edge_cell = &buf[(rect.col, rect.row)];
             let at = format!("truecolor={truecolor}");
             assert_eq!(
