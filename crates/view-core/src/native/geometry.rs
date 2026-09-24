@@ -593,11 +593,10 @@ pub const PALETTE_BAND_MIN_ROWS: u16 = 4;
 /// to land. A terminal too short to hold the floor plus its own gap has
 /// nowhere left to shrink, so this open falls back to the centred float.
 ///
-/// Under gaps the band sits two rings in from the terminal edge, the same
-/// two `frames::paint_frames` draws around a real tile (the outer one
-/// view's own window layout leaves around a split, the inner one the
-/// frame's own `box_edge` inset draws), so the band's border lines up with
-/// a buffer tile's to the column.
+/// Under gaps the band sits one ring in from the terminal edge, the ring
+/// view's own window layout leaves around the tiles, so the band's border
+/// lands on the rows and columns a buffer tile's frame
+/// ([`Look::frame_box`](crate::model::Look::frame_box)) is drawn on.
 #[must_use]
 pub fn palette_rect(
     layout: SurfaceLayout,
@@ -618,7 +617,7 @@ pub fn palette_rect(
         .with_anchor(layout.anchor)
         .rect(term_w, bounds_h);
     let content_height = band.height.max(PALETTE_BAND_MIN_ROWS);
-    let rings: u16 = if gaps { 2 } else { 0 };
+    let rings: u16 = u16::from(gaps);
     let reserved_height = content_height.saturating_add(rings.saturating_mul(2));
     if reserved_height > bounds_h {
         return centred();
@@ -665,6 +664,61 @@ mod tests {
                         "size={size} bounds_h={bounds_h} gaps={gaps}: rect \
                          {rect:?} reaches past the terminal it was resolved against"
                     );
+                }
+            }
+        }
+    }
+
+    /// The windowed band's border stands on the rows a buffer tile's frame
+    /// stands on at the edge it is anchored to, and under gaps on the same
+    /// columns, at every terminal size, with and without the pill.
+    #[test]
+    fn the_palette_band_frames_on_the_tile_frame_rows() {
+        use crate::model::{grid_target_for, Look, Panes};
+        let anchors = [
+            Anchor::Center,
+            Anchor::Left,
+            Anchor::Right,
+            Anchor::Top,
+            Anchor::Bottom,
+            Anchor::TopLeft,
+            Anchor::TopRight,
+            Anchor::BottomLeft,
+            Anchor::BottomRight,
+        ];
+        for gaps in [false, true] {
+            let look = Look::new(Panes::Tiles, gaps);
+            let offset = look.grid_offset();
+            for term_w in 20..=120u16 {
+                for term_h in 8..=50u16 {
+                    for pill in [0u16, 1] {
+                        let bounds_h = term_h - pill;
+                        let (grid_w, grid_h) =
+                            grid_target_for((term_w, term_h), pill, false, look.ring());
+                        let slot = (0, 0, grid_w, grid_h - 1);
+                        let [top, bottom] = look.edge_rows(slot);
+                        let tile_top = if gaps { top + offset } else { 0 };
+                        let tile_bottom = bottom + offset;
+                        for anchor in anchors {
+                            let layout = SurfaceLayout::new(SurfacePlacement::Windowed, anchor, 30);
+                            let rect = palette_rect(layout, true, gaps, term_w, bounds_h);
+                            let rings = u16::from(gaps);
+                            if rect.width != term_w - 2 * rings {
+                                continue;
+                            }
+                            let case =
+                                format!("{term_w}x{term_h} pill={pill} gaps={gaps} {anchor:?}");
+                            if anchor == Anchor::Bottom {
+                                assert_eq!(rect.row + rect.height - 1, tile_bottom, "{case}");
+                            } else {
+                                assert_eq!(rect.row, tile_top, "{case}");
+                            }
+                            if let Some((_, col, width, _)) = look.frame_box(slot) {
+                                assert_eq!(rect.col, col + offset, "{case}");
+                                assert_eq!(rect.col + rect.width, col + width + offset, "{case}");
+                            }
+                        }
+                    }
                 }
             }
         }

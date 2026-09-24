@@ -1,13 +1,13 @@
 //! The frame view draws around every window under `panes = "tiles"`.
 //!
 //! Gapped and gapless are the same picture drawn in two places. A gapped
-//! tile's frame sits one cell inside the slot nvim gave the window, with a
-//! cell of gap outside it, so two neighbouring frames never touch. A
-//! gapless tile has no room of its own: its frame is the cell *between* two
-//! slots, which is the separator column and the status row nvim already
-//! paints there, restyled. One cell between two tiles is what makes a
-//! junction glyph possible at all, since a doubled line leaves nowhere for
-//! one to sit.
+//! tile's frame is the outer ring of the slot nvim gave the window, and
+//! the separator column and status row nvim paints just past the slot are
+//! cleared to the one cell of gap between two frames. A gapless tile has
+//! no room of its own: its frame is the cell *between* two slots, which is
+//! that same separator column and status row, restyled. One cell between
+//! two tiles is what makes a junction glyph possible at all, since a
+//! doubled line leaves nowhere for one to sit.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -61,7 +61,7 @@ pub(crate) fn paint_frames(
     let foot = area.height.saturating_sub(model.cmdline_rows());
     if look.gaps {
         paint_gapped(
-            panes, active, theme, borders, quiet, accent, area, foot, damage, buf,
+            panes, look, active, theme, borders, quiet, accent, area, foot, damage, buf,
         );
     } else {
         paint_gapless(
@@ -162,7 +162,7 @@ fn paint_edges(
             if !framed(pane) {
                 continue;
             }
-            let (top, bottom) = gapped_edges(pane, area, buf.area);
+            let (top, bottom) = gapped_edges(look, pane, area, buf.area);
             if let Some(edge) = top.filter(|edge| damage.covers(edge.y)) {
                 paint_name(status, is_active, theme, edge, buf);
             }
@@ -179,13 +179,10 @@ fn paint_edges(
 
 /// A gapped tile's top and bottom frame edges as screen rects, in the same
 /// coordinates [`box_edge`] draws the box in.
-fn gapped_edges(pane: &Pane, area: Rect, screen: Rect) -> (Option<Rect>, Option<Rect>) {
-    let (row, col, width, height) = pane.slot;
-    let (box_w, box_h) = (width.saturating_sub(2), height.saturating_sub(2));
-    if box_w < 2 || box_h < 2 {
+fn gapped_edges(look: Look, pane: &Pane, area: Rect, screen: Rect) -> (Option<Rect>, Option<Rect>) {
+    let Some((top, left, box_w, box_h)) = look.frame_box(pane.slot) else {
         return (None, None);
-    }
-    let (top, left) = (row.saturating_add(1), col.saturating_add(1));
+    };
     let bottom = top.saturating_add(box_h).saturating_sub(1);
     let run = |r: u16| {
         (r < area.height && left < area.width).then(|| {
@@ -388,6 +385,7 @@ fn write_edge(groups: &[Vec<Span>], base: Style, theme: &Theme, edge: Rect, buf:
 #[allow(clippy::too_many_arguments)]
 fn paint_gapped(
     panes: &[Pane],
+    look: Look,
     active: Option<GridId>,
     theme: &Theme,
     borders: BorderSet,
@@ -398,37 +396,32 @@ fn paint_gapped(
     damage: &Damage,
     buf: &mut Buffer,
 ) {
-    // two rings are cleared per tile. The slot's own outermost row and
-    // column are the gap the frame sits inside, and the cell just beyond
-    // the slot is where nvim paints the separator column and the status
-    // row; a stale separator left in the gap row survives every later
-    // redraw, because nvim believes the window's own grid covers it
+    // the gap is the separator column and the status row nvim paints just
+    // past the slot, cleared here; a stale separator left there survives
+    // every later redraw, because nvim believes the window's own grid
+    // covers it
     let gap = ratatui_style(theme.normal());
     for pane in panes.iter().filter(|pane| is_tile(pane) && framed(pane)) {
         let (row, col, width, height) = pane.slot;
         // a row nvim keeps for its command line is where the mode message
         // and the answer to every prompt are written, so every clear stops
-        // above `foot`; any other row under a slot is the status row the
-        // frame replaces
+        // above `foot`; any other row under a slot is the status row
         let under = u16::from(row.saturating_add(height) < foot);
-        let (span_w, span_h) = (width.saturating_add(1), height.saturating_add(under));
-        clear(row, col, span_w, 1, gap, area, damage, buf);
         clear(
-            row.saturating_add(height).saturating_sub(1),
-            col,
-            span_w,
-            1 + under,
+            row,
+            col.saturating_add(width),
+            1,
+            height.saturating_add(under),
             gap,
             area,
             damage,
             buf,
         );
-        clear(row, col, 1, span_h, gap, area, damage, buf);
         clear(
-            row,
-            col.saturating_add(width).saturating_sub(1),
-            2,
-            span_h,
+            row.saturating_add(height),
+            col,
+            width.saturating_add(1),
+            under,
             gap,
             area,
             damage,
@@ -436,23 +429,15 @@ fn paint_gapped(
         );
     }
     for pane in panes.iter().filter(|pane| is_tile(pane) && framed(pane)) {
-        let (row, col, width, height) = pane.slot;
+        let Some((row, col, width, height)) = look.frame_box(pane.slot) else {
+            continue;
+        };
         let style = if active == Some(pane.id) {
             accent
         } else {
             quiet
         };
-        box_edge(
-            row.saturating_add(1),
-            col.saturating_add(1),
-            width.saturating_sub(2),
-            height.saturating_sub(2),
-            borders,
-            style,
-            area,
-            damage,
-            buf,
-        );
+        box_edge(row, col, width, height, borders, style, area, damage, buf);
     }
 }
 
@@ -675,8 +660,8 @@ fn screen(row: u16, col: u16, area: Rect, damage: &Damage) -> Option<(u16, u16)>
 /// `area` is already the band's own rect (`Model::palette_rect`'s
 /// `windowed` answer): the caller's gap ring, if any, is baked into that
 /// rect by `palette_rect` itself, so the border is drawn flush with
-/// `area`'s own edges here, exactly where a real tile's `box_edge` call
-/// draws one cell inside its already-gapped slot.
+/// `area`'s own edges here, the way a real tile's `box_edge` call draws on
+/// its slot's own edges.
 ///
 /// The border is always `theme.accent()`, never `quiet_style`: a real tile
 /// only earns the active colour while the user is in it, but the band holds

@@ -1344,11 +1344,16 @@ struct Tiles {
 }
 
 fn tiled(gaps: bool) -> Tiles {
-    let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
+    tiled_at(gaps, (TILED_WIDTH, TILED_HEIGHT), 0)
+}
+
+/// [`tiled`] on a terminal of `size` with `chrome_rows` of pill above the
+/// lattice.
+fn tiled_at(gaps: bool, size: (u16, u16), chrome_rows: u16) -> Tiles {
+    let (grid_width, grid_height) = outer_grid_at(gaps, size, chrome_rows);
     // tiles hold nvim at `laststatus = 2` whatever `[native] statusline`
-    // says, so every window has a status row of its own under it -- the
-    // row the frame's bottom edge is painted over -- and a session owning
-    // the command line keeps no row for it
+    // says, so every window has a status row of its own under it, and a
+    // session owning the command line keeps no row for it
     let window_height = grid_height - 1;
     let left_width = (grid_width - 1) / 2;
     let right_col = left_width + 1;
@@ -1357,7 +1362,22 @@ fn tiled(gaps: bool) -> Tiles {
         (0, right_col, grid_width - right_col, window_height),
     ];
     Tiles {
-        model: tiled_model(gaps, TILED_HEIGHT, &slots),
+        model: tiled_model_at(gaps, size, chrome_rows, &slots),
+        slots,
+    }
+}
+
+/// A `:split` on a terminal of `size`: two windows stacked, each with its
+/// own status row under it.
+fn stacked_at(gaps: bool, size: (u16, u16), chrome_rows: u16) -> Tiles {
+    let (grid_width, grid_height) = outer_grid_at(gaps, size, chrome_rows);
+    let top_height = (grid_height - 2).div_ceil(2);
+    let slots = vec![
+        (0, 0, grid_width, top_height),
+        (top_height + 1, 0, grid_width, grid_height - 2 - top_height),
+    ];
+    Tiles {
+        model: tiled_model_at(gaps, size, chrome_rows, &slots),
         slots,
     }
 }
@@ -1392,8 +1412,12 @@ fn tiled_nested(gaps: bool) -> Tiles {
 /// The size of grid 1 under a look, which is the terminal less the ring the
 /// look spends on its outer frame.
 fn outer_grid(gaps: bool, height: u16) -> (u16, u16) {
+    outer_grid_at(gaps, (TILED_WIDTH, height), 0)
+}
+
+fn outer_grid_at(gaps: bool, size: (u16, u16), chrome_rows: u16) -> (u16, u16) {
     let look = view_core::model::Look::new(view_core::model::Panes::Tiles, gaps);
-    view_core::model::grid_target_for((TILED_WIDTH, height), 0, false, look.ring())
+    view_core::model::grid_target_for(size, chrome_rows, false, look.ring())
 }
 
 /// Hands the command line back to nvim, which is the session nvim keeps a
@@ -1409,11 +1433,22 @@ fn with_nvims_command_line(model: &mut Model) {
 }
 
 fn tiled_model(gaps: bool, height: u16, slots: &[(u16, u16, u16, u16)]) -> Model {
-    let (grid_width, grid_height) = outer_grid(gaps, height);
+    tiled_model_at(gaps, (TILED_WIDTH, height), 0, slots)
+}
+
+/// [`tiled_model`] on a terminal of `size`, its grid 1 sized for
+/// `chrome_rows` of pill; the caller attaches the tab line that fills them.
+fn tiled_model_at(
+    gaps: bool,
+    size: (u16, u16),
+    chrome_rows: u16,
+    slots: &[(u16, u16, u16, u16)],
+) -> Model {
+    let (grid_width, grid_height) = outer_grid_at(gaps, size, chrome_rows);
     let look = view_core::model::Look::new(view_core::model::Panes::Tiles, gaps);
     let mut model = Model::new().with_look(look);
-    model.term_width = TILED_WIDTH;
-    model.term_height = height;
+    model.term_width = size.0;
+    model.term_height = size.1;
     model.statusline_enabled = true;
     // the shipped attach: view owns the command line and the message area,
     // so the takeover holds `cmdheight` at 0 and the grid's last row is a
@@ -1533,29 +1568,143 @@ fn frame_lines(buf: &Buffer) -> (Vec<u16>, Vec<u16>) {
     (cols, rows)
 }
 
+/// Paints what nvim puts on grid 1 around its windows: a `│` in every
+/// separator column and a status line in every status row.
+fn with_nvims_own_lattice(tiles: &mut Tiles) {
+    let (grid_width, grid_height) = tiles
+        .model
+        .engine
+        .grids()
+        .grid(view_core::grid::registry::GLOBAL_GRID)
+        .map(view_core::grid::Grid::size)
+        .expect("grid 1 is sized");
+    let mut rows = vec![vec![' '; usize::from(grid_width)]; usize::from(grid_height)];
+    for &(row, col, width, height) in &tiles.slots {
+        let (sep, status) = (col + width, row + height);
+        for r in row..=status.min(grid_height - 1) {
+            if sep < grid_width {
+                rows[usize::from(r)][usize::from(sep)] = '│';
+            }
+        }
+        if status < grid_height {
+            for c in col..(col + width).min(grid_width) {
+                rows[usize::from(status)][usize::from(c)] = '=';
+            }
+        }
+    }
+    let mut events: Vec<UiEvent> = rows
+        .iter()
+        .enumerate()
+        .map(|(r, cells)| line(1, r as u64, &cells.iter().collect::<String>(), 0))
+        .collect();
+    events.push(UiEvent::Flush);
+    drive(&mut tiles.model, events);
+}
+
+/// Every column and every row a frame corner stands in, read back off the
+/// composited screen. Corners survive an edge filled with text, which a
+/// count of line glyphs does not at narrow widths.
+fn corner_lines(buf: &Buffer) -> (Vec<u16>, Vec<u16>) {
+    let corner = |col: u16, row: u16| "╭╮╰╯".contains(buf[(col, row)].symbol());
+    let cols = (0..buf.area.width)
+        .filter(|&col| (0..buf.area.height).any(|row| corner(col, row)))
+        .collect();
+    let rows = (0..buf.area.height)
+        .filter(|&row| (0..buf.area.width).any(|col| corner(col, row)))
+        .collect();
+    (cols, rows)
+}
+
+/// Neighbours side by side and stacked, at every width a terminal is
+/// likely to have: exactly one cell lies between the facing frame lines,
+/// it is gap, and nothing nvim painted there survives.
 #[test]
-fn a_gapped_frame_leaves_two_cells_between_neighbouring_tiles() {
-    let tiles = tiled(true);
-    let buf = tiled_frame(&tiles.model);
-    let (cols, _) = frame_lines(&buf);
-    assert_eq!(
-        cols.len(),
-        4,
-        "two gapped tiles carry two vertical frame runs each: {cols:?}"
-    );
-    let (left_edge, right_edge) = (cols[1], cols[2]);
-    assert_eq!(
-        right_edge - left_edge - 1,
-        3,
-        "two gaps and nvim's separator column sit between the frames: {cols:?}"
-    );
-    for col in (left_edge + 1)..right_edge {
-        for row in 0..TILED_HEIGHT {
+fn two_neighbours_sit_one_gap_apart_on_both_axes() {
+    for width in 20..=120u16 {
+        for stacked in [false, true] {
+            let mut tiles = if stacked {
+                stacked_at(true, (width, TILED_HEIGHT), 0)
+            } else {
+                tiled_at(true, (width, TILED_HEIGHT), 0)
+            };
+            with_nvims_own_lattice(&mut tiles);
+            let buf = tiled_frame(&tiles.model);
+            let (cols, rows) = corner_lines(&buf);
+            let lines = if stacked { &rows } else { &cols };
             assert_eq!(
-                buf[(col, row)].symbol(),
-                " ",
-                "the cells between two frames are gap, not nvim's separator"
+                lines.len(),
+                4,
+                "width {width} stacked={stacked}: two tiles carry two frame lines each: {lines:?}"
             );
+            let (near, far) = (lines[1], lines[2]);
+            assert_eq!(
+                far - near - 1,
+                1,
+                "width {width} stacked={stacked}: one cell between facing frames: {lines:?}"
+            );
+            let gap = near + 1;
+            let cells: Vec<(u16, u16)> = if stacked {
+                (cols[0]..=cols[1]).map(|x| (x, gap)).collect()
+            } else {
+                (rows[0]..=rows[1]).map(|y| (gap, y)).collect()
+            };
+            for (x, y) in cells {
+                assert_eq!(
+                    buf[(x, y)].symbol(),
+                    " ",
+                    "width {width} stacked={stacked}: ({x}, {y}) between two frames is gap"
+                );
+            }
+            for y in 0..TILED_HEIGHT {
+                assert!(
+                    !row_text(&buf, y).contains('='),
+                    "width {width} stacked={stacked}: nvim's status row survived on row {y}"
+                );
+            }
+        }
+    }
+}
+
+/// Every terminal size from small to generous, with and without the pill:
+/// one empty cell between the frames and the terminal edge on the left,
+/// the right and the bottom, and between the frames and the pill (or the
+/// top edge) above.
+#[test]
+fn the_outer_gap_is_one_cell_on_every_side() {
+    for width in 20..=120u16 {
+        for height in 8..=50u16 {
+            for pill in [0u16, 1] {
+                let mut tiles = tiled_at(true, (width, height), pill);
+                if pill == 1 {
+                    with_the_pill(&mut tiles.model);
+                }
+                with_nvims_own_lattice(&mut tiles);
+                let buf = tiled_frame(&tiles.model);
+                let (cols, rows) = corner_lines(&buf);
+                let size = format!("{width}x{height} pill={pill}");
+                assert_eq!(cols.first(), Some(&1), "{size}: left gap {cols:?}");
+                assert_eq!(
+                    cols.last(),
+                    Some(&(width - 2)),
+                    "{size}: right gap {cols:?}"
+                );
+                assert_eq!(rows.first(), Some(&(pill + 1)), "{size}: top gap {rows:?}");
+                assert_eq!(
+                    rows.last(),
+                    Some(&(height - 2)),
+                    "{size}: the status row is the bottom gap {rows:?}"
+                );
+                for y in pill..height {
+                    for x in [0, width - 1] {
+                        assert_eq!(buf[(x, y)].symbol(), " ", "{size}: edge cell ({x}, {y})");
+                    }
+                }
+                for x in 0..width {
+                    for y in [pill, height - 1] {
+                        assert_eq!(buf[(x, y)].symbol(), " ", "{size}: edge cell ({x}, {y})");
+                    }
+                }
+            }
         }
     }
 }
@@ -1613,7 +1762,7 @@ fn only_the_active_tiles_frame_carries_the_accent_fg() {
     let accent = rgb(ACCENT_FG).expect("the accent token resolves to a colour");
     let frame_fg = |slot: (u16, u16, u16, u16)| {
         let (row, col, _, _) = slot;
-        buf[(col + 1 + 1, row + 1 + 1)].fg
+        buf[(col + 1, row + 1)].fg
     };
     assert_eq!(
         frame_fg(tiles.slots[0]),
@@ -1677,7 +1826,7 @@ fn a_gapped_layout_leaves_the_same_margin_on_every_side() {
         );
         assert_eq!(
             margins,
-            (2, 2, 2, 2),
+            (1, 1, 1, 1),
             "statusline = {statusline}: (top, bottom, left, right) empty cells \
              between the frames and the edge"
         );
@@ -1707,9 +1856,9 @@ fn an_inactive_tiles_frame_is_the_separator_colour_the_colorscheme_states() {
         let buf = tiled_frame(&tiles.model);
         let separator = rgb(VIEW_SEPARATOR_FG).expect("the separator resolves to a colour");
         let (row, _, _, height) = tiles.slots[0];
-        // a gapped frame sits one cell inside its slot, which starts one
-        // cell in from the terminal; a gapless one is the ring's own column
-        let edge = if gaps { 2 } else { 0 };
+        // a gapped frame is its slot's own edge, which starts one cell in
+        // from the terminal; a gapless one is the ring's own column
+        let edge = if gaps { 1 } else { 0 };
         let y = row + 1 + height / 2;
         assert_eq!(
             (buf[(edge, y)].symbol(), buf[(edge, y)].fg),
@@ -1765,7 +1914,7 @@ fn an_inactive_tiles_frame_without_a_separator_colour_is_the_dimmed_text_colour(
             drive(&mut tiles.model, events);
             let buf = tiled_frame(&tiles.model);
             let (row, _, _, height) = tiles.slots[0];
-            let edge = if gaps { 2 } else { 0 };
+            let edge = if gaps { 1 } else { 0 };
             let y = row + 1 + height / 2;
             assert_eq!(
                 (buf[(edge, y)].symbol(), buf[(edge, y)].fg),
@@ -1786,10 +1935,10 @@ fn a_grid_line_on_a_window_leaves_the_frame_rows_undamaged() {
     let offset = tiles.model.chrome_rows() + tiles.model.look.grid_offset();
     let damaged = Damage::from_frame(&damage, offset, &[], false);
     assert!(
-        damaged.covers(offset + row + 2 + 1),
+        damaged.covers(offset + row + 1 + 1),
         "the row the line landed on is repainted"
     );
-    for frame_row in [row + 1, row + height - 2] {
+    for frame_row in [row, row + height - 1] {
         assert!(
             !damaged.covers(offset + frame_row),
             "a grid line inside a window damaged the frame row at {frame_row}"
@@ -1927,13 +2076,9 @@ fn no_bar_row_stands_under_tiles() {
 /// The rows a gapped tile's two frame edges land on, and the one row a
 /// gapless tile's single edge does.
 fn edge_rows(model: &Model, slot: (u16, u16, u16, u16)) -> (u16, u16) {
-    let (row, _, _, height) = slot;
     let offset = model.look.grid_offset() + model.chrome_rows();
-    if model.look.gaps {
-        (row + 1 + offset, row + height - 2 + offset)
-    } else {
-        (row + height + offset, row + height + offset)
-    }
+    let [top, bottom] = model.look.edge_rows(slot);
+    (top + offset, bottom + offset)
 }
 
 /// The mode belongs to the session, so it shows only on the tile the user
@@ -2284,7 +2429,7 @@ fn edge_with_name(slots: &[(u16, u16, u16, u16)], name: String) -> String {
 fn an_edge_too_narrow_for_a_whole_group_carries_none_of_it() {
     // 18 cells of text: the mode, and neither room for the counts beside it
     // nor for the separator they would follow
-    let slots = vec![(0, 0, 24, TILED_HEIGHT - 3)];
+    let slots = vec![(0, 0, 22, TILED_HEIGHT - 3)];
     let mut model = tiled_model(true, TILED_HEIGHT, &slots);
     let _ = update(
         &mut model,
@@ -3209,7 +3354,7 @@ fn a_gapless_native_panes_edge_keeps_the_name_and_drops_the_segments() {
 /// at the right -- the row a person doing agentic work over ssh sees above
 /// their own split.
 fn pill_tabs_scene() -> Tiles {
-    let mut tiles = tiled(true);
+    let mut tiles = tiled_at(true, (TILED_WIDTH, TILED_HEIGHT), 1);
     let mut surfaces = view_core::native::ext::shipped_multigrid();
     surfaces.push(view_core::native::ext::Ext::Tabline);
     tiles.model.attach_surfaces(surfaces);
@@ -3236,7 +3381,7 @@ fn pill_tabs_scene() -> Tiles {
 /// The same lattice with the pill in `"buffers"` mode: one tabpage, four
 /// buffers, the second both unsaved and current.
 fn pill_buffers_scene() -> Tiles {
-    let mut tiles = tiled(true);
+    let mut tiles = tiled_at(true, (TILED_WIDTH, TILED_HEIGHT), 1);
     let mut surfaces = view_core::native::ext::shipped_multigrid();
     surfaces.push(view_core::native::ext::Ext::Tabline);
     tiles.model.attach_surfaces(surfaces);

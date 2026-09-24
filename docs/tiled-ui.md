@@ -144,9 +144,10 @@ window's text into a grid of its own.
 `nvim_ui_try_resize_grid(grid, w, h)` sets that window's *inner* size. The
 slot stays where nvim put it, the text grid becomes smaller than the slot,
 and the difference belongs to view. Tiles mode asks each window for a grid
-four columns and four rows smaller than its slot and draws the frame and the
-gap into what is left. `<C-w>` commands, `:split`, and a plugin that opens
-windows all keep working.
+two columns and two rows smaller than its slot and draws the frame into what
+is left. The gap between two frames is the separator column and the status
+row nvim paints just past the slot, which view clears. `<C-w>` commands,
+`:split`, and a plugin that opens windows all keep working.
 
 Three properties of that request shape the geometry:
 
@@ -158,7 +159,7 @@ Three properties of that request shape the geometry:
 - A `winbar` adds its row on top of the requested height. The row arrives as
   `win_viewport_margins`, and the height request carries it as a term.
 
-A slot narrower than 5 columns or shorter than 5 rows has no room to spare,
+A slot narrower than 3 columns or shorter than 3 rows has no room to spare,
 so view leaves its grid at the slot size and draws the tile bare.
 
 Gapless tiles need no room at all. The one cell between two windows is the
@@ -167,10 +168,11 @@ restyles those cells as the frame. The screen's top row and left column come
 from the outer grid attaching one row and one column short.
 
 Where view draws the command line it holds `cmdheight` at 0, so the lowest
-window's status row is the outer grid's last row and the lowest tile's frame
-reaches it. A session that gave back the palette or the notifications leaves
-nvim a command-line row at the foot of the grid, and the frames stop above
-it.
+window's status row is the outer grid's last row. Under gapped tiles that
+row is the gap below the lowest frames, and under gapless tiles it is their
+bottom frame line. A session that gave back the palette or the
+notifications leaves nvim a command-line row at the foot of the grid, and
+the frames stop above it.
 
 ## The accent
 
@@ -274,8 +276,8 @@ and `<leader>ug`, the gaps toggle beside it.
 
 The tree, the agent panel and the other surfaces size themselves as a
 percentage of the outer grid. Under gapped tiles the outer grid is already
-two columns narrower than the terminal, and a tile spends four more on its
-frame and gaps. A windowed surface has up to six columns less text width
+two columns narrower than the terminal, and a tile spends two more on its
+frame. A windowed surface has up to four columns less text width
 than the same percentage of the terminal.
 
 Inside its own pane, a windowed surface draws unframed: the tile around it

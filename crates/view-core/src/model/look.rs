@@ -29,10 +29,11 @@ pub struct Look {
     pub gaps: bool,
 }
 
-/// The narrowest slot a gapped frame fits in, on each axis. The height
-/// axis is tested against this plus the window's top margin, since the
-/// margin comes out of the request and a request of 0 is no request.
-pub const MIN_FRAMED_SLOT: (u16, u16) = (5, 5);
+/// The narrowest slot a gapped frame fits in, on each axis: the frame on
+/// both sides and one cell of text between. The height axis is tested
+/// against this plus the window's top margin, since the margin comes out
+/// of the request and a request of 0 is no request.
+pub const MIN_FRAMED_SLOT: (u16, u16) = (3, 3);
 
 /// What `panes = "auto"` answers on this session's environment, and the
 /// environment variable that decided it.
@@ -109,12 +110,28 @@ impl Look {
     /// Slot origin to grid origin, as `(rows, cols)`.
     ///
     /// Gapless tiles fill their slots, so only a gapped one moves its grid
-    /// inward -- one cell of gap and one of frame on each side.
+    /// inward, by the one cell of frame on each side. The gap outside the
+    /// frame is nvim's separator column and status row, which lie beyond
+    /// the slot.
     #[must_use]
     pub const fn inset(self) -> (u16, u16) {
         match (self.panes, self.gaps) {
-            (Panes::Tiles, true) => (2, 2),
+            (Panes::Tiles, true) => (1, 1),
             _ => (0, 0),
+        }
+    }
+
+    /// The box a gapped tile's frame is drawn on, as `(row, col, width,
+    /// height)`: the slot itself. `None` for a gapless or `"nvim"` look,
+    /// and for a slot too small to hold a box.
+    ///
+    /// The one answer the frame painter, the edge text and the palette
+    /// band all read, so the three stay on the same cells.
+    #[must_use]
+    pub const fn frame_box(self, slot: (u16, u16, u16, u16)) -> Option<(u16, u16, u16, u16)> {
+        match (self.panes, self.gaps) {
+            (Panes::Tiles, true) if slot.2 >= 3 && slot.3 >= 3 => Some(slot),
+            _ => None,
         }
     }
 
@@ -147,9 +164,9 @@ impl Look {
     /// The grid rows a tile's frame edges stand on, for a window nvim
     /// placed in `slot`.
     ///
-    /// A gapped tile has two: the top edge one row into the slot, and the
-    /// bottom edge one row above its foot. A gapless tile has one, the
-    /// lattice row under the slot, which this answers twice.
+    /// A gapped tile has two: the slot's own top and bottom rows. A
+    /// gapless tile has one, the lattice row under the slot, which this
+    /// answers twice.
     ///
     /// Read by the painter's own damage, without the refusals
     /// [`Look::frames`] makes for a slot too small to carry a frame: a row
@@ -159,10 +176,7 @@ impl Look {
     pub fn edge_rows(self, slot: (u16, u16, u16, u16)) -> [u16; 2] {
         let (row, _, _, height) = slot;
         if self.gaps {
-            [
-                row.saturating_add(1),
-                row.saturating_add(height).saturating_sub(2),
-            ]
+            [row, row.saturating_add(height).saturating_sub(1)]
         } else {
             [row.saturating_add(height); 2]
         }
@@ -176,6 +190,71 @@ impl Look {
             Panes::Nvim => false,
             Panes::Tiles if self.gaps => self.inner_request(slot, margin_top) != (0, 0),
             Panes::Tiles => true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every slot size a gapped tile can be given, with and without a
+    /// winbar: the frame is the slot's own outer ring, the grid sits one
+    /// cell inside it, and a right-hand neighbour placed past nvim's
+    /// separator column leaves exactly that one column between the two
+    /// frames. The same holds downward, with the status row as the gap.
+    #[test]
+    fn every_slot_size_frames_one_cell_in_and_leaves_one_cell_between() {
+        let look = Look::new(Panes::Tiles, true);
+        assert_eq!(look.inset(), (1, 1));
+        for w in 1..=40u16 {
+            for h in 1..=40u16 {
+                for m in 0..=1u16 {
+                    let slot = (4, 6, w, h);
+                    let fits = w >= 3 && h >= 3 + m;
+                    let request = look.inner_request((w, h), m);
+                    if fits {
+                        assert_eq!(request, (w - 2, h - 2 - m), "slot {w}x{h} m={m}");
+                        assert_eq!(look.frame_box(slot), Some(slot), "slot {w}x{h}");
+                        assert_eq!(look.edge_rows(slot), [4, 4 + h - 1], "slot {w}x{h}");
+                    } else {
+                        assert_eq!(request, (0, 0), "slot {w}x{h} m={m} is too small");
+                    }
+                    assert_eq!(look.frames((w, h), m), fits, "slot {w}x{h} m={m}");
+                    if w >= 3 && h >= 3 {
+                        let right = look.frame_box((4, 6 + w + 1, w, h));
+                        let below = look.frame_box((4 + h + 1, 6, w, h));
+                        let (_, left_col, left_w, _) = slot;
+                        let right_col = right.map(|b| b.1);
+                        let below_row = below.map(|b| b.0);
+                        assert_eq!(
+                            right_col.map(|col| col - (left_col + left_w - 1) - 1),
+                            Some(1),
+                            "one gap column between facing frames at {w}x{h}"
+                        );
+                        assert_eq!(
+                            below_row.map(|row| row - (4 + h - 1) - 1),
+                            Some(1),
+                            "one gap row between facing frames at {w}x{h}"
+                        );
+                    }
+                }
+            }
+        }
+        let (min_w, min_h) = MIN_FRAMED_SLOT;
+        assert_eq!((min_w, min_h), (3, 3));
+        assert!(!look.frames((min_w - 1, min_h), 0));
+        assert!(!look.frames((min_w, min_h - 1), 0));
+        assert!(look.frames((min_w, min_h), 0));
+    }
+
+    /// Gapless tiles and nvim's own picture have no frame box and move no
+    /// grid.
+    #[test]
+    fn only_gapped_tiles_have_a_frame_box() {
+        for look in [Look::new(Panes::Tiles, false), Look::new(Panes::Nvim, true)] {
+            assert_eq!(look.inset(), (0, 0));
+            assert_eq!(look.frame_box((0, 0, 40, 20)), None);
         }
     }
 }

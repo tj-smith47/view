@@ -1847,7 +1847,7 @@ mod tests {
         window_slot(&mut registry, GridId(2), (3, 5, 40, 20));
         let pane = pane_of(&registry, GridId(2));
         assert_eq!(pane.slot, (3, 5, 40, 20), "the slot nvim reported");
-        assert_eq!(pane.origin, (5, 7), "the inner origin the look puts in it");
+        assert_eq!(pane.origin, (4, 6), "the inner origin the look puts in it");
         assert_eq!(registry.window_handle(GridId(2)), Some(WinHandle(2)));
     }
 
@@ -1859,7 +1859,7 @@ mod tests {
         window_slot(&mut registry, GridId(3), (0, 40, 40, 20));
         assert_eq!(
             registry.pending_inner_request(GridId(2), tiles(true)),
-            Some((36, 16))
+            Some((38, 18))
         );
         registry.apply(GridEvent::Margins {
             grid: GridId(2),
@@ -1867,26 +1867,49 @@ mod tests {
         });
         assert_eq!(
             registry.pending_inner_request(GridId(2), tiles(true)),
-            Some((36, 15)),
+            Some((38, 17)),
             "the winbar row comes out of the height the window is asked for"
         );
         assert_eq!(
             registry.pending_inner_request(GridId(3), tiles(true)),
-            Some((36, 16)),
+            Some((38, 18)),
             "the neighbour has no winbar and owes its whole inner height"
         );
     }
 
     #[test]
-    fn a_gapped_slot_requests_four_cells_less_at_the_inset_origin() {
+    fn a_gapped_slot_requests_two_cells_less_at_the_inset_origin() {
         let mut registry = GridRegistry::new();
         registry.set_look(tiles(true));
         window_slot(&mut registry, GridId(2), (4, 6, 40, 20));
         assert_eq!(
             registry.pending_inner_request(GridId(2), tiles(true)),
-            Some((36, 16))
+            Some((38, 18))
         );
-        assert_eq!(pane_of(&registry, GridId(2)).origin, (6, 8));
+        assert_eq!(pane_of(&registry, GridId(2)).origin, (5, 7));
+    }
+
+    /// The grid sits one cell inside every slot that frames, and at the
+    /// slot's own origin in every slot that does not.
+    #[test]
+    fn every_framed_slot_places_its_grid_one_cell_inside() {
+        let look = tiles(true);
+        for w in 1..=40u16 {
+            for h in 1..=40u16 {
+                for m in 0..=1u16 {
+                    let expected = if look.frames((w, h), m) {
+                        (5, 7)
+                    } else {
+                        (4, 6)
+                    };
+                    assert_eq!(
+                        inner_origin(look, (4, 6, w, h), m),
+                        expected,
+                        "slot {w}x{h} m={m}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1913,7 +1936,7 @@ mod tests {
         });
         assert_eq!(
             registry.pending_inner_request(GridId(2), tiles(true)),
-            Some((36, 15))
+            Some((38, 17))
         );
     }
 
@@ -1937,11 +1960,11 @@ mod tests {
     }
 
     #[test]
-    fn a_five_row_slot_with_a_winbar_is_drawn_bare() {
+    fn a_three_row_slot_with_a_winbar_is_drawn_bare() {
         let look = tiles(true);
         let mut registry = GridRegistry::new();
         registry.set_look(look);
-        window_slot(&mut registry, GridId(2), (0, 0, 40, 5));
+        window_slot(&mut registry, GridId(2), (0, 0, 40, 3));
         registry.apply(GridEvent::Margins {
             grid: GridId(2),
             top: 1,
@@ -1951,8 +1974,8 @@ mod tests {
             Some((0, 0))
         );
         assert_eq!(pane_of(&registry, GridId(2)).origin, (0, 0));
-        assert!(!look.frames((40, 5), 1));
-        assert!(look.frames((40, 6), 1), "one more row and the ring fits");
+        assert!(!look.frames((40, 3), 1));
+        assert!(look.frames((40, 4), 1), "one more row and the ring fits");
     }
 
     #[test]
@@ -1976,7 +1999,7 @@ mod tests {
         window_slot(&mut registry, GridId(2), (0, 0, 40, 20));
         assert_eq!(
             registry.pending_inner_request(GridId(2), tiles(true)),
-            Some((36, 16))
+            Some((38, 18))
         );
         assert_eq!(registry.pending_inner_request(GridId(2), tiles(true)), None);
         window_slot(&mut registry, GridId(2), (0, 0, 40, 20));
@@ -1994,7 +2017,7 @@ mod tests {
         window_slot(&mut registry, GridId(2), (0, 0, 40, 20));
         assert_eq!(
             registry.pending_inner_request(GridId(2), tiles(true)),
-            Some((36, 16))
+            Some((38, 18))
         );
         assert!(registry.set_look(tiles(false)));
         assert_eq!(
@@ -2013,7 +2036,7 @@ mod tests {
         for grid in registry.window_grids() {
             assert_eq!(
                 registry.pending_inner_request(grid, tiles(true)),
-                Some((36, 16))
+                Some((38, 18))
             );
         }
         let nvim = Look::new(Panes::Nvim, true);
@@ -2042,8 +2065,8 @@ mod tests {
         });
         assert_eq!(
             pane_of(&registry, GridId(7)).origin,
-            (7, 9),
-            "nvim placed the float from the slot origin, two cells out from \
+            (6, 8),
+            "nvim placed the float from the slot origin, one cell out from \
              the text it hovers"
         );
     }

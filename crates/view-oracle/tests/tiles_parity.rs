@@ -30,9 +30,9 @@ const QUIESCE_DEADLINE: Duration = Duration::from_secs(5);
 /// The grid nvim paints chrome into, which no window owns.
 const GLOBAL_GRID: u64 = 1;
 
-/// What a gapped tile spends on each axis: a frame cell and a gap cell on
-/// each of the two sides.
-const RING: usize = 4;
+/// What a gapped tile spends on each axis: a frame cell on each of the
+/// two sides.
+const RING: usize = 2;
 
 /// The same layout `multigrid_parity.rs` drives, for the same reason: a
 /// buffer of its own in each window, so a grid compared against the wrong

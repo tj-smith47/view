@@ -3,7 +3,7 @@
 //!
 //! The tiled look rests on one claim: a window grid can be made smaller
 //! than the layout slot nvim keeps for it, so the difference is the UI's to
-//! draw a frame and a gap into. Every geometry rule the compositor follows
+//! draw a frame into. Every geometry rule the compositor follows
 //! is a consequence of that claim plus three details -- that the request
 //! stands until it is replaced, that `0, 0` is the only value that clears
 //! it, and that a winbar row arrives on top of the height asked for.
@@ -31,8 +31,8 @@ use view_oracle::UI_EXT_OPTIONS_MULTIGRID;
 const COLS: u16 = 80;
 const ROWS: u16 = 24;
 
-/// The ring a gapped tile spends on each axis: two cells per side.
-const RING: u64 = 4;
+/// The ring a gapped tile spends on each axis: one cell of frame per side.
+const RING: u64 = 2;
 
 /// How long a step's redraw traffic may keep arriving before the reader
 /// calls it settled, and how long it waits for the first `flush` that says
