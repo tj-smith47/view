@@ -55,7 +55,7 @@ ssh "$REMOTE_HOST" "printf '#!/bin/sh\nexec \"%s\" -u \"%s\" \"\$@\"\n' \
   chmod +x '$REMOTE_WRAPPER'"
 
 cd -- "$ROOT"
-tmux -L "$SOCKET" new-session -d -s cap -x 220 -y 50 \
+new_cap_session "$SOCKET" 220 50 -- \
   "$BIN" --nvim-bin "$REMOTE_WRAPPER" --remote "$REMOTE"
 
 record_gif "$SOCKET" "$OUT" 15 220 50

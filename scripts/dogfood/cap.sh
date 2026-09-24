@@ -83,7 +83,7 @@ SOCKET=view-cap-$$
 
 mkdir -p -- "$(dirname -- "$OUT")"
 
-tmux -L "$SOCKET" new-session -d -s cap -x "$COLS" -y "$ROWS" "$BIN" "$@"
+new_cap_session "$SOCKET" "$COLS" "$ROWS" -- "$BIN" "$@"
 sleep "$SETTLE"
 if [ -n "$KEYS" ]; then
   tmux -L "$SOCKET" send-keys -t cap "$KEYS"

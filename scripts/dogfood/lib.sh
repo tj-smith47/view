@@ -16,6 +16,24 @@ cleanup() {
   fi
 }
 
+# WHY: every capture opens its session here, so none of them carries tmux's
+# status line under the editor. The option is set on the server before the
+# session exists, which gives the pane its full -y rows from the first
+# frame; turning it off afterwards would resize the editor once as it
+# starts. Usage: new_cap_session SOCKET COLS ROWS -- CMD [ARG...]
+new_cap_session() {
+  socket=$1
+  cols=$2
+  rows=$3
+  [ "${4:-}" = -- ] || {
+    echo "new_cap_session: usage: new_cap_session SOCKET COLS ROWS -- CMD..." >&2
+    return 2
+  }
+  shift 4
+  tmux -L "$socket" set-option -g status off \; \
+    new-session -d -s cap -x "$cols" -y "$rows" "$@"
+}
+
 # WHY: shared by every tape script that turns a live tmux session into a
 # gif. vhs needs a terminal attached for the whole recording, which
 # cap.sh's headless capture-pane never has, so this drives vhs onto the
@@ -34,12 +52,12 @@ cleanup() {
 # (probed with `tput cols`/`tput lines` against three Width/Height pairs
 # on this recorder's build of vhs 0.11.0 -- 1200x600 -> 117x29,
 # 2200x1000 -> 228x54, 3000x1400 -> 317x79 -- all three solve the same
-# 9px/16px cell and 147px/136px pad exactly). tmux's own status line
-# takes one more row than the pane itself, and MARGIN_COLS/MARGIN_ROWS
-# cover font-hinting drift across hosts and vhs versions this recorder
-# has not measured; a caller whose session was created at a given
-# `-x`/`-y` passes that same shape here, the way every tape script's
-# `-x 220 -y 50` becomes `record_gif ... 220 50`.
+# 9px/16px cell and 147px/136px pad exactly). new_cap_session turns
+# tmux's status line off, so the pane is the whole session, and
+# MARGIN_COLS/MARGIN_ROWS cover font-hinting drift across hosts and vhs
+# versions this recorder has not measured; a caller whose session was
+# created at a given `-x`/`-y` passes that same shape here, the way every
+# tape script's `-x 220 -y 50` becomes `record_gif ... 220 50`.
 record_gif() {
   socket=$1
   out=$2
@@ -55,11 +73,10 @@ record_gif() {
   cell_h=16
   pad_w=147
   pad_h=136
-  status_rows=1
   margin_cols=2
   margin_rows=1
   width=$(( (cols + margin_cols) * cell_w + pad_w ))
-  height=$(( (rows + status_rows + margin_rows) * cell_h + pad_h ))
+  height=$(( (rows + margin_rows) * cell_h + pad_h ))
   mkdir -p -- "$(dirname -- "$out")"
   tapedir="${XDG_CACHE_HOME:-$HOME/.cache}/view-dogfood-tapes"
   mkdir -p -- "$tapedir"

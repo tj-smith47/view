@@ -27,7 +27,7 @@ SOCKET=view-cap-restart-$$
 . "$HERE/../lib.sh"
 
 cd -- "$ROOT"
-tmux -L "$SOCKET" new-session -d -s cap -x 220 -y 50 "$BIN" README.md
+new_cap_session "$SOCKET" 220 50 -- "$BIN" README.md
 (
   sleep 3
   VIEW_PID=$(tmux -L "$SOCKET" list-panes -t cap -F '#{pane_pid}')

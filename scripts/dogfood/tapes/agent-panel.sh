@@ -77,7 +77,7 @@ cleanup_agent_panel() {
 trap cleanup_agent_panel EXIT INT TERM
 
 cd -- "$WORKDIR"
-tmux -L "$SOCKET" new-session -d -s cap -x 220 -y 50 "$BIN" --config "$CFG" view-ai-stub-diff.txt
+new_cap_session "$SOCKET" 220 50 -- "$BIN" --config "$CFG" view-ai-stub-diff.txt
 (
   sleep 3
   tmux -L "$SOCKET" send-keys -t cap ':View ai open' Enter

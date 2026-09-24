@@ -32,7 +32,7 @@ SOCKET=view-cap-tiles-$$
 . "$HERE/../lib.sh"
 
 cd -- "$ROOT"
-tmux -L "$SOCKET" new-session -d -s cap -x 220 -y 50 "$BIN" README.md
+new_cap_session "$SOCKET" 220 50 -- "$BIN" README.md
 (
   sleep 3
   tmux -L "$SOCKET" send-keys -t cap ':View ui panes tiles' Enter
