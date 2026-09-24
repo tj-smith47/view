@@ -699,6 +699,21 @@ impl EngineSession {
         self.model.focus()
     }
 
+    /// Keeps the tab line surface as this session attached it whatever
+    /// look it is put in, the way `[native] tabline` spelled in a config
+    /// does. A driver that attached without `ext_tabline` then runs tiles
+    /// with no pill row.
+    pub fn hold_tabline_as_attached(&mut self) {
+        self.model.tabline_follows_look = false;
+    }
+
+    /// The model this session folds nvim's redraws into, for a leg that
+    /// reads a rect the paint path resolves from it.
+    #[must_use]
+    pub fn model(&self) -> &Model {
+        &self.model
+    }
+
     /// Whether this session's model still holds the file tree open, in
     /// either placement.
     pub fn tree_is_open(&mut self) -> bool {

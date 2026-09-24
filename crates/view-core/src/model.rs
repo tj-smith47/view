@@ -1215,6 +1215,30 @@ impl Model {
     /// carry live editor state the user still needs while the panel is open
     /// -- the ruler and the search count among it. The share stays a share
     /// of what an overlay may actually have.
+    ///
+    /// Under gapped tiles those rows lose one ring on every side as well,
+    /// the ring [`Look::inset`] leaves around
+    /// the outermost frames, so a full-height side panel's border stands on
+    /// the rows and the edge column the tiles beside it frame on.
+    #[must_use]
+    pub fn overlay_rect(&self, overlay: &Overlay) -> OverlayRect {
+        let top = self.chrome_rows();
+        let (ring_rows, ring_cols) = self.look.inset();
+        let content = self
+            .term_height
+            .saturating_sub(top)
+            .saturating_sub(self.statusline_rows());
+        let rect = overlay.geometry.rect(
+            self.term_width.saturating_sub(ring_cols * 2),
+            content.saturating_sub(ring_rows * 2),
+        );
+        OverlayRect {
+            row: rect.row.saturating_add(top).saturating_add(ring_rows),
+            col: rect.col.saturating_add(ring_cols),
+            ..rect
+        }
+    }
+
     /// The rows the toast stack is laid out in: the engine grid's own
     /// height, floored at one framed box so a stack is never budgeted out
     /// of existence on a terminal too small to hold one. Read by the
@@ -1224,20 +1248,6 @@ impl Model {
     #[must_use]
     pub fn toast_rows(&self) -> usize {
         usize::from(self.engine.grid().size().1).max(3)
-    }
-
-    #[must_use]
-    pub fn overlay_rect(&self, overlay: &Overlay) -> OverlayRect {
-        let top = self.chrome_rows();
-        let content = self
-            .term_height
-            .saturating_sub(top)
-            .saturating_sub(self.statusline_rows());
-        let rect = overlay.geometry.rect(self.term_width, content);
-        OverlayRect {
-            row: rect.row.saturating_add(top),
-            ..rect
-        }
     }
 
     /// Steps the agent panel one notch wider or narrower, reporting whether

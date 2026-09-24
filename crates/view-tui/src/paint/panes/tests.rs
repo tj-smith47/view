@@ -3149,6 +3149,350 @@ fn notifications_ticker_windowed() {
     }
 }
 
+/// The agent panel floating at the right edge over the two-tile scene, the
+/// placement a config that names none opens it at.
+fn agent_overlay_beside_the_tiles(gaps: bool) -> Tiles {
+    let mut tiles = tiled(gaps);
+    open_surface(
+        &mut tiles.model,
+        view_core::native::geometry::NativeSurface::Agent,
+        view_core::native::geometry::SurfacePlacement::Overlay,
+        view_core::native::geometry::Anchor::Right,
+        None,
+    );
+    tiles
+        .model
+        .ai_panel_mut()
+        .transcript
+        .echo_user_prompt("what does the gaps toggle do?");
+    tiles
+}
+
+/// Opens `surface` at `placement` and `anchor`. A windowed open claims the
+/// window already placed at `slot`, as `(index, slot)` into the fixture's
+/// own slot list, the way nvim hands view the split it opened.
+fn open_surface(
+    model: &mut Model,
+    surface: view_core::native::geometry::NativeSurface,
+    placement: view_core::native::geometry::SurfacePlacement,
+    anchor: view_core::native::geometry::Anchor,
+    slot: Option<(usize, (u16, u16, u16, u16))>,
+) {
+    use view_core::native::geometry::NativeSurface;
+    model.ai_trusted = true;
+    model.surfaces.set_layout(
+        surface,
+        view_core::native::geometry::SurfaceLayout::new(placement, anchor, 30),
+    );
+    let (feature, verb) = match surface {
+        NativeSurface::Tree => ("tree", "toggle"),
+        NativeSurface::Agent => ("ai", "toggle"),
+        _ => {
+            let _ = model.engine.record_message(
+                "echomsg".to_string(),
+                vec![(0, "3 files saved".to_string())],
+                false,
+            );
+            ("notifications", "history")
+        }
+    };
+    let effects = update(
+        model,
+        Msg::FeatureInvoke {
+            feature: feature.to_string(),
+            verb: verb.to_string(),
+        },
+    );
+    let Some((index, (row, col, width, height))) = slot else {
+        return;
+    };
+    let generation = effects
+        .iter()
+        .find_map(|effect| match effect {
+            view_core::msg::Effect::Rpc(view_core::msg::RpcCall::OpenNativeWindow {
+                generation,
+                ..
+            }) => Some(*generation),
+            _ => None,
+        })
+        .expect("a windowed open asks nvim for a window");
+    let win = WinHandle(1000 + index as u64);
+    let _ = update(
+        model,
+        Msg::NativeWindowOpened {
+            generation,
+            surface,
+            win,
+        },
+    );
+    drive(
+        model,
+        vec![
+            UiEvent::WinPos {
+                grid: LEFT + index as u64,
+                win,
+                startrow: u64::from(row),
+                startcol: u64::from(col),
+                width: u64::from(width),
+                height: u64::from(height),
+            },
+            UiEvent::Flush,
+        ],
+    );
+}
+
+/// A slot as `(row, col, width, height)`.
+type Slot = (u16, u16, u16, u16);
+
+/// Where a frame line starts and ends along its axis.
+type Ends = (Option<u16>, Option<u16>);
+
+/// The slots of a layout on a grid of `grid` cells: a vsplit, over a
+/// full-width window when `bottom_split` holds, beside a full-height
+/// column (`Left`/`Right`) or under/over a full-width band
+/// (`Top`/`Bottom`) that a windowed surface takes. Every window keeps its
+/// status row under it and the last one stands on the grid's last row.
+/// Answers the slots and the index of the one the surface takes.
+fn walk_layout(
+    grid: (u16, u16),
+    bottom_split: bool,
+    edge: Option<view_core::native::geometry::Anchor>,
+) -> (Vec<Slot>, Option<usize>) {
+    use view_core::native::geometry::Anchor;
+    let (width, height) = grid;
+    let band = 4;
+    let side = width / 3;
+    // the region the vsplit fills, as (row, col, width, rows incl. status)
+    let (region, own) = match edge {
+        Some(Anchor::Left) => (
+            (0, side + 1, width - side - 1, height),
+            (0, 0, side, height - 1),
+        ),
+        Some(Anchor::Right) => (
+            (0, 0, width - side - 1, height),
+            (0, width - side, side, height - 1),
+        ),
+        Some(Anchor::Top) => ((band + 1, 0, width, height - band - 1), (0, 0, width, band)),
+        Some(_) => (
+            (0, 0, width, height - band - 1),
+            (height - band - 1, 0, width, band),
+        ),
+        None => ((0, 0, width, height), (0, 0, 0, 0)),
+    };
+    let (row, col, region_width, rows) = region;
+    let left_width = (region_width - 1) / 2;
+    let right = (col + left_width + 1, region_width - left_width - 1);
+    let mut slots = if bottom_split {
+        let top = (rows - 2) / 2;
+        vec![
+            (row, col, left_width, top),
+            (row, right.0, right.1, top),
+            (row + top + 1, col, region_width, rows - top - 2),
+        ]
+    } else {
+        vec![
+            (row, col, left_width, rows - 1),
+            (row, right.0, right.1, rows - 1),
+        ]
+    };
+    if edge.is_none() {
+        return (slots, None);
+    }
+    slots.push(own);
+    let index = slots.len() - 1;
+    (slots, Some(index))
+}
+
+/// Where a surface's frame line at `facing` ends, beside where the tiles'
+/// frames end on the same axis, each as `(first, last)` along it.
+///
+/// `at(along, across)` names a cell by its place along the facing line and
+/// across it, which lets one walk read a column or a row. The tiles' frames
+/// are read off the cells outside `span`, the surface's own extent across
+/// the line, and below the pill's `chrome` rows.
+fn frame_ends(
+    buf: &Buffer,
+    facing: u16,
+    span: (u16, u16),
+    (along_len, across_len): (u16, u16),
+    chrome: u16,
+    at: impl Fn(u16, u16) -> (u16, u16),
+) -> (Ends, Ends) {
+    let frame =
+        |(col, row): (u16, u16)| row >= chrome && "╭╮╰╯├┤┬┴┼│─".contains(buf[(col, row)].symbol());
+    let ends = |hits: Vec<u16>| (hits.first().copied(), hits.last().copied());
+    let own = (0..along_len)
+        .filter(|&along| frame(at(along, facing)))
+        .collect();
+    let tiles = (0..along_len)
+        .filter(|&along| {
+            (0..across_len)
+                .filter(|across| !(span.0..=span.1).contains(across))
+                .any(|across| frame(at(along, across)))
+        })
+        .collect();
+    (ends(own), ends(tiles))
+}
+
+/// Every side surface, floating or in a window of its own, and every band
+/// across the tiles, on terminals from small to generous, under both gap
+/// settings, with and without the pill and a full-width window under the
+/// vsplit: the facing frame line of the surface turns on the first and
+/// last rows (a band: columns) the tiles' own frames turn on.
+#[test]
+fn every_windowed_surface_frames_on_the_tile_ring_rows() {
+    use view_core::native::geometry::{Anchor, NativeSurface, SurfacePlacement};
+    let cases = [
+        (NativeSurface::Tree, SurfacePlacement::Overlay, Anchor::Left),
+        (
+            NativeSurface::Tree,
+            SurfacePlacement::Overlay,
+            Anchor::Right,
+        ),
+        (
+            NativeSurface::Tree,
+            SurfacePlacement::Windowed,
+            Anchor::Left,
+        ),
+        (
+            NativeSurface::Tree,
+            SurfacePlacement::Windowed,
+            Anchor::Right,
+        ),
+        (
+            NativeSurface::Agent,
+            SurfacePlacement::Overlay,
+            Anchor::Left,
+        ),
+        (
+            NativeSurface::Agent,
+            SurfacePlacement::Overlay,
+            Anchor::Right,
+        ),
+        (
+            NativeSurface::Agent,
+            SurfacePlacement::Windowed,
+            Anchor::Left,
+        ),
+        (
+            NativeSurface::Agent,
+            SurfacePlacement::Windowed,
+            Anchor::Right,
+        ),
+        (
+            NativeSurface::Notifications,
+            SurfacePlacement::Windowed,
+            Anchor::Left,
+        ),
+        (
+            NativeSurface::Notifications,
+            SurfacePlacement::Windowed,
+            Anchor::Right,
+        ),
+        (
+            NativeSurface::Notifications,
+            SurfacePlacement::Windowed,
+            Anchor::Top,
+        ),
+        (
+            NativeSurface::Notifications,
+            SurfacePlacement::Windowed,
+            Anchor::Bottom,
+        ),
+    ];
+    for size in [(60u16, 16u16), (80, 24), (120, 40)] {
+        for gaps in [true, false] {
+            for pill in [0u16, 1] {
+                for bottom_split in [false, true] {
+                    for case in cases {
+                        surface_frames_on_the_tile_rows(size, gaps, pill, bottom_split, case);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One member of [`every_windowed_surface_frames_on_the_tile_ring_rows`]'s
+/// walk.
+fn surface_frames_on_the_tile_rows(
+    size: (u16, u16),
+    gaps: bool,
+    pill: u16,
+    bottom_split: bool,
+    (surface, placement, anchor): (
+        view_core::native::geometry::NativeSurface,
+        view_core::native::geometry::SurfacePlacement,
+        view_core::native::geometry::Anchor,
+    ),
+) {
+    use view_core::native::geometry::{Anchor, SurfacePlacement};
+    let label = format!(
+        "{size:?} gaps={gaps} pill={pill} bottom_split={bottom_split} \
+                             {surface:?} {placement:?} {anchor:?}"
+    );
+    let windowed = placement == SurfacePlacement::Windowed;
+    let grid = outer_grid_at(gaps, size, pill);
+    let (slots, own) = walk_layout(grid, bottom_split, windowed.then_some(anchor));
+    let mut model = tiled_model_at(gaps, size, pill, &slots);
+    if pill == 1 {
+        with_the_pill(&mut model);
+    }
+    open_surface(
+        &mut model,
+        surface,
+        placement,
+        anchor,
+        own.map(|index| (index, slots[index])),
+    );
+    // the surface's box on the terminal, as inclusive
+    // (top, bottom, left, right)
+    let (top, bottom, left, right) = if windowed {
+        let (row, col, width, height) = model
+            .engine
+            .grids()
+            .native_pane_rect(surface)
+            .unwrap_or_else(|| panic!("{label}: no pane was placed"));
+        let (origin_row, origin_col) = view_surface::grid_origin(&model);
+        let (row, col) = (row + origin_row, col + origin_col);
+        if gaps {
+            (row, row + height - 1, col, col + width - 1)
+        } else {
+            (row - 1, row + height, col - 1, col + width)
+        }
+    } else {
+        let overlay = model
+            .overlays()
+            .last()
+            .unwrap_or_else(|| panic!("{label}: nothing opened"));
+        let rect = model.overlay_rect(overlay);
+        (
+            rect.row,
+            rect.row + rect.height - 1,
+            rect.col,
+            rect.col + rect.width - 1,
+        )
+    };
+    let buf = tiled_frame(&model);
+    let across = matches!(anchor, Anchor::Top | Anchor::Bottom);
+    let (facing, (own, tiles)) = if across {
+        let facing = if anchor == Anchor::Top { bottom } else { top };
+        let at = |along: u16, across: u16| (along, across);
+        let ends = frame_ends(&buf, facing, (top, bottom), size, pill, at);
+        (facing, ends)
+    } else {
+        let facing = if anchor == Anchor::Left { right } else { left };
+        let at = |along: u16, across: u16| (across, along);
+        let ends = frame_ends(&buf, facing, (left, right), (size.1, size.0), pill, at);
+        (facing, ends)
+    };
+    assert_eq!(
+        own, tiles,
+        "{label}: the surface's frame line at {facing} ends on {own:?}, \
+         the tiles' frames on {tiles:?}"
+    );
+}
+
 /// A toast stack anchored to one of the four corners, over the same two-tile
 /// scene every other golden here uses -- toasts float over the tiles and
 /// claim none, so this needs none of the native-window machinery the
@@ -3491,6 +3835,9 @@ const TILED_SCENES: &[(&str, SceneDump)] = &[
     }),
     ("agent-windowed", |tier| {
         tiles_dump(tier, agent_in_the_right_tile(true))
+    }),
+    ("agent-overlay", |tier| {
+        tiles_dump(tier, agent_overlay_beside_the_tiles(true))
     }),
     ("palette-windowed", |tier| {
         tiles_dump(tier, palette_in_the_bottom_band(true))
