@@ -583,6 +583,24 @@ fn with_native_table(fixture_toml: &str, native: &str) -> Result<String> {
     Ok(format!("{kept}\n{native}"))
 }
 
+/// Merges `native` into the fixture `view.toml` at `view_config_path` and
+/// writes the result back.
+///
+/// A missing or unreadable fixture file used to merge as an empty string, so
+/// the `[native]` override alone reached the scenario and the fixture's
+/// `[ui] panes = "nvim"` was lost -- the same bug [`with_native_table`]'s own
+/// doc comment describes, reintroduced one line earlier. Every compat
+/// fixture ships a `view.toml`, so a missing one here fails loudly, naming
+/// the path.
+fn write_native_override(view_config_path: &Path, native: &str) -> Result<()> {
+    let fixture_toml = std::fs::read_to_string(view_config_path)
+        .with_context(|| format!("reading {}", view_config_path.display()))?;
+    let merged = with_native_table(&fixture_toml, native)
+        .with_context(|| format!("merging [native] into {}", view_config_path.display()))?;
+    std::fs::write(view_config_path, merged)
+        .with_context(|| format!("writing {}", view_config_path.display()))
+}
+
 /// The environment variable a fixture's `init.lua` reads to decide whether
 /// to apply its accommodations. Rides the same path [`run_scenario`] already
 /// proves reaches the nvim grandchild with `VIEW_COMPAT_SOCK`: set on the
@@ -929,11 +947,7 @@ fn run_scenario(
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        let fixture_toml = std::fs::read_to_string(&view_config_path).unwrap_or_default();
-        let merged = with_native_table(&fixture_toml, &rendered)
-            .with_context(|| format!("merging [native] into {}", view_config_path.display()))?;
-        std::fs::write(&view_config_path, merged)
-            .with_context(|| format!("writing {}", view_config_path.display()))?;
+        write_native_override(&view_config_path, &rendered)?;
     }
 
     let mut cmd = CommandBuilder::new(view_bin);
@@ -1950,6 +1964,24 @@ mod tests {
         let native = merged["native"].as_table().expect("a [native] table");
         assert_eq!(native.len(), 1, "only the state's own keys: {native}");
         assert_eq!(native["statusline"].as_bool(), Some(false));
+    }
+
+    /// A state with a native override whose fixture `view.toml` cannot be
+    /// read fails naming the path.
+    #[test]
+    fn a_missing_fixtures_view_toml_fails_naming_the_path() {
+        let dir =
+            view_test_support::ScratchDir::new("compat-missing-fixture").expect("scratch dir");
+        let missing = dir.join("view.toml");
+        let mut native = BTreeMap::new();
+        native.insert("statusline".to_string(), false);
+        let err = write_native_override(&missing, &render_native_toml(&native))
+            .expect_err("a missing fixture file is an error");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "expected the path in the error, got: {message}"
+        );
     }
 
     /// Every state of every committed scenario runs under nvim's own window
