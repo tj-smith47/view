@@ -6,10 +6,10 @@ machine_class = "dev-linux"
 p99_ms = 0.171286
 
 [ai_composer.minimal]
-p99_ms = 0.169476
+p99_ms = 0.160883
 
 [ai_session_active.minimal]
-key_to_rpc_p99_us = 73.295
+key_to_rpc_p99_us = 41.989
 
 [ai_streaming.minimal]
 p99_ms = 0.446275
@@ -30,7 +30,7 @@ view_p99_ms = 0.726575
 paired_delta_p99_ms = 0.726127
 ratio_p50 = 1.1097269280826585
 ratio_p99 = 1.1076770542009724
-view_p99_ms = 1.583071
+view_p99_ms = 1.395298
 
 [echo_control.heavy]
 control_delta_p99_ms = 0.5941500000000001
@@ -42,7 +42,7 @@ control_ratio_p99 = 0.9537267522250585
 control_delta_p99_ms = 0.23828200000000002
 control_p99_ms = 0.658715
 control_ratio_p50 = 0.9937197455771009
-control_ratio_p99 = 1.035776855693868
+control_ratio_p99 = 0.9931923158138306
 
 [echo_speculated.minimal]
 speculated_paint_p99_ms = 0.301
@@ -54,8 +54,8 @@ speculated_ratio_p50 = 0.33177052820600483
 
 [first_paint.heavy]
 marker_cold_ms = 79.267231
-marker_ratio_p50 = 1.1007776687309356
-marker_ratio_p99 = 1.0454034775236194
+marker_ratio_p50 = 1.04544071317909
+marker_ratio_p99 = 0.9784575650408728
 shell_visible_cold_ms = 3.788316
 
 [first_paint.minimal]
@@ -66,19 +66,19 @@ shell_visible_cold_ms = 4.094983
 
 [first_paint.user]
 marker_cold_ms = 80.511921
-marker_ratio_p50 = 1.0842888118747391
-marker_ratio_p99 = 1.0459755652851106
+marker_ratio_p50 = 1.0417943031916592
+marker_ratio_p99 = 1.0060041531198392
 shell_visible_cold_ms = 4.542766
 
 [flood.minimal]
 cadence_p99_ms = 16.0907
 cadence_p99_ratio = 0.9690219746859104
-pace_ratio = 1.000040416926719
+pace_ratio = 1.0000017105194994
 
 [flood.user]
 cadence_p99_ms = 16.914409
 cadence_p99_ratio = 0.9809471542433376
-pace_ratio = 1.0184579367365834
+pace_ratio = 1.0000034209938573
 
 [input_path.minimal]
 key_to_rpc_p99_us = 70.077
@@ -90,15 +90,15 @@ pss_mb = 4.962
 p99_ms = 0.107136
 
 [picker.minimal]
-first_page_p50_ms = 2.449141
-first_page_p99_ms = 4.961949000000001
-match_paint_p50_ms = 2.831874
+first_page_p50_ms = 1.774537
+first_page_p99_ms = 2.6718219999999997
+match_paint_p50_ms = 2.048501
 match_paint_p99_ms = 4.703527
 
 [remote_memory.minimal]
 local_pss_mb = 5.19140625
 pss_mb = 3.7109375
-remote_local_ratio = 1.024527766595133
+remote_local_ratio = 1.0074844608364062
 
 [scroll.heavy]
 ratio_p50 = 1.8909534928734097

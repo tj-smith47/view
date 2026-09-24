@@ -40,7 +40,7 @@ You press a key and the character appears.
 
 | | view | Neovim | on |
 |---|---|---|---|
-| keypress to glyph, worst case in a thousand | 1.58 ms | 1.43 ms | your config, same host, same run |
+| keypress to glyph, worst case in a thousand | 1.40 ms | 1.19 ms | your config, same host, same run |
 | the same keypress, with view drawing the glyph it expects | 0.32 ms | 1.25 ms | your config, same host, same run |
 
 At the median, under your config, keypress to glyph is 11% behind, against a
@@ -81,12 +81,12 @@ staleness is 1.07 ms.
 A plugin storm or a `:terminal` flood pouring output into the screen is the
 same moment under load. Under your config, measured 2026-09-06, the screen
 answers on a 16.9 ms cadence, just past one frame, so this too is a bar
-view has not met, and Neovim answers on a 17.5 ms one. On that same login-shaped
-run view drains the flood to within 2% of the pace Neovim holds, and the longest
-it goes without painting is 48.9 ms. Plugin-free the cadence is 16.1 ms,
-recorded 2026-09-15, so it sits past the frame as well. Neovim refreshes a
-terminal buffer on a fixed 10 ms timer, and neither side can paint more often
-than that timer plus one redraw.
+view has not met, and Neovim answers on a 17.5 ms one. On that same run the
+longest view goes without painting is 48.9 ms. Recorded again 2026-09-24 on
+the same login-shaped config, view drains the flood at the pace Neovim holds.
+Plugin-free the cadence is 16.1 ms, recorded 2026-09-15, so it sits past the
+frame as well. Neovim refreshes a terminal buffer on a fixed 10 ms timer, and
+neither side can paint more often than that timer plus one redraw.
 
 ## You search a huge tree
 
@@ -95,7 +95,7 @@ You open the picker and type; the matches are under your fingers.
 | | view | Neovim | on |
 |---|---|---|---|
 | keystroke to matching results, 100k entries | 4.7 ms | n/a | bench fixture, worst case in a thousand |
-| first page of results, 1M-file tree | 5.0 ms | n/a | bench fixture, worst case in a thousand |
+| first page of results, 1M-file tree | 2.7 ms | n/a | bench fixture, worst case in a thousand |
 
 Neovim ships no picker, so this moment has no second column. The results
 stream while the scan is still running, so the first page is there before

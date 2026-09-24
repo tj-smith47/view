@@ -113,8 +113,8 @@ status line are on screen in about 4 ms, drawn while your config is still
 loading.
 
 **You type.** You press a key and the character appears. Under that same
-login-shaped config, view's worst keystroke in a thousand takes 1.58 ms
-against Neovim's 1.43 ms, and at the median view is 11% behind against a bar
+login-shaped config, view's worst keystroke in a thousand takes 1.40 ms
+against Neovim's 1.19 ms, and at the median view is 11% behind against a bar
 of 10%, a second bar missed by 1%. view can also draw the character it
 expects before Neovim confirms it: under that same config the predicted
 glyph is on screen in 0.32 ms at that same worst case, beside Neovim's

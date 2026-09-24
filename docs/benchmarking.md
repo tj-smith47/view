@@ -108,8 +108,8 @@ the one fixture that unit names.
 | UI shell painted, engine still loading, no plugins (p99) | `first_paint.shell_visible_cold_ms` **4.1 ms** | n/a | budget 50 ms |
 | UI shell painted, engine still loading, 15-plugin lazy.nvim stack (p99) | `first_paint.shell_visible_cold_ms` **3.8 ms** | n/a | budget 50 ms |
 | First paint, cold, no plugins, `minimal` (p99) | 27.4 ms | **25.4 ms** | `first_paint.marker_ratio_p99` reads ~1.08x slower, a diagnostic of the felt `startup.settled_ratio_p50` |
-| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** | `first_paint.marker_ratio_p99` reads ~1.05x slower, a diagnostic of the felt `startup.settled_ratio_p50` |
-| First paint, cold, full login, `user` (p99) | `first_paint.marker_cold_ms` 80.5 ms | not recorded on its own | seated at `e9087db`; the ratio beside it was retaken 2026-09-06 (`first_paint.marker_ratio_p50` 1.084, `first_paint.marker_ratio_p99` 1.046) |
+| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 91.7 ms | **93.7 ms** | `first_paint.marker_ratio_p99` reads ~0.98x, a diagnostic of the felt `startup.settled_ratio_p50` |
+| First paint, cold, full login, `user` (p99) | `first_paint.marker_cold_ms` 80.5 ms | not recorded on its own | seated at `e9087db`; the ratio beside it was re-recorded 2026-09-24 at `a836efa` (`first_paint.marker_ratio_p50` 1.042, `first_paint.marker_ratio_p99` 1.006) |
 | Resident memory (PSS), view process only, no plugins | `memory.pss_mb` **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | `output_path.p99_ms` **0.11 ms** | n/a | budget 1 ms |
 | Keystroke to cell change, steady typing, no plugins (p99) | `echo.view_p99_ms` 0.73 ms | 0.67 ms | `echo.ratio_p99` ~1.09x slower at the tail, where `echo.view_p99_ms` carries the bound; at the median `echo.ratio_p50` reads 1.130 |
@@ -119,8 +119,9 @@ the one fixture that unit names.
 | Sustained scroll, no plugins, versus Neovim | | | ~1.6x slower (`scroll.ratio_p50`, the paired ratio beside the felt `scroll.staleness_p99_ms`) |
 | Sustained scroll, 15-plugin lazy.nvim stack, versus Neovim | | | ~1.9x slower (`scroll.ratio_p50`, the paired ratio beside the felt `scroll.staleness_p99_ms`) |
 
-The two bare-Neovim first-paint figures are the 2026-09-06 dev-linux
-retake. The figures they replace were withdrawn: both sides are spawned on
+The two bare-Neovim first-paint figures are dev-linux pairs: the `minimal`
+one from the 2026-09-06 retake, the `heavy` one from the 2026-09-24 record at
+`a836efa`. The figures they replace were withdrawn: both sides are spawned on
 a pty the harness owns, and until that pty answered the DSR that Neovim's
 tty startup writes behind its background-colour query, the bare side waited
 out its own `vim.wait(100, ...)` on every cold sample, roughly 100 ms that
@@ -128,7 +129,7 @@ view's side never paid, because view's engine owns no tty and never asks.
 The pty answers it now (`view_oracle::pty`, pinned by
 `view-bench/tests/nvim_arm_startup.rs`).
 
-Both first-paint columns are the retake's own interleaved pair; view's
+Both first-paint columns on a row are one run's interleaved pair; view's
 recorded gate bar ratchets separately and came from a quieter run. One
 paragraph per fixture below, since each of these numbers belongs to one of
 them.
@@ -138,31 +139,33 @@ pair reads 16.88 ms p50 against bare nvim's 15.43 ms, which is
 `first_paint.marker_ratio_p50` 1.094 and `first_paint.marker_ratio_p99`
 1.076.
 
-On `heavy` the bar is `first_paint.marker_cold_ms` 79.3 ms. The retake pair
-reads 55.08 ms p50 against 50.04 ms, which is `first_paint.marker_ratio_p50`
-1.101 and `first_paint.marker_ratio_p99` 1.045.
+On `heavy` the bar is `first_paint.marker_cold_ms` 79.3 ms. The pair the
+2026-09-24 record at `a836efa` took reads 52.94 ms p50 against 50.64 ms,
+which is `first_paint.marker_ratio_p50` 1.045 and the p99 pair's
+`first_paint.marker_ratio_p99` 0.978.
 
-On `user` the retake pair reads 58.73 ms p50 against 54.16 ms, which is
-`first_paint.marker_ratio_p50` 1.084 and `first_paint.marker_ratio_p99`
-1.046.
+On `user` the pair the same record took reads 54.55 ms p50 against 52.36 ms,
+which is `first_paint.marker_ratio_p50` 1.042 and the p99 pair's
+`first_paint.marker_ratio_p99` 1.006.
 
-view trails bare Neovim by 8-10% on every paired cold cell, and on
-`minimal` what it trails by is the post-VimEnter attach-plus-takeover round
+view trails bare Neovim by 4-9% at the median on every paired cold cell, and
+on `minimal` what it trails by is the post-VimEnter attach-plus-takeover round
 trip the late-attach design pays serially, since Neovim's own TUI attaches
 before init runs. Attribution past that outline is open work.
 
-Both dev classes are re-seated: dev-linux from the retake above, dev-macos
-from its own on mbp the same day. `gh-linux` and `gh-macos` are re-seated
-from the measured artifacts of bench run 35472867066, the first gate run
-under the answering pty.
+Both dev classes are re-seated: dev-linux from the retake above, with its
+`heavy` and `user` ratios taken again by the 2026-09-24 record, and dev-macos
+from its own retake on mbp on 2026-09-06. `gh-linux` and `gh-macos` are
+re-seated from the measured artifacts of bench run 35472867066, the first
+gate run under the answering pty.
 
 The `user` row is recorded, and each class states its own reading on its own
 line, since a number belongs to one class and one fixture.
 
 dev-linux holds `first_paint.marker_cold_ms` 80.512 ms and
 `first_paint.shell_visible_cold_ms` 4.543 ms on the `user` fixture, seated at
-`e9087db`, and its two ratios come from the 2026-09-06 retake above
-(`first_paint.marker_ratio_p50` 1.084, `first_paint.marker_ratio_p99` 1.046).
+`e9087db`, and its two ratios come from the 2026-09-24 record above
+(`first_paint.marker_ratio_p50` 1.042, `first_paint.marker_ratio_p99` 1.006).
 
 dev-macos holds `first_paint.marker_cold_ms` 87.563 ms and
 `first_paint.shell_visible_cold_ms` 12.504 ms on the same `user` fixture,
@@ -223,10 +226,10 @@ Both calibrations sit well inside the 15% floor that refuses a run.
 | cell, `user` fixture | view | bare Neovim | reading |
 |---|---|---|---|
 | `startup.settled_ratio_p50` (`user`) | 53.929 ms p50 | 52.422 ms p50 | 1.029 against the 1.0 bar, unmet, re-recorded 2026-09-15 after the parked attach was fixed; the diagnostic `startup.server_delta_ms` reads 1.637 ms, the attach wait having moved inside the segment that metric measures |
-| `echo.ratio_p50`, `echo.view_p99_ms` (`user`) | 0.920 ms p50, `echo.view_p99_ms` 1.583 ms p99 | 0.829 ms p50, 1.429 ms p99 | `echo.ratio_p50` 1.110 against the 1.10 bar, unmet; the tail is inside its 8 ms bar, `echo.paired_delta_p99_ms` 0.726 ms |
+| `echo.ratio_p50`, `echo.view_p99_ms` (`user`) | 0.920 ms p50, `echo.view_p99_ms` 1.395 ms p99, re-recorded 2026-09-24 | 0.829 ms p50, 1.191 ms p99 | `echo.ratio_p50` 1.110 against the 1.10 bar, unmet; the tail is inside its 8 ms bar, `echo.paired_delta_p99_ms` 0.726 ms |
 | `echo_speculated.speculated_ratio_p50` (`user`) | 0.200 ms p50, `echo_speculated.speculated_paint_p99_ms` 0.318 ms p99 | 0.603 ms p50, 1.250 ms p99 | 0.332 against the 1.0 bar, met; a prediction answered 99.9% of the samples and the rest can only understate it |
 | `scroll.staleness_p99_ms` (`user`) | `scroll.staleness_p99_ms` 1.572 ms p99 | 0.951 ms p99 | inside the 16 ms bar; `scroll.ratio_p50` 1.717 and `scroll.ratio_p99` 1.664 are recorded on a shared class and not gated |
-| `flood.cadence_p99_ms` (`user`) | `flood.cadence_p99_ms` 16.914 ms p99 | 17.480 ms p99 | 0.9 ms past the 16 ms frame, recorded 2026-09-06, unmet on both sides; `flood.cadence_p99_ratio` 0.981, `flood.pace_ratio` 1.018, worst no-paint gap 48.9 ms reported and not gated |
+| `flood.cadence_p99_ms` (`user`) | `flood.cadence_p99_ms` 16.914 ms p99 | 17.480 ms p99 | 0.9 ms past the 16 ms frame, recorded 2026-09-06, unmet on both sides; `flood.cadence_p99_ratio` 0.981, `flood.pace_ratio` 1.000 re-recorded 2026-09-24, worst no-paint gap 48.9 ms reported and not gated |
 
 The flood cell's plugin-free leg was re-recorded 2026-09-15 in a quiet
 window of its own, under conditions no cell records either:
