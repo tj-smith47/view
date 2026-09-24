@@ -593,9 +593,12 @@ pub const PALETTE_BAND_MIN_ROWS: u16 = 4;
 /// to land. A terminal too short to hold the floor plus its own gap has
 /// nowhere left to shrink, so this open falls back to the centred float.
 ///
-/// Under gaps the band sits one ring in from the terminal edge, the ring
-/// view's own window layout leaves around the tiles, so the band's border
-/// lands on the rows and columns a buffer tile's frame
+/// `gaps` holds for gapped tiles alone, the look whose
+/// [`Look::inset`](crate::model::Look::inset) is non-zero; the `"nvim"`
+/// look passes `false` whatever its `gaps` setting. Under it the band sits
+/// one ring in from the terminal edge, the ring view's own window layout
+/// leaves around the tiles, so the band's border lands on the rows and
+/// columns a buffer tile's frame
 /// ([`Look::frame_box`](crate::model::Look::frame_box)) is drawn on.
 #[must_use]
 pub fn palette_rect(
@@ -669,12 +672,14 @@ mod tests {
         }
     }
 
-    /// The windowed band's border stands on the rows a buffer tile's frame
-    /// stands on at the edge it is anchored to, and under gaps on the same
-    /// columns, at every terminal size, with and without the pill.
+    /// The windowed band's border stands on the rows and columns the cell
+    /// table puts a buffer tile's frame on, at every terminal size, with
+    /// and without the pill, in coordinates under the pill. Gapped: rows 1
+    /// and `bounds_h - 2`, columns 1 and `term_w - 2`. Gapless: rows 0 and
+    /// `bounds_h - 1`, columns 0 and `term_w - 1`. A band anchored to the
+    /// bottom meets the bottom frame row, any other anchor the top one.
     #[test]
     fn the_palette_band_frames_on_the_tile_frame_rows() {
-        use crate::model::{grid_target_for, Look, Panes};
         let anchors = [
             Anchor::Center,
             Anchor::Left,
@@ -687,35 +692,30 @@ mod tests {
             Anchor::BottomRight,
         ];
         for gaps in [false, true] {
-            let look = Look::new(Panes::Tiles, gaps);
-            let offset = look.grid_offset();
+            let ring = u16::from(gaps);
             for term_w in 20..=120u16 {
                 for term_h in 8..=50u16 {
                     for pill in [0u16, 1] {
                         let bounds_h = term_h - pill;
-                        let (grid_w, grid_h) =
-                            grid_target_for((term_w, term_h), pill, false, look.ring());
-                        let slot = (0, 0, grid_w, grid_h - 1);
-                        let [top, bottom] = look.edge_rows(slot);
-                        let tile_top = if gaps { top + offset } else { 0 };
-                        let tile_bottom = bottom + offset;
                         for anchor in anchors {
                             let layout = SurfaceLayout::new(SurfacePlacement::Windowed, anchor, 30);
                             let rect = palette_rect(layout, true, gaps, term_w, bounds_h);
-                            let rings = u16::from(gaps);
-                            if rect.width != term_w - 2 * rings {
-                                continue;
-                            }
                             let case =
                                 format!("{term_w}x{term_h} pill={pill} gaps={gaps} {anchor:?}");
+                            assert_eq!(rect.col, ring, "{case}: left column");
+                            assert_eq!(
+                                rect.col + rect.width,
+                                term_w - ring,
+                                "{case}: right column"
+                            );
                             if anchor == Anchor::Bottom {
-                                assert_eq!(rect.row + rect.height - 1, tile_bottom, "{case}");
+                                assert_eq!(
+                                    rect.row + rect.height,
+                                    bounds_h - ring,
+                                    "{case}: bottom row"
+                                );
                             } else {
-                                assert_eq!(rect.row, tile_top, "{case}");
-                            }
-                            if let Some((_, col, width, _)) = look.frame_box(slot) {
-                                assert_eq!(rect.col, col + offset, "{case}");
-                                assert_eq!(rect.col + rect.width, col + width + offset, "{case}");
+                                assert_eq!(rect.row, ring, "{case}: top row");
                             }
                         }
                     }

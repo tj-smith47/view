@@ -230,7 +230,7 @@ impl Model {
         let rect = crate::native::geometry::palette_rect(
             layout,
             self.palette_windowed_active(),
-            self.look.gaps,
+            self.look.inset() != (0, 0),
             self.term_width,
             bounds_h,
         );

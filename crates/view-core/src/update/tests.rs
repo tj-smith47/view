@@ -14704,6 +14704,25 @@ fn windowed_palette_model() -> Model {
     m
 }
 
+/// The windowed band insets one ring for gapped tiles alone. The `"nvim"`
+/// look draws no ring and no frame whatever its `gaps` setting, so a band
+/// inset there would leave a column of buffer text at each side of it.
+#[test]
+fn a_windowed_palette_band_insets_one_ring_for_gapped_tiles_alone() {
+    use crate::model::{Look, Panes};
+    for (look, col, width) in [
+        (Look::new(Panes::Nvim, true), 0, 80),
+        (Look::new(Panes::Nvim, false), 0, 80),
+        (Look::new(Panes::Tiles, false), 0, 80),
+        (Look::new(Panes::Tiles, true), 1, 78),
+    ] {
+        let mut m = windowed_palette_model();
+        m.look = look;
+        let rect = m.palette_rect();
+        assert_eq!((rect.col, rect.width), (col, width), "{look:?}: {rect:?}");
+    }
+}
+
 /// nvim opening its command line, the whole of what a windowed palette
 /// watches to know when to claim its tile.
 fn cmdline_show() -> Msg {
@@ -14791,7 +14810,7 @@ fn a_press_inside_the_windowed_palette_band_reaches_it_under_a_reserved_tabline_
     let raw = crate::native::geometry::palette_rect(
         layout,
         m.palette_windowed_active(),
-        m.look.gaps,
+        m.look.inset() != (0, 0),
         m.term_width,
         bounds_h,
     );

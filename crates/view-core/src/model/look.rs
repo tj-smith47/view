@@ -123,14 +123,19 @@ impl Look {
 
     /// The box a gapped tile's frame is drawn on, as `(row, col, width,
     /// height)`: the slot itself. `None` for a gapless or `"nvim"` look,
-    /// and for a slot too small to hold a box.
+    /// and for a slot too small to hold the box itself; a winbar's row is
+    /// judged by [`Look::frames`].
     ///
-    /// The one answer the frame painter, the edge text and the palette
-    /// band all read, so the three stay on the same cells.
+    /// The frame painter and the edge text read this box. The windowed
+    /// palette band insets one ring where [`Look::inset`] is non-zero,
+    /// which is exactly where this answers `Some`, so its border lands on
+    /// the same rows and columns.
     #[must_use]
     pub const fn frame_box(self, slot: (u16, u16, u16, u16)) -> Option<(u16, u16, u16, u16)> {
         match (self.panes, self.gaps) {
-            (Panes::Tiles, true) if slot.2 >= 3 && slot.3 >= 3 => Some(slot),
+            (Panes::Tiles, true) if slot.2 >= MIN_FRAMED_SLOT.0 && slot.3 >= MIN_FRAMED_SLOT.1 => {
+                Some(slot)
+            }
             _ => None,
         }
     }
@@ -222,21 +227,11 @@ mod tests {
                     }
                     assert_eq!(look.frames((w, h), m), fits, "slot {w}x{h} m={m}");
                     if w >= 3 && h >= 3 {
-                        let right = look.frame_box((4, 6 + w + 1, w, h));
-                        let below = look.frame_box((4 + h + 1, 6, w, h));
-                        let (_, left_col, left_w, _) = slot;
-                        let right_col = right.map(|b| b.1);
-                        let below_row = below.map(|b| b.0);
-                        assert_eq!(
-                            right_col.map(|col| col - (left_col + left_w - 1) - 1),
-                            Some(1),
-                            "one gap column between facing frames at {w}x{h}"
-                        );
-                        assert_eq!(
-                            below_row.map(|row| row - (4 + h - 1) - 1),
-                            Some(1),
-                            "one gap row between facing frames at {w}x{h}"
-                        );
+                        // nvim's separator column is `6 + w` and the status
+                        // row `4 + h`: the frame's right column and bottom
+                        // row are the cells just before them
+                        let far = look.frame_box(slot).map(|b| (b.1 + b.2 - 1, b.0 + b.3 - 1));
+                        assert_eq!(far, Some((6 + w - 1, 4 + h - 1)), "slot {w}x{h}");
                     }
                 }
             }
