@@ -557,11 +557,20 @@ pub fn test_region(text: &str) -> String {
 /// comparison, because a break at a space drops that space and a break
 /// inside a word adds none.
 pub fn boxed_text_contains(screen: &str, needle: &str) -> bool {
-    let squash = |text: &str| text.split_whitespace().collect::<String>();
+    let squashed = squash(needle);
+    screen.lines().any(|line| squash(line).contains(&squashed)) || in_a_box(screen, needle)
+}
+
+/// `text` with its whitespace left out.
+fn squash(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
+/// Whether `needle` stands inside a box on `screen`, on one of its rows or
+/// across the rows it wraps onto: the reading of [`boxed_text_contains`]
+/// that a line of nvim's own, with no box edge around it, never satisfies.
+pub fn in_a_box(screen: &str, needle: &str) -> bool {
     let needle = squash(needle);
-    if screen.lines().any(|line| squash(line).contains(&needle)) {
-        return true;
-    }
     let rows: Vec<Vec<(usize, String)>> = screen
         .lines()
         .map(|line| {
@@ -605,8 +614,25 @@ pub fn boxed_text_contains(screen: &str, needle: &str) -> bool {
 /// that gains a notice would otherwise land the marker back underneath one,
 /// and the failure reads as the text never having been typed.
 pub fn newlines_below_toasts(screen: &str) -> String {
-    // three rows per box -- one line of text between two frame rows -- and
-    // one more so the marker clears the last of them
-    let boxes = screen.matches('╭').count();
-    "\r".repeat(boxes * 3 + 1)
+    let rows: Vec<Vec<char>> = screen.lines().map(|line| line.chars().collect()).collect();
+    // each box is as tall as it is drawn, a wrapped notice included, and
+    // one more row clears the last of them
+    let drawn: usize = rows
+        .iter()
+        .enumerate()
+        .flat_map(|(top, cells)| {
+            cells
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| **c == '╭')
+                .map(move |(col, _)| (top, col))
+        })
+        .map(|(top, col)| {
+            rows[top..]
+                .iter()
+                .position(|cells| cells.get(col) == Some(&'╰'))
+                .map_or(3, |bottom| bottom + 1)
+        })
+        .sum();
+    "\r".repeat(drawn + 1)
 }

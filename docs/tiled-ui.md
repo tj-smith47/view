@@ -344,10 +344,12 @@ tile is too narrow for the full date to fit beside the message.
 
 Notices stack in a column in the corner named by
 `[ui.surfaces.notifications] anchor`. The column takes the part of the
-screen no windowed surface holds. Under tiles it sits inside the tile in
-that corner, one cell in from the frame. It is at most 60 columns wide and
-at most half the screen wide, and a notice longer than that wraps onto more
-lines inside its box.
+screen that the tree, the agent panel, the other surfaces and a plugin's
+sidebar leave, wherever each is placed. Under tiles it sits inside the
+tile in that corner, one cell in from the frame. When a panel fills the
+whole screen, the column takes the screen's own corner. It is at most 60
+columns wide and at most half the screen wide, and a notice longer than
+that wraps onto more lines inside its box.
 
 When the boxes would cover the line your cursor is on, the stack starts
 from the column's other end. A plugin's floating window over the column

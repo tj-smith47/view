@@ -3902,6 +3902,15 @@ fn notices_beside_the_agent() -> Tiles {
     tiles
 }
 
+/// The agent panel drawn over the right of the tiles with notices
+/// arriving: the stack sits in the part of the tiles the panel leaves,
+/// clear of the panel's frame.
+fn notices_beside_the_tiled_agent() -> Tiles {
+    let mut tiles = agent_overlay_beside_the_tiles(true);
+    stack_three_toasts(&mut tiles.model);
+    tiles
+}
+
 /// The cursor on the first row of the right tile, under the stack's top
 /// right corner: the stack draws from the tile's bottom instead.
 fn notices_flipped_off_the_cursor() -> Tiles {
@@ -4270,6 +4279,9 @@ const TILED_SCENES: &[(&str, SceneDump)] = &[
     }),
     ("notices-beside-agent-windowed", |tier| {
         tiles_dump(tier, notices_beside_the_agent())
+    }),
+    ("notices-beside-agent-tiled", |tier| {
+        tiles_dump(tier, notices_beside_the_tiled_agent())
     }),
     ("notices-flip-off-cursor", |tier| {
         tiles_dump(tier, notices_flipped_off_the_cursor())

@@ -7,7 +7,7 @@
 //! column has room, so a notice leaves the text a person is working on in
 //! view.
 
-use super::{Model, Panes};
+use super::{Model, Panes, TileKind};
 use crate::grid::registry::{PaneKind, GLOBAL_GRID};
 use crate::native::geometry::{Anchor, NativeSurface};
 
@@ -51,7 +51,9 @@ impl Model {
     /// Where view stacks its own notices, in grid coordinates.
     ///
     /// The column sits in the anchor's corner of the grid left over once
-    /// every windowed surface's pane is taken out. Under tiles it stays
+    /// every windowed surface's pane, every sidebar window and every side
+    /// panel drawn over the grid are taken out. Where they leave no room
+    /// for a box, it sits in the grid's own corner. Under tiles it stays
     /// inside the inner rect of the tile in that corner, so no box lands on
     /// a frame line, and a float of a plugin's that overlaps it pushes the
     /// stack past its rows. When the boxes stacked from the anchor's end
@@ -111,10 +113,23 @@ impl Model {
         let (top, left) = (anchor.is_top_corner(), anchor.is_left_corner());
         let (grid_w, grid_h) = self.engine.grid().size();
         let panes = self.engine.grids().panes_in_z_order();
+        let sidebar = |id| {
+            self.engine
+                .grids()
+                .window_handle(id)
+                .and_then(|win| self.window_status.get(&win))
+                .is_some_and(|status| matches!(status.kind, TileKind::Sidebar { .. }))
+        };
+        let grid = (0, 0, grid_w, grid_h);
         let area = panes
             .iter()
-            .filter(|pane| matches!(pane.kind, PaneKind::Native { .. }))
-            .fold((0, 0, grid_w, grid_h), |area, pane| cut(area, pane.slot));
+            .filter(|pane| matches!(pane.kind, PaneKind::Native { .. }) || sidebar(pane.id))
+            .map(|pane| pane.slot)
+            .chain(self.side_panels())
+            .fold(grid, cut);
+        // a side panel or windowed surface that fills the grid leaves no
+        // room for a box, and the grid's own corner is the one left to use
+        let area = if area.2 < 3 || area.3 < 3 { grid } else { area };
         let corner = (
             if top { area.0 } else { far(area.0, area.3) },
             if left { area.1 } else { far(area.1, area.2) },
@@ -124,20 +139,23 @@ impl Model {
             .then(|| {
                 panes
                     .iter()
-                    .filter(|pane| pane.id != GLOBAL_GRID && pane.kind == PaneKind::Window)
-                    .filter(|pane| overlaps(pane.slot, area))
-                    .min_by_key(|pane| {
-                        let (row, col, width, height) = pane.slot;
+                    .filter(|pane| {
+                        pane.id != GLOBAL_GRID && pane.kind == PaneKind::Window && !sidebar(pane.id)
+                    })
+                    // a tile runs on under a side panel drawn over it, so
+                    // only the part of it the area keeps is the tile's
+                    .map(|pane| within(shrink(pane.slot, inset_rows, inset_cols), area))
+                    .filter(|kept| kept.2 > 0 && kept.3 > 0)
+                    .min_by_key(|&(row, col, width, height)| {
                         let at = (
                             if top { row } else { far(row, height) },
                             if left { col } else { far(col, width) },
                         );
                         corner.0.abs_diff(at.0) + corner.1.abs_diff(at.1)
                     })
-                    .map(|pane| pane.slot)
             })
             .flatten();
-        let base = shrink(tile.unwrap_or(area), inset_rows, inset_cols);
+        let base = tile.unwrap_or_else(|| shrink(area, inset_rows, inset_cols));
         let width = NOTICE_COLUMN_MAX.min((area.2 / 2).max(1)).min(base.2);
         let col = if left {
             base.1
@@ -145,6 +163,26 @@ impl Model {
             base.1.saturating_add(base.2).saturating_sub(width)
         };
         (base.0, col, width, base.3)
+    }
+
+    /// Every open overlay pinned to an edge, the tree and the agent panel
+    /// among them, in grid coordinates. Each one covers the tiles under it,
+    /// so a box stacked there would sit over the panel.
+    fn side_panels(&self) -> impl Iterator<Item = Cells> + '_ {
+        let offset = self.look.grid_offset();
+        let top = self.chrome_rows().saturating_add(offset);
+        self.overlays()
+            .iter()
+            .filter(|overlay| overlay.geometry.anchor != Anchor::Center)
+            .map(move |overlay| {
+                let rect = self.overlay_rect(overlay);
+                (
+                    rect.row.saturating_sub(top),
+                    rect.col.saturating_sub(offset),
+                    rect.width,
+                    rect.height,
+                )
+            })
     }
 
     /// [`Self::notice_bounds`] with every visible float that overlaps it
@@ -238,6 +276,24 @@ fn overlaps(a: Cells, b: Cells) -> bool {
         && b.1 < a.1.saturating_add(a.2)
 }
 
+/// The cells `rect` and `area` share, empty where they share none.
+fn within(rect: Cells, area: Cells) -> Cells {
+    let row = rect.0.max(area.0);
+    let col = rect.1.max(area.1);
+    let bottom = far(rect.0, rect.3)
+        .min(far(area.0, area.3))
+        .saturating_add(1);
+    let right = far(rect.1, rect.2)
+        .min(far(area.1, area.2))
+        .saturating_add(1);
+    (
+        row,
+        col,
+        right.saturating_sub(col),
+        bottom.saturating_sub(row),
+    )
+}
+
 /// `rect` less `rows` on the top and bottom and `cols` on either side.
 fn shrink(rect: Cells, rows: u16, cols: u16) -> Cells {
     (
@@ -282,9 +338,11 @@ pub(crate) mod tests {
     use super::*;
     use crate::events::{UiEvent, WinHandle};
     use crate::grid::registry::GridId;
-    use crate::model::{Look, MIN_FRAMED_SLOT};
+    use crate::model::{Look, OverlayKind, WindowStatus, MIN_FRAMED_SLOT};
     use crate::msg::Msg;
+    use crate::native::geometry::OverlayBox;
     use crate::native::geometry::SurfaceLayout;
+    use crate::native::tree::TreeState;
     use crate::update::update;
 
     const CORNERS: [Anchor; 4] = [
@@ -545,6 +603,147 @@ pub(crate) mod tests {
             }
         });
         assert!(scenes > 10_000, "the walk reached only {scenes} scenes");
+    }
+
+    /// Where a panel of `kind` sits in terminal cells once it is opened on
+    /// `scene`, for each way a surface can be drawn beside the tiles.
+    fn open_panel(scene: &mut Scene, kind: usize) -> Option<Cells> {
+        let model = &mut scene.model;
+        let overlay = |surface: NativeSurface, anchor: Anchor| {
+            let geometry = OverlayBox::new(30, 100).with_anchor(anchor);
+            let kind = match surface {
+                NativeSurface::Tree => OverlayKind::Tree(TreeState::open(".".into())),
+                _ => OverlayKind::Ai,
+            };
+            (geometry, kind)
+        };
+        let (geometry, kind) = match kind {
+            0 => overlay(NativeSurface::Tree, Anchor::Left),
+            1 => overlay(NativeSurface::Tree, Anchor::Right),
+            2 => overlay(NativeSurface::Agent, Anchor::Right),
+            3 => overlay(NativeSurface::Agent, Anchor::Left),
+            _ => {
+                // a plugin's tree in the leftmost tile, which is the only
+                // window a single tile leaves
+                if scene.tiles.len() < 2 {
+                    return None;
+                }
+                let grid = scene.tiles.remove(0);
+                model.window_status.insert(
+                    WinHandle(1000 + grid),
+                    WindowStatus {
+                        kind: TileKind::Sidebar {
+                            filetype: "NvimTree".into(),
+                        },
+                        ..WindowStatus::default()
+                    },
+                );
+                let origin = model.chrome_rows() + model.look.grid_offset();
+                let (row, col, width, height) = scene.slots[0];
+                return Some((row + origin, col + model.look.grid_offset(), width, height));
+            }
+        };
+        model.push_overlay(geometry, kind);
+        let panel = model.overlays().last()?;
+        let rect = model.overlay_rect(panel);
+        Some((rect.row, rect.col, rect.width, rect.height))
+    }
+
+    /// The tree and the agent panel drawn over the tiles at either edge,
+    /// and a plugin's sidebar tile, under tiles with and without gaps,
+    /// every corner and the cursor in every other tile.
+    #[test]
+    fn the_notice_column_never_intersects_a_side_panel_or_a_sidebar_tile() {
+        let mut scenes = 0;
+        for width in (40..=240).step_by(13) {
+            for height in (10..=60).step_by(5) {
+                for gaps in [true, false] {
+                    for tiles in 1..=3 {
+                        for kind in 0..5 {
+                            let look = Look::new(Panes::Tiles, gaps);
+                            let Some(mut scene) = scene((width, height), look, 0, tiles) else {
+                                continue;
+                            };
+                            let Some(panel) = open_panel(&mut scene, kind) else {
+                                continue;
+                            };
+                            for anchor in CORNERS {
+                                anchor_at(&mut scene.model, anchor);
+                                for index in 0..scene.tiles.len() {
+                                    focus(&mut scene.model, scene.tiles[index], 0);
+                                    scenes += 1;
+                                    let model = &scene.model;
+                                    let (row, col, w, h) = model.notice_column().rect;
+                                    let origin = model.chrome_rows() + model.look.grid_offset();
+                                    let column =
+                                        (row + origin, col + model.look.grid_offset(), w, h);
+                                    assert!(
+                                        w > 0 && h > 0,
+                                        "{width}x{height} gaps={gaps} tiles={tiles} \
+                                         panel={kind} {anchor:?}: the column is empty"
+                                    );
+                                    assert!(
+                                        !overlaps(column, panel),
+                                        "{width}x{height} gaps={gaps} tiles={tiles} \
+                                         panel={kind} {anchor:?} focus={index}: the column \
+                                         {column:?} covers the panel at {panel:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(scenes > 5_000, "the walk reached only {scenes} scenes");
+    }
+
+    /// The agent panel windowed into the only window there is: nothing is
+    /// left beside it, and the stack takes the grid's own corner.
+    #[test]
+    fn a_panel_filling_the_grid_leaves_the_column_in_the_grids_corner() {
+        for panes in [Panes::Tiles, Panes::Nvim] {
+            let look = Look::new(panes, true);
+            let mut model = Model::with_term_size(80, 24).with_look(look);
+            let (grid_w, grid_h) = model.grid_target();
+            model
+                .engine
+                .grids_mut()
+                .claim_native_window(WinHandle(1021), NativeSurface::Agent);
+            let _ = update(
+                &mut model,
+                Msg::Redraw(vec![
+                    UiEvent::GridResize {
+                        grid: 1,
+                        width: u64::from(grid_w),
+                        height: u64::from(grid_h),
+                    },
+                    UiEvent::GridResize {
+                        grid: 21,
+                        width: u64::from(grid_w),
+                        height: u64::from(grid_h - 1),
+                    },
+                    UiEvent::WinPos {
+                        grid: 21,
+                        win: WinHandle(1021),
+                        startrow: 0,
+                        startcol: 0,
+                        width: u64::from(grid_w),
+                        height: u64::from(grid_h - 1),
+                    },
+                    UiEvent::Flush,
+                ]),
+            );
+            let (inset_rows, inset_cols) = model.look.inset();
+            let (row, col, width, height) = model.notice_column().rect;
+            assert!(width > 0 && height > 0, "{panes:?}: the column is empty");
+            assert_eq!(row, inset_rows, "{panes:?}: the column starts at the top");
+            assert_eq!(
+                col + width,
+                grid_w - inset_cols,
+                "{panes:?}: the column ends at the grid's right edge"
+            );
+        }
     }
 
     /// Three notices in the column of the focused tile, and the cursor on

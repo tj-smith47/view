@@ -195,7 +195,8 @@ fn spawn_view_pty_raw() -> ViewPtySession {
 /// feature's rendering.
 const MESSAGES_ON: &[&str] = &["notifications"];
 
-/// Whether `token` is on `screen` inside view's own toast frame.
+/// Whether `token` is on `screen` inside view's own toast frame, on one of
+/// its rows or across the rows a long notice wraps onto.
 ///
 /// The frame is what tells the two renderings apart. With `ext_messages`
 /// detached nvim paints the same text into the grid's last row, which
@@ -205,9 +206,7 @@ const MESSAGES_ON: &[&str] = &["notifications"];
 /// count: `BorderSet::for_caps` draws the vertical edge as `|` at a
 /// terminal that answered no box-glyph probe and as `│` at one that did.
 fn toast_shows(screen: &str, token: &str) -> bool {
-    screen
-        .lines()
-        .any(|row| row.contains(token) && (row.contains('│') || row.contains('|')))
+    common::in_a_box(screen, token)
 }
 
 /// [`toast_shows`], waited for.
