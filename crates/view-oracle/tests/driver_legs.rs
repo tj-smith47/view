@@ -162,11 +162,10 @@ fn pty_session_against_the_view_binary_shows_a_typed_character_on_screen() {
         session.screen()
     );
 
-    // the notices are toasts anchored over the top rows of the grid, so the
-    // first cells of an empty buffer are legitimately covered while they are
+    // a toast stands in the notice column, which moves off the cursor row,
+    // so the first cells of an empty buffer can sit under one while it is
     // up. The newlines put the typed character below whatever stack this
-    // launch actually raised, rather than depending on a dismissal: nothing
-    // but a slot timer retires a toast.
+    // launch raised, since nothing but a slot timer retires a toast.
     let below = common::newlines_below_toasts(&session.screen());
     session.send(format!("i{below}Z").as_bytes()).unwrap();
     assert!(

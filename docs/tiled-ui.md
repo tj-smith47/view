@@ -342,18 +342,22 @@ tile is too narrow for the full date to fit beside the message.
 
 ## Where notices appear
 
-Notices stack in a column in the corner named by
+Notices stack in the notice column, in the corner named by
 `[ui.surfaces.notifications] anchor`. The column takes the part of the
 screen that the tree, the agent panel, the other surfaces and a plugin's
 sidebar leave, wherever each is placed. Under tiles it sits inside the
 tile in that corner, one cell in from the frame. When a panel fills the
 whole screen, the column takes the screen's own corner. It is at most 60
-columns wide and at most half the screen wide, and a notice longer than
-that wraps onto more lines inside its box.
+columns wide and at most half as wide as the room the surfaces leave, and
+a notice longer than that wraps onto more lines inside its box.
 
-When the boxes would cover the line your cursor is on, the stack starts
-from the column's other end. A plugin's floating window over the column
-keeps its place, and the stack starts past it.
+When the boxes would cover the line your cursor is on, or the change you
+are reviewing from its header to its last added line, the stack moves to
+the column's other end. It stays there until your cursor or the change
+reaches it. When the change reaches both ends, the column shrinks to the
+larger side of it, and the notices that no longer fit wait in the
+history. A plugin's floating window over the column keeps its place, and
+the stack starts past it.
 
 ## The placement ring
 

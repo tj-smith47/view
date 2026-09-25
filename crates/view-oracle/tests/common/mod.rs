@@ -607,12 +607,12 @@ pub fn in_a_box(screen: &str, needle: &str) -> bool {
 /// Enough `<CR>`s in insert mode to put the next typed character below every
 /// toast box standing on `screen`.
 ///
-/// A toast is the one surface anchored over the top rows of the grid, and
+/// A toast stands in the notice column, which moves off the cursor row, and
 /// nothing but a slot timer retires one (spec 7.1, motion rule 5), so a leg
 /// that asserts screen text either waits out the whole stack or types below
-/// it. Derived from the boxes actually up rather than written down: a launch
-/// that gains a notice would otherwise land the marker back underneath one,
-/// and the failure reads as the text never having been typed.
+/// it. Derived from the boxes actually up: a launch that gains a notice
+/// would otherwise land the marker back underneath one, and the failure
+/// reads as the text never having been typed.
 pub fn newlines_below_toasts(screen: &str) -> String {
     let rows: Vec<Vec<char>> = screen.lines().map(|line| line.chars().collect()).collect();
     // each box is as tall as it is drawn, a wrapped notice included, and

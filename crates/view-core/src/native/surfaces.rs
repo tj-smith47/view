@@ -25,7 +25,7 @@
 //! Nothing here does I/O or allocates per observation: [`claims`] is
 //! integer arithmetic over one rect and the grid's size.
 
-use crate::model::Model;
+use crate::model::{Model, NOTICE_COLUMN_MAX};
 use crate::native::channels::{Channel, Region};
 use crate::native::ext::Ext;
 
@@ -435,12 +435,25 @@ pub fn claims_at(
     // thing and not this detector's business
     let chrome_rows = i64::from(grid_h) / 2;
     let rows = bottom - top + 1;
-    let over_the_stack = || {
-        let (c_row, c_col, c_width, c_height) = model.notice_bounds();
+    let anchor = model.notice_anchor();
+    // a plugin's notifier stacks in the grid's own corner whatever view has
+    // open there, so that corner is read beside the column view uses
+    let corner_width = NOTICE_COLUMN_MAX.min((grid_w / 2).max(1));
+    let grid_corner = (
+        0,
+        if anchor.is_left_corner() {
+            0
+        } else {
+            grid_w.saturating_sub(corner_width)
+        },
+        corner_width,
+        grid_h,
+    );
+    let over_the_stack = |column: (u16, u16, u16, u16)| {
+        let (c_row, c_col, c_width, c_height) = column;
         let (c_row, c_col) = (i64::from(c_row), i64::from(c_col));
         // the half of the column the stack grows from: a float at the
         // far end covers a box only once the stack has filled the column
-        let anchor = model.notice_anchor();
         let near_the_anchor = if anchor.is_top_corner() {
             top < c_row + (i64::from(c_height) + 1) / 2
         } else {
@@ -468,7 +481,9 @@ pub fn claims_at(
             Channel::Float(Region::CmdlineBand) => {
                 model.engine.paints_cmdline() && bottom >= last_row - (CMDLINE_ROWS - 1)
             }
-            Channel::Float(Region::TopRightChrome) => over_the_stack(),
+            Channel::Float(Region::NoticeColumn) => {
+                over_the_stack(model.notice_bounds()) || over_the_stack(grid_corner)
+            }
             _ => false,
         })
     })?;
@@ -1131,7 +1146,7 @@ mod tests {
                 };
                 let sighting = match region {
                     crate::native::channels::Region::CmdlineBand => cmp_cmdline_menu(),
-                    crate::native::channels::Region::TopRightChrome => notify_toast(),
+                    crate::native::channels::Region::NoticeColumn => notify_toast(),
                 };
                 assert_eq!(
                     claims(&sighting, &model),
@@ -1221,6 +1236,67 @@ mod tests {
             Some(Surface::Messages),
             "a toast pinned to the top right corner draws where view stacks its own"
         );
+    }
+
+    /// The captured nvim-notify toast with the agent open at the right
+    /// edge, drawn over the tiles and windowed, at the shipped width and at
+    /// one wide enough that view's column stands clear of the toast: the
+    /// toast in the grid's own corner is a float over the message area in
+    /// each.
+    #[test]
+    fn a_notifier_toast_beside_a_right_side_panel_is_a_messages_claim() {
+        use crate::events::WinHandle;
+        use crate::model::OverlayKind;
+        use crate::native::geometry::{Anchor, NativeSurface, OverlayBox};
+        for panel in [30, 60] {
+            let mut model = captured_session();
+            model.push_overlay(
+                OverlayBox::new(panel, 100).with_anchor(Anchor::Right),
+                OverlayKind::Ai,
+            );
+            let (_, col, width, _) = model.notice_bounds();
+            assert!(col + width <= GRID_W - panel, "{panel}%: {col}+{width}");
+            assert_eq!(
+                claims(&notify_toast(), &model),
+                Some(Surface::Messages),
+                "the agent drawn over {panel}% of the tiles"
+            );
+
+            let mut model = captured_session();
+            model
+                .engine
+                .grids_mut()
+                .claim_native_window(WinHandle(1021), NativeSurface::Agent);
+            let _ = update(
+                &mut model,
+                crate::msg::Msg::Redraw(vec![
+                    UiEvent::GridResize {
+                        grid: 21,
+                        width: u64::from(panel),
+                        height: u64::from(GRID_H - 1),
+                    },
+                    UiEvent::WinPos {
+                        grid: 21,
+                        win: WinHandle(1021),
+                        startrow: 0,
+                        startcol: u64::from(GRID_W - panel),
+                        width: u64::from(panel),
+                        height: u64::from(GRID_H - 1),
+                    },
+                    UiEvent::Flush,
+                ]),
+            );
+            let (_, col, width, _) = model.notice_bounds();
+            assert!(
+                col + width <= GRID_W - panel,
+                "{panel} windowed: {col}+{width}"
+            );
+            assert_eq!(
+                claims(&notify_toast(), &model),
+                Some(Surface::Messages),
+                "the agent windowed {panel} cells wide"
+            );
+        }
     }
 
     /// Wherever the layout puts the notice column, a short float over its

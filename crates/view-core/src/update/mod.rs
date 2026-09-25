@@ -202,6 +202,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // while it is open is neither on screen nor in the list unless the list
     // follows the ring
     model.dirty |= model.refresh_message_history();
+    // the end the stack holds moves only here, and each notice is wrapped
+    // here once for the column's width so a frame reads the wrap
+    model.place_notices();
     effects
 }
 

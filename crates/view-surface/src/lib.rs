@@ -673,9 +673,8 @@ fn toast_box(lines: &[Vec<Span>], column_w: u16) -> (u16, u16) {
     (width, height)
 }
 
-/// The notice column this frame stacks into, or `None` while there is
-/// nothing to stack: the geometry walks every pane, and a frame with no
-/// notice up and none leaving has no use for it.
+/// The notice column this frame stacks into, or `None` while no notice is
+/// up and none is leaving.
 pub(crate) fn live_notice_column(model: &Model) -> Option<NoticeColumn> {
     (!model.engine.messages.entries.is_empty() || model.toast_motion.is_some())
         .then(|| model.notice_column())
@@ -1518,12 +1517,12 @@ mod tests {
         surfaces.push(view_core::native::ext::Ext::Tabline);
         model.attach_surfaces(surfaces);
         model.engine.apply_grid(GridOp::Resize { width, height });
-        // a stack covering the cursor's row moves to the column's other
-        // end; the middle row is under neither end of a short stack, so the
-        // tests here read the anchored placement unless they move the
-        // cursor themselves
+        // a stack keeps clear of the cursor's row, and shrinks where both
+        // ends would cover it; the last row is under no stack grown from
+        // the top that leaves a row free, so the tests here read the
+        // anchored placement unless they move the cursor themselves
         model.engine.apply_grid(GridOp::CursorGoto {
-            row: height / 2,
+            row: height.saturating_sub(1),
             col: 0,
         });
         // past the startup window: a foreign message is parked rather than
@@ -1592,13 +1591,23 @@ mod tests {
 
     /// Points the notifications surface at `anchor`, keeping its placement
     /// and size at whatever they already were -- the corner is the only
-    /// thing the toast-stack geometry tests below vary.
+    /// thing the toast-stack geometry tests below vary. The cursor goes to
+    /// the row farthest from that corner, clear of the stack.
     fn with_notifications_anchor(model: &mut Model, anchor: Anchor) {
         let layout = model.surfaces.layout(NativeSurface::Notifications);
         model.surfaces.set_layout(
             NativeSurface::Notifications,
             view_core::native::geometry::SurfaceLayout::new(layout.placement, anchor, layout.size),
         );
+        let (_, height) = model.engine.grid().size();
+        model.engine.apply_grid(GridOp::CursorGoto {
+            row: if anchor.is_top_corner() {
+                height.saturating_sub(1)
+            } else {
+                0
+            },
+            col: 0,
+        });
     }
 
     /// Every toast layer's `(slot, rect)` in paint order -- the column as
@@ -2404,11 +2413,11 @@ mod tests {
 
     #[test]
     fn messages_layer_keeps_a_persistent_error_line_when_transient_lines_overflow_the_box() {
-        // 6 rows, not 3: each notice is its own framed box costing its
-        // line plus two frame rows, so a grid with room for two of the
-        // three boxes is what puts the eviction priority this test targets
-        // in play rather than the single-box floor
-        let mut model = model_with_grid(20, 6);
+        // each notice is its own framed box costing its line plus two frame
+        // rows, so a grid with room for two of the three boxes puts the
+        // eviction priority this test targets in play; the seventh row is
+        // the cursor's, clear of the stack
+        let mut model = model_with_grid(20, 7);
         apply(
             &mut model,
             UiEvent::MsgShow {
@@ -2544,7 +2553,8 @@ mod tests {
     /// for its terminal.
     #[test]
     fn a_notice_the_row_budget_never_showed_leaves_without_a_motion() {
-        let mut model = model_with_grid(20, 9);
+        // three boxes and the cursor's row under them
+        let mut model = model_with_grid(20, 10);
         model.caps.tier = view_core::model::Tier::Full;
         for text in ["first", "second", "third", "fourth"] {
             apply(

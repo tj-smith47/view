@@ -577,6 +577,24 @@ impl DiffReviewState {
         rows
     }
 
+    /// The hunk under the review's cursor as its buffer draws it: the first
+    /// row it replaces, one past the last, and how many virtual lines hang
+    /// off it (the header, then the added lines). `None` when the cursor is
+    /// on no open hunk.
+    #[must_use]
+    pub fn current_hunk_rows(&self) -> Option<(u32, u32, u32)> {
+        let hunk = self
+            .hunks
+            .get(self.cursor)
+            .filter(|hunk| hunk.status.is_open())?;
+        let virt = HEADER_ROWS.saturating_add(hunk.new_lines.len());
+        Some((
+            hunk.old_range.0,
+            hunk.old_range.1,
+            u32::try_from(virt).unwrap_or(u32::MAX),
+        ))
+    }
+
     /// Every open hunk's presentation in the buffer itself, top of the
     /// buffer first.
     ///
@@ -606,7 +624,7 @@ impl DiffReviewState {
                     stale: hunk.status == HunkStatus::Stale,
                     current: index == self.cursor,
                     header: if index == self.cursor {
-                        self.header(index)
+                        self.header(index).to_vec()
                     } else {
                         Vec::new()
                     },
@@ -624,10 +642,10 @@ impl DiffReviewState {
     /// not move with the hunk's state: what decides *this* hunk on the
     /// first, what moves between hunks and out of the review on the
     /// second.
-    fn header(&self, index: usize) -> Vec<String> {
+    fn header(&self, index: usize) -> [String; HEADER_ROWS] {
         let position = format!("hunk {}/{}", index + 1, self.hunks.len());
         if let Some(notice) = self.sync.notice() {
-            return vec![format!("{position} -- {notice}"), LEAVE_HINT.to_string()];
+            return [format!("{position} -- {notice}"), LEAVE_HINT.to_string()];
         }
         let hunk = self.hunks.get(index);
         let stale = hunk.is_some_and(|hunk| hunk.status == HunkStatus::Stale);
@@ -645,7 +663,7 @@ impl DiffReviewState {
             (true, true) => STALE_KEY_HINT,
             (true, false) => UNANCHORED_KEY_HINT,
         };
-        vec![format!("{position} -- {keys}"), NAV_HINT.to_string()]
+        [format!("{position} -- {keys}"), NAV_HINT.to_string()]
     }
 
     /// The call that draws this review in its buffer, or `None` for a
@@ -761,6 +779,10 @@ const UNANCHORED_KEY_HINT: &str = "stale, anchor gone: <leader>hx reject";
 /// The row under every [`KEY_HINT`] variant: moving between hunks and
 /// leaving, which no hunk's own state can take away.
 const NAV_HINT: &str = "]c next  [c prev  <leader>hq leave";
+
+/// The rows of the current hunk's header: the keys that decide it, then
+/// the keys that move and leave.
+const HEADER_ROWS: usize = 2;
 
 /// The one key a review whose buffer can no longer be trusted still has,
 /// standing in for [`NAV_HINT`] under the sync notice that says why nothing

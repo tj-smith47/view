@@ -58,9 +58,56 @@ pub struct MessageEntry {
     /// timestamp of its own -- this is the instant view learned of it,
     /// which can trail the instant nvim raised it.
     at: SystemTime,
+    /// The rows this entry's lines last wrapped to. A frame reads them
+    /// without wrapping again, and they are rebuilt only when the column's
+    /// width or the entry's text moves.
+    wrapped: WrapCache,
 }
 
+/// An entry's wrapped rows with the width and the text they were wrapped
+/// from. Every cache compares equal, since it restates the entry's own
+/// text.
+#[derive(Debug, Clone, Default)]
+struct WrapCache(Option<(u16, u64, Vec<String>)>);
+
+impl PartialEq for WrapCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for WrapCache {}
+
 impl MessageEntry {
+    /// A fingerprint of the entry's text, which is what a wrap depends on.
+    fn text_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.content.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// The entry's lines wrapped to a box `width` cells wide, from the
+    /// cache when it was built for this width and this text.
+    fn wrapped(&self, width: u16) -> std::borrow::Cow<'_, [String]> {
+        match &self.wrapped.0 {
+            Some((at, key, rows)) if *at == width && *key == self.text_key() => {
+                std::borrow::Cow::Borrowed(rows)
+            }
+            _ => std::borrow::Cow::Owned(wrap_toast(&self.lines(), width)),
+        }
+    }
+
+    /// Fills the cache for `width`, wrapping only when the width or the
+    /// text moved since the last fill.
+    fn rewrap(&mut self, width: u16) {
+        let key = self.text_key();
+        if matches!(&self.wrapped.0, Some((at, k, _)) if *at == width && *k == key) {
+            return;
+        }
+        self.wrapped = WrapCache(Some((width, key, wrap_toast(&self.lines(), width))));
+    }
+
     /// The instant the fold that pushed this entry ran, per
     /// [`Model::set_now`](crate::model::Model::set_now). What the history
     /// overlay and the windowed notification stream render alongside the
@@ -440,6 +487,7 @@ impl Messages {
             family: None,
             stood_its_window: false,
             at: self.now,
+            wrapped: WrapCache::default(),
         };
         if replace_last {
             if let Some(last) = self
@@ -481,6 +529,7 @@ impl Messages {
             family: None,
             stood_its_window: false,
             at: self.now,
+            wrapped: WrapCache::default(),
         }
     }
 
@@ -1119,7 +1168,7 @@ impl Messages {
         let costs: Vec<(bool, usize)> = self
             .painted()
             .map(|e| {
-                let rows = wrap_toast(&e.lines(), width).len();
+                let rows = e.wrapped(width).len();
                 (e.outranks_transient(), rows.saturating_add(2))
             })
             .collect();
@@ -1162,12 +1211,30 @@ impl Messages {
             .zip(self.keep_visible_in(max_rows, width))
             .filter(|(_, shown)| *shown)
             .map(|(e, _)| {
-                wrap_toast(&e.lines(), width)
-                    .into_iter()
-                    .map(|l| vec![Span::plain(l)])
+                e.wrapped(width)
+                    .iter()
+                    .map(|l| vec![Span::plain(l.clone())])
                     .collect()
             })
             .collect()
+    }
+
+    /// The rows the boxes [`Self::visible_toasts_in`] shows take together,
+    /// frames included.
+    pub(crate) fn shown_rows(&self, max_rows: usize, width: u16) -> usize {
+        self.painted()
+            .zip(self.keep_visible_in(max_rows, width))
+            .filter(|(_, shown)| *shown)
+            .map(|(e, _)| e.wrapped(width).len().saturating_add(2))
+            .sum()
+    }
+
+    /// Wraps every entry for a column `width` cells wide, once: an entry
+    /// already wrapped at this width with this text keeps its rows.
+    pub(crate) fn rewrap(&mut self, width: u16) {
+        for entry in &mut self.entries {
+            entry.rewrap(width);
+        }
     }
 }
 

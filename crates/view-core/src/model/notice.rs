@@ -8,7 +8,7 @@
 //! view.
 
 use super::{Model, Panes, TileKind};
-use crate::grid::registry::{PaneKind, GLOBAL_GRID};
+use crate::grid::registry::{GridId, PaneKind, GLOBAL_GRID};
 use crate::native::geometry::{Anchor, NativeSurface};
 
 /// The widest the notice column gets, in cells. A notice longer than a
@@ -56,37 +56,38 @@ impl Model {
     /// for a box, it sits in the grid's own corner. Under tiles it stays
     /// inside the inner rect of the tile in that corner, so no box lands on
     /// a frame line, and a float of a plugin's that overlaps it pushes the
-    /// stack past its rows. When the boxes stacked from the anchor's end
-    /// would cover the cursor's row in the focused window, and stacking
-    /// them from the other end would not, they stack from the other end.
+    /// stack past its rows.
+    ///
+    /// The stack keeps clear of the cursor's row in the focused window and,
+    /// while a review is open in it, of the hunk under review from its
+    /// header to its last added line. It stays at the end it was drawn from
+    /// until that region enters it, then moves to the other end. When both
+    /// ends would cover the region, the column shrinks to the larger side
+    /// of it and the notices that no longer fit wait in the history.
+    ///
+    /// The end the stack holds is kept by `update`, and the rest is read
+    /// off the layout of the moment.
     #[must_use]
     pub fn notice_column(&self) -> NoticeColumn {
         let anchor = self.notice_anchor();
-        let rect = self.notice_rect();
-        let anchored = anchor.is_top_corner();
-        let stack = self.stack_height(rect);
-        let from_top = if self.covers_cursor_row(rect, stack, anchored)
-            && !self.covers_cursor_row(rect, stack, !anchored)
-        {
-            !anchored
-        } else {
-            anchored
-        };
-        NoticeColumn {
-            rect,
-            from_top,
-            left_edge: anchor.is_left_corner(),
-        }
+        let held = self
+            .notice_held
+            .filter(|(corner, _)| *corner == anchor)
+            .map(|(_, from_top)| from_top);
+        self.place_column(held)
     }
 
-    /// The rows the toast stack is laid out in: the notice column's height,
-    /// floored at one framed box so a terminal too small to hold one still
-    /// shows the newest notice. Read by the renderer that lays the boxes
-    /// out and by `update`'s own read of which notice the budget is
-    /// showing, so the model animates only the boxes the frame drew.
-    #[must_use]
-    pub fn toast_rows(&self) -> usize {
-        usize::from(self.notice_rect().3).max(3)
+    /// Records the end the stack is drawn from this update, and wraps every
+    /// notice to the column's width. A session with nothing on the stack
+    /// records nothing, so the next notice starts from the anchor.
+    pub(crate) fn place_notices(&mut self) {
+        if self.engine.messages.entries.is_empty() && self.toast_motion.is_none() {
+            self.notice_held = None;
+            return;
+        }
+        let column = self.notice_column();
+        self.notice_held = Some((self.notice_anchor(), column.from_top));
+        self.engine.messages.rewrap(column.rect.2);
     }
 
     /// Where the armed toast sits among the boxes the column is showing.
@@ -96,10 +97,60 @@ impl Model {
         if self.engine.messages.entries.is_empty() {
             return None;
         }
-        let rect = self.notice_rect();
+        let rect = self.notice_column().rect;
         self.engine
             .messages
             .armed_visible_slot(usize::from(rect.3).max(3), rect.2)
+    }
+
+    /// The column for the current layout, drawn from the top where `held`
+    /// is `Some(true)` and the bottom where it is `Some(false)`, until the
+    /// region it keeps clear enters that end.
+    fn place_column(&self, held: Option<bool>) -> NoticeColumn {
+        let anchor = self.notice_anchor();
+        let rect = self.notice_rect();
+        let column = |rect, from_top| NoticeColumn {
+            rect,
+            from_top,
+            left_edge: anchor.is_left_corner(),
+        };
+        let preferred = held.unwrap_or(anchor.is_top_corner());
+        let Some((first, last)) = self.keep_clear(rect) else {
+            return column(rect, preferred);
+        };
+        let stack = self.stack_height(rect);
+        let covers = |from_top: bool| {
+            let (top, bottom) = if from_top {
+                (rect.0, rect.0.saturating_add(stack))
+            } else {
+                (
+                    rect.0.saturating_add(rect.3).saturating_sub(stack),
+                    rect.0.saturating_add(rect.3),
+                )
+            };
+            stack > 0 && first < bottom && last >= top
+        };
+        if !covers(preferred) {
+            return column(rect, preferred);
+        }
+        if !covers(!preferred) {
+            return column(rect, !preferred);
+        }
+        let above = first.saturating_sub(rect.0);
+        let below = rect
+            .0
+            .saturating_add(rect.3)
+            .saturating_sub(last.saturating_add(1));
+        if above.max(below) < 3 {
+            // no side holds a framed box, and a box over the region is
+            // still a notice read
+            return column(rect, preferred);
+        }
+        if above >= below {
+            column((rect.0, rect.1, rect.2, above), true)
+        } else {
+            column((last.saturating_add(1), rect.1, rect.2, below), false)
+        }
     }
 
     /// The column before any plugin float is taken out of it.
@@ -218,44 +269,84 @@ impl Model {
 
     /// The rows the boxes showing in `rect` take together, frames included.
     fn stack_height(&self, rect: Cells) -> u16 {
-        let rows: usize = self
+        let rows = self
             .engine
             .messages
-            .visible_toasts_in(usize::from(rect.3).max(3), rect.2)
-            .iter()
-            .map(|lines| lines.len().saturating_add(2))
-            .sum();
+            .shown_rows(usize::from(rect.3).max(3), rect.2);
         u16::try_from(rows).unwrap_or(u16::MAX).min(rect.3)
     }
 
-    /// Whether `stack` rows stacked from the top (or the bottom) of `rect`
-    /// cover the cursor's row inside the focused window.
-    fn covers_cursor_row(&self, rect: Cells, stack: u16, from_top: bool) -> bool {
-        if stack == 0 {
-            return false;
-        }
+    /// The first and last grid rows the stack keeps clear of, where the
+    /// focused window shares columns with `rect`: the cursor's row, and
+    /// while a review is open in that window, the hunk under review from
+    /// the first row it replaces or its header to its last added line.
+    fn keep_clear(&self, rect: Cells) -> Option<(u16, u16)> {
         let grids = self.engine.grids();
         let (cursor_row, _) = grids.cursor_pos();
         let (focused, ..) = grids.cursor_local();
         let window = grids
             .panes_in_z_order()
             .into_iter()
-            .find(|pane| pane.id == focused)
-            .map(|pane| pane.slot);
-        let Some(window) = window else {
-            return false;
-        };
-        let band = if from_top {
-            (rect.0, rect.1, rect.2, stack)
+            .find(|pane| pane.id == focused)?
+            .slot;
+        if !overlaps(
+            (cursor_row, rect.1, rect.2, 1),
+            (cursor_row, window.1, window.2, 1),
+        ) {
+            return None;
+        }
+        let hunk = self.hunk_rows(focused, cursor_row, window);
+        Some(hunk.map_or((cursor_row, cursor_row), |(first, last)| {
+            (first.min(cursor_row), last.max(cursor_row))
+        }))
+    }
+
+    /// The grid rows the hunk under review takes in the window on `grid`,
+    /// clipped to the window, or `None` when no review is open there.
+    ///
+    /// Counted out from the cursor's buffer line: every buffer line between
+    /// the two is one row, and the hunk's own virtual lines sit above its
+    /// first row for an insertion and under its last row for a
+    /// replacement. A fold or a wrapped line between the cursor and the
+    /// hunk moves the span by the rows it hides or adds.
+    fn hunk_rows(&self, grid: GridId, cursor_row: u16, window: Cells) -> Option<(u16, u16)> {
+        let review = self.ai_panel().pending_diff.as_ref()?;
+        let buffer = review.buffer?;
+        let status = self
+            .engine
+            .grids()
+            .window_handle(grid)
+            .and_then(|win| self.window_status.get(&win))
+            .filter(|status| status.buf == buffer.0)?;
+        let (row, end_row, virt) = review.current_hunk_rows()?;
+        let cursor_line = i64::from(status.row.saturating_sub(1));
+        let virt = i64::from(virt);
+        // the buffer line the virtual lines are drawn under
+        let after = if end_row > row {
+            i64::from(end_row) - 1
         } else {
-            (
-                rect.0.saturating_add(rect.3).saturating_sub(stack),
-                rect.1,
-                rect.2,
-                stack,
-            )
+            i64::from(row) - 1
         };
-        overlaps(band, (cursor_row, window.1, window.2, 1))
+        let screen = |line: i64| {
+            let between = if cursor_line <= after && after < line {
+                virt
+            } else if line <= after && after < cursor_line {
+                -virt
+            } else {
+                0
+            };
+            i64::from(cursor_row) + (line - cursor_line) + between
+        };
+        let first = if end_row > row {
+            screen(i64::from(row))
+        } else {
+            screen(after) + 1
+        };
+        let last = screen(after) + virt;
+        let top = i64::from(window.0);
+        let bottom = i64::from(far(window.0, window.3));
+        let clip = |at: i64| u16::try_from(at.clamp(top, bottom)).unwrap_or(window.0);
+        (last >= top && first <= bottom).then(|| (clip(first), clip(last)))
     }
 }
 
@@ -341,16 +432,38 @@ pub(crate) mod tests {
     use crate::model::{Look, OverlayKind, WindowStatus, MIN_FRAMED_SLOT};
     use crate::msg::Msg;
     use crate::native::geometry::OverlayBox;
-    use crate::native::geometry::SurfaceLayout;
+    use crate::native::geometry::{SurfaceLayout, SurfacePlacement};
     use crate::native::tree::TreeState;
     use crate::update::update;
 
-    const CORNERS: [Anchor; 4] = [
-        Anchor::TopLeft,
-        Anchor::TopRight,
-        Anchor::BottomLeft,
-        Anchor::BottomRight,
-    ];
+    /// Every corner the stack can be anchored at.
+    const CORNERS: &[Anchor] =
+        SurfaceLayout::accepted_anchors(NativeSurface::Notifications, SurfacePlacement::Overlay);
+
+    /// Every set of windowed surfaces the walk opens: none, each surface
+    /// alone at every edge it accepts windowed, and every combination of
+    /// them at their default windowed edges.
+    fn layouts() -> Vec<Vec<(NativeSurface, Anchor)>> {
+        let mut layouts = Vec::new();
+        for surface in NativeSurface::ALL {
+            for &anchor in SurfaceLayout::accepted_anchors(surface, SurfacePlacement::Windowed) {
+                layouts.push(vec![(surface, anchor)]);
+            }
+        }
+        for mask in 0..1_u32 << NativeSurface::ALL.len() {
+            let set: Vec<_> = (0..NativeSurface::ALL.len())
+                .filter(|bit| mask & 1 << bit != 0)
+                .map(|bit| {
+                    let surface = NativeSurface::ALL[bit];
+                    (surface, SurfaceLayout::default_windowed_anchor(surface))
+                })
+                .collect();
+            if set.len() != 1 {
+                layouts.push(set);
+            }
+        }
+        layouts
+    }
 
     /// A laid-out session and what the walk needs to know about it.
     pub(crate) struct Scene {
@@ -363,46 +476,53 @@ pub(crate) mod tests {
         pub(crate) natives: Vec<(u16, u16, u16, u16)>,
     }
 
-    /// One session on a `size` terminal under `look`: `tiles` vsplits side
-    /// by side, a windowed tree on the left, agent on the right and
-    /// notification stream under the tiles where `natives` has bits 0, 1
-    /// and 2 set. Every window keeps its status row under it, as the
-    /// `laststatus = 2` hold leaves it. `None` where a window would be
-    /// narrower or shorter than a framed slot.
-    pub(crate) fn scene(size: (u16, u16), look: Look, natives: u8, tiles: u16) -> Option<Scene> {
+    /// One session on a `size` terminal under `look`: each windowed
+    /// surface in `natives` opened against its edge of what the ones before
+    /// it left, then `tiles` vsplits side by side in the rest. Every window
+    /// keeps its status row under it, as the `laststatus = 2` hold leaves
+    /// it. `None` where a window would be narrower or shorter than a framed
+    /// slot, or an anchor is no edge.
+    pub(crate) fn scene(
+        size: (u16, u16),
+        look: Look,
+        natives: &[(NativeSurface, Anchor)],
+        tiles: u16,
+    ) -> Option<Scene> {
         let mut model = Model::with_term_size(size.0, size.1).with_look(look);
         let (grid_w, grid_h) = model.grid_target();
-        let full = grid_h.checked_sub(1)?;
-        let panel = |total: u16| (total * 3 / 10).max(3);
+        let panel = (grid_w * 3 / 10).max(3);
+        let band = (grid_h / 4).max(3);
         let mut placed: Vec<(u64, Cells, Option<NativeSurface>)> = Vec::new();
-        let mut left = 0;
-        let mut right = grid_w;
-        if natives & 1 != 0 {
-            let width = panel(grid_w);
-            placed.push((20, (0, 0, width, full), Some(NativeSurface::Tree)));
-            left = width + 1;
-        }
-        if natives & 2 != 0 {
-            let width = panel(grid_w);
-            placed.push((
-                21,
-                (0, grid_w.checked_sub(width)?, width, full),
-                Some(NativeSurface::Agent),
-            ));
-            right = grid_w.checked_sub(width + 1)?;
+        let (mut top, mut left) = (0, 0);
+        let (mut bottom, mut right) = (grid_h.checked_sub(1)?, grid_w);
+        for (surface, anchor) in natives {
+            let (width, height) = (right.checked_sub(left)?, bottom.checked_sub(top)?);
+            let slot = match anchor {
+                Anchor::Left => {
+                    left += panel + 1;
+                    (top, left - panel - 1, panel, height)
+                }
+                Anchor::Right => {
+                    right = right.checked_sub(panel + 1)?;
+                    (top, right + 1, panel, height)
+                }
+                Anchor::Top => {
+                    top += band + 1;
+                    (top - band - 1, left, width, band)
+                }
+                Anchor::Bottom => {
+                    bottom = bottom.checked_sub(band)?;
+                    let slot = (bottom, left, width, band);
+                    bottom = bottom.checked_sub(1)?;
+                    slot
+                }
+                _ => return None,
+            };
+            let grid = 20 + u64::try_from(surface.index()).unwrap();
+            placed.push((grid, slot, Some(*surface)));
         }
         let middle = right.checked_sub(left)?;
-        let mut tile_h = full;
-        if natives & 4 != 0 {
-            let height = (grid_h / 4).max(3);
-            let row = full.checked_sub(height)?;
-            placed.push((
-                22,
-                (row, left, middle, height),
-                Some(NativeSurface::Notifications),
-            ));
-            tile_h = row.checked_sub(1)?;
-        }
+        let tile_h = bottom.checked_sub(top)?;
         let tile_w = middle.checked_sub(tiles - 1)? / tiles;
         if tile_w < MIN_FRAMED_SLOT.0 || tile_h < MIN_FRAMED_SLOT.1 {
             return None;
@@ -417,7 +537,7 @@ pub(crate) mod tests {
             };
             let grid = 2 + u64::from(index);
             grids.push(grid);
-            placed.push((grid, (0, col, width, tile_h), None));
+            placed.push((grid, (top, col, width, tile_h), None));
         }
         let mut events = vec![UiEvent::GridResize {
             grid: 1,
@@ -494,30 +614,31 @@ pub(crate) mod tests {
     }
 
     /// Every layout the column is judged on: terminal widths 40 to 240 in
-    /// steps of 7, heights 10 to 60 in steps of 5, both looks with and
-    /// without gaps, every corner, each windowed surface on and off, one to
-    /// three vsplits, and the cursor in every tile. `each` gets the scene
-    /// and a label naming it.
+    /// steps of 11, heights 10 to 60 in steps of 5, both looks with and
+    /// without gaps, every corner, every set of [`layouts`], one to three
+    /// vsplits, and the cursor in every tile. `each` gets the scene and a
+    /// label naming it.
     pub(crate) fn walk(mut each: impl FnMut(&mut Scene, &str)) {
-        for width in (40..=240).step_by(7) {
+        let layouts = layouts();
+        for width in (40..=240).step_by(11) {
             for height in (10..=60).step_by(5) {
                 for panes in [Panes::Tiles, Panes::Nvim] {
                     for gaps in [true, false] {
-                        for natives in 0..8 {
+                        for natives in &layouts {
                             for tiles in 1..=3 {
                                 let look = Look::new(panes, gaps);
                                 let Some(mut scene) = scene((width, height), look, natives, tiles)
                                 else {
                                     continue;
                                 };
-                                for anchor in CORNERS {
+                                for &anchor in CORNERS {
                                     anchor_at(&mut scene.model, anchor);
                                     for index in 0..scene.tiles.len() {
                                         let grid = scene.tiles[index];
                                         focus(&mut scene.model, grid, 0);
                                         let label = format!(
                                             "{width}x{height} {panes:?} gaps={gaps} \
-                                             natives={natives:03b} tiles={tiles} \
+                                             natives={natives:?} tiles={tiles} \
                                              {anchor:?} focus={index}"
                                         );
                                         each(&mut scene, &label);
@@ -605,24 +726,50 @@ pub(crate) mod tests {
         assert!(scenes > 10_000, "the walk reached only {scenes} scenes");
     }
 
-    /// Where a panel of `kind` sits in terminal cells once it is opened on
-    /// `scene`, for each way a surface can be drawn beside the tiles.
-    fn open_panel(scene: &mut Scene, kind: usize) -> Option<Cells> {
+    /// Every anchor there is, in a chain the compiler checks: a new anchor
+    /// fails to compile here until it has a place in it.
+    fn anchors() -> impl Iterator<Item = Anchor> {
+        std::iter::successors(Some(Anchor::Center), |anchor| match anchor {
+            Anchor::Center => Some(Anchor::Left),
+            Anchor::Left => Some(Anchor::Right),
+            Anchor::Right => Some(Anchor::Top),
+            Anchor::Top => Some(Anchor::Bottom),
+            Anchor::Bottom => Some(Anchor::TopLeft),
+            Anchor::TopLeft => Some(Anchor::TopRight),
+            Anchor::TopRight => Some(Anchor::BottomLeft),
+            Anchor::BottomLeft => Some(Anchor::BottomRight),
+            Anchor::BottomRight => None,
+        })
+    }
+
+    /// The share of the terminal a panel at `anchor` takes, as the width
+    /// and height percentages of its box.
+    fn panel_share(anchor: Anchor) -> (u16, u16) {
+        match anchor {
+            Anchor::Center => (60, 60),
+            Anchor::Left | Anchor::Right => (30, 100),
+            Anchor::Top | Anchor::Bottom => (100, 30),
+            Anchor::TopLeft | Anchor::TopRight | Anchor::BottomLeft | Anchor::BottomRight => {
+                (30, 30)
+            }
+        }
+    }
+
+    /// Where a panel sits in terminal cells once it is opened on `scene`:
+    /// an overlay pinned at `anchor`, or a plugin's sidebar tile where
+    /// `anchor` is `None`.
+    fn open_panel(scene: &mut Scene, anchor: Option<Anchor>) -> Option<Cells> {
         let model = &mut scene.model;
-        let overlay = |surface: NativeSurface, anchor: Anchor| {
-            let geometry = OverlayBox::new(30, 100).with_anchor(anchor);
-            let kind = match surface {
-                NativeSurface::Tree => OverlayKind::Tree(TreeState::open(".".into())),
-                _ => OverlayKind::Ai,
-            };
-            (geometry, kind)
-        };
-        let (geometry, kind) = match kind {
-            0 => overlay(NativeSurface::Tree, Anchor::Left),
-            1 => overlay(NativeSurface::Tree, Anchor::Right),
-            2 => overlay(NativeSurface::Agent, Anchor::Right),
-            3 => overlay(NativeSurface::Agent, Anchor::Left),
-            _ => {
+        let (geometry, kind) = match anchor {
+            Some(anchor) => {
+                let (width, height) = panel_share(anchor);
+                let kind = match anchor {
+                    Anchor::Left => OverlayKind::Tree(TreeState::open(".".into())),
+                    _ => OverlayKind::Ai,
+                };
+                (OverlayBox::new(width, height).with_anchor(anchor), kind)
+            }
+            None => {
                 // a plugin's tree in the leftmost tile, which is the only
                 // window a single tile leaves
                 if scene.tiles.len() < 2 {
@@ -649,25 +796,33 @@ pub(crate) mod tests {
         Some((rect.row, rect.col, rect.width, rect.height))
     }
 
-    /// The tree and the agent panel drawn over the tiles at either edge,
-    /// and a plugin's sidebar tile, under tiles with and without gaps,
+    /// A panel drawn over the tiles at every anchor but the centre, and a
+    /// plugin's sidebar tile, under both looks with and without gaps,
     /// every corner and the cursor in every other tile.
     #[test]
     fn the_notice_column_never_intersects_a_side_panel_or_a_sidebar_tile() {
+        let panels: Vec<Option<Anchor>> = anchors()
+            .filter(|&anchor| anchor != Anchor::Center)
+            .map(Some)
+            .chain([None])
+            .collect();
         let mut scenes = 0;
         for width in (40..=240).step_by(13) {
             for height in (10..=60).step_by(5) {
-                for gaps in [true, false] {
+                for (panes, gaps) in [Panes::Tiles, Panes::Nvim]
+                    .into_iter()
+                    .flat_map(|panes| [(panes, true), (panes, false)])
+                {
                     for tiles in 1..=3 {
-                        for kind in 0..5 {
-                            let look = Look::new(Panes::Tiles, gaps);
-                            let Some(mut scene) = scene((width, height), look, 0, tiles) else {
+                        for &kind in &panels {
+                            let look = Look::new(panes, gaps);
+                            let Some(mut scene) = scene((width, height), look, &[], tiles) else {
                                 continue;
                             };
                             let Some(panel) = open_panel(&mut scene, kind) else {
                                 continue;
                             };
-                            for anchor in CORNERS {
+                            for &anchor in CORNERS {
                                 anchor_at(&mut scene.model, anchor);
                                 for index in 0..scene.tiles.len() {
                                     focus(&mut scene.model, scene.tiles[index], 0);
@@ -677,16 +832,16 @@ pub(crate) mod tests {
                                     let origin = model.chrome_rows() + model.look.grid_offset();
                                     let column =
                                         (row + origin, col + model.look.grid_offset(), w, h);
-                                    assert!(
-                                        w > 0 && h > 0,
-                                        "{width}x{height} gaps={gaps} tiles={tiles} \
-                                         panel={kind} {anchor:?}: the column is empty"
+                                    let label = format!(
+                                        "{width}x{height} {panes:?} gaps={gaps} \
+                                         tiles={tiles} panel={kind:?} {anchor:?} \
+                                         focus={index}"
                                     );
+                                    assert!(w > 0 && h > 0, "{label}: the column is empty");
                                     assert!(
                                         !overlaps(column, panel),
-                                        "{width}x{height} gaps={gaps} tiles={tiles} \
-                                         panel={kind} {anchor:?} focus={index}: the column \
-                                         {column:?} covers the panel at {panel:?}"
+                                        "{label}: the column {column:?} covers the panel \
+                                         at {panel:?}"
                                     );
                                 }
                             }
@@ -752,7 +907,7 @@ pub(crate) mod tests {
     fn the_stack_flips_off_the_cursor_row() {
         let look = Look::new(Panes::Tiles, true);
         for anchor in [Anchor::TopRight, Anchor::BottomRight] {
-            let mut scene = scene((80, 24), look, 0, 2).expect("an 80x24 vsplit");
+            let mut scene = scene((80, 24), look, &[], 2).expect("an 80x24 vsplit");
             anchor_at(&mut scene.model, anchor);
             for text in ["saved", "2 matches", "linted"] {
                 scene.model.engine.messages.push(
@@ -798,13 +953,14 @@ pub(crate) mod tests {
                 "{anchor:?}: the stack never moved off the cursor"
             );
 
-            // the cursor in the other tile is under no box, so nothing flips
+            // the cursor in the other tile is under no box, so nothing moves
+            let held = scene.model.notice_column().from_top;
             for row in 0..inner_h {
                 focus(&mut scene.model, scene.tiles[0], row);
                 assert_eq!(
                     scene.model.notice_column().from_top,
-                    anchor.is_top_corner(),
-                    "{anchor:?}: row {row} of the unfocused-column tile flipped the stack"
+                    held,
+                    "{anchor:?}: row {row} of the unfocused-column tile moved the stack"
                 );
             }
         }
@@ -816,7 +972,7 @@ pub(crate) mod tests {
     #[test]
     fn a_foreign_float_in_the_column_pushes_the_stack_past_it() {
         let look = Look::new(Panes::Tiles, true);
-        let mut scene = scene((80, 24), look, 0, 2).expect("an 80x24 vsplit");
+        let mut scene = scene((80, 24), look, &[], 2).expect("an 80x24 vsplit");
         scene
             .model
             .engine
@@ -864,5 +1020,188 @@ pub(crate) mod tests {
             "the far end of the column stays"
         );
         assert_eq!(scene.model.notice_bounds(), before.rect);
+    }
+
+    /// One tile at 80x24 under `anchor` with three notices up, and where
+    /// the stack stands before any cursor has had its say: the column, the
+    /// rows the stack takes, and the grid row the tile's first line is on.
+    fn stacked(anchor: Anchor) -> (Scene, Cells, u16, u16) {
+        let look = Look::new(Panes::Tiles, true);
+        let mut scene = scene((80, 24), look, &[], 1).expect("an 80x24 tile");
+        anchor_at(&mut scene.model, anchor);
+        for text in ["saved", "2 matches", "linted"] {
+            scene
+                .model
+                .engine
+                .messages
+                .push("echomsg".to_string(), vec![(0, text.into())], false);
+        }
+        let grid = scene.tiles[0];
+        focus(&mut scene.model, grid, 0);
+        let origin = scene.model.engine.grids().cursor_pos().0;
+        let rect = scene.model.notice_bounds();
+        let stack = scene.model.stack_height(rect);
+        assert!(
+            rect.3 > stack * 2 + 1,
+            "the column holds a stack at each end with a row between"
+        );
+        // the first row moved the stack; start over from the anchor's end
+        // with the cursor between the two ends
+        scene.model.notice_held = None;
+        focus(&mut scene.model, grid, rect.0 + stack - origin);
+        assert_eq!(scene.model.notice_column().from_top, anchor.is_top_corner());
+        (scene, rect, stack, origin)
+    }
+
+    /// Opens a review of `old` against `new` in the tile, and puts the
+    /// cursor on buffer `line` at the tile's `row`.
+    fn review_at(scene: &mut Scene, old: &str, new: &str, line: u32, row: u16) {
+        let grid = scene.tiles[0];
+        let mut review = crate::native::ai_panel::DiffReviewState::new(
+            1,
+            std::path::PathBuf::from("a.rs"),
+            1,
+            crate::native::diff::hunk::diff(Some(old), new),
+        );
+        review.buffer = Some(crate::msg::BufferHandle(7));
+        scene.model.ai_panel_mut().pending_diff = Some(review);
+        scene.model.window_status.insert(
+            WinHandle(1000 + grid),
+            WindowStatus {
+                buf: 7,
+                row: line + 1,
+                ..WindowStatus::default()
+            },
+        );
+        focus(&mut scene.model, grid, row);
+    }
+
+    /// The rows the stack takes in `column`.
+    fn band(model: &Model, column: NoticeColumn) -> std::ops::Range<u16> {
+        let (top, _, _, height) = column.rect;
+        let stack = model.stack_height(column.rect);
+        if column.from_top {
+            top..top + stack
+        } else {
+            top + height - stack..top + height
+        }
+    }
+
+    fn lines(count: usize) -> String {
+        (0..count).map(|line| format!("line {line}\n")).collect()
+    }
+
+    /// A line inserted at the top of the file, its header and the line
+    /// itself drawn above the first row, and the cursor below the rows a
+    /// top stack takes: the stack leaves the hunk for the bottom.
+    #[test]
+    fn the_stack_leaves_an_insertion_hunk_at_the_window_top() {
+        let (mut scene, rect, stack, origin) = stacked(Anchor::TopRight);
+        let old = lines(40);
+        let new = format!("inserted\n{old}");
+        let cursor = rect.0 + stack;
+        // the header and the inserted line take the tile's first 3 rows
+        let line = u32::from(cursor - origin - 3);
+        review_at(&mut scene, &old, &new, line, cursor - origin);
+        assert_eq!(scene.model.engine.grids().cursor_pos().0, cursor);
+        let column = scene.model.notice_column();
+        let rows = band(&scene.model, column);
+        assert!(!column.from_top, "the stack stayed over the hunk: {rows:?}");
+        for row in origin..=cursor {
+            assert!(
+                !rows.contains(&row),
+                "the stack {rows:?} covers row {row} of the hunk"
+            );
+        }
+    }
+
+    /// The last two lines of the file replaced by eight, the cursor on the
+    /// first of them above the rows a bottom stack takes: the header and the
+    /// added lines run into those rows, and the stack moves to the top.
+    #[test]
+    fn the_stack_leaves_a_long_replacement_at_the_file_end() {
+        let (mut scene, rect, stack, origin) = stacked(Anchor::BottomRight);
+        let old = lines(40);
+        let new = format!(
+            "{}{}",
+            lines(38),
+            (0..8).map(|n| format!("new {n}\n")).collect::<String>()
+        );
+        let cursor = rect.0 + stack;
+        review_at(&mut scene, &old, &new, 38, cursor - origin);
+        let column = scene.model.notice_column();
+        let rows = band(&scene.model, column);
+        assert!(column.from_top, "the stack stayed over the hunk: {rows:?}");
+        let last = (cursor + 2 + 10).min(rect.0 + rect.3 - 1);
+        for row in cursor..=last {
+            assert!(
+                !rows.contains(&row),
+                "the stack {rows:?} covers row {row} of the hunk"
+            );
+        }
+    }
+
+    /// A hunk that reaches into both ends of the column: the column
+    /// shrinks to the larger side of it, and no box covers the hunk.
+    #[test]
+    fn a_hunk_under_both_ends_shrinks_the_column_to_the_larger_side() {
+        let (mut scene, rect, _, origin) = stacked(Anchor::TopRight);
+        let old = lines(40);
+        let new = format!(
+            "{}{}{}",
+            lines(10),
+            (0..6).map(|n| format!("new {n}\n")).collect::<String>(),
+            &lines(40)[lines(11).len()..]
+        );
+        let cursor = rect.0 + 4;
+        review_at(&mut scene, &old, &new, 10, cursor - origin);
+        // the replaced row, the header and the six added lines
+        let last = cursor + 8;
+        let column = scene.model.notice_column();
+        let (top, _, _, height) = column.rect;
+        assert!(height >= 3, "the column keeps room for a box: {column:?}");
+        assert!(
+            top > last || top + height <= cursor,
+            "the column {column:?} covers the hunk on rows {cursor} to {last}"
+        );
+        assert_eq!(
+            (top, top + height),
+            (last + 1, rect.0 + rect.3),
+            "the column takes the larger side, under the hunk"
+        );
+    }
+
+    /// The cursor moving down every row and back up: the stack moves only
+    /// on a step that brings the cursor into the rows it takes.
+    #[test]
+    fn the_stack_holds_its_end_until_the_cursor_enters_it() {
+        for anchor in [Anchor::TopRight, Anchor::BottomRight] {
+            let (mut scene, _, _, _) = stacked(anchor);
+            let grid = scene.tiles[0];
+            let (_, inner_h) = scene
+                .model
+                .engine
+                .grids()
+                .grid(GridId(grid))
+                .unwrap()
+                .size();
+            let mut before = scene.model.notice_column();
+            let mut moves = 0;
+            for row in (0..inner_h).chain((0..inner_h).rev()) {
+                focus(&mut scene.model, grid, row);
+                let cursor = scene.model.engine.grids().cursor_pos().0;
+                let after = scene.model.notice_column();
+                if after.from_top != before.from_top {
+                    moves += 1;
+                    assert!(
+                        band(&scene.model, before).contains(&cursor),
+                        "{anchor:?}: the stack moved with the cursor on row {cursor}, \
+                         outside the rows it took"
+                    );
+                }
+                before = after;
+            }
+            assert!(moves >= 2, "{anchor:?}: the stack moved {moves} times");
+        }
     }
 }

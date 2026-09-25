@@ -173,8 +173,8 @@ struct Inputs {
     // different rows, so a cache keyed on the stack's contents alone would
     // hand back the frame before the one that just advanced
     toast_motion: Option<view_core::native::toast::ToastMotion>,
-    // where the stack is drawn follows panes, floats and the cursor row,
-    // none of which the fields above compare
+    // where the stack is drawn follows panes, floats, the cursor row and
+    // the hunk under review, none of which the fields above compare
     notice_column: Option<view_core::model::NoticeColumn>,
 }
 
@@ -213,8 +213,10 @@ impl Inputs {
     }
 
     /// Whether `model` would produce the same layers this snapshot did.
-    /// Comparison only -- no clone, no allocation: on the steady-typing
-    /// frame every field is a scalar compare or an `is_none` pair.
+    /// Comparison only, with no clone: on the steady-typing frame every
+    /// field is a scalar compare or an `is_none` pair. While a notice is
+    /// up, the notice column is placed afresh, which walks the panes into
+    /// a few short vectors and reads each notice's wrap from its cache.
     fn matches(&self, model: &Model) -> bool {
         let engine = &model.engine;
         !self.had_overlays

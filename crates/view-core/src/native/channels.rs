@@ -104,7 +104,7 @@ pub enum Region {
     CmdlineBand,
     /// The notice column, where view stacks its toasts
     /// ([`Model::notice_bounds`](crate::model::Model::notice_bounds)).
-    TopRightChrome,
+    NoticeColumn,
 }
 
 /// One way a surface can be drawn.
@@ -149,7 +149,7 @@ impl Channel {
             Self::Attach(ext) => ext.as_str(),
             Self::Replaced(global) => global,
             Self::Float(Region::CmdlineBand) => "a float over the command line",
-            Self::Float(Region::TopRightChrome) => "a float over the notice column",
+            Self::Float(Region::NoticeColumn) => "a float over the notice column",
         }
     }
 }
@@ -217,7 +217,7 @@ pub const CHANNELS: &[SurfaceChannels] = &[
                 option: "rulerformat",
                 by: "cmdheight",
             },
-            Channel::Float(Region::TopRightChrome),
+            Channel::Float(Region::NoticeColumn),
         ],
     },
     SurfaceChannels {
