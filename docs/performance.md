@@ -15,13 +15,13 @@ the tree, the tabline and the statusline present and still.
 
 | | view | Neovim | on |
 |---|---|---|---|
-| screen ready | 53.9 ms | 52.4 ms | your config (lazy.nvim, noice, nvim-notify), same host, same run |
+| screen ready | 53.4 ms | 52.5 ms | your config (lazy.nvim, noice, nvim-notify), same host, same run |
 
-Under your config view is 1.5 ms behind on screen ready, against a bar level
-with Neovim, so this row is a bar view has not met, by 2.9%. At the worst launch
+Under your config view is 0.9 ms behind on screen ready, against a bar level
+with Neovim, so this row is a bar view has not met, by 1.7%. At the worst launch
 in a thousand under your config, held from the 2026-09-06 run, the two are
 within a millisecond of each other (78.2 ms against 77.2 ms). With no plugins at
-all screen ready is 9.6% behind, which is a bench fixture reading.
+all screen ready is 2.5% behind, which is a bench fixture reading.
 
 What makes it that number: view paints its own shell, the chrome you see
 before anything has loaded, in about 4 ms, and that frame is on screen
@@ -32,7 +32,7 @@ already painted; it now attaches while your `init.lua` is still running. What
 is left of that gap is the screen the attach asks for, which travels to view
 over the wire and is painted again by view, where Neovim's own terminal UI
 reads it out of the same process. That attach is inside the engine's own
-startup now, so the engine's "started" mark lands 1.64 ms later under view.
+startup now, so the engine's "started" mark lands 1.24 ms later under view.
 
 ## You type
 
@@ -40,7 +40,7 @@ You press a key and the character appears.
 
 | | view | Neovim | on |
 |---|---|---|---|
-| keypress to glyph, worst case in a thousand | 1.40 ms | 1.19 ms | your config, same host, same run |
+| keypress to glyph, worst case in a thousand | 1.34 ms | 1.20 ms | your config, same host, same run |
 | the same keypress, with view drawing the glyph it expects | 0.32 ms | 1.25 ms | your config, same host, same run |
 
 At the median, under your config, keypress to glyph is 11% behind, against a
