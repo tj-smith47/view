@@ -263,6 +263,57 @@ fn the_active_pane_is_distinguishable_from_the_inactive_one() {
     );
 }
 
+/// A cell of the inactive pane with a background of its own, the row
+/// `cursorline` lights in every window, keeps that background where
+/// `NormalNC` sets a different one, and the unhighlighted cell beside it
+/// takes `NormalNC`'s.
+#[test]
+fn an_inactive_pane_keeps_a_cells_own_background_under_normal_nc() {
+    const NC_BG: u32 = 0x0011_1111;
+    const LIT_BG: u32 = 0x0044_475A;
+    let mut model = vsplit();
+    drive(
+        &mut model,
+        vec![
+            UiEvent::HlAttrDefine {
+                id: 7,
+                fg: Some(0x0033_3333),
+                bg: Some(NC_BG),
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+            UiEvent::HlGroupSet {
+                name: "NormalNC".to_string(),
+                hl_id: 7,
+            },
+            UiEvent::HlAttrDefine {
+                id: 8,
+                fg: None,
+                bg: Some(LIT_BG),
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+            line(RIGHT, 1, "lit", 8),
+            UiEvent::Flush,
+        ],
+    );
+    let buf = frame(&model);
+    assert_eq!(
+        buf[(SEPARATOR_COL + 1, 1)].style().bg,
+        rgb(LIT_BG),
+        "the inactive pane's lit cell lost its own background"
+    );
+    assert_eq!(
+        buf[(SEPARATOR_COL + 1, 0)].style().bg,
+        rgb(NC_BG),
+        "the inactive pane's plain cell did not take NormalNC's background"
+    );
+}
+
 /// A pure focus move -- `GridCursorGoto` onto the other window, no cell of
 /// either grid touched -- flips which pane's cells resolve through
 /// `NormalNC` in [`super::pane_theme`], but carries no `GridDamage` row and

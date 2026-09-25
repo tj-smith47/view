@@ -292,6 +292,24 @@ impl Pair {
             "{}: cursor rows differ",
             leg.name
         );
+        if multigrid {
+            // the reference applier keeps no window placement, so the grid
+            // view names for `win` has to show `win`'s own cursor line there
+            let want = reference
+                .eval_str(&format!("getbufline(winbufnr({win}), line('.', {win}))[0]"))
+                .unwrap();
+            let shown = ref_grids
+                .iter()
+                .find(|(id, _)| *id == grid)
+                .and_then(|(_, screen)| screen.rows.get(row))
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                !want.is_empty() && shown.starts_with(&want),
+                "{}: reference grid {grid} row {row} is {shown:?}, not window {win}'s line {want:?}",
+                leg.name
+            );
+        }
         Self {
             view: window_rows(engine, &view_grids, grid, multigrid, win),
             reference: window_rows(reference, &ref_grids, grid, multigrid, win),
