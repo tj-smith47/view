@@ -2733,11 +2733,13 @@ mod tests {
         assert_eq!(
             registrations.len(),
             1,
-            "the keys register exactly once per session: {calls:?}"
+            "the takeover registers once per session: {calls:?}"
         );
-        assert!(
-            registrations[0].contains("ff") && registrations[0].ends_with(",7)"),
-            "the registration carries this session's keys and channel: {registrations:?}"
+        // the keys follow from the takeover's claims reply, behind the answer
+        // that stops nvim's startup clock (`NativeSession::take_over`)
+        assert_eq!(
+            registrations[0], "register_mappings(,7)",
+            "the takeover's registration carries no key, on this session's channel"
         );
     }
 }
