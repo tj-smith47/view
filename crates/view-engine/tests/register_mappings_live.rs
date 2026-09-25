@@ -63,6 +63,35 @@ fn spawn_attached() -> (
     (engine, channel, rx, pump, cutover)
 }
 
+/// `:View` ends at a `|` the way nvim's own commands do: the feature gets
+/// the verb before the bar, and the command after it runs.
+#[test]
+fn a_view_command_hands_a_trailing_bar_command_to_nvim() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_claims(&rx);
+
+    engine
+        .handle
+        .eval_str("execute('View ui panes tiles | vsplit')")
+        .unwrap();
+    let invoked = loop {
+        match rx.recv_timeout(view_test_support::host_deadline(TICK)) {
+            Ok(Msg::FeatureInvoke { feature, verb }) => break (feature, verb),
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                panic!("no Msg::FeatureInvoke arrived within the deadline")
+            }
+        }
+    };
+    assert_eq!(invoked, ("ui".to_string(), "panes tiles".to_string()));
+    assert_eq!(
+        engine.handle.eval_str("winnr('$')").unwrap(),
+        "2",
+        "the vsplit after the bar never ran"
+    );
+}
+
 /// A second registration that reissues the same chord must not report it as
 /// taken from a user: the previous run's own claim is not a user mapping,
 /// so the reissue's own claim for the same key must answer

@@ -184,6 +184,7 @@ vim.api.nvim_create_user_command(command, function(opts)
   vim.rpcnotify(channel, 'view_invoke', opts.fargs[1] or '', verb)
 end, {
   nargs = '*',
+  bar = true,
   desc = 'invoke a view native feature',
   complete = function(lead, line)
     local words = vim.split(vim.trim(line), '%s+')
