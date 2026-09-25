@@ -458,9 +458,10 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             win,
             curline,
             curcol,
+            line_count,
             ..
         } => {
-            super::bridge::on_window_cursor(model, win, curline, curcol);
+            super::bridge::on_window_cursor(model, win, curline, curcol, line_count);
             Vec::new()
         }
         UiEvent::Unknown { .. } => Vec::new(),

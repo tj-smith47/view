@@ -218,9 +218,10 @@ fn decode_msg_set_pos(args: &[Value]) -> Option<UiEvent> {
 
 fn decode_win_viewport(args: &[Value]) -> Option<UiEvent> {
     // nvim grew `line_count` and `scroll_delta` onto the end of this tuple
-    // after the six fields below; `..` takes whatever a build sends rather
-    // than making arity part of the match, the same way `grid_line` does
-    let [grid, win, topline, botline, curline, curcol, ..] = args else {
+    // after the six fields below; the rest takes whatever a build sends
+    // rather than making arity part of the match, the same way `grid_line`
+    // does
+    let [grid, win, topline, botline, curline, curcol, rest @ ..] = args else {
         return None;
     };
     Some(UiEvent::WinViewport {
@@ -230,6 +231,7 @@ fn decode_win_viewport(args: &[Value]) -> Option<UiEvent> {
         botline: as_u64(botline)?,
         curline: as_u64(curline)?,
         curcol: as_u64(curcol)?,
+        line_count: rest.first().and_then(as_u64),
     })
 }
 
@@ -724,7 +726,8 @@ mod tests {
     /// The viewport event carries the one relocation nvim announces without
     /// resending the relocated cells, so it has to decode to a variant that
     /// still holds `topline` -- and it has to keep decoding on a build that
-    /// appends fields to the tuple, which nvim has already done twice.
+    /// appends fields to the tuple, which nvim has already done twice. The
+    /// first appended field is the line count, read where a build sends it.
     #[test]
     fn decodes_win_viewport_including_a_longer_tuple() {
         let six = arr(vec![
@@ -749,15 +752,25 @@ mod tests {
 
         let evs = decode_redraw(&params);
 
-        let expected = UiEvent::WinViewport {
+        let six = UiEvent::WinViewport {
             grid: 1,
             win: WinHandle(7),
             topline: 10,
             botline: 34,
             curline: 12,
             curcol: 3,
+            line_count: None,
         };
-        assert_eq!(evs, vec![expected.clone(), expected]);
+        let eight = UiEvent::WinViewport {
+            grid: 1,
+            win: WinHandle(7),
+            topline: 10,
+            botline: 34,
+            curline: 12,
+            curcol: 3,
+            line_count: Some(200),
+        };
+        assert_eq!(evs, vec![six, eight]);
     }
 
     /// Every tuple here is quoted from `docs/multigrid-wire-capture.md`,

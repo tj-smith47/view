@@ -110,17 +110,30 @@ pub(super) fn on_window_status(
 /// `curline` and `curcol` are 0-based, `curcol` in bytes, which is what the
 /// report's `nvim_win_get_cursor` reads too, so both put the same number on
 /// the ruler.
-pub(super) fn on_window_cursor(model: &mut Model, win: WinHandle, curline: u64, curcol: u64) {
+///
+/// `line_count` is folded the same way: nvim resends it when entries are
+/// appended from another window under an open quickfix window, which
+/// fires no autocmd. An unchanged reading damages nothing, since this runs
+/// on every cursor motion.
+pub(super) fn on_window_cursor(
+    model: &mut Model,
+    win: WinHandle,
+    curline: u64,
+    curcol: u64,
+    line_count: Option<u64>,
+) {
     let Some(status) = model.window_status.get_mut(&win) else {
         return;
     };
     let row = saturate_u32(curline.saturating_add(1));
     let col = saturate_u32(curcol.saturating_add(1));
-    if (status.row, status.col) == (row, col) {
+    let lines = line_count.map_or(status.lines, saturate_u32);
+    if (status.row, status.col, status.lines) == (row, col, lines) {
         return;
     }
     status.row = row;
     status.col = col;
+    status.lines = lines;
     damage_frame_edges(model, win);
 }
 

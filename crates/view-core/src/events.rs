@@ -116,9 +116,10 @@ pub enum UiEvent {
     /// buffer lines at the same screen rows, which is the one relocation
     /// nvim announces without ever resending the relocated cells, and so the
     /// one a per-cell reconciliation cannot see. The model reads
-    /// `curline`/`curcol` into the window's
+    /// `curline`/`curcol` and `line_count` into the window's
     /// [`WindowStatus`](crate::model::WindowStatus), which is what a tile's
-    /// ruler shows. `botline` is decoded for wire completeness.
+    /// ruler and its `row/lines` count show. `botline` is decoded for wire
+    /// completeness.
     WinViewport {
         grid: u64,
         win: WinHandle,
@@ -126,6 +127,9 @@ pub enum UiEvent {
         botline: u64,
         curline: u64,
         curcol: u64,
+        /// The buffer's line count, which nvim sends again whenever it
+        /// changes, or `None` from an nvim that appends no count.
+        line_count: Option<u64>,
     },
     /// The rows and columns of a window's grid that are not part of the
     /// viewport `win_viewport` reports -- what 'winbar' and a floating

@@ -1574,6 +1574,7 @@ mod tests {
                     botline: 20,
                     curline: 0,
                     curcol: 0,
+                    line_count: Some(40),
                 },
                 UiEvent::Flush,
             ],
@@ -1657,6 +1658,7 @@ mod tests {
                     botline: 20,
                     curline: 0,
                     curcol: 0,
+                    line_count: Some(40),
                 },
                 false,
             ),
@@ -2188,6 +2190,7 @@ mod tests {
             botline: topline + 12,
             curline: topline,
             curcol: 0,
+            line_count: Some(topline + 40),
         }
     }
 

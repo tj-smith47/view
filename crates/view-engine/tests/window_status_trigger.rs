@@ -493,3 +493,69 @@ fn a_typed_motion_moves_the_window_position_with_no_report() {
     assert_eq!(position(&model), (5, 9), "typing in insert mode");
     assert_eq!(reports, 0, "typing in insert mode sent a window report");
 }
+
+/// Entries appended from another window to the list under an open quickfix
+/// window change that window's line count and fire no autocmd, since nvim
+/// refills the buffer's tail in place. `win_viewport` resends the count, so the tile's
+/// `lines` follows the longer list. A replaced list refills the buffer and
+/// fires `FileType`, which the bridge's own report already covers.
+///
+/// Disconfirm: dropping the `lines` fold in `on_window_cursor` leaves the
+/// count at 3.
+#[test]
+fn entries_appended_under_an_open_quickfix_window_move_its_line_count() {
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+    let channel = engine.api_info.channel_id;
+    let (tx, rx) = mpsc::sync_channel(256);
+    let (pump, _cutover) = engine.start_pump(tx);
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS_MULTIGRID)
+        .unwrap();
+    engine.handle.register_bridge(channel).unwrap();
+    let lua = |chunk: &str| {
+        engine
+            .handle
+            .request(
+                "nvim_exec_lua",
+                vec![rmpv::Value::from(chunk), rmpv::Value::Array(Vec::new())],
+            )
+            .unwrap()
+    };
+    let mut model = Model::new();
+    let _ = update(
+        &mut model,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+
+    let items = |count: usize| {
+        let entries: Vec<String> = (1..=count)
+            .map(|i| format!("{{ filename = 'a.rs', lnum = {i}, text = 'e{i}' }}"))
+            .collect();
+        format!("{{ {} }}", entries.join(", "))
+    };
+    lua(&format!("vim.fn.setqflist({}) vim.cmd('copen')", items(3)));
+    let _ = fold(&rx, &pump, &mut model);
+    let qf = WinHandle(
+        lua("return vim.fn.getqflist({ winid = 0 }).winid")
+            .as_u64()
+            .unwrap(),
+    );
+    let lines = |model: &Model| model.window_status.get(&qf).map(|status| status.lines);
+    assert_eq!(lines(&model), Some(3), "the quickfix window's first report");
+
+    // `copen` leaves the quickfix window current, where an append also
+    // fires `BufModifiedSet` and the bridge reports the window itself
+    lua("vim.cmd('wincmd p')");
+    let _ = fold(&rx, &pump, &mut model);
+    lua(&format!(
+        "vim.fn.setqflist({{}}, 'a', {{ items = {} }})",
+        items(2)
+    ));
+    let reports = fold(&rx, &pump, &mut model);
+    assert_eq!(reports, 0, "an append from another window sent a report");
+    assert_eq!(lines(&model), Some(5), "the appended list's count");
+}

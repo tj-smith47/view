@@ -13014,7 +13014,7 @@ fn a_closed_windows_status_is_dropped() {
     }
 }
 
-fn viewport(curline: u64, curcol: u64) -> Msg {
+fn viewport(curline: u64, curcol: u64, line_count: Option<u64>) -> Msg {
     Msg::Redraw(vec![UiEvent::WinViewport {
         grid: 6,
         win: crate::events::WinHandle(1003),
@@ -13022,6 +13022,7 @@ fn viewport(curline: u64, curcol: u64) -> Msg {
         botline: 24,
         curline,
         curcol,
+        line_count,
     }])
 }
 
@@ -13056,7 +13057,7 @@ fn a_window_status_change_paints_only_under_tiles() {
         );
         assert_eq!(m.dirty, paints, "{panes:?}: a new report");
         m.dirty = false;
-        let _ = update(&mut m, viewport(4, 7));
+        let _ = update(&mut m, viewport(4, 7, Some(40)));
         assert_eq!(
             (m.window_status[&win].row, m.window_status[&win].col),
             (5, 8),
@@ -13064,9 +13065,46 @@ fn a_window_status_change_paints_only_under_tiles() {
         );
         assert_eq!(m.dirty, paints, "{panes:?}: a cursor motion");
         m.dirty = false;
-        let _ = update(&mut m, viewport(4, 7));
+        let _ = update(&mut m, viewport(4, 7, Some(40)));
         assert!(!m.dirty, "{panes:?}: an unmoved cursor asked for a frame");
+        let _ = update(&mut m, viewport(4, 7, None));
+        assert_eq!(m.window_status[&win].lines, 40, "{panes:?}: no count sent");
+        assert!(
+            !m.dirty,
+            "{panes:?}: a viewport with no count asked for a frame"
+        );
     }
+}
+
+/// Entries appended from another window under an open quickfix window
+/// fire no autocmd, so the count `win_viewport` resends is the only way
+/// the tile's line count follows them.
+///
+/// Disconfirm: dropping the `lines` fold in `on_window_cursor` leaves the
+/// count at 3.
+#[test]
+fn a_viewport_with_a_new_line_count_updates_the_tile_and_asks_for_a_frame() {
+    let mut m = vsplit_model();
+    m.look = crate::model::Look::new(crate::model::Panes::Tiles, true);
+    let win = crate::events::WinHandle(1003);
+    let _ = update(
+        &mut m,
+        Msg::WindowStatus {
+            win,
+            status: crate::model::WindowStatus {
+                row: 1,
+                col: 1,
+                lines: 3,
+                ..crate::model::WindowStatus::default()
+            },
+        },
+    );
+    m.dirty = false;
+    let _ = update(&mut m, viewport(0, 0, Some(3)));
+    assert!(!m.dirty, "an unchanged count asked for a frame");
+    let _ = update(&mut m, viewport(0, 0, Some(5)));
+    assert_eq!(m.window_status[&win].lines, 5);
+    assert!(m.dirty, "a new count painted nothing");
 }
 
 /// The report is the only way a user finds out why a session came up in a
