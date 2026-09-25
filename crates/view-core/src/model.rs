@@ -772,6 +772,16 @@ impl Model {
         self
     }
 
+    /// The first-run record keys this session's config has already been
+    /// told about, read once at startup: `update()` has no filesystem
+    /// access, and a channel held under a key named here goes to the
+    /// history without a box.
+    pub fn seed_announced(&mut self, keys: impl IntoIterator<Item = String>) {
+        for key in keys {
+            self.surface_conflicts.note_announced(key);
+        }
+    }
+
     /// The `--remote` destination this session was started against.
     ///
     /// A builder step beside [`Model::with_cwd`] for the same reason: no
@@ -1847,6 +1857,19 @@ impl EngineModel {
         );
         self.toast_history.push(&entry);
         true
+    }
+
+    /// Records `text` to the notification history and nowhere else: never
+    /// the stack, and never the startup hold, which releases what it parks
+    /// onto the stack.
+    ///
+    /// For a finding a box has already told this config, or a line that
+    /// spells in full what a box names in brief.
+    pub fn record_to_history_alone(&mut self, text: String) {
+        let entry = self
+            .messages
+            .history_only_entry(String::new(), vec![(0, text)]);
+        self.toast_history.push(&entry);
     }
 
     /// A locally-synthesized notice -- never from nvim's own `msg_show` --

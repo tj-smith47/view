@@ -649,6 +649,10 @@ impl<E: EngineOps> Executor<E> {
                 }
                 Flow::Continue
             }
+            // `dispatch` writes the record before an effect reaches here,
+            // since the native session holds its path; one that arrives
+            // anyway costs a repeated notice next launch
+            Effect::RecordAnnounced { .. } => Flow::Continue,
             // the same one-shot thread again, and the degrade `msg.rs`
             // states: an unwired channel leaves the grace open, which is a
             // take-down bounded by the complaint signature alone

@@ -546,13 +546,19 @@ pub struct SurfaceConflicts {
     /// already names, with the same `[native]` line, and a second box
     /// saying so is one conflict counted twice.
     held: Vec<Surface>,
-    /// The surfaces a channel notice already stands for
-    /// ([`Self::note_channel_notice`]). A config drawing one surface
-    /// through several channels is one takeover, and the remedy line is
-    /// the same in every box, so the channel that reports first is the one
-    /// that names it. Kept apart from `held`, which a sink reading sets
-    /// without raising a notice at all.
-    noticed: Vec<Surface>,
+    /// What the launch box names ([`Self::tell_held`]): each surface a
+    /// channel report found written by the config, with the channels that
+    /// reported it, in the order they reported. One box for all of them,
+    /// because a launch that finds three writes is one thing to read. Kept
+    /// apart from `held`, which a sink reading sets without raising a
+    /// notice at all.
+    told: Vec<(Surface, Vec<String>)>,
+    /// The first-run record keys this config has already been told about
+    /// (`held:<channel>`), seeded at startup from the record
+    /// ([`crate::model::Model::seed_announced`]) and grown as this session
+    /// tells more. A channel named here goes to the history alone: a write
+    /// the config makes on every launch is news once.
+    announced: std::collections::BTreeSet<String>,
     /// The floating windows the take-down has already asked rows of,
     /// whether or not the answer was filed, so a scan that sights one again
     /// before its close lands does not record it twice. Each carries the
@@ -704,15 +710,44 @@ impl SurfaceConflicts {
         self.held.contains(&surface)
     }
 
-    /// Records that a channel notice now stands for `surface`, and answers
-    /// whether that is news -- a second channel of the same surface has
-    /// nothing to add.
-    pub fn note_channel_notice(&mut self, surface: Surface) -> bool {
-        if self.noticed.contains(&surface) {
+    /// Adds `channel` of `surface`, spelled as the box names it, to what the
+    /// launch box names, and answers whether that is news: a channel
+    /// reported again adds nothing.
+    pub fn tell_held(&mut self, surface: Surface, channel: &str) -> bool {
+        let index = match self.told.iter().position(|(told, _)| *told == surface) {
+            Some(index) => index,
+            None => {
+                self.told.push((surface, Vec::new()));
+                self.told.len() - 1
+            }
+        };
+        let Some((_, channels)) = self.told.get_mut(index) else {
+            return false;
+        };
+        if channels.iter().any(|told| told == channel) {
             return false;
         }
-        self.noticed.push(surface);
+        channels.push(channel.to_string());
         true
+    }
+
+    /// Every surface the launch box names, with the channels that reported
+    /// it, in report order.
+    #[must_use]
+    pub fn told(&self) -> &[(Surface, Vec<String>)] {
+        &self.told
+    }
+
+    /// Whether the first-run record key `key` has been told under this
+    /// config, at an earlier launch or in this session.
+    #[must_use]
+    pub fn is_announced(&self, key: &str) -> bool {
+        self.announced.contains(key)
+    }
+
+    /// Records `key` as told, and answers whether it was news.
+    pub fn note_announced(&mut self, key: String) -> bool {
+        self.announced.insert(key)
     }
 
     /// Records that a channel of `surface` was found populated by a holder
@@ -940,7 +975,8 @@ impl SurfaceConflicts {
     /// | `generation` | bumped: the dead engine's deadlines are still sleeping in their timer threads, and their expiries must find nobody to answer to |
     /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config draws the same windows -- forgetting it would raise a second notice per window for one conflict |
     /// | `held` | cleared: the replacement re-reports its own channels, and a surface left in here would swallow that report as a conflict already accounted for |
-    /// | `noticed` | cleared with `held`, and for the same reason: the replacement's own first report is the one that raises the box for its surface |
+    /// | `told` | kept: the box it words is still standing, and a channel the replacement reports first is added to that box |
+    /// | `announced` | kept: it records what this config has been told, which a restart does not undo |
     pub fn forget_engine(&mut self) {
         self.complaints.clear();
         self.typed = false;
@@ -948,7 +984,6 @@ impl SurfaceConflicts {
         self.sink_read = false;
         self.sink_holds.clear();
         self.held.clear();
-        self.noticed.clear();
         self.generation += 1;
     }
 

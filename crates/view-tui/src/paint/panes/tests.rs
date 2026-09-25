@@ -3893,6 +3893,31 @@ fn stack_three_toasts(model: &mut Model) {
     }
 }
 
+/// A first launch whose config writes three channels of surfaces view
+/// draws: one box names them all with the lines that give them back, and
+/// no value the config wrote reaches the screen.
+fn launch_notice_once() -> Tiles {
+    let mut tiles = tiled(true);
+    tiles.model.statusline_enabled = true;
+    for (channel, holder) in [
+        (
+            "vim.notify",
+            "@/home/a/.local/share/nvim/lazy/a.renderer/lua/a/renderer/notify.lua",
+        ),
+        ("statusline", "%{%v:lua.require'a.bar'.statusline()%}"),
+        ("tabline", "%!v:lua.nvim_bufferline()"),
+    ] {
+        let _ = view_core::update::update(
+            &mut tiles.model,
+            view_core::msg::Msg::ChannelHeld {
+                channel: channel.to_string(),
+                holder: holder.to_string(),
+            },
+        );
+    }
+    tiles
+}
+
 /// The agent windowed in the right tile with notices arriving: the column
 /// moves into the left tile, and the stack sits in its top right corner,
 /// clear of the agent's frame.
@@ -4312,6 +4337,9 @@ const TILED_SCENES: &[(&str, SceneDump)] = &[
         tiles_dump(tier, pill_buffers_scene())
     }),
     ("nvim-statusline-bar", nvim_bar_dump),
+    ("launch-notice-once", |tier| {
+        tiles_dump(tier, launch_notice_once())
+    }),
 ];
 
 /// The committed picture of every tiled-family scene, one per tier, driven

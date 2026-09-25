@@ -203,6 +203,12 @@ pub(crate) fn dispatch<E: EngineOps>(
         };
     crate::vlog::log_layout(model, &layout);
     for eff in effects {
+        // the session holds the record's path and the config it is keyed
+        // on, which the executor has no reach to
+        if let Effect::RecordAnnounced { key } = &eff {
+            follow_ups.native.record_announced(key);
+            continue;
+        }
         if holding && follow_ups.native.holds(&eff) {
             follow_ups.native.hold_input(eff);
             continue;
@@ -4154,6 +4160,52 @@ mod tests {
         );
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(ops.calls.borrow()[0], "input(x)");
+    }
+
+    /// A channel told once is written to the first-run record through
+    /// `dispatch`, and a session seeded from that record files the next
+    /// report to the history with no box.
+    #[test]
+    fn a_told_channel_is_recorded_and_the_next_launch_stays_quiet() {
+        let dir = view_test_support::ScratchDir::new("runtime-told-channel").unwrap();
+        let record = dir.join("first-run.toml");
+        let held = || Msg::ChannelHeld {
+            channel: "vim.notify".to_string(),
+            holder: "@/lazy/a.renderer/init.lua".to_string(),
+        };
+        let boxes = |model: &Model| {
+            model
+                .engine
+                .messages
+                .entries
+                .iter()
+                .filter(|entry| entry.is_native())
+                .count()
+        };
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut bridge = ThemeBridge::new(None, None);
+
+        let mut first = Model::with_term_size(80, 24);
+        let mut native = NativeSession::all_enabled(1, Some(record.clone()));
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let _ = dispatch(&mut first, &executor, &mut follow_ups, held());
+        assert_eq!(boxes(&first), 1);
+        let told = view_native::toast::announced_keys(None, &record).unwrap();
+        assert_eq!(told, vec!["held:vim.notify".to_string()]);
+
+        let mut next = Model::with_term_size(80, 24);
+        next.seed_announced(told);
+        let _ = dispatch(&mut next, &executor, &mut follow_ups, held());
+        assert_eq!(boxes(&next), 0);
+        assert_eq!(
+            view_native::toast::announced_keys(None, &record).unwrap(),
+            vec!["held:vim.notify".to_string()]
+        );
     }
 
     /// One `Msg::CheckTimeReply` naming `path` as unreadable.

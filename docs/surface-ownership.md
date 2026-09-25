@@ -17,8 +17,9 @@ The table below is generated from `SURFACES` in
   decides whether view draws the surface at all. `-- none --` is a surface
   no attach carries.
 - **policy** is what view does when something else draws there. `Own` means
-  view keeps drawing it and tells you once, with the line that resolves it.
-  `Yield` means view does not draw it, so drawing there takes nothing.
+  view keeps drawing it and tells you once per config, with the line that
+  resolves it. `Yield` means view does not draw it, so drawing there takes
+  nothing.
 - **`[native]` switch** is the `view.toml` line that hands the surface back
   to your plugins. For a surface an attach carries it is the switch that
   attach is gated on. `-- none --` means no switch reaches that surface,
@@ -60,8 +61,9 @@ per surface.
 The tab line is the row where this shows. `ext_tabline` takes nvim's own
 tab row, and a window's `winbar` draws inside that window's grid, so the
 capability leaves it standing. view holds `winbar` empty in every window
-and in every window that opens afterwards, and says once what the option
-was set to, with the line that hands the tab line back.
+and in every window that opens afterwards. It names the option once per
+config, with the line that hands the tab line back, and the message history
+keeps what the option was set to.
 
 Channels view leaves to Neovim are listed beside them in `NOT_CHROME`,
 each with what you get instead: the gutter, line numbers, signs and
@@ -112,12 +114,14 @@ one row above the same band stays silent.
 
 ## The notice a conflict gets
 
-When something else writes a channel of a surface view draws, view sets the
-channel back and tells you once for that surface: which surface it was,
-what the channel was set to, and the `view.toml` line that hands the
-surface back. A config drawing one surface through several channels is one
-box, for the channel that reported first. A float parked over one of those
-surfaces gets the same notice, named by what that window calls itself.
+When your config writes a channel of a surface view draws, view sets the
+channel back. It tells you once per config, then the history: the first
+launch under a config file shows one box naming each surface and the
+channels that reported it, with the `view.toml` lines that hand them back.
+Every later launch under the same file records the same finding to the
+message history and shows no box. The history entry spells what the channel
+was set to, which the box leaves out. A float parked over one of those
+surfaces gets a notice of its own, named by what that window calls itself.
 
 The notice stands until you take it down. Any key, click or paste,
 `<Esc>` included, clears it once the notice has been on screen for as long

@@ -14,7 +14,7 @@
 //! than anywhere a user keeps things they wrote.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -117,7 +117,7 @@ pub fn first_run(
     current.schema_version = SCHEMA_VERSION;
 
     let key = config_path.map_or_else(String::new, config_key);
-    let announced = current.announced.entry(key).or_default();
+    let announced = current.announced.entry(key.clone()).or_default();
 
     let mut notices = Vec::new();
     for entry in report {
@@ -133,8 +133,43 @@ pub fn first_run(
     }
     announced.sort();
 
-    write_record(record, &current)?;
+    write_record(record, &mut current, &key)?;
     Ok(notices)
+}
+
+/// The keys already announced under `config_path`, which a session seeds
+/// its once-per-config notices with.
+///
+/// Read on the same terms [`first_run`] reads: an absent or unreadable
+/// record announces nothing, so everything is news once.
+pub fn announced_keys(
+    config_path: Option<&Path>,
+    record: &Path,
+) -> Result<Vec<String>, ToastError> {
+    let current = read_record(record)?;
+    let config = config_path.map_or_else(String::new, config_key);
+    Ok(current.announced.get(&config).cloned().unwrap_or_default())
+}
+
+/// Records `key` as announced under `config_path`, for a notice a session
+/// raised itself.
+///
+/// A key already there writes nothing, and a record from a newer schema is
+/// left as it is, on the terms [`first_run`] gives both.
+pub fn record_key(config_path: Option<&Path>, key: &str, record: &Path) -> Result<(), ToastError> {
+    let mut current = read_record(record)?;
+    if current.schema_version > SCHEMA_VERSION {
+        return Ok(());
+    }
+    current.schema_version = SCHEMA_VERSION;
+    let config = config_path.map_or_else(String::new, config_key);
+    let announced = current.announced.entry(config.clone()).or_default();
+    if announced.iter().any(|known| known == key) {
+        return Ok(());
+    }
+    announced.push(key.to_string());
+    announced.sort();
+    write_record(record, &mut current, &config)
 }
 
 /// The record key for a config path: its own bytes, with `%` and every byte
@@ -205,9 +240,57 @@ fn read_record(path: &Path) -> Result<Record, ToastError> {
     Ok(toml::from_str(&raw).unwrap_or_default())
 }
 
+/// The config path `key` was written for, the inverse of [`config_key`].
+///
+/// `None` for a key this build did not write, and on a platform whose paths
+/// are not bytes, for one holding a byte that is not UTF-8.
+fn config_path_of(key: &str) -> Option<PathBuf> {
+    let mut bytes = Vec::with_capacity(key.len());
+    let mut rest = key.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte == b'%' {
+            let hex = std::str::from_utf8(tail.get(..2)?).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            rest = tail.get(2..)?;
+        } else {
+            bytes.push(byte);
+            rest = tail;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(bytes).ok().map(PathBuf::from)
+    }
+}
+
+/// Whether the record may drop what it holds under `key`: the key names an
+/// absolute path the filesystem answers is gone.
+///
+/// A key that does not decode, a relative one and one whose existence the
+/// filesystem cannot answer are all kept, since dropping one re-announces
+/// every notice under a config that may still be there.
+fn config_is_gone(key: &str) -> bool {
+    config_path_of(key)
+        .filter(|path| path.is_absolute())
+        .is_some_and(|path| matches!(path.try_exists(), Ok(false)))
+}
+
 /// Writes `record` to `path`, creating the state directory if this is the
 /// first thing view has ever stored there.
-fn write_record(path: &Path, record: &Record) -> Result<(), ToastError> {
+///
+/// Every config the record names that no longer exists is dropped first,
+/// apart from `keep`, the config being written for. A config is written for
+/// under a path every launch, and a record nothing prunes keeps one entry
+/// for each temporary config a script ever launched with.
+fn write_record(path: &Path, record: &mut Record, keep: &str) -> Result<(), ToastError> {
+    record
+        .announced
+        .retain(|config, _| config == keep || !config_is_gone(config));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| ToastError::CreateDir {
             path: parent.display().to_string(),
@@ -230,8 +313,6 @@ mod tests {
     use crate::config::NativeConfig;
     use crate::report::report;
     use crate::supersede::plan;
-    #[cfg(unix)]
-    use std::path::PathBuf;
     use view_core::model::Look;
     use view_core::native::mappings::MappingClaim;
     use view_core::native::registry;
@@ -552,6 +633,60 @@ mod tests {
             "only the surfaces a v1 record never named may introduce themselves"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A config that has been deleted is dropped from the record at the
+    /// next write, while the config being written for, a session with no
+    /// config and a config that still exists all stay.
+    #[test]
+    fn a_record_forgets_configs_that_no_longer_exist() {
+        let dir = scratch("prune");
+        let record = dir.join("native-first-run.toml");
+        let kept = dir.join("kept.toml");
+        let gone = dir.join("gone.toml");
+        std::fs::write(&kept, "").expect("the kept config must be writable");
+
+        record_key(Some(&kept), "held:statusline", &record).expect("the kept config records");
+        record_key(None, "held:statusline", &record).expect("a config-less session records");
+        // the config being written for stays even while it does not exist
+        record_key(Some(&gone), "held:tabline", &record).expect("a missing config records");
+        assert_eq!(
+            announced_keys(Some(&gone), &record).expect("the record reads"),
+            vec!["held:tabline".to_string()]
+        );
+
+        record_key(Some(&kept), "held:vim.notify", &record).expect("the kept config records");
+
+        assert!(
+            announced_keys(Some(&gone), &record)
+                .expect("the record reads")
+                .is_empty(),
+            "a deleted config's entry must be dropped: {}",
+            std::fs::read_to_string(&record).unwrap_or_default()
+        );
+        assert_eq!(
+            announced_keys(Some(&kept), &record).expect("the record reads"),
+            vec!["held:statusline".to_string(), "held:vim.notify".to_string()]
+        );
+        assert_eq!(
+            announced_keys(None, &record).expect("the record reads"),
+            vec!["held:statusline".to_string()]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Decoding a key gives back the path it was written for, so the prune
+    /// checks the file the user named.
+    #[test]
+    fn a_record_key_decodes_to_its_own_config_path() {
+        for path in ["/cfg/view.toml", "/cfg/50%/view.toml", "/cfg/ünïcode.toml"] {
+            assert_eq!(
+                config_path_of(&config_key(Path::new(path))),
+                Some(PathBuf::from(path))
+            );
+        }
+        assert_eq!(config_path_of("/cfg/%G1"), None);
+        assert_eq!(config_path_of("/cfg/%4"), None);
     }
 
     #[test]

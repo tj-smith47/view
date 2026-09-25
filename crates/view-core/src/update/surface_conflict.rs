@@ -12,6 +12,7 @@
 
 use crate::model::Model;
 use crate::msg::Effect;
+use crate::native::channels::Channel;
 use crate::native::surfaces::{self, FloatSighting, Surface};
 use crate::native::toast::HoldOutcome;
 
@@ -54,33 +55,61 @@ fn family(identity: Option<&str>) -> String {
 /// The family every float that names nobody shares.
 const ANONYMOUS_FAMILY: &str = "view: a plugin is drawing over ";
 
-/// The opening every notice about a held channel shares: one family per
-/// channel, so a second window found holding the same option adds nothing.
-/// The first channel of a surface to report is the one that raises its
-/// box (see [`on_channel_held`]), so the family a session actually sees is
-/// one per surface.
-///
-/// Built from nvim's own option name, which is a compile-time string from
-/// the channel table rather than anything a session can spell, so a
-/// collision with another family is an edit here and never a plugin's
-/// doing.
-fn channel_family(channel: &str) -> String {
-    format!("view: {channel} was drawing ")
+/// The opening of the one box a launch raises about the config's writes to
+/// surfaces view draws. One family for every channel, so a channel that
+/// reports later re-words the standing box through the family withdrawal
+/// and the launch still shows one box.
+const HELD_FAMILY: &str = "view: your config also draws ";
+
+/// What a held channel was holding, as far as a notice may speak of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Holder<'a> {
+    /// A replaced function, named by the source location nvim gives for it.
+    Function(&'a str),
+    /// An option's value, which only the history entry spells: a status
+    /// line format string is a screenful of escapes that tells nobody which
+    /// plugin wrote it.
+    Value,
 }
 
-/// Tells the user, once, that a channel of a surface view draws was
-/// holding something else, and what was in it.
+/// `holder` as the channel table says it may be shown: a location for a
+/// channel the table lists as a replaced function, and nothing for an
+/// option.
+fn holder_of<'a>(channel: &str, holder: &'a str) -> Holder<'a> {
+    let replaced = crate::native::channels::CHANNELS
+        .iter()
+        .flat_map(|entry| entry.channels.iter())
+        .any(|entry| matches!(entry, Channel::Replaced(name) if *name == channel));
+    if replaced {
+        Holder::Function(holder)
+    } else {
+        Holder::Value
+    }
+}
+
+/// The first-run record key a held channel is told under.
+fn announced_key(channel: &str) -> String {
+    format!("held:{channel}")
+}
+
+/// Answers one report that a channel of a surface view draws was holding
+/// something the config wrote, and has been set back.
 ///
-/// Raised from the window-local hold's own report
-/// ([`crate::msg::RpcCall::HoldWindowOption`]), which fires on the
-/// session's window events: the option has already been set back by the
-/// time this runs, so the line is an account of what happened rather than
-/// a conflict still standing.
+/// Every report goes to the history with what the channel held. The box is
+/// raised only for a channel this config has not been told about: the
+/// config rewrites the same channels on every launch, and a box that
+/// repeats every launch is one a user learns to skip. A channel told for
+/// the first time joins the launch's one box and is recorded
+/// ([`Effect::RecordAnnounced`]), so the next launch records it to the
+/// history alone.
+///
+/// Raised from the holds' own reports
+/// ([`crate::msg::RpcCall::HoldWindowOption`] and its siblings), so the
+/// option has already been set back by the time this runs.
 ///
 /// Silent for a channel no surface claims and for a surface this session
-/// handed back -- neither is view's to report -- and silent for a holder
-/// that spells nothing, since a notice naming an empty holder tells the
-/// user less than no notice at all.
+/// handed back, since neither is view's to report, and silent for a holder
+/// that spells nothing.
 pub(super) fn on_channel_held(model: &mut Model, channel: &str, holder: &str) -> Vec<Effect> {
     if holder.is_empty() {
         return Vec::new();
@@ -95,31 +124,121 @@ pub(super) fn on_channel_held(model: &mut Model, channel: &str, holder: &str) ->
     if surfaces::row(surface).is_none() {
         return Vec::new();
     }
-    // one surface, one box: a config drawing its tab line through
-    // `winbar`, `tabline` and `showtabline` is one takeover, and three
-    // boxes carrying the same `[native]` line is that takeover counted
-    // three times over a screen the user is trying to read
-    if !model.surface_conflicts.note_channel_notice(surface) {
-        return Vec::new();
-    }
     let mut effects = note_held(model, surface);
-    let family = channel_family(channel);
-    let text = format!(
-        "{}{}",
-        notice(&family, &[surface], model.config_was_read(), Some(holder)),
-        startup_account(model)
+    let held = holder_of(channel, holder);
+    model
+        .engine
+        .record_to_history_alone(history_line(channel, holder, held));
+    let key = announced_key(channel);
+    if model.surface_conflicts.is_announced(&key) {
+        return effects;
+    }
+    let shown = match held {
+        Holder::Function(location) => format!("{channel} from {}", spelled(location)),
+        Holder::Value => channel.to_string(),
+    };
+    if !model.surface_conflicts.tell_held(surface, &shown) {
+        return effects;
+    }
+    model.surface_conflicts.note_announced(key.clone());
+    let text = held_notice(
+        model.surface_conflicts.told(),
+        model.config_was_read(),
+        model.surface_conflicts.startup_window_open(),
     );
     model.dirty = true;
-    effects.extend(model.engine.record_native_notice_sticky_once(&family, text));
+    effects.extend(
+        model
+            .engine
+            .record_native_notice_sticky_once(HELD_FAMILY, text),
+    );
+    effects.push(Effect::RecordAnnounced { key });
     effects
 }
+
+/// The history's account of one report, which is the one place the value a
+/// channel held is spelled in full.
+fn history_line(channel: &str, holder: &str, held: Holder<'_>) -> String {
+    match held {
+        Holder::Function(_) => format!(
+            "view: your config set {channel} to the function at {holder}, and view set it back."
+        ),
+        Holder::Value => {
+            format!("view: your config set {channel} to {holder}, and view set it back.")
+        }
+    }
+}
+
+/// The launch box for every surface in `told`: what the config also draws,
+/// the lines that give it back, and where the launch's messages went.
+///
+/// A surface is named by its label with the channels that reported it, so
+/// the user reads both the surface they see and the option they wrote. The
+/// last line names the key that shows this launch's own messages, which are
+/// in the history on every launch; a box raised after the user has acted is
+/// not about a launch and leaves it out.
+fn held_notice(told: &[(Surface, Vec<String>)], config_was_read: bool, startup: bool) -> String {
+    let rows: Vec<_> = told
+        .iter()
+        .filter_map(|(surface, channels)| {
+            surfaces::row(*surface).map(|row| (row, channels.join(", ")))
+        })
+        .collect();
+    let items: Vec<String> = rows
+        .iter()
+        .map(|(row, channels)| format!("{} ({channels})", row.label))
+        .collect();
+    let items: Vec<&str> = items.iter().map(String::as_str).collect();
+    let them = if rows.len() > 1 { "them" } else { "it" };
+    let mut switches: Vec<&str> = Vec::new();
+    for switch in rows.iter().filter_map(|(row, _)| off_switch(row.feature)) {
+        if !switches.contains(&switch) {
+            switches.push(switch);
+        }
+    }
+    let remedy = if !config_was_read {
+        UNREAD_CONFIG.to_string()
+    } else if switches.is_empty() {
+        String::new()
+    } else {
+        let verb = if switches.len() > 1 { "give" } else { "gives" };
+        format!("\n{} {verb} {them} back.", join(&switches))
+    };
+    let account = if startup {
+        "\nStartup messages: <leader>fm"
+    } else {
+        ""
+    };
+    format!(
+        "{HELD_FAMILY}{}. view draws {them} now.{remedy}{account}",
+        join(&items)
+    )
+}
+
+/// The registry's off switch for `feature`, the line doctor and the
+/// first-run notice print as well.
+fn off_switch(feature: Option<&str>) -> Option<&'static str> {
+    let feature = feature?;
+    crate::native::registry::features()
+        .iter()
+        .find(|desc| desc.id == feature)
+        .map(|desc| desc.off_switch)
+}
+
+/// The remedy line on a session whose `view.toml` could not be read. Never
+/// "set palette = false" on this leg: the file that would have carried it
+/// is the one view could not read, so the user may have written it already
+/// and been overruled by the fail-open an unreadable config takes (see
+/// `Model::config_was_read`).
+const UNREAD_CONFIG: &str = "\nview.toml could not be read this session, so every native feature \
+     stayed at its default; fix that file and restart.";
 
 /// The longest holder a notice spells out.
 ///
 /// A replaced global's holder is whatever `debug.getinfo` calls the
 /// function's chunk, which for a plugin is the absolute path it was
-/// installed at -- longer on its own than the widest line the message
-/// layer can draw, which clips at the grid width less two.
+/// installed at: a prefix every plugin in the config shares, ahead of the
+/// file that names this one.
 const HOLDER_WIDTH: usize = 60;
 
 /// `holder` as a notice spells it: the end of it, which is the file that
@@ -136,22 +255,6 @@ fn spelled(holder: &str) -> String {
     }
     let tail: String = holder.chars().skip(len - (HOLDER_WIDTH - 3)).collect();
     format!("...{tail}")
-}
-
-/// The sentence a notice about a launch ends on, and nothing for one
-/// raised after the user has acted.
-///
-/// The box is the account of a launch: view's own startup lines are in the
-/// ring on every launch, so a user reading it is owed the key that shows
-/// the rest of them. A notice raised mid-session -- a window opened an hour
-/// in, writing a chrome option of its own -- is not about a launch and says
-/// nothing about the history.
-fn startup_account(model: &Model) -> &'static str {
-    if model.surface_conflicts.startup_window_open() {
-        "\nStartup messages from this launch are in the history: <leader>fm."
-    } else {
-        ""
-    }
 }
 
 /// Records that a channel of `surface` was found populated by a holder that
@@ -184,7 +287,7 @@ fn note_held(model: &mut Model, surface: Surface) -> Vec<Effect> {
             model.dirty |= model.engine.withdraw_native_notice(&family);
             continue;
         }
-        let text = notice(&family, &rest, model.config_was_read(), None);
+        let text = notice(&family, &rest, model.config_was_read());
         effects.extend(model.engine.record_native_notice_sticky_once(&family, text));
         model.dirty = true;
     }
@@ -520,7 +623,7 @@ fn raise_notice(model: &mut Model, identity: Option<&str>, surface: Surface) -> 
         return Vec::new();
     };
     let family = family(identity);
-    let text = notice(&family, &claimed, model.config_was_read(), None);
+    let text = notice(&family, &claimed, model.config_was_read());
     // reaching here at all means the claim is news, so the wording is about
     // to change and the frame does owe a repaint
     model.dirty = true;
@@ -546,17 +649,13 @@ pub(super) fn sweep_floats(model: &mut Model) -> Vec<Effect> {
     Vec::new()
 }
 
-/// The whole notice for `claimed`, opening with its own `family` -- which
-/// `record_native_notice_once`'s `starts_with` withdrawal requires, and why
-/// the family is prepended here rather than left to the caller.
+/// The whole notice for `claimed`, opening with its own `family`, which
+/// `record_native_notice_once`'s `starts_with` withdrawal requires and why
+/// the family is prepended here.
 ///
-/// Four lines at most, broken on `\n` because that is the only break the
-/// message box takes: `MessageEntry::lines` splits on it, and the layer that
-/// sizes the box clips at the grid width rather than wrapping, so a remedy
-/// pushed onto the end of the first sentence is a remedy the user cannot
-/// read.
-///
-fn notice(family: &str, claimed: &[Surface], config_was_read: bool, held: Option<&str>) -> String {
+/// The remedy starts a line of its own, broken on `\n`, so it reads as the
+/// thing to do and never as the tail of the first sentence.
+fn notice(family: &str, claimed: &[Surface], config_was_read: bool) -> String {
     let rows: Vec<_> = claimed
         .iter()
         .filter_map(|surface| surfaces::row(*surface))
@@ -572,13 +671,7 @@ fn notice(family: &str, claimed: &[Surface], config_was_read: bool, held: Option
         }
     }
     let remedy = if !config_was_read {
-        // never "set palette = false" on this leg: the file that would have
-        // carried it is the one view could not read, so the user may have
-        // written it already and been overruled by the fail-open that an
-        // unreadable config takes (see `Model::config_was_read`)
-        "\nview.toml could not be read this session, so every native feature \
-         stayed at its default; fix that file and restart."
-            .to_string()
+        UNREAD_CONFIG.to_string()
     } else if remedies.is_empty() {
         String::new()
     } else {
@@ -588,11 +681,7 @@ fn notice(family: &str, claimed: &[Surface], config_was_read: bool, held: Option
             join(&remedies)
         )
     };
-    let value = match held {
-        Some(holder) => format!("\nIt was set to {}.", spelled(holder)),
-        None => String::new(),
-    };
-    format!("{family}{}, which view owns.{value}{remedy}", join(&labels))
+    format!("{family}{}, which view owns.{remedy}", join(&labels))
 }
 
 /// `["a", "b", "c"]` as `"a, b and c"`: the reading order a sentence needs,
@@ -708,10 +797,10 @@ mod tests {
     }
 
     /// The window-local hold's report, seen from the user's side: the line
-    /// names the surface, what was in the channel, and the switch that
-    /// hands the surface back.
+    /// names the surface, the option, and the switch that hands the surface
+    /// back, and leaves the value to the history.
     #[test]
-    fn a_held_channel_is_named_with_its_holder_and_the_switch_that_returns_it() {
+    fn a_held_channel_is_named_with_its_option_and_the_switch_that_returns_it() {
         let mut model = captured_session();
         model.attach_surfaces(vec![crate::native::ext::Ext::Tabline]);
 
@@ -724,19 +813,15 @@ mod tests {
         );
 
         let lines = notices(&model);
-        assert_eq!(lines.len(), 1, "one line per channel: {lines:?}");
+        assert_eq!(lines.len(), 1, "one box: {lines:?}");
         let line = &lines[0];
-        for part in [
-            "winbar",
-            "the tab line",
-            "%{%v:lua.crumbs()%}",
-            "[native] tabline = false",
-        ] {
+        for part in ["winbar", "the tab line", "native.tabline = false"] {
             assert!(
                 line.contains(part),
                 "the line must name `{part}`, and reads: {line}"
             );
         }
+        assert!(!line.contains("crumbs"), "{line}");
     }
 
     /// The same report twice, which is what two windows holding one option
@@ -1225,17 +1310,15 @@ mod tests {
         armed[0]
     }
 
-    /// The decided wording, line for line: the shape the message box can
-    /// actually draw -- one break per sentence, because the layer that
-    /// sizes the box clips at the grid width instead of wrapping -- with
-    /// the channel, what was in it, the file the remedy goes in and the key
+    /// The decided wording, line for line: the surface with the channel and
+    /// the function's location, the switch that gives it back, and the key
     /// that shows the rest of the launch.
     ///
     /// Ranged over whether anyone has typed yet, because only the last line
     /// is conditional on that: a notice raised mid-session is not about a
     /// launch and says nothing about the history.
     #[test]
-    fn the_notice_breaks_at_every_sentence_so_the_remedy_is_on_screen() {
+    fn the_launch_box_reads_line_for_line() {
         for acted in [false, true] {
             let mut model = captured_session();
             if acted {
@@ -1252,28 +1335,21 @@ mod tests {
             assert_eq!(standing.len(), 1, "acted={acted}: {standing:?}");
             let lines: Vec<&str> = standing[0].split('\n').collect();
             let mut want = vec![
-                "view: vim.notify was drawing the message area, which view owns.",
-                "It was set to function <a.renderer>.",
-                "Set [native] notifications = false in view.toml to give it back.",
+                "view: your config also draws the message area (vim.notify from \
+                 function <a.renderer>). view draws it now.",
+                "native.notifications = false gives it back.",
             ];
             if !acted {
-                want.push("Startup messages from this launch are in the history: <leader>fm.");
+                want.push("Startup messages: <leader>fm");
             }
             assert_eq!(lines, want, "acted={acted}");
-            for line in &lines {
-                assert!(
-                    line.chars().count() <= 98,
-                    "a line the toast layer clips is a line the user cannot read: {line:?}"
-                );
-            }
         }
     }
 
-    /// The holder a real session hands over is a plugin's install path,
-    /// which is wider on its own than the line the message layer can draw.
-    /// The end of it is the half that names the plugin.
+    /// The holder a real session hands over is a plugin's install path, and
+    /// the end of it is the half that names the plugin.
     #[test]
-    fn a_holder_wider_than_the_line_is_spelled_from_its_end() {
+    fn a_function_holder_is_spelled_from_its_end() {
         let mut model = captured_session();
         let holder = "@/home/a/.local/share/nvim/lazy/a.renderer/lua/a/renderer/init.lua";
         let _ = update(
@@ -1285,20 +1361,177 @@ mod tests {
         );
         let standing = notices(&model);
         assert_eq!(standing.len(), 1, "{standing:?}");
-        let spelled: Vec<&str> = standing[0]
-            .split('\n')
-            .filter(|line| line.starts_with("It was set to "))
-            .collect();
-        assert_eq!(spelled.len(), 1, "{standing:?}");
+        let first = standing[0].split('\n').next().unwrap_or_default();
         assert!(
-            spelled[0].ends_with("lua/a/renderer/init.lua."),
-            "{spelled:?}"
+            first.contains("(vim.notify from ...") && first.contains("lua/a/renderer/init.lua)"),
+            "{first:?}"
         );
-        for line in standing[0].split('\n') {
-            assert!(
-                line.chars().count() <= 98,
-                "a line the toast layer clips is a line the user cannot read: {line:?}"
-            );
+        assert!(!first.contains("/home/a/"), "{first:?}");
+    }
+
+    /// Every line the history holds on `model`, newest first.
+    fn history(model: &Model) -> Vec<String> {
+        model
+            .engine
+            .toast_history
+            .entries()
+            .flat_map(|entry| entry.lines())
+            .collect()
+    }
+
+    /// Every channel a hold reports on, the options a hold covers included,
+    /// which is the population a first-run key is written for.
+    fn reported_channels() -> Vec<&'static str> {
+        crate::native::channels::CHANNELS
+            .iter()
+            .flat_map(|entry| entry.channels.iter())
+            .filter(|channel| {
+                matches!(
+                    channel,
+                    crate::native::channels::Channel::Hold { .. }
+                        | crate::native::channels::Channel::Covered { .. }
+                        | crate::native::channels::Channel::Replaced(_)
+                )
+            })
+            .map(|channel| channel.name())
+            .collect()
+    }
+
+    /// A session drawing every surface a channel can report on.
+    fn drawing_everything() -> Model {
+        let mut model = captured_session();
+        model.attach_surfaces(crate::native::ext::ALL.to_vec());
+        model.statusline_enabled = true;
+        model
+    }
+
+    fn held(model: &mut Model, channel: &str, holder: &str) -> Vec<Effect> {
+        update(
+            model,
+            Msg::ChannelHeld {
+                channel: channel.to_string(),
+                holder: holder.to_string(),
+            },
+        )
+    }
+
+    /// A config rewrites the same channels on every launch, so a box about
+    /// them is told once per config and the history carries every launch
+    /// after it.
+    #[test]
+    fn a_channel_already_announced_under_this_config_goes_to_history_only() {
+        let channels = reported_channels();
+        assert!(channels.len() > 5, "the walk found nothing: {channels:?}");
+        for channel in channels {
+            let key = super::announced_key(channel);
+            for announced in [false, true] {
+                let mut model = drawing_everything();
+                if announced {
+                    model.seed_announced([key.clone()]);
+                }
+                let effects = held(&mut model, channel, "x");
+                let recorded = effects.iter().any(
+                    |effect| matches!(effect, Effect::RecordAnnounced { key: k } if *k == key),
+                );
+                let boxes = notices(&model);
+                assert!(
+                    history(&model)
+                        .iter()
+                        .any(|line| line.contains(channel) && line.contains("set it back")),
+                    "{channel} announced={announced}: every report goes to the history"
+                );
+                // the history line stays off the stack whatever the startup
+                // hold decides after it
+                let _ = model
+                    .engine
+                    .messages
+                    .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+                assert!(
+                    !model.engine.messages.entries.iter().any(|entry| entry
+                        .content
+                        .iter()
+                        .any(|(_, line)| line.contains("set it back"))),
+                    "{channel} announced={announced}: the history line reached the stack"
+                );
+                if announced {
+                    assert!(boxes.is_empty(), "{channel}: {boxes:?}");
+                    assert!(!recorded, "{channel}: an announced key is written again");
+                } else {
+                    assert_eq!(boxes.len(), 1, "{channel}: {boxes:?}");
+                    assert!(boxes[0].contains(channel), "{channel}: {boxes:?}");
+                    assert!(recorded, "{channel}: the first telling is not recorded");
+                }
+            }
+        }
+    }
+
+    /// Every order of `items`.
+    fn orders<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut out = Vec::new();
+        for (i, first) in items.iter().enumerate() {
+            let mut rest = items.to_vec();
+            rest.remove(i);
+            for mut tail in orders(&rest) {
+                tail.insert(0, first.clone());
+                out.push(tail);
+            }
+        }
+        out
+    }
+
+    /// However many channels report and in whatever order, a launch shows
+    /// one box, and that box names every one of them.
+    #[test]
+    fn one_launch_raises_one_box_however_many_channels_report() {
+        let pool = [
+            ("vim.notify", "function <a.renderer>"),
+            ("tabline", "%!v:lua.nvim_bufferline()"),
+            ("statusline", "%{%v:lua.lualine()%}"),
+            ("winbar", "%#barbecue_normal#"),
+            ("cmdheight", "0"),
+        ];
+        for n in 1..=pool.len() {
+            for order in orders(&pool[..n]) {
+                let mut model = drawing_everything();
+                for (channel, holder) in &order {
+                    let _ = held(&mut model, channel, holder);
+                }
+                let boxes = notices(&model);
+                assert_eq!(boxes.len(), 1, "{order:?}: {boxes:?}");
+                for (channel, _) in &order {
+                    assert!(boxes[0].contains(channel), "{order:?}: {}", boxes[0]);
+                }
+            }
+        }
+    }
+
+    /// A status line value is a screenful of escapes that names no plugin,
+    /// so the box names the option and the history keeps the value whole.
+    #[test]
+    fn a_held_value_never_reaches_the_toast() {
+        let long = "%#Lualine_a#%{v:lua.x()}".repeat(40);
+        for holder in [
+            "%!v:lua.nvim_bufferline()",
+            "%{%v:lua.require'lualine'.statusline()%}",
+            "%{&ff}",
+            long.as_str(),
+        ] {
+            for channel in ["statusline", "tabline", "winbar", "rulerformat"] {
+                let mut model = drawing_everything();
+                let _ = held(&mut model, channel, holder);
+                let boxes = notices(&model);
+                assert_eq!(boxes.len(), 1, "{channel} {holder}: {boxes:?}");
+                for piece in ["%!", "%{", "%#", "v:lua"] {
+                    assert!(!boxes[0].contains(piece), "{channel}: {}", boxes[0]);
+                }
+                assert!(
+                    history(&model).iter().any(|line| line.contains(holder)),
+                    "{channel}: the history must keep {holder:?} whole"
+                );
+            }
         }
     }
 
@@ -1318,10 +1551,7 @@ mod tests {
         );
         let standing = notices(&model);
         assert_eq!(standing.len(), 1, "{standing:?}");
-        assert!(
-            standing[0].starts_with("view: vim.notify was drawing "),
-            "{standing:?}"
-        );
+        assert!(standing[0].starts_with(super::HELD_FAMILY), "{standing:?}");
     }
 
     /// The narrowing half of the same seam: an unnamed float claiming a
@@ -1837,17 +2067,9 @@ mod tests {
             };
             families.push(super::family(sighting.identity()));
         }
-        // every channel the shipped table names, plus the names a future
-        // row would plausibly carry. An option name is a compile-time
-        // string from that table, never a session's own, so this is the
-        // whole population
-        for channel in crate::native::channels::CHANNELS
-            .iter()
-            .flat_map(|entry| entry.channels.iter().map(|channel| channel.name()))
-            .chain(["winbar", "statusline", "vim.ui.select", "view"])
-        {
-            families.push(super::channel_family(channel));
-        }
+        // the one box every held channel shares, a fixed opening the way the
+        // anonymous one is
+        families.push(super::HELD_FAMILY.to_string());
         // and what a user can call a file. The path is the one part of a
         // family that stays under the user's control after the boundary
         // above -- a path has no charset to hold it to -- so the terminator
@@ -1900,7 +2122,11 @@ mod tests {
                     stack.push(path);
                     continue;
                 }
-                if path.extension().is_none_or(|ext| ext != "rs") {
+                // a `tests.rs` is a test module whole, with no boundary line
+                // of its own to cut at
+                if path.extension().is_none_or(|ext| ext != "rs")
+                    || path.file_name().is_some_and(|name| name == "tests.rs")
+                {
                     continue;
                 }
                 let text = std::fs::read_to_string(&path).expect("a readable source file");
@@ -1908,6 +2134,18 @@ mod tests {
                 // fixture, not a family a notice is ever recorded under
                 let text = text.split("\n#[cfg(test)]").next().unwrap_or_default();
                 for line in text.lines() {
+                    // a fixed opening is a producer too, and the one a
+                    // rewording can make prefix another as easily as a
+                    // built one
+                    let fixed = line
+                        .split_once("const ")
+                        .and_then(|(_, rest)| rest.split_once(": &str"))
+                        .map(|(name, _)| name)
+                        .filter(|name| name.ends_with("_FAMILY"));
+                    if let Some(name) = fixed {
+                        producers.push(name.to_string());
+                        continue;
+                    }
                     // a family producer is a free function returning the
                     // opening string itself; `pub(super) fn` and friends are
                     // why this looks for `fn ` rather than a line prefix
@@ -2442,14 +2680,23 @@ mod tests {
         for family in [
             super::ANONYMOUS_FAMILY.to_string(),
             super::family(Some("a.menu")),
-            super::channel_family("vim.notify"),
         ] {
             for read in [true, false] {
-                let text = super::notice(&family, &claimed, read, None);
+                let text = super::notice(&family, &claimed, read);
                 assert!(
                     text.starts_with(family.as_str()),
                     "{text:?} is not in {family:?}"
                 );
+            }
+        }
+        let told = [
+            (Surface::Messages, vec!["vim.notify".to_string()]),
+            (Surface::Tabline, vec!["winbar".to_string()]),
+        ];
+        for read in [true, false] {
+            for startup in [true, false] {
+                let text = super::held_notice(&told, read, startup);
+                assert!(text.starts_with(super::HELD_FAMILY), "{text:?}");
             }
         }
     }

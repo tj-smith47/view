@@ -53,17 +53,16 @@ native = {}
 steps = [
   { wait_for_probe = "luaeval('package.loaded.noice ~= nil')", expect = "true", timeout_ms = 180000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
-  # What a defaults user must see: view's own single notice, carrying the
-  # channel that was taken, what stood in it, and the exact line that undoes
-  # it. One needle per row because the notice is four rows -- the message
-  # layer clips at the grid's width less two rather than wrapping. Each row
-  # of that notice has to be covered by a needle here, which
+  # What a defaults user must see on a first launch: view's own single
+  # notice, carrying the surface and the channel that was taken and the
+  # exact line that undoes it. One needle per line of the notice, each short
+  # enough to sit on one row of the notice column, which wraps a longer
+  # line. Each line of that notice has to be covered by a needle here, which
   # `every_compat_needle_is_a_row_view_still_writes` grades: these are a
   # copy of view's own wording, and nothing else read it back.
-  { wait_for = "vim.notify was drawing the message area, which view owns", timeout_ms = 30000 },
-  { wait_for = "It was set to", timeout_ms = 5000 },
-  { wait_for = "Set [native] notifications = false in view.toml to give it back", timeout_ms = 5000 },
-  { wait_for = "Startup messages from this launch are in the history", timeout_ms = 5000 },
+  { wait_for = "your config also draws the message area", timeout_ms = 30000 },
+  { wait_for = "native.notifications = false", timeout_ms = 5000 },
+  { wait_for = "Startup messages: <leader>fm", timeout_ms = 5000 },
   # What view does about the conflict, asked of noice rather than read off
   # the screen: the plugin is left running, and the channel it wrote is the
   # only thing view sets back.
@@ -169,7 +168,7 @@ steps = [
   { probe = "luaeval('tostring(vim.o.cmdheight)')", expect = "0" },
   # The remedy's whole point: neither complaint survives it.
   { assert_absent = "Noice can't work when the GUI has" },
-  { assert_absent = "vim.notify was drawing the message area" },
+  { assert_absent = "your config also draws the message area" },
   { send = ":lua vim.notify('noice-compat-marker')<CR>" },
   { wait_for = "noice-compat-marker", timeout_ms = 15000 },
   { wait_for_probe = "luaeval('(function() local ok, m = pcall(require, \"noice.message.manager\") if not ok then return \"no-mod\" end local msgs = m.get({ event = \"notify\" }, { history = true }) for _, msg in ipairs(msgs) do if tostring(msg:content()):find(\"noice%-compat%-marker\") then return \"routed\" end end return \"absent:\" .. #msgs end)()')", expect = "routed", timeout_ms = 10000 },

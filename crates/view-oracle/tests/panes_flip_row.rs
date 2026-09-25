@@ -141,8 +141,9 @@ fn a_panes_flip_takes_a_drawn_top_row_away_on_screen() {
     // own next one, which is not a foreign write; a notice box saying so
     // is the false positive `HOLD_OPTION_CHUNK`'s own-value check exists
     // to refuse
-    let conflict_box = session
-        .with_screen(|screen| (0..ROWS).any(|row| row_text(screen, row).contains("was drawing")));
+    let conflict_box = session.with_screen(|screen| {
+        (0..ROWS).any(|row| row_text(screen, row).contains("your config also draws"))
+    });
     assert!(
         !conflict_box,
         "a surface-conflict notice is on screen after the flip; screen:\n{}",

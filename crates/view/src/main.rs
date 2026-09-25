@@ -1580,6 +1580,7 @@ fn main() -> Result<()> {
     let (mut native, load_effects) = native::NativeSession::load(
         resolved.clone(),
         config_path.clone(),
+        view_native::paths::state_dir().map(|dir| view_native::paths::first_run_record(&dir)),
         engine.api_info.channel_id,
         &mut model,
     );

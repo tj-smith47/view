@@ -493,9 +493,9 @@ pub enum Msg {
     /// Raised by the window-local hold ([`RpcCall::HoldWindowOption`]) at
     /// the session's own window events, so a window opened after the
     /// takeover is answered for as it opens rather than at the next redraw.
-    /// The payload is the option's own name and the value found in it,
-    /// which is what a user needs in order to recognise what was drawing
-    /// there.
+    /// The payload is the option's own name and the value found in it.
+    /// The value goes to the message history, where a user can recognise
+    /// what was drawing there; the notice names the channel alone.
     ChannelHeld {
         /// The nvim option, exactly as nvim spells it.
         channel: String,
@@ -1512,6 +1512,16 @@ pub enum Effect {
         after: Duration,
         generation: u64,
     },
+    /// Adds `key` to the first-run record under this session's config, so
+    /// the next launch finds it told and records the same finding to the
+    /// history alone. `update()` has no filesystem access; the `view` bin
+    /// owns the record and its path.
+    ///
+    /// The degrade when a runtime or harness drops this effect: the next
+    /// launch tells the user again.
+    RecordAnnounced {
+        key: String,
+    },
     /// Re-nominates `path` after a grace period, so an answer of
     /// [`CheckTimeOutcome::FileGone`] is confirmed before anything is said
     /// about it. The executor sleeps and sends
@@ -1966,9 +1976,10 @@ pub enum RpcCall {
     /// longer owned, over the one nvim had resumed drawing.
     ///
     /// The report is what makes the takeover legible, on the same terms as
-    /// its window-local twin: view says once what was drawing the surface,
-    /// naming the surface, the channel and the value, with the `[native]`
-    /// line that gives the surface back. The channels this one covers are
+    /// its window-local twin: view says once per config what was drawing
+    /// the surface, naming the surface and the channel, with the `[native]`
+    /// line that gives the surface back, and records the value in the
+    /// message history. The channels this one covers are
     /// read with it, since a renderer writes the option nvim evaluates
     /// rather than the one that leaves it a row.
     ///

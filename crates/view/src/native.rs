@@ -23,7 +23,7 @@ use view_native::config::Source;
 use view_native::config::{NativeConfig, Resolved, ResolvedConfig};
 use view_native::report::report;
 use view_native::supersede::{plan, Supersession};
-use view_native::{mappings, paths, toast};
+use view_native::{mappings, toast};
 
 /// Which native step, if any, a message owes beyond `update()`'s own answer
 /// to it.
@@ -276,9 +276,15 @@ impl NativeSession {
     /// pre-cutover executor" or, for an even earlier failure, "once an
     /// executor exists at all" -- this method has no opinion on which and
     /// must not silently drop the effect deciding it does not apply yet.
+    ///
+    /// `record` is the first-run record
+    /// ([`view_native::paths::first_run_record`]), or
+    /// `None` for a machine with no state directory. The told keys under
+    /// `config_path` are read from it here, once, and seeded onto `model`.
     pub(crate) fn load(
         resolved: ResolvedConfig,
         config_path: Option<PathBuf>,
+        record: Option<PathBuf>,
         channel_id: u64,
         model: &mut Model,
     ) -> (Self, Vec<Effect>) {
@@ -344,11 +350,21 @@ impl NativeSession {
             resolved.keys.gaps_lhs().to_string(),
             resolved.keys.cycle_lhs().to_string(),
         );
+        // read once here, before the loop, so a channel report looks the
+        // key up in memory and the record is touched only to add one
+        if let Some(record) = &record {
+            match toast::announced_keys(config_path.as_deref(), record) {
+                Ok(keys) => model.seed_announced(keys),
+                Err(err) => {
+                    crate::vlog::log_with("native", || format!("first-run record failed: {err}"));
+                }
+            }
+        }
         let session = Self {
             cfg,
             plan,
             config_path,
-            record: paths::state_dir().map(|dir| paths::first_run_record(&dir)),
+            record,
             channel_id,
             handed_over: false,
             ui_keys_lhs,
@@ -879,6 +895,29 @@ impl NativeSession {
         effects
     }
 
+    /// Records `key` as told under this session's config, for a notice the
+    /// model raised about the config ([`Effect::RecordAnnounced`]).
+    ///
+    /// A record that cannot be written is logged, which costs the same
+    /// notice once more next launch.
+    ///
+    /// Latency consequence: one read and one write of the record file, on
+    /// the dispatch thread, once per key a config has never been told. A
+    /// key already told raises no effect, so a launch under a told config
+    /// never reaches this.
+    pub(crate) fn record_announced(&self, key: &str) {
+        let Some(record) = &self.record else {
+            crate::vlog::log(
+                "native",
+                "no state directory: a told notice cannot be recorded",
+            );
+            return;
+        };
+        if let Err(err) = toast::record_key(self.config_path.as_deref(), key, record) {
+            crate::vlog::log_with("native", || format!("first-run record failed: {err}"));
+        }
+    }
+
     /// Shows whatever this session took over for the first time, once.
     ///
     /// Options and keys come through one report, so the wording, the off
@@ -1157,7 +1196,9 @@ mod tests {
         let file = view_native::config::ViewConfig::load(config_path.as_deref()).unwrap();
         let resolved =
             view_native::config::resolve(&file, &view_native::config::Overrides::default());
-        NativeSession::load(resolved, config_path, channel_id, model)
+        // no record: a test reading or writing the user's own would pass
+        // or fail on what that machine's launches have told
+        NativeSession::load(resolved, config_path, None, channel_id, model)
     }
 
     /// A scratch record path for one test, named for it so two tests never

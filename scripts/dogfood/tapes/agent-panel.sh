@@ -15,8 +15,8 @@
 # own `view.toml` (theme, native surfaces and all) with one `[ai]` table
 # appended -- never the real file itself.
 #
-# Startup leaves three "statusline/winbar/vim.notify was drawing ..."
-# notices standing (`crates/view-core/src/update/surface_conflict.rs`:
+# A first launch under a config leaves a "your config also draws ..."
+# notice standing (`crates/view-core/src/update/surface_conflict.rs`:
 # `record_native_notice_sticky_once` -- sticky by design, taken down by
 # `:View notifications dismiss` one at a time or by
 # `Messages::dismiss_read_sticky` once each has stood its reading window
@@ -60,7 +60,10 @@ SOCKET=view-cap-agent-$$
 
 cachedir="${XDG_CACHE_HOME:-$HOME/.cache}/view-dogfood-tapes"
 mkdir -p -- "$cachedir"
-CFG="$cachedir/agent-panel-view-$$.toml"
+# one path for every run: the first-run record is keyed on the config
+# path, and a path that changed every run was a config told everything
+# afresh on every recording
+CFG="$cachedir/agent-panel-view.toml"
 USER_CFG="${XDG_CONFIG_HOME:-$HOME/.config}/view/view.toml"
 [ -f "$USER_CFG" ] && cat -- "$USER_CFG" >"$CFG" || : >"$CFG"
 printf '\n[ai]\nagent = ["%s"]\n' "$STUB_BIN" >>"$CFG"
@@ -70,7 +73,6 @@ mkdir -p -- "$WORKDIR"
 printf 'alpha\nbeta\ngamma\n' >"$WORKDIR/view-ai-stub-diff.txt"
 
 cleanup_agent_panel() {
-  rm -f -- "$CFG"
   rm -rf -- "$WORKDIR"
   cleanup
 }
@@ -106,13 +108,14 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" --config "$CFG" view-ai-stub-diff.txt
   # timer) once the one ahead of it has cleared, so firing the verb three
   # times back to back outran that handoff -- this reads the live pane and
   # keeps sending the verb until none of the native-override notices
-  # (view-native/src/report.rs's "... still loads. Turn it off with ...")
-  # remain, capped so a real stuck notice cannot hang the tape.
+  # (view-native/src/report.rs's "... still loads" and "... gives it back.",
+  # surface_conflict.rs's "... give them back.") remain, capped so a real
+  # stuck notice cannot hang the tape.
   n=0
   while [ "$n" -lt 8 ]; do
     pane=$(tmux -L "$SOCKET" capture-pane -p -t cap)
     case "$pane" in
-      (*'still loads'*|*'which view owns'*)
+      (*'still loads'*|*'which view owns'*|*'gives it back'*|*'give them back'*)
         tmux -L "$SOCKET" send-keys -t cap ':View notifications dismiss' Enter
         sleep 0.8
         ;;

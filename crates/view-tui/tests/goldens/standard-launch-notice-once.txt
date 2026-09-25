@@ -1,0 +1,53 @@
+                                                                                
+ ╭ left.rs ───────────────────────────╮ ╭ right.rs ───────────────────────────╮ 
+ │left                                │ │╭───────────────────────────────────╮│ 
+ │                                    │ ││view: your config also draws the   ││ 
+ │                                    │ ││message area (vim.notify from      ││ 
+ │                                    │ ││...ocal/share/nvim/lazy/a.renderer/││ 
+ │                                    │ ││lua/a/renderer/notify.lua) and the ││ 
+ │                                    │ ││status line (statusline). view     ││ 
+ │                                    │ ││draws them now.                    ││ 
+ │                                    │ ││native.notifications = false and   ││ 
+ │                                    │ ││native.statusline = false give them││ 
+ │                                    │ ││back.                              ││ 
+ │                                    │ ││Startup messages: <leader>fm       ││ 
+ │                                    │ │╰───────────────────────────────────╯│ 
+ │                                    │ │                                     │ 
+ │                                    │ │                                     │ 
+ │                                    │ │                                     │ 
+ │                                    │ │                                     │ 
+ │                                    │ │                                     │ 
+ │                                    │ │                                     │ 
+ │                                    │ │                                     │ 
+ │                                    │ │                                     │ 
+ ╰ -- INSERT -- 1:1 ──────────────────╯ ╰ E 1 2:1 ────────────────────────────╯ 
+                                                                                
+--- fg ---
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+A = Reset
+B = Rgb(137, 180, 250)
+C = Rgb(204, 221, 238)
+D = Rgb(128, 128, 128)

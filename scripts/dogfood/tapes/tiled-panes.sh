@@ -6,8 +6,8 @@
 # drives its own tmux session the same way cap.sh does, and hands it to
 # record_gif in lib.sh for the recording.
 #
-# Startup leaves three "statusline/winbar/vim.notify was drawing ..."
-# notices standing over the right tile
+# A first launch under a config leaves a "your config also draws ..."
+# notice standing over the right tile
 # (`crates/view-core/src/update/surface_conflict.rs`:
 # `record_native_notice_sticky_once` -- sticky by design, taken down by
 # `:View notifications dismiss` one at a time). This tape sends the
@@ -43,7 +43,7 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" README.md
   while [ "$n" -lt 8 ]; do
     pane=$(tmux -L "$SOCKET" capture-pane -p -t cap)
     case "$pane" in
-      (*'still loads'*|*'which view owns'*)
+      (*'still loads'*|*'which view owns'*|*'gives it back'*|*'give them back'*)
         tmux -L "$SOCKET" send-keys -t cap ':View notifications dismiss' Enter
         sleep 0.8
         ;;

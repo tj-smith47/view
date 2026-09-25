@@ -12,6 +12,7 @@
 //! registered at all is a different question, answered by the mapping table
 //! and the config rather than by this report.
 
+use view_core::native::chords;
 use view_core::native::mappings;
 use view_core::native::mappings::MappingClaim;
 use view_core::native::registry::FeatureDesc;
@@ -63,11 +64,21 @@ impl Handover {
     /// doctor's output alike. The off switch is never reworded or re-derived
     /// here, so what a user is told to paste is what the registry says
     /// works.
+    ///
+    /// A key says what it does now and that the user's own mapping of it is
+    /// off. The plugin a feature supersedes is no part of that: a key took
+    /// the user's mapping, and whatever plugin it called still loads.
     #[must_use]
     pub fn notice(&self) -> String {
         let took = match &self.surface {
             Surface::SessionHold => format!("view is drawing the {}", self.feature),
-            Surface::Key { lhs } => format!("view took {lhs} for the {}", self.feature),
+            Surface::Key { lhs } => {
+                return format!(
+                    "view maps {lhs} to {} now. Your own mapping of it is off; {} gives it back.",
+                    action(self.feature, lhs),
+                    self.reverses_with
+                );
+            }
         };
         match self.supersedes {
             Some(theirs) => format!(
@@ -90,6 +101,30 @@ impl Handover {
             Surface::SessionHold => self.feature.to_string(),
             Surface::Key { lhs } => format!("{}:key:{lhs}", self.feature),
         }
+    }
+}
+
+/// What `lhs` does under `feature`, in words: the feature and the verb the
+/// key registers, from the default key table or the desktop chord table.
+///
+/// A key neither table spells that way, a chord a `[keys.desktop]` row
+/// rebound, is named by its feature alone.
+fn action(feature: &str, lhs: &str) -> String {
+    let verb = mappings::default_maps()
+        .iter()
+        .find(|spec| spec.feature == feature && spec.lhs == lhs)
+        .map(|spec| spec.verb)
+        .or_else(|| {
+            chords::desktop_chords()
+                .iter()
+                .find(|chord| {
+                    chord.feature == feature && (chord.with_super == lhs || chord.with_alt == lhs)
+                })
+                .map(|chord| chord.verb)
+        });
+    match verb {
+        Some(verb) => format!("{feature} {}", verb.replace('_', " ")),
+        None => format!("the {feature}"),
     }
 }
 
@@ -182,8 +217,8 @@ mod tests {
         assert_eq!(report.len(), 1, "the claimed key must be reported");
         assert_eq!(
             report[0].notice(),
-            "view took <leader>ff for the picker (your own fuzzy finder \
-             still loads). Turn it off with native.picker = false"
+            "view maps <leader>ff to picker files now. Your own mapping of it \
+             is off; native.picker = false gives it back."
         );
     }
 
@@ -268,10 +303,56 @@ mod tests {
         assert_eq!(report.len(), 1, "the claimed chord must be reported");
         assert_eq!(
             report[0].notice(),
-            "view took <D-Left> for the window (your desktop's own \
-             window-management chords still loads). Turn it off with \
-             keys.profile = \"editor\""
+            "view maps <D-Left> to window focus left now. Your own mapping of \
+             it is off; keys.profile = \"editor\" gives it back."
         );
+    }
+
+    /// Every key a session can take from a user, by every spelling it
+    /// registers under, reads as one sentence: what the key does now, that
+    /// the user's mapping is off, and the line that gives it back. A key
+    /// that landed on nothing says nothing.
+    #[test]
+    fn every_key_handover_reads_as_a_sentence() {
+        let mut keys: Vec<(String, String)> = mappings::default_maps()
+            .iter()
+            .map(|spec| (spec.feature.to_string(), spec.lhs.to_string()))
+            .collect();
+        for chord in chords::desktop_chords() {
+            for lhs in [chord.with_super, chord.with_alt] {
+                keys.push((chord.feature.to_string(), lhs.to_string()));
+            }
+        }
+        assert!(keys.len() > 50, "the walk found nothing: {keys:?}");
+        for (feature, lhs) in &keys {
+            for had_user_mapping in [true, false] {
+                let handovers = report(
+                    &[],
+                    &[claim(feature, lhs, had_user_mapping)],
+                    registry::features(),
+                );
+                if !had_user_mapping {
+                    assert!(handovers.is_empty(), "{feature} {lhs}: {handovers:?}");
+                    continue;
+                }
+                assert_eq!(handovers.len(), 1, "{feature} {lhs}: {handovers:?}");
+                let text = handovers[0].notice();
+                let want = format!("view maps {lhs} to {feature} ");
+                assert!(text.starts_with(&want), "{text}");
+                assert!(
+                    text.ends_with(&format!(
+                        " now. Your own mapping of it is off; {} gives it back.",
+                        handovers[0].reverses_with
+                    )),
+                    "{text}"
+                );
+                for stale in ["still loads", "chords", "Turn it off"] {
+                    assert!(!text.contains(stale), "{text}");
+                }
+                let action = text[want.len()..].split(" now.").next().unwrap_or_default();
+                assert!(!action.contains('_'), "a verb is spelled in words: {text}");
+            }
+        }
     }
 
     #[test]
@@ -373,8 +454,8 @@ mod tests {
         );
         assert_eq!(
             report[0].notice(),
-            "view took <leader>ai for the ai (your own AI chat plugin still \
-             loads). Turn it off with ai.enabled = false"
+            "view maps <leader>ai to ai toggle now. Your own mapping of it is \
+             off; ai.enabled = false gives it back."
         );
     }
 }
