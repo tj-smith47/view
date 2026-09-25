@@ -17,7 +17,6 @@ use view_core::msg::{Effect, EngineRequest, Msg, RpcCall, TakeoverStep};
 use view_core::native::channels::{self, Channel};
 use view_core::native::chords::{KeyProfile, ModifierChoice, DESKTOP_CHORD_COUNT};
 use view_core::native::registry;
-use view_core::native::surfaces;
 use view_native::config::profile;
 #[cfg(test)]
 use view_native::config::Source;
@@ -842,11 +841,8 @@ impl NativeSession {
         effects.push(RpcCall::RegisterClipboard {
             channel_id: self.channel_id,
         });
-        for channel in channels::session_held() {
-            let Channel::Hold { option, value, .. } = channel else {
-                continue;
-            };
-            if channels::claimants_of(option).all(|s| surfaces::view_draws(s, model)) {
+        for channel in channels::session_holds_in(channels::CHANNELS, model) {
+            if let Channel::Hold { option, value, .. } = channel {
                 effects.push(RpcCall::HoldOption {
                     name: option.to_string(),
                     value: value.wire(self.look),
@@ -1377,24 +1373,25 @@ mod tests {
     /// Whether the takeover zeroes `cmdheight`: nvim does so itself for
     /// any UI attached with `ext_messages`, command line or not, and a
     /// session that handed messages back keeps the row they draw on. Walks
-    /// all four crossings of the two switches, so a hold keyed on the
-    /// palette as well fails by name.
+    /// every combination of the switches that decide an attach, so a hold
+    /// keyed on any other switch fails by name.
     #[test]
     fn cmdheight_is_zeroed_exactly_where_view_draws_the_messages() {
-        for (toml, zeroed) in [
-            ("", true),
-            ("[native]\npalette = false\n", true),
-            ("[native]\nnotifications = false\n", false),
-            ("[native]\npalette = false\nnotifications = false\n", false),
-        ] {
-            let cfg = NativeConfig::from_toml_str(toml).expect("valid toml");
-            let surfaces: Vec<Ext> = view_core::native::ext::ALL
-                .iter()
-                .copied()
-                .filter(|ext| ext.feature().is_none_or(|id| cfg.enabled(id)))
+        let ids = view_core::native::ext::switches();
+        for on in view_core::native::ext::switch_sets() {
+            let toml: String = std::iter::once("[native]\n".to_string())
+                .chain(ids.iter().map(|id| format!("{id} = {}\n", on.contains(id))))
                 .collect();
+            let file = view_native::config::ViewConfig::from_toml_str(&toml).expect("valid toml");
+            let resolved = view_native::config::resolve_with(
+                &file,
+                &view_native::config::Overrides::default(),
+                &|_| None,
+            );
+            let surfaces = view_native::config::ext_surfaces(&resolved);
+            let zeroed = surfaces.contains(&Ext::Messages);
             let mut session = NativeSession::all_enabled(7, None);
-            session.cfg = cfg;
+            session.cfg = resolved.tables.native;
             let mut m = model();
             m.attach_surfaces(surfaces.clone());
             let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));

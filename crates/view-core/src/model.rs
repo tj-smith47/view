@@ -3109,22 +3109,22 @@ mod tests {
         assert_eq!(m.grid_target(), (78, 23));
     }
 
-    /// Which sessions nvim keeps a row at the grid's foot for, over all four
-    /// crossings of the two surfaces that draw there. `ext_messages` turns
+    /// Which sessions nvim keeps a row at the grid's foot for, over every
+    /// attach the `[native]` switches can produce. `ext_messages` turns
     /// `ext_cmdline` on with it and zeroes `cmdheight`, so the message area
     /// decides the row whatever the command line's attach says.
     #[test]
     fn nvim_keeps_a_command_line_row_only_where_view_leaves_it_the_messages() {
-        use crate::native::ext::Ext;
-        for (surfaces, rows) in [
-            (crate::native::ext::ALL.to_vec(), 0),
-            (vec![Ext::LineGrid, Ext::Messages, Ext::Tabline], 0),
-            (vec![Ext::LineGrid, Ext::Cmdline, Ext::Popupmenu], 1),
-            (vec![Ext::LineGrid], 1),
-        ] {
+        use crate::native::ext::{attached_under, switch_sets, Ext};
+        for on in switch_sets() {
+            let surfaces = attached_under(|id| on.contains(&id));
             let mut m = Model::with_term_size(80, 24);
             m.attach_surfaces(surfaces.clone());
-            assert_eq!(m.cmdline_rows(), rows, "attached {surfaces:?}");
+            assert_eq!(
+                m.cmdline_rows(),
+                u16::from(!surfaces.contains(&Ext::Messages)),
+                "switches on {on:?}, attached {surfaces:?}"
+            );
         }
     }
 

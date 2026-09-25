@@ -23,12 +23,11 @@
 # and the message is drawn as view's own toast instead. That is the one
 # thing that differs between `superseded` and `deferred` here beyond the
 # attach, and both states assert it from noice's own manager history. `cmdheight`
-# reads 0 there, and not from view: view zeroes it only for a session that
-# took both the cmdline and the messages, which the same two switches deny
+# reads 0 there, and view is not what zeroes it: view zeroes it only for a
+# session that took the messages, which `notifications = false` denies
 # (`dressing`/`fidget` deferred run those switches with noice's components
-# off and read 1). It is noice taking the surface that zeroes it -- its
-# message component calls `vim.ui_attach` with `ext_messages`, and the
-# pinned engine sets `cmdheight = 0` for a Lua UI that asks for messages
+# off and read 1). noice taking the surface zeroes it. Its message
+# component calls `vim.ui_attach` with `ext_messages`, and the pinned engine sets `cmdheight = 0` for a Lua UI that asks for messages
 # (v0.12.4, reproduced headless). noice writes the option itself nowhere:
 # its one mention, lua/noice/message/router.lua:245, is commented out.
 #
@@ -162,10 +161,11 @@ steps = [
   { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_linegrid == true)')", expect = "true" },
   { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_tabline == true)')", expect = "false" },
   # The handoff completing, read from the option itself: view withheld
-  # `cmdheight = 0` (it zeroes it only when it took both the cmdline and
-  # the messages), and it is 0 anyway because noice's own `vim.ui_attach`
-  # for `ext_messages` made the engine zero it. Nothing but noice owning
-  # the message surface produces this value here.
+  # `cmdheight = 0` (it zeroes it only for a session that took the
+  # messages, which `notifications = false` denies), and it is 0 anyway
+  # because noice's own `vim.ui_attach` for `ext_messages` made the engine
+  # zero it. Nothing but noice owning the message surface produces this
+  # value here.
   { probe = "luaeval('tostring(vim.o.cmdheight)')", expect = "0" },
   # The remedy's whole point: neither complaint survives it.
   { assert_absent = "Noice can't work when the GUI has" },

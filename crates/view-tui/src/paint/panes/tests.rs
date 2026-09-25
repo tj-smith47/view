@@ -1451,19 +1451,23 @@ fn with_nvims_message_area(model: &mut Model) {
     model.attach_surfaces(without(&[view_core::native::ext::Ext::Messages]));
 }
 
-/// The four crossings of the two surfaces that draw at the grid's foot,
-/// each as what the shipped attach drops: `[native] palette = false`
-/// drops the command line and its menu, `notifications = false` the
-/// message area.
-const ATTACH_SHAPES: [&[view_core::native::ext::Ext]; 4] = {
-    use view_core::native::ext::Ext;
-    [
-        &[],
-        &[Ext::Cmdline, Ext::Popupmenu],
-        &[Ext::Messages],
-        &[Ext::Cmdline, Ext::Popupmenu, Ext::Messages],
-    ]
-};
+/// Every attach the `[native]` switches can produce, each once and with
+/// the multigrid option the tiles run under. The tab line is left out: the
+/// row the pill takes is [`tiled_model`]'s separate question, and a walk
+/// that wants it adds it.
+fn attach_shapes() -> Vec<Vec<view_core::native::ext::Ext>> {
+    use view_core::native::ext::{attached_under, switch_sets, Ext};
+    let mut shapes: Vec<Vec<Ext>> = Vec::new();
+    for on in switch_sets() {
+        let mut shape = attached_under(|id| on.contains(&id));
+        shape.retain(|ext| *ext != Ext::Tabline);
+        shape.push(Ext::Multigrid);
+        if !shapes.contains(&shape) {
+            shapes.push(shape);
+        }
+    }
+    shapes
+}
 
 /// Where view draws the message area nvim keeps no command-line row, so
 /// the grid's last row is the lowest window's status row, which the frames
@@ -1473,12 +1477,12 @@ const ATTACH_SHAPES: [&[view_core::native::ext::Ext]; 4] = {
 fn the_grids_last_row_is_nvims_only_where_it_keeps_the_messages() {
     const STATUS: &str = "NvimTree_1 [-] 1:1 NORMAL";
     for gaps in [true, false] {
-        for dropped in ATTACH_SHAPES {
-            let keeps = dropped.contains(&view_core::native::ext::Ext::Messages);
+        for shape in attach_shapes() {
+            let keeps = !shape.contains(&view_core::native::ext::Ext::Messages);
             let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
             let slots = vec![(0, 0, grid_width, grid_height - 1 - u16::from(keeps))];
             let mut model = tiled_model(gaps, TILED_HEIGHT, &slots);
-            model.attach_surfaces(without(dropped));
+            model.attach_surfaces(shape.clone());
             drive(
                 &mut model,
                 vec![
@@ -1488,7 +1492,7 @@ fn the_grids_last_row_is_nvims_only_where_it_keeps_the_messages() {
             );
             let buf = tiled_frame(&model);
             let last = row_text(&buf, grid_height - 1 + model.look.grid_offset());
-            let label = format!("gaps={gaps} dropped={dropped:?}");
+            let label = format!("gaps={gaps} attached={shape:?}");
             assert_eq!(
                 last.contains(STATUS),
                 keeps,
@@ -3553,7 +3557,7 @@ fn frame_ends(
 /// Every side surface, floating or in a window of its own, and every band
 /// across the tiles, on terminals from small to generous, under both gap
 /// settings, with and without the pill and a full-width window under the
-/// vsplit, in every [`ATTACH_SHAPES`] crossing: the facing frame line of
+/// vsplit, in every [`attach_shapes`] member: the facing frame line of
 /// the surface turns on the first and last rows (a band: columns) the
 /// tiles' own frames turn on.
 #[test]
@@ -3617,17 +3621,18 @@ fn every_windowed_surface_frames_on_the_tile_ring_rows() {
             Anchor::Bottom,
         ),
     ];
+    let shapes = attach_shapes();
     for size in [(60u16, 16u16), (80, 24), (120, 40)] {
         for gaps in [true, false] {
             for pill in [0u16, 1] {
                 for bottom_split in [false, true] {
-                    for dropped in ATTACH_SHAPES {
+                    for shape in &shapes {
                         for case in cases {
                             surface_frames_on_the_tile_rows(
                                 size,
                                 gaps,
                                 pill,
-                                (bottom_split, dropped),
+                                (bottom_split, shape),
                                 case,
                             );
                         }
@@ -3663,7 +3668,7 @@ fn surface_frames_on_the_tile_rows(
     size: (u16, u16),
     gaps: bool,
     pill: u16,
-    (bottom_split, dropped): (bool, &[view_core::native::ext::Ext]),
+    (bottom_split, shape): (bool, &[view_core::native::ext::Ext]),
     (surface, placement, anchor): (
         view_core::native::geometry::NativeSurface,
         view_core::native::geometry::SurfacePlacement,
@@ -3672,10 +3677,10 @@ fn surface_frames_on_the_tile_rows(
 ) {
     use view_core::native::ext::Ext;
     use view_core::native::geometry::{Anchor, SurfacePlacement};
-    let keeps_cmdline = dropped.contains(&Ext::Messages);
+    let keeps_cmdline = !shape.contains(&Ext::Messages);
     let label = format!(
         "{size:?} gaps={gaps} pill={pill} bottom_split={bottom_split} \
-         dropped={dropped:?} {surface:?} {placement:?} {anchor:?}"
+         attached={shape:?} {surface:?} {placement:?} {anchor:?}"
     );
     let windowed = placement == SurfacePlacement::Windowed;
     let (grid_width, grid_height) = outer_grid_at(gaps, size, pill);
@@ -3686,9 +3691,7 @@ fn surface_frames_on_the_tile_rows(
     if pill == 1 {
         with_the_pill(&mut model);
     }
-    // `with_nvims_message_area` alone would take the pill's tab line back
-    // as well
-    let mut surfaces = without(dropped);
+    let mut surfaces = shape.to_vec();
     if pill == 1 {
         surfaces.push(Ext::Tabline);
     }

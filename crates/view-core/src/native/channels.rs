@@ -373,7 +373,15 @@ pub fn channels(surface: Surface) -> &'static [Channel] {
 /// A hold is issued only where every one of them is view's, which is what
 /// keeps `cmdheight` with nvim for a session that kept nvim's messages.
 pub fn claimants_of(option: &str) -> impl Iterator<Item = Surface> + '_ {
-    CHANNELS
+    claimants_in(CHANNELS, option)
+}
+
+/// [`claimants_of`] over `table`.
+pub fn claimants_in<'a>(
+    table: &'a [SurfaceChannels],
+    option: &'a str,
+) -> impl Iterator<Item = Surface> + 'a {
+    table
         .iter()
         .filter(move |row| row.channels.iter().any(|channel| channel.name() == option))
         .map(|row| row.surface)
@@ -407,16 +415,37 @@ pub fn shared_by_surfaces(channel: &str) -> bool {
 /// enumerates the guards they install both read this one answer.
 #[must_use]
 pub fn session_held() -> Vec<Channel> {
-    CHANNELS
+    session_held_in(CHANNELS)
+}
+
+/// [`session_held`] over `table`.
+#[must_use]
+pub fn session_held_in(table: &[SurfaceChannels]) -> Vec<Channel> {
+    table
         .iter()
         .flat_map(|entry| entry.channels.iter().copied())
-        .filter(|channel| shared_by_surfaces(channel.name()))
+        .filter(|channel| claimants_in(table, channel.name()).count() > 1)
         .fold(Vec::new(), |mut out, channel| {
             if !out.contains(&channel) {
                 out.push(channel);
             }
             out
         })
+}
+
+/// The holds of [`session_held_in`] `table` that `model` issues: those
+/// whose every claimant view draws, since a surface handed back keeps the
+/// row the channel would take from it.
+#[must_use]
+pub fn session_holds_in(table: &[SurfaceChannels], model: &crate::model::Model) -> Vec<Channel> {
+    session_held_in(table)
+        .into_iter()
+        .filter(|channel| matches!(channel, Channel::Hold { .. }))
+        .filter(|channel| {
+            claimants_in(table, channel.name())
+                .all(|surface| crate::native::surfaces::view_draws(surface, model))
+        })
+        .collect()
 }
 
 /// Every channel of every surface `option` belongs to that nvim evaluates
@@ -552,6 +581,42 @@ mod tests {
     fn the_command_line_row_is_claimed_by_the_message_area_alone() {
         let claimants: Vec<Surface> = claimants_of("cmdheight").collect();
         assert_eq!(claimants, vec![Surface::Messages]);
+    }
+
+    /// A channel two surfaces claim is held only where view draws both, so
+    /// handing either one back keeps the channel with nvim.
+    #[test]
+    fn a_shared_hold_is_issued_only_where_every_claimant_is_drawn() {
+        const HOLD: Channel = Channel::Hold {
+            option: "shared-row",
+            scope: Scope::Global,
+            value: ChannelValue::Int(0),
+        };
+        const TABLE: &[SurfaceChannels] = &[
+            SurfaceChannels {
+                surface: Surface::Cmdline,
+                channels: &[HOLD],
+            },
+            SurfaceChannels {
+                surface: Surface::Messages,
+                channels: &[HOLD],
+            },
+        ];
+        assert_eq!(session_held_in(TABLE), vec![HOLD]);
+        for (attached, held) in [
+            (vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages], true),
+            (vec![Ext::LineGrid, Ext::Messages], false),
+            (vec![Ext::LineGrid, Ext::Cmdline], false),
+            (vec![Ext::LineGrid], false),
+        ] {
+            let mut model = crate::model::Model::with_term_size(80, 24);
+            model.attach_surfaces(attached.clone());
+            assert_eq!(
+                session_holds_in(TABLE, &model) == vec![HOLD],
+                held,
+                "attached {attached:?}"
+            );
+        }
     }
 
     #[test]

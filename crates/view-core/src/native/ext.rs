@@ -153,14 +153,57 @@ pub const ALL_NAMES_MULTIGRID: &[&str] = &[
 /// switch asks view for it.
 #[must_use]
 pub fn shipped() -> Vec<Ext> {
+    attached_under(|id| {
+        crate::native::registry::features()
+            .iter()
+            .any(|feature| feature.id == id && feature.default_on)
+    })
+}
+
+/// The capabilities of [`ALL`] a session attaches when `on` answers which
+/// `[native]` switches are on: every one no switch gates, and every one
+/// whose switch is on.
+///
+/// The one statement of the attach rule, so the resolver, the shipped
+/// default and a walk over every combination of switches read the same
+/// answer.
+#[must_use]
+pub fn attached_under(on: impl Fn(&str) -> bool) -> Vec<Ext> {
     ALL.iter()
         .copied()
-        .filter(|surface| {
-            surface.feature().is_none_or(|id| {
-                crate::native::registry::features()
-                    .iter()
-                    .any(|feature| feature.id == id && feature.default_on)
-            })
+        .filter(|surface| surface.feature().is_none_or(&on))
+        .collect()
+}
+
+/// Every `[native]` switch that decides some capability of [`ALL`], in
+/// attach order and each once.
+#[must_use]
+pub fn switches() -> Vec<&'static str> {
+    ALL.iter()
+        .filter_map(|surface| surface.feature())
+        .fold(Vec::new(), |mut out, id| {
+            if !out.contains(&id) {
+                out.push(id);
+            }
+            out
+        })
+}
+
+/// Every combination of [`switches`], each as the ids it turns on.
+///
+/// The population a walk over the attach shapes a `[native]` table can
+/// produce has to cover, so a switch [`Ext::feature`] gains joins every
+/// such walk with no edit to it.
+#[must_use]
+pub fn switch_sets() -> Vec<Vec<&'static str>> {
+    let ids = switches();
+    (0..1u32 << ids.len())
+        .map(|mask| {
+            ids.iter()
+                .enumerate()
+                .filter(|(bit, _)| mask >> bit & 1 == 1)
+                .map(|(_, id)| *id)
+                .collect()
         })
         .collect()
 }

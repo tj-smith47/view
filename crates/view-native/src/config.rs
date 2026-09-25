@@ -1293,11 +1293,7 @@ impl NativeConfig {
 #[must_use]
 pub fn ext_surfaces(cfg: &ResolvedConfig) -> Vec<Ext> {
     let native = &cfg.tables.native;
-    let mut set: Vec<Ext> = ext::ALL
-        .iter()
-        .copied()
-        .filter(|surface| surface.feature().is_none_or(|id| native.enabled(id)))
-        .collect();
+    let mut set = ext::attached_under(|id| native.enabled(id));
     // multigrid is the shipped mode; the knob exists because this is the
     // protocol's roughest corner and a user needs one line to get out
     if !cfg.engine.single_grid.value {
