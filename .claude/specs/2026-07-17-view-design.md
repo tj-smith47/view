@@ -401,7 +401,11 @@ Compat has three classes; only the first is "by construction":
   ordinary transient toast, so the keystroke already in flight when it
   appeared leaves it standing (amended 2026-09-15: the notice answered to
   nothing but `d` in the notification history, and a dogfood session
-  carried it top-right from launch to exit).
+  carried it top-right from launch to exit). Amended 2026-09-25: the
+  first-launch notice is per config file. The first launch under a config
+  file shows one box for every channel that config writes on a surface view
+  draws, and later launches under the same file record the finding to the
+  notification history alone, with the value the channel held.
   Its text stays in the notification history (§9), which is where the
   notice itself points. The plugin's own startup complaints are the same finding
   in the plugin's voice, so they are recorded to the notification history
