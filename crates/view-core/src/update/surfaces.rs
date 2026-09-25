@@ -268,6 +268,21 @@ pub(crate) fn window_zoom(model: &mut Model) -> Vec<Effect> {
     })]
 }
 
+/// `Msg::FeatureInvoke { feature: "window", verb: "fit" }`: sizes the
+/// focused tile to the longest line it shows. nvim measures and resizes
+/// ([`RpcCall::FitWindow`]), because a line wider than the window reaches
+/// view already wrapped. No zoom flag is read or cleared: a fitted tile
+/// leaves its siblings above their floor, so the next zoom press reads the
+/// layout as unzoomed and zooms again.
+pub(crate) fn window_fit(model: &mut Model) -> Vec<Effect> {
+    if focused_tile_rect(model).is_none() {
+        return no_target_notice(model, "fit");
+    }
+    vec![Effect::Rpc(RpcCall::FitWindow {
+        inset_cols: model.look.inset().1,
+    })]
+}
+
 /// `Msg::FeatureInvoke { feature: "window", verb: "flip" }`: turns a
 /// side-by-side pair into a stacked one and back, read off the two tiled
 /// panes' own rects -- sharing a row is side by side, sharing a column is

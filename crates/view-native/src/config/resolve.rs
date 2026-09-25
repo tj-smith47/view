@@ -133,6 +133,8 @@ pub struct ResolvedUi {
     pub detected_panes: Panes,
     /// Whether a gap separates neighbouring frames under tiles.
     pub gaps: Resolved<bool>,
+    /// Whether every window the cursor moves into is fitted to its text.
+    pub fit_active: Resolved<bool>,
     /// How the pill's ends are drawn, or `None` for `"auto"`, which the
     /// model answers from the probed `unicode_boxes`.
     pub pill_caps: Resolved<Option<PillCaps>>,
@@ -177,7 +179,7 @@ pub struct ResolvedConfig {
     /// terminal's own answer ([`profile::modifier_for`]), which a caller
     /// holding `model.caps` supplies at takeover.
     pub desktop_modifier: Resolved<ModifierChoice>,
-    /// `[keys.desktop]`'s 46 rows, in [`chords::desktop_chords`] order. A
+    /// `[keys.desktop]`'s 47 rows, in [`chords::desktop_chords`] order. A
     /// row whose source is [`Source::Derived`] carries no override --
     /// [`chords::DesktopChord::lhs`] is this session's answer for it -- and
     /// a row from any other layer carries the override verbatim, empty
@@ -378,6 +380,19 @@ pub fn resolve_with(
             env_read(env, "ui", "gaps", BOOL_EXPECTED, parse_bool, &mut notices),
             file.ui.gaps,
             true,
+        ),
+        fit_active: layer(
+            None,
+            env_read(
+                env,
+                "ui",
+                "fit_active",
+                BOOL_EXPECTED,
+                parse_bool,
+                &mut notices,
+            ),
+            file.ui.fit_active,
+            false,
         ),
         pill_caps: layer(
             None,
@@ -704,6 +719,10 @@ impl ResolvedConfig {
                 self.ui.panes.source,
             ),
             ("ui", "gaps") => (self.ui.gaps.value.to_string(), self.ui.gaps.source),
+            ("ui", "fit_active") => (
+                self.ui.fit_active.value.to_string(),
+                self.ui.fit_active.source,
+            ),
             ("ui", "pill_caps") => (
                 self.ui
                     .pill_caps

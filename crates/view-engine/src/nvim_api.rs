@@ -7,6 +7,7 @@
 mod accent;
 mod buffers;
 mod decode;
+mod fit;
 mod mappings;
 pub(crate) mod native_window;
 mod window_status;

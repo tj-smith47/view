@@ -3,7 +3,7 @@
 //!
 //! View's keys are omarchy's keys on a machine with no desktop of its own,
 //! and nvim's leader keys on one that has one (`docs/keymaps.md`, Key
-//! profiles). [`DESKTOP_CHORDS`] is the 46-row table that decision produces:
+//! profiles). [`DESKTOP_CHORDS`] is the 47-row table that decision produces:
 //! every chord a session under [`KeyProfile::Desktop`] registers, both the
 //! `Super`-modifier spelling a kitty-protocol terminal delivers and the
 //! `Alt`-modifier spelling every terminal delivers.
@@ -86,7 +86,7 @@ impl DesktopChord {
 
 /// How many chords the table holds, so the two arrays sized by it stay one
 /// number.
-pub const DESKTOP_CHORD_COUNT: usize = 46;
+pub const DESKTOP_CHORD_COUNT: usize = 47;
 
 // Ordered to match the design's own table (spec section 9): tile focus and
 // move, tile lifecycle, palette/picker/tree, tabpages, resize, then the
@@ -221,6 +221,16 @@ static DESKTOP_CHORDS: [DesktopChord; DESKTOP_CHORD_COUNT] = [
         verb: "full_width",
         rhs: Rhs::Keys("<C-w>|"),
         twin: "<C-w>|",
+    },
+    DesktopChord {
+        id: "fit",
+        omarchy: "SUPER + Home",
+        with_super: "<D-Home>",
+        with_alt: "<M-Home>",
+        feature: "window",
+        verb: "fit",
+        rhs: Rhs::Invoke,
+        twin: "<leader>wf",
     },
     DesktopChord {
         id: "flip_split",
@@ -565,13 +575,12 @@ static DESKTOP_CHORDS: [DesktopChord; DESKTOP_CHORD_COUNT] = [
 /// that skip the switch, the tenth workspace having no digit key, the fine
 /// and coarse resize steps, notification chords with no verb yet, and power
 /// and session.
-static UNBOUND: [(&str, &str); 149] = [
+static UNBOUND: [(&str, &str); 148] = [
     ("CTRL + ALT + DELETE", "power and session"),
     ("SUPER + P", "the Hyprland layout modes"),
     ("SUPER + CTRL + F", "compositor surface properties"),
     ("SUPER + O", "compositor surface properties"),
     ("SUPER + ALT + Home", "the saved window width"),
-    ("SUPER + Home", "the saved window width"),
     ("SUPER + L", "the Hyprland layout modes"),
     (
         "SUPER + SHIFT + ALT + code:10",

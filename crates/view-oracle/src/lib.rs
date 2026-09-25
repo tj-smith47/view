@@ -264,6 +264,8 @@ fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) -> 
             RpcCall::MoveWindowToTabpage { win, destination } => {
                 handle.move_window_to_tabpage(*win, *destination)
             }
+            RpcCall::FitWindow { inset_cols } => handle.fit_window(*inset_cols),
+            RpcCall::SetFitActive { on, inset_cols } => handle.set_fit_active(*on, *inset_cols),
             // RpcCall is #[non_exhaustive]: a future call kind degrades to a
             // no-op here rather than fail to compile, matching
             // Executor::run's own fallback arm.
@@ -652,6 +654,26 @@ impl EngineSession {
             },
         );
         self.apply_effects(effects)
+    }
+
+    /// Turns `[ui] fit_active` on or off and hands nvim the hook, the call
+    /// a production session sends at `VimEnter`, which this driver never
+    /// answers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OracleError::Engine`] if the call cannot be written to the
+    /// connection.
+    pub fn set_fit_active(&mut self, on: bool) -> Result<(), OracleError> {
+        self.model.fit_active = on;
+        let call = self
+            .model
+            .fit_active_call()
+            .unwrap_or(RpcCall::SetFitActive {
+                on: false,
+                inset_cols: 0,
+            });
+        self.apply_effects(vec![Effect::Rpc(call)])
     }
 
     /// Puts one of view's own surfaces into a placement, the way

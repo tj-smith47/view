@@ -88,7 +88,7 @@ pub struct MappingClaim {
 // switching user already has them in muscle memory; a claim over a user's
 // own `<leader>f` or `<leader>e` prefix is reported rather than avoided by
 // picking keys nobody uses.
-static DEFAULT_MAPS: [MappingSpec; 24] = [
+static DEFAULT_MAPS: [MappingSpec; 25] = [
     MappingSpec {
         feature: "picker",
         lhs: Cow::Borrowed("<leader>ff"),
@@ -154,7 +154,7 @@ static DEFAULT_MAPS: [MappingSpec; 24] = [
         verb: "cycle_surfaces",
         rhs: Rhs::Invoke,
     },
-    // the five window verbs and the nine `to_tabpage_<N>` rows are every
+    // the six window verbs and the nine `to_tabpage_<N>` rows are every
     // `Rhs::Invoke` desktop chord's own twin (`native::chords::DESKTOP_CHORDS`)
     // that names no row above: `full_width`'s twin is the raw `<C-w>|` and
     // `gaps`'s is the `ui`/`gaps` row already here, so neither needs one.
@@ -168,6 +168,12 @@ static DEFAULT_MAPS: [MappingSpec; 24] = [
         feature: "window",
         lhs: Cow::Borrowed("<leader>wz"),
         verb: "zoom",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<leader>wf"),
+        verb: "fit",
         rhs: Rhs::Invoke,
     },
     MappingSpec {

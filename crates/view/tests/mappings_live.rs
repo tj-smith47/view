@@ -314,6 +314,7 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
             "<leader>uw".to_string(),
             "<leader>wn".to_string(),
             "<leader>wz".to_string(),
+            "<leader>wf".to_string(),
             "<leader>ws".to_string(),
             "<leader>uf".to_string(),
             "<leader>w1".to_string(),
@@ -333,7 +334,7 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
     let claimed = session.claims();
     assert_eq!(
         claimed.len(),
-        16,
+        17,
         "only the keys no [native] entry here names may be claimed: {claimed:?}"
     );
     assert_eq!(
@@ -344,6 +345,7 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
             "<leader>uw",
             "<leader>wn",
             "<leader>wz",
+            "<leader>wf",
             "<leader>ws",
             "<leader>uf",
             "<leader>w1",
@@ -387,7 +389,7 @@ fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
     session.register(&cfg);
     assert_eq!(
         session.claims().len(),
-        16,
+        17,
         "only ai's key, the two ui actions and window's own tile keys, \
              none of which [native] can turn off, survive every other \
              feature being disabled"

@@ -991,6 +991,16 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn fit_window(&self, _inset_cols: u16) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn set_fit_active(
+            &self,
+            _on: bool,
+            _inset_cols: u16,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn preview_buffer(
             &self,
             _path: &str,

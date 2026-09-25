@@ -145,6 +145,12 @@ pub trait EngineOps {
     /// longer side and keeping the window's buffer, cursor and scroll
     /// view. See `view_engine::nvim_api::EngineHandle::move_window_to_tabpage`.
     fn move_window_to_tabpage(&self, win: u64, destination: u32) -> Result<(), EngineError>;
+    /// Sizes nvim's current window to the longest line it shows. See
+    /// `view_engine::nvim_api::EngineHandle::fit_window`.
+    fn fit_window(&self, inset_cols: u16) -> Result<(), EngineError>;
+    /// Turns the fit on window entry on or off. See
+    /// `view_engine::nvim_api::EngineHandle::set_fit_active`.
+    fn set_fit_active(&self, on: bool, inset_cols: u16) -> Result<(), EngineError>;
     /// Resolves the picker preview pane's text for `path`, tagged
     /// `generation`; never blocks, and never itself returns the answer (see
     /// `Msg::PickerPreviewReply`).
@@ -428,6 +434,12 @@ impl EngineOps for EngineHandle {
     fn move_window_to_tabpage(&self, win: u64, destination: u32) -> Result<(), EngineError> {
         self.move_window_to_tabpage(win, destination)
     }
+    fn fit_window(&self, inset_cols: u16) -> Result<(), EngineError> {
+        self.fit_window(inset_cols)
+    }
+    fn set_fit_active(&self, on: bool, inset_cols: u16) -> Result<(), EngineError> {
+        self.set_fit_active(on, inset_cols)
+    }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.preview_buffer(path, generation)
     }
@@ -666,6 +678,12 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn move_window_to_tabpage(&self, win: u64, destination: u32) -> Result<(), EngineError> {
         (**self).move_window_to_tabpage(win, destination)
+    }
+    fn fit_window(&self, inset_cols: u16) -> Result<(), EngineError> {
+        (**self).fit_window(inset_cols)
+    }
+    fn set_fit_active(&self, on: bool, inset_cols: u16) -> Result<(), EngineError> {
+        (**self).set_fit_active(on, inset_cols)
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
@@ -908,6 +926,12 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn move_window_to_tabpage(&self, win: u64, destination: u32) -> Result<(), EngineError> {
         (**self).move_window_to_tabpage(win, destination)
+    }
+    fn fit_window(&self, inset_cols: u16) -> Result<(), EngineError> {
+        (**self).fit_window(inset_cols)
+    }
+    fn set_fit_active(&self, on: bool, inset_cols: u16) -> Result<(), EngineError> {
+        (**self).set_fit_active(on, inset_cols)
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
@@ -1216,6 +1240,12 @@ impl EngineOps for FakeOps {
     fn move_window_to_tabpage(&self, win: u64, destination: u32) -> Result<(), EngineError> {
         self.record(format!("move_window_to_tabpage({win},{destination})"))
     }
+    fn fit_window(&self, inset_cols: u16) -> Result<(), EngineError> {
+        self.record(format!("fit_window({inset_cols})"))
+    }
+    fn set_fit_active(&self, on: bool, inset_cols: u16) -> Result<(), EngineError> {
+        self.record(format!("set_fit_active({on},{inset_cols})"))
+    }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.record(format!("preview_buffer({path},{generation})"))
     }
@@ -1512,6 +1542,12 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn move_window_to_tabpage(&self, _win: u64, _destination: u32) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn fit_window(&self, _inset_cols: u16) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn set_fit_active(&self, _on: bool, _inset_cols: u16) -> Result<(), EngineError> {
         Ok(())
     }
     fn preview_buffer(&self, _path: &str, _generation: u64) -> Result<(), EngineError> {

@@ -74,6 +74,8 @@ pub(crate) fn set_look(model: &mut Model, look: Look) -> Vec<Effect> {
     effects.push(Effect::Rpc(RpcCall::TryResize { width, height }));
     effects.append(&mut look_keyed_holds(model, before));
     effects.append(&mut request_all(model));
+    // the hook fits to the inset it was handed, and gaps move the inset
+    effects.extend(model.fit_active_call().map(Effect::Rpc));
     effects
 }
 

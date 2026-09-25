@@ -231,6 +231,32 @@ bottom frame line. A session that gave back the palette or the
 notifications leaves nvim a command-line row at the foot of the grid, and
 the frames stop above it.
 
+## Fitting a tile to its text
+
+`<leader>wf` (`SUPER + Home` under the desktop profile, `:View window fit`)
+sizes the focused tile to the longest line it shows, with one column spare
+for the cursor.
+
+```toml
+[ui]
+fit_active = false   # true: every window you move into is fitted to its text
+```
+
+The width comes from the lines on screen, from the top of the window to the
+bottom. It never goes below `winwidth`. It stops at `textwidth`, or where
+`textwidth` is 0 at the first `colorcolumn` given as a number, so the
+marker column stays in view. The number and sign columns and the frame are
+added on top.
+
+With `equalalways` on, the other tiles share the columns that are left.
+With `noequalalways`, only the neighbour the columns came from changes.
+Floats, terminals and fixed-width sidebars are left as they are, and a
+fixed-width sidebar keeps its width when a tile beside it is fitted.
+
+Fitting a zoomed tile changes its width and keeps its height. The next zoom
+press zooms it again. Under `fit_active`, a zoomed layout stays zoomed when
+the cursor comes back to the zoomed tile from a float or a picker.
+
 ## The accent
 
 The active tile's frame takes the first of these that resolves:

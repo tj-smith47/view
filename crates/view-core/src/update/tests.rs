@@ -16601,6 +16601,102 @@ fn window_verbs_treat_a_windowed_sidebar_as_no_tile() {
     );
 }
 
+/// The inset a `FitWindow` carries.
+fn fit_inset(effects: &[Effect]) -> Option<u16> {
+    match effects {
+        [Effect::Rpc(RpcCall::FitWindow { inset_cols })] => Some(*inset_cols),
+        _ => None,
+    }
+}
+
+/// `window fit` hands nvim the frame's columns under the look the session
+/// is in: one a side for gapped tiles, none for gapless tiles or nvim's
+/// own separators.
+#[test]
+fn fit_sends_the_looks_inset_for_the_focused_tile() {
+    use crate::model::{Look, Panes};
+
+    let mut m = vsplit_model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::GridCursorGoto {
+            grid: 6,
+            row: 0,
+            col: 0,
+        }]),
+    );
+    assert_eq!(fit_inset(&update(&mut m, window_invoke("fit"))), Some(0));
+
+    let _ = super::look::set_look(&mut m, Look::new(Panes::Tiles, true));
+    assert_eq!(fit_inset(&update(&mut m, window_invoke("fit"))), Some(1));
+
+    let _ = super::look::set_look(&mut m, Look::new(Panes::Tiles, false));
+    assert_eq!(fit_inset(&update(&mut m, window_invoke("fit"))), Some(0));
+}
+
+/// `window fit` from view's own sidebar has no tile to size and says so.
+#[test]
+fn fit_from_a_windowed_sidebar_notices_and_sends_nothing() {
+    let mut m = focused_windowed_tree();
+    let effects = update(&mut m, window_invoke("fit"));
+    assert_eq!(fit_inset(&effects), None, "{effects:?}");
+    assert!(
+        visible_texts(&m)
+            .iter()
+            .any(|line| line.contains("window fit")),
+        "the cursor sits in the sidebar: {:?}",
+        visible_texts(&m)
+    );
+}
+
+/// Every `SetFitActive` in `effects`, as `(on, inset_cols)`.
+fn fit_active_calls(effects: &[Effect]) -> Vec<(bool, u16)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Rpc(RpcCall::SetFitActive { on, inset_cols }) => Some((*on, *inset_cols)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `[ui] fit_active` reaches nvim at every `VimEnter`, since a restarted
+/// engine starts with no hook, and again on a look change, which moves the
+/// inset the hook fits to. A session with it off sends nothing at either.
+#[test]
+fn fit_active_is_sent_at_vim_enter_and_again_when_the_look_moves_the_inset() {
+    use crate::model::{Look, Panes};
+
+    fn vim_enter(model: &mut Model) -> Vec<Effect> {
+        update(
+            model,
+            Msg::EngineRequest(crate::msg::EngineRequest::VimEnter {
+                token: ReplyToken { msgid: 7 },
+                leader: crate::msg::DEFAULT_MAPLEADER.to_string(),
+            }),
+        )
+    }
+
+    let mut off = vsplit_model();
+    assert!(fit_active_calls(&vim_enter(&mut off)).is_empty());
+    let flip = super::look::set_look(&mut off, Look::new(Panes::Tiles, true));
+    assert!(fit_active_calls(&flip).is_empty(), "{flip:?}");
+
+    let mut on = vsplit_model();
+    on.fit_active = true;
+    assert_eq!(fit_active_calls(&vim_enter(&mut on)), vec![(true, 0)]);
+    let gapped = super::look::set_look(&mut on, Look::new(Panes::Tiles, true));
+    assert_eq!(fit_active_calls(&gapped), vec![(true, 1)]);
+    let gapless = update(
+        &mut on,
+        Msg::FeatureInvoke {
+            feature: "ui".to_string(),
+            verb: "gaps".to_string(),
+        },
+    );
+    assert_eq!(fit_active_calls(&gapless), vec![(true, 0)]);
+}
+
 /// `window float` with no view surface under the cursor moves nothing and
 /// says so.
 #[test]

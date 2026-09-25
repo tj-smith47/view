@@ -114,6 +114,7 @@ desktop_modifier = "auto"   # "auto" | "super" | "alt"
                              # the two is focused
 # zoom         = "<D-f>"
 # full_width   = "<M-D-f>"
+# fit          = "<D-Home>"
 # flip_split   = "<D-j>"
 # float        = "<D-t>"
 # palette      = "<D-Space>"
@@ -259,6 +260,9 @@ panes = "auto"             # default: "auto" -- tiles everywhere except under
                            # a tiling window manager. tiles | nvim force it
 gaps = true                # default: true -- a gap between neighbouring
                            # frames. false has them share their edges
+fit_active = false         # default: false -- true fits every window you
+                           # move into to its longest visible line, the way
+                           # :View window fit does
 pill_caps = "auto"         # default: "auto" -- round ends where the
                            # terminal draws box glyphs one cell wide, flat
                            # elsewhere. round | flat force it

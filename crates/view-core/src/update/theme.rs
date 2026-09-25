@@ -41,6 +41,9 @@ pub(super) fn on_vim_enter(model: &mut Model, token: ReplyToken) -> Vec<Effect> 
     if let Some(name) = &model.colorscheme {
         effects.push(Effect::Rpc(RpcCall::Colorscheme { name: name.clone() }));
     }
+    // a replacement engine starts with no fit hook, so every `VimEnter`
+    // hands it over again
+    effects.extend(model.fit_active_call().map(Effect::Rpc));
     // a replacement engine's `VimEnter`: the surfaces the restart closed out
     // of the dead engine's windows. Empty on the first launch
     effects.extend(super::surfaces::reopen_after_restart(model));

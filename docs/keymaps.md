@@ -23,6 +23,7 @@ The table below is generated from `default_maps()` in
 | `<leader>uw` | `ui` | `:View ui cycle_surfaces` |
 | `<leader>wn` | `window` | `:View window new` |
 | `<leader>wz` | `window` | `:View window zoom` |
+| `<leader>wf` | `window` | `:View window fit` |
 | `<leader>ws` | `window` | `:View window flip` |
 | `<leader>uf` | `window` | `:View window float` |
 | `<leader>fd` | `notifications` | `:View notifications dismiss` |
@@ -141,7 +142,7 @@ kitty on macOS hold `Cmd` for themselves before the pty sees it.
 
 ### The chords
 
-46 chords, one row per `[keys.desktop]` key. `super` and `alt` are the two
+47 chords, one row per `[keys.desktop]` key. `super` and `alt` are the two
 spellings `desktop_modifier` picks between; `twin` is the key that reaches
 the same result under the editor profile, and stays bound under both:
 
@@ -161,6 +162,7 @@ the same result under the editor profile, and stays bound under both:
 | `SUPER + RETURN` | `new_tile` | `<D-CR>` | `<M-CR>` | `:View window new` | `<leader>wn` |
 | `SUPER + F` | `zoom` | `<D-f>` | `<M-f>` | `:View window zoom` | `<leader>wz` |
 | `SUPER + ALT + F` | `full_width` | `<M-D-f>` | `<C-M-f>` | `<C-w>|` | `<C-w>|` |
+| `SUPER + Home` | `fit` | `<D-Home>` | `<M-Home>` | `:View window fit` | `<leader>wf` |
 | `SUPER + J` | `flip_split` | `<D-j>` | `<M-j>` | `:View window flip` | `<leader>ws` |
 | `SUPER + T` | `float` | `<D-t>` | `<M-t>` | `:View window float` | `<leader>uf` |
 | `SUPER + SPACE` | `palette` | `<D-Space>` | `<M-Space>` | `:View palette open` | `<leader><leader>` |
@@ -208,7 +210,6 @@ for; each row below names what it would have to reach for:
 | `SUPER + CTRL + F` | compositor surface properties |
 | `SUPER + O` | compositor surface properties |
 | `SUPER + ALT + Home` | the saved window width |
-| `SUPER + Home` | the saved window width |
 | `SUPER + L` | the Hyprland layout modes |
 | `SUPER + SHIFT + ALT + code:10` | workspace moves that skip the switch |
 | `SUPER + SHIFT + ALT + code:11` | workspace moves that skip the switch |

@@ -630,6 +630,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 match verb.as_str() {
                     "new" => return surfaces::window_new(model),
                     "zoom" => return surfaces::window_zoom(model),
+                    "fit" => return surfaces::window_fit(model),
                     "flip" => return surfaces::window_flip(model),
                     "float" => return surfaces::window_float(model),
                     _ => {

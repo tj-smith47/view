@@ -1409,6 +1409,26 @@ fn tiled_nested(gaps: bool) -> Tiles {
     }
 }
 
+/// The vsplit after `window fit` on the left tile: its one short line fits
+/// to `winwidth`'s floor of 20 text columns, the frame's columns on both
+/// sides added to the slot, and the right tile takes the rest.
+fn tiled_fitted(gaps: bool) -> Tiles {
+    let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
+    let inset = view_core::model::Look::new(view_core::model::Panes::Tiles, gaps)
+        .inset()
+        .1;
+    let left_width = 20 + 2 * inset;
+    let right_col = left_width + 1;
+    let slots = vec![
+        (0, 0, left_width, grid_height - 1),
+        (0, right_col, grid_width - right_col, grid_height - 1),
+    ];
+    Tiles {
+        model: tiled_model(gaps, TILED_HEIGHT, &slots),
+        slots,
+    }
+}
+
 /// The size of grid 1 under a look, which is the terminal less the ring the
 /// look spends on its outer frame.
 fn outer_grid(gaps: bool, height: u16) -> (u16, u16) {
@@ -4077,6 +4097,9 @@ const TILED_SCENES: &[(&str, SceneDump)] = &[
     }),
     ("vsplit-tiles-nested", |tier| {
         tiles_dump(tier, tiled_nested(true))
+    }),
+    ("vsplit-tiles-fitted", |tier| {
+        tiles_dump(tier, tiled_fitted(true))
     }),
     ("tree-windowed", |tier| {
         tiles_dump(tier, tree_windowed_on_a_branch())

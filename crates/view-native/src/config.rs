@@ -115,6 +115,8 @@ struct UiTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     gaps: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    fit_active: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pill_caps: Option<String>,
     // a `toml::Value` for `[native] tree_width`'s reason: a map written in
     // the wrong shape is a notice, and the rest of the file still loads
@@ -256,6 +258,7 @@ struct UiFile {
     /// carries.
     panes: Option<Option<Panes>>,
     gaps: Option<bool>,
+    fit_active: Option<bool>,
     /// `Some(None)` is the word `auto`, the same double meaning `tier`
     /// carries.
     pill_caps: Option<Option<PillCaps>>,
@@ -438,6 +441,7 @@ fn resolve_ui(table: &UiTable) -> UiFile {
         theme: table.theme.as_deref().map(parse_theme),
         panes,
         gaps: table.gaps,
+        fit_active: table.fit_active,
         pill_caps,
         tile_titles,
         // the outer `Some` is the file naming the key at all, which is what
@@ -901,7 +905,7 @@ pub struct KeysConfig {
     desktop_modifier: Option<String>,
     /// `[keys.desktop]` as the file wrote it, unvalidated: which ids exist
     /// and which values are spellable keys are both
-    /// [`resolve::resolve_with`]'s own check, since a 46-row map answers
+    /// [`resolve::resolve_with`]'s own check, since a 47-row map answers
     /// through the same env/file/derived chain every other key does.
     desktop: BTreeMap<String, String>,
 }
@@ -1372,6 +1376,9 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
     }
     if file.ui.gaps.is_some() {
         spelled.push(("ui", "gaps"));
+    }
+    if file.ui.fit_active.is_some() {
+        spelled.push(("ui", "fit_active"));
     }
     if file.ui.pill_caps.is_some() {
         spelled.push(("ui", "pill_caps"));
@@ -1903,6 +1910,7 @@ mod tests {
             ("ui", "theme") => "\"gruvbox\"",
             ("ui", "panes") => "\"nvim\"",
             ("ui", "gaps") => "false",
+            ("ui", "fit_active") => "true",
             ("ui", "pill_caps") => "\"flat\"",
             ("ui", "tile_titles") => "{ outline = \"symbols\" }",
             ("ui.tokens", "accent") => "\"#89b4fa\"",

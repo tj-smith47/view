@@ -1479,6 +1479,7 @@ mod tests {
             "Right" => KeyCode::Right,
             "Up" => KeyCode::Up,
             "Down" => KeyCode::Down,
+            "Home" => KeyCode::Home,
             "CR" => KeyCode::Enter,
             "Tab" => KeyCode::Tab,
             "BS" => KeyCode::Backspace,
@@ -1509,6 +1510,7 @@ mod tests {
             "Right" => arrow_bytes('C', shift),
             "Up" => arrow_bytes('A', shift),
             "Down" => arrow_bytes('B', shift),
+            "Home" => arrow_bytes('H', shift),
             "Tab" if shift => b"\x1b[Z".to_vec(),
             "Tab" => b"\t".to_vec(),
             "CR" => b"\r".to_vec(),
@@ -1533,7 +1535,7 @@ mod tests {
 
     /// Every `with_super` spelling in the desktop chord table is the
     /// protocol's own report for that chord, run through `encode_key`: the
-    /// 92 table spellings are bytes the encoder actually emits.
+    /// 94 table spellings are bytes the encoder actually emits.
     #[test]
     fn a_super_chord_is_spelled_the_way_the_table_spells_it() {
         for chord in view_core::native::chords::desktop_chords() {

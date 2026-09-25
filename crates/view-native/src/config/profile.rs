@@ -4,7 +4,7 @@
 //! This module carries the two pure derivations -- what `"auto"` resolves to
 //! for the profile, from the environment, and what `"auto"` resolves to for
 //! the modifier, from the kitty keyboard protocol probe -- and [`chord_plan`],
-//! which turns [`ResolvedConfig`](super::resolve::ResolvedConfig)'s 46
+//! which turns [`ResolvedConfig`](super::resolve::ResolvedConfig)'s 47
 //! `[keys.desktop]` answers into the specs a takeover registers. Layering an
 //! explicit `view.toml`/environment override on top of the profile
 //! derivation is `resolve_with`'s own job.
@@ -108,7 +108,7 @@ pub fn modifier_for(
 /// `[keys.desktop]` row applied. Empty under [`KeyProfile::Editor`].
 ///
 /// `desktop` is [`ResolvedConfig`](super::resolve::ResolvedConfig)'s answer
-/// for the 46 rows, in [`desktop_chords`] order -- the fixed length is what
+/// for the 47 rows, in [`desktop_chords`] order -- the fixed length is what
 /// rules out a shorter slice silently dropping trailing chords under
 /// `.zip`. A row whose resolved value is empty yields no spec.
 ///

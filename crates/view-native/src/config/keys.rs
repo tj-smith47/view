@@ -85,6 +85,12 @@ pub fn keys() -> &'static [ConfigKey] {
             },
             ConfigKey {
                 table: "ui",
+                key: "fit_active",
+                flag: None,
+                derived: Some("false"),
+            },
+            ConfigKey {
+                table: "ui",
                 key: "pill_caps",
                 flag: None,
                 derived: Some(super::AUTO),
@@ -231,7 +237,7 @@ pub fn keys() -> &'static [ConfigKey] {
                 derived: None,
             },
         ]);
-        // the 46 `[keys.desktop]` rows, walked from `desktop_chords()` the
+        // the 47 `[keys.desktop]` rows, walked from `desktop_chords()` the
         // way `[native]`'s rows are walked from the feature registry: a
         // chord this build ships is a config key by construction, and the
         // default each row derives depends on the modifier this session

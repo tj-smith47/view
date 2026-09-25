@@ -1275,6 +1275,7 @@ fn main() -> Result<()> {
     // whether a `:View ui panes` flip derives `[native] tabline` again, or
     // leaves the value the user spelled where they put it
     model.tabline_follows_look = resolved.tabline_follows_look();
+    model.fit_active = resolved.ui.fit_active.value;
     // the accent the user named, ahead of the two syntax groups the theme
     // probes for when they named none
     model

@@ -95,7 +95,10 @@ impl Frame {
 ///   `chrome_painted`, which is here), `stdin_relay` (an attach option
 ///   the session was started with), `tabline_follows_look` (it decides
 ///   whether a look flip moves `ext_surfaces`, and the move itself reaches
-///   a layer through `offset`) and `native_min_pane_size` (`window zoom`
+///   a layer through `offset`), `fit_active` (it decides only whether a
+///   `VimEnter` or a look flip sends nvim the fit hook, and the resize
+///   that follows reaches a layer through `grids`) and
+///   `native_min_pane_size` (`window zoom`
 ///   reads it to choose which notation to send, and neither the choice
 ///   nor the option it is read from changes what any layer paints)
 /// - read through a field already here: `engine` (this destructures it),

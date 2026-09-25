@@ -2397,6 +2397,23 @@ pub enum RpcCall {
         /// tabpage creates a new one at the end.
         destination: u32,
     },
+    /// `:View window fit`: widens or narrows nvim's current window to the
+    /// longest line it shows, measured and resized inside nvim, since a
+    /// line longer than the window reaches view already wrapped.
+    FitWindow {
+        /// The columns a gapped frame takes off each side of the slot,
+        /// [`Look::inset`](crate::model::Look::inset)'s second half.
+        inset_cols: u16,
+    },
+    /// `[ui] fit_active`: fits every window the cursor moves into, the way
+    /// [`FitWindow`](Self::FitWindow) fits one, or stops doing so.
+    SetFitActive {
+        /// Whether windows are fitted on entry.
+        on: bool,
+        /// As [`FitWindow`](Self::FitWindow)'s own, re-sent when the look
+        /// changes it.
+        inset_cols: u16,
+    },
     /// Renames the file at `old_path` to `new_path` and, when a buffer is
     /// open for `old_path`, retargets that buffer onto the new path in the
     /// same call rather than leaving it pointing at a path that no longer

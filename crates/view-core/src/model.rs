@@ -269,6 +269,11 @@ pub struct Model {
     /// spelled the key: a value the user wrote is theirs under every look,
     /// and re-deriving it would throw it away at the first flip.
     pub tabline_follows_look: bool,
+    /// `[ui] fit_active`: whether every window the cursor moves into is
+    /// fitted to its text. Set once at startup and handed to nvim at each
+    /// `VimEnter`, and again on a look change, which moves the inset the
+    /// fit adds.
+    pub fit_active: bool,
     /// The colorscheme `[ui] theme` named, or `None` when it named none and
     /// view derives its chrome from whatever the user's own config ends on.
     ///
@@ -460,6 +465,7 @@ impl Model {
             showtabline: crate::native::pill::DEFAULT_SHOWTABLINE,
             native_min_pane_size: (1, 1),
             tabline_follows_look: true,
+            fit_active: false,
             colorscheme: None,
             ai_trusted: false,
             ai_enabled: true,
@@ -791,6 +797,17 @@ impl Model {
     pub fn with_tile_titles(mut self, titles: TileTitles) -> Self {
         self.tile_titles = titles;
         self
+    }
+
+    /// The call that hands [`Self::fit_active`] to nvim at the current
+    /// look's inset, or `None` while it is off: nvim holds no fit hook
+    /// until one is sent, so an off session owes nothing.
+    #[must_use]
+    pub fn fit_active_call(&self) -> Option<crate::msg::RpcCall> {
+        self.fit_active.then(|| crate::msg::RpcCall::SetFitActive {
+            on: true,
+            inset_cols: self.look.inset().1,
+        })
     }
 
     /// The window look this session starts under. The registry holds the

@@ -368,6 +368,10 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::MoveWindowToTabpage { win, destination } => {
                         self.ops.move_window_to_tabpage(win, destination)
                     }
+                    RpcCall::FitWindow { inset_cols } => self.ops.fit_window(inset_cols),
+                    RpcCall::SetFitActive { on, inset_cols } => {
+                        self.ops.set_fit_active(on, inset_cols)
+                    }
                     RpcCall::PreviewBuffer { path, generation } => {
                         self.ops.preview_buffer(&path, generation)
                     }
