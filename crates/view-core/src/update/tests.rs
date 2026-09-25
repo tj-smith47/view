@@ -13101,6 +13101,55 @@ fn view_panes_with_no_argument_reports_the_mode_and_its_marker() {
     );
 }
 
+/// `:View ui panes` says who draws the top row, and says so while view
+/// holds it with nothing to name: under tiles a row the frames already
+/// cover is not drawn, and a report calling it view's would name a row
+/// the person cannot find.
+#[test]
+fn view_panes_reports_the_row_drawn_hidden_or_left_to_nvim() {
+    let report = |m: &mut Model| -> String {
+        let _ = update(
+            m,
+            Msg::FeatureInvoke {
+                feature: "ui".to_string(),
+                verb: "panes".to_string(),
+            },
+        );
+        m.engine
+            .messages
+            .entries
+            .last()
+            .map(|entry| {
+                entry
+                    .content
+                    .iter()
+                    .map(|(_, text)| text.as_str())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut m = pill_model(crate::native::pill::TablineShows::Tabs);
+    assert!(
+        report(&mut m).ends_with("the top row is view's"),
+        "two tabpages under tiles"
+    );
+    m.engine
+        .tabline
+        .as_mut()
+        .expect("the fixture attaches a tabline")
+        .tabs
+        .truncate(1);
+    assert!(
+        report(&mut m).ends_with("the top row is view's, hidden until it has something to name"),
+        "one tabpage under tiles"
+    );
+    m.attach_surfaces(crate::native::ext::shipped_multigrid());
+    assert!(
+        report(&mut m).ends_with("the top row is nvim's"),
+        "the tabline left with nvim"
+    );
+}
+
 /// A pill model: the tabline surface attached, the tiled look, and three
 /// tabpages named across the row.
 fn pill_model(shows: crate::native::pill::TablineShows) -> Model {
@@ -13391,18 +13440,28 @@ fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
         ),
         ("the permission answered", Box::new(|_| {}), key("1"), 0),
         (
-            "the session ready",
+            "the session ready, with no turn yet",
             Box::new(|_| {}),
             Msg::Ai(AiEvent::SessionReady {
                 session_id: "s-1".to_string(),
             }),
-            1,
+            0,
         ),
+        ("a prompt typed", Box::new(|_| {}), key("h"), 0),
+        ("the prompt submitted", Box::new(|_| {}), key("<CR>"), 1),
         (
-            "a permission asked of a running agent",
+            "a permission asked mid-turn",
             Box::new(|_| {}),
             permission_requested_msg(8, everyday_options()),
             1,
+        ),
+        (
+            "the turn ended",
+            Box::new(|_| {}),
+            Msg::Ai(AiEvent::TurnEnded {
+                stop_reason: crate::native::ai_event::StopReason::EndTurn,
+            }),
+            0,
         ),
         (
             "the session crashed",
@@ -13418,7 +13477,7 @@ fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
             Msg::Ai(AiEvent::SessionReady {
                 session_id: "s-2".to_string(),
             }),
-            1,
+            0,
         ),
         (
             "showtabline=2 under the nvim look",

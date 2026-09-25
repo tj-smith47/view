@@ -153,6 +153,15 @@ vim.fn.feedkeys(vim.api.nvim_replace_termcodes(..., true, true, true), 't')";
 /// a table no config writes, so [`RELEASE_OPTION_CHUNK`] can put back the
 /// user's own value. A second hold of the same option leaves it alone: by
 /// then the option carries view's value.
+///
+/// The same table also keeps `held_at`, the value the option's own hold
+/// last set it to, across chunk re-runs (a look flip re-executes this
+/// whole chunk with fresh locals, so only `_G` state survives from one
+/// hold to the next). A re-hold that re-targets the option finds it still
+/// at the value the earlier hold left it there, view's own doing, and
+/// `report` reads `held_at` to name it. A hold's first run stores nothing
+/// in `held_at` yet, so that run's own finding is judged only against
+/// `stock`, as before.
 const HOLD_OPTION_CHUNK: &str = "\
 local name, value, channel, covered = ...
 local seen = {}
@@ -170,11 +179,12 @@ local function stock(option)
   defaults[option] = { default = default }
   return default
 end
-local function report(option, held, key)
+local function report(option, held, key, held_at)
   if seen[key] then
     return
   end
-  if held == nil or held == false or held == '' or held == stock(option) then
+  if held == nil or held == false or held == '' or held == stock(option)
+    or held == held_at then
     return
   end
   seen[key] = true
@@ -186,7 +196,7 @@ local function beside()
     if not seen[option] then
       local ok, held = pcall(vim.api.nvim_get_option_value, option, {})
       if ok then
-        report(option, held, option)
+        report(option, held, option, nil)
       end
     end
   end
@@ -196,13 +206,15 @@ _G.view_held = before
 if before[name] == nil then
   before[name] = { value = vim.api.nvim_get_option_value(name, {}) }
 end
+local record = before[name]
 local group = vim.api.nvim_create_augroup(
   'view-hold-' .. name, { clear = true })
 local function hold()
   local held = vim.api.nvim_get_option_value(name, {})
   if held ~= value then
     vim.api.nvim_set_option_value(name, value, {})
-    report(name, held, name .. tostring(held))
+    report(name, held, name .. tostring(held), record.held_at)
+    record.held_at = value
   end
   beside()
 end
@@ -5346,6 +5358,18 @@ mod tests {
         assert!(
             HOLD_OPTION_CHUNK.contains("{ clear = true }"),
             "a re-applied plan must replace its guard rather than stack a second one"
+        );
+        assert!(
+            HOLD_OPTION_CHUNK.contains("or held == held_at then"),
+            "a look flip that re-targets an option finds it at the value \
+             the earlier hold left there, and that is view's own doing, \
+             not a foreign write"
+        );
+        assert!(
+            HOLD_OPTION_CHUNK.contains("record.held_at = value"),
+            "the value a hold sets has to survive the chunk re-run the \
+             next hold is, or the next hold cannot tell its own past value \
+             from a foreign one"
         );
     }
 

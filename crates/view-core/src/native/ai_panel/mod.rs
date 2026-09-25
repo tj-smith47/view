@@ -203,6 +203,8 @@ pub struct AiPanelState {
     /// left set by a session that died without a `TurnEnded` is exactly
     /// what those two arms both clearing it exists to prevent. Gates
     /// `<C-c>`: cancelling with nothing in flight has no turn to cancel.
+    /// The top row reads it too: the agent's `running` word, and the row
+    /// it keeps up under tiles, last exactly as long as a turn does.
     pub turn_in_flight: bool,
     /// Panel-local crash surface, deliberately not a transient toast: a
     /// crashed long-running session is easy to miss in four seconds.

@@ -79,7 +79,8 @@ impl PillCaps {
     }
 
     /// The answer `value` spells, or `None` for a word this build does not
-    /// know. `auto` is not an answer here: it is the absence of one.
+    /// know. `auto` returns `None`, which the config layer reads as no
+    /// choice made.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -188,7 +189,7 @@ pub struct PillSlot {
 }
 
 /// The cells a pill adds to its word: an end and a blank on each side.
-pub const PILL: u16 = 4;
+const PILL: u16 = 4;
 
 /// The blank column between two neighbouring pills.
 const SEP: u16 = 1;
@@ -210,10 +211,7 @@ impl PillView {
             host: model.remote.clone().unwrap_or_default(),
             entries,
             names,
-            agent: match agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted) {
-                "idle" => "",
-                word => word,
-            },
+            agent: shown_agent(model),
             caps: model
                 .pill_caps
                 .unwrap_or(PillCaps::derived(model.caps.unicode_boxes)),
@@ -432,10 +430,22 @@ pub fn agent_word(panel: &AiPanelState, enabled: bool, trusted: bool) -> &'stati
     if panel.pending_permission.is_some() {
         return "waiting";
     }
+    // an open session between turns is waiting on nothing and doing
+    // nothing, so only a turn in flight reads as running
     match SessionState::derive(panel, trusted) {
-        SessionState::Active => "running",
+        SessionState::Active if panel.turn_in_flight => "running",
         SessionState::Crashed => "crashed",
-        SessionState::Trusted | SessionState::NotStarted => "idle",
+        _ => "idle",
+    }
+}
+
+/// The agent word the row draws: [`agent_word`] with `idle` drawn as
+/// nothing, since an idle agent is nothing a person has to read.
+#[must_use]
+pub fn shown_agent(model: &Model) -> &'static str {
+    match agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted) {
+        "idle" => "",
+        word => word,
     }
 }
 
@@ -477,10 +487,7 @@ pub fn has_unique_content(model: &Model) -> bool {
     tabs > 1
         || (model.tabline_shows == TablineShows::Buffers && model.buffers.len() >= 2)
         || model.remote.is_some()
-        || !matches!(
-            agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted),
-            "" | "idle"
-        )
+        || !shown_agent(model).is_empty()
 }
 
 /// [`shows`] from the five answers it reads, for the callers that have
@@ -779,6 +786,7 @@ mod tests {
         let mut model = Model::with_term_size(80, 24);
         model.ai_trusted = true;
         model.ai_panel_mut().session_id = Some("s-1".to_string());
+        model.ai_panel_mut().turn_in_flight = true;
         assert_eq!(
             agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted),
             "running"
@@ -802,6 +810,8 @@ mod tests {
     enum Agent {
         Disabled,
         Idle,
+        /// A session open between turns.
+        Open,
         Running,
         Waiting,
         Crashed,
@@ -819,6 +829,7 @@ mod tests {
         let agents = [
             Agent::Disabled,
             Agent::Idle,
+            Agent::Open,
             Agent::Running,
             Agent::Waiting,
             Agent::Crashed,
@@ -871,7 +882,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(walked, 4 * 4 * 2 * 2 * 5 * 2 * 3 * 2);
+        assert_eq!(walked, 4 * 4 * 2 * 2 * 6 * 2 * 3 * 2);
     }
 
     /// One model of the walk above, built from its three groups of answers.
@@ -906,7 +917,11 @@ mod tests {
         let panel = model.ai_panel_mut();
         match agent {
             Agent::Disabled | Agent::Idle => {}
-            Agent::Running => panel.session_id = Some("s-1".to_string()),
+            Agent::Open => panel.session_id = Some("s-1".to_string()),
+            Agent::Running => {
+                panel.session_id = Some("s-1".to_string());
+                panel.turn_in_flight = true;
+            }
             Agent::Waiting => {
                 panel.pending_permission = Some(crate::native::ai_panel::PermissionPrompt::new(
                     1,
@@ -958,6 +973,12 @@ mod tests {
             "idle"
         );
         model.ai_panel_mut().session_id = Some("s-1".to_string());
+        assert_eq!(
+            agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted),
+            "idle",
+            "an open session between turns is doing nothing"
+        );
+        model.ai_panel_mut().turn_in_flight = true;
         assert_eq!(
             agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted),
             "running"

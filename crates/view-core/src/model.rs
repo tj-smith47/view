@@ -244,10 +244,10 @@ pub struct Model {
     /// draws the top row under `panes = "nvim"`, `1` draws it once a
     /// second tabpage is open, `2` always.
     ///
-    /// Holds nvim's default until the bridge's first reading arrives, for
-    /// the reason the row is reserved off the attach, ahead of any tabline
-    /// event: a session that reserved no row and then found it
-    /// wanted one would shift every window down a frame later.
+    /// Holds nvim's default until the bridge's first reading arrives. Under
+    /// `showtabline = 2` the spawn reserves the row off the attach, and a
+    /// session that reserved no row and read the option late would shift
+    /// every window down a frame later.
     pub showtabline: u8,
     /// nvim's own `winminwidth`/`winminheight`, as the bridge last relayed
     /// them: the floor `<C-w>_<C-w>|` squeezes a tiled sibling to, which

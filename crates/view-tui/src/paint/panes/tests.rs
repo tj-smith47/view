@@ -3782,9 +3782,11 @@ fn pill_tabs_scene() -> Tiles {
     let mut surfaces = view_core::native::ext::shipped_multigrid();
     surfaces.push(view_core::native::ext::Ext::Tabline);
     tiles.model.attach_surfaces(surfaces);
+    theme_the_pill_row(&mut tiles.model);
     tiles.model.remote = Some("deploy@prod-box".to_string());
     tiles.model.ai_trusted = true;
     tiles.model.ai_panel_mut().session_id = Some("s-1".to_string());
+    tiles.model.ai_panel_mut().turn_in_flight = true;
     drive(
         &mut tiles.model,
         vec![UiEvent::TablineUpdate {
@@ -3802,6 +3804,36 @@ fn pill_tabs_scene() -> Tiles {
     tiles
 }
 
+/// Gives `Normal`, `TabLine` and `TabLineSel` backgrounds of their own, the
+/// way a colorscheme does, so every pill has a colour its round ends can
+/// be drawn in.
+fn theme_the_pill_row(model: &mut Model) {
+    let mut events = vec![UiEvent::DefaultColorsSet {
+        fg: None,
+        bg: Some(0x0f_0f_0f),
+        sp: None,
+    }];
+    for (id, group, fg, bg) in [
+        (901_u64, "TabLine", 0x11_11_11_u32, 0xa1_a1_a1_u32),
+        (902, "TabLineSel", 0x22_22_22, 0xa2_a2_a2),
+    ] {
+        events.push(UiEvent::HlAttrDefine {
+            id,
+            fg: Some(fg),
+            bg: Some(bg),
+            bold: false,
+            italic: false,
+            underline: false,
+            reverse: false,
+        });
+        events.push(UiEvent::HlGroupSet {
+            name: group.to_string(),
+            hl_id: id,
+        });
+    }
+    drive(model, events);
+}
+
 /// The same lattice with the pill in `"buffers"` mode: one tabpage, four
 /// buffers, the second both unsaved and current.
 fn pill_buffers_scene() -> Tiles {
@@ -3809,6 +3841,7 @@ fn pill_buffers_scene() -> Tiles {
     let mut surfaces = view_core::native::ext::shipped_multigrid();
     surfaces.push(view_core::native::ext::Ext::Tabline);
     tiles.model.attach_surfaces(surfaces);
+    theme_the_pill_row(&mut tiles.model);
     tiles.model.tabline_shows = view_core::native::pill::TablineShows::Buffers;
     drive(
         &mut tiles.model,

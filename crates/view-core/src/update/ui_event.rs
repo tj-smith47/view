@@ -15,10 +15,9 @@ use crate::native::prompt::PromptState;
 use crate::native::statusline::SegmentUpdate;
 
 /// Applies one decoded redraw sub-event to `model`, returning any effects
-/// it produces. Only [`UiEvent::TablineUpdate`] can produce one: crossing
-/// the 1-tab chrome-reservation boundary (either direction) changes the
-/// grid target size, which the loop's executor must forward to the engine
-/// as a `TryResize` the same way a terminal resize does.
+/// it produces. A tabline change that brings the top row in or takes it
+/// away is resized for at the tail of `update()`, which compares the
+/// chrome row count across every message.
 pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
     match ev {
         UiEvent::GridResize {

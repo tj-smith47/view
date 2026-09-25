@@ -221,6 +221,7 @@ fn pill_tabs(boxes: bool, pill_caps: Option<view_core::native::pill::PillCaps>) 
     model.caps = model.caps.with_unicode_boxes(boxes);
     model.ai_trusted = true;
     model.ai_panel_mut().session_id = Some("s-1".to_string());
+    model.ai_panel_mut().turn_in_flight = true;
     open_tabs(&mut model, 2, &["work", "docs", "notes"]);
     LayerKind::Pill(view_core::native::pill::PillView::from_model(&model))
 }

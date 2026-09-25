@@ -54,7 +54,8 @@ With none of those the row is gone and the tiles take its line. Under
 `panes = "nvim"` it follows your `showtabline`: `0` keeps the row off, `1`
 brings it up once a second tabpage is open, `2` keeps it up always. It is
 the same row in both modes. `:View ui panes` moves the row with the mode it
-switches to, and says which of the two now draws it.
+switches to, and says which of the two now draws it. While view holds the
+row with nothing to name, the report says the row is hidden.
 
 Each name is its own pill, centred on the row, and the current one is lit.
 The host's pill sits at the left edge and the agent's at the right. Between
@@ -92,10 +93,12 @@ The agent's word is one of three:
 | what is happening | word |
 |---|---|
 | the agent is asking your permission | `waiting` |
-| a session is running | `running` |
+| the agent is working on your prompt | `running` |
 | the agent died | `crashed` |
 
 An idle agent draws no pill, and neither does an agent `[ai]` turns off.
+An agent is idle between prompts, so under tiles the agent's pill comes
+up when you send a prompt and leaves when the answer is done.
 
 `[native] tabline = false` leaves the row to nvim, so your own tabline
 plugin keeps it.

@@ -721,6 +721,53 @@ fn a_hold_that_finds_nvims_own_value_names_nobody() {
     );
 }
 
+/// A re-hold that re-targets an option (a look flip moving `laststatus`
+/// from view's own `0` to its own `2`) reports nothing: the value it
+/// displaces is the option's own earlier hold. A third party's write
+/// between the two holds names a real holder, and is still reported.
+#[test]
+fn a_re_hold_over_its_own_earlier_value_reports_nothing_but_a_third_partys_still_does() {
+    let dir = common::fixture("supersede-live-rehold", "");
+    let (engine, rx) = reported_session(&dir);
+
+    // the first hold's own finding is nvim's stock value, which names
+    // nobody and is drained without asserting on it
+    hold(
+        &engine.handle,
+        "laststatus",
+        Scope::Global,
+        channels::ChannelValue::Int(0),
+    );
+    common::drain_until(&rx, Duration::from_secs(2), |msg| match msg {
+        Msg::ChannelHeld { .. } => Some(()),
+        _ => None,
+    });
+
+    hold(
+        &engine.handle,
+        "laststatus",
+        Scope::Global,
+        channels::ChannelValue::Int(2),
+    );
+    let self_targeted = common::drain_until(&rx, Duration::from_secs(2), |msg| match msg {
+        Msg::ChannelHeld { channel, holder } => Some(format!("{channel} = {holder}")),
+        _ => None,
+    });
+    assert!(
+        self_targeted.is_none(),
+        "a re-hold reported the value its own earlier hold left there: {self_targeted:?}"
+    );
+
+    engine
+        .handle
+        .eval_str("execute('set laststatus=5')")
+        .unwrap();
+    assert!(
+        reported_holding(&rx, "laststatus", "5"),
+        "a third party's write between two holds went unreported"
+    );
+}
+
 /// Every row of nvim's own screen, as one string per row.
 ///
 /// `screenstring` cell by cell rather than any buffer read: what is asked
