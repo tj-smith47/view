@@ -1006,7 +1006,7 @@ fn the_command_line_under_the_lowest_tile_keeps_its_text() {
     let (grid_width, grid_height) = outer_grid(true, TILED_HEIGHT);
     let slots = vec![(0, 0, grid_width, grid_height - 1)];
     let mut model = tiled_model(true, TILED_HEIGHT, &slots);
-    with_nvims_command_line(&mut model);
+    with_nvims_message_area(&mut model);
     drive(
         &mut model,
         vec![
@@ -1177,7 +1177,7 @@ fn the_gapless_lattice_stops_above_the_command_line() {
     let (_, grid_height) = outer_grid(false, TILED_HEIGHT);
     let tiles = tiled(false);
     let mut model = tiles.model;
-    with_nvims_command_line(&mut model);
+    with_nvims_message_area(&mut model);
     drive(
         &mut model,
         vec![
@@ -1440,16 +1440,77 @@ fn outer_grid_at(gaps: bool, size: (u16, u16), chrome_rows: u16) -> (u16, u16) {
     view_core::model::grid_target_for(size, chrome_rows, false, look.ring())
 }
 
-/// Hands the command line back to nvim, which is the session nvim keeps a
-/// row of its own at the grid's foot for: the takeover holds `cmdheight`
-/// at 0 only where view owns that row's other tenant as well.
+/// Hands the message area back to nvim, which is the session nvim keeps a
+/// command-line row of its own at the grid's foot for: an attach carrying
+/// `ext_messages` has nvim zero `cmdheight` whatever else it carries.
 ///
 /// The tab line stays with nvim here for [`tiled_model`]'s reason: the row
 /// the pill takes is a separate question from the row nvim's command line
 /// keeps.
-fn with_nvims_command_line(model: &mut Model) {
+fn with_nvims_message_area(model: &mut Model) {
+    model.attach_surfaces(without(&[view_core::native::ext::Ext::Messages]));
+}
+
+/// The four crossings of the two surfaces that draw at the grid's foot,
+/// each as what the shipped attach drops: `[native] palette = false`
+/// drops the command line and its menu, `notifications = false` the
+/// message area.
+const ATTACH_SHAPES: [&[view_core::native::ext::Ext]; 4] = {
     use view_core::native::ext::Ext;
-    model.attach_surfaces(vec![Ext::LineGrid, Ext::Messages]);
+    [
+        &[],
+        &[Ext::Cmdline, Ext::Popupmenu],
+        &[Ext::Messages],
+        &[Ext::Cmdline, Ext::Popupmenu, Ext::Messages],
+    ]
+};
+
+/// Where view draws the message area nvim keeps no command-line row, so
+/// the grid's last row is the lowest window's status row, which the frames
+/// replace whatever the palette switch says. Where nvim keeps the messages
+/// the row is its command line and keeps its text.
+#[test]
+fn the_grids_last_row_is_nvims_only_where_it_keeps_the_messages() {
+    const STATUS: &str = "NvimTree_1 [-] 1:1 NORMAL";
+    for gaps in [true, false] {
+        for dropped in ATTACH_SHAPES {
+            let keeps = dropped.contains(&view_core::native::ext::Ext::Messages);
+            let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
+            let slots = vec![(0, 0, grid_width, grid_height - 1 - u16::from(keeps))];
+            let mut model = tiled_model(gaps, TILED_HEIGHT, &slots);
+            model.attach_surfaces(without(dropped));
+            drive(
+                &mut model,
+                vec![
+                    line(1, u64::from(grid_height - 1), STATUS, 0),
+                    UiEvent::Flush,
+                ],
+            );
+            let buf = tiled_frame(&model);
+            let last = row_text(&buf, grid_height - 1 + model.look.grid_offset());
+            let label = format!("gaps={gaps} dropped={dropped:?}");
+            assert_eq!(
+                last.contains(STATUS),
+                keeps,
+                "{label}: the grid's last row reads {last:?}"
+            );
+            if !keeps && !gaps {
+                assert!(
+                    last.contains('─'),
+                    "{label}: the lowest frame's bottom edge is missing: {last:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The shipped attach less `dropped`, which is what a `[native]` switch
+/// turned off leaves.
+fn without(dropped: &[view_core::native::ext::Ext]) -> Vec<view_core::native::ext::Ext> {
+    view_core::native::ext::shipped_multigrid()
+        .into_iter()
+        .filter(|ext| !dropped.contains(ext))
+        .collect()
 }
 
 fn tiled_model(gaps: bool, height: u16, slots: &[(u16, u16, u16, u16)]) -> Model {
@@ -1470,9 +1531,9 @@ fn tiled_model_at(
     model.term_width = size.0;
     model.term_height = size.1;
     model.statusline_enabled = true;
-    // the shipped attach: view owns the command line and the message area,
-    // so the takeover holds `cmdheight` at 0 and the grid's last row is a
-    // window's status row. The tab line is left with nvim, which is what
+    // the shipped attach: view owns the message area, so nvim keeps
+    // `cmdheight` at 0 and the grid's last row is a window's status row.
+    // The tab line is left with nvim, which is what
     // keeps the lattice at the top of the screen: the row the pill takes is
     // `the_lattice_sits_under_the_pills_row`'s question, and every slot here
     // would otherwise be one row lower for a reason that has nothing to do
@@ -3492,8 +3553,9 @@ fn frame_ends(
 /// Every side surface, floating or in a window of its own, and every band
 /// across the tiles, on terminals from small to generous, under both gap
 /// settings, with and without the pill and a full-width window under the
-/// vsplit: the facing frame line of the surface turns on the first and
-/// last rows (a band: columns) the tiles' own frames turn on.
+/// vsplit, in every [`ATTACH_SHAPES`] crossing: the facing frame line of
+/// the surface turns on the first and last rows (a band: columns) the
+/// tiles' own frames turn on.
 #[test]
 fn every_windowed_surface_frames_on_the_tile_ring_rows() {
     use view_core::native::geometry::{Anchor, NativeSurface, SurfacePlacement};
@@ -3559,13 +3621,13 @@ fn every_windowed_surface_frames_on_the_tile_ring_rows() {
         for gaps in [true, false] {
             for pill in [0u16, 1] {
                 for bottom_split in [false, true] {
-                    for keeps_cmdline in [false, true] {
+                    for dropped in ATTACH_SHAPES {
                         for case in cases {
                             surface_frames_on_the_tile_rows(
                                 size,
                                 gaps,
                                 pill,
-                                (bottom_split, keeps_cmdline),
+                                (bottom_split, dropped),
                                 case,
                             );
                         }
@@ -3601,7 +3663,7 @@ fn surface_frames_on_the_tile_rows(
     size: (u16, u16),
     gaps: bool,
     pill: u16,
-    (bottom_split, keeps_cmdline): (bool, bool),
+    (bottom_split, dropped): (bool, &[view_core::native::ext::Ext]),
     (surface, placement, anchor): (
         view_core::native::geometry::NativeSurface,
         view_core::native::geometry::SurfacePlacement,
@@ -3610,9 +3672,10 @@ fn surface_frames_on_the_tile_rows(
 ) {
     use view_core::native::ext::Ext;
     use view_core::native::geometry::{Anchor, SurfacePlacement};
+    let keeps_cmdline = dropped.contains(&Ext::Messages);
     let label = format!(
         "{size:?} gaps={gaps} pill={pill} bottom_split={bottom_split} \
-         keeps_cmdline={keeps_cmdline} {surface:?} {placement:?} {anchor:?}"
+         dropped={dropped:?} {surface:?} {placement:?} {anchor:?}"
     );
     let windowed = placement == SurfacePlacement::Windowed;
     let (grid_width, grid_height) = outer_grid_at(gaps, size, pill);
@@ -3623,15 +3686,13 @@ fn surface_frames_on_the_tile_rows(
     if pill == 1 {
         with_the_pill(&mut model);
     }
-    if keeps_cmdline {
-        // `with_nvims_command_line` alone would take the pill's tab line
-        // back as well
-        let mut surfaces = vec![Ext::LineGrid, Ext::Messages];
-        if pill == 1 {
-            surfaces.push(Ext::Tabline);
-        }
-        model.attach_surfaces(surfaces);
+    // `with_nvims_message_area` alone would take the pill's tab line back
+    // as well
+    let mut surfaces = without(dropped);
+    if pill == 1 {
+        surfaces.push(Ext::Tabline);
     }
+    model.attach_surfaces(surfaces);
     assert_eq!(
         (model.chrome_rows(), model.cmdline_rows()),
         (pill, u16::from(keeps_cmdline)),

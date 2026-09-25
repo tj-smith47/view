@@ -238,9 +238,8 @@ fn takeover_call(row: &Takeover, look: Look) -> Option<RpcCall> {
 /// claims is stated once: the audit that reads them back and the takeover
 /// that holds them cannot disagree about what view owns.
 ///
-/// A channel claimed by more than one surface is not a feature's to hold --
-/// the last grid row carries nvim's command line and its message area
-/// both, and a session that gave either one back still needs it -- so those
+/// A channel claimed by more than one surface is not a feature's to hold,
+/// since a session that gave either surface back still needs it, so those
 /// are held by the session against its attach set instead, on the same
 /// reading ([`channels::shared_by_surfaces`]).
 fn takeovers() -> Vec<Takeover> {

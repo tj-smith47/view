@@ -194,7 +194,7 @@ pub struct Model {
     /// Private, read through [`Model::owns`] and
     /// [`Model::attached_surfaces`]: "did this session externalize that
     /// surface?" is a question a conflict notice, a restart's re-attach and
-    /// the `cmdheight` takeover all ask, and each answering it from its own
+    /// the command line row count all ask, and each answering it from its own
     /// copy of the `[native]` table is how the answers come to disagree.
     /// Defaults to what a config-absent session attaches
     /// ([`ext::shipped_multigrid`](crate::native::ext::shipped_multigrid)):
@@ -3109,16 +3109,16 @@ mod tests {
         assert_eq!(m.grid_target(), (78, 23));
     }
 
-    /// Which sessions nvim keeps a row at the grid's foot for. The row
-    /// carries the command line and the message area both, so the takeover
-    /// holds `cmdheight` at 0 only where view owns them both, and the
-    /// tiles painter clears the grid's last row only there.
+    /// Which sessions nvim keeps a row at the grid's foot for, over all four
+    /// crossings of the two surfaces that draw there. `ext_messages` turns
+    /// `ext_cmdline` on with it and zeroes `cmdheight`, so the message area
+    /// decides the row whatever the command line's attach says.
     #[test]
-    fn nvim_keeps_a_command_line_row_unless_view_owns_both_its_tenants() {
+    fn nvim_keeps_a_command_line_row_only_where_view_leaves_it_the_messages() {
         use crate::native::ext::Ext;
         for (surfaces, rows) in [
             (crate::native::ext::ALL.to_vec(), 0),
-            (vec![Ext::LineGrid, Ext::Messages, Ext::Tabline], 1),
+            (vec![Ext::LineGrid, Ext::Messages, Ext::Tabline], 0),
             (vec![Ext::LineGrid, Ext::Cmdline, Ext::Popupmenu], 1),
             (vec![Ext::LineGrid], 1),
         ] {

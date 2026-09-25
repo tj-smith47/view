@@ -809,14 +809,9 @@ impl NativeSession {
     ///
     /// A channel more than one surface claims follows the externalized
     /// surfaces rather than `self.plan`, and the attach that externalizes
-    /// them closes the sequence. The last screen line is nvim's own cmdline
-    /// and message area both, so taking it away is correct only for a
-    /// session that externalized both of those surfaces: one that left
-    /// either with nvim -- `native.palette = false` keeps the cmdline
-    /// there, `native.notifications = false` keeps the messages -- needs
-    /// the row it draws them on, and zeroing it would leave the user typing
-    /// `:` into a line that is not on screen. No single `[native]` switch
-    /// decides it, which is why it is not a feature's plan entry.
+    /// them closes the sequence. `cmdheight` is the message area's alone
+    /// and rides in its feature's plan entry: nvim zeroes the row for any
+    /// UI attached with `ext_messages`, command line or not.
     fn take_over(&mut self, model: &mut Model) -> Vec<Effect> {
         if self.handed_over {
             return Vec::new();
@@ -1379,23 +1374,27 @@ mod tests {
         );
     }
 
-    /// Whether the takeover may zero `cmdheight` at all: the last screen
-    /// row is nvim's own cmdline and message area, and a session that gave
-    /// either surface back needs it. Walks all four crossings rather than
-    /// the two that differ, so a rule rewritten as "either" instead of
-    /// "both" fails by name.
+    /// Whether the takeover zeroes `cmdheight`: nvim does so itself for
+    /// any UI attached with `ext_messages`, command line or not, and a
+    /// session that handed messages back keeps the row they draw on. Walks
+    /// all four crossings of the two switches, so a hold keyed on the
+    /// palette as well fails by name.
     #[test]
-    fn cmdheight_is_zeroed_only_for_a_session_that_took_both_surfaces() {
-        for (surfaces, zeroed) in [
-            (view_core::native::ext::ALL.to_vec(), true),
-            (vec![Ext::LineGrid, Ext::Messages, Ext::Tabline], false),
-            (
-                vec![Ext::LineGrid, Ext::Cmdline, Ext::Popupmenu, Ext::Tabline],
-                false,
-            ),
-            (vec![Ext::LineGrid, Ext::Tabline], false),
+    fn cmdheight_is_zeroed_exactly_where_view_draws_the_messages() {
+        for (toml, zeroed) in [
+            ("", true),
+            ("[native]\npalette = false\n", true),
+            ("[native]\nnotifications = false\n", false),
+            ("[native]\npalette = false\nnotifications = false\n", false),
         ] {
+            let cfg = NativeConfig::from_toml_str(toml).expect("valid toml");
+            let surfaces: Vec<Ext> = view_core::native::ext::ALL
+                .iter()
+                .copied()
+                .filter(|ext| ext.feature().is_none_or(|id| cfg.enabled(id)))
+                .collect();
             let mut session = NativeSession::all_enabled(7, None);
+            session.cfg = cfg;
             let mut m = model();
             m.attach_surfaces(surfaces.clone());
             let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -1554,49 +1553,6 @@ mod tests {
                 Effect::Rpc(RpcCall::RegisterMappings { channel_id: 21, .. })
             )),
             "view's own keys are unbound in the recovered session: {again:?}"
-        );
-    }
-
-    #[test]
-    fn cmdheight_is_forced_to_zero_even_with_the_notifications_feature_off() {
-        let cfg =
-            NativeConfig::from_toml_str("[native]\nnotifications = false\n").expect("valid toml");
-        let mut session = NativeSession {
-            plan: plan(&cfg, registry::features(), Look::default()),
-            cfg,
-            config_path: None,
-            record: None,
-            channel_id: 11,
-            handed_over: false,
-            ai_enabled: true,
-            look: Look::default(),
-            ui_keys_lhs: default_ui_keys_lhs(),
-            initial_profile: KeyProfile::Editor,
-            profile: KeyProfile::Editor,
-            desktop_modifier_choice: ModifierChoice::Auto,
-            desktop: default_desktop(),
-            profile_marker: None,
-            chords_pending: false,
-            leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
-            hold_starts: HoldStarts::default(),
-            claims_owed: 0,
-            held_input: Vec::new(),
-            hold_lifted: false,
-            hold_generation: 0,
-            takeover_sent: None,
-            announced: Vec::new(),
-        };
-        let mut m = model();
-        let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
-        let cmdheight = effects.iter().find_map(|e| match e {
-            Effect::Rpc(RpcCall::HoldOption { name, value }) if name == "cmdheight" => Some(value),
-            _ => None,
-        });
-        assert_eq!(
-            cmdheight,
-            Some(&OptionValue::Int(0)),
-            "cmdheight must be forced to 0 unconditionally -- ext_messages is attach-level, \
-             not gated on native.notifications: {effects:?}"
         );
     }
 

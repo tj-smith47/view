@@ -113,6 +113,9 @@ struct Look {
     gaps: bool,
     pill: bool,
     bottom_split: bool,
+    /// Whether the command line is attached, which `[native] palette =
+    /// false` drops while the message area stays view's.
+    palette: bool,
 }
 
 /// The tape's layout: two files side by side under tiles, with a
@@ -122,11 +125,13 @@ fn session(dir: &Path, look: Look) -> EngineSession {
         gaps,
         pill,
         bottom_split,
+        palette,
     } = look;
     let ext: Vec<&str> = UI_EXT_OPTIONS_MULTIGRID
         .iter()
         .copied()
         .filter(|ext| pill || *ext != "ext_tabline")
+        .filter(|ext| palette || !matches!(*ext, "ext_cmdline" | "ext_popupmenu"))
         .collect();
     let mut engine =
         EngineSession::spawn_with_ext(COLS, ROWS, &ext).expect("EngineSession against real nvim");
@@ -156,11 +161,17 @@ fn session(dir: &Path, look: Look) -> EngineSession {
         invoke(&mut engine, "ui", "gaps");
         settle(&mut engine, "gapless");
     }
+    let kept = engine.eval_str("&cmdheight").unwrap();
     let model = engine.model();
     assert_eq!(
-        (model.chrome_rows(), model.look.gaps, model.cmdline_rows()),
-        (u16::from(pill), gaps, 0),
+        (model.chrome_rows(), model.look.gaps),
+        (u16::from(pill), gaps),
         "the session is not the one the walk names"
+    );
+    assert_eq!(
+        model.cmdline_rows().to_string(),
+        kept.trim(),
+        "{look:?}: the model's command-line rows against nvim's own `cmdheight`"
     );
     engine
 }
@@ -275,12 +286,40 @@ fn a_windowed_surface_frames_on_its_neighbours_ring_rows() {
                     gaps,
                     pill,
                     bottom_split,
+                    palette: true,
                 };
                 let mut engine = session(&work, look);
                 for &case in CASES {
                     found.extend(walk_case(&mut engine, look, case));
                 }
             }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "surfaces off their neighbours' frame lines:\n{}",
+        found.join("\n")
+    );
+}
+
+/// `[native] palette = false` keeps the message area attached, and nvim
+/// then keeps no command-line row, so the tiles and every surface beside
+/// them still reach the grid's foot.
+#[test]
+fn a_session_without_the_palette_frames_down_to_the_grids_foot() {
+    let work = view_test_support::ScratchDir::new("windowed-surface-rows-no-palette").unwrap();
+    build_fixture(&work);
+    let mut found = Vec::new();
+    for gaps in [true, false] {
+        let look = Look {
+            gaps,
+            pill: false,
+            bottom_split: false,
+            palette: false,
+        };
+        let mut engine = session(&work, look);
+        for &case in CASES {
+            found.extend(walk_case(&mut engine, look, case));
         }
     }
     assert!(

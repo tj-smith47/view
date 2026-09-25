@@ -40,14 +40,16 @@ impl Model {
 
     /// Rows nvim keeps for its command line at the foot of the outer grid.
     ///
-    /// The takeover holds `cmdheight` at 0 for a session that owns both the
-    /// command line and the message area, since one row carries both; a
-    /// session that handed either back leaves nvim that row. The tiles
+    /// nvim's rule (`api-ui-events.txt`, `ui-messages`): `ext_messages`
+    /// "Activates ui-linegrid and ui-cmdline implicitly", and "'cmdheight'
+    /// will be set to zero". So the row goes with the message area alone:
+    /// a session drawing messages keeps none whatever `[native] palette`
+    /// says, and one that handed messages back keeps nvim's row. The tiles
     /// painter spends the answer to tell the grid's last row from a
     /// window's status row, which it clears and draws a frame edge over.
     ///
     /// Read off the same channel table the hold is issued from, so the two
-    /// cannot disagree about which surfaces decide it.
+    /// cannot disagree about which surface decides it.
     #[must_use]
     pub fn cmdline_rows(&self) -> u16 {
         u16::from(

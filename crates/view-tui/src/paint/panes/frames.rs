@@ -55,9 +55,9 @@ pub(crate) fn paint_frames(
     let accent = ratatui_style(theme.accent());
     // the first row nvim keeps for itself at the grid's foot, which every
     // run and every clear below stops above. It is the grid's own height
-    // where view owns the command line and the message area both, since
-    // the takeover then holds `cmdheight` at 0 and the last row is a
-    // window's status row like any other
+    // where view draws the message area, since nvim then keeps
+    // `cmdheight` at 0 and the last row is a window's status row like any
+    // other
     let foot = area.height.saturating_sub(model.cmdline_rows());
     if look.gaps {
         paint_gapped(

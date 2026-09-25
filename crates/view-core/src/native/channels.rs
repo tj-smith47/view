@@ -167,14 +167,34 @@ pub struct SurfaceChannels {
 /// Every surface view can own, with the channels that draw it.
 ///
 /// A channel named by two surfaces is held only where both of them are
-/// view's: the last grid row carries nvim's command line and its message
-/// area both, so a session that handed either one back still needs the row
-/// (`cmdheight`).
+/// view's ([`session_held`]), so a surface handed back keeps whatever row
+/// it draws on.
 pub const CHANNELS: &[SurfaceChannels] = &[
     SurfaceChannels {
         surface: Surface::Cmdline,
         channels: &[
             Channel::Attach(Ext::Cmdline),
+            Channel::Float(Region::CmdlineBand),
+        ],
+    },
+    SurfaceChannels {
+        surface: Surface::Popupmenu,
+        channels: &[
+            Channel::Attach(Ext::Popupmenu),
+            Channel::Covered {
+                option: "ext_wildmenu",
+                by: "ext_popupmenu",
+            },
+        ],
+    },
+    SurfaceChannels {
+        surface: Surface::Messages,
+        channels: &[
+            Channel::Attach(Ext::Messages),
+            Channel::Replaced("vim.notify"),
+            // nvim decides the row from this attach alone: `ext_messages`
+            // turns `ext_cmdline` on with it and sets `cmdheight` to zero,
+            // so the row is gone whatever the command line's switch says
             Channel::Hold {
                 option: "cmdheight",
                 scope: Scope::Global,
@@ -195,29 +215,6 @@ pub const CHANNELS: &[SurfaceChannels] = &[
             Channel::Covered {
                 option: "rulerformat",
                 by: "cmdheight",
-            },
-            Channel::Float(Region::CmdlineBand),
-        ],
-    },
-    SurfaceChannels {
-        surface: Surface::Popupmenu,
-        channels: &[
-            Channel::Attach(Ext::Popupmenu),
-            Channel::Covered {
-                option: "ext_wildmenu",
-                by: "ext_popupmenu",
-            },
-        ],
-    },
-    SurfaceChannels {
-        surface: Surface::Messages,
-        channels: &[
-            Channel::Attach(Ext::Messages),
-            Channel::Replaced("vim.notify"),
-            Channel::Hold {
-                option: "cmdheight",
-                scope: Scope::Global,
-                value: ChannelValue::Int(0),
             },
             Channel::Float(Region::TopRightChrome),
         ],
@@ -532,7 +529,7 @@ mod tests {
             vec!["showmode", "showcmd", "ruler", "rulerformat"]
         );
         assert_eq!(covered_beside("winbar"), vec!["tabline", "showtabline"]);
-        assert!(covered_beside("vim.notify").is_empty());
+        assert!(covered_beside("ext_cmdline").is_empty());
         assert!(covered_beside("nothing-claims-this").is_empty());
     }
 
@@ -547,12 +544,14 @@ mod tests {
         }
     }
 
-    /// The two surfaces of the last grid row. A hold issued for one of them
-    /// alone takes the row a handed-back surface still draws on.
+    /// nvim zeroes `cmdheight` for any UI attached with `ext_messages`,
+    /// whether or not it asked for `ext_cmdline`, so the row follows the
+    /// message area alone and a second claimant would count a row nvim
+    /// no longer keeps.
     #[test]
-    fn the_command_line_row_is_claimed_by_both_surfaces_that_draw_on_it() {
+    fn the_command_line_row_is_claimed_by_the_message_area_alone() {
         let claimants: Vec<Surface> = claimants_of("cmdheight").collect();
-        assert_eq!(claimants, vec![Surface::Cmdline, Surface::Messages]);
+        assert_eq!(claimants, vec![Surface::Messages]);
     }
 
     #[test]

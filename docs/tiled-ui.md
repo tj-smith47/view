@@ -224,12 +224,13 @@ restyles those cells as the frame. The screen's top row and its left and
 right columns come from the outer grid attaching one row and two columns
 short.
 
-Where view draws the command line it holds `cmdheight` at 0, so the lowest
+Where view draws the messages nvim keeps `cmdheight` at 0, so the lowest
 window's status row is the outer grid's last row. Under gapped tiles that
 row is the gap below the lowest frames, and under gapless tiles it is their
-bottom frame line. A session that gave back the palette or the
-notifications leaves nvim a command-line row at the foot of the grid, and
-the frames stop above it.
+bottom frame line. That holds with the palette given back as well, since
+nvim draws no command-line row for a session that takes its messages. A
+session that gave back the notifications leaves nvim a command-line row at
+the foot of the grid, and the frames stop above it.
 
 ## Fitting a tile to its text
 
