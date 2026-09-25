@@ -30,7 +30,9 @@
 //! tiles. `FileType` and `TermOpen` are about a buffer as well and arm the
 //! same way: a plugin sets its filetype after `BufEnter` has reported the
 //! window, often from outside it, and the tile's kind is read off that
-//! filetype.
+//! filetype. `OptionSet` on `winfixwidth` arms the current window, because
+//! nvim runs a window-local `OptionSet` with that window made current, and
+//! a tree plugin sets or clears the option after its window has reported.
 
 /// The lua chunk [`register_window_status`] runs inside nvim, taking view's
 /// channel id as its single vararg.
@@ -40,9 +42,10 @@
 /// data is interpolated into the Lua source.
 ///
 /// The payload is `(win, buf, name, modified, row, col, errors, warnings,
-/// buftype, filetype, loclist, lines)`, decoded field for field by
-/// `handle::decode`'s `"window"` arm. `name` is the buffer's tail, the same
-/// `:t` modifier the `buffer` trigger takes, so a tile's edge names a file.
+/// buftype, filetype, loclist, lines, winfixwidth)`, decoded field for
+/// field by `handle::decode`'s `"window"` arm. `name` is the buffer's
+/// tail, the same `:t` modifier the `buffer` trigger takes, so a tile's
+/// edge names a file.
 /// A whole path would not fit. A terminal's buffer is named
 /// `term://{cwd}//{pid}:{cmd}`, so its name is the tail of the command's
 /// first word, the program the job runs. The word stops at a `;` as well,
@@ -98,7 +101,7 @@ local function report(win)
     vim.fn.fnamemodify(name, ':t'),
     vim.bo[buf].modified, cursor[1], cursor[2] + 1, errors, warnings,
     buftype, vim.bo[buf].filetype, vim.fn.getwininfo(win)[1].loclist,
-    vim.api.nvim_buf_line_count(buf))
+    vim.api.nvim_buf_line_count(buf), vim.wo[win].winfixwidth)
 end
 local function flush()
   armed = false
@@ -145,6 +148,11 @@ vim.api.nvim_create_autocmd('DiagnosticChanged', {
 vim.api.nvim_create_autocmd({ 'FileType', 'TermOpen' }, {
   group = group,
   callback = arm_showing,
+})
+vim.api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = 'winfixwidth',
+  callback = arm_current,
 })
 vim.api.nvim_create_autocmd('VimEnter', {
   group = group,

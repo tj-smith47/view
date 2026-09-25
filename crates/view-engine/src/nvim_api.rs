@@ -5434,9 +5434,9 @@ mod tests {
 
     #[test]
     fn the_window_status_chunk_arms_every_event_of_its_group_and_defers_to_a_tick() {
-        // only `BufModifiedSet` and `DiagnosticChanged` reach the live test,
-        // and a group that lost any other event still answers every message
-        // it is asked for: the tile simply stops following the window
+        // the live tests fire only some of these, and a group that lost any
+        // other event still answers every message it is asked for: the
+        // tile simply stops following the window
         for event in [
             "WinEnter",
             "BufEnter",
@@ -5445,12 +5445,19 @@ mod tests {
             "VimEnter",
             "FileType",
             "TermOpen",
+            "OptionSet",
         ] {
             assert!(
                 REGISTER_WINDOW_STATUS_CHUNK.contains(&format!("'{event}'")),
                 "{event} arms no window, so a tile stops following it"
             );
         }
+        // an `OptionSet` with no pattern runs a callback for every option
+        // any command sets
+        assert!(
+            REGISTER_WINDOW_STATUS_CHUNK.contains("pattern = 'winfixwidth'"),
+            "the OptionSet arm is not scoped to winfixwidth"
+        );
         assert!(
             REGISTER_WINDOW_STATUS_CHUNK.contains("vim.schedule(flush)"),
             "a trigger that notifies inline sends one message per motion \

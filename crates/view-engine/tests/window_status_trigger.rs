@@ -294,7 +294,11 @@ fn a_filetype_set_after_the_buffer_enters_reclassifies_the_tile() {
         "a filetype set after BufEnter left the tile's kind behind: {typed:?}"
     );
 
-    lua("vim.cmd('enew') vim.fn.jobstart({ 'cat' }, { term = true })");
+    // the job starts in a request of its own, after the `BufEnter` of the
+    // new buffer has already been drained
+    lua("vim.cmd('enew')");
+    let _ = drain_window_status(&rx);
+    lua("vim.fn.jobstart({ 'cat' }, { term = true })");
     let term = drain_window_status(&rx);
     let (_, status) = term
         .last()
@@ -311,6 +315,97 @@ fn a_filetype_set_after_the_buffer_enters_reclassifies_the_tile() {
         tagged.last().map(|(_, status)| status.name.as_str()),
         Some("cat"),
         "{tagged:?}"
+    );
+
+    // a job start also fires `BufModifiedSet` in the window it starts in,
+    // so the group's current-window events are taken out first and only
+    // `TermOpen` is left to report the terminal
+    lua("vim.cmd('enew') \
+         for _, autocmd in ipairs(vim.api.nvim_get_autocmds({ \
+           group = 'view_window_status', event = 'BufModifiedSet' })) do \
+           vim.api.nvim_del_autocmd(autocmd.id) \
+         end");
+    let _ = drain_window_status(&rx);
+    lua("vim.fn.jobstart({ 'cat' }, { term = true })");
+    let opened = drain_window_status(&rx);
+    assert_eq!(
+        last_kind(&opened),
+        Some(TileKind::Terminal),
+        "a terminal whose job started after its window reported kept the \
+         window's old kind: {opened:?}"
+    );
+}
+
+/// A tree plugin fixes its window's width after the window has reported,
+/// often from another window, and clears it again when it lets the column
+/// go. Each change reclassifies the tile, or it keeps the kind it had when
+/// the option was last read.
+#[test]
+fn a_width_fixed_after_the_window_reports_makes_its_tile_a_sidebar() {
+    use view_core::model::TileKind;
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+    let channel = engine.api_info.channel_id;
+    let (tx, rx) = mpsc::sync_channel(256);
+    let (_pump, _cutover) = engine.start_pump(tx);
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+    engine.handle.register_bridge(channel).unwrap();
+    let lua = |chunk: &str| {
+        engine
+            .handle
+            .request(
+                "nvim_exec_lua",
+                vec![rmpv::Value::from(chunk), rmpv::Value::Array(Vec::new())],
+            )
+            .unwrap()
+    };
+    let _ = drain_window_status(&rx);
+
+    let panel = WinHandle(
+        lua(
+            "vim.cmd('vsplit') vim.cmd('enew') vim.bo.buftype = 'nofile' \
+             vim.bo.filetype = 'outline' \
+             local win = vim.api.nvim_get_current_win() \
+             vim.cmd('wincmd p') return win",
+        )
+        .as_u64()
+        .unwrap(),
+    );
+    let settled = drain_window_status(&rx);
+    let panel_kind = |reports: &[(WinHandle, WindowStatus)]| {
+        reports
+            .iter()
+            .rev()
+            .find(|(win, _)| *win == panel)
+            .map(|(_, status)| status.kind.clone())
+    };
+    let scratch = TileKind::Scratch {
+        filetype: "outline".to_string(),
+    };
+    assert_eq!(
+        panel_kind(&settled),
+        Some(scratch.clone()),
+        "the panel before its width is fixed: {settled:?}"
+    );
+
+    lua(&format!("vim.wo[{}].winfixwidth = true", panel.0));
+    let fixed = drain_window_status(&rx);
+    assert_eq!(
+        panel_kind(&fixed),
+        Some(TileKind::Sidebar {
+            filetype: "outline".to_string()
+        }),
+        "a width fixed from another window left the tile's kind behind: {fixed:?}"
+    );
+
+    lua(&format!("vim.wo[{}].winfixwidth = false", panel.0));
+    let released = drain_window_status(&rx);
+    assert_eq!(
+        panel_kind(&released),
+        Some(scratch),
+        "a width released from another window left the tile a sidebar: {released:?}"
     );
 }
 

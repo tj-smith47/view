@@ -3988,7 +3988,7 @@ mod tests {
     ///
     /// Positional and same-typed: `buf`, `row`, `col`, `errors` and
     /// `warnings` and `lines` are all plain counts, so a pair swapped
-    /// anywhere along the thirteen arguments decodes without complaint and
+    /// anywhere along the fourteen arguments decodes without complaint and
     /// paints a cursor position that is really a diagnostic count. Every
     /// value here is distinct for that reason, and so are the two strings.
     #[test]
@@ -4009,10 +4009,25 @@ mod tests {
             unreachable!("a quickfix window decoded to nothing")
         };
         assert_eq!(status.kind, view_core::model::TileKind::Quickfix);
+        // `winfixwidth` is the last field, and it is what makes a `nofile`
+        // window a sidebar
+        let mut payload = window_payload(0);
+        payload[9] = Value::from("nofile");
+        payload[13] = Value::from(true);
+        let Some(Msg::WindowStatus { status, .. }) = decode_bridge_event(&payload) else {
+            unreachable!("a fixed-width nofile window decoded to nothing")
+        };
+        assert_eq!(
+            status.kind,
+            view_core::model::TileKind::Sidebar {
+                filetype: "qf".to_string()
+            }
+        );
     }
 
-    /// The window trigger's thirteen params for a quickfix window, a
-    /// location list where `loclist` is 1.
+    /// The window trigger's fourteen params for a quickfix window, a
+    /// location list where `loclist` is 1, in a window with no
+    /// `winfixwidth`.
     fn window_payload(loclist: u64) -> Vec<Value> {
         vec![
             Value::from("window"),
@@ -4028,6 +4043,7 @@ mod tests {
             Value::from("qf"),
             Value::from(loclist),
             Value::from(90_u64),
+            Value::from(false),
         ]
     }
 

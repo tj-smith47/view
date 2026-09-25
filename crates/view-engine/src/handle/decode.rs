@@ -231,11 +231,13 @@ fn decode_buffer_entries(list: &Value) -> Option<Vec<BufferEntry>> {
 }
 
 /// Decodes the window trigger's `('window', win, buf, name, modified, row,
-/// col, errors, warnings, buftype, filetype, loclist, lines)` params into
-/// [`Msg::WindowStatus`], or `None` for a shape the chunk does not produce.
+/// col, errors, warnings, buftype, filetype, loclist, lines, winfixwidth)`
+/// params into [`Msg::WindowStatus`], or `None` for a shape the chunk does
+/// not produce.
 ///
-/// `buftype`, `filetype` and `loclist` are read here and nowhere else:
-/// [`TileKind::classify`] turns them into the tile's kind.
+/// `buftype`, `filetype`, `loclist` and `winfixwidth` are read here and
+/// nowhere else: [`TileKind::classify_window`] turns them into the tile's
+/// kind.
 ///
 /// Read off `params` whole, for the reason [`decode_float_observed`] is:
 /// one pattern a reviewer can check against the `rpcnotify` call in
@@ -246,7 +248,7 @@ fn decode_buffer_entries(list: &Value) -> Option<Vec<BufferEntry>> {
 /// cannot hold, and a count that reached the ceiling still reads as "more
 /// than the edge can show".
 fn decode_window_status(params: &[Value]) -> Option<Msg> {
-    let [_, win, buf, name, modified, row, col, errors, warnings, buftype, filetype, loclist, lines] =
+    let [_, win, buf, name, modified, row, col, errors, warnings, buftype, filetype, loclist, lines, fixed_width] =
         params
     else {
         return None;
@@ -264,10 +266,11 @@ fn decode_window_status(params: &[Value]) -> Option<Msg> {
     status.warnings = saturate_u32(warnings.as_u64()?);
     // `getwininfo`'s `loclist` is a number, and nothing but 1 marks a
     // location list
-    status.kind = TileKind::classify(
+    status.kind = TileKind::classify_window(
         buftype.as_str()?,
         filetype.as_str()?,
         loclist.as_u64() == Some(1),
+        fixed_width.as_bool()?,
     );
     status.lines = saturate_u32(lines.as_u64()?);
     Some(Msg::WindowStatus {
