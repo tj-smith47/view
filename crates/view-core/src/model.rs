@@ -175,6 +175,9 @@ pub struct Model {
     /// (`update::ui_event`), so a session that opens and closes splits all
     /// day holds one record per window on screen and no more.
     pub window_status: std::collections::HashMap<crate::events::WinHandle, WindowStatus>,
+    /// `[ui] tile_titles`: the title a tile titled by its filetype takes
+    /// instead, set once at startup.
+    pub tile_titles: TileTitles,
     /// Whether the `palette` native feature is enabled for this session, set
     /// the same way and at the same place as `statusline_enabled`. Gates
     /// `view-surface::render`'s choice between the centered floating
@@ -444,6 +447,7 @@ impl Model {
             look: Look::default(),
             detected_look: Detected::default(),
             window_status: std::collections::HashMap::new(),
+            tile_titles: TileTitles::new(),
             palette_enabled: false,
             ext_surfaces: crate::native::ext::shipped_multigrid(),
             config_was_read: true,
@@ -779,6 +783,13 @@ impl Model {
     #[must_use]
     pub fn with_pill_caps(mut self, caps: Option<crate::native::pill::PillCaps>) -> Self {
         self.pill_caps = caps;
+        self
+    }
+
+    /// The titles `[ui] tile_titles` gives a tile by its filetype.
+    #[must_use]
+    pub fn with_tile_titles(mut self, titles: TileTitles) -> Self {
+        self.tile_titles = titles;
         self
     }
 

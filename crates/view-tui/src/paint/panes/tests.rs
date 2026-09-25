@@ -2164,7 +2164,7 @@ fn a_plugin_scratch_tile_is_titled_by_its_filetype_and_carries_no_position() {
     status.name = "NvimTree_1".to_string();
     status.row = 1;
     status.col = 1;
-    status.kind = view_core::model::TileKind::classify("nofile", "NvimTree", false);
+    status.kind = view_core::model::TileKind::classify_window("nofile", "NvimTree", false, false);
     let _ = update(
         &mut model,
         Msg::WindowStatus {
@@ -2217,9 +2217,61 @@ fn special_tile(mut tiles: Tiles, index: usize, kind: view_core::model::TileKind
 }
 
 /// A help page in the active left tile: titled by its page, and its only
-/// segment the position, with no mode, branch or diagnostics.
+/// segment the position, with no mode, branch or diagnostics. `FloatTitle`
+/// is themed, so the help title reads in its own colour and the file title
+/// beside it keeps the edge's.
 fn help_tile() -> Tiles {
-    special_tile(tiled(true), 0, view_core::model::TileKind::Help)
+    let mut tiles = special_tile(tiled(true), 0, view_core::model::TileKind::Help);
+    theme_the_float_title(&mut tiles.model);
+    tiles
+}
+
+/// Gives `FloatTitle` a foreground of its own, apart from the accent and
+/// the quiet edge colour.
+fn theme_the_float_title(model: &mut Model) {
+    drive(
+        model,
+        vec![
+            UiEvent::HlAttrDefine {
+                id: 903,
+                fg: Some(0x5f_af_5f),
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+            UiEvent::HlGroupSet {
+                name: "FloatTitle".to_string(),
+                hl_id: 903,
+            },
+        ],
+    );
+}
+
+/// A plugin's file tree in the active left tile: a fixed-width `nofile`
+/// window, titled by the name `[ui] tile_titles` gives its filetype, and
+/// carrying the branch alone.
+fn sidebar_tile() -> Tiles {
+    let mut tiles = special_tile(
+        tiled(true),
+        0,
+        view_core::model::TileKind::classify_window("nofile", "NvimTree", false, true),
+    );
+    tiles.model.tile_titles = [("NvimTree".to_string(), "files".to_string())].into();
+    tiles
+}
+
+/// The windowed tree with a branch on the session, which view's own tree
+/// tile carries and nothing else.
+fn tree_windowed_on_a_branch() -> Tiles {
+    let mut tiles = tree_in_the_left_tile(true);
+    tiles
+        .model
+        .engine
+        .statusline
+        .apply(SegmentUpdate::GitBranch("dev/p6-polish".to_string()));
+    tiles
 }
 
 /// The quickfix list in the bottom tile of a `:split`: titled `quickfix`,
@@ -4027,7 +4079,7 @@ const TILED_SCENES: &[(&str, SceneDump)] = &[
         tiles_dump(tier, tiled_nested(true))
     }),
     ("tree-windowed", |tier| {
-        tiles_dump(tier, tree_in_the_left_tile(true))
+        tiles_dump(tier, tree_windowed_on_a_branch())
     }),
     ("agent-windowed", |tier| {
         tiles_dump(tier, agent_in_the_right_tile(true))
@@ -4052,6 +4104,7 @@ const TILED_SCENES: &[(&str, SceneDump)] = &[
     }),
     ("help-tile", |tier| tiles_dump(tier, help_tile())),
     ("quickfix-tile", |tier| tiles_dump(tier, quickfix_tile())),
+    ("sidebar-tile", |tier| tiles_dump(tier, sidebar_tile())),
     ("pill-tabs", |tier| tiles_dump(tier, pill_tabs_scene())),
     ("pill-buffers", |tier| {
         tiles_dump(tier, pill_buffers_scene())

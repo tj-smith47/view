@@ -13,9 +13,10 @@ use std::path::PathBuf;
 pub use view_core::config::Source;
 use view_core::config::{
     discarded_file, BOOL_EXPECTED, COLOR_EXPECTED, KEYS_EXPECTED, PANES_EXPECTED,
-    PILL_CAPS_EXPECTED, TABLINE_SHOWS_EXPECTED, TIER_EXPECTED, WIDTH_EXPECTED,
+    PILL_CAPS_EXPECTED, TABLINE_SHOWS_EXPECTED, TIER_EXPECTED, TILE_TITLES_EXPECTED,
+    WIDTH_EXPECTED,
 };
-use view_core::model::{Panes, Tier};
+use view_core::model::{Panes, Tier, TileTitles};
 use view_core::native::chords::{
     self, DesktopChord, KeyProfile, ModifierChoice, DESKTOP_CHORD_COUNT,
 };
@@ -29,8 +30,9 @@ use view_core::native::registry;
 use super::keys::{env_name, keys, ConfigKey};
 use super::profile;
 use super::{
-    parse_color, parse_nvim_bin, parse_panes, parse_pill_caps, parse_theme, parse_tier, read_key,
-    KeysConfig, NativeConfig, SupervisionConfig, UiTokens, ViewConfig, AUTO, BUNDLED,
+    parse_color, parse_nvim_bin, parse_panes, parse_pill_caps, parse_theme, parse_tier,
+    parse_tile_titles, read_key, render_tile_titles, KeysConfig, NativeConfig, SupervisionConfig,
+    UiTokens, ViewConfig, AUTO, BUNDLED,
 };
 
 /// One resolved answer and the reason it is that answer.
@@ -134,6 +136,9 @@ pub struct ResolvedUi {
     /// How the pill's ends are drawn, or `None` for `"auto"`, which the
     /// model answers from the probed `unicode_boxes`.
     pub pill_caps: Resolved<Option<PillCaps>>,
+    /// The title each filetype named here gives a tile titled by its
+    /// filetype, empty where the user named none.
+    pub tile_titles: Resolved<TileTitles>,
     /// The colours the user named for themselves.
     pub tokens: Resolved<UiTokens>,
 }
@@ -386,6 +391,19 @@ pub fn resolve_with(
             ),
             file.ui.pill_caps,
             None,
+        ),
+        tile_titles: layer(
+            None,
+            env_read(
+                env,
+                "ui",
+                "tile_titles",
+                TILE_TITLES_EXPECTED,
+                parse_tile_titles,
+                &mut notices,
+            ),
+            file.ui.tile_titles.clone(),
+            TileTitles::new(),
         ),
         tokens: layer(
             None,
@@ -693,6 +711,10 @@ impl ResolvedConfig {
                     .map_or(AUTO, PillCaps::label)
                     .to_string(),
                 self.ui.pill_caps.source,
+            ),
+            ("ui", "tile_titles") => (
+                render_tile_titles(&self.ui.tile_titles.value),
+                self.ui.tile_titles.source,
             ),
             ("ui.tokens", "accent") => (
                 self.ui
@@ -1343,6 +1365,7 @@ mod tests {
             ("ui", "theme") => "gruvbox",
             ("ui", "panes") => "nvim",
             ("ui", "pill_caps") => "flat",
+            ("ui", "tile_titles") => "{ outline = \"symbols\" }",
             ("ui.tokens", "accent") => "#89b4fa",
             ("engine", "nvim_bin") => "/opt/nvim/bin/nvim",
             ("engine", "appname") => "work",
@@ -1910,6 +1933,40 @@ mod tests {
             notices.contains("turbo") && notices.contains("[ui] tier"),
             "the file's own discarded value must reach the same notice list an \
              environment's does: {notices:?}"
+        );
+    }
+
+    /// `tile_titles` read off the file's own table, and a table holding a
+    /// value that is no title answers from the layer below with a notice,
+    /// with every other key in the file still read.
+    #[test]
+    fn a_tile_titles_table_reads_its_titles_and_a_bad_one_falls_through_with_a_notice() {
+        let file = ViewConfig::from_toml_str(
+            "[ui]\ntile_titles = { outline = \"symbols\", \"my panel\" = \"panel\" }\n",
+        )
+        .expect("the fixture must parse");
+        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+        assert_eq!(resolved.ui.tile_titles.source, Source::File);
+        assert_eq!(
+            row(&resolved, "ui", "tile_titles").0,
+            "{ \"my panel\" = \"panel\", outline = \"symbols\" }"
+        );
+
+        let file = ViewConfig::from_toml_str("[ui]\ngaps = false\ntile_titles = { outline = 3 }\n")
+            .expect("a title in the wrong shape must not refuse the file");
+        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+        assert_eq!(
+            resolved.ui.tile_titles,
+            Resolved {
+                value: TileTitles::new(),
+                source: Source::Derived
+            }
+        );
+        assert!(!resolved.ui.gaps.value, "the rest of the file was dropped");
+        let notices = resolved.notices().join("\n");
+        assert!(
+            notices.contains("[ui] tile_titles"),
+            "a title in the wrong shape owes a notice: {notices:?}"
         );
     }
 

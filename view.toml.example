@@ -227,6 +227,11 @@ single_grid = false        # default: false -- view composites nvim's windows
 # gaps is about tiles only: true leaves a gap between neighbouring frames,
 # false has them share their edges.
 #
+# tile_titles names a tile a plugin fills. A file tree, an outline or a
+# scratch buffer is titled by its filetype, and an entry here keyed by that
+# filetype gives it a title of your own: { NvimTree = "files", Outline =
+# "symbols", alpha = "dashboard" }.
+#
 # pill_caps is how each pill on the top row ends. "round" draws the half
 # circles a Nerd Font carries; "flat" draws one blank cell in the pill's
 # own colour, for a font without those glyphs or a terminal that draws them
@@ -257,6 +262,8 @@ gaps = true                # default: true -- a gap between neighbouring
 pill_caps = "auto"         # default: "auto" -- round ends where the
                            # terminal draws box glyphs one cell wide, flat
                            # elsewhere. round | flat force it
+tile_titles = {}           # default: {} -- each tile keeps its filetype
+                           # as its title
 
 [ui.tokens]
 accent = "auto"            # default: "auto" -- the active tile's frame

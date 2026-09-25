@@ -1270,7 +1270,8 @@ fn main() -> Result<()> {
         // thing on screen that says which machine the session is on
         .with_remote(pill_host(cli.remote.as_deref()))
         .with_tabline_shows(resolved.tables.native.tabline_shows())
-        .with_pill_caps(resolved.ui.pill_caps.value);
+        .with_pill_caps(resolved.ui.pill_caps.value)
+        .with_tile_titles(resolved.ui.tile_titles.value.clone());
     // whether a `:View ui panes` flip derives `[native] tabline` again, or
     // leaves the value the user spelled where they put it
     model.tabline_follows_look = resolved.tabline_follows_look();

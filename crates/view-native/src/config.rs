@@ -35,7 +35,7 @@ pub use resolve::{
 };
 use serde::{Deserialize, Serialize};
 pub use surfaces::surfaces;
-use view_core::model::Panes;
+use view_core::model::{Panes, TileTitles};
 use view_core::native::chords;
 use view_core::native::ext::{self, Ext};
 use view_core::native::geometry;
@@ -116,6 +116,10 @@ struct UiTable {
     gaps: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pill_caps: Option<String>,
+    // a `toml::Value` for `[native] tree_width`'s reason: a map written in
+    // the wrong shape is a notice, and the rest of the file still loads
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tile_titles: Option<toml::Value>,
     #[serde(default)]
     tokens: UiTokensTable,
     #[serde(default)]
@@ -255,6 +259,7 @@ struct UiFile {
     /// `Some(None)` is the word `auto`, the same double meaning `tier`
     /// carries.
     pill_caps: Option<Option<PillCaps>>,
+    tile_titles: Option<TileTitles>,
     tokens: Option<UiTokens>,
     /// The `[ui.surfaces]` tables as the file wrote them. Unparsed here:
     /// the words are read by [`surfaces::surfaces`], whose notices reach
@@ -343,6 +348,47 @@ fn parse_color(value: &str) -> Option<Option<u32>> {
         .map(Some)
 }
 
+/// The titles an inline table such as `{ outline = "symbols" }` maps each
+/// filetype to, or `None` for text that is no such table, which falls
+/// through to the layer below the way [`parse_tier`] does.
+fn parse_tile_titles(value: &str) -> Option<TileTitles> {
+    let document: toml::Table = format!("titles = {value}").parse().ok()?;
+    tile_titles_of(document.get("titles")?)
+}
+
+/// The titles a parsed TOML value maps each filetype to, or `None` where
+/// it is no table or one of its values is no string.
+fn tile_titles_of(value: &toml::Value) -> Option<TileTitles> {
+    value
+        .as_table()?
+        .iter()
+        .map(|(filetype, title)| Some((filetype.clone(), title.as_str()?.to_string())))
+        .collect()
+}
+
+/// `titles` written back as the inline table a user would write to get
+/// them, `{}` for none, so the doctor's row reads as the file's own text.
+fn render_tile_titles(titles: &TileTitles) -> String {
+    if titles.is_empty() {
+        return "{}".to_string();
+    }
+    let entries: Vec<String> = titles
+        .iter()
+        .map(|(filetype, title)| {
+            let bare = filetype
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            let key = if bare && !filetype.is_empty() {
+                filetype.clone()
+            } else {
+                toml::Value::String(filetype.clone()).to_string()
+            };
+            format!("{key} = {}", toml::Value::String(title.clone()))
+        })
+        .collect();
+    format!("{{ {} }}", entries.join(", "))
+}
+
 /// The `[ui]` table's answers with each key's own vocabulary applied, and
 /// the notice a value neither vocabulary accepts owes the user.
 fn resolve_ui(table: &UiTable) -> UiFile {
@@ -368,6 +414,18 @@ fn resolve_ui(table: &UiTable) -> UiFile {
         parse_pill_caps,
         &mut notices,
     );
+    let tile_titles = table.tile_titles.as_ref().and_then(|value| {
+        let titles = tile_titles_of(value);
+        if titles.is_none() {
+            notices.push(view_core::config::discarded_file(
+                &value.to_string(),
+                view_core::config::TILE_TITLES_EXPECTED,
+                "ui",
+                "tile_titles",
+            ));
+        }
+        titles
+    });
     let accent = read_key(
         table.tokens.accent.as_deref(),
         ("ui.tokens", "accent"),
@@ -381,6 +439,7 @@ fn resolve_ui(table: &UiTable) -> UiFile {
         panes,
         gaps: table.gaps,
         pill_caps,
+        tile_titles,
         // the outer `Some` is the file naming the key at all, which is what
         // keeps a value this build could not read from reading as the file
         // declining the role
@@ -1317,6 +1376,9 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
     if file.ui.pill_caps.is_some() {
         spelled.push(("ui", "pill_caps"));
     }
+    if file.ui.tile_titles.is_some() {
+        spelled.push(("ui", "tile_titles"));
+    }
     if file.ui.tokens.accent.is_some() {
         spelled.push(("ui.tokens", "accent"));
     }
@@ -1842,6 +1904,7 @@ mod tests {
             ("ui", "panes") => "\"nvim\"",
             ("ui", "gaps") => "false",
             ("ui", "pill_caps") => "\"flat\"",
+            ("ui", "tile_titles") => "{ outline = \"symbols\" }",
             ("ui.tokens", "accent") => "\"#89b4fa\"",
             ("engine", "nvim_bin") => "\"/opt/nvim/bin/nvim\"",
             ("engine", "appname") => "\"work\"",

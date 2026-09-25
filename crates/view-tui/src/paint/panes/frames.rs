@@ -153,21 +153,22 @@ fn paint_edges(
         };
         let status = &*status;
         let is_active = active == Some(pane.id);
+        let title = || status.kind.title_with(status, &model.tile_titles);
         if look.gaps {
             if !framed(pane) {
                 continue;
             }
             let (top, bottom) = gapped_edges(look, pane, area, buf.area);
             if let Some(edge) = top.filter(|edge| damage.covers(edge.y)) {
-                paint_name(status, is_active, theme, edge, buf);
+                paint_name(title(), is_active, theme, edge, buf);
             }
             if let Some(edge) = bottom.filter(|edge| damage.covers(edge.y)) {
-                paint_segments(status, is_active, state, theme, look, edge, buf);
+                paint_segments(status, None, is_active, state, theme, edge, buf);
             }
         } else if let Some(edge) =
             gapless_edge(pane, area, foot, buf.area).filter(|edge| damage.covers(edge.y))
         {
-            paint_segments(status, is_active, state, theme, look, edge, buf);
+            paint_segments(status, Some(title()), is_active, state, theme, edge, buf);
         }
     }
 }
@@ -236,40 +237,30 @@ fn clipped(rect: Rect, screen: Rect) -> Option<Rect> {
 
 /// Writes one tile's title into a frame edge.
 pub(crate) fn paint_name(
-    status: &WindowStatus,
+    title: Vec<Span>,
     active: bool,
     theme: &Theme,
     edge: Rect,
     buf: &mut Buffer,
 ) {
-    write_edge(
-        &[status.kind.title(status)],
-        edge_style(active, theme),
-        theme,
-        edge,
-        buf,
-    );
+    write_edge(&[title], edge_style(active, theme), theme, edge, buf);
 }
 
-/// Writes one tile's status segments into a frame edge.
+/// Writes one tile's status segments into a frame edge, after `title`.
 ///
 /// A gapless tile has one edge row and no top run of its own, so its title
 /// leads the segments there; a gapped tile's title is already in the top
-/// edge and this is the segments alone.
+/// edge and passes none.
 pub(crate) fn paint_segments(
     status: &WindowStatus,
+    title: Option<Vec<Span>>,
     active: bool,
     state: &StatuslineState,
     theme: &Theme,
-    look: Look,
     edge: Rect,
     buf: &mut Buffer,
 ) {
-    let mut groups = if look.gaps {
-        Vec::new()
-    } else {
-        vec![status.kind.title(status)]
-    };
+    let mut groups: Vec<Vec<Span>> = title.into_iter().collect();
     groups.extend(state.tile_segments(status, active));
     write_edge(&groups, edge_style(active, theme), theme, edge, buf);
 }

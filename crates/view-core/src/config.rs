@@ -50,6 +50,10 @@ pub const PILL_CAPS_EXPECTED: &str = "one of auto, round or flat";
 /// What a value that is not a colour owes the user.
 pub const COLOR_EXPECTED: &str = "a hex colour such as \"#89b4fa\"";
 
+/// What a value that maps no filetype to a title owes the user.
+pub const TILE_TITLES_EXPECTED: &str =
+    "an inline table of filetypes and titles such as { outline = \"symbols\" }";
+
 /// What a sidebar width that is not a whole number owes the user.
 pub const WIDTH_EXPECTED: &str = "a whole number of percent";
 

@@ -115,16 +115,6 @@ impl Segments {
 }
 
 impl TileKind {
-    /// The kind nvim's own facts about a buffer name.
-    ///
-    /// Every buffer that no file backs and whose `buftype` has no meaning
-    /// of its own is a scratch buffer, a `buftype` nvim adds later
-    /// included.
-    #[must_use]
-    pub fn classify(buftype: &str, filetype: &str, loclist: bool) -> Self {
-        Self::classify_window(buftype, filetype, loclist, false)
-    }
-
     /// The kind nvim's own facts about a window and its buffer name.
     ///
     /// Every buffer that no file backs and whose `buftype` has no meaning
@@ -156,12 +146,6 @@ impl TileKind {
                 filetype: filetype.to_owned(),
             },
         }
-    }
-
-    /// The title a tile of this kind carries on its frame.
-    #[must_use]
-    pub fn title(&self, status: &WindowStatus) -> Vec<Span> {
-        self.title_with(status, &TileTitles::new())
     }
 
     /// The title a tile of this kind carries on its frame, where `titles`
@@ -448,6 +432,7 @@ mod tests {
             modified: true,
             ..WindowStatus::default()
         };
+        let untitled = TileTitles::new();
         for row in table(&status.name.clone()) {
             let kind =
                 TileKind::classify_window(row.buftype, row.filetype, row.loclist, row.fixed_width);
@@ -456,7 +441,7 @@ mod tests {
                 row.buftype, row.filetype, row.loclist, row.fixed_width
             );
             assert_eq!(kind, row.kind, "{at}");
-            let title = kind.title(&status);
+            let title = kind.title_with(&status, &untitled);
             assert_eq!(text(&title), row.title, "{at}");
             let file = kind == TileKind::File;
             assert!(
@@ -480,7 +465,11 @@ mod tests {
         assert_eq!(native.len(), NativeSurface::ALL.len());
         for (surface, title, segments) in native {
             let kind = TileKind::Native(surface);
-            assert_eq!(text(&kind.title(&status)), title, "{surface:?}");
+            assert_eq!(
+                text(&kind.title_with(&status, &untitled)),
+                title,
+                "{surface:?}"
+            );
             assert_eq!(kind.segments(), segments, "{surface:?}");
         }
         // the fallbacks a name or a filetype stands in front of
@@ -502,7 +491,11 @@ mod tests {
                 "scratch",
             ),
         ] {
-            assert_eq!(text(&kind.title(&status)), title, "{kind:?} unnamed");
+            assert_eq!(
+                text(&kind.title_with(&status, &untitled)),
+                title,
+                "{kind:?} unnamed"
+            );
         }
     }
 

@@ -104,7 +104,9 @@ impl Frame {
 ///   alone), `hl` and `mode` (painters read them off the
 ///   `Model` on the reuse path), `window_status` (the tile segments are
 ///   painted off the `Model` the same way, and the row each one stands on
-///   is marked changed where the status changes), `overlays` (via
+///   is marked changed where the status changes), `tile_titles` (painted
+///   off the `Model` beside `window_status`, and set once at startup),
+///   `overlays` (via
 ///   `had_overlays`),
 ///   `statusline` (via `statusline_rows`), `toast_history` (only the
 ///   palette's history view reads it, and that is an overlay),

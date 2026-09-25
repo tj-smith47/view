@@ -29,13 +29,14 @@ frame.
 |---|---|
 | the mode, `-- INSERT --` or `recording @q` | the tile you are working in |
 | the git branch | every tile of a kind that carries it, once the branch is read |
-| the diagnostic counts, `E 2` and `W 1` | every tile whose buffer has any |
-| the cursor position, `row:col` | every tile, from that window's own cursor |
+| the diagnostic counts, `E 2` and `W 1` | a file or scratch tile whose buffer has any |
+| the cursor position, `row:col` | a file or help tile, from that window's own cursor |
 | the entry you are on, `row/lines` | a quickfix or location list tile |
 | the keys you have typed so far | the tile you are working in |
 
 What a tile holds decides its title and which of those segments it
-carries. A view panel decides first, then the buffer's type.
+carries. A view panel decides first, then the buffer's type, then whether
+the window keeps a fixed width.
 
 | tile | title | segments |
 |---|---|---|
@@ -48,10 +49,21 @@ carries. A view panel decides first, then the buffer's type.
 | view's tree | `tree` | branch |
 | view's agent panel | `agent` | none |
 | view's notifications | `notifications` | none |
-| any other buffer with no file behind it, such as a plugin's file tree or dashboard | its filetype, else its name, else `scratch` | diagnostics |
+| a side panel: a `nofile` buffer in a window with `winfixwidth` set, such as a plugin's file tree, outline or debugger panel | its filetype, else its name, else `scratch` | branch |
+| any other buffer with no file behind it, such as a dashboard | its filetype, else its name, else `scratch` | diagnostics |
 
 The mode and the typed keys show only on the tile you are working in. Every
 title but a file's is drawn in the colorscheme's float title colour.
+
+A tile titled by its filetype takes the title `tile_titles` gives that
+filetype:
+
+```toml
+[ui]
+tile_titles = { NvimTree = "files", Outline = "symbols", alpha = "dashboard" }
+```
+
+A filetype the table leaves out keeps the filetype as its title.
 
 A segment that runs out of room in the edge is dropped whole, with
 everything after it.

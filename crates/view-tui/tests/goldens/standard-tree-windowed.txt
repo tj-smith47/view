@@ -20,7 +20,7 @@
  │                                    │ │                                     │ 
  │                                    │ │                                     │ 
  │                                    │ │                                     │ 
- ╰────────────────────────────────────╯ ╰ E 1 2:1 ────────────────────────────╯ 
+ ╰ dev/p6-polish ─────────────────────╯ ╰ dev/p6-polish E 1 2:1 ──────────────╯ 
                                                                                 
 --- fg ---
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
