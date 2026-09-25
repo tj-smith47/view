@@ -705,3 +705,111 @@ fn a_spawn_that_kept_nvims_own_attach_barrier_gets_one_uienter() {
          event, fired where nvim had already fired one"
     );
 }
+
+/// The bridge reads the git branch once nvim has started, and never inside
+/// the segment `--startuptime`'s `NVIM STARTED` closes: a `git` fork and
+/// exec there costs every launch about a millisecond of the engine's own
+/// startup.
+///
+/// The fixture wraps `vim.system` from `init.lua`, which the bridge looks
+/// up at each call, and counts every `git` spawn made before the startup
+/// log carries `NVIM STARTED`. nvim writes that line and closes the log in
+/// one step, so a spawn that finds the line in the file came after it. The
+/// config also changes directory while it sources, which fires
+/// `DirChanged` inside startup, and the first `BufEnter` fires there too.
+#[test]
+fn the_branch_is_read_after_startup_and_reaches_view() {
+    let dir = ScratchDir::new("vim-enter-branch").unwrap();
+    let repo = dir.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [
+        &["init", "-q", "-b", "view-branch-probe"][..],
+        &[
+            "-c",
+            "user.name=view",
+            "-c",
+            "user.email=view@localhost",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "probe",
+        ][..],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed in the fixture repo");
+    }
+    let log = dir.join("startuptime.log");
+    let lua = format!(
+        "_G.view_git = {{ early = 0, spawns = 0 }}\n\
+         local log = {log:?}\n\
+         local system = vim.system\n\
+         vim.system = function(cmd, ...)\n\
+           if cmd[1] == 'git' then\n\
+             local f = io.open(log)\n\
+             local text = f and f:read('*a') or ''\n\
+             if f then f:close() end\n\
+             if not text:find('NVIM STARTED', 1, true) then\n\
+               _G.view_git.early = _G.view_git.early + 1\n\
+             end\n\
+             _G.view_git.spawns = _G.view_git.spawns + 1\n\
+           end\n\
+           return system(cmd, ...)\n\
+         end\n\
+         vim.fn.chdir({repo:?})\n",
+        log = log.to_string_lossy(),
+        repo = repo.to_string_lossy(),
+    );
+    std::fs::write(dir.join("init.lua"), lua).unwrap();
+    let mut engine = Engine::spawn(
+        EngineConfig::isolated()
+            .with_arg("--startuptime")
+            .with_arg(&log)
+            .with_arg("-u")
+            .with_arg(dir.join("init.lua"))
+            .with_late_attach(120, 40),
+    )
+    .unwrap();
+    let rx = answered(&mut engine);
+
+    let deadline = Instant::now() + common::rpc_deadline_for(3);
+    let mut branch = None;
+    while branch.is_none() && Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(Msg::GitBranchChanged { branch: read }) => branch = Some(read),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        branch.as_deref(),
+        Some("view-branch-probe"),
+        "the branch must reach view once nvim has started"
+    );
+    let answer = engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                Value::from("return { _G.view_git.early, _G.view_git.spawns }"),
+                Value::Array(vec![]),
+            ],
+        )
+        .unwrap();
+    let counts: Vec<i64> = answer
+        .as_array()
+        .expect("the fixture answers with a list")
+        .iter()
+        .map(|v| v.as_i64().unwrap_or(-1))
+        .collect();
+    assert_eq!(
+        counts[0], 0,
+        "no git spawn may run inside the startup segment: {counts:?}"
+    );
+    assert!(counts[1] >= 1, "the read must have spawned git: {counts:?}");
+}

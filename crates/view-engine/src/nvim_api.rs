@@ -583,6 +583,14 @@ pub const NOTIFY_HOLD_CHUNK: &str = HOLD_NOTIFY_CHUNK;
 /// repository a branch is read from changes when the active buffer changes
 /// or the working directory moves, and the branch itself can change under a
 /// backgrounded editor, which is what returning focus is the signal for.
+/// None of them spawns `git` while nvim is starting: the fork and exec cost
+/// about a millisecond, and the first `BufEnter` fires inside the segment
+/// `--startuptime`'s `NVIM STARTED` closes. The first read is scheduled from
+/// this chunk's `VimEnter` callback, which runs after the startup hook's
+/// `vim.wait` has returned, so it lands on the first loop turn after
+/// startup. A `vim.schedule` from the first `BufEnter` would run inside that
+/// `vim.wait`. A chunk registered after startup reads on its triggers
+/// straight away (`vim_did_enter`).
 /// `BufEnter`, `BufFilePost`, `BufWritePost`, and `BufModifiedSet` are the
 /// buffer triggers: the first three cover a new or renamed file landing in
 /// the current window, and `BufModifiedSet` alone covers every actual
@@ -711,17 +719,23 @@ vim.api.nvim_create_autocmd('DiagnosticChanged', {
     vim.rpcnotify(channel, 'view_bridge', 'diagnostics', errors, warnings)
   end,
 })
+local function read_branch()
+  vim.system({ 'git', 'rev-parse', '--abbrev-ref', 'HEAD' }, { text = true },
+    function(res)
+    local branch = ''
+    if res.code == 0 and res.stdout then
+      branch = res.stdout:gsub('%s+$', '')
+    end
+    vim.rpcnotify(channel, 'view_bridge', 'git', branch)
+  end)
+end
+local branch_live = vim.v.vim_did_enter == 1
 vim.api.nvim_create_autocmd({ 'BufEnter', 'DirChanged', 'FocusGained' }, {
   group = group,
   callback = function()
-    vim.system({ 'git', 'rev-parse', '--abbrev-ref', 'HEAD' }, { text = true },
-      function(res)
-      local branch = ''
-      if res.code == 0 and res.stdout then
-        branch = res.stdout:gsub('%s+$', '')
-      end
-      vim.rpcnotify(channel, 'view_bridge', 'git', branch)
-    end)
+    if branch_live then
+      read_branch()
+    end
   end,
 })
 vim.api.nvim_create_autocmd(
@@ -797,6 +811,10 @@ vim.api.nvim_create_autocmd('VimEnter', {
     relay_ttimeout()
     relay_showtabline()
     relay_min_pane_size()
+    vim.schedule(function()
+      branch_live = true
+      read_branch()
+    end)
   end,
 })
 vim.api.nvim_create_autocmd('OptionSet', {
@@ -5113,6 +5131,20 @@ mod tests {
         assert!(
             REGISTER_BRIDGE_CHUNK.contains("vim.system("),
             "the git lookup must run asynchronously, off nvim's main loop"
+        );
+        let triggers = REGISTER_BRIDGE_CHUNK
+            .find("'BufEnter', 'DirChanged', 'FocusGained'")
+            .expect("the git triggers");
+        assert!(
+            REGISTER_BRIDGE_CHUNK[triggers..].contains("if branch_live then\n      read_branch()"),
+            "a git trigger must not spawn while nvim is starting"
+        );
+        assert!(
+            REGISTER_BRIDGE_CHUNK.contains(
+                "relay_min_pane_size()\n    vim.schedule(function()\n      \
+                 branch_live = true\n      read_branch()"
+            ),
+            "the first read is scheduled from VimEnter, behind the startup hook"
         );
         assert!(
             REGISTER_BRIDGE_CHUNK.contains("vim.fn.expand('%:t')")
