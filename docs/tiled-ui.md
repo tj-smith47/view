@@ -21,17 +21,37 @@ frame.
 
 | where | what it carries |
 |---|---|
-| gapped, top edge | the buffer name, with `[+]` on unsaved changes |
+| gapped, top edge | the tile's title |
 | gapped, bottom edge | the segments below |
-| gapless, bottom edge | the buffer name, then the segments below |
+| gapless, bottom edge | the title, then the segments below |
 
 | segment | shown on |
 |---|---|
 | the mode, `-- INSERT --` or `recording @q` | the tile you are working in |
-| the git branch | every tile |
+| the git branch | every tile of a kind that carries it, once the branch is read |
 | the diagnostic counts, `E 2` and `W 1` | every tile whose buffer has any |
 | the cursor position, `row:col` | every tile, from that window's own cursor |
+| the entry you are on, `row/lines` | a quickfix or location list tile |
 | the keys you have typed so far | the tile you are working in |
+
+What a tile holds decides its title and which of those segments it
+carries. A view panel decides first, then the buffer's type.
+
+| tile | title | segments |
+|---|---|---|
+| a file | the file name, with `[+]` on unsaved changes | mode, branch, diagnostics, `row:col`, typed keys |
+| help | `help: options` | `row:col` |
+| the quickfix list | `quickfix` | `row/lines` |
+| a location list | `location list` | `row/lines` |
+| a terminal | `terminal: zsh`, the program it runs | mode |
+| a prompt buffer | its filetype, else `prompt` | mode |
+| view's tree | `tree` | branch |
+| view's agent panel | `agent` | none |
+| view's notifications | `notifications` | none |
+| any other buffer with no file behind it, such as a plugin's file tree or dashboard | its filetype, else its name, else `scratch` | diagnostics |
+
+The mode and the typed keys show only on the tile you are working in. Every
+title but a file's is drawn in the colorscheme's float title colour.
 
 A segment that runs out of room in the edge is dropped whole, with
 everything after it.

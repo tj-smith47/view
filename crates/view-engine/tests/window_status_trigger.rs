@@ -242,6 +242,78 @@ fn the_startup_sweep_leaves_the_diagnostic_module_unloaded_and_counts_still_arri
     );
 }
 
+/// A plugin fills its window's buffer and only then sets the filetype that
+/// titles its tile, after `BufEnter` has already reported the window, and a
+/// terminal's job starts after the buffer entered too. Both reports have to
+/// follow, or the tile keeps the kind it had at `BufEnter`.
+#[test]
+fn a_filetype_set_after_the_buffer_enters_reclassifies_the_tile() {
+    use view_core::model::TileKind;
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+    let channel = engine.api_info.channel_id;
+    let (tx, rx) = mpsc::sync_channel(256);
+    let (_pump, _cutover) = engine.start_pump(tx);
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+    engine.handle.register_bridge(channel).unwrap();
+    let lua = |chunk: &str| {
+        engine
+            .handle
+            .request(
+                "nvim_exec_lua",
+                vec![rmpv::Value::from(chunk), rmpv::Value::Array(Vec::new())],
+            )
+            .unwrap()
+    };
+    let _ = drain_window_status(&rx);
+    let last_kind = |reports: &[(WinHandle, WindowStatus)]| {
+        reports.last().map(|(_, status)| status.kind.clone())
+    };
+
+    lua("vim.cmd('enew') vim.bo.buftype = 'nofile'");
+    let entered = drain_window_status(&rx);
+    assert_eq!(
+        last_kind(&entered),
+        Some(TileKind::Scratch {
+            filetype: String::new()
+        }),
+        "the scratch buffer's report: {entered:?}"
+    );
+
+    // set from outside the window, the way a plugin's setup does it
+    lua("local buf = vim.api.nvim_get_current_buf() \
+         vim.api.nvim_set_option_value('filetype', 'outline', { buf = buf })");
+    let typed = drain_window_status(&rx);
+    assert_eq!(
+        last_kind(&typed),
+        Some(TileKind::Scratch {
+            filetype: "outline".to_string()
+        }),
+        "a filetype set after BufEnter left the tile's kind behind: {typed:?}"
+    );
+
+    lua("vim.cmd('enew') vim.fn.jobstart({ 'cat' }, { term = true })");
+    let term = drain_window_status(&rx);
+    let (_, status) = term
+        .last()
+        .expect("a terminal's job started and its window never reported");
+    assert_eq!(status.kind, TileKind::Terminal, "{term:?}");
+    assert_eq!(status.name, "cat", "the terminal's title names its program");
+
+    // the tag a terminal manager appends to the command is no program
+    lua("local buf = vim.api.nvim_get_current_buf() \
+         vim.api.nvim_buf_set_name(buf, vim.api.nvim_buf_get_name(buf) .. ';#toggleterm#1') \
+         vim.api.nvim_exec_autocmds('WinEnter', {})");
+    let tagged = drain_window_status(&rx);
+    assert_eq!(
+        tagged.last().map(|(_, status)| status.name.as_str()),
+        Some("cat"),
+        "{tagged:?}"
+    );
+}
+
 /// Folds every message into `model` until a quiet window passes, the way
 /// the runtime loop does, and counts the `window` reports among them.
 fn fold(

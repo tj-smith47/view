@@ -2149,6 +2149,89 @@ fn the_position_segment_reads_the_window_trigger_under_tiles() {
     );
 }
 
+/// A plugin's scratch window is a tile like any other, and its buffer name
+/// and cursor say nothing a person reads there: the frame names the tile
+/// by its filetype and keeps no position or branch.
+#[test]
+fn a_plugin_scratch_tile_is_titled_by_its_filetype_and_carries_no_position() {
+    let tiles = tiled(true);
+    let mut model = tiles.model;
+    model
+        .engine
+        .statusline
+        .apply(SegmentUpdate::GitBranch("dev/p6-polish".to_string()));
+    let mut status = WindowStatus::default();
+    status.name = "NvimTree_1".to_string();
+    status.row = 1;
+    status.col = 1;
+    status.kind = view_core::model::TileKind::classify("nofile", "NvimTree", false);
+    let _ = update(
+        &mut model,
+        Msg::WindowStatus {
+            win: WinHandle(1000),
+            status,
+        },
+    );
+    let buf = tiled_frame(&model);
+    let (top, bottom) = edge_rows(&model, tiles.slots[0]);
+    let (_, _, left_width, _) = tiles.slots[0];
+    let left = |row: u16| -> String {
+        row_text(&buf, row)
+            .chars()
+            .take(usize::from(left_width) + 2)
+            .collect()
+    };
+    let (title, segments) = (left(top), left(bottom));
+    assert!(
+        title.contains("╭ NvimTree ─") && !title.contains("NvimTree_1"),
+        "the plugin's tile carries its buffer name: {title:?}"
+    );
+    assert!(
+        !segments.contains("dev/p6-polish") && !segments.contains("1:1"),
+        "the plugin's tile carries a file's segments: {segments:?}"
+    );
+}
+
+/// The vsplit with the tile at `index` reporting `kind`, and a branch on
+/// the session so a golden shows which tiles carry it.
+fn special_tile(mut tiles: Tiles, index: usize, kind: view_core::model::TileKind) -> Tiles {
+    tiles
+        .model
+        .engine
+        .statusline
+        .apply(SegmentUpdate::GitBranch("dev/p6-polish".to_string()));
+    let mut status = window_status("options", index);
+    status.name = "options.txt".to_string();
+    status.row = 12;
+    status.col = 5;
+    status.lines = 40;
+    status.kind = kind;
+    let _ = update(
+        &mut tiles.model,
+        Msg::WindowStatus {
+            win: WinHandle(1000 + index as u64),
+            status,
+        },
+    );
+    tiles
+}
+
+/// A help page in the active left tile: titled by its page, and its only
+/// segment the position, with no mode, branch or diagnostics.
+fn help_tile() -> Tiles {
+    special_tile(tiled(true), 0, view_core::model::TileKind::Help)
+}
+
+/// The quickfix list in the bottom tile of a `:split`: titled `quickfix`,
+/// and its only segment the entry the cursor is on out of how many.
+fn quickfix_tile() -> Tiles {
+    special_tile(
+        stacked_at(true, (TILED_WIDTH, TILED_HEIGHT), 0),
+        1,
+        view_core::model::TileKind::Quickfix,
+    )
+}
+
 /// A cursor move inside a tile repaints the edge its position is painted
 /// on. nvim redraws nothing for one, and the edge row lies outside the
 /// window's own grid, so a frame clipped to the damage nvim reported would
@@ -3967,6 +4050,8 @@ const TILED_SCENES: &[(&str, SceneDump)] = &[
     ("notifications-windowed", |tier| {
         tiles_dump(tier, notifications_in_the_left_tile(true))
     }),
+    ("help-tile", |tier| tiles_dump(tier, help_tile())),
+    ("quickfix-tile", |tier| tiles_dump(tier, quickfix_tile())),
     ("pill-tabs", |tier| tiles_dump(tier, pill_tabs_scene())),
     ("pill-buffers", |tier| {
         tiles_dump(tier, pill_buffers_scene())

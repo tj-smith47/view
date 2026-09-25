@@ -3983,23 +3983,13 @@ mod tests {
     /// in the order `REGISTER_WINDOW_STATUS_CHUNK` sends them.
     ///
     /// Positional and same-typed: `buf`, `row`, `col`, `errors` and
-    /// `warnings` are all plain counts, so a pair swapped anywhere along
-    /// the nine arguments decodes without complaint and paints a cursor
-    /// position that is really a diagnostic count. Every value here is
-    /// distinct for that reason.
+    /// `warnings` and `lines` are all plain counts, so a pair swapped
+    /// anywhere along the thirteen arguments decodes without complaint and
+    /// paints a cursor position that is really a diagnostic count. Every
+    /// value here is distinct for that reason, and so are the two strings.
     #[test]
     fn a_window_trigger_decodes_every_field_it_carries() {
-        let decoded = decode_bridge_event(&[
-            Value::from("window"),
-            Value::from(1001_u64),
-            Value::from(7_u64),
-            Value::from("model.rs"),
-            Value::from(true),
-            Value::from(42_u64),
-            Value::from(13_u64),
-            Value::from(2_u64),
-            Value::from(5_u64),
-        ]);
+        let decoded = decode_bridge_event(&window_payload(1));
         let Some(Msg::WindowStatus { win, status }) = decoded else {
             unreachable!("the window trigger decoded to {decoded:?}")
         };
@@ -4009,13 +3999,18 @@ mod tests {
         assert!(status.modified);
         assert_eq!((status.row, status.col), (42, 13));
         assert_eq!((status.errors, status.warnings), (2, 5));
+        assert_eq!(status.lines, 90);
+        assert_eq!(status.kind, view_core::model::TileKind::LocationList);
+        let Some(Msg::WindowStatus { status, .. }) = decode_bridge_event(&window_payload(0)) else {
+            unreachable!("a quickfix window decoded to nothing")
+        };
+        assert_eq!(status.kind, view_core::model::TileKind::Quickfix);
     }
 
-    /// A payload one field short is a chunk this build does not know,
-    /// which drops, so no position is decoded out of the wrong argument.
-    #[test]
-    fn a_short_window_trigger_payload_decodes_to_nothing() {
-        let decoded = decode_bridge_event(&[
+    /// The window trigger's thirteen params for a quickfix window, a
+    /// location list where `loclist` is 1.
+    fn window_payload(loclist: u64) -> Vec<Value> {
+        vec![
             Value::from("window"),
             Value::from(1001_u64),
             Value::from(7_u64),
@@ -4024,7 +4019,21 @@ mod tests {
             Value::from(42_u64),
             Value::from(13_u64),
             Value::from(2_u64),
-        ]);
+            Value::from(5_u64),
+            Value::from("quickfix"),
+            Value::from("qf"),
+            Value::from(loclist),
+            Value::from(90_u64),
+        ]
+    }
+
+    /// A payload one field short is a chunk this build does not know,
+    /// which drops, so no position is decoded out of the wrong argument.
+    #[test]
+    fn a_short_window_trigger_payload_decodes_to_nothing() {
+        let mut payload = window_payload(0);
+        payload.pop();
+        let decoded = decode_bridge_event(&payload);
         assert!(decoded.is_none(), "got {decoded:?}");
     }
 

@@ -5443,6 +5443,8 @@ mod tests {
             "BufModifiedSet",
             "DiagnosticChanged",
             "VimEnter",
+            "FileType",
+            "TermOpen",
         ] {
             assert!(
                 REGISTER_WINDOW_STATUS_CHUNK.contains(&format!("'{event}'")),

@@ -14,7 +14,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use std::collections::BTreeSet;
 use view_core::grid::registry::{GridId, Pane, GLOBAL_GRID};
-use view_core::model::{Look, Model, Panes, WindowStatus};
+use view_core::model::{Look, Model, Panes, TileKind, WindowStatus};
 use view_core::native::statusline::StatuslineState;
 use view_core::native::surfaces::{view_draws, Surface};
 use view_core::native::views::{Span, StyleRole};
@@ -141,23 +141,18 @@ fn paint_edges(
         else {
             continue;
         };
-        // a native surface's window holds an unnamed scratch buffer, so the
-        // frame would carry nothing where every other tile carries a name
-        let native = pane.kind.native_surface();
-        let status = match native {
+        // a native surface's window holds a scratch buffer nvim reports as
+        // any other, so the surface is what names the kind
+        let status = match pane.kind.native_surface() {
             Some(surface) => {
-                let mut named = status.clone();
-                named.name = surface.id().to_string();
-                std::borrow::Cow::Owned(named)
+                let mut native = status.clone();
+                native.kind = TileKind::Native(surface);
+                std::borrow::Cow::Owned(native)
             }
             None => std::borrow::Cow::Borrowed(status),
         };
         let status = &*status;
         let is_active = active == Some(pane.id);
-        // nvim's mode and cursor for that scratch window describe the
-        // sidebar's own cursor, never the file being edited, so a native
-        // tile's edge states nothing about either
-        let state = (native.is_none()).then_some(state);
         if look.gaps {
             if !framed(pane) {
                 continue;
@@ -239,7 +234,7 @@ fn clipped(rect: Rect, screen: Rect) -> Option<Rect> {
     inside.then_some(rect)
 }
 
-/// Writes one tile's buffer name into a frame edge.
+/// Writes one tile's title into a frame edge.
 pub(crate) fn paint_name(
     status: &WindowStatus,
     active: bool,
@@ -248,7 +243,7 @@ pub(crate) fn paint_name(
     buf: &mut Buffer,
 ) {
     write_edge(
-        &[name_spans(status)],
+        &[status.kind.title(status)],
         edge_style(active, theme),
         theme,
         edge,
@@ -258,16 +253,13 @@ pub(crate) fn paint_name(
 
 /// Writes one tile's status segments into a frame edge.
 ///
-/// A gapless tile has one edge row and no top run of its own, so its name
-/// leads the segments there; a gapped tile's name is already in the top
+/// A gapless tile has one edge row and no top run of its own, so its title
+/// leads the segments there; a gapped tile's title is already in the top
 /// edge and this is the segments alone.
-///
-/// `state` is `None` for a tile view draws itself, which has no mode and
-/// no cursor position of its own to state.
 pub(crate) fn paint_segments(
     status: &WindowStatus,
     active: bool,
-    state: Option<&StatuslineState>,
+    state: &StatuslineState,
     theme: &Theme,
     look: Look,
     edge: Rect,
@@ -276,25 +268,10 @@ pub(crate) fn paint_segments(
     let mut groups = if look.gaps {
         Vec::new()
     } else {
-        vec![name_spans(status)]
+        vec![status.kind.title(status)]
     };
-    if let Some(state) = state {
-        groups.extend(state.tile_segments(status, active));
-    }
+    groups.extend(state.tile_segments(status, active));
     write_edge(&groups, edge_style(active, theme), theme, edge, buf);
-}
-
-/// The buffer name a tile's frame carries, with the unsaved marker behind
-/// it.
-fn name_spans(status: &WindowStatus) -> Vec<Span> {
-    if status.name.is_empty() {
-        return Vec::new();
-    }
-    let mut spans = vec![Span::new(status.name.clone(), StyleRole::File)];
-    if status.modified {
-        spans.push(Span::new(" [+]", StyleRole::Modified));
-    }
-    spans
 }
 
 /// The colour a tile's own edge text sits in, which is the colour its frame

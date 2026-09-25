@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 use view_core::events::WinHandle;
-use view_core::model::{BufferEntry, WindowStatus};
+use view_core::model::{BufferEntry, TileKind, WindowStatus};
 use view_core::msg::{DeleteConfirmOutcome, EngineRequest, Msg, RegisterType, ReplyToken};
 use view_core::native::mappings::MappingClaim;
 use view_core::native::surfaces::{FloatAnchor, FloatSighting};
@@ -219,8 +219,11 @@ fn decode_buffer_entries(list: &Value) -> Option<Vec<BufferEntry>> {
 }
 
 /// Decodes the window trigger's `('window', win, buf, name, modified, row,
-/// col, errors, warnings)` params into [`Msg::WindowStatus`], or `None` for
-/// a shape the chunk does not produce.
+/// col, errors, warnings, buftype, filetype, loclist, lines)` params into
+/// [`Msg::WindowStatus`], or `None` for a shape the chunk does not produce.
+///
+/// `buftype`, `filetype` and `loclist` are read here and nowhere else:
+/// [`TileKind::classify`] turns them into the tile's kind.
 ///
 /// Read off `params` whole, for the reason [`decode_float_observed`] is:
 /// one pattern a reviewer can check against the `rpcnotify` call in
@@ -231,7 +234,9 @@ fn decode_buffer_entries(list: &Value) -> Option<Vec<BufferEntry>> {
 /// cannot hold, and a count that reached the ceiling still reads as "more
 /// than the edge can show".
 fn decode_window_status(params: &[Value]) -> Option<Msg> {
-    let [_, win, buf, name, modified, row, col, errors, warnings] = params else {
+    let [_, win, buf, name, modified, row, col, errors, warnings, buftype, filetype, loclist, lines] =
+        params
+    else {
         return None;
     };
     // field by field off a default, with no single struct expression:
@@ -245,6 +250,14 @@ fn decode_window_status(params: &[Value]) -> Option<Msg> {
     status.col = saturate_u32(col.as_u64()?);
     status.errors = saturate_u32(errors.as_u64()?);
     status.warnings = saturate_u32(warnings.as_u64()?);
+    // `getwininfo`'s `loclist` is a number, and nothing but 1 marks a
+    // location list
+    status.kind = TileKind::classify(
+        buftype.as_str()?,
+        filetype.as_str()?,
+        loclist.as_u64() == Some(1),
+    );
+    status.lines = saturate_u32(lines.as_u64()?);
     Some(Msg::WindowStatus {
         win: WinHandle(win.as_u64()?),
         status,

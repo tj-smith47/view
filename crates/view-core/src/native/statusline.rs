@@ -279,6 +279,10 @@ impl StatuslineState {
     /// moment `laststatus` is 2, which is what tiles mode holds it at, so
     /// under tiles that segment has no other source.
     ///
+    /// Which of them a tile carries is its kind's
+    /// [`segments`](crate::model::TileKind::segments). The branch is read
+    /// after startup, so a tile drawn before it lands carries none.
+    ///
     /// No truncation here. A frame edge is as wide as its tile and the
     /// painter is what knows how many cells are left, so it drops whole
     /// groups off the end. This composer would have to be told the width. A
@@ -290,44 +294,59 @@ impl StatuslineState {
         status: &crate::model::WindowStatus,
         active: bool,
     ) -> Vec<Vec<Span>> {
+        let shown = status.kind.segments();
         let mut groups: Vec<Vec<Span>> = Vec::new();
-        if active && !self.mode.is_empty() {
+        if shown.mode && active && !self.mode.is_empty() {
             groups.push(vec![Span::new(self.mode.clone(), StyleRole::Mode)]);
         }
-        if !self.git_branch.is_empty() {
+        if shown.branch && !self.git_branch.is_empty() {
             groups.push(vec![Span::new(
                 self.git_branch.clone(),
                 StyleRole::GitBranch,
             )]);
         }
-        let mut diagnostics = Vec::new();
-        if status.errors > 0 {
-            diagnostics.push(Span::new(
-                format!("E {}", status.errors),
-                StyleRole::DiagnosticError,
-            ));
+        if shown.diagnostics {
+            groups.extend(tile_diagnostics(status));
         }
-        if status.warnings > 0 {
-            if !diagnostics.is_empty() {
-                diagnostics.push(Span::plain(" "));
-            }
-            diagnostics.push(Span::new(
-                format!("W {}", status.warnings),
-                StyleRole::DiagnosticWarning,
-            ));
+        if shown.position {
+            groups.push(vec![Span::new(
+                format!("{}:{}", status.row, status.col),
+                StyleRole::Ruler,
+            )]);
         }
-        if !diagnostics.is_empty() {
-            groups.push(diagnostics);
+        if shown.count {
+            groups.push(vec![Span::new(
+                format!("{}/{}", status.row, status.lines),
+                StyleRole::Ruler,
+            )]);
         }
-        groups.push(vec![Span::new(
-            format!("{}:{}", status.row, status.col),
-            StyleRole::Ruler,
-        )]);
-        if active && !self.showcmd.is_empty() {
+        if shown.showcmd && active && !self.showcmd.is_empty() {
             groups.push(vec![Span::plain(self.showcmd.clone())]);
         }
         groups
     }
+}
+
+/// A tile's error and warning counts as one group, or none where both are
+/// zero.
+fn tile_diagnostics(status: &crate::model::WindowStatus) -> Option<Vec<Span>> {
+    let mut diagnostics = Vec::new();
+    if status.errors > 0 {
+        diagnostics.push(Span::new(
+            format!("E {}", status.errors),
+            StyleRole::DiagnosticError,
+        ));
+    }
+    if status.warnings > 0 {
+        if !diagnostics.is_empty() {
+            diagnostics.push(Span::plain(" "));
+        }
+        diagnostics.push(Span::new(
+            format!("W {}", status.warnings),
+            StyleRole::DiagnosticWarning,
+        ));
+    }
+    (!diagnostics.is_empty()).then_some(diagnostics)
 }
 
 /// The row's approximate assembled width: `mode` plus every candidate's
@@ -633,6 +652,55 @@ mod tests {
             ..Default::default()
         };
         (state, status)
+    }
+
+    /// Every segment a kind's table row names is drawn and nothing else,
+    /// and a branch not yet read leaves the tree panel's edge empty.
+    #[test]
+    fn a_tile_draws_the_segments_its_kind_names_and_no_other() {
+        use crate::model::TileKind;
+        use crate::native::geometry::NativeSurface;
+        let (mut state, mut status) = positioned();
+        state.apply(SegmentUpdate::Mode("-- INSERT --".to_string()));
+        state.apply(SegmentUpdate::Showcmd("2d".to_string()));
+        status.errors = 1;
+        status.lines = 90;
+        let drawn = |state: &StatuslineState, status: &crate::model::WindowStatus| {
+            state
+                .tile_segments(status, true)
+                .iter()
+                .map(|group| text(group))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            drawn(&state, &status),
+            ["-- INSERT --", "E 1", "42:13", "2d"]
+        );
+        state.apply(SegmentUpdate::GitBranch("main".to_string()));
+        for (kind, expected) in [
+            (
+                TileKind::File,
+                vec!["-- INSERT --", "main", "E 1", "42:13", "2d"],
+            ),
+            (TileKind::Help, vec!["42:13"]),
+            (TileKind::Quickfix, vec!["42/90"]),
+            (TileKind::LocationList, vec!["42/90"]),
+            (TileKind::Terminal, vec!["-- INSERT --"]),
+            (TileKind::Native(NativeSurface::Tree), vec!["main"]),
+            (TileKind::Native(NativeSurface::Agent), vec![]),
+            (
+                TileKind::Scratch {
+                    filetype: String::new(),
+                },
+                vec!["E 1"],
+            ),
+        ] {
+            status.kind = kind;
+            assert_eq!(drawn(&state, &status), expected, "{:?}", status.kind);
+        }
+        state.apply(SegmentUpdate::GitBranch(String::new()));
+        status.kind = TileKind::Native(NativeSurface::Tree);
+        assert!(drawn(&state, &status).is_empty());
     }
 
     /// nvim stops sending `msg_ruler` the moment `laststatus` is 2, which
