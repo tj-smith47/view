@@ -1668,6 +1668,7 @@ mod tests {
 
         let presink = vec![Msg::EngineRequest(EngineRequest::VimEnter {
             token: ReplyToken { msgid: 1 },
+            leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
         })];
         let keys: Vec<Key> = (0..KEY_RING_CAPACITY)
             .map(|i| key(&i.to_string()))
@@ -1772,6 +1773,7 @@ mod tests {
             CutoverInput {
                 presink: vec![Msg::EngineRequest(EngineRequest::VimEnter {
                     token: ReplyToken { msgid: 1 },
+                    leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
                 })],
                 pending_redraw: vec![],
                 resize: None,
@@ -2188,8 +2190,9 @@ mod tests {
     /// queued at `VimEnter` puts a live nvim at a hit-enter prompt ahead of
     /// the chord registration, in a desktop session that leaves messages to
     /// nvim. nvim runs the registration only once a key dismisses the
-    /// prompt, so the Enter typed during launch has to reach it while the
-    /// chords are still unmapped. Returns whether nvim answered the
+    /// prompt, so the leader typed during launch, which the hold keeps, has
+    /// to reach it while the keys are still unmapped. Returns whether nvim
+    /// answered the
     /// registration, which it can only do once it has left the prompt, and
     /// what the session saw.
     #[cfg(unix)]
@@ -2298,7 +2301,7 @@ mod tests {
                     &mut model,
                     &executor,
                     &mut follow_ups,
-                    Msg::Key(key("<CR>")),
+                    Msg::Key(key(view_core::msg::DEFAULT_MAPLEADER)),
                 );
                 assert_eq!(flow, crate::runtime::Flow::Continue);
             }
@@ -2309,7 +2312,7 @@ mod tests {
     }
 
     /// Under multigrid the prompt shows as a scrolled message area, and the
-    /// session releases the Enter on that alone, with no bound armed.
+    /// session releases the leader on that alone, with no bound armed.
     #[cfg(unix)]
     #[test]
     fn a_prompt_raised_during_launch_takes_the_key_typed_into_it() {
@@ -2317,13 +2320,13 @@ mod tests {
             launch_behind_a_prompt(view_core::native::ext::shipped_multigrid(), false, false);
         assert!(
             answered,
-            "the Enter typed at the hit-enter prompt was held, so nvim never \
+            "the leader typed at the hit-enter prompt was held, so nvim never \
              left it to run the chord registration; saw {seen:?}"
         );
     }
 
     /// A single-grid session is sent no sign of the prompt, and the bound
-    /// armed from the takeover's reply releases the Enter.
+    /// armed from the takeover's reply releases the leader.
     #[cfg(unix)]
     #[test]
     fn a_prompt_raised_during_launch_on_a_single_grid_ends_at_the_bound() {
@@ -2331,14 +2334,14 @@ mod tests {
             launch_behind_a_prompt(view_core::native::ext::shipped(), true, false);
         assert!(
             answered,
-            "the Enter typed at the hit-enter prompt was held past the bound, \
+            "the leader typed at the hit-enter prompt was held past the bound, \
              so nvim never left it to run the chord registration; saw {seen:?}"
         );
     }
 
     /// A single-grid session whose takeover reply never arrives sends the
     /// prompt no sign at all, so the ceiling on the hold is what releases
-    /// the Enter. No bound is ever armed from a reply.
+    /// the leader. No bound is ever armed from a reply.
     #[cfg(unix)]
     #[test]
     fn a_prompt_raised_during_launch_on_a_single_grid_ends_at_the_ceiling() {
@@ -2346,7 +2349,7 @@ mod tests {
             launch_behind_a_prompt(view_core::native::ext::shipped(), true, true);
         assert!(
             answered,
-            "the Enter typed at the hit-enter prompt was held past the ceiling, \
+            "the leader typed at the hit-enter prompt was held past the ceiling, \
              so nvim never left it to run the chord registration; saw {seen:?}"
         );
         assert!(lift_elapsed.is_some(), "the hold never lifted: {seen:?}");
@@ -2366,9 +2369,23 @@ mod tests {
         msgs: Vec<Msg>,
         between: impl Fn(usize),
     ) -> Vec<crate::runtime::Flow> {
+        dispatch_session(
+            ops,
+            crate::native::NativeSession::desktop(7, None),
+            msgs,
+            between,
+        )
+    }
+
+    /// [`dispatch_desktop`] through `native`.
+    fn dispatch_session(
+        ops: &crate::engine_ops::FakeOps,
+        mut native: crate::native::NativeSession,
+        msgs: Vec<Msg>,
+        between: impl Fn(usize),
+    ) -> Vec<crate::runtime::Flow> {
         let executor = crate::runtime::Executor::new(ops);
         let mut model = Model::with_term_size(80, 24);
-        let mut native = crate::native::NativeSession::desktop(7, None);
         let mut theme = crate::bridge::ThemeBridge::new(None, None);
         let mut follow_ups = crate::runtime::FollowUps {
             native: &mut native,
@@ -2385,9 +2402,95 @@ mod tests {
     }
 
     fn vim_enter() -> Msg {
+        vim_enter_with(view_core::msg::DEFAULT_MAPLEADER)
+    }
+
+    fn vim_enter_with(leader: &str) -> Msg {
         Msg::EngineRequest(view_core::msg::EngineRequest::VimEnter {
             token: view_core::msg::ReplyToken { msgid: 1 },
+            leader: leader.to_string(),
         })
+    }
+
+    /// The chord [`dispatch_desktop`]'s session registers first.
+    fn first_chord() -> &'static str {
+        let (modifier, _, _) = view_native::config::profile::modifier_for(
+            view_core::native::chords::ModifierChoice::Auto,
+            Model::with_term_size(80, 24).caps.kitty_kbd,
+        );
+        view_core::native::chords::desktop_chords()[0].lhs(modifier)
+    }
+
+    /// Input typed between `VimEnter` and the key registration's reply,
+    /// under both profiles and a space leader: a plain key, text, a mouse
+    /// press and a resize reach nvim at once. The leader waits for the
+    /// registration's reply, and a plain key typed behind it waits behind
+    /// it, so nvim runs the chord mapped and in the order it was typed.
+    #[test]
+    fn only_input_that_could_begin_an_unmapped_key_waits_for_the_registration() {
+        for native in [
+            crate::native::NativeSession::desktop(7, None),
+            crate::native::NativeSession::all_enabled(7, None),
+        ] {
+            let ops = crate::engine_ops::FakeOps::default();
+            let flows = dispatch_session(
+                &ops,
+                native,
+                vec![
+                    vim_enter_with(" "),
+                    Msg::Key(key("j")),
+                    Msg::Paste("hello".to_string()),
+                    Msg::Mouse(view_core::msg::MouseInput {
+                        button: "left".into(),
+                        action: "press".into(),
+                        modifier: String::new(),
+                        row: 5,
+                        col: 10,
+                    }),
+                    Msg::Resized {
+                        width: 100,
+                        height: 30,
+                    },
+                    Msg::Key(key(" ")),
+                    Msg::Key(key("f")),
+                    Msg::Key(key("f")),
+                    Msg::Key(key("k")),
+                    claims(),
+                    claims(),
+                ],
+                |_| {},
+            );
+            assert!(flows.iter().all(|f| *f == crate::runtime::Flow::Continue));
+            let calls = ops.calls.borrow().clone();
+            let at = |call: &str| {
+                let at = calls.iter().position(|c| c.starts_with(call));
+                assert!(at.is_some(), "{call} never reached nvim: {calls:?}");
+                at.unwrap_or_default()
+            };
+            let mapped = calls
+                .iter()
+                .position(|c| c.starts_with("register_mappings(") && c.contains("<leader>ff"));
+            assert!(
+                mapped.is_some(),
+                "the keys were never registered: {calls:?}"
+            );
+            let mapped = mapped.unwrap_or_default();
+            for passed in ["input(j)", "paste(", "input_mouse(", "try_resize("] {
+                assert!(
+                    at(passed) < mapped,
+                    "{passed} waited for the registration: {calls:?}"
+                );
+            }
+            let leader = at("input( )");
+            assert!(
+                leader > mapped,
+                "the leader reached nvim ahead of its mapping: {calls:?}"
+            );
+            assert!(
+                leader < at("input(k)"),
+                "a key typed behind the held leader overtook it: {calls:?}"
+            );
+        }
     }
 
     fn claims() -> Msg {
@@ -2404,11 +2507,7 @@ mod tests {
     /// bound again and the chord waits for the registration's reply.
     #[test]
     fn a_chord_typed_into_a_slow_takeover_reaches_nvim_after_its_mapping() {
-        let (modifier, _, _) = view_native::config::profile::modifier_for(
-            view_core::native::chords::ModifierChoice::Auto,
-            Model::with_term_size(80, 24).caps.kitty_kbd,
-        );
-        let chord = view_core::native::chords::desktop_chords()[0].lhs(modifier);
+        let chord = first_chord();
         let ops = crate::engine_ops::FakeOps::default();
         let flows = dispatch_desktop(
             &ops,
@@ -2437,17 +2536,17 @@ mod tests {
         );
     }
 
-    /// A resize made while input is held for the desktop chords goes out
-    /// behind the keys typed before it, the order the terminal produced
-    /// them in.
+    /// A resize made while a chord typed before it is held goes out behind
+    /// that chord, the order the terminal produced them in.
     #[test]
     fn a_resize_during_the_input_hold_stays_behind_the_keys_typed_before_it() {
+        let chord = first_chord();
         let ops = crate::engine_ops::FakeOps::default();
         let flows = dispatch_desktop(
             &ops,
             vec![
                 vim_enter(),
-                Msg::Key(key("x")),
+                Msg::Key(key(chord)),
                 Msg::Resized {
                     width: 100,
                     height: 30,
@@ -2459,7 +2558,7 @@ mod tests {
         );
         assert!(flows.iter().all(|f| *f == crate::runtime::Flow::Continue));
         let calls = ops.calls.borrow().clone();
-        let typed = calls.iter().position(|c| c == "input(x)");
+        let typed = calls.iter().position(|c| *c == format!("input({chord})"));
         let resized = calls.iter().position(|c| c.starts_with("try_resize("));
         assert!(
             matches!((typed, resized), (Some(t), Some(r)) if t < r),
@@ -2472,10 +2571,11 @@ mod tests {
     /// the dead engine before the restart rebinds the session.
     #[test]
     fn input_held_when_a_pass_loses_the_connection_is_never_written() {
+        let chord = first_chord();
         let ops = crate::engine_ops::FakeOps::default();
         let flows = dispatch_desktop(
             &ops,
-            vec![vim_enter(), Msg::Key(key("x")), claims(), claims()],
+            vec![vim_enter(), Msg::Key(key(chord)), claims(), claims()],
             |at| {
                 if at == 2 {
                     *ops.fail_next.borrow_mut() = true;
@@ -2485,7 +2585,7 @@ mod tests {
         assert_eq!(flows[2], crate::runtime::Flow::EngineLost);
         let calls = ops.calls.borrow().clone();
         assert!(
-            !calls.iter().any(|c| c == "input(x)"),
+            !calls.iter().any(|c| *c == format!("input({chord})")),
             "held input went to a connection already lost: {calls:?}"
         );
     }
@@ -2650,6 +2750,7 @@ mod tests {
             CutoverInput {
                 presink: vec![Msg::EngineRequest(EngineRequest::VimEnter {
                     token: ReplyToken { msgid: 1 },
+                    leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
                 })],
                 pending_redraw: vec![UiEvent::Flush],
                 resize: Some((100, 40)),
@@ -2698,6 +2799,7 @@ mod tests {
             CutoverInput {
                 presink: vec![Msg::EngineRequest(EngineRequest::VimEnter {
                     token: ReplyToken { msgid: 1 },
+                    leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
                 })],
                 pending_redraw: vec![],
                 resize: None,

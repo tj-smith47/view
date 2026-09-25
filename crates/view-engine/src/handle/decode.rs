@@ -38,6 +38,18 @@ pub(super) fn decode_feature_invoke(params: &[Value]) -> Option<Msg> {
     })
 }
 
+/// The leader `view_vim_enter`'s one positional param carries: the config's
+/// `g:mapleader`, or nvim's own fallback where that is unset, empty or not
+/// a string.
+pub(super) fn decode_leader(params: &[Value]) -> String {
+    params
+        .first()
+        .and_then(Value::as_str)
+        .filter(|leader| !leader.is_empty())
+        .unwrap_or(view_core::msg::DEFAULT_MAPLEADER)
+        .to_owned()
+}
+
 /// Decodes a `"+p`/`"*p` paste's `(register)` positional param into the
 /// message the loop routes to `update()`. `register` must decode to exactly
 /// one `char` (`'+'` or `'*'`); anything else falls through to the reader

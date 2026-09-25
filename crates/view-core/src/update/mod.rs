@@ -396,7 +396,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 exit_code: 128 + signal,
             }]
         }
-        Msg::EngineRequest(EngineRequest::VimEnter { token }) => on_vim_enter(model, token),
+        Msg::EngineRequest(EngineRequest::VimEnter { token, .. }) => on_vim_enter(model, token),
         // delegated, not answered here: the worker owns the reply (see
         // Effect::ClipboardRead/ClipboardWrite's docs), so this loop never
         // blocks on the system clipboard the way a direct Effect::Reply

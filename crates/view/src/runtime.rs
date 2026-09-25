@@ -171,14 +171,16 @@ pub(crate) fn dispatch<E: EngineOps>(
     } else {
         Vec::new()
     };
-    // input read while the desktop chords are still unregistered waits for
-    // nvim's reply to the registration that carries them: nvim puts
+    // a key that could begin one the takeover left unregistered waits for
+    // nvim's reply to the registration that carries it: nvim puts
     // `nvim_input` into typeahead as it reads it and runs a registration
     // later from its main loop, so a chord written right behind its mapping
-    // still runs as nvim's own keys. A resize waits with the input so it
-    // stays behind the keys typed before it. Only what goes to nvim waits,
-    // so a modal answered while the engine is down is still answered
+    // still runs as nvim's own keys. Whatever follows a held key waits
+    // behind it, a resize included, so nvim sees the order the terminal
+    // produced. Only what goes to nvim waits, so a modal answered while the
+    // engine is down is still answered
     let holding = is_held_kind(&msg) && follow_ups.native.holds_input();
+    follow_ups.native.note_vim_enter(&msg);
     let mut flow = Flow::Continue;
     // ahead of the fold's own effects: what a guess this batch took back
     // owes is a window somebody else's plugin is waiting to draw in again
@@ -201,7 +203,7 @@ pub(crate) fn dispatch<E: EngineOps>(
         };
     crate::vlog::log_layout(model, &layout);
     for eff in effects {
-        if holding && matches!(eff, Effect::Rpc(_)) {
+        if holding && follow_ups.native.holds(&eff) {
             follow_ups.native.hold_input(eff);
             continue;
         }
@@ -322,8 +324,8 @@ pub(crate) fn dispatch<E: EngineOps>(
     flow
 }
 
-/// Whether `msg` is one of the messages whose engine-bound effects wait
-/// while the native session holds input.
+/// Whether `msg` is input whose engine-bound effects the native session
+/// may hold ([`crate::native::NativeSession::holds`] decides per effect).
 fn is_held_kind(msg: &Msg) -> bool {
     matches!(
         msg,
@@ -1973,6 +1975,7 @@ mod tests {
             &mut follow_ups,
             Msg::EngineRequest(view_core::msg::EngineRequest::VimEnter {
                 token: ReplyToken { msgid: 3 },
+                leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
             }),
         );
         assert_eq!(flow, Flow::Continue);
@@ -2026,6 +2029,7 @@ mod tests {
             &mut follow_ups,
             Msg::EngineRequest(view_core::msg::EngineRequest::VimEnter {
                 token: ReplyToken { msgid: 3 },
+                leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
             }),
         );
         let calls = ops.calls.borrow().clone();

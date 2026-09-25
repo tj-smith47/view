@@ -88,6 +88,7 @@ mod tests {
             model,
             Msg::EngineRequest(EngineRequest::VimEnter {
                 token: ReplyToken { msgid: 7 },
+                leader: crate::msg::DEFAULT_MAPLEADER.to_string(),
             }),
         )
     }

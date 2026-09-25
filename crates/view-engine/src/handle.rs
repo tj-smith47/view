@@ -16,9 +16,9 @@ use decode::{
     decode_accent_probe_reply, decode_bridge_event, decode_buf_lines_event,
     decode_buffer_list_reply, decode_clipboard_get, decode_clipboard_set,
     decode_delete_confirm_reply, decode_feature_invoke, decode_float_rows_reply,
-    decode_hl_probe_reply, decode_mapping_report, decode_preview_reply, decode_prompt_reply,
-    decode_rename_reply, decode_swap_recovery_reply, decode_takeover_reply, takeover_error_text,
-    SwapRecoveryReading, TakeoverReading,
+    decode_hl_probe_reply, decode_leader, decode_mapping_report, decode_preview_reply,
+    decode_prompt_reply, decode_rename_reply, decode_swap_recovery_reply, decode_takeover_reply,
+    takeover_error_text, SwapRecoveryReading, TakeoverReading,
 };
 
 /// Errors produced by [`EngineHandle`] operations.
@@ -1200,7 +1200,10 @@ impl EngineHandle {
                             msgid: u64::from(msgid),
                         };
                         let routed = if method == "view_vim_enter" {
-                            Some(Msg::EngineRequest(EngineRequest::VimEnter { token }))
+                            Some(Msg::EngineRequest(EngineRequest::VimEnter {
+                                token,
+                                leader: decode_leader(&params),
+                            }))
                         } else if method == "view_clipboard_get" {
                             decode_clipboard_get(token, &params)
                         } else if method == "view_clipboard_set" {
@@ -2240,10 +2243,11 @@ mod tests {
         let msg = rx
             .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
             .unwrap();
-        let Msg::EngineRequest(EngineRequest::VimEnter { token }) = msg else {
+        let Msg::EngineRequest(EngineRequest::VimEnter { token, leader }) = msg else {
             unreachable!("expected Msg::EngineRequest(VimEnter), got {msg:?}");
         };
         assert_eq!(token.msgid, 42);
+        assert_eq!(leader, "\\", "a request with no leader carries nvim's own");
 
         h.reply(token, ReplyValue::Nil).unwrap();
         let mut r = std::io::BufReader::new(peer_read);
@@ -2473,7 +2477,7 @@ mod tests {
         let (_dpump, cutover) = pump.attach_sink(tx);
 
         let msgid_of = |m: &Msg| match m {
-            Msg::EngineRequest(EngineRequest::VimEnter { token }) => token.msgid,
+            Msg::EngineRequest(EngineRequest::VimEnter { token, .. }) => token.msgid,
             other => unreachable!("expected Msg::EngineRequest(VimEnter), got {other:?}"),
         };
         assert_eq!(cutover.presink.len(), 2);
@@ -4218,6 +4222,15 @@ mod tests {
                 if name == "nonexistent-scheme"),
             "got {decoded:?}"
         );
+    }
+
+    #[test]
+    fn the_vim_enter_leader_is_the_configs_or_nvims_own() {
+        assert_eq!(decode_leader(&[Value::from(",")]), ",");
+        assert_eq!(decode_leader(&[Value::from(" ")]), " ");
+        for params in [vec![], vec![Value::Nil], vec![Value::from("")]] {
+            assert_eq!(decode_leader(&params), "\\", "{params:?}");
+        }
     }
 
     #[test]

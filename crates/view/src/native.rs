@@ -50,13 +50,14 @@ pub(crate) enum Stage {
     /// `Msg::FeatureInvoke { feature: "keys", .. }` reached `update()`,
     /// which may have moved `model.key_profile_override`.
     ProfileFlip,
-    /// The bound on input held for the desktop chords elapsed, for the hold
-    /// armed with `generation`.
+    /// The bound on input held because it could begin a key not yet
+    /// registered elapsed, for the hold armed with `generation`.
     HoldExpired { generation: u64 },
 }
 
-/// How long typed input may wait for nvim to run the desktop chord
-/// registration before it goes to nvim unmapped. The registration waits two
+/// How long input that could begin a key the takeover left for the
+/// follow-up registration may wait for nvim to run that registration before
+/// it goes to nvim unmapped. The registration waits two
 /// round trips behind `VimEnter` plus whatever startup work nvim has queued
 /// ahead of it, and this leaves that wait a wide margin under a login
 /// config while keeping a freeze behind a prompt nvim cannot leave short.
@@ -84,6 +85,58 @@ pub(crate) fn stage(msg: &Msg) -> Stage {
         },
         _ => Stage::None,
     }
+}
+
+/// The first keys of the keys a takeover left unmapped, which is all a key
+/// typed before their registration answers can begin.
+#[derive(Debug, Default)]
+struct HoldStarts {
+    /// The first key of every such key, spelled as [`first_key`] spells it.
+    keys: Vec<String>,
+    /// The modifier the desktop chords are spelled with, as it stands in
+    /// notation (`d` or `m`), under the desktop profile. A chord key is held
+    /// on its modifier alone, so a chord the terminal spells with its
+    /// modifiers in another order still waits.
+    modifier: Option<&'static str>,
+}
+
+impl HoldStarts {
+    /// Whether `notation` could begin one of the unmapped keys.
+    fn starts(&self, notation: &str) -> bool {
+        let Some(key) = first_key(notation) else {
+            return false;
+        };
+        if self.keys.contains(&key) {
+            return true;
+        }
+        let modifiers = key
+            .strip_prefix('<')
+            .and_then(|name| name.strip_suffix('>'))
+            .and_then(|name| name.rsplit_once('-'))
+            .map_or("", |(modifiers, _)| modifiers);
+        self.modifier
+            .is_some_and(|wanted| modifiers.split('-').any(|m| m == wanted))
+    }
+}
+
+/// The first key of `keys` in nvim key notation, one spelling per key: a
+/// `<...>` name lowercased, and the name of a printable key written as the
+/// character, which is how the terminal reader sends it unmodified.
+fn first_key(keys: &str) -> Option<String> {
+    let first = keys.chars().next()?;
+    if first == '<' {
+        if let Some(end) = keys.find('>') {
+            let name = keys[..=end].to_ascii_lowercase();
+            return Some(match name.as_str() {
+                "<space>" => " ".to_string(),
+                "<lt>" => "<".to_string(),
+                "<bslash>" => "\\".to_string(),
+                "<bar>" => "|".to_string(),
+                _ => name,
+            });
+        }
+    }
+    Some(first.to_string())
 }
 
 /// One session's native configuration and the plan it applies.
@@ -164,6 +217,13 @@ pub(crate) struct NativeSession {
     /// toward nvim's own startup clock. Cleared the moment the follow-up
     /// that registers them is sent.
     chords_pending: bool,
+    /// The leader nvim reported at `VimEnter`, which `<leader>` in a
+    /// registered key stands for.
+    leader: String,
+    /// What input has to start with to wait for the follow-up registration
+    /// ([`Self::holds`]), taken by [`Self::take_over`] from the keys it left
+    /// for that registration.
+    hold_starts: HoldStarts,
     /// How many `MappingsClaimed` replies are still owed for registrations
     /// sent while input was held, the one carrying the chords among them.
     /// nvim takes `nvim_input` into typeahead the moment it reads it and
@@ -301,6 +361,8 @@ impl NativeSession {
             desktop_modifier_choice,
             desktop,
             chords_pending: false,
+            leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
+            hold_starts: HoldStarts::default(),
             claims_owed: 0,
             held_input: Vec::new(),
             hold_lifted: false,
@@ -333,12 +395,68 @@ impl NativeSession {
         self.takeover_sent = None;
     }
 
-    /// Whether engine-bound input has to wait: from the takeover that left
-    /// the keys out until nvim has answered the registration that
-    /// carries them, or until the hold is lifted ([`CHORD_HOLD_BOUND`],
-    /// [`CHORD_HOLD_CEILING`], [`Self::note_redraw`]).
+    /// Whether the hold is in force: from the takeover that left the keys
+    /// out until nvim has answered the registration that carries them, or
+    /// until the hold is lifted ([`CHORD_HOLD_BOUND`],
+    /// [`CHORD_HOLD_CEILING`], [`Self::note_redraw`]). What it holds is
+    /// [`Self::holds`]'s answer.
     pub(crate) fn holds_input(&self) -> bool {
         !self.hold_lifted && (self.chords_pending || self.claims_owed > 0)
+    }
+
+    /// Whether `effect`, which input produced, waits for the registration:
+    /// keys that could begin a key not yet mapped, since nvim would run them
+    /// as its own, and anything behind held input, so input reaches nvim in
+    /// the order it was typed. Every other key, a mouse event, a paste and
+    /// a resize go to nvim at once.
+    pub(crate) fn holds(&self, effect: &Effect) -> bool {
+        if !self.holds_input() || !matches!(effect, Effect::Rpc(_)) {
+            return false;
+        }
+        if !self.held_input.is_empty() {
+            return true;
+        }
+        matches!(effect, Effect::Rpc(RpcCall::Input { notation }) if self.hold_starts.starts(notation))
+    }
+
+    /// Records the leader nvim reported at `VimEnter`, ahead of the
+    /// takeover that reads it.
+    pub(crate) fn note_vim_enter(&mut self, msg: &Msg) {
+        if let Msg::EngineRequest(EngineRequest::VimEnter { leader, .. }) = msg {
+            self.leader.clone_from(leader);
+        }
+    }
+
+    /// The first keys of `specs`, `<leader>` read as [`Self::leader`], and
+    /// under the desktop profile the modifier its chords are spelled with.
+    fn starts_of(
+        &self,
+        specs: &[view_core::native::mappings::MappingSpec],
+        model: &Model,
+    ) -> HoldStarts {
+        let leader = first_key(&self.leader);
+        let keys = specs
+            .iter()
+            .filter_map(|spec| {
+                let lhs = spec.lhs.as_ref();
+                let leads = lhs
+                    .get(..8)
+                    .is_some_and(|head| head.eq_ignore_ascii_case("<leader>"));
+                if leads {
+                    leader.clone()
+                } else {
+                    first_key(lhs)
+                }
+            })
+            .collect();
+        let modifier =
+            (self.profile == KeyProfile::Desktop).then(|| {
+                match profile::modifier_for(self.desktop_modifier_choice, model.caps.kitty_kbd).0 {
+                    view_core::native::chords::DesktopModifier::Super => "d",
+                    _ => "m",
+                }
+            });
+        HoldStarts { keys, modifier }
     }
 
     /// Ends the hold with the registration still unanswered, so the held
@@ -591,6 +709,31 @@ impl NativeSession {
     /// [`profile::modifier_for`] owes when `[keys] desktop_modifier =
     /// "super"` is unreachable this run, empty otherwise.
     fn build_mapping_call(&self, model: &mut Model) -> (RpcCall, Vec<Effect>) {
+        let (specs, super_notice) = self.live_specs(model);
+        let notice_effects = match super_notice {
+            Some(text) => model.engine.record_native_notice(text.to_string(), false),
+            None => Vec::new(),
+        };
+        let mapping_call = RpcCall::RegisterMappings {
+            specs,
+            channel_id: self.channel_id,
+        };
+        (mapping_call, notice_effects)
+    }
+
+    /// Every key this session registers, in the order
+    /// [`Self::build_mapping_call`] sends them, and the notice
+    /// [`profile::modifier_for`] owes when a desktop chord among them falls
+    /// back from an unreachable `super`. Reads `self` and `model` and changes
+    /// neither, so [`Self::take_over`] asks it what the follow-up will map
+    /// without raising that notice early.
+    fn live_specs(
+        &self,
+        model: &Model,
+    ) -> (
+        Vec<view_core::native::mappings::MappingSpec>,
+        Option<&'static str>,
+    ) {
         let mut mapping_call = mappings::register_plan(&self.cfg, self.channel_id);
         // `[keys] toggle_gaps`/`cycle_surfaces`: `view-native` already
         // validated the override (`resolve_ui_lhs`). `MappingSpec::lhs` is
@@ -629,19 +772,15 @@ impl NativeSession {
         let (modifier, _, super_notice) =
             profile::modifier_for(self.desktop_modifier_choice, model.caps.kitty_kbd);
         let chords = profile::chord_plan(&self.desktop, self.profile, modifier, &self.cfg);
-        // Only raised when this call actually registers a desktop chord
+        // Only owed when this call actually registers a desktop chord
         // under the fallback: a flip to `editor` (no chords at all) or a
         // reissue that keeps carrying the same fallback would otherwise
         // repeat the same notice on every one of them.
-        let notice_effects = match super_notice {
-            Some(text) if !chords.is_empty() => {
-                model.engine.record_native_notice(text.to_string(), false)
-            }
-            _ => Vec::new(),
+        let super_notice = super_notice.filter(|_| !chords.is_empty());
+        let RpcCall::RegisterMappings { mut specs, .. } = mapping_call else {
+            return (Vec::new(), None);
         };
-        if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
-            specs.extend(chords);
-        }
+        specs.extend(chords);
         // `NativeConfig::enabled("ai")` is unconditionally `true` -- `[ai]`
         // has no `[native]` switch by design, so `register_plan` alone would
         // always register the key. `model.ai_enabled` is the bit `[native]`
@@ -649,11 +788,9 @@ impl NativeSession {
         // here, once, after the desktop chords have joined the list too.
         // `view-native` has no other reason to know the feature's name.
         if !self.ai_enabled {
-            if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
-                specs.retain(|spec| spec.feature != "ai");
-            }
+            specs.retain(|spec| spec.feature != "ai");
         }
-        (mapping_call, notice_effects)
+        (specs, super_notice)
     }
 
     /// Every takeover this session performs, then the registration of the
@@ -700,17 +837,9 @@ impl NativeSession {
         // startup clock stops, and each key costs a `maparg` snapshot and a
         // `nvim_set_keymap` there. The empty registration still carries the
         // `:View` command and the reply that fires `Stage::Claims`.
-        let (modifier, _, _) =
-            profile::modifier_for(self.desktop_modifier_choice, model.caps.kitty_kbd);
-        let kept = |spec: &view_core::native::mappings::MappingSpec| {
-            self.ai_enabled || spec.feature != "ai"
-        };
-        self.chords_pending = view_core::native::mappings::default_maps()
-            .iter()
-            .any(|spec| self.cfg.enabled(spec.feature) && kept(spec))
-            || profile::chord_plan(&self.desktop, self.profile, modifier, &self.cfg)
-                .iter()
-                .any(kept);
+        let (specs, _) = self.live_specs(model);
+        self.chords_pending = !specs.is_empty();
+        self.hold_starts = self.starts_of(&specs, model);
         effects.push(RpcCall::RegisterMappings {
             specs: Vec::new(),
             channel_id: self.channel_id,
@@ -899,6 +1028,8 @@ impl NativeSession {
             desktop: default_desktop(),
             profile_marker: None,
             chords_pending: false,
+            leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
+            hold_starts: HoldStarts::default(),
             claims_owed: 0,
             held_input: Vec::new(),
             hold_lifted: false,
@@ -931,6 +1062,8 @@ impl NativeSession {
             desktop: default_desktop(),
             profile_marker: None,
             chords_pending: false,
+            leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
+            hold_starts: HoldStarts::default(),
             claims_owed: 0,
             held_input: Vec::new(),
             hold_lifted: false,
@@ -1009,6 +1142,19 @@ mod tests {
             .collect()
     }
 
+    fn input(notation: &str) -> Effect {
+        Effect::Rpc(RpcCall::Input {
+            notation: notation.to_string(),
+        })
+    }
+
+    fn leader_vim_enter(leader: &str) -> Msg {
+        Msg::EngineRequest(EngineRequest::VimEnter {
+            token: ReplyToken { msgid: 1 },
+            leader: leader.to_string(),
+        })
+    }
+
     /// `load` over a config file read the way `main.rs` reads it, so these
     /// tests keep asserting from a path on disk rather than from a value
     /// they built by hand -- the parse is half of what they cover.
@@ -1048,7 +1194,8 @@ mod tests {
     fn vim_enter_is_the_stage_that_hands_the_surfaces_over() {
         assert!(
             stage(&Msg::EngineRequest(EngineRequest::VimEnter {
-                token: ReplyToken { msgid: 1 }
+                token: ReplyToken { msgid: 1 },
+                leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
             })) == Stage::VimEnter
         );
         assert!(
@@ -1290,6 +1437,8 @@ mod tests {
             desktop: default_desktop(),
             profile_marker: None,
             chords_pending: false,
+            leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
+            hold_starts: HoldStarts::default(),
             claims_owed: 0,
             held_input: Vec::new(),
             hold_lifted: false,
@@ -1351,6 +1500,8 @@ mod tests {
             desktop: default_desktop(),
             profile_marker: None,
             chords_pending: false,
+            leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
+            hold_starts: HoldStarts::default(),
             claims_owed: 0,
             held_input: Vec::new(),
             hold_lifted: false,
@@ -1426,6 +1577,8 @@ mod tests {
             desktop: default_desktop(),
             profile_marker: None,
             chords_pending: false,
+            leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
+            hold_starts: HoldStarts::default(),
             claims_owed: 0,
             held_input: Vec::new(),
             hold_lifted: false,
@@ -1876,19 +2029,47 @@ cycle_surfaces = \"gz\"
     fn input_is_held_until_the_chord_registration_has_answered() {
         // a leader chord under the editor profile waits for its mapping the
         // way a desktop chord does, since both register behind the reply
+        let chord = view_core::native::chords::desktop_chords()[0]
+            .lhs(profile::modifier_for(ModifierChoice::Auto, model().caps.kitty_kbd).0);
         for (mut session, typed) in [
-            (NativeSession::desktop(7, None), "x"),
+            (NativeSession::desktop(7, None), chord),
+            (NativeSession::desktop(7, None), " ff"),
             (NativeSession::all_enabled(7, None), " ff"),
         ] {
             let mut m = model();
+            session.note_vim_enter(&leader_vim_enter(" "));
             let _ = session.follow_up(&mut m, Stage::VimEnter);
             assert!(
                 session.holds_input(),
                 "{typed:?}: the takeover starts the hold"
             );
-            session.hold_input(Effect::Rpc(RpcCall::Input {
-                notation: typed.to_string(),
-            }));
+            for passes in [
+                input("j"),
+                input("hello"),
+                Effect::Rpc(RpcCall::Paste {
+                    text: " ff".to_string(),
+                }),
+                Effect::Rpc(RpcCall::TryResize {
+                    width: 100,
+                    height: 30,
+                }),
+                Effect::Rpc(RpcCall::InputMouse {
+                    button: "left".to_string(),
+                    action: "press".to_string(),
+                    modifier: String::new(),
+                    grid: view_core::grid::registry::GridId(1),
+                    row: 5,
+                    col: 10,
+                }),
+            ] {
+                assert!(!session.holds(&passes), "{typed:?}: held {passes:?}");
+            }
+            assert!(session.holds(&input(typed)), "{typed:?} went out unmapped");
+            session.hold_input(input(typed));
+            assert!(
+                session.holds(&input("j")),
+                "{typed:?}: a key typed behind held input overtook it"
+            );
             let follow_up = session.follow_up(&mut m, Stage::Claims);
             assert!(
                 follow_up
@@ -1910,6 +2091,23 @@ cycle_surfaces = \"gz\"
                 "the key registration answered, so the held input goes out: {released:?}"
             );
             assert!(!session.holds_input());
+            assert!(!session.holds(&input(typed)), "the hold has ended");
+        }
+    }
+
+    /// The leader nvim reports at `VimEnter` decides which key waits: under
+    /// a `,` leader a `,` is held and a space goes to nvim at once.
+    #[test]
+    fn the_configs_leader_decides_which_key_waits() {
+        for (leader, held, passes) in [(",", ",", " "), (" ", " ", ","), ("\\", "\\", " ")] {
+            let mut session = NativeSession::all_enabled(7, None);
+            session.note_vim_enter(&leader_vim_enter(leader));
+            let _ = session.follow_up(&mut model(), Stage::VimEnter);
+            assert!(session.holds(&input(held)), "{leader:?}: {held:?} passed");
+            assert!(
+                !session.holds(&input(passes)),
+                "{leader:?}: {passes:?} held"
+            );
         }
     }
 

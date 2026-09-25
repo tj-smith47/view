@@ -265,7 +265,7 @@ fn a_notifier_installed_at_the_attach_is_read_after_the_takeover() {
     // ahead of the sink, so the presink is read for it first -- a test that
     // waited only on the channel left nvim parked for its own lifetime
     let mut entered = cutover.presink.into_iter().find_map(|msg| match msg {
-        Msg::EngineRequest(EngineRequest::VimEnter { token }) => Some(token),
+        Msg::EngineRequest(EngineRequest::VimEnter { token, .. }) => Some(token),
         _ => None,
     });
     let mut first = None;
@@ -274,7 +274,7 @@ fn a_notifier_installed_at_the_attach_is_read_after_the_takeover() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(remaining) {
             Ok(Msg::NotifySinkRead { foreign }) if first.is_none() => first = Some(foreign),
-            Ok(Msg::EngineRequest(EngineRequest::VimEnter { token })) => entered = Some(token),
+            Ok(Msg::EngineRequest(EngineRequest::VimEnter { token, .. })) => entered = Some(token),
             Ok(_) => {}
             Err(_) => break,
         }

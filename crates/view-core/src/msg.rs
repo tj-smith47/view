@@ -518,8 +518,9 @@ pub enum Msg {
     StartupHoldExpired {
         generation: u64,
     },
-    /// The bound on input held for the desktop chords elapsed
-    /// ([`Effect::ScheduleChordHold`]). Arms the bound again while the
+    /// The bound on held input elapsed ([`Effect::ScheduleChordHold`]): input
+    /// that could begin a key not yet registered, and everything typed
+    /// behind it. Arms the bound again while the
     /// takeover is unanswered and the ceiling has not passed; otherwise
     /// releases the held input whether or not nvim has run the
     /// registration yet, so an engine that cannot run it until a key
@@ -1149,6 +1150,9 @@ pub struct ExitInfo {
     pub by_signal: bool,
 }
 
+/// The leader nvim uses when `g:mapleader` is unset or empty.
+pub const DEFAULT_MAPLEADER: &str = "\\";
+
 /// Engine-initiated requests, decoded to a closed vocabulary in
 /// `view-engine`; unknown methods never reach core (the reader auto-errors
 /// them, as built).
@@ -1163,16 +1167,17 @@ pub struct ExitInfo {
 pub enum EngineRequest {
     VimEnter {
         token: ReplyToken,
+        /// `g:mapleader` as the user's config left it, or
+        /// [`DEFAULT_MAPLEADER`] where it set none or set it empty, which
+        /// is the leader nvim itself falls back to.
+        leader: String,
     },
     /// `"+p`/`"*p`: the injected `g:clipboard.paste` closure blocks nvim on
     /// this `rpcrequest`, so the loop must delegate rather than answer
     /// inline -- see [`Effect::ClipboardRead`]. `register` is `'+'` or
     /// `'*'`; view wires both to the same backend (see
     /// `Effect::ClipboardRead`'s doc for why).
-    ClipboardGet {
-        token: ReplyToken,
-        register: char,
-    },
+    ClipboardGet { token: ReplyToken, register: char },
     /// `"+yy`/`"*yy`: the injected `g:clipboard.copy` closure blocks nvim on
     /// this `rpcrequest` the same way `ClipboardGet` does, so a copy and a
     /// paste that race each other serialize through the same one-token,
@@ -1476,7 +1481,8 @@ pub enum Effect {
         after: Duration,
         generation: u64,
     },
-    /// Arms the bound on input held for the desktop chords: after `after`
+    /// Arms the bound on input held because it could begin a key not yet
+    /// registered: after `after`
     /// elapses the timer worker sends [`Msg::ChordHoldExpired`] into the
     /// loop. The same one-shot thread and the same shape as
     /// [`Effect::ScheduleStartupHold`].

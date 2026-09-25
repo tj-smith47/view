@@ -2096,7 +2096,7 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          once = true,\n\
          callback = function()\n\
          local had_ui = #attached() > 0\n\
-         vim.rpcrequest(channel, 'view_vim_enter')\n\
+         vim.rpcrequest(channel, 'view_vim_enter', vim.g.mapleader)\n\
          vim.wait(200, function() return #attached() > 0 end, 1)\n\
          if not had_ui and #attached() > 0 then\n\
          -- in the hook rather than on the loop: nvim's own first screen\n\
@@ -3197,6 +3197,43 @@ mod busy_text_kill_tests {
 mod config_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// The startup `--cmd`, every chunk it loads included, spawns a process
+    /// from one place: the bridge's `read_branch`, which runs only after the
+    /// segment `--startuptime`'s `NVIM STARTED` closes. A spawn added
+    /// anywhere else in that text runs inside the segment on every launch.
+    #[test]
+    fn the_startup_command_spawns_only_from_read_branch() {
+        let cmd = late_attach_cmd(80, 24);
+        let spawns: Vec<(usize, &str)> = [
+            "vim.system(",
+            "jobstart",
+            "vim.fn.system",
+            "uv.spawn",
+            "loop.spawn",
+            "io.popen",
+            "os.execute",
+        ]
+        .iter()
+        .flat_map(|needle| cmd.match_indices(needle))
+        .collect();
+        assert_eq!(
+            spawns.len(),
+            1,
+            "spawn sites in the startup --cmd: {spawns:?}"
+        );
+        let start = cmd
+            .find("local function read_branch()")
+            .expect("the bridge chunk defines read_branch");
+        let end = start
+            + cmd[start..]
+                .find("\nend\n")
+                .expect("read_branch closes at the chunk's own indent");
+        assert!(
+            (start..end).contains(&spawns[0].0),
+            "the one spawn stands outside read_branch: {spawns:?}"
+        );
+    }
 
     /// The environment the spawn path actually hands a child, read back off
     /// the built `Command` rather than off [`EngineConfig::env_plan`]: the

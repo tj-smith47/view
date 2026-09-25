@@ -363,8 +363,16 @@ fn vim_enter_token(
     presink: Vec<Msg>,
     rx: &mpsc::Receiver<Msg>,
 ) -> Option<view_core::msg::ReplyToken> {
+    vim_enter_request(presink, rx).map(|(token, _)| token)
+}
+
+/// [`vim_enter_token`] with the leader the request carries.
+fn vim_enter_request(
+    presink: Vec<Msg>,
+    rx: &mpsc::Receiver<Msg>,
+) -> Option<(view_core::msg::ReplyToken, String)> {
     let staged = presink.into_iter().find_map(|msg| match msg {
-        Msg::EngineRequest(EngineRequest::VimEnter { token }) => Some(token),
+        Msg::EngineRequest(EngineRequest::VimEnter { token, leader }) => Some((token, leader)),
         _ => None,
     });
     if staged.is_some() {
@@ -374,7 +382,9 @@ fn vim_enter_token(
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(remaining) {
-            Ok(Msg::EngineRequest(EngineRequest::VimEnter { token })) => return Some(token),
+            Ok(Msg::EngineRequest(EngineRequest::VimEnter { token, leader })) => {
+                return Some((token, leader))
+            }
             Ok(_) => {}
             Err(_) => break,
         }
@@ -706,9 +716,9 @@ fn a_spawn_that_kept_nvims_own_attach_barrier_gets_one_uienter() {
     );
 }
 
-/// The bridge reads the git branch once nvim has started, and never inside
-/// the segment `--startuptime`'s `NVIM STARTED` closes: a `git` fork and
-/// exec there costs every launch about a millisecond of the engine's own
+/// The bridge reads the git branch on the first loop turn after the segment
+/// `--startuptime`'s `NVIM STARTED` closes. A `git` fork and exec inside
+/// that segment costs every launch about a millisecond of the engine's own
 /// startup.
 ///
 /// The fixture wraps `vim.system` from `init.lua`, which the bridge looks
@@ -812,4 +822,27 @@ fn the_branch_is_read_after_startup_and_reaches_view() {
         "no git spawn may run inside the startup segment: {counts:?}"
     );
     assert!(counts[1] >= 1, "the read must have spawned git: {counts:?}");
+}
+
+/// The `VimEnter` request carries the leader the config set, which is what
+/// view reads `<leader>` in its own keys as while it decides which typed
+/// keys wait for their registration. A config that sets none carries nvim's
+/// own backslash.
+#[test]
+fn the_vim_enter_request_carries_the_configs_leader() {
+    let dir = ScratchDir::new("vim-enter-leader").unwrap();
+    std::fs::write(dir.join("init.lua"), "vim.g.mapleader = ','\n").unwrap();
+    for (init, want) in [(Some(dir.join("init.lua")), ","), (None, "\\")] {
+        let mut config = EngineConfig::isolated().with_late_attach(120, 40);
+        if let Some(init) = &init {
+            config = config.with_arg("-u").with_arg(init);
+        }
+        let mut engine = Engine::spawn(config).unwrap();
+        let (tx, rx) = mpsc::sync_channel(256);
+        let (_pump, cutover) = engine.start_pump(tx);
+        let (token, leader) = vim_enter_request(cutover.presink, &rx)
+            .expect("the child never asked view_vim_enter, so nothing here was measured");
+        assert_eq!(leader, want, "init {init:?}");
+        engine.handle.reply(token, ReplyValue::Nil).unwrap();
+    }
 }

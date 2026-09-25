@@ -1659,6 +1659,7 @@ fn loop_tokens_are_noops_and_engine_request_always_replies() {
         &mut m,
         Msg::EngineRequest(EngineRequest::VimEnter {
             token: ReplyToken { msgid: 9 },
+            leader: crate::msg::DEFAULT_MAPLEADER.to_string(),
         }),
     );
     assert!(matches!(
@@ -9925,6 +9926,7 @@ fn arm_swap_probe(m: &mut Model) -> u64 {
         m,
         Msg::EngineRequest(EngineRequest::VimEnter {
             token: ReplyToken { msgid: 7 },
+            leader: crate::msg::DEFAULT_MAPLEADER.to_string(),
         }),
     );
     swap_probe_generation(&effects)
@@ -10118,6 +10120,7 @@ fn replacement_vim_enter(m: &mut Model) -> Vec<Effect> {
         m,
         Msg::EngineRequest(EngineRequest::VimEnter {
             token: ReplyToken { msgid: 99 },
+            leader: crate::msg::DEFAULT_MAPLEADER.to_string(),
         }),
     )
 }
@@ -10479,6 +10482,7 @@ fn vim_enter_is_answered_first_and_then_asked_what_it_recovered() {
         &mut m,
         Msg::EngineRequest(EngineRequest::VimEnter {
             token: ReplyToken { msgid: 7 },
+            leader: crate::msg::DEFAULT_MAPLEADER.to_string(),
         }),
     );
     assert!(
