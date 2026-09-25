@@ -2932,12 +2932,12 @@ mod tests {
         let mut messages = Messages::default();
         messages.push("echomsg".to_string(), vec![(0, "one\ntwo".into())], false);
         messages.push("echomsg".to_string(), vec![(0, "three".into())], false);
-        let boxes = messages.visible_toasts(7);
+        let boxes = messages.visible_toasts_in(7, 40);
         assert_eq!(boxes.len(), 2);
         assert_eq!(texts(&boxes[0]), vec!["one", "two"]);
         assert_eq!(texts(&boxes[1]), vec!["three"]);
         assert_eq!(
-            messages.visible_toasts(6).len(),
+            messages.visible_toasts_in(6, 40).len(),
             1,
             "a 4-row box and a 3-row box do not both fit in 6 rows"
         );

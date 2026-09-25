@@ -377,7 +377,7 @@ fn blank_row(canvas: &mut Canvas<'_>, row: u16, col: u16, width: u16) {
     }
 }
 
-/// `lines` is already the exact visible set `Messages::visible_toasts`
+/// `lines` is already the exact visible set `Messages::visible_toasts_in`
 /// selected for this one notice -- one physical line per row, in display
 /// order -- so this only has to blank each row (mirroring the real
 /// painter's own toast-box clear; without it a row's cells past a shorter

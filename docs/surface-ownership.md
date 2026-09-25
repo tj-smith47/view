@@ -40,7 +40,7 @@ The table below is generated from `SURFACES` in
 | --- | --- | --- | --- | --- | --- |
 | the command line | `ext_cmdline` | `Own` | `[native] palette = false` | `ext_cmdline`, `a float over the command line` | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
 | the completion menu | `ext_popupmenu` | `Own` | `[native] palette = false` | `ext_popupmenu`, `ext_wildmenu` | `noice`/`superseded`, `noice`/`deferred` |
-| the message area | `ext_messages` | `Own` | `[native] notifications = false` | `ext_messages`, `vim.notify`, `cmdheight`, `showmode`, `showcmd`, `ruler`, `rulerformat`, `a float over the message area` | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
+| the message area | `ext_messages` | `Own` | `[native] notifications = false` | `ext_messages`, `vim.notify`, `cmdheight`, `showmode`, `showcmd`, `ruler`, `rulerformat`, `a float over the notice column` | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
 | the tab line | `ext_tabline` | `Own` | `[native] tabline = false` | `ext_tabline`, `winbar`, `tabline`, `showtabline` | `noice`/`deferred`, `smoke-minimal`/`native-only` |
 | the status line | -- none -- | `Own` | `[native] statusline = false` | `laststatus`, `statusline` | -- none -- |
 | the tile status segments | -- none -- | `Own` | `[native] statusline = false` | -- none -- | -- none -- |

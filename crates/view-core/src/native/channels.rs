@@ -149,7 +149,7 @@ impl Channel {
             Self::Attach(ext) => ext.as_str(),
             Self::Replaced(global) => global,
             Self::Float(Region::CmdlineBand) => "a float over the command line",
-            Self::Float(Region::TopRightChrome) => "a float over the message area",
+            Self::Float(Region::TopRightChrome) => "a float over the notice column",
         }
     }
 }

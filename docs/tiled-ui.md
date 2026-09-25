@@ -340,6 +340,19 @@ instead, `winfixheight`-pinned so a split beside it cannot steal its rows.
 Either shape shortens each entry's timestamp to `HH:MM:SS` once its own
 tile is too narrow for the full date to fit beside the message.
 
+## Where notices appear
+
+Notices stack in a column in the corner named by
+`[ui.surfaces.notifications] anchor`. The column takes the part of the
+screen no windowed surface holds. Under tiles it sits inside the tile in
+that corner, one cell in from the frame. It is at most 60 columns wide and
+at most half the screen wide, and a notice longer than that wraps onto more
+lines inside its box.
+
+When the boxes would cover the line your cursor is on, the stack starts
+from the column's other end. A plugin's floating window over the column
+keeps its place, and the stack starts past it.
+
 ## The placement ring
 
 `<leader>uw` (`cycle_surfaces`) steps the tree, the agent panel, the

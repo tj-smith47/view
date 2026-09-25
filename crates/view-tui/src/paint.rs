@@ -3135,7 +3135,7 @@ mod tests {
     /// must actually reach the screen rather than being selected and then
     /// silently clipped away by a frame the selection never paid for.
     /// Disconfirm: charging a box its lines alone in
-    /// `Messages::visible_toasts` keeps two boxes for a 5-row stack, and
+    /// `Messages::visible_toasts_in` keeps two boxes for a 5-row stack, and
     /// the second one's rows fall outside the grid -- the interior row here
     /// reads `"info3"`, a transient line the error should have outranked,
     /// instead of "critical error".

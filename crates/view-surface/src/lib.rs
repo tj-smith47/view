@@ -108,7 +108,7 @@ pub enum LayerKind {
     /// The command line, present while nvim's command line is open.
     Cmdline(CmdlineState),
     /// One notice's toast box: its physical lines, already selected by
-    /// `Messages::visible_toasts` (persistent error/warn boxes kept, the
+    /// `Messages::visible_toasts_in` (persistent error/warn boxes kept, the
     /// most recent transient ones filling what room remains) and split on
     /// the entry's own embedded line breaks -- one row per span-vec, in
     /// display order top to bottom.

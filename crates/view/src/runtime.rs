@@ -3566,7 +3566,7 @@ mod tests {
             model
                 .engine
                 .messages
-                .visible_toasts(model.toast_rows())
+                .visible_toasts_in(model.toast_rows(), model.notice_column().rect.2)
                 .len(),
             1,
             "the notice that left is gone from the stack it settled into"

@@ -116,17 +116,6 @@ impl MessageEntry {
         joined.split('\n').map(str::to_string).collect()
     }
 
-    /// How many physical lines [`Self::lines`] would return, without
-    /// building them.
-    #[must_use]
-    pub(crate) fn line_count(&self) -> usize {
-        self.content
-            .iter()
-            .map(|(_, t)| t.matches('\n').count())
-            .sum::<usize>()
-            .saturating_add(1)
-    }
-
     /// Whether nvim's own `msg_show` `kind` (per `api-ui-events.txt`'s kind
     /// table) names this an error or a warning: `"emsg"`, `"echoerr"`,
     /// `"wmsg"`, `"lua_error"`, `"rpc_error"`, `"shell_err"`. These must be
@@ -1106,38 +1095,26 @@ impl Messages {
     /// what the stack currently says, for a caller that asks that and not
     /// where any of it is drawn.
     ///
-    /// `max_rows` is [`Self::visible_toasts`]' budget, frames included, so
-    /// the two can never disagree about which notices are showing. Nothing
-    /// paints from this -- `view-surface` builds its layers from
-    /// `visible_toasts` directly -- which is why the flattening is here
-    /// rather than a second selection with its own eviction rule.
+    /// `max_rows` is [`Self::visible_toasts_in`]' budget, frames included,
+    /// with each notice on its own unwrapped lines. Nothing paints from
+    /// this: `view-surface` builds its layers from `visible_toasts_in`
+    /// directly, so the flattening reuses that selection and its eviction
+    /// rule.
     ///
     /// Each returned line is one span, carrying [`StyleRole::Plain`]
     /// (`crate::native::views::StyleRole`): a toast has no per-segment
-    /// structure to preserve, so a single honest span is the whole row --
-    /// not a placeholder for styling nobody asked for yet.
+    /// structure to preserve, so one span is the whole row.
     #[must_use]
     pub fn visible_lines(&self, max_rows: usize) -> Vec<Vec<Span>> {
-        self.visible_toasts(max_rows)
+        self.visible_toasts_in(max_rows, u16::MAX)
             .into_iter()
             .flatten()
             .collect()
     }
 
-    /// Which entries the row budget is showing, in `entries` order. Costed
-    /// off each entry's own line count rather than its rendered spans, so
-    /// the answer is free of the allocation [`Self::visible_toasts`] pays
-    /// for the boxes it hands back.
-    fn keep_visible(&self, max_rows: usize) -> Vec<bool> {
-        let costs: Vec<(bool, usize)> = self
-            .painted()
-            .map(|e| (e.outranks_transient(), e.line_count().saturating_add(2)))
-            .collect();
-        Self::keep_costed(&costs, max_rows)
-    }
-
-    /// [`Self::keep_visible`] for boxes `width` cells wide, each entry
-    /// costed at the rows its lines wrap to inside that width.
+    /// Which entries the row budget is showing in boxes `width` cells
+    /// wide, in `entries` order, each entry costed at the rows its lines
+    /// wrap to inside that width plus its frame.
     fn keep_visible_in(&self, max_rows: usize, width: u16) -> Vec<bool> {
         let costs: Vec<(bool, usize)> = self
             .painted()
@@ -1164,39 +1141,21 @@ impl Messages {
         keep
     }
 
-    /// The toast boxes actually visible in a stack `max_rows` tall, oldest
-    /// first: one box per entry, holding that entry's own physical lines
-    /// (its content split on its own embedded newlines) and costing those
-    /// lines plus the two rows of the frame drawn around them.
+    /// The toast boxes visible in a column `max_rows` tall and `width`
+    /// cells wide, oldest first: one box per entry, holding that entry's
+    /// own physical lines (its content split on its own embedded newlines)
+    /// wrapped to fit inside the box's frame, and costing the rows they
+    /// wrap to plus the two rows of the frame drawn around them.
     ///
-    /// One box per entry rather than one box for the log is what lets the
-    /// top slot's notice leave to the right while the ones under it slide
-    /// up: two boxes moving in different directions cannot be one rect.
+    /// One box per entry is what lets the top slot's notice leave to the
+    /// side while the ones under it slide up: two boxes moving in different
+    /// directions are two rects.
     ///
     /// Eviction is [`keep_within`]'s: an error, a warning or an unanswered
-    /// question is never pushed off merely because other messages arrived
-    /// after it, and only when those alone overflow the stack does eviction
-    /// reach them, oldest first. A single box too tall for the whole stack
-    /// is still shown rather than evicted into an empty screen -- the caller
-    /// clips it, which is a truncated notice instead of no notice at all.
-    #[must_use]
-    pub fn visible_toasts(&self, max_rows: usize) -> Vec<Vec<Vec<Span>>> {
-        self.painted()
-            .zip(self.keep_visible(max_rows))
-            .filter(|(_, shown)| *shown)
-            .map(|(e, _)| {
-                e.lines()
-                    .into_iter()
-                    .map(|l| vec![Span::plain(l)])
-                    .collect()
-            })
-            .collect()
-    }
-
-    /// The toast boxes visible in a column `max_rows` tall and `width`
-    /// cells wide, oldest first: [`Self::visible_toasts`] with every line
-    /// wrapped to fit inside the box's frame, and each entry costed at the
-    /// rows it wraps to.
+    /// question stays up however many messages arrive after it, and only
+    /// when those alone overflow the stack does eviction reach them, oldest
+    /// first. A single box too tall for the whole stack is still shown and
+    /// the caller clips it, so a truncated notice is what the person sees.
     #[must_use]
     pub fn visible_toasts_in(&self, max_rows: usize, width: u16) -> Vec<Vec<Vec<Span>>> {
         self.painted()

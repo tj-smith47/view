@@ -19,7 +19,7 @@ use super::{
 };
 
 /// Renders one notice's toast box: `render()` already picked exactly the
-/// physical lines this box holds (`Messages::visible_toasts`) and
+/// physical lines this box holds (`Messages::visible_toasts_in`) and
 /// grew/anchored `area` to them plus a one-cell frame on every edge, so
 /// painting only has to draw the border around `area` and write one line
 /// per interior row, in the order given.
