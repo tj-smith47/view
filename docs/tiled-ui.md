@@ -10,6 +10,9 @@ two frames and around the outside of the screen. With `gaps = false` two
 neighbouring tiles share one frame line, and the places where lines meet
 take a junction glyph.
 
+An inactive tile shows the cursor line when your config sets `cursorline`
+for every window, as nvim does.
+
 Under `panes = "nvim"` the screen keeps the shape nvim draws: the `│`
 separator column between windows, restyled through `WinSeparator`.
 
