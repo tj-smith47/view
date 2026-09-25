@@ -7,18 +7,18 @@
  |                                    | ||lua/a/renderer/notify.lua) and the || 
  |                                    | ||status line (statusline). view     || 
  |                                    | ||draws them now.                    || 
- |                                    | ||native.notifications = false and   || 
- |                                    | ||native.statusline = false give them|| 
+ |                                    | ||Now drawing the picker.            || 
+ |                                    | ||Now mapping <leader>ff to picker   || 
+ |                                    | ||files and <D-Left> to window focus || 
+ |                                    | ||left. Your own mappings of them are|| 
+ |                                    | ||off.                               || 
+ |                                    | ||native.notifications = false,      || 
+ |                                    | ||native.statusline = false,         || 
+ |                                    | ||native.picker = false and          || 
+ |                                    | ||keys.profile = "editor" give them  || 
  |                                    | ||back.                              || 
  |                                    | ||Startup messages: <leader>fm       || 
  |                                    | |+-----------------------------------+| 
- |                                    | |                                     | 
- |                                    | |                                     | 
- |                                    | |                                     | 
- |                                    | |                                     | 
- |                                    | |                                     | 
- |                                    | |                                     | 
- |                                    | |                                     | 
  |                                    | |                                     | 
  + -- INSERT -- 1:1 ------------------+ + E 1 2:1 ----------------------------+ 
                                                                                 
@@ -36,14 +36,14 @@ ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADCA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDCA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA

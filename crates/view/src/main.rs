@@ -1401,8 +1401,14 @@ fn main() -> Result<()> {
                     path.display()
                 )
             });
-            if let Some(notice) = notice {
-                pre_executor_effects.extend(model.engine.record_native_notice(notice, false));
+            match notice {
+                Some(notice) if theme_cache::is_missing_cache(&notice) => {
+                    model.engine.record_to_history_alone(notice);
+                }
+                Some(notice) => {
+                    pre_executor_effects.extend(model.engine.record_native_notice(notice, false));
+                }
+                None => {}
             }
             // only seeds on a genuine cache hit: seeding from a miss's
             // Theme::default() would register TabLineSel/PmenuSel with

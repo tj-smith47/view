@@ -13,7 +13,7 @@
 use crate::model::Model;
 use crate::msg::Effect;
 use crate::native::channels::Channel;
-use crate::native::surfaces::{self, FloatSighting, Surface};
+use crate::native::surfaces::{self, FloatSighting, Surface, Taken};
 use crate::native::toast::HoldOutcome;
 
 /// How long the engine's float watcher waits after the first arming event
@@ -55,11 +55,21 @@ fn family(identity: Option<&str>) -> String {
 /// The family every float that names nobody shares.
 const ANONYMOUS_FAMILY: &str = "view: a plugin is drawing over ";
 
-/// The opening of the one box a launch raises about the config's writes to
-/// surfaces view draws. One family for every channel, so a channel that
-/// reports later re-words the standing box through the family withdrawal
-/// and the launch still shows one box.
+/// The opening of the launch box's line about the config's writes to
+/// surfaces view draws, and the box's family whenever that line leads.
 const HELD_FAMILY: &str = "view: your config also draws ";
+
+/// The opening of the launch box's line naming the features view draws,
+/// and the box's family when no held channel leads it.
+const DRAWING_FAMILY: &str = "view: now drawing ";
+
+/// The opening of the launch box's line listing the user keys view maps,
+/// and the box's family when that line is all the box says.
+const MAPPING_FAMILY: &str = "view: now mapping ";
+
+/// Every family the launch box can open with, in the order its lines
+/// stand. A launch shows one box, so raising it withdraws the others.
+const LAUNCH_FAMILIES: [&str; 3] = [HELD_FAMILY, DRAWING_FAMILY, MAPPING_FAMILY];
 
 /// What a held channel was holding, as far as a notice may speak of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,18 +151,61 @@ pub(super) fn on_channel_held(model: &mut Model, channel: &str, holder: &str) ->
         return effects;
     }
     model.surface_conflicts.note_announced(key.clone());
-    let text = held_notice(
+    effects.extend(raise_launch_box(model));
+    effects.push(Effect::RecordAnnounced { key });
+    effects
+}
+
+/// Adds what a launch handed to view (the features it draws, the user keys
+/// it maps) to the launch's one box.
+///
+/// Each item comes with its first-run record key, and one this config was
+/// told at an earlier launch is left out. The caller writes the record,
+/// which keys these by feature and key.
+pub(super) fn on_taken_over(model: &mut Model, taken: Vec<(String, Taken)>) -> Vec<Effect> {
+    let mut news = false;
+    for (key, taken) in taken {
+        if model.surface_conflicts.note_announced(key) {
+            news |= model.surface_conflicts.tell_taken(taken);
+        }
+    }
+    if !news {
+        return Vec::new();
+    }
+    raise_launch_box(model)
+}
+
+/// Raises or re-words the launch's one box from everything it names so far.
+///
+/// The box opens with whichever of its lines comes first, so its family
+/// changes as more is told; every other launch family is withdrawn first,
+/// which keeps one box standing however the reports interleave.
+fn raise_launch_box(model: &mut Model) -> Vec<Effect> {
+    let Some((family, text)) = launch_notice(
         model.surface_conflicts.told(),
+        model.surface_conflicts.taken(),
         model.config_was_read(),
         model.surface_conflicts.startup_window_open(),
-    );
+    ) else {
+        return Vec::new();
+    };
+    let mut reworded = false;
+    for other in LAUNCH_FAMILIES.iter().filter(|other| **other != family) {
+        reworded |= model.engine.withdraw_native_notice(other);
+    }
     model.dirty = true;
-    effects.extend(
-        model
-            .engine
-            .record_native_notice_sticky_once(HELD_FAMILY, text),
-    );
-    effects.push(Effect::RecordAnnounced { key });
+    // a held channel is the config fighting view, which stands until the
+    // user acts; a feature or a key view took is told and times out
+    let mut effects = if model.surface_conflicts.told().is_empty() {
+        model.engine.record_native_notice_once(family, text)
+    } else {
+        model.engine.record_native_notice_sticky_once(family, text)
+    };
+    // a plugin notifier already popped this box under its earlier opening,
+    // and the same family re-worded is not sent to it again either
+    if reworded {
+        effects.retain(|e| !matches!(e, Effect::Rpc(crate::msg::RpcCall::Notify { .. })));
+    }
     effects
 }
 
@@ -169,33 +222,88 @@ fn history_line(channel: &str, holder: &str, held: Holder<'_>) -> String {
     }
 }
 
-/// The launch box for every surface in `told`: what the config also draws,
-/// the lines that give it back, and where the launch's messages went.
+/// The launch box, and the family it opens with: what the config also
+/// draws, the features view draws now, the user keys view maps now, the
+/// lines that give all of it back, and where the launch's messages went.
+/// `None` when there is nothing to name.
 ///
 /// A surface is named by its label with the channels that reported it, so
 /// the user reads both the surface they see and the option they wrote. The
-/// last line names the key that shows this launch's own messages, which are
-/// in the history on every launch; a box raised after the user has acted is
-/// not about a launch and leaves it out.
-fn held_notice(told: &[(Surface, Vec<String>)], config_was_read: bool, startup: bool) -> String {
+/// keys stand in one sentence, each with what it does now. The last line
+/// names the key that shows this launch's own messages, which are in the
+/// history on every launch; a box raised after the user has acted is not
+/// about a launch and leaves it out.
+fn launch_notice(
+    told: &[(Surface, Vec<String>)],
+    taken: &[Taken],
+    config_was_read: bool,
+    startup: bool,
+) -> Option<(&'static str, String)> {
     let rows: Vec<_> = told
         .iter()
         .filter_map(|(surface, channels)| {
             surfaces::row(*surface).map(|row| (row, channels.join(", ")))
         })
         .collect();
-    let items: Vec<String> = rows
-        .iter()
-        .map(|(row, channels)| format!("{} ({channels})", row.label))
-        .collect();
-    let items: Vec<&str> = items.iter().map(String::as_str).collect();
-    let them = if rows.len() > 1 { "them" } else { "it" };
+    let mut lines: Vec<(&'static str, String)> = Vec::new();
     let mut switches: Vec<&str> = Vec::new();
-    for switch in rows.iter().filter_map(|(row, _)| off_switch(row.feature)) {
+    let mut add_switch = |switch: &'static str| {
         if !switches.contains(&switch) {
             switches.push(switch);
         }
+    };
+    if !rows.is_empty() {
+        let items: Vec<String> = rows
+            .iter()
+            .map(|(row, channels)| format!("{} ({channels})", row.label))
+            .collect();
+        let items: Vec<&str> = items.iter().map(String::as_str).collect();
+        let them = if rows.len() > 1 { "them" } else { "it" };
+        lines.push((
+            HELD_FAMILY,
+            format!("{}. view draws {them} now.", join(&items)),
+        ));
+        for switch in rows.iter().filter_map(|(row, _)| off_switch(row.feature)) {
+            add_switch(switch);
+        }
     }
+    // a feature whose channel the held line already names is told there
+    let drawing: Vec<String> = taken
+        .iter()
+        .filter_map(|taken| match taken {
+            Taken::Drawing { feature, .. } => Some(*feature),
+            Taken::Key { .. } => None,
+        })
+        .filter(|feature| !rows.iter().any(|(row, _)| row.feature == Some(*feature)))
+        .map(feature_label)
+        .collect();
+    if !drawing.is_empty() {
+        let drawing_read: Vec<&str> = drawing.iter().map(String::as_str).collect();
+        lines.push((DRAWING_FAMILY, format!("{}.", join(&drawing_read))));
+    }
+    let keys: Vec<String> = taken
+        .iter()
+        .filter_map(|taken| match taken {
+            Taken::Key { lhs, action, .. } => Some(format!("{lhs} to {action}")),
+            Taken::Drawing { .. } => None,
+        })
+        .collect();
+    if !keys.is_empty() {
+        let keys_read: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let theirs = if keys.len() > 1 {
+            "Your own mappings of them are off."
+        } else {
+            "Your own mapping of it is off."
+        };
+        lines.push((MAPPING_FAMILY, format!("{}. {theirs}", join(&keys_read))));
+    }
+    for taken in taken {
+        add_switch(taken.off_switch());
+    }
+    let (family, _) = lines.first()?;
+    let family = *family;
+    let named = rows.len() + drawing.len() + keys.len();
+    let them = if named > 1 { "them" } else { "it" };
     let remedy = if !config_was_read {
         UNREAD_CONFIG.to_string()
     } else if switches.is_empty() {
@@ -209,10 +317,38 @@ fn held_notice(told: &[(Surface, Vec<String>)], config_was_read: bool, startup: 
     } else {
         ""
     };
-    format!(
-        "{HELD_FAMILY}{}. view draws {them} now.{remedy}{account}",
-        join(&items)
-    )
+    let body: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .map(|(index, (opening, rest))| {
+            if index == 0 {
+                format!("{opening}{rest}")
+            } else {
+                format!("{}{rest}", continued(opening))
+            }
+        })
+        .collect();
+    Some((family, format!("{}{remedy}{account}", body.join("\n"))))
+}
+
+/// A launch family's opening as a line under the box's first: the family
+/// prefix dropped and the first letter raised.
+fn continued(opening: &str) -> String {
+    let bare = opening.strip_prefix("view: ").unwrap_or(opening);
+    let mut chars = bare.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// The name a feature is drawn under: the label of the first surface it
+/// draws, or its registry id where no surface row names it.
+fn feature_label(feature: &str) -> String {
+    surfaces::SURFACES
+        .iter()
+        .find(|row| row.feature == Some(feature))
+        .map_or_else(|| format!("the {feature}"), |row| row.label.to_string())
 }
 
 /// The registry's off switch for `feature`, the line doctor and the
@@ -704,7 +840,7 @@ mod tests {
     use crate::model::Model;
     use crate::msg::{Effect, Msg, RpcCall};
     use crate::native::ext::Ext;
-    use crate::native::surfaces::{FloatAnchor, FloatSighting, Surface};
+    use crate::native::surfaces::{FloatAnchor, FloatSighting, Surface, Taken};
     use crate::update::update;
 
     /// The wire capture's own session: a 100x30 terminal whose nvim grid is
@@ -2067,9 +2203,15 @@ mod tests {
             };
             families.push(super::family(sighting.identity()));
         }
-        // the one box every held channel shares, a fixed opening the way the
+        // the openings the one launch box can take, fixed the way the
         // anonymous one is
-        families.push(super::HELD_FAMILY.to_string());
+        for launch in [
+            super::HELD_FAMILY,
+            super::DRAWING_FAMILY,
+            super::MAPPING_FAMILY,
+        ] {
+            families.push(launch.to_string());
+        }
         // and what a user can call a file. The path is the one part of a
         // family that stays under the user's control after the boundary
         // above -- a path has no charset to hold it to -- so the terminator
@@ -2636,27 +2778,13 @@ mod tests {
     /// needle left behind by a rewording covers no row.
     #[test]
     fn every_compat_needle_is_a_row_view_still_writes() {
-        let scenario = include_str!("../../../../compat/scenarios/noice.toml");
-        let needles: Vec<String> = scenario
-            .lines()
-            .filter_map(|line| line.split_once("wait_for = \""))
-            .filter_map(|(_, rest)| rest.split_once('"'))
-            .map(|(needle, _)| needle.to_string())
-            .collect();
+        let needles = wait_needles(include_str!("../../../../compat/scenarios/noice.toml"));
         assert!(
             needles.len() > 5,
             "the file's needles went unread: {needles:?}"
         );
 
-        let mut model = captured_session();
-        let _ = update(
-            &mut model,
-            Msg::ChannelHeld {
-                channel: "vim.notify".to_string(),
-                holder: "function <a.renderer>".to_string(),
-            },
-        );
-        let standing = notices(&model);
+        let standing = notices(&noice_launch());
         assert_eq!(standing.len(), 1, "{standing:?}");
 
         let uncovered: Vec<&str> = standing[0]
@@ -2672,6 +2800,66 @@ mod tests {
             uncovered.join("\n  "),
             needles.join("\n  ")
         );
+    }
+
+    /// Every `wait_for` needle a scenario file names.
+    fn wait_needles(scenario: &str) -> Vec<String> {
+        scenario
+            .lines()
+            .filter_map(|line| line.split_once("wait_for = \""))
+            .filter_map(|(_, rest)| rest.split_once('"'))
+            .map(|(needle, _)| needle.to_string())
+            .collect()
+    }
+
+    /// The launch box noice's first launch raises: its message area held.
+    ///
+    /// Whether a line naming a feature view draws stands beside it depends
+    /// on which of the fixture's plugins has written its channel by the
+    /// time the box is read, so the scenario waits for none of that line.
+    fn noice_launch() -> Model {
+        let mut model = captured_session();
+        let _ = update(
+            &mut model,
+            Msg::ChannelHeld {
+                channel: "vim.notify".to_string(),
+                holder: "function <a.renderer>".to_string(),
+            },
+        );
+        model
+    }
+
+    /// A needle a scenario takes from the launch box sits on one row of it
+    /// as the compat harness's 80-column terminal wraps it, because
+    /// `wait_for` matches one screen row at a time.
+    #[test]
+    fn every_compat_needle_from_the_launch_box_fits_one_row() {
+        let standing = notices(&noice_launch());
+        let lines: Vec<String> = standing[0].split('\n').map(str::to_string).collect();
+        let rows = crate::model::wrap_toast(&lines, crate::model::NOTICE_COLUMN_MAX.min(80 / 2));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compat/scenarios");
+        let mut graded = 0;
+        for entry in std::fs::read_dir(&dir).expect("the compat scenarios") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.extension().is_none_or(|ext| ext != "toml") {
+                continue;
+            }
+            let scenario = std::fs::read_to_string(&path).expect("a readable scenario");
+            for needle in wait_needles(&scenario) {
+                if !lines.iter().any(|line| line.contains(needle.as_str())) {
+                    continue;
+                }
+                graded += 1;
+                assert!(
+                    rows.iter().any(|row| row.contains(needle.as_str())),
+                    "{}: {needle:?} straddles a row of the box as the harness \
+                     wraps it:\n  {}",
+                    path.display(),
+                    rows.join("\n  ")
+                );
+            }
+        }
+        assert!(graded > 5, "the walk graded nothing: {graded}");
     }
 
     #[test]
@@ -2693,11 +2881,149 @@ mod tests {
             (Surface::Messages, vec!["vim.notify".to_string()]),
             (Surface::Tabline, vec!["winbar".to_string()]),
         ];
-        for read in [true, false] {
-            for startup in [true, false] {
-                let text = super::held_notice(&told, read, startup);
-                assert!(text.starts_with(super::HELD_FAMILY), "{text:?}");
+        let taken = every_taking();
+        for told in [&told[..], &[]] {
+            for taken in [&taken[..], &taken[..1], &taken[taken.len() - 1..], &[]] {
+                for read in [true, false] {
+                    for startup in [true, false] {
+                        let launch = super::launch_notice(told, taken, read, startup);
+                        let Some((family, text)) = launch else {
+                            assert!(told.is_empty() && taken.is_empty());
+                            continue;
+                        };
+                        assert!(super::LAUNCH_FAMILIES.contains(&family), "{family:?}");
+                        assert!(text.starts_with(family), "{text:?} is not in {family:?}");
+                    }
+                }
             }
+        }
+    }
+
+    /// Everything a launch can hand to view beside the channels: every
+    /// feature the registry names, and every default key and desktop chord
+    /// as a key the user had mapped, keyed the way the first-run record
+    /// keys them.
+    fn every_taken() -> Vec<(String, Taken)> {
+        let mut taken: Vec<(String, Taken)> = crate::native::registry::features()
+            .iter()
+            .map(|desc| {
+                (
+                    desc.id.to_string(),
+                    Taken::Drawing {
+                        feature: desc.id,
+                        off_switch: desc.off_switch,
+                    },
+                )
+            })
+            .collect();
+        let keys = crate::native::mappings::default_maps()
+            .iter()
+            .map(|spec| (spec.feature, spec.lhs.to_string(), spec.verb))
+            .chain(
+                crate::native::chords::desktop_chords()
+                    .iter()
+                    .map(|chord| (chord.feature, chord.with_super.to_string(), chord.verb)),
+            );
+        for (feature, lhs, verb) in keys {
+            taken.push((
+                format!("{feature}:key:{lhs}"),
+                Taken::Key {
+                    lhs: lhs.to_string(),
+                    action: format!("{feature} {}", verb.replace('_', " ")),
+                    off_switch: "keys.profile = \"editor\"",
+                },
+            ));
+        }
+        taken
+    }
+
+    fn every_taking() -> Vec<Taken> {
+        every_taken().into_iter().map(|(_, taken)| taken).collect()
+    }
+
+    /// The launch box stands until the user acts once a held channel is in
+    /// it, and times out while it tells only what view took.
+    #[test]
+    fn the_launch_box_stands_only_for_a_held_channel() {
+        let kinds = |model: &Model| -> Vec<String> {
+            model
+                .engine
+                .messages
+                .entries
+                .iter()
+                .filter(|entry| entry.is_native())
+                .map(|entry| entry.kind.clone())
+                .collect()
+        };
+        let mut model = drawing_everything();
+        let _ = crate::update::tell_taken_over(&mut model, every_taken());
+        assert_eq!(kinds(&model), ["native"]);
+        let _ = held(&mut model, "vim.notify", "function <a.renderer>");
+        assert_eq!(kinds(&model), ["native_sticky"]);
+    }
+
+    /// The launch shows one box whatever a config trips and in whatever
+    /// order the reports land, and the keys stand in one line of it. The
+    /// next launch under the same config raises none.
+    #[test]
+    fn a_first_launch_that_trips_everything_raises_one_box() {
+        let channels: Vec<&str> = reported_channels();
+        let taken = every_taken();
+        let (first, rest) = taken.split_at(taken.len() / 2);
+        let orders: [&[&str]; 3] = [
+            &["taken", "held"],
+            &["held", "taken"],
+            &["first", "held", "rest"],
+        ];
+        for order in orders {
+            let mut model = drawing_everything();
+            for step in order {
+                let _ = match *step {
+                    "held" => channels
+                        .iter()
+                        .flat_map(|channel| held(&mut model, channel, "function <a.renderer>"))
+                        .collect(),
+                    "taken" => crate::update::tell_taken_over(&mut model, taken.clone()),
+                    "first" => crate::update::tell_taken_over(&mut model, first.to_vec()),
+                    _ => crate::update::tell_taken_over(&mut model, rest.to_vec()),
+                };
+            }
+            let boxes = notices(&model);
+            assert_eq!(boxes.len(), 1, "{order:?}: {boxes:?}");
+            let lines: Vec<&str> = boxes[0].split('\n').collect();
+            let mapping: Vec<&&str> = lines
+                .iter()
+                .filter(|line| line.contains("ow mapping "))
+                .collect();
+            assert_eq!(mapping.len(), 1, "{order:?}: {lines:?}");
+            for (_, taken) in &taken {
+                if let Taken::Key { lhs, .. } = taken {
+                    assert!(
+                        mapping[0].contains(lhs.as_str()),
+                        "{lhs} {order:?}: {lines:?}"
+                    );
+                }
+            }
+            for channel in &channels {
+                assert!(
+                    boxes[0].contains(channel),
+                    "{channel} {order:?}: {}",
+                    boxes[0]
+                );
+            }
+
+            let mut next = drawing_everything();
+            next.seed_announced(
+                taken
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .chain(channels.iter().map(|channel| super::announced_key(channel))),
+            );
+            let _ = crate::update::tell_taken_over(&mut next, taken.clone());
+            for channel in &channels {
+                let _ = held(&mut next, channel, "function <a.renderer>");
+            }
+            assert!(notices(&next).is_empty(), "{:?}", notices(&next));
         }
     }
 }

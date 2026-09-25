@@ -522,6 +522,39 @@ pub fn view_draws(surface: Surface, model: &Model) -> bool {
     row(surface).is_some_and(|row| row.policy == Policy::Own && owned(surface, model).is_some())
 }
 
+/// Something a launch handed to view that the launch box names beside the
+/// channels the config wrote, each with the line that gives it back.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Taken {
+    /// A feature view draws this session, named by its registry id.
+    Drawing {
+        /// The registry id of the feature.
+        feature: &'static str,
+        /// The config line that turns the feature off.
+        off_switch: &'static str,
+    },
+    /// A key of the user's own that view maps now.
+    Key {
+        /// The key in nvim notation.
+        lhs: String,
+        /// What the key does now, in words.
+        action: String,
+        /// The config line that gives the key back.
+        off_switch: &'static str,
+    },
+}
+
+impl Taken {
+    /// The config line that gives this back.
+    #[must_use]
+    pub fn off_switch(&self) -> &'static str {
+        match self {
+            Self::Drawing { off_switch, .. } | Self::Key { off_switch, .. } => off_switch,
+        }
+    }
+}
+
 /// Which identities have been seen claiming which surfaces, so a second
 /// sighting adds to one notice rather than raising a second one.
 ///
@@ -553,6 +586,9 @@ pub struct SurfaceConflicts {
     /// apart from `held`, which a sink reading sets without raising a
     /// notice at all.
     told: Vec<(Surface, Vec<String>)>,
+    /// The features and keys the same box names as handed to view
+    /// ([`Self::tell_taken`]), in the order they were told.
+    taken: Vec<Taken>,
     /// The first-run record keys this config has already been told about
     /// (`held:<channel>`), seeded at startup from the record
     /// ([`crate::model::Model::seed_announced`]) and grown as this session
@@ -736,6 +772,22 @@ impl SurfaceConflicts {
     #[must_use]
     pub fn told(&self) -> &[(Surface, Vec<String>)] {
         &self.told
+    }
+
+    /// Adds `taken` to what the launch box names, and answers whether that
+    /// is news.
+    pub fn tell_taken(&mut self, taken: Taken) -> bool {
+        if self.taken.contains(&taken) {
+            return false;
+        }
+        self.taken.push(taken);
+        true
+    }
+
+    /// Every feature and key the launch box names, in the order told.
+    #[must_use]
+    pub fn taken(&self) -> &[Taken] {
+        &self.taken
     }
 
     /// Whether the first-run record key `key` has been told under this
@@ -975,7 +1027,7 @@ impl SurfaceConflicts {
     /// | `generation` | bumped: the dead engine's deadlines are still sleeping in their timer threads, and their expiries must find nobody to answer to |
     /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config draws the same windows -- forgetting it would raise a second notice per window for one conflict |
     /// | `held` | cleared: the replacement re-reports its own channels, and a surface left in here would swallow that report as a conflict already accounted for |
-    /// | `told` | kept: the box it words is still standing, and a channel the replacement reports first is added to that box |
+    /// | `told`, `taken` | kept: the box they word is still standing, and a channel the replacement reports first is added to that box |
     /// | `announced` | kept: it records what this config has been told, which a restart does not undo |
     pub fn forget_engine(&mut self) {
         self.complaints.clear();

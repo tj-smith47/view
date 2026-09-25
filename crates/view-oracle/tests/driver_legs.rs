@@ -155,7 +155,7 @@ fn pty_session_against_the_view_binary_shows_a_typed_character_on_screen() {
     // notice arrives with the asynchronous claim reply, so typing first
     // would race a toast that is about to appear.
     assert!(
-        session.wait_for("view is drawing the statusline", Duration::from_secs(5)),
+        session.wait_for("view: now drawing the", Duration::from_secs(5)),
         "a first launch never introduced what it took over: the startup path \
          that reads the config, holds the superseded options and registers \
          the feature keys is not running in the real binary; screen:\n{}",

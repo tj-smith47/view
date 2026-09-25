@@ -258,6 +258,18 @@ pub(crate) fn cache_target(config_path: &Path, theme: Option<&str>) -> Option<Pa
     Some(cache_path(&state_dir, config_path, theme))
 }
 
+/// The opening of the diagnostic for a cache that has not been written yet.
+const MISSING_OPENING: &str = "view: no theme cache at ";
+
+/// Whether `notice` is [`load`]'s diagnostic for a cache not written yet.
+///
+/// A first launch under a config or theme has no cache, and this session
+/// writes it, so that diagnostic is a history entry and never a box.
+#[must_use]
+pub(crate) fn is_missing_cache(notice: &str) -> bool {
+    notice.starts_with(MISSING_OPENING)
+}
+
 /// [`load`]'s implementation given an already-resolved cache file path, so
 /// tests can exercise missing/corrupt/version-mismatched-file behavior
 /// without mutating process environment. Public to this crate for the same
@@ -274,7 +286,7 @@ pub(crate) fn load_from_path(path: &Path) -> (Option<Theme>, Option<String>) {
             return (
                 None,
                 Some(format!(
-                    "view: no theme cache at {} yet, using built-in defaults",
+                    "{MISSING_OPENING}{} yet, using built-in defaults",
                     path.display()
                 )),
             );
@@ -647,8 +659,9 @@ mod tests {
     fn missing_cache_file_yields_none_without_panicking() {
         let dir = tmp_dir("missing");
         let path = dir.join("does-not-exist.toml");
-        let (loaded, _) = load_from_path(&path);
+        let (loaded, notice) = load_from_path(&path);
         assert_eq!(loaded, None);
+        assert!(is_missing_cache(&notice.unwrap()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -657,8 +670,9 @@ mod tests {
         let dir = tmp_dir("corrupt");
         let path = dir.join("theme.toml");
         std::fs::write(&path, "this is not valid { toml at all ]]]").unwrap();
-        let (loaded, _) = load_from_path(&path);
+        let (loaded, notice) = load_from_path(&path);
         assert_eq!(loaded, None);
+        assert!(!is_missing_cache(&notice.unwrap()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

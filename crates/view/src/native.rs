@@ -918,7 +918,8 @@ impl NativeSession {
         }
     }
 
-    /// Shows whatever this session took over for the first time, once.
+    /// Adds whatever this session took over for the first time under this
+    /// config to the launch's one notice.
     ///
     /// Options and keys come through one report, so the wording, the off
     /// switch and the record entry are the same mechanism for both. A record
@@ -950,29 +951,23 @@ impl NativeSession {
                 .iter()
                 .map(view_native::report::Handover::record_key),
         );
-        let notices = match &self.record {
-            Some(record) => match toast::first_run(&handovers, self.config_path.as_deref(), record)
-            {
-                Ok(notices) => notices,
-                Err(err) => {
+        match &self.record {
+            Some(record) => {
+                if let Err(err) = toast::first_run(&handovers, self.config_path.as_deref(), record)
+                {
                     crate::vlog::log_with("native", || format!("first-run record failed: {err}"));
-                    handovers.iter().map(|h| h.notice()).collect()
                 }
-            },
-            None => {
-                crate::vlog::log(
-                    "native",
-                    "no state directory: the first-run notice cannot be recorded",
-                );
-                handovers.iter().map(|h| h.notice()).collect()
             }
-        };
-        let mut effects = Vec::new();
-        for notice in notices {
-            model.dirty = true;
-            effects.extend(model.engine.record_native_notice(notice, false));
+            None => crate::vlog::log(
+                "native",
+                "no state directory: the first-run notice cannot be recorded",
+            ),
         }
-        effects
+        let taken = handovers
+            .iter()
+            .map(|h| (h.record_key(), h.taken()))
+            .collect();
+        view_core::update::tell_taken_over(model, taken)
     }
 }
 
@@ -1627,8 +1622,9 @@ mod tests {
         );
         assert!(m.dirty);
 
-        let mut next = NativeSession::all_enabled(7, Some(record));
+        let mut next = NativeSession::all_enabled(7, Some(record.clone()));
         let mut later = model();
+        later.seed_announced(toast::announced_keys(next.config_path.as_deref(), &record).unwrap());
         later.record_claimed_keys(claimed);
         let _ = next.follow_up(&mut later, Stage::Claims);
         assert_eq!(

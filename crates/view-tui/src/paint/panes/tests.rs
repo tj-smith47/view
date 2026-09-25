@@ -3894,11 +3894,45 @@ fn stack_three_toasts(model: &mut Model) {
 }
 
 /// A first launch whose config writes three channels of surfaces view
-/// draws: one box names them all with the lines that give them back, and
-/// no value the config wrote reaches the screen.
+/// draws, and whose own keys view maps over: one box names the channels,
+/// the features view draws and the keys in one line, with the lines that
+/// give them back, and no value the config wrote reaches the screen.
 fn launch_notice_once() -> Tiles {
+    use view_core::native::surfaces::Taken;
     let mut tiles = tiled(true);
     tiles.model.statusline_enabled = true;
+    let key = |feature: &str, lhs: &str, action: &str, off_switch: &'static str| {
+        (
+            format!("{feature}:key:{lhs}"),
+            Taken::Key {
+                lhs: lhs.to_string(),
+                action: action.to_string(),
+                off_switch,
+            },
+        )
+    };
+    let taken = vec![
+        (
+            "picker".to_string(),
+            Taken::Drawing {
+                feature: "picker",
+                off_switch: "native.picker = false",
+            },
+        ),
+        key(
+            "picker",
+            "<leader>ff",
+            "picker files",
+            "native.picker = false",
+        ),
+        key(
+            "window",
+            "<D-Left>",
+            "window focus left",
+            "keys.profile = \"editor\"",
+        ),
+    ];
+    let _ = view_core::update::tell_taken_over(&mut tiles.model, taken);
     for (channel, holder) in [
         (
             "vim.notify",

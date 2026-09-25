@@ -16,6 +16,7 @@ use view_core::native::chords;
 use view_core::native::mappings;
 use view_core::native::mappings::MappingClaim;
 use view_core::native::registry::FeatureDesc;
+use view_core::native::surfaces::Taken;
 
 use crate::supersede::Supersession;
 
@@ -86,6 +87,23 @@ impl Handover {
                 self.reverses_with
             ),
             None => format!("{took}. Turn it off with {}", self.reverses_with),
+        }
+    }
+
+    /// This handover as the launch box names it, beside everything else the
+    /// launch handed to view.
+    #[must_use]
+    pub fn taken(&self) -> Taken {
+        match &self.surface {
+            Surface::SessionHold => Taken::Drawing {
+                feature: self.feature,
+                off_switch: self.reverses_with,
+            },
+            Surface::Key { lhs } => Taken::Key {
+                lhs: lhs.clone(),
+                action: action(self.feature, lhs),
+                off_switch: self.reverses_with,
+            },
         }
     }
 
@@ -351,6 +369,15 @@ mod tests {
                 }
                 let action = text[want.len()..].split(" now.").next().unwrap_or_default();
                 assert!(!action.contains('_'), "a verb is spelled in words: {text}");
+                assert_eq!(
+                    handovers[0].taken(),
+                    Taken::Key {
+                        lhs: lhs.clone(),
+                        action: format!("{feature} {action}"),
+                        off_switch: handovers[0].reverses_with,
+                    },
+                    "the launch box names the key as the sentence does: {text}"
+                );
             }
         }
     }

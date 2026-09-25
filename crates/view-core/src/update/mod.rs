@@ -117,6 +117,21 @@ pub fn forget_native_windows(model: &mut Model) -> Vec<Effect> {
     surfaces::forget_native_windows(model)
 }
 
+/// Adds what a launch handed to view (the features it draws, the user keys
+/// it maps) to the launch's one notice, returning what raising it owes the
+/// executor.
+///
+/// Each item carries its first-run record key, and one the record already
+/// holds for this config ([`Model::seed_announced`]) is left out. The
+/// caller writes the record.
+#[must_use]
+pub fn tell_taken_over(
+    model: &mut Model,
+    taken: Vec<(String, crate::native::surfaces::Taken)>,
+) -> Vec<Effect> {
+    surface_conflict::on_taken_over(model, taken)
+}
+
 /// Applies one message to `model`, returning the effects the executor must
 /// carry out. Never blocks and never performs I/O: every side effect crosses
 /// the boundary as a returned [`Effect`] instead of being performed here.
