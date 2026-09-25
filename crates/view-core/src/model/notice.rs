@@ -305,10 +305,12 @@ impl Model {
     /// clipped to the window, or `None` when no review is open there.
     ///
     /// Counted out from the cursor's buffer line: every buffer line between
-    /// the two is one row, and the hunk's own virtual lines sit above its
-    /// first row for an insertion and under its last row for a
-    /// replacement. A fold or a wrapped line between the cursor and the
-    /// hunk moves the span by the rows it hides or adds.
+    /// the two is one row, and so is every virtual line an open hunk hangs
+    /// between them. A hunk's virtual lines sit above its first row for an
+    /// insertion and under its last row for a replacement, and only the
+    /// hunk under review carries the header. A fold or a wrapped line
+    /// between the cursor and the hunk moves the span by the rows it hides
+    /// or adds.
     fn hunk_rows(&self, grid: GridId, cursor_row: u16, window: Cells) -> Option<(u16, u16)> {
         let review = self.ai_panel().pending_diff.as_ref()?;
         let buffer = review.buffer?;
@@ -318,23 +320,35 @@ impl Model {
             .window_handle(grid)
             .and_then(|win| self.window_status.get(&win))
             .filter(|status| status.buf == buffer.0)?;
-        let (row, end_row, virt) = review.current_hunk_rows()?;
+        // each open hunk as the buffer line its virtual lines are drawn
+        // under, the count of them, and its first and end rows
+        let hunks: Vec<(i64, i64, u32, u32, bool)> = review
+            .open_hunk_rows()
+            .into_iter()
+            .map(|(row, end_row, virt, current)| {
+                let after = if end_row > row {
+                    i64::from(end_row) - 1
+                } else {
+                    i64::from(row) - 1
+                };
+                (after, i64::from(virt), row, end_row, current)
+            })
+            .collect();
+        let &(after, virt, row, end_row, _) = hunks.iter().find(|hunk| hunk.4)?;
         let cursor_line = i64::from(status.row.saturating_sub(1));
-        let virt = i64::from(virt);
-        // the buffer line the virtual lines are drawn under
-        let after = if end_row > row {
-            i64::from(end_row) - 1
-        } else {
-            i64::from(row) - 1
-        };
         let screen = |line: i64| {
-            let between = if cursor_line <= after && after < line {
-                virt
-            } else if line <= after && after < cursor_line {
-                -virt
-            } else {
-                0
-            };
+            let between: i64 = hunks
+                .iter()
+                .map(|&(after, virt, ..)| {
+                    if cursor_line <= after && after < line {
+                        virt
+                    } else if line <= after && after < cursor_line {
+                        -virt
+                    } else {
+                        0
+                    }
+                })
+                .sum();
             i64::from(cursor_row) + (line - cursor_line) + between
         };
         let first = if end_row > row {
@@ -1169,6 +1183,43 @@ pub(crate) mod tests {
             (last + 1, rect.0 + rect.3),
             "the column takes the larger side, under the hunk"
         );
+    }
+
+    /// Two replacements, the first under review, and the cursor on the line
+    /// under the second, whose six added lines stand between the cursor and
+    /// the first: the column shrinks clear of the first hunk's rows where
+    /// they are drawn.
+    #[test]
+    fn the_reviewed_hunk_counts_the_added_lines_of_a_hunk_below_it() {
+        let (mut scene, rect, stack, origin) = stacked(Anchor::TopRight);
+        let old = lines(30);
+        let new = format!(
+            "{}first\n{}{}{}",
+            lines(3),
+            &lines(5)[lines(4).len()..],
+            (0..6).map(|n| format!("second {n}\n")).collect::<String>(),
+            &lines(30)[lines(6).len()..]
+        );
+        // lines 0 to 3, the header and the added line of the first hunk,
+        // lines 4 and 5, the six added lines of the second, then line 6
+        let cursor = origin + 15;
+        review_at(&mut scene, &old, &new, 6, cursor - origin);
+        let review = scene.model.ai_panel().pending_diff.as_ref().unwrap();
+        assert_eq!(review.hunks.len(), 2, "two hunks: {:?}", review.hunks);
+        let bottom = rect.0 + rect.3;
+        assert!(
+            cursor >= bottom - stack && rect.0 + 3 < rect.0 + stack,
+            "the cursor is under a bottom stack and the hunk under a top one"
+        );
+        let column = scene.model.notice_column();
+        let (top, _, _, height) = column.rect;
+        assert!(height >= 3, "the column keeps room for a box: {column:?}");
+        for row in origin + 3..=origin + 6 {
+            assert!(
+                !(top..top + height).contains(&row),
+                "the column {column:?} covers row {row} of the hunk under review"
+            );
+        }
     }
 
     /// The cursor moving down every row and back up: the stack moves only

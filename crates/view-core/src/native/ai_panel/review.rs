@@ -577,22 +577,28 @@ impl DiffReviewState {
         rows
     }
 
-    /// The hunk under the review's cursor as its buffer draws it: the first
-    /// row it replaces, one past the last, and how many virtual lines hang
-    /// off it (the header, then the added lines). `None` when the cursor is
-    /// on no open hunk.
+    /// Every open hunk as its buffer draws it, the ones [`Self::marks`]
+    /// draws: the first row it replaces, one past the last, how many
+    /// virtual lines hang off it (the header on the current hunk, then the
+    /// added lines), and whether it is the current hunk.
     #[must_use]
-    pub fn current_hunk_rows(&self) -> Option<(u32, u32, u32)> {
-        let hunk = self
-            .hunks
-            .get(self.cursor)
-            .filter(|hunk| hunk.status.is_open())?;
-        let virt = HEADER_ROWS.saturating_add(hunk.new_lines.len());
-        Some((
-            hunk.old_range.0,
-            hunk.old_range.1,
-            u32::try_from(virt).unwrap_or(u32::MAX),
-        ))
+    pub fn open_hunk_rows(&self) -> Vec<(u32, u32, u32, bool)> {
+        self.hunks
+            .iter()
+            .enumerate()
+            .filter(|(_, hunk)| hunk.status.is_open())
+            .map(|(index, hunk)| {
+                let current = index == self.cursor;
+                let header = if current { HEADER_ROWS } else { 0 };
+                let virt = header.saturating_add(hunk.new_lines.len());
+                (
+                    hunk.old_range.0,
+                    hunk.old_range.1,
+                    u32::try_from(virt).unwrap_or(u32::MAX),
+                    current,
+                )
+            })
+            .collect()
     }
 
     /// Every open hunk's presentation in the buffer itself, top of the
