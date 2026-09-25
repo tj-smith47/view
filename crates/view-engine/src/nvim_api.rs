@@ -5405,6 +5405,33 @@ mod tests {
         );
     }
 
+    /// `HOLD_WINDOW_OPTION_CHUNK` keeps no `held_at` memory of the value
+    /// view last held, so a re-hold with a changed value would report
+    /// view's own earlier value as a foreign write. Only a look-keyed
+    /// value is ever re-held with a new value, so every window-scoped
+    /// channel stays constant until the chunk learns what view last held.
+    #[test]
+    fn every_window_scoped_hold_is_a_constant_value() {
+        use view_core::native::channels::{Channel, ChannelValue, Scope, CHANNELS};
+        for entry in CHANNELS {
+            for channel in entry.channels {
+                if let Channel::Hold {
+                    option,
+                    scope: Scope::Window,
+                    value,
+                } = channel
+                {
+                    assert!(
+                        !matches!(value, ChannelValue::ByLook { .. }),
+                        "{option} is held per window with a look-keyed value, \
+                         and HOLD_WINDOW_OPTION_CHUNK would report view's own \
+                         earlier value as a foreign write"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_window_status_chunk_arms_every_event_of_its_group_and_defers_to_a_tick() {
         // only `BufModifiedSet` and `DiagnosticChanged` reach the live test,
