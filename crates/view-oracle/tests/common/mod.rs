@@ -546,6 +546,55 @@ pub fn test_region(text: &str) -> String {
     "\n".repeat(text[..at].matches('\n').count()) + &text[at..]
 }
 
+/// Whether `needle` stands on `screen`, read through the rows a box wraps
+/// it onto as well as on one row.
+///
+/// A notice wider than the notice column wraps inside its toast, so a
+/// sentence a plain `contains` would find on one row is split across the
+/// box's interior rows. A box's text on a row is a run between two
+/// vertical edges (`│` or `|`), and the rows under it continue the text
+/// where a run starts at the same column. Whitespace is left out of the
+/// comparison, because a break at a space drops that space and a break
+/// inside a word adds none.
+pub fn boxed_text_contains(screen: &str, needle: &str) -> bool {
+    let squash = |text: &str| text.split_whitespace().collect::<String>();
+    let needle = squash(needle);
+    if screen.lines().any(|line| squash(line).contains(&needle)) {
+        return true;
+    }
+    let rows: Vec<Vec<(usize, String)>> = screen
+        .lines()
+        .map(|line| {
+            let cells: Vec<char> = line.chars().collect();
+            let edges: Vec<usize> = cells
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| matches!(c, '│' | '|'))
+                .map(|(at, _)| at)
+                .collect();
+            edges
+                .windows(2)
+                .map(|pair| (pair[0], cells[pair[0] + 1..pair[1]].iter().collect()))
+                .collect()
+        })
+        .collect();
+    rows.iter().enumerate().any(|(first, runs)| {
+        runs.iter().any(|(edge, text)| {
+            let mut joined = squash(text);
+            for below in &rows[first + 1..] {
+                if joined.contains(&needle) {
+                    return true;
+                }
+                match below.iter().find(|(at, _)| at == edge) {
+                    Some((_, more)) => joined.push_str(&squash(more)),
+                    None => break,
+                }
+            }
+            joined.contains(&needle)
+        })
+    })
+}
+
 /// Enough `<CR>`s in insert mode to put the next typed character below every
 /// toast box standing on `screen`.
 ///

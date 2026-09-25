@@ -1,6 +1,8 @@
                                                                                 
- + left.rs ---------------------------+ + right.rs ---------------------------+ 
- |left                                | |right                                | 
+ + left.rs ---------------------------+ + agent ------------------------------+ 
+ |left                                | |>                                    | 
+ |                                    | |-------------------------------------| 
+ |                                    | |  ⠋ what does the gaps toggle do?    | 
  |                                    | |                                     | 
  |                                    | |                                     | 
  |                                    | |                                     | 
@@ -9,18 +11,16 @@
  |                                    | |                                     | 
  |                                    | |                                     | 
  |                                    | |                                     | 
- |                                    | |                                     | 
- |                                    | |                                     | 
- |+------+                            | |                                     | 
- ||linted|                            | |                                     | 
- |+------+                            | |                                     | 
- |+---------+                         | |                                     | 
- ||2 matches|                         | |                                     | 
- |+---------+                         | |                                     | 
- |+-----+                             | |                                     | 
- ||saved|                             | |                                     | 
- |+-----+                             | |                                     | 
- + -- INSERT -- 1:1 ------------------+ + E 1 2:1 ----------------------------+ 
+ |                            +------+| |                                     | 
+ |                            |linted|| |                                     | 
+ |                            +------+| |                                     | 
+ |                         +---------+| |                                     | 
+ |                         |2 matches|| |                                     | 
+ |                         +---------+| |                                     | 
+ |                             +-----+| |                                     | 
+ |                             |saved|| |                                     | 
+ |                             +-----+| |                                     | 
+ + -- INSERT -- 1:1 ------------------+ +-------------------------------------+ 
                                                                                 
 --- fg ---
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
@@ -36,15 +36,15 @@ ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDAAAAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDAAAAAAAAADAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDAAAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAADBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAAADBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAADBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 A = Reset

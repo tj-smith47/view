@@ -11,16 +11,16 @@
  |                                    | |                                     | 
  |                                    | |                                     | 
  |                                    | |                                     | 
- |+------+                            | |                                     | 
- ||linted|                            | |                                     | 
- |+------+                            | |                                     | 
- |+---------+                         | |                                     | 
- ||2 matches|                         | |                                     | 
- |+---------+                         | |                                     | 
- |+-----+                             | |                                     | 
- ||saved|                             | |                                     | 
- |+-----+                             | |                                     | 
- + -- INSERT -- 1:1 ------------------+ + E 1 2:1 ----------------------------+ 
+ |                                    | |                             +------+| 
+ |                                    | |                             |linted|| 
+ |                                    | |                             +------+| 
+ |                                    | |                          +---------+| 
+ |                                    | |                          |2 matches|| 
+ |                                    | |                          +---------+| 
+ |                                    | |                              +-----+| 
+ |                                    | |                              |saved|| 
+ |                                    | |                              +-----+| 
+ + 1:1 -------------------------------+ + -- INSERT -- E 1 2:1 ---------------+ 
                                                                                 
 --- fg ---
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
@@ -36,18 +36,18 @@ ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDAAAAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDAAAAAAAAADAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDAAAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDCA
 ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 A = Reset
-B = Rgb(137, 180, 250)
-C = Rgb(204, 221, 238)
+B = Rgb(204, 221, 238)
+C = Rgb(137, 180, 250)
 D = Rgb(128, 128, 128)

@@ -102,6 +102,15 @@ fn ready(mut session: PtySession) -> PtySession {
         "the session never opened the fixture; screen:\n{}",
         session.screen()
     );
+    // a notice the launch raised leaves on its own timer, and its exit is
+    // a write no wheel report caused
+    assert!(
+        session.wait_for_screen(view_test_support::host_deadline(BUDGET), |screen| {
+            !screen.contents().contains('╭')
+        }),
+        "the launch's notices never left; screen:\n{}",
+        session.screen()
+    );
     session.send(b"\x1b:set mouse=a\r").unwrap();
     session.record_raw_output();
     session

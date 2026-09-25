@@ -33,9 +33,11 @@ const TARGET: &str = "view-history-copy /home/tj/my notes/plan v2.md is gone";
 /// first frame drew (~9 on an 80x24 terminal).
 const FILLER: usize = 30;
 
-/// The part of `TARGET` that survives the overlay's column truncation, so
-/// the same needle works on a history row and in a pasted buffer line.
-const TARGET_NEEDLE: &str = "my notes/plan";
+/// The part of `TARGET` that survives the overlay's column truncation and
+/// stays on one row of the toast, which wraps at the space before it, so
+/// the same needle works on a toast, a history row and a pasted buffer
+/// line.
+const TARGET_NEEDLE: &str = "notes/plan";
 
 /// nvim's default leader, which the isolated home never overrides.
 const LEADER: &str = "\\";

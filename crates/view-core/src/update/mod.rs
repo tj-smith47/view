@@ -156,7 +156,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // where the stack the user was looking at was actually drawing the
     // notice that is about to leave
     let entries_before = model.engine.messages.entries.len();
-    let armed_before = model.engine.messages.armed_visible_slot(model.toast_rows());
+    let armed_before = model.armed_toast_slot();
     let chrome_before = model.chrome_rows();
     let mut effects = dispatch(model, msg);
     // the top row follows facts a dozen arms move (a tabpage, the buffer

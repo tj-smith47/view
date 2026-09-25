@@ -5,7 +5,7 @@
 view 633
 view-ai 306
 view-bench 293
-view-core 1148
+view-core 1147
 view-engine 890
 view-harness 461
 view-native 228
@@ -13,4 +13,4 @@ view-oracle 713
 view-proc 23
 view-surface 140
 view-test-support 37
-view-tui 407
+view-tui 405

@@ -998,7 +998,9 @@ fn a_recovered_engine_says_so_and_clears_nvims_report_with_no_keypress() {
         .expect("a recovery of one swap file is worth a notice");
     let settled = session.wait_for_screen(Duration::from_secs(30), |screen| {
         let text = screen.contents();
-        text.contains(UNSAVED) && text.contains(&notice) && !text.contains(SWAP_REPLAYED)
+        text.contains(UNSAVED)
+            && common::boxed_text_contains(&text, &notice)
+            && !text.contains(SWAP_REPLAYED)
     });
     assert!(
         settled,
@@ -1238,7 +1240,7 @@ fn a_swap_that_cannot_be_read_is_reported_as_a_failure_and_never_as_work_returne
         &mut session,
         Duration::from_secs(45),
         &[RECOVERED_WORK],
-        |text| text.contains(UNREADABLE_SWAP) && text.contains(&named),
+        |text| text.contains(UNREADABLE_SWAP) && common::boxed_text_contains(text, &named),
     );
     // the lie before the silence: a session that says nothing has at least
     // left the user looking at the engine's own error, and a session that
@@ -1319,7 +1321,7 @@ fn a_restart_that_cannot_read_the_swap_says_so_instead_of_going_silent() {
         &mut session,
         Duration::from_secs(45),
         &[RECOVERED_WORK],
-        |text| text.contains(UNREADABLE_SWAP) && text.contains(&named),
+        |text| text.contains(UNREADABLE_SWAP) && common::boxed_text_contains(text, &named),
     );
     assert!(
         !claimed,
@@ -1374,7 +1376,7 @@ fn a_recovery_that_came_back_with_holes_is_not_worded_as_one_that_failed() {
         &mut session,
         Duration::from_secs(45),
         &[failed.as_str()],
-        |text| text.contains(DAMAGED_SWAP) && text.contains(&named),
+        |text| text.contains(DAMAGED_SWAP) && common::boxed_text_contains(text, &named),
     );
     assert!(
         !claimed,
@@ -1462,7 +1464,7 @@ fn a_restart_whose_file_moved_under_the_swap_recovers_the_work_and_keeps_the_war
         &mut session,
         Duration::from_secs(45),
         &[failed.as_str()],
-        |text| text.contains(&named) && text.contains(CHANGED_UNDER_SWAP),
+        |text| common::boxed_text_contains(text, &named) && text.contains(CHANGED_UNDER_SWAP),
     );
     assert!(
         !claimed,
@@ -1832,7 +1834,9 @@ fn watch_screen(
     let mut seen = false;
     loop {
         let text = session.screen();
-        seen |= forbidden.iter().any(|line| text.contains(line));
+        seen |= forbidden
+            .iter()
+            .any(|line| common::boxed_text_contains(&text, line));
         if settled(&text) {
             return (true, seen);
         }
@@ -3356,7 +3360,9 @@ fn a_terminal_under_the_engines_minimum_reports_the_geometry_it_was_clamped_to()
     session.send(b"\x1b:View notifications history\r").unwrap();
     let shown = session
         .resize_until(120, 30, Duration::from_secs(15), |s| {
-            s.wait_for(notice, Duration::from_millis(400))
+            s.wait_for_screen(Duration::from_millis(400), |screen| {
+                common::boxed_text_contains(&screen.contents(), notice)
+            })
         })
         .unwrap();
     assert!(
@@ -3376,7 +3382,9 @@ fn a_terminal_under_the_engines_minimum_reports_the_geometry_it_was_clamped_to()
     // keyboard is nvim's again.
     session.send(b"\x1b").unwrap();
     assert!(
-        session.wait_for_screen(Duration::from_secs(10), |s| !s.contents().contains(notice)),
+        session.wait_for_screen(Duration::from_secs(10), |s| {
+            !common::boxed_text_contains(&s.contents(), notice)
+        }),
         "the history overlay never closed, so a quit typed here is answered \
          by view rather than nvim; last screen:\n{}",
         session.screen()

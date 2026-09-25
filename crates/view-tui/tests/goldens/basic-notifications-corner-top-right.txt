@@ -1,14 +1,14 @@
                                                                                 
- + left.rs ---------------------------+ + right.rs ---------------------+-----+ 
- |left                                | |right                          |saved| 
- |                                    | |                               +-----+ 
- |                                    | |                           +---------+ 
- |                                    | |                           |2 matches| 
- |                                    | |                           +---------+ 
- |                                    | |                              +------+ 
- |                                    | |                              |linted| 
- |                                    | |                              +------+ 
- |                                    | |                                     | 
+ + left.rs ---------------------------+ + right.rs ---------------------------+ 
+ |left                                | |right                         +-----+| 
+ |                                    | |                              |saved|| 
+ |                                    | |                              +-----+| 
+ |                                    | |                          +---------+| 
+ |                                    | |                          |2 matches|| 
+ |                                    | |                          +---------+| 
+ |                                    | |                             +------+| 
+ |                                    | |                             |linted|| 
+ |                                    | |                             +------+| 
  |                                    | |                                     | 
  |                                    | |                                     | 
  |                                    | |                                     | 
@@ -24,16 +24,16 @@
                                                                                 
 --- fg ---
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCDDDDDDDA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDCA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA

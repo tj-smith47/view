@@ -393,11 +393,11 @@ const CMDLINE_ROWS: i64 = 2;
 ///   `cmdline_show` that makes it true (`update::surface_conflict`'s
 ///   `observe_float`), so a guess and a window drawing under it can share
 ///   the screen until the answer lands.
-/// - **the message area**, when the float is pinned to the grid's top
-///   right corner -- where view stacks its toasts -- and is short enough to
-///   be chrome rather than a screenful. A picker centered in the grid
-///   overlaps that corner without being pinned to it, which is the
-///   distinction the negative control turns on.
+/// - **the message area**, when the float overlaps the anchored half of
+///   the notice column ([`Model::notice_bounds`]), reaches the column's
+///   outer side the way the boxes do, and is at most half the grid tall.
+///   A hover crossing the column stops short of its outer side, and a
+///   picker centered in the grid is taller than half of it.
 #[must_use]
 pub fn claims(float: &FloatSighting, model: &Model) -> Option<Surface> {
     claims_at(
@@ -428,21 +428,47 @@ pub fn claims_at(
     model: &Model,
 ) -> Option<Surface> {
     let (grid_w, grid_h) = model.engine.grid().size();
-    let (top, _left, bottom, right) = span(row, col, width, height, anchor, grid_w, grid_h)?;
+    let (top, left, bottom, right) = span(row, col, width, height, anchor, grid_w, grid_h)?;
     let last_row = i64::from(grid_h) - 1;
     // half the grid: the bound between a piece of chrome pinned in a corner
     // and a window that has taken the screen over, which is a different
     // thing and not this detector's business
     let chrome_rows = i64::from(grid_h) / 2;
     let rows = bottom - top + 1;
+    let over_the_stack = || {
+        let (c_row, c_col, c_width, c_height) = model.notice_bounds();
+        let (c_row, c_col) = (i64::from(c_row), i64::from(c_col));
+        // the half of the column the stack grows from: a float at the
+        // far end covers a box only once the stack has filled the column
+        let anchor = model.notice_anchor();
+        let near_the_anchor = if anchor.is_top_corner() {
+            top < c_row + (i64::from(c_height) + 1) / 2
+        } else {
+            bottom >= c_row + i64::from(c_height) / 2
+        };
+        // the boxes hug the column's outer side, and so does a plugin's
+        // toast; a hover or a menu crossing the column stops short of it
+        let on_the_outer_side = if anchor.is_left_corner() {
+            left <= c_col
+        } else {
+            right >= c_col + i64::from(c_width) - 1
+        };
+        c_width > 0
+            && c_height > 0
+            && top < c_row + i64::from(c_height)
+            && bottom >= c_row
+            && left < c_col + i64::from(c_width)
+            && right >= c_col
+            && near_the_anchor
+            && on_the_outer_side
+            && rows <= chrome_rows
+    };
     let hit = crate::native::channels::CHANNELS.iter().find(|entry| {
         entry.channels.iter().any(|channel| match channel {
             Channel::Float(Region::CmdlineBand) => {
                 model.engine.paints_cmdline() && bottom >= last_row - (CMDLINE_ROWS - 1)
             }
-            Channel::Float(Region::TopRightChrome) => {
-                right == i64::from(grid_w) - 1 && top < chrome_rows && rows <= chrome_rows
-            }
+            Channel::Float(Region::TopRightChrome) => over_the_stack(),
             _ => false,
         })
     })?;
@@ -1195,6 +1221,55 @@ mod tests {
             Some(Surface::Messages),
             "a toast pinned to the top right corner draws where view stacks its own"
         );
+    }
+
+    /// Wherever the layout puts the notice column, a short float over its
+    /// anchored corner is a float over the message area: under tiles the
+    /// column sits inside a tile, away from the grid's right edge, and a
+    /// left corner puts it on the other side of the grid entirely. The
+    /// same float moved one cell in from the column's outer side is a
+    /// hover or a menu crossing the column, and claims nothing.
+    #[test]
+    fn a_float_over_the_moved_column_still_claims_the_message_area() {
+        crate::model::notice::tests::walk(|scene, label| {
+            let model = &scene.model;
+            let (row, col, width, height) = model.notice_bounds();
+            let anchor = model.notice_anchor();
+            let rows = height.min(3);
+            let wide = width.min(5);
+            let at = if anchor.is_top_corner() {
+                row
+            } else {
+                row + height - rows
+            };
+            let (flush, inward) = if anchor.is_left_corner() {
+                (col, col + 1)
+            } else {
+                (col + width - wide, (col + width - wide).saturating_sub(1))
+            };
+            let claim = |left: u16| {
+                super::claims_at(
+                    i64::from(at),
+                    i64::from(left),
+                    wide,
+                    rows,
+                    FloatAnchor::NorthWest,
+                    model,
+                )
+            };
+            assert_eq!(
+                claim(flush),
+                Some(Surface::Messages),
+                "{label}: a float over the column's corner at ({at}, {flush})"
+            );
+            if width > wide {
+                assert_eq!(
+                    claim(inward),
+                    None,
+                    "{label}: a float one cell in from the corner at ({at}, {inward})"
+                );
+            }
+        });
     }
 
     /// The test that keeps the detector from becoming noise. Every one of

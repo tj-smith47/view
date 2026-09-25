@@ -102,9 +102,10 @@ impl Frame {
 ///   reads it to choose which notation to send, and neither the choice
 ///   nor the option it is read from changes what any layer paints)
 /// - read through a field already here: `engine` (this destructures it),
-///   `grids` (via `grid`, which is the global grid's size -- the panes it
-///   also holds reach no layer while the compositor paints that grid
-///   alone), `hl` and `mode` (painters read them off the
+///   `grids` (via `grid`, which is the global grid's size, and via
+///   `notice_column`, the one layer its panes, floats and cursor move; the
+///   compositor paints the panes themselves off the `Model`),
+///   `hl` and `mode` (painters read them off the
 ///   `Model` on the reuse path), `window_status` (the tile segments are
 ///   painted off the `Model` the same way, and the row each one stands on
 ///   is marked changed where the status changes), `tile_titles` (painted
@@ -172,6 +173,9 @@ struct Inputs {
     // different rows, so a cache keyed on the stack's contents alone would
     // hand back the frame before the one that just advanced
     toast_motion: Option<view_core::native::toast::ToastMotion>,
+    // where the stack is drawn follows panes, floats and the cursor row,
+    // none of which the fields above compare
+    notice_column: Option<view_core::model::NoticeColumn>,
 }
 
 /// The pill's agent word for `model`, or the empty string where the pill
@@ -204,6 +208,7 @@ impl Inputs {
             popupmenu: engine.popupmenu.clone(),
             messages: engine.messages.clone(),
             toast_motion: model.toast_motion.clone(),
+            notice_column: crate::live_notice_column(model),
         }
     }
 
@@ -232,6 +237,7 @@ impl Inputs {
             && self.popupmenu == engine.popupmenu
             && self.messages == engine.messages
             && self.toast_motion == model.toast_motion
+            && self.notice_column == crate::live_notice_column(model)
     }
 }
 

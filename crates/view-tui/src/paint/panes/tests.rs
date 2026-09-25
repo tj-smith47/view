@@ -3851,10 +3851,6 @@ fn toast_stack_in_the_corner(gaps: bool, anchor: view_core::native::geometry::An
     let tiles = tiled(gaps);
     let slots = tiles.slots;
     let mut model = tiles.model;
-    let _ = model
-        .engine
-        .messages
-        .resolve_startup_hold(view_core::native::toast::HoldOutcome::Release);
     let layout = model
         .surfaces
         .layout(view_core::native::geometry::NativeSurface::Notifications);
@@ -3862,9 +3858,32 @@ fn toast_stack_in_the_corner(gaps: bool, anchor: view_core::native::geometry::An
         view_core::native::geometry::NativeSurface::Notifications,
         view_core::native::geometry::SurfaceLayout::new(layout.placement, anchor, layout.size),
     );
+    // the tile's middle, which three boxes from either end leave clear, so
+    // each picture shows the stack at its own corner
+    drive(
+        &mut model,
+        vec![
+            UiEvent::GridCursorGoto {
+                grid: LEFT,
+                row: u64::from(slots[0].3 / 2 - 2),
+                col: 0,
+            },
+            UiEvent::Flush,
+        ],
+    );
+    stack_three_toasts(&mut model);
+    Tiles { slots, model }
+}
+
+/// Three short notices on the stack, past the startup hold.
+fn stack_three_toasts(model: &mut Model) {
+    let _ = model
+        .engine
+        .messages
+        .resolve_startup_hold(view_core::native::toast::HoldOutcome::Release);
     for text in ["saved", "2 matches", "linted"] {
         drive(
-            &mut model,
+            model,
             vec![UiEvent::MsgShow {
                 kind: "echomsg".to_string(),
                 content: vec![(0, text.to_string())],
@@ -3872,7 +3891,34 @@ fn toast_stack_in_the_corner(gaps: bool, anchor: view_core::native::geometry::An
             }],
         );
     }
-    Tiles { slots, model }
+}
+
+/// The agent windowed in the right tile with notices arriving: the column
+/// moves into the left tile, and the stack sits in its top right corner,
+/// clear of the agent's frame.
+fn notices_beside_the_agent() -> Tiles {
+    let mut tiles = agent_in_the_right_tile(true);
+    stack_three_toasts(&mut tiles.model);
+    tiles
+}
+
+/// The cursor on the first row of the right tile, under the stack's top
+/// right corner: the stack draws from the tile's bottom instead.
+fn notices_flipped_off_the_cursor() -> Tiles {
+    let mut tiles = tiled(true);
+    drive(
+        &mut tiles.model,
+        vec![
+            UiEvent::GridCursorGoto {
+                grid: LEFT + 1,
+                row: 0,
+                col: 0,
+            },
+            UiEvent::Flush,
+        ],
+    );
+    stack_three_toasts(&mut tiles.model);
+    tiles
 }
 
 /// The four committed pictures of the toast stack growing away from its own
@@ -4221,6 +4267,12 @@ const TILED_SCENES: &[(&str, SceneDump)] = &[
     }),
     ("agent-windowed", |tier| {
         tiles_dump(tier, agent_in_the_right_tile(true))
+    }),
+    ("notices-beside-agent-windowed", |tier| {
+        tiles_dump(tier, notices_beside_the_agent())
+    }),
+    ("notices-flip-off-cursor", |tier| {
+        tiles_dump(tier, notices_flipped_off_the_cursor())
     }),
     ("agent-overlay", |tier| {
         tiles_dump(tier, agent_overlay_beside_the_tiles(true))

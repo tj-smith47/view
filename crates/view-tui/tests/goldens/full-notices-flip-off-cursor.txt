@@ -1,14 +1,6 @@
                                                                                 
  ╭ left.rs ───────────────────────────╮ ╭ right.rs ───────────────────────────╮ 
- │╭─────╮                             │ │right                                │ 
- ││saved│                             │ │                                     │ 
- │╰─────╯                             │ │                                     │ 
- │╭─────────╮                         │ │                                     │ 
- ││2 matches│                         │ │                                     │ 
- │╰─────────╯                         │ │                                     │ 
- │╭──────╮                            │ │                                     │ 
- ││linted│                            │ │                                     │ 
- │╰──────╯                            │ │                                     │ 
+ │left                                │ │right                                │ 
  │                                    │ │                                     │ 
  │                                    │ │                                     │ 
  │                                    │ │                                     │ 
@@ -19,21 +11,20 @@
  │                                    │ │                                     │ 
  │                                    │ │                                     │ 
  │                                    │ │                                     │ 
- │                                    │ │                                     │ 
- ╰ -- INSERT -- 1:1 ──────────────────╯ ╰ E 1 2:1 ────────────────────────────╯ 
+ │                                    │ │                             ╭──────╮│ 
+ │                                    │ │                             │linted││ 
+ │                                    │ │                             ╰──────╯│ 
+ │                                    │ │                          ╭─────────╮│ 
+ │                                    │ │                          │2 matches││ 
+ │                                    │ │                          ╰─────────╯│ 
+ │                                    │ │                              ╭─────╮│ 
+ │                                    │ │                              │saved││ 
+ │                                    │ │                              ╰─────╯│ 
+ ╰ 1:1 ───────────────────────────────╯ ╰ -- INSERT -- E 1 2:1 ───────────────╯ 
                                                                                 
 --- fg ---
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA
-ABDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDAAAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDAAAAAAAAADAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDAAAAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABDDDDDDDDAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
@@ -45,9 +36,18 @@ ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAADCA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDCA
 ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 A = Reset
-B = Rgb(137, 180, 250)
-C = Rgb(204, 221, 238)
+B = Rgb(204, 221, 238)
+C = Rgb(137, 180, 250)
 D = Rgb(128, 128, 128)

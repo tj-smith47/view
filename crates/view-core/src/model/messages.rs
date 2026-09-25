@@ -752,10 +752,10 @@ impl Messages {
     /// boxes the row budget is actually showing, or `None` when it is
     /// showing none of it or nothing is armed.
     #[must_use]
-    pub(crate) fn armed_visible_slot(&self, max_rows: usize) -> Option<usize> {
+    pub(crate) fn armed_visible_slot(&self, max_rows: usize, width: u16) -> Option<usize> {
         let armed = self.armed_slot?;
         let mut slot = 0;
-        for (entry, shown) in self.entries.iter().zip(self.keep_visible(max_rows)) {
+        for (entry, shown) in self.painted().zip(self.keep_visible_in(max_rows, width)) {
             if entry.id() == armed {
                 return shown.then_some(slot);
             }
@@ -1133,7 +1133,25 @@ impl Messages {
             .painted()
             .map(|e| (e.outranks_transient(), e.line_count().saturating_add(2)))
             .collect();
-        let mut keep = keep_within(&costs, max_rows);
+        Self::keep_costed(&costs, max_rows)
+    }
+
+    /// [`Self::keep_visible`] for boxes `width` cells wide, each entry
+    /// costed at the rows its lines wrap to inside that width.
+    fn keep_visible_in(&self, max_rows: usize, width: u16) -> Vec<bool> {
+        let costs: Vec<(bool, usize)> = self
+            .painted()
+            .map(|e| {
+                let rows = wrap_toast(&e.lines(), width).len();
+                (e.outranks_transient(), rows.saturating_add(2))
+            })
+            .collect();
+        Self::keep_costed(&costs, max_rows)
+    }
+
+    /// The eviction both budgets share.
+    fn keep_costed(costs: &[(bool, usize)], max_rows: usize) -> Vec<bool> {
+        let mut keep = keep_within(costs, max_rows);
         // a stack with no room for even one framed box shows the newest
         // notice clipped rather than nothing at all: a truncated line still
         // says something happened, an empty screen says the message was
@@ -1173,5 +1191,150 @@ impl Messages {
                     .collect()
             })
             .collect()
+    }
+
+    /// The toast boxes visible in a column `max_rows` tall and `width`
+    /// cells wide, oldest first: [`Self::visible_toasts`] with every line
+    /// wrapped to fit inside the box's frame, and each entry costed at the
+    /// rows it wraps to.
+    #[must_use]
+    pub fn visible_toasts_in(&self, max_rows: usize, width: u16) -> Vec<Vec<Vec<Span>>> {
+        self.painted()
+            .zip(self.keep_visible_in(max_rows, width))
+            .filter(|(_, shown)| *shown)
+            .map(|(e, _)| {
+                wrap_toast(&e.lines(), width)
+                    .into_iter()
+                    .map(|l| vec![Span::plain(l)])
+                    .collect()
+            })
+            .collect()
+    }
+}
+
+/// `lines` wrapped to the inside of a toast box `width` cells wide: at the
+/// last space that fits, and at the cell where a word is wider than the
+/// box. A line keeps at least one row, so an empty line stays a row.
+#[must_use]
+pub fn wrap_toast(lines: &[String], width: u16) -> Vec<String> {
+    let inside = usize::from(width.saturating_sub(2)).max(1);
+    lines
+        .iter()
+        .flat_map(|line| wrap_line(line, inside))
+        .collect()
+}
+
+/// One line broken into rows of at most `width` cells.
+fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    let mut used = 0_usize;
+    for cluster in crate::native::text::clusters(line) {
+        let cells = usize::from(crate::native::text::cluster_width(cluster));
+        if used > 0 && used.saturating_add(cells) > width {
+            if cluster == " " {
+                rows.push(String::new());
+                used = 0;
+                continue;
+            }
+            // the unfinished word moves down with the break, and the space
+            // before it goes, since a row ending in one reads as nothing
+            let carried = rows.last_mut().and_then(|row| {
+                let space = row.rfind(' ').filter(|&at| at > 0)?;
+                let word = row.split_off(space.saturating_add(1));
+                row.truncate(space);
+                Some(word)
+            });
+            let word = carried.unwrap_or_default();
+            used = usize::from(crate::native::text::text_width(&word));
+            rows.push(word);
+        }
+        if let Some(row) = rows.last_mut() {
+            row.push_str(cluster);
+        }
+        used = used.saturating_add(cells);
+    }
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(boxes: &[Vec<Vec<Span>>]) -> Vec<Vec<String>> {
+        boxes
+            .iter()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|spans| spans.iter().map(|s| s.text.as_str()).collect())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A native notice the user's own notifier speaks takes no box, so the
+    /// armed toast standing behind it is counted from the first box the
+    /// stack draws.
+    #[test]
+    fn the_armed_toast_is_found_behind_a_notice_the_stack_does_not_draw() {
+        let mut messages = Messages {
+            handed_back: true,
+            ..Messages::default()
+        };
+        let _ = messages.set_foreign_notifier(true);
+        messages.push_native("spoken".to_string(), false);
+        messages.push("echomsg".to_string(), vec![(0, "shown".into())], false);
+        let _ = messages.arm_top_slot();
+        assert!(messages.armed_slot.is_some(), "the drawn toast is armed");
+        assert_eq!(messages.armed_visible_slot(20, 40), Some(0));
+    }
+
+    /// A notice longer than the column breaks at the last space that fits,
+    /// a word wider than the box breaks at the cell, every row fits inside
+    /// the frame, and the budget pays for the rows the wrap produced: the
+    /// 4-row wrapped box and the 3-row short one do not fit in 6 rows
+    /// together, where their unwrapped lines would.
+    #[test]
+    fn a_notice_wider_than_the_column_wraps_and_is_budgeted_at_its_wrapped_height() {
+        let mut messages = Messages::default();
+        messages.push(
+            "echomsg".to_string(),
+            vec![(0, "written to the file you opened".into())],
+            false,
+        );
+        messages.push("echomsg".to_string(), vec![(0, "ok".into())], false);
+        let width = 14;
+        let boxes = messages.visible_toasts_in(8, width);
+        assert_eq!(
+            texts(&boxes),
+            vec![
+                vec![
+                    "written to".to_string(),
+                    "the file you".into(),
+                    "opened".into()
+                ],
+                vec!["ok".to_string()],
+            ]
+        );
+        for line in boxes.iter().flatten() {
+            let text: String = line.iter().map(|s| s.text.as_str()).collect();
+            assert!(
+                crate::native::text::text_width(&text) <= width - 2,
+                "{text:?} does not fit inside a {width}-wide box"
+            );
+        }
+        assert_eq!(
+            texts(&messages.visible_toasts_in(7, width)),
+            vec![vec!["ok".to_string()]],
+            "the wrapped box costs its three rows plus the frame"
+        );
+        assert_eq!(messages.visible_toasts_in(7, u16::MAX).len(), 2);
+
+        assert_eq!(
+            wrap_toast(&["abcdefghijkl".to_string()], 7),
+            vec!["abcde", "fghij", "kl"],
+            "a word wider than the box breaks at the cell"
+        );
+        assert_eq!(wrap_toast(&[String::new()], 7), vec![""]);
     }
 }

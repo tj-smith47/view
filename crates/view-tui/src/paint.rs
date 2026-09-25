@@ -2214,6 +2214,21 @@ mod tests {
         let _ = view_core::update::update(model, view_core::msg::Msg::Redraw(vec![ev]));
     }
 
+    /// Parks the cursor on the grid's last row, below a top-anchored
+    /// stack, so the stack stays at its own corner and does not flip off
+    /// the cursor row.
+    fn cursor_below_the_stack(model: &mut Model) {
+        let (_, height) = model.engine.grid().size();
+        apply(
+            model,
+            view_core::events::UiEvent::GridCursorGoto {
+                grid: 1,
+                row: u64::from(height.saturating_sub(1)),
+                col: 0,
+            },
+        );
+    }
+
     /// Drives the agent panel's `:View ai <verb>` entry point.
     fn ai_verb(model: &mut Model, verb: &str) {
         let _ = view_core::update::update(
@@ -3055,9 +3070,11 @@ mod tests {
     /// underneath.
     #[test]
     fn messages_overlay_multiline_message_gets_one_row_per_physical_line_and_clears_its_box() {
+        // the notice column is half the grid, so the right 26 columns are
+        // the column the box lays out in
         let mut model = Model::new();
         model.engine.apply_grid(GridOp::Resize {
-            width: 26,
+            width: 52,
             height: 5,
         });
         // stands in for real grid content underneath the toast's rect (a
@@ -3068,9 +3085,10 @@ mod tests {
             model.engine.apply_grid(GridOp::PutLine {
                 row,
                 col_start: 0,
-                cells: vec![("X".into(), 0, 26)],
+                cells: vec![("X".into(), 0, 52)],
             });
         }
+        cursor_below_the_stack(&mut model);
         apply(
             &mut model,
             view_core::events::UiEvent::MsgShow {
@@ -3081,16 +3099,16 @@ mod tests {
         );
 
         let surface = view_surface::render(&model);
-        let backend = TestBackend::new(26, 5);
+        let backend = TestBackend::new(52, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| composite(&model, &surface, f)).unwrap();
         let buf = terminal.backend().buffer().clone();
         let row_text =
-            |r: u16| -> String { (0..26).map(|c| buf[(c, r)].symbol().to_string()).collect() };
+            |r: u16| -> String { (26..52).map(|c| buf[(c, r)].symbol().to_string()).collect() };
 
         // interior width = the longer physical line (23 cells), not the sum
         // of both lines (28); the framed box adds the 2-cell border (25
-        // wide, 4 tall total), right-anchored at col 1 (26 - 25), so the
+        // wide, 4 tall total), right-anchored at the column's col 1, so the
         // interior's two text rows land at y=1 and y=2, columns 2..25, with
         // the border's own left/right edge glyphs at columns 1 and 25 --
         // column 0 alone stays real grid content, and the second line
@@ -3126,9 +3144,10 @@ mod tests {
     ) {
         let mut model = Model::new();
         model.engine.apply_grid(GridOp::Resize {
-            width: 20,
+            width: 40,
             height: 5,
         });
+        cursor_below_the_stack(&mut model);
         for kind_and_text in [
             ("echomsg", "info0"),
             ("echomsg", "info1"),
@@ -3147,7 +3166,7 @@ mod tests {
         }
 
         let surface = view_surface::render(&model);
-        let backend = TestBackend::new(20, 5);
+        let backend = TestBackend::new(40, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| composite(&model, &surface, f)).unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -3195,31 +3214,19 @@ mod tests {
         );
     }
 
-    /// Width analogue of the clamp-boundary test above: a single 9-cell
-    /// line in a 10-wide grid leaves only 8 interior cells once the
-    /// border's own left/right edge is subtracted, so the interior must
-    /// show exactly the widest line's first 8 cells -- never fewer, which
-    /// is what happens if `render()`'s width budget is measured against
-    /// the raw `grid_w` instead of `grid_w` shrunk by the frame's own 2
-    /// columns first. (This specific right-anchored geometry -- `col =
-    /// grid_w.saturating_sub(width)` saturates to 0 the moment `width`
-    /// exceeds `grid_w`, and the subsequent `clamp_to` then caps `width`
-    /// back to exactly `grid_w` regardless of how large the unclamped
-    /// request was -- means the final interior width converges to the
-    /// same `grid_w - 2` whether or not the budget was pre-shrunk, so
-    /// reverting the width leg of the fix alone does not fail this
-    /// particular assertion; the row leg above is what the disconfirm run
-    /// actually falsifies. The width leg is still correct to keep: it
-    /// makes the selected budget equal the interior by construction
-    /// rather than by this clamp's saturating-arithmetic coincidence, so
-    /// it stays correct if that anchor formula ever changes.)
+    /// Width analogue of the clamp-boundary test above: a 9-cell line in a
+    /// 10-wide notice column leaves 8 interior cells once the border's two
+    /// edges are subtracted, so the box spans the column, its first row
+    /// shows the line's first 8 cells, and the ninth wraps to the row
+    /// under it.
     #[test]
-    fn messages_toast_shows_the_widest_lines_final_interior_cell_at_the_width_clamp_boundary() {
+    fn messages_toast_wraps_a_line_one_cell_wider_than_the_column_interior() {
         let mut model = Model::new();
         model.engine.apply_grid(GridOp::Resize {
-            width: 10,
+            width: 20,
             height: 5,
         });
+        cursor_below_the_stack(&mut model);
         apply(
             &mut model,
             view_core::events::UiEvent::MsgShow {
@@ -3230,7 +3237,7 @@ mod tests {
         );
 
         let surface = view_surface::render(&model);
-        let backend = TestBackend::new(10, 5);
+        let backend = TestBackend::new(20, 5);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| composite(&model, &surface, f)).unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -3241,18 +3248,16 @@ mod tests {
             .find(|l| matches!(l.kind, LayerKind::Toast { .. }))
             .expect("messages layer present");
         let (x, y, w) = (messages.rect.col, messages.rect.row, messages.rect.width);
-        assert_eq!(
-            w, 10,
-            "box must span the full grid width, not overflow past it"
-        );
+        assert_eq!((x, w), (10, 10), "the box spans the column");
+        assert_eq!(messages.rect.height, 4, "two interior rows in a frame");
 
-        let interior_row: String = (x + 1..x + w - 1)
-            .map(|c| buf[(c, y + 1)].symbol().to_string())
-            .collect();
-        assert_eq!(
-            interior_row, "12345678",
-            "the interior's 8 cells must show the line's own first 8 characters, ending at '8', not fewer"
-        );
+        let interior = |row: u16| -> String {
+            (x + 1..x + w - 1)
+                .map(|c| buf[(c, row)].symbol().to_string())
+                .collect()
+        };
+        assert_eq!(interior(y + 1), "12345678", "the first 8 cells");
+        assert_eq!(interior(y + 2), "9       ", "the ninth wraps");
     }
 
     /// A toast is the one float `view-surface` hands over unframed, so its
@@ -3273,6 +3278,7 @@ mod tests {
                 width: 10,
                 height: 5,
             });
+            cursor_below_the_stack(&mut model);
             apply(
                 &mut model,
                 view_core::events::UiEvent::MsgShow {
@@ -3656,6 +3662,7 @@ mod tests {
                 cells: vec![("Z".into(), 0, 10)],
             });
         }
+        cursor_below_the_stack(&mut model);
         apply(
             &mut model,
             view_core::events::UiEvent::MsgShow {

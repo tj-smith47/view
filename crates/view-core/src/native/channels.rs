@@ -102,7 +102,8 @@ pub enum Region {
     /// The rows at the foot of the grid the engine keeps for a command
     /// line.
     CmdlineBand,
-    /// The grid's top-right corner, where view stacks its toasts.
+    /// The notice column, where view stacks its toasts
+    /// ([`Model::notice_bounds`](crate::model::Model::notice_bounds)).
     TopRightChrome,
 }
 

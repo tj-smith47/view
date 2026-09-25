@@ -1285,17 +1285,6 @@ impl Model {
         }
     }
 
-    /// The rows the toast stack is laid out in: the engine grid's own
-    /// height, floored at one framed box so a stack is never budgeted out
-    /// of existence on a terminal too small to hold one. Read by the
-    /// renderer that lays the boxes out and by `update`'s own read of which
-    /// notice the budget is showing -- one budget, because two would let
-    /// the model animate a box the frame never drew.
-    #[must_use]
-    pub fn toast_rows(&self) -> usize {
-        usize::from(self.engine.grid().size().1).max(3)
-    }
-
     /// Steps the agent panel one notch wider or narrower, reporting whether
     /// the width actually moved (it does not at either end of the range).
     ///
@@ -2135,12 +2124,14 @@ mod buffers;
 mod focus;
 mod look;
 mod messages;
+pub(crate) mod notice;
 mod rows;
 mod window_status;
 
 pub use buffers::BufferEntry;
 pub use look::{Detected, Look, Panes, MIN_FRAMED_SLOT};
-pub use messages::{format_at, MessageEntry, MessageId, Messages};
+pub use messages::{format_at, wrap_toast, MessageEntry, MessageId, Messages};
+pub use notice::{NoticeColumn, NOTICE_COLUMN_MAX};
 pub use rows::{grid_room_for, grid_target_for, ENGINE_MIN_SIZE, SIZE_FLOOR};
 pub use window_status::{Segments, TileKind, TileTitles, WindowStatus};
 

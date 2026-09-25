@@ -19,11 +19,11 @@ use view_core::grid::registry::GridId;
 use view_core::grid::registry::GLOBAL_GRID;
 use view_core::grid::Grid;
 use view_core::model::{
-    CmdlineState, Focus, Model, Overlay, OverlayKind, PopupmenuState, TermCaps,
+    CmdlineState, Focus, Model, NoticeColumn, Overlay, OverlayKind, PopupmenuState, TermCaps,
 };
 #[cfg(test)]
-use view_core::native::geometry::OverlayBox;
-use view_core::native::geometry::{Anchor, NativeSurface, OverlayRect};
+use view_core::native::geometry::{Anchor, OverlayBox};
+use view_core::native::geometry::{NativeSurface, OverlayRect};
 use view_core::native::palette::PaletteState;
 use view_core::native::prompt::PromptState;
 use view_core::native::speculate::PredictedCell;
@@ -590,7 +590,9 @@ pub fn render(model: &Model) -> Surface {
             ));
         }
     }
-    layers.extend(toast_layers(model, (grid_w, grid_h), origin));
+    if let Some(column) = live_notice_column(model) {
+        layers.extend(toast_layers(model, column, origin));
+    }
     layers.extend(
         over_toasts
             .iter()
@@ -651,17 +653,17 @@ fn messages_width(lines: &[Vec<Span>]) -> u16 {
 }
 
 /// One framed toast box's outer size: the widest line it holds plus the
-/// frame, clipped to the grid.
+/// frame, clipped to the notice column.
 ///
-/// The floors match `Messages::visible_toasts`' own: a pre-attach frame
-/// (`grid_w`/`grid_h` still 0, e.g. a native toast pushed before the
-/// engine's first `GridResize`) still reserves a box rather than vanishing
-/// until real grid content arrives, and `paint::toast`'s
-/// width/height-under-2 guard is what degrades a grid too small for the
-/// frame to a blank fill instead of a panic.
-fn toast_box(lines: &[Vec<Span>], grid_w: u16) -> (u16, u16) {
+/// The floors match `Messages::visible_toasts_in`' own: a pre-attach frame
+/// (a column still 0 wide, e.g. a native toast pushed before the engine's
+/// first `GridResize`) still reserves a box rather than vanishing until
+/// real grid content arrives, and `paint::toast`'s width/height-under-2
+/// guard is what degrades a column too small for the frame to a blank fill
+/// instead of a panic.
+fn toast_box(lines: &[Vec<Span>], column_w: u16) -> (u16, u16) {
     let width = messages_width(lines)
-        .min(grid_w.saturating_sub(2))
+        .min(column_w.saturating_sub(2))
         .max(1)
         .saturating_add(2);
     let height = u16::try_from(lines.len())
@@ -671,25 +673,18 @@ fn toast_box(lines: &[Vec<Span>], grid_w: u16) -> (u16, u16) {
     (width, height)
 }
 
-/// The notifications stack's anchor, normalized to one of the four corners
-/// [`Anchor::is_top_corner`]/[`Anchor::is_left_corner`] read -- a defensive
-/// floor for a layout `[ui.surfaces.notifications] anchor` writes a
-/// non-corner value into (bottom/top/left/right, valid for a windowed
-/// placement but not a floating stack's corner), so a slot with no corner
-/// of its own still has to grow and exit somewhere, and `is_top_corner`'s
-/// "only meaningful for a corner" floor is no answer for it.
-fn notifications_corner(model: &Model) -> Anchor {
-    let anchor = model.surfaces.layout(NativeSurface::Notifications).anchor;
-    if anchor.is_corner() {
-        anchor
-    } else {
-        Anchor::TopRight
-    }
+/// The notice column this frame stacks into, or `None` while there is
+/// nothing to stack: the geometry walks every pane, and a frame with no
+/// notice up and none leaving has no use for it.
+pub(crate) fn live_notice_column(model: &Model) -> Option<NoticeColumn> {
+    (!model.engine.messages.entries.is_empty() || model.toast_motion.is_some())
+        .then(|| model.notice_column())
 }
 
-/// The toast stack: one framed box per visible notice, nearest the anchor
-/// corner first, plus the box a dismissal is still carrying off toward that
-/// same corner.
+/// The toast stack: one framed box per visible notice, nearest the
+/// column's stacking end first, plus the box a dismissal is still carrying
+/// off toward the column's edge. Every box stays inside `column`
+/// ([`Model::notice_column`]), the exit slide included.
 ///
 /// The stack is already in its final state here -- the departed notice is
 /// out of `Messages::entries` -- so the motion decides only where the boxes
@@ -703,18 +698,27 @@ fn notifications_corner(model: &Model) -> Anchor {
 ///
 /// The departing box is pushed last, so it composites over the stack
 /// arriving underneath it instead of being cleared by it.
-fn toast_layers(model: &Model, bounds: (u16, u16), origin: (u16, u16)) -> Vec<Layer> {
-    let (grid_w, grid_h) = bounds;
-    let anchor = notifications_corner(model);
-    let grow_down = anchor.is_top_corner();
-    let left_corner = anchor.is_left_corner();
+fn toast_layers(model: &Model, column: NoticeColumn, origin: (u16, u16)) -> Vec<Layer> {
+    let (top, _, column_w, column_h) = column.rect;
+    let grow_down = column.from_top;
     let paused = model.engine.messages.paused();
-    let stack = model.engine.messages.visible_toasts(model.toast_rows());
+    let stack = model
+        .engine
+        .messages
+        .visible_toasts_in(usize::from(column_h).max(3), column_w);
     let leaving = model.toast_motion.as_ref().map(|motion| {
         let (lines, slot) = motion.exiting();
-        let (width, height) = toast_box(lines, grid_w);
+        let text: Vec<String> = lines
+            .iter()
+            .map(|spans| overlay::line_text(spans))
+            .collect();
+        let lines: Vec<Vec<Span>> = view_core::model::wrap_toast(&text, column_w)
+            .into_iter()
+            .map(|line| vec![Span::plain(line)])
+            .collect();
+        let (width, height) = toast_box(&lines, column_w);
         Leaving {
-            lines: lines.to_vec(),
+            lines,
             slot: slot.min(stack.len()),
             height,
             x_offset: motion.cells_of(width),
@@ -726,21 +730,23 @@ fn toast_layers(model: &Model, bounds: (u16, u16), origin: (u16, u16)) -> Vec<La
     }
     let vacated = leaving.as_ref().map_or(usize::MAX, |l| l.slot);
     let y_shift = leaving.as_ref().map_or(0, |l| l.y_shift);
-    // the box's own top row, `dist` cells from the anchor's edge: measured
-    // down from row 0 for a top corner, up from `grid_h` for a bottom one,
-    // so both directions share one accumulator and only its reading differs
+    // the box's own top row, `dist` cells from the stacking end: measured
+    // down from the column's top for a stack growing down, up from its
+    // bottom otherwise, so both directions share one accumulator and only
+    // its reading differs
+    let bottom = top.saturating_add(column_h);
     let to_row = |dist: u16, height: u16| -> u16 {
         if grow_down {
-            dist
+            top.saturating_add(dist)
         } else {
-            grid_h.saturating_sub(dist).saturating_sub(height)
+            bottom.saturating_sub(dist).saturating_sub(height).max(top)
         }
     };
     let mut layers = Vec::with_capacity(stack.len().saturating_add(1));
     let mut dist: u16 = 0;
-    let mut vacated_row: u16 = 0;
+    let mut vacated_row: u16 = top;
     for (i, lines) in stack.into_iter().enumerate() {
-        let (_, height) = toast_box(&lines, grid_w);
+        let (_, height) = toast_box(&lines, column_w);
         let near_row = to_row(dist, height);
         if i == vacated {
             vacated_row = near_row;
@@ -749,7 +755,7 @@ fn toast_layers(model: &Model, bounds: (u16, u16), origin: (u16, u16)) -> Vec<La
             if grow_down {
                 near_row.saturating_add(y_shift)
             } else {
-                near_row.saturating_sub(y_shift)
+                near_row.saturating_sub(y_shift).max(top)
             }
         } else {
             near_row
@@ -760,13 +766,7 @@ fn toast_layers(model: &Model, bounds: (u16, u16), origin: (u16, u16)) -> Vec<La
             paused: i == 0 && paused,
         };
         layers.push(toast_layer(
-            lines,
-            placement,
-            at,
-            bounds,
-            origin,
-            left_corner,
-            model.caps,
+            lines, placement, at, column, origin, model.caps,
         ));
         dist = dist.saturating_add(height);
     }
@@ -781,15 +781,7 @@ fn toast_layers(model: &Model, bounds: (u16, u16), origin: (u16, u16)) -> Vec<La
             x_offset: leaving.x_offset,
             paused: false,
         };
-        let layer = toast_layer(
-            leaving.lines,
-            placement,
-            at,
-            bounds,
-            origin,
-            left_corner,
-            model.caps,
-        );
+        let layer = toast_layer(leaving.lines, placement, at, column, origin, model.caps);
         // a box that has travelled its own width is entirely past the edge
         // it is leaving through; it leaves the stack, so the paint shadow
         // has no empty rect to pair against
@@ -818,35 +810,35 @@ struct Placement {
     paused: bool,
 }
 
-/// One toast box as a [`Layer`]: anchored to the grid edge its own corner
-/// names, shifted `x_offset` cells further toward that corner's side while
-/// it is on its way out. A left corner is already flush against column 0,
-/// so its exit shrinks the visible width from the right, since a column
-/// past that bound is a negative `u16` cannot express -- the same
-/// clip a right corner gets for free from [`overlay_layer`]'s own bound,
-/// worked out by hand here so both directions read one rect.
+/// One toast box as a [`Layer`]: against the column edge its corner names,
+/// shifted `x_offset` cells further toward that edge while it is on its way
+/// out. A box at the left edge exits by shrinking its visible width from
+/// the right, since the cells past that edge are a frame or another pane;
+/// a box at the right edge slides and is clipped by [`overlay_layer`] at
+/// the column's own right edge, so both directions stop where the column
+/// does.
 fn toast_layer(
     lines: Vec<Vec<Span>>,
     placement: Placement,
     row: u16,
-    bounds: (u16, u16),
+    column: NoticeColumn,
     origin: (u16, u16),
-    left_corner: bool,
     caps: TermCaps,
 ) -> Layer {
-    let (grid_w, _) = bounds;
-    let (width, height) = toast_box(&lines, grid_w);
+    let (top, col, column_w, column_h) = column.rect;
+    let left_corner = column.left_edge;
+    let (width, height) = toast_box(&lines, column_w);
     let visible_width = width.saturating_sub(placement.x_offset);
-    let col = if left_corner {
-        0
+    let at = if left_corner {
+        col
     } else {
-        grid_w
+        col.saturating_add(column_w)
             .saturating_sub(width)
             .saturating_add(placement.x_offset)
     };
     overlay_layer(
-        Rect::new(row, col, visible_width, height),
-        bounds,
+        Rect::new(row, at, visible_width, height),
+        (col.saturating_add(column_w), top.saturating_add(column_h)),
         origin,
         LayerKind::Toast {
             lines,
@@ -1526,6 +1518,14 @@ mod tests {
         surfaces.push(view_core::native::ext::Ext::Tabline);
         model.attach_surfaces(surfaces);
         model.engine.apply_grid(GridOp::Resize { width, height });
+        // a stack covering the cursor's row moves to the column's other
+        // end; the middle row is under neither end of a short stack, so the
+        // tests here read the anchored placement unless they move the
+        // cursor themselves
+        model.engine.apply_grid(GridOp::CursorGoto {
+            row: height / 2,
+            col: 0,
+        });
         // past the startup window: a foreign message is parked rather than
         // stacked until it closes (`view_core::native::toast::StartupHold`),
         // and every test here is about where a toast paints rather than
@@ -2322,9 +2322,21 @@ mod tests {
                 // the ring alone
                 let down = inset + model.chrome_rows();
                 for (tiled, plain) in places(&model).iter().zip(&bare) {
+                    // the notice column keeps a gapped frame's width clear
+                    // on every side, so a top-right box sits one row lower
+                    // and one column further left again
+                    let (clear_rows, clear_cols) = if tiled.0 == "toast" {
+                        look.inset()
+                    } else {
+                        (0, 0)
+                    };
                     assert_eq!(
                         (tiled.0, tiled.1, tiled.2),
-                        (plain.0, plain.1 + down, plain.2 + inset),
+                        (
+                            plain.0,
+                            plain.1 + down + clear_rows,
+                            plain.2 + inset - clear_cols
+                        ),
                         "{} is not the ring's inset in from where nvim mode puts it (gaps {gaps})",
                         tiled.0
                     );

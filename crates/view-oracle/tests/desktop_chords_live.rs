@@ -95,6 +95,14 @@ fn spawn_split(label: &str, policy: QueryPolicy) -> (common::ScratchPaths, PtySe
         "the split never showed both windows' own text; screen:\n{}",
         session.screen()
     );
+    // the trailing Esc stays pending in view's decoder until its timeout
+    // says no sequence follows it, and a chord sent inside that window is
+    // read as the Esc's Alt prefix (`<M-D-Left>`)
+    assert!(
+        session.wait_for_screen(BUDGET, |screen| !screen.contents().contains("-- INSERT --")),
+        "the trailing Esc never left insert mode; screen:\n{}",
+        session.screen()
+    );
     (paths, session)
 }
 
