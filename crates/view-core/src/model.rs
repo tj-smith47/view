@@ -2114,7 +2114,7 @@ pub use buffers::BufferEntry;
 pub use look::{Detected, Look, Panes, MIN_FRAMED_SLOT};
 pub use messages::{format_at, MessageEntry, MessageId, Messages};
 pub use rows::{grid_room_for, grid_target_for, ENGINE_MIN_SIZE, SIZE_FLOOR};
-pub use window_status::{Segments, TileKind, WindowStatus};
+pub use window_status::{Segments, TileKind, TileTitles, WindowStatus};
 
 /// The open tabs, present once nvim has sent at least one `tabline_update`.
 #[non_exhaustive]

@@ -6,8 +6,14 @@
 //! of these per window that changed, and the model keeps the last one it
 //! heard for each.
 
+use std::collections::BTreeMap;
+
 use crate::native::geometry::NativeSurface;
 use crate::native::views::{Span, StyleRole};
+
+/// `[ui] tile_titles`: the title a user gives a tile by its buffer's
+/// filetype, ahead of the filetype itself.
+pub type TileTitles = BTreeMap<String, String>;
 
 /// One window's buffer identity, cursor position and diagnostic counts, as
 /// the bridge's `window` trigger group reports them.
@@ -61,6 +67,12 @@ pub enum TileKind {
         /// The buffer's filetype, empty where none is set.
         filetype: String,
     },
+    /// A `nofile` buffer in a window held at a fixed width, which is how a
+    /// file tree, an outline or a debugger panel keeps its column.
+    Sidebar {
+        /// The buffer's filetype, empty where none is set.
+        filetype: String,
+    },
     /// Any other buffer backed by no file.
     Scratch {
         /// The buffer's filetype, empty where none is set.
@@ -74,6 +86,7 @@ pub enum TileKind {
 ///
 /// `mode` and `showcmd` describe the session and show on the active tile
 /// alone; the rest describe the tile's own window.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Segments {
     /// The mode message.
@@ -109,6 +122,24 @@ impl TileKind {
     /// included.
     #[must_use]
     pub fn classify(buftype: &str, filetype: &str, loclist: bool) -> Self {
+        Self::classify_window(buftype, filetype, loclist, false)
+    }
+
+    /// The kind nvim's own facts about a window and its buffer name.
+    ///
+    /// Every buffer that no file backs and whose `buftype` has no meaning
+    /// of its own is a scratch buffer, a `buftype` nvim adds later
+    /// included. A `nofile` one in a window whose `winfixwidth` is set is a
+    /// sidebar: every tree, outline and panel plugin sets that option so a
+    /// split beside it leaves its column alone, and a named `buftype` keeps
+    /// its own row whatever the window holds.
+    #[must_use]
+    pub fn classify_window(
+        buftype: &str,
+        filetype: &str,
+        loclist: bool,
+        fixed_width: bool,
+    ) -> Self {
         match buftype {
             "help" => Self::Help,
             "quickfix" if loclist => Self::LocationList,
@@ -118,6 +149,9 @@ impl TileKind {
                 filetype: filetype.to_owned(),
             },
             "" => Self::File,
+            "nofile" if fixed_width => Self::Sidebar {
+                filetype: filetype.to_owned(),
+            },
             _ => Self::Scratch {
                 filetype: filetype.to_owned(),
             },
@@ -127,7 +161,15 @@ impl TileKind {
     /// The title a tile of this kind carries on its frame.
     #[must_use]
     pub fn title(&self, status: &WindowStatus) -> Vec<Span> {
+        self.title_with(status, &TileTitles::new())
+    }
+
+    /// The title a tile of this kind carries on its frame, where `titles`
+    /// names a tile titled by its filetype.
+    #[must_use]
+    pub fn title_with(&self, status: &WindowStatus, titles: &TileTitles) -> Vec<Span> {
         let name = status.name.as_str();
+        let mapped = |filetype: &str| titles.get(filetype).map_or("", String::as_str);
         let text = match self {
             Self::File => {
                 if name.is_empty() {
@@ -147,8 +189,10 @@ impl TileKind {
             Self::LocationList => "location list".to_owned(),
             Self::Terminal if name.is_empty() => "terminal".to_owned(),
             Self::Terminal => format!("terminal: {name}"),
-            Self::Prompt { filetype } => first_of(&[filetype], "prompt"),
-            Self::Scratch { filetype } => first_of(&[filetype, name], "scratch"),
+            Self::Prompt { filetype } => first_of(&[mapped(filetype), filetype], "prompt"),
+            Self::Sidebar { filetype } | Self::Scratch { filetype } => {
+                first_of(&[mapped(filetype), filetype, name], "scratch")
+            }
             Self::Native(surface) => surface.id().to_owned(),
         };
         vec![Span::new(text, StyleRole::Title)]
@@ -178,7 +222,7 @@ impl TileKind {
                 mode: true,
                 ..Segments::NONE
             },
-            Self::Native(NativeSurface::Tree) => Segments {
+            Self::Native(NativeSurface::Tree) | Self::Sidebar { .. } => Segments {
                 branch: true,
                 ..Segments::NONE
             },
@@ -211,6 +255,7 @@ mod tests {
         buftype: &'static str,
         filetype: &'static str,
         loclist: bool,
+        fixed_width: bool,
         kind: TileKind,
         title: &'static str,
         segments: Segments,
@@ -245,6 +290,7 @@ mod tests {
         ..Segments::NONE
     };
 
+    /// A row read with the window's `winfixwidth` off; [`table`] sets it.
     fn row(
         buftype: &'static str,
         filetype: &'static str,
@@ -257,6 +303,7 @@ mod tests {
             buftype,
             filetype,
             loclist,
+            fixed_width: false,
             kind,
             title,
             segments,
@@ -265,10 +312,25 @@ mod tests {
 
     /// The table in docs/tiled-ui.md as data. Every buftype nvim documents
     /// and one it does not, crossed with no filetype, a tree plugin's and
-    /// an ordinary one, so a plugin's filetype on any buftype and a buftype
-    /// nvim adds later both land on a row.
+    /// an ordinary one, with `loclist` and `winfixwidth` each on and off, so
+    /// a plugin's filetype on any buftype, a fixed-width window holding any
+    /// buftype and a buftype nvim adds later all land on a row.
     fn table(name: &str) -> Vec<Row> {
+        let mut rows = Vec::new();
+        for fixed_width in [false, true] {
+            for mut row in rows_at(name, fixed_width) {
+                row.fixed_width = fixed_width;
+                rows.push(row);
+            }
+        }
+        rows
+    }
+
+    fn rows_at(name: &str, fixed_width: bool) -> Vec<Row> {
         let scratch = |filetype: &'static str| TileKind::Scratch {
+            filetype: filetype.to_owned(),
+        };
+        let sidebar = |filetype: &'static str| TileKind::Sidebar {
             filetype: filetype.to_owned(),
         };
         let prompt = |filetype: &'static str| TileKind::Prompt {
@@ -338,7 +400,26 @@ mod tests {
                     MODE,
                 ),
             ]);
-            for buftype in ["nofile", "nowrite", "acwrite", "someday"] {
+            if fixed_width {
+                rows.extend([
+                    row("nofile", "", loclist, sidebar(""), "page.txt", BRANCH),
+                    row("nofile", "lua", loclist, sidebar("lua"), "lua", BRANCH),
+                    row(
+                        "nofile",
+                        "NvimTree",
+                        loclist,
+                        sidebar("NvimTree"),
+                        "NvimTree",
+                        BRANCH,
+                    ),
+                ]);
+            }
+            let scratches: &[&'static str] = if fixed_width {
+                &["nowrite", "acwrite", "someday"]
+            } else {
+                &["nofile", "nowrite", "acwrite", "someday"]
+            };
+            for &buftype in scratches {
                 rows.extend([
                     row(buftype, "", loclist, scratch(""), "page.txt", DIAGNOSTICS),
                     row(buftype, "lua", loclist, scratch("lua"), "lua", DIAGNOSTICS),
@@ -368,10 +449,11 @@ mod tests {
             ..WindowStatus::default()
         };
         for row in table(&status.name.clone()) {
-            let kind = TileKind::classify(row.buftype, row.filetype, row.loclist);
+            let kind =
+                TileKind::classify_window(row.buftype, row.filetype, row.loclist, row.fixed_width);
             let at = format!(
-                "buftype {:?}, filetype {:?}, loclist {}",
-                row.buftype, row.filetype, row.loclist
+                "buftype {:?}, filetype {:?}, loclist {}, winfixwidth {}",
+                row.buftype, row.filetype, row.loclist, row.fixed_width
             );
             assert_eq!(kind, row.kind, "{at}");
             let title = kind.title(&status);
@@ -413,8 +495,70 @@ mod tests {
                 },
                 "scratch",
             ),
+            (
+                TileKind::Sidebar {
+                    filetype: String::new(),
+                },
+                "scratch",
+            ),
         ] {
             assert_eq!(text(&kind.title(&status)), title, "{kind:?} unnamed");
+        }
+    }
+
+    /// `[ui] tile_titles` names every tile titled by its filetype, ahead of
+    /// the filetype, and a kind titled by anything else keeps its own.
+    #[test]
+    fn a_tile_titled_by_its_filetype_takes_the_title_the_user_mapped_it_to() {
+        let status = WindowStatus {
+            name: "page.txt".to_owned(),
+            ..WindowStatus::default()
+        };
+        let titles: TileTitles = [("NvimTree", "files"), ("blank", "")]
+            .into_iter()
+            .map(|(filetype, title)| (filetype.to_owned(), title.to_owned()))
+            .collect();
+        let of = |filetype: &str| filetype.to_owned();
+        for (kind, title) in [
+            (
+                TileKind::Sidebar {
+                    filetype: of("NvimTree"),
+                },
+                "files",
+            ),
+            (
+                TileKind::Scratch {
+                    filetype: of("NvimTree"),
+                },
+                "files",
+            ),
+            (
+                TileKind::Prompt {
+                    filetype: of("NvimTree"),
+                },
+                "files",
+            ),
+            (
+                TileKind::Sidebar {
+                    filetype: of("lua"),
+                },
+                "lua",
+            ),
+            (TileKind::Scratch { filetype: of("") }, "page.txt"),
+            (TileKind::Prompt { filetype: of("") }, "prompt"),
+            // an entry mapped to nothing names nothing, and the filetype
+            // stands in
+            (
+                TileKind::Sidebar {
+                    filetype: of("blank"),
+                },
+                "blank",
+            ),
+            (TileKind::File, "page.txt"),
+            (TileKind::Help, "help: page"),
+            (TileKind::Native(NativeSurface::Tree), "tree"),
+        ] {
+            assert_eq!(text(&kind.title_with(&status, &titles)), title, "{kind:?}");
         }
     }
 }

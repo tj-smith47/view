@@ -687,6 +687,12 @@ mod tests {
             (TileKind::LocationList, vec!["42/90"]),
             (TileKind::Terminal, vec!["-- INSERT --"]),
             (TileKind::Native(NativeSurface::Tree), vec!["main"]),
+            (
+                TileKind::Sidebar {
+                    filetype: String::new(),
+                },
+                vec!["main"],
+            ),
             (TileKind::Native(NativeSurface::Agent), vec![]),
             (
                 TileKind::Scratch {
