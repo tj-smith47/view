@@ -244,9 +244,9 @@ fit_active = false   # true: every window you move into is fitted to its text
 
 The width comes from the lines on screen, from the top of the window to the
 bottom. It never goes below `winwidth`. It stops at `textwidth`, or where
-`textwidth` is 0 at the first `colorcolumn` given as a number, so the
-marker column stays in view. The number and sign columns and the frame are
-added on top.
+`textwidth` is 0 at the first `colorcolumn` entry that is a plain column
+number, such as `90` in `+1,90`, so the marker column stays in view. The
+number and sign columns and the frame are added on top.
 
 With `equalalways` on, the other tiles share the columns that are left.
 With `noequalalways`, only the neighbour the columns came from changes.
@@ -255,7 +255,7 @@ fixed-width sidebar keeps its width when a tile beside it is fitted.
 
 Fitting a zoomed tile changes its width and keeps its height. The next zoom
 press zooms it again. Under `fit_active`, a zoomed layout stays zoomed when
-the cursor comes back to the zoomed tile from a float or a picker.
+the cursor comes back to the zoomed tile from a float.
 
 ## The accent
 

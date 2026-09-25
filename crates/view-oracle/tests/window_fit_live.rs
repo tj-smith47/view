@@ -109,12 +109,14 @@ fn inset(engine: &EngineSession) -> usize {
 /// The width a fit gives, from the case's own inputs.
 fn expected_width(longest: usize, tw: usize, cc: &str, numbered: bool, inset: usize) -> usize {
     let mut target = (longest + 1).max(WINWIDTH);
-    // a relative colorcolumn is counted from textwidth, which is 0 here
-    let absolute = !cc.starts_with(['+', '-']);
+    // a relative colorcolumn entry is counted from textwidth, which is 0
+    // wherever this branch reads it, so it marks nothing
     let cap = if tw > 0 {
         Some(tw)
     } else {
-        cc.parse::<usize>().ok().filter(|_| absolute)
+        cc.split(',')
+            .find(|entry| !entry.is_empty() && entry.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|entry| entry.parse().ok())
     };
     if let Some(cap) = cap {
         target = target.min(cap);
@@ -123,8 +125,9 @@ fn expected_width(longest: usize, tw: usize, cc: &str, numbered: bool, inset: us
 }
 
 /// The walk the arithmetic table names: every line length on both sides
-/// of each cap, both textwidths, a colorcolumn that is absolute, relative
-/// or absent, with and without the number column, gapped and gapless.
+/// of each cap, both textwidths, a colorcolumn that is absolute, relative,
+/// a list led by a relative entry, or absent, with and without the number
+/// column, gapped and gapless.
 #[test]
 fn fit_widens_to_the_longest_visible_line_within_its_cap() {
     for gaps in [true, false] {
@@ -134,7 +137,7 @@ fn fit_widens_to_the_longest_visible_line_within_its_cap() {
         let mut checked = 0;
         for longest in [5, 40, 79, 81, 200] {
             for tw in [0, 72] {
-                for cc in ["", "81", "+1"] {
+                for cc in ["", "81", "+1", "+1,90"] {
                     for numbered in [false, true] {
                         ex(&mut engine, "wincmd =");
                         set_lines(&mut engine, &[3, longest]);
@@ -152,7 +155,7 @@ fn fit_widens_to_the_longest_visible_line_within_its_cap() {
                 }
             }
         }
-        assert_eq!(checked, 60);
+        assert_eq!(checked, 80);
 
         // a line scrolled out of view is not measured, and one scrolled
         // into view is
@@ -315,4 +318,97 @@ fn fit_active_fits_on_enter_and_skips_a_zoomed_layout() {
     let off = widths(&mut engine);
     keys(&mut engine, "<C-w>l<C-w>h");
     assert_eq!(widths(&mut engine), off, "a fit ran with fit_active off");
+}
+
+/// A fit on a zoomed tile hands the squeezed columns back and keeps the
+/// rows the zoom took, and the next zoom press zooms again. The tile has a
+/// window stacked under it, so the zoom has rows to keep.
+#[test]
+fn a_fit_on_a_zoomed_tile_keeps_its_height_and_zooms_again() {
+    let mut engine = session(true);
+    let inset = inset(&engine);
+    keys(&mut engine, ":split<CR>");
+    ex(&mut engine, "setlocal nonumber tw=0 cc=");
+    set_lines(&mut engine, &[30]);
+    let size = |engine: &mut EngineSession, what: &str, winnr: u8| -> usize {
+        let text = engine
+            .eval_str(&format!("nvim_win_get_{what}(win_getid({winnr}))"))
+            .unwrap();
+        text.parse().unwrap()
+    };
+
+    keys(&mut engine, "<C-w>_<C-w>|");
+    let height = size(&mut engine, "height", 1);
+    assert!(
+        size(&mut engine, "height", 2) <= 1 && size(&mut engine, "width", 3) <= 1,
+        "the zoom squeezed both siblings"
+    );
+
+    invoke(&mut engine, "window", "fit");
+    settle(&mut engine, "fit on the zoomed tile");
+    assert_eq!(
+        size(&mut engine, "width", 1),
+        expected_width(30, 0, "", false, inset)
+    );
+    assert!(
+        size(&mut engine, "width", 3) > 1,
+        "the tile beside got no columns back"
+    );
+    assert_eq!(
+        size(&mut engine, "height", 1),
+        height,
+        "the fit gave up the rows the zoom took"
+    );
+
+    invoke(&mut engine, "window", "zoom");
+    settle(&mut engine, "zoom after the fit");
+    assert!(
+        size(&mut engine, "width", 3) <= 1,
+        "the zoom press after the fit did not zoom"
+    );
+    assert_eq!(size(&mut engine, "height", 1), height);
+}
+
+/// A zoom is read over the tiles alone, the way `window zoom` reads it, so
+/// view's own tree standing at its full width beside a zoomed tile leaves
+/// the layout zoomed for `fit_active`.
+#[test]
+fn fit_active_reads_a_zoom_past_views_own_sidebar() {
+    use view_core::native::geometry::{Anchor, NativeSurface, SurfaceLayout, SurfacePlacement};
+
+    let work = view_test_support::ScratchDir::new("window-fit-sidebar").unwrap();
+    std::fs::write(work.path().join("notes.txt"), "notes\n").unwrap();
+    let mut engine = EngineSession::spawn_with_ext(COLS, ROWS, UI_EXT_OPTIONS_MULTIGRID)
+        .expect("EngineSession against real nvim");
+    settle(&mut engine, "attach");
+    keys(&mut engine, &format!(":cd {}<CR>", work.path().display()));
+    engine.set_panes("tiles").unwrap();
+    settle(&mut engine, "tiles");
+    engine.set_surface(
+        NativeSurface::Tree,
+        SurfaceLayout::new(SurfacePlacement::Windowed, Anchor::Left, 30),
+    );
+    invoke(&mut engine, "tree", "toggle");
+    settle(&mut engine, "tree");
+    assert_eq!(engine.eval_str("&filetype").unwrap(), "view-tree");
+    keys(&mut engine, "<C-w>l:vsplit<CR>");
+    ex(&mut engine, "setglobal nonumber tw=0 cc=");
+    set_lines(&mut engine, &[30]);
+
+    engine.set_fit_active(true).unwrap();
+    keys(&mut engine, "<C-w>_<C-w>|");
+    ex(&mut engine, "call nvim_win_set_width(win_getid(1), 30)");
+    let zoomed = widths(&mut engine);
+    assert_eq!(zoomed[0], 30, "the tree stands at its width: {zoomed:?}");
+    assert!(zoomed[2] <= 1, "the zoom squeezed the tile: {zoomed:?}");
+
+    let float = ":lua vim.api.nvim_open_win(0, true, \
+                 { relative = 'editor', row = 2, col = 2, width = 20, height = 3 })<CR>\
+                 :close<CR>";
+    keys(&mut engine, float);
+    assert_eq!(
+        widths(&mut engine),
+        zoomed,
+        "the tree beside the zoom read as an unzoomed layout"
+    );
 }

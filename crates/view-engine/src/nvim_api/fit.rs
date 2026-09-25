@@ -20,7 +20,8 @@ use rmpv::Value;
 /// The text width is the widest `strdisplaywidth` over the lines from `w0`
 /// to `w$`, plus one column for the cursor past the last character, and
 /// never under `winwidth`. It is capped at `textwidth`, or where that is 0
-/// at the first absolute `colorcolumn`, so the marker column stays in view.
+/// at the first `colorcolumn` entry that is a plain number, so the marker
+/// column stays in view.
 /// The slot adds the number and sign columns (`textoff`) and the frame on
 /// both sides.
 ///
@@ -36,8 +37,9 @@ use rmpv::Value;
 /// `on` replaces the `view_fit` group with a `WinEnter` hook that fits the
 /// entered window at the inset it was handed. It skips a layout a zoom
 /// left behind, read the way `window zoom` reads one: every other window at
-/// `winminwidth` or `winminheight`. So opening and closing a float over a
-/// zoomed tile does not undo the zoom.
+/// `winminwidth` or `winminheight`, view's own native windows and floats
+/// left out. So opening and closing a float over a zoomed tile does not
+/// undo the zoom.
 ///
 /// [`EngineHandle::fit_window`]: super::EngineHandle::fit_window
 /// [`EngineHandle::set_fit_active`]: super::EngineHandle::set_fit_active
@@ -65,7 +67,15 @@ local function fit(win)
   local target = math.max(longest + 1, vim.o.winwidth)
   local cap = vim.bo[buf].textwidth
   if cap <= 0 then
-    cap = tonumber(vim.wo[win].colorcolumn:match('^%d+')) or 0
+    cap = 0
+    -- with textwidth 0 a relative entry draws no marker, and tonumber
+    -- reads '+1' as 1, so only a plain number counts
+    for entry in vim.wo[win].colorcolumn:gmatch('[^,]+') do
+      if entry:match('^%d+$') then
+        cap = tonumber(entry)
+        break
+      end
+    end
   end
   if cap > 0 then
     target = math.min(target, cap)
@@ -84,9 +94,13 @@ local function fit(win)
   end
 end
 local function zoomed(win)
+  local native = {}
+  for _, held in pairs(vim.g.view_native_windows or {}) do
+    native[held.win] = true
+  end
   local tab = api.nvim_win_get_tabpage(win)
   for _, other in ipairs(api.nvim_tabpage_list_wins(tab)) do
-    if other ~= win and not floating(other)
+    if other ~= win and not native[other] and not floating(other)
       and api.nvim_win_get_width(other) > vim.o.winminwidth
       and api.nvim_win_get_height(other) > vim.o.winminheight then
       return false
