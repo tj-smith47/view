@@ -363,6 +363,16 @@ pub(super) fn gives_back(switches: &[&str], named: usize) -> String {
     format!("\n{} {verb} {them} back.", join(switches))
 }
 
+/// [`gives_back`]'s line for a switch that protects what comes next and
+/// brings back nothing already lost.
+pub(super) fn keeps(switches: &[&str], what: &str) -> String {
+    if switches.is_empty() {
+        return String::new();
+    }
+    let verb = if switches.len() > 1 { "keep" } else { "keeps" };
+    format!("\n{} {verb} {what}.", join(switches))
+}
+
 /// The remedy line on a session whose `view.toml` could not be read. Never
 /// "set palette = false" on this leg: the file that would have carried it
 /// is the one view could not read, so the user may have written it already

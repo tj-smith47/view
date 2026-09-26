@@ -371,7 +371,7 @@ impl Surface {
 /// itself.
 pub(crate) fn painted_grid_size(model: &Model) -> (u16, u16) {
     if model.chrome_painted {
-        model.engine.grid().size()
+        model.engine.painted_grid().size()
     } else {
         (0, 0)
     }
@@ -986,7 +986,7 @@ pub(crate) const SPECULATED_LAYER_INDEX: usize = 1;
 /// all of them would drag the survivors' glyphs to the grid edge (see
 /// [`PredictedCell`]).
 fn speculated_layer(model: &Model, origin: (u16, u16)) -> Option<Layer> {
-    let registry = model.engine.grids();
+    let registry = model.engine.painted_grids();
     let cells: Vec<PredictedCell> = model
         .speculate
         .pending()
@@ -1160,7 +1160,7 @@ fn painted_cmdline(model: &Model) -> Option<Cow<'_, CmdlineState>> {
 /// its own, and the panel/palette rect lookups below scan the frame's own
 /// small, fixed-size layer list.
 fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<CursorSpec> {
-    let (width, height) = model.engine.grid().size();
+    let (width, height) = model.engine.painted_grid().size();
     if width == 0 || height == 0 {
         return None;
     }
@@ -1206,7 +1206,7 @@ fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<Cu
         // reading it here would place the caret at whatever it was last set
         // to (nothing, on a session that never touches grid 1's cursor at
         // all) instead of tracking the window actually being typed into
-        let registry = model.engine.grids();
+        let registry = model.engine.painted_grids();
         let (grid, row, col) = registry.cursor_local();
         // predictions are grid-local (see `PredictedCell::row`), so the
         // overtake search below must run in the cursor's own grid and
@@ -1316,7 +1316,7 @@ fn pane_cursor(model: &Model, origin: (u16, u16)) -> Option<CursorSpec> {
     }
     let (row, col, width, height) = model
         .engine
-        .grids()
+        .painted_grids()
         .native_pane_rect(NativeSurface::Agent)?;
     let view = model
         .ai_panel()

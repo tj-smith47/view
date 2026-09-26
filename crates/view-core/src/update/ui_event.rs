@@ -232,6 +232,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // screen (see Model::takes_attach), and Model::chrome_painted
             // documents why it never resets
             model.chrome_painted = true;
+            model.engine.release_held_frame();
             Vec::new()
         }
         UiEvent::ModeInfoSet {

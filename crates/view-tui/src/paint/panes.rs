@@ -50,7 +50,7 @@ pub(super) fn paint_panes(
     damage: &Damage,
     buf: &mut Buffer,
 ) {
-    let registry = model.engine.grids();
+    let registry = model.engine.painted_grids();
     let hl = model.engine.hl();
     // the shipped single-grid frame, and every multigrid one before its
     // first window lands: one grid covering the layer, no chrome between
@@ -130,7 +130,7 @@ pub(super) fn paint_panes(
 /// change when they move: comparing this list across frames is the only
 /// record of which rows a tree scan or a selection step repainted.
 pub(super) fn native_panes(model: &Model, area: TermRect) -> Vec<(TermRect, LayerKind)> {
-    let registry = model.engine.grids();
+    let registry = model.engine.painted_grids();
     if !registry.has_panes() {
         return Vec::new();
     }

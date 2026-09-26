@@ -629,6 +629,144 @@ fn vsplit_model() -> Model {
     m
 }
 
+/// One line of `text` at the top of `grid`, and the flush that shows it.
+fn written(grid: u64, text: &str) -> Vec<UiEvent> {
+    vec![
+        UiEvent::GridLine {
+            grid,
+            row: 0,
+            col_start: 0,
+            cells: vec![crate::events::GridCell {
+                text: text.into(),
+                hl_id: 0,
+                repeat: 1,
+            }],
+        },
+        UiEvent::Flush,
+    ]
+}
+
+/// What a replacement's attach sends ahead of its first window: the global
+/// grid sized and cleared, a window grid sized and not yet placed.
+fn replacement_chrome() -> Msg {
+    Msg::Redraw(vec![
+        UiEvent::GridResize {
+            grid: 1,
+            width: 80,
+            height: 24,
+        },
+        UiEvent::GridClear { grid: 1 },
+        UiEvent::GridResize {
+            grid: 2,
+            width: 80,
+            height: 23,
+        },
+        UiEvent::Flush,
+    ])
+}
+
+/// The text of the first row of `grid` on the screen, as painted.
+fn painted_row(m: &Model, grid: u64) -> Option<String> {
+    let grid = m.engine.painted_grids().grid(GridId(grid))?;
+    Some(grid.row_text(0).trim_end().to_string())
+}
+
+#[test]
+fn a_restart_paints_the_dead_engines_windows_until_the_replacement_places_one() {
+    let mut m = vsplit_model();
+    let _ = update(&mut m, Msg::Redraw(written(6, "d")));
+    m.engine.forget_overlays();
+    assert!(
+        !m.engine.grids().has_panes(),
+        "the live registry kept a pane"
+    );
+    assert_eq!(painted_row(&m, 6).as_deref(), Some("d"));
+    assert!(m.take_paint_damage().full, "a held frame repaints whole");
+
+    // a failed attempt forgets again, and the frame it holds stays the dead one
+    m.engine.forget_overlays();
+    let _ = update(&mut m, replacement_chrome());
+    assert_eq!(
+        painted_row(&m, 6).as_deref(),
+        Some("d"),
+        "the screen left the dead engine's frame before the replacement \
+         placed a window"
+    );
+
+    let mut placed = vec![UiEvent::WinPos {
+        grid: 2,
+        win: crate::events::WinHandle(1000),
+        startrow: 0,
+        startcol: 0,
+        width: 80,
+        height: 23,
+    }];
+    placed.extend(written(2, "f"));
+    let _ = update(&mut m, Msg::Redraw(placed));
+    assert_eq!(
+        painted_row(&m, 6),
+        None,
+        "a dead window outlived the handback"
+    );
+    assert_eq!(painted_row(&m, 2).as_deref(), Some("f"));
+    assert!(m.take_paint_damage().full, "the handback repaints whole");
+}
+
+/// A replacement showing an empty buffer draws no text, and the window it
+/// places is its first frame all the same.
+#[test]
+fn a_replacement_on_an_empty_buffer_takes_the_screen_when_its_window_is_placed() {
+    let mut m = vsplit_model();
+    let _ = update(&mut m, Msg::Redraw(written(6, "d")));
+    m.engine.forget_overlays();
+    let _ = update(&mut m, replacement_chrome());
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::WinPos {
+                grid: 2,
+                win: crate::events::WinHandle(1000),
+                startrow: 0,
+                startcol: 0,
+                width: 80,
+                height: 23,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert_eq!(
+        painted_row(&m, 6),
+        None,
+        "the dead frame stayed over the replacement's empty buffer"
+    );
+}
+
+#[test]
+fn a_single_grid_restart_paints_the_dead_engines_text_until_the_replacement_draws() {
+    let mut m = Model::with_term_size(80, 24);
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::GridResize {
+            grid: 1,
+            width: 80,
+            height: 24,
+        }]),
+    );
+    let _ = update(&mut m, Msg::Redraw(written(1, "d")));
+    m.engine.forget_overlays();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::GridClear { grid: 1 }, UiEvent::Flush]),
+    );
+    assert_eq!(
+        painted_row(&m, 1).as_deref(),
+        Some("d"),
+        "the replacement's cleared grid reached the screen"
+    );
+    let _ = update(&mut m, Msg::Redraw(written(1, "f")));
+    assert_eq!(painted_row(&m, 1).as_deref(), Some("f"));
+}
+
 #[test]
 fn a_click_in_the_right_split_names_that_grid() {
     let mut m = vsplit_model();
@@ -10908,7 +11046,7 @@ fn a_restart_names_the_buffer_it_reopened_without_its_unsaved_changes() {
         [
             "view: README.md reopened from disk; its unsaved changes had no swap \
              file (swapfile is off)",
-            "set swapfile gives it back.",
+            "set swapfile keeps unsaved changes through the next restart.",
         ],
     );
 }

@@ -769,6 +769,25 @@ impl GridRegistry {
         })
     }
 
+    /// Whether nvim has put a window on screen for a person to look at: a
+    /// visible window pane under multigrid, or text on the global grid
+    /// under single-grid.
+    ///
+    /// Answers yes for a window showing an empty buffer, which
+    /// [`Self::window_text_painted`] does not: an empty buffer is the frame
+    /// that session starts on.
+    #[must_use]
+    pub fn shows_a_window(&self) -> bool {
+        if self.slots.is_empty() {
+            return self.global.has_text();
+        }
+        self.slots.iter().any(|slot| {
+            slot.placed.as_ref().is_some_and(|placed| {
+                matches!(placed.kind, PaneKind::Window) && !placed.hidden && !placed.withheld
+            })
+        })
+    }
+
     /// The grid nvim last placed the cursor in.
     #[must_use]
     pub fn cursor_grid(&self) -> Option<GridId> {
@@ -829,8 +848,8 @@ impl GridRegistry {
     /// somebody else's numbers -- both halves: a pane left behind names a
     /// window that no longer exists and nothing will ever destroy it, and
     /// the cells behind it are a dead session's. The global grid's own
-    /// cells stay, so the last frame survives the restart the way it always
-    /// has.
+    /// cells stay. The screen keeps the last frame through a copy the
+    /// engine model holds (`EngineModel::painted_grids`).
     pub(crate) fn forget_grids(&mut self) {
         self.slots.clear();
         self.cursor = None;

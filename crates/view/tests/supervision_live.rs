@@ -735,7 +735,7 @@ fn a_restart_without_swap_files_names_the_buffers_it_reopened_from_disk() {
             "view: a.txt, b.txt reopened from disk; their unsaved changes had no \
              swap files (swapfile is off)"
                 .to_string(),
-            "set swapfile gives them back.".to_string(),
+            "set swapfile keeps unsaved changes through the next restart.".to_string(),
         ]),
         "the restart did not name the buffers it lost: {lines:?}"
     );

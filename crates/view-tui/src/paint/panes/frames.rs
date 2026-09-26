@@ -135,7 +135,7 @@ fn paint_edges(
     for pane in panes.iter().filter(|pane| is_tile(pane)) {
         let Some(status) = model
             .engine
-            .grids()
+            .painted_grids()
             .window_handle(pane.id)
             .and_then(|win| model.window_status.get(&win))
         else {

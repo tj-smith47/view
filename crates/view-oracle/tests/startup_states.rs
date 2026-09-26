@@ -421,8 +421,8 @@ fn until_the_first_chunk(session: &mut PtySession) -> std::time::Instant {
 /// the buffer it holds before its own `VimEnter`.
 ///
 /// Disconfirm: dropping `Model::rearm_attach` from
-/// `recovery::restart_engine` puts `PREVIMENTERBUFFER` into the stream on
-/// the restart while the first start stays clean.
+/// `recovery::restart_engine` fails the wait: the replacement is never
+/// attached, and the screen keeps the held frame.
 #[test]
 #[cfg(target_os = "linux")]
 fn a_restarted_engine_attaches_after_its_own_vim_enter() {
@@ -435,14 +435,17 @@ fn a_restarted_engine_attaches_after_its_own_vim_enter() {
         !wrote(&first, PRE_VIM_ENTER),
         "the first start already failed the pin this restart extends"
     );
+    // the typed line moves the scratch text down a row, so the replacement's
+    // own frame writes it again where the held frame shows the typed line
+    hold_a_line(&mut under_test, "view");
     let session_pid = under_test.pid().expect("the session under test has a pid");
     let engine = engine_child_of(session_pid).expect("view spawned an nvim child");
 
     // from the kill onward, never the whole stream: the layout the first
-    // start left is still on the screen, so a screen-side wait for it would
-    // be answered by the dead engine's frame and this would assert against
-    // a restart that never happened
-    let mark = first.len();
+    // start left stays on the screen through the restart, so a screen-side
+    // wait for it would be answered by the dead engine's frame and this
+    // would assert against a restart that never happened
+    let mark = under_test.raw_output().len();
     kill(engine);
     // whichever lands first, so a replacement that paints the pre-VimEnter
     // screen fails on that rather than on the wait: without the re-arm it writes
@@ -458,6 +461,73 @@ fn a_restarted_engine_attaches_after_its_own_vim_enter() {
         "no replacement engine drew its own screen, so this asserted nothing \
          about a restart"
     );
+}
+
+/// A line typed into the scratch window before the engine dies. The
+/// replacement's scratch window never holds it, so the screen showing it is
+/// the dead engine's last frame and the screen without it is the
+/// replacement's.
+#[cfg(target_os = "linux")]
+const HELD: &str = "HELDFRAMELINE";
+
+/// Types [`HELD`] above the scratch window's text and waits for it.
+#[cfg(target_os = "linux")]
+fn hold_a_line(session: &mut PtySession, who: &str) {
+    session
+        .send(format!("O{HELD}\x1b").as_bytes())
+        .expect("the typed line reaches the session");
+    assert!(
+        session.wait_for(HELD, view_test_support::host_deadline(BUDGET)),
+        "{who}: the typed line never showed; screen:\n{}",
+        session.screen()
+    );
+}
+
+/// From the engine's death to the replacement's first frame, every screen
+/// the terminal shows carries the windows the person was looking at, under
+/// both grid modes.
+///
+/// Read per chunk the terminal absorbs, so a frame written between the
+/// restart and the replacement's first window cannot pass unseen.
+///
+/// Disconfirm: making `EngineModel::painted_grids` answer the live registry
+/// while a frame is held fails both legs on a screen with neither window's
+/// text.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_restart_keeps_the_last_frame_until_the_replacement_draws() {
+    for single_grid in [false, true] {
+        let paths = common::ScratchPaths::new("startup-states-held");
+        common::plant_nvim_config(&paths.isolated_home, "startup-states");
+        plant_native_off(&paths.isolated_home, &[], single_grid);
+        let mut under_test = view_session(&paths.isolated_home);
+        let _ = until_the_split(&mut under_test, "view");
+        hold_a_line(&mut under_test, &format!("single_grid={single_grid}"));
+        let session_pid = under_test.pid().expect("the session under test has a pid");
+        let engine = engine_child_of(session_pid).expect("view spawned an nvim child");
+        kill(engine);
+
+        let mut blank = None;
+        let replaced =
+            under_test.wait_for_screen(view_test_support::host_deadline(BUDGET), |screen| {
+                let text = screen.contents();
+                if !text.contains(SPLIT) && !text.contains(BESIDE_THE_SPLIT) {
+                    blank.get_or_insert(text.clone());
+                }
+                !text.contains(HELD) && text.contains(SPLIT)
+            });
+        assert_eq!(
+            blank, None,
+            "single_grid={single_grid}: a screen between the restart and the \
+             replacement's first frame showed neither window"
+        );
+        assert!(
+            replaced,
+            "single_grid={single_grid}: the replacement never drew its own \
+             frame; screen:\n{}",
+            under_test.screen()
+        );
+    }
 }
 
 /// Waits until any of `needles` is written past `mark` in the recorded

@@ -377,11 +377,9 @@ pub(crate) fn restart_engine(
     // ([`SurfaceConflicts::forget_engine`])
     model.forget_engine_conflicts();
     // the replacement runs its own startup and owes its own attach
-    // ([`Model::rearm_attach`]); until that lands there is no grid to
-    // paint, so the shell frame carries the supervision notice the way the
-    // first start's did
+    // ([`Model::rearm_attach`]); until it puts a window on screen, the
+    // screen keeps the frame `forget_overlays` held
     model.rearm_attach();
-    model.chrome_painted = false;
     // the forgets change what is painted whether or not the spawn below
     // succeeds: a failed attempt goes back to a loop that only repaints on
     // its own account, and would leave the dropped overlays painted and the

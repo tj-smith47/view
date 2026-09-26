@@ -332,9 +332,9 @@ pub(super) fn lost_notice(names: &[String], swap_off: bool) -> String {
     );
     if swap_off {
         notice.push_str(" (swapfile is off)");
-        notice.push_str(&super::surface_conflict::gives_back(
+        notice.push_str(&super::surface_conflict::keeps(
             &["set swapfile"],
-            names.len(),
+            "unsaved changes through the next restart",
         ));
     }
     notice

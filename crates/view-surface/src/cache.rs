@@ -105,6 +105,8 @@ impl Frame {
 ///   `grids` (via `grid`, which is the global grid's size, and via
 ///   `notice_column`, the one layer its panes, floats and cursor move; the
 ///   compositor paints the panes themselves off the `Model`),
+///   `held_frame` (the same way: `grid` is the painted grid's size, and
+///   the panes are painted off the `Model`),
 ///   `hl` and `mode` (painters read them off the
 ///   `Model` on the reuse path), `window_status` (the tile segments are
 ///   painted off the `Model` the same way, and the row each one stands on
@@ -189,7 +191,7 @@ impl Inputs {
     fn capture(model: &Model) -> Self {
         let engine = &model.engine;
         Self {
-            grid: engine.grid().size(),
+            grid: engine.painted_grid().size(),
             offset: model.chrome_rows(),
             look: model.look,
             term: (model.term_width, model.term_height),
@@ -221,7 +223,7 @@ impl Inputs {
         let engine = &model.engine;
         !self.had_overlays
             && model.overlays().is_empty()
-            && self.grid == engine.grid().size()
+            && self.grid == engine.painted_grid().size()
             && self.offset == model.chrome_rows()
             && self.look == model.look
             && self.term == (model.term_width, model.term_height)
@@ -524,6 +526,52 @@ mod tests {
         None
     }
 
+    /// A painter reads the grid the screen shows, which during a restart
+    /// is the dead engine's last frame. A read of the live registry paints
+    /// the replacement's cleared grid over it, and nothing fails until a
+    /// person sees the blank screen.
+    #[test]
+    fn every_painter_reads_the_painted_registry() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut dirs = vec![crates.join("view-surface/src"), crates.join("view-tui/src")];
+        let mut walked = 0;
+        let mut live = Vec::new();
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir)
+                .expect("a paint crate's src/")
+                .flatten()
+            {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                if path.extension() != Some("rs".as_ref())
+                    || path.file_name() == Some("tests.rs".as_ref())
+                {
+                    continue;
+                }
+                walked += 1;
+                let source = std::fs::read_to_string(&path).expect("a listed source");
+                let flat: String = production(&source)
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                for read in ["engine.grids()", "engine.grid()"] {
+                    if flat.contains(read) {
+                        live.push(format!("{} reads {read}", path.display()));
+                    }
+                }
+            }
+        }
+        assert!(walked > 10, "the walk reached {walked} sources");
+        assert!(
+            live.is_empty(),
+            "paint through `painted_grids()` / `painted_grid()`:\n  {}",
+            live.join("\n  ")
+        );
+    }
+
     /// Everything in `source` ahead of its test module.
     ///
     /// The boundary is the module, not the first `#[cfg(test)]`: `lib.rs`
@@ -658,7 +706,7 @@ mod tests {
                 .iter()
                 .filter_map(|f| block_after(source, &format!("fn {f}(")))
                 .collect();
-            for reader in ["panes_in_z_order", ".grids()"] {
+            for reader in ["panes_in_z_order", ".grids()", ".painted_grids()"] {
                 for (offset, _) in source.match_indices(reader) {
                     let re_resolved = resolved_every_frame.iter().any(|r| r.contains(&offset));
                     assert!(
