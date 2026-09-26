@@ -192,8 +192,31 @@ impl WedgeKind {
         }
     }
 
-    /// The banner's two lines: how long the wedge has held, then the keys
-    /// that answer it.
+    /// How long the engine had been quiet by the time this wedge was
+    /// declared: the threshold the verdict waits out. A closed connection is
+    /// declared the moment it closes.
+    ///
+    /// The engine's own thresholds are pinned equal to these by its tests.
+    #[must_use]
+    pub const fn quiet_before_verdict(self) -> Duration {
+        match self {
+            Self::ReadSide | Self::WriteSide => Duration::from_secs(10),
+            Self::Dead => Duration::ZERO,
+        }
+    }
+
+    /// The whole seconds the engine has been quiet, `since` being the time
+    /// since the verdict: a lower bound on the wait the user has sat
+    /// through, short by at most one probe interval.
+    #[must_use]
+    pub const fn quiet_readout(self, since: SinceStamp) -> u64 {
+        self.quiet_before_verdict()
+            .saturating_add(since.elapsed())
+            .as_secs()
+    }
+
+    /// The banner's two lines: how long the engine has been quiet, then the
+    /// keys that answer it.
     ///
     /// Restart leads the keys because it is the one that answers every
     /// wedge. The rest are this wedge's own choices, less the dismissal,
@@ -210,7 +233,7 @@ impl WedgeKind {
             .map(|choice| format!("{} {}", choice.key(), choice.verb()))
             .collect();
         [
-            format!("{} {}s", self.banner_lead(), since.readout()),
+            format!("{} {}s", self.banner_lead(), self.quiet_readout(since)),
             keys.join("   "),
         ]
     }
@@ -454,7 +477,11 @@ impl EngineBusyState {
     /// that never arrived.
     #[must_use]
     pub fn message(&self) -> String {
-        let base = format!("{} ({}s)", self.kind.notice(), self.since.readout());
+        let base = format!(
+            "{} ({}s)",
+            self.kind.notice(),
+            self.kind.quiet_readout(self.since)
+        );
         match self.interrupted {
             Some(sent) if self.interrupt_unanswered() => format!(
                 "{base}; interrupt sent {}s ago, nothing has answered since",
@@ -1210,7 +1237,10 @@ mod tests {
         for kind in [WedgeKind::ReadSide, WedgeKind::WriteSide, WedgeKind::Dead] {
             for secs in [0_u64, 14, 29, 61] {
                 let [first, keys] = kind.banner(SinceStamp::new(Duration::from_secs(secs)));
-                assert_eq!(first, format!("{} {secs}s", kind.banner_lead()));
+                // counted from the engine's last answer, which the verdict
+                // trails by its own threshold
+                let quiet = secs + kind.quiet_before_verdict().as_secs();
+                assert_eq!(first, format!("{} {quiet}s", kind.banner_lead()));
                 assert!(
                     keys.starts_with("<F5> restart"),
                     "{kind:?} leads with anything but restart: {keys}"
@@ -1226,7 +1256,7 @@ mod tests {
             }
         }
         assert_eq!(
-            WedgeKind::ReadSide.banner(SinceStamp::new(Duration::from_millis(14_900))),
+            WedgeKind::ReadSide.banner(SinceStamp::new(Duration::from_millis(4_900))),
             [
                 "nvim has not answered for 14s".to_string(),
                 "<F5> restart   <C-c> interrupt".to_string()
@@ -1377,7 +1407,9 @@ mod tests {
             WedgeKind::ReadSide,
             SinceStamp::new(Duration::from_secs(42)),
         );
-        assert!(busy.message().ends_with("(42s)"), "{}", busy.message());
+        assert!(busy.message().ends_with("(52s)"), "{}", busy.message());
+        let gone = EngineBusyState::new(WedgeKind::Dead, SinceStamp::new(Duration::from_secs(42)));
+        assert!(gone.message().ends_with("(42s)"), "{}", gone.message());
     }
 
     #[test]

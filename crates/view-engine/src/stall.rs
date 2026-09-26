@@ -194,6 +194,15 @@ mod tests {
 
     const THRESHOLD: Duration = Duration::from_secs(10);
 
+    /// The banner counts the user's wait from this threshold.
+    #[test]
+    fn the_banner_counts_the_wait_from_the_shipped_threshold() {
+        assert_eq!(
+            view_core::native::supervision::WedgeKind::WriteSide.quiet_before_verdict(),
+            WRITER_STALL_THRESHOLD
+        );
+    }
+
     fn watch() -> OutboxStallWatch {
         OutboxStallWatch::new(THRESHOLD)
     }

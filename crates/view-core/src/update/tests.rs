@@ -9614,7 +9614,7 @@ fn the_banner_takes_the_first_slot_in_the_warning_role() {
         &mut m,
         Msg::EngineLiveness {
             wedge: Some(WedgeKind::ReadSide),
-            observed_for: Duration::from_secs(14),
+            observed_for: Duration::from_secs(4),
         },
     );
     let boxes = m.engine.messages.visible_toasts_in(40, 60);

@@ -705,6 +705,15 @@ mod tests {
     use super::*;
 
     const THRESHOLD: Duration = Duration::from_secs(10);
+
+    /// The banner counts the user's wait from this threshold.
+    #[test]
+    fn the_banner_counts_the_wait_from_the_shipped_threshold() {
+        assert_eq!(
+            WedgeKind::ReadSide.quiet_before_verdict(),
+            HEARTBEAT_WEDGE_THRESHOLD
+        );
+    }
     /// The shipped cadence itself rather than a copy of its current value:
     /// the timelines below drive the interval production runs at, and the
     /// prospective deadline is built from this exact constant, so a test

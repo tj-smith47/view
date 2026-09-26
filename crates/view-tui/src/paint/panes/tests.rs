@@ -4308,7 +4308,7 @@ fn nvim_statusline_bar_scene() -> Model {
     model
 }
 
-/// An engine that stopped answering 14 s ago, raised between two notices:
+/// An engine that last answered 14 s ago, raised between two notices:
 /// the banner stands in the column's first slot in the warning role, both
 /// lines of it, whatever arrived before or after.
 fn raise_wedge_banner(model: &mut Model) {
@@ -4342,7 +4342,7 @@ fn raise_wedge_banner(model: &mut Model) {
         model,
         Msg::EngineLiveness {
             wedge: Some(view_core::native::supervision::WedgeKind::ReadSide),
-            observed_for: std::time::Duration::from_secs(14),
+            observed_for: std::time::Duration::from_secs(4),
         },
     );
     notice(model, "linted");
