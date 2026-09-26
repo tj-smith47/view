@@ -43,7 +43,7 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" README.md
   while [ "$n" -lt 8 ]; do
     pane=$(tmux -L "$SOCKET" capture-pane -p -t cap)
     case "$pane" in
-      (*'still loads'*|*'which view owns'*|*'gives it back'*|*'give them back'*)
+      (*'which view owns'*|*'gives it back'*|*'give them back'*)
         tmux -L "$SOCKET" send-keys -t cap ':View notifications dismiss' Enter
         sleep 0.8
         ;;

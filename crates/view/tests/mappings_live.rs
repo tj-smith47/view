@@ -20,12 +20,12 @@ use view_core::msg::{Msg, RpcCall};
 use view_core::native::mappings::MappingClaim;
 use view_core::native::registry;
 use view_core::native::speculate::CMDLINE_LITERAL_KEYS;
+use view_core::native::surfaces::Taken;
 use view_engine::process::Engine;
 use view_native::config::NativeConfig;
 use view_native::mappings::register_plan;
-use view_native::report::report;
+use view_native::report::{report, Handover};
 use view_native::supersede::plan;
-use view_native::toast::first_run;
 use view_test_support::ScratchDir;
 
 /// How long a claim reply or an invoke notification is waited for. Generous
@@ -57,7 +57,8 @@ const LEADER: &str = ",";
 struct Session {
     engine: Engine,
     rx: Receiver<Msg>,
-    dir: ScratchDir,
+    /// Held so the fixture's config directory outlives the nvim reading it.
+    _dir: ScratchDir,
 }
 
 impl Session {
@@ -82,7 +83,11 @@ impl Session {
             .handle
             .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
             .unwrap();
-        Self { engine, rx, dir }
+        Self {
+            engine,
+            rx,
+            _dir: dir,
+        }
     }
 
     /// Registers the plan `cfg` produces, exactly as the runtime's executor
@@ -165,16 +170,18 @@ impl Session {
     }
 }
 
-/// The notices a first run would show for `claimed`, through the one report
-/// every handover crosses.
-fn notices(claimed: &[MappingClaim], record: &Path) -> Vec<String> {
+/// What the launch box names for `claimed`, through the one report every
+/// handover crosses.
+fn taken(claimed: &[MappingClaim]) -> Vec<Taken> {
     let features = registry::features();
-    let handovers = report(
+    report(
         &plan(&NativeConfig::all_enabled(), features, Look::default()),
         claimed,
         features,
-    );
-    first_run(&handovers, Some(Path::new("/cfg/view.toml")), record).unwrap()
+    )
+    .iter()
+    .map(Handover::taken)
+    .collect()
 }
 
 #[test]
@@ -216,15 +223,15 @@ fn an_enabled_features_key_is_claimed_over_the_users_and_reported_with_its_off_s
         "view's own mapping must be what nvim resolves, and readable as such, got {rhs:?}"
     );
 
-    let record = session.dir.join("first-run.toml");
-    let notices = notices(&claimed, &record);
-    let key = notices
-        .iter()
-        .find(|n| n.contains("<leader>ff"))
-        .unwrap_or_else(|| panic!("the claim must reach the first-run notice, got {notices:?}"));
+    let taken = taken(&claimed);
     assert!(
-        key.contains("native.picker = false"),
-        "the notice must name the exact line that gives the key back, got {key:?}"
+        taken.contains(&Taken::Key {
+            lhs: "<leader>ff".to_string(),
+            action: "picker files".to_string(),
+            off_switch: "native.picker = false",
+        }),
+        "the claim must reach the launch box with the line that gives the key back, \
+         got {taken:?}"
     );
 
     session.press(",ff");

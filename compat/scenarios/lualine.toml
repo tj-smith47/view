@@ -43,6 +43,7 @@ steps = [
   # fixture has several, so this walks the newest rows rather than the top
   # one, and closes the overlay behind it.
   { wait_for = "view: your config also draws", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 30000 },
   # The command form rather than `<leader>fm`: `:View` is registered
   # whatever the config turns off, and one of these states turns the
   # notifications feature (and with it that key) off.
@@ -89,6 +90,7 @@ steps = [
   # fixture has several, so this walks the newest rows rather than the top
   # one, and closes the overlay behind it.
   { wait_for = "view: your config also draws", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 30000 },
   # The command form rather than `<leader>fm`: `:View` is registered
   # whatever the config turns off, and one of these states turns the
   # notifications feature (and with it that key) off.
@@ -120,6 +122,7 @@ steps = [
   # out: it is a box over the cells this reads, and `<Esc>` no longer takes
   # a notice view raised about a standing condition down.
   { wait_for = "view: your config also draws", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 30000 },
   # The command form rather than `<leader>fm`: `:View` is registered
   # whatever the config turns off, and one of these states turns the
   # notifications feature (and with it that key) off.

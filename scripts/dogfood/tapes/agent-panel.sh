@@ -108,14 +108,13 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" --config "$CFG" view-ai-stub-diff.txt
   # timer) once the one ahead of it has cleared, so firing the verb three
   # times back to back outran that handoff -- this reads the live pane and
   # keeps sending the verb until none of the native-override notices
-  # (view-native/src/report.rs's "... still loads" and "... gives it back.",
-  # surface_conflict.rs's "... give them back.") remain, capped so a real
-  # stuck notice cannot hang the tape.
+  # (surface_conflict.rs's "... gives it back." and "... give them back.")
+  # remain, capped so a real stuck notice cannot hang the tape.
   n=0
   while [ "$n" -lt 8 ]; do
     pane=$(tmux -L "$SOCKET" capture-pane -p -t cap)
     case "$pane" in
-      (*'still loads'*|*'which view owns'*|*'gives it back'*|*'give them back'*)
+      (*'which view owns'*|*'gives it back'*|*'give them back'*)
         tmux -L "$SOCKET" send-keys -t cap ':View notifications dismiss' Enter
         sleep 0.8
         ;;

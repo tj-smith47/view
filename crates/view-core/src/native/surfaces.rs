@@ -108,11 +108,20 @@ pub struct OwnedSurface {
     pub policy: Policy,
     /// How a notice names it to a user, who never sees an `ext_*` key.
     pub label: &'static str,
-    /// The `[native]` line that returns it, or `None` when no switch
-    /// reaches this surface today -- a notice about such a surface says
-    /// what happened and stops, rather than naming a setting that does not
-    /// exist.
-    pub remedy: Option<&'static str>,
+}
+
+impl OwnedSurface {
+    /// The `view.toml` line that returns this surface, from the registry
+    /// row of the feature that draws it. `None` when no switch reaches it:
+    /// a notice about such a surface says what happened and stops.
+    #[must_use]
+    pub fn off_switch(&self) -> Option<&'static str> {
+        let feature = self.feature?;
+        crate::native::registry::features()
+            .iter()
+            .find(|desc| desc.id == feature)
+            .map(|desc| desc.off_switch)
+    }
 }
 
 /// Every surface, in the order a notice lists them when one identity
@@ -127,7 +136,6 @@ pub const SURFACES: &[OwnedSurface] = &[
         feature: Some("palette"),
         policy: Policy::Own,
         label: "the command line",
-        remedy: Some("[native] palette = false"),
     },
     OwnedSurface {
         surface: Surface::Popupmenu,
@@ -135,7 +143,6 @@ pub const SURFACES: &[OwnedSurface] = &[
         feature: Some("palette"),
         policy: Policy::Own,
         label: "the completion menu",
-        remedy: Some("[native] palette = false"),
     },
     OwnedSurface {
         surface: Surface::Messages,
@@ -143,7 +150,6 @@ pub const SURFACES: &[OwnedSurface] = &[
         feature: Some("notifications"),
         policy: Policy::Own,
         label: "the message area",
-        remedy: Some("[native] notifications = false"),
     },
     OwnedSurface {
         surface: Surface::Tabline,
@@ -151,7 +157,6 @@ pub const SURFACES: &[OwnedSurface] = &[
         feature: Some("tabline"),
         policy: Policy::Own,
         label: "the tab line",
-        remedy: Some("[native] tabline = false"),
     },
     OwnedSurface {
         surface: Surface::Statusline,
@@ -159,7 +164,6 @@ pub const SURFACES: &[OwnedSurface] = &[
         feature: Some("statusline"),
         policy: Policy::Own,
         label: "the status line",
-        remedy: Some("[native] statusline = false"),
     },
     OwnedSurface {
         surface: Surface::Frame,
@@ -167,7 +171,6 @@ pub const SURFACES: &[OwnedSurface] = &[
         feature: Some("statusline"),
         policy: Policy::Own,
         label: "the tile status segments",
-        remedy: Some("[native] statusline = false"),
     },
     OwnedSurface {
         surface: Surface::Grid,
@@ -175,7 +178,6 @@ pub const SURFACES: &[OwnedSurface] = &[
         feature: None,
         policy: Policy::Yield,
         label: "the buffer grid",
-        remedy: None,
     },
 ];
 
@@ -1712,7 +1714,7 @@ mod tests {
                 |ext| format!("`{}`", ext.as_str()),
             );
             let remedy = table_row
-                .remedy
+                .off_switch()
                 .map_or_else(|| NONE_CELL.to_string(), |line| format!("`{line}`"));
             let claimants: Vec<String> = crate::native::channels::channels(table_row.surface)
                 .iter()
@@ -1804,9 +1806,9 @@ mod tests {
     fn every_owned_surface_names_the_switch_its_attach_is_gated_on() {
         let matrix = render_matrix();
         for table_row in SURFACES.iter().filter(|row| row.policy != Policy::Yield) {
-            let gate = table_row.feature.map(|id| format!("[native] {id} = false"));
+            let gate = table_row.feature.map(|id| format!("native.{id} = false"));
             assert_eq!(
-                table_row.remedy.map(str::to_string),
+                table_row.off_switch().map(str::to_string),
                 gate,
                 "{}'s off switch is not the one its feature answers to",
                 table_row.label
@@ -1820,7 +1822,7 @@ mod tests {
                 );
             }
             let cell = table_row
-                .remedy
+                .off_switch()
                 .map_or_else(|| NONE_CELL.to_string(), |line| format!("`{line}`"));
             assert!(
                 matrix.contains(&format!("| {cell} |")),

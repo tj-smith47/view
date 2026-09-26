@@ -71,27 +71,24 @@ const MAPPING_FAMILY: &str = "view: now mapping ";
 /// stand. A launch shows one box, so raising it withdraws the others.
 const LAUNCH_FAMILIES: [&str; 3] = [HELD_FAMILY, DRAWING_FAMILY, MAPPING_FAMILY];
 
-/// What a held channel was holding, as far as a notice may speak of it.
+/// What kind of thing a held channel was holding, which decides how the
+/// history entry words it. The box names the channel alone for both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Holder<'a> {
-    /// A replaced function, named by the source location nvim gives for it.
-    Function(&'a str),
-    /// An option's value, which only the history entry spells: a status
-    /// line format string is a screenful of escapes that tells nobody which
-    /// plugin wrote it.
+enum Holder {
+    /// A replaced function, which nvim names by its source location.
+    Function,
+    /// An option's value.
     Value,
 }
 
-/// `holder` as the channel table says it may be shown: a location for a
-/// channel the table lists as a replaced function, and nothing for an
-/// option.
-fn holder_of<'a>(channel: &str, holder: &'a str) -> Holder<'a> {
+/// The kind of holder `channel` carries, per the channel table.
+fn holder_of(channel: &str) -> Holder {
     let replaced = crate::native::channels::CHANNELS
         .iter()
         .flat_map(|entry| entry.channels.iter())
         .any(|entry| matches!(entry, Channel::Replaced(name) if *name == channel));
     if replaced {
-        Holder::Function(holder)
+        Holder::Function
     } else {
         Holder::Value
     }
@@ -135,19 +132,14 @@ pub(super) fn on_channel_held(model: &mut Model, channel: &str, holder: &str) ->
         return Vec::new();
     }
     let mut effects = note_held(model, surface);
-    let held = holder_of(channel, holder);
     model
         .engine
-        .record_to_history_alone(history_line(channel, holder, held));
+        .record_history_only(vec![(0, history_line(channel, holder, holder_of(channel)))]);
     let key = announced_key(channel);
     if model.surface_conflicts.is_announced(&key) {
         return effects;
     }
-    let shown = match held {
-        Holder::Function(location) => format!("{channel} from {}", spelled(location)),
-        Holder::Value => channel.to_string(),
-    };
-    if !model.surface_conflicts.tell_held(surface, &shown) {
+    if !model.surface_conflicts.tell_held(surface, channel) {
         return effects;
     }
     model.surface_conflicts.note_announced(key.clone());
@@ -211,10 +203,14 @@ fn raise_launch_box(model: &mut Model) -> Vec<Effect> {
 
 /// The history's account of one report, which is the one place the value a
 /// channel held is spelled in full.
-fn history_line(channel: &str, holder: &str, held: Holder<'_>) -> String {
+///
+/// A function's location drops the `@` `debug.getinfo` puts in front of a
+/// file path.
+fn history_line(channel: &str, holder: &str, held: Holder) -> String {
     match held {
-        Holder::Function(_) => format!(
-            "view: your config set {channel} to the function at {holder}, and view set it back."
+        Holder::Function => format!(
+            "view: your config set {channel} to the function at {}, and view set it back.",
+            holder.strip_prefix('@').unwrap_or(holder)
         ),
         Holder::Value => {
             format!("view: your config set {channel} to {holder}, and view set it back.")
@@ -263,7 +259,7 @@ fn launch_notice(
             HELD_FAMILY,
             format!("{}. view draws {them} now.", join(&items)),
         ));
-        for switch in rows.iter().filter_map(|(row, _)| off_switch(row.feature)) {
+        for switch in rows.iter().filter_map(|(row, _)| row.off_switch()) {
             add_switch(switch);
         }
     }
@@ -302,16 +298,11 @@ fn launch_notice(
     }
     let (family, _) = lines.first()?;
     let family = *family;
-    let named = rows.len() + drawing.len() + keys.len();
-    let them = if named > 1 { "them" } else { "it" };
-    let remedy = if !config_was_read {
-        UNREAD_CONFIG.to_string()
-    } else if switches.is_empty() {
-        String::new()
-    } else {
-        let verb = if switches.len() > 1 { "give" } else { "gives" };
-        format!("\n{} {verb} {them} back.", join(&switches))
-    };
+    let remedy = give_back(
+        &switches,
+        rows.len() + drawing.len() + keys.len(),
+        config_was_read,
+    );
     let account = if startup {
         "\nStartup messages: <leader>fm"
     } else {
@@ -351,14 +342,19 @@ fn feature_label(feature: &str) -> String {
         .map_or_else(|| format!("the {feature}"), |row| row.label.to_string())
 }
 
-/// The registry's off switch for `feature`, the line doctor and the
-/// first-run notice print as well.
-fn off_switch(feature: Option<&str>) -> Option<&'static str> {
-    let feature = feature?;
-    crate::native::registry::features()
-        .iter()
-        .find(|desc| desc.id == feature)
-        .map(|desc| desc.off_switch)
+/// The line that names the switches handing `named` things back, on a line
+/// of its own so it reads as the thing to do. Every notice about what view
+/// took ends with it, so the switch is worded once.
+fn give_back(switches: &[&str], named: usize, config_was_read: bool) -> String {
+    if !config_was_read {
+        return UNREAD_CONFIG.to_string();
+    }
+    if switches.is_empty() {
+        return String::new();
+    }
+    let verb = if switches.len() > 1 { "give" } else { "gives" };
+    let them = if named > 1 { "them" } else { "it" };
+    format!("\n{} {verb} {them} back.", join(switches))
 }
 
 /// The remedy line on a session whose `view.toml` could not be read. Never
@@ -368,30 +364,6 @@ fn off_switch(feature: Option<&str>) -> Option<&'static str> {
 /// `Model::config_was_read`).
 const UNREAD_CONFIG: &str = "\nview.toml could not be read this session, so every native feature \
      stayed at its default; fix that file and restart.";
-
-/// The longest holder a notice spells out.
-///
-/// A replaced global's holder is whatever `debug.getinfo` calls the
-/// function's chunk, which for a plugin is the absolute path it was
-/// installed at: a prefix every plugin in the config shares, ahead of the
-/// file that names this one.
-const HOLDER_WIDTH: usize = 60;
-
-/// `holder` as a notice spells it: the end of it, which is the file that
-/// names the plugin, with the install prefix every plugin in the config
-/// shares dropped in front.
-///
-/// `...` rather than an ellipsis glyph: notice text reaches the grid
-/// verbatim, and the charset a terminal can draw is not a reading the
-/// message layer takes.
-fn spelled(holder: &str) -> String {
-    let len = holder.chars().count();
-    if len <= HOLDER_WIDTH {
-        return holder.to_string();
-    }
-    let tail: String = holder.chars().skip(len - (HOLDER_WIDTH - 3)).collect();
-    format!("...{tail}")
-}
 
 /// Records that a channel of `surface` was found populated by a holder that
 /// is not view: the complaint grace opens on the first such finding, and
@@ -696,7 +668,8 @@ fn complaint_recorded(model: &mut Model, win: u64, lines: &[String]) -> Vec<Effe
     let mut effects = if text.is_empty() {
         Vec::new()
     } else if surfaces::SurfaceConflicts::reads_as_complaint(lines) {
-        model.engine.record_history_only(vec![(0, text)])
+        model.engine.record_history_only(vec![(0, text)]);
+        Vec::new()
     } else {
         model.engine.record_seen_notification(vec![(0, text)])
     };
@@ -789,34 +762,24 @@ pub(super) fn sweep_floats(model: &mut Model) -> Vec<Effect> {
 /// `record_native_notice_once`'s `starts_with` withdrawal requires and why
 /// the family is prepended here.
 ///
-/// The remedy starts a line of its own, broken on `\n`, so it reads as the
-/// thing to do and never as the tail of the first sentence.
+/// The switch sentence is [`give_back`]'s, the same one the launch box
+/// ends with.
 fn notice(family: &str, claimed: &[Surface], config_was_read: bool) -> String {
     let rows: Vec<_> = claimed
         .iter()
         .filter_map(|surface| surfaces::row(*surface))
         .collect();
     let labels: Vec<&str> = rows.iter().map(|row| row.label).collect();
-    let mut remedies: Vec<&str> = Vec::new();
-    for remedy in rows.iter().filter_map(|row| row.remedy) {
+    let mut switches: Vec<&str> = Vec::new();
+    for switch in rows.iter().filter_map(|row| row.off_switch()) {
         // two surfaces can share one switch (the palette returns both the
         // command line and the completion menu), and a line printed twice
         // reads as two things to do
-        if !remedies.contains(&remedy) {
-            remedies.push(remedy);
+        if !switches.contains(&switch) {
+            switches.push(switch);
         }
     }
-    let remedy = if !config_was_read {
-        UNREAD_CONFIG.to_string()
-    } else if remedies.is_empty() {
-        String::new()
-    } else {
-        let them = if labels.len() > 1 { "them" } else { "it" };
-        format!(
-            "\nSet {} in view.toml to give {them} back.",
-            join(&remedies)
-        )
-    };
+    let remedy = give_back(&switches, labels.len(), config_was_read);
     format!("{family}{}, which view owns.{remedy}", join(&labels))
 }
 
@@ -1048,7 +1011,7 @@ mod tests {
             notices(&model),
             vec![
                 "view: cmp_menu is drawing over the command line, which view owns.\n\
-                 Set [native] palette = false in view.toml to give it back."
+                 native.palette = false gives it back."
                     .to_string()
             ]
         );
@@ -1063,7 +1026,7 @@ mod tests {
             notices(&model),
             vec![
                 "view: a plugin is drawing over the command line, which view owns.\n\
-                 Set [native] palette = false in view.toml to give it back."
+                 native.palette = false gives it back."
                     .to_string()
             ]
         );
@@ -1079,8 +1042,8 @@ mod tests {
             notices(&model),
             vec![
                 "view: noice is drawing over the command line and the message area, \
-                 which view owns.\nSet [native] palette = false and \
-                 [native] notifications = false in view.toml to give them back."
+                 which view owns.\nnative.palette = false and \
+                 native.notifications = false give them back."
                     .to_string()
             ],
             "one line, both surfaces, both remedies -- never two notices retracting each other"
@@ -1118,7 +1081,7 @@ mod tests {
         open_cmdline(&mut model);
         let expected = vec![
             "view: cmp_menu is drawing over the command line, which view owns.\n\
-             Set [native] palette = false in view.toml to give it back."
+             native.palette = false gives it back."
                 .to_string(),
         ];
         let _ = observe_float(&mut model, &cmdline_float("cmp_menu"));
@@ -1195,7 +1158,7 @@ mod tests {
             "{standing:?}"
         );
         assert!(
-            !standing[0].contains("Set [native]"),
+            !standing[0].contains("= false"),
             "a session that never read the file cannot tell the user to set a line in it: \
              {standing:?}"
         );
@@ -1471,8 +1434,7 @@ mod tests {
             assert_eq!(standing.len(), 1, "acted={acted}: {standing:?}");
             let lines: Vec<&str> = standing[0].split('\n').collect();
             let mut want = vec![
-                "view: your config also draws the message area (vim.notify from \
-                 function <a.renderer>). view draws it now.",
+                "view: your config also draws the message area (vim.notify). view draws it now.",
                 "native.notifications = false gives it back.",
             ];
             if !acted {
@@ -1482,27 +1444,32 @@ mod tests {
         }
     }
 
-    /// The holder a real session hands over is a plugin's install path, and
-    /// the end of it is the half that names the plugin.
+    /// A replaced function's holder is the path nvim gives for its source:
+    /// the box names the channel alone, and the history spells the path
+    /// without the `@` in front of it.
     #[test]
-    fn a_function_holder_is_spelled_from_its_end() {
+    fn a_function_holder_reaches_the_history_and_never_the_box() {
         let mut model = captured_session();
-        let holder = "@/home/a/.local/share/nvim/lazy/a.renderer/lua/a/renderer/init.lua";
+        let path = "/home/a/.local/share/nvim/lazy/a.renderer/lua/a/renderer/init.lua";
         let _ = update(
             &mut model,
             Msg::ChannelHeld {
                 channel: "vim.notify".to_string(),
-                holder: holder.to_string(),
+                holder: format!("@{path}"),
             },
         );
         let standing = notices(&model);
         assert_eq!(standing.len(), 1, "{standing:?}");
-        let first = standing[0].split('\n').next().unwrap_or_default();
+        for piece in ["/", ".lua", "renderer", "@"] {
+            assert!(!standing[0].contains(piece), "{piece}: {}", standing[0]);
+        }
         assert!(
-            first.contains("(vim.notify from ...") && first.contains("lua/a/renderer/init.lua)"),
-            "{first:?}"
+            history(&model)
+                .iter()
+                .any(|line| line.contains(&format!("the function at {path},"))),
+            "{:?}",
+            history(&model)
         );
-        assert!(!first.contains("/home/a/"), "{first:?}");
     }
 
     /// Every line the history holds on `model`, newest first.
@@ -1601,6 +1568,33 @@ mod tests {
         }
     }
 
+    /// A plugin's complaint recorded while the startup hold is pending stays
+    /// in the history when the hold releases what it parked onto the stack.
+    #[test]
+    fn a_complaint_recorded_under_the_startup_hold_never_reaches_the_stack() {
+        let mut model = captured_session();
+        let complaint = "`vim.notify` has been overwritten by another plugin?".to_string();
+        let _ = super::complaint_recorded(&mut model, 1001, &[complaint]);
+        let _ = model
+            .engine
+            .messages
+            .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+        assert!(
+            !model
+                .engine
+                .messages
+                .entries
+                .iter()
+                .flat_map(|entry| entry.lines())
+                .any(|line| line.contains("overwritten by another plugin")),
+            "{:?}",
+            model.engine.messages.entries
+        );
+        assert!(history(&model)
+            .iter()
+            .any(|line| line.contains("overwritten by another plugin")));
+    }
+
     /// Every order of `items`.
     fn orders<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
         if items.len() <= 1 {
@@ -1668,6 +1662,29 @@ mod tests {
                     "{channel}: the history must keep {holder:?} whole"
                 );
             }
+        }
+        let replaced: Vec<&str> = crate::native::channels::CHANNELS
+            .iter()
+            .flat_map(|entry| entry.channels.iter())
+            .filter_map(|entry| match entry {
+                super::Channel::Replaced(name) => Some(*name),
+                _ => None,
+            })
+            .collect();
+        assert!(!replaced.is_empty(), "the walk found no replaced channel");
+        for channel in replaced {
+            let location = "/home/a/.local/share/nvim/lazy/a.renderer/lua/a/renderer/notify.lua";
+            let mut model = drawing_everything();
+            let _ = held(&mut model, channel, &format!("@{location}"));
+            let boxes = notices(&model);
+            assert_eq!(boxes.len(), 1, "{channel}: {boxes:?}");
+            for piece in ["/", ".lua", "@"] {
+                assert!(!boxes[0].contains(piece), "{channel}: {}", boxes[0]);
+            }
+            assert!(
+                history(&model).iter().any(|line| line.contains(location)),
+                "{channel}: the history must keep {location:?} whole"
+            );
         }
     }
 
@@ -2161,7 +2178,7 @@ mod tests {
         let _ = notifier_takes_the_messages(&mut model);
         let standing = notices(&model);
         assert_eq!(standing.len(), 1);
-        assert!(!standing[0].contains("Set [native]"), "{standing:?}");
+        assert!(!standing[0].contains("= false"), "{standing:?}");
         assert!(
             standing[0].contains("view.toml could not be read this session"),
             "{standing:?}"
@@ -2804,9 +2821,15 @@ mod tests {
 
     /// Every `wait_for` needle a scenario file names.
     fn wait_needles(scenario: &str) -> Vec<String> {
+        step_needles(scenario, "wait_for")
+    }
+
+    /// Every needle a scenario file names under `step`.
+    fn step_needles(scenario: &str, step: &str) -> Vec<String> {
+        let opening = format!("{step} = \"");
         scenario
             .lines()
-            .filter_map(|line| line.split_once("wait_for = \""))
+            .filter_map(|line| line.split_once(opening.as_str()))
             .filter_map(|(_, rest)| rest.split_once('"'))
             .map(|(needle, _)| needle.to_string())
             .collect()
@@ -2829,23 +2852,81 @@ mod tests {
         model
     }
 
-    /// A needle a scenario takes from the launch box sits on one row of it
-    /// as the compat harness's 80-column terminal wraps it, because
-    /// `wait_for` matches one screen row at a time.
+    /// Every launch box a compat fixture can raise, as its lines: each
+    /// channel the fixtures' plugins write, alone and all together, with no
+    /// taken key, with one, and with everything a launch can take.
+    fn fixture_launches() -> Vec<Vec<String>> {
+        let channels = ["vim.notify", "statusline", "tabline"];
+        let mut sets: Vec<Vec<&str>> = channels.iter().map(|channel| vec![*channel]).collect();
+        sets.push(channels.to_vec());
+        let every = every_taken();
+        let one_key: Vec<(String, Taken)> = every
+            .iter()
+            .filter(|(_, taken)| matches!(taken, Taken::Key { .. }))
+            .take(1)
+            .cloned()
+            .collect();
+        let mut boxes = Vec::new();
+        for set in &sets {
+            for taken in [Vec::new(), one_key.clone(), every.clone()] {
+                let mut model = drawing_everything();
+                let _ = crate::update::tell_taken_over(&mut model, taken);
+                for channel in set {
+                    let holder = if *channel == "vim.notify" {
+                        "function <a.renderer>"
+                    } else {
+                        "%!v:lua.a()"
+                    };
+                    let _ = held(&mut model, channel, holder);
+                }
+                let standing = notices(&model);
+                assert_eq!(standing.len(), 1, "{set:?}: {standing:?}");
+                boxes.push(standing[0].split('\n').map(str::to_string).collect());
+            }
+        }
+        boxes
+    }
+
+    /// The width of the terminal every compat scenario runs in, read from
+    /// the harness that sets it.
+    fn compat_cols() -> u16 {
+        include_str!("../../../view-harness/src/bin/oracle/compat.rs")
+            .lines()
+            .find_map(|line| line.strip_prefix("const COMPAT_COLS: u16 = "))
+            .and_then(|rest| rest.strip_suffix(';'))
+            .and_then(|cols| cols.parse().ok())
+            .expect("the compat harness declares its terminal width")
+    }
+
+    /// A needle a scenario waits for or asserts absent from the launch box
+    /// sits on one row of it as the compat harness's terminal wraps it,
+    /// because both steps read one screen row at a time. Graded against every box
+    /// a fixture can raise, since the channels that land first move where a
+    /// needle stands in the box.
     #[test]
     fn every_compat_needle_from_the_launch_box_fits_one_row() {
-        let standing = notices(&noice_launch());
-        let lines: Vec<String> = standing[0].split('\n').map(str::to_string).collect();
-        let rows = crate::model::wrap_toast(&lines, crate::model::NOTICE_COLUMN_MAX.min(80 / 2));
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compat/scenarios");
-        let mut graded = 0;
+        let mut needles: Vec<(std::path::PathBuf, String)> = Vec::new();
         for entry in std::fs::read_dir(&dir).expect("the compat scenarios") {
             let path = entry.expect("a readable directory entry").path();
             if path.extension().is_none_or(|ext| ext != "toml") {
                 continue;
             }
             let scenario = std::fs::read_to_string(&path).expect("a readable scenario");
-            for needle in wait_needles(&scenario) {
+            // an absence a needle straddles holds whatever the box says
+            for step in ["wait_for", "assert_absent"] {
+                for needle in step_needles(&scenario, step) {
+                    needles.push((path.clone(), needle));
+                }
+            }
+        }
+        let launches = fixture_launches();
+        assert_eq!(launches.len(), 12, "the walk lost a box shape");
+        let width = crate::model::NOTICE_COLUMN_MAX.min(compat_cols() / 2);
+        let mut graded = 0;
+        for lines in &launches {
+            let rows = crate::model::wrap_toast(lines, width);
+            for (path, needle) in &needles {
                 if !lines.iter().any(|line| line.contains(needle.as_str())) {
                     continue;
                 }
@@ -2859,7 +2940,7 @@ mod tests {
                 );
             }
         }
-        assert!(graded > 5, "the walk graded nothing: {graded}");
+        assert!(graded > 50, "the walk graded nothing: {graded}");
     }
 
     #[test]

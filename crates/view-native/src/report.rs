@@ -52,44 +52,9 @@ pub struct Handover {
     /// registry's `off_switch`, so what a notice prints and what doctor
     /// prints can never disagree.
     pub reverses_with: &'static str,
-    /// The plugin surface being taken over, verbatim from the registry's
-    /// `supersedes`, or `None` for a feature that names no plugin.
-    pub supersedes: Option<&'static str>,
 }
 
 impl Handover {
-    /// The user-facing sentence: what view took, what still loads, and the
-    /// line that hands it back.
-    ///
-    /// Reads as prose because it is shown as prose, in a toast and in
-    /// doctor's output alike. The off switch is never reworded or re-derived
-    /// here, so what a user is told to paste is what the registry says
-    /// works.
-    ///
-    /// A key says what it does now and that the user's own mapping of it is
-    /// off. The plugin a feature supersedes is no part of that: a key took
-    /// the user's mapping, and whatever plugin it called still loads.
-    #[must_use]
-    pub fn notice(&self) -> String {
-        let took = match &self.surface {
-            Surface::SessionHold => format!("view is drawing the {}", self.feature),
-            Surface::Key { lhs } => {
-                return format!(
-                    "view maps {lhs} to {} now. Your own mapping of it is off; {} gives it back.",
-                    action(self.feature, lhs),
-                    self.reverses_with
-                );
-            }
-        };
-        match self.supersedes {
-            Some(theirs) => format!(
-                "{took} ({theirs} still loads). Turn it off with {}",
-                self.reverses_with
-            ),
-            None => format!("{took}. Turn it off with {}", self.reverses_with),
-        }
-    }
-
     /// This handover as the launch box names it, beside everything else the
     /// launch handed to view.
     #[must_use]
@@ -174,7 +139,6 @@ pub fn report(
             feature: entry.feature,
             surface: Surface::SessionHold,
             reverses_with: entry.reverses_with,
-            supersedes: entry.supersedes,
         });
     }
     out.extend(
@@ -182,25 +146,22 @@ pub fn report(
             .iter()
             .filter(|c| c.had_user_mapping)
             .filter_map(|c| {
-                // A feature the registry tracks answers first; a feature
+                // A feature the registry tracks answers first. A feature
                 // reachable only through `mappings::exempt_feature` (a key
                 // with no `FeatureDesc` row, `ai` today) answers the same
-                // three facts from there instead of being silently dropped
-                // -- both a user's own mapping being taken and the line that
-                // gives it back are news regardless of which table names the
-                // feature.
-                let (id, supersedes, off_switch) =
+                // two facts from there: a user's own mapping being taken is
+                // news whichever table names the feature.
+                let (id, off_switch) =
                     if let Some(desc) = features.iter().find(|f| f.id == c.feature) {
-                        (desc.id, desc.supersedes, desc.off_switch)
+                        (desc.id, desc.off_switch)
                     } else {
                         let exempt = mappings::exempt_feature(&c.feature)?;
-                        (exempt.id, exempt.supersedes, exempt.off_switch)
+                        (exempt.id, exempt.off_switch)
                     };
                 Some(Handover {
                     feature: id,
                     surface: Surface::Key { lhs: c.lhs.clone() },
                     reverses_with: off_switch,
-                    supersedes,
                 })
             }),
     );
@@ -234,9 +195,12 @@ mod tests {
         );
         assert_eq!(report.len(), 1, "the claimed key must be reported");
         assert_eq!(
-            report[0].notice(),
-            "view maps <leader>ff to picker files now. Your own mapping of it \
-             is off; native.picker = false gives it back."
+            report[0].taken(),
+            Taken::Key {
+                lhs: "<leader>ff".to_string(),
+                action: "picker files".to_string(),
+                off_switch: "native.picker = false",
+            }
         );
     }
 
@@ -255,9 +219,11 @@ mod tests {
         .find(|h| h.feature == "statusline")
         .expect("an all-enabled plan must supersede the statusline");
         assert_eq!(
-            handover.notice(),
-            "view is drawing the statusline (your own status line still \
-             loads). Turn it off with native.statusline = false"
+            handover.taken(),
+            Taken::Drawing {
+                feature: "statusline",
+                off_switch: "native.statusline = false",
+            }
         );
     }
 
@@ -300,9 +266,11 @@ mod tests {
         .expect("an all-enabled plan must supersede notifications");
         assert_eq!(handover.surface, Surface::SessionHold);
         assert_eq!(
-            handover.notice(),
-            "view is drawing the notifications (your own notifier still \
-             loads). Turn it off with native.notifications = false"
+            handover.taken(),
+            Taken::Drawing {
+                feature: "notifications",
+                off_switch: "native.notifications = false",
+            }
         );
     }
 
@@ -320,18 +288,21 @@ mod tests {
         );
         assert_eq!(report.len(), 1, "the claimed chord must be reported");
         assert_eq!(
-            report[0].notice(),
-            "view maps <D-Left> to window focus left now. Your own mapping of \
-             it is off; keys.profile = \"editor\" gives it back."
+            report[0].taken(),
+            Taken::Key {
+                lhs: "<D-Left>".to_string(),
+                action: "window focus left".to_string(),
+                off_switch: "keys.profile = \"editor\"",
+            }
         );
     }
 
     /// Every key a session can take from a user, by every spelling it
-    /// registers under, reads as one sentence: what the key does now, that
-    /// the user's mapping is off, and the line that gives it back. A key
-    /// that landed on nothing says nothing.
+    /// registers under, reaches the launch box as the key, what it does now
+    /// in words, and the line that gives it back. A key that landed on
+    /// nothing says nothing.
     #[test]
-    fn every_key_handover_reads_as_a_sentence() {
+    fn every_key_handover_names_its_action_in_words() {
         let mut keys: Vec<(String, String)> = mappings::default_maps()
             .iter()
             .map(|spec| (spec.feature.to_string(), spec.lhs.to_string()))
@@ -354,30 +325,26 @@ mod tests {
                     continue;
                 }
                 assert_eq!(handovers.len(), 1, "{feature} {lhs}: {handovers:?}");
-                let text = handovers[0].notice();
-                let want = format!("view maps {lhs} to {feature} ");
-                assert!(text.starts_with(&want), "{text}");
+                let Taken::Key {
+                    lhs: taken_lhs,
+                    action,
+                    off_switch,
+                } = handovers[0].taken()
+                else {
+                    unreachable!("a key handover is a taken key");
+                };
+                assert_eq!(&taken_lhs, lhs);
+                assert_eq!(off_switch, handovers[0].reverses_with, "{feature} {lhs}");
+                let verb = action.strip_prefix(&format!("{feature} "));
                 assert!(
-                    text.ends_with(&format!(
-                        " now. Your own mapping of it is off; {} gives it back.",
-                        handovers[0].reverses_with
-                    )),
-                    "{text}"
+                    verb.is_some_and(|verb| !verb.is_empty()),
+                    "{feature} {lhs}: the action names the feature and a verb: {action}"
                 );
-                for stale in ["still loads", "chords", "Turn it off"] {
-                    assert!(!text.contains(stale), "{text}");
-                }
-                let action = text[want.len()..].split(" now.").next().unwrap_or_default();
-                assert!(!action.contains('_'), "a verb is spelled in words: {text}");
-                assert_eq!(
-                    handovers[0].taken(),
-                    Taken::Key {
-                        lhs: lhs.clone(),
-                        action: format!("{feature} {action}"),
-                        off_switch: handovers[0].reverses_with,
-                    },
-                    "the launch box names the key as the sentence does: {text}"
+                assert!(
+                    !action.contains('_'),
+                    "a verb is spelled in words: {action}"
                 );
+                assert!(!action.contains("chords"), "{action}");
             }
         }
     }
@@ -419,12 +386,11 @@ mod tests {
                 .iter()
                 .find(|f| f.id == handover.feature)
                 .expect("every handover must name a registry feature");
-            assert!(
-                handover.notice().contains(desc.off_switch),
-                "{}'s notice must quote {} verbatim, got {:?}",
-                handover.feature,
+            assert_eq!(
+                handover.taken().off_switch(),
                 desc.off_switch,
-                handover.notice()
+                "{}'s launch box line must quote the registry switch verbatim",
+                handover.feature
             );
         }
     }
@@ -480,9 +446,12 @@ mod tests {
             "the claimed ai key must be reported even with no FeatureDesc: {report:?}"
         );
         assert_eq!(
-            report[0].notice(),
-            "view maps <leader>ai to ai toggle now. Your own mapping of it is \
-             off; ai.enabled = false gives it back."
+            report[0].taken(),
+            Taken::Key {
+                lhs: "<leader>ai".to_string(),
+                action: "ai toggle".to_string(),
+                off_switch: "ai.enabled = false",
+            }
         );
     }
 }

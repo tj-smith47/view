@@ -57,12 +57,13 @@ steps = [
   # notice, carrying the surface and the channel that was taken and the
   # exact line that undoes it. One needle per line of the notice, each short
   # enough to sit on one row of the notice column, which wraps a longer
-  # line (`every_compat_needle_from_the_launch_box_fits_one_row`). Each line of that notice has to be covered by a needle here, which
+  # line (`every_compat_needle_from_the_launch_box_fits_one_row`). Each line
+  # of that notice has to be covered by a needle here, which
   # `every_compat_needle_is_a_row_view_still_writes` grades: these are a
   # copy of view's own wording, and nothing else read it back.
   { wait_for = "view: your config also draws the", timeout_ms = 30000 },
-  { wait_for = "message area (vim.notify", timeout_ms = 5000 },
-  { wait_for = "native.notifications = false", timeout_ms = 5000 },
+  { wait_for = "(vim.notify", timeout_ms = 5000 },
+  { wait_for = "native.notifications", timeout_ms = 5000 },
   { wait_for = "Startup messages: <leader>fm", timeout_ms = 5000 },
   # What view does about the conflict, asked of noice rather than read off
   # the screen: the plugin is left running, and the channel it wrote is the
@@ -169,7 +170,7 @@ steps = [
   { probe = "luaeval('tostring(vim.o.cmdheight)')", expect = "0" },
   # The remedy's whole point: neither complaint survives it.
   { assert_absent = "Noice can't work when the GUI has" },
-  { assert_absent = "message area (vim.notify" },
+  { assert_absent = "(vim.notify" },
   { send = ":lua vim.notify('noice-compat-marker')<CR>" },
   { wait_for = "noice-compat-marker", timeout_ms = 15000 },
   { wait_for_probe = "luaeval('(function() local ok, m = pcall(require, \"noice.message.manager\") if not ok then return \"no-mod\" end local msgs = m.get({ event = \"notify\" }, { history = true }) for _, msg in ipairs(msgs) do if tostring(msg:content()):find(\"noice%-compat%-marker\") then return \"routed\" end end return \"absent:\" .. #msgs end)()')", expect = "routed", timeout_ms = 10000 },

@@ -3901,6 +3901,11 @@ fn launch_notice_once() -> Tiles {
     use view_core::native::surfaces::Taken;
     let mut tiles = tiled(true);
     tiles.model.statusline_enabled = true;
+    // the tab line is drawn by view here, so the bar's report lands in the
+    // box beside the other two
+    let mut surfaces = tiles.model.attached_surfaces().to_vec();
+    surfaces.push(view_core::native::ext::Ext::Tabline);
+    tiles.model.attach_surfaces(surfaces);
     let key = |feature: &str, lhs: &str, action: &str, off_switch: &'static str| {
         (
             format!("{feature}:key:{lhs}"),
@@ -3939,7 +3944,7 @@ fn launch_notice_once() -> Tiles {
             "@/home/a/.local/share/nvim/lazy/a.renderer/lua/a/renderer/notify.lua",
         ),
         ("statusline", "%{%v:lua.require'a.bar'.statusline()%}"),
-        ("tabline", "%!v:lua.nvim_bufferline()"),
+        ("tabline", "%!v:lua.a_tabs()"),
     ] {
         let _ = view_core::update::update(
             &mut tiles.model,

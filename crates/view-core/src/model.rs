@@ -1692,29 +1692,17 @@ impl EngineModel {
         self.record_message_in_family(kind, content, replace_last, None, None)
     }
 
-    /// [`Self::record_message`] for text that belongs in the notification
-    /// history and never on the toast stack, whatever the startup hold has
-    /// resolved to: a claiming plugin's own startup complaint, which spec
-    /// 5.5 records in the plugin's voice beside view's one notice rather
-    /// than stacking it on top.
+    /// Records text in the notification history alone, whatever the startup
+    /// hold has resolved to: a claiming plugin's own startup complaint,
+    /// which spec 5.5 records in the plugin's voice beside view's one
+    /// notice.
     ///
-    /// The route is decided here rather than left to
-    /// [`route_under_hold`](crate::native::toast::route_under_hold) because
-    /// that function answers about the hold, and the hold ends on its own
-    /// deadline three seconds after attach -- while a heavy configuration's
-    /// plugins are still loading, and so before the complaints this records
-    /// have been raised at all. A window sighted after that is still inside
-    /// the startup conflict window (which ends at the first key, click or
-    /// paste) or inside the complaint grace that outlives it, and
-    /// its text still owes the history rather than the stack.
-    pub fn record_history_only(&mut self, content: Vec<(u64, String)>) -> Vec<crate::msg::Effect> {
-        self.record_message_in_family(
-            String::new(),
-            content,
-            false,
-            None,
-            Some(crate::native::toast::Route::HistoryOnly),
-        )
+    /// Written to the history directly. The hold parks what it holds and
+    /// releases it onto the stack, so an entry that passed through it would
+    /// be toasted when a pending hold releases.
+    pub fn record_history_only(&mut self, content: Vec<(u64, String)>) {
+        let entry = self.messages.history_only_entry(String::new(), content);
+        self.toast_history.push(&entry);
     }
 
     /// [`Self::record_message`] for a plugin's own notification that view
@@ -1722,13 +1710,12 @@ impl EngineModel {
     /// stack whatever the startup hold has resolved to, and the history
     /// keeps it like any other.
     ///
-    /// The other half of [`Self::record_history_only`], and the hold is
-    /// what parts them. A message the hold parks is one nobody has seen --
-    /// that is what the collapse buys, and view's notice says where it
-    /// went. This text was already drawn on a screen the user was looking
-    /// at, in a window view is withholding, so parking it would take a
-    /// notification away rather than tidy one up. What the plugin was
-    /// telling the user, view tells them.
+    /// The other half of [`Self::record_history_only`]. A message the hold
+    /// parks is one nobody has seen, and view's notice says where it went.
+    /// This text was already drawn on a screen the user was looking at, in
+    /// a window view is withholding, so parking it would take a
+    /// notification away. What the plugin was telling the user, view tells
+    /// them.
     pub fn record_seen_notification(
         &mut self,
         content: Vec<(u64, String)>,
@@ -1747,10 +1734,9 @@ impl EngineModel {
     /// [`MessageEntry::family`]). Private because a family is only ever
     /// decided by [`Self::record_native_notice_once_as`], the one caller.
     ///
-    /// `route` overrides the kind-and-hold classification for the two
-    /// callers whose routing is a property of what the text *is* rather
-    /// than of the kind it arrived under ([`Self::record_history_only`],
-    /// [`Self::record_seen_notification`]).
+    /// `route` overrides the kind-and-hold classification for
+    /// [`Self::record_seen_notification`], whose routing is a property of
+    /// what the text is.
     fn record_message_in_family(
         &mut self,
         kind: String,
@@ -1857,19 +1843,6 @@ impl EngineModel {
         );
         self.toast_history.push(&entry);
         true
-    }
-
-    /// Records `text` to the notification history and nowhere else: never
-    /// the stack, and never the startup hold, which releases what it parks
-    /// onto the stack.
-    ///
-    /// For a finding a box has already told this config, or a line that
-    /// spells in full what a box names in brief.
-    pub fn record_to_history_alone(&mut self, text: String) {
-        let entry = self
-            .messages
-            .history_only_entry(String::new(), vec![(0, text)]);
-        self.toast_history.push(&entry);
     }
 
     /// A locally-synthesized notice -- never from nvim's own `msg_show` --

@@ -233,14 +233,14 @@ fn cache_path(state_dir: &Path, config_path: &Path, theme: Option<&str>) -> Path
 /// theme, and unconditionally seeding either one registers those two groups
 /// with all-false attributes, permanently defeating that fallback.
 #[must_use]
-pub fn load(config_path: &Path, theme: Option<&str>) -> (Option<Theme>, Option<String>) {
+pub fn load(config_path: &Path, theme: Option<&str>) -> (Option<Theme>, Option<CacheDiagnostic>) {
     let Some(path) = cache_target(config_path, theme) else {
         return (
             None,
-            Some(
+            Some(CacheDiagnostic::Unreadable(
                 "view: no XDG_STATE_HOME, HOME, or LOCALAPPDATA set; theme cache unavailable, using built-in defaults"
                     .to_string(),
-            ),
+            )),
         );
     };
     load_from_path(&path)
@@ -258,16 +258,31 @@ pub(crate) fn cache_target(config_path: &Path, theme: Option<&str>) -> Option<Pa
     Some(cache_path(&state_dir, config_path, theme))
 }
 
-/// The opening of the diagnostic for a cache that has not been written yet.
-const MISSING_OPENING: &str = "view: no theme cache at ";
+/// Why [`load`] fell back to the built-in defaults, with the text that
+/// says so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheDiagnostic {
+    /// No cache has been written yet for this config and theme. Every
+    /// first launch under them meets this, and the session writes one.
+    Missing(String),
+    /// A cache that could not be used, or no place to keep one.
+    Unreadable(String),
+}
 
-/// Whether `notice` is [`load`]'s diagnostic for a cache not written yet.
-///
-/// A first launch under a config or theme has no cache, and this session
-/// writes it, so that diagnostic is a history entry and never a box.
-#[must_use]
-pub(crate) fn is_missing_cache(notice: &str) -> bool {
-    notice.starts_with(MISSING_OPENING)
+/// Tells the user what `diagnostic` says: a missing cache goes to the
+/// message history alone, and a cache that could not be used raises a
+/// notice.
+pub(crate) fn report(
+    model: &mut view_core::model::Model,
+    diagnostic: CacheDiagnostic,
+) -> Vec<view_core::msg::Effect> {
+    match diagnostic {
+        CacheDiagnostic::Missing(text) => {
+            model.engine.record_history_only(vec![(0, text)]);
+            Vec::new()
+        }
+        CacheDiagnostic::Unreadable(text) => model.engine.record_native_notice(text, false),
+    }
 }
 
 /// [`load`]'s implementation given an already-resolved cache file path, so
@@ -279,36 +294,36 @@ pub(crate) fn is_missing_cache(notice: &str) -> bool {
 /// See [`load`]'s doc comment for why the diagnostic is data, not a stderr
 /// write.
 #[must_use]
-pub(crate) fn load_from_path(path: &Path) -> (Option<Theme>, Option<String>) {
+pub(crate) fn load_from_path(path: &Path) -> (Option<Theme>, Option<CacheDiagnostic>) {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return (
                 None,
-                Some(format!(
-                    "{MISSING_OPENING}{} yet, using built-in defaults",
+                Some(CacheDiagnostic::Missing(format!(
+                    "view: no theme cache at {} yet, using built-in defaults",
                     path.display()
-                )),
+                ))),
             );
         }
         Err(e) => {
             return (
                 None,
-                Some(format!(
+                Some(CacheDiagnostic::Unreadable(format!(
                     "view: failed to read theme cache {}: {e}, using built-in defaults",
                     path.display()
-                )),
+                ))),
             );
         }
     };
     match toml::from_str::<CachedTheme>(&contents) {
         Ok(cached) if cached.schema_version > CACHE_SCHEMA_VERSION => (
             None,
-            Some(format!(
+            Some(CacheDiagnostic::Unreadable(format!(
                 "view: theme cache {} is schema v{}, newer than this build's v{CACHE_SCHEMA_VERSION}; using built-in defaults",
                 path.display(),
                 cached.schema_version
-            )),
+            ))),
         ),
         Ok(cached) => (Some(cached.into()), None),
         Err(e) => {
@@ -335,7 +350,7 @@ pub(crate) fn load_from_path(path: &Path) -> (Option<Theme>, Option<String>) {
                     path.display()
                 ),
             };
-            (None, Some(notice))
+            (None, Some(CacheDiagnostic::Unreadable(notice)))
         }
     }
 }
@@ -661,8 +676,38 @@ mod tests {
         let path = dir.join("does-not-exist.toml");
         let (loaded, notice) = load_from_path(&path);
         assert_eq!(loaded, None);
-        assert!(is_missing_cache(&notice.unwrap()));
+        assert!(
+            matches!(notice, Some(CacheDiagnostic::Missing(_))),
+            "{notice:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A missing cache reaches the message history and leaves the notice
+    /// stack empty; a cache that could not be used raises a notice.
+    #[test]
+    fn a_missing_cache_goes_to_the_history_and_an_unreadable_one_to_a_notice() {
+        let standing = |model: &view_core::model::Model| model.engine.messages.entries.len();
+        let history = |model: &view_core::model::Model| {
+            model
+                .engine
+                .toast_history
+                .entries()
+                .flat_map(|entry| entry.content.iter().map(|(_, text)| text.clone()))
+                .collect::<Vec<_>>()
+        };
+        let mut model = view_core::model::Model::with_term_size(80, 24);
+        let _ = report(
+            &mut model,
+            CacheDiagnostic::Missing("view: missing".to_string()),
+        );
+        assert_eq!(standing(&model), 0);
+        assert_eq!(history(&model), ["view: missing"]);
+        let _ = report(
+            &mut model,
+            CacheDiagnostic::Unreadable("view: corrupt".to_string()),
+        );
+        assert_eq!(standing(&model), 1);
     }
 
     #[test]
@@ -672,7 +717,10 @@ mod tests {
         std::fs::write(&path, "this is not valid { toml at all ]]]").unwrap();
         let (loaded, notice) = load_from_path(&path);
         assert_eq!(loaded, None);
-        assert!(!is_missing_cache(&notice.unwrap()));
+        assert!(
+            matches!(notice, Some(CacheDiagnostic::Unreadable(_))),
+            "{notice:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

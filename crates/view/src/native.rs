@@ -253,6 +253,101 @@ pub(crate) struct NativeSession {
     /// follow-up adds one to every desktop startup, so a session with no
     /// record to consult would otherwise repeat each notice.
     announced: Vec<String>,
+    /// The thread that writes the first-run record.
+    writer: RecordWriter,
+}
+
+/// One write to the first-run record.
+enum RecordWrite {
+    /// Everything a registration handed over, keyed per surface.
+    Handovers(Vec<view_native::report::Handover>),
+    /// One notice the model raised about the config.
+    Key(String),
+}
+
+/// The first-run record's writer: one thread that owns every write, spawned
+/// at the first write a session makes.
+///
+/// The record is read and written in full each time, and a write on the
+/// dispatch thread would hold the frame behind a disk. One thread keeps the
+/// writes in order, so two keys told in one launch never overwrite each
+/// other. Dropping the writer waits for the writes it was handed, so a
+/// session that quits at once still records what it told.
+#[derive(Default)]
+struct RecordWriter {
+    tx: Option<std::sync::mpsc::Sender<RecordWrite>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RecordWriter {
+    fn send(
+        &mut self,
+        record: &std::path::Path,
+        config: Option<&std::path::Path>,
+        write: RecordWrite,
+    ) {
+        if self.tx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel::<RecordWrite>();
+            let owned_record = record.to_path_buf();
+            let owned_config = config.map(std::path::Path::to_path_buf);
+            let spawned = std::thread::Builder::new()
+                .name("first-run-record".to_string())
+                .spawn(move || {
+                    for write in rx {
+                        apply_record_write(&owned_record, owned_config.as_deref(), write);
+                    }
+                });
+            match spawned {
+                Ok(thread) => {
+                    self.tx = Some(tx);
+                    self.thread = Some(thread);
+                }
+                Err(err) => {
+                    // a host out of threads still records, on this thread
+                    crate::vlog::log_with("native", || {
+                        format!("first-run record thread failed: {err}")
+                    });
+                    apply_record_write(record, config, write);
+                    return;
+                }
+            }
+        }
+        if let Some(tx) = &self.tx {
+            if tx.send(write).is_err() {
+                crate::vlog::log("native", "first-run record thread is gone");
+            }
+        }
+    }
+
+    /// Waits for every write handed over so far.
+    fn finish(&mut self) {
+        self.tx = None;
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() {
+                crate::vlog::log("native", "first-run record thread panicked");
+            }
+        }
+    }
+}
+
+impl Drop for RecordWriter {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+fn apply_record_write(
+    record: &std::path::Path,
+    config: Option<&std::path::Path>,
+    write: RecordWrite,
+) {
+    let result = match write {
+        RecordWrite::Handovers(handovers) => toast::first_run(&handovers, config, record),
+        RecordWrite::Key(key) => toast::record_key(config, &key, record),
+    };
+    if let Err(err) = result {
+        crate::vlog::log_with("native", || format!("first-run record failed: {err}"));
+    }
 }
 
 impl NativeSession {
@@ -384,6 +479,7 @@ impl NativeSession {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            writer: RecordWriter::default(),
         };
         (session, effects)
     }
@@ -901,11 +997,15 @@ impl NativeSession {
     /// A record that cannot be written is logged, which costs the same
     /// notice once more next launch.
     ///
-    /// Latency consequence: one read and one write of the record file, on
-    /// the dispatch thread, once per key a config has never been told. A
-    /// key already told raises no effect, so a launch under a told config
-    /// never reaches this.
-    pub(crate) fn record_announced(&self, key: &str) {
+    /// Latency consequence: the dispatch thread hands the key to the
+    /// record's writer thread and touches no file. The first key a session
+    /// records also spawns that thread.
+    pub(crate) fn record_announced(&mut self, key: &str) {
+        self.write_record(RecordWrite::Key(key.to_string()));
+    }
+
+    /// Hands `write` to the record's writer thread.
+    fn write_record(&mut self, write: RecordWrite) {
         let Some(record) = &self.record else {
             crate::vlog::log(
                 "native",
@@ -913,9 +1013,7 @@ impl NativeSession {
             );
             return;
         };
-        if let Err(err) = toast::record_key(self.config_path.as_deref(), key, record) {
-            crate::vlog::log_with("native", || format!("first-run record failed: {err}"));
-        }
+        self.writer.send(record, self.config_path.as_deref(), write);
     }
 
     /// Adds whatever this session took over for the first time under this
@@ -924,22 +1022,13 @@ impl NativeSession {
     /// Options and keys come through one report, so the wording, the off
     /// switch and the record entry are the same mechanism for both. A record
     /// that cannot be written is logged and the notice shown anyway: the
-    /// worst that costs is repeating it next launch, and staying silent
-    /// instead would trade a repeated notice for a user who is never told
-    /// what took their key.
+    /// worst that costs is repeating it next launch, and a user who is
+    /// never told what took their key is worse.
     ///
-    /// Latency consequence: `toast::first_run` underneath this reads and,
-    /// when there is anything new to announce, writes the record file
-    /// (`std::fs::read_to_string`/`create_dir_all`/`write` in
-    /// `view-native`'s `toast.rs`) synchronously, on whatever thread calls
-    /// this -- the same `dispatch` thread every `Msg` runs through, since
-    /// this follow-up fires from `Stage::Claims`. That stage fires once per
-    /// registration reply, two or more in a desktop session, and a reply
-    /// that claims nothing past `Self::announced` returns before the record
-    /// is touched. So the record is read and written at most once at
-    /// startup and again only when a later registration claims a new key,
-    /// and never on the per-frame steady-state path this crate's
-    /// performance budgets gate.
+    /// Latency consequence: the record write goes to the writer thread
+    /// ([`Self::record_announced`]), so the dispatch thread builds the
+    /// report and touches no file. A registration reply that claims nothing
+    /// past `Self::announced` returns before the report reaches the model.
     fn announce(&mut self, model: &mut Model) -> Vec<Effect> {
         let mut handovers = report(&self.plan, model.claimed_keys(), registry::features());
         handovers.retain(|h| !self.announced.contains(&h.record_key()));
@@ -951,23 +1040,19 @@ impl NativeSession {
                 .iter()
                 .map(view_native::report::Handover::record_key),
         );
-        match &self.record {
-            Some(record) => {
-                if let Err(err) = toast::first_run(&handovers, self.config_path.as_deref(), record)
-                {
-                    crate::vlog::log_with("native", || format!("first-run record failed: {err}"));
-                }
-            }
-            None => crate::vlog::log(
-                "native",
-                "no state directory: the first-run notice cannot be recorded",
-            ),
-        }
         let taken = handovers
             .iter()
             .map(|h| (h.record_key(), h.taken()))
             .collect();
+        self.write_record(RecordWrite::Handovers(handovers));
         view_core::update::tell_taken_over(model, taken)
+    }
+
+    /// Waits for every record write this session has handed over, for a
+    /// test that reads the record back.
+    #[cfg(test)]
+    pub(crate) fn flush_record(&mut self) {
+        self.writer.finish();
     }
 }
 
@@ -1061,6 +1146,7 @@ impl NativeSession {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            writer: RecordWriter::default(),
         }
     }
 
@@ -1095,6 +1181,7 @@ impl NativeSession {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            writer: RecordWriter::default(),
         }
     }
 
@@ -1477,6 +1564,7 @@ mod tests {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            writer: RecordWriter::default(),
         };
         let mut m = model();
         let specs = startup_specs(&mut session, &mut m);
@@ -1540,6 +1628,7 @@ mod tests {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            writer: RecordWriter::default(),
         };
         let mut m = model();
         let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
@@ -1621,6 +1710,7 @@ mod tests {
             "the option this session held must announce itself through the same notice, got {first:?}"
         );
         assert!(m.dirty);
+        session.flush_record();
 
         let mut next = NativeSession::all_enabled(7, Some(record.clone()));
         let mut later = model();

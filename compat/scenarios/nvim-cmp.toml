@@ -193,7 +193,7 @@ steps = [
   # itself and carrying the line that ends the overlap. The `present` state
   # above is that line applied.
   { wait_for = "cmp_menu is drawing over the command line", timeout_ms = 15000 },
-  { wait_for = "Set [native] palette = false in view.toml to give it back", timeout_ms = 5000 },
+  { wait_for = "native.palette = false gives it back", timeout_ms = 5000 },
   # Not the anonymous wording: a window that names itself is named, and
   # nothing else on this row claims it.
   { assert_absent = "a plugin is drawing over the command line" },

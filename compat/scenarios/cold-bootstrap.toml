@@ -50,6 +50,7 @@ steps = [
   # because the condition is still true, so no wait outlasts it; `d` in the
   # message history is its dismissal.
   { wait_for = "view: your config also draws", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 30000 },
   { send = ":View notifications<CR>" },
   { wait_for = "Messages", timeout_ms = 60000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
