@@ -583,7 +583,7 @@ pub struct SurfaceConflicts {
     held: Vec<Surface>,
     /// What the launch box names ([`Self::tell_held`]): each surface a
     /// channel report found written by the config, with the channels that
-    /// reported it, in the order they reported. One box for all of them,
+    /// reported it, in the channel table's order. One box for all of them,
     /// because a launch that finds three writes is one thing to read. Kept
     /// apart from `held`, which a sink reading sets without raising a
     /// notice at all.
@@ -765,12 +765,25 @@ impl SurfaceConflicts {
         if channels.iter().any(|told| told == channel) {
             return false;
         }
-        channels.push(channel.to_string());
+        // the box lists a surface's channels in the channel table's order,
+        // so the same config words the same box whichever report lands
+        // first
+        let rank = |name: &str| {
+            crate::native::channels::channels(surface)
+                .iter()
+                .position(|entry| entry.name() == name)
+                .unwrap_or(usize::MAX)
+        };
+        let at = channels
+            .iter()
+            .position(|told| rank(told) > rank(channel))
+            .unwrap_or(channels.len());
+        channels.insert(at, channel.to_string());
         true
     }
 
     /// Every surface the launch box names, with the channels that reported
-    /// it, in report order.
+    /// it, in the channel table's order.
     #[must_use]
     pub fn told(&self) -> &[(Surface, Vec<String>)] {
         &self.told

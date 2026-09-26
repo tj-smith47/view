@@ -4195,7 +4195,7 @@ mod tests {
         };
         let _ = dispatch(&mut first, &executor, &mut follow_ups, held());
         assert_eq!(boxes(&first), 1);
-        follow_ups.native.flush_record();
+        follow_ups.native.finish_record();
         let told = view_native::toast::announced_keys(None, &record).unwrap();
         assert_eq!(told, vec!["held:vim.notify".to_string()]);
 
@@ -4203,7 +4203,7 @@ mod tests {
         next.seed_announced(told);
         let _ = dispatch(&mut next, &executor, &mut follow_ups, held());
         assert_eq!(boxes(&next), 0);
-        follow_ups.native.flush_record();
+        follow_ups.native.finish_record();
         assert_eq!(
             view_native::toast::announced_keys(None, &record).unwrap(),
             vec!["held:vim.notify".to_string()]

@@ -287,9 +287,19 @@ fn write_record(path: &Path, record: &mut Record, keep: &str) -> Result<(), Toas
         })?;
     }
     let rendered = toml::to_string(record)?;
-    std::fs::write(path, rendered).map_err(|source| ToastError::Write {
-        path: path.display().to_string(),
-        source,
+    // written beside the record and renamed over it, so a process killed
+    // mid-write leaves the previous record whole; the pid keeps two views
+    // writing at once off each other's temp file
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(format!(".{}.tmp", std::process::id()));
+    let temp = PathBuf::from(temp);
+    let written = std::fs::write(&temp, rendered).and_then(|()| std::fs::rename(&temp, path));
+    written.map_err(|source| {
+        let _ = std::fs::remove_file(&temp);
+        ToastError::Write {
+            path: path.display().to_string(),
+            source,
+        }
     })
 }
 
@@ -677,6 +687,64 @@ mod tests {
         assert!(
             !record.exists(),
             "a run with nothing to say must not create a record"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A reader that reads the record on every change sees either the
+    /// previous record or the next one, whole: a process killed mid-write
+    /// leaves a record the next launch can still read.
+    #[test]
+    fn a_record_is_never_observed_half_written() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = scratch("whole");
+        let record = dir.join("native-first-run.toml");
+        let done = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let record = record.clone();
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                let mut reads = 0usize;
+                let mut torn = Vec::new();
+                while !done.load(Ordering::Relaxed) {
+                    let Ok(raw) = std::fs::read_to_string(&record) else {
+                        continue;
+                    };
+                    reads += 1;
+                    let parsed = toml::from_str::<Record>(&raw);
+                    if parsed.map_or(true, |parsed| parsed.announced.is_empty()) {
+                        torn.push(raw.len());
+                    }
+                }
+                (reads, torn)
+            })
+        };
+        let padding = "k".repeat(200);
+        for n in 0..300 {
+            record_key(None, &format!("{padding}:{n:04}"), &record).expect("the write must land");
+        }
+        done.store(true, Ordering::Relaxed);
+        let (reads, torn) = reader.join().expect("the reader must finish");
+
+        assert!(
+            reads > 300,
+            "the reader must watch the writes: {reads} reads"
+        );
+        assert!(
+            torn.is_empty(),
+            "a reader saw a half-written record: {torn:?}"
+        );
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .expect("the scratch directory must read")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name != "native-first-run.toml")
+            .collect();
+        assert!(
+            left.is_empty(),
+            "a temp file was left beside the record: {left:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

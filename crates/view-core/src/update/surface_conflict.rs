@@ -1518,6 +1518,31 @@ mod tests {
         )
     }
 
+    /// A surface names its channels in the channel table's order, so a
+    /// needle that finds `(vim.notify` finds it whichever channel of the
+    /// message area reported first.
+    #[test]
+    fn a_surface_names_its_channels_in_table_order() {
+        for order in [["cmdheight", "vim.notify"], ["vim.notify", "cmdheight"]] {
+            let mut model = drawing_everything();
+            for channel in order {
+                let holder = if channel == "cmdheight" {
+                    "1"
+                } else {
+                    "function <a.renderer>"
+                };
+                let _ = held(&mut model, channel, holder);
+            }
+            let boxes = notices(&model);
+            assert_eq!(boxes.len(), 1, "{order:?}: {boxes:?}");
+            assert!(
+                boxes[0].contains("the message area (vim.notify, cmdheight)"),
+                "{order:?}: {}",
+                boxes[0]
+            );
+        }
+    }
+
     /// A config rewrites the same channels on every launch, so a box about
     /// them is told once per config and the history carries every launch
     /// after it.
@@ -2853,12 +2878,14 @@ mod tests {
     }
 
     /// Every launch box a compat fixture can raise, as its lines: each
-    /// channel the fixtures' plugins write, alone and all together, with no
-    /// taken key, with one, and with everything a launch can take.
+    /// channel the fixtures' plugins write, alone and all together, and
+    /// `cmdheight` reported ahead of `vim.notify`, each with no taken key,
+    /// with one, and with everything a launch can take.
     fn fixture_launches() -> Vec<Vec<String>> {
         let channels = ["vim.notify", "statusline", "tabline"];
         let mut sets: Vec<Vec<&str>> = channels.iter().map(|channel| vec![*channel]).collect();
         sets.push(channels.to_vec());
+        sets.push(vec!["cmdheight", "vim.notify"]);
         let every = every_taken();
         let one_key: Vec<(String, Taken)> = every
             .iter()
@@ -2872,10 +2899,10 @@ mod tests {
                 let mut model = drawing_everything();
                 let _ = crate::update::tell_taken_over(&mut model, taken);
                 for channel in set {
-                    let holder = if *channel == "vim.notify" {
-                        "function <a.renderer>"
-                    } else {
-                        "%!v:lua.a()"
+                    let holder = match *channel {
+                        "vim.notify" => "function <a.renderer>",
+                        "cmdheight" => "1",
+                        _ => "%!v:lua.a()",
                     };
                     let _ = held(&mut model, channel, holder);
                 }
@@ -2900,9 +2927,9 @@ mod tests {
 
     /// A needle a scenario waits for or asserts absent from the launch box
     /// sits on one row of it as the compat harness's terminal wraps it,
-    /// because both steps read one screen row at a time. Graded against every box
-    /// a fixture can raise, since the channels that land first move where a
-    /// needle stands in the box.
+    /// because both steps read one screen row at a time. Graded against
+    /// every box a fixture can raise, since the channels a box names move
+    /// where a needle stands in it.
     #[test]
     fn every_compat_needle_from_the_launch_box_fits_one_row() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compat/scenarios");
@@ -2921,7 +2948,7 @@ mod tests {
             }
         }
         let launches = fixture_launches();
-        assert_eq!(launches.len(), 12, "the walk lost a box shape");
+        assert_eq!(launches.len(), 15, "the walk lost a box shape");
         let width = crate::model::NOTICE_COLUMN_MAX.min(compat_cols() / 2);
         let mut graded = 0;
         for lines in &launches {

@@ -1623,6 +1623,7 @@ fn main() -> Result<()> {
         vlog::log("exit", "children stopped");
         term.restore_now();
         vlog::log("exit", "terminal restored");
+        follow_ups.native.finish_record();
         // after restore_now, not before: persist_theme's own diagnostic (on
         // a cache-write failure) is a plain stderr write, and the terminal
         // is raw-mode/alternate-screen owned until the line above -- see
@@ -1671,6 +1672,9 @@ fn main() -> Result<()> {
     // only once the terminal is no longer raw-mode/alternate-screen owned.
     term.restore_now();
     vlog::log("exit", "terminal restored");
+    // after the restore, so a stalled disk holds a restored terminal for
+    // at most the writer's bound
+    follow_ups.native.finish_record();
     persist_theme(&model, &config_path);
     report_fatal_reason(&model);
     vlog::log_with("exit", || format!("leaving code={exit_code}"));

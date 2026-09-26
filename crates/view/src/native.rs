@@ -271,13 +271,28 @@ enum RecordWrite {
 /// The record is read and written in full each time, and a write on the
 /// dispatch thread would hold the frame behind a disk. One thread keeps the
 /// writes in order, so two keys told in one launch never overwrite each
-/// other. Dropping the writer waits for the writes it was handed, so a
-/// session that quits at once still records what it told.
+/// other.
+///
+/// Quitting waits for the writes still queued for at most
+/// [`RECORD_QUIT_WAIT`] and then leaves the thread to the process exit. The
+/// record is replaced whole by a rename, so a write the exit cuts short
+/// loses only this launch's additions, which costs the same notice once
+/// more next launch.
 #[derive(Default)]
 struct RecordWriter {
     tx: Option<std::sync::mpsc::Sender<RecordWrite>>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    /// Disconnects when the writer thread has ended.
+    done: Option<std::sync::mpsc::Receiver<()>>,
 }
+
+/// How long quitting waits for the record writes still queued.
+///
+/// A write is one read, one stat per config the record names and one
+/// rename of a file of a few kilobytes, which a local disk finishes in a
+/// few milliseconds. A writer still busy past this is stalled on a disk
+/// that may never answer, such as a dead network mount, and a quit held
+/// behind it is a hang.
+const RECORD_QUIT_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl RecordWriter {
     fn send(
@@ -287,31 +302,45 @@ impl RecordWriter {
         write: RecordWrite,
     ) {
         if self.tx.is_none() {
-            let (tx, rx) = std::sync::mpsc::channel::<RecordWrite>();
             let owned_record = record.to_path_buf();
             let owned_config = config.map(std::path::Path::to_path_buf);
-            let spawned = std::thread::Builder::new()
-                .name("first-run-record".to_string())
-                .spawn(move || {
-                    for write in rx {
-                        apply_record_write(&owned_record, owned_config.as_deref(), write);
-                    }
+            let started = self.start_with(move |write| {
+                apply_record_write(&owned_record, owned_config.as_deref(), write);
+            });
+            if let Err(err) = started {
+                // a host out of threads still records, on this thread
+                crate::vlog::log_with("native", || {
+                    format!("first-run record thread failed: {err}")
                 });
-            match spawned {
-                Ok(thread) => {
-                    self.tx = Some(tx);
-                    self.thread = Some(thread);
-                }
-                Err(err) => {
-                    // a host out of threads still records, on this thread
-                    crate::vlog::log_with("native", || {
-                        format!("first-run record thread failed: {err}")
-                    });
-                    apply_record_write(record, config, write);
-                    return;
-                }
+                apply_record_write(record, config, write);
+                return;
             }
         }
+        self.push(write);
+    }
+
+    /// Spawns the writer thread, which hands every write to `apply` in the
+    /// order it was sent.
+    fn start_with(
+        &mut self,
+        mut apply: impl FnMut(RecordWrite) + Send + 'static,
+    ) -> std::io::Result<()> {
+        let (tx, rx) = std::sync::mpsc::channel::<RecordWrite>();
+        let (done_tx, done) = std::sync::mpsc::channel::<()>();
+        std::thread::Builder::new()
+            .name("first-run-record".to_string())
+            .spawn(move || {
+                let _done = done_tx;
+                for write in rx {
+                    apply(write);
+                }
+            })?;
+        self.tx = Some(tx);
+        self.done = Some(done);
+        Ok(())
+    }
+
+    fn push(&mut self, write: RecordWrite) {
         if let Some(tx) = &self.tx {
             if tx.send(write).is_err() {
                 crate::vlog::log("native", "first-run record thread is gone");
@@ -319,20 +348,28 @@ impl RecordWriter {
         }
     }
 
-    /// Waits for every write handed over so far.
-    fn finish(&mut self) {
+    /// Waits up to `wait` for every write handed over so far, and answers
+    /// whether they all finished. A writer still busy is left running.
+    fn finish_within(&mut self, wait: std::time::Duration) -> bool {
         self.tx = None;
-        if let Some(thread) = self.thread.take() {
-            if thread.join().is_err() {
-                crate::vlog::log("native", "first-run record thread panicked");
+        let Some(done) = self.done.take() else {
+            return true;
+        };
+        match done.recv_timeout(wait) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                crate::vlog::log_with("native", || {
+                    format!("first-run record writer still busy after {wait:?}, left to the exit")
+                });
+                false
             }
+            _ => true,
         }
     }
 }
 
 impl Drop for RecordWriter {
     fn drop(&mut self) {
-        self.finish();
+        self.finish_within(RECORD_QUIT_WAIT);
     }
 }
 
@@ -998,8 +1035,8 @@ impl NativeSession {
     /// notice once more next launch.
     ///
     /// Latency consequence: the dispatch thread hands the key to the
-    /// record's writer thread and touches no file. The first key a session
-    /// records also spawns that thread.
+    /// record's writer thread and touches no file. The first record write a
+    /// session makes spawns that thread.
     pub(crate) fn record_announced(&mut self, key: &str) {
         self.write_record(RecordWrite::Key(key.to_string()));
     }
@@ -1048,11 +1085,11 @@ impl NativeSession {
         view_core::update::tell_taken_over(model, taken)
     }
 
-    /// Waits for every record write this session has handed over, for a
-    /// test that reads the record back.
-    #[cfg(test)]
-    pub(crate) fn flush_record(&mut self) {
-        self.writer.finish();
+    /// Waits up to [`RECORD_QUIT_WAIT`] for every record write this session
+    /// has handed over. Called on quit after the terminal is restored,
+    /// since `std::process::exit` runs no destructor.
+    pub(crate) fn finish_record(&mut self) {
+        self.writer.finish_within(RECORD_QUIT_WAIT);
     }
 }
 
@@ -1710,7 +1747,7 @@ mod tests {
             "the option this session held must announce itself through the same notice, got {first:?}"
         );
         assert!(m.dirty);
-        session.flush_record();
+        session.finish_record();
 
         let mut next = NativeSession::all_enabled(7, Some(record.clone()));
         let mut later = model();
@@ -2760,5 +2797,44 @@ cycle_surfaces = \"gz\"
             !m.key_profile_report_requested,
             "the flag must be cleared once the report is recorded"
         );
+    }
+
+    /// A record write stalled on a disk that never answers holds quitting
+    /// for the bound and no longer.
+    #[test]
+    fn quitting_waits_no_longer_than_the_bound_for_a_stalled_record_write() {
+        let (release, stalled) = std::sync::mpsc::channel::<()>();
+        let mut writer = RecordWriter::default();
+        writer
+            .start_with(move |_| {
+                let _ = stalled.recv();
+            })
+            .expect("the writer thread must spawn");
+        writer.push(RecordWrite::Key("held:vim.notify".to_string()));
+        let started = std::time::Instant::now();
+        let finished = writer.finish_within(RECORD_QUIT_WAIT);
+        let waited = started.elapsed();
+        // a timeout is the wait having run its whole bound
+        assert!(!finished, "a stalled write must be reported unfinished");
+        let budget = view_test_support::HostBudget::new(
+            RECORD_QUIT_WAIT,
+            std::time::Duration::from_millis(250),
+        );
+        assert!(
+            waited < budget.total(),
+            "quitting waited {waited:?} against {budget}"
+        );
+        drop(release);
+    }
+
+    /// Writes that finish end the wait as soon as they do.
+    #[test]
+    fn quitting_returns_once_the_record_writes_finish() {
+        let mut writer = RecordWriter::default();
+        writer
+            .start_with(|_| {})
+            .expect("the writer thread must spawn");
+        writer.push(RecordWrite::Key("held:vim.notify".to_string()));
+        assert!(writer.finish_within(RECORD_QUIT_WAIT));
     }
 }
