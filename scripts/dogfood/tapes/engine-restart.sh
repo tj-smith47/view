@@ -55,7 +55,7 @@ BODY='Sleep 4s
 Hide
 Sleep 12s
 Show
-Sleep 7s'
-record_gif "$SOCKET" "$OUT" 23 220 50 "$BODY"
+Sleep 5s'
+record_gif "$SOCKET" "$OUT" 21 220 50 "$BODY"
 
 echo "engine-restart.sh: recorded $OUT" >&2

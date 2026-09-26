@@ -15,7 +15,12 @@ cleanup() {
     rm -f -- "$TAPE"
   fi
   if [ -n "${STATE_COPY:-}" ]; then
-    rm -rf -- "$STATE_COPY"
+    # the editor the server just hung up on writes its state as it exits,
+    # so a removal that races that write is taken again once it is done
+    if ! rm -rf -- "$STATE_COPY" 2>/dev/null; then
+      sleep 1
+      rm -rf -- "$STATE_COPY"
+    fi
   fi
 }
 
@@ -93,6 +98,7 @@ record_gif() {
     printf 'Set Width %s\n' "$width"
     printf 'Set Height %s\n' "$height"
     printf 'Set FontSize 14\n'
+    printf 'Set Framerate 10\n'
     # the attach is the recorder's own setup, so the gif opens on the editor
     printf 'Hide\n'
     printf 'Type "tmux -L %s attach -t cap"\n' "$socket"
