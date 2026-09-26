@@ -706,7 +706,14 @@ mod tests {
 
     const THRESHOLD: Duration = Duration::from_secs(10);
 
-    /// The banner counts the user's wait from this threshold.
+    /// The shipped cadence itself rather than a copy of its current value:
+    /// the timelines below drive the interval production runs at, and the
+    /// prospective deadline is built from this exact constant, so a test
+    /// asserting against a second spelling of it would agree with the
+    /// deadline only until one of the two moved.
+    const INTERVAL: Duration = HEARTBEAT_PROBE_INTERVAL;
+
+    /// The banner counts the user's wait from the shipped wedge threshold.
     #[test]
     fn the_banner_counts_the_wait_from_the_shipped_threshold() {
         assert_eq!(
@@ -714,12 +721,6 @@ mod tests {
             HEARTBEAT_WEDGE_THRESHOLD
         );
     }
-    /// The shipped cadence itself rather than a copy of its current value:
-    /// the timelines below drive the interval production runs at, and the
-    /// prospective deadline is built from this exact constant, so a test
-    /// asserting against a second spelling of it would agree with the
-    /// deadline only until one of the two moved.
-    const INTERVAL: Duration = HEARTBEAT_PROBE_INTERVAL;
 
     /// An armed watch and its prober over a connection whose peer neither
     /// answers nor hangs up, so a probe genuinely goes unanswered rather

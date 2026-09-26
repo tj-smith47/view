@@ -14,6 +14,9 @@ cleanup() {
   if [ -n "${TAPE:-}" ]; then
     rm -f -- "$TAPE"
   fi
+  if [ -n "${STATE_COPY:-}" ]; then
+    rm -rf -- "$STATE_COPY"
+  fi
 }
 
 # WHY: every capture opens its session here, so none of them carries tmux's
@@ -58,6 +61,9 @@ new_cap_session() {
 # versions this recorder has not measured; a caller whose session was
 # created at a given `-x`/`-y` passes that same shape here, the way every
 # tape script's `-x 220 -y 50` becomes `record_gif ... 220 50`.
+# $6, when given, is the tape body played after the attach in place of
+# one Sleep of $3 seconds: Sleep, Hide and Show lines that cut a wait
+# out of the gif while the session keeps running behind it.
 record_gif() {
   socket=$1
   out=$2
@@ -93,11 +99,57 @@ record_gif() {
     printf 'Enter\n'
     printf 'Sleep 500ms\n'
     printf 'Show\n'
-    printf 'Sleep %ss\n' "$seconds"
+    if [ -n "${6:-}" ]; then
+      printf '%s\n' "$6"
+    else
+      printf 'Sleep %ss\n' "$seconds"
+    fi
   } >"$TAPE"
+  tmux -L "$socket" set-hook -g client-attached "wait-for -S $RECORDER_ATTACHED"
   vhs "$TAPE"
   rm -f -- "$TAPE"
   TAPE=
 }
+
+# WHY: a tape body that cuts a wait with Hide and Show is timed from the
+# recorder's attach, and vhs takes a varying while to start, so a driver
+# that times its keys from this return shares the body's clock. tmux
+# keeps the signal record_gif's hook raises, so a driver that asks after
+# the attach returns at once. The wait ends with the server when the
+# recorder never attaches. Usage: wait_for_recorder SOCKET
+wait_for_recorder() {
+  tmux -L "$1" wait-for "$RECORDER_ATTACHED"
+}
+
+# WHY: lazy.nvim opens its update report over the editor whenever its last
+# check is older than its frequency, and a tape records whatever is on
+# screen. Each tape runs against a copy of the state directory with that
+# check stamped to now, so the person's own state is never written. The
+# copy leaves nvim's swap files behind, so a crash in some earlier session
+# raises no swap prompt in the recording. Usage: recording_state_home
+# (exports XDG_STATE_HOME; cleanup() removes the copy).
+recording_state_home() {
+  real="${XDG_STATE_HOME:-$HOME/.local/state}"
+  statedir="${XDG_CACHE_HOME:-$HOME/.cache}/view-dogfood-tapes"
+  mkdir -p -- "$statedir"
+  STATE_COPY=$(mktemp -d "$statedir/state-XXXXXX")
+  if [ -d "$real" ]; then
+    cp -R -- "$real/." "$STATE_COPY/"
+  fi
+  rm -rf -- "$STATE_COPY/nvim/swap"
+  mkdir -p -- "$STATE_COPY/nvim/lazy"
+  lazy_state="$STATE_COPY/nvim/lazy/state.json"
+  now=$(date +%s)
+  if [ -f "$lazy_state" ] && grep -q '"last_check"' "$lazy_state"; then
+    sed "s/\"last_check\":[0-9]*/\"last_check\":$now/" "$lazy_state" >"$lazy_state.new"
+    mv -- "$lazy_state.new" "$lazy_state"
+  else
+    printf '{"checker":{"last_check":%s}}\n' "$now" >"$lazy_state"
+  fi
+  XDG_STATE_HOME=$STATE_COPY
+  export XDG_STATE_HOME
+}
+
+RECORDER_ATTACHED=view-recorder-attached
 
 trap cleanup EXIT INT TERM

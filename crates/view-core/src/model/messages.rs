@@ -411,10 +411,10 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// transient items go first, oldest first, and only once every one of them
 /// is gone does eviction reach into the persistent ones (again oldest
 /// first), and the condition last of all, since it states what holds now.
-/// Shared by the two budgets the stack is selected against -- a box
-/// costing its lines plus its frame, and a bare line costing one row --
-/// because a stack sized by one rule and painted by another is how a kept
-/// error line ends up behind a frame that has no room for it.
+/// Shared by the two budgets the stack is selected against. A box costs
+/// its lines plus its frame, and a bare line costs one row. A stack sized by
+/// one rule and painted by another is how a kept error line ends up behind a
+/// frame that has no room for it.
 fn keep_within(items: &[(u8, usize)], budget: usize) -> Vec<bool> {
     let mut keep = vec![true; items.len()];
     let mut total: usize = items.iter().map(|(_, cost)| *cost).sum();

@@ -1702,11 +1702,23 @@ mod tests {
     }
 
     /// The two banner lines `kind` raises, with the readout taken from what
-    /// the model shows since the seconds a test waited are not exact.
+    /// the model shows since the seconds a test waited are not exact. The
+    /// readout still counts from the threshold the verdict waited out.
     fn banner_texts(model: &Model, kind: WedgeKind) -> Vec<String> {
         let [lead, keys] = kind.banner(view_core::native::supervision::SinceStamp::default());
         match visible_texts(model).first() {
-            Some(shown) if shown.starts_with(kind.banner_lead()) => vec![shown.clone(), keys],
+            Some(shown) if shown.starts_with(kind.banner_lead()) => {
+                let waited: u64 = shown[kind.banner_lead().len()..]
+                    .trim()
+                    .trim_end_matches('s')
+                    .parse()
+                    .unwrap_or_else(|_| panic!("the banner reads no seconds: {shown:?}"));
+                assert!(
+                    waited >= kind.quiet_before_verdict().as_secs(),
+                    "the banner counted the wait from the verdict: {shown:?}"
+                );
+                vec![shown.clone(), keys]
+            }
             _ => vec![lead, keys],
         }
     }
@@ -2016,6 +2028,56 @@ mod tests {
         assert!(
             at("ui_attach(") < at("claim_stdout_tty()"),
             "the stdout claim closes the attach: {calls:?}"
+        );
+    }
+
+    /// A restart's windowed tree opens ahead of the `VimEnter` answer, so the
+    /// replacement's first frame, drawn once the attach lands behind that
+    /// answer, already holds the tree's window.
+    #[test]
+    fn a_restarts_reopened_tree_is_in_the_replacements_first_frame() {
+        use view_core::native::geometry::{Anchor, NativeSurface, SurfaceLayout, SurfacePlacement};
+
+        let (msg_tx, _msg_rx) = mpsc::sync_channel(16);
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(msg_tx));
+        let mut model = Model::with_term_size(80, 24);
+        model.surfaces.set_layout(
+            NativeSurface::Tree,
+            SurfaceLayout::new(SurfacePlacement::Windowed, Anchor::Left, 30),
+        );
+        model.surfaces.mark_reopen(NativeSurface::Tree);
+        let mut native = NativeSession::all_enabled(7, None);
+        let mut bridge = ThemeBridge::new(None, None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let flow = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::EngineRequest(view_core::msg::EngineRequest::VimEnter {
+                token: ReplyToken { msgid: 3 },
+                leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
+            }),
+        );
+        assert_eq!(flow, Flow::Continue);
+        let calls = ops.calls.borrow().clone();
+        let at = |needle: &str| {
+            calls
+                .iter()
+                .position(|call| call.starts_with(needle))
+                .unwrap_or_else(|| panic!("{needle} never went out: {calls:?}"))
+        };
+        assert!(
+            at("open_native_window(tree,") < at("reply(3,"),
+            "the tree opens after the answer frees nvim to draw: {calls:?}"
+        );
+        assert!(
+            at("reply(3,") < at("ui_attach("),
+            "the attach leads the answer: {calls:?}"
         );
     }
 

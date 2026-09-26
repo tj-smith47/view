@@ -225,8 +225,11 @@ pub enum Msg {
     /// starting, whether it wrote its own report about doing so, and the
     /// error it raised if the recovery could not be performed at all.
     ///
-    /// `count` is how many buffers came back holding work the file on disk
-    /// does not have -- the fact a user is owed a line about. `reported` is
+    /// `recovered` is the full path of every buffer that came back holding
+    /// work the file on disk does not have, each one a user is owed a line
+    /// about. `swap_off` says the engine had `'swapfile'` off, which is why a
+    /// restart's unsaved buffer can come back from disk alone, and `entered`
+    /// marks the reading taken after `VimEnter`, the final one. `reported` is
     /// the wider one: nvim writes its multi-line recovery report whenever it
     /// replays a swap, so a recovery that restored nothing changed still
     /// leaves a report over the buffer that only a redraw takes down.
@@ -247,10 +250,12 @@ pub enum Msg {
     /// hands the replacement engine the sink the dead one wrote into.
     SwapRecovered {
         generation: u64,
-        count: u64,
+        recovered: Vec<String>,
         reported: bool,
         failure: Option<String>,
         empty: bool,
+        swap_off: bool,
+        entered: bool,
     },
     /// The complete answer to one [`RpcCall::RegisterMappings`]: every
     /// default key the session registered, and whether it landed over a

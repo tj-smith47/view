@@ -351,6 +351,11 @@ pub(crate) fn restart_engine(
     // read before anything below is forgotten: the list is the dead
     // engine's last report of what the session had open
     let reopen = view_core::model::reopen_order(&model.buffers);
+    // what the replacement's swap reading is checked against, so a file that
+    // comes back from disk alone is named
+    model
+        .supervision
+        .note_restart_unsaved(view_core::model::unsaved_files(&model.buffers));
     // ahead of the forget below, which drops the claims that record which
     // surfaces the dead engine held windows for. The closes run on
     // `executor`, the one that started their work, before the spawn can

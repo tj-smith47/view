@@ -723,13 +723,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty = true;
             model.engine.record_native_notice(notice, false)
         }
-        Msg::SwapRecovered {
-            generation,
-            count,
-            reported,
-            failure,
-            empty,
-        } => supervision::note_swap_recovery(model, generation, count, reported, failure, empty),
+        reading @ Msg::SwapRecovered { .. } => supervision::note_swap_recovery(model, reading),
         Msg::MappingsClaimed {
             claimed,
             colon_mapped,

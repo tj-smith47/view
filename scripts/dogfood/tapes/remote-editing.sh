@@ -38,6 +38,7 @@ command -v scp >/dev/null 2>&1 || { echo "remote-editing.sh: scp is not on PATH"
 
 SOCKET=view-cap-remote-$$
 . "$HERE/../lib.sh"
+recording_state_home
 
 REMOTE_REAL_NVIM="${REMOTE_NVIM_BIN:-nvim}"
 REMOTE_INIT=/tmp/view-dogfood-clean-init.lua

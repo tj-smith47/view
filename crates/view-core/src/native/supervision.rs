@@ -217,12 +217,21 @@ impl WedgeKind {
 
     /// The banner's two lines: how long the engine has been quiet, then the
     /// keys that answer it.
+    #[must_use]
+    pub fn banner(self, since: SinceStamp) -> [String; 2] {
+        [
+            format!("{} {}s", self.banner_lead(), self.quiet_readout(since)),
+            self.banner_keys(),
+        ]
+    }
+
+    /// The banner's second line, the keys that answer this wedge.
     ///
     /// Restart leads the keys because it is the one that answers every
     /// wedge. The rest are this wedge's own choices, less the dismissal,
     /// since the banner stands for as long as the wedge does.
     #[must_use]
-    pub fn banner(self, since: SinceStamp) -> [String; 2] {
+    pub fn banner_keys(self) -> String {
         let keys: Vec<String> = std::iter::once(SupervisionChoice::Restart)
             .chain(self.choices().into_iter().filter(|choice| {
                 !matches!(
@@ -232,10 +241,7 @@ impl WedgeKind {
             }))
             .map(|choice| format!("{} {}", choice.key(), choice.verb()))
             .collect();
-        [
-            format!("{} {}s", self.banner_lead(), self.quiet_readout(since)),
-            keys.join("   "),
-        ]
+        keys.join("   ")
     }
 
     /// The modal's title for this wedge.
@@ -528,9 +534,10 @@ impl ReconnectProgress {
         self.attempt > self.max_attempts
     }
 
-    /// The banner's text while attempts remain, and `None` once they do not
-    /// -- an exhausted sequence has nothing left to announce that
-    /// [`WedgeKind::Dead`]'s own notice does not already say.
+    /// The banner's two lines while attempts remain, the attempt it is on
+    /// and then [`WedgeKind::Dead`]'s keys, and `None` once they do not. An
+    /// exhausted sequence has nothing left to announce that the closed
+    /// connection's own banner does not already say.
     ///
     /// Deliberately cause-neutral. A remote editor crashing and a network
     /// connection dropping reach view as the identical signal, ordinary
@@ -540,15 +547,17 @@ impl ReconnectProgress {
     pub fn notice(self) -> Option<String> {
         (!self.exhausted()).then(|| {
             format!(
-                "connection lost, reconnecting ({}/{})",
-                self.attempt, self.max_attempts
+                "connection lost, reconnecting ({}/{})\n{}",
+                self.attempt,
+                self.max_attempts,
+                WedgeKind::Dead.banner_keys()
             )
         })
     }
 }
 
-/// What a session says once its replacement engine has replayed `count` swap
-/// files on the user's behalf.
+/// What a session says once its replacement engine has replayed the swap
+/// files of the buffers `names` on the user's behalf, naming each.
 ///
 /// A recovery view performed silently is a recovery the user cannot trust:
 /// the buffer comes back holding text the file on disk does not have, and
@@ -562,15 +571,11 @@ impl ReconnectProgress {
 /// nvim's own vocabulary and belongs in the engine, while the fact the user
 /// needs is that the buffer holds unsaved work again.
 ///
-/// Callers pass a count they have already established is nonzero; a zero is
-/// not a recovery to announce and this returns `None` for it rather than
-/// wording a notice about nothing.
+/// An empty `names` is not a recovery to announce, and this returns `None`
+/// for it.
 #[must_use]
-pub fn swap_recovery_notice(count: u64) -> Option<String> {
-    (count > 0).then(|| match count {
-        1 => "view: unsaved changes recovered from the swap file".to_string(),
-        n => format!("view: unsaved changes recovered from {n} swap files"),
-    })
+pub fn swap_recovery_notice(names: &[String]) -> Option<String> {
+    (!names.is_empty()).then(|| format!("view: unsaved changes recovered for {}", names.join(", ")))
 }
 
 /// What a session says when the recovery it asked its replacement engine for
@@ -615,7 +620,7 @@ pub fn swap_recovery_damage_notice(error: &str) -> String {
 }
 
 /// What a session says when the recovery worked and the engine warned about
-/// it anyway, `count` being the buffers that came back with work in them.
+/// it anyway, `names` being the buffers that came back with work in them.
 ///
 /// One warning reaches this today and it is the ordinary crash: `E308` says
 /// the file on disk changed after the swap was written, which is exactly what
@@ -626,8 +631,8 @@ pub fn swap_recovery_damage_notice(error: &str) -> String {
 /// who saves over a file that moved underneath their swap loses whatever
 /// moved it.
 #[must_use]
-pub fn swap_recovery_warning_notice(count: u64, error: &str) -> String {
-    match swap_recovery_notice(count) {
+pub fn swap_recovery_warning_notice(names: &[String], error: &str) -> String {
+    match swap_recovery_notice(names) {
         Some(recovered) => format!("{recovered}. {error}"),
         None => format!("view: swap recovery finished with a warning. {error}"),
     }
@@ -719,6 +724,10 @@ pub struct SupervisionState {
     swap_notice: Option<String>,
     /// The wedge the banner stands for, or `None` while the engine answers.
     wedge: Option<WedgeKind>,
+    /// The full paths of the files a restart's dead engine held unsaved
+    /// changes in, kept until the replacement's final swap reading says which
+    /// of them came back.
+    unsaved: Vec<String>,
 }
 
 impl Default for SupervisionState {
@@ -734,11 +743,23 @@ impl Default for SupervisionState {
             swap_probe: 0,
             swap_notice: None,
             wedge: None,
+            unsaved: Vec::new(),
         }
     }
 }
 
 impl SupervisionState {
+    /// Records the files a restart's dead engine held unsaved changes in, read
+    /// off the session's buffer list before the restart forgets it.
+    pub fn note_restart_unsaved(&mut self, paths: Vec<String>) {
+        self.unsaved = paths;
+    }
+
+    /// The files [`Self::note_restart_unsaved`] recorded, clearing the record.
+    pub fn take_restart_unsaved(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.unsaved)
+    }
+
     /// Claims a probe generation for a connection that has just attached,
     /// and forgets what the connection before it reported.
     pub fn begin_swap_probe(&mut self) -> u64 {
@@ -946,19 +967,40 @@ mod tests {
         }
     }
 
+    /// A recovery names every buffer it brought back, in the order given, and
+    /// says nothing for an empty list.
+    #[test]
+    fn a_recovery_names_every_buffer_it_brought_back() {
+        let names = ["README.md".to_string(), "notes.md".to_string()];
+        assert_eq!(
+            swap_recovery_notice(&names).as_deref(),
+            Some("view: unsaved changes recovered for README.md, notes.md")
+        );
+        assert_eq!(
+            swap_recovery_notice(&names[1..]).as_deref(),
+            Some("view: unsaved changes recovered for notes.md")
+        );
+        assert_eq!(swap_recovery_notice(&[]), None);
+    }
+
     /// A recovery that worked says so, and the warning rides along on the
     /// same line: the redraw that takes nvim's report off the buffer takes
     /// the warning with it, so a notice that dropped it would leave the user
     /// with no account of a file that changed under their swap.
     #[test]
     fn a_warned_recovery_says_what_came_back_and_what_the_engine_warned() {
-        let notice =
-            swap_recovery_warning_notice(1, "E308: Warning: Original file may have been changed");
-        assert!(notice.contains("unsaved changes recovered"), "{notice}");
+        let notice = swap_recovery_warning_notice(
+            &["notes.md".to_string()],
+            "E308: Warning: Original file may have been changed",
+        );
+        assert!(
+            notice.contains("unsaved changes recovered for notes.md"),
+            "{notice}"
+        );
         assert!(notice.contains("E308"), "{notice}");
         assert!(!notice.contains("failed"), "{notice}");
         let nothing =
-            swap_recovery_warning_notice(0, "E308: Warning: Original file may have been changed");
+            swap_recovery_warning_notice(&[], "E308: Warning: Original file may have been changed");
         assert!(!nothing.contains("failed"), "{nothing}");
         assert!(nothing.contains("E308"), "{nothing}");
     }
@@ -971,11 +1013,11 @@ mod tests {
     fn a_scheduled_reconnect_names_the_attempt_it_is_on() {
         assert_eq!(
             ReconnectProgress::new(1, 5).notice().as_deref(),
-            Some("connection lost, reconnecting (1/5)")
+            Some("connection lost, reconnecting (1/5)\n<F5> restart   <C-q> quit")
         );
         assert_eq!(
             ReconnectProgress::new(5, 5).notice().as_deref(),
-            Some("connection lost, reconnecting (5/5)")
+            Some("connection lost, reconnecting (5/5)\n<F5> restart   <C-q> quit")
         );
         for attempt in 1..=5 {
             assert!(

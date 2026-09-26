@@ -61,6 +61,17 @@ pub fn reopen_order(buffers: &[BufferEntry]) -> Vec<String> {
         .collect()
 }
 
+/// The full path of every listed buffer that holds a file with unsaved
+/// changes, in list order.
+#[must_use]
+pub fn unsaved_files(buffers: &[BufferEntry]) -> Vec<String> {
+    buffers
+        .iter()
+        .filter(|entry| entry.modified && !entry.path.is_empty())
+        .map(|entry| entry.path.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +89,19 @@ mod tests {
         ];
         assert_eq!(reopen_order(&buffers), ["/w/a.rs", "/w/c.rs", "/w/b.rs"]);
         assert!(reopen_order(&buffers[2..3]).is_empty());
+    }
+
+    #[test]
+    fn the_unsaved_files_are_the_modified_buffers_that_hold_a_file() {
+        let entry = |buf: u64, path: &str, modified: bool| {
+            BufferEntry::new(buf, String::new(), modified, false).with_path(path.to_string())
+        };
+        let buffers = [
+            entry(1, "/w/a.rs", true),
+            entry(2, "/w/b.rs", false),
+            entry(3, "", true),
+            entry(4, "/w/c.rs", true),
+        ];
+        assert_eq!(unsaved_files(&buffers), ["/w/a.rs", "/w/c.rs"]);
     }
 }

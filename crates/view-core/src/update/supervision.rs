@@ -3,7 +3,7 @@
 //! replacement engine says about the work it recovered on the way up.
 
 use crate::model::{Model, OverlayKind};
-use crate::msg::{Effect, RpcCall};
+use crate::msg::{Effect, Msg, RpcCall};
 use crate::native::geometry::OverlayBox;
 use crate::native::supervision::{
     swap_error_outcome, swap_recovery_damage_notice, swap_recovery_failure_notice,
@@ -229,14 +229,26 @@ pub(super) fn restarts_at_standing_wedge(model: &Model, notation: &str) -> bool 
 /// the one reachable before that connection has finished starting: the same
 /// error alongside a count it had not settled the first time is a truer line,
 /// not a repeat.
-pub(super) fn note_swap_recovery(
-    model: &mut Model,
-    generation: u64,
-    count: u64,
-    reported: bool,
-    failure: Option<String>,
-    empty: bool,
-) -> Vec<Effect> {
+///
+/// - **A restart's unsaved buffer that did not come back.** The final reading
+///   is compared with the files the dead engine held unsaved changes in
+///   (`SupervisionState::note_restart_unsaved`), and each one missing from
+///   what was recovered is named in [`lost_notice`], since the replacement
+///   shows it as it is on disk. A failed recovery skips this: its own notice
+///   already says the work did not come back.
+pub(super) fn note_swap_recovery(model: &mut Model, reading: Msg) -> Vec<Effect> {
+    let Msg::SwapRecovered {
+        generation,
+        recovered,
+        reported,
+        failure,
+        empty,
+        swap_off,
+        entered,
+    } = reading
+    else {
+        return Vec::new();
+    };
     // a restart hands the replacement engine's pump the sink the dead one
     // wrote into, so a reading that crossed before the cutover can arrive
     // after it, speaking for an engine that is gone -- and one connection is
@@ -244,11 +256,17 @@ pub(super) fn note_swap_recovery(
     if generation != model.supervision.swap_probe_generation() {
         return Vec::new();
     }
+    let unsaved = if entered {
+        model.supervision.take_restart_unsaved()
+    } else {
+        Vec::new()
+    };
+    let names = file_names(&recovered);
     if let Some(error) = failure {
         let notice = match swap_error_outcome(&error) {
             SwapOutcome::Failed => swap_recovery_failure_notice(&error, empty),
             SwapOutcome::Damaged => swap_recovery_damage_notice(&error),
-            SwapOutcome::Warned => swap_recovery_warning_notice(count, &error),
+            SwapOutcome::Warned => swap_recovery_warning_notice(&names, &error),
         };
         if !model.supervision.note_swap_notice(&notice) {
             return Vec::new();
@@ -256,10 +274,23 @@ pub(super) fn note_swap_recovery(
         model.dirty = true;
         return model.engine.record_native_notice(notice, false);
     }
-    if !reported {
-        return Vec::new();
+    let lost: Vec<String> = unsaved
+        .into_iter()
+        .filter(|path| !recovered.contains(path))
+        .collect();
+    let mut effects = Vec::new();
+    if !lost.is_empty() {
+        model.dirty = true;
+        effects.extend(
+            model
+                .engine
+                .record_native_notice(lost_notice(&file_names(&lost), swap_off), false),
+        );
     }
-    let mut effects = match swap_recovery_notice(count) {
+    if !reported {
+        return effects;
+    }
+    effects.extend(match swap_recovery_notice(&names) {
         Some(notice) => {
             model.dirty = true;
             model.engine.record_native_notice(notice, false)
@@ -269,7 +300,42 @@ pub(super) fn note_swap_recovery(
         // tell the user -- but nvim reported it all the same, and that
         // report is still over their buffer
         None => Vec::new(),
-    };
+    });
     effects.push(Effect::Rpc(RpcCall::Redraw));
     effects
+}
+
+/// The file name each of `paths` ends in, as a notice names a buffer.
+fn file_names(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| {
+            std::path::Path::new(path)
+                .file_name()
+                .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned())
+        })
+        .collect()
+}
+
+/// What a restart says about the buffers `names` it reopened from disk with
+/// their unsaved changes gone, and, when `swap_off`, the option that kept
+/// them from a swap file and the line that turns it back on.
+pub(super) fn lost_notice(names: &[String], swap_off: bool) -> String {
+    let (its, files) = if names.len() > 1 {
+        ("their", "swap files")
+    } else {
+        ("its", "swap file")
+    };
+    let mut notice = format!(
+        "view: {} reopened from disk; {its} unsaved changes had no {files}",
+        names.join(", ")
+    );
+    if swap_off {
+        notice.push_str(" (swapfile is off)");
+        notice.push_str(&super::surface_conflict::gives_back(
+            &["set swapfile"],
+            names.len(),
+        ));
+    }
+    notice
 }

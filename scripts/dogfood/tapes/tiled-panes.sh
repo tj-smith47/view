@@ -30,6 +30,7 @@ command -v tmux >/dev/null 2>&1 || { echo "tiled-panes.sh: tmux is not on PATH" 
 
 SOCKET=view-cap-tiles-$$
 . "$HERE/../lib.sh"
+recording_state_home
 
 cd -- "$ROOT"
 new_cap_session "$SOCKET" 220 50 -- "$BIN" README.md

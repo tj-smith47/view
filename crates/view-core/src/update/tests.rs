@@ -9020,7 +9020,10 @@ fn a_scheduled_reconnect_counts_on_the_banner_and_asks_for_no_second_attempt() {
         );
         assert_eq!(
             visible_texts(&m),
-            vec![format!("connection lost, reconnecting ({attempt}/5)")],
+            vec![
+                format!("connection lost, reconnecting ({attempt}/5)"),
+                "<F5> restart   <C-q> quit".to_string(),
+            ],
             "the banner must name the attempt the reconnect is on"
         );
         assert!(
@@ -10512,10 +10515,12 @@ fn one_connection_says_its_recovery_failed_once_however_often_it_is_asked() {
         &mut m,
         Msg::SwapRecovered {
             generation: attached,
-            count: 0,
+            recovered: Vec::new(),
             reported: false,
             failure: Some(E305.to_string()),
             empty: true,
+            swap_off: false,
+            entered: false,
         },
     );
     assert!(!first.is_empty(), "the first reading said nothing");
@@ -10524,10 +10529,12 @@ fn one_connection_says_its_recovery_failed_once_however_often_it_is_asked() {
         &mut m,
         Msg::SwapRecovered {
             generation: entered,
-            count: 0,
+            recovered: Vec::new(),
             reported: true,
             failure: Some(E305.to_string()),
             empty: true,
+            swap_off: false,
+            entered: true,
         },
     );
     assert!(
@@ -10550,10 +10557,12 @@ fn a_replacement_connection_may_report_the_same_failure_its_predecessor_did() {
         &mut m,
         Msg::SwapRecovered {
             generation: first,
-            count: 0,
+            recovered: Vec::new(),
             reported: false,
             failure: Some(E305.to_string()),
             empty: true,
+            swap_off: false,
+            entered: false,
         },
     );
     let second = attach_swap_probe(&mut m);
@@ -10561,10 +10570,12 @@ fn a_replacement_connection_may_report_the_same_failure_its_predecessor_did() {
         &mut m,
         Msg::SwapRecovered {
             generation: second,
-            count: 0,
+            recovered: Vec::new(),
             reported: false,
             failure: Some(E305.to_string()),
             empty: true,
+            swap_off: false,
+            entered: false,
         },
     );
     // read off the stack rather than off the effects: the second notice
@@ -10630,10 +10641,12 @@ fn a_session_that_recovered_nothing_neither_speaks_nor_redraws() {
         &mut m,
         Msg::SwapRecovered {
             generation,
-            count: 0,
+            recovered: Vec::new(),
             reported: false,
             failure: None,
             empty: false,
+            swap_off: false,
+            entered: true,
         },
     );
     assert!(effects.is_empty(), "{effects:?}");
@@ -10648,10 +10661,12 @@ fn a_swap_recovery_announces_what_came_back_and_redraws_the_report_away() {
         &mut m,
         Msg::SwapRecovered {
             generation,
-            count: 1,
+            recovered: vec!["/home/u/notes.md".to_string()],
             reported: true,
             failure: None,
             empty: false,
+            swap_off: false,
+            entered: true,
         },
     );
     assert!(
@@ -10660,7 +10675,8 @@ fn a_swap_recovery_announces_what_came_back_and_redraws_the_report_away() {
             .any(|e| matches!(e, Effect::Rpc(RpcCall::Redraw))),
         "nothing takes nvim's report off the buffer: {effects:?}"
     );
-    let notice = crate::native::supervision::swap_recovery_notice(1).unwrap();
+    let notice =
+        crate::native::supervision::swap_recovery_notice(&["notes.md".to_string()]).unwrap();
     assert!(
         visible_texts(&m).contains(&notice),
         "the recovery went unannounced: {:?}",
@@ -10680,10 +10696,12 @@ fn a_recovery_that_restored_nothing_still_redraws_and_stays_quiet() {
         &mut m,
         Msg::SwapRecovered {
             generation,
-            count: 0,
+            recovered: Vec::new(),
             reported: true,
             failure: None,
             empty: false,
+            swap_off: false,
+            entered: true,
         },
     );
     assert!(
@@ -10703,10 +10721,12 @@ fn a_recovery_that_failed_names_the_error_and_never_redraws_it_away() {
         &mut m,
         Msg::SwapRecovered {
             generation,
-            count: 0,
+            recovered: Vec::new(),
             reported: true,
             failure: Some(E305.to_string()),
             empty: true,
+            swap_off: false,
+            entered: true,
         },
     );
     assert!(
@@ -10741,10 +10761,12 @@ fn a_recovery_that_came_back_damaged_is_not_worded_as_one_that_failed() {
         &mut m,
         Msg::SwapRecovered {
             generation,
-            count: 1,
+            recovered: vec!["/home/u/notes.md".to_string()],
             reported: true,
             failure: Some(E312.to_string()),
             empty: false,
+            swap_off: false,
+            entered: true,
         },
     );
     assert!(
@@ -10774,10 +10796,12 @@ fn a_recovery_the_engine_only_warned_about_still_says_the_work_came_back() {
         &mut m,
         Msg::SwapRecovered {
             generation,
-            count: 1,
+            recovered: vec!["/home/u/notes.md".to_string()],
             reported: true,
             failure: Some(E308.to_string()),
             empty: false,
+            swap_off: false,
+            entered: true,
         },
     );
     assert!(
@@ -10806,10 +10830,12 @@ fn a_failure_that_left_the_file_in_place_never_says_the_buffer_is_empty() {
         &mut m,
         Msg::SwapRecovered {
             generation,
-            count: 0,
+            recovered: Vec::new(),
             reported: true,
             failure: Some(E309.to_string()),
             empty: false,
+            swap_off: false,
+            entered: true,
         },
     );
     let texts = visible_texts(&m);
@@ -10833,10 +10859,16 @@ fn a_reading_from_an_engine_that_has_been_replaced_is_dropped() {
         &mut m,
         Msg::SwapRecovered {
             generation: stale,
-            count: 3,
+            recovered: vec![
+                "/w/a.md".to_string(),
+                "/w/b.md".to_string(),
+                "/w/c.md".to_string(),
+            ],
             reported: true,
             failure: None,
             empty: false,
+            swap_off: false,
+            entered: true,
         },
     );
     assert!(
@@ -10845,6 +10877,93 @@ fn a_reading_from_an_engine_that_has_been_replaced_is_dropped() {
          {effects:?}"
     );
     assert!(visible_texts(&m).is_empty(), "{:?}", visible_texts(&m));
+}
+
+/// Folds the `VimEnter` reading of a replacement engine that recovered
+/// `recovered` with the swapfile option as `swap_off` says.
+fn restart_reading(m: &mut Model, recovered: &[&str], swap_off: bool) -> Vec<Effect> {
+    let generation = arm_swap_probe(m);
+    update(
+        m,
+        Msg::SwapRecovered {
+            generation,
+            recovered: recovered.iter().map(|path| (*path).to_string()).collect(),
+            reported: !recovered.is_empty(),
+            failure: None,
+            empty: false,
+            swap_off,
+            entered: true,
+        },
+    )
+}
+
+#[test]
+fn a_restart_names_the_buffer_it_reopened_without_its_unsaved_changes() {
+    let mut m = model();
+    m.supervision
+        .note_restart_unsaved(vec!["/w/README.md".to_string()]);
+    let _ = restart_reading(&mut m, &[], true);
+    assert_eq!(
+        visible_texts(&m),
+        [
+            "view: README.md reopened from disk; its unsaved changes had no swap \
+             file (swapfile is off)",
+            "set swapfile gives it back.",
+        ],
+    );
+}
+
+#[test]
+fn a_restart_names_every_lost_buffer_and_none_it_recovered() {
+    let mut m = model();
+    m.supervision.note_restart_unsaved(vec![
+        "/w/a.md".to_string(),
+        "/w/b.md".to_string(),
+        "/w/c.md".to_string(),
+    ]);
+    let _ = restart_reading(&mut m, &["/w/b.md"], false);
+    let texts = visible_texts(&m);
+    assert!(
+        texts.contains(
+            &"view: a.md, c.md reopened from disk; their unsaved changes had no \
+              swap files"
+                .to_string()
+        ),
+        "{texts:?}"
+    );
+    assert!(
+        texts.contains(&"view: unsaved changes recovered for b.md".to_string()),
+        "{texts:?}"
+    );
+}
+
+#[test]
+fn the_reading_before_vim_enter_leaves_the_restart_unsaved_set_in_place() {
+    let mut m = model();
+    m.supervision
+        .note_restart_unsaved(vec!["/w/README.md".to_string()]);
+    let generation = attach_swap_probe(&mut m);
+    let _ = update(
+        &mut m,
+        Msg::SwapRecovered {
+            generation,
+            recovered: Vec::new(),
+            reported: false,
+            failure: None,
+            empty: false,
+            swap_off: false,
+            entered: false,
+        },
+    );
+    assert!(visible_texts(&m).is_empty(), "{:?}", visible_texts(&m));
+    let _ = restart_reading(&mut m, &[], false);
+    assert!(
+        visible_texts(&m)
+            .iter()
+            .any(|line| line.starts_with("view: README.md reopened from disk")),
+        "the attach reading spent the set the VimEnter reading answers for: {:?}",
+        visible_texts(&m)
+    );
 }
 
 #[test]

@@ -360,6 +360,10 @@ pub struct EngineConfig {
     /// and a caller that could set the size alone would describe a child
     /// nobody ever hooked.
     late_attach: Option<(u16, u16)>,
+    /// Whether [`SWAP_RECOVERY_CMD`] loads every file of the argument list
+    /// ([`EngineConfig::reopening`]). Private because it is the other half
+    /// of the file list that call writes.
+    reopen: bool,
     /// The remote target [`build_command`] routes the spawn through, or
     /// `None` for a local child. Private for the same reason `hermetic` is:
     /// where the child runs decides what its whole environment plan means,
@@ -380,6 +384,7 @@ impl Default for EngineConfig {
             shutdown_timeout: Duration::from_millis(500),
             hermetic: false,
             late_attach: None,
+            reopen: false,
             #[cfg(unix)]
             stdin_relay: None,
             bundled: None,
@@ -564,9 +569,9 @@ impl EngineConfig {
     ///
     /// nvim loads only the first file of its argument list at startup, and
     /// a swap is recovered only for a buffer nvim loads, so each later file
-    /// is edited in turn by [`REOPEN_CMD`]. That runs as a `-c`, before
-    /// `VimEnter`, so every recovery lands inside the window
-    /// [`SWAP_RECOVERY_CMD`] reads.
+    /// is edited in turn at `VimEnter` by [`SWAP_RECOVERY_CMD`] itself,
+    /// armed with [`REOPEN_ARM`], inside the window that chunk reads. The
+    /// launch's own `-c` arguments are kept, and the reopen spends none.
     #[must_use]
     pub fn reopening(mut self, open: &[String]) -> Self {
         if open.is_empty() {
@@ -585,9 +590,7 @@ impl EngineConfig {
             .filter(|(index, _)| !dropped.contains(index))
             .map(|(_, arg)| arg)
             .collect();
-        if open.len() > 1 {
-            args.extend(["-c".into(), REOPEN_CMD.into()]);
-        }
+        self.reopen = open.len() > 1;
         args.push("--".into());
         args.extend(open.iter().map(OsString::from));
         self.extra_args = args;
@@ -1770,11 +1773,26 @@ impl Drop for Engine {
 /// window. It counts recoveries that returned something, never prompts
 /// answered: a swap nvim could not read answers its prompt exactly like one
 /// it could, and counting the prompt is how a session ends up announcing work
-/// that is gone.
+/// that is gone. `g:view_swap_paths` names those same buffers, so a notice can
+/// say which files came back.
+///
+/// # The reopen
+///
+/// A spawn built by [`EngineConfig::reopening`] carries [`REOPEN_ARM`] on the
+/// end of this chunk, which makes the `VimEnter` close edit every file of the
+/// argument list after the first before it closes the window, so each of
+/// their recoveries is read inside it. nvim loads only the first file of its
+/// argument list at startup, and a swap is recovered only for a buffer nvim
+/// loads. The close is `nested` so those edits raise `SwapExists` and the
+/// reads, and `:hide` keeps a recovered buffer loaded under a config that
+/// turns `'hidden'` off. It rides this `--cmd` because nvim allows ten `-c`
+/// arguments and a caller's own launch may already spend all of them.
 const SWAP_RECOVERY_CMD: &str = "lua \
      local group = vim.api.nvim_create_augroup('view_swap_recovery', { clear = true }) \
      local window = false \
      local before = '' \
+     local reopen = false \
+     local reopening = false \
      local function fault(err) \
      local code = tonumber(err:match('^E(%d+):') or '') \
      return code == 295 or (code ~= nil and code >= 305 and code <= 312) \
@@ -1805,6 +1823,9 @@ const SWAP_RECOVERY_CMD: &str = "lua \
      if vim.bo.modified and not vim.b.view_swap_counted then \
      vim.b.view_swap_counted = true \
      vim.g.view_swap_recovered = (vim.g.view_swap_recovered or 0) + 1 \
+     local paths = vim.g.view_swap_paths or {} \
+     table.insert(paths, vim.api.nvim_buf_get_name(0)) \
+     vim.g.view_swap_paths = paths \
      end \
      end \
      if vim.tbl_contains(vim.v.argv, '-r') then open() end \
@@ -1815,7 +1836,7 @@ const SWAP_RECOVERY_CMD: &str = "lua \
      callback = function() \
      if vim.v.swapchoice ~= '' then return end \
      vim.v.swapchoice = 'r' \
-     if vim.v.vim_did_enter == 0 then open() end \
+     if vim.v.vim_did_enter == 0 or reopening then open() end \
      end, \
      }) \
      vim.api.nvim_create_autocmd('BufReadPre', { \
@@ -1835,7 +1856,15 @@ const SWAP_RECOVERY_CMD: &str = "lua \
      vim.api.nvim_create_autocmd('VimEnter', { \
      group = group, \
      desc = 'Close the recovery window the startup has finished', \
+     nested = true, \
      callback = function() \
+     if reopen then \
+     reopening = true \
+     for i = 2, vim.fn.argc() do \
+     pcall(vim.cmd, 'hide ' .. i .. 'argument') \
+     end \
+     reopening = false \
+     end \
      local recovering = window \
      look() \
      window = false \
@@ -2191,7 +2220,12 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
 
 /// Everything a started engine can say about a swap recovery it performed,
 /// as one vimscript expression answering
-/// `[recovered, reported, failure, empty]`.
+/// `[recovered, reported, failure, empty, paths, swap_off, entered]`.
+///
+/// `paths` names the `recovered` buffers by their full paths, and `swap_off`
+/// reads `'swapfile'` off, so a restart can say which unsaved buffers came
+/// back and why the others did not. `entered` marks the final reading, taken
+/// after `VimEnter`.
 ///
 /// Almost every field is a read of what [`SWAP_RECOVERY_CMD`]'s autocommands
 /// recorded while the recovery was happening, rather than a reconstruction
@@ -2312,7 +2346,10 @@ pub const SWAP_RECOVERY_PROBE: &str = "[\
      index(map(argv(), 'fnamemodify(v:val, \":p\")'), \
      fnamemodify(matchstr(v:errmsg, '\"\\zs[^\"]*\\ze\"'), ':p')) >= 0)) \
      ? v:errmsg : ''), \
-     get(g:, 'view_swap_empty', line('$') == 1 && getline(1) == '')]";
+     get(g:, 'view_swap_empty', line('$') == 1 && getline(1) == ''), \
+     v:vim_did_enter ? get(g:, 'view_swap_paths', []) : [], \
+     v:vim_did_enter && !&swapfile, \
+     v:vim_did_enter]";
 
 /// nvim's own crash-recovery flag, which view recognises on a caller's
 /// argument list and never adds to one.
@@ -2348,12 +2385,19 @@ pub const SWAP_RECOVERY_PROBE: &str = "[\
 /// shape ([`EngineConfig::attaches_late`]).
 const RECOVERY_ARG: &str = "-r";
 
-/// Edits every file of the argument list after the first, in order, for
-/// [`EngineConfig::reopening`]. `:hide` keeps a recovered buffer loaded
-/// under a config that turns `'hidden'` off, and a file that fails to open
-/// leaves the rest to open.
-const REOPEN_CMD: &str =
-    "lua for i = 2, vim.fn.argc() do pcall(vim.cmd, 'hide ' .. i .. 'argument') end";
+/// Appended to [`SWAP_RECOVERY_CMD`] for [`EngineConfig::reopening`], where
+/// it sets that chunk's own `reopen` flag.
+const REOPEN_ARM: &str = " reopen = true";
+
+/// The `--cmd` every spawn carries: [`SWAP_RECOVERY_CMD`], armed with
+/// [`REOPEN_ARM`] when the spawn reopens a session's files.
+fn swap_recovery_cmd(cfg: &EngineConfig) -> std::borrow::Cow<'static, str> {
+    if cfg.reopen {
+        format!("{SWAP_RECOVERY_CMD}{REOPEN_ARM}").into()
+    } else {
+        SWAP_RECOVERY_CMD.into()
+    }
+}
 
 /// nvim options that take no value of their own, so an ordinary word
 /// following one of them is a file name rather than that option's argument.
@@ -2580,7 +2624,10 @@ fn local_command(cfg: &EngineConfig) -> Command {
     // nvim runs `--cmd` commands before it opens any of them, and an
     // autocommand registered after the file it is meant to guard is already
     // open guards nothing
-    command.arg("--embed").arg("--cmd").arg(SWAP_RECOVERY_CMD);
+    command
+        .arg("--embed")
+        .arg("--cmd")
+        .arg(swap_recovery_cmd(cfg).as_ref());
     if let Some((width, height)) = cfg.late_attach {
         if cfg.attaches_late() {
             command.arg("--headless");
@@ -2685,7 +2732,7 @@ fn remote_command_line(remote: &RemoteSpec, cfg: &EngineConfig) -> Result<OsStri
     // rides every spawn, ahead of the files it opens
     tokens.push(b"--embed".to_vec());
     tokens.push(b"--cmd".to_vec());
-    tokens.push(SWAP_RECOVERY_CMD.as_bytes().to_vec());
+    tokens.push(swap_recovery_cmd(cfg).as_bytes().to_vec());
     // the same tokens the local half adds, in the same place: a remote
     // editor that waited for its UI would spend the whole ssh round trip
     // before sourcing anything
@@ -4586,14 +4633,12 @@ mod tests {
             launched(&["-c", "set nu", "README.md", "-u", "NONE"])
                 .reopening(&open)
                 .extra_args,
-            args(&["-c", "set nu", "-u", "NONE", "-c", REOPEN_CMD, "--", "/w/a.md", "/w/b.md"])
+            args(&["-c", "set nu", "-u", "NONE", "--", "/w/a.md", "/w/b.md"])
         );
-        assert_eq!(
-            launched(&["-R", "--", "-odd", "x"])
-                .reopening(&open[..1])
-                .extra_args,
-            args(&["-R", "--", "/w/a.md"])
-        );
+        assert!(launched(&["README.md"]).reopening(&open).reopen);
+        let single = launched(&["-R", "--", "-odd", "x"]).reopening(&open[..1]);
+        assert_eq!(single.extra_args, args(&["-R", "--", "/w/a.md"]));
+        assert!(!single.reopen, "one file needs no reopen");
         assert_eq!(
             launched(&["README.md"]).reopening(&[]).extra_args,
             args(&["README.md"])
@@ -4680,6 +4725,47 @@ mod tests {
             spawned,
             args(&["--embed", "--cmd", SWAP_RECOVERY_CMD, "notes.md"]),
             "the swap answer must ride every spawn, ahead of its files"
+        );
+    }
+
+    /// A reopening arms the swap answer's own `--cmd` and spends no `-c`, so a
+    /// launch that already carries nvim's ten still restarts, locally and
+    /// over ssh.
+    #[test]
+    fn a_reopening_spends_no_command_slot() {
+        let mut launch: Vec<&str> = Vec::new();
+        for _ in 0..10 {
+            launch.extend(["-c", "set nu"]);
+        }
+        launch.push("README.md");
+        let cfg = EngineConfig {
+            extra_args: args(&launch),
+            ..EngineConfig::default()
+        }
+        .reopening(&["/w/a.md".to_string(), "/w/b.md".to_string()]);
+        let spawned: Vec<OsString> = build_command(&cfg)
+            .expect("a local config always builds a command")
+            .get_args()
+            .map(std::ffi::OsStr::to_os_string)
+            .collect();
+        let slots = spawned.iter().filter(|arg| *arg == "-c").count();
+        assert_eq!(slots, 10, "the reopen spent a -c slot: {spawned:?}");
+        let armed = format!("{SWAP_RECOVERY_CMD}{REOPEN_ARM}");
+        assert_eq!(
+            spawned.get(2).and_then(|arg| arg.to_str()),
+            Some(armed.as_str()),
+            "the reopen rides the swap answer's --cmd"
+        );
+        let remote = cfg.with_remote(RemoteSpec::new("host"));
+        let line = remote_command_line(
+            remote.remote.as_ref().expect("the remote was armed"),
+            &remote,
+        )
+        .expect("a UTF-8 remote config always builds a line");
+        assert!(
+            line.to_string_lossy()
+                .contains(&*String::from_utf8_lossy(&shell_quote(armed.as_bytes()))),
+            "the remote spawn dropped the reopen: {line:?}"
         );
     }
 

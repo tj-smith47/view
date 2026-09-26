@@ -552,8 +552,9 @@ pub(super) fn decode_buffer_list_reply(result: &Value) -> Vec<String> {
 /// [`SWAP_RECOVERY_PROBE`]: crate::process::SWAP_RECOVERY_PROBE
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct SwapRecoveryReading {
-    /// Buffers that came back holding work the file on disk does not have.
-    pub(super) count: u64,
+    /// The full paths of the buffers that came back holding work the file on
+    /// disk does not have.
+    pub(super) recovered: Vec<String>,
     /// Whether the engine wrote a recovery report on screen at all.
     pub(super) reported: bool,
     /// The engine's own error text when the recovery it was asked for could
@@ -563,9 +564,15 @@ pub(super) struct SwapRecoveryReading {
     /// not inferred from the error, because a failed recovery is not one
     /// shape.
     pub(super) empty: bool,
+    /// Whether the started engine had `'swapfile'` off.
+    pub(super) swap_off: bool,
+    /// Whether the reading was taken after `VimEnter`, when it is final.
+    pub(super) entered: bool,
 }
 
-/// Decodes [`SWAP_RECOVERY_PROBE`]'s four-element answer.
+/// Decodes [`SWAP_RECOVERY_PROBE`]'s seven-element answer. The first element,
+/// the recovered count, is the length of the paths element and is read as
+/// that list.
 ///
 /// A shape this crate has never seen from the pinned engine degrades to the
 /// default -- the same "absent or malformed is exactly as informative as an
@@ -581,7 +588,16 @@ pub(super) fn decode_swap_recovery_reply(result: &Value) -> SwapRecoveryReading 
         return SwapRecoveryReading::default();
     };
     SwapRecoveryReading {
-        count: fields.first().and_then(Value::as_u64).unwrap_or(0),
+        recovered: fields
+            .get(4)
+            .and_then(Value::as_array)
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter_map(|path| path.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
         // vimscript has no boolean type: `||` and a comparison both answer
         // with the numbers 0 and 1, which is what arrives here
         reported: fields.get(1).and_then(Value::as_u64).unwrap_or(0) != 0,
@@ -591,6 +607,8 @@ pub(super) fn decode_swap_recovery_reply(result: &Value) -> SwapRecoveryReading 
             .filter(|text| !text.is_empty())
             .map(str::to_owned),
         empty: fields.get(3).and_then(Value::as_u64).unwrap_or(0) != 0,
+        swap_off: fields.get(5).and_then(Value::as_u64).unwrap_or(0) != 0,
+        entered: fields.get(6).and_then(Value::as_u64).unwrap_or(0) != 0,
     }
 }
 

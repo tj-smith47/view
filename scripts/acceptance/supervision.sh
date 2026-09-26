@@ -499,7 +499,7 @@ PRESERVED='File preserved'
 # file, and the whole reason the report above comes down without a keypress
 # (see `swap_recovery_notice`). Held to the source's own wording by the same
 # rule as everything else asserted here.
-RECOVERY_NOTICE='unsaved changes recovered from the swap file'
+RECOVERY_NOTICE='unsaved changes recovered for'
 grep -qF -- "$RECOVERY_NOTICE" "$SUPERVISION_RS" || {
     printf 'FAIL: a recovery no longer reports "%s" in %s\n' "$RECOVERY_NOTICE" "$SUPERVISION_RS" >&2
     exit 1

@@ -296,13 +296,7 @@ fn a_wedge_that_opens_while_the_session_is_idle_still_raises_the_notice() {
         },
     );
     assert_eq!(
-        model
-            .engine
-            .messages
-            .visible_lines(40)
-            .into_iter()
-            .map(|spans| spans.into_iter().map(|span| span.text).collect::<String>())
-            .collect::<Vec<_>>(),
+        notices(&model),
         WedgeKind::ReadSide.banner(SinceStamp::new(after)).to_vec(),
         "the verdict never reached the notice a waiting user reads"
     );
@@ -493,13 +487,28 @@ fn holds(haystack: &[u8], needle: &str) -> bool {
         .any(|window| window == needle.as_bytes())
 }
 
-/// `<F5>` at a wedge the modal has not opened for replaces a stopped engine
-/// with one that reopens both listed files, the current one on screen, each
-/// with the text only its swap held.
-#[cfg(unix)]
-#[test]
-fn a_restart_reopens_every_listed_buffer_and_recovers_its_unsaved_text() {
-    let dir = view_test_support::ScratchDir::resolved("supervision-live-reopen").unwrap();
+/// A restart as the runtime performs one, off a session whose two listed
+/// files `a.txt` and `b.txt` each hold one unsaved line, the second current.
+///
+/// `configure` is applied to the spawn and to its replacement alike, and
+/// `swapped` says whether the session writes swap files to wait on. The
+/// model has folded the replacement's `EngineAttached`, so the swap probe
+/// generation it answers is the one the model is waiting on.
+struct Restarted {
+    dir: view_test_support::ScratchDir,
+    model: Model,
+    replacement: view_engine::process::Engine,
+    drained: std::sync::mpsc::Receiver<Msg>,
+    generation: u64,
+    _pump: view_engine::DamagePump,
+}
+
+fn restart_with_unsaved_work(
+    label: &str,
+    configure: fn(view_engine::process::EngineConfig) -> view_engine::process::EngineConfig,
+    swapped_to_disk: bool,
+) -> Restarted {
+    let dir = view_test_support::ScratchDir::resolved(label).unwrap();
     std::fs::create_dir_all(dir.join("swap")).unwrap();
     let a = dir.join("a.txt");
     let b = dir.join("b.txt");
@@ -507,7 +516,7 @@ fn a_restart_reopens_every_listed_buffer_and_recovers_its_unsaved_text() {
     std::fs::write(&b, "b on disk\n").unwrap();
 
     let (engine, _pump, _tx, rx) =
-        common::spawn_with_wired_pump(recoverable(&dir).with_arg(&a).with_arg(&b), 256);
+        common::spawn_with_wired_pump(configure(recoverable(&dir)).with_arg(&a).with_arg(&b), 256);
     engine
         .handle
         .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
@@ -521,7 +530,7 @@ fn a_restart_reopens_every_listed_buffer_and_recovers_its_unsaved_text() {
     engine.handle.input("Ob unsaved<Esc>").unwrap();
 
     // the list the restart reads is the one the bridge reported, once it
-    // reports both files with the second one current
+    // reports both files modified with the second one current
     let mut model = Model::with_term_size(80, 24);
     let b_name = b.to_string_lossy().into_owned();
     let listed = common::drain_until(
@@ -530,6 +539,7 @@ fn a_restart_reopens_every_listed_buffer_and_recovers_its_unsaved_text() {
         |msg| match msg {
             Msg::BufferList { buffers }
                 if buffers.len() == 2
+                    && buffers.iter().all(|entry| entry.modified)
                     && buffers
                         .iter()
                         .any(|entry| entry.current && entry.path == b_name) =>
@@ -539,12 +549,14 @@ fn a_restart_reopens_every_listed_buffer_and_recovers_its_unsaved_text() {
             _ => None,
         },
     )
-    .expect("the bridge never reported both files with the second one current");
+    .expect("the bridge never reported both files modified with the second one current");
     let _ = update(&mut model, listed);
     std::thread::spawn(move || while rx.recv().is_ok() {});
 
     let deadline = Instant::now() + view_test_support::host_deadline(SETTLES);
-    while !(holds(&swapped(&dir), "a unsaved") && holds(&swapped(&dir), "b unsaved")) {
+    while swapped_to_disk
+        && !(holds(&swapped(&dir), "a unsaved") && holds(&swapped(&dir), "b unsaved"))
+    {
         assert!(
             Instant::now() < deadline,
             "the swaps never held both unsaved lines, so there is nothing to recover"
@@ -584,28 +596,147 @@ fn a_restart_reopens_every_listed_buffer_and_recovers_its_unsaved_text() {
 
     let reopen = view_core::model::reopen_order(&model.buffers);
     assert_eq!(reopen, vec![a.to_string_lossy().into_owned(), b_name]);
+    model
+        .supervision
+        .note_restart_unsaved(view_core::model::unsaved_files(&model.buffers));
     let mut replacement = engine
-        .restart(recoverable(&dir).with_arg(&a).reopening(&reopen))
+        .restart(configure(recoverable(&dir)).with_arg(&a).reopening(&reopen))
         .unwrap();
     let (sink, drained) = std::sync::mpsc::sync_channel(64);
-    let (_pump, _cutover) = replacement.start_pump(sink);
-    std::thread::spawn(move || while drained.recv().is_ok() {});
+    let (pump, _cutover) = replacement.start_pump(sink);
     replacement
         .handle
         .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
         .unwrap();
+    let generation = update(&mut model, Msg::EngineAttached)
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Rpc(RpcCall::ProbeSwapRecovery { generation }) => Some(*generation),
+            _ => None,
+        })
+        .expect("the replacement's attach armed no swap probe");
+    Restarted {
+        dir,
+        model,
+        replacement,
+        drained,
+        generation,
+        _pump: pump,
+    }
+}
 
-    assert_eq!(
-        first_row_reading(&replacement, "b unsaved"),
-        "b unsaved",
-        "the current file came back without its unsaved line"
+/// Asks the replacement what its start recovered, once its first screen row
+/// reads `settled`, and folds the answer into the model.
+fn fold_recovery_reading(restarted: &mut Restarted, settled: &str) {
+    assert_eq!(first_row_reading(&restarted.replacement, settled), settled);
+    restarted
+        .replacement
+        .handle
+        .probe_swap_recovery(restarted.generation)
+        .unwrap();
+    let reading = common::drain_until(
+        &restarted.drained,
+        view_test_support::host_deadline(SETTLES),
+        |msg| matches!(msg, Msg::SwapRecovered { .. }).then(|| msg.clone()),
+    )
+    .expect("the replacement never answered the swap probe");
+    let _ = update(&mut restarted.model, reading);
+}
+
+/// The lines the model's notices show, as a user reads them.
+fn notices(model: &Model) -> Vec<String> {
+    model
+        .engine
+        .messages
+        .visible_lines(40)
+        .into_iter()
+        .map(|spans| spans.into_iter().map(|span| span.text).collect::<String>())
+        .collect()
+}
+
+/// `<F5>` at a wedge the modal has not opened for replaces a stopped engine
+/// with one that reopens both listed files, the current one on screen, each
+/// with the text only its swap held, and says which ones it recovered.
+#[cfg(unix)]
+#[test]
+fn a_restart_reopens_every_listed_buffer_and_recovers_its_unsaved_text() {
+    let mut restarted = restart_with_unsaved_work("supervision-live-reopen", |config| config, true);
+    fold_recovery_reading(&mut restarted, "b unsaved");
+    assert!(
+        notices(&restarted.model)
+            .contains(&"view: unsaved changes recovered for a.txt, b.txt".to_string()),
+        "the recovery did not name both buffers: {:?}",
+        notices(&restarted.model)
     );
+    let replacement = &restarted.replacement;
     replacement.handle.command("hide bprevious").unwrap();
     assert_eq!(
-        first_row_reading(&replacement, "a unsaved"),
+        first_row_reading(replacement, "a unsaved"),
         "a unsaved",
         "the other listed file came back without its unsaved line"
     );
-    assert_eq!(std::fs::read_to_string(&a).unwrap(), "a on disk\n");
-    assert_eq!(std::fs::read_to_string(&b).unwrap(), "b on disk\n");
+    let dir = &restarted.dir;
+    assert_eq!(
+        std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+        "a on disk\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("b.txt")).unwrap(),
+        "b on disk\n"
+    );
+}
+
+/// A launch already carrying the ten `-c` commands nvim accepts restarts
+/// with both files recovered: the reopen spends no command slot.
+#[cfg(unix)]
+#[test]
+fn a_launch_with_every_command_slot_taken_still_restarts_with_its_work() {
+    let mut restarted = restart_with_unsaved_work(
+        "supervision-live-ten-c",
+        |config| {
+            (0..10).fold(config, |config, slot| {
+                config
+                    .with_arg("-c")
+                    .with_arg(format!("let g:slot{slot} = 1"))
+            })
+        },
+        true,
+    );
+    fold_recovery_reading(&mut restarted, "b unsaved");
+    let replacement = &restarted.replacement;
+    assert_eq!(
+        replacement.handle.eval_str("string(g:slot9)").unwrap(),
+        "1",
+        "the tenth -c of the launch never ran on the replacement"
+    );
+    replacement.handle.command("hide bprevious").unwrap();
+    assert_eq!(
+        first_row_reading(replacement, "a unsaved"),
+        "a unsaved",
+        "the other listed file came back without its unsaved line"
+    );
+}
+
+/// A session run with `noswapfile` has nothing to recover from, and the
+/// restart names the buffer whose unsaved changes it lost and the option
+/// that kept them out of a swap file.
+#[cfg(unix)]
+#[test]
+fn a_restart_without_swap_files_names_the_buffers_it_reopened_from_disk() {
+    let mut restarted = restart_with_unsaved_work(
+        "supervision-live-noswap",
+        |config| config.with_arg("--cmd").with_arg("set noswapfile"),
+        false,
+    );
+    fold_recovery_reading(&mut restarted, "b on disk");
+    let lines = notices(&restarted.model);
+    assert!(
+        lines.ends_with(&[
+            "view: a.txt, b.txt reopened from disk; their unsaved changes had no \
+             swap files (swapfile is off)"
+                .to_string(),
+            "set swapfile gives them back.".to_string(),
+        ]),
+        "the restart did not name the buffers it lost: {lines:?}"
+    );
 }

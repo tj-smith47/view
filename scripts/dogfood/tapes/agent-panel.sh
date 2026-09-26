@@ -57,6 +57,7 @@ command -v tmux >/dev/null 2>&1 || { echo "agent-panel.sh: tmux is not on PATH" 
 
 SOCKET=view-cap-agent-$$
 . "$HERE/../lib.sh"
+recording_state_home
 
 cachedir="${XDG_CACHE_HOME:-$HOME/.cache}/view-dogfood-tapes"
 mkdir -p -- "$cachedir"

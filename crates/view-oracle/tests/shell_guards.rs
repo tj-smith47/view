@@ -624,6 +624,29 @@ fn the_walk_leaves_the_captures_the_rule_does_not_ask_about_alone() {
     );
 }
 
+/// Every tape records against `recording_state_home`'s copy of the state
+/// directory, since a tape run on the person's own state can open lazy.nvim's
+/// update report over the moment it records.
+#[test]
+fn every_tape_records_against_a_copy_of_the_state_directory() {
+    let tapes = shell_scripts(&repo_root().join("scripts/dogfood/tapes"));
+    assert!(!tapes.is_empty(), "the walk found no tape scripts");
+    let bare: Vec<String> = tapes
+        .iter()
+        .filter(|tape| {
+            !std::fs::read_to_string(tape)
+                .unwrap_or_default()
+                .lines()
+                .any(|line| line.trim() == "recording_state_home")
+        })
+        .map(|tape| tape.display().to_string())
+        .collect();
+    assert!(
+        bare.is_empty(),
+        "these tapes record on the person's own state: {bare:?}"
+    );
+}
+
 /// Every `.sh` file under `dir`, recursively.
 fn shell_scripts(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();

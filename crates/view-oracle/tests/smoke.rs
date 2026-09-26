@@ -993,7 +993,9 @@ fn a_recovered_engine_says_so_and_clears_nvims_report_with_no_keypress() {
         session.screen()
     );
 
-    let notice = view_core::native::supervision::swap_recovery_notice(1)
+    // the scratch file is named `smoke-<pid>-<id>.txt`, so the notice is read
+    // up to the part of the name every scratch file shares
+    let notice = view_core::native::supervision::swap_recovery_notice(&["smoke-".to_string()])
         .expect("a recovery of one swap file is worth a notice");
     let settled = session.wait_for_screen(Duration::from_secs(30), |screen| {
         let text = screen.contents();
@@ -1456,7 +1458,8 @@ fn a_restart_whose_file_moved_under_the_swap_recovers_the_work_and_keeps_the_war
         .unwrap();
     assert!(kill_status.success(), "kill -KILL {killed} failed");
 
-    let named = said_part(&view_core::native::supervision::swap_recovery_warning_notice(1, ""));
+    let named = view_core::native::supervision::swap_recovery_notice(&["smoke-".to_string()])
+        .expect("a recovery of one swap file is worth a notice");
     let failed =
         said_part(&view_core::native::supervision::swap_recovery_failure_notice("", false));
     let (settled, claimed) = watch_screen(

@@ -747,10 +747,12 @@ impl EngineHandle {
                                     };
                                     pump.route_swap_recovery(Msg::SwapRecovered {
                                         generation,
-                                        count: reading.count,
+                                        recovered: reading.recovered,
                                         reported: reading.reported,
                                         failure: reading.failure,
                                         empty: reading.empty,
+                                        swap_off: reading.swap_off,
+                                        entered: reading.entered,
                                     });
                                 }
                             }
