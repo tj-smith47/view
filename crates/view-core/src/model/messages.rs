@@ -6,7 +6,7 @@
 
 use std::time::SystemTime;
 
-use crate::native::views::Span;
+use crate::native::views::{Span, StyleRole};
 
 /// A locally-assigned identity for one [`MessageEntry`], stamped by
 /// [`Messages::push`] from a monotonic per-session counter. Exists to name
@@ -268,6 +268,16 @@ impl MessageEntry {
     fn outranks_transient(&self) -> bool {
         self.is_persistent() || self.is_prompt()
     }
+
+    /// This entry's rank in [`keep_within`]: the raised condition above
+    /// everything that outranks transient text, and that above the rest.
+    fn eviction_rank(&self) -> u8 {
+        if self.condition {
+            2
+        } else {
+            u8::from(self.outranks_transient())
+        }
+    }
 }
 
 /// The message log built from `msg_show`/`msg_clear`. A log rather than a
@@ -393,25 +403,27 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, month, day)
 }
 
-/// Which of `items` fit in `budget`, given each one's cost and whether it
-/// outranks transient text.
+/// Which of `items` fit in `budget`, given each one's cost and its rank:
+/// `0` for transient text, `1` for text that outranks it, `2` for the
+/// raised condition.
 ///
 /// Eviction order is the toast stack's whole priority rule in one place:
 /// transient items go first, oldest first, and only once every one of them
 /// is gone does eviction reach into the persistent ones (again oldest
-/// first). Shared by the two budgets the stack is selected against -- a box
+/// first), and the condition last of all, since it states what holds now.
+/// Shared by the two budgets the stack is selected against -- a box
 /// costing its lines plus its frame, and a bare line costing one row --
 /// because a stack sized by one rule and painted by another is how a kept
 /// error line ends up behind a frame that has no room for it.
-fn keep_within(items: &[(bool, usize)], budget: usize) -> Vec<bool> {
+fn keep_within(items: &[(u8, usize)], budget: usize) -> Vec<bool> {
     let mut keep = vec![true; items.len()];
     let mut total: usize = items.iter().map(|(_, cost)| *cost).sum();
-    for target in [false, true] {
-        for (i, (persistent, cost)) in items.iter().enumerate() {
+    for target in [0, 1, 2] {
+        for (i, (rank, cost)) in items.iter().enumerate() {
             if total <= budget {
                 return keep;
             }
-            if *persistent == target {
+            if *rank == target {
                 keep[i] = false;
                 total = total.saturating_sub(*cost);
             }
@@ -1002,6 +1014,9 @@ impl Messages {
     /// persistent while raised (see `MessageEntry::is_persistent`), so the
     /// keypresses that dismiss ordinary transient text leave it alone.
     ///
+    /// It takes the stack's first slot, and `text` may hold several lines
+    /// split on `\n`, each its own row of the one box.
+    ///
     /// Idempotent, and cheap enough to call unconditionally on every loop
     /// pass: re-asserting the text already showing changes nothing and
     /// reports so. Returns whether the visible set changed, which is the
@@ -1025,8 +1040,11 @@ impl Messages {
         // built here: a condition is a native notice in every respect but
         // its lifetime, and one construction site is what keeps it so
         self.push_native(text.to_string(), false);
-        if let Some(raised) = self.entries.last_mut() {
+        if let Some(mut raised) = self.entries.pop() {
             raised.condition = true;
+            // the column's first slot, so the banner stands nearest the
+            // corner whatever arrives behind it
+            self.entries.insert(0, raised);
         }
         true
     }
@@ -1150,9 +1168,9 @@ impl Messages {
     /// directly, so the flattening reuses that selection and its eviction
     /// rule.
     ///
-    /// Each returned line is one span, carrying [`StyleRole::Plain`]
-    /// (`crate::native::views::StyleRole`): a toast has no per-segment
-    /// structure to preserve, so one span is the whole row.
+    /// Each returned line is one span, carrying [`StyleRole::Plain`], or
+    /// [`StyleRole::Warning`] for the raised condition's lines: a toast has
+    /// no per-segment structure to preserve, so one span is the whole row.
     #[must_use]
     pub fn visible_lines(&self, max_rows: usize) -> Vec<Vec<Span>> {
         self.visible_toasts_in(max_rows, u16::MAX)
@@ -1165,26 +1183,31 @@ impl Messages {
     /// wide, in `entries` order, each entry costed at the rows its lines
     /// wrap to inside that width plus its frame.
     fn keep_visible_in(&self, max_rows: usize, width: u16) -> Vec<bool> {
-        let costs: Vec<(bool, usize)> = self
+        let costs: Vec<(u8, usize)> = self
             .painted()
             .map(|e| {
                 let rows = e.wrapped(width).len();
-                (e.outranks_transient(), rows.saturating_add(2))
+                (e.eviction_rank(), rows.saturating_add(2))
             })
             .collect();
         Self::keep_costed(&costs, max_rows)
     }
 
     /// The eviction both budgets share.
-    fn keep_costed(costs: &[(bool, usize)], max_rows: usize) -> Vec<bool> {
+    fn keep_costed(costs: &[(u8, usize)], max_rows: usize) -> Vec<bool> {
         let mut keep = keep_within(costs, max_rows);
         // a stack with no room for even one framed box shows the newest
-        // notice clipped rather than nothing at all: a truncated line still
-        // says something happened, an empty screen says the message was
-        // never raised
+        // notice of the highest rank clipped: a truncated line still says
+        // something happened, an empty screen says the message was never
+        // raised
         if !keep.iter().any(|k| *k) {
-            if let Some(last) = keep.last_mut() {
-                *last = true;
+            let shown = costs
+                .iter()
+                .enumerate()
+                .max_by_key(|(at, (rank, _))| (*rank, *at))
+                .map(|(at, _)| at);
+            if let Some(slot) = shown.and_then(|at| keep.get_mut(at)) {
+                *slot = true;
             }
         }
         keep
@@ -1211,9 +1234,14 @@ impl Messages {
             .zip(self.keep_visible_in(max_rows, width))
             .filter(|(_, shown)| *shown)
             .map(|(e, _)| {
+                let role = if e.condition {
+                    StyleRole::Warning
+                } else {
+                    StyleRole::Plain
+                };
                 e.wrapped(width)
                     .iter()
-                    .map(|l| vec![Span::plain(l.clone())])
+                    .map(|l| vec![Span::new(l.clone(), role)])
                     .collect()
             })
             .collect()

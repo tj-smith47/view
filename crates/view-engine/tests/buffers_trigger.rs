@@ -85,6 +85,14 @@ fn the_buffers_trigger_reports_the_listed_set_once_per_tick() {
         "the report names {:?}",
         names(last)
     );
+    // the path is what a restart reopens, so it is the file's full name
+    let cwd = engine.handle.eval_str("getcwd()").unwrap();
+    assert_eq!(
+        last.iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![format!("{cwd}/a.rs"), format!("{cwd}/b.rs")],
+    );
 
     // the set replaces what view held: a wiped buffer is gone from it
     lua("vim.cmd('bwipeout')".to_string());

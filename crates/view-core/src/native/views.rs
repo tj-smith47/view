@@ -130,6 +130,9 @@ pub enum StyleRole {
     /// both, because they are one state to a reader: the call has not
     /// answered yet.
     AiToolRunning,
+    /// A notice about something wrong with the session that holds while it
+    /// stands: the engine wedge banner.
+    Warning,
 }
 
 impl StyleRole {
@@ -164,6 +167,7 @@ impl StyleRole {
             Self::AiNotice => Some(ChromeGroup::WarningMsg),
             Self::AiToolDone => Some(ChromeGroup::OkMsg),
             Self::AiToolFailed => Some(ChromeGroup::ErrorMsg),
+            Self::Warning => Some(ChromeGroup::WarningMsg),
         }
     }
 

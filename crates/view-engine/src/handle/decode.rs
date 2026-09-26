@@ -205,8 +205,8 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
     }
 }
 
-/// Decodes the `buffers` trigger's list of `(buf, name, modified, current)`
-/// tuples, or `None` for a payload that is not a list.
+/// Decodes the `buffers` trigger's list of `(buf, name, modified, current,
+/// path)` tuples, or `None` for a payload that is not a list.
 ///
 /// An entry the chunk could not have produced is dropped, and the rest of
 /// the list stands: the set nvim just sent is a better answer than the set
@@ -216,15 +216,18 @@ fn decode_buffer_entries(list: &Value) -> Option<Vec<BufferEntry>> {
         list.as_array()?
             .iter()
             .filter_map(|entry| {
-                let [buf, name, modified, current] = entry.as_array()?.as_slice() else {
+                let [buf, name, modified, current, path] = entry.as_array()?.as_slice() else {
                     return None;
                 };
-                Some(BufferEntry::new(
-                    buf.as_u64()?,
-                    name.as_str().unwrap_or_default().to_owned(),
-                    modified.as_bool().unwrap_or(false),
-                    current.as_bool().unwrap_or(false),
-                ))
+                Some(
+                    BufferEntry::new(
+                        buf.as_u64()?,
+                        name.as_str().unwrap_or_default().to_owned(),
+                        modified.as_bool().unwrap_or(false),
+                        current.as_bool().unwrap_or(false),
+                    )
+                    .with_path(path.as_str().unwrap_or_default().to_owned()),
+                )
             })
             .collect(),
     )

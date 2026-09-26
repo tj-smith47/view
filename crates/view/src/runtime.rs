@@ -1701,6 +1701,16 @@ mod tests {
             .collect()
     }
 
+    /// The two banner lines `kind` raises, with the readout taken from what
+    /// the model shows since the seconds a test waited are not exact.
+    fn banner_texts(model: &Model, kind: WedgeKind) -> Vec<String> {
+        let [lead, keys] = kind.banner(view_core::native::supervision::SinceStamp::default());
+        match visible_texts(model).first() {
+            Some(shown) if shown.starts_with(kind.banner_lead()) => vec![shown.clone(), keys],
+            _ => vec![lead, keys],
+        }
+    }
+
     /// A path the engine refuses outright is a refusal of that path, never
     /// a lost connection: the loop keeps running, and the review that asked
     /// gets the same buffer-less resolve nvim's own refusal would have
@@ -5114,7 +5124,7 @@ mod tests {
         );
         assert_eq!(
             visible_texts(&model),
-            vec![WedgeKind::WriteSide.notice().to_string()],
+            banner_texts(&model, WedgeKind::WriteSide),
             "the notice named the consequence instead of the cause"
         );
     }
@@ -5205,7 +5215,7 @@ mod tests {
         );
         assert_eq!(
             visible_texts(&model),
-            vec![WedgeKind::WriteSide.notice().to_string()]
+            banner_texts(&model, WedgeKind::WriteSide)
         );
 
         assert!(
@@ -5219,7 +5229,7 @@ mod tests {
         assert!(!model.engine.messages.dismiss_sticky());
         assert_eq!(
             visible_texts(&model),
-            vec![WedgeKind::WriteSide.notice().to_string()]
+            banner_texts(&model, WedgeKind::WriteSide)
         );
 
         peer.release();
@@ -5282,7 +5292,7 @@ mod tests {
         }
         assert_eq!(
             visible_texts(&model),
-            vec![WedgeKind::WriteSide.notice().to_string()]
+            banner_texts(&model, WedgeKind::WriteSide)
         );
         peer.release();
     }

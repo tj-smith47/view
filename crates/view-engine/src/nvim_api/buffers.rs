@@ -28,10 +28,11 @@
 /// data is interpolated into the Lua source.
 ///
 /// The payload is `(list)`, one entry per listed buffer as
-/// `(buf, name, modified, current)`, decoded by `handle::decode`'s
+/// `(buf, name, modified, current, path)`, decoded by `handle::decode`'s
 /// `"buffers"` arm. `name` is the buffer's tail, the same `:t` modifier the
 /// `window` trigger takes, because the row names a file. A whole path
-/// would not fit.
+/// would not fit. `path` is the whole one, for a restart to reopen, and
+/// empty for a buffer with a `buftype`, which holds no file to open.
 ///
 /// `BufModifiedSet` is in the trigger list beside the three that change the
 /// set itself: the row draws an unsaved marker, and without it the marker
@@ -59,9 +60,10 @@ local function report()
   local listed = {}
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
     if vim.bo[buf].buflisted then
-      listed[#listed + 1] = { buf,
-        vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ':t'),
-        vim.bo[buf].modified, buf == current }
+      local name = vim.api.nvim_buf_get_name(buf)
+      listed[#listed + 1] = { buf, vim.fn.fnamemodify(name, ':t'),
+        vim.bo[buf].modified, buf == current,
+        vim.bo[buf].buftype == '' and name or '' }
     end
   end
   vim.rpcnotify(channel, 'view_bridge', 'buffers', listed)

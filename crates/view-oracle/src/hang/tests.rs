@@ -165,6 +165,11 @@ fn a_bounded_wedge_loop_ends_on_its_own_with_nothing_killing_it() {
 
 // -- the two hang schedules ---------------------------------------------
 
+/// Whether `banner` is the read side's lead line, whatever seconds it reads.
+fn reads_side_banner(banner: Option<&str>) -> bool {
+    banner.is_some_and(|line| line.starts_with(WedgeKind::ReadSide.banner_lead()))
+}
+
 /// A read-side wedge reaches `Wedged` inside the shipped bound, and the
 /// harness is demonstrably still folding while it does.
 #[test]
@@ -184,7 +189,7 @@ fn a_read_side_wedge_is_reported_wedged_within_the_probe_and_threshold_bound() {
          read it)"
     );
     assert_eq!(report.wedge, Some(WedgeKind::ReadSide));
-    assert_eq!(report.banner.as_deref(), Some(WedgeKind::ReadSide.notice()));
+    assert!(reads_side_banner(report.banner.as_deref()), "{report:?}");
     assert!(
         report.survived(),
         "the observing side completed only {} folds over the {:?} survival \
@@ -207,7 +212,7 @@ fn a_read_side_wedge_is_reported_wedged_within_the_probe_and_threshold_bound() {
 fn a_read_side_wedge_escalates_to_the_modal_only_past_the_modal_threshold() {
     let report = run_schedule(HangRun::new(HangSchedule::ReadSideWedge).escalating()).unwrap();
 
-    assert_eq!(report.banner.as_deref(), Some(WedgeKind::ReadSide.notice()));
+    assert!(reads_side_banner(report.banner.as_deref()), "{report:?}");
     assert_eq!(
         report.offered,
         Some(WedgeKind::ReadSide),

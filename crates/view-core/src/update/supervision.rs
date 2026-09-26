@@ -8,7 +8,7 @@ use crate::native::geometry::OverlayBox;
 use crate::native::supervision::{
     swap_error_outcome, swap_recovery_damage_notice, swap_recovery_failure_notice,
     swap_recovery_notice, swap_recovery_warning_notice, EngineBusyState, ReconnectProgress,
-    SinceStamp, SupervisionChoice, SwapOutcome, WedgeKind,
+    SinceStamp, SupervisionChoice, SwapOutcome, WedgeKind, RESTART_NOTATION,
 };
 
 /// Folds one supervision reading into the banner and, past the escalation
@@ -18,6 +18,7 @@ pub(super) fn note_engine_liveness(
     wedge: Option<WedgeKind>,
     observed_for: std::time::Duration,
 ) -> Vec<Effect> {
+    model.supervision.note_wedge(wedge);
     let Some(kind) = wedge else {
         let retracted = model.engine.messages.set_native_condition(None);
         let closed = model.close_engine_busy();
@@ -36,14 +37,14 @@ pub(super) fn note_engine_liveness(
         .reconnect()
         .filter(|_| kind == WedgeKind::Dead);
     let counted = reconnect.and_then(ReconnectProgress::notice);
+    let since = SinceStamp::new(observed_for);
+    let banner = counted
+        .clone()
+        .unwrap_or_else(|| kind.banner(since).join("\n"));
     // re-asserted on every reading rather than raised once on the way in:
     // `msg_clear` empties the log wholesale, and a notice raised only on the
     // transition would be gone for good while its condition is still true
-    if model
-        .engine
-        .messages
-        .set_native_condition(Some(counted.as_deref().unwrap_or(kind.notice())))
-    {
+    if model.engine.messages.set_native_condition(Some(&banner)) {
         model.dirty = true;
     }
     // an attempt is already owed and already waiting out its backoff:
@@ -67,7 +68,6 @@ pub(super) fn note_engine_liveness(
         }
         return vec![Effect::RestartEngine];
     }
-    let since = SinceStamp::new(observed_for);
     match model.engine_busy_mut() {
         Some(open) if open.kind == kind => {
             if open.since.readout() != since.readout() {
@@ -105,7 +105,9 @@ pub(super) fn note_engine_liveness(
 }
 
 /// Folds a keypress into the open interrupt/restart modal's own bookkeeping
-/// and returns only the effects that bookkeeping owes.
+/// and returns only the effects that bookkeeping owes. With no modal open,
+/// the restart key still picks a restart while the banner stands
+/// ([`restarts_at_standing_wedge`]).
 ///
 /// The caller goes on to route the very same key, and what that routing
 /// delivers is decided by the flow this function's effects produce, not by
@@ -141,7 +143,13 @@ pub(super) fn note_engine_liveness(
 /// covers every key a user could plausibly be typing at the editor, and the
 /// second covers only the two that are a request to view itself.
 pub(super) fn note_supervision_choice(model: &mut Model, notation: &str) -> Vec<Effect> {
-    let Some(choice) = model.engine_busy().and_then(|state| state.choose(notation)) else {
+    let Some(choice) = model
+        .engine_busy()
+        .and_then(|state| state.choose(notation))
+        .or_else(|| {
+            restarts_at_standing_wedge(model, notation).then_some(SupervisionChoice::Restart)
+        })
+    else {
         return Vec::new();
     };
     match choice {
@@ -172,6 +180,15 @@ pub(super) fn note_supervision_choice(model: &mut Model, notation: &str) -> Vec<
             }]
         }
     }
+}
+
+/// Whether `notation` asks for a restart at a wedge the banner stands for,
+/// with or without the modal open.
+///
+/// The banner names the key from the moment the wedge is seen, and the
+/// modal waits thirty seconds, so the key answers the banner too.
+pub(super) fn restarts_at_standing_wedge(model: &Model, notation: &str) -> bool {
+    notation == RESTART_NOTATION && model.supervision.wedge().is_some()
 }
 
 /// Folds one connection's swap-recovery reading into what the user is told

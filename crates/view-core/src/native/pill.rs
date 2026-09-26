@@ -545,6 +545,7 @@ mod tests {
             name: name.to_string(),
             modified: false,
             current,
+            path: String::new(),
         }
     }
 

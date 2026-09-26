@@ -33,6 +33,9 @@ const ENGINE_SEPARATOR_HL: u64 = 12;
 const VIEW_SEPARATOR_HL: u64 = 13;
 const ENGINE_SEPARATOR_FG: u32 = 0x0011_2233;
 const VIEW_SEPARATOR_FG: u32 = 0x00CC_DDEE;
+/// The highlight a colorscheme gives `WarningMsg` in the wedge scenes.
+const WARNING_HL: u64 = 41;
+const WARNING_FG: u32 = 0x00F9_E2AF;
 /// A fixture terminal whose box-glyph probe came back saying it accounts
 /// for a box-drawing glyph as one cell, and one whose did not: the bit the
 /// separator charset is keyed on, named rather than spelled at a call site.
@@ -4305,6 +4308,61 @@ fn nvim_statusline_bar_scene() -> Model {
     model
 }
 
+/// An engine that stopped answering 14 s ago, raised between two notices:
+/// the banner stands in the column's first slot in the warning role, both
+/// lines of it, whatever arrived before or after.
+fn raise_wedge_banner(model: &mut Model) {
+    let _ = model
+        .engine
+        .messages
+        .resolve_startup_hold(view_core::native::toast::HoldOutcome::Release);
+    let notice = |model: &mut Model, text: &str| {
+        drive(
+            model,
+            vec![UiEvent::MsgShow {
+                kind: "echomsg".to_string(),
+                content: vec![(0, text.to_string())],
+                replace_last: false,
+            }],
+        );
+    };
+    notice(model, "saved");
+    // a scheme's own warning colour, so the dump shows which rows take it
+    drive(
+        model,
+        vec![
+            attr(WARNING_HL, WARNING_FG),
+            UiEvent::HlGroupSet {
+                name: "WarningMsg".to_string(),
+                hl_id: WARNING_HL,
+            },
+        ],
+    );
+    let _ = update(
+        model,
+        Msg::EngineLiveness {
+            wedge: Some(view_core::native::supervision::WedgeKind::ReadSide),
+            observed_for: std::time::Duration::from_secs(14),
+        },
+    );
+    notice(model, "linted");
+}
+
+fn wedge_banner_dump(tier: (&str, bool, bool, bool, bool)) -> String {
+    let (_, sync, truecolor, kitty, unicode_boxes) = tier;
+    let mut model = nvim_statusline_bar_scene();
+    raise_wedge_banner(&mut model);
+    model.caps = view_core::model::TermCaps::from_probe(sync, truecolor, kitty)
+        .with_unicode_boxes(unicode_boxes);
+    screen_dump(&tiled_frame(&model))
+}
+
+fn wedge_banner_tiles() -> Tiles {
+    let mut tiles = tiled(true);
+    raise_wedge_banner(&mut tiles.model);
+    tiles
+}
+
 fn nvim_bar_dump(tier: (&str, bool, bool, bool, bool)) -> String {
     let (_, sync, truecolor, kitty, unicode_boxes) = tier;
     let mut model = nvim_statusline_bar_scene();
@@ -4378,6 +4436,10 @@ const TILED_SCENES: &[(&str, SceneDump)] = &[
     ("nvim-statusline-bar", nvim_bar_dump),
     ("launch-notice-once", |tier| {
         tiles_dump(tier, launch_notice_once())
+    }),
+    ("wedge-banner", wedge_banner_dump),
+    ("wedge-banner-tiles", |tier| {
+        tiles_dump(tier, wedge_banner_tiles())
     }),
 ];
 

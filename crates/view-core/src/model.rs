@@ -2130,7 +2130,7 @@ pub(crate) mod notice;
 mod rows;
 mod window_status;
 
-pub use buffers::BufferEntry;
+pub use buffers::{reopen_order, BufferEntry};
 pub use look::{Detected, Look, Panes, MIN_FRAMED_SLOT};
 pub use messages::{format_at, wrap_toast, MessageEntry, MessageId, Messages};
 pub use notice::{NoticeColumn, NOTICE_COLUMN_MAX};
@@ -2885,7 +2885,7 @@ mod tests {
         messages.push("progress".to_string(), vec![(0, "[2/57]".into())], true);
         assert_eq!(
             texts(&messages.visible_lines(6)),
-            vec!["[2/57]", "engine stalled"]
+            vec!["engine stalled", "[2/57]"]
         );
         assert_eq!(messages.entries.len(), 2);
     }

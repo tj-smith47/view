@@ -163,7 +163,7 @@ pub enum WedgeKind {
 }
 
 impl WedgeKind {
-    /// The sticky banner's text for this wedge.
+    /// The modal's account of this wedge, which its message opens with.
     ///
     /// Worded to the observation the verdict behind it is made of, never to
     /// a diagnosis of who is at fault. The read-side verdict in particular
@@ -179,6 +179,40 @@ impl WedgeKind {
             Self::WriteSide => "keystrokes queued: nvim has stopped reading view's output",
             Self::Dead => "the nvim connection has closed; no further input reaches it",
         }
+    }
+
+    /// The words the banner's first line opens with, ahead of the elapsed
+    /// seconds.
+    #[must_use]
+    pub const fn banner_lead(self) -> &'static str {
+        match self {
+            Self::ReadSide => "nvim has not answered for",
+            Self::WriteSide => "nvim has not read a keystroke for",
+            Self::Dead => "the nvim connection has been closed for",
+        }
+    }
+
+    /// The banner's two lines: how long the wedge has held, then the keys
+    /// that answer it.
+    ///
+    /// Restart leads the keys because it is the one that answers every
+    /// wedge. The rest are this wedge's own choices, less the dismissal,
+    /// since the banner stands for as long as the wedge does.
+    #[must_use]
+    pub fn banner(self, since: SinceStamp) -> [String; 2] {
+        let keys: Vec<String> = std::iter::once(SupervisionChoice::Restart)
+            .chain(self.choices().into_iter().filter(|choice| {
+                !matches!(
+                    choice,
+                    SupervisionChoice::Restart | SupervisionChoice::Dismiss
+                )
+            }))
+            .map(|choice| format!("{} {}", choice.key(), choice.verb()))
+            .collect();
+        [
+            format!("{} {}s", self.banner_lead(), since.readout()),
+            keys.join("   "),
+        ]
     }
 
     /// The modal's title for this wedge.
@@ -304,6 +338,17 @@ impl SupervisionChoice {
             Self::Quit => "Quit view",
         };
         format!("[{}] {name}", self.key())
+    }
+
+    /// The word the banner prints beside this choice's key.
+    #[must_use]
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::Interrupt => "interrupt",
+            Self::Restart => "restart",
+            Self::Dismiss => "dismiss",
+            Self::Quit => "quit",
+        }
     }
 }
 
@@ -645,6 +690,8 @@ pub struct SupervisionState {
     /// The recovery notice the current connection has already put on screen,
     /// so being asked twice does not say the same thing twice.
     swap_notice: Option<String>,
+    /// The wedge the banner stands for, or `None` while the engine answers.
+    wedge: Option<WedgeKind>,
 }
 
 impl Default for SupervisionState {
@@ -659,6 +706,7 @@ impl Default for SupervisionState {
             reconnect: None,
             swap_probe: 0,
             swap_notice: None,
+            wedge: None,
         }
     }
 }
@@ -720,6 +768,18 @@ impl SupervisionState {
     /// Records that the modal has been opened for `kind`.
     pub fn note_offered(&mut self, kind: WedgeKind) {
         self.offered = Some(kind);
+    }
+
+    /// The wedge standing now, the one the banner names.
+    #[must_use]
+    pub fn wedge(&self) -> Option<WedgeKind> {
+        self.wedge
+    }
+
+    /// Records the wedge the latest reading saw, `None` for an engine that
+    /// answered.
+    pub fn note_wedge(&mut self, wedge: Option<WedgeKind>) {
+        self.wedge = wedge;
     }
 
     /// Forgets the episode, so a later wedge escalates on its own terms.
@@ -1140,6 +1200,42 @@ mod tests {
                 .past_modal_threshold()
         );
         assert!(SinceStamp::new(ENGINE_BUSY_MODAL_THRESHOLD).past_modal_threshold());
+    }
+
+    /// The banner is the only thing on screen for the first thirty seconds
+    /// of a wedge, so it carries the keys that answer it and a readout that
+    /// counts.
+    #[test]
+    fn every_banner_names_its_keys_and_its_elapsed_seconds() {
+        for kind in [WedgeKind::ReadSide, WedgeKind::WriteSide, WedgeKind::Dead] {
+            for secs in [0_u64, 14, 29, 61] {
+                let [first, keys] = kind.banner(SinceStamp::new(Duration::from_secs(secs)));
+                assert_eq!(first, format!("{} {secs}s", kind.banner_lead()));
+                assert!(
+                    keys.starts_with("<F5> restart"),
+                    "{kind:?} leads with anything but restart: {keys}"
+                );
+                for choice in kind.choices() {
+                    let named = keys.contains(&format!("{} {}", choice.key(), choice.verb()));
+                    assert_eq!(
+                        named,
+                        choice != SupervisionChoice::Dismiss,
+                        "{kind:?}'s banner and {choice:?}: {keys}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            WedgeKind::ReadSide.banner(SinceStamp::new(Duration::from_millis(14_900))),
+            [
+                "nvim has not answered for 14s".to_string(),
+                "<F5> restart   <C-c> interrupt".to_string()
+            ]
+        );
+        assert_eq!(
+            WedgeKind::Dead.banner(SinceStamp::default())[1],
+            "<F5> restart   <C-q> quit"
+        );
     }
 
     /// A notice may report what the fold observed and nothing else. The

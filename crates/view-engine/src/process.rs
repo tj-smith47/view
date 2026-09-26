@@ -558,6 +558,42 @@ impl EngineConfig {
         self.late_attach
     }
 
+    /// This config with the files it opens replaced by `open`, in order,
+    /// every one of them loaded before startup ends and the last one left
+    /// on screen. An empty `open` leaves the config as it is.
+    ///
+    /// nvim loads only the first file of its argument list at startup, and
+    /// a swap is recovered only for a buffer nvim loads, so each later file
+    /// is edited in turn by [`REOPEN_CMD`]. That runs as a `-c`, before
+    /// `VimEnter`, so every recovery lands inside the window
+    /// [`SWAP_RECOVERY_CMD`] reads.
+    #[must_use]
+    pub fn reopening(mut self, open: &[String]) -> Self {
+        if open.is_empty() {
+            return self;
+        }
+        let mut dropped: Vec<usize> = file_operands(&self.extra_args)
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect();
+        // the separator goes with the files after it, since the list below
+        // brings its own
+        dropped.extend(self.extra_args.iter().position(|arg| arg == "--"));
+        let mut args: Vec<OsString> = std::mem::take(&mut self.extra_args)
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| !dropped.contains(index))
+            .map(|(_, arg)| arg)
+            .collect();
+        if open.len() > 1 {
+            args.extend(["-c".into(), REOPEN_CMD.into()]);
+        }
+        args.push("--".into());
+        args.extend(open.iter().map(OsString::from));
+        self.extra_args = args;
+        self
+    }
+
     /// Whether this child runs its whole startup before a UI attaches, and
     /// so owes its caller an attach only once it says `VimEnter`.
     ///
@@ -2311,6 +2347,13 @@ pub const SWAP_RECOVERY_PROBE: &str = "[\
 /// it -- view forwards what the user typed -- and a spawn that does changes
 /// shape ([`EngineConfig::attaches_late`]).
 const RECOVERY_ARG: &str = "-r";
+
+/// Edits every file of the argument list after the first, in order, for
+/// [`EngineConfig::reopening`]. `:hide` keeps a recovered buffer loaded
+/// under a config that turns `'hidden'` off, and a file that fails to open
+/// leaves the rest to open.
+const REOPEN_CMD: &str =
+    "lua for i = 2, vim.fn.argc() do pcall(vim.cmd, 'hide ' .. i .. 'argument') end";
 
 /// nvim options that take no value of their own, so an ordinary word
 /// following one of them is a file name rather than that option's argument.
@@ -4526,6 +4569,34 @@ mod tests {
             carries(&editing(EngineConfig::default()).with_arg(RECOVERY_ARG)),
             "a caller's own -r is forwarded like any other passthrough \
              argument, and is the only way one reaches nvim"
+        );
+    }
+
+    /// A restart's file list replaces the launch's own and keeps every
+    /// option with its value, and more than one file brings the command
+    /// that loads the rest.
+    #[test]
+    fn a_reopening_replaces_the_files_and_keeps_the_options() {
+        let launched = |list: &[&str]| EngineConfig {
+            extra_args: args(list),
+            ..EngineConfig::default()
+        };
+        let open = ["/w/a.md".to_string(), "/w/b.md".to_string()];
+        assert_eq!(
+            launched(&["-c", "set nu", "README.md", "-u", "NONE"])
+                .reopening(&open)
+                .extra_args,
+            args(&["-c", "set nu", "-u", "NONE", "-c", REOPEN_CMD, "--", "/w/a.md", "/w/b.md"])
+        );
+        assert_eq!(
+            launched(&["-R", "--", "-odd", "x"])
+                .reopening(&open[..1])
+                .extra_args,
+            args(&["-R", "--", "/w/a.md"])
+        );
+        assert_eq!(
+            launched(&["README.md"]).reopening(&[]).extra_args,
+            args(&["README.md"])
         );
     }
 

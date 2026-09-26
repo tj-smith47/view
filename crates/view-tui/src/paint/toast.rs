@@ -80,10 +80,8 @@ pub(super) fn paint_toast(
     paint_toast_border(area, borders, frame.paused, border_style, damage, buf);
 
     let inner = inset_by_one(area);
-    // every toast line is a single `StyleRole::Plain` span (see
-    // `LayerKind::Toast`'s doc comment), so this row's own `style` is the
-    // whole story -- `paint_text_row` over the flattened text is the honest
-    // rendering, not a placeholder for per-span resolution nobody asked for
+    // every toast line is a single span, so its role colours the whole row,
+    // in the role group's foreground over the toast's own background
     for (i, spans) in lines.iter().enumerate() {
         let Ok(row) = u16::try_from(i) else {
             break;
@@ -91,9 +89,18 @@ pub(super) fn paint_toast(
         if !damage.covers_row_of(inner, row) {
             continue;
         }
+        let row_style = spans
+            .first()
+            .and_then(|span| span.role.chrome_group())
+            .map_or(style, |group| {
+                ratatui_style(ResolvedStyle {
+                    fg: theme.chrome(group).fg.or(body.fg),
+                    ..body
+                })
+            });
         paint_text_row(
             skip_cells(&view_surface::overlay::line_text(spans), frame.skip),
-            style,
+            row_style,
             inner,
             row,
             buf,

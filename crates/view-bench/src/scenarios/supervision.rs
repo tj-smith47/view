@@ -228,7 +228,7 @@ fn detect_sample(
     session.send(submitted(&wedge_command(WEDGE_SELF_BOUND)).as_bytes())?;
     let detected = wait_for(
         &mut session,
-        Present(WedgeKind::ReadSide.notice()),
+        Present(WedgeKind::ReadSide.banner_lead()),
         DETECT_TIMEOUT,
     );
     // the engine outlives the editor here: it is inside a loop that reaches

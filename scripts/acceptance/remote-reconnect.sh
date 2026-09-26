@@ -263,7 +263,7 @@ RECONNECT_FMT=$(awk '
     printf 'FAIL: ReconnectProgress::notice no longer formats a banner in %s\n' "$SUPERVISION_RS" >&2
     exit 1
 }
-DEAD_NOTICE=$(wedge_arm notice Dead)
+DEAD_NOTICE=$(wedge_arm banner_lead Dead)
 GONE_TITLE=$(wedge_arm title Dead)
 RESTART_NOTATION=$(const_str "$SUPERVISION_RS" RESTART_NOTATION)
 RESTART_KEY=$(tmux_named_key "$RESTART_NOTATION")

@@ -288,7 +288,7 @@ impl LoopChannels {
 pub struct EngineSession<'a> {
     pub engine: Engine,
     pub pump: view_engine::DamagePump,
-    pub respawn: &'a dyn Fn() -> view_engine::EngineConfig,
+    pub respawn: &'a dyn Fn(&[String]) -> view_engine::EngineConfig,
 }
 
 /// The replacement session [`restart_engine`] produced, and everything
@@ -340,7 +340,7 @@ pub(crate) struct Restarted {
 /// Neither the steady-state pass nor a healthy session reaches any of this.
 pub(crate) fn restart_engine(
     engine: &mut Engine,
-    respawn: &dyn Fn() -> view_engine::EngineConfig,
+    respawn: &dyn Fn(&[String]) -> view_engine::EngineConfig,
     model: &mut Model,
     channels: &LoopChannels,
     route: &crate::clipboard::ReplyRoute<EngineHandle>,
@@ -348,6 +348,9 @@ pub(crate) fn restart_engine(
     executor: &Executor<EngineHandle>,
 ) -> Result<Restarted, crate::startup::AttachFailure> {
     let (width, height) = model.grid_target();
+    // read before anything below is forgotten: the list is the dead
+    // engine's last report of what the session had open
+    let reopen = view_core::model::reopen_order(&model.buffers);
     // ahead of the forget below, which drops the claims that record which
     // surfaces the dead engine held windows for. The closes run on
     // `executor`, the one that started their work, before the spawn can
@@ -379,10 +382,11 @@ pub(crate) fn restart_engine(
     // its own account, and would leave the dropped overlays painted and the
     // released startup lines unpainted until something else dirtied the model
     model.dirty = true;
-    let mut engine =
-        crate::startup::respawn_engine(engine, respawn().with_late_attach(width, height), || {
-            model.takes_attach()
-        })?;
+    let mut engine = crate::startup::respawn_engine(
+        engine,
+        respawn(&reopen).with_late_attach(width, height),
+        || model.takes_attach(),
+    )?;
     let (pump, cutover) = engine.start_pump(channels.msg.clone());
     let pending_redraw = if cutover.redraw_pending {
         let (events, folded_at) = pump.take_damage_folded();
@@ -811,8 +815,12 @@ mod tests {
             ),
             msg,
         };
-        let respawn = || view_engine::process::EngineConfig::isolated();
-        let mut engine = Engine::spawn(respawn()).unwrap();
+        let reopened = std::cell::RefCell::new(Vec::new());
+        let respawn = |open: &[String]| {
+            reopened.replace(open.to_vec());
+            view_engine::process::EngineConfig::isolated()
+        };
+        let mut engine = Engine::spawn(respawn(&[])).unwrap();
         engine
             .handle
             .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
@@ -898,6 +906,17 @@ mod tests {
              or the assertions below are vacuous: {}",
             painted(&model)
         );
+        let _ = view_core::update::update(
+            &mut model,
+            view_core::msg::Msg::BufferList {
+                buffers: vec![
+                    view_core::model::BufferEntry::new(1, "b.md".into(), true, true)
+                        .with_path("/w/b.md".into()),
+                    view_core::model::BufferEntry::new(2, "a.md".into(), true, false)
+                        .with_path("/w/a.md".into()),
+                ],
+            },
+        );
         let executor = channels.executor(engine.handle.clone(), route.epoch());
         let fresh = restart_engine(
             &mut engine,
@@ -909,6 +928,11 @@ mod tests {
             &executor,
         )
         .expect("a crashed engine must be replaceable");
+        assert_eq!(
+            *reopened.borrow(),
+            vec!["/w/a.md".to_string(), "/w/b.md".to_string()],
+            "the replacement must open the listed files with the current one last"
+        );
         assert!(
             model.engine.cmdline.is_none(),
             "a restart must drop the dead engine's command line: nothing retracts it, \
@@ -1050,8 +1074,9 @@ mod tests {
         let mut engine = Engine::spawn(view_engine::process::EngineConfig::isolated()).unwrap();
         let route = crate::clipboard::ReplyRoute::new(engine.handle.clone());
         let ai_context_route = crate::ai_context_worker::OpsRoute::new(engine.handle.clone());
-        let respawn =
-            || view_engine::process::EngineConfig::isolated().with_nvim_bin("/nonexistent/nvim");
+        let respawn = |_: &[String]| {
+            view_engine::process::EngineConfig::isolated().with_nvim_bin("/nonexistent/nvim")
+        };
         let executor = channels.executor(engine.handle.clone(), route.epoch());
         let scratch = view_test_support::ScratchDir::new("restart-tree-scan").unwrap();
 
@@ -1141,8 +1166,9 @@ mod tests {
         let mut engine = Engine::spawn(view_engine::process::EngineConfig::isolated()).unwrap();
         let route = crate::clipboard::ReplyRoute::new(engine.handle.clone());
         let ai_context_route = crate::ai_context_worker::OpsRoute::new(engine.handle.clone());
-        let respawn =
-            || view_engine::process::EngineConfig::isolated().with_nvim_bin("/nonexistent/nvim");
+        let respawn = |_: &[String]| {
+            view_engine::process::EngineConfig::isolated().with_nvim_bin("/nonexistent/nvim")
+        };
         let mut model = Model::with_term_size(80, 24);
         model.dirty = false;
 
@@ -1406,7 +1432,7 @@ mod tests {
         });
 
         // every attempt from here on meets a client that refuses
-        let respawn = || remote_through("fake-ssh-reject");
+        let respawn = |_: &[String]| remote_through("fake-ssh-reject");
         let mut model = Model::with_term_size(80, 24);
         let mut schedule = ReconnectSchedule::new(
             TEST_BACKOFF_BASE,

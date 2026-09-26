@@ -660,6 +660,13 @@ fn respawn_config(cli: &Cli, engine: &ResolvedEngine) -> EngineConfig {
     cfg
 }
 
+/// [`respawn_config`] for a restart that brings the session's files back:
+/// `open` replaces the files the launch named, so a file opened since then
+/// comes back too, and its swap with it.
+fn respawn_config_for(cli: &Cli, engine: &ResolvedEngine, open: &[String]) -> EngineConfig {
+    respawn_config(cli, engine).reopening(open)
+}
+
 /// Arms `cfg`'s stdin relay when `passthrough` names `-` and the process's
 /// own stdin is not a terminal (`ls | view -`): duplicates it onto the
 /// fixed descriptor `startup::spawn_and_attach` tells nvim to read via
@@ -1637,7 +1644,7 @@ fn main() -> Result<()> {
 
     // built fresh per restart rather than stored once: `EngineConfig` is
     // consumed by the spawn it describes
-    let respawn = || respawn_config(&cli, &resolved.engine);
+    let respawn = |open: &[String]| respawn_config_for(&cli, &resolved.engine, open);
     let (model, exit_code) = runtime::run(
         model,
         recovery::EngineSession {

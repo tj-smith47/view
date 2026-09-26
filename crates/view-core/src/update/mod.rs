@@ -80,7 +80,7 @@ mod watch;
 
 use ai::{on_ai_event, open_ai_trust_prompt};
 use paste::{paste_into_agent_composer, paste_into_focused_surface};
-use supervision::{note_engine_liveness, note_supervision_choice};
+use supervision::{note_engine_liveness, note_supervision_choice, restarts_at_standing_wedge};
 pub use surface_conflict::FLOAT_SCAN_THROTTLE;
 use surfaces::{
     message_history_key, notice_ai_disabled, notice_clipboard_unavailable, open_ai_panel,
@@ -306,7 +306,10 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // dismissal: asked afterwards, every key that answered a modal
             // reads as one that arrived with none open
             let busy = model.engine_busy();
-            let answers_anywhere = busy.is_some_and(|open| open.kind == WedgeKind::Dead);
+            // the restart key at a standing wedge is a request to view, and
+            // no overlay answers it
+            let answers_anywhere = busy.is_some_and(|open| open.kind == WedgeKind::Dead)
+                || restarts_at_standing_wedge(model, &notation);
             let modal_was_open = busy.is_some();
             let mut effects = if answers_anywhere || model.focus() == Focus::Engine {
                 note_supervision_choice(model, &notation)

@@ -104,7 +104,18 @@ the walk finishes.
 ## The engine hangs
 
 A plugin drives Neovim into a synchronous loop and the editor stops
-answering. You get a banner naming the wedge.
+answering. You get a banner naming the wedge, above every other notice:
+
+```
+nvim has not answered for 14s
+<F5> restart   <C-c> interrupt
+```
+
+The seconds count up while the wedge stands. `<F5>` restarts the engine
+whenever the banner is up. The restart reopens every file you had listed,
+each with the unsaved text its swap file held, and leaves you in the one you
+were editing. Your window layout starts fresh. When the connection itself is
+gone, the second line offers `<C-q>` to quit in place of the interrupt.
 
 | | view | Neovim | on |
 |---|---|---|---|

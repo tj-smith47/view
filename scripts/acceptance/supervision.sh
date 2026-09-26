@@ -427,9 +427,9 @@ ensure_artifact "$STUB_BIN" "$TARGET_ROOT/release/view-ai-stub-agent" \
     exit 1
 }
 
-READ_NOTICE=$(wedge_arm notice ReadSide)
-WRITE_NOTICE=$(wedge_arm notice WriteSide)
-DEAD_NOTICE=$(wedge_arm notice Dead)
+READ_NOTICE=$(wedge_arm banner_lead ReadSide)
+WRITE_NOTICE=$(wedge_arm banner_lead WriteSide)
+DEAD_NOTICE=$(wedge_arm banner_lead Dead)
 BUSY_TITLE=$(wedge_arm title ReadSide)
 GONE_TITLE=$(wedge_arm title Dead)
 INTERRUPT_KEY=$(tmux_named_key "$(const_str "$SUPERVISION_RS" INTERRUPT_NOTATION)")

@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 
 use view_core::model::Model;
 use view_core::msg::{Effect, Key, Msg, RpcCall};
-use view_core::native::supervision::{WedgeKind, ENGINE_BUSY_MODAL_THRESHOLD, INTERRUPT_NOTATION};
+use view_core::native::supervision::{
+    SinceStamp, WedgeKind, ENGINE_BUSY_MODAL_THRESHOLD, INTERRUPT_NOTATION,
+};
 use view_core::update::update;
 use view_engine::{wedge_kind, OutboxStallWatch};
 use view_oracle::hang::detection_deadline;
@@ -301,7 +303,7 @@ fn a_wedge_that_opens_while_the_session_is_idle_still_raises_the_notice() {
             .into_iter()
             .map(|spans| spans.into_iter().map(|span| span.text).collect::<String>())
             .collect::<Vec<_>>(),
-        vec![WedgeKind::ReadSide.notice().to_string()],
+        WedgeKind::ReadSide.banner(SinceStamp::new(after)).to_vec(),
         "the verdict never reached the notice a waiting user reads"
     );
 }
@@ -422,4 +424,188 @@ fn every_key_typed_at_the_modal_still_lands_in_the_buffer() {
         "n",
         "the dismissal's <Esc> never reached the engine, so insert mode survived it"
     );
+}
+
+/// How long a live engine is given to flush a swap, repaint, or report its
+/// buffer list, before the host's load widens it.
+const SETTLES: Duration = Duration::from_secs(10);
+
+/// A spawn that leaves swap files under `dir` for a replacement to recover:
+/// `EngineConfig::isolated` passes `-n`, which writes none.
+fn recoverable(dir: &std::path::Path) -> view_engine::process::EngineConfig {
+    view_engine::process::EngineConfig::default()
+        .with_arg("--clean")
+        .with_arg("--cmd")
+        .with_arg(format!(
+            "lua vim.o.directory = [[{}//]] vim.o.updatetime = 100",
+            dir.join("swap").display()
+        ))
+        .with_env("HOME", dir)
+        .with_env("XDG_CONFIG_HOME", dir.join("config"))
+        .with_env("XDG_DATA_HOME", dir.join("data"))
+        .with_env("XDG_STATE_HOME", dir.join("state"))
+        .with_env_remove("VIMINIT")
+        .with_env_remove("XDG_CONFIG_DIRS")
+        // the engine being replaced is stopped, so its `qa!` goes unread and
+        // only the force-kill after this ends it
+        .with_shutdown_timeout(Duration::from_secs(1))
+}
+
+/// What the engine shows on its first screen row.
+fn first_row(engine: &view_engine::process::Engine) -> String {
+    engine.handle.command("redraw").unwrap();
+    engine
+        .handle
+        .eval_str("join(map(range(1, &columns), 'screenstring(1, v:val)'), '')")
+        .unwrap()
+        .trim_end()
+        .to_string()
+}
+
+/// Waits until `engine`'s first screen row reads `want`, and returns what it
+/// read last.
+fn first_row_reading(engine: &view_engine::process::Engine, want: &str) -> String {
+    let deadline = Instant::now() + view_test_support::host_deadline(SETTLES);
+    loop {
+        let row = first_row(engine);
+        if row == want || Instant::now() >= deadline {
+            return row;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Every swap file under `dir` together, as bytes.
+fn swapped(dir: &std::path::Path) -> Vec<u8> {
+    std::fs::read_dir(dir.join("swap"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .flat_map(|entry| std::fs::read(entry.path()).unwrap_or_default())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn holds(haystack: &[u8], needle: &str) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle.as_bytes())
+}
+
+/// `<F5>` at a wedge the modal has not opened for replaces a stopped engine
+/// with one that reopens both listed files, the current one on screen, each
+/// with the text only its swap held.
+#[cfg(unix)]
+#[test]
+fn a_restart_reopens_every_listed_buffer_and_recovers_its_unsaved_text() {
+    let dir = view_test_support::ScratchDir::resolved("supervision-live-reopen").unwrap();
+    std::fs::create_dir_all(dir.join("swap")).unwrap();
+    let a = dir.join("a.txt");
+    let b = dir.join("b.txt");
+    std::fs::write(&a, "a on disk\n").unwrap();
+    std::fs::write(&b, "b on disk\n").unwrap();
+
+    let (engine, _pump, _tx, rx) =
+        common::spawn_with_wired_pump(recoverable(&dir).with_arg(&a).with_arg(&b), 256);
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+    engine
+        .handle
+        .register_bridge(engine.api_info.channel_id)
+        .unwrap();
+    engine.handle.input("Oa unsaved<Esc>").unwrap();
+    engine.handle.input(":hide bnext<CR>").unwrap();
+    engine.handle.input("Ob unsaved<Esc>").unwrap();
+
+    // the list the restart reads is the one the bridge reported, once it
+    // reports both files with the second one current
+    let mut model = Model::with_term_size(80, 24);
+    let b_name = b.to_string_lossy().into_owned();
+    let listed = common::drain_until(
+        &rx,
+        view_test_support::host_deadline(SETTLES),
+        |msg| match msg {
+            Msg::BufferList { buffers }
+                if buffers.len() == 2
+                    && buffers
+                        .iter()
+                        .any(|entry| entry.current && entry.path == b_name) =>
+            {
+                Some(msg.clone())
+            }
+            _ => None,
+        },
+    )
+    .expect("the bridge never reported both files with the second one current");
+    let _ = update(&mut model, listed);
+    std::thread::spawn(move || while rx.recv().is_ok() {});
+
+    let deadline = Instant::now() + view_test_support::host_deadline(SETTLES);
+    while !(holds(&swapped(&dir), "a unsaved") && holds(&swapped(&dir), "b unsaved")) {
+        assert!(
+            Instant::now() < deadline,
+            "the swaps never held both unsaved lines, so there is nothing to recover"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let stopped = std::process::Command::new("kill")
+        .args(["-STOP", &engine.pid().to_string()])
+        .status()
+        .unwrap();
+    assert!(stopped.success(), "the engine could not be stopped");
+
+    let _ = update(
+        &mut model,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: Duration::from_secs(12),
+        },
+    );
+    assert!(
+        model.overlays().is_empty(),
+        "the modal opened below its threshold"
+    );
+    let effects = update(
+        &mut model,
+        Msg::Key(Key {
+            notation: "<F5>".into(),
+        }),
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::RestartEngine)),
+        "<F5> at the banner asked for no restart: {effects:?}"
+    );
+
+    let reopen = view_core::model::reopen_order(&model.buffers);
+    assert_eq!(reopen, vec![a.to_string_lossy().into_owned(), b_name]);
+    let mut replacement = engine
+        .restart(recoverable(&dir).with_arg(&a).reopening(&reopen))
+        .unwrap();
+    let (sink, drained) = std::sync::mpsc::sync_channel(64);
+    let (_pump, _cutover) = replacement.start_pump(sink);
+    std::thread::spawn(move || while drained.recv().is_ok() {});
+    replacement
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+
+    assert_eq!(
+        first_row_reading(&replacement, "b unsaved"),
+        "b unsaved",
+        "the current file came back without its unsaved line"
+    );
+    replacement.handle.command("hide bprevious").unwrap();
+    assert_eq!(
+        first_row_reading(&replacement, "a unsaved"),
+        "a unsaved",
+        "the other listed file came back without its unsaved line"
+    );
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "a on disk\n");
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), "b on disk\n");
 }

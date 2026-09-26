@@ -25,12 +25,18 @@ use crate::native::geometry::OverlayBox;
 use crate::native::keys::{Action, Direction};
 use crate::native::speculate::{CmdlineSpeculation, SpecStamp};
 use crate::native::supervision::{
-    ReconnectProgress, SupervisionChoice, WedgeKind, AUTOMATIC_RECOVERY_ATTEMPTS,
+    ReconnectProgress, SinceStamp, SupervisionChoice, WedgeKind, AUTOMATIC_RECOVERY_ATTEMPTS,
     ENGINE_BUSY_MODAL_THRESHOLD, INTERRUPT_NOTATION, INTERRUPT_REACTION_WINDOW, QUIT_NOTATION,
     RESTART_NOTATION,
 };
 use crate::update::paste::{NO_TEXT_INPUT_NOTICE, PERMISSION_PASTE_NOTICE};
 use std::time::Duration;
+
+/// The banner's two lines for `kind` after `observed_for` of it, as
+/// [`visible_texts`] reads them.
+fn banner(kind: WedgeKind, observed_for: Duration) -> Vec<String> {
+    kind.banner(SinceStamp::new(observed_for)).to_vec()
+}
 
 /// Every message line currently on screen, joined per row -- the same
 /// selection `view-surface` paints from, so a test asserting on it is
@@ -8863,7 +8869,7 @@ fn a_wedge_raises_the_banner_first_and_the_modal_only_past_the_threshold() {
     assert!(effects.is_empty());
     assert_eq!(
         visible_texts(&m),
-        vec![WedgeKind::ReadSide.notice().to_string()],
+        banner(WedgeKind::ReadSide, Duration::ZERO),
         "the banner must raise on the observation that first saw the wedge"
     );
     assert!(
@@ -8901,7 +8907,7 @@ fn a_wedge_raises_the_banner_first_and_the_modal_only_past_the_threshold() {
     );
     assert_eq!(
         visible_texts(&m),
-        vec![WedgeKind::ReadSide.notice().to_string()],
+        banner(WedgeKind::ReadSide, ENGINE_BUSY_MODAL_THRESHOLD),
         "the banner stays up underneath the modal"
     );
 }
@@ -8932,7 +8938,7 @@ fn a_dead_connection_raises_banner_and_modal_on_the_same_observation() {
 
     assert_eq!(
         visible_texts(&m),
-        vec![WedgeKind::Dead.notice().to_string()],
+        banner(WedgeKind::Dead, Duration::ZERO),
         "a dead connection must raise the banner at once"
     );
     let Some(OverlayKind::EngineBusy(state)) = m.overlays().last().map(|o| &o.kind) else {
@@ -9050,7 +9056,7 @@ fn a_spent_reconnect_lands_on_the_dead_engine_banner_and_modal() {
     );
     assert_eq!(
         visible_texts(&m),
-        vec![WedgeKind::Dead.notice().to_string()],
+        banner(WedgeKind::Dead, Duration::ZERO),
         "the banner must stop counting attempts nobody is going to make"
     );
     let busy = m
@@ -9348,10 +9354,7 @@ fn a_wedge_that_becomes_dead_replaces_the_modal_it_had_opened() {
     );
     assert_eq!(m.overlays().len(), 1, "{:?}", m.overlays());
     assert_eq!(m.engine_busy().map(|s| s.kind), Some(WedgeKind::Dead));
-    assert_eq!(
-        visible_texts(&m),
-        vec![WedgeKind::Dead.notice().to_string()]
-    );
+    assert_eq!(visible_texts(&m), banner(WedgeKind::Dead, Duration::ZERO));
 }
 
 #[test]
@@ -9529,6 +9532,112 @@ fn the_restart_key_reaches_the_respawn_and_no_other_key_does() {
     }
 }
 
+/// The banner names `<F5>` from the first reading, so the key restarts
+/// through the whole stretch before the modal opens, and the routed copy
+/// of the key sits behind the restart, which ends the batch before it.
+#[test]
+fn f5_restarts_at_a_standing_wedge_with_no_modal_open() {
+    for kind in [WedgeKind::ReadSide, WedgeKind::WriteSide, WedgeKind::Dead] {
+        for secs in 10..=29 {
+            let mut m = model();
+            let _ = update(
+                &mut m,
+                Msg::EngineLiveness {
+                    wedge: Some(kind),
+                    observed_for: Duration::from_secs(secs),
+                },
+            );
+            assert!(
+                m.engine_busy().is_none(),
+                "{kind:?} at {secs}s opened the modal"
+            );
+            let effects = update(
+                &mut m,
+                Msg::Key(Key {
+                    notation: RESTART_NOTATION.to_string(),
+                }),
+            );
+            let restart = effects
+                .iter()
+                .position(|e| matches!(e, Effect::RestartEngine));
+            let routed = effects
+                .iter()
+                .position(|e| matches!(e, Effect::Rpc(RpcCall::Input { .. })));
+            assert!(
+                restart.is_some_and(|at| routed.is_none_or(|key| at < key)),
+                "{kind:?} at {secs}s: {effects:?}"
+            );
+        }
+    }
+}
+
+/// A healthy session's `<F5>` is the user's own key, mapped or not.
+#[test]
+fn f5_reaches_nvim_when_no_wedge_stands() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: Duration::from_secs(12),
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: None,
+            observed_for: Duration::ZERO,
+        },
+    );
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: RESTART_NOTATION.to_string(),
+        }),
+    );
+    assert!(
+        matches!(&effects[..], [Effect::Rpc(RpcCall::Input { notation })] if notation == RESTART_NOTATION),
+        "{effects:?}"
+    );
+}
+
+/// The banner leads the column whatever stood there before it, and its
+/// two lines carry the warning role.
+#[test]
+fn the_banner_takes_the_first_slot_in_the_warning_role() {
+    use crate::native::views::StyleRole;
+    let mut m = model();
+    let _ = m
+        .engine
+        .record_native_notice("an earlier notice".to_string(), false);
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: Duration::from_secs(14),
+        },
+    );
+    let boxes = m.engine.messages.visible_toasts_in(40, 60);
+    let first: Vec<(String, StyleRole)> = boxes[0]
+        .iter()
+        .map(|spans| (spans[0].text.clone(), spans[0].role))
+        .collect();
+    assert_eq!(
+        first,
+        [
+            (
+                "nvim has not answered for 14s".to_string(),
+                StyleRole::Warning
+            ),
+            (
+                "<F5> restart   <C-c> interrupt".to_string(),
+                StyleRole::Warning
+            ),
+        ]
+    );
+    assert_eq!(boxes[1][0][0].role, StyleRole::Plain);
+}
+
 #[test]
 fn dismiss_closes_the_modal_keeps_the_banner_and_does_not_reopen() {
     let mut m = model();
@@ -9555,7 +9664,7 @@ fn dismiss_closes_the_modal_keeps_the_banner_and_does_not_reopen() {
     assert!(m.overlays().is_empty(), "Dismiss must close the modal");
     assert_eq!(
         visible_texts(&m),
-        vec![WedgeKind::ReadSide.notice().to_string()],
+        banner(WedgeKind::ReadSide, ENGINE_BUSY_MODAL_THRESHOLD),
         "the underlying condition has not changed, so the banner stays"
     );
 
