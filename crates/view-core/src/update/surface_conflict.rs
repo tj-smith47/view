@@ -349,12 +349,6 @@ fn give_back(switches: &[&str], named: usize, config_was_read: bool) -> String {
     if !config_was_read {
         return UNREAD_CONFIG.to_string();
     }
-    gives_back(switches, named)
-}
-
-/// [`give_back`]'s switch line for any switch, a `view.toml` line or an nvim
-/// option alike, with no reading of `view.toml` behind it.
-pub(super) fn gives_back(switches: &[&str], named: usize) -> String {
     if switches.is_empty() {
         return String::new();
     }
@@ -363,7 +357,7 @@ pub(super) fn gives_back(switches: &[&str], named: usize) -> String {
     format!("\n{} {verb} {them} back.", join(switches))
 }
 
-/// [`gives_back`]'s line for a switch that protects what comes next and
+/// [`give_back`]'s line for a switch that protects what comes next and
 /// brings back nothing already lost.
 pub(super) fn keeps(switches: &[&str], what: &str) -> String {
     if switches.is_empty() {

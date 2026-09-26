@@ -1406,14 +1406,16 @@ pub struct EngineModel {
     /// installs a tracker holding none of the damage the replacement caused
     /// and clips the next frame to nothing.
     grids: GridRegistry,
-    /// The registry the dead engine last painted. The screen shows it from
-    /// a restart until the replacement puts a window on screen
+    /// The registry the dead engine last painted and the highlight table
+    /// its cells were drawn with. The screen shows them from a restart
+    /// until the replacement puts a window on screen
     /// ([`EngineModel::release_held_frame`]).
     ///
     /// The replacement's attach reaches that frame over several flushes, and
     /// the ones before it carry a cleared grid and no window, so painting
-    /// the live registry through them paints an empty screen.
-    held_frame: Option<GridRegistry>,
+    /// the live registry through them paints an empty screen. Its first
+    /// batch also redefines the highlight ids the held cells carry.
+    held_frame: Option<(GridRegistry, HlTable)>,
     /// The highlight table, private for the same reason `grid` is; see
     /// [`EngineModel::hl`] and the mutators beside it. Whole-table
     /// replacement stays available through [`EngineModel::replace_hl`],
@@ -1514,31 +1516,6 @@ impl EngineModel {
     #[inline]
     pub fn grids(&self) -> &GridRegistry {
         &self.grids
-    }
-
-    /// The engine grid the screen shows, for the compositor: the dead
-    /// engine's last one while a restart holds its frame.
-    #[must_use]
-    pub fn painted_grid(&self) -> &Grid {
-        self.painted_grids().global()
-    }
-
-    /// Every grid and pane the screen shows, for the compositor: the dead
-    /// engine's last registry while a restart holds its frame, and
-    /// [`Self::grids`] otherwise.
-    #[must_use]
-    #[inline]
-    pub fn painted_grids(&self) -> &GridRegistry {
-        self.held_frame.as_ref().unwrap_or(&self.grids)
-    }
-
-    /// Hands the screen back to the replacement once it has put a window
-    /// on screen.
-    pub(crate) fn release_held_frame(&mut self) {
-        // the held check first: a single-grid answer reads every cell
-        if self.held_frame.is_some() && self.grids.shows_a_window() {
-            self.held_frame = None;
-        }
     }
 
     /// Every grid and pane, for the two callers that change the window
@@ -1680,7 +1657,7 @@ impl EngineModel {
     /// | `statusline`'s bridge segments | view's own bridge, re-fired on install | no |
     /// | `grids`' global cells | a fresh attach redraws every cell | no |
     /// | `grids`' window grids and every pane | grid ids are per-connection, so both the panes and the cells behind them belong to a session that ended | yes |
-    /// | `held_frame` | the replacement's first window on screen | no: it is taken here from `grids` when no restart holds one yet, so the screen keeps the dead engine's last frame |
+    /// | `held_frame` | the replacement's first window on screen | no: it is taken here from `grids` and `hl` when no restart holds one yet, so the screen keeps the dead engine's last frame in its own colours |
     /// | `hl` | the replacement's own table replaces it | no |
     /// | `mode` | the replacement announces its modes on attach | no |
     /// | `messages`' `entries`, `toast_history` | scrollback, not a point-in-time state | no |
@@ -1702,7 +1679,8 @@ impl EngineModel {
         self.popupmenu = None;
         // a failed attempt comes back here holding the frame already, and
         // the registry it would copy now is the empty one
-        self.held_frame.get_or_insert_with(|| self.grids.clone());
+        self.held_frame
+            .get_or_insert_with(|| (self.grids.clone(), self.hl.clone()));
         self.grids.forget_grids();
         self.tabline = None;
         self.mouse_on = false;
@@ -2166,6 +2144,7 @@ impl CmdlineState {
 
 mod buffers;
 mod focus;
+mod held;
 mod look;
 mod messages;
 pub(crate) mod notice;

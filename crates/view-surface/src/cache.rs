@@ -106,7 +106,8 @@ impl Frame {
 ///   `notice_column`, the one layer its panes, floats and cursor move; the
 ///   compositor paints the panes themselves off the `Model`),
 ///   `held_frame` (the same way: `grid` is the painted grid's size, and
-///   the panes are painted off the `Model`),
+///   the panes and the highlight table held with them are painted off the
+///   `Model`),
 ///   `hl` and `mode` (painters read them off the
 ///   `Model` on the reuse path), `window_status` (the tile segments are
 ///   painted off the `Model` the same way, and the row each one stands on
@@ -529,11 +530,21 @@ mod tests {
     /// A painter reads the grid the screen shows, which during a restart
     /// is the dead engine's last frame. A read of the live registry paints
     /// the replacement's cleared grid over it, and nothing fails until a
-    /// person sees the blank screen.
+    /// person sees the blank screen. The held cells carry the dead engine's
+    /// highlight ids, which the replacement's first batch redefines, so
+    /// they are drawn with the table held beside them.
+    ///
+    /// view-core's model sources are walked too: the notice column the
+    /// compositor paints every frame places its boxes from them, and a
+    /// live read there sets a toast over the held tree or cursor line.
     #[test]
     fn every_painter_reads_the_painted_registry() {
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let mut dirs = vec![crates.join("view-surface/src"), crates.join("view-tui/src")];
+        let mut dirs = vec![
+            crates.join("view-surface/src"),
+            crates.join("view-tui/src"),
+            crates.join("view-core/src/model"),
+        ];
         let mut walked = 0;
         let mut live = Vec::new();
         while let Some(dir) = dirs.pop() {
@@ -557,7 +568,7 @@ mod tests {
                     .chars()
                     .filter(|c| !c.is_whitespace())
                     .collect();
-                for read in ["engine.grids()", "engine.grid()"] {
+                for read in ["engine.grids()", "engine.grid()", "engine.hl()"] {
                     if flat.contains(read) {
                         live.push(format!("{} reads {read}", path.display()));
                     }
@@ -567,7 +578,7 @@ mod tests {
         assert!(walked > 10, "the walk reached {walked} sources");
         assert!(
             live.is_empty(),
-            "paint through `painted_grids()` / `painted_grid()`:\n  {}",
+            "paint through `painted_grids()` / `painted_grid()` / `painted_hl()`:\n  {}",
             live.join("\n  ")
         );
     }
@@ -579,9 +590,13 @@ mod tests {
     /// reads the walk below exists to classify. Test code is out of scope
     /// either way -- no cached frame is served from it.
     fn production(source: &str) -> &str {
-        source
-            .split_once("#[cfg(test)]\nmod tests")
-            .map_or(source, |(prod, _)| prod)
+        [
+            "#[cfg(test)]\nmod tests",
+            "#[cfg(test)]\npub(crate) mod tests",
+        ]
+        .iter()
+        .find_map(|boundary| source.split_once(boundary))
+        .map_or(source, |(prod, _)| prod)
     }
 
     /// The half the classification above cannot carry on its own: `grids`

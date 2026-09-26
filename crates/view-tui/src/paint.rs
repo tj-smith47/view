@@ -824,7 +824,7 @@ fn composite_layers(
     // derived once per frame from the engine's live highlight state: a
     // lookup over already-decoded fields, not an RPC round trip, so
     // re-deriving on every paint costs nothing beyond this struct copy
-    let theme = Theme::from_hl(model.engine.hl());
+    let theme = Theme::from_hl(model.engine.painted_hl());
     let borders = BorderSet::for_caps(model.caps);
     for (index, layer) in surface.layers.iter().enumerate() {
         let area = clip_to_frame(layer.rect, frame_area);

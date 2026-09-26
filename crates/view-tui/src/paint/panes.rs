@@ -51,7 +51,7 @@ pub(super) fn paint_panes(
     buf: &mut Buffer,
 ) {
     let registry = model.engine.painted_grids();
-    let hl = model.engine.hl();
+    let hl = model.engine.painted_hl();
     // the shipped single-grid frame, and every multigrid one before its
     // first window lands: one grid covering the layer, no chrome between
     // windows, and no pane list allocated on the paint path to say so

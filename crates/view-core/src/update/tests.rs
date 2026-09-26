@@ -767,6 +767,59 @@ fn a_single_grid_restart_paints_the_dead_engines_text_until_the_replacement_draw
     assert_eq!(painted_row(&m, 1).as_deref(), Some("f"));
 }
 
+/// A toast standing through a restart is placed against the frame on
+/// screen: the held windows and cursor, where the replacement has none.
+/// Tiles fit the column inside the tile in its corner, so a column placed
+/// against the replacement's empty registry comes out wider.
+#[test]
+fn a_held_frame_keeps_the_notice_column_it_was_placed_in() {
+    let mut m = vsplit_model();
+    m.look = crate::model::Look::new(crate::model::Panes::Tiles, false);
+    let _ = update(&mut m, Msg::Redraw(written(6, "d")));
+    let placed = m.notice_column();
+    m.engine.forget_overlays();
+    let _ = update(&mut m, replacement_chrome());
+    assert_eq!(
+        m.notice_column(),
+        placed,
+        "the notice column moved to the replacement's empty registry"
+    );
+}
+
+/// The held cells carry the dead engine's highlight ids, which the
+/// replacement's first batch redefines.
+#[test]
+fn a_held_frame_keeps_the_dead_engines_colours_until_the_handback() {
+    let define = |fg| UiEvent::HlAttrDefine {
+        id: 7,
+        fg: Some(fg),
+        bg: None,
+        bold: false,
+        italic: false,
+        underline: false,
+        reverse: false,
+    };
+    let mut m = vsplit_model();
+    let _ = update(&mut m, Msg::Redraw(vec![define(0x11), UiEvent::Flush]));
+    m.engine.forget_overlays();
+    let _ = update(&mut m, Msg::Redraw(vec![define(0x22), UiEvent::Flush]));
+    let fg = |m: &Model| m.engine.painted_hl().attr(7).and_then(|attr| attr.fg);
+    assert_eq!(fg(&m), Some(0x11), "the held frame took the new colours");
+
+    let mut placed = vec![UiEvent::WinPos {
+        grid: 2,
+        win: crate::events::WinHandle(1000),
+        startrow: 0,
+        startcol: 0,
+        width: 80,
+        height: 23,
+    }];
+    placed.extend(written(2, "f"));
+    let _ = update(&mut m, replacement_chrome());
+    let _ = update(&mut m, Msg::Redraw(placed));
+    assert_eq!(fg(&m), Some(0x22), "the handback kept the dead colours");
+}
+
 #[test]
 fn a_click_in_the_right_split_names_that_grid() {
     let mut m = vsplit_model();
@@ -11046,9 +11099,28 @@ fn a_restart_names_the_buffer_it_reopened_without_its_unsaved_changes() {
         [
             "view: README.md reopened from disk; its unsaved changes had no swap \
              file (swapfile is off)",
-            "set swapfile keeps unsaved changes through the next restart.",
+            "swapfile on in your config keeps unsaved changes through a restart.",
         ],
     );
+}
+
+/// `'swapfile'` is buffer-local and the replacement re-sources the config
+/// that turned it off, so a remedy spelled as a command recovers nothing.
+#[test]
+fn the_no_swap_remedy_names_the_config_and_no_command() {
+    let mut m = model();
+    m.supervision
+        .note_restart_unsaved(vec!["/w/a.md".to_string(), "/w/b.md".to_string()]);
+    let _ = restart_reading(&mut m, &[], true);
+    let texts = visible_texts(&m);
+    let remedy = texts.last().map(String::as_str).unwrap_or_default();
+    assert!(remedy.contains("in your config"), "{texts:?}");
+    for command in [":set", "set "] {
+        assert!(
+            !texts.iter().any(|line| line.contains(command)),
+            "the remedy names `{command}`: {texts:?}"
+        );
+    }
 }
 
 #[test]

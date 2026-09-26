@@ -319,7 +319,10 @@ fn file_names(paths: &[String]) -> Vec<String> {
 
 /// What a restart says about the buffers `names` it reopened from disk with
 /// their unsaved changes gone, and, when `swap_off`, the option that kept
-/// them from a swap file and the line that turns it back on.
+/// them from a swap file and the config change that keeps them next time.
+/// The remedy names the config: `'swapfile'` is buffer-local, and a
+/// replacement re-sources the config that turned it off, so a `:set` in
+/// this session recovers nothing at the next restart.
 pub(super) fn lost_notice(names: &[String], swap_off: bool) -> String {
     let (its, files) = if names.len() > 1 {
         ("their", "swap files")
@@ -333,8 +336,8 @@ pub(super) fn lost_notice(names: &[String], swap_off: bool) -> String {
     if swap_off {
         notice.push_str(" (swapfile is off)");
         notice.push_str(&super::surface_conflict::keeps(
-            &["set swapfile"],
-            "unsaved changes through the next restart",
+            &["swapfile on in your config"],
+            "unsaved changes through a restart",
         ));
     }
     notice

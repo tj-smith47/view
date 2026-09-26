@@ -162,11 +162,11 @@ impl Model {
     pub fn notice_bounds(&self) -> (u16, u16, u16, u16) {
         let anchor = self.notice_anchor();
         let (top, left) = (anchor.is_top_corner(), anchor.is_left_corner());
-        let (grid_w, grid_h) = self.engine.grid().size();
-        let panes = self.engine.grids().panes_in_z_order();
+        let (grid_w, grid_h) = self.engine.painted_grid().size();
+        let panes = self.engine.painted_grids().panes_in_z_order();
         let sidebar = |id| {
             self.engine
-                .grids()
+                .painted_grids()
                 .window_handle(id)
                 .and_then(|win| self.window_status.get(&win))
                 .is_some_and(|status| matches!(status.kind, TileKind::Sidebar { .. }))
@@ -243,7 +243,7 @@ impl Model {
         let right = col.saturating_add(width);
         let mut top = row;
         let mut bottom = row.saturating_add(height);
-        for pane in self.engine.grids().panes_in_z_order() {
+        for pane in self.engine.painted_grids().panes_in_z_order() {
             if !matches!(pane.kind, PaneKind::Float { .. }) {
                 continue;
             }
@@ -281,7 +281,7 @@ impl Model {
     /// while a review is open in that window, the hunk under review from
     /// the first row it replaces or its header to its last added line.
     fn keep_clear(&self, rect: Cells) -> Option<(u16, u16)> {
-        let grids = self.engine.grids();
+        let grids = self.engine.painted_grids();
         let (cursor_row, _) = grids.cursor_pos();
         let (focused, ..) = grids.cursor_local();
         let window = grids
@@ -316,7 +316,7 @@ impl Model {
         let buffer = review.buffer?;
         let status = self
             .engine
-            .grids()
+            .painted_grids()
             .window_handle(grid)
             .and_then(|win| self.window_status.get(&win))
             .filter(|status| status.buf == buffer.0)?;
