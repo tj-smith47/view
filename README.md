@@ -88,7 +88,8 @@ What typing over a link feels like is under [Performance](#performance).
 
 **Your work survives a crash.** If Neovim hangs or crashes underneath
 view, it is interrupted or restarted with your buffers restored, and the
-screen never goes blank.
+screen never goes blank. Unsaved changes come back when swap files are on,
+as they are by default.
 
 ![the hang banner, then the same buffer back after a restart](assets/tapes/engine-restart.gif)
 

@@ -294,7 +294,9 @@ Dependency rules (audit-enforced, cfgd-style):
 - Supervision: an engine death (any exit nvim never announced — a signal, a
   crash that manages a clean exit status, a reader that stopped for its own
   reason) → view keeps the last Surface painted, offers one-key restart, and
-  swapfiles make that restart non-destructive; an engine told to exit (`:q`,
+  swapfiles make that restart non-destructive (with swapfiles off, the
+  restart's notice names each buffer it reopened from disk and the option
+  that gives recovery back); an engine told to exit (`:q`,
   `:cq`) announces its own departure over view's bridge before the channel
   closes, and that announcement — never the exit status, which carries no
   intent at all on Windows — is what ends the session with nvim's own status
