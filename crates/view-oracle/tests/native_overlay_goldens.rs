@@ -649,6 +649,67 @@ fn basic_crashed_ai_panel() {
     );
 }
 
+/// A review the agent opened on a file inside the workspace, and a second
+/// one queued behind it outside the workspace under the home: the panel
+/// names both relative to where the reader already is, and carries the
+/// review's keys nowhere (they are on the hunk in the buffer).
+fn reviewing_ai_panel(width: u16, height: u16) -> LayerKind {
+    use view_core::native::ai_panel::{AiPanelState, DiffReviewState};
+    let mut state = AiPanelState::new();
+    state.set_workspace(
+        PathBuf::from("/home/me/work"),
+        Some(PathBuf::from("/home/me")),
+    );
+    state.agent_name = Some("Stub".to_string());
+    let hunks = view_core::native::diff::hunk::diff(Some("alpha\nbeta\n"), "alpha\nBETA\n");
+    let mut review = DiffReviewState::new(1, PathBuf::from("/home/me/work/src/main.rs"), 1, hunks);
+    let _ = review.bind(1, Some(view_core::msg::BufferHandle(9)), 1);
+    state.pending_diff = Some(review);
+    state.pending_diff_next = Some(DiffReviewState::new(
+        2,
+        PathBuf::from("/home/me/.cache/scratch.txt"),
+        2,
+        Vec::new(),
+    ));
+    LayerKind::Ai(state.view(usize::from(height), usize::from(width), false))
+}
+
+#[test]
+fn full_agent_review_relative_path() {
+    assert_golden(
+        "full-agent-review-relative-path",
+        &dump(
+            Tier::Full,
+            DRAWS_BOX_GLYPHS,
+            44,
+            8,
+            reviewing_ai_panel(44, 8),
+        ),
+    );
+}
+
+#[test]
+fn basic_agent_review_relative_path() {
+    assert_golden(
+        "basic-agent-review-relative-path",
+        &dump(Tier::Basic, NO_BOX_GLYPHS, 44, 8, reviewing_ai_panel(44, 8)),
+    );
+}
+
+#[test]
+fn standard_agent_review_relative_path() {
+    assert_golden(
+        "standard-agent-review-relative-path",
+        &dump(
+            Tier::Standard,
+            DRAWS_BOX_GLYPHS,
+            44,
+            8,
+            reviewing_ai_panel(44, 8),
+        ),
+    );
+}
+
 /// The two crossings the committed dumps do not have files for: a `basic`
 /// terminal whose box-glyph probe came back, and a `full` one whose did
 /// not. Each is asserted against the same-fixture dump of the tier that

@@ -3,7 +3,7 @@
 # this file holds at HEAD is refused, and a crate under its row fails until
 # the row is lowered in the same change.
 view 633
-view-ai 306
+view-ai 305
 view-bench 293
 view-core 1128
 view-engine 890
@@ -11,6 +11,6 @@ view-harness 461
 view-native 222
 view-oracle 711
 view-proc 23
-view-surface 138
+view-surface 133
 view-test-support 37
 view-tui 403

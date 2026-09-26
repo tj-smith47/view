@@ -1005,7 +1005,7 @@ ensure_artifact "$STUB_BIN" "$TARGET_ROOT/release/view-ai-stub-agent" \
     exit 1
 }
 
-FOCUSED_TITLE=$(const_str "$PANEL_RS" FOCUSED_TITLE)
+FOCUSED_TITLE=$(agent_panel_title focused) || exit 1
 # Truncated deliberately: the panel is a column beside the buffer and the
 # hint row is wider than it, so the full constant is never on screen. The
 # leading run of it still fails loudly if the keys are reworded.

@@ -2944,6 +2944,7 @@ fn agent_in_the_right_tile(gaps: bool) -> Tiles {
             win: WinHandle(1001),
         },
     );
+    model.ai_panel_mut().agent_name = Some("Stub".to_owned());
     model
         .ai_panel_mut()
         .transcript
@@ -3434,6 +3435,7 @@ fn agent_overlay_beside_the_tiles(gaps: bool) -> Tiles {
         view_core::native::geometry::Anchor::Right,
         None,
     );
+    tiles.model.ai_panel_mut().agent_name = Some("Stub".to_owned());
     tiles
         .model
         .ai_panel_mut()

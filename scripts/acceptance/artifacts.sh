@@ -496,6 +496,28 @@ const_str() {
     printf '%s' "$value"
 }
 
+# The agent panel's title while the stub agent holds it, `focused` or not:
+# the panel is titled with the name the agent gives itself in its
+# `initialize` reply, and entered it adds the way back out. Read from the
+# stub's own reply and the panel's own suffix, so a renamed stub or a
+# reworded suffix moves every leg that waits on the title.
+agent_panel_title() {
+    local focused="${1:-}" name suffix
+    name=$(grep -oE '"agentInfo": \{[^}]*"title": "[^"]+"' \
+        "$REPO_ROOT/crates/view-ai/tests/fixtures/stub_agent.rs" |
+        sed -E 's/.*"title": "([^"]+)"/\1/') || true
+    if [ -z "$name" ]; then
+        printf 'FAIL: the stub agent names itself with no agentInfo title any more\n' >&2
+        return 1
+    fi
+    if [ "$focused" = focused ]; then
+        suffix=$(const_str "$REPO_ROOT/crates/view-core/src/native/ai_panel/mod.rs" \
+            FOCUSED_SUFFIX) || return 1
+        name=$name$suffix
+    fi
+    printf '%s' "$name"
+}
+
 # The value of a `Duration::from_secs` constant, read from the file that
 # owns it. A threshold that moved and a script that did not would silently
 # assert the wrong window, which is the one failure a timing acceptance

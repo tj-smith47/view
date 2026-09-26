@@ -103,7 +103,7 @@ fn unbindable(model: &mut Model) -> Vec<Effect> {
     };
     let notice = format!(
         "{} could not be opened: {}",
-        review.path.display(),
+        panel.display_path(&review.path),
         ReviewSync::Unbindable.notice().unwrap_or_default()
     );
     panel.transcript.record_review(notice);
@@ -202,7 +202,8 @@ pub(super) fn review_verb(model: &mut Model, verb: &str) -> Vec<Effect> {
             .record_native_notice(refusal_notice(Refusal::UnknownVerb), false);
     }
     let target = model.ai_review_open_target;
-    let Some(review) = model.ai_panel_mut().pending_diff.as_mut() else {
+    let panel = model.ai_panel_mut();
+    let Some(review) = panel.pending_diff.as_mut() else {
         return Vec::new();
     };
     let index = review.cursor;
@@ -228,7 +229,7 @@ pub(super) fn review_verb(model: &mut Model, verb: &str) -> Vec<Effect> {
         }
         LEAVE => {
             let closing = review.close_effects();
-            let outcome = review.outcome();
+            let outcome = review.outcome(&panel.cwd, panel.home.as_deref());
             // Abandoned with decisions still owed, so the session forgets
             // the proposal was ever raised: the user dismissed it unread,
             // and an agent restating the same diff later must reach them
@@ -284,7 +285,8 @@ pub(super) fn review_verb(model: &mut Model, verb: &str) -> Vec<Effect> {
         let panel = model.ai_panel_mut();
         if let Some(finished) = panel.pending_diff.take() {
             effects.extend(finished.close_effects());
-            panel.transcript.record_review(finished.outcome());
+            let outcome = finished.outcome(&panel.cwd, panel.home.as_deref());
+            panel.transcript.record_review(outcome);
         }
         effects.extend(promote_queued(model));
     } else if let Some(review) = model.ai_panel().pending_diff.as_ref() {
@@ -355,9 +357,10 @@ fn promote_queued(model: &mut Model) -> Vec<Effect> {
         return Vec::new();
     };
     let effects = vec![queued.bind_effect()];
+    let shown = panel.display_path(&queued.path);
     panel
         .transcript
-        .record_review(format!("now reviewing {}", queued.path.display()));
+        .record_review(format!("now reviewing {shown}"));
     panel.pending_diff = Some(queued);
     model.dirty = true;
     effects

@@ -31,8 +31,13 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq)]
 pub enum AiEvent {
     /// The handshake and session creation both completed; `session_id` is
-    /// what every later exchange in this session is addressed to.
-    SessionReady { session_id: String },
+    /// what every later exchange in this session is addressed to. `agent`
+    /// is the name the agent gave itself in its `initialize` reply, when it
+    /// gave one.
+    SessionReady {
+        session_id: String,
+        agent: Option<String>,
+    },
     /// One streamed chunk of a message.
     ///
     /// `from_agent` distinguishes the agent's own reply from the user turn
@@ -409,6 +414,7 @@ mod tests {
         let events = vec![
             AiEvent::SessionReady {
                 session_id: "sess_abc123def456".to_string(),
+                agent: Some("Stub".to_string()),
             },
             AiEvent::MessageChunk {
                 message_id: Some("m1".to_string()),

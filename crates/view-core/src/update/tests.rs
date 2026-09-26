@@ -13924,6 +13924,7 @@ fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
             Box::new(|_| {}),
             Msg::Ai(AiEvent::SessionReady {
                 session_id: "s-1".to_string(),
+                agent: None,
             }),
             0,
         ),
@@ -13956,6 +13957,7 @@ fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
             Box::new(|_| {}),
             Msg::Ai(AiEvent::SessionReady {
                 session_id: "s-2".to_string(),
+                agent: None,
             }),
             0,
         ),

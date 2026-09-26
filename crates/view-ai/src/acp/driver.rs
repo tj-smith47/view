@@ -29,6 +29,7 @@
 //! `docs/acp-v1-wire-capture.md`; none is recalled.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, PoisonError};
 
 use serde_json::{json, Value};
@@ -39,6 +40,8 @@ use view_core::native::ai_event::{
     AiCommand, AiEvent, ContextBlock, Cost, FsError, PermissionOption, PlanEntry,
     PlanEntryPriority, PlanEntryStatus, StopReason, ToolCallStatus,
 };
+use view_core::native::ai_panel::display_path;
+use view_core::native::diff::hunk::{diff, split_lines};
 
 use crate::acp::fs::PendingReply;
 use crate::acp::permission::{permission_option, permission_outcome};
@@ -243,6 +246,9 @@ struct Driver {
     /// The directory the agent was started in, and the root the session is
     /// created against.
     cwd: std::path::PathBuf,
+    /// The home directory a path outside [`Self::cwd`] is written relative
+    /// to in the transcript, read once when the driver starts.
+    home: Option<std::path::PathBuf>,
     /// The next id for a request this client sends. Numeric because view
     /// chooses its own shape for the ids it originates; an agent's own ids
     /// keep whatever shape the agent gave them.
@@ -265,6 +271,10 @@ struct Driver {
     /// Empty means the agent offered none, which makes the retry path a
     /// no-op regardless of `requires_auth`.
     auth_methods: Vec<String>,
+    /// The name `initialize` gave the agent in `agentInfo`: its `title`,
+    /// else its `name`. Carried on [`AiEvent::SessionReady`] so the panel
+    /// is titled with it.
+    agent_name: Option<String>,
     /// Set once `authenticate` has been sent, so a `session/new` that fails
     /// with `auth_required` a second time is reported rather than retried
     /// forever against an agent whose rejection has nothing to do with
@@ -306,11 +316,13 @@ impl Driver {
             shared,
             out,
             cwd,
+            home: std::env::var_os("HOME").map(std::path::PathBuf::from),
             next_wire_id: 1,
             next_boundary_id: 1,
             outstanding: HashMap::new(),
             requires_auth,
             auth_methods: Vec::new(),
+            agent_name: None,
             auth_attempted: false,
             session_id: None,
             open_permissions: HashMap::new(),
@@ -486,6 +498,7 @@ impl Driver {
                             .collect()
                     })
                     .unwrap_or_default();
+                self.agent_name = agent_name(&result);
                 self.begin_session_new();
             }
             Outstanding::Authenticate => self.begin_session_new(),
@@ -499,6 +512,7 @@ impl Driver {
                 self.session_id = Some(session_id.to_string());
                 self.shared.emit(AiEvent::SessionReady {
                     session_id: session_id.to_string(),
+                    agent: self.agent_name.clone(),
                 });
                 for command in std::mem::take(&mut self.deferred) {
                     self.on_command(command);
@@ -594,7 +608,7 @@ impl Driver {
         let content = update
             .get("content")
             .is_some_and(|c| !c.is_null())
-            .then(|| tool_call_content(update));
+            .then(|| tool_call_content(update, &self.cwd, self.home.as_deref()));
         let mut proposed = known.map(|k| k.proposed.clone()).unwrap_or_default();
         self.shared.emit(AiEvent::ToolCallUpdate {
             tool_call_id: tool_call_id.to_string(),
@@ -603,10 +617,9 @@ impl Driver {
             content,
         });
         // The diff items of the same `content` array, raised as proposals
-        // the user decides on rather than left as the placeholder row
-        // `tool_call_content_item` renders for them. The transcript entry
-        // above is emitted first so the call the proposal belongs to is
-        // already on screen when the review opens over it.
+        // the user decides on. The transcript entry above is emitted first
+        // so the call the proposal belongs to is already on screen when the
+        // review opens over it.
         for proposal in diff_proposals(update) {
             let fingerprint = fingerprint(&proposal);
             if proposed.iter().any(|(_, seen)| *seen == fingerprint) {
@@ -1060,22 +1073,93 @@ fn tool_call_status_from_wire(wire: &str) -> Option<ToolCallStatus> {
     }
 }
 
-/// A tool call's whole `content` array, each item decoded to a display
-/// string via [`tool_call_content_item`]. Empty (not dropped) when the
+/// The name an `initialize` reply gives the agent in `agentInfo`: its
+/// display `title`, else its programmatic `name`, else `None`. A blank
+/// value names nothing.
+fn agent_name(result: &Value) -> Option<String> {
+    let info = result.get("agentInfo")?;
+    ["title", "name"]
+        .into_iter()
+        .filter_map(|key| info.get(key).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|name| !name.is_empty())
+        .map(ToString::to_string)
+}
+
+/// A tool call's whole `content` array, decoded to transcript rows: a
+/// `"diff"` item as its [`diff_preview`], with its path written relative to
+/// `cwd` or `home` (see [`display_path`]), and every other item as the one
+/// row [`tool_call_content_item`] decodes. Empty (not dropped) when the
 /// update carries no `content` array at all.
-fn tool_call_content(update: &Value) -> Vec<String> {
-    update
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|items| items.iter().map(tool_call_content_item).collect())
-        .unwrap_or_default()
+fn tool_call_content(update: &Value, cwd: &Path, home: Option<&Path>) -> Vec<String> {
+    let Some(items) = update.get("content").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for item in items {
+        match diff_item(item) {
+            Some((path, old_text, new_text)) => {
+                let shown = display_path(Path::new(path), cwd, home);
+                rows.extend(diff_preview(&shown, old_text, new_text));
+            }
+            None => rows.push(tool_call_content_item(item)),
+        }
+    }
+    rows
+}
+
+/// The rows a proposed diff shows in the transcript: `path +N -M`, then at
+/// most [`DIFF_PREVIEW_ROWS`] removed and added lines, hunk by hunk, then
+/// how many lines were left out.
+///
+/// The hunks are the ones the review opens with (`hunk::diff`), so the
+/// counts here are the counts the review decides on.
+fn diff_preview(path: &str, old_text: Option<&str>, new_text: &str) -> Vec<String> {
+    let old_lines = old_text.map(split_lines).unwrap_or_default();
+    let mut body = Vec::new();
+    let (mut added, mut removed) = (0_usize, 0_usize);
+    for hunk in diff(old_text, new_text) {
+        let (start, end) = hunk.old_range;
+        let gone = old_lines
+            .get(start as usize..end as usize)
+            .unwrap_or_default();
+        removed += gone.len();
+        added += hunk.new_lines.len();
+        body.extend(gone.iter().map(|line| format!("-{line}")));
+        body.extend(hunk.new_lines.iter().map(|line| format!("+{line}")));
+    }
+    let mut rows = vec![format!("{path} +{added} -{removed}")];
+    let more = body.len().saturating_sub(DIFF_PREVIEW_ROWS);
+    rows.extend(body.into_iter().take(DIFF_PREVIEW_ROWS));
+    if more > 0 {
+        rows.push(format!("... {more} more lines"));
+    }
+    rows
+}
+
+/// The most changed lines one diff shows in the transcript. The review in
+/// the file holds all of them.
+const DIFF_PREVIEW_ROWS: usize = 8;
+
+/// The `path`, `oldText` and `newText` of a `"diff"` item, read the way
+/// [`diff_proposal`] reads them, with any path the wire sent.
+fn diff_item(item: &Value) -> Option<(&str, Option<&str>, &str)> {
+    if item.get("type").and_then(Value::as_str) != Some("diff") {
+        return None;
+    }
+    Some((
+        item.get("path").and_then(Value::as_str)?,
+        item.get("oldText").and_then(Value::as_str),
+        item.get("newText").and_then(Value::as_str)?,
+    ))
 }
 
 /// One `ToolCallContent` item, decoded per `docs/acp-v1-wire-capture.md`'s
 /// `Content`/`Terminal` pin. A `"content"`-typed item wrapping a `"text"`
 /// `ContentBlock` becomes its own text; every other `ContentBlock` kind
-/// (`image`/`audio`/`resource_link`/`resource`), and `ToolCallContent`'s own
-/// `"diff"`/`"terminal"` variants, become `"[<kind> content]"` -- a labeled
+/// (`image`/`audio`/`resource_link`/`resource`), `ToolCallContent`'s
+/// `"terminal"` variant, and a `"diff"` item missing a field
+/// [`diff_item`] needs become `"[<kind> content]"` -- a labeled
 /// placeholder rather than a dropped item, since a client that saw content
 /// arrive and showed nothing for it looks like the call produced no output.
 /// Never guesses at unpinned field names for the placeholder kinds: it only
@@ -2271,11 +2355,13 @@ mod tests {
     }
 
     /// A `"diff"` content item is a proposal the user decides on, decoded
-    /// per the wire capture's pinned shape -- not the `[diff content]`
-    /// placeholder the transcript row renders for it.
+    /// per the wire capture's pinned shape, and the transcript row shows
+    /// its changed lines under the path relative to the workspace.
     #[test]
     fn a_diff_content_item_is_raised_as_a_proposal() {
         let (mut driver, events_rx) = diff_driver();
+        driver.cwd = std::path::PathBuf::from(abs(""));
+        driver.home = None;
 
         driver.on_notification(
             "session/update",
@@ -2291,12 +2377,16 @@ mod tests {
         );
 
         let first = next_emitted(&events_rx, "the tool call was emitted");
-        assert!(
-            matches!(
-                first,
-                view_core::msg::Msg::Ai(AiEvent::ToolCallUpdate { .. })
-            ),
-            "the call the proposal belongs to reaches the transcript first: {first:?}"
+        let view_core::msg::Msg::Ai(AiEvent::ToolCallUpdate { content, .. }) = first else {
+            panic!("the call the proposal belongs to reaches the transcript first: {first:?}");
+        };
+        assert_eq!(
+            content,
+            Some(vec![
+                "main.rs +1 -1".to_string(),
+                "-fn main() {}".to_string(),
+                "+fn main() { run() }".to_string(),
+            ])
         );
         assert_eq!(
             proposals(&events_rx),
@@ -2306,6 +2396,71 @@ mod tests {
                 "fn main() { run() }\n".to_string(),
             )]
         );
+    }
+
+    /// A diff longer than the preview shows its first changed lines and
+    /// counts the rest, with the header counting every line.
+    #[test]
+    fn a_long_diff_preview_stops_at_eight_rows_and_counts_the_rest() {
+        let old: String = (0..10).map(|n| format!("line {n}\n")).collect();
+        let new: String = (0..10).map(|n| format!("LINE {n}\n")).collect();
+        let rows = diff_preview("src/a.rs", Some(&old), &new);
+        assert_eq!(rows[0], "src/a.rs +10 -10");
+        assert_eq!(rows.len(), 1 + DIFF_PREVIEW_ROWS + 1, "{rows:?}");
+        assert_eq!(rows[1], "-line 0");
+        assert!(
+            rows[1..=DIFF_PREVIEW_ROWS]
+                .iter()
+                .all(|row| row.starts_with('-') || row.starts_with('+')),
+            "{rows:?}"
+        );
+        assert_eq!(rows[DIFF_PREVIEW_ROWS + 1], "... 12 more lines");
+
+        let short = diff_preview("b.rs", Some("a\nb\n"), "a\nB\n");
+        assert_eq!(short, vec!["b.rs +1 -1", "-b", "+B"]);
+        let added = diff_preview("new.rs", None, "x\n");
+        assert_eq!(added, vec!["new.rs +1 -0", "+x"]);
+    }
+
+    /// The panel is titled with the agent's `agentInfo.title`, else its
+    /// `agentInfo.name`, and with nothing from the agent when it sends
+    /// neither.
+    #[test]
+    fn the_agents_own_title_names_the_panel() {
+        for (info, named) in [
+            (
+                json!({ "agentInfo": { "name": "stub", "title": "Stub" } }),
+                Some("Stub"),
+            ),
+            (json!({ "agentInfo": { "name": "stub" } }), Some("stub")),
+            (
+                json!({ "agentInfo": { "name": "stub", "title": "  " } }),
+                Some("stub"),
+            ),
+            (json!({}), None),
+        ] {
+            let (events_tx, events_rx) = std::sync::mpsc::channel();
+            let shared = Arc::new(SessionShared::detached(Box::new(move |msg| {
+                let _ = events_tx.send(msg);
+            })));
+            let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+            let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+            driver.begin();
+            let initialize = out_rx.try_recv().expect("initialize was sent");
+            let mut reply = info.clone();
+            reply["protocolVersion"] = json!(PROTOCOL_VERSION);
+            driver.on_response(initialize.id.expect("initialize carries an id"), Ok(reply));
+            let session_new = out_rx.try_recv().expect("session/new was sent");
+            driver.on_response(
+                session_new.id.expect("session/new carries an id"),
+                Ok(json!({ "sessionId": "s1" })),
+            );
+            let ready = next_emitted(&events_rx, "SessionReady was emitted");
+            let view_core::msg::Msg::Ai(AiEvent::SessionReady { agent, .. }) = ready else {
+                panic!("expected SessionReady, got {ready:?}");
+            };
+            assert_eq!(agent.as_deref(), named, "{info}");
+        }
     }
 
     /// `oldText` is absent for a file that does not exist yet -- the one

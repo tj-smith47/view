@@ -219,11 +219,11 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             // pin would otherwise outlive it for the rest of the run.
             let mut effects = super::ai_fs::on_session_ended(model);
             if let Some(queued) = abandoned {
+                let shown = model.ai_panel().display_path(&queued.path);
                 effects.extend(model.engine.record_native_notice(
                     format!(
-                        "AI agent's queued changes to {} were dropped. The session ended \
-                         before that review opened",
-                        queued.path.display()
+                        "AI agent's queued changes to {shown} were dropped. The session ended \
+                         before that review opened"
                     ),
                     false,
                 ));
@@ -245,9 +245,10 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
         // a session id only ever arrives once the handshake and
         // `session/new` both succeeded, which is a stronger signal that
         // the agent is working again than any timeout could be.
-        AiEvent::SessionReady { session_id } => {
+        AiEvent::SessionReady { session_id, agent } => {
             let panel = model.ai_panel_mut();
             panel.session_id = Some(session_id);
+            panel.agent_name = agent;
             panel.local_error = None;
             // A standing answer answers questions on the user's behalf, so
             // it lasts exactly as long as the session it was given in --
@@ -282,15 +283,14 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
                 // dropped in silence: the agent believes it changed the
                 // file, and a review that never opened would otherwise
                 // look like a lost proposal.
+                let shown = model.ai_panel().display_path(&path);
                 return model.engine.record_native_notice(
-                    format!(
-                        "AI agent proposed no change to {}. The file already matches",
-                        path.display()
-                    ),
+                    format!("AI agent proposed no change to {shown}. The file already matches"),
                     false,
                 );
             }
             let panel = model.ai_panel_mut();
+            let shown = panel.display_path(&path);
             if panel.pending_diff.is_some() && panel.pending_diff_next.is_some() {
                 // Both slots full. This is the one proposal that is
                 // announced and dropped, and it is dropped at the driver
@@ -299,8 +299,8 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
                 // ever saw.
                 let notice = model.engine.record_native_notice(
                     format!(
-                        "AI agent proposed changes to {} and dropped them. Two reviews are already waiting",
-                        path.display()
+                        "AI agent proposed changes to {shown} and dropped them. Two reviews are \
+                         already waiting"
                     ),
                     false,
                 );
@@ -319,13 +319,9 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             // attaches when its turn comes, so nothing is subscribed to a
             // buffer whose review is not on screen.
             if model.ai_panel().pending_diff.is_some() {
-                let path = review.path.clone();
                 model.ai_panel_mut().pending_diff_next = Some(review);
                 return model.engine.record_native_notice(
-                    format!(
-                        "AI agent proposed changes to {}, queued behind the open review",
-                        path.display()
-                    ),
+                    format!("AI agent proposed changes to {shown}, queued behind the open review"),
                     false,
                 );
             }
@@ -884,6 +880,7 @@ mod tests {
             },
             AiEvent::SessionReady {
                 session_id: "s1".to_string(),
+                agent: None,
             },
             AiEvent::FsReadRequested {
                 request_id: 1,
@@ -1038,6 +1035,7 @@ mod tests {
             &mut model,
             Msg::Ai(AiEvent::SessionReady {
                 session_id: "sess_2".to_string(),
+                agent: None,
             }),
         );
 
@@ -1222,6 +1220,7 @@ mod tests {
     fn session_ready(session_id: &str) -> Msg {
         Msg::Ai(AiEvent::SessionReady {
             session_id: session_id.to_string(),
+            agent: Some("Stub".to_string()),
         })
     }
 

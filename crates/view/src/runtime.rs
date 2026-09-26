@@ -1154,6 +1154,7 @@ pub fn run(
     // (`main.rs`'s `Model::with_cwd`) and never reassigned afterward, so an
     // engine restart's fresh `Executor` re-wiring this same worker (below)
     // still targets the one project this session was ever asked about
+    model.ai_panel_mut().configured_agent = ai_agent.label();
     let ai = crate::ai_worker::AiWorker::new(ai_agent, model.cwd.clone(), msg_tx.clone());
     // declared here so every way out of this function -- the quit returns
     // below and the `?` on a terminal write alike -- signals the agent

@@ -15,6 +15,7 @@ use ratatui::style::Style;
 use std::collections::BTreeSet;
 use view_core::grid::registry::{GridId, Pane, GLOBAL_GRID};
 use view_core::model::{Look, Model, Panes, TileKind, WindowStatus};
+use view_core::native::geometry::NativeSurface;
 use view_core::native::statusline::StatuslineState;
 use view_core::native::surfaces::{view_draws, Surface};
 use view_core::native::views::{Span, StyleRole};
@@ -142,11 +143,17 @@ fn paint_edges(
             continue;
         };
         // a native surface's window holds a scratch buffer nvim reports as
-        // any other, so the surface is what names the kind
+        // any other, so the surface is what names the kind, and the name is
+        // what the surface holds: the agent panel's agent, and nothing for
+        // a surface holding no one thing
         let status = match pane.kind.native_surface() {
             Some(surface) => {
                 let mut native = status.clone();
                 native.kind = TileKind::Native(surface);
+                native.name = match surface {
+                    NativeSurface::Agent => model.ai_panel().name().unwrap_or_default().to_owned(),
+                    _ => String::new(),
+                };
                 std::borrow::Cow::Owned(native)
             }
             None => std::borrow::Cow::Borrowed(status),

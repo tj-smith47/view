@@ -421,7 +421,9 @@ A proposal is drawn in the file itself, and its keys are buffer-local nvim
 mappings on the reviewed buffer, set when the review opens and deleted when
 it closes. They are in `:map` for exactly that window, and they take
 nothing from your config in between: the whole set lives under
-`<leader>h` and on `]c`/`[c`.
+`<leader>h` and on `]c`/`[c`. The keys are printed on the header of the
+current hunk, in the buffer, where you decide it. The agent panel names the
+file and the hunk you are on and prints no keys.
 
 <!-- generated from review_keys() -->
 | key | does | command |

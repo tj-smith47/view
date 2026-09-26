@@ -506,12 +506,15 @@ fn ai_payload(event: &view_core::native::ai_event::AiEvent) -> String {
             "ThoughtChunk {{ message_id: {message_id:?}, text: {} }}",
             capped(text)
         ),
-        // Both carry a string the agent chose: a crash message is whatever
-        // its `error.message` said, and a session id is opaque to this
-        // process. Neither is bounded by anything on this side of the wire.
-        AiEvent::SessionReady { session_id } => {
-            format!("SessionReady {{ session_id: {} }}", capped(session_id))
-        }
+        // Both carry strings the agent chose: a crash message is whatever
+        // its `error.message` said, and a session id and an agent name are
+        // opaque to this process. None is bounded by anything on this side
+        // of the wire.
+        AiEvent::SessionReady { session_id, agent } => format!(
+            "SessionReady {{ session_id: {}, agent: {} }}",
+            capped(session_id),
+            agent.as_deref().map_or_else(|| "None".to_owned(), capped)
+        ),
         AiEvent::SessionCrashed { message } => {
             format!("SessionCrashed {{ message: {} }}", capped(message))
         }
@@ -1782,6 +1785,7 @@ mod tests {
 
         let ready = ai_payload(&AiEvent::SessionReady {
             session_id: huge.clone(),
+            agent: None,
         });
         assert!(
             ready.len() < PAYLOAD_CAP * 4 && ready.contains("+199880B"),

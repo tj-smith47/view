@@ -17,7 +17,7 @@
 //! extmark shifts with the user's own edits without this state hearing
 //! about it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::super::diff::{rebase, BufTextChangedEvent, Hunk, HunkStatus};
 use super::super::views::Span;
@@ -550,29 +550,23 @@ impl DiffReviewState {
         Ok(())
     }
 
-    /// The review's summary rows in the panel: which file, which hunk of
-    /// how many, and the keys that act on it.
+    /// The review's summary rows in the panel: which file and which hunk of
+    /// how many, then the sync notice when the buffer can no longer be
+    /// trusted.
     ///
-    /// The second copy of the key hint on purpose -- the first is the
-    /// header [`Self::marks`] puts at the hunk itself, where the decision
-    /// is made. This one survives the user scrolling the buffer away from
-    /// every hunk, and is split over the same rows the header is for the
-    /// same reason: the panel is the narrowest surface here.
+    /// The keys are on the hunk's own header ([`Self::marks`]), where the
+    /// eye is when the decision is made, and nowhere else.
     #[must_use]
-    pub fn summary_rows(&self) -> Vec<Vec<Span>> {
+    pub fn summary_rows(&self, cwd: &Path, home: Option<&Path>) -> Vec<Vec<Span>> {
         let open = self.hunks.iter().filter(|h| h.status.is_open()).count();
         let mut rows = vec![vec![Span::plain(format!(
             "Review {}: hunk {}/{}, {open} open",
-            self.path.display(),
+            display_path(&self.path, cwd, home),
             (self.cursor + 1).min(self.hunks.len().max(1)),
             self.hunks.len()
         ))]];
         if let Some(notice) = self.sync.notice() {
             rows.push(vec![Span::plain(notice.to_string())]);
-            rows.push(vec![Span::plain(LEAVE_HINT)]);
-        } else {
-            rows.push(vec![Span::plain(KEY_HINT)]);
-            rows.push(vec![Span::plain(NAV_HINT)]);
         }
         rows
     }
@@ -742,9 +736,9 @@ impl DiffReviewState {
     /// The review's own sentence rather than the caller's, so the two ways
     /// it can end cannot describe the same outcome differently.
     #[must_use]
-    pub fn outcome(&self) -> String {
+    pub fn outcome(&self, cwd: &Path, home: Option<&Path>) -> String {
         let open = self.hunks.iter().filter(|h| h.status.is_open()).count();
-        let path = self.path.display();
+        let path = display_path(&self.path, cwd, home);
         if open > 0 {
             return format!("discarded the proposal for {path}. {open} hunks were left undecided");
         }
@@ -754,13 +748,45 @@ impl DiffReviewState {
     }
 }
 
+/// `path` as the agent panel prints it: relative to `cwd` when it is
+/// inside it, else relative to `~` when it is inside `home`, else as
+/// given. The workspace itself prints as `.` and the home as `~`.
+///
+/// An agent names files by absolute path, and the workspace prefix it
+/// repeats on every row is the part a reader already knows.
+#[must_use]
+pub fn display_path(path: &Path, cwd: &Path, home: Option<&Path>) -> String {
+    // an empty base strips nothing and would report every absolute path as
+    // already relative to it
+    let inside = |base: &Path| {
+        (!base.as_os_str().is_empty())
+            .then(|| path.strip_prefix(base).ok())
+            .flatten()
+    };
+    if let Some(rest) = inside(cwd) {
+        return if rest.as_os_str().is_empty() {
+            ".".to_owned()
+        } else {
+            rest.display().to_string()
+        };
+    }
+    if let Some(rest) = home.and_then(inside) {
+        return if rest.as_os_str().is_empty() {
+            "~".to_owned()
+        } else {
+            format!("~/{}", rest.display())
+        };
+    }
+    path.display().to_string()
+}
+
 /// How many hunks are in `status`.
 fn count(hunks: &[Hunk], status: HunkStatus) -> usize {
     hunks.iter().filter(|hunk| hunk.status == status).count()
 }
 
-/// The review's own keys, on the current hunk's header in the buffer and
-/// on the panel's summary row. Buffer-local nvim mappings rather than
+/// The review's own keys, on the current hunk's header in the buffer.
+/// Buffer-local nvim mappings rather than
 /// panel keys (see `docs/keymaps.md`): a reviewed buffer stays editable,
 /// so claiming bare `a`/`x`/`q` in it for the length of a review would
 /// break the one contract -- ordinary nvim keys do ordinary nvim things --
@@ -1162,18 +1188,118 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_names_the_file_the_hunk_count_and_the_keys() {
+    fn the_summary_names_the_file_and_the_hunk_count() {
         let state = review();
-        let rows = state.summary_rows();
+        let rows = state.summary_rows(Path::new("/work"), None);
         assert_eq!(
-            rows[0],
-            vec![Span::plain("Review /tmp/a.rs: hunk 1/2, 2 open")]
+            rows,
+            vec![vec![Span::plain("Review /tmp/a.rs: hunk 1/2, 2 open")]]
         );
-        assert_eq!(rows[1], vec![Span::plain(KEY_HINT)]);
+    }
+
+    /// Every key a review offers is read once on screen: on the current
+    /// hunk's header in the buffer, and on no row of the panel.
+    #[test]
+    fn the_review_keys_appear_once_on_screen() {
+        for sync in [ReviewSync::Live, ReviewSync::Detached] {
+            let mut state = review();
+            state.sync = sync;
+            let panel: Vec<String> = state
+                .summary_rows(Path::new("/tmp"), None)
+                .iter()
+                .flatten()
+                .map(|span| span.text.to_string())
+                .collect();
+            let headers: Vec<String> = state
+                .marks()
+                .into_iter()
+                .flat_map(|mark| mark.header)
+                .collect();
+            for hint in [
+                KEY_HINT,
+                STALE_KEY_HINT,
+                UNANCHORED_KEY_HINT,
+                NAV_HINT,
+                LEAVE_HINT,
+            ] {
+                for key in hint
+                    .split_whitespace()
+                    .filter(|word| word.starts_with("<leader>") || matches!(*word, "]c" | "[c"))
+                {
+                    let seen = panel
+                        .iter()
+                        .chain(&headers)
+                        .map(|row| row.matches(key).count())
+                        .sum::<usize>();
+                    assert!(
+                        seen <= 1,
+                        "{key} is on screen {seen} times under {sync:?}: panel {panel:?}, headers {headers:?}"
+                    );
+                    assert!(
+                        panel.iter().all(|row| !row.contains(key)),
+                        "{key} is in the panel under {sync:?}: {panel:?}"
+                    );
+                }
+            }
+            assert!(
+                headers.iter().any(|row| row.contains("<leader>hq")),
+                "the way out is on the hunk under {sync:?}: {headers:?}"
+            );
+        }
+    }
+
+    /// The four places the panel prints a path, each fed the same paths:
+    /// inside the workspace, the workspace itself, inside the home, the home
+    /// itself, and outside both.
+    #[test]
+    fn every_panel_path_is_relative_to_the_workspace() {
+        let cwd = Path::new("/home/me/work");
+        let home = Some(Path::new("/home/me"));
+        let cases = [
+            ("/home/me/work/src/a.rs", "src/a.rs"),
+            ("/home/me/work", "."),
+            ("/home/me/.cache/x/a.rs", "~/.cache/x/a.rs"),
+            ("/home/me", "~"),
+            ("/etc/hosts", "/etc/hosts"),
+        ];
+        for (path, shown) in cases {
+            assert_eq!(display_path(Path::new(path), cwd, home), shown);
+            let state = DiffReviewState::new(1, PathBuf::from(path), 3, Vec::new());
+            assert_eq!(
+                state.summary_rows(cwd, home)[0],
+                vec![Span::plain(format!("Review {shown}: hunk 1/0, 0 open"))]
+            );
+            assert_eq!(
+                state.outcome(cwd, home),
+                format!("accepted 0 and rejected 0 hunks in {shown}")
+            );
+            let mut panel = crate::native::ai_panel::AiPanelState::new();
+            panel.set_workspace(cwd.to_path_buf(), home.map(Path::to_path_buf));
+            panel.pending_diff = Some(DiffReviewState::new(
+                1,
+                PathBuf::from("/home/me/work/b.rs"),
+                3,
+                Vec::new(),
+            ));
+            panel.pending_diff_next = Some(state);
+            let view = panel.view(40, 80, false);
+            let review: Vec<String> = view
+                .review
+                .iter()
+                .flatten()
+                .map(|span| span.text.to_string())
+                .collect();
+            assert!(
+                review.contains(&format!(
+                    "{shown} is queued and opens when this review ends"
+                )),
+                "{review:?}"
+            );
+        }
         assert_eq!(
-            rows[2],
-            vec![Span::plain(NAV_HINT)],
-            "the panel is narrower than the buffer, so its copy is split too"
+            display_path(Path::new("/a/b"), Path::new(""), None),
+            "/a/b",
+            "an unset workspace strips nothing"
         );
     }
 
@@ -1215,7 +1341,7 @@ mod tests {
     fn the_summary_says_why_a_broken_review_cannot_be_acted_on() {
         let mut state = review();
         state.sync = ReviewSync::Detached;
-        let rows = state.summary_rows();
+        let rows = state.summary_rows(Path::new("/work"), None);
         assert!(
             rows[1][0].text.contains("edit stream ended"),
             "a review that cannot apply must say so: {rows:?}"
@@ -1468,13 +1594,13 @@ mod tests {
     fn the_outcome_counts_the_decisions_or_says_the_proposal_was_dismissed() {
         let mut state = review();
         assert_eq!(
-            state.outcome(),
-            "discarded the proposal for /tmp/a.rs. 2 hunks were left undecided"
+            state.outcome(Path::new("/tmp"), None),
+            "discarded the proposal for a.rs. 2 hunks were left undecided"
         );
         let _ = state.accept(0).unwrap();
         assert!(state.reject(1).is_ok());
         assert_eq!(
-            state.outcome(),
+            state.outcome(Path::new("/work"), None),
             "accepted 1 and rejected 1 hunks in /tmp/a.rs"
         );
     }

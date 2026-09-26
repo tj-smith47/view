@@ -361,8 +361,8 @@ fn picker_split_rows(
             .collect(),
         selected: None,
         header_keep_tail: false,
-        items_keep_tail: false,
         rule: false,
+        footer: Vec::new(),
     };
     let preview = lay_out(&preview_body, preview_width, height, borders);
 
@@ -583,29 +583,16 @@ struct Body {
     /// [`lay_out`] knows which of them is selected.
     items: Vec<Line>,
     selected: Option<usize>,
-    /// Which end of `header` [`lay_out`] keeps when the overlay is too
-    /// short for all of it: `false` (every kind but [`ai_body`]) keeps the
-    /// first `height` rows, the shape a prompt or picker's own message-then-
-    /// input ordering wants. `true` keeps the last `height` rows instead --
-    /// `ai_body`'s only user, where the tail is the crash banner and the
-    /// pending permission's answerable options, and the head is the
-    /// question and composer line above them; a crashed session or a
-    /// request blocking the agent's own turn cannot be shown without those,
-    /// while the question is context that can be sacrificed first.
+    /// Whether this body is laid out as a chat ([`lay_out_chat`]): `false`
+    /// (every kind but [`ai_body`]) keeps the first `height` header rows,
+    /// the shape a prompt or picker's own message-then-input ordering
+    /// wants, and the first items. `true` keeps the header's last rows --
+    /// the crash banner and the pending permission's answerable options,
+    /// which a crashed session or a request blocking the agent's own turn
+    /// cannot be shown without, while the question above them is context
+    /// that can be sacrificed first -- and the newest items, which is where
+    /// a reader is and the end whose loss reads as a dead panel.
     header_keep_tail: bool,
-    /// Which end of `items` [`lay_out`] keeps when there are more of them
-    /// than rows, for a body with no `selected` row to anchor the window
-    /// on: `false` (every kind but [`ai_body`]) keeps the first rows, the
-    /// only end a list of matches or a file tree has an order for. `true`
-    /// keeps the last -- a transcript's newest rows, which is where a
-    /// reader is, and the end whose loss reads as a dead panel.
-    ///
-    /// The panel derives its own window before the rows ever reach here
-    /// (see `AiPanelState::view`), so this normally has nothing to cut. It
-    /// is what keeps a header taller than that window's arithmetic
-    /// expected -- a permission prompt's options, a review summary -- from
-    /// costing the newest rows instead of the oldest.
-    items_keep_tail: bool,
     /// Whether this body draws the rule that separates its header from its
     /// scrolling items.
     ///
@@ -614,64 +601,88 @@ struct Body {
     /// `header`'s own kept rows have had theirs -- the lowest priority in
     /// the row, nothing to lose by disappearing first.
     ///
-    /// For `header_keep_tail: true` ([`ai_body`]) the rule instead ranks
-    /// between the header's two tiers: below the single most-recent row
-    /// (the crash banner, or the last-pushed permission option) but above
-    /// the rest of the header (the question and composer line). A rule
-    /// folded into `header` as its own trailing [`Line::Rule`] (the shape
-    /// every one of these bodies used before this field existed) would
-    /// instead outrank the very row `header_keep_tail: true` exists to
-    /// protect: as the literal last element, a "keep the last `budget`
-    /// rows" slice would keep the rule ahead of the crash banner or the
-    /// permission options at the one-row budget an overlay squeezed thin
-    /// enough reaches, which is exactly backwards from what those two
-    /// exist to guarantee survive truncation. See [`lay_out`]'s
-    /// `header_keep_tail` branch for the exact tier order.
+    /// For `header_keep_tail: true` ([`ai_body`]) the rule separates the
+    /// transcript from the [`Self::footer`] under it, and ranks below the
+    /// footer's last row and the header's last row (the crash banner, or
+    /// the last-pushed permission option) and above everything else. See
+    /// [`chat_fit`] for the exact tier order.
     rule: bool,
+    /// Rows pinned to the bottom of a `header_keep_tail` body, under the
+    /// rule: the agent panel's composer, so the newest transcript row sits
+    /// directly above what the user is typing. Kept from the tail, since
+    /// the last row is where the cursor is. Empty for every other kind.
+    footer: Vec<Line>,
 }
 
-/// How a `header_keep_tail` body's rows were spent against a row budget:
-/// how many of the header rows above its last one were kept (always the
-/// tail of them), and whether the last header row and the rule each got a
-/// slot of their own.
+/// How a run of rows was spent against a row budget: how many of the rows
+/// above its last one were kept (always the tail of them), and whether the
+/// last row got a slot of its own.
 struct HeaderFit {
     rest: usize,
     last: bool,
-    rule: bool,
 }
 
-/// Priority order, most important first: the single most-recently pushed
-/// header row (the crash banner, or the last permission option), then the
-/// rule, then the rest of the header from most recent to least. The rule
-/// sits between those two tiers rather than outranking the row it separates
-/// from context -- see [`Body::rule`] -- so it is spent from the same
-/// `budget` the header content shares, one slot at a time, in that order.
+/// How a `header_keep_tail` body's rows were spent: its header, the rule
+/// and its footer.
+struct ChatFit {
+    header: HeaderFit,
+    rule: bool,
+    footer: HeaderFit,
+}
+
+impl ChatFit {
+    /// The footer rows kept, painted at the bottom of the rect.
+    fn footer_rows(&self) -> usize {
+        self.footer.rest + usize::from(self.footer.last)
+    }
+}
+
+/// Priority order, most important first: the footer's last row (the
+/// composer row the cursor is usually on), the header's last row (the
+/// crash banner, or the last permission option), the rule, the rest of the
+/// header from most recent to least, and the rest of the footer from most
+/// recent to least. The rule is spent from the same `budget` as the
+/// content, one slot at a time, in that order.
 ///
 /// Its own function rather than [`lay_out`]'s locals, because [`ai_caret`]
 /// has to name the row this arithmetic put the composer on. Two copies of
 /// it is a caret that walks off its own text on exactly the panels short
 /// enough for the truncation to bite.
 ///
-/// Takes the header's row count rather than its rows: the count is all this
-/// reads, and [`ai_caret`] runs on every frame the user is typing on --
-/// building a header there only to measure it would clone the panel's chrome
-/// spans per keystroke.
-fn header_fit(header_len: usize, rule: bool, budget: usize) -> HeaderFit {
-    let rest_len = header_len.saturating_sub(1);
-    let last = header_len >= 1 && budget >= 1;
-    let rule = rule && budget > usize::from(last);
-    let slots_used = usize::from(last) + usize::from(rule);
-    HeaderFit {
-        rest: budget.saturating_sub(slots_used).min(rest_len),
-        last,
+/// Takes row counts rather than rows: the counts are all this reads, and
+/// [`ai_caret`] runs on every frame the user is typing on -- building a
+/// header there only to measure it would clone the panel's chrome spans
+/// per keystroke.
+fn chat_fit(header_len: usize, footer_len: usize, rule: bool, budget: usize) -> ChatFit {
+    let mut left = budget;
+    let mut take = |wanted: bool| {
+        let taken = wanted && left > 0;
+        left -= usize::from(taken);
+        taken
+    };
+    let footer_last = take(footer_len >= 1);
+    let header_last = take(header_len >= 1);
+    let rule = take(rule);
+    let header_rest = left.min(header_len.saturating_sub(1));
+    left -= header_rest;
+    let footer_rest = left.min(footer_len.saturating_sub(1));
+    ChatFit {
+        header: HeaderFit {
+            rest: header_rest,
+            last: header_last,
+        },
         rule,
+        footer: HeaderFit {
+            rest: footer_rest,
+            last: footer_last,
+        },
     }
 }
 
 impl HeaderFit {
-    /// Which of the rows [`lay_out`] painted holds header line `index` of a
-    /// `header_len`-line header, or `None` when the truncation dropped that
-    /// line entirely.
+    /// Which of the kept rows holds line `index` of a `header_len`-line
+    /// run, counted from the first kept row, or `None` when the truncation
+    /// dropped that line entirely.
     fn row_of(&self, index: usize, header_len: usize) -> Option<usize> {
         if index + 1 >= header_len {
             return self.last.then_some(self.rest);
@@ -694,31 +705,17 @@ impl HeaderFit {
 /// selection instead (centering it, or starting from it) would jump the
 /// list on every cursor move.
 fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
+    if body.header_keep_tail {
+        return lay_out_chat(body, width, height, borders);
+    }
     let mut lines: Vec<Vec<Span>> = Vec::with_capacity(usize::from(height));
     let budget = usize::from(height);
-    if body.header_keep_tail {
-        let kept = header_fit(body.header.len(), body.rule, budget);
-        let (last, rest) = body
-            .header
-            .split_last()
-            .map_or((None, &[][..]), |(last, rest)| (Some(last), rest));
-        for line in &rest[rest.len() - kept.rest..] {
-            lines.push(fit(line, width, borders));
-        }
-        if let Some(last) = last.filter(|_| kept.last) {
-            lines.push(fit(last, width, borders));
-        }
-        if kept.rule {
-            lines.push(fit(&Line::Rule, width, borders));
-        }
-    } else {
-        let header_budget = budget.min(body.header.len());
-        for line in &body.header[..header_budget] {
-            lines.push(fit(line, width, borders));
-        }
-        if body.rule && lines.len() < budget {
-            lines.push(fit(&Line::Rule, width, borders));
-        }
+    let header_budget = budget.min(body.header.len());
+    for line in &body.header[..header_budget] {
+        lines.push(fit(line, width, borders));
+    }
+    if body.rule && lines.len() < budget {
+        lines.push(fit(&Line::Rule, width, borders));
     }
     let header_rows = lines.len();
     let item_rows = usize::from(height).saturating_sub(header_rows);
@@ -727,7 +724,6 @@ fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
     let selected = body.selected.filter(|i| *i < body.items.len());
     let first = match selected {
         Some(i) if item_rows > 0 && i >= item_rows => i + 1 - item_rows,
-        None if body.items_keep_tail => body.items.len().saturating_sub(item_rows),
         _ => 0,
     };
     for (offset, item) in body.items.iter().skip(first).take(item_rows).enumerate() {
@@ -749,6 +745,53 @@ fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
         selected: selected_row,
         framed: false,
     }
+}
+
+/// [`lay_out`] for a `header_keep_tail` body: the header at the top, the
+/// footer at the bottom with the rule above it, and the newest items
+/// directly above the rule. Blank rows go between the header and the
+/// items, so a short transcript reads upwards from the composer the way a
+/// chat does.
+fn lay_out_chat(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
+    let budget = usize::from(height);
+    let kept = chat_fit(body.header.len(), body.footer.len(), body.rule, budget);
+    let mut lines: Vec<Vec<Span>> = Vec::with_capacity(budget);
+    for line in kept_tail(&body.header, &kept.header) {
+        lines.push(fit(line, width, borders));
+    }
+    let mut bottom: Vec<Vec<Span>> = Vec::new();
+    if kept.rule {
+        bottom.push(fit(&Line::Rule, width, borders));
+    }
+    for line in kept_tail(&body.footer, &kept.footer) {
+        bottom.push(fit(line, width, borders));
+    }
+    let item_rows = budget.saturating_sub(lines.len() + bottom.len());
+    let first = body.items.len().saturating_sub(item_rows);
+    let shown = body.items.len() - first;
+    for _ in shown..item_rows {
+        lines.push(vec![Span::plain(" ".repeat(usize::from(width)))]);
+    }
+    for item in &body.items[first..] {
+        lines.push(fit(&marked(item, UNSELECTED_MARK), width, borders));
+    }
+    lines.extend(bottom);
+    Rows {
+        lines,
+        selected: None,
+        framed: false,
+    }
+}
+
+/// The rows of `run` that `fit` kept: the tail of the rows above its last,
+/// then its last.
+fn kept_tail<'a>(run: &'a [Line], fit: &HeaderFit) -> impl Iterator<Item = &'a Line> {
+    let (last, rest) = run
+        .split_last()
+        .map_or((None, &[][..]), |(last, rest)| (Some(last), rest));
+    rest[rest.len() - fit.rest..]
+        .iter()
+        .chain(last.filter(|_| fit.last))
 }
 
 /// The [`Body`] for a native overlay layer, or `None` for a layer kind that
@@ -787,8 +830,8 @@ fn picker_body(view: &PickerView) -> Body {
         items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: view.selected,
         header_keep_tail: false,
-        items_keep_tail: false,
         rule: true,
+        footer: Vec::new(),
     }
 }
 
@@ -804,8 +847,8 @@ fn tree_body(view: &TreeView) -> Body {
             .collect(),
         selected: view.selected,
         header_keep_tail: false,
-        items_keep_tail: false,
         rule: false,
+        footer: Vec::new(),
     }
 }
 
@@ -850,8 +893,8 @@ fn statusline_body(view: &StatuslineView) -> Body {
         items: Vec::new(),
         selected: None,
         header_keep_tail: false,
-        items_keep_tail: false,
         rule: false,
+        footer: Vec::new(),
     }
 }
 
@@ -876,8 +919,8 @@ fn prompt_body(view: &PromptView) -> Body {
             .collect(),
         selected: view.selected,
         header_keep_tail: false,
-        items_keep_tail: false,
         rule: true,
+        footer: Vec::new(),
     }
 }
 
@@ -891,8 +934,8 @@ fn palette_body(view: &PaletteView) -> Body {
         items: view.rows.iter().map(palette_row_line).collect(),
         selected: view.selected,
         header_keep_tail: false,
-        items_keep_tail: false,
         rule: true,
+        footer: Vec::new(),
     }
 }
 
@@ -907,8 +950,8 @@ fn stream_body(view: &PaletteView) -> Body {
         items: view.rows.iter().map(palette_row_line).collect(),
         selected: view.selected,
         header_keep_tail: false,
-        items_keep_tail: false,
         rule: false,
+        footer: Vec::new(),
     }
 }
 
@@ -917,31 +960,30 @@ fn stream_body(view: &PaletteView) -> Body {
 /// cursor position to point at.
 ///
 /// The crash banner and the pending permission prompt's rows, when either
-/// is present, are drawn between the composer line and the rule -- part of
-/// the header that always shows, never a scrolling item, since a crashed
-/// session or a request blocking the agent's own turn must both stay
-/// visible however far the transcript has scrolled. The banner is drawn
-/// first: a crash already cleared any pending permission (see
-/// `update/ai.rs`'s `on_ai_event`), so the two never actually appear
+/// is present, are part of the header that always shows, never a scrolling
+/// item, since a crashed session or a request blocking the agent's own turn
+/// must both stay visible however far the transcript has scrolled. The
+/// banner is drawn last: a crash already cleared any pending permission
+/// (see `update/ai.rs`'s `on_ai_event`), so the two never actually appear
 /// together, and this ordering is what a future case where they did would
 /// fall back to.
+///
+/// The composer is the footer, under the transcript and the rule, so the
+/// newest row the agent wrote sits directly above what the user types.
 fn ai_body(view: &AiPanelView) -> Body {
     Body {
         title: view.title.clone(),
         header: ai_header(view),
         items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: None,
-        // the crash banner, the pending permission's options and the
-        // review's summary are the actionable content of this header; see
-        // `Body::header_keep_tail`'s own doc for why they must outlive the
-        // question and composer line under truncation
         header_keep_tail: true,
-        items_keep_tail: true,
         rule: AI_RULE,
+        footer: composer_lines(&view.input),
     }
 }
 
-/// Whether the panel draws the rule between its header and its transcript.
+/// Whether the panel draws the rule between its transcript and its
+/// composer.
 ///
 /// Named rather than written at both call sites because it costs a row of
 /// the same budget the header rows compete for (see [`Body::rule`]), so
@@ -954,22 +996,18 @@ const AI_RULE: bool = true;
 /// Header order is truncation order, because `header_keep_tail` keeps the
 /// tail: the first row here is the first sacrificed and the last is the last
 /// standing. Session accounting first (it answers a question nobody is
-/// currently blocked on), then the composer's rows (context -- what the user
-/// is typing survives in the state whether or not it is painted, and the row
-/// the cursor is on is the last of them, so a truncated composer still shows
-/// where typing lands), then the review's own summary, then a pending
+/// currently blocked on), then the review's own summary, then a pending
 /// permission's question and options, and the crash banner last of all. A
 /// dead session is the one thing that explains why nothing else on this
 /// panel will ever answer, so it outranks a review the user can still scroll
 /// to and a request whose agent is already gone.
 ///
 /// Its own function because [`ai_header_len`] counts exactly these groups
-/// and `ai_panel_header_len_counts_what_ai_header_builds` holds the two to
-/// each other -- a row group added here and not there is a caret one row off
-/// the text it belongs to.
+/// and `the_counted_ai_header_is_as_long_as_the_built_one_for_every_row_group`
+/// holds the two to each other -- a row group added here and not there is a
+/// caret one row off the text it belongs to.
 fn ai_header(view: &AiPanelView) -> Vec<Line> {
     let mut header: Vec<Line> = view.usage.iter().cloned().map(Line::Text).collect();
-    header.extend(composer_lines(&view.input));
     header.extend(view.review.iter().cloned().map(Line::Text));
     header.extend(view.pending_permission.iter().cloned().map(Line::Text));
     header.extend(view.local_error.iter().cloned().map(Line::Text));
@@ -988,7 +1026,6 @@ fn ai_header(view: &AiPanelView) -> Vec<Line> {
 fn ai_header_len(view: &AiPanelView) -> usize {
     view.usage
         .len()
-        .saturating_add(composer_row_count(&view.input))
         .saturating_add(view.review.len())
         .saturating_add(view.pending_permission.len())
         .saturating_add(view.local_error.len())
@@ -1035,10 +1072,11 @@ fn composer_lines(rows: &[String]) -> Vec<Line> {
 /// composer's insertion point, or -- while a permission question is pending
 /// -- on the digit that answers it (see [`ai_caret_target`]).
 ///
-/// Resolved through the same [`header_fit`] [`rows`] laid the panel out
+/// Resolved through the same [`chat_fit`] [`rows`] laid the panel out
 /// with, and against the same painted view: which row the caret is on
-/// depends on the accounting row, the review summary, a pending question and
-/// the crash banner all being counted exactly as they were drawn.
+/// depends on the composer, the accounting row, the review summary, a
+/// pending question and the crash banner all being counted exactly as they
+/// were drawn.
 ///
 /// `None` only for a rect with no cells at all. A panel too short to have painted the caret's own
 /// row still owns the keyboard, so the caret stays inside it -- on its first interior cell, since
@@ -1077,22 +1115,35 @@ fn ai_caret_at(
     if width == 0 || height == 0 {
         return None;
     }
-    let (index, cells) = ai_caret_target(view);
+    let (target, cells) = ai_caret_target(view);
     let col = u16::try_from(cells)
         .unwrap_or(u16::MAX)
         .saturating_add(col_off)
         .min(width.saturating_sub(1));
     let header_len = ai_header_len(view);
-    let Some(row) = header_fit(header_len, AI_RULE, usize::from(interior))
-        .row_of(index, header_len)
-        .and_then(|row| u16::try_from(row).ok())
-    else {
+    let footer_len = composer_row_count(&view.input);
+    let budget = usize::from(interior);
+    let fit = chat_fit(header_len, footer_len, AI_RULE, budget);
+    let row = match target {
+        CaretRow::Header(index) => fit.header.row_of(index, header_len),
+        CaretRow::Composer(index) => fit
+            .footer
+            .row_of(index, footer_len)
+            .map(|row| budget - fit.footer_rows() + row),
+    };
+    let Some(row) = row.and_then(|row| u16::try_from(row).ok()) else {
         return Some((row_off, col_off));
     };
     Some((row.saturating_add(row_off), col))
 }
 
-/// Which of [`ai_header`]'s rows the caret belongs on, and how far into that
+/// Which run of the panel's rows the caret is on, and its index there.
+enum CaretRow {
+    Header(usize),
+    Composer(usize),
+}
+
+/// Which of the panel's rows the caret belongs on, and how far into that
 /// row in cells.
 ///
 /// Two answers, because the panel has two states that take keys. With
@@ -1108,22 +1159,16 @@ fn ai_caret_at(
 /// to eat. Static, like the confirm prompt's own caret
 /// ([`crate::prompt_cursor`]), because no key moves it: one press ends the
 /// question.
-fn ai_caret_target(view: &AiPanelView) -> (usize, usize) {
+fn ai_caret_target(view: &AiPanelView) -> (CaretRow, usize) {
     use view_core::native::ai_panel::PROMPT_COLS;
 
-    let above_composer = view.usage.len();
     if view.pending_permission.is_empty() {
         let (row, cells) = view.composer_cursor();
-        return (
-            above_composer.saturating_add(row),
-            PROMPT_COLS.saturating_add(cells),
-        );
+        return (CaretRow::Composer(row), PROMPT_COLS.saturating_add(cells));
     }
     let (row, cells) = view.permission_answer;
-    let question = above_composer
-        .saturating_add(composer_row_count(&view.input))
-        .saturating_add(view.review.len());
-    (question.saturating_add(row), cells)
+    let question = view.usage.len().saturating_add(view.review.len());
+    (CaretRow::Header(question.saturating_add(row)), cells)
 }
 
 /// One palette row: the command's name, plus its binding as a second

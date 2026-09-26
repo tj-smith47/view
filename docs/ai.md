@@ -14,6 +14,16 @@ confined to that root for as long as the session runs.
 
 ## The panel
 
+The panel's title is the agent's name, as the agent gives it when the
+session starts. Until then it is the name your config gives the agent. While
+you are in the panel the title also names the way out:
+
+```
+╭ Claude Code: Esc returns ─────╮
+```
+
+A windowed panel's tile is titled `agent: Claude Code`.
+
 The panel is a transcript. Your prompts, the agent's replies, and the
 agent's reasoning each speak in their own voice. Each entry opens with its
 own marker and paints in its own color from your colorscheme, and
@@ -62,8 +72,9 @@ puts you back in it. The same key reads the panel before it acts:
 Closing it, whichever way you get there, leaves the agent session running,
 and reopening it brings the transcript back where you left it.
 
-The prompt you are composing sits under the header, and it wraps. A prompt
-several sentences long grows the composer downward, indented under its own
+The prompt you are composing sits at the bottom of the panel, under a rule,
+with the newest transcript line directly above it. It wraps. A prompt
+several sentences long grows the composer upward, indented under its own
 `>`, with the transcript giving up the rows:
 
 ```
@@ -260,11 +271,23 @@ proposal against text that has moved, so a stale hunk offers `<leader>hR`
 the accept it would have to refuse. Keep editing the same rows and even that
 goes: once your own edits reach past the context the hunk was anchored on,
 there is no text left to re-anchor it against, so its header drops the
-re-diff and offers the reject alone. The panel keeps a summary of the
-review beside the buffer (which file, which hunk of how many, how many are
-still undecided, and the same keys), so a scroll away from every hunk does
-not lose you the review. The marks are in the buffer and the keys are on
-it, so a proposal is read and decided with no panel on screen at all.
+re-diff and offers the reject alone. The panel keeps a one-line summary of
+the review beside the buffer (which file, which hunk of how many, how many
+are still undecided), so a scroll away from every hunk does not lose you the
+review. The keys are on the current hunk's header in the buffer, and only
+there, so a proposal is read and decided with no panel on screen at all.
+
+A file the agent names is written relative to your working directory, or
+to `~` when it is outside it. The transcript row for the agent's edit shows
+the file and how many lines it adds and removes, then the first changed
+lines:
+
+```
+src/client.rs +2 -1
+-    retries: 5,
++    retries: 8,
++    backoff: Backoff::Exponential,
+```
 
 An accepted review is one undo entry of its own, separate from your own
 preceding edit: a single `u` retracts the whole thing.

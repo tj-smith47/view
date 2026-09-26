@@ -99,8 +99,8 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" --config "$CFG" view-ai-stub-diff.txt
   esac
   tmux -L "$SOCKET" send-keys -t cap 'propose' Enter
   sleep 8
-  # the AI panel still has focus after submitting the turn (docs/keymaps.md:
-  # "AI Agent: focused, Esc returns"), and ':' typed there goes into its
+  # the AI panel still has focus after submitting the turn (its title reads
+  # "Stub: Esc returns"), and ':' typed there goes into its
   # own input box rather than opening the command line -- Esc first, so the
   # dismiss verb below actually reaches `:View notifications dismiss`.
   tmux -L "$SOCKET" send-keys -t cap Escape

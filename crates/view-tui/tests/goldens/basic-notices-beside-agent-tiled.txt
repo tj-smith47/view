@@ -1,9 +1,9 @@
                                                                                 
- + left.rs ---------------------------+ + right.rs -----+ AI Agent: focused,… + 
- |left                                | |right   +-----+| >                   | 
- |                                    | |        |saved|| ------------------- | 
- |                                    | |        +-----+|   ⠋ what does the g | 
- |                                    | |    +---------+|     aps toggle do?  | 
+ + left.rs ---------------------------+ + right.rs -----+ Stub: Esc returns --+ 
+ |left                                | |right   +-----+|                     | 
+ |                                    | |        |saved||                     | 
+ |                                    | |        +-----+|                     | 
+ |                                    | |    +---------+|                     | 
  |                                    | |    |2 matches||                     | 
  |                                    | |    +---------+|                     | 
  |                                    | |       +------+|                     | 
@@ -16,15 +16,15 @@
  |                                    | |               |                     | 
  |                                    | |               |                     | 
  |                                    | |               |                     | 
- |                                    | |               |                     | 
- |                                    | |               |                     | 
- |                                    | |               |                     | 
- |                                    | |               |                     | 
+ |                                    | |               |   ⠋ what does the g | 
+ |                                    | |               |     aps toggle do?  | 
+ |                                    | |               | ------------------- | 
+ |                                    | |               | >                   | 
  + -- INSERT -- 1:1 ------------------+ + E 1 2:1 ------+---------------------+ 
                                                                                 
 --- fg ---
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCDAAAAAAAAAAAAAAAAAAAAADA
+ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCDAAAAAAAAAAAAAAAAAAADDDA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAADDDDDDDDAAAAAAAAAAAAAAAAAAAAADA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAADAAAAADDAAAAAAAAAAAAAAAAAAAAADA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAADDDDDDDDAAAAAAAAAAAAAAAAAAAAADA

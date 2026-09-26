@@ -3591,9 +3591,9 @@ mod tests {
             "the caret must be on the composer's last row: {row:?}"
         );
         assert_eq!(
-            cursor.row - layer.rect.row,
-            u16::try_from(view.input.len()).unwrap(),
-            "one row per composer row, below the frame's own top edge"
+            cursor.row,
+            layer.rect.row + layer.rect.height - 2,
+            "the composer's last row is the frame's last interior row"
         );
     }
 

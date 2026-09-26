@@ -768,7 +768,16 @@ impl Model {
     /// state, one of which no test ever exercised.
     #[must_use]
     pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
+        self.ai_panel.cwd.clone_from(&cwd);
         self.cwd = cwd;
+        self
+    }
+
+    /// This model with the home directory the agent panel writes a path
+    /// outside the workspace relative to, read once at startup.
+    #[must_use]
+    pub fn with_home(mut self, home: Option<PathBuf>) -> Self {
+        self.ai_panel.home = home;
         self
     }
 

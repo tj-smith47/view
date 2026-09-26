@@ -26,7 +26,6 @@ FIXTURE=$REPO_ROOT/compat/fixtures/minimal
 SUPERVISION_RS=$REPO_ROOT/crates/view-core/src/native/supervision.rs
 HEARTBEAT_RS=$REPO_ROOT/crates/view-engine/src/heartbeat.rs
 STALL_RS=$REPO_ROOT/crates/view-engine/src/stall.rs
-PANEL_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/mod.rs
 AI_UPDATE_RS=$REPO_ROOT/crates/view-core/src/update/ai.rs
 
 # What the exit legs' buffer holds, and what their shell prints once it has
@@ -434,18 +433,16 @@ BUSY_TITLE=$(wedge_arm title ReadSide)
 GONE_TITLE=$(wedge_arm title Dead)
 INTERRUPT_KEY=$(tmux_named_key "$(const_str "$SUPERVISION_RS" INTERRUPT_NOTATION)")
 RESTART_KEY=$(tmux_named_key "$(const_str "$SUPERVISION_RS" RESTART_NOTATION)")
-# crate-private rather than `pub`, so `const_str`'s pattern does not reach it.
-# Only the head of it is ever asserted: the panel is a third of this pane
-# wide, so its own framing truncates the title, and the part that survives is
-# still the half that says "focused" -- the unfocused title is the bare
-# `TITLE`, which carries no separator at all.
-FOCUSED_TITLE=$(grep -oE 'const FOCUSED_TITLE: &str = "[^"]+"' "$PANEL_RS" |
-    sed -E 's/.*"(.*)"/\1/' | cut -c1-16)
+# Only the head of the entered title is ever asserted: the panel is a third
+# of this pane wide, so its own framing truncates the title, and the part
+# that survives still carries the separator the entered suffix opens with.
+# The unfocused title is the agent's name alone, which carries none.
+FOCUSED_TITLE=$(agent_panel_title focused | cut -c1-16)
 case "$FOCUSED_TITLE" in
-*--*) ;;
+*:*) ;;
 *)
-    printf 'FAIL: FOCUSED_TITLE in %s no longer reads as focused within its first 16 columns (%s), so a truncated title cannot be told from the unfocused one\n' \
-        "$PANEL_RS" "${FOCUSED_TITLE:-nothing this can read}" >&2
+    printf 'FAIL: the entered agent panel title no longer reads as entered within its first 16 columns (%s), so a truncated title cannot be told from the unfocused one\n' \
+        "${FOCUSED_TITLE:-nothing this can read}" >&2
     exit 1
     ;;
 esac

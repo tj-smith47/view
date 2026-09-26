@@ -14,6 +14,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use super::geometry::{interior_text_width, LIST_MARKER_COLS};
 use super::views::{AiPanelView, Span};
@@ -24,7 +25,7 @@ mod transcript;
 
 pub use permission::PermissionPrompt;
 pub(crate) use permission::StandingAnswer;
-pub use review::{DiffReviewState, Refusal, ReviewSync};
+pub use review::{display_path, DiffReviewState, Refusal, ReviewSync};
 pub use transcript::{
     Transcript, TranscriptAnchor, TranscriptEntry, TranscriptEntryKind, TranscriptRole,
     SPINNER_INTERVAL,
@@ -294,6 +295,20 @@ pub struct AiPanelState {
     /// two scroll methods are the only writers, and both settle it against
     /// [`Transcript::tail_anchor`] before storing it.
     transcript_top: Option<TranscriptAnchor>,
+    /// The agent's own name for itself, from its `initialize` reply
+    /// (`agentInfo.title`, else `agentInfo.name`), once a session is ready.
+    pub agent_name: Option<String>,
+    /// The name the config gives the agent: its adapter id, or the file
+    /// stem of its command. Titles the panel before the agent has named
+    /// itself, and for an agent that never does.
+    pub configured_agent: String,
+    /// The workspace every path the panel prints is written relative to
+    /// (see [`display_path`]). Empty until startup sets it
+    /// ([`crate::model::Model::with_cwd`]).
+    pub(crate) cwd: PathBuf,
+    /// The home directory a path outside the workspace is written relative
+    /// to, when the process has one ([`crate::model::Model::with_home`]).
+    pub(crate) home: Option<PathBuf>,
 }
 
 /// Two panels holding the same state are equal whatever their caches hold:
@@ -324,6 +339,10 @@ impl PartialEq for AiPanelState {
             hidden_generation,
             standing_answers,
             transcript_top,
+            agent_name,
+            configured_agent,
+            cwd,
+            home,
             row_starts: _,
             row_width: _,
         } = self;
@@ -342,6 +361,10 @@ impl PartialEq for AiPanelState {
             && *hidden_generation == other.hidden_generation
             && *standing_answers == other.standing_answers
             && *transcript_top == other.transcript_top
+            && *agent_name == other.agent_name
+            && *configured_agent == other.configured_agent
+            && *cwd == other.cwd
+            && *home == other.home
     }
 }
 
@@ -378,6 +401,48 @@ impl AiPanelState {
             hidden_generation: 0,
             standing_answers: BTreeMap::new(),
             transcript_top: None,
+            agent_name: None,
+            configured_agent: String::new(),
+            cwd: PathBuf::new(),
+            home: None,
+        }
+    }
+
+    /// Sets the directories the panel's paths are printed relative to,
+    /// learned once at startup since `update()` has no filesystem access.
+    pub fn set_workspace(&mut self, cwd: PathBuf, home: Option<PathBuf>) {
+        self.cwd = cwd;
+        self.home = home;
+    }
+
+    /// `path` as this panel prints it (see [`display_path`]).
+    #[must_use]
+    pub fn display_path(&self, path: &Path) -> String {
+        display_path(path, &self.cwd, self.home.as_deref())
+    }
+
+    /// The agent's name as the panel shows it: its own, else the
+    /// configured one, else `None` when neither is known.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        [
+            self.agent_name.as_deref(),
+            Some(self.configured_agent.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|name| !name.is_empty())
+    }
+
+    /// The panel's title: the agent's name, and while the panel holds the
+    /// keys, the way back out.
+    #[must_use]
+    pub fn title(&self, focused: bool) -> String {
+        let name = self.name().unwrap_or(TITLE);
+        if focused {
+            format!("{name}{FOCUSED_SUFFIX}")
+        } else {
+            name.to_owned()
         }
     }
 
@@ -755,18 +820,18 @@ impl AiPanelState {
             rows.push(vec![Span::plain(MORE_BELOW)]);
             rows
         };
-        let mut view = AiPanelView::new(if has_keyboard { FOCUSED_TITLE } else { TITLE })
+        let mut view = AiPanelView::new(self.title(has_keyboard))
             .with_input_rows(composer)
             .with_rows(rows);
         if let Some(usage) = &self.usage {
             view = view.with_usage(vec![Span::plain(usage.render())]);
         }
         if let Some(review) = &self.pending_diff {
-            let mut rows = review.summary_rows();
+            let mut rows = review.summary_rows(&self.cwd, self.home.as_deref());
             if let Some(queued) = &self.pending_diff_next {
                 rows.push(vec![Span::plain(format!(
                     "{} is queued and opens when this review ends",
-                    queued.path.display()
+                    self.display_path(&queued.path)
                 ))]);
             }
             view = view.with_review(rows);
@@ -803,7 +868,8 @@ impl Default for AiPanelState {
     }
 }
 
-/// The overlay's title, drawn into its top border.
+/// The overlay's title while no agent name is known, drawn into its top
+/// border.
 const TITLE: &str = "AI Agent";
 
 /// Rows of every AI panel that are never transcript: the frame's top and
@@ -1256,11 +1322,11 @@ const MORE_BELOW: &str = "-- more below, <PageDown> follows again --";
 /// it, which is the whole reason it is named once here.
 const MARKER_ROWS: usize = 1;
 
-/// The entered panel's title: the border is the one surface that shows in
-/// every state, so it carries the fact that keys now belong to the panel
-/// and names the way back out. It spells none of the transcript's entry
-/// marks, which the acceptance scripts find on screen.
-const FOCUSED_TITLE: &str = "AI Agent: focused, Esc returns";
+/// What the entered panel's title carries after the agent's name: the
+/// border is the one surface that shows in every state, so it names the
+/// way back out while keys belong to the panel. It spells none of the
+/// transcript's entry marks, which the acceptance scripts find on screen.
+const FOCUSED_SUFFIX: &str = ": Esc returns";
 
 /// Named after the verb it points at (`update::mod`'s `feature == "ai" &&
 /// (verb == "open" || verb == "focus")` arm) -- shown beneath a pending
@@ -2204,12 +2270,32 @@ mod tests {
         assert_eq!(state.view(ROOM, WIDE_PANEL, state.focused).title, TITLE);
         state.focused = true;
         let view = state.view(ROOM, WIDE_PANEL, state.focused);
-        assert_eq!(view.title, FOCUSED_TITLE);
+        assert_eq!(view.title, format!("{TITLE}{FOCUSED_SUFFIX}"));
         assert!(
             view.title.contains("Esc"),
             "the entered title must name the way back out: {:?}",
             view.title
         );
+    }
+
+    /// The title is the agent's own name once its session is ready, the
+    /// configured name before that, and the generic title only when
+    /// neither is known.
+    #[test]
+    fn the_panel_is_titled_with_the_agents_name() {
+        let mut state = AiPanelState::new();
+        state.configured_agent = "view-ai-stub-agent".to_owned();
+        assert_eq!(state.title(false), "view-ai-stub-agent");
+        state.agent_name = Some("Stub".to_owned());
+        assert_eq!(state.view(ROOM, WIDE_PANEL, false).title, "Stub");
+        assert_eq!(
+            state.view(ROOM, WIDE_PANEL, true).title,
+            "Stub: Esc returns"
+        );
+        state.agent_name = Some(String::new());
+        assert_eq!(state.title(false), "view-ai-stub-agent");
+        state.configured_agent = String::new();
+        assert_eq!(state.title(false), TITLE);
     }
 
     /// The panel's own `view()` must carry and render a pending prompt, not
@@ -2328,7 +2414,7 @@ mod tests {
             }],
         ));
         let view = state.view(ROOM, WIDE_PANEL, true);
-        assert_eq!(view.title, FOCUSED_TITLE);
+        assert_eq!(view.title, state.title(true));
         assert_eq!(
             view.local_error,
             vec![vec![Span::plain(format!(

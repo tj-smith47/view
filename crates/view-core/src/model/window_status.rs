@@ -78,7 +78,9 @@ pub enum TileKind {
         /// The buffer's filetype, empty where none is set.
         filetype: String,
     },
-    /// A window a view surface paints.
+    /// A window a view surface paints, titled `{surface}: {name}` when the
+    /// status names what the surface holds (the agent panel's agent) and
+    /// by the surface alone otherwise.
     Native(NativeSurface),
 }
 
@@ -177,7 +179,8 @@ impl TileKind {
             Self::Sidebar { filetype } | Self::Scratch { filetype } => {
                 first_of(&[mapped(filetype), filetype, name], "scratch")
             }
-            Self::Native(surface) => surface.id().to_owned(),
+            Self::Native(surface) if name.is_empty() => surface.id().to_owned(),
+            Self::Native(surface) => format!("{}: {name}", surface.id()),
         };
         vec![Span::new(text, StyleRole::Title)]
     }
@@ -463,12 +466,22 @@ mod tests {
             ),
         ];
         assert_eq!(native.len(), NativeSurface::ALL.len());
+        let unnamed = WindowStatus::default();
+        let named = WindowStatus {
+            name: "Stub".to_owned(),
+            ..WindowStatus::default()
+        };
         for (surface, title, segments) in native {
             let kind = TileKind::Native(surface);
             assert_eq!(
-                text(&kind.title_with(&status, &untitled)),
+                text(&kind.title_with(&unnamed, &untitled)),
                 title,
                 "{surface:?}"
+            );
+            assert_eq!(
+                text(&kind.title_with(&named, &untitled)),
+                format!("{title}: Stub"),
+                "a named surface carries its name after its own: {surface:?}"
             );
             assert_eq!(kind.segments(), segments, "{surface:?}");
         }
@@ -549,7 +562,7 @@ mod tests {
             ),
             (TileKind::File, "page.txt"),
             (TileKind::Help, "help: page"),
-            (TileKind::Native(NativeSurface::Tree), "tree"),
+            (TileKind::Native(NativeSurface::Tree), "tree: page.txt"),
         ] {
             assert_eq!(text(&kind.title_with(&status, &titles)), title, "{kind:?}");
         }

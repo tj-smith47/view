@@ -1270,6 +1270,7 @@ fn main() -> Result<()> {
     // `Source::Files` with no root override searches from here
     let mut model = Model::with_term_size(width, height)
         .with_cwd(std::env::current_dir().unwrap_or_default())
+        .with_home(std::env::var_os("HOME").map(std::path::PathBuf::from))
         // the same look the spawn's geometry was seeded from, so the first
         // frame reserves the ring the child was already laid out inside
         .with_look(look)

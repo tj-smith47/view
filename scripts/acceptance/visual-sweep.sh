@@ -63,7 +63,6 @@ FIXTURE=$SCRIPT_DIR/fixtures/themed
 SWEEP_CONFIG=${VIEW_SWEEP_CONFIG:-$FIXTURE}
 SWEEP_DATA=${VIEW_SWEEP_DATA:-}
 MAPPINGS_RS=$REPO_ROOT/crates/view-core/src/native/mappings.rs
-PANEL_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/mod.rs
 PERMISSION_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/permission.rs
 PICKER_RS=$REPO_ROOT/crates/view-core/src/native/picker.rs
 PALETTE_RS=$REPO_ROOT/crates/view-core/src/native/palette.rs
@@ -1227,8 +1226,8 @@ rust_const() {
     }
     printf '%s' "$value"
 }
-FOCUSED_TITLE=$(rust_const "$PANEL_RS" FOCUSED_TITLE) || exit 1
-PANEL_TITLE=$(rust_const "$PANEL_RS" TITLE) || exit 1
+FOCUSED_TITLE=$(agent_panel_title focused) || exit 1
+PANEL_TITLE=$(agent_panel_title) || exit 1
 
 # The glyph a title too long for its top edge is cut with, read out of the
 # framing that appends it.

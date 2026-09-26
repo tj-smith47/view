@@ -604,8 +604,7 @@ fn a_prompt_carries_its_question_its_input_and_its_choices() {
 
 /// The prompt has to reach the painted frame, not only `AiPanelView`'s own
 /// field. A pending permission's question and its options render into the
-/// header, above the rule that separates them from the scrolling
-/// transcript.
+/// header at the top, and the rule and the composer stay at the bottom.
 #[test]
 fn an_ai_panel_with_a_pending_permission_renders_its_question_and_options() {
     use view_core::native::views::AiPanelView;
@@ -621,19 +620,24 @@ fn an_ai_panel_with_a_pending_permission_renders_its_question_and_options() {
     );
     let framed = rows(50, 8, &kind, BorderSet::ASCII);
     assert!(
-        line_text(&framed.lines[2]).contains("Delete config.yaml"),
+        line_text(&framed.lines[1]).contains("Delete config.yaml"),
         "{:?}",
         framed.lines
     );
     assert!(
-        line_text(&framed.lines[3]).contains("Allow once (allow_once)"),
+        line_text(&framed.lines[2]).contains("Allow once (allow_once)"),
         "{:?}",
         framed.lines
     );
     assert!(
-        line_text(&framed.lines[4]).contains("---"),
-        "the rule still separates the header from the transcript once a \
-         permission prompt has grown it"
+        line_text(&framed.lines[5]).contains("---"),
+        "the rule sits above the composer: {:?}",
+        framed.lines
+    );
+    assert!(
+        line_text(&framed.lines[6]).contains("> "),
+        "the composer is the last interior row: {:?}",
+        framed.lines
     );
 }
 
@@ -933,7 +937,7 @@ fn a_short_ai_panel_keeps_the_crash_banner_over_the_permission_and_the_review() 
             "Error: the agent exited -- dismiss".to_string(),
         )]]);
 
-    // interior = height - 2 = 2: one header row and the rule
+    // interior = height - 2 = 2: the composer and one header row
     let text: Vec<String> = rows(60, 4, &LayerKind::Ai(panel.clone()), BorderSet::ASCII)
         .lines
         .iter()
@@ -948,8 +952,9 @@ fn a_short_ai_panel_keeps_the_crash_banner_over_the_permission_and_the_review() 
         "the review summary is sacrificed before the banner: {text:?}"
     );
 
-    // one row more: the permission's option joins it, the review still not
-    let text: Vec<String> = rows(60, 5, &LayerKind::Ai(panel), BorderSet::ASCII)
+    // two rows more: the rule and then the permission's option join it,
+    // the review still not
+    let text: Vec<String> = rows(60, 6, &LayerKind::Ai(panel), BorderSet::ASCII)
         .lines
         .iter()
         .map(|line| line_text(line))
@@ -969,9 +974,9 @@ fn a_short_ai_panel_keeps_the_crash_banner_over_the_permission_and_the_review() 
 }
 
 /// A request blocking the agent's own turn is unanswerable if the overlay
-/// is too short to show how to answer it: the option must survive, and the
-/// question and composer line -- context, not action -- are what a short
-/// overlay sacrifices first.
+/// is too short to show how to answer it: the option must survive beside
+/// the composer, and the question -- context, not action -- is what a
+/// short overlay sacrifices first.
 #[test]
 fn a_short_ai_panel_keeps_the_permissions_options_and_drops_the_question_first() {
     use view_core::native::views::AiPanelView;
@@ -985,8 +990,8 @@ fn a_short_ai_panel_keeps_the_permissions_options_and_drops_the_question_first()
                 vec![Span::plain("  Allow once (allow_once)".to_string())],
             ]),
     );
-    // interior = height - 2 = 2: room for exactly one header row and the
-    // rule, not both the composer line and the question above them
+    // interior = height - 2 = 2: room for the composer and exactly one
+    // header row
     let framed = rows(50, 4, &kind, BorderSet::ASCII);
     let text: Vec<String> = framed.lines.iter().map(|line| line_text(line)).collect();
     assert!(
@@ -999,8 +1004,8 @@ fn a_short_ai_panel_keeps_the_permissions_options_and_drops_the_question_first()
         "the question is context, sacrificed first under truncation: {text:?}"
     );
     assert!(
-        !text.iter().any(|line| line.contains("draft prompt")),
-        "the composer line is context, sacrificed first under truncation: {text:?}"
+        text[2].contains("draft prompt"),
+        "the composer stays the last interior row: {text:?}"
     );
 }
 
@@ -1020,23 +1025,22 @@ fn an_ai_panel_with_a_local_error_renders_its_crash_banner() {
     );
     let framed = rows(50, 8, &kind, BorderSet::ASCII);
     assert!(
-        line_text(&framed.lines[2]).contains("the agent exited"),
+        line_text(&framed.lines[1]).contains("the agent exited"),
         "{:?}",
         framed.lines
     );
     assert!(
-        line_text(&framed.lines[3]).contains("---"),
-        "the rule still separates the header from the transcript once a \
-         crash banner has grown it"
+        line_text(&framed.lines[5]).contains("---"),
+        "the rule sits above the composer: {:?}",
+        framed.lines
     );
 }
 
-/// A crashed session is unmissable even if the overlay is too short to show everything: the banner
-/// must survive, on the same "actionable content outlives context" terms
-/// `a_short_ai_panel_keeps_the_permissions_options_and_drops_the_question_first` proves for the
-/// permission prompt.
+/// A crashed session is unmissable even if the overlay is too short to show
+/// everything: the banner survives beside the composer, and the rule is
+/// what goes first.
 #[test]
-fn a_short_ai_panel_keeps_the_crash_banner_and_drops_the_composer_line_first() {
+fn a_short_ai_panel_keeps_the_composer_and_the_crash_banner_over_the_rule() {
     use view_core::native::views::AiPanelView;
     let kind = LayerKind::Ai(
         AiPanelView::new("AI Agent")
@@ -1045,17 +1049,17 @@ fn a_short_ai_panel_keeps_the_crash_banner_and_drops_the_composer_line_first() {
                 "Error: the agent exited (signal: 9)".to_string(),
             )]]),
     );
-    // interior = height - 2 = 2: room for exactly one header row and the
-    // rule, not both the composer line and the banner above them
+    // interior = height - 2 = 2: room for the composer and one header row,
+    // not the rule as well
     let framed = rows(50, 4, &kind, BorderSet::ASCII);
     let text: Vec<String> = framed.lines.iter().map(|line| line_text(line)).collect();
     assert!(
-        text.iter().any(|line| line.contains("the agent exited")),
+        text[1].contains("the agent exited"),
         "the crash banner must survive truncation: {text:?}"
     );
     assert!(
-        !text.iter().any(|line| line.contains("draft prompt")),
-        "the composer line is context, sacrificed first under truncation: {text:?}"
+        text[2].contains("draft prompt"),
+        "the composer stays the last interior row: {text:?}"
     );
 }
 
@@ -1133,16 +1137,11 @@ fn the_caret_lands_on_the_last_row_of_a_multi_line_prompt() {
 }
 
 /// One row shorter still than
-/// `a_short_ai_panel_keeps_the_crash_banner_and_drops_the_composer_line_first`,
-/// where the header's one surviving row and the rule are no longer both
-/// affordable: the banner must still win that contest, not the rule. A
-/// rule folded into `header` as its own trailing `Line::Rule` -- the shape
-/// every overlay body used before `Body::rule` existed -- would keep the
-/// rule instead at this exact budget, since it was the literal last
-/// element of the vector the old "keep the last `budget` rows" slice read
-/// from; that is the defect this test exists to pin.
+/// `a_short_ai_panel_keeps_the_composer_and_the_crash_banner_over_the_rule`:
+/// the one interior row is the composer's, where the keys the panel holds
+/// are typed.
 #[test]
-fn a_maximally_short_ai_panel_keeps_the_crash_banner_over_the_rule() {
+fn a_one_row_ai_panel_keeps_the_composer() {
     use view_core::native::views::AiPanelView;
     let kind = LayerKind::Ai(
         AiPanelView::new("AI Agent")
@@ -1151,18 +1150,117 @@ fn a_maximally_short_ai_panel_keeps_the_crash_banner_over_the_rule() {
                 "Error: the agent exited (signal: 9)".to_string(),
             )]]),
     );
-    // interior = height - 2 = 1: room for exactly one row, and it must go
-    // to the banner, not the rule and not the composer line
     let framed = rows(50, 3, &kind, BorderSet::ASCII);
     let text: Vec<String> = framed.lines.iter().map(|line| line_text(line)).collect();
+    assert!(text[1].contains("draft prompt"), "{text:?}");
     assert!(
-        text.iter().any(|line| line.contains("the agent exited")),
-        "the crash banner must outrank the rule at the tightest budget: {text:?}"
+        !text.iter().any(|line| line.contains("the agent exited")),
+        "{text:?}"
     );
+}
+
+/// The composer is the last interior row of every panel, whatever the
+/// header holds and however many rows the prompt wraps to, and the caret
+/// stands on the prompt row it belongs to. Walked over framed and windowed
+/// panels, since the two resolve the caret against different interiors.
+#[test]
+fn the_composer_is_the_last_interior_row_at_every_height() {
+    use view_core::native::views::AiPanelView;
+    type Header = fn(AiPanelView) -> AiPanelView;
+
+    let groups: [(&str, Header); 5] = [
+        ("nothing", |view| view),
+        ("usage", |view| {
+            view.with_usage(vec![Span::plain("context 10/100".to_string())])
+        }),
+        ("review", |view| {
+            view.with_review(vec![vec![Span::plain("Review a.rs: hunk 1/1".to_string())]])
+        }),
+        ("error", |view| {
+            view.with_local_error(vec![vec![Span::plain("Error: gone".to_string())]])
+        }),
+        ("all", |view| {
+            view.with_usage(vec![Span::plain("context 10/100".to_string())])
+                .with_review(vec![vec![Span::plain("Review a.rs: hunk 1/1".to_string())]])
+                .with_local_error(vec![vec![Span::plain("Error: gone".to_string())]])
+        }),
+    ];
+    let transcript: Vec<Vec<Span>> = (0..40)
+        .map(|row| vec![Span::plain(format!("transcript {row}"))])
+        .collect();
+    let width = 40_u16;
+    for height in 3..=60_u16 {
+        for composer_rows in 1..=6_usize {
+            let input: Vec<String> = (0..composer_rows)
+                .map(|row| format!("typed{row}"))
+                .collect();
+            let last = format!("typed{}", composer_rows - 1);
+            for (group, add) in &groups {
+                let view = add(AiPanelView::new("AI Agent")
+                    .with_input_rows(input.clone())
+                    .with_rows(transcript.clone()));
+                let at = format!("height {height}, {composer_rows} composer rows, {group}");
+
+                let framed = rows(
+                    width,
+                    height,
+                    &LayerKind::Ai(view.clone()),
+                    BorderSet::ASCII,
+                );
+                let bottom = usize::from(height) - 2;
+                assert!(
+                    line_text(&framed.lines[bottom]).contains(&last),
+                    "{at}: the last interior row is {:?}",
+                    line_text(&framed.lines[bottom])
+                );
+                let (row, _) = ai_caret(&view, width, height).expect("the panel has cells");
+                assert_eq!(usize::from(row), bottom, "{at}: framed caret");
+
+                let bare = unframed_rows(
+                    width,
+                    height,
+                    &LayerKind::Ai(view.clone()),
+                    BorderSet::ASCII,
+                );
+                let bottom = usize::from(height) - 1;
+                assert!(
+                    line_text(&bare.lines[bottom]).contains(&last),
+                    "{at}: the windowed panel's last row is {:?}",
+                    line_text(&bare.lines[bottom])
+                );
+                let (row, _) =
+                    ai_caret_unframed(&view, width, height).expect("the panel has cells");
+                assert_eq!(usize::from(row), bottom, "{at}: windowed caret");
+            }
+        }
+    }
+}
+
+/// While a permission question stands the caret is on the answer, which
+/// is a header row, and the composer is still the last interior row.
+#[test]
+fn a_pending_permission_takes_the_caret_and_leaves_the_composer_at_the_bottom() {
+    use view_core::native::views::AiPanelView;
+    let view = AiPanelView::new("AI Agent")
+        .with_input("draft")
+        .with_pending_permission(vec![
+            vec![Span::plain("Permission requested".to_string())],
+            vec![Span::plain("  1 Allow (allow_once)".to_string())],
+        ]);
+    let (width, height) = (40_u16, 10_u16);
+    let framed = rows(
+        width,
+        height,
+        &LayerKind::Ai(view.clone()),
+        BorderSet::ASCII,
+    );
+    let (row, _) = ai_caret(&view, width, height).expect("the panel has cells");
     assert!(
-        !text.iter().any(|line| line.contains("draft prompt")),
-        "the composer line is still context, still sacrificed first: {text:?}"
+        line_text(&framed.lines[usize::from(row)]).contains("Permission requested"),
+        "{:?}",
+        framed.lines
     );
+    assert!(line_text(&framed.lines[8]).contains("> draft"));
 }
 
 /// The counted header and the built one must agree row for row: the caret's
@@ -1242,7 +1340,8 @@ fn a_panel_too_short_to_paint_the_composer_keeps_the_caret_inside_its_frame() {
         .with_local_error(vec![vec![Span::plain(
             "Error: the agent exited".to_string(),
         )]]);
-    let (width, height) = (50, 4);
+    // two border rows and no interior between them
+    let (width, height) = (50, 2);
 
     let framed = rows(
         width,

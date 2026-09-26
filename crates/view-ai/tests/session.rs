@@ -81,7 +81,7 @@ fn next_event(rx: &Receiver<Msg>, what: &str) -> AiEvent {
 
 fn ready(rx: &Receiver<Msg>) -> String {
     match next_event(rx, "SessionReady") {
-        AiEvent::SessionReady { session_id } => session_id,
+        AiEvent::SessionReady { session_id, .. } => session_id,
         other => panic!("expected SessionReady, got {other:?}"),
     }
 }

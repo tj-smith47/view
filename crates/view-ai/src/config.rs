@@ -33,6 +33,26 @@ pub enum AgentSpec {
     Command(Vec<String>),
 }
 
+impl AgentSpec {
+    /// The name this spec gives the agent before the agent names itself:
+    /// the adapter id, or the file stem of the command's program.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Id(id) => id.clone(),
+            Self::Command(argv) => argv
+                .first()
+                .map(|program| {
+                    Path::new(program).file_stem().map_or_else(
+                        || program.clone(),
+                        |stem| stem.to_string_lossy().into_owned(),
+                    )
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
 /// Resolved `[ai]` config: whether the agent panel and ACP client are on,
 /// and which agent to speak to.
 #[non_exhaustive]
@@ -975,6 +995,18 @@ agent = "claude-code"
         let cfg = AiConfig::from_toml_str("[ai]\nagent = \" claude-code \"\n")
             .expect("a padded id is valid once trimmed");
         assert_eq!(cfg.agent_spec(), &AgentSpec::Id("claude-code".into()));
+    }
+
+    #[test]
+    fn an_agent_is_labelled_by_its_id_or_its_programs_file_stem() {
+        assert_eq!(AgentSpec::Id("claude-code".into()).label(), "claude-code");
+        let command =
+            AgentSpec::Command(vec!["/opt/bin/view-ai-stub-agent".into(), "--flag".into()]);
+        assert_eq!(command.label(), "view-ai-stub-agent");
+        assert_eq!(
+            AgentSpec::Command(vec!["gemini.exe".into()]).label(),
+            "gemini"
+        );
     }
 
     #[test]
