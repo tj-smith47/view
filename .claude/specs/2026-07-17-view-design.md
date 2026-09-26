@@ -406,6 +406,11 @@ Compat has three classes; only the first is "by construction":
   file shows one box for every channel that config writes on a surface view
   draws, and later launches under the same file record the finding to the
   notification history alone, with the value the channel held.
+  Amended again 2026-09-25: the same box also lists the features view
+  draws and the keys of the user's it maps, each once per config file, and
+  names each channel by the option alone. It stands until the user acts
+  only while it names a held channel; a box that lists only features and
+  keys times out like a transient toast.
   Its text stays in the notification history (§9), which is where the
   notice itself points. The plugin's own startup complaints are the same finding
   in the plugin's voice, so they are recorded to the notification history
