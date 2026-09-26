@@ -87,8 +87,12 @@ record_gif() {
     printf 'Set Width %s\n' "$width"
     printf 'Set Height %s\n' "$height"
     printf 'Set FontSize 14\n'
+    # the attach is the recorder's own setup, so the gif opens on the editor
+    printf 'Hide\n'
     printf 'Type "tmux -L %s attach -t cap"\n' "$socket"
     printf 'Enter\n'
+    printf 'Sleep 500ms\n'
+    printf 'Show\n'
     printf 'Sleep %ss\n' "$seconds"
   } >"$TAPE"
   vhs "$TAPE"
