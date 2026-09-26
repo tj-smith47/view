@@ -537,6 +537,8 @@ mod tests {
     /// view-core's model sources are walked too: the notice column the
     /// compositor paints every frame places its boxes from them, and a
     /// live read there sets a toast over the held tree or cursor line.
+    /// A live read a painter reaches that paints nothing is named in
+    /// [`LIVE_READS`] with its grounds.
     #[test]
     fn every_painter_reads_the_painted_registry() {
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -545,8 +547,7 @@ mod tests {
             crates.join("view-tui/src"),
             crates.join("view-core/src/model"),
         ];
-        let mut walked = 0;
-        let mut live = Vec::new();
+        let mut files = vec![crates.join("view-core/src/model.rs")];
         while let Some(dir) = dirs.pop() {
             for entry in std::fs::read_dir(&dir)
                 .expect("a paint crate's src/")
@@ -555,33 +556,64 @@ mod tests {
                 let path = entry.path();
                 if path.is_dir() {
                     dirs.push(path);
-                    continue;
-                }
-                if path.extension() != Some("rs".as_ref())
-                    || path.file_name() == Some("tests.rs".as_ref())
+                } else if path.extension() == Some("rs".as_ref())
+                    && path.file_name() != Some("tests.rs".as_ref())
                 {
-                    continue;
-                }
-                walked += 1;
-                let source = std::fs::read_to_string(&path).expect("a listed source");
-                let flat: String = production(&source)
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .collect();
-                for read in ["engine.grids()", "engine.grid()", "engine.hl()"] {
-                    if flat.contains(read) {
-                        live.push(format!("{} reads {read}", path.display()));
-                    }
+                    files.push(path);
                 }
             }
         }
-        assert!(walked > 10, "the walk reached {walked} sources");
+        let mut live = Vec::new();
+        for path in &files {
+            let source = std::fs::read_to_string(path).expect("a listed source");
+            let mut flat: String = production(&source)
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            for (file, signature, read, _grounds) in LIVE_READS {
+                if !path.ends_with(file) {
+                    continue;
+                }
+                let Some(at) = flat.find(signature) else {
+                    live.push(format!("{file} no longer defines `{signature}`"));
+                    continue;
+                };
+                let body = at + signature.len();
+                let end = ["///", "#[", "pubfn", "pub(crate)fn"]
+                    .iter()
+                    .filter_map(|marker| flat[body..].find(marker))
+                    .min()
+                    .map_or(flat.len(), |offset| body + offset);
+                let Some(hit) = flat[body..end].find(read) else {
+                    live.push(format!("`{signature}` in {file} no longer reads {read}"));
+                    continue;
+                };
+                flat.replace_range(body + hit..body + hit + read.len(), "");
+            }
+            for read in ["engine.grids()", "engine.grid()", "engine.hl()"] {
+                if flat.contains(read) {
+                    live.push(format!("{} reads {read}", path.display()));
+                }
+            }
+        }
+        assert!(files.len() > 10, "the walk reached {} sources", files.len());
         assert!(
             live.is_empty(),
             "paint through `painted_grids()` / `painted_grid()` / `painted_hl()`:\n  {}",
             live.join("\n  ")
         );
     }
+
+    /// Live registry reads a painter reaches that paint nothing: the file,
+    /// the function's signature with its whitespace taken out, the read,
+    /// and the grounds.
+    const LIVE_READS: &[(&str, &str, &str, &str)] = &[(
+        "view-core/src/model.rs",
+        "pubfnfocus(&self)->Focus{",
+        "engine.grids()",
+        "`Model::focus` routes input, so it reads the live registry: while a \
+         frame is held, keys go to the replacement, which has no pane yet",
+    )];
 
     /// Everything in `source` ahead of its test module.
     ///

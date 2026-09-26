@@ -821,9 +821,9 @@ fn composite_layers(
     // replaces. Resetting the damaged rows makes the clipped path
     // byte-identical to the full path -- the property the equality test pins.
     reset_damaged_rows(buf, damage);
-    // derived once per frame from the engine's live highlight state: a
-    // lookup over already-decoded fields, not an RPC round trip, so
-    // re-deriving on every paint costs nothing beyond this struct copy
+    // derived once per frame from the highlight table the screen is drawn
+    // with: a lookup over already-decoded fields with no RPC behind it, so
+    // re-deriving on every paint costs this struct copy alone
     let theme = Theme::from_hl(model.engine.painted_hl());
     let borders = BorderSet::for_caps(model.caps);
     for (index, layer) in surface.layers.iter().enumerate() {
