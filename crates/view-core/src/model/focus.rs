@@ -159,15 +159,16 @@ impl Model {
     ///
     /// Mouse input routes through this: an open overlay owns the keyboard
     /// outright ([`Model::focus`]), but it owns only the cells it covers, so
-    /// a click on visible grid outside it still reaches the engine.
+    /// a click on visible grid outside it still reaches the engine. The
+    /// blank gutter beside an edge-anchored frame counts as the overlay's,
+    /// since the buffer cell under it is painted over.
     #[must_use]
     pub fn overlay_at(&self, row: u16, col: u16) -> Option<OverlayId> {
         self.overlays
             .iter()
             .rev()
             .find(|overlay| {
-                self.draws_as_overlay(&overlay.kind)
-                    && self.overlay_rect(overlay).contains(row, col)
+                self.draws_as_overlay(&overlay.kind) && self.overlay_box(overlay).contains(row, col)
             })
             .map(|overlay| overlay.id)
     }

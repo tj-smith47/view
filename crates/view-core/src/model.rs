@@ -3286,6 +3286,31 @@ mod tests {
         );
     }
 
+    /// The blank column a gapped look leaves beside an edge-anchored frame
+    /// is painted over the buffer, so a click on it belongs to the overlay.
+    #[test]
+    fn a_click_on_the_gutter_beside_a_pinned_panel_lands_on_the_panel() {
+        use crate::native::geometry::{Anchor, OverlayBox};
+
+        let mut m = tabline_model();
+        m.look = Look::new(Panes::Tiles, true);
+        m.push_overlay(
+            OverlayBox::new(30, 100).with_anchor(Anchor::Right),
+            OverlayKind::Ai,
+        );
+        let overlay = m.overlays().last().expect("the panel was just pushed");
+        let gutter = m
+            .overlay_gutter(overlay)
+            .expect("a gapped look leaves a gutter beside a right-pinned frame");
+        let frame = m.overlay_rect(overlay);
+        assert!(!frame.contains(gutter.row, gutter.col));
+        assert_eq!(
+            m.overlay_at(gutter.row, gutter.col),
+            Some(overlay.id),
+            "a click on the gutter reached the buffer cell painted over"
+        );
+    }
+
     /// The names declared in `source`'s struct block opening with `header`.
     ///
     /// A doc line always carries a `/` before its first colon, and an
