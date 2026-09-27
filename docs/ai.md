@@ -87,9 +87,10 @@ The composer never takes more than half the rows the panel has left after its
 border, header, and whichever of the accounting row and the crash banner are
 showing. It scrolls inside them after that, so the end of what you are typing is
 always the last row on screen, and the transcript keeps as many rows as the
-composer, however long the prompt gets. The transcript loses its last row only
-on a panel too short to hold that chrome and one line at once, where the prompt
-row is all there is space for.
+composer, however long the prompt gets. On a panel too short to hold that
+chrome and one transcript line, the transcript goes first and the prompt row
+last. While the agent is waiting on a permission, the option you answer with
+outlasts the prompt row.
 
 The transcript follows its newest line, the way a terminal does, so a
 session hours long still shows you what just happened. To read back over
