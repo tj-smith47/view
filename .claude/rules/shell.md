@@ -157,8 +157,9 @@ A file with a bash or sh shebang outside `scripts/lib/` is an entry point and
 carries the executable bit; everything else under `scripts/` is a library and
 carries none. A script run by path fails with `Permission denied` when the bit
 is missing, and a sourced library has no reason to carry one.
-`check_script_modes` in `scripts/check-style.sh` grades every tracked
-`scripts/**/*.sh` against that rule.
+`check_script_modes` in `scripts/check-style.sh` grades every
+`scripts/**/*.sh` git lists against that rule, untracked ones included,
+because `task commit` runs the gate before it stages a new file.
 
 ## A pipeline stage names the file it reads
 
@@ -543,13 +544,14 @@ own red verdict, and it names the root it was run against.
 ## Every script passes shellcheck at warning level
 
 `task lint:shell`, run by `task lint`, lints every script under `scripts/` and
-every other tracked `.sh` with `shellcheck -S warning`, and fails when
-shellcheck is missing. A warning it raises is fixed in the script. A `disable`
-directive stands only where the construct has a reader shellcheck cannot see,
-such as `eval` or a sourcing script, with a comment above it naming that
-reader. Thirty-two findings had gathered with no lint to report them, and one
-was a probe script under `#!/bin/sh` reading `BASH_SOURCE`, which dash refuses
-as a bad substitution before the script does anything.
+every other `.sh` git lists, untracked ones included, with
+`shellcheck -S warning`, and fails when shellcheck is missing. A warning it
+raises is fixed in the script. A `disable` directive stands only where the
+construct has a reader shellcheck cannot see, such as `eval` or a sourcing
+script, with a comment above it naming that reader. Thirty-two findings had
+gathered with no lint to report them, and one was a probe script under
+`#!/bin/sh` reading `BASH_SOURCE`, which dash refuses as a bad substitution
+before the script does anything.
 
 `scripts/lint-shell.sh` holds the directive rule itself. It fails a `disable`
 whose line above is no comment carrying the word `read`, one ahead of the
@@ -559,9 +561,9 @@ command covers the whole file: a file-wide `SC2034` in
 `scripts/lib/moment-grading.sh` passed a planted unused variable. Every other
 directive covers the next command, so the rule keeps it directly above that
 command, where a reader sees both, and stacked codes join with a comma in one
-directive. A line in a here-doc body or a quoted string is text and is not
-read. `scripts/lint-shell-cases.sh`, run by `task lint:shell`, holds a case
-for each shape. An intended word split, a trap string expanded at set time
-and a literal `$` in a pattern each have a rewrite (an array read with
-`read -a`, a global the trap reads, an escaped `\$`), so none of them earns a
-directive.
+directive, which the message spells out from the codes it read. A line in a
+here-doc body or a quoted string is text and is not read.
+`scripts/lint-shell-cases.sh`, run by `task lint:shell`, holds a case for each
+shape. An intended word split, a trap string expanded at set time and a literal
+`$` in a pattern each have a rewrite (an array read with `read -a`, a global the
+trap reads, an escaped `\$`), so none of them earns a directive.
