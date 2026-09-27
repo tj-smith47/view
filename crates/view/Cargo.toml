@@ -84,7 +84,11 @@ libc = "0.2"
 # src/localtime.rs's `GetTimeZoneInformation`: the same host offset, on the
 # platform `libc::tm` carries no `tm_gmtoff` for. Already a vetted
 # dependency in this workspace (view-engine's named-pipe transport).
-windows-sys = { version = "0.61.2", features = ["Win32_System_Time"] }
+# `TIME_ZONE_ID_DAYLIGHT` lives under SystemServices.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_System_SystemServices",
+    "Win32_System_Time",
+] }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 # The apple fallback in src/wake.rs sets O_NONBLOCK via

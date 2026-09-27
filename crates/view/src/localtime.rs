@@ -82,9 +82,8 @@ fn platform_offset_secs() -> i64 {
 
 #[cfg(windows)]
 fn platform_offset_secs() -> i64 {
-    use windows_sys::Win32::System::Time::{
-        GetTimeZoneInformation, TIME_ZONE_ID_DAYLIGHT, TIME_ZONE_ID_INVALID,
-    };
+    use windows_sys::Win32::System::SystemServices::TIME_ZONE_ID_DAYLIGHT;
+    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_ID_INVALID};
 
     // SAFETY: `info` is a plain stack value the Win32 call fills in place;
     // no pointer it receives is retained past the call.
