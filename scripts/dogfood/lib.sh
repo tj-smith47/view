@@ -46,26 +46,27 @@ new_cap_session() {
 # gif. vhs needs a terminal attached for the whole recording, which
 # cap.sh's headless capture-pane never has, so this drives vhs onto the
 # same private socket the caller already attached its session to and
-# leaves the resulting gif at $2. $TAPE is a script global, not a local:
+# leaves the resulting gif at $2. $TAPE is a script global, since
 # cleanup() above reads it after this function has returned. $4 and $5
-# are the tmux session's own columns and rows (its `-x`/`-y`), not vhs's
-# pixel Width/Height: tmux resizes to whatever vhs attaches at
-# (window-size=latest), so a canvas guessed in pixels drifts from the
-# session's actual shape -- confirmed against engine-restart.sh's wedge
-# banner, clipped at the right edge because the old fixed 2000x820
-# default carried no padding budget at all. The pixel canvas here is
-# derived from cols/rows instead: at `Set FontSize 14` (the only size
-# every tape script requests), vhs's own terminal grid measures out to
-# `cols = floor((Width - 147) / 9)` and `rows = floor((Height - 136) / 16)`
-# (probed with `tput cols`/`tput lines` against three Width/Height pairs
-# on this recorder's build of vhs 0.11.0 -- 1200x600 -> 117x29,
-# 2200x1000 -> 228x54, 3000x1400 -> 317x79 -- all three solve the same
-# 9px/16px cell and 147px/136px pad exactly). new_cap_session turns
-# tmux's status line off, so the pane is the whole session, and
-# MARGIN_COLS/MARGIN_ROWS cover font-hinting drift across hosts and vhs
-# versions this recorder has not measured; a caller whose session was
-# created at a given `-x`/`-y` passes that same shape here, the way every
-# tape script's `-x 220 -y 50` becomes `record_gif ... 220 50`.
+# are the tmux session's own columns and rows (its `-x`/`-y`). tmux
+# resizes to whatever vhs attaches at (window-size=latest), so the pixel
+# canvas is derived from them: a canvas guessed in pixels clipped
+# engine-restart.sh's wedge banner at the right edge.
+#
+# The tape sets a Nerd Font because vhs's bundled font has no icon
+# glyphs, and every tree icon, pill separator and statusline symbol under
+# a person's config recorded as a box. RECORD_GIF_FONT names another
+# family; the cell constants below hold for the default only. At
+# FontSize 14 in that font, vhs 0.11.0's grid measures out to
+# `cols = floor((Width - 145) / 9)` and `rows = floor((Height - 130) / 18)`:
+# `tput cols`/`tput lines` read off plain-shell tapes put the column
+# boundaries at Width 1198 and 2206 and the row boundaries at Height 1012,
+# 1030, 1048 and 1066. new_cap_session turns tmux's status line off, so
+# the pane is the whole session, and margin_cols/margin_rows cover
+# hinting drift across hosts and vhs versions this recorder has not
+# measured. A caller passes the `-x`/`-y` its session was created at,
+# the way every tape script's `-x 220 -y 50` becomes
+# `record_gif ... 220 50`.
 # $6, when given, is the tape body played after the attach in place of
 # one Sleep of $3 seconds: Sleep, Hide and Show lines that cut a wait
 # out of the gif while the session keeps running behind it.
@@ -80,10 +81,26 @@ record_gif() {
       "github.com/charmbracelet/vhs@latest)" >&2
     return 2
   }
+  font=${RECORD_GIF_FONT:-JetBrainsMono Nerd Font}
+  command -v fc-list >/dev/null 2>&1 || {
+    echo "record_gif: fc-list is not on PATH, so the tape font cannot be" \
+      "checked (install fontconfig)" >&2
+    return 2
+  }
+  # vhs draws in a headless browser that falls back to its bundled font
+  # without a word, so a missing family is caught before the recording
+  if [ -z "$(fc-list "$font" family 2>/dev/null)" ]; then
+    echo "record_gif: font \"$font\" is not installed (fc-list lists no" \
+      "such family). Install JetBrainsMono Nerd Font: brew install --cask" \
+      "font-jetbrains-mono-nerd-font, or JetBrainsMono.zip from" \
+      "github.com/ryanoasis/nerd-fonts/releases unpacked into" \
+      "$HOME/.local/share/fonts and fc-cache -f" >&2
+    return 2
+  fi
   cell_w=9
-  cell_h=16
-  pad_w=147
-  pad_h=136
+  cell_h=18
+  pad_w=145
+  pad_h=130
   margin_cols=2
   margin_rows=1
   width=$(( (cols + margin_cols) * cell_w + pad_w ))
@@ -98,6 +115,7 @@ record_gif() {
     printf 'Set Width %s\n' "$width"
     printf 'Set Height %s\n' "$height"
     printf 'Set FontSize 14\n'
+    printf 'Set FontFamily "%s"\n' "$font"
     printf 'Set Framerate 10\n'
     # the attach is the recorder's own setup, so the gif opens on the editor
     printf 'Hide\n'
