@@ -552,10 +552,16 @@ was a probe script under `#!/bin/sh` reading `BASH_SOURCE`, which dash refuses
 as a bad substitution before the script does anything.
 
 `scripts/lint-shell.sh` holds the directive rule itself. It fails a `disable`
-whose line above is no comment carrying the word `read`, one with a blank or
-a comment under it, and one ahead of the file's first command. The last two
-cover the whole file: a file-wide `SC2034` in `scripts/lib/moment-grading.sh`
-passed a planted unused variable. An intended word split, a trap string
-expanded at set time and a literal `$` in a pattern each have a rewrite (an
-array read with `read -a`, a global the trap reads, an escaped `\$`), so none
-of them earns a directive.
+whose line above is no comment carrying the word `read`, one ahead of the
+file's first command, one with a blank or a comment under it, one stacked on
+another and one on a file's last line. Only the one ahead of the first
+command covers the whole file: a file-wide `SC2034` in
+`scripts/lib/moment-grading.sh` passed a planted unused variable. Every other
+directive covers the next command, so the rule keeps it directly above that
+command, where a reader sees both, and stacked codes join with a comma in one
+directive. A line in a here-doc body or a quoted string is text and is not
+read. `scripts/lint-shell-cases.sh`, run by `task lint:shell`, holds a case
+for each shape. An intended word split, a trap string expanded at set time
+and a literal `$` in a pattern each have a rewrite (an array read with
+`read -a`, a global the trap reads, an escaped `\$`), so none of them earns a
+directive.
