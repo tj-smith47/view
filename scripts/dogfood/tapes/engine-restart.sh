@@ -51,7 +51,9 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" README.md
 
 # the gif cuts the wedge threshold out: the banner's readout still counts
 # the whole wait, and the restart plays out after <F5> in full
-BODY='Sleep 4s
+BODY='Sleep 500ms
+Show
+Sleep 4s
 Hide
 Sleep 12s
 Show

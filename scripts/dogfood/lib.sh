@@ -38,7 +38,14 @@ new_cap_session() {
     return 2
   }
   shift 4
+  # tmux draws italics as standout when default-terminal names screen, which
+  # a person's tmux.conf often does, and every italic comment then recorded
+  # as a reversed block. The fallback is for a host whose terminfo has no
+  # tmux entry.
+  term=tmux-256color
+  infocmp "$term" >/dev/null 2>&1 || term=xterm-256color
   tmux -L "$socket" set-option -g status off \; \
+    set-option -g default-terminal "$term" \; \
     new-session -d -s cap -x "$cols" -y "$rows" "$@"
 }
 
@@ -68,8 +75,10 @@ new_cap_session() {
 # the way every tape script's `-x 220 -y 50` becomes
 # `record_gif ... 220 50`.
 # $6, when given, is the tape body played after the attach in place of
-# one Sleep of $3 seconds: Sleep, Hide and Show lines that cut a wait
-# out of the gif while the session keeps running behind it.
+# `Sleep 500ms`, `Show` and one Sleep of $3 seconds. It starts hidden, so
+# a body opens with the Sleep that covers the editor's start and the
+# driver's setup, then its own `Show`: the first frame of the gif is the
+# settled editor, whatever the attach and the setup took.
 record_gif() {
   socket=$1
   out=$2
@@ -121,11 +130,11 @@ record_gif() {
     printf 'Hide\n'
     printf 'Type "tmux -L %s attach -t cap"\n' "$socket"
     printf 'Enter\n'
-    printf 'Sleep 500ms\n'
-    printf 'Show\n'
     if [ -n "${6:-}" ]; then
       printf '%s\n' "$6"
     else
+      printf 'Sleep 500ms\n'
+      printf 'Show\n'
       printf 'Sleep %ss\n' "$seconds"
     fi
   } >"$TAPE"
@@ -143,6 +152,18 @@ record_gif() {
 # recorder never attaches. Usage: wait_for_recorder SOCKET
 wait_for_recorder() {
   tmux -L "$1" wait-for "$RECORDER_ATTACHED"
+}
+
+# WHY: a driver whose setup takes a varying while (notices to dismiss, an
+# ssh connection to open) has to start its visible part at the moment the
+# tape body shows it, so it waits out the rest of a deadline counted from
+# the attach. date +%s is the clock POSIX sh has, so the wait ends up to
+# one second late, and the body's hidden lead is set that much short.
+# Usage: start=$(date +%s); ...; sleep_until_elapsed "$start" SECONDS
+sleep_until_elapsed() {
+  while [ $(( $(date +%s) - $1 )) -lt "$2" ]; do
+    sleep 0.2
+  done
 }
 
 # WHY: lazy.nvim opens its update report over the editor whenever its last
