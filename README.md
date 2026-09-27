@@ -52,7 +52,7 @@ gap between them and your accent colour on the one you are working in. Turn
 it off with one config key, or let view read your desktop and decide. See
 [`docs/tiled-ui.md`](docs/tiled-ui.md).
 
-![two windows, each in its own frame and gap](assets/tapes/tiled-panes.gif)
+![a Rust file beside the README, each in its own frame, reflowing as the terminal shrinks and grows, then fitted to its code](assets/tapes/tiled-panes.gif)
 
 **Status in every frame.** Each window carries its own status along the
 bottom of its frame: the mode in the window you are working in, and the
@@ -84,7 +84,7 @@ proposed change reviewed as a diff in the file itself.
 machine over SSH with the same editor, config and clipboard as at home.
 What typing over a link feels like is under [Performance](#performance).
 
-![view opening a file on a remote host over SSH](assets/tapes/remote-editing.gif)
+![a sentence typed into a file on a remote host over SSH, each key showing as it is pressed](assets/tapes/remote-editing.gif)
 
 **Your work survives a crash.** If Neovim hangs or crashes underneath
 view, it is interrupted or restarted with your buffers restored, and the
