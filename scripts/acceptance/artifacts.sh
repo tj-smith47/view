@@ -118,6 +118,9 @@ check_target_root() {
         printf 'FAIL: a relative CARGO_TARGET_DIR is not resolved against the repo (said: %s)\n' "$out" >&2
         exit 1
     fi
+    # the variable is set empty for this one call, the case of a host that
+    # declares it and leaves it blank
+    # shellcheck disable=SC1007
     out=$(CARGO_TARGET_DIR= target_root)
     if [ "$out" != "$REPO_ROOT/target" ]; then
         printf 'FAIL: with nothing declared the harness must look in the target directory the tree owns (said: %s)\n' "$out" >&2
@@ -125,6 +128,8 @@ check_target_root() {
     fi
 }
 check_target_root
+# read by the scripts that source this file
+# shellcheck disable=SC2034
 TARGET_ROOT=$(target_root)
 
 # Every `view` a run has started, reaped by pid when it ends, and the one
@@ -277,6 +282,7 @@ check_view_reaping() {
     # clear takes no caller's trap with it because this function runs at
     # source time, from the block at the foot of this file, while the
     # sourcing script is still on its `.` line and has installed none.
+    # shellcheck disable=SC2064 # expanded now: the local is gone at exit
     trap "rm -rf '$SELFCHECK_TMP'" EXIT
     SELFCHECK_SESSION="view-acc-selfcheck-$$"
     # a shell under the name the recorder looks for. The trailing `:` is

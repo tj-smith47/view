@@ -328,7 +328,7 @@ LADDER_BUDGET=$(plus "$LADDER_TOTAL" 20)
 printf 'view acceptance: remote reconnect (%s, %s, %sx%s)\n' \
     "${VIEW_BIN#"$REPO_ROOT/"}" "$(nvim --version | head -1)" "$COLS" "$ROWS"
 
-CURRENT_LEG=remote-session
+CURRENT_LEG='remote-session'
 start_session drop
 assert_edit_accepted "ALIVE-$$"
 UNSAVED="UNSAVED-$$"
@@ -336,7 +336,7 @@ type_unsaved "$UNSAVED"
 printf '[1/4] %-34s ... %s  OK\n' 'remote session over the client' \
     "engine alive, edit accepted"
 
-CURRENT_LEG=connection-dropped
+CURRENT_LEG='connection-dropped'
 printf '%s\n' "$REFUSED_ATTEMPTS" >"$ROOT/refusals"
 drop_start=$(now)
 kill -9 "$CLIENT_PID"

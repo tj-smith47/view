@@ -37,12 +37,12 @@ impl PermissionPrompt {
     /// Builds the prompt an [`crate::native::ai_event::AiEvent::PermissionRequested`]
     /// folds into [`super::AiPanelState::pending_permission`]. Names `title`
     /// when the agent sent one, falling back to `tool_call_id`: the wire's
-    /// `RequestPermissionRequest.toolCall` member is a `ToolCallUpdate`, not
-    /// a `ToolCall` (`docs/acp-v1-wire-capture.md`'s
-    /// `## RequestPermissionRequest` section dumps both `$defs` verbatim),
-    /// and `ToolCallUpdate` requires only `toolCallId` -- `title` is
-    /// nullable/optional there -- so an agent that omits it still gets a
-    /// question naming the call it asks about, never a blank.
+    /// `RequestPermissionRequest.toolCall` member is a `ToolCallUpdate`
+    /// (`docs/acp-v1-wire-capture.md`'s `## RequestPermissionRequest`
+    /// section dumps its `$defs` verbatim), and `ToolCallUpdate` requires
+    /// only `toolCallId`. `title` is optional
+    /// there, so an agent that omits it still gets a question naming the
+    /// call it asks about.
     #[must_use]
     pub fn new(
         request_id: u64,
@@ -76,9 +76,9 @@ impl PermissionPrompt {
     /// invisible other state would be the same class of defect.
     ///
     /// Only the first nine options are reachable, which is what
-    /// [`Self::render_rows`] paints a digit against -- there is no key
-    /// beyond `9`, and a row labelled with a number nothing answers would
-    /// promise one.
+    /// [`Self::render_rows`] paints a digit against. There is no key beyond
+    /// `9`, and a row labelled with a number nothing answers would promise
+    /// one.
     #[must_use]
     pub fn option_for_key(&self, key: char) -> Option<&PermissionOption> {
         let index = usize::try_from(key.to_digit(10)?).ok()?.checked_sub(1)?;
@@ -172,8 +172,8 @@ const UNREACHABLE_OPTION_MARK: char = '-';
 
 /// The role one option row paints in: the answers a user can tell apart at
 /// a glance are allow-once, allow-always and refuse, so those are the three
-/// colors -- an always-allow reading as an ordinary allow is how a user
-/// tells the agent to stop asking by accident.
+/// colors. An always-allow reading as an ordinary allow is how a user tells
+/// the agent to stop asking by accident.
 fn option_role(kind: PermissionOptionKind) -> StyleRole {
     match kind {
         PermissionOptionKind::AllowOnce => StyleRole::AiPermissionAllow,
@@ -185,9 +185,8 @@ fn option_role(kind: PermissionOptionKind) -> StyleRole {
 }
 
 /// The wire spelling for `kind`, per `docs/acp-v1-wire-capture.md`'s pinned
-/// `PermissionOptionKind` strings -- shown verbatim rather than a
-/// view-invented label, so what the panel prints for a kind always matches
-/// what the wire itself called it.
+/// `PermissionOptionKind` strings, shown verbatim so what the panel prints
+/// for a kind always matches what the wire itself called it.
 fn kind_label(kind: PermissionOptionKind) -> &'static str {
     match kind {
         PermissionOptionKind::AllowOnce => "allow_once",

@@ -14,7 +14,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use view_oracle::PtySession;
 
@@ -23,6 +23,10 @@ use view_oracle::PtySession;
 const COLS: u16 = 132;
 const ROWS: u16 = 30;
 const BUDGET: Duration = Duration::from_secs(30);
+/// How long the pill's row may stand once the review has risen: the turn
+/// ends in the stub's next message, a frame or two later, and a pill that
+/// lingers is one a person reads as a turn still running.
+const PILL_AFTER_REVIEW: Duration = Duration::from_millis(250);
 
 /// The file the stub's `propose` diffs, seeded with the text its edit
 /// expects to find.
@@ -114,7 +118,8 @@ fn pill_row_gone(screen: &vt100::Screen) -> bool {
 /// Every frame from the prompt to the end of the turn is read. The word
 /// has to show while the turn is held, and the first frame on which the
 /// pill's row has left the screen carries no cell of it: a row that leaves
-/// while its old cells still stand is the defect this reads for.
+/// while its old cells still stand is the defect this reads for. The row
+/// leaves within [`PILL_AFTER_REVIEW`] of the review rising.
 #[test]
 fn the_agent_word_is_gone_on_the_frame_its_row_leaves() {
     let paths = common::ScratchPaths::new("agent-turn");
@@ -126,6 +131,8 @@ fn the_agent_word_is_gone_on_the_frame_its_row_leaves() {
     session.send(b"propose-when-released\r").unwrap();
     let mut saw_running = false;
     let mut left: Option<String> = None;
+    let mut review_at: Option<(Instant, String)> = None;
+    let mut pill_after_review = Duration::ZERO;
     let settled = session.wait_for_screen(BUDGET, |screen| {
         if !saw_running {
             if every_row(screen).contains("running") && !pill_row_gone(screen) {
@@ -136,10 +143,25 @@ fn the_agent_word_is_gone_on_the_frame_its_row_leaves() {
         }
         if pill_row_gone(screen) {
             left = Some(every_row(screen));
+            if let Some((at, _)) = &review_at {
+                pill_after_review = at.elapsed();
+            }
             return true;
+        }
+        if review_at.is_none() && every_row(screen).contains("Review") {
+            review_at = Some((Instant::now(), every_row(screen)));
         }
         false
     });
+    // the review rises with the edit, and the stub ends the turn in the
+    // message after it, so the two may take one frame each
+    if let Some((_, frame)) = review_at {
+        assert!(
+            pill_after_review <= PILL_AFTER_REVIEW,
+            "the pill's row stood {pill_after_review:?} after the review rose, past \
+             {PILL_AFTER_REVIEW:?}; the first frame with the review:\n{frame}"
+        );
+    }
     assert!(
         saw_running,
         "a held turn never put the agent word on the pill's row; screen:\n{}",

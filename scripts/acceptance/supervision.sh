@@ -544,7 +544,7 @@ VIM_WEDGE=':while 1 | endwhile'
 printf 'view acceptance: supervision (%s, %s, %sx%s)\n' \
     "${VIEW_BIN#"$REPO_ROOT/"}" "$(nvim --version | head -1)" "$COLS" "$ROWS"
 
-CURRENT_LEG=read-side-lua
+CURRENT_LEG='read-side-lua'
 start_session lua 'acceptance seed line'
 UNSAVED="UNSAVED-LUA-$$"
 type_unsaved "$UNSAVED"
@@ -564,7 +564,7 @@ end_session
 printf '[1/6] %-33s ... %s  OK\n' 'read-side wedge (blocked Lua)' \
     "banner at ${banner}s, modal at ${modal}s after it, interrupt unanswered at ${unanswered}s, restart recovers (swap rehydrated)"
 
-CURRENT_LEG=read-side-vimscript
+CURRENT_LEG='read-side-vimscript'
 start_session vim 'acceptance seed line'
 type_line "$VIM_WEDGE"
 vim_banner=$(wait_on_pane "$READ_NOTICE" 20 "the read-side banner")
@@ -584,7 +584,7 @@ end_session
 printf '      %-33s ... %s  OK\n' 'read-side wedge (Vimscript)' \
     "banner at ${vim_banner}s, modal at ${vim_modal}s after it, interrupt recovers in ${recovered}s"
 
-CURRENT_LEG=dead-connection
+CURRENT_LEG='dead-connection'
 start_session dead 'acceptance seed line'
 UNSAVED="UNSAVED-DEAD-$$"
 type_unsaved "$UNSAVED"
@@ -599,7 +599,7 @@ end_session
 printf '[2/6] %-33s ... %s  OK\n' 'dead connection (SIGKILL)' \
     "banner+modal at $(plus "$dead_notice" "$dead_modal")s (Dead skips the grace period), restart recovers, swap rehydrated"
 
-CURRENT_LEG=write-side
+CURRENT_LEG='write-side'
 start_session write 'acceptance seed line'
 head -c "$PASTE_BYTES" /dev/zero | tr '\0' 'x' >"$ROOT/paste.txt"
 # stopped rather than killed: the connection stays open and the peer stops
@@ -631,7 +631,7 @@ printf '[3/6] %-33s ... %s  OK\n' 'write-side wedge (existing)' \
 # the terminal looks like afterwards. Both are run with the panel open and a
 # real agent child underneath it, because the exit that stranded a terminal
 # in the field was one taken from that state.
-CURRENT_LEG=clean-exit
+CURRENT_LEG='clean-exit'
 start_exit_session quit
 open_stub_panel
 tmux send-keys -t "$SESSION" Escape

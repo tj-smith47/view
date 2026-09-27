@@ -1502,7 +1502,7 @@ printf '  config %s\n  palette %s\n' "$SWEEP_CONFIG" \
 RESUME_FILE=$(mktemp -u "${TMPDIR:-/tmp}/view-visual-resume-$$-XXXXXX")
 printf '\n[ai]\nagent = ["%s", "%s"]\n' "$STUB_BIN" "$RESUME_FILE" >>"$VIEW_TOML"
 
-CURRENT_LEG=theme-cache
+CURRENT_LEG='theme-cache'
 SESSION="view-visual-$$-warm"
 warm_root=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-warm-XXXXXX")
 ROOTS+=("$warm_root")
@@ -1782,11 +1782,14 @@ drive_action() {
             wait_until "$REACTION_SECS" "the tree floating over the buffer on $chord" \
                 shows "$BOX_TL $(basename -- "$ROOT")" >/dev/null || return 1
         fi
-        # and the key itself, typed inside the tiled tree, which answers
-        # none of its keys and passes them on to nvim. A chord that floated
-        # the tree left the ring at windowed, and three ring steps bring it
-        # round to windowed again
-        dismiss tree || return 1
+        # and the key itself, typed inside the tiled tree, which passes on
+        # to nvim the keys it does not answer. A chord that floated the tree
+        # left the ring at windowed, and three ring steps bring it round to
+        # windowed again. The tiles stay framed, so the floating tree is
+        # waited out by its title
+        send_key Escape
+        wait_until "$WAIT_SECS" 'the floating tree closing' \
+            lacks "$BOX_TL $(basename -- "$ROOT")" >/dev/null || return 1
         while [ "$ring_steps" -gt 0 ]; do
             command_line ':View ui cycle_surfaces'
             ring_steps=$((ring_steps - 1))
@@ -1828,7 +1831,7 @@ drive_action() {
 }
 
 leg_entry_points() {
-    CURRENT_LEG=entry-points
+    CURRENT_LEG='entry-points'
     start_session entry 'visual sweep seed line'
 
     # The bare form first, and against a project no trust store has heard
@@ -1958,7 +1961,7 @@ ACTIONS
 }
 
 leg_toast_and_history() {
-    CURRENT_LEG=toast-and-history
+    CURRENT_LEG='toast-and-history'
     start_session toast 'visual sweep seed line'
 
     # A toast lands over the cursor row, whose highlight runs the full width
@@ -2087,7 +2090,7 @@ leg_toast_and_history() {
 # terminal was told: a unit test can assert a layer's index, only a capture
 # can say the glyphs reached the cells.
 leg_toast_beside_panel() {
-    CURRENT_LEG=toast-beside-panel
+    CURRENT_LEG='toast-beside-panel'
     local toast='Not an editor command' span trow tcol edges own panel
     start_session overlap 'visual sweep seed line'
     command_line ':View ai'
@@ -2136,7 +2139,7 @@ leg_toast_beside_panel() {
 }
 
 leg_panel_typing() {
-    CURRENT_LEG=panel-typing
+    CURRENT_LEG='panel-typing'
     start_session typing 'visual sweep seed line'
     command_line ':View ai'
     wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
@@ -2236,7 +2239,7 @@ leg_panel_typing() {
 # a box a laptop user meets anonymous, with no way to tell it from the
 # picker or the tree.
 leg_narrow_title() {
-    CURRENT_LEG=narrow-title
+    CURRENT_LEG='narrow-title'
     # scoped to this leg, and read by `start_session` as it starts the pane
     local COLS=$NARROW_COLS marker
     start_session narrow 'visual sweep seed line'
@@ -2285,7 +2288,7 @@ paste_into_pane() {
 }
 
 leg_panel_paste() {
-    CURRENT_LEG=panel-paste
+    CURRENT_LEG='panel-paste'
     local mark=PASTEMARK tree_mark=TREEPASTE echoed copies
     start_session paste 'visual sweep seed line'
     command_line ':View ai'
@@ -2457,7 +2460,7 @@ open_inline_review() {
 }
 
 leg_inline_review() {
-    CURRENT_LEG=inline-review
+    CURRENT_LEG='inline-review'
     local proposed=$REVIEW_PROPOSED replaced=$REVIEW_REPLACED header='hunk 1/1' key
     open_inline_review
 
@@ -2520,7 +2523,7 @@ leg_inline_review() {
 # what it should be here, as it does for the others; nothing in this file
 # names a color.
 leg_review_stale() {
-    CURRENT_LEG=review-stale
+    CURRENT_LEG='review-stale'
     local staled="$REVIEW_REPLACED STALE"
     open_inline_review
 
@@ -2555,7 +2558,7 @@ leg_review_stale() {
 # next `>` on a width. The width itself is state no capture holds, so every
 # assertion below reads the panel's own frame edge instead.
 leg_resize_chord() {
-    CURRENT_LEG=resize-chord
+    CURRENT_LEG='resize-chord'
     start_session chord 'visual sweep seed line'
     command_line ':View ai'
     wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
@@ -2713,7 +2716,7 @@ leg_resize_chord() {
 # it is read from tmux and joined to the capture here rather than pinned in
 # a surface test alone.
 leg_permission_caret() {
-    CURRENT_LEG=permission-caret
+    CURRENT_LEG='permission-caret'
     start_session permission 'visual sweep seed line'
     command_line ':View ai'
     wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
@@ -2778,7 +2781,7 @@ leg_permission_caret() {
 # unit tests; what neither can see is a real SIGWINCH arriving mid-frame and
 # the rows the terminal is left holding, which is what this reads.
 leg_transcript_reflow() {
-    CURRENT_LEG=transcript-reflow
+    CURRENT_LEG='transcript-reflow'
     start_session reflow 'visual sweep seed line'
     command_line ':View ai'
     wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null

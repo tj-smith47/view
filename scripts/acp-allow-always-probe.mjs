@@ -152,6 +152,19 @@ function verdict(failure) {
   if (!failure && !permLog[0]?.options.some((o) => o.endsWith("/allow_always"))) {
     failure = "the first permission request offered no allow_always option";
   }
+  // one request and no edits made is a turn that stopped, which a grant
+  // honoured and a grant ignored both look like from the request count
+  const carries = (f) => {
+    try {
+      return fs.readFileSync(path.join(WORK, f + ".txt"), "utf8").trim() === "x2";
+    } catch {
+      return false;
+    }
+  };
+  const unedited = ["a", "b", "c", "d"].filter((f) => !carries(f));
+  if (!failure && unedited.length) {
+    failure = `the turn left ${unedited.map((f) => f + ".txt").join(", ")} without x2`;
+  }
   const honored = !failure && permCount === 1;
   console.log(
     JSON.stringify(
