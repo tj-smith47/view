@@ -4501,5 +4501,23 @@ else
   printf 'FAIL %s - %s\n  want rc=1, "my entry.sh" named\n  got  rc=%s\n%s\n' "$n" "$desc" "$rc" "$out"
 fi
 
+# `task commit` runs the gate before it stages the paths it commits, so a
+# new script is still untracked when the gate grades it
+new_case_modes
+printf '#!/usr/bin/env bash\necho hi\n' > "$CASE/scripts/tracked.sh"
+chmod +x "$CASE/scripts/tracked.sh"
+git -C "$CASE" add -A
+printf '#!/usr/bin/env bash\necho hi\n' > "$CASE/scripts/fresh.sh"
+out=$(bash "$CHECKER" --script-modes "$CASE" 2>&1)
+rc=$?
+desc='an untracked entry point missing its executable bit'
+case "$out" in (*'scripts/fresh.sh: an entry point'*) named=1 ;; (*) named=0 ;; esac
+if [ "$rc" = 1 ] && [ "$named" = 1 ]; then
+  printf 'ok %s - %s\n' "$n" "$desc"
+else
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=1, fresh.sh named\n  got  rc=%s\n%s\n' "$n" "$desc" "$rc" "$out"
+fi
+
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

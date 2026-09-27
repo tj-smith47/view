@@ -1521,14 +1521,24 @@ EOF
 # The walk grades the filesystem bit and not the mode `git ls-files -s`
 # still holds, because `task commit` runs this gate before it stages the
 # paths it is about to commit, and a chmod made this run has not reached the
-# index yet.
+# index yet. For the same reason a script not yet tracked is walked too: the
+# gate a new script is committed through runs before it is staged, and a
+# walk over tracked files alone first sees it at the next commit.
 check_script_modes() {
-  local fail=0 entries line path first lib
+  local fail=0 entries fresh line path first lib
   entries=$(git ls-files -s -- 'scripts/*.sh' 'scripts/**/*.sh' 2>&1) || {
     echo "STYLE FAIL: git ls-files could not list scripts/**/*.sh"
     printf '%s\n' "$entries"
     return 1
   }
+  fresh=$(git ls-files --others --exclude-standard -- 'scripts/*.sh' 'scripts/**/*.sh' 2>&1) || {
+    echo "STYLE FAIL: git ls-files could not list the untracked scripts/**/*.sh"
+    printf '%s\n' "$fresh"
+    return 1
+  }
+  if [ -n "$fresh" ]; then
+    entries=$(printf '%s\n%s\n' "$entries" "$fresh")
+  fi
   if [ -z "$entries" ]; then
     echo "STYLE FAIL: no tracked .sh file found under scripts/"
     echo "  A walk handed an empty list reports nothing and reads like a"
