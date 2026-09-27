@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Lints every shell script this tree carries at warning level: the shebang
-# population under scripts/ and every other tracked `.sh`.
+# population under scripts/ and every other `.sh` git lists, untracked ones
+# included, since `task commit` runs the lint before it stages a new file.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -15,11 +16,11 @@ fi
 script_population_read .
 # its own capture, so a failing git stops the lint: the shebang population
 # alone would otherwise read clean
-tracked=$(git ls-files -- '*.sh') || {
-  echo "lint:shell: git ls-files failed, so the tracked scripts cannot be listed" >&2
+listed=$(git ls-files --cached --others --exclude-standard -- '*.sh') || {
+  echo "lint:shell: git ls-files failed, so the scripts outside scripts/ cannot be listed" >&2
   exit 1
 }
-scripts=$({ printf '%s\n' "$SCRIPT_POPULATION"; printf '%s\n' "$tracked"; } |
+scripts=$({ printf '%s\n' "$SCRIPT_POPULATION"; printf '%s\n' "$listed"; } |
   grep . | LC_ALL=C sort -u || true)
 if [ -z "$scripts" ]; then
   echo "lint:shell: no shell script found to lint" >&2
@@ -41,12 +42,18 @@ done <<<"$scripts"
 # quoted string is text no shell reads as a comment, and each directive gets
 # one message naming everything wrong with it.
 bare=$(awk -v SQ="'" "$SCRIPT_CODE_AWK"'
+  function directive_codes(line,    c) {
+    c = line
+    sub(/^.*disable=/, "", c)
+    sub(/[[:space:]].*$/, "", c)
+    return c
+  }
   function settle(next_line) {
     if (site == "") { return }
     if (next_line == "last") {
       why = why "; is on the last line of the file and covers no command"
     } else if (next_line ~ /^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]+disable=/) {
-      why = why "; is stacked on another, and the codes join with a comma in one directive (disable=SC2034,SC2086)"
+      why = why "; is stacked on another, and the codes join with a comma in one directive (disable=" codes "," directive_codes(next_line) ")"
     } else if (next_line ~ /^[[:space:]]*(#|$)/) {
       why = why "; has a blank or a comment under it, and belongs directly above the command it covers"
     }
@@ -69,6 +76,7 @@ bare=$(awk -v SQ="'" "$SCRIPT_CODE_AWK"'
       why = why "; sits ahead of the first command of the file, where it covers the whole file"
     }
     site = FILENAME ":" FNR
+    codes = directive_codes($0)
     next
   }
   $0 !~ /^[[:space:]]*(#|$)/ { commands++ }

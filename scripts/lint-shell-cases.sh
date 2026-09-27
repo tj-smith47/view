@@ -180,8 +180,20 @@ set -eu
 UNUSED=$1
 EOF
 commit_case
-expect 1 'scripts/p.sh:4: a shellcheck disable is stacked on another, and the codes join with a comma in one directive' 1 \
+expect 1 'scripts/p.sh:4: a shellcheck disable is stacked on another, and the codes join with a comma in one directive (disable=SC2034,SC2086)' 1 \
   'stacked directives give one message, on the first, naming the comma join'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+# read by the trap at exit, which shellcheck does not follow from here
+# shellcheck disable=SC2016,SC2154
+# shellcheck disable=SC2064 # expanded now
+trap "echo $x" EXIT
+EOF
+commit_case
+expect 1 'scripts/p.sh:4: a shellcheck disable is stacked on another, and the codes join with a comma in one directive (disable=SC2016,SC2154,SC2064)' 1 \
+  'the stacked message names the codes the two directives carry'
 
 new_case
 plant p.sh <<'EOF'
@@ -233,6 +245,19 @@ printf '%s\n' '
 OUTER
 commit_case
 expect 0 'scripts clean' 0 'a directive in a here-doc body or a quoted string is text and passes'
+
+# task commit runs the lint before it stages a new file, so a script git
+# does not track yet is linted too
+new_case
+plant p.sh <<'EOF'
+set -eu
+echo clean
+EOF
+commit_case
+mkdir -p "$CASE/compat"
+printf '#!/usr/bin/env bash\nset -eu\n# shellcheck disable=SC2034\nUNUSED=1\n' >"$CASE/compat/u.sh"
+expect 1 'compat/u.sh:3: a shellcheck disable has no comment above it naming the reader' 0 \
+  'an untracked script outside scripts/ is linted'
 
 new_case
 plant p.sh <<'EOF'

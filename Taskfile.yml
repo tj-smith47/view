@@ -52,7 +52,7 @@ tasks:
       - cargo clippy --workspace --bins -- -D warnings
 
   lint:shell:
-    desc: shellcheck at warning level over every script under scripts/ and every other tracked .sh, failing when shellcheck is missing, and the case matrix of the disable-directive rule
+    desc: shellcheck at warning level over every script under scripts/ and every other .sh git lists, untracked ones included, failing when shellcheck is missing, and the case matrix of the disable-directive rule
     cmds:
       - bash scripts/lint-shell.sh
       - bash scripts/lint-shell-cases.sh
