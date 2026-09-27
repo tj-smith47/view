@@ -758,14 +758,16 @@ impl PumpShared {
         self.route_held(msg, Held::Heartbeat);
     }
 
-    /// Routes a `Msg::MappingsClaimed` without ever dropping or reordering
-    /// it on a full sink, and without blocking, on the terms
+    /// Routes a `Msg::MappingsClaimed`, or the `Msg::UserMappingsRead` the
+    /// same reply carries, without ever dropping or reordering it on a full
+    /// sink, and without blocking, on the terms
     /// [`route_buf_detached`](Self::route_buf_detached) states.
     ///
     /// A dropped claim report is silent and permanent: nothing re-issues
     /// the answer, a user whose `<leader>ff` view has just taken over would
     /// never be told which switch gives it back, and input held until the
-    /// desktop chords are mapped would stay held.
+    /// desktop chords are mapped would stay held. A dropped reading of the
+    /// user's own keys leaves them unreachable from the windowed tree.
     pub(crate) fn route_claims(&self, msg: Msg) {
         self.route_queued(msg);
     }

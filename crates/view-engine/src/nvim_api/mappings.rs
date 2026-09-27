@@ -112,6 +112,13 @@ use view_core::native::mappings::{
 /// spans `n`, `x` and `v`, because a `:` typed in visual mode opens a
 /// command line too.
 ///
+/// The same global snapshot answers with every sequence the user's config
+/// maps in normal mode, spelled by `keytrans()`, and `'timeoutlen'` (`-1`
+/// where `'timeout'` is off): a surface of view's own with a window of its
+/// own passes those keys on to nvim, the way a buffer tile does, and waits
+/// on a sequence's prefix as long as nvim would. `<Plug>` and `<SNR>` keys
+/// are left out, since no one types them.
+///
 /// The command registers unconditionally, outside the spec loop: a user who
 /// turned every default key off, or every feature, still has a way in.
 pub(crate) const REGISTER_MAPPINGS_CHUNK: &str = "\
@@ -131,7 +138,16 @@ local function note(maps)
     taken[m.lhs] = true
   end
 end
-note(vim.api.nvim_get_keymap('n'))
+local global = vim.api.nvim_get_keymap('n')
+note(global)
+local user_keys = {}
+for _, m in ipairs(global) do
+  local typed = not vim.startswith(m.lhs, '<Plug>')
+    and not vim.startswith(m.lhs, '<SNR>')
+  if typed then
+    user_keys[#user_keys + 1] = vim.fn.keytrans(m.lhsraw or m.lhs)
+  end
+end
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
   if vim.api.nvim_buf_is_loaded(buf) then
     note(vim.api.nvim_buf_get_keymap(buf, 'n'))
@@ -187,7 +203,12 @@ for _, spec in ipairs(specs) do
 end
 vim.g.view_registered_keys = registered_now
 assert(load(command_chunk))(channel, entries, command)
-return { claims = claimed, colon_mapped = colon }";
+return {
+  claims = claimed,
+  colon_mapped = colon,
+  user_keys = user_keys,
+  timeoutlen = vim.o.timeout and vim.o.timeoutlen or -1,
+}";
 
 /// The lua chunk that creates the `:View` command, taking view's channel id,
 /// every feature/verb pair the command completes, and the command's own
@@ -262,6 +283,10 @@ pub(crate) fn command_entries_lua() -> String {
 /// `the_mapping_reply_names_the_keys_its_decoder_reads`.
 pub(crate) const MAPPINGS_CLAIMS_KEY: &str = "claims";
 pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
+/// The keys the user's own normal-mode mappings answer under, and
+/// `'timeoutlen'` beside them, in the same reply.
+pub(crate) const MAPPINGS_USER_KEYS_KEY: &str = "user_keys";
+pub(crate) const MAPPINGS_TIMEOUT_KEY: &str = "timeoutlen";
 
 impl super::EngineHandle {
     /// Registers `specs` as real nvim mappings and the `:View` command in

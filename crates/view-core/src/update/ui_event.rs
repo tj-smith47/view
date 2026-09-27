@@ -257,6 +257,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             }
             model.engine.mode.current = mode;
             model.engine.mode.current_idx = mode_idx;
+            model.submit_hold.note_mode_reported();
             Vec::new()
         }
         UiEvent::CmdlineShow {

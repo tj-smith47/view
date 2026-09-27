@@ -291,6 +291,18 @@ pub enum Msg {
     ColonMappingRead {
         mapped: bool,
     },
+    /// The key sequences the user's own config maps in normal mode, read
+    /// by the mapping registration before it sets view's own keys, and how
+    /// long nvim waits for the rest of one.
+    ///
+    /// A surface of view's own with a window of its own passes these keys
+    /// on to nvim, the way a buffer tile does.
+    UserMappingsRead {
+        /// Each sequence as `keytrans()` spells it, the leader resolved.
+        keys: Vec<String>,
+        /// `'timeoutlen'`, or `None` where `'timeout'` is off.
+        timeoutlen: Option<Duration>,
+    },
     /// nvim's own `:messages` as it stood at `VimEnter`, read once by the
     /// takeover ([`RpcCall::Takeover`]).
     ///
@@ -544,6 +556,16 @@ pub enum Msg {
     /// `generation` is the arming effect's own: a hold that already ended
     /// and was armed again ignores the first one's clock.
     SubmitHoldExpired {
+        generation: u64,
+    },
+    /// nvim's `'timeoutlen'` elapsed on the keys a surface of view's own
+    /// holds while they spell the start of a mapped sequence
+    /// ([`Effect::ScheduleSequenceExpiry`]), so they go where nvim would
+    /// send them: the whole mapping they spell, or the surface.
+    ///
+    /// `generation` is the arming effect's own: a key held since re-arms
+    /// the bound, and the earlier clock ends nothing.
+    SequenceExpired {
         generation: u64,
     },
     /// The complaint grace elapsed
@@ -1517,6 +1539,17 @@ pub enum Effect {
     /// that never reports back keeps its input held until the next one
     /// does.
     ScheduleSubmitHold {
+        after: Duration,
+        generation: u64,
+    },
+    /// Arms the bound on keys a surface holds while they spell the start
+    /// of a mapped sequence: after `after` elapses the timer worker sends
+    /// [`Msg::SequenceExpired`] into the loop. The same one-shot thread as
+    /// [`Effect::ScheduleSubmitHold`].
+    ///
+    /// The degrade when a runtime or harness drops this effect: the held
+    /// keys wait for the next key typed on that surface.
+    ScheduleSequenceExpiry {
         after: Duration,
         generation: u64,
     },

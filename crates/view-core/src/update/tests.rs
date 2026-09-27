@@ -5678,6 +5678,37 @@ fn a_meta_key_at_a_pending_permission_answers_nothing_and_types_nothing() {
     }
 }
 
+/// An Alt chord nvim maps to one of view's verbs reaches nvim whole at a
+/// pending permission, and the question stays unanswered with the panel
+/// kept.
+#[test]
+fn a_view_chord_at_a_pending_permission_reaches_nvim_and_answers_nothing() {
+    let windowed = || {
+        let mut m = focused_windowed_agent();
+        let _ = update(&mut m, permission_requested_msg(7, everyday_options()));
+        m
+    };
+    for (placement, build) in [
+        ("floating", pending_permission_model as fn() -> Model),
+        ("windowed", windowed),
+    ] {
+        let mut m = build();
+        let mut claims = LEADER_CLAIMS.to_vec();
+        claims.push(("window", "<M-1>"));
+        claim_invocations(&mut m, &claims);
+        let effects = update(&mut m, key("<M-1>"));
+        assert_eq!(meta_inputs(&effects), ["<M-1>"], "{placement}: {effects:?}");
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Ai(AiCommand::AnswerPermission { .. }))),
+            "{placement}: {effects:?}"
+        );
+        assert!(m.ai_panel().pending_permission.is_some(), "{placement}");
+        assert_ne!(m.focus(), Focus::Engine, "{placement}");
+    }
+}
+
 /// A prompt nvim relays is nvim's own input loop, so an Alt chord goes to
 /// it whole, in the `<Esc>`'s place: splitting it cancelled the prompt and
 /// then handed nvim a bare key in normal mode, where `d` waits for a
@@ -5770,6 +5801,106 @@ fn keys_that_part_from_every_sequence_are_the_trees_own() {
             .any(|effect| matches!(effect, Effect::Rpc(RpcCall::TreeCreatePrompt { .. }))),
         "{effects:?}"
     );
+}
+
+/// `keys` as the user's own normal-mode mappings, with nvim waiting
+/// `timeoutlen` on a prefix.
+fn user_mappings(m: &mut Model, keys: &[&str], timeoutlen: Option<Duration>) {
+    let _ = update(
+        m,
+        Msg::UserMappingsRead {
+            keys: keys.iter().map(|keys| (*keys).to_string()).collect(),
+            timeoutlen,
+        },
+    );
+}
+
+/// A user's own mapping typed in the windowed tree or the windowed message
+/// stream reaches nvim the way it does from a buffer tile, and arms no
+/// hold, since nothing of view's answers it. The floating tree keeps the
+/// keys its own.
+#[test]
+fn a_users_own_mapping_in_a_windowed_surface_reaches_nvim() {
+    for (name, build) in [
+        ("windowed tree", focused_windowed_tree as fn() -> Model),
+        ("windowed stream", focused_windowed_notifications),
+    ] {
+        let mut m = build();
+        m.engine.mode.current = "normal".to_string();
+        claim_invocations(&mut m, &LEADER_CLAIMS);
+        user_mappings(&mut m, &["<Space>fg"], Some(Duration::from_millis(1000)));
+        let effects = typed(&mut m, &[" ", "f", "g"]);
+        assert_eq!(
+            meta_inputs(&effects),
+            [" ", "f", "g"],
+            "{name}: {effects:?}"
+        );
+        assert!(!m.submit_hold.is_holding(), "{name}");
+        assert_ne!(m.focus(), Focus::Engine, "{name}");
+    }
+
+    let mut m = tree_sidebar_model();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    user_mappings(&mut m, &["<Space>fg"], Some(Duration::from_millis(1000)));
+    let effects = typed(&mut m, &[" ", "f", "g"]);
+    assert!(meta_inputs(&effects).is_empty(), "{effects:?}");
+}
+
+/// The generation of the last sequence bound `effects` armed.
+fn sequence_bound(effects: &[Effect]) -> Option<(Duration, u64)> {
+    effects.iter().rev().find_map(|effect| match effect {
+        Effect::ScheduleSequenceExpiry { after, generation } => Some((*after, *generation)),
+        _ => None,
+    })
+}
+
+/// Held keys wait as long as nvim's own `'timeoutlen'` and then go where
+/// nvim sends them: a prefix that spells nothing whole is the surface's own
+/// again, and one that spells a shorter mapping runs it. A key held since
+/// re-arms the bound, and `'timeout'` off waits for the next key.
+#[test]
+fn a_held_sequence_resolves_at_nvims_timeoutlen() {
+    let mut m = focused_windowed_tree();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    user_mappings(&mut m, &[], Some(Duration::from_millis(300)));
+    let effects = typed(&mut m, &[" ", "a"]);
+    let (after, generation) = sequence_bound(&effects).expect("the prefix armed no bound");
+    assert_eq!(after, Duration::from_millis(300));
+    let stale = update(
+        &mut m,
+        Msg::SequenceExpired {
+            generation: generation.wrapping_sub(1),
+        },
+    );
+    assert!(stale.is_empty(), "{stale:?}");
+    let expired = update(&mut m, Msg::SequenceExpired { generation });
+    assert!(meta_inputs(&expired).is_empty(), "{expired:?}");
+    assert!(
+        expired
+            .iter()
+            .any(|effect| matches!(effect, Effect::Rpc(RpcCall::TreeCreatePrompt { .. }))),
+        "the tree's own `a` never ran: {expired:?}"
+    );
+
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    user_mappings(
+        &mut m,
+        &["<Space>f", "<Space>fg"],
+        Some(Duration::from_millis(300)),
+    );
+    let effects = typed(&mut m, &[" ", "f"]);
+    assert!(meta_inputs(&effects).is_empty(), "{effects:?}");
+    let (_, generation) = sequence_bound(&effects).expect("the prefix armed no bound");
+    let expired = update(&mut m, Msg::SequenceExpired { generation });
+    assert_eq!(meta_inputs(&expired), [" ", "f"], "{expired:?}");
+
+    let mut m = focused_windowed_tree();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    user_mappings(&mut m, &[], None);
+    let effects = typed(&mut m, &[" ", "a"]);
+    assert_eq!(sequence_bound(&effects), None, "{effects:?}");
 }
 
 /// The windowed message stream passes a leader default on the same way.
@@ -5902,8 +6033,9 @@ fn keyboard_surfaces() -> Vec<(&'static str, Model, bool)> {
 /// A key a surface of view's own does not answer reaches the router the
 /// buffer tiles use, on every surface: a desktop chord goes to nvim whole,
 /// an Alt key no one maps goes to nvim whole, and a leader default goes to
-/// nvim key by key where the surface types no text. A surface that types
-/// text keeps the leader as text, as insert mode does.
+/// nvim key by key where the surface types no text, as does a user's own
+/// mapping where that surface has a window of its own. A surface that
+/// types text keeps the leader as text, as insert mode does.
 #[test]
 fn every_surface_passes_on_the_keys_it_does_not_answer() {
     let composer = |m: &Model, name: &str| match name {
@@ -5940,6 +6072,19 @@ fn every_surface_passes_on_the_keys_it_does_not_answer() {
             assert_eq!(
                 meta_inputs(&effects),
                 [" ", "u", "f"],
+                "{name}: {effects:?}"
+            );
+        }
+
+        // a surface with a window of its own passes the user's own
+        // mappings on as a buffer tile does
+        let mut m = fresh();
+        user_mappings(&mut m, &["<Space>fg"], Some(Duration::from_millis(1000)));
+        let effects = typed(&mut m, &[" ", "f", "g"]);
+        if matches!(m.focus(), Focus::Pane(_)) && !types_text {
+            assert_eq!(
+                meta_inputs(&effects),
+                [" ", "f", "g"],
                 "{name}: {effects:?}"
             );
         }

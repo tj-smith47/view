@@ -667,6 +667,7 @@ impl EngineHandle {
                                     } else {
                                         Default::default()
                                     };
+                                    pump.route_claims(report.user_keys.into_msg());
                                     pump.route_claims(Msg::MappingsClaimed {
                                         claimed: report.claimed,
                                         colon_mapped: report.colon_mapped,
@@ -703,6 +704,7 @@ impl EngineHandle {
                                     pump.route_notify_sink(Msg::NotifySinkRead {
                                         foreign: reading.foreign_notifier,
                                     });
+                                    pump.route_claims(reading.user_keys.into_msg());
                                     pump.route_claims(Msg::MappingsClaimed {
                                         claimed: reading.claimed,
                                         colon_mapped: reading.colon_mapped,
@@ -3921,6 +3923,39 @@ mod tests {
 
         assert!(report.claimed.is_empty());
         assert!(!report.colon_mapped);
+    }
+
+    /// The user's own keys decode with `'timeoutlen'`; a negative one says
+    /// `'timeout'` is off, and a reply carrying none reads as nvim's
+    /// default.
+    #[test]
+    fn a_mapping_reply_carries_the_users_own_keys_and_timeoutlen() {
+        let reply = |timeoutlen: Option<i64>| {
+            let mut pairs = vec![(
+                Value::from(crate::nvim_api::MAPPINGS_USER_KEYS_KEY),
+                Value::Array(vec![Value::from("<Space>fg"), Value::from(3)]),
+            )];
+            if let Some(ms) = timeoutlen {
+                pairs.push((
+                    Value::from(crate::nvim_api::MAPPINGS_TIMEOUT_KEY),
+                    Value::from(ms),
+                ));
+            }
+            Value::Map(pairs)
+        };
+        let report = super::decode::decode_mapping_report(&reply(Some(300)));
+        assert_eq!(report.user_keys.keys, ["<Space>fg"]);
+        assert_eq!(
+            report.user_keys.timeoutlen,
+            Some(Duration::from_millis(300))
+        );
+        let report = super::decode::decode_mapping_report(&reply(Some(-1)));
+        assert_eq!(report.user_keys.timeoutlen, None);
+        let report = super::decode::decode_mapping_report(&reply(None));
+        assert_eq!(
+            report.user_keys.timeoutlen,
+            Some(Duration::from_millis(1000))
+        );
     }
 
     /// The late re-read: a plugin that loaded after the registration and

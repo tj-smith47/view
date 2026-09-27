@@ -132,6 +132,33 @@ fn an_invoking_claim_carries_the_keys_nvim_matches() {
     assert_eq!(keys("<D-Left>"), None);
 }
 
+/// The registration reads the user's own normal-mode keys, the leader
+/// resolved, and `'timeoutlen'`, ahead of the claims in the same reply.
+#[test]
+fn a_registration_reads_the_users_own_keys_and_timeoutlen() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    for setup in [
+        "execute('let mapleader = \" \"')",
+        "execute('nnoremap <leader>fg :echo<CR>')",
+        "execute('set timeoutlen=300')",
+    ] {
+        engine.handle.eval_str(setup).unwrap();
+    }
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let (keys, timeoutlen) = loop {
+        match rx.recv_timeout(view_test_support::host_deadline(TICK)) {
+            Ok(Msg::UserMappingsRead { keys, timeoutlen }) => break (keys, timeoutlen),
+            Ok(Msg::MappingsClaimed { .. }) => panic!("the claims came before the user's keys"),
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                panic!("no Msg::UserMappingsRead arrived within the deadline")
+            }
+        }
+    };
+    assert!(keys.iter().any(|k| k == "<Space>fg"), "{keys:?}");
+    assert_eq!(timeoutlen, Some(Duration::from_millis(300)));
+}
+
 /// A second registration that reissues the same chord must not report it as
 /// taken from a user: the previous run's own claim is not a user mapping,
 /// so the reissue's own claim for the same key must answer

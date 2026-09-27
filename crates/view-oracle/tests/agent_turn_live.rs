@@ -24,9 +24,10 @@ const COLS: u16 = 132;
 const ROWS: u16 = 30;
 const BUDGET: Duration = Duration::from_secs(30);
 /// How long the pill's row may stand once the review has risen: the turn
-/// ends in the stub's next message, a frame or two later, and a pill that
-/// lingers is one a person reads as a turn still running.
-const PILL_AFTER_REVIEW: Duration = Duration::from_millis(250);
+/// ends in the stub's next message, a few milliseconds later, and a pill
+/// standing past the 100 ms a person perceives reads as a turn still
+/// running.
+const PILL_AFTER_REVIEW: Duration = Duration::from_millis(100);
 
 /// The file the stub's `propose` diffs, seeded with the text its edit
 /// expects to find.
@@ -154,7 +155,7 @@ fn the_agent_word_is_gone_on_the_frame_its_row_leaves() {
         false
     });
     // the review rises with the edit, and the stub ends the turn in the
-    // message after it, so the two may take one frame each
+    // message after it, so the two may stand on separate frames
     if let Some((_, frame)) = review_at {
         assert!(
             pill_after_review <= PILL_AFTER_REVIEW,

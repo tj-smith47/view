@@ -40,9 +40,8 @@ impl PermissionPrompt {
     /// `RequestPermissionRequest.toolCall` member is a `ToolCallUpdate`
     /// (`docs/acp-v1-wire-capture.md`'s `## RequestPermissionRequest`
     /// section dumps its `$defs` verbatim), and `ToolCallUpdate` requires
-    /// only `toolCallId`. `title` is optional
-    /// there, so an agent that omits it still gets a question naming the
-    /// call it asks about.
+    /// only `toolCallId`. `title` is optional there, so an agent that
+    /// omits it still gets a question naming the call it asks about.
     #[must_use]
     pub fn new(
         request_id: u64,

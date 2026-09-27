@@ -757,6 +757,11 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.record_colon_mapped(mapped);
             Vec::new()
         }
+        Msg::UserMappingsRead { keys, timeoutlen } => {
+            model.submit_hold.learn_user_keys(&keys, timeoutlen);
+            Vec::new()
+        }
+        Msg::SequenceExpired { generation } => route::expire_sequence(model, generation),
         // no effect and no state of its own: the colors arrive through the
         // redraw stream and every frame re-derives its `Theme` from the
         // live highlight table regardless. Marking the model dirty is the

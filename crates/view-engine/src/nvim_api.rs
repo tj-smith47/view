@@ -40,8 +40,8 @@ use decode::{
 pub(crate) use decode::{decode_ai_fs_reply, decode_checktime_reply};
 use mappings::mapping_args;
 pub(crate) use mappings::{
-    command_entries_lua, MAPPINGS_CLAIMS_KEY, MAPPINGS_COLON_KEY, REGISTER_COMMAND_CHUNK,
-    REGISTER_MAPPINGS_CHUNK,
+    command_entries_lua, MAPPINGS_CLAIMS_KEY, MAPPINGS_COLON_KEY, MAPPINGS_TIMEOUT_KEY,
+    MAPPINGS_USER_KEYS_KEY, REGISTER_COMMAND_CHUNK, REGISTER_MAPPINGS_CHUNK,
 };
 pub(crate) use window_status::REGISTER_WINDOW_STATUS_CHUNK;
 
@@ -4694,12 +4694,17 @@ mod tests {
     /// than joining the claimant group that deletes itself.
     #[test]
     fn the_mapping_reply_names_the_keys_its_decoder_reads() {
-        assert!(
-            REGISTER_MAPPINGS_CHUNK.contains(&format!(
-                "return {{ {MAPPINGS_CLAIMS_KEY} = claimed, {MAPPINGS_COLON_KEY} = colon }}"
-            )),
-            "the chunk must answer under the keys `decode_mapping_report` looks for"
-        );
+        for answer in [
+            format!("  {MAPPINGS_CLAIMS_KEY} = claimed,\n"),
+            format!("  {MAPPINGS_COLON_KEY} = colon,\n"),
+            format!("  {MAPPINGS_USER_KEYS_KEY} = user_keys,\n"),
+            format!("  {MAPPINGS_TIMEOUT_KEY} = vim.o.timeout and vim.o.timeoutlen or -1,\n"),
+        ] {
+            assert!(
+                REGISTER_MAPPINGS_CHUNK.contains(&answer),
+                "the chunk must answer under the keys `decode_mapping_report` looks for: {answer}"
+            );
+        }
         for mode in ["'x'", "'v'"] {
             assert!(
                 REGISTER_MAPPINGS_CHUNK.contains(mode),

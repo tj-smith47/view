@@ -876,7 +876,12 @@ pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
             model.engine.literal_pending = CMDLINE_LITERAL_KEYS.contains(&notation.as_str());
             fold_keystroke(model, notation, now);
         }
-        RpcCall::Paste { .. } | RpcCall::InputMouse { .. } => fold_invalidation(model),
+        RpcCall::Paste { .. } | RpcCall::InputMouse { .. } => {
+            // a click reaches nvim as the key a pending `f` or `m` reads for
+            // its argument, so the key after it starts a command again
+            model.submit_hold.forget_argument();
+            fold_invalidation(model);
+        }
         // `RpcCall` is `#[non_exhaustive]`: a call added later is assumed to
         // touch neither the buffer nor the cursor until someone decides
         // otherwise, which is the reading that costs an unaccelerated

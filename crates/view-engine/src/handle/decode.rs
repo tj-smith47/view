@@ -415,6 +415,56 @@ pub(super) fn decode_buf_lines_event(
 pub(super) struct MappingReport {
     pub(super) claimed: Vec<MappingClaim>,
     pub(super) colon_mapped: bool,
+    pub(super) user_keys: UserKeys,
+}
+
+/// The user's own normal-mode key sequences and `'timeoutlen'`, as a
+/// mapping registration read them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UserKeys {
+    pub(super) keys: Vec<String>,
+    /// `None` where `'timeout'` is off.
+    pub(super) timeoutlen: Option<Duration>,
+}
+
+/// nvim's own default, read where a reply carries no `'timeoutlen'`.
+impl Default for UserKeys {
+    fn default() -> Self {
+        Self {
+            keys: Vec::new(),
+            timeoutlen: Some(Duration::from_millis(1000)),
+        }
+    }
+}
+
+impl UserKeys {
+    pub(super) fn into_msg(self) -> Msg {
+        Msg::UserMappingsRead {
+            keys: self.keys,
+            timeoutlen: self.timeoutlen,
+        }
+    }
+}
+
+/// Decodes the user's keys under `user_keys` and `'timeoutlen'` under
+/// `timeoutlen`, where a negative one says `'timeout'` is off. A key that
+/// is not a string is dropped.
+fn decode_user_keys(pairs: &[(Value, Value)]) -> UserKeys {
+    let keys = crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_USER_KEYS_KEY)
+        .and_then(Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| key.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let timeoutlen = match crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_TIMEOUT_KEY)
+        .and_then(Value::as_i64)
+    {
+        Some(ms) => u64::try_from(ms).ok().map(Duration::from_millis),
+        None => UserKeys::default().timeoutlen,
+    };
+    UserKeys { keys, timeoutlen }
 }
 
 /// Decodes a mapping registration's reply: the claim rows under `claims`,
@@ -436,6 +486,7 @@ pub(super) fn decode_mapping_report(result: &Value) -> MappingReport {
         colon_mapped: crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_COLON_KEY)
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        user_keys: decode_user_keys(pairs),
     }
 }
 
@@ -482,6 +533,7 @@ pub(super) struct TakeoverReading {
     /// The mapping registration's `:` reading, carried through the takeover
     /// exactly as the claims beside it are.
     pub(super) colon_mapped: bool,
+    pub(super) user_keys: UserKeys,
     pub(super) messages: String,
     pub(super) foreign_notifier: bool,
 }
@@ -504,6 +556,7 @@ pub(super) fn decode_takeover_reply(result: &Value) -> TakeoverReading {
     TakeoverReading {
         claimed: mappings.claimed,
         colon_mapped: mappings.colon_mapped,
+        user_keys: mappings.user_keys,
         messages: crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_MESSAGES_KEY)
             .and_then(Value::as_str)
             .unwrap_or_default()
