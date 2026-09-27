@@ -87,9 +87,18 @@ pub(crate) async fn run_session(
     commands: mpsc::UnboundedReceiver<AiCommand>,
     shared: Arc<SessionShared>,
     cwd: std::path::PathBuf,
+    home: Option<std::path::PathBuf>,
     requires_auth: bool,
 ) {
-    let ending = drive(codec, commands, Arc::clone(&shared), cwd, requires_auth).await;
+    let ending = drive(
+        codec,
+        commands,
+        Arc::clone(&shared),
+        cwd,
+        home,
+        requires_auth,
+    )
+    .await;
 
     // The signal is sent while the lock is still held, and the child leaves
     // the slot only afterwards. That ordering is what makes the state where
@@ -151,6 +160,7 @@ async fn drive<R, W>(
     mut commands: mpsc::UnboundedReceiver<AiCommand>,
     shared: Arc<SessionShared>,
     cwd: std::path::PathBuf,
+    home: Option<std::path::PathBuf>,
     requires_auth: bool,
 ) -> Option<SessionEnd>
 where
@@ -192,6 +202,7 @@ where
     });
 
     let mut driver = Driver::new(shared, out_tx, cwd, requires_auth);
+    driver.home = home;
     driver.begin();
 
     loop {
@@ -316,7 +327,7 @@ impl Driver {
             shared,
             out,
             cwd,
-            home: std::env::var_os("HOME").map(std::path::PathBuf::from),
+            home: None,
             next_wire_id: 1,
             next_boundary_id: 1,
             outstanding: HashMap::new(),
@@ -1159,9 +1170,9 @@ fn diff_item(item: &Value) -> Option<(&str, Option<&str>, &str)> {
 /// `ContentBlock` becomes its own text; every other `ContentBlock` kind
 /// (`image`/`audio`/`resource_link`/`resource`), `ToolCallContent`'s
 /// `"terminal"` variant, and a `"diff"` item missing a field
-/// [`diff_item`] needs become `"[<kind> content]"` -- a labeled
-/// placeholder rather than a dropped item, since a client that saw content
-/// arrive and showed nothing for it looks like the call produced no output.
+/// [`diff_item`] needs become the labeled placeholder `"[<kind> content]"`.
+/// A client that saw content arrive and showed nothing for it looks like
+/// the call produced no output.
 /// Never guesses at unpinned field names for the placeholder kinds: it only
 /// ever reads the `type` discriminant already pinned for each of them.
 fn tool_call_content_item(item: &Value) -> String {
@@ -1589,6 +1600,7 @@ mod tests {
                 commands,
                 shared,
                 std::env::temp_dir(),
+                None,
                 false,
             ),
         )
@@ -1631,6 +1643,7 @@ mod tests {
             commands,
             shared,
             std::env::temp_dir(),
+            None,
             false,
         ));
 
@@ -2352,6 +2365,44 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A path outside the workspace and under the home the session was
+    /// handed is written from `~`.
+    #[test]
+    fn a_diff_under_the_home_directory_is_written_from_the_tilde() {
+        let (mut driver, events_rx) = diff_driver();
+        let home = if cfg!(windows) {
+            "C:\\Users\\me"
+        } else {
+            "/home/me"
+        };
+        driver.cwd = std::path::PathBuf::from(abs(""));
+        driver.home = Some(std::path::PathBuf::from(home));
+        let path = std::path::Path::new(home).join("notes.txt");
+
+        driver.on_notification(
+            "session/update",
+            &diff_update(
+                "c1",
+                json!([{
+                    "type": "diff",
+                    "path": path,
+                    "oldText": "a\n",
+                    "newText": "b\n",
+                }]),
+            ),
+        );
+
+        let first = next_emitted(&events_rx, "the tool call was emitted");
+        let view_core::msg::Msg::Ai(AiEvent::ToolCallUpdate { content, .. }) = first else {
+            panic!("the call reaches the transcript: {first:?}");
+        };
+        let shown = std::path::Path::new("~").join("notes.txt");
+        assert_eq!(
+            content.and_then(|rows| rows.into_iter().next()),
+            Some(format!("{} +1 -1", shown.display()))
+        );
     }
 
     /// A `"diff"` content item is a proposal the user decides on, decoded

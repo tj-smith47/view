@@ -449,7 +449,8 @@ pub fn lhs_is_spellable(lhs: &str) -> bool {
 
 /// Whether `s` is a bare lowercase word: the shape a feature id and a verb
 /// share, and the shape that needs no escaping anywhere view spells one.
-fn is_token(s: &str) -> bool {
+#[must_use]
+pub fn is_token(s: &str) -> bool {
     !s.is_empty()
         && s.starts_with(|c: char| c.is_ascii_lowercase())
         && s.chars()

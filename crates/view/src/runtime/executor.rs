@@ -649,6 +649,16 @@ impl<E: EngineOps> Executor<E> {
                 }
                 Flow::Continue
             }
+            Effect::ScheduleSubmitHold { after, generation } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    spawn_or_log("submit-hold", move || {
+                        std::thread::sleep(after);
+                        let _ = tx.send(Msg::SubmitHoldExpired { generation });
+                    });
+                }
+                Flow::Continue
+            }
             // `dispatch` hands this to the native session's record writer
             // before an effect reaches here, since the session holds the
             // path; one that arrives anyway costs a repeated notice next

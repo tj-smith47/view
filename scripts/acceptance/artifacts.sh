@@ -496,16 +496,27 @@ const_str() {
     printf '%s' "$value"
 }
 
-# The agent panel's title while the stub agent holds it, `focused` or not:
-# the panel is titled with the name the agent gives itself in its
-# `initialize` reply, and entered it adds the way back out. Read from the
-# stub's own reply and the panel's own suffix, so a renamed stub or a
-# reworded suffix moves every leg that waits on the title.
+# The agent panel's title, `focused` or not. With no PROGRAM it is the name
+# the stub gives itself in its `initialize` reply, which the panel shows once
+# a session exists. A session starts on the first prompt, so a panel opened
+# before one is titled by the configured command: pass that PROGRAM and the
+# title is its file stem, the rule `AgentSpec::label` applies. Entered, the
+# panel adds the way back out. Read from the stub's own reply and the
+# panel's own suffix, so a renamed stub or a reworded suffix moves every leg
+# that waits on the title.
 agent_panel_title() {
-    local focused="${1:-}" name suffix
-    name=$(grep -oE '"agentInfo": \{[^}]*"title": "[^"]+"' \
-        "$REPO_ROOT/crates/view-ai/tests/fixtures/stub_agent.rs" |
-        sed -E 's/.*"title": "([^"]+)"/\1/') || true
+    local focused="${1:-}" program="${2:-}" name suffix
+    if [ -n "$program" ]; then
+        name=$(basename -- "$program")
+        # `file_stem` keeps a leading dot and drops only the last extension
+        case "$name" in
+        ?*.*) name=${name%.*} ;;
+        esac
+    else
+        name=$(grep -oE '"agentInfo": \{[^}]*"title": "[^"]+"' \
+            "$REPO_ROOT/crates/view-ai/tests/fixtures/stub_agent.rs" |
+            sed -E 's/.*"title": "([^"]+)"/\1/') || true
+    fi
     if [ -z "$name" ]; then
         printf 'FAIL: the stub agent names itself with no agentInfo title any more\n' >&2
         return 1

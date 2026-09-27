@@ -415,6 +415,12 @@ impl AiPanelState {
         self.home = home;
     }
 
+    /// The home directory paths are written under from `~`.
+    #[must_use]
+    pub fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+
     /// `path` as this panel prints it (see [`display_path`]).
     #[must_use]
     pub fn display_path(&self, path: &Path) -> String {

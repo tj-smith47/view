@@ -347,6 +347,42 @@ impl OverlayRect {
             height: self.height.saturating_sub(2),
         }
     }
+
+    /// This rect split into the box a frame is drawn on and the one-column
+    /// gutter on its inner side, for a box `anchor` puts against the left or
+    /// right edge. The gutter keeps a tile the box covers from running its
+    /// border into the box's frame, the same gap the lattice leaves between
+    /// two tiles. A box on no side edge, or one column wide, keeps its
+    /// whole rect.
+    #[must_use]
+    pub fn split_gutter(self, anchor: Anchor) -> (Self, Option<Self>) {
+        let against_left = matches!(anchor, Anchor::Left | Anchor::TopLeft | Anchor::BottomLeft);
+        let against_right = matches!(
+            anchor,
+            Anchor::Right | Anchor::TopRight | Anchor::BottomRight
+        );
+        if self.width < 2 || !(against_left || against_right) {
+            return (self, None);
+        }
+        let width = self.width - 1;
+        let (frame_col, gutter_col) = if against_left {
+            (self.col, self.col.saturating_add(width))
+        } else {
+            (self.col.saturating_add(1), self.col)
+        };
+        (
+            Self {
+                col: frame_col,
+                width,
+                ..self
+            },
+            Some(Self {
+                col: gutter_col,
+                width: 1,
+                ..self
+            }),
+        )
+    }
 }
 
 /// One of view's own surfaces: a feature that draws beside the buffer.

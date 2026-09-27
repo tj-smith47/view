@@ -178,9 +178,10 @@ const DECLARED_ABSOLUTES: &[DeclaredAbsolute] = &[
     },
     DeclaredAbsolute {
         file: "view-oracle/tests/smoke.rs",
-        line: "std::thread::sleep((TRANSIENT_TOAST_TIMEOUT * 2).saturating_sub(dispatched.elapsed()));",
-        grounds: "it aims inside the window from one timeout to four after \
-                  the dispatch, and the round's retry absorbs an overshoot",
+        line: "std::thread::sleep(TRANSIENT_TOAST_TIMEOUT / 4);",
+        grounds: "a quarter timeout after the first toast left, the fifth \
+                  stands four timeouts from its own expiry, so a host slow \
+                  enough to overshoot the beat is still inside the window",
     },
     DeclaredAbsolute {
         file: "view-oracle/tests/smoke.rs",

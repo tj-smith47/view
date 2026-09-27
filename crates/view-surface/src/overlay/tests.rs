@@ -261,12 +261,7 @@ fn an_edge_too_short_to_mark_a_cut_still_carries_the_titles_first_word() {
 fn only_an_edge_too_small_for_any_form_of_the_title_goes_bare() {
     // one cell for the title: too little for a glyph and the mark both, and
     // no first word that short
-    let panel = rows(
-        5,
-        5,
-        &titled("AI Agent: focused, Esc returns"),
-        BorderSet::ROUNDED,
-    );
+    let panel = rows(5, 5, &titled("Stub: Esc returns"), BorderSet::ROUNDED);
     assert_eq!(line_text(&panel.lines[0]), "╭───╮");
     assert!(title_span(&panel).is_none());
     assert_eq!(
@@ -294,14 +289,15 @@ fn a_title_of_nothing_a_reader_can_see_never_reaches_an_edge_that_has_no_room() 
 
 /// The geometry the acceptance sweep found the title vanishing at: the AI
 /// panel's default 30% share of a 112-column terminal, which is a narrower
-/// top edge than its focused title is long.
+/// top edge than its focused title is long. The title is the one a panel
+/// shows before its first session, named for the agent's program.
 #[test]
 fn the_ai_panels_share_of_a_laptop_width_terminal_still_names_the_panel() {
-    let title = "AI Agent: focused, Esc returns";
+    let title = "view-ai-stub-agent: Esc returns";
     let edge = rows(33, 8, &titled(title), BorderSet::ROUNDED);
     let label = title_span(&edge).expect("a 33-cell edge names the panel");
     assert!(
-        label.starts_with(" AI Agent: "),
+        label.starts_with(" view-ai-stub-agent: "),
         "the panel is named by what survives the cut: {label:?}"
     );
     assert!(label.ends_with("… "), "the cut is marked: {label:?}");
@@ -974,9 +970,8 @@ fn a_short_ai_panel_keeps_the_crash_banner_over_the_permission_and_the_review() 
 }
 
 /// A request blocking the agent's own turn is unanswerable if the overlay
-/// is too short to show how to answer it: the option must survive beside
-/// the composer, and the question -- context, not action -- is what a
-/// short overlay sacrifices first.
+/// is too short to show how to answer it. The option survives beside the
+/// composer, and the question is the first row a short overlay gives up.
 #[test]
 fn a_short_ai_panel_keeps_the_permissions_options_and_drops_the_question_first() {
     use view_core::native::views::AiPanelView;
@@ -1007,6 +1002,23 @@ fn a_short_ai_panel_keeps_the_permissions_options_and_drops_the_question_first()
         text[2].contains("draft prompt"),
         "the composer stays the last interior row: {text:?}"
     );
+}
+
+/// On a panel with one interior row and a permission pending, the row goes
+/// to the option the keys answer.
+#[test]
+fn a_one_row_ai_panel_with_a_permission_pending_shows_the_option() {
+    use view_core::native::views::AiPanelView;
+    let view = AiPanelView::new("AI Agent")
+        .with_input("draft prompt")
+        .with_pending_permission(vec![
+            vec![Span::plain("Permission requested".to_string())],
+            vec![Span::plain("  Allow once (allow_once)".to_string())],
+        ]);
+    let framed = rows(50, 3, &LayerKind::Ai(view), BorderSet::ASCII);
+    let text: Vec<String> = framed.lines.iter().map(|line| line_text(line)).collect();
+    assert!(text[1].contains("Allow once"), "{text:?}");
+    assert!(!text[1].contains("draft prompt"), "{text:?}");
 }
 
 /// The crash banner's own falsifiable check, the same shape
@@ -1290,6 +1302,11 @@ fn the_counted_ai_header_is_as_long_as_the_built_one_for_every_row_group() {
             ai_header_len(&view),
             ai_header(&view).len(),
             "the counted header must be the built header's own length"
+        );
+        assert_eq!(
+            composer_row_count(&view.input),
+            composer_lines(&view.input).len(),
+            "the counted composer must be the built footer's own length"
         );
     }
 }

@@ -5677,6 +5677,32 @@ fn shift_enter_breaks_the_line_too_and_neither_key_reaches_past_a_question() {
     assert!(!m.dirty);
 }
 
+/// An `<Esc>` typed quickly before `:` arrives as `<M-:>`, which leaves the
+/// entered panel and opens nvim's command line the way the two keys do. A
+/// Meta key the panel binds keeps its binding.
+#[test]
+fn an_unbound_meta_key_on_the_panel_is_its_escape_and_then_its_key() {
+    let mut m = entered_ai_panel_model();
+    let effects = update(&mut m, key("<M-:>"));
+    assert!(!m.ai_panel().focused, "the escape leaves the panel");
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Rpc(RpcCall::Input { notation }) if notation == ":"
+        )),
+        "the `:` reaches nvim: {effects:?}"
+    );
+    assert!(
+        m.ai_panel().input().is_empty(),
+        "the composer typed nothing"
+    );
+
+    let mut m = entered_ai_panel_model();
+    let _ = update(&mut m, key("<M-CR>"));
+    assert!(m.ai_panel().focused, "a bound Meta key stays in the panel");
+    assert_eq!(m.ai_panel().input(), "\n");
+}
+
 /// The cancel half of the same producer: `<C-c>` with nothing in flight has
 /// no turn to cancel, so it is a no-op rather than reaching
 /// `AiWorker::dispatch`'s own "no active session" surface for a key the

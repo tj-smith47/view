@@ -264,6 +264,7 @@ impl AiSession {
         let task_shared = Arc::clone(&shared);
         let task_child = Arc::clone(&child);
         let cwd = cfg.cwd;
+        let home = cfg.home;
         let requires_auth = cfg.requires_auth;
         runtime.spawn(async move {
             run_session(
@@ -272,6 +273,7 @@ impl AiSession {
                 command_rx,
                 task_shared,
                 cwd,
+                home,
                 requires_auth,
             )
             .await;

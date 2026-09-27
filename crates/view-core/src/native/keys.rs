@@ -240,6 +240,25 @@ pub fn well_formed(key: &str) -> bool {
     rest.chars().count() == 1 || NAMED_KEYS.contains(&rest) || function_key
 }
 
+/// The key a Meta key stands for once its `<Esc>` is taken off: `x` for
+/// `<M-x>`, `<CR>` for `<M-CR>`, `<C-w>` for `<M-C-w>`. `None` for a key
+/// carrying no Meta.
+///
+/// A terminal sends Alt+x as `<Esc>` and then `x`, and an `<Esc>` typed
+/// quickly before a key arrives the same way, so nvim reads a Meta key no
+/// mapping claims as those two keys.
+#[must_use]
+pub fn escaped_key(notation: &str) -> Option<String> {
+    let rest = notation
+        .strip_prefix("<M-")
+        .or_else(|| notation.strip_prefix("<A-"))?;
+    let mut chars = rest.chars();
+    Some(match (chars.next(), chars.next(), chars.next()) {
+        (Some(key), Some('>'), None) => key.to_string(),
+        _ => format!("<{rest}"),
+    })
+}
+
 /// The one or two keys `spelling` names, or `None` when it names none at
 /// all, more than a chord's two, or one this build could never be handed
 /// ([`well_formed`]).
@@ -298,6 +317,23 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[test]
+    fn a_meta_key_stands_for_the_key_its_escape_came_before() {
+        for (meta, key) in [
+            ("<M-:>", Some(":")),
+            ("<A-q>", Some("q")),
+            ("<M->>", Some(">")),
+            ("<M-CR>", Some("<CR>")),
+            ("<M-lt>", Some("<lt>")),
+            ("<M-C-w>", Some("<C-w>")),
+            ("<C-w>", None),
+            (":", None),
+            ("<Esc>", None),
+        ] {
+            assert_eq!(escaped_key(meta).as_deref(), key, "{meta}");
+        }
+    }
 
     /// What a report shows for an action is the set the resolver actually
     /// answers, written in the notation `rebind` reads back -- so a

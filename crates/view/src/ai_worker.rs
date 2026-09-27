@@ -81,6 +81,16 @@ enum SpawnFailure {
 /// distinguish from the real off-thread behavior it is supposed to prove.
 type Resolver = Arc<dyn Fn(&AgentSpec, &Path) -> Result<AgentLaunch, SpawnFailure> + Send + Sync>;
 
+/// The launch `resolver` answers for `spec`, carrying the worker's `home`.
+fn launch_for(
+    resolver: &Resolver,
+    spec: &AgentSpec,
+    cwd: &Path,
+    home: Option<PathBuf>,
+) -> Result<AgentLaunch, SpawnFailure> {
+    resolver(spec, cwd).map(|launch| launch.with_home(home))
+}
+
 /// The step [`AiWorker::spawn_in_background`] calls through rather than
 /// naming `spawn_or_log` directly, returning whether the OS accepted the
 /// worker thread. Exists so a test can prove the thread-spawn-refusal path
@@ -253,6 +263,8 @@ fn stop_watch(watch: &Watch, generation: u64) {
 pub(crate) struct AiWorker {
     agent_spec: AgentSpec,
     cwd: PathBuf,
+    /// The home directory each session writes paths under from `~`.
+    home: Option<PathBuf>,
     msg: LoopSender,
     slot: Arc<Mutex<AiSlot>>,
     resolver: Resolver,
@@ -288,12 +300,19 @@ impl AiWorker {
         Self {
             agent_spec,
             cwd,
+            home: None,
             msg,
             slot: Arc::new(Mutex::new(AiSlot::Idle)),
             resolver,
             spawner,
             watch: Watch::default(),
         }
+    }
+
+    /// The same worker, its sessions writing paths under `home` from `~`.
+    pub(crate) fn with_home(mut self, home: Option<PathBuf>) -> Self {
+        self.home = home;
+        self
     }
 
     /// Same as [`Self::new`], with [`resolve_launch`] replaced by
@@ -487,6 +506,7 @@ impl AiWorker {
     fn spawn_in_background(&self) {
         let agent_spec = self.agent_spec.clone();
         let cwd = self.cwd.clone();
+        let home = self.home.clone();
         let slot = Arc::clone(&self.slot);
         let watch = Arc::clone(&self.watch);
         let watch_generation = begin_watch(&watch);
@@ -501,7 +521,7 @@ impl AiWorker {
             if let Some(detail) = provisioning_notice(&agent_spec) {
                 let _ = msg.send(Msg::AiProvisioning { detail });
             }
-            let result = resolver(&agent_spec, &cwd).and_then(|launch| {
+            let result = launch_for(&resolver, &agent_spec, &cwd, home).and_then(|launch| {
                 let emit_tx = msg.clone();
                 start_watch(
                     &watch_for_start,
@@ -859,6 +879,22 @@ mod tests {
             matches!(&*slot, AiSlot::Idle),
             "a thread-spawn refusal must leave the slot ready to retry, not stuck in Spawning"
         );
+    }
+
+    /// The launch a session is spawned from carries the worker's home, so
+    /// its rows write paths under it from `~`.
+    #[test]
+    fn the_launch_carries_the_workers_home() {
+        let resolver: Resolver =
+            Arc::new(|_spec: &AgentSpec, cwd: &Path| Ok(AgentLaunch::new("agent", cwd)));
+        let home = PathBuf::from("home");
+        let launch = launch_for(
+            &resolver,
+            &missing_program_spec(),
+            Path::new("."),
+            Some(home.clone()),
+        );
+        assert_eq!(launch.ok().and_then(|launch| launch.home), Some(home));
     }
 
     /// The resolve-and-spawn step genuinely runs off the calling thread:

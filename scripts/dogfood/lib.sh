@@ -156,6 +156,21 @@ recording_state_home() {
   export XDG_STATE_HOME
 }
 
+# WHY: a capture or a tape records whichever binary it is handed, and a
+# release build left over from an earlier day is a recording of code without
+# the change under review. So the newer of the two builds is taken, never
+# the first one found. Prints nothing when neither exists.
+# Usage: newest_build REPO_ROOT BINARY_NAME
+newest_build() {
+  found=
+  for candidate in "$1/target/release/$2" "$1/target/debug/$2"; do
+    if [ -x "$candidate" ] && { [ -z "$found" ] || [ "$candidate" -nt "$found" ]; }; then
+      found=$candidate
+    fi
+  done
+  printf '%s' "$found"
+}
+
 RECORDER_ATTACHED=view-recorder-attached
 
 trap cleanup EXIT INT TERM

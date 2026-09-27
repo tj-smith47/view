@@ -214,6 +214,9 @@ pub enum LayerKind {
     Speculated(Vec<PredictedCell>),
     /// The agent panel's composer line and transcript rows.
     Ai(AiPanelView),
+    /// Blank cells between an edge-anchored overlay's frame and the tiles
+    /// it covers ([`view_core::model::Model::overlay_gutter`]).
+    Gutter,
 }
 
 /// The terminal cursor's shape, decoded from the active mode's
@@ -265,6 +268,7 @@ impl LayerKind {
             | Self::Pill(_)
             | Self::Popupmenu(_)
             | Self::Speculated(_)
+            | Self::Gutter
             | Self::Shell => false,
         }
     }
@@ -536,9 +540,18 @@ pub fn render(model: &Model) -> Surface {
     // it and `d` is how they are taken down, so a box standing over the
     // list the user opened hides its own remedy. It is painted after the
     // toasts below, and only while it holds the top of the stack.
+    //
+    // The busy modal is the other: the command line that wedged nvim stays
+    // on screen for as long as the wedge does, since the engine that would
+    // hide it is the one not answering, so a modal under it is never seen.
     let overlays = model.overlays();
     let (under_toasts, over_toasts) = match overlays.last() {
-        Some(open) if matches!(open.kind, OverlayKind::MessageHistory(_)) => {
+        Some(open)
+            if matches!(
+                open.kind,
+                OverlayKind::MessageHistory(_) | OverlayKind::EngineBusy(_)
+            ) =>
+        {
             overlays.split_at(overlays.len().saturating_sub(1))
         }
         _ => (overlays, &overlays[overlays.len()..]),
@@ -546,7 +559,7 @@ pub fn render(model: &Model) -> Surface {
     layers.extend(
         under_toasts
             .iter()
-            .filter_map(|open| native_layer(model, open)),
+            .flat_map(|open| native_layers(model, open)),
     );
     // whether a Prompt overlay currently holds the stack's top: it already
     // renders this exact cmdline state as its own floating input line (see
@@ -598,7 +611,7 @@ pub fn render(model: &Model) -> Surface {
     layers.extend(
         over_toasts
             .iter()
-            .filter_map(|open| native_layer(model, open)),
+            .flat_map(|open| native_layers(model, open)),
     );
     if let Some(pm) = &engine.popupmenu {
         // mirrors, term for term, the condition the cmdline block above
@@ -1042,6 +1055,23 @@ fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
         kind,
         model.caps,
     ))
+}
+
+/// [`native_layer`], with the blank gutter beside it under gapped tiles
+/// painted first.
+fn native_layers(model: &Model, open: &Overlay) -> impl Iterator<Item = Layer> {
+    let framed = native_layer(model, open);
+    let gutter = framed
+        .as_ref()
+        .and(model.overlay_gutter(open))
+        .map(|gutter| {
+            Layer::new(
+                Rect::new(gutter.row, gutter.col, gutter.width, gutter.height),
+                LayerKind::Gutter,
+                model.caps,
+            )
+        });
+    gutter.into_iter().chain(framed)
 }
 
 /// The paint-facing layer content for one overlay's feature state, or
@@ -3005,9 +3035,54 @@ mod tests {
         );
     }
 
-    /// The exception is the history's alone, and only while it holds the
-    /// top of the stack: every other overlay stays under the transient
-    /// surfaces, which is what the panel case above pins.
+    /// A command that wedges nvim leaves the palette drawn for as long as
+    /// the wedge lasts, so the busy modal raised over it stands above it.
+    #[test]
+    fn the_busy_modal_stands_over_the_command_line_that_wedged_the_engine() {
+        use std::time::Duration;
+        use view_core::native::geometry::OverlayBox;
+        use view_core::native::supervision::{EngineBusyState, SinceStamp, WedgeKind};
+
+        let mut model = model_with_grid(120, 40);
+        model.term_width = 120;
+        model.term_height = 40;
+        model.palette_enabled = true;
+        apply(
+            &mut model,
+            UiEvent::CmdlineShow {
+                content: vec![(0, "lua while true do end".to_string())],
+                pos: 21,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+        );
+        model.push_overlay(
+            OverlayBox::new(60, 30),
+            OverlayKind::EngineBusy(EngineBusyState::new(
+                WedgeKind::ReadSide,
+                SinceStamp::new(Duration::from_secs(31)),
+            )),
+        );
+
+        let surface = render(&model);
+        let position =
+            |matches: fn(&LayerKind) -> bool| surface.layers.iter().position(|l| matches(&l.kind));
+        let palette = position(|k| matches!(k, LayerKind::Palette(_)))
+            .expect("the wedged command line is still drawn");
+        let modal =
+            position(|k| matches!(k, LayerKind::Prompt(_))).expect("the busy modal is open");
+        assert!(
+            palette < modal,
+            "the palette painted after the modal covers the modal it wedged"
+        );
+    }
+
+    /// The exception is the history's and the busy modal's, and only while
+    /// one of them holds the top of the stack: every other overlay stays
+    /// under the transient surfaces, which is what the panel case above
+    /// pins.
     #[test]
     fn another_overlay_over_the_history_leaves_the_notice_on_top() {
         use view_core::native::geometry::OverlayBox;

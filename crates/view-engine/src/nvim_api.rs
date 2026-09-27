@@ -39,7 +39,10 @@ use decode::{
 };
 pub(crate) use decode::{decode_ai_fs_reply, decode_checktime_reply};
 use mappings::mapping_args;
-pub(crate) use mappings::{MAPPINGS_CLAIMS_KEY, MAPPINGS_COLON_KEY, REGISTER_MAPPINGS_CHUNK};
+pub(crate) use mappings::{
+    command_entries_lua, MAPPINGS_CLAIMS_KEY, MAPPINGS_COLON_KEY, REGISTER_COMMAND_CHUNK,
+    REGISTER_MAPPINGS_CHUNK,
+};
 pub(crate) use window_status::REGISTER_WINDOW_STATUS_CHUNK;
 
 /// Upper bound on how long each of [`EngineHandle::read_current_buffer_text`],
@@ -4650,6 +4653,7 @@ mod tests {
             .expect("the chunk's arguments must cross as an array");
         assert_eq!(args[0], Value::from(7));
         assert_eq!(args[3], Value::from(COMMAND));
+        assert_eq!(args[4], Value::from(REGISTER_COMMAND_CHUNK));
         let specs = args[1]
             .as_array()
             .expect("the specs must cross as an array");

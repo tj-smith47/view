@@ -361,6 +361,7 @@ fn picker_split_rows(
             .collect(),
         selected: None,
         header_keep_tail: false,
+        header_first: false,
         rule: false,
         footer: Vec::new(),
     };
@@ -586,13 +587,18 @@ struct Body {
     /// Whether this body is laid out as a chat ([`lay_out_chat`]): `false`
     /// (every kind but [`ai_body`]) keeps the first `height` header rows,
     /// the shape a prompt or picker's own message-then-input ordering
-    /// wants, and the first items. `true` keeps the header's last rows --
-    /// the crash banner and the pending permission's answerable options,
-    /// which a crashed session or a request blocking the agent's own turn
-    /// cannot be shown without, while the question above them is context
-    /// that can be sacrificed first -- and the newest items, which is where
-    /// a reader is and the end whose loss reads as a dead panel.
+    /// wants, and the first items. `true` keeps the header's last rows and
+    /// the newest items. The header's last rows are the crash banner and
+    /// the pending permission's answerable options, which a crashed session
+    /// or a request blocking the agent's own turn cannot be shown without.
+    /// The question above them goes first. The newest items are where a
+    /// reader is, and losing them reads as a dead panel.
     header_keep_tail: bool,
+    /// Whether the header's last row outranks the footer's last row for a
+    /// row of a short panel ([`chat_fit`]). Set while a permission is
+    /// pending, since the keys answer its options and the composer takes
+    /// none of them.
+    header_first: bool,
     /// Whether this body draws the rule that separates its header from its
     /// scrolling items.
     ///
@@ -617,7 +623,7 @@ struct Body {
 /// How a run of rows was spent against a row budget: how many of the rows
 /// above its last one were kept (always the tail of them), and whether the
 /// last row got a slot of its own.
-struct HeaderFit {
+struct RunFit {
     rest: usize,
     last: bool,
 }
@@ -625,9 +631,9 @@ struct HeaderFit {
 /// How a `header_keep_tail` body's rows were spent: its header, the rule
 /// and its footer.
 struct ChatFit {
-    header: HeaderFit,
+    header: RunFit,
     rule: bool,
-    footer: HeaderFit,
+    footer: RunFit,
 }
 
 impl ChatFit {
@@ -641,8 +647,9 @@ impl ChatFit {
 /// composer row the cursor is usually on), the header's last row (the
 /// crash banner, or the last permission option), the rule, the rest of the
 /// header from most recent to least, and the rest of the footer from most
-/// recent to least. The rule is spent from the same `budget` as the
-/// content, one slot at a time, in that order.
+/// recent to least. With `header_first` the first two swap, because a
+/// pending permission is where the keys go. The rule is spent from the
+/// same `budget` as the content, one slot at a time, in that order.
 ///
 /// Its own function rather than [`lay_out`]'s locals, because [`ai_caret`]
 /// has to name the row this arithmetic put the composer on. Two copies of
@@ -653,33 +660,44 @@ impl ChatFit {
 /// [`ai_caret`] runs on every frame the user is typing on -- building a
 /// header there only to measure it would clone the panel's chrome spans
 /// per keystroke.
-fn chat_fit(header_len: usize, footer_len: usize, rule: bool, budget: usize) -> ChatFit {
+fn chat_fit(
+    header_len: usize,
+    footer_len: usize,
+    rule: bool,
+    header_first: bool,
+    budget: usize,
+) -> ChatFit {
     let mut left = budget;
     let mut take = |wanted: bool| {
         let taken = wanted && left > 0;
         left -= usize::from(taken);
         taken
     };
-    let footer_last = take(footer_len >= 1);
-    let header_last = take(header_len >= 1);
+    let (header_last, footer_last) = if header_first {
+        let header_last = take(header_len >= 1);
+        (header_last, take(footer_len >= 1))
+    } else {
+        let footer_last = take(footer_len >= 1);
+        (take(header_len >= 1), footer_last)
+    };
     let rule = take(rule);
     let header_rest = left.min(header_len.saturating_sub(1));
     left -= header_rest;
     let footer_rest = left.min(footer_len.saturating_sub(1));
     ChatFit {
-        header: HeaderFit {
+        header: RunFit {
             rest: header_rest,
             last: header_last,
         },
         rule,
-        footer: HeaderFit {
+        footer: RunFit {
             rest: footer_rest,
             last: footer_last,
         },
     }
 }
 
-impl HeaderFit {
+impl RunFit {
     /// Which of the kept rows holds line `index` of a `header_len`-line
     /// run, counted from the first kept row, or `None` when the truncation
     /// dropped that line entirely.
@@ -754,7 +772,13 @@ fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
 /// chat does.
 fn lay_out_chat(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
     let budget = usize::from(height);
-    let kept = chat_fit(body.header.len(), body.footer.len(), body.rule, budget);
+    let kept = chat_fit(
+        body.header.len(),
+        body.footer.len(),
+        body.rule,
+        body.header_first,
+        budget,
+    );
     let mut lines: Vec<Vec<Span>> = Vec::with_capacity(budget);
     for line in kept_tail(&body.header, &kept.header) {
         lines.push(fit(line, width, borders));
@@ -785,7 +809,7 @@ fn lay_out_chat(body: &Body, width: u16, height: u16, borders: BorderSet) -> Row
 
 /// The rows of `run` that `fit` kept: the tail of the rows above its last,
 /// then its last.
-fn kept_tail<'a>(run: &'a [Line], fit: &HeaderFit) -> impl Iterator<Item = &'a Line> {
+fn kept_tail<'a>(run: &'a [Line], fit: &RunFit) -> impl Iterator<Item = &'a Line> {
     let (last, rest) = run
         .split_last()
         .map_or((None, &[][..]), |(last, rest)| (Some(last), rest));
@@ -816,6 +840,7 @@ fn body(kind: &LayerKind) -> Option<Body> {
         | LayerKind::Popupmenu(_)
         | LayerKind::Speculated(_)
         | LayerKind::Pill(_)
+        | LayerKind::Gutter
         | LayerKind::Shell => None,
     }
 }
@@ -830,6 +855,7 @@ fn picker_body(view: &PickerView) -> Body {
         items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: view.selected,
         header_keep_tail: false,
+        header_first: false,
         rule: true,
         footer: Vec::new(),
     }
@@ -847,6 +873,7 @@ fn tree_body(view: &TreeView) -> Body {
             .collect(),
         selected: view.selected,
         header_keep_tail: false,
+        header_first: false,
         rule: false,
         footer: Vec::new(),
     }
@@ -893,6 +920,7 @@ fn statusline_body(view: &StatuslineView) -> Body {
         items: Vec::new(),
         selected: None,
         header_keep_tail: false,
+        header_first: false,
         rule: false,
         footer: Vec::new(),
     }
@@ -919,6 +947,7 @@ fn prompt_body(view: &PromptView) -> Body {
             .collect(),
         selected: view.selected,
         header_keep_tail: false,
+        header_first: false,
         rule: true,
         footer: Vec::new(),
     }
@@ -934,6 +963,7 @@ fn palette_body(view: &PaletteView) -> Body {
         items: view.rows.iter().map(palette_row_line).collect(),
         selected: view.selected,
         header_keep_tail: false,
+        header_first: false,
         rule: true,
         footer: Vec::new(),
     }
@@ -950,6 +980,7 @@ fn stream_body(view: &PaletteView) -> Body {
         items: view.rows.iter().map(palette_row_line).collect(),
         selected: view.selected,
         header_keep_tail: false,
+        header_first: false,
         rule: false,
         footer: Vec::new(),
     }
@@ -977,6 +1008,7 @@ fn ai_body(view: &AiPanelView) -> Body {
         items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: None,
         header_keep_tail: true,
+        header_first: !view.pending_permission.is_empty(),
         rule: AI_RULE,
         footer: composer_lines(&view.input),
     }
@@ -1123,7 +1155,13 @@ fn ai_caret_at(
     let header_len = ai_header_len(view);
     let footer_len = composer_row_count(&view.input);
     let budget = usize::from(interior);
-    let fit = chat_fit(header_len, footer_len, AI_RULE, budget);
+    let fit = chat_fit(
+        header_len,
+        footer_len,
+        AI_RULE,
+        !view.pending_permission.is_empty(),
+        budget,
+    );
     let row = match target {
         CaretRow::Header(index) => fit.header.row_of(index, header_len),
         CaretRow::Composer(index) => fit

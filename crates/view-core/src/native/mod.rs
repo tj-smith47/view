@@ -23,6 +23,7 @@ pub mod prompt;
 pub mod registry;
 pub mod speculate;
 pub mod statusline;
+pub mod submit_hold;
 pub mod supervision;
 pub mod surfaces;
 pub mod text;

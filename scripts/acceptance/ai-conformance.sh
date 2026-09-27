@@ -291,6 +291,17 @@ refute() {
     fi
 }
 
+# The same, over the buffer region alone: the panel previews each proposed
+# diff in its transcript, so a proposal's line stays on screen there after
+# the file has stopped drawing it.
+refute_in_buffer() {
+    local text="$1" what="$2"
+    if holds "$text" "$(buffer_region)"; then
+        fail "$what (found '$text' in the buffer region)"
+        return 1
+    fi
+}
+
 # One review verb through its `:View` form -- the way in that exists
 # whatever happened to the keys, and the one a user reaches for when
 # `<leader>h` is already theirs. A separate assertion from the keys below,
@@ -317,8 +328,13 @@ start_session() {
     ROOTS+=("$cache")
     cp -R "$FIXTURE" "$ROOT/xdg_config_home"
     mkdir -p "$ROOT/xdg_data_home" "$ROOT/xdg_state_home" "$cache"
+    # A panel is opened before any prompt, so it is titled by the configured
+    # command until the first turn starts a session and the agent names
+    # itself.
+    PANEL_PROGRAM=$DEFAULT_AGENT
     if [ "$agent" != "default" ]; then
         printf '\n[ai]\nagent = %s\n' "$agent" >>"$ROOT/xdg_config_home/view/view.toml"
+        PANEL_PROGRAM=$STUB_BIN
     fi
     # The file every proposal leg offers edits to, seeded with what the stub
     # agent's own `oldText` claims it holds.
@@ -351,7 +367,8 @@ open_panel() {
     send_key Enter
     wait_for "$TRUST_PROMPT" "$WAIT_SECS" "the project trust prompt" >/dev/null
     send_text 'y'
-    wait_for "$FOCUSED_TITLE" "$budget" "the entered agent panel" >/dev/null
+    wait_for "$(agent_panel_title focused "$PANEL_PROGRAM")" "$budget" \
+        "the entered agent panel" >/dev/null
 }
 
 submit() {
@@ -631,7 +648,7 @@ leg_diff_accept_and_reject() {
         "the abandoned proposal's own line, drawn in the file" >/dev/null
     review_verb leave
     until_gone "$REVIEW_KEY_HINT" "$WAIT_SECS" "the review closing unanswered" >/dev/null
-    refute "$PROPOSED_BETA" 'an abandoned review left its proposal drawn in the file'
+    refute_in_buffer "$PROPOSED_BETA" 'an abandoned review left its proposal drawn in the file'
     wait_for "${REVIEW_MARK}discarded the proposal" "$WAIT_SECS" \
         "the abandoned review's own account of itself" >/dev/null
     assert_file_is 'alpha
@@ -680,7 +697,7 @@ gamma' 'an abandoned review changed the buffer'
     # The namespace went with it. A decoration that outlived its review
     # would leave the user reading a proposal that is already the file's own
     # text, with no keys left to answer it.
-    refute "$PROPOSED_BETA" 'the accepted proposal is still drawn over the text it became'
+    refute_in_buffer "$PROPOSED_BETA" 'the accepted proposal is still drawn over the text it became'
     wait_for "${REVIEW_MARK}accepted 1 and rejected 0 hunks" "$WAIT_SECS" \
         "the accepted review's own account of itself" >/dev/null
     assert_file_is 'alpha
@@ -699,7 +716,7 @@ gamma' 'the accepted hunk was not written byte for byte'
     assert_file_is 'alpha
 BETA
 gamma' 'a rejected hunk changed the buffer'
-    refute 'GAMMA' 'a rejected hunk reached the buffer, or is still drawn over it'
+    refute_in_buffer 'GAMMA' 'a rejected hunk reached the buffer, or is still drawn over it'
     pass 'a proposal rejected with <leader>hx left the buffer untouched'
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
@@ -1005,6 +1022,13 @@ ensure_artifact "$STUB_BIN" "$TARGET_ROOT/release/view-ai-stub-agent" \
     exit 1
 }
 
+# The agent a config naming none runs, held to the config key's own default.
+DEFAULT_AGENT=$(grep -A3 'key: "agent",' "$REPO_ROOT/crates/view-native/src/config/keys.rs" |
+    sed -nE 's/.*derived: Some\("([^"]+)"\).*/\1/p') || true
+[ -n "$DEFAULT_AGENT" ] || {
+    printf 'FAIL: the [ai] agent key no longer derives a default agent\n' >&2
+    exit 1
+}
 FOCUSED_TITLE=$(agent_panel_title focused) || exit 1
 # Truncated deliberately: the panel is a column beside the buffer and the
 # hint row is wider than it, so the full constant is never on screen. The

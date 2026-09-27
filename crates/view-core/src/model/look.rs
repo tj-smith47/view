@@ -6,6 +6,8 @@
 //! spawn's geometry `--cmd`, the registry's inner-size requests, and the
 //! compositor's frame.
 
+use crate::native::geometry::OverlayRect;
+
 /// How window layout is drawn.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +201,33 @@ impl Look {
             Panes::Tiles if self.gaps => self.inner_request(slot, margin_top) != (0, 0),
             Panes::Tiles => true,
         }
+    }
+}
+
+impl super::Model {
+    /// The cells `overlay`'s frame covers on the current terminal: its box,
+    /// less the gutter [`Self::overlay_gutter`] names.
+    #[must_use]
+    pub fn overlay_rect(&self, overlay: &super::Overlay) -> OverlayRect {
+        self.overlay_split(overlay).0
+    }
+
+    /// The blank column between an edge-anchored overlay's frame and the
+    /// tiles it covers under gapped tiles, or `None` where the frame takes
+    /// its whole box.
+    #[must_use]
+    pub fn overlay_gutter(&self, overlay: &super::Overlay) -> Option<OverlayRect> {
+        self.overlay_split(overlay).1
+    }
+
+    fn overlay_split(&self, overlay: &super::Overlay) -> (OverlayRect, Option<OverlayRect>) {
+        let full = self.overlay_box(overlay);
+        // a gapless frame shares its edge with the tile beside it, which is
+        // the lattice's own rule for two tiles
+        if self.look.inset() == (0, 0) {
+            return (full, None);
+        }
+        full.split_gutter(overlay.geometry.anchor)
     }
 }
 

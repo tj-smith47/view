@@ -1,10 +1,9 @@
 #!/bin/sh
 # WHY: the moment README's "Every window in a frame" bullet promises -- two
 # windows open at once, each with its own frame and gap, right after
-# `:View ui panes tiles` turns tiling on. cap.sh's single --keys argument
-# cannot carry two Ex commands each ended by its own Enter, so this script
-# drives its own tmux session the same way cap.sh does, and hands it to
-# record_gif in lib.sh for the recording.
+# `:View ui panes tiles` turns tiling on. cap.sh writes a text capture and
+# no gif, so this script drives its own tmux session the same way cap.sh
+# does, and hands it to record_gif in lib.sh for the recording.
 #
 # A first launch under a config leaves a "your config also draws ..."
 # notice standing over the right tile
@@ -23,13 +22,13 @@ HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(cd -- "$HERE/../../.." && pwd)
 OUT="${1:-$ROOT/assets/tapes/tiled-panes.gif}"
 
-BIN="${VIEW_BIN:-$ROOT/target/release/view}"
-[ -x "$BIN" ] || BIN="$ROOT/target/debug/view"
-[ -x "$BIN" ] || { echo "tiled-panes.sh: no view binary; build one or set VIEW_BIN" >&2; exit 2; }
-command -v tmux >/dev/null 2>&1 || { echo "tiled-panes.sh: tmux is not on PATH" >&2; exit 2; }
-
 SOCKET=view-cap-tiles-$$
 . "$HERE/../lib.sh"
+
+BIN="${VIEW_BIN:-$(newest_build "$ROOT" view)}"
+[ -n "$BIN" ] || { echo "tiled-panes.sh: no view binary; build one or set VIEW_BIN" >&2; exit 2; }
+command -v tmux >/dev/null 2>&1 || { echo "tiled-panes.sh: tmux is not on PATH" >&2; exit 2; }
+
 recording_state_home
 
 cd -- "$ROOT"

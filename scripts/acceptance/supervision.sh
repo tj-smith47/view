@@ -436,12 +436,15 @@ RESTART_KEY=$(tmux_named_key "$(const_str "$SUPERVISION_RS" RESTART_NOTATION)")
 # Only the head of the entered title is ever asserted: the panel is a third
 # of this pane wide, so its own framing truncates the title, and the part
 # that survives still carries the separator the entered suffix opens with.
-# The unfocused title is the agent's name alone, which carries none.
-FOCUSED_TITLE=$(agent_panel_title focused | cut -c1-16)
+# The unfocused title is the agent's name alone, which carries none. The
+# panel is waited on before any prompt, so no session exists yet and the
+# name is the configured command's.
+PANEL_TITLE=$(agent_panel_title '' "$STUB_BIN") || exit 1
+FOCUSED_TITLE=$(agent_panel_title focused "$STUB_BIN" | cut -c1-$((${#PANEL_TITLE} + 1)))
 case "$FOCUSED_TITLE" in
-*:*) ;;
+*:) ;;
 *)
-    printf 'FAIL: the entered agent panel title no longer reads as entered within its first 16 columns (%s), so a truncated title cannot be told from the unfocused one\n' \
+    printf 'FAIL: the entered agent panel title no longer opens with the name and its separator (%s), so a truncated title cannot be told from the unfocused one\n' \
         "${FOCUSED_TITLE:-nothing this can read}" >&2
     exit 1
     ;;

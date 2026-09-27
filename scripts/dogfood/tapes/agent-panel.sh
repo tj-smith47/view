@@ -42,12 +42,13 @@ HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(cd -- "$HERE/../../.." && pwd)
 OUT="${1:-$ROOT/assets/tapes/agent-panel.gif}"
 
-BIN="${VIEW_BIN:-$ROOT/target/release/view}"
-[ -x "$BIN" ] || BIN="$ROOT/target/debug/view"
-[ -x "$BIN" ] || { echo "agent-panel.sh: no view binary; build one or set VIEW_BIN" >&2; exit 2; }
-STUB_BIN="${VIEW_AI_STUB_BIN:-$ROOT/target/release/view-ai-stub-agent}"
-[ -x "$STUB_BIN" ] || STUB_BIN="$ROOT/target/debug/view-ai-stub-agent"
-[ -x "$STUB_BIN" ] || {
+SOCKET=view-cap-agent-$$
+. "$HERE/../lib.sh"
+
+BIN="${VIEW_BIN:-$(newest_build "$ROOT" view)}"
+[ -n "$BIN" ] || { echo "agent-panel.sh: no view binary; build one or set VIEW_BIN" >&2; exit 2; }
+STUB_BIN="${VIEW_AI_STUB_BIN:-$(newest_build "$ROOT" view-ai-stub-agent)}"
+[ -n "$STUB_BIN" ] || {
   echo "agent-panel.sh: no view-ai-stub-agent binary; build one with" \
     "cargo build --release -p view-ai --features test-support" \
     "--bin view-ai-stub-agent, or set VIEW_AI_STUB_BIN" >&2
@@ -55,8 +56,6 @@ STUB_BIN="${VIEW_AI_STUB_BIN:-$ROOT/target/release/view-ai-stub-agent}"
 }
 command -v tmux >/dev/null 2>&1 || { echo "agent-panel.sh: tmux is not on PATH" >&2; exit 2; }
 
-SOCKET=view-cap-agent-$$
-. "$HERE/../lib.sh"
 recording_state_home
 
 cachedir="${XDG_CACHE_HOME:-$HOME/.cache}/view-dogfood-tapes"

@@ -1883,7 +1883,9 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// burst still ran with `v:vim_did_enter` at 1 and the config's own
 /// `:colorscheme` already applied. A `--cmd` runs before any of it, which
 /// is why the `VimEnter` hook, the `view_bridge` group and the
-/// `vim.notify` reading all ride here rather than over the channel.
+/// `vim.notify` reading all ride here rather than over the channel. The
+/// `:View` command rides here too, so a `-c` argument and a config that
+/// call it find it defined.
 ///
 /// The channel is discovered rather than passed: an `--embed` child's
 /// stdio channel exists by the time `--cmd` arguments run, and a spawn has
@@ -2115,6 +2117,9 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
     let notify_sink = crate::nvim_api::NOTIFY_SINK_CHUNK;
     let window_status = crate::nvim_api::REGISTER_WINDOW_STATUS_CHUNK;
     let buffers = crate::nvim_api::REGISTER_BUFFERS_CHUNK;
+    let command_chunk = crate::nvim_api::REGISTER_COMMAND_CHUNK;
+    let command_entries = crate::nvim_api::command_entries_lua();
+    let command = view_core::native::mappings::COMMAND;
     let sync_parse_bytes = SYNC_PARSE_BYTES;
     let combined_parse_bytes = COMBINED_PARSE_BYTES;
     format!(
@@ -2214,7 +2219,10 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          ]==]))(channel)\n\
          assert(load([==[\n\
          {buffers}\n\
-         ]==]))(channel)"
+         ]==]))(channel)\n\
+         assert(load([==[\n\
+         {command_chunk}\n\
+         ]==]))(channel, {command_entries}, '{command}')"
     )
 }
 
@@ -3287,6 +3295,21 @@ mod busy_text_kill_tests {
 mod config_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// The `:View` command is defined by the startup `--cmd`, ahead of the
+    /// config and every `-c`, with the whole completion list.
+    #[test]
+    fn the_startup_command_defines_the_view_command() {
+        let cmd = late_attach_cmd(80, 24);
+        assert!(
+            cmd.contains(crate::nvim_api::REGISTER_COMMAND_CHUNK),
+            "{cmd}"
+        );
+        assert!(
+            cmd.contains(&crate::nvim_api::command_entries_lua()),
+            "{cmd}"
+        );
+    }
 
     /// The startup `--cmd`, every chunk it loads included, spawns a process
     /// from one place: the bridge's `read_branch`, which runs only after the

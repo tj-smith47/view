@@ -886,6 +886,7 @@ fn composite_layers(
             LayerKind::Speculated(cells) => {
                 paint_speculated(cells, view_surface::grid_origin(model), damage, buf);
             }
+            LayerKind::Gutter => paint_gutter(area, damage, buf),
             LayerKind::Palette(_) if model.palette_windowed_active() => {
                 panes::frames::paint_windowed_palette(layer, &theme, borders, area, damage, buf);
             }
@@ -969,6 +970,19 @@ fn reset_damaged_rows(buf: &mut Buffer, damage: &Damage) {
         let start = buf.index_of(area.x, area.y + row);
         for cell in &mut buf.content[start..start + width] {
             cell.reset();
+        }
+    }
+}
+
+/// Blanks `area` on this frame's damaged rows, as the cells between two
+/// gapped tiles are blank.
+fn paint_gutter(area: ratatui::layout::Rect, damage: &Damage, buf: &mut Buffer) {
+    for row in 0..area.height {
+        if !damage.covers_row_of(area, row) {
+            continue;
+        }
+        for col in area.x..area.x.saturating_add(area.width) {
+            buf[(col, area.y + row)].reset();
         }
     }
 }

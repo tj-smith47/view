@@ -29,15 +29,15 @@ ROOT=$(cd -- "$HERE/../../.." && pwd)
 OUT="${1:-$ROOT/assets/tapes/remote-editing.gif}"
 REMOTE_HOST=${REMOTE%%:*}
 
-BIN="${VIEW_BIN:-$ROOT/target/release/view}"
-[ -x "$BIN" ] || BIN="$ROOT/target/debug/view"
-[ -x "$BIN" ] || { echo "remote-editing.sh: no view binary; build one or set VIEW_BIN" >&2; exit 2; }
+SOCKET=view-cap-remote-$$
+. "$HERE/../lib.sh"
+
+BIN="${VIEW_BIN:-$(newest_build "$ROOT" view)}"
+[ -n "$BIN" ] || { echo "remote-editing.sh: no view binary; build one or set VIEW_BIN" >&2; exit 2; }
 command -v tmux >/dev/null 2>&1 || { echo "remote-editing.sh: tmux is not on PATH" >&2; exit 2; }
 command -v ssh >/dev/null 2>&1 || { echo "remote-editing.sh: ssh is not on PATH" >&2; exit 2; }
 command -v scp >/dev/null 2>&1 || { echo "remote-editing.sh: scp is not on PATH" >&2; exit 2; }
 
-SOCKET=view-cap-remote-$$
-. "$HERE/../lib.sh"
 recording_state_home
 
 REMOTE_REAL_NVIM="${REMOTE_NVIM_BIN:-nvim}"

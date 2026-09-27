@@ -5,7 +5,7 @@
 //! Beside [`super::buffers`] and [`super::window_status`] in shape (a
 //! constant Lua chunk plus the [`super::EngineHandle`] method that sends
 //! it), and with a method of its own beside the data: the chunk's
-//! four arguments are assembled from two different tables
+//! five arguments are assembled from two different tables
 //! ([`default_maps`] and [`command_only_forms`]) and a caller-supplied spec
 //! list, which is [`mapping_args`]'s own job and belongs beside the chunk
 //! it feeds.
@@ -14,13 +14,13 @@ use rmpv::Value;
 
 use crate::handle::EngineError;
 use view_core::native::mappings::{
-    command_only_forms, default_maps, is_spellable, MappingSpec, Rhs, COMMAND,
+    command_only_forms, default_maps, is_spellable, is_token, MappingSpec, Rhs, COMMAND,
 };
 
 /// The lua chunk [`EngineHandle::register_mappings`] runs inside nvim,
 /// taking view's channel id, the specs to register, every feature/verb pair
-/// the command can complete, and the command's own name as its four
-/// varargs. Constant by construction for the same reason as
+/// the command can complete, the command's own name and
+/// [`REGISTER_COMMAND_CHUNK`] as its five varargs. Constant by construction for the same reason as
 /// [`FEED_KEYS_CHUNK`](super::FEED_KEYS_CHUNK): no caller data is
 /// interpolated into the Lua source.
 ///
@@ -109,7 +109,7 @@ use view_core::native::mappings::{
 /// The command registers unconditionally, outside the spec loop: a user who
 /// turned every default key off, or every feature, still has a way in.
 pub(crate) const REGISTER_MAPPINGS_CHUNK: &str = "\
-local channel, specs, entries, command = ...
+local channel, specs, entries, command, command_chunk = ...
 local previous = vim.g.view_registered_keys or {}
 for lhs, saved in pairs(previous) do
   if type(saved) == 'table' and next(saved) ~= nil then
@@ -179,6 +179,23 @@ for _, spec in ipairs(specs) do
   }
 end
 vim.g.view_registered_keys = registered_now
+assert(load(command_chunk))(channel, entries, command)
+return { claims = claimed, colon_mapped = colon }";
+
+/// The lua chunk that creates the `:View` command, taking view's channel id,
+/// every feature/verb pair the command completes, and the command's own
+/// name as its three varargs.
+///
+/// It depends on nothing a config sets (the keys wait for `mapleader`, the
+/// command has no key), so the startup `--cmd` runs it before the user's
+/// config and before any `-c`: `view -c 'View ai open'` and an `init.lua`
+/// that calls `:View` both find the command there. The command's
+/// invocations reach view as notifications, and a feature invoked before
+/// the session can open it takes the deferred-command path.
+/// [`REGISTER_MAPPINGS_CHUNK`] runs it again, so a caller that registers
+/// over the channel alone still gets the command.
+pub(crate) const REGISTER_COMMAND_CHUNK: &str = "\
+local channel, entries, command = ...
 vim.api.nvim_create_user_command(command, function(opts)
   local verb = table.concat(vim.list_slice(opts.fargs, 2), ' ')
   vim.rpcnotify(channel, 'view_invoke', opts.fargs[1] or '', verb)
@@ -205,8 +222,32 @@ end, {
     table.sort(out)
     return out
   end,
-})
-return { claims = claimed, colon_mapped = colon }";
+})";
+
+/// Every feature/verb pair `:View` completes: the keyed entry points and the
+/// command-only forms, whatever this session mapped.
+fn command_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
+    default_maps()
+        .iter()
+        .map(|spec| (spec.feature, spec.verb))
+        .chain(
+            command_only_forms()
+                .iter()
+                .map(|form| (form.feature, form.verb)),
+        )
+}
+
+/// [`command_entries`] as a Lua table literal, for the startup `--cmd`,
+/// which has no channel to receive arguments over. A pair whose tokens
+/// need escaping is left out, the same vetting [`is_spellable`] gives a
+/// key, and every compiled-in pair passes it.
+pub(crate) fn command_entries_lua() -> String {
+    let rows: Vec<String> = command_entries()
+        .filter(|(feature, verb)| is_token(feature) && is_token(verb))
+        .map(|(feature, verb)| format!("{{ feature = '{feature}', verb = '{verb}' }}"))
+        .collect();
+    format!("{{ {} }}", rows.join(", "))
+}
 
 /// The two keys [`REGISTER_MAPPINGS_CHUNK`] answers under: the claim rows,
 /// and its reading of whether `:` carries a user mapping. Pinned against the
@@ -264,7 +305,7 @@ impl super::EngineHandle {
     }
 }
 
-/// [`REGISTER_MAPPINGS_CHUNK`]'s four arguments, shared by the call that
+/// [`REGISTER_MAPPINGS_CHUNK`]'s five arguments, shared by the call that
 /// sends it alone and the takeover that batches it.
 pub(crate) fn mapping_args(specs: &[MappingSpec], channel_id: u64) -> Vec<Value> {
     let specs = specs
@@ -282,14 +323,7 @@ pub(crate) fn mapping_args(specs: &[MappingSpec], channel_id: u64) -> Vec<Value>
             Value::Map(fields)
         })
         .collect();
-    let entries = default_maps()
-        .iter()
-        .map(|spec| (spec.feature, spec.verb))
-        .chain(
-            command_only_forms()
-                .iter()
-                .map(|form| (form.feature, form.verb)),
-        )
+    let entries = command_entries()
         .map(|(feature, verb)| {
             Value::Map(vec![
                 (Value::from("feature"), Value::from(feature)),
@@ -302,6 +336,7 @@ pub(crate) fn mapping_args(specs: &[MappingSpec], channel_id: u64) -> Vec<Value>
         Value::Array(specs),
         Value::Array(entries),
         Value::from(COMMAND),
+        Value::from(REGISTER_COMMAND_CHUNK),
     ]
 }
 
@@ -342,6 +377,18 @@ mod tests {
         assert!(
             fields.contains(&(Value::from("keys"), Value::from("<C-w>h"))),
             "a Keys row must carry its own nvim keys across: {fields:?}"
+        );
+    }
+
+    /// The startup `--cmd` spells every pair the command completes, so no
+    /// pair completes over the channel and not before `VimEnter`.
+    #[test]
+    fn the_startup_command_completes_every_pair_the_channel_does() {
+        let lua = command_entries_lua();
+        assert_eq!(
+            lua.matches("feature = ").count(),
+            command_entries().count(),
+            "{lua}"
         );
     }
 

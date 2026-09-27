@@ -537,6 +537,15 @@ pub enum Msg {
     ChordHoldExpired {
         generation: u64,
     },
+    /// The bound on input held behind a submitted `:View` elapsed
+    /// ([`Effect::ScheduleSubmitHold`]) with no word from the command, so
+    /// the input goes wherever focus stands.
+    ///
+    /// `generation` is the arming effect's own: a hold that already ended
+    /// and was armed again ignores the first one's clock.
+    SubmitHoldExpired {
+        generation: u64,
+    },
     /// The complaint grace elapsed
     /// ([`Effect::ScheduleComplaintGrace`]). After this a complaint a named
     /// holder raises over the message area is left standing like any
@@ -1496,6 +1505,18 @@ pub enum Effect {
     /// ends only on nvim's reply to the registration, or on a message
     /// prompt nvim raises while it is held.
     ScheduleChordHold {
+        after: Duration,
+        generation: u64,
+    },
+    /// Arms the bound on input held behind a submitted `:View`: after
+    /// `after` elapses the timer worker sends [`Msg::SubmitHoldExpired`]
+    /// into the loop. The same one-shot thread as
+    /// [`Effect::ScheduleStartupHold`].
+    ///
+    /// The degrade when a runtime or harness drops this effect: a `:View`
+    /// that never reports back keeps its input held until the next one
+    /// does.
+    ScheduleSubmitHold {
         after: Duration,
         generation: u64,
     },

@@ -416,6 +416,11 @@ function match_col(r, text,   n, c, k, ok) {
     }
     return -1
 }
+function edged(r, c,   b) {
+    for (b = 0; b < c; b++)
+        if (glyph[r "," b] == "\342\224\202") return 1
+    return 0
+}
 BEGIN { FS = "\t" }
 {
     glyph[$1 "," $2] = $6
@@ -426,6 +431,7 @@ END {
     hit = -1
     for (r in rows) {
         c = match_col(r, text)
+        if (c >= 0 && buffer && edged(r, c)) continue
         if (c >= 0 && (hit < 0 || r + 0 < hit)) { hit = r + 0; col = c }
     }
     if (hit < 0) exit
@@ -623,19 +629,20 @@ wait_no_box() {
 box_text() { LC_ALL=C awk -v BOX_TL="$BOX_TL" -v BOX_TR="$BOX_TR" -v BOX_BL="$BOX_BL" -v BOX_BR="$BOX_BR" -v BOX_V="$BOX_V" "$BOX_AWK$BOX_TEXT_AWK" "$CELLS"; }
 
 # "row col leftmost nearest" for `text` in the last capture; empty when it is
-# not on screen at all.
-text_span() { LC_ALL=C awk -v text="$1" "$SPAN_AWK" "$CELLS"; }
+# not on screen at all. A second argument of 1 reads only the matches with
+# no frame to their left.
+text_span() { LC_ALL=C awk -v text="$1" -v buffer="${2:-0}" "$SPAN_AWK" "$CELLS"; }
 
 # The background the first cell of `text` is painted on, in the buffer's own
-# region of the screen -- nothing at all when it is not on screen, or when
-# some overlay's edge stands to its left.
+# region of the screen -- nothing at all when it is not on screen there.
 #
 # The region matters as much as the color: a decoration in the file is left
 # of every frame on its row, where a panel row is right of one. Both halves
-# are the claim "the proposal is drawn where the code is".
+# are the claim "the proposal is drawn where the code is". The panel's own
+# review line names the same hunk, so a match inside a frame is passed over.
 buffer_bg() {
     local span row col leftmost
-    span=$(text_span "$1")
+    span=$(text_span "$1" 1)
     [ -n "$span" ] || return 0
     read -r row col leftmost _ <<<"$span"
     [ "$leftmost" -lt 0 ] || return 0
@@ -1059,9 +1066,14 @@ fi
 # Every session starts through this rather than through the binary, because
 # what a leg has to hand tmux is one command line: the engine arguments
 # below carry spaces of their own, and a tmux command string re-splits them.
+#
+# `--panes nvim` because every reader here takes the leftmost frame on a row
+# for an overlay's edge and the cells left of it for the buffer, which holds
+# only where nvim draws its windows unframed. A tile's own frame stands left
+# of every overlay under the tiled looks.
 LAUNCHER=$RUN_SUPPORT/launch.sh
 {
-    printf '#!/usr/bin/env bash\nexec %q --config %q' "$VIEW_BIN" "$VIEW_TOML"
+    printf '#!/usr/bin/env bash\nexec %q --config %q --panes nvim' "$VIEW_BIN" "$VIEW_TOML"
     # guarded rather than left to the expansion: bash's `%q` with no
     # argument at all prints `''`, and an empty argument reaches view as a
     # path to open -- which resolves to the working directory and puts a
@@ -1226,8 +1238,12 @@ rust_const() {
     }
     printf '%s' "$value"
 }
-FOCUSED_TITLE=$(agent_panel_title focused) || exit 1
-PANEL_TITLE=$(agent_panel_title) || exit 1
+# Every leg waits on the panel before its first prompt, when no session
+# exists and the panel is titled by the configured command. A leg that has
+# run a turn names the agent's own title as NAMED_FOCUSED_TITLE.
+FOCUSED_TITLE=$(agent_panel_title focused "$STUB_BIN") || exit 1
+PANEL_TITLE=$(agent_panel_title '' "$STUB_BIN") || exit 1
+NAMED_FOCUSED_TITLE=$(agent_panel_title focused) || exit 1
 
 # The glyph a title too long for its top edge is cut with, read out of the
 # framing that appends it.
@@ -1371,14 +1387,23 @@ marker_for() {
 }
 
 # Every default key this build registers, and the feature and verb behind
-# it, from the table the engine registers them out of.
+# it, from the table the engine registers them out of. The key is written
+# as a `Cow::Borrowed` literal there, and a field read empty leaves a row of
+# two words whose verb lands in the key's column, so a short row fails the
+# read.
 ENTRY_POINTS=$(awk '
     /^static DEFAULT_MAPS/ { inside = 1 }
     inside && /feature: "/ { f = $0; sub(/.*feature: "/, "", f); sub(/".*/, "", f) }
-    inside && /lhs: "/     { l = $0; sub(/.*lhs: "/, "", l); sub(/".*/, "", l) }
+    inside && /lhs: /      { l = $0; sub(/.*lhs: (Cow::Borrowed\()?"/, "", l); sub(/".*/, "", l) }
     inside && /verb: "/    { v = $0; sub(/.*verb: "/, "", v); sub(/".*/, "", v); print f, l, v }
     inside && /^\];/ { exit }
 ' "$MAPPINGS_RS")
+short_row=$(printf '%s\n' "$ENTRY_POINTS" | awk 'NF != 3 { print; exit }')
+if [ -n "$short_row" ]; then
+    printf 'FAIL: %s has a default mapping this read as "%s", with a field missing\n' \
+        "$MAPPINGS_RS" "$short_row" >&2
+    exit 1
+fi
 # checked against the array's own declared length, because the reader above
 # recognizes the three fields by name and in the order they are written: a
 # reordered or renamed field would leave it silently short, and a sweep that
@@ -1594,21 +1619,21 @@ leg_toast_and_history() {
     assert_chrome 'the error toast'
     pass 'a mistyped command toasts over the cursor row, opaque'
 
-    # The live negative control for `leg_toast_over_panel`'s overlap check.
-    # A bordered box always has an edge left of its own text, so a check that
-    # asked only for "some edge to the left" would be answered by the toast
-    # itself and would pass over an empty buffer. Here there is nothing under
-    # the toast, and the two columns that check compares must therefore be
-    # the same one -- if they can differ with no second box on screen, that
-    # check is measuring something other than overlap.
-    local bare_span bare_left bare_near
+    # The live negative control for `leg_toast_beside_panel`'s edge count. A
+    # bordered box always has an edge right of its own text, so with no
+    # panel on screen the toast's row carries exactly one edge right of it.
+    # A second one here means that check counts something other than the
+    # panel.
+    local bare_span bare_row bare_col bare_edges
     bare_span=$(text_span 'Not an editor command')
-    read -r _ _ bare_left bare_near <<<"$bare_span"
-    if [ "$bare_left" != "$bare_near" ]; then
-        fail "a toast over a bare buffer reports two different box edges left of its text ($bare_left and $bare_near), so the overlap check in leg_toast_over_panel would pass with no panel on screen"
+    read -r bare_row bare_col _ _ <<<"$bare_span"
+    bare_edges=$(LC_ALL=C awk -F'\t' -v r="$bare_row" -v c="$bare_col" \
+        '$1 == r && $2 > c && $6 == "\342\224\202" { n++ } END { print n + 0 }' "$CELLS")
+    if [ "$bare_edges" != 1 ]; then
+        fail "a toast over a bare buffer has $bare_edges box edges right of its text, so the edge count in leg_toast_beside_panel would pass with no panel on screen"
         return 1
     fi
-    pass "an unoverlapped toast has only its own frame to its left (column $bare_left)"
+    pass "an unoverlapped toast has only its own frame to its right"
 
     # The pause key, on the standing box above. It freezes the stack's
     # dismissal timing and says so with a mark in the top box's border run --
@@ -1703,12 +1728,16 @@ leg_toast_and_history() {
 # notices travel that same Messages layer, so the surface most in need of
 # saying something was the one that could not.
 #
+# The notice column now stops short of a panel pinned to its edge, so the
+# toast stands whole beside the panel with its own frame clear of the
+# panel's.
+#
 # Read here rather than in a paint test because the claim is about what a
 # terminal was told: a unit test can assert a layer's index, only a capture
-# can say the glyphs reached the cells the panel owns.
-leg_toast_over_panel() {
-    CURRENT_LEG=toast-over-panel
-    local toast='Not an editor command' span trow tcol pleft
+# can say the glyphs reached the cells.
+leg_toast_beside_panel() {
+    CURRENT_LEG=toast-beside-panel
+    local toast='Not an editor command' span trow tcol edges own panel
     start_session overlap 'visual sweep seed line'
     command_line ':View ai'
     wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
@@ -1731,25 +1760,25 @@ leg_toast_over_panel() {
     wait_for "$toast" "$WAIT_SECS" "the error toast over the open panel" >/dev/null
     assert_chrome 'the error toast over the open panel'
 
-    # the whole point, in four numbers: two distinct box edges left of the
-    # toast's text. The nearer one is the toast's own frame -- a bordered box
-    # always has one, so a check that only asked for "an edge to the left"
-    # would be answered by the toast itself and pass with no panel on screen
-    # at all. The further one is the panel, and only a toast drawn over the
-    # panel's interior has both. A panel that instead reserved its column and
-    # let the toast reflow beside it would leave the two equal, which is the
-    # layout this leg exists to tell apart from the one that ships.
+    # Two edges right of the toast's text on its row: the nearer is the
+    # toast's own frame and the further is the panel's. A toast drawn over
+    # the panel's interior has the panel's edge left of its text instead, and
+    # one under the panel is not in any cell at all.
     span=$(text_span "$toast")
     if [ -z "$span" ]; then
         fail "the toast text is not in any cell on screen, so the panel is painting over it"
         return 1
     fi
-    read -r trow tcol pleft pnear <<<"$span"
-    if [ "$pleft" -lt 0 ] || [ "$pleft" -ge "$pnear" ]; then
-        fail "the toast on row $trow starts at column $tcol with only its own frame to its left (edges at $pleft and $pnear), so nothing on that row is underneath it and this leg proves nothing"
+    read -r trow tcol _ _ <<<"$span"
+    edges=$(LC_ALL=C awk -F'\t' -v r="$trow" -v c="$tcol" \
+        '$1 == r && $2 > c && $6 == "\342\224\202" { print $2 }' "$CELLS" | sort -n | head -2)
+    own=$(printf '%s\n' "$edges" | sed -n 1p)
+    panel=$(printf '%s\n' "$edges" | sed -n 2p)
+    if [ -z "$panel" ] || [ "$own" -ge "$panel" ]; then
+        fail "the toast on row $trow (text at column $tcol) has no panel edge right of its own frame (edges: $(printf '%s' "$edges" | tr '\n' ' ')), so it is not standing beside the panel"
         return 1
     fi
-    pass "a toast paints over the open panel (row $trow, text at column $tcol, its own frame at $pnear, the panel's edge at $pleft)"
+    pass "a toast stands beside the open panel (row $trow, text at column $tcol, its own frame at $own, the panel's edge at $panel)"
 
     dismiss ai
     end_session
@@ -2308,7 +2337,7 @@ leg_resize_chord() {
     }
     ai_key=$(tmux_key "$ai_key") || return 1
     send_text "$ai_key"
-    wait_in_box "$FOCUSED_TITLE" "$WAIT_SECS" 'the panel the toggle re-enters' >/dev/null
+    wait_in_box "$NAMED_FOCUSED_TITLE" "$WAIT_SECS" 'the panel the toggle re-enters' >/dev/null
     send_text '>DROPPED'
     wait_in_box '>DROPPED' "$REACTION_SECS" "the '>' typed after focus came back" >/dev/null
     dropped=$(panel_edge)
@@ -2456,7 +2485,7 @@ leg_transcript_reflow() {
     end_session
 }
 
-LEGS=(leg_entry_points leg_toast_and_history leg_toast_over_panel leg_panel_typing
+LEGS=(leg_entry_points leg_toast_and_history leg_toast_beside_panel leg_panel_typing
     leg_panel_paste leg_narrow_title leg_inline_review leg_resize_chord
     leg_permission_caret leg_transcript_reflow leg_review_stale)
 if [ "$#" -eq 0 ]; then

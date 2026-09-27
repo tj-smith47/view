@@ -77,6 +77,8 @@ impl Frame {
 ///
 /// - not state at all: `dirty`, `running`, `fatal_reason`, `config_was_read`,
 ///   `checktime_generation`, `pending_file_gone_probes`, `speculate`,
+///   `submit_hold` (input kept from routing reaches a layer only once it
+///   is replayed),
 ///   `supervision`, `claimed_keys`, `key_bindings`, `key_profile_override`,
 ///   `key_profile_report_requested`
 ///   (`update()` only records a `:View keys profile` flip or bare report
@@ -420,6 +422,7 @@ fn kind_name(kind: &crate::LayerKind) -> &'static str {
         crate::LayerKind::Speculated(_) => "Speculated",
         crate::LayerKind::Ai(_) => "Ai",
         crate::LayerKind::Pill(_) => "Pill",
+        crate::LayerKind::Gutter => "Gutter",
     }
 }
 

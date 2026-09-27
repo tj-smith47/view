@@ -3424,6 +3424,52 @@ fn notifications_ticker_windowed() {
     }
 }
 
+/// The frame of an overlay against a side edge, and the tile border it
+/// covers, read on the frame's top row: `(gutter, border)` for the column
+/// on the frame's inner side and the one past it.
+fn inner_side_of_the_frame(tiles: &Tiles, against_right: bool) -> (String, String) {
+    let open = tiles
+        .model
+        .overlays()
+        .last()
+        .expect("the scene opened an overlay");
+    let rect = tiles.model.overlay_rect(open);
+    let buf = tiled_frame(&tiles.model);
+    let (gutter, border) = if against_right {
+        (rect.col - 1, rect.col - 2)
+    } else {
+        (rect.col + rect.width, rect.col + rect.width + 1)
+    };
+    let cell = |col: u16| buf[(col, rect.row)].symbol().to_string();
+    (cell(gutter), cell(border))
+}
+
+/// Under gapped tiles the right-anchored agent panel stands one blank
+/// column clear of the tile it covers, and that tile's top border runs up
+/// to the column.
+#[test]
+fn a_right_anchored_overlay_stands_a_gap_clear_of_the_tile_it_covers() {
+    let (gutter, border) = inner_side_of_the_frame(&agent_overlay_beside_the_tiles(true), true);
+    assert_eq!(gutter, " ");
+    assert!(["-", "─"].contains(&border.as_str()), "{border:?}");
+}
+
+/// The left-anchored tree mirrors it on the frame's right side.
+#[test]
+fn a_left_anchored_overlay_stands_a_gap_clear_of_the_tile_it_covers() {
+    let mut tiles = tiled(true);
+    open_surface(
+        &mut tiles.model,
+        view_core::native::geometry::NativeSurface::Tree,
+        view_core::native::geometry::SurfacePlacement::Overlay,
+        view_core::native::geometry::Anchor::Left,
+        None,
+    );
+    let (gutter, border) = inner_side_of_the_frame(&tiles, false);
+    assert_eq!(gutter, " ");
+    assert!(["-", "─"].contains(&border.as_str()), "{border:?}");
+}
+
 /// The agent panel floating at the right edge over the two-tile scene, the
 /// placement a config that names none opens it at.
 fn agent_overlay_beside_the_tiles(gaps: bool) -> Tiles {

@@ -344,6 +344,10 @@ pub struct Model {
     /// after it would silently re-point some later, unrelated press at a
     /// resize.
     pub(crate) pending_chord: Option<String>,
+    /// The `:` command line being typed to the engine, and the input held
+    /// behind a submitted `:View` until view has run it; see
+    /// [`crate::native::submit_hold`].
+    pub submit_hold: crate::native::submit_hold::SubmitHold,
     /// Supervision's memory of the current wedge episode -- which wedge the
     /// user has already been offered a modal for, so a dismissed one stays
     /// dismissed while the banner behind it keeps re-asserting; see
@@ -481,6 +485,7 @@ impl Model {
             surfaces: crate::native::placement::SurfaceState::default(),
             key_bindings: crate::native::keys::KeyBindings::default(),
             pending_chord: None,
+            submit_hold: crate::native::submit_hold::SubmitHold::default(),
             supervision: crate::native::supervision::SupervisionState::default(),
             speculate: crate::native::speculate::SpeculateState::default(),
             ai_panel: crate::native::ai_panel::AiPanelState::new(),
@@ -1264,7 +1269,8 @@ impl Model {
         self.mouse_capture = None;
     }
 
-    /// The cells `overlay` covers on the current terminal.
+    /// The cells `overlay`'s box covers on the current terminal, the gutter
+    /// [`Model::overlay_gutter`] names included.
     ///
     /// The one place an overlay's share of the terminal becomes cells, for
     /// hit-testing and for painting alike: two resolutions reading two
@@ -1285,8 +1291,7 @@ impl Model {
     /// loses the one-cell ring [`Look::inset`] leaves around the outermost
     /// frames as well, so a full-height side panel's border stands on the
     /// rows and the edge column the tiles beside it frame on.
-    #[must_use]
-    pub fn overlay_rect(&self, overlay: &Overlay) -> OverlayRect {
+    fn overlay_box(&self, overlay: &Overlay) -> OverlayRect {
         let top = self.chrome_rows();
         let (ring_rows, ring_cols) = self.look.inset();
         let foot = if self.look.panes == Panes::Tiles {

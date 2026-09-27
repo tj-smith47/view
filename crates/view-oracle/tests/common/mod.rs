@@ -52,23 +52,32 @@ use std::time::Duration;
 /// the neighbours instead of view.
 pub fn view_bin_path() -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    BUILT.get_or_init(build_view_bin).clone()
+    BUILT.get_or_init(|| built_bin("view", "view", &[])).clone()
 }
 
-fn build_view_bin() -> PathBuf {
-    let profile_dir = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    let path = view_oracle::target_root().join(profile_dir).join("view");
+/// Builds `bin` from `package` with `features` in the profile this test
+/// binary was built in, and returns its path. The profile is passed to
+/// cargo as well as read back, so a release test run builds and runs a
+/// release binary.
+pub fn built_bin(package: &str, bin: &str, features: &[&str]) -> PathBuf {
+    let release = !cfg!(debug_assertions);
+    let mut args = vec!["build", "-p", package, "--bin", bin];
+    if release {
+        args.push("--release");
+    }
+    let features = features.join(",");
+    if !features.is_empty() {
+        args.extend(["--features", features.as_str()]);
+    }
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let status = std::process::Command::new(cargo)
-        .args(["build", "-p", "view"])
+        .args(&args)
         .status()
-        .expect("failed to invoke cargo build -p view");
-    assert!(status.success(), "cargo build -p view failed");
-    path
+        .expect("failed to invoke cargo build");
+    assert!(status.success(), "cargo {args:?} failed");
+    view_oracle::target_root()
+        .join(if release { "release" } else { "debug" })
+        .join(bin)
 }
 
 /// Returns the workspace `target/view-oracle-scratch` directory, creating

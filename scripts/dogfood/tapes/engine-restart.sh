@@ -20,13 +20,13 @@ HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(cd -- "$HERE/../../.." && pwd)
 OUT="${1:-$ROOT/assets/tapes/engine-restart.gif}"
 
-BIN="${VIEW_BIN:-$ROOT/target/release/view}"
-[ -x "$BIN" ] || BIN="$ROOT/target/debug/view"
-[ -x "$BIN" ] || { echo "engine-restart.sh: no view binary; build one or set VIEW_BIN" >&2; exit 2; }
-command -v tmux >/dev/null 2>&1 || { echo "engine-restart.sh: tmux is not on PATH" >&2; exit 2; }
-
 SOCKET=view-cap-restart-$$
 . "$HERE/../lib.sh"
+
+BIN="${VIEW_BIN:-$(newest_build "$ROOT" view)}"
+[ -n "$BIN" ] || { echo "engine-restart.sh: no view binary; build one or set VIEW_BIN" >&2; exit 2; }
+command -v tmux >/dev/null 2>&1 || { echo "engine-restart.sh: tmux is not on PATH" >&2; exit 2; }
+
 recording_state_home
 
 cd -- "$ROOT"

@@ -260,7 +260,14 @@ fn spawn_view_pty_owning_messages() -> ViewPtySession {
         QueryPolicy::AnswerDa1,
         MESSAGES_ON,
     );
-    let _ = session.wait_for("~", Duration::from_secs(5));
+    assert!(
+        session.wait_for(
+            "~",
+            view_test_support::host_deadline(Duration::from_secs(5))
+        ),
+        "view never painted the empty buffer; screen:\n{}",
+        session.screen()
+    );
     wait_for_quiet_toast_stack(&mut session);
     session
 }
@@ -2178,78 +2185,63 @@ fn a_stack_of_toasts_expires_one_slot_at_a_time_rather_than_all_at_once() {
 
     let mut session = spawn_view_pty_owning_messages();
 
-    for round in 1..=3u32 {
-        let token = format!("slot{round}token");
-        let dispatched = Instant::now();
-        session
-            .send(
-                format!(
-                    "\x1b:for i in range(1,{TOASTS_PER_ROUND}) | echomsg '{token}' . i | endfor\r"
-                )
+    let token = "slottoken";
+    let first = format!("{token}1");
+    let last = format!("{token}{TOASTS_PER_ROUND}");
+    session
+        .send(
+            format!("\x1b:for i in range(1,{TOASTS_PER_ROUND}) | echomsg '{token}' . i | endfor\r")
                 .as_bytes(),
-            )
-            .unwrap();
-        assert!(
-            wait_for_toast(
-                &mut session,
-                &format!("{token}{TOASTS_PER_ROUND}"),
-                view_test_support::host_deadline(Duration::from_secs(5))
-            ),
-            "screen never showed the fifth of five echomsg lines; last screen:\n{}",
-            session.screen()
-        );
-
-        // no further input: every expiry from here is a timer's doing. The
-        // read aims at two timeouts after the dispatch, the middle of the
-        // window from one timeout (a timer-per-toast design has taken the
-        // whole stack down) to four (the fifth slot reaches the top). The
-        // aim is a moment in that window, so it is unscaled: a host-scaled
-        // sleep lands past the window's end once the load factor reaches
-        // 4/3, and the stalled-round retry below absorbs an overshoot.
-        std::thread::sleep((TRANSIENT_TOAST_TIMEOUT * 2).saturating_sub(dispatched.elapsed()));
-        let screen = session.screen();
-        // the window this round had to land inside, timed from the dispatch
-        // and never from the start of the wait: the fifth slot reaches the
-        // top at four timeouts and expires at five, so a screen read past
-        // the fourth is a round this thread slept through and the fifth slot
-        // may legitimately own the top by now -- a token gone there says
-        // nothing about which timer was armed. Wait the round out and
-        // dispatch again rather than conclude from it: nothing but a slot
-        // timer retires a transient, so the recovery rides out the whole
-        // five-slot drain rather than clearing it with a key.
-        if dispatched.elapsed() >= TRANSIENT_TOAST_TIMEOUT * 4 {
-            assert!(
-                session.wait_for_screen(
-                    view_test_support::host_deadline(TRANSIENT_TOAST_TIMEOUT * TOASTS_PER_ROUND),
-                    |s| { !s.contents().contains(&token) }
-                ),
-                "the stalled round's toasts never left the screen, so the next \
-                 round would start behind them; last screen:\n{}",
-                session.screen()
-            );
-            continue;
-        }
-        assert!(
-            toast_shows(&screen, &format!("{token}{TOASTS_PER_ROUND}")),
-            "the last of five stacked toasts expired before it ever reached the \
-             top slot -- its timer ran while it was queued behind four others; \
-             read {:?} after the dispatch; last screen:\n{screen}",
-            dispatched.elapsed()
-        );
-        assert!(
-            !screen.contains(&format!("{token}1")),
-            "the top slot's own timer never ran, so this proves nothing about \
-             which timer is armed; last screen:\n{screen}"
-        );
-
-        session.send(b"\x1b:q!\r").unwrap();
-        expect_quit(&mut session);
-        return;
-    }
-    panic!(
-        "the host slept through the readable window on three consecutive \
-         rounds; this says nothing about the slot timers either way"
+        )
+        .unwrap();
+    assert!(
+        wait_for_toast(
+            &mut session,
+            &last,
+            view_test_support::host_deadline(Duration::from_secs(5))
+        ),
+        "screen never showed the fifth of five echomsg lines; last screen:\n{}",
+        session.screen()
     );
+
+    // no further input, so every expiry from here is a timer's doing. The
+    // order is read and no instant is: the first screen without the top
+    // toast is the one its own timer produced, and the fifth has to stand
+    // on it
+    let mut first_gone = None;
+    assert!(
+        session.wait_for_screen(
+            view_test_support::host_deadline(TRANSIENT_TOAST_TIMEOUT * 2),
+            |s| {
+                let contents = s.contents();
+                let gone = !toast_shows(&contents, &first);
+                if gone {
+                    first_gone = Some(contents);
+                }
+                gone
+            }
+        ),
+        "the top slot's own timer never ran; last screen:\n{}",
+        session.screen()
+    );
+    let screen = first_gone.unwrap_or_default();
+    assert!(
+        toast_shows(&screen, &last),
+        "the fifth toast left with the first, so its timer ran while it was \
+         queued behind four others; screen:\n{screen}"
+    );
+    // a timer per toast takes all five down within milliseconds of each
+    // other, which a single frame can split. The beat is unscaled because
+    // the fifth slot stands four more timeouts from here
+    std::thread::sleep(TRANSIENT_TOAST_TIMEOUT / 4);
+    let later = session.screen();
+    assert!(
+        toast_shows(&later, &last),
+        "the fifth toast left a quarter timeout after the first; screen:\n{later}"
+    );
+
+    session.send(b"\x1b:q!\r").unwrap();
+    expect_quit(&mut session);
 }
 
 // The falsifiable counterpart to the transient-expiry test above: an emsg

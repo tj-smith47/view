@@ -39,6 +39,9 @@ pub struct AgentLaunch {
     /// authentication methods without enforcing them must not be made to
     /// authenticate against its own wishes.
     pub requires_auth: bool,
+    /// The home directory a path outside [`Self::cwd`] is written relative
+    /// to in the panel's rows, when the process has one.
+    pub home: Option<std::path::PathBuf>,
 }
 
 impl AgentLaunch {
@@ -50,7 +53,15 @@ impl AgentLaunch {
             args: Vec::new(),
             cwd: cwd.into(),
             requires_auth: false,
+            home: None,
         }
+    }
+
+    /// The same configuration, writing paths under `home` from `~`.
+    #[must_use]
+    pub fn with_home(mut self, home: Option<std::path::PathBuf>) -> Self {
+        self.home = home;
+        self
     }
 
     /// The same configuration with `args` passed to the agent.
@@ -84,6 +95,7 @@ impl AgentLaunch {
             args: args.to_vec(),
             cwd: cwd.into(),
             requires_auth: adapter.requires_auth(),
+            home: None,
         }
     }
 }

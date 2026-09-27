@@ -226,7 +226,9 @@ impl Model {
             .iter()
             .filter(|overlay| overlay.geometry.anchor != Anchor::Center)
             .map(move |overlay| {
-                let rect = self.overlay_rect(overlay);
+                // the box, gutter included: a notice beside the panel keeps
+                // the same gap from its frame that the tiles do
+                let rect = self.overlay_box(overlay);
                 (
                     rect.row.saturating_sub(top),
                     rect.col.saturating_sub(offset),
@@ -806,7 +808,7 @@ pub(crate) mod tests {
         };
         model.push_overlay(geometry, kind);
         let panel = model.overlays().last()?;
-        let rect = model.overlay_rect(panel);
+        let rect = model.overlay_box(panel);
         Some((rect.row, rect.col, rect.width, rect.height))
     }
 

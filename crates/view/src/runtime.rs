@@ -179,7 +179,10 @@ pub(crate) fn dispatch<E: EngineOps>(
     // behind it, a resize included, so nvim sees the order the terminal
     // produced. Only what goes to nvim waits, so a modal answered while the
     // engine is down is still answered
-    let holding = is_held_kind(&msg) && follow_ups.native.holds_input();
+    // the pass that ends a `:View` hold replays input, which waits here like
+    // the input it is
+    let holding =
+        (is_held_kind(&msg) || model.submit_hold.releases(&msg)) && follow_ups.native.holds_input();
     follow_ups.native.note_vim_enter(&msg);
     let mut flow = Flow::Continue;
     // ahead of the fold's own effects: what a guess this batch took back
@@ -1155,7 +1158,8 @@ pub fn run(
     // engine restart's fresh `Executor` re-wiring this same worker (below)
     // still targets the one project this session was ever asked about
     model.ai_panel_mut().configured_agent = ai_agent.label();
-    let ai = crate::ai_worker::AiWorker::new(ai_agent, model.cwd.clone(), msg_tx.clone());
+    let ai = crate::ai_worker::AiWorker::new(ai_agent, model.cwd.clone(), msg_tx.clone())
+        .with_home(model.ai_panel().home().map(std::path::Path::to_path_buf));
     // declared here so every way out of this function -- the quit returns
     // below and the `?` on a terminal write alike -- signals the agent
     // child, which no refcount can promise (see `AiWorker::shutdown`)

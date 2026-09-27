@@ -137,6 +137,23 @@ pub fn tell_taken_over(
 /// the boundary as a returned [`Effect`] instead of being performed here.
 #[must_use]
 pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
+    let Some(msg) = model.submit_hold.hold(msg) else {
+        return Vec::new();
+    };
+    let releases = model.submit_hold.releases(&msg);
+    let mut effects = update_one(model, msg);
+    // replayed after the command has run, so the focus it set routes them.
+    // A replayed `:View` submit arms a fresh hold, which the rest are then
+    // kept behind in order
+    if releases {
+        for held in model.submit_hold.take_held() {
+            effects.extend(update(model, held));
+        }
+    }
+    effects
+}
+
+fn update_one(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // any input during an animation completes it on that frame (the spec's
     // interruptible rule): the model is already in the state the motion is
     // interpolating toward, so jumping to the last frame paints that state
@@ -316,7 +333,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             } else {
                 Vec::new()
             };
-            effects.extend(route_key(model, notation, modal_was_open));
+            effects.extend(surfaces::route_unescaped(model, notation, modal_was_open));
             effects
         }
         Msg::Paste(text) => match model.focus() {
@@ -775,6 +792,8 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // the input hold belongs to the binary's native session, which
         // reads this message at the same dispatch
         Msg::ChordHoldExpired { .. } => Vec::new(),
+        // `update` releases the hold around this dispatch
+        Msg::SubmitHoldExpired { .. } => Vec::new(),
         // The key-dispatch-path arm: one event per keystroke in an attached
         // buffer, folded into the open review's hunks and nothing else. The
         // work is O(open hunks) and allocation-free for an edit outside
@@ -1532,7 +1551,9 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             if notation == "<Esc>" && !modal_was_open && model.engine.messages.dismiss_sticky() {
                 model.dirty = true;
             }
-            vec![Effect::Rpc(RpcCall::Input { notation })]
+            let mut effects = crate::native::submit_hold::fold_engine_key(model, &notation);
+            effects.insert(0, Effect::Rpc(RpcCall::Input { notation }));
+            effects
         }
         Focus::Pane(NativeSurface::Tree) => surfaces::tree_key(model, &notation),
         Focus::Pane(NativeSurface::Agent) => surfaces::agent_pane_key(model, &notation),
