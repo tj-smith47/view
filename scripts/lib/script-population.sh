@@ -48,8 +48,7 @@ script_population_read() {
     printf '%s\n' "$unreadable" | sed 's/$/: the shebang selection cannot read it/'
     return 1
   fi
-  # every reader of this name is a sourcing script, which shellcheck does
-  # not follow from here
+  # read by the sourcing scripts, which shellcheck does not follow from here
   # shellcheck disable=SC2034
   SCRIPT_POPULATION=$(printf '%s\n' "$graded" | sed -n 's/^take //p')
   return 0
@@ -64,6 +63,7 @@ script_population_read() {
 # words are the union of what those three carried: dropping `elif`, `while`
 # or `until` leaves a walk guarded behind one of them fail-open, with the
 # path it guards never demanded and nothing said.
+# read by the sourcing scripts, which shellcheck does not follow from here
 # shellcheck disable=SC2034
 SCRIPT_COMMAND_START='((^|[;&|({!])[[:space:]]*|(^|[[:space:]])(if|then|do|else|elif|while|until)[[:space:]]+)'
 
@@ -76,6 +76,7 @@ SCRIPT_COMMAND_START='((^|[;&|({!])[[:space:]]*|(^|[[:space:]])(if|then|do|else|
 # end of scripts/check-style-cases.sh reads this name the way it reads the
 # command-start list. Written with printf rather than as `$'\034'`, which
 # bash 3.2 reads and `sh` does not.
+# read by the sourcing scripts, which shellcheck does not follow from here
 # shellcheck disable=SC2034
 SCRIPT_FIELD_SEP=$(printf '\034')
 
@@ -98,6 +99,7 @@ SCRIPT_FIELD_SEP=$(printf '\034')
 # to the blank or operator that ends a shell word where it is not. A spelling
 # read as no operator at all has the body under it scanned as commands, which
 # is the direction that hides findings behind text no shell ever runs.
+# read by the sourcing scripts, which shellcheck does not follow from here
 # shellcheck disable=SC2034
 SCRIPT_HEREDOC_AWK='function tags_of(line,   i, j, n, c, q, qc, rest, t, dash, out, ansi, adepth) {
   out = ""
@@ -221,6 +223,7 @@ SCRIPT_HEREDOC_AWK='function tags_of(line,   i, j, n, c, q, qc, rest, t, dash, o
 # and never terminates leaves CODE empty to the end of the file: every walk
 # then reads no code there, which is the fail-closed half -- a harvest stops
 # rather than running on into text the handler never runs.
+# read by the sourcing scripts, which shellcheck does not follow from here
 # shellcheck disable=SC2034
 SCRIPT_CODE_AWK="$SCRIPT_HEREDOC_AWK"'
   FNR == 1 { DEPTH = 0; STACK = ""; HD = "" }

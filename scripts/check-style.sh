@@ -2481,10 +2481,11 @@ read_script_population() {
 # reddens naming them rather than grading a list one file short.
 script_comment_ban() {
   local verdict="$1" files="$2" hits rc
+  local -a operands
   shift 2
   rc=0
-  # shellcheck disable=SC2086
-  hits=$(LC_ALL=C grep -n "$@" $files) || rc=$?
+  read -r -d '' -a operands <<<"$files" || true
+  hits=$(LC_ALL=C grep -n "$@" ${operands[@]+"${operands[@]}"}) || rc=$?
   if [ "$rc" -gt 1 ]; then
     echo "STYLE FAIL: the $verdict ban exited $rc instead of grading the scripts"
     return 1

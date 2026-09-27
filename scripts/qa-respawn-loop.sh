@@ -300,6 +300,7 @@ fi
 
 one_run() {
     local idx="$1" root session ready view_pid engine_pids after_pids left verdict
+    local -a watched left_pids
     session="view-qa-$$-$idx"
     root=$(mktemp -d "$SCRATCH/view-qa-XXXXXX")
     ROOTS="$ROOTS $root"
@@ -436,12 +437,13 @@ EOF
     # counted, because that bound is what the shape asserts; a quit is read
     # at the instant its exit was recorded, which is what it has always
     # asserted.
+    # the samples are blank- and newline-separated pid lists, one operand
+    # per pid; read stops at the end of the string without a NUL
+    read -r -d '' -a watched <<<"$view_pid $engine_pids $after_pids" || true
     if [ "$ENDING" = signal ]; then
-        # shellcheck disable=SC2086
-        left=$(await_reaped "$REAP_BOUND" "$view_pid" $engine_pids $after_pids) || true
+        left=$(await_reaped "$REAP_BOUND" "${watched[@]}") || true
     else
-        # shellcheck disable=SC2086
-        left=$(still_running "$view_pid" $engine_pids $after_pids)
+        left=$(still_running "${watched[@]}")
     fi
     if [ -n "${left# }" ]; then
         STRAYS=$((STRAYS + 1))
@@ -450,8 +452,8 @@ EOF
         printf 'run %-3s %s\n' "$idx" "$verdict"
     fi
 
-    # shellcheck disable=SC2086
-    end_watched $left
+    read -r -d '' -a left_pids <<<"$left" || true
+    end_watched ${left_pids[@]+"${left_pids[@]}"}
     tmux kill-session -t "$session" 2>/dev/null || true
     rm -rf "$root"
 }

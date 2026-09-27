@@ -72,9 +72,9 @@ PY
     continue
   fi
 
-  # the args column is word-split into separate cargo arguments
-  # shellcheck disable=SC2086
-  if cargo test $test_args >"$BACKUP_DIR/out" 2>&1; then
+  # the args column holds separate cargo arguments
+  read -r -a test_argv <<<"$test_args"
+  if cargo test ${test_argv[@]+"${test_argv[@]}"} >"$BACKUP_DIR/out" 2>&1; then
     echo "    SURVIVED -- no test failed with the guard removed"
     tail -5 "$BACKUP_DIR/out" | sed 's/^/      /'
     survivors=$((survivors + 1))

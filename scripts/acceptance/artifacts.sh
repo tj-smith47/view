@@ -264,23 +264,21 @@ selfcheck_abort() {
 # `kill -0` answers for a zombie as though it were alive, and a real orphan
 # is never one.
 check_view_reaping() {
-    # local, so the two names this needs do not become globals in every
-    # script that sources this file: bash's dynamic scoping still shows
-    # them to `selfcheck_abort` while this frame is live, which is the only
-    # reader either of them has
-    local before SELFCHECK_TMP SELFCHECK_SESSION
+    # local, so the session name does not become a global in every script
+    # that sources this file: bash's dynamic scoping still shows it to
+    # `selfcheck_abort` while this frame is live, which is its only reader.
+    # The directory is a global, because the exit trap below reads it after
+    # this frame is gone, and it is unset once the rm has run
+    local before SELFCHECK_SESSION
     SELFCHECK_TMP=$(mktemp -d "$(scratch_root)/view-acc-selfcheck-XXXXXX")
     # the straight-line rm at the end of this frame, and the one in
     # `selfcheck_abort`, both cover a path this function walks to its end; a
-    # Ctrl-C in the ten-attempt wait below walks neither. The path is baked
-    # into the trap rather than named, because the variable holding it is a
-    # local and `set -u` would abort the exit path on a name that is gone.
-    # Cleared once the rm has run, so it never outlives this frame. The
-    # clear takes no caller's trap with it because this function runs at
-    # source time, from the block at the foot of this file, while the
-    # sourcing script is still on its `.` line and has installed none.
-    # shellcheck disable=SC2064 # expanded now: the local is gone at exit
-    trap "rm -rf '$SELFCHECK_TMP'" EXIT
+    # Ctrl-C in the ten-attempt wait below walks neither. Cleared once the
+    # rm has run, so it never outlives this frame. The clear takes no
+    # caller's trap with it because this function runs at source time, from
+    # the block at the foot of this file, while the sourcing script is still
+    # on its `.` line and has installed none.
+    trap 'rm -rf "${SELFCHECK_TMP:-}"' EXIT
     SELFCHECK_SESSION="view-acc-selfcheck-$$"
     # a shell under the name the recorder looks for. The trailing `:` is
     # what keeps that name: given one command, a shell execs it and becomes
@@ -304,6 +302,7 @@ check_view_reaping() {
     tmux kill-session -t "$SELFCHECK_SESSION" 2>/dev/null || true
     rm -rf "$SELFCHECK_TMP"
     trap - EXIT
+    unset SELFCHECK_TMP
     VIEW_PIDS=()
     VIEW_PID=""
 }

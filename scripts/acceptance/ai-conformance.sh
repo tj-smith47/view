@@ -1059,7 +1059,8 @@ PROPOSED_GAMMA='+GAMMA'
 # The keys the review installs on the buffer, read and shape-checked out of
 # the table the maps are generated from, so a reworded key fails here rather
 # than being typed at a buffer that no longer answers it.
-# shellcheck disable=SC2034 # read by `review_key`, which lives in artifacts.sh
+# read by `review_key`, which lives in artifacts.sh
+# shellcheck disable=SC2034
 REVIEW_KEYS=$(review_keys_of "$MAPPINGS_RS") || exit 1
 # The marker the review's own transcript lines carry. Every review ends
 # with one, and what it says is how the review ended -- which is the one

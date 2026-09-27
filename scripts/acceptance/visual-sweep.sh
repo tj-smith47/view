@@ -1472,7 +1472,8 @@ if [ -z "$declared" ] || [ "$read_count" != "$declared" ]; then
 fi
 # Every key a review installs on the buffer it draws in, read and shape-checked
 # the same way as the defaults above (`review_keys_of`, artifacts.sh).
-# shellcheck disable=SC2034 # read by `review_key`, which lives in artifacts.sh
+# read by `review_key`, which lives in artifacts.sh
+# shellcheck disable=SC2034
 REVIEW_KEYS=$(review_keys_of "$MAPPINGS_RS") || exit 1
 
 # The features in registration order with the verb a bare `:View <feature>`

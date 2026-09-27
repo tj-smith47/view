@@ -32,8 +32,7 @@ check_workflow() {
   # on missing files was previously swallowed by `|| true`, turning every
   # check below into a no-op that still exited 0
   [ -f "$file" ] || { echo "PIN FAIL: $file not found"; fail=1; return; }
-  # shellcheck disable=SC2016 # literal grep pattern, not a shell expansion
-  reads="$(grep -cF 'ENGINE_PIN=$(cat .engine-pin)' "$file" || true)"
+  reads="$(grep -cF "ENGINE_PIN=\$(cat .engine-pin)" "$file" || true)"
   if ! [ "$reads" -ge "$floor" ]; then
     echo "PIN FAIL: $file: expected >=$floor install steps reading .engine-pin, found $reads"
     fail=1

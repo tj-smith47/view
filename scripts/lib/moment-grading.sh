@@ -30,30 +30,6 @@
 # or `excluded:<ground>`, or `unaccounted` -- for every figure of the
 # population, where the index counts the figure tokens of that line.
 
-# every program here is read by the scripts that source this file, and the
-# lint does not follow a sourcing script back to its source
-# shellcheck disable=SC2034
-
-# The class a unit resolves against when it names none. The page declares it
-# in its own words and this reads that declaration, because a default kept in
-# a script instead would be a class the reader of the page is never told about.
-#
-# Sentence scope, over the page joined: the declaration is prose and wraps
-# wherever the paragraph does, so a line-at-a-time read finds it on the line
-# whose half of the sentence happens to carry the class name.
-MOMENT_CLASS_AWK='
-  { buf = buf $0 " " }
-  END {
-    n = split(buf, sentence, /\. /)
-    for (i = 1; i <= n; i++) {
-      if (sentence[i] !~ /default class/) { continue }
-      m = split(sentence[i], part, "`")
-      for (j = 2; j <= m; j += 2) {
-        if (part[j] ~ /^[a-z0-9]+-[a-z0-9]+$/) { print part[j]; exit }
-      }
-    }
-  }'
-
 # What a figure is, whether a figure is a value this tree records at all, and
 # the walk that prints one verdict per figure. Shared by the three programs
 # below and, through them, by the sweep: the sweep tokenized a line for
@@ -274,6 +250,30 @@ GRADE_COMMON_AWK='
     }
 '
 
+# The class a unit resolves against when it names none. The page declares it
+# in its own words and this reads that declaration, because a default kept in
+# a script instead would be a class the reader of the page is never told about.
+#
+# Sentence scope, over the page joined: the declaration is prose and wraps
+# wherever the paragraph does, so a line-at-a-time read finds it on the line
+# whose half of the sentence happens to carry the class name.
+# read by the sourcing scripts, which shellcheck does not follow from here
+# shellcheck disable=SC2034
+MOMENT_CLASS_AWK='
+  { buf = buf $0 " " }
+  END {
+    n = split(buf, sentence, /\. /)
+    for (i = 1; i <= n; i++) {
+      if (sentence[i] !~ /default class/) { continue }
+      m = split(sentence[i], part, "`")
+      for (j = 2; j <= m; j += 2) {
+        if (part[j] ~ /^[a-z0-9]+-[a-z0-9]+$/) { print part[j]; exit }
+      }
+    }
+  }'
+
+# read by the sourcing scripts, which shellcheck does not follow from here
+# shellcheck disable=SC2034
 MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
     FNR == NR {
       split($0, f, "\t")
@@ -772,6 +772,8 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
 # The grading of docs/benchmarking.md, where a number takes the nearest cell
 # id before it in its own sentence. Same two inputs and same modes as the
 # program above, with -v fallback the class that page declares.
+# read by the sourcing scripts, which shellcheck does not follow from here
+# shellcheck disable=SC2034
 RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
     FNR == NR {
       split($0, f, "\t")
@@ -1058,6 +1060,8 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
 # table and budgets.toml, with -v file the name to report and -v TRIALS_BAND
 # the fraction a draw may sit from its seat. In population mode it reports
 # the why figures alone.
+# read by the sourcing scripts, which shellcheck does not follow from here
+# shellcheck disable=SC2034
 WHY_GRADE_AWK="$GRADE_COMMON_AWK"'
     FNR == NR {
       split($0, f, "\t")
