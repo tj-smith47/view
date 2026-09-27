@@ -324,12 +324,7 @@ mod tests {
     }
 
     fn claim(feature: &str, lhs: &str) -> MappingClaim {
-        MappingClaim {
-            feature: feature.to_string(),
-            lhs: lhs.to_string(),
-            had_user_mapping: true,
-            keys: None,
-        }
+        MappingClaim::new(feature, lhs, true)
     }
 
     /// Both surface kinds in one report, since the toast has to introduce

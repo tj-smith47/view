@@ -5703,11 +5703,9 @@ fn a_meta_key_at_a_relayed_prompt_reaches_nvim_whole() {
 fn claim_invocations(m: &mut Model, claims: &[(&str, &str)]) {
     let claimed = claims
         .iter()
-        .map(|(feature, keys)| crate::native::mappings::MappingClaim {
-            feature: (*feature).to_string(),
-            lhs: (*keys).to_string(),
-            had_user_mapping: false,
-            keys: Some((*keys).to_string()),
+        .map(|(feature, keys)| {
+            crate::native::mappings::MappingClaim::new(*feature, *keys, false)
+                .with_keys(Some((*keys).to_string()))
         })
         .collect();
     let _ = update(
@@ -6001,12 +5999,10 @@ fn a_view_chord_in_a_windowed_surface_runs_on_that_surface() {
     .flat_map(|build| [(build, "<M-t>"), (build, "<D-t>")])
     {
         let mut m = build();
-        let claimed = vec![crate::native::mappings::MappingClaim {
-            feature: "window".to_string(),
-            lhs: notation.to_string(),
-            had_user_mapping: false,
-            keys: Some(notation.to_string()),
-        }];
+        let claimed = vec![
+            crate::native::mappings::MappingClaim::new("window", notation, false)
+                .with_keys(Some(notation.to_string())),
+        ];
         let _ = update(
             &mut m,
             Msg::MappingsClaimed {
@@ -7678,12 +7674,7 @@ fn a_verb_this_build_does_not_answer_is_told_the_ones_it_does() {
 fn claimed_keys_are_recorded_for_the_handover_report() {
     use crate::native::mappings::MappingClaim;
     let mut m = model();
-    let claimed = vec![MappingClaim {
-        feature: "picker".to_string(),
-        lhs: "<leader>ff".to_string(),
-        had_user_mapping: true,
-        keys: None,
-    }];
+    let claimed = vec![MappingClaim::new("picker", "<leader>ff", true)];
     let effects = update(
         &mut m,
         Msg::MappingsClaimed {

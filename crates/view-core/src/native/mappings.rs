@@ -73,6 +73,7 @@ pub struct MappingSpec {
 /// A default key that view set over an existing user mapping: what was
 /// claimed, and (through its feature id) the off switch that gives it back.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MappingClaim {
     /// The feature id whose default key this is.
     pub feature: String,
@@ -86,6 +87,28 @@ pub struct MappingClaim {
     /// resolved (`\ai`, `<Space>ai`), as `keytrans()` spells them. `None`
     /// for a chord that sends nvim keys of its own, which invokes nothing.
     pub keys: Option<String>,
+}
+
+impl MappingClaim {
+    /// A claim of `lhs` for `feature` that invokes nothing until
+    /// [`MappingClaim::with_keys`] names the keys nvim matches for it.
+    #[must_use]
+    pub fn new(feature: impl Into<String>, lhs: impl Into<String>, had_user_mapping: bool) -> Self {
+        Self {
+            feature: feature.into(),
+            lhs: lhs.into(),
+            had_user_mapping,
+            keys: None,
+        }
+    }
+
+    /// The claim with the keys nvim matches for it, as `keytrans()` spells
+    /// them.
+    #[must_use]
+    pub fn with_keys(mut self, keys: Option<String>) -> Self {
+        self.keys = keys;
+        self
+    }
 }
 
 // the ecosystem's own default keys deliberately, spelled the way a

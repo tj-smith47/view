@@ -179,12 +179,7 @@ mod tests {
     use view_core::native::registry;
 
     fn claim(feature: &str, lhs: &str, had_user_mapping: bool) -> MappingClaim {
-        MappingClaim {
-            feature: feature.to_string(),
-            lhs: lhs.to_string(),
-            had_user_mapping,
-            keys: None,
-        }
+        MappingClaim::new(feature, lhs, had_user_mapping)
     }
 
     #[test]

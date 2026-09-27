@@ -522,11 +522,9 @@ mod tests {
         let mut model = normal_mode();
         let claims: Vec<_> = keys
             .iter()
-            .map(|keys| crate::native::mappings::MappingClaim {
-                feature: "picker".to_string(),
-                lhs: "<leader>ff".to_string(),
-                had_user_mapping: false,
-                keys: keys.map(str::to_string),
+            .map(|keys| {
+                crate::native::mappings::MappingClaim::new("picker", "<leader>ff", false)
+                    .with_keys(keys.map(str::to_string))
             })
             .collect();
         model.submit_hold.learn_invoke_keys(&claims);

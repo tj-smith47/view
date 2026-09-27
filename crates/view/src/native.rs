@@ -1718,12 +1718,7 @@ mod tests {
     #[test]
     fn a_claimed_key_is_announced_with_the_switch_that_returns_it() {
         let (_dir, record) = scratch("claimed");
-        let claimed = vec![MappingClaim {
-            feature: "picker".to_string(),
-            lhs: "<leader>ff".to_string(),
-            had_user_mapping: true,
-            keys: None,
-        }];
+        let claimed = vec![MappingClaim::new("picker", "<leader>ff", true)];
 
         let mut session = NativeSession::all_enabled(7, Some(record.clone()));
         let mut m = model();
@@ -2518,12 +2513,7 @@ cycle_surfaces = \"gz\"
     fn a_second_claims_reply_repeats_no_handover_notice() {
         let mut session = NativeSession::desktop(7, None);
         let mut m = model();
-        m.record_claimed_keys(vec![MappingClaim {
-            feature: "picker".to_string(),
-            lhs: "<leader>ff".to_string(),
-            had_user_mapping: true,
-            keys: None,
-        }]);
+        m.record_claimed_keys(vec![MappingClaim::new("picker", "<leader>ff", true)]);
         let _ = session.follow_up(&mut m, Stage::VimEnter);
         let _ = session.follow_up(&mut m, Stage::Claims);
         let first = shown(&m);

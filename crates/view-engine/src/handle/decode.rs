@@ -454,18 +454,20 @@ fn decode_mapping_claims(result: &Value) -> Vec<MappingClaim> {
     rows.iter()
         .filter_map(|row| {
             let pairs = row.as_map()?;
-            Some(MappingClaim {
-                feature: crate::wire::map_find(pairs, "feature")?
-                    .as_str()?
-                    .to_owned(),
-                lhs: crate::wire::map_find(pairs, "lhs")?.as_str()?.to_owned(),
-                had_user_mapping: crate::wire::map_find(pairs, "had_user_mapping")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                keys: crate::wire::map_find(pairs, "keys")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            })
+            Some(
+                MappingClaim::new(
+                    crate::wire::map_find(pairs, "feature")?.as_str()?,
+                    crate::wire::map_find(pairs, "lhs")?.as_str()?,
+                    crate::wire::map_find(pairs, "had_user_mapping")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                )
+                .with_keys(
+                    crate::wire::map_find(pairs, "keys")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                ),
+            )
         })
         .collect()
 }
