@@ -155,7 +155,7 @@ fn damage_frame_edges(model: &mut Model, win: WinHandle) {
         return;
     }
     model.dirty = true;
-    let Some(slot) = model.engine.grids().window_slot(win) else {
+    let Some(slot) = model.engine.grids().window_filled(win) else {
         return;
     };
     for row in model.look.edge_rows(slot) {

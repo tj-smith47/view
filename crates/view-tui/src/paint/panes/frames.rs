@@ -183,7 +183,7 @@ fn paint_edges(
 /// A gapped tile's top and bottom frame edges as screen rects, in the same
 /// coordinates [`box_edge`] draws the box in.
 fn gapped_edges(look: Look, pane: &Pane, area: Rect, screen: Rect) -> (Option<Rect>, Option<Rect>) {
-    let Some((top, left, box_w, box_h)) = look.frame_box(pane.slot) else {
+    let Some((top, left, box_w, box_h)) = look.frame_box(pane.filled) else {
         return (None, None);
     };
     let bottom = top.saturating_add(box_h).saturating_sub(1);
@@ -211,7 +211,7 @@ fn gapped_edges(look: Look, pane: &Pane, area: Rect, screen: Rect) -> (Option<Re
 /// bound [`lattice`] stops at, since no frame is drawn there to write
 /// into.
 fn gapless_edge(pane: &Pane, area: Rect, foot: u16, screen: Rect) -> Option<Rect> {
-    let (row, col, width, height) = pane.slot;
+    let (row, col, width, height) = pane.filled;
     let edge_row = row.saturating_add(height);
     if edge_row >= foot {
         return None;
@@ -379,14 +379,18 @@ fn paint_gapped(
     let gap = ratatui_style(theme.normal());
     for pane in panes.iter().filter(|pane| is_tile(pane) && framed(pane)) {
         let (row, col, width, height) = pane.slot;
+        // the part of the slot a grid nvim has yet to resize leaves bare
+        // is gap as well, since it holds whatever the global grid kept
+        // from the layout before the resize
+        let (_, _, filled_width, filled_height) = pane.filled;
         // a row nvim keeps for its command line is where the mode message
         // and the answer to every prompt are written, so every clear stops
         // above `foot`; any other row under a slot is the status row
         let under = u16::from(row.saturating_add(height) < foot);
         clear(
             row,
-            col.saturating_add(width),
-            1,
+            col.saturating_add(filled_width),
+            width.saturating_sub(filled_width).saturating_add(1),
             height.saturating_add(under),
             gap,
             area,
@@ -394,10 +398,10 @@ fn paint_gapped(
             buf,
         );
         clear(
-            row.saturating_add(height),
+            row.saturating_add(filled_height),
             col,
             width.saturating_add(1),
-            under,
+            height.saturating_sub(filled_height).saturating_add(under),
             gap,
             area,
             damage,
@@ -405,7 +409,7 @@ fn paint_gapped(
         );
     }
     for pane in panes.iter().filter(|pane| is_tile(pane) && framed(pane)) {
-        let Some((row, col, width, height)) = look.frame_box(pane.slot) else {
+        let Some((row, col, width, height)) = look.frame_box(pane.filled) else {
             continue;
         };
         let style = if active == Some(pane.id) {
@@ -522,7 +526,7 @@ fn lattice(panes: &[Pane], area: Rect, foot: u16, screen: Rect) -> BTreeSet<Cell
     // the answer to every prompt are written, so no run of the lattice
     // reaches `foot` -- the same bound the gapped ring already stops at
     for pane in panes.iter().filter(|pane| is_tile(pane)) {
-        let (row, col, width, height) = pane.slot;
+        let (row, col, width, height) = pane.filled;
         let (edge_col, edge_row) = (col.saturating_add(width), row.saturating_add(height));
         if edge_col < area.width {
             for r in row..=edge_row.min(foot.saturating_sub(1)) {
@@ -556,7 +560,7 @@ fn lattice(panes: &[Pane], area: Rect, foot: u16, screen: Rect) -> BTreeSet<Cell
 /// from its slot on all four sides. A side the lattice does not reach is
 /// the terminal's own edge, which nothing draws.
 fn perimeter(pane: &Pane, lattice: &BTreeSet<Cell>, area: Rect) -> BTreeSet<Cell> {
-    let (row, col, width, height) = pane.slot;
+    let (row, col, width, height) = pane.filled;
     let (row, col) = (area.y.saturating_add(row), area.x.saturating_add(col));
     let (top, bottom) = (row.saturating_sub(1), row.saturating_add(height));
     let (left, right) = (col.saturating_sub(1), col.saturating_add(width));

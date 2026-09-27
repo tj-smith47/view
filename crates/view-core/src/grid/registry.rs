@@ -71,10 +71,21 @@ pub struct Pane {
     /// tiles, and the slot's own origin everywhere else.
     pub origin: (u16, u16),
     /// The layout slot nvim reported, as `(row, col, width, height)`, which
-    /// is what the frame painter draws into. A pane nvim never placed as an
+    /// is where the tile stands in the layout. A pane nvim never placed as an
     /// ordinary window -- a float, the message area, the global grid --
     /// carries its origin and the grid's own size here.
     pub slot: (u16, u16, u16, u16),
+    /// The part of [`Self::slot`] the grid covers, ring included, as
+    /// `(row, col, width, height)`: the box a frame is drawn on and the
+    /// area the grid's text is painted in.
+    ///
+    /// nvim announces a resized screen's new slots, runs the config's
+    /// `VimResized` handlers, and only then resizes the window grids, so
+    /// for the length of those handlers a slot and its grid disagree. A
+    /// frame drawn on the slot would then stand away from the text it
+    /// holds after a grow, and text wider than a shrunk slot would run
+    /// into its neighbour. Equal to `slot` whenever the grid fits it.
+    pub filled: (u16, u16, u16, u16),
     /// Which layer the pane belongs to and, for a float, how it sorts.
     pub kind: PaneKind,
     /// Whether nvim has taken the pane off screen without destroying it, per
@@ -215,6 +226,15 @@ struct Slot {
     /// What `win_pos` last said about this grid's window, `None` for a
     /// grid that is not an ordinary window.
     window: Option<Window>,
+}
+
+impl Slot {
+    /// [`Pane::filled`] for a placed window's grid.
+    fn filled(&self) -> Option<(u16, u16, u16, u16)> {
+        let window = self.window.as_ref()?;
+        let placed = self.placed.as_ref()?;
+        Some(filled(window.slot, placed.origin, self.grid.size()))
+    }
 }
 
 /// What a standing inner request answers for: the slot nvim gave the
@@ -547,10 +567,12 @@ impl GridRegistry {
     #[must_use]
     pub fn panes_in_z_order(&self) -> Vec<Pane> {
         let (global_width, global_height) = self.global.size();
+        let global = (0, 0, global_width, global_height);
         let mut panes = vec![Pane {
             id: GLOBAL_GRID,
             origin: (0, 0),
-            slot: (0, 0, global_width, global_height),
+            slot: global,
+            filled: global,
             kind: PaneKind::Window,
             hidden: false,
         }];
@@ -563,18 +585,23 @@ impl GridRegistry {
         // the id is the last key so the order is total: nvim reuses no id
         // after a destroy, so two panes never tie on all four
         placed.sort_by_key(|(slot, p)| (p.layer(), p.zindex(), p.compindex, slot.id));
-        panes.extend(placed.into_iter().map(|(slot, p)| Pane {
-            id: slot.id,
-            origin: p.origin,
-            slot: slot.window.as_ref().map_or_else(
+        panes.extend(placed.into_iter().map(|(slot, p)| {
+            let size = slot.grid.size();
+            let (pane_slot, filled) = slot.window.as_ref().map_or_else(
                 || {
-                    let (width, height) = slot.grid.size();
-                    (p.origin.0, p.origin.1, width, height)
+                    let own = (p.origin.0, p.origin.1, size.0, size.1);
+                    (own, own)
                 },
-                |window| window.slot,
-            ),
-            kind: p.kind.clone(),
-            hidden: p.hidden,
+                |window| (window.slot, filled(window.slot, p.origin, size)),
+            );
+            Pane {
+                id: slot.id,
+                origin: p.origin,
+                slot: pane_slot,
+                filled,
+                kind: p.kind.clone(),
+                hidden: p.hidden,
+            }
         }));
         panes
     }
@@ -1178,6 +1205,16 @@ impl GridRegistry {
             })
     }
 
+    /// [`Pane::filled`] for `win`'s window: the box its frame is drawn on.
+    #[must_use]
+    pub fn window_filled(&self, win: WinHandle) -> Option<(u16, u16, u16, u16)> {
+        self.slots
+            .iter()
+            .filter(|slot| slot.placed.as_ref().is_some_and(|p| !p.hidden))
+            .filter(|slot| slot.window.as_ref().is_some_and(|w| w.win == win))
+            .find_map(Slot::filled)
+    }
+
     /// The grid rows every placed window's frame edges stand on under
     /// `look`, which are the rows a tile's own status segments are painted
     /// in.
@@ -1187,8 +1224,8 @@ impl GridRegistry {
             .slots
             .iter()
             .filter(|slot| slot.placed.as_ref().is_some_and(|p| !p.hidden))
-            .filter_map(|slot| slot.window.as_ref())
-            .flat_map(|window| look.edge_rows(window.slot))
+            .filter_map(Slot::filled)
+            .flat_map(|filled| look.edge_rows(filled))
             .collect();
         // a gapless tile answers its one lattice row twice, and two tiles
         // stacked in a column share the row between them
@@ -1314,6 +1351,25 @@ fn inner_origin(look: Look, slot: (u16, u16, u16, u16), margin_top: u16) -> (u16
     }
     let (rows, cols) = look.inset();
     (row.saturating_add(rows), col.saturating_add(cols))
+}
+
+/// [`Pane::filled`] for a window grid of `size` whose cell `(0, 0)` sits at
+/// `origin` inside `slot`: the slot cut down to the grid plus the same ring
+/// on the far sides as the origin leaves on the near ones.
+fn filled(
+    slot: (u16, u16, u16, u16),
+    origin: (u16, u16),
+    size: (u16, u16),
+) -> (u16, u16, u16, u16) {
+    let (row, col, width, height) = slot;
+    let ring_rows = origin.0.saturating_sub(row).saturating_mul(2);
+    let ring_cols = origin.1.saturating_sub(col).saturating_mul(2);
+    (
+        row,
+        col,
+        width.min(size.0.saturating_add(ring_cols)),
+        height.min(size.1.saturating_add(ring_rows)),
+    )
 }
 
 impl Default for GridRegistry {
@@ -1868,6 +1924,35 @@ mod tests {
         assert_eq!(pane.slot, (3, 5, 40, 20), "the slot nvim reported");
         assert_eq!(pane.origin, (4, 6), "the inner origin the look puts in it");
         assert_eq!(registry.window_handle(GridId(2)), Some(WinHandle(2)));
+    }
+
+    /// Between a grow's `win_pos` and the `grid_resize` that answers it the
+    /// frame, and the rows its segments are damaged on, stay on the grid.
+    #[test]
+    fn a_frame_edge_follows_the_grid_until_nvim_resizes_it() {
+        for gaps in [true, false] {
+            let look = tiles(gaps);
+            let ring = u16::from(gaps) * 2;
+            let mut registry = GridRegistry::new();
+            registry.set_look(look);
+            window_slot(&mut registry, GridId(2), (0, 0, 40, 20));
+            resize(&mut registry, GridId(2), 40 - ring, 20 - ring);
+            assert_eq!(pane_of(&registry, GridId(2)).filled, (0, 0, 40, 20));
+            window_slot(&mut registry, GridId(2), (0, 0, 60, 30));
+            let pane = pane_of(&registry, GridId(2));
+            assert_eq!(pane.slot, (0, 0, 60, 30), "gaps={gaps}");
+            assert_eq!(pane.filled, (0, 0, 40, 20), "gaps={gaps}");
+            assert_eq!(
+                registry.window_filled(WinHandle(2)),
+                Some(pane.filled),
+                "gaps={gaps}"
+            );
+            let mut edges = look.edge_rows(pane.filled).to_vec();
+            edges.dedup();
+            assert_eq!(registry.window_edge_rows(look), edges, "gaps={gaps}");
+            resize(&mut registry, GridId(2), 60 - ring, 30 - ring);
+            assert_eq!(pane_of(&registry, GridId(2)).filled, (0, 0, 60, 30));
+        }
     }
 
     #[test]

@@ -4519,3 +4519,109 @@ fn every_tiled_scene_has_a_golden_at_every_tier() {
         }
     }
 }
+
+/// A window's new slot, its grid's size and the letter its grid is filled
+/// with.
+type MidResizeTile = ((u16, u16, u16, u16), (u16, u16), char);
+
+/// The vsplit laid out and drawn for a terminal of `from`, each window's
+/// grid filled edge to edge with its own letter, then placed again by nvim
+/// for a terminal of `to` with the grids still at their `from` sizes: the
+/// screen between a resize's `win_pos` and the redraw that resizes the
+/// window grids, which a config's `VimResized` handlers hold open.
+///
+/// Answers the model, each window's new slot, its grid's size and letter.
+fn mid_resize(gaps: bool, from: (u16, u16), to: (u16, u16)) -> (Model, Vec<MidResizeTile>) {
+    // no title or status segment the fixture writes carries either
+    let letters = ['#', '%'];
+    let mut model = tiled_at(gaps, from, 0).model;
+    let mut tiles = Vec::new();
+    let mut fill = Vec::new();
+    for (index, slot) in tiled_at(gaps, to, 0).slots.into_iter().enumerate() {
+        let grid = LEFT + index as u64;
+        let size = model
+            .engine
+            .grids()
+            .grid(GridId(grid))
+            .map(view_core::grid::Grid::size)
+            .expect("the window grid is sized");
+        let text = letters[index].to_string().repeat(usize::from(size.0));
+        fill.extend((0..size.1).map(|row| line(grid, u64::from(row), &text, 0)));
+        tiles.push((slot, size, letters[index]));
+    }
+    fill.push(UiEvent::Flush);
+    drive(&mut model, fill);
+    let (grid_width, grid_height) = outer_grid_at(gaps, to, 0);
+    model.term_width = to.0;
+    model.term_height = to.1;
+    let mut placed = vec![UiEvent::GridResize {
+        grid: 1,
+        width: u64::from(grid_width),
+        height: u64::from(grid_height),
+    }];
+    for (index, ((row, col, width, height), _, _)) in tiles.iter().enumerate() {
+        placed.push(UiEvent::WinPos {
+            grid: LEFT + index as u64,
+            win: WinHandle(1000 + index as u64),
+            startrow: u64::from(*row),
+            startcol: u64::from(*col),
+            width: u64::from(*width),
+            height: u64::from(*height),
+        });
+    }
+    placed.push(UiEvent::Flush);
+    drive(&mut model, placed);
+    (model, tiles)
+}
+
+/// Every tile's text stays inside its frame, and its frame stands on the
+/// edge of its text, while a resize is half applied: grown, where the slot
+/// outgrows the grid, and shrunk, where the grid overhangs the slot and
+/// the left tile's letters would otherwise land in the right tile. Gapped
+/// and gapless alike, since nvim sends both looks the same two halves.
+#[test]
+fn a_tile_frame_follows_its_grid_through_a_half_applied_resize() {
+    let (small, large) = ((60, 18), (TILED_WIDTH, TILED_HEIGHT));
+    for gaps in [true, false] {
+        for (from, to) in [(small, large), (large, small)] {
+            let (model, tiles) = mid_resize(gaps, from, to);
+            let buf = tiled_frame(&model);
+            let offset = model.look.grid_offset();
+            let ring = u16::from(gaps);
+            let case = format!("gaps={gaps} {from:?} -> {to:?}");
+            for ((row, col, width, height), (grid_width, grid_height), letter) in tiles {
+                let filled_width = width.min(grid_width + 2 * ring);
+                let filled_height = height.min(grid_height + 2 * ring);
+                let (left, top) = (offset + col + ring, offset + row + ring);
+                let (right, bottom) = (
+                    offset + col + filled_width - ring,
+                    offset + row + filled_height - ring,
+                );
+                for y in 0..buf.area.height {
+                    for x in 0..buf.area.width {
+                        let text = buf[(x, y)].symbol() == letter.to_string();
+                        let inside = (left..right).contains(&x) && (top..bottom).contains(&y);
+                        assert_eq!(
+                            text,
+                            inside,
+                            "{case}: tile {letter} at ({x}, {y}) of text {left}..{right} \
+                             x {top}..{bottom}:\n{}",
+                            screen_dump(&buf)
+                        );
+                    }
+                }
+                // the first column past the text is the frame's own under
+                // either look: the ring's right side gapped, the lattice
+                // column gapless
+                if right < buf.area.width {
+                    assert!(
+                        "│├┤┼┬┴╮╯".contains(buf[(right, top)].symbol()),
+                        "{case}: tile {letter}'s frame is not on its text's edge at \
+                         column {right}:\n{}",
+                        screen_dump(&buf)
+                    );
+                }
+            }
+        }
+    }
+}
