@@ -182,9 +182,9 @@ a color of its own.
 
 ### What an "Always" answer does
 
-With Claude Code, the agent view starts by default, an always-allow for a
-command is saved to the project's `.claude/settings.local.json`. Later
-sessions in that project run the same command without asking. An
+Claude Code is the agent view starts by default. With it, an always-allow
+for a command is saved to the project's `.claude/settings.local.json`.
+Later sessions in that project run the same command without asking. An
 always-allow for an edit lasts until the session ends. Claude Code offers
 no always-reject, and its deny answers the one request.
 
