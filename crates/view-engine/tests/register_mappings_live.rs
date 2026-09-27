@@ -205,6 +205,40 @@ fn a_mapping_set_on_very_lazy_is_read_again() {
     assert_eq!(timeoutlen, Some(Duration::from_millis(400)));
 }
 
+/// Opening a file raises `FileType`, `BufEnter` and `BufWinEnter`, and the
+/// user's keys are walked once for the three. Each walk reads every global
+/// normal-mode map, so one per event is paid on every buffer switch.
+#[test]
+fn opening_a_file_walks_the_users_keys_once() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_user_keys(&rx);
+    // counts the walks from outside the chunk, since nvim_get_keymap('n')
+    // is read nowhere else in it once the registration has returned
+    engine
+        .handle
+        .eval_str(
+            "execute('lua local get = vim.api.nvim_get_keymap; \
+             vim.g.walks = 0; \
+             vim.api.nvim_get_keymap = function(m) \
+             if m == \"n\" then vim.g.walks = vim.g.walks + 1 end \
+             return get(m) end')",
+        )
+        .unwrap();
+    let dir = view_test_support::ScratchDir::new("keys-walk").unwrap();
+    let file = dir.join("walked.lua");
+    engine
+        .handle
+        .eval_str(&format!("execute('edit {}')", file.display()))
+        .unwrap();
+    engine
+        .handle
+        .eval_str("execute('lua vim.wait(200, function() return false end)')")
+        .unwrap();
+    assert_eq!(engine.handle.eval_str("&filetype").unwrap(), "lua");
+    assert_eq!(engine.handle.eval_str("g:walks").unwrap(), "1");
+}
+
 /// nvim's own default mappings are among the user's keys, and a surface
 /// with a window of its own passes them on the way a tile does. Its buffer
 /// is not modifiable, so a default that edits (`&` repeating the last `:s`,

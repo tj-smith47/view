@@ -34,6 +34,9 @@ const LEAVES_NORMAL: [&str; 25] = [
 /// The keys that leave normal mode as the argument of the key before
 /// them: `gi`, `gv` and `gn` enter insert and visual, and the `g` and `z`
 /// operators (nvim's default `gc` among them) wait for a motion.
+/// A `gn` or `gN` with no search pattern stays in normal mode, so no mode
+/// report clears the doubt it raised, and a view key typed after it is
+/// not recognised until the next mode change.
 const LEAVES_NORMAL_AFTER: [(&str, &str); 19] = [
     ("g", "n"),
     ("g", "N"),

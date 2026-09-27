@@ -122,7 +122,9 @@ use view_core::native::mappings::{
 /// the claims carry. Both are read again by the same listener as `:`, and
 /// sent on the `view_bridge` `user_keys` event when they moved, so a
 /// mapping a config sets on `VeryLazy` reaches the windowed tree the way
-/// it reaches a tile.
+/// it reaches a tile. That read walks every global normal-mode map, and one
+/// file open raises three or four of the events, so the events of one tick
+/// share a single walk scheduled after them.
 ///
 /// The command registers unconditionally, outside the spec loop: a user who
 /// turned every default key off, or every feature, still has a way in.
@@ -171,17 +173,25 @@ local function colon_mapped()
 end
 local colon = colon_mapped()
 local group = vim.api.nvim_create_augroup('view_colon_map', { clear = true })
+local keys_pending = false
+local function reread_keys()
+  keys_pending = false
+  local keys, wait = read_user_keys()
+  local read = table.concat(keys, ' ') .. ' ' .. wait
+  if read ~= user_read then
+    user_read = read
+    pcall(vim.rpcnotify, channel, 'view_bridge', 'user_keys', keys, wait)
+  end
+end
 local function reread()
   local now = colon_mapped()
   if now ~= colon then
     colon = now
     pcall(vim.rpcnotify, channel, 'view_bridge', 'colon_mapped', now)
   end
-  local keys, wait = read_user_keys()
-  local read = table.concat(keys, ' ') .. ' ' .. wait
-  if read ~= user_read then
-    user_read = read
-    pcall(vim.rpcnotify, channel, 'view_bridge', 'user_keys', keys, wait)
+  if not keys_pending then
+    keys_pending = true
+    vim.schedule(reread_keys)
   end
 end
 vim.api.nvim_create_autocmd('User', {
