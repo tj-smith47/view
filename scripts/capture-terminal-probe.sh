@@ -15,7 +15,7 @@
 # pane's output is the thing being measured, not a place to put results.
 set -eu
 
-HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=scripts/lib/scratch.sh
 . "$HERE/lib/scratch.sh"
 

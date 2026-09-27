@@ -27,6 +27,7 @@ tasks:
   lint:
     desc: Clippy with warnings as errors, over the shipped feature set and then over every feature
     cmds:
+      - task: lint:shell
       - cargo clippy --workspace --all-targets -- -D warnings
       # the shipped set never compiles the arms behind bench-taps,
       # bench-support or bench-no-heartbeat, so a lint that stopped at the
@@ -49,6 +50,10 @@ tasks:
       # same feature unification therefore hides the same dead code in the
       # binary that ships
       - cargo clippy --workspace --bins -- -D warnings
+
+  lint:shell:
+    desc: shellcheck at warning level over every script under scripts/ and every other tracked .sh, failing when shellcheck is missing
+    cmd: bash scripts/lint-shell.sh
 
   lint:cross:
     desc: Clippy for the targets whose fences select other source than Linux does, so a platform-only item fails here rather than on a remote leg

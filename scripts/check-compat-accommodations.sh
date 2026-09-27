@@ -44,7 +44,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 [ -n "$ROOT" ] || ROOT="$REPO_ROOT/compat/fixtures"
 
 # reads from a redirect rather than a pipeline so a second offending file is

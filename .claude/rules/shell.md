@@ -539,3 +539,14 @@ citation bans skip that one file, since it spells the banned phrases in order to
 define them, and a `scripts/` holding nothing else leaves both of them reporting
 `ok` having graded nothing, which is the shape the rule above bans. That is its
 own red verdict, and it names the root it was run against.
+
+## Every script passes shellcheck at warning level
+
+`task lint:shell`, run by `task lint`, lints every script under `scripts/` and
+every other tracked `.sh` with `shellcheck -S warning`, and fails when
+shellcheck is missing. A warning it raises is fixed in the script. A `disable`
+directive stands only where the construct has a reader shellcheck cannot see,
+such as `eval` or a sourcing script, with a comment above it naming that
+reader. Thirty-two findings had gathered with no lint to report them, and one
+was a probe script under `#!/bin/sh` reading `BASH_SOURCE`, which dash refuses
+as a bad substitution before the script does anything.

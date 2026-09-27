@@ -2793,16 +2793,15 @@ if [ "${1:-}" = "--prose-width" ]; then
     exit 2
   fi
   cd "$ROOT" || exit 2
-  targets=""
-  if [ -f README.md ]; then targets="README.md"; fi
-  if [ -d docs ]; then targets="$targets docs"; fi
-  if [ -d .claude/rules ]; then targets="$targets .claude/rules"; fi
-  if [ -z "$targets" ]; then
+  pages=()
+  if [ -f README.md ]; then pages+=(README.md); fi
+  if [ -d docs ]; then pages+=(docs); fi
+  if [ -d .claude/rules ]; then pages+=(.claude/rules); fi
+  if [ "${#pages[@]}" -eq 0 ]; then
     check_prose_width /dev/null
     exit $?
   fi
-  # shellcheck disable=SC2086
-  check_prose_width $targets
+  check_prose_width "${pages[@]}"
   exit $?
 fi
 # The stance walk alone, graded the same way. Its population is the three
@@ -2815,16 +2814,15 @@ if [ "${1:-}" = "--prose-frames" ]; then
     exit 2
   fi
   cd "$ROOT" || exit 2
-  targets=""
-  if [ -f README.md ]; then targets="README.md"; fi
-  if [ -d docs ]; then targets="$targets docs"; fi
-  if [ -d .claude/rules ]; then targets="$targets .claude/rules"; fi
-  if [ -z "$targets" ]; then
+  pages=()
+  if [ -f README.md ]; then pages+=(README.md); fi
+  if [ -d docs ]; then pages+=(docs); fi
+  if [ -d .claude/rules ]; then pages+=(.claude/rules); fi
+  if [ "${#pages[@]}" -eq 0 ]; then
     check_prose_frames /dev/null
     exit $?
   fi
-  # shellcheck disable=SC2086
-  check_prose_frames $targets
+  check_prose_frames "${pages[@]}"
   exit $?
 fi
 # The comment rules over scripts/ alone, graded the same way: a walk that
@@ -2976,7 +2974,9 @@ done
 # emdash ban, the narrative-marker scan and the prose-width walk all sit
 # behind `[ -f README.md ]`, so a root without it would pass having run none
 # of the three. A second list because the test differs, and because the
-# directory verdicts read `x/ directory missing`.
+# directory verdicts read `x/ directory missing`. A list of one, because
+# check-style-cases.sh reads the file guards off this line.
+# shellcheck disable=SC2043
 for required_file in README.md; do
   if [ ! -f "$required_file" ]; then
     echo "STYLE FAIL: $required_file missing"; fail=1

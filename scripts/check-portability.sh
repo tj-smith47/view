@@ -212,7 +212,7 @@ done
 
 for reader in $readers; do
   sites=$(printf '%s\n' "$ANNOTATED" |
-    awk -F"$SCRIPT_FIELD_SEP" -v re="$WORD$reader[[:space:]]+[\"']" '$4 ~ re { print $1 ":" $2 ":" $4 }' || true)
+    awk -F"$SCRIPT_FIELD_SEP" -v re="${WORD}${reader}[[:space:]]+[\"']" '$4 ~ re { print $1 ":" $2 ":" $4 }' || true)
   [ -n "$sites" ] || continue
   while IFS= read -r site; do
     [ -n "$site" ] || continue

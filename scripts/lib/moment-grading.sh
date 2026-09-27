@@ -30,6 +30,10 @@
 # or `excluded:<ground>`, or `unaccounted` -- for every figure of the
 # population, where the index counts the figure tokens of that line.
 
+# every program here is read by the scripts that source this file, and the
+# lint does not follow a sourcing script back to its source
+# shellcheck disable=SC2034
+
 # The class a unit resolves against when it names none. The page declares it
 # in its own words and this reads that declaration, because a default kept in
 # a script instead would be a class the reader of the page is never told about.

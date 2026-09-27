@@ -118,10 +118,7 @@ check_target_root() {
         printf 'FAIL: a relative CARGO_TARGET_DIR is not resolved against the repo (said: %s)\n' "$out" >&2
         exit 1
     fi
-    # the variable is set empty for this one call, the case of a host that
-    # declares it and leaves it blank
-    # shellcheck disable=SC1007
-    out=$(CARGO_TARGET_DIR= target_root)
+    out=$(CARGO_TARGET_DIR='' target_root)
     if [ "$out" != "$REPO_ROOT/target" ]; then
         printf 'FAIL: with nothing declared the harness must look in the target directory the tree owns (said: %s)\n' "$out" >&2
         exit 1

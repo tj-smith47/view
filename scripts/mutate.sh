@@ -72,7 +72,8 @@ PY
     continue
   fi
 
-  # shellcheck disable=SC2086 -- the args column is deliberately word-split
+  # the args column is word-split into separate cargo arguments
+  # shellcheck disable=SC2086
   if cargo test $test_args >"$BACKUP_DIR/out" 2>&1; then
     echo "    SURVIVED -- no test failed with the guard removed"
     tail -5 "$BACKUP_DIR/out" | sed 's/^/      /'

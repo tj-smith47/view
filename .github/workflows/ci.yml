@@ -75,6 +75,28 @@ jobs:
           # version check below still passes.
           cygpath -w "$PWD/nvim-win64/bin" >> "$GITHUB_PATH"
 
+      # one version on every leg, because a newer shellcheck adds warnings and
+      # `task lint` fails on any of them
+      - name: Install shellcheck
+        shell: bash
+        env:
+          SHELLCHECK_PIN: v0.11.0
+        run: |
+          base="https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_PIN}"
+          case "$RUNNER_OS" in
+            (Linux) curl -fsSL "$base/shellcheck-${SHELLCHECK_PIN}.linux.x86_64.tar.xz" | tar xJf - ;;
+            (macOS) curl -fsSL "$base/shellcheck-${SHELLCHECK_PIN}.darwin.aarch64.tar.xz" | tar xJf - ;;
+            (Windows)
+              curl -fsSL -o shellcheck.zip "$base/shellcheck-${SHELLCHECK_PIN}.zip"
+              unzip -q -d "shellcheck-${SHELLCHECK_PIN}" shellcheck.zip ;;
+          esac
+          "$PWD/shellcheck-${SHELLCHECK_PIN}/shellcheck" --version | tr -d '\r' | grep -Fx "version: ${SHELLCHECK_PIN#v}"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cygpath -w "$PWD/shellcheck-${SHELLCHECK_PIN}" >> "$GITHUB_PATH"
+          else
+            echo "$PWD/shellcheck-${SHELLCHECK_PIN}" >> "$GITHUB_PATH"
+          fi
+
       - name: Check neovim version
         shell: bash
         run: |

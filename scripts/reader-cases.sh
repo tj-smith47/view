@@ -44,6 +44,17 @@ check() {
     failures=$((failures + 1))
 }
 
+# a test run as its own case: the status of a `[` read through `$?` on the
+# next line is one shellcheck cannot tell from a command substitution inside
+# the brackets, and a reordering that put one between them would grade the
+# substitution
+check_that() {
+    local desc=$1
+    shift
+    "$@"
+    check "$desc" 0 $?
+}
+
 # `matches`: a row at a time, so an anchor means the ends of a row and a
 # needle does not span the newline -- and every answer is the one `grep -qE`
 # gives, which is what the patterns in the legs were written against
@@ -102,14 +113,14 @@ CONST_SITES=$(grep -oE 'rust_const "\$[A-Z_]+_RS" [A-Z_]+' "$SWEEP" |
 # arriving one call site later. The one subtracted is the definition
 SITES_SEEN=$(printf '%s\n' "$CONST_SITES" | grep -c .)
 SITES_ALL=$(grep -c 'rust_const' "$SWEEP")
-[ "$SITES_SEEN" -eq "$((SITES_ALL - 1))" ]
-check "every sweep mention of rust_const is a call site this file grades" 0 $?
+check_that "every sweep mention of rust_const is a call site this file grades" \
+    [ "$SITES_SEEN" -eq "$((SITES_ALL - 1))" ]
 
 while read -r var name; do
     [ -n "$name" ] || continue
-    eval "rs=\$$var"
-    [ -n "$(rust_const "$rs" "$name" 2>/dev/null)" ]
-    check "the sweep reads $name out of ${rs#"$ROOT"/}" 0 $?
+    rs=${!var}
+    check_that "the sweep reads $name out of ${rs#"$ROOT"/}" \
+        [ -n "$(rust_const "$rs" "$name" 2>/dev/null)" ]
 done <<<"$CONST_SITES"
 
 rust_const "$PALETTE_RS" A_CONSTANT_NO_SOURCE_DECLARES >/dev/null 2>&1
@@ -143,8 +154,8 @@ unparted_escapes() {
     ' "$@"
 }
 
-[ -z "$(unparted_escapes "$ROOT"/scripts/acceptance/*.sh)" ]
-check "no acceptance leg writes a key into the window an Escape is held for" 0 $?
+check_that "no acceptance leg writes a key into the window an Escape is held for" \
+    [ -z "$(unparted_escapes "$ROOT"/scripts/acceptance/*.sh)" ]
 
 PLANTED=$(mktemp "$(scratch_root)/reader-cases-XXXXXX")
 trap 'rm -f "$PLANTED"' EXIT
@@ -154,8 +165,8 @@ leg_planted() {
     send_text ':View ai close'
 }
 PLANT
-[ -n "$(unparted_escapes "$PLANTED")" ]
-check "an unparted Escape is found rather than read as a parted one" 0 $?
+check_that "an unparted Escape is found rather than read as a parted one" \
+    [ -n "$(unparted_escapes "$PLANTED")" ]
 
 # Every default key the engine registers, walked through the shapes the
 # entry-points leg knows. Twenty of twenty-five once had none, and the leg
@@ -167,6 +178,8 @@ eval "$(awk '/^entry_points_of\(\) \{/,/^\}/' "$SWEEP")"
 eval "$(awk '/^marker_for\(\) \{/,/^\}/' "$SWEEP")"
 eval "$(awk '/^PICKER_MARKERS=\$\(awk/,/^'"'"' "\$SURFACES_RS" "\$PICKER_RS"\)$/' "$SWEEP")"
 DRIVES=$(awk '/^drive_action\(\) \{/,/^\}/' "$SWEEP" | grep -E '^    [a-z][a-z |]*\)$' | tr -d ' )' | tr '|' '\n')
+# read by the sweep functions evaluated above, which shellcheck cannot follow
+# shellcheck disable=SC2034
 ROOT=/sweep/root HISTORY_TITLE=history PANEL_TITLE=panel NARROW_FOCUSED_TITLE=narrow PROMPT_MARK='>'
 ROWS_SEEN=0
 while read -r feature lhs verb; do
@@ -181,8 +194,8 @@ while read -r feature lhs verb; do
     esac
     check "the $feature $verb key ($lhs) has a marker or a drive for its $shape shape" 0 $?
 done <<<"$(entry_points_of "$MAPPINGS_RS")"
-[ "$ROWS_SEEN" -eq "$(grep -oE '^static DEFAULT_MAPS: \[MappingSpec; [0-9]+\]' "$MAPPINGS_RS" | grep -oE '[0-9]+' | tail -1)" ]
-check "the walk read every row DEFAULT_MAPS declares" 0 $?
+check_that "the walk read every row DEFAULT_MAPS declares" \
+    [ "$ROWS_SEEN" -eq "$(grep -oE '^static DEFAULT_MAPS: \[MappingSpec; [0-9]+\]' "$MAPPINGS_RS" | grep -oE '[0-9]+' | tail -1)" ]
 entry_shape brand new >/dev/null 2>&1
 check "a pair with no shape fails the leg" 1 $?
 
@@ -202,20 +215,21 @@ printf '%s: %s crates/a/src/with\\ space.rs\n' "$BIN" "$BUILT/crates/a/src/lib.r
 touch -t 202601010000 "$BUILT/crates/a/src/lib.rs" "$BUILT/crates/a/src/with space.rs" \
     "$BUILT/crates/a/tests/live.rs"
 touch -t 202601010100 "$BIN"
+# read by newer_source, evaluated above out of the shared leg code
+# shellcheck disable=SC2034
 REPO_ROOT=$BUILT
-[ -z "$(newer_source "$BIN")" ]
-check "a binary built after every source it lists is current" 0 $?
+check_that "a binary built after every source it lists is current" \
+    [ -z "$(newer_source "$BIN")" ]
 touch -t 202601010200 "$BUILT/crates/a/tests/live.rs"
-[ -z "$(newer_source "$BIN")" ]
-check "an edit to a test the binary never compiled leaves it current" 0 $?
+check_that "an edit to a test the binary never compiled leaves it current" \
+    [ -z "$(newer_source "$BIN")" ]
 touch -t 202601010200 "$BUILT/crates/a/src/with space.rs"
-[ "$(newer_source "$BIN")" = "$BUILT/crates/a/src/with space.rs" ]
-check "an edit to a source the dep-info lists makes the binary stale" 0 $?
+check_that "an edit to a source the dep-info lists makes the binary stale" \
+    [ "$(newer_source "$BIN")" = "$BUILT/crates/a/src/with space.rs" ]
 touch -t 202601010000 "$BUILT/crates/a/src/with space.rs"
 rm "$BIN.d"
 [ "$(newer_source "$BIN")" = "$BUILT/crates/a/tests/live.rs" ]
 check "with no dep-info every source under crates/ is compared" 0 $?
-REPO_ROOT=$ROOT
 
 printf '%s cases, %s failures\n' "$cases" "$failures"
 [ "$failures" -eq 0 ] || exit 1
