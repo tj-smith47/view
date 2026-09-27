@@ -105,21 +105,21 @@ const DECLARED_JOINS: &[DeclaredJoin] = &[
     },
     DeclaredJoin {
         file: "view-ai/src/acp/driver.rs",
-        line: "let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);",
+        line: "let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), None, false);",
         times: 7,
         grounds: "the root is the driver's cwd, which the spawn reads and \
                   never extends",
     },
     DeclaredJoin {
         file: "view-ai/src/acp/driver.rs",
-        line: "Driver::new(shared, out_tx, std::env::temp_dir(), requires_auth),",
+        line: "Driver::new(shared, out_tx, std::env::temp_dir(), None, requires_auth),",
         times: 1,
         grounds: "the root is the driver's cwd, which the spawn reads and \
                   never extends",
     },
     DeclaredJoin {
         file: "view-ai/src/acp/driver.rs",
-        line: "Driver::new(shared, out_tx, std::env::temp_dir(), false),",
+        line: "Driver::new(shared, out_tx, std::env::temp_dir(), None, false),",
         times: 1,
         grounds: "the root is the driver's cwd, which the spawn reads and \
                   never extends",

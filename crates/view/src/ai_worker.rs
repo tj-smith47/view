@@ -897,6 +897,25 @@ mod tests {
         assert_eq!(launch.ok().and_then(|launch| launch.home), Some(home));
     }
 
+    /// Windows keeps the home in `USERPROFILE` and usually sets no `HOME`.
+    /// The home view reads at startup is that directory, and a path under
+    /// it is written from `~` with the platform's separator.
+    #[cfg(windows)]
+    #[test]
+    fn a_path_under_the_user_profile_is_written_from_the_tilde() {
+        let profile = PathBuf::from(
+            std::env::var_os("USERPROFILE").expect("Windows sets USERPROFILE for a login"),
+        );
+        let home = std::env::home_dir();
+        assert_eq!(home.as_deref(), Some(profile.as_path()));
+        let shown = view_core::native::ai_panel::display_path(
+            &profile.join("notes").join("a.txt"),
+            Path::new("C:\\elsewhere"),
+            home.as_deref(),
+        );
+        assert_eq!(shown, "~\\notes\\a.txt");
+    }
+
     /// The resolve-and-spawn step genuinely runs off the calling thread:
     /// `dispatch` returns in milliseconds even when the resolver itself
     /// blocks for seconds, which an inlined resolve+spawn (the mutation

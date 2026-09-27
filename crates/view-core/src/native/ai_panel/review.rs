@@ -774,7 +774,7 @@ pub fn display_path(path: &Path, cwd: &Path, home: Option<&Path>) -> String {
         return if rest.as_os_str().is_empty() {
             "~".to_owned()
         } else {
-            format!("~/{}", rest.display())
+            Path::new("~").join(rest).display().to_string()
         };
     }
     path.display().to_string()
@@ -1255,10 +1255,12 @@ mod tests {
     fn every_panel_path_is_relative_to_the_workspace() {
         let cwd = Path::new("/home/me/work");
         let home = Some(Path::new("/home/me"));
+        // the tilde joins the rest with the platform's own separator
+        let under_home = Path::new("~").join(".cache/x/a.rs").display().to_string();
         let cases = [
             ("/home/me/work/src/a.rs", "src/a.rs"),
             ("/home/me/work", "."),
-            ("/home/me/.cache/x/a.rs", "~/.cache/x/a.rs"),
+            ("/home/me/.cache/x/a.rs", under_home.as_str()),
             ("/home/me", "~"),
             ("/etc/hosts", "/etc/hosts"),
         ];

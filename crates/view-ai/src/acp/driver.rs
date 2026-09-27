@@ -201,8 +201,7 @@ where
         }
     });
 
-    let mut driver = Driver::new(shared, out_tx, cwd, requires_auth);
-    driver.home = home;
+    let mut driver = Driver::new(shared, out_tx, cwd, home, requires_auth);
     driver.begin();
 
     loop {
@@ -321,13 +320,14 @@ impl Driver {
         shared: Arc<SessionShared>,
         out: mpsc::UnboundedSender<JsonRpcMessage>,
         cwd: std::path::PathBuf,
+        home: Option<std::path::PathBuf>,
         requires_auth: bool,
     ) -> Self {
         Self {
             shared,
             out,
             cwd,
-            home: None,
+            home,
             next_wire_id: 1,
             next_boundary_id: 1,
             outstanding: HashMap::new(),
@@ -1736,6 +1736,77 @@ mod tests {
         );
     }
 
+    /// The home `drive()` is handed reaches the transcript: a diff under it
+    /// and outside the workspace is written from `~`.
+    #[tokio::test]
+    async fn a_session_driven_with_a_home_writes_a_path_under_it_from_the_tilde() {
+        let (agent_out, client_in) = tokio::io::duplex(4096);
+        let (client_out, agent_in) = tokio::io::duplex(4096);
+        let (mut agent_reader, mut agent_writer) = JsonRpcCodec::new(agent_in, agent_out).split();
+        let (_commands_tx, commands) = mpsc::unbounded_channel();
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let shared = Arc::new(SessionShared::detached(Box::new(move |msg| {
+            let _ = events_tx.send(msg);
+        })));
+        let home = if cfg!(windows) {
+            "C:\\Users\\me"
+        } else {
+            "/home/me"
+        };
+        let _session = tokio::spawn(drive(
+            JsonRpcCodec::new(client_in, client_out),
+            commands,
+            shared,
+            std::path::PathBuf::from(abs("")),
+            Some(std::path::PathBuf::from(home)),
+            false,
+        ));
+
+        for (method, result) in [
+            ("initialize", json!({ "protocolVersion": PROTOCOL_VERSION })),
+            ("session/new", json!({ "sessionId": "s1" })),
+        ] {
+            let request = agent_reader
+                .next_message()
+                .await
+                .expect("read the handshake")
+                .unwrap_or_else(|| panic!("{method} arrives"));
+            let id = request
+                .id
+                .unwrap_or_else(|| panic!("{method} carries an id"));
+            agent_writer
+                .write_message(&JsonRpcMessage::response(id, result))
+                .await
+                .unwrap_or_else(|err| panic!("answer {method}: {err}"));
+        }
+        let path = std::path::Path::new(home).join("notes.txt");
+        agent_writer
+            .write_message(&JsonRpcMessage::notification(
+                "session/update",
+                diff_update(
+                    "c1",
+                    json!([{ "type": "diff", "path": path, "oldText": "a\n", "newText": "b\n" }]),
+                ),
+            ))
+            .await
+            .expect("send the diff");
+
+        let shown = format!(
+            "{} +1 -1",
+            std::path::Path::new("~").join("notes.txt").display()
+        );
+        let rows = tokio::task::spawn_blocking(move || loop {
+            if let view_core::msg::Msg::Ai(AiEvent::ToolCallUpdate { content, .. }) =
+                next_emitted(&events_rx, "the tool call was emitted")
+            {
+                break content;
+            }
+        })
+        .await
+        .expect("the event reader did not panic");
+        assert_eq!(rows.and_then(|rows| rows.into_iter().next()), Some(shown));
+    }
+
     /// The capability advertisement and the handlers behind it must move
     /// together: this flipped to `true` in the same commit that gave
     /// `on_request` its two `fs/*` arms, and it must never read `true` while
@@ -1746,7 +1817,7 @@ mod tests {
     fn the_outgoing_initialize_advertises_fs_capabilities_as_true() {
         let shared = Arc::new(SessionShared::detached(Box::new(|_| {})));
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), None, false);
 
         driver.begin();
 
@@ -1774,7 +1845,7 @@ mod tests {
     fn a_version_mismatch_never_reaches_session_new() {
         let shared = Arc::new(SessionShared::detached(Box::new(|_| {})));
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), None, false);
 
         driver.begin();
         let _initialize = out_rx.try_recv().expect("initialize was sent");
@@ -1791,7 +1862,7 @@ mod tests {
         let shared = Arc::new(SessionShared::detached(Box::new(|_| {})));
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         (
-            Driver::new(shared, out_tx, std::env::temp_dir(), requires_auth),
+            Driver::new(shared, out_tx, std::env::temp_dir(), None, requires_auth),
             out_rx,
         )
     }
@@ -1944,7 +2015,11 @@ mod tests {
             let _ = events_tx.send(msg);
         })));
         let (out_tx, out_rx) = mpsc::unbounded_channel();
-        (Driver::new(shared, out_tx, cwd, false), events_rx, out_rx)
+        (
+            Driver::new(shared, out_tx, cwd, None, false),
+            events_rx,
+            out_rx,
+        )
     }
 
     /// Both methods reach their handlers through `on_request` itself, not
@@ -2205,7 +2280,7 @@ mod tests {
             let _ = events_tx.send(msg);
         })));
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), None, false);
 
         driver.on_notification(
             "session/update",
@@ -2277,7 +2352,7 @@ mod tests {
             let _ = events_tx.send(msg);
         })));
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), None, false);
 
         driver.on_notification(
             "session/update",
@@ -2321,7 +2396,7 @@ mod tests {
         })));
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
         (
-            Driver::new(shared, out_tx, std::env::temp_dir(), false),
+            Driver::new(shared, out_tx, std::env::temp_dir(), None, false),
             events_rx,
         )
     }
@@ -2495,7 +2570,7 @@ mod tests {
                 let _ = events_tx.send(msg);
             })));
             let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-            let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+            let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), None, false);
             driver.begin();
             let initialize = out_rx.try_recv().expect("initialize was sent");
             let mut reply = info.clone();
@@ -2745,7 +2820,7 @@ mod tests {
             let _ = events_tx.send(msg);
         })));
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), None, false);
 
         driver.on_notification(
             "session/update",
@@ -2783,7 +2858,7 @@ mod tests {
             let _ = events_tx.send(msg);
         })));
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), None, false);
 
         driver.begin();
         let initialize = out_rx.try_recv().expect("initialize was sent");
