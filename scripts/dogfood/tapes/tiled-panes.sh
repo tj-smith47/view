@@ -6,10 +6,8 @@
 # text capture and no gif, so this script drives its own tmux session the
 # same way cap.sh does, and hands it to record_gif in lib.sh.
 #
-# A first launch under a config leaves a "your config also draws ..."
-# notice standing over a tile. The dismiss verb is sent while the gif is
-# still hidden, repeated against the live pane, because the next notice
-# takes the top slot only once the one ahead of it has cleared.
+# The launch notices are dismissed while the gif is still hidden, so none
+# stands over a tile.
 #
 # Usage: scripts/dogfood/tapes/tiled-panes.sh [outfile]
 set -eu
@@ -37,20 +35,7 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" --panes tiles README.md
   sleep 2
   tmux -L "$SOCKET" send-keys -t cap ':vsplit crates/view-core/src/update/look.rs' Enter
   sleep 1.5
-  n=0
-  while [ "$n" -lt 8 ]; do
-    pane=$(tmux -L "$SOCKET" capture-pane -p -t cap)
-    case "$pane" in
-      (*'which view owns'*|*'gives it back'*|*'give them back'*)
-        tmux -L "$SOCKET" send-keys -t cap ':View notifications dismiss' Enter
-        sleep 0.8
-        ;;
-      (*)
-        break
-        ;;
-    esac
-    n=$((n + 1))
-  done
+  dismiss_launch_notices "$SOCKET"
   sleep_until_elapsed "$start" 10
   sleep 1.5
   tmux -L "$SOCKET" resize-window -t cap -x 150 -y 38
@@ -64,9 +49,9 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" --panes tiles README.md
   tmux -L "$SOCKET" send-keys -t cap Enter
 ) &
 
-BODY='Sleep 9500ms
+BODY='Sleep 9s
 Show
-Sleep 12s'
+Sleep 12500ms'
 record_gif "$SOCKET" "$OUT" 12 220 50 "$BODY"
 
 echo "tiled-panes.sh: recorded $OUT" >&2

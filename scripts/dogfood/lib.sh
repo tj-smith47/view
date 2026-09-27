@@ -154,11 +154,35 @@ wait_for_recorder() {
   tmux -L "$1" wait-for "$RECORDER_ATTACHED"
 }
 
+# WHY: a first launch under a config leaves a "your config also draws ..."
+# notice standing (surface_conflict.rs, record_native_notice_sticky_once),
+# and the next one takes the top slot only once the one ahead of it has
+# cleared, so the dismiss verb is repeated against the live pane. The cap
+# keeps a notice that never clears from hanging the tape.
+# Usage: dismiss_launch_notices SOCKET
+dismiss_launch_notices() {
+  n=0
+  while [ "$n" -lt 8 ]; do
+    pane=$(tmux -L "$1" capture-pane -p -t cap)
+    case "$pane" in
+      (*'which view owns'*|*'gives it back'*|*'give them back'*)
+        tmux -L "$1" send-keys -t cap ':View notifications dismiss' Enter
+        sleep 0.8
+        ;;
+      (*)
+        break
+        ;;
+    esac
+    n=$((n + 1))
+  done
+}
+
 # WHY: a driver whose setup takes a varying while (notices to dismiss, an
 # ssh connection to open) has to start its visible part at the moment the
 # tape body shows it, so it waits out the rest of a deadline counted from
-# the attach. date +%s is the clock POSIX sh has, so the wait ends up to
-# one second late, and the body's hidden lead is set that much short.
+# the attach. date +%s is the clock POSIX sh has, and the start it reads
+# drops its fraction, so the wait can end up to one second early: a body's
+# hidden lead ends a second before the deadline it is paired with.
 # Usage: start=$(date +%s); ...; sleep_until_elapsed "$start" SECONDS
 sleep_until_elapsed() {
   while [ $(( $(date +%s) - $1 )) -lt "$2" ]; do

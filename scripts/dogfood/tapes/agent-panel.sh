@@ -1,39 +1,24 @@
 #!/bin/sh
-# WHY: the moment README's "Agents in the editor" bullet promises -- the
-# ACP agent panel opening beside your buffer, reviewing a proposed change,
-# captured under a real config rather than a fixture. `:View ai open` is
-# the config-independent form of `<leader>ai` (the leader key itself is
-# whatever the user's own config sets, per docs/keymaps.md); this script
-# drives it all the way through a turn rather than stopping at an empty
-# panel, using `view-ai-stub-agent` (`crates/view-ai/tests/fixtures/
-# stub_agent.rs`, the same fixture `scripts/acceptance/ai-conformance.sh`
-# drives) as the `[ai] agent`, so the alt text's "reviewing a proposed
-# change" is something the gif actually shows rather than a promise it
-# makes. `VIEW_AI_AGENT` only ever names an adapter id
-# (`crates/view-ai/src/config.rs`'s `AGENT_ENV`), never a command line, so
-# the override has to go through `--config` against a copy of the user's
-# own `view.toml` (theme, native surfaces and all) with one `[ai]` table
-# appended -- never the real file itself.
+# WHY: the moment README's "Agents in the editor" bullet promises: the ACP
+# agent panel opening beside your buffer and reviewing a proposed change,
+# under the person's own config. `:View ai open` is the config-independent
+# form of `<leader>ai`, whose leader is whatever the config sets
+# (docs/keymaps.md). The agent is `view-ai-stub-agent`
+# (crates/view-ai/tests/fixtures/stub_agent.rs, the fixture
+# scripts/acceptance/ai-conformance.sh drives), so the turn ends in a real
+# proposed change. `VIEW_AI_AGENT` names an adapter id and no command line
+# (crates/view-ai/src/config.rs, AGENT_ENV), so the agent reaches view
+# through `--config` against a copy of the user's own view.toml with one
+# `[ai]` table appended. The user's file is left untouched.
 #
-# A first launch under a config leaves a "your config also draws ..."
-# notice standing (`crates/view-core/src/update/surface_conflict.rs`:
-# `record_native_notice_sticky_once` -- sticky by design, taken down by
-# `:View notifications dismiss` one at a time or by
-# `Messages::dismiss_read_sticky` once each has stood its reading window
-# with no input arriving first). This tape sends the dismiss verb before
-# the panel content settles so none of them sit over it.
+# `propose` anchors its diff at the stub agent's cwd
+# (named_inside_cwd(DIFF_FILE) in stub_agent.rs), so the tape runs from a
+# scratch directory seeded with that file's expected old text, the seed
+# ai-conformance.sh uses, and the review buffer has a real file to diff.
 #
-# cap.sh's headless capture-pane produces a text snapshot, not the gif
-# README's tape table names, so this drives its own tmux session the way
-# cap.sh does and hands it to record_gif in lib.sh for the recording.
-#
-# `propose` anchors its diff at the stub agent's own cwd
-# (`named_inside_cwd(DIFF_FILE)` in stub_agent.rs), so opening README.md
-# from the repo root left the review buffer empty: no
-# view-ai-stub-diff.txt exists there. This runs from a scratch directory
-# seeded with that file's expected old text instead (the same seed
-# scripts/acceptance/ai-conformance.sh uses), so propose has a real file
-# to diff and the panel shows an actual reviewed change.
+# cap.sh's headless capture-pane produces a text snapshot, and README's
+# tape table names a gif, so this drives its own tmux session and hands it
+# to record_gif in lib.sh.
 #
 # Usage: scripts/dogfood/tapes/agent-panel.sh [outfile]
 set -eu
@@ -81,14 +66,16 @@ trap cleanup_agent_panel EXIT INT TERM
 cd -- "$WORKDIR"
 new_cap_session "$SOCKET" 220 50 -- "$BIN" --config "$CFG" view-ai-stub-diff.txt
 (
-  sleep 3
+  wait_for_recorder "$SOCKET"
+  start=$(date +%s)
+  sleep 1.5
+  dismiss_launch_notices "$SOCKET"
+  sleep_until_elapsed "$start" 5
   tmux -L "$SOCKET" send-keys -t cap ':View ai open' Enter
   sleep 1
-  # 'y' only where the trust prompt is actually up, read off the live
-  # pane: a project already trusted from an earlier session skips
-  # straight to the focused panel, and a bare 'y' typed into that focused
-  # panel would sit in the prompt box until Enter, which the propose line
-  # below sends -- the same text it means to submit, doubled.
+  # 'y' only where the trust prompt is up: a project trusted in an earlier
+  # session opens straight on the focused panel, where a bare 'y' would sit
+  # in the prompt box and reach the agent in front of 'propose'
   pane=$(tmux -L "$SOCKET" capture-pane -p -t cap)
   case "$pane" in
     (*'Trust '*)
@@ -97,35 +84,11 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" --config "$CFG" view-ai-stub-diff.txt
       ;;
   esac
   tmux -L "$SOCKET" send-keys -t cap 'propose' Enter
-  sleep 8
-  # the AI panel still has focus after submitting the turn (its title reads
-  # "Stub: Esc returns"), and ':' typed there goes into its
-  # own input box rather than opening the command line -- Esc first, so the
-  # dismiss verb below actually reaches `:View notifications dismiss`.
-  tmux -L "$SOCKET" send-keys -t cap Escape
-  sleep 0.5
-  # the next sticky notice only takes the top slot (and its own dismissal
-  # timer) once the one ahead of it has cleared, so firing the verb three
-  # times back to back outran that handoff -- this reads the live pane and
-  # keeps sending the verb until none of the native-override notices
-  # (surface_conflict.rs's "... gives it back." and "... give them back.")
-  # remain, capped so a real stuck notice cannot hang the tape.
-  n=0
-  while [ "$n" -lt 8 ]; do
-    pane=$(tmux -L "$SOCKET" capture-pane -p -t cap)
-    case "$pane" in
-      (*'which view owns'*|*'gives it back'*|*'give them back'*)
-        tmux -L "$SOCKET" send-keys -t cap ':View notifications dismiss' Enter
-        sleep 0.8
-        ;;
-      (*)
-        break
-        ;;
-    esac
-    n=$((n + 1))
-  done
 ) &
 
-record_gif "$SOCKET" "$OUT" 26 220 50
+BODY='Sleep 3500ms
+Show
+Sleep 10s'
+record_gif "$SOCKET" "$OUT" 10 220 50 "$BODY"
 
 echo "agent-panel.sh: recorded $OUT" >&2
