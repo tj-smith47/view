@@ -12,38 +12,8 @@ use crate::native::geometry::{Anchor, NativeSurface, OverlayBox};
 use crate::native::keys::{Action, Resolved};
 use crate::native::palette::MessageHistoryState;
 
-use super::{path_to_wire, route_key, take_binding};
-
-/// Routes one key, reading a Meta key no binding claims as `<Esc>` and then
-/// its key while a surface of view's own holds the keyboard.
-///
-/// nvim makes that same reading of the keys that reach it, so an `<Esc>`
-/// typed quickly before `:` leaves the agent panel and opens the command
-/// line, as it leaves insert mode.
-pub(super) fn route_unescaped(
-    model: &mut Model,
-    notation: String,
-    modal_was_open: bool,
-) -> Vec<Effect> {
-    let native = !matches!(
-        model.focus(),
-        Focus::Engine | Focus::Pane(NativeSurface::Palette)
-    );
-    let unbound = || {
-        model
-            .key_bindings
-            .resolve(model.pending_chord.as_deref(), &notation)
-            .is_none()
-    };
-    match crate::native::keys::escaped_key(&notation) {
-        Some(key) if native && unbound() => {
-            let mut effects = route_key(model, "<Esc>".to_string(), modal_was_open);
-            effects.extend(route_key(model, key, modal_was_open));
-            effects
-        }
-        _ => route_key(model, notation, modal_was_open),
-    }
-}
+use super::path_to_wire;
+use super::route::take_binding;
 
 /// Issues an `Effect::Rpc(RpcCall::PreviewBuffer)` for `state`'s current
 /// selection, or no effect at all when there is nothing to preview (an
