@@ -1307,11 +1307,15 @@ leg_always_allow_real_adapter() {
     # rather than left to the host so the leg asserts the same thing on any
     # of them -- and scoped to the leg's own throwaway root, so no
     # developer's own configuration is touched.
+    #
+    # The adapter offers its always-allow only where Claude Code suggests a
+    # rule to add. It suggests none for a command an `ask` rule matched, nor
+    # for `mkdir`, `touch` or a `>` redirect, and it suggests `git init:*`.
     mkdir -p "$ROOT/.claude"
     printf '%s\n' \
-        '{ "permissions": { "defaultMode": "default", "ask": ["Bash(echo:*)"] } }' \
+        '{ "permissions": { "defaultMode": "default" } }' \
         >"$ROOT/.claude/settings.json"
-    prompt='Using the Bash tool exactly twice and no other tool, first run the command `echo alpha > alpha.log`, then run the command `echo beta > beta.log`. Then say DONE.'
+    prompt='Using the Bash tool exactly twice and no other tool, first run the command `git init alpha`, then run the command `git init beta`. Then say DONE.'
     submit "$prompt"
     wait_for "$PERMISSION_PROMPT" "$PROVISION_SECS" \
         "the real adapter's first permission request" >/dev/null
@@ -1354,11 +1358,8 @@ leg_always_allow_real_adapter() {
         fail "the turn never ended, with $asked permission request(s) reaching view"
         return 1
     fi
-    local left right
-    left=$(cat "$ROOT/alpha.log" 2>/dev/null || true)
-    right=$(cat "$ROOT/beta.log" 2>/dev/null || true)
-    if [ "$left" != "alpha" ] || [ "$right" != "beta" ]; then
-        fail "the agent did not run both commands (alpha.log is $(printf '%q' "$left"), beta.log is $(printf '%q' "$right")), so the second permission this leg is about was never needed"
+    if [ ! -d "$ROOT/alpha/.git" ] || [ ! -d "$ROOT/beta/.git" ]; then
+        fail "the agent did not run both commands (alpha/.git and beta/.git are not both there), so the second permission this leg is about was never needed"
         return 1
     fi
 

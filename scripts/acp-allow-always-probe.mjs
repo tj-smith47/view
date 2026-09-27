@@ -147,6 +147,11 @@ const PROMPT =
   "Using the Edit tool four separate times (once per file, no other tool), change `x1` to `x2` in a.txt, then b.txt, then c.txt, then d.txt. Then say DONE.";
 
 function verdict(failure) {
+  // a first request with no allow_always was cancelled, which ends the turn
+  // after one request whatever the adapter does with a grant
+  if (!failure && !permLog[0]?.options.some((o) => o.endsWith("/allow_always"))) {
+    failure = "the first permission request offered no allow_always option";
+  }
   const honored = !failure && permCount === 1;
   console.log(
     JSON.stringify(
