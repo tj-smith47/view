@@ -55,6 +55,20 @@ impl SubmitHold {
         self.recent.clear();
     }
 
+    /// Whether `notation` alone is a chord nvim maps to one of view's own
+    /// verbs. Only a key carrying a modifier counts, so a text key typed
+    /// into a composer stays text whatever a config binds it to.
+    #[must_use]
+    pub fn invokes(&self, notation: &str) -> bool {
+        let key = canonical(notation);
+        key.starts_with('<')
+            && key.contains('-')
+            && self
+                .invoke_keys
+                .iter()
+                .any(|keys| matches!(keys.as_slice(), [only] if *only == key))
+    }
+
     /// Whether `msg` ends a standing hold: the command's own notification,
     /// or the bound this hold armed.
     #[must_use]

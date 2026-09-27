@@ -433,6 +433,10 @@ fn engine_input(model: &mut Model, notation: String) -> Vec<Effect> {
 /// does in insert mode. When the `<Esc>` leaves the keyboard on the
 /// surface, as it does answering a pending permission, the surface gets
 /// the key the `<Esc>` came off.
+///
+/// A chord nvim maps to one of view's own verbs, pressed in a surface that
+/// has a window of its own, goes to nvim with the cursor still in that
+/// window, so a verb acting on the focused tile acts on the surface.
 pub(super) fn route_unescaped(
     model: &mut Model,
     notation: String,
@@ -442,14 +446,20 @@ pub(super) fn route_unescaped(
         model.focus(),
         Focus::Engine | Focus::Pane(NativeSurface::Palette)
     );
-    let unbound = || {
-        model
+    // the lookup is spent only while a surface of view's own holds the
+    // keyboard
+    let unbound = native
+        && model
             .key_bindings
             .resolve(model.pending_chord.as_deref(), &notation)
-            .is_none()
-    };
+            .is_none();
+    // the verb acts on the tile the cursor stands in, so the chord leaves
+    // the cursor in the pane it was pressed in
+    if unbound && matches!(model.focus(), Focus::Pane(_)) && model.submit_hold.invokes(&notation) {
+        return engine_input(model, notation);
+    }
     match crate::native::keys::escaped_key(&notation) {
-        Some(key) if native && unbound() => {
+        Some(key) if unbound => {
             let mut effects = route_key(model, "<Esc>".to_string(), modal_was_open);
             // a windowed surface's `<Esc>` moves nvim's cursor, which
             // `focus()` sees only once nvim redraws it there

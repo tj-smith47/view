@@ -5792,6 +5792,44 @@ fn a_meta_letter_on_the_windowed_tree_raises_none_of_its_prompts() {
     }
 }
 
+/// A chord nvim maps to one of view's verbs, pressed in the windowed tree,
+/// reaches nvim with the cursor still in the tree, which is the tile the
+/// verb acts on. A Meta chord and a Super chord alike.
+#[test]
+fn a_view_chord_in_the_windowed_tree_runs_on_the_tree() {
+    for notation in ["<M-t>", "<D-t>"] {
+        let mut m = focused_windowed_tree();
+        let claimed = vec![crate::native::mappings::MappingClaim {
+            feature: "window".to_string(),
+            lhs: notation.to_string(),
+            had_user_mapping: false,
+            keys: Some(notation.to_string()),
+        }];
+        let _ = update(
+            &mut m,
+            Msg::MappingsClaimed {
+                claimed,
+                colon_mapped: false,
+                generation: 0,
+            },
+        );
+        let effects = update(&mut m, key(notation));
+        assert!(
+            matches!(
+                effects.first(),
+                Some(Effect::Rpc(RpcCall::Input { notation: sent })) if sent == notation
+            ),
+            "{notation}: {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Rpc(RpcCall::FocusPreviousWindow))),
+            "{notation} left the tree before its verb ran: {effects:?}"
+        );
+    }
+}
+
 /// The cancel half of the same producer: `<C-c>` with nothing in flight has
 /// no turn to cancel, so it is a no-op rather than reaching
 /// `AiWorker::dispatch`'s own "no active session" surface for a key the
