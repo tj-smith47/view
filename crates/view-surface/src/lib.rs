@@ -539,7 +539,8 @@ pub fn render(model: &Model) -> Surface {
     // The one exception is the message history: those notices are read in
     // it and `d` is how they are taken down, so a box standing over the
     // list the user opened hides its own remedy. It is painted after the
-    // toasts below, and only while it holds the top of the stack.
+    // toasts and the completion menu below, and only while it holds the top
+    // of the stack.
     //
     // The busy modal is the other: the command line that wedged nvim stays
     // on screen for as long as the wedge does, since the engine that would
@@ -608,11 +609,6 @@ pub fn render(model: &Model) -> Surface {
     if let Some(column) = live_notice_column(model) {
         layers.extend(toast_layers(model, column, origin));
     }
-    layers.extend(
-        over_toasts
-            .iter()
-            .flat_map(|open| native_layers(model, open)),
-    );
     if let Some(pm) = &engine.popupmenu {
         // mirrors, term for term, the condition the cmdline block above
         // actually built a `completion` under: only when every one of
@@ -646,6 +642,14 @@ pub fn render(model: &Model) -> Surface {
             }
         }
     }
+    // after the completion menu as well: a wedge leaves up whatever menu
+    // the command that caused it opened, for the same reason it leaves the
+    // command line up
+    layers.extend(
+        over_toasts
+            .iter()
+            .flat_map(|open| native_layers(model, open)),
+    );
 
     let cursor = cursor_spec(model, origin, &layers);
     Surface { layers, cursor }
@@ -3076,6 +3080,29 @@ mod tests {
         assert!(
             palette < modal,
             "the palette painted after the modal covers the modal it wedged"
+        );
+
+        // a completion menu the wedging command left up, in a buffer
+        apply(
+            &mut model,
+            UiEvent::PopupmenuShow {
+                items: vec![view_core::events::PmItem::default()],
+                selected: -1,
+                row: 20,
+                col: 50,
+                grid: 1,
+            },
+        );
+        let surface = render(&model);
+        let position =
+            |matches: fn(&LayerKind) -> bool| surface.layers.iter().position(|l| matches(&l.kind));
+        let menu = position(|k| matches!(k, LayerKind::Popupmenu(_)))
+            .expect("the menu left up is still drawn");
+        let modal =
+            position(|k| matches!(k, LayerKind::Prompt(_))).expect("the busy modal is open");
+        assert!(
+            menu < modal,
+            "the menu painted after the modal covers the modal it wedged"
         );
     }
 
