@@ -1053,6 +1053,12 @@ impl EngineHandle {
                                     Some(msg @ Msg::NotifySinkRead { .. }) => {
                                         pump.route_notify_sink(msg);
                                     }
+                                    // sent only when they moved, on the
+                                    // same terms
+                                    Some(
+                                        msg @ (Msg::UserMappingsRead { .. }
+                                        | Msg::ColonMappingRead { .. }),
+                                    ) => pump.route_claims(msg),
                                     Some(msg) => {
                                         let _ = pump.route_msg(msg);
                                     }
@@ -3965,6 +3971,25 @@ mod tests {
         let decoded = decode_bridge_event(&[Value::from("colon_mapped"), Value::from(true)]);
         assert!(
             matches!(decoded, Some(Msg::ColonMappingRead { mapped: true })),
+            "got {decoded:?}"
+        );
+    }
+
+    /// The user's keys read again after registration arrive on the bridge
+    /// in the shape a registration's reply carries them.
+    #[test]
+    fn a_bridge_user_keys_event_decodes_the_late_reading() {
+        let decoded = decode_bridge_event(&[
+            Value::from("user_keys"),
+            Value::Array(vec![Value::from("<Space>fg")]),
+            Value::from(300),
+        ]);
+        assert!(
+            matches!(
+                &decoded,
+                Some(Msg::UserMappingsRead { keys, timeoutlen })
+                    if keys == &["<Space>fg"] && *timeoutlen == Some(Duration::from_millis(300))
+            ),
             "got {decoded:?}"
         );
     }

@@ -201,6 +201,10 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
         "colon_mapped" => Some(Msg::ColonMappingRead {
             mapped: first.as_bool()?,
         }),
+        // the user's keys and `'timeoutlen'` read again on the same events,
+        // sent only when they moved: a config that maps on `VeryLazy` has
+        // mapped nothing yet when the registration reads them
+        "user_keys" => Some(user_keys_from(Some(first), rest.first()).into_msg()),
         _ => None,
     }
 }
@@ -450,7 +454,16 @@ impl UserKeys {
 /// `timeoutlen`, where a negative one says `'timeout'` is off. A key that
 /// is not a string is dropped.
 fn decode_user_keys(pairs: &[(Value, Value)]) -> UserKeys {
-    let keys = crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_USER_KEYS_KEY)
+    user_keys_from(
+        crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_USER_KEYS_KEY),
+        crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_TIMEOUT_KEY),
+    )
+}
+
+/// The user's keys and `'timeoutlen'` out of the two values that carry
+/// them, in a registration's reply or on the bridge.
+fn user_keys_from(keys: Option<&Value>, timeoutlen: Option<&Value>) -> UserKeys {
+    let keys = keys
         .and_then(Value::as_array)
         .map(|keys| {
             keys.iter()
@@ -458,9 +471,7 @@ fn decode_user_keys(pairs: &[(Value, Value)]) -> UserKeys {
                 .collect()
         })
         .unwrap_or_default();
-    let timeoutlen = match crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_TIMEOUT_KEY)
-        .and_then(Value::as_i64)
-    {
+    let timeoutlen = match timeoutlen.and_then(Value::as_i64) {
         Some(ms) => u64::try_from(ms).ok().map(Duration::from_millis),
         None => UserKeys::default().timeoutlen,
     };

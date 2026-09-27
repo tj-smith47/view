@@ -758,8 +758,9 @@ impl PumpShared {
         self.route_held(msg, Held::Heartbeat);
     }
 
-    /// Routes a `Msg::MappingsClaimed`, or the `Msg::UserMappingsRead` the
-    /// same reply carries, without ever dropping or reordering it on a full
+    /// Routes a `Msg::MappingsClaimed`, the `Msg::UserMappingsRead` the
+    /// same reply carries, or either mapping reading the bridge re-sends
+    /// when it moves, without ever dropping or reordering it on a full
     /// sink, and without blocking, on the terms
     /// [`route_buf_detached`](Self::route_buf_detached) states.
     ///

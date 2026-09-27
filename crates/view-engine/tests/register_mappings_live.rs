@@ -159,6 +159,115 @@ fn a_registration_reads_the_users_own_keys_and_timeoutlen() {
     assert_eq!(timeoutlen, Some(Duration::from_millis(300)));
 }
 
+/// The next `Msg::UserMappingsRead` on `rx`, every other message discarded.
+fn next_user_keys(rx: &mpsc::Receiver<Msg>) -> (Vec<String>, Option<Duration>) {
+    loop {
+        match rx.recv_timeout(view_test_support::host_deadline(TICK)) {
+            Ok(Msg::UserMappingsRead { keys, timeoutlen }) => return (keys, timeoutlen),
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                panic!("no Msg::UserMappingsRead arrived within the deadline")
+            }
+        }
+    }
+}
+
+/// A mapping a config sets on `User VeryLazy`, after the registration read
+/// the user's keys, is read again and sent on the bridge, and view's own
+/// keys stay out of it.
+#[test]
+fn a_mapping_set_on_very_lazy_is_read_again() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    for setup in [
+        "execute('let mapleader = \" \"')",
+        "execute('autocmd User VeryLazy nnoremap <leader>fz :echo<CR>')",
+        "execute('set timeoutlen=400')",
+    ] {
+        engine.handle.eval_str(setup).unwrap();
+    }
+    let specs = [MappingSpec {
+        feature: "ai",
+        lhs: Cow::Borrowed("<leader>ai"),
+        verb: "toggle",
+        rhs: Rhs::Invoke,
+    }];
+    engine.handle.register_mappings(&specs, channel).unwrap();
+    let (first, _) = next_user_keys(&rx);
+    assert!(!first.iter().any(|k| k == "<Space>fz"), "{first:?}");
+
+    engine
+        .handle
+        .eval_str("execute('doautocmd User VeryLazy')")
+        .unwrap();
+    let (keys, timeoutlen) = next_user_keys(&rx);
+    assert!(keys.iter().any(|k| k == "<Space>fz"), "{keys:?}");
+    assert!(!keys.iter().any(|k| k == "<Space>ai"), "{keys:?}");
+    assert_eq!(timeoutlen, Some(Duration::from_millis(400)));
+}
+
+/// nvim's own default mappings are among the user's keys, and a surface
+/// with a window of its own passes them on the way a tile does. Its buffer
+/// is not modifiable, so a default that edits (`&` repeating the last `:s`,
+/// the `gcc` comment toggle) changes nothing there, and the buffer the
+/// last `:s` ran in is left alone too.
+#[test]
+fn a_default_mapping_typed_in_a_surface_window_changes_no_buffer() {
+    let (engine, _channel, _rx, _pump, _cutover) = spawn_attached();
+    for setup in [
+        "execute('call setline(1, \"axa\")')",
+        "execute('s/x/y/')",
+        "execute('call setline(1, \"axa\")')",
+    ] {
+        engine.handle.eval_str(setup).unwrap();
+    }
+    let win = engine
+        .handle
+        .open_native_window_sync(
+            view_core::native::geometry::NativeSurface::Tree,
+            view_core::msg::WinSplit::Left,
+            30,
+            true,
+        )
+        .unwrap()
+        .expect("the surface window opened");
+    // text in the surface buffer for the defaults to match, put there
+    // around its own modifiable setting, which is what is under test
+    engine
+        .handle
+        .eval_str(
+            "execute('lua local m = vim.bo.modifiable; \
+             vim.bo.modifiable = true; \
+             vim.api.nvim_buf_set_lines(0, 0, -1, false, {\"axa\"}); \
+             vim.bo.modifiable = m; vim.bo.commentstring = \"#%s\"')",
+        )
+        .unwrap();
+    let surface_lines = || {
+        engine
+            .handle
+            .eval_str("join(getline(1, '$'), '|')")
+            .unwrap()
+    };
+    assert_eq!(surface_lines(), "axa");
+    for keys in ["&", "gcc"] {
+        engine.handle.feed_keys(keys).unwrap();
+        engine.handle.eval_str("1").unwrap();
+    }
+    assert_eq!(
+        engine.handle.eval_str("win_getid()").unwrap(),
+        win.0.to_string(),
+        "the keys ran outside the surface window"
+    );
+    assert_eq!(surface_lines(), "axa");
+    assert_eq!(engine.handle.eval_str("&modifiable").unwrap(), "0");
+    assert_eq!(
+        engine
+            .handle
+            .eval_str("join(getbufline(1, 1, '$'), '|')")
+            .unwrap(),
+        "axa"
+    );
+}
+
 /// A second registration that reissues the same chord must not report it as
 /// taken from a user: the previous run's own claim is not a user mapping,
 /// so the reissue's own claim for the same key must answer

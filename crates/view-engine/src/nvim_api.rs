@@ -4698,7 +4698,7 @@ mod tests {
             format!("  {MAPPINGS_CLAIMS_KEY} = claimed,\n"),
             format!("  {MAPPINGS_COLON_KEY} = colon,\n"),
             format!("  {MAPPINGS_USER_KEYS_KEY} = user_keys,\n"),
-            format!("  {MAPPINGS_TIMEOUT_KEY} = vim.o.timeout and vim.o.timeoutlen or -1,\n"),
+            format!("  {MAPPINGS_TIMEOUT_KEY} = timeoutlen,\n"),
         ] {
             assert!(
                 REGISTER_MAPPINGS_CHUNK.contains(&answer),

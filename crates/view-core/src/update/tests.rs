@@ -5846,6 +5846,20 @@ fn a_users_own_mapping_in_a_windowed_surface_reaches_nvim() {
     assert!(meta_inputs(&effects).is_empty(), "{effects:?}");
 }
 
+/// A reading of the user's keys taken again after registration, the way a
+/// config mapping on `VeryLazy` arrives, replaces the first one, and its
+/// new key reaches nvim from the windowed tree.
+#[test]
+fn a_users_mapping_read_after_registration_reaches_nvim_from_the_windowed_tree() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    user_mappings(&mut m, &[], Some(Duration::from_millis(1000)));
+    user_mappings(&mut m, &["<Space>fz"], Some(Duration::from_millis(1000)));
+    let effects = typed(&mut m, &[" ", "f", "z"]);
+    assert_eq!(meta_inputs(&effects), [" ", "f", "z"], "{effects:?}");
+}
+
 /// The generation of the last sequence bound `effects` armed.
 fn sequence_bound(effects: &[Effect]) -> Option<(Duration, u64)> {
     effects.iter().rev().find_map(|effect| match effect {
@@ -5901,6 +5915,102 @@ fn a_held_sequence_resolves_at_nvims_timeoutlen() {
     user_mappings(&mut m, &[], None);
     let effects = typed(&mut m, &[" ", "a"]);
     assert_eq!(sequence_bound(&effects), None, "{effects:?}");
+}
+
+/// nvim putting the cursor in `grid`, which is what moves the keyboard
+/// between windows.
+fn cursor_to(grid: u64) -> Msg {
+    Msg::Redraw(vec![
+        UiEvent::GridCursorGoto {
+            grid,
+            row: 0,
+            col: 0,
+        },
+        UiEvent::Flush,
+    ])
+}
+
+/// The windowed tree holding `<Space>`, the start of its `<Space>e`, with
+/// the bound that hold armed.
+fn tree_holding_the_leader() -> (Model, u64) {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    let effects = typed(&mut m, &[" "]);
+    let (_, generation) = sequence_bound(&effects).expect("the leader armed no bound");
+    (m, generation)
+}
+
+/// The cursor back in the tree and an `e` typed there: a `<Space>` still
+/// held from before would complete `<Space>e` and send it to nvim.
+fn assert_back_in_the_tree_e_completes_nothing(m: &mut Model, route: &str) {
+    let _ = update(m, cursor_to(TREE_GRID));
+    assert_eq!(
+        m.focus(),
+        Focus::Pane(crate::native::geometry::NativeSurface::Tree),
+        "{route}"
+    );
+    let effects = typed(m, &["e"]);
+    assert!(meta_inputs(&effects).is_empty(), "{route}: {effects:?}");
+}
+
+/// A click in a buffer tile takes the keyboard from the tree, and the
+/// `<Space>` it was holding goes with it.
+#[test]
+fn a_held_sequence_dies_when_a_click_leaves_its_surface() {
+    let (mut m, _) = tree_holding_the_leader();
+    let _ = update(&mut m, click(5, 40));
+    let _ = update(&mut m, cursor_to(2));
+    assert_eq!(m.focus(), Focus::Engine);
+    assert_back_in_the_tree_e_completes_nothing(&mut m, "click");
+}
+
+/// `:View ai open` takes the keyboard from the tree, and `:View ai close`
+/// hands it back with nothing held, though no key reached the panel.
+#[test]
+fn a_held_sequence_dies_when_a_view_command_takes_the_keyboard() {
+    let (mut m, _) = tree_holding_the_leader();
+    m.ai_trusted = true;
+    let ai = |verb: &str| Msg::FeatureInvoke {
+        feature: "ai".to_string(),
+        verb: verb.to_string(),
+    };
+    let _ = update(&mut m, ai("open"));
+    assert!(matches!(m.focus(), Focus::Native(_)), "{:?}", m.focus());
+    let _ = update(&mut m, ai("close"));
+    assert_back_in_the_tree_e_completes_nothing(&mut m, ":View ai open");
+}
+
+/// An agent's review comes to the user in the reviewed buffer, which moves
+/// nvim's cursor out of the tree with no key of the user's.
+#[test]
+fn a_held_sequence_dies_when_an_agent_review_takes_the_keyboard() {
+    let (mut m, _) = tree_holding_the_leader();
+    m.ai_trusted = true;
+    open_review(&mut m);
+    let _ = update(&mut m, cursor_to(2));
+    assert_eq!(m.focus(), Focus::Engine);
+    assert_back_in_the_tree_e_completes_nothing(&mut m, "agent review");
+}
+
+/// A restart closes the windowed tree outside any update, and the keys
+/// it was holding go with it.
+#[test]
+fn a_held_sequence_dies_when_the_engine_restarts() {
+    let (mut m, _) = tree_holding_the_leader();
+    let _ = restart(&mut m);
+    assert_eq!(m.submit_hold.take_sequence(), Vec::<String>::new());
+}
+
+/// The bound a held sequence armed drops the keys wherever the keyboard
+/// went in the meantime, so none of them is left for a later key.
+#[test]
+fn a_held_sequence_expires_wherever_the_keyboard_went() {
+    let (mut m, generation) = tree_holding_the_leader();
+    let _ = update(&mut m, cursor_to(2));
+    let expired = update(&mut m, Msg::SequenceExpired { generation });
+    assert!(meta_inputs(&expired).is_empty(), "{expired:?}");
+    assert_back_in_the_tree_e_completes_nothing(&mut m, "expiry");
 }
 
 /// The windowed message stream passes a leader default on the same way.

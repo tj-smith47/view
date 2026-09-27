@@ -116,6 +116,9 @@ fn path_to_wire(path: &std::path::Path) -> String {
 /// one stays open across the restart.
 #[must_use]
 pub fn forget_native_windows(model: &mut Model) -> Vec<Effect> {
+    // runs outside `update`, so its focus comparison never sees the
+    // surfaces this closes
+    model.submit_hold.take_sequence();
     surfaces::forget_native_windows(model)
 }
 
@@ -192,7 +195,15 @@ fn update_one(model: &mut Model, msg: Msg) -> Vec<Effect> {
     let entries_before = model.engine.messages.entries.len();
     let armed_before = model.armed_toast_slot();
     let chrome_before = model.chrome_rows();
+    let focus_before = model.focus();
     let mut effects = dispatch(model, msg);
+    // held keys belong to the surface they were typed on: a click, a
+    // `:View` command, an agent's review or a window nvim closed can move
+    // the keyboard with no key of the user's, and a sequence left standing
+    // would be completed by the next key typed after focus comes back
+    if model.focus() != focus_before {
+        model.submit_hold.take_sequence();
+    }
     // the top row follows facts a dozen arms move (a tabpage, the buffer
     // list, the agent's state, `showtabline`), so the one comparison lives
     // here: a row that appears or leaves resizes the grid once, and a look

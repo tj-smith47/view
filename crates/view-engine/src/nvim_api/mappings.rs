@@ -47,13 +47,14 @@ use view_core::native::mappings::{
 /// well as the global ones, and the current buffer is the one the `:` is
 /// going to. It reads a Lua-callback mapping as well as a string one (the
 /// rhs comes back as `<Lua 42: ...>`, which is not the empty string
-/// `maparg` returns for no mapping at all). The cost per fire is those
-/// three calls -- the walk it replaces materialised every mapping of three
-/// modes, globally and for every loaded buffer, on every event below.
+/// `maparg` returns for no mapping at all). The `:` reading costs those
+/// three calls per fire; the user's keys below cost one walk of the global
+/// normal-mode table, and no buffer's own.
 ///
-/// Re-read on four events, reported on the `view_bridge` `colon_mapped`
-/// event only when the answer moved. `User LazyLoad`, so a plugin that
-/// loads late and maps `:` closes the gate for the rest of the session --
+/// Re-read on five events, reported on the `view_bridge` `colon_mapped`
+/// event only when the answer moved. `User LazyLoad` and `User VeryLazy`,
+/// so a plugin or a keymap file that loads late and maps `:` closes the
+/// gate for the rest of the session --
 /// and `BufEnter`, `FileType` and `BufWinEnter` beside it, because a config
 /// that loads no plugin lazily fires the first one never, and because a
 /// buffer-local `:` map belongs to whichever buffer is current: an ftplugin
@@ -117,7 +118,11 @@ use view_core::native::mappings::{
 /// where `'timeout'` is off): a surface of view's own with a window of its
 /// own passes those keys on to nvim, the way a buffer tile does, and waits
 /// on a sequence's prefix as long as nvim would. `<Plug>` and `<SNR>` keys
-/// are left out, since no one types them.
+/// are left out, since no one types them, and so are view's own, which
+/// the claims carry. Both are read again by the same listener as `:`, and
+/// sent on the `view_bridge` `user_keys` event when they moved, so a
+/// mapping a config sets on `VeryLazy` reaches the windowed tree the way
+/// it reaches a tile.
 ///
 /// The command registers unconditionally, outside the spec loop: a user who
 /// turned every default key off, or every feature, still has a way in.
@@ -138,16 +143,21 @@ local function note(maps)
     taken[m.lhs] = true
   end
 end
-local global = vim.api.nvim_get_keymap('n')
-note(global)
-local user_keys = {}
-for _, m in ipairs(global) do
-  local typed = not vim.startswith(m.lhs, '<Plug>')
-    and not vim.startswith(m.lhs, '<SNR>')
-  if typed then
-    user_keys[#user_keys + 1] = vim.fn.keytrans(m.lhsraw or m.lhs)
+note(vim.api.nvim_get_keymap('n'))
+local function read_user_keys()
+  local keys = {}
+  for _, m in ipairs(vim.api.nvim_get_keymap('n')) do
+    local typed = not vim.startswith(m.lhs, '<Plug>')
+      and not vim.startswith(m.lhs, '<SNR>')
+      and not vim.startswith(m.desc or '', 'view: ')
+    if typed then
+      keys[#keys + 1] = vim.fn.keytrans(m.lhsraw or m.lhs)
+    end
   end
+  return keys, vim.o.timeout and vim.o.timeoutlen or -1
 end
+local user_keys, timeoutlen = read_user_keys()
+local user_read = table.concat(user_keys, ' ') .. ' ' .. timeoutlen
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
   if vim.api.nvim_buf_is_loaded(buf) then
     note(vim.api.nvim_buf_get_keymap(buf, 'n'))
@@ -167,10 +177,16 @@ local function reread()
     colon = now
     pcall(vim.rpcnotify, channel, 'view_bridge', 'colon_mapped', now)
   end
+  local keys, wait = read_user_keys()
+  local read = table.concat(keys, ' ') .. ' ' .. wait
+  if read ~= user_read then
+    user_read = read
+    pcall(vim.rpcnotify, channel, 'view_bridge', 'user_keys', keys, wait)
+  end
 end
 vim.api.nvim_create_autocmd('User', {
   group = group,
-  pattern = 'LazyLoad',
+  pattern = { 'LazyLoad', 'VeryLazy' },
   callback = reread,
 })
 vim.api.nvim_create_autocmd({ 'BufEnter', 'FileType', 'BufWinEnter' }, {
@@ -207,7 +223,7 @@ return {
   claims = claimed,
   colon_mapped = colon,
   user_keys = user_keys,
-  timeoutlen = vim.o.timeout and vim.o.timeoutlen or -1,
+  timeoutlen = timeoutlen,
 }";
 
 /// The lua chunk that creates the `:View` command, taking view's channel id,

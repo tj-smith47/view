@@ -25,15 +25,19 @@ const DEFAULT_TIMEOUTLEN: Duration = Duration::from_millis(1000);
 /// Normal-mode keys that leave normal mode: into insert, replace, visual
 /// or a command line, or into an operator's pending motion. A key typed
 /// behind one of them is no normal-mode command, so it starts no mapping.
-const LEAVES_NORMAL: [&str; 26] = [
+/// `Q` replays the last recorded register and stays in normal mode.
+const LEAVES_NORMAL: [&str; 25] = [
     ":", "/", "?", "o", "O", "a", "A", "i", "I", "s", "S", "C", "R", "c", "d", "y", "<", ">", "=",
-    "!", "v", "V", "<C-v>", "<C-q>", "<Insert>", "Q",
+    "!", "v", "V", "<C-v>", "<C-q>", "<Insert>",
 ];
 
 /// The keys that leave normal mode as the argument of the key before
-/// them: `gi` and `gv` enter insert and visual, and the `g` and `z`
-/// operators wait for a motion.
-const LEAVES_NORMAL_AFTER: [(&str, &str); 16] = [
+/// them: `gi`, `gv` and `gn` enter insert and visual, and the `g` and `z`
+/// operators (nvim's default `gc` among them) wait for a motion.
+const LEAVES_NORMAL_AFTER: [(&str, &str); 19] = [
+    ("g", "n"),
+    ("g", "N"),
+    ("g", "c"),
     ("g", "i"),
     ("g", "I"),
     ("g", "v"),
@@ -844,6 +848,24 @@ mod tests {
             model.submit_hold.is_holding(),
             "the `a` and `i` of the invocation before left the mode unsure"
         );
+    }
+
+    /// `Q` replays a register and stays in normal mode, so a sequence
+    /// behind it holds. `gn`, `gN` and nvim's default `gc` leave normal
+    /// mode, so one behind them holds nothing.
+    #[test]
+    fn q_stays_in_normal_mode_where_gn_and_gc_leave_it() {
+        let mut model = claiming(&[Some("<Space>e")]);
+        let _ = type_keys(&mut model, &["Q", " ", "e"]);
+        assert!(model.submit_hold.is_holding(), "Q then <Space>e");
+
+        for lead in [&["g", "n"][..], &["g", "N"], &["g", "c"]] {
+            let mut model = claiming(&[Some("<Space>e")]);
+            let keys: Vec<&str> = lead.iter().copied().chain([" ", "e", "x"]).collect();
+            let sent = type_keys(&mut model, &keys);
+            assert_eq!(inputs(&sent), keys, "{lead:?}: {sent:?}");
+            assert!(!model.submit_hold.is_holding(), "{lead:?}<Space>e armed");
+        }
     }
 
     /// A mode nvim reports answers the key that left normal mode, and a

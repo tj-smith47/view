@@ -614,12 +614,13 @@ fn resolve_held(
 }
 
 /// Resolves the keys the focused surface holds once nvim's
-/// `'timeoutlen'` has passed on them.
+/// `'timeoutlen'` has passed on them. Keys whose surface no longer has
+/// the keyboard are dropped.
 pub(super) fn expire_sequence(model: &mut Model, generation: u64) -> Vec<Effect> {
+    let keys = model.submit_hold.take_expired_sequence(generation);
     let Some(answer) = sequence_answer(model) else {
         return Vec::new();
     };
-    let keys = model.submit_hold.take_expired_sequence(generation);
     if keys.is_empty() {
         return Vec::new();
     }
