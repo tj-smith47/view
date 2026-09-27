@@ -180,12 +180,18 @@ panel stays an ordinary editable buffer while you read the question.
 The colors carry the same split as the words, and the always-allow row takes
 a color of its own.
 
-### What the two "Always" answers do
+### What an "Always" answer does
 
-The agent keeps an always-allow or an always-reject. Its own name for the
-option says what the answer covers, such as every `echo` command or every
-edit in the session. view sends the answer you chose and answers no later
-request for you, so any request the agent sends still opens the prompt.
+With Claude Code, the agent view starts by default, an always-allow for a
+command is saved to the project's `.claude/settings.local.json`. Later
+sessions in that project run the same command without asking. An
+always-allow for an edit lasts until the session ends. Claude Code offers
+no always-reject, and its deny answers the one request.
+
+Another agent keeps its always answers its own way, and the option's name
+says what the answer covers. view sends the answer you chose and answers no
+later request for you, so any request the agent sends still opens the
+prompt.
 
 ## Reviewing an agent's edits
 
