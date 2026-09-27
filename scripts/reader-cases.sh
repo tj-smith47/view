@@ -157,5 +157,36 @@ PLANT
 [ -n "$(unparted_escapes "$PLANTED")" ]
 check "an unparted Escape is found rather than read as a parted one" 0 $?
 
+# The staleness check the legs run on a binary before driving it. A test
+# file the binary never compiled was once enough to fail it, which pushed a
+# run into touching a binary by hand.
+eval "$(awk '/^newer_source\(\) \{/,/^\}/' "$SHARED")"
+BUILT=$(mktemp -d "$(scratch_root)/reader-cases-built-XXXXXX")
+trap 'rm -f "$PLANTED"; rm -rf "$BUILT"' EXIT
+mkdir -p "$BUILT/crates/a/src" "$BUILT/crates/a/tests" "$BUILT/target/debug"
+BIN=$BUILT/target/debug/view
+: >"$BUILT/crates/a/src/lib.rs"
+: >"$BUILT/crates/a/src/with space.rs"
+: >"$BUILT/crates/a/tests/live.rs"
+: >"$BIN"
+printf '%s: %s crates/a/src/with\\ space.rs\n' "$BIN" "$BUILT/crates/a/src/lib.rs" >"$BIN.d"
+touch -t 202601010000 "$BUILT/crates/a/src/lib.rs" "$BUILT/crates/a/src/with space.rs" \
+    "$BUILT/crates/a/tests/live.rs"
+touch -t 202601010100 "$BIN"
+REPO_ROOT=$BUILT
+[ -z "$(newer_source "$BIN")" ]
+check "a binary built after every source it lists is current" 0 $?
+touch -t 202601010200 "$BUILT/crates/a/tests/live.rs"
+[ -z "$(newer_source "$BIN")" ]
+check "an edit to a test the binary never compiled leaves it current" 0 $?
+touch -t 202601010200 "$BUILT/crates/a/src/with space.rs"
+[ "$(newer_source "$BIN")" = "$BUILT/crates/a/src/with space.rs" ]
+check "an edit to a source the dep-info lists makes the binary stale" 0 $?
+touch -t 202601010000 "$BUILT/crates/a/src/with space.rs"
+rm "$BIN.d"
+[ "$(newer_source "$BIN")" = "$BUILT/crates/a/tests/live.rs" ]
+check "with no dep-info every source under crates/ is compared" 0 $?
+REPO_ROOT=$ROOT
+
 printf '%s cases, %s failures\n' "$cases" "$failures"
 [ "$failures" -eq 0 ] || exit 1

@@ -397,6 +397,43 @@ check_class_gate() {
 }
 check_class_gate
 
+# The first source `path` was built from that has changed since it was
+# built, or nothing when it is current.
+#
+#   newer=$(newer_source "$REPO_ROOT/target/debug/view")
+#
+# Read from the dep-info cargo writes beside the binary, which lists every
+# file that build read: an edit to a test the binary never compiled leaves
+# it current. A listed file that is gone counts as changed. With no
+# dep-info to read, every `.rs` under crates/ is compared.
+newer_source() {
+    local path="$1" src
+    if [ ! -f "$path.d" ]; then
+        find "$REPO_ROOT/crates" -name '*.rs' -newer "$path" -print -quit 2>/dev/null || true
+        return 0
+    fi
+    # dep-info is `target: source source ...` with a space inside a name
+    # written as a backslash and a space
+    while IFS= read -r src; do
+        [ -n "$src" ] || continue
+        case "$src" in
+        (/*) ;;
+        (*) src=$REPO_ROOT/$src ;;
+        esac
+        if [ ! -e "$src" ] || [ "$src" -nt "$path" ]; then
+            printf '%s\n' "$src"
+            return 0
+        fi
+    done <<SOURCES
+$(awk 'NR == 1 {
+        sub(/^[^:]*: */, "")
+        gsub(/\\ /, "\001")
+        n = split($0, part, " ")
+        for (i = 1; i <= n; i++) { gsub("\001", " ", part[i]); print part[i] }
+    }' "$path.d")
+SOURCES
+}
+
 # Makes sure `path` is a binary this tree's source produced.
 #
 #   ensure_artifact "$VIEW_BIN" "$REPO_ROOT/target/release/view" \
@@ -419,7 +456,7 @@ ensure_artifact() {
             return 1
         }
         local newer
-        newer=$(find "$REPO_ROOT/crates" -name '*.rs' -newer "$path" -print -quit 2>/dev/null || true)
+        newer=$(newer_source "$path")
         if [ -n "$newer" ]; then
             printf 'FAIL: %s predates %s, so it is not the tree it would be measuring\n' \
                 "$path" "${newer#"$REPO_ROOT/"}" >&2
