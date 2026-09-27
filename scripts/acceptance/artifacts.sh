@@ -647,7 +647,14 @@ LEADER=${LEADER:-\\}
 # entry point nothing drives is the hole the legs that press keys exist to
 # close.
 tmux_key() {
-    local lhs="$1" typed=${1/<leader>/"$LEADER"}
+    local lhs="$1" typed="$1"
+    # one at a time: `<leader><leader>` spells the leader twice
+    while :; do
+        case "$typed" in
+        *'<leader>'*) typed=${typed/<leader>/"$LEADER"} ;;
+        *) break ;;
+        esac
+    done
     case "$typed" in
     *'<'* | *'>'*)
         printf 'FAIL: %s carries a key notation this script cannot type; teach tmux_key to spell it\n' "$lhs" >&2

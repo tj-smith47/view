@@ -157,6 +157,35 @@ PLANT
 [ -n "$(unparted_escapes "$PLANTED")" ]
 check "an unparted Escape is found rather than read as a parted one" 0 $?
 
+# Every default key the engine registers, walked through the shapes the
+# entry-points leg knows. Twenty of twenty-five once had none, and the leg
+# failed at the first of them on a machine that could run it and passed
+# `task ci` everywhere. A surface's marker is resolved from the sweep's
+# own arms with its runtime titles stood in.
+eval "$(awk '/^entry_shape\(\) \{/,/^\}/' "$SWEEP")"
+eval "$(awk '/^entry_points_of\(\) \{/,/^\}/' "$SWEEP")"
+eval "$(awk '/^marker_for\(\) \{/,/^\}/' "$SWEEP")"
+eval "$(awk '/^PICKER_MARKERS=\$\(awk/,/^'"'"' "\$SURFACES_RS" "\$PICKER_RS"\)$/' "$SWEEP")"
+DRIVES=$(awk '/^drive_action\(\) \{/,/^\}/' "$SWEEP" | grep -E '^    [a-z][a-z |]*\)$' | tr -d ' )' | tr '|' '\n')
+ROOT=/sweep/root HISTORY_TITLE=history PANEL_TITLE=panel NARROW_FOCUSED_TITLE=narrow PROMPT_MARK='>'
+ROWS_SEEN=0
+while read -r feature lhs verb; do
+    [ -n "$feature" ] || continue
+    ROWS_SEEN=$((ROWS_SEEN + 1))
+    shape=$(entry_shape "$feature" "$verb" 2>/dev/null)
+    check "the $feature $verb key ($lhs) has a shape the entry-points leg knows" 0 $?
+    case "$shape" in
+    (surface) [ -n "$(marker_for "$feature" "$verb" 2>/dev/null)" ] ;;
+    (pause) true ;;
+    (*) grep -Fqx -- "$shape" <<<"$DRIVES" ;;
+    esac
+    check "the $feature $verb key ($lhs) has a marker or a drive for its $shape shape" 0 $?
+done <<<"$(entry_points_of "$MAPPINGS_RS")"
+[ "$ROWS_SEEN" -eq "$(grep -oE '^static DEFAULT_MAPS: \[MappingSpec; [0-9]+\]' "$MAPPINGS_RS" | grep -oE '[0-9]+' | tail -1)" ]
+check "the walk read every row DEFAULT_MAPS declares" 0 $?
+entry_shape brand new >/dev/null 2>&1
+check "a pair with no shape fails the leg" 1 $?
+
 # The staleness check the legs run on a binary before driving it. A test
 # file the binary never compiled was once enough to fail it, which pushed a
 # run into touching a binary by hand.

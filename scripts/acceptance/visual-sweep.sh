@@ -67,6 +67,7 @@ PERMISSION_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/permission.rs
 PICKER_RS=$REPO_ROOT/crates/view-core/src/native/picker.rs
 PALETTE_RS=$REPO_ROOT/crates/view-core/src/native/palette.rs
 SURFACES_RS=$REPO_ROOT/crates/view-core/src/update/surfaces.rs
+CHORDS_RS=$REPO_ROOT/crates/view-core/src/native/chords.rs
 OVERLAY_RS=$REPO_ROOT/crates/view-surface/src/overlay.rs
 NVIM_API_RS=$REPO_ROOT/crates/view-engine/src/nvim_api.rs
 # the mod file above is being split into sibling files under this directory;
@@ -881,7 +882,9 @@ assert_chrome() {
 # cache lives, already warmed. Everything a leg writes that another leg must
 # not see (the AI trust store, the working tree it opens) is its own.
 start_session() {
-    local tag="$1" seed="$2"
+    local tag="$1" seed="$2" launcher="${3:-$LAUNCHER}" ruler=','
+    # a tile writes its cursor position into its own frame as `row:col`
+    [ "$launcher" != "$TILES_LAUNCHER" ] || ruler=':'
     SESSION="view-visual-$$-$tag"
     ROOT=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-$tag-XXXXXX")
     ROOTS+=("$ROOT")
@@ -906,7 +909,7 @@ start_session() {
              XDG_CACHE_HOME=$ROOT/xdg_cache_home \
              VIEW_LOG=$ROOT/view.log \
              TERM=xterm-256color COLORTERM=truecolor \
-             $LAUNCHER $ROOT/scratch.txt"
+             $launcher $ROOT/scratch.txt"
 
     wait_for "$seed" "$WAIT_SECS" "the seeded buffer" >/dev/null || return 1
     watch_view "$SESSION" || return 1
@@ -923,7 +926,7 @@ start_session() {
     # moved whether it had or not
     local middle=$((ROWS / 2))
     send_text "${middle}G"
-    wait_for "$middle,1" "$WAIT_SECS" "the cursor on the middle line" >/dev/null || return 1
+    wait_for "${middle}${ruler}1" "$WAIT_SECS" "the cursor on the middle line" >/dev/null || return 1
 }
 
 # Puts the screen back to a bare buffer. `ai` needs naming because Escape
@@ -1082,6 +1085,11 @@ LAUNCHER=$RUN_SUPPORT/launch.sh
     printf ' "$@"\n'
 } >"$LAUNCHER"
 chmod +x "$LAUNCHER"
+# The default keys that act on the tiles themselves are driven where the
+# tiles are drawn, and read by their frames.
+TILES_LAUNCHER=$RUN_SUPPORT/launch-tiles.sh
+sed 's/--panes nvim/--panes tiles/' "$LAUNCHER" >"$TILES_LAUNCHER"
+chmod +x "$TILES_LAUNCHER"
 
 # Every background the assertions turn on, out of the live scheme.
 #
@@ -1288,6 +1296,17 @@ case "$TOAST_PAUSE_MARK" in
     ;;
 esac
 
+# The glyph the palette's prompt row opens with, read out of the framing
+# that writes it. The palette is nvim's own command line, so its marker is
+# that glyph with the `:` the line was opened on.
+PROMPT_MARK=$(grep -oE "const PROMPT_MARK: char = '.*'" "$OVERLAY_RS" |
+    sed -E "s/.*= '(.*)'/\1/") || true
+[ -n "$PROMPT_MARK" ] || {
+    printf 'FAIL: %s no longer declares the prompt glyph as a char constant\n' "$OVERLAY_RS" >&2
+    exit 1
+}
+BOX_H=$(border_glyph ROUNDED horizontal)
+
 # What each surface writes into its own frame when it is the one that
 # opened, read out of the code that writes it.
 #
@@ -1377,6 +1396,7 @@ marker_for() {
     # this script is asked for, and a narrow pane's panel is a different
     # thing on screen from the same panel on a wide one
     ai/focus-narrow) marker=$NARROW_FOCUSED_TITLE ;;
+    palette/open) marker="$PROMPT_MARK :" ;;
     esac
     [ -n "$marker" ] || {
         printf 'FAIL: nothing here knows what the %s %s surface paints, so driving it would prove nothing; give it a marker\n' \
@@ -1386,18 +1406,52 @@ marker_for() {
     printf '%s' "$marker"
 }
 
+# What a (feature, verb) pair puts on screen, and so how the entry-points
+# leg knows its key arrived:
+#
+#   surface   a box `marker_for` names
+#   pause     the mark on a standing toast, driven by leg_toast_and_history
+#   dismiss   a standing toast gone
+#   gaps      the blank column left of the tiles, gone and back
+#   cycle     the next surface opening in a tile of its own
+#   new zoom fit flip float tabpage
+#             the change to the tiles each one names (`drive_action`)
+#
+# A pair with no shape fails the run, and `scripts/reader-cases.sh` walks
+# every default key through this on `task ci`.
+entry_shape() {
+    case "$1/$2" in
+    picker/* | tree/toggle | notifications/history | ai/toggle | ai/focus-narrow | palette/open)
+        printf 'surface' ;;
+    notifications/pause) printf 'pause' ;;
+    notifications/dismiss) printf 'dismiss' ;;
+    ui/gaps) printf 'gaps' ;;
+    ui/cycle_surfaces) printf 'cycle' ;;
+    window/new | window/zoom | window/fit | window/flip | window/float) printf '%s' "$2" ;;
+    window/to_tabpage_[1-9]) printf 'tabpage' ;;
+    *)
+        printf 'FAIL: nothing here knows what the %s %s key changes on screen, so pressing it would prove nothing; give it a shape\n' \
+            "$1" "$2" >&2
+        return 1
+        ;;
+    esac
+}
+
 # Every default key this build registers, and the feature and verb behind
 # it, from the table the engine registers them out of. The key is written
 # as a `Cow::Borrowed` literal there, and a field read empty leaves a row of
 # two words whose verb lands in the key's column, so a short row fails the
 # read.
-ENTRY_POINTS=$(awk '
-    /^static DEFAULT_MAPS/ { inside = 1 }
-    inside && /feature: "/ { f = $0; sub(/.*feature: "/, "", f); sub(/".*/, "", f) }
-    inside && /lhs: /      { l = $0; sub(/.*lhs: (Cow::Borrowed\()?"/, "", l); sub(/".*/, "", l) }
-    inside && /verb: "/    { v = $0; sub(/.*verb: "/, "", v); sub(/".*/, "", v); print f, l, v }
-    inside && /^\];/ { exit }
-' "$MAPPINGS_RS")
+entry_points_of() {
+    awk '
+        /^static DEFAULT_MAPS/ { inside = 1 }
+        inside && /feature: "/ { f = $0; sub(/.*feature: "/, "", f); sub(/".*/, "", f) }
+        inside && /lhs: /      { l = $0; sub(/.*lhs: (Cow::Borrowed\()?"/, "", l); sub(/".*/, "", l) }
+        inside && /verb: "/    { v = $0; sub(/.*verb: "/, "", v); sub(/".*/, "", v); print f, l, v }
+        inside && /^\];/ { exit }
+    ' "$1"
+}
+ENTRY_POINTS=$(entry_points_of "$MAPPINGS_RS")
 short_row=$(printf '%s\n' "$ENTRY_POINTS" | awk 'NF != 3 { print; exit }')
 if [ -n "$short_row" ]; then
     printf 'FAIL: %s has a default mapping this read as "%s", with a field missing\n' \
@@ -1503,6 +1557,258 @@ done
 end_session
 pass "the colorscheme reaches view's own theme cache (NormalFloat bg $FLOAT_BG)"
 
+# Waits until `check` and its arguments answer yes against a fresh capture,
+# printing the seconds it took.
+#
+#   took=$(wait_until "$REACTION_SECS" 'a second tile' reads tile_layout beside)
+wait_until() {
+    local budget="$1" what="$2" start el
+    shift 2
+    start=$(now)
+    while :; do
+        capture
+        if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+            fail "the view session exited while waiting for $what"
+            return 1
+        fi
+        if "$@"; then
+            elapsed "$start" "$(now)"
+            return 0
+        fi
+        el=$(elapsed "$start" "$(now)")
+        if ! under "$el" "$budget"; then
+            fail "$what was not on screen after ${budget}s"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+}
+
+# Whether the reader `$1` answers `$2` on the last capture.
+reads() { [ "$("$1")" = "$2" ]; }
+# Whether no cell of the last capture spells `$1`.
+lacks() { ! grep -qF -- "$1" "$SCREEN"; }
+# Whether the last capture holds every one of the texts given.
+shows() {
+    local text
+    for text in "$@"; do
+        grep -qF -- "$text" "$SCREEN" || return 1
+    done
+}
+
+# Where every titled frame's top-left corner stands, a `row col` line
+# apiece. A tile's frame carries its buffer's name on its top edge or its
+# bottom one, and a toast's carries nothing, so a toast standing over the
+# tiles is never read as one.
+tile_corners() {
+    LC_ALL=C awk -F'\t' -v tl="$BOX_TL" -v bl="$BOX_BL" -v h="$BOX_H" '
+        function titled(row, col,   t) {
+            t = glyph[row "," (col + 2)]
+            return glyph[row "," (col + 1)] == " " && t != " " && t != h && t != ""
+        }
+        {
+            glyph[$1 "," $2] = $6
+            if ($1 > last) last = $1
+            if ($6 == tl) { n++; r[n] = $1; c[n] = $2 }
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                below = -1
+                for (k = r[i] + 1; k <= last && below < 0; k++)
+                    if (glyph[k "," c[i]] == bl) below = k
+                if (titled(r[i], c[i]) || (below >= 0 && titled(below, c[i])))
+                    print r[i], c[i]
+            }
+        }' "$CELLS"
+}
+# How the tiles stand: `one`, `beside`, `stacked` or `other`.
+tile_layout() {
+    tile_corners | awk '
+        { n++; row[n] = $1; col[n] = $2 }
+        END {
+            if (n == 1) print "one"
+            else if (n == 2 && row[1] == row[2]) print "beside"
+            else if (n == 2 && col[1] == col[2]) print "stacked"
+            else print "other"
+        }'
+}
+# `gap` while a blank column stands left of the leftmost tile, `flush`
+# while a tile's frame is drawn in the first column.
+left_edge() {
+    tile_corners | awk '
+        NR == 1 || $2 < m { m = $2 }
+        END { if (NR == 0) print "none"; else if (m == 0) print "flush"; else print "gap" }'
+}
+# The column the second tile's frame starts in, reading left to right.
+second_tile_col() { tile_corners | sort -n -k2 | awk 'NR == 2 { print $2 }'; }
+second_tile_moved_from() { [ "$(second_tile_col)" != "$1" ]; }
+# The column the seeded buffer's tile title starts in, or nothing while it
+# is covered.
+scratch_col() { text_span scratch.txt | awk '$2 >= 0 { print $2 }'; }
+# Whether the seeded buffer's tile title stands right of column `$1`.
+scratch_right_of() {
+    local col
+    col=$(scratch_col)
+    [ -n "$col" ] || return 1
+    [ "$col" -gt "$1" ]
+}
+
+# The Alt form of the desktop chord whose twin is `lhs`, read out of the
+# table both are declared in.
+chord_twin() {
+    awk -v twin="$1" '
+        /with_alt: "/ { a = $0; sub(/.*with_alt: "/, "", a); sub(/".*/, "", a) }
+        /twin: "/ { t = $0; sub(/.*twin: "/, "", t); sub(/".*/, "", t); if (t == twin) { print a; exit } }
+    ' "$CHORDS_RS"
+}
+
+# Drives a pair whose key acts on the tiles or on a standing toast, in a
+# tiled session of its own, and waits for the change a person looks for.
+# Everything after the pair is the gesture, run as a command:
+#
+#   drive_action window zoom send_text '\wz'
+#   drive_action window new command_line ':View window'
+#
+# Leaves what it saw, with the seconds the change took, in `SAW`. Run in
+# the leg's own shell, so the session it starts is one `cleanup` knows.
+drive_action() {
+    local feature="$1" verb="$2" shape took before n source chord
+    shift 2
+    SAW=""
+    shape=$(entry_shape "$feature" "$verb") || return 1
+    start_session "action-$verb" 'visual sweep seed line' "$TILES_LAUNCHER" || return 1
+    case "$shape" in
+    dismiss)
+        command_line ':bogus'
+        wait_for 'Not an editor command' "$WAIT_SECS" 'the error toast' >/dev/null || return 1
+        "$@"
+        took=$(wait_until "$REACTION_SECS" "the error toast leaving on $feature $verb" \
+            lacks 'Not an editor command') || return 1
+        SAW="takes the standing toast down in ${took}s"
+        ;;
+    gaps)
+        wait_until "$WAIT_SECS" 'the blank column left of the tiles' reads left_edge gap >/dev/null ||
+            return 1
+        "$@"
+        took=$(wait_until "$REACTION_SECS" "the tiles reaching the first column on $feature $verb" \
+            reads left_edge flush) || return 1
+        "$@"
+        wait_until "$REACTION_SECS" "the blank column coming back on a second $feature $verb" \
+            reads left_edge gap >/dev/null || return 1
+        SAW="closes the gap round the tiles in ${took}s and opens it again"
+        ;;
+    cycle)
+        before=$(scratch_col)
+        [ -n "$before" ] || {
+            fail 'the seeded buffer has no titled tile to measure the ring step against'
+            return 1
+        }
+        "$@"
+        command_line ':View tree'
+        took=$(wait_until "$REACTION_SECS" "the tree opening in a tile of its own after $feature $verb" \
+            scratch_right_of "$before") || return 1
+        SAW="opens the next surface in a tile of its own (the tree, in ${took}s)"
+        ;;
+    new)
+        wait_until "$WAIT_SECS" 'the one tile' reads tile_layout one >/dev/null || return 1
+        "$@"
+        took=$(wait_until "$REACTION_SECS" "a second tile on $feature $verb" \
+            reads tile_layout beside) || return 1
+        SAW="adds a tile beside the first in ${took}s"
+        ;;
+    zoom | flip | fit)
+        command_line ':silent vsplit'
+        wait_until "$WAIT_SECS" 'two tiles side by side' reads tile_layout beside >/dev/null ||
+            return 1
+        case "$shape" in
+        zoom)
+            "$@"
+            took=$(wait_until "$REACTION_SECS" "one tile filling the lattice on $feature $verb" \
+                reads tile_layout one) || return 1
+            "$@"
+            wait_until "$REACTION_SECS" "both tiles back on a second $feature $verb" \
+                reads tile_layout beside >/dev/null || return 1
+            SAW="fills the lattice with one tile in ${took}s and gives the other back"
+            ;;
+        flip)
+            "$@"
+            took=$(wait_until "$REACTION_SECS" "the pair stacked on $feature $verb" \
+                reads tile_layout stacked) || return 1
+            "$@"
+            wait_until "$REACTION_SECS" "the pair side by side again on a second $feature $verb" \
+                reads tile_layout beside >/dev/null || return 1
+            SAW="stacks the pair in ${took}s and sets it side by side again"
+            ;;
+        fit)
+            before=$(second_tile_col)
+            "$@"
+            took=$(wait_until "$REACTION_SECS" "the focused tile resized on $feature $verb" \
+                second_tile_moved_from "$before") || return 1
+            SAW="sizes the focused tile to its text in ${took}s"
+            ;;
+        esac
+        ;;
+    float)
+        # the verb acts on the surface the cursor stands in, and in the
+        # buffer's own tile it answers that there is none
+        "$@"
+        took=$(wait_until "$REACTION_SECS" "the answer to $feature $verb in a buffer tile" \
+            shows "window float has nothing to act on") || return 1
+        # and pressed where it acts, as the Alt chord the key is the twin
+        # of: the tree in a tile of its own goes back over the buffer,
+        # titled as the floating tree is
+        chord=$(chord_twin "$(printf '%s\n' "$ENTRY_POINTS" |
+            awk -v f="$feature" -v v="$verb" '$1 == f && $3 == v { print $2 }')")
+        [ -n "$chord" ] || {
+            fail "no desktop chord in $CHORDS_RS is the twin of the $feature $verb key"
+            return 1
+        }
+        local chord_desc
+        chord_desc=$(mapping_desc "$chord") || return 1
+        if [ "$chord_desc" = -none- ]; then
+            fail "nothing maps $chord in this session, so view's $feature $verb chord never registered"
+            return 1
+        elif [ "$chord_desc" != "$(printf "$DESC_FORMAT" "$feature" "$verb")" ]; then
+            skip "$chord is this config's own key (\"$chord_desc\"), which outranks view's $feature $verb chord"
+        else
+            before=$(scratch_col)
+            command_line ':View ui cycle_surfaces'
+            command_line ':View tree'
+            wait_until "$WAIT_SECS" 'the tree in a tile of its own' \
+                scratch_right_of "$before" >/dev/null || return 1
+            chord=${chord#<}
+            send_key "${chord%>}"
+            wait_until "$REACTION_SECS" "the tree floating over the buffer on $chord" \
+                shows "$BOX_TL $(basename -- "$ROOT")" >/dev/null || return 1
+        fi
+        SAW="answers from a buffer tile in ${took}s, and its chord floats the tiled tree"
+        ;;
+    tabpage)
+        n=${verb#to_tabpage_}
+        source=9
+        [ "$n" != 9 ] || source=1
+        command_line ':silent edit tab1.txt'
+        local i
+        for i in 2 3 4 5 6 7 8 9; do
+            command_line ":silent tabnew tab$i.txt"
+        done
+        command_line ":silent ${source}tabnext"
+        command_line ':silent vsplit scratch.txt'
+        wait_until "$WAIT_SECS" "the seeded buffer beside tab$source.txt" \
+            shows "$BOX_TL tab$source.txt" "$BOX_TL scratch.txt" >/dev/null || return 1
+        "$@"
+        took=$(wait_until "$REACTION_SECS" "the window arriving on tabpage $n on $feature $verb" \
+            shows "$BOX_TL tab$n.txt" "$BOX_TL scratch.txt") || return 1
+        SAW="carries the window to tabpage $n in ${took}s"
+        ;;
+    *)
+        fail "drive_action has no drive for the $shape shape"
+        return 1
+        ;;
+    esac
+    end_session
+}
+
 leg_entry_points() {
     CURRENT_LEG=entry-points
     start_session entry 'visual sweep seed line'
@@ -1525,8 +1831,16 @@ leg_entry_points() {
     # fed from here-documents rather than pipes: a pipeline's loop body runs
     # in a subshell, where a failed assertion would abort that subshell and
     # leave the session list this script cleans up behind incomplete
-    local feature lhs verb key marker took
+    # the keys that act on the tiles are driven after this session ends,
+    # each in a tiled session of its own
+    local feature lhs verb key marker took shape actions=""
     while read -r feature verb; do
+        shape=$(entry_shape "$feature" "$verb") || return 1
+        if [ "$shape" != surface ]; then
+            actions="$actions$feature $verb bare - -
+"
+            continue
+        fi
         marker=$(marker_for "$feature" "$verb") || return 1
         mark
         command_line ":View $feature"
@@ -1564,9 +1878,9 @@ BARE
         # marks a box that is already standing rather than opening one, and
         # the shape below presses its key onto a bare buffer, where there is
         # nothing for the mark to land on and nothing to wait for
-        [ "$feature/$verb" != notifications/pause ] || continue
+        shape=$(entry_shape "$feature" "$verb") || return 1
+        [ "$shape" != pause ] || continue
         key=$(tmux_key "$lhs") || return 1
-        marker=$(marker_for "$feature" "$verb") || return 1
         desc=$(mapping_desc "$key") || return 1
         # built from the engine's own format string rather than spelled
         # again here: a description that gains a field would otherwise match
@@ -1583,6 +1897,12 @@ BARE
             continue
         fi
         pressed=$((pressed + 1))
+        if [ "$shape" != surface ]; then
+            actions="$actions$feature $verb key $key $lhs
+"
+            continue
+        fi
+        marker=$(marker_for "$feature" "$verb") || return 1
         mark
         send_text "$key"
         took=$(wait_change "$REACTION_SECS" "$lhs")
@@ -1603,6 +1923,20 @@ ENTRIES
     }
 
     end_session
+
+    local how
+    while read -r feature verb how key lhs; do
+        [ -n "$feature" ] || continue
+        if [ "$how" = bare ]; then
+            drive_action "$feature" "$verb" command_line ":View $feature" || return 1
+            pass ":View $feature ($feature $verb) $SAW"
+        else
+            drive_action "$feature" "$verb" send_text "$key" || return 1
+            pass "$lhs ($feature $verb) $SAW"
+        fi
+    done <<ACTIONS
+$actions
+ACTIONS
 }
 
 leg_toast_and_history() {
@@ -1728,9 +2062,8 @@ leg_toast_and_history() {
 # notices travel that same Messages layer, so the surface most in need of
 # saying something was the one that could not.
 #
-# The notice column now stops short of a panel pinned to its edge, so the
-# toast stands whole beside the panel with its own frame clear of the
-# panel's.
+# The notice column stops short of a panel pinned to its edge, so a toast
+# stands whole beside the panel with its own frame clear of the panel's.
 #
 # Read here rather than in a paint test because the claim is about what a
 # terminal was told: a unit test can assert a layer's index, only a capture
