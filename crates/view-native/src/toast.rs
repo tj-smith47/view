@@ -697,41 +697,60 @@ mod tests {
     /// leaves a record the next launch can still read.
     #[test]
     fn a_record_is_never_observed_half_written() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::Arc;
 
         let dir = scratch("whole");
         let record = dir.join("native-first-run.toml");
         let done = Arc::new(AtomicBool::new(false));
+        let reads = Arc::new(AtomicUsize::new(0));
         let reader = {
             let record = record.clone();
             let done = Arc::clone(&done);
+            let reads = Arc::clone(&reads);
             std::thread::spawn(move || {
-                let mut reads = 0usize;
                 let mut torn = Vec::new();
                 while !done.load(Ordering::Relaxed) {
                     let Ok(raw) = std::fs::read_to_string(&record) else {
                         continue;
                     };
-                    reads += 1;
+                    reads.fetch_add(1, Ordering::Relaxed);
                     let parsed = toml::from_str::<Record>(&raw);
                     if parsed.map_or(true, |parsed| parsed.announced.is_empty()) {
                         torn.push(raw.len());
                     }
                 }
-                (reads, torn)
+                torn
             })
         };
         let padding = "k".repeat(200);
+        let mut watched = 0usize;
         for n in 0..300 {
+            let before = reads.load(Ordering::Relaxed);
             record_key(None, &format!("{padding}:{n:04}"), &record).expect("the write must land");
+            // the writer waits for a read to start after its write, so a
+            // loaded host that starves the reader thread slows the test
+            // down without leaving the writes unwatched
+            let deadline = std::time::Instant::now()
+                + view_test_support::HostBudget::host_only(std::time::Duration::from_millis(500))
+                    .total();
+            while reads.load(Ordering::Relaxed) <= before + 1 {
+                if std::time::Instant::now() > deadline {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            if reads.load(Ordering::Relaxed) <= before + 1 {
+                break;
+            }
+            watched += 1;
         }
         done.store(true, Ordering::Relaxed);
-        let (reads, torn) = reader.join().expect("the reader must finish");
+        let torn = reader.join().expect("the reader must finish");
 
-        assert!(
-            reads > 300,
-            "the reader must watch the writes: {reads} reads"
+        assert_eq!(
+            watched, 300,
+            "the reader must watch every write: {watched} of 300 were read after they landed"
         );
         assert!(
             torn.is_empty(),
