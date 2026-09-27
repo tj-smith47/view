@@ -823,7 +823,7 @@ leg_permission_overlap() {
 }
 
 # The prompt the user actually has to answer: its keys on screen, the key
-# they press, and what a standing grant does with the next request. The
+# they press, and the request an agent sends after an always-answer. The
 # live defect this covers shipped because no leg ever looked at a
 # permission prompt -- every leg above answers one and asserts what came
 # back, none of them read what the rows offered.
@@ -860,22 +860,20 @@ leg_permission_keys_and_grant() {
     wait_for "${AGENT_PREFIX}first allow-always" "$WAIT_SECS" \
         "the agent's report of the first answer" >/dev/null
 
-    # The second request, of the same tool kind, is answered by the grant
-    # rather than by the user -- visibly, on the transcript, and with the
-    # same option id.
-    wait_for "$AUTO_ALLOW_LINE" "$WAIT_SECS" "the standing grant's own row" >/dev/null
+    # The stub asks again for the same tool kind, the way an agent that
+    # ignored the always-allow would. The agent keeps the grant, so view
+    # puts the request in front of the user and answers nothing itself.
+    wait_for "$PERMISSION_PROMPT call_102" "$WAIT_SECS" \
+        "the second request of the same kind" >/dev/null
+    send_text '2'
     # Read from the log: this chunk shares a message id with the one above,
     # so it folds into that same transcript row and the row is wider than
     # the panel.
-    wait_for_log 'ai MessageChunk .* text: "second allow-always"' "$WAIT_SECS" \
-        "the agent's report of the auto-answer" >/dev/null
-    refute "$PERMISSION_PROMPT call_102" 'a granted kind asked the user again'
-    wait_for_log 'ai TurnEnded' "$WAIT_SECS" "the turn ending after the grant" >/dev/null
-    pass 'an always-allow answered the next request of that kind without asking'
+    wait_for_log 'ai MessageChunk .* text: "second allow-once"' "$WAIT_SECS" \
+        "the agent's report of the user's second answer" >/dev/null
+    wait_for_log 'ai TurnEnded' "$WAIT_SECS" "the turn ending after the second answer" >/dev/null
+    pass 'a request the agent sends after an always-allow is asked, and answered by the user'
 
-    # The refusing half of the same promise, on a kind the grant above says
-    # nothing about: an "always" that only held one way would leave this
-    # second request asking again.
     submit 'refuse-always'
     wait_for "$PERMISSION_PROMPT call_201" "$WAIT_SECS" "the refusal request" >/dev/null
     wait_for "$PERMISSION_ROW_NEVER" "$WAIT_SECS" \
@@ -890,11 +888,12 @@ leg_permission_keys_and_grant() {
     wait_for_log 'ai MessageChunk .* text: "first reject-always"' "$WAIT_SECS" \
         "the agent's report of the first refusal" >/dev/null
 
-    wait_for "$AUTO_REFUSE_LINE" "$WAIT_SECS" "the standing refusal's own row" >/dev/null
-    wait_for_log 'ai MessageChunk .* text: "second reject-always"' "$WAIT_SECS" \
-        "the agent's report of the auto-refusal" >/dev/null
-    refute "$PERMISSION_PROMPT call_202" 'a refused kind asked the user again'
-    pass 'an always-reject refused the next request of that kind without asking'
+    wait_for "$PERMISSION_PROMPT call_202" "$WAIT_SECS" \
+        "the second request of the refused kind" >/dev/null
+    send_text '2'
+    wait_for_log 'ai MessageChunk .* text: "second reject-once"' "$WAIT_SECS" \
+        "the agent's report of the user's second refusal" >/dev/null
+    pass 'a request the agent sends after an always-reject is asked, and answered by the user'
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
 
@@ -1167,17 +1166,13 @@ permission_row() {
 # options guarded below.
 PERMISSION_ROW_DENY=$(permission_row 1 Deny reject_once) || exit 1
 PERMISSION_ROW_ONCE=$(permission_row 2 'Allow Once' allow_once) || exit 1
-# The two rows whose answer outlives the question say what they cover and
-# how long for, off the request's own tool kind. Asserted as a prefix: at
-# this width the row is a few columns wider than the panel's interior, the
-# same truncation `REVIEW_KEY_HINT` is read through.
-require_template "$PERMISSION_RS" '"all {tool} this session"' || exit 1
-require_template "$PERMISSION_RS" '"no {tool} this session"' || exit 1
-# Short enough that both rows' prefixes are inside the panel at this width.
+# The two always rows are asserted as a prefix: at this width each is a few
+# columns wider than the panel's interior, the same truncation
+# `REVIEW_KEY_HINT` is read through.
 PERMISSION_ROW_COLS=27
-PERMISSION_ROW_ALWAYS=$(permission_row 3 'Always Allow' 'all edit this session') || exit 1
+PERMISSION_ROW_ALWAYS=$(permission_row 3 'Always Allow' allow_always) || exit 1
 PERMISSION_ROW_ALWAYS=${PERMISSION_ROW_ALWAYS:0:$PERMISSION_ROW_COLS}
-PERMISSION_ROW_NEVER=$(permission_row 3 'Always Reject' 'no execute this session') || exit 1
+PERMISSION_ROW_NEVER=$(permission_row 3 'Always Reject' reject_always) || exit 1
 PERMISSION_ROW_NEVER=${PERMISSION_ROW_NEVER:0:$PERMISSION_ROW_COLS}
 for stub_option in \
     '{ "optionId": "reject-once", "name": "Deny", "kind": "reject_once" }' \
@@ -1187,16 +1182,6 @@ for stub_option in \
     require_template "$STUB_RS" "$stub_option" || exit 1
 done
 PERMISSION_KEY_HINT=$(const_str "$PERMISSION_RS" KEY_HINT) || exit 1
-# What the panel says when a standing answer answered for the user. The
-# template lives where the answer is given; `edit` and `execute` are the
-# kinds the stub's own two requests name. Both are read as a prefix for the
-# same width reason as the option rows above.
-require_template "$REPO_ROOT/crates/view-core/src/update/ai.rs" \
-    '"auto-allowed {tool_kind} (standing answer)"' || exit 1
-require_template "$REPO_ROOT/crates/view-core/src/update/ai.rs" \
-    '"auto-refused {tool_kind} (standing answer)"' || exit 1
-AUTO_ALLOW_LINE='auto-allowed edit (standing'
-AUTO_REFUSE_LINE='auto-refused execute (standing'
 
 # How the first-run provisioning wait announces itself.
 PROVISION_NOTICE=$(const_str "$REPO_ROOT/crates/view/src/ai_worker.rs" PROVISION_NOTICE_PREFIX)
@@ -1294,32 +1279,26 @@ ROOTS+=("$ADAPTER_CACHE")
 # session from nothing, so any subset is a run in its own right -- which is
 # what makes reverting one task and re-running the one leg that covers it a
 # practical way to check that the leg is really the thing being asserted.
-# The standing-answer store against the adapter it exists for.
+# An always-allow against the pinned adapter, which is what keeps it.
 #
-# Leg 8 drives the store over a wire whose every frame this repo writes, so
-# what it proves is view's half. The half it cannot reach is the shape the
-# real adapter asks in -- which option ids and kinds it offers, which
-# `toolCall.kind` it scopes them with, and whether it honors an
-# `allow_always` at all. The store is keyed on that kind, so an adapter that
-# started spelling it differently would leave every "Always Allow" the user
-# gives silently answering nothing, and no stub could ever say so.
-#
-# Either side may be the one that answers, and the leg reports which: view's
-# store fires only while the adapter keeps re-asking (see
+# Leg 8 drives the prompt over a wire whose every frame this repo writes.
+# What it cannot reach is the shape the real adapter asks in, which option
+# ids and kinds it offers, and whether it honors the `allow_always` view
+# sends back. view answers no request on the user's behalf, so an adapter
+# that stopped honoring it would ask the user about every later call (see
 # `crates/view-ai/src/provision.rs`'s pin assertion and
-# `scripts/acp-allow-always-probe.mjs`). What is asserted rather than
-# reported is the user's own contract -- one question, one answer, and the
-# second edit made without asking again.
-leg_standing_answer_real_adapter() {
-    CURRENT_LEG=10-standing-answer-real-adapter
+# `scripts/acp-allow-always-probe.mjs`). The user's contract is asserted:
+# one question, one answer, and the second command run without asking.
+leg_always_allow_real_adapter() {
+    CURRENT_LEG=10-always-allow-real-adapter
     local prompt digit option_id tool_kind asked answered
-    start_session standing default "$ADAPTER_CACHE"
+    start_session always default "$ADAPTER_CACHE"
     open_panel "$WAIT_SECS"
 
     # Shell commands rather than edits: view advertises `fs.writeTextFile`,
     # so the adapter routes an Edit through a diff proposal (leg 3) and
     # never asks permission for one at all. Two commands of the same kind
-    # is the shape a standing answer is for.
+    # is the shape an always-allow is for.
     #
     # Project settings in the directory the agent is spawned in, because
     # whether it asks at all is the host's to decide otherwise: this machine
@@ -1353,7 +1332,7 @@ leg_standing_answer_real_adapter() {
     tool_kind=$(grep -m1 'ai PermissionRequested' "$ROOT/view.log" |
         sed -nE 's/.*tool_kind: Some\("([^"]*)"\).*/\1/p') || true
     [ -n "$tool_kind" ] || {
-        fail 'the real adapter scoped its request with no tool kind, so there is nothing for a standing answer to be keyed on'
+        fail 'the real adapter scoped its request with no tool kind'
         return 1
     }
     pass "the real adapter asks with an always-allow at digit $digit, scoped '$tool_kind'"
@@ -1367,8 +1346,14 @@ leg_standing_answer_real_adapter() {
 
     # Both commands run is what makes the rest meaningful: an agent that
     # only ever made one call would need one permission whatever either
-    # side did with the grant.
-    wait_for_log 'ai TurnEnded' "$PROVISION_SECS" "the real agent's turn ending" >/dev/null
+    # side did with the grant. A re-asked second command holds the turn
+    # open behind a prompt nobody answers, so the count is named on the
+    # failure.
+    if ! wait_for_log 'ai TurnEnded' "$PROVISION_SECS" "the real agent's turn ending" >/dev/null; then
+        asked=$(grep -c 'ai PermissionRequested' "$ROOT/view.log" || true)
+        fail "the turn never ended, with $asked permission request(s) reaching view"
+        return 1
+    fi
     local left right
     left=$(cat "$ROOT/alpha.log" 2>/dev/null || true)
     right=$(cat "$ROOT/beta.log" 2>/dev/null || true)
@@ -1377,42 +1362,20 @@ leg_standing_answer_real_adapter() {
         return 1
     fi
 
-    # The contract, whichever side kept it: the user was asked once.
     asked=$(grep -c 'ai PermissionRequested' "$ROOT/view.log" || true)
     answered=$(grep -c 'ai AnswerPermission' "$ROOT/view.log" || true)
-    if [ "$asked" -ne "$answered" ]; then
-        fail "$asked permission request(s) reached view and $answered were answered, so one is still standing unanswered"
+    if [ "$asked" -ne 1 ] || [ "$answered" -ne 1 ]; then
+        fail "$asked permission request(s) reached view and $answered were answered for two '$tool_kind' calls, so the pinned adapter did not keep the always-allow"
         return 1
     fi
-    if [ "$asked" -eq 1 ]; then
-        pass "the pinned adapter honored the always-allow itself: it asked once for two '$tool_kind' calls, and view's standing-answer store never fired"
-        pass 'the user answered one question for two calls (the adapter answered the second)'
-    else
-        # view's store answered, so it must have said so on the transcript:
-        # an auto-answer the user cannot see is a grant they cannot audit.
-        wait_for "auto-allowed $tool_kind (standing" "$WAIT_SECS" \
-            "the standing grant's own transcript row" >/dev/null
-        # captured rather than piped into `grep -q`: a quiet grep exits at
-        # its first match and SIGPIPEs whatever feeds it, which `pipefail`
-        # then reports as a failed pipeline -- so the one shape this branch
-        # exists to catch would read as "nothing found". See `holds`.
-        local unchosen
-        unchosen=$(grep 'ai AnswerPermission' "$ROOT/view.log" | tail -n +2 |
-            grep -vF "option_id: \"$option_id\"") || true
-        if [ -n "$unchosen" ]; then
-            fail "view's store answered a later request with an option id the user never chose (wanted '$option_id')"
-            return 1
-        fi
-        pass "the pinned adapter re-asked for the same '$tool_kind' kind ($asked requests) and view's store answered every later one with '$option_id'"
-        pass 'the user answered one question for two calls (view answered the second)'
-    fi
+    pass "the pinned adapter kept the always-allow: it asked once for two '$tool_kind' calls"
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
 
 LEGS=(leg_session_lifecycle leg_streaming_and_tool_status leg_diff_accept_and_reject
     leg_cancel_mid_turn leg_agent_crash leg_permission_overlap leg_filesystem_round_trip
     leg_permission_keys_and_grant leg_prompt_awaiting_its_answer
-    leg_standing_answer_real_adapter)
+    leg_always_allow_real_adapter)
 if [ "$#" -eq 0 ]; then
     selected=("${LEGS[@]}")
 else

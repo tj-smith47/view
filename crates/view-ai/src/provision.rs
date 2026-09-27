@@ -15,10 +15,10 @@
 //! adapter's real, currently published release, not guessed:
 //!
 //! ```text
-//! curl -sS -L -o claude-agent-acp-0.69.0.tgz \
-//!   https://registry.npmjs.org/@agentclientprotocol/claude-agent-acp/-/claude-agent-acp-0.69.0.tgz
-//! sha256sum claude-agent-acp-0.69.0.tgz
-//! # 73334255e17f5f48f08030fa4e0c54c118e820f9aaaf29f4629aa230e48c65c2
+//! curl -sS -L -o claude-agent-acp-0.81.2.tgz \
+//!   https://registry.npmjs.org/@agentclientprotocol/claude-agent-acp/-/claude-agent-acp-0.81.2.tgz
+//! sha256sum claude-agent-acp-0.81.2.tgz
+//! # 15368e30e06789df93c057d910247e15a3b38f59bddd039c2e44a0e946341b0c
 //! ```
 //!
 //! That artifact is a single, platform-independent npm tarball (the
@@ -56,9 +56,9 @@
 //! tarball itself:
 //!
 //! ```text
-//! tar xzf claude-agent-acp-0.69.0.tgz
+//! tar xzf claude-agent-acp-0.81.2.tgz
 //! cd package && npm install --package-lock-only --omit=dev --ignore-scripts
-//! # -> crates/view-ai/adapters/claude-code-0.69.0-package-lock.json
+//! # -> crates/view-ai/adapters/claude-code-0.81.2-package-lock.json
 //! ```
 
 use std::io::Write as _;
@@ -247,12 +247,12 @@ pub struct AdapterPin {
 // looks like; nothing here assumes there is only ever one.
 static ADAPTERS: [AdapterPin; 1] = [AdapterPin {
     id: "claude-code",
-    version: "0.69.0",
-    url_template: "https://registry.npmjs.org/@agentclientprotocol/claude-agent-acp/-/claude-agent-acp-0.69.0.tgz",
-    sha256: "73334255e17f5f48f08030fa4e0c54c118e820f9aaaf29f4629aa230e48c65c2",
+    version: "0.81.2",
+    url_template: "https://registry.npmjs.org/@agentclientprotocol/claude-agent-acp/-/claude-agent-acp-0.81.2.tgz",
+    sha256: "15368e30e06789df93c057d910247e15a3b38f59bddd039c2e44a0e946341b0c",
     entry: "package/dist/index.js",
     lockfile: Some(include_str!(
-        "../adapters/claude-code-0.69.0-package-lock.json"
+        "../adapters/claude-code-0.81.2-package-lock.json"
     )),
 }];
 
@@ -1600,16 +1600,14 @@ mod tests {
     /// The adapter release the `allow_always` probe was last run against,
     /// and what it answered.
     ///
-    /// `scripts/acp-allow-always-probe.mjs` drove 0.69.0 over a real wire
-    /// with real credentials and was re-prompted for all four Edit calls
-    /// after answering the adapter's own `allow_always` option id verbatim:
-    /// the release does not honor the grant, which is why view carries the
-    /// standing-answer store in `crate::acp::permission`. The store is dead
-    /// weight -- and its auto-answer a second grant the user did not give --
-    /// the day an adapter starts honoring it, so the pin may not move
-    /// without the probe moving with it.
-    const PROBED_VERSION: &str = "0.69.0";
-    const PROBED_HONORS_ALLOW_ALWAYS: bool = false;
+    /// `scripts/acp-allow-always-probe.mjs` drove 0.81.2 over a real wire
+    /// with real credentials, answered the first Edit request with the
+    /// adapter's own `allow_always` option id, and was asked nothing for the
+    /// three Edit calls after it. view keeps no answer of its own for a
+    /// later request and relies on the adapter for that, so a pin that
+    /// stopped honoring the grant would ask the user again on every call.
+    const PROBED_VERSION: &str = "0.81.2";
+    const PROBED_HONORS_ALLOW_ALWAYS: bool = true;
 
     #[test]
     fn the_pinned_adapter_is_the_one_the_allow_always_probe_answered_for() {
@@ -1618,23 +1616,18 @@ mod tests {
             pinned, PROBED_VERSION,
             "the claude-code pin moved to {pinned} and nothing has probed it: re-run the probe \
              (`node scripts/acp-allow-always-probe.mjs`) against {pinned}, then set \
-             PROBED_VERSION and PROBED_HONORS_ALLOW_ALWAYS here from its verdict. If \
-             `honors_allow_always` came back true, view's standing-answer store \
-             (crates/view-ai/src/acp/permission.rs) now auto-answers a request the adapter \
-             would have answered itself and must be retired in the same commit."
+             PROBED_VERSION and PROBED_HONORS_ALLOW_ALWAYS here from its verdict."
         );
     }
 
-    /// The other half of the pin assertion, and a compile error rather than
-    /// a test failure because the store this guards is shipped code: a probe
-    /// verdict of `honors_allow_always: true` means view's standing-answer
-    /// store auto-answers a request the adapter would have granted itself,
-    /// which is a second grant the user never gave.
+    /// The other half of the pin assertion, and a compile error because
+    /// view answers every permission request by asking the user: an adapter
+    /// that ignores `allow_always` turns each "don't ask again" answer into a
+    /// question repeated on every later call.
     const _: () = assert!(
-        !PROBED_HONORS_ALLOW_ALWAYS,
-        "the probe recorded the pinned adapter as honoring allow_always: retire the \
-         standing-answer store in crates/view-ai/src/acp/permission.rs rather than \
-         relaxing this"
+        PROBED_HONORS_ALLOW_ALWAYS,
+        "the probe recorded the pinned adapter as ignoring allow_always, so every \
+         always-allow the user gives is asked again: pin a release that honors it"
     );
 
     /// The probe named above has to be runnable by the session the assertion
@@ -1709,7 +1702,7 @@ mod tests {
 
     #[test]
     fn the_claude_code_row_is_pinned_and_reachable_by_lookup() {
-        assert_eq!(pinned_version("claude-code"), Some("0.69.0"));
+        assert_eq!(pinned_version("claude-code"), Some("0.81.2"));
         assert_eq!(pinned_version("no-such-adapter"), None);
         let pin = lookup("claude-code").expect("claude-code is this build's one known adapter");
         assert_eq!(pin.sha256.len(), 64, "sha256 must be a full hex digest");

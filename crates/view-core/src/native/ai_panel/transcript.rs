@@ -22,8 +22,6 @@ const USER_MARK: &str = "\u{276f} ";
 const AGENT_MARK: &str = "\u{25cf} ";
 /// The glyph opening the agent's reasoning.
 const THOUGHT_MARK: &str = "\u{25e6} ";
-/// The glyph opening a line view itself wrote into the transcript.
-const NOTICE_MARK: &str = "\u{203c} ";
 /// The glyph opening what became of a diff review.
 const REVIEW_MARK: &str = "\u{00b1} ";
 /// The glyph a tool call that has not started yet opens with.
@@ -105,15 +103,6 @@ pub enum TranscriptRole {
     /// tell them apart is being shown the agent asserting things it was
     /// only considering.
     Thought,
-    /// view itself, speaking in the transcript about the conversation --
-    /// today, a permission request a standing grant answered without
-    /// asking.
-    ///
-    /// Its own role for the same reason [`Self::Thought`] is one: a line
-    /// view wrote is not the agent talking, and attributing an answer view
-    /// gave on the user's behalf to either of them is the opposite of the
-    /// audit trail it exists to be.
-    Notice,
 }
 
 /// What one transcript entry represents: a streamed message, a tool call's
@@ -955,7 +944,6 @@ fn render_entry(entry: &TranscriptEntry, spinner: Option<usize>, width: usize) -
                 TranscriptRole::User => (USER_MARK, StyleRole::AiUser),
                 TranscriptRole::Agent => (AGENT_MARK, StyleRole::AiAgent),
                 TranscriptRole::Thought => (THOUGHT_MARK, StyleRole::AiThought),
-                TranscriptRole::Notice => (NOTICE_MARK, StyleRole::AiNotice),
             };
             // A message animates in exactly one case -- the prompt awaiting
             // the agent's first word (`Transcript::echo_user_prompt`) -- and

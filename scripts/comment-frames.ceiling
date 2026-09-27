@@ -3,9 +3,9 @@
 # this file holds at HEAD is refused, and a crate under its row fails until
 # the row is lowered in the same change.
 view 633
-view-ai 304
+view-ai 303
 view-bench 293
-view-core 1128
+view-core 1120
 view-engine 890
 view-harness 461
 view-native 222

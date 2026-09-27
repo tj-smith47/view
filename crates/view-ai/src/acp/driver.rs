@@ -706,9 +706,8 @@ impl Driver {
             .and_then(|call| call.get("title"))
             .and_then(Value::as_str)
             .map(ToString::to_string);
-        // Also optional on the wire, and carried verbatim: it is what a
-        // standing grant is scoped to on the panel side, so a normalisation
-        // here would silently widen or split that scope.
+        // Also optional on the wire, and carried verbatim so the log names
+        // the kind the agent itself sent.
         let tool_kind = tool_call
             .and_then(|call| call.get("kind"))
             .and_then(Value::as_str)

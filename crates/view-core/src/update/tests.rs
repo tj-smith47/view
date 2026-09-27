@@ -4256,8 +4256,7 @@ fn everyday_options() -> Vec<PermissionOption> {
     ]
 }
 
-/// The other shape an agent offers: the two refusals beside a single allow,
-/// which is what a standing refusal is answered from.
+/// The other shape an agent offers: the two refusals beside a single allow.
 fn refusing_options() -> Vec<PermissionOption> {
     vec![
         permission_option("allow-once", PermissionOptionKind::AllowOnce),
@@ -4323,10 +4322,6 @@ fn the_first_digit_answers_the_first_offered_option_and_clears_the_slot() {
     assert!(
         m.ai_panel().pending_permission.is_none(),
         "the slot must clear once the user has answered"
-    );
-    assert!(
-        m.ai_panel().standing_answer("edit").is_none(),
-        "allowing once must grant nothing standing"
     );
 }
 
@@ -4409,13 +4404,11 @@ fn with_a_review_and_a_permission_both_pending_the_question_keeps_the_panels_key
     );
 }
 
-/// The standing grant, end to end from the keyboard: the user answers
-/// always-allow once, and the next request for the same tool kind is
-/// answered with the same option without the prompt ever coming back --
-/// which is what the prompt promises and the pinned adapter does not keep
-/// (`AiPanelState::standing_answers`).
+/// An always-allow is the agent's to keep: view sends the option the user
+/// chose and answers nothing later on its own, so a request the agent sends
+/// anyway is put in front of the user.
 #[test]
-fn an_always_allow_answer_answers_the_next_request_of_that_kind_by_itself() {
+fn an_always_allow_answer_leaves_the_next_request_of_that_kind_asking() {
     let mut m = pending_permission_model();
 
     let effects = update(
@@ -4433,40 +4426,25 @@ fn an_always_allow_answer_answers_the_next_request_of_that_kind_by_itself() {
     }
 
     let effects = update(&mut m, permission_requested_msg(8, everyday_options()));
-    match effects.as_slice() {
-        [Effect::Ai(AiCommand::AnswerPermission {
-            request_id: 8,
-            outcome: PermissionOutcome::Selected { option_id },
-        })] => assert_eq!(option_id, "allow-always"),
-        other => panic!("expected the second request to be auto-answered, got {other:?}"),
-    }
     assert!(
-        m.ai_panel().pending_permission.is_none(),
-        "a granted kind must never put the question back on screen"
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Ai(AiCommand::AnswerPermission { .. }))),
+        "view must answer nothing on the user's behalf: {effects:?}"
     );
-    let rows: Vec<String> = m
-        .ai_panel()
-        .view(24, 60, m.ai_panel().focused)
-        .rows
-        .iter()
-        .map(|row| row.iter().map(|span| span.text.clone()).collect())
-        .collect();
-    assert!(
-        rows.iter()
-            .any(|line| line.contains("auto-allowed edit (standing answer)")),
-        "an answer view gave on the user's behalf must be on the transcript: {rows:?}"
-    );
-    assert!(
-        visible_texts(&m).is_empty(),
-        "the transcript is on screen, so the toast would be the same line twice"
+    assert_eq!(
+        m.ai_panel()
+            .pending_permission
+            .as_ref()
+            .map(|prompt| prompt.request_id),
+        Some(8)
     );
 }
 
-/// The refusal half of the same promise: "Always Reject" outlives its own
-/// question exactly as "Always Allow" does, answered with the reject the
-/// request itself offered.
+/// The refusal half: an always-reject goes to the agent as chosen and
+/// answers no later request by itself.
 #[test]
-fn an_always_reject_answer_refuses_the_next_request_of_that_kind_by_itself() {
+fn an_always_reject_answer_leaves_the_next_request_of_that_kind_asking() {
     let mut m = model();
     m.ai_trusted = true;
     let _ = update(
@@ -4488,28 +4466,18 @@ fn an_always_reject_answer_refuses_the_next_request_of_that_kind_by_itself() {
     }
 
     let effects = update(&mut m, permission_requested_msg(8, refusing_options()));
-    match effects.as_slice() {
-        [Effect::Ai(AiCommand::AnswerPermission {
-            request_id: 8,
-            outcome: PermissionOutcome::Selected { option_id },
-        })] => assert_eq!(option_id, "reject-always"),
-        other => panic!("expected the second request to be auto-refused, got {other:?}"),
-    }
     assert!(
-        m.ai_panel().pending_permission.is_none(),
-        "a refused kind must never put the question back on screen"
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Ai(AiCommand::AnswerPermission { .. }))),
+        "view must refuse nothing on the user's behalf: {effects:?}"
     );
-    let rows: Vec<String> = m
-        .ai_panel()
-        .view(24, 60, m.ai_panel().focused)
-        .rows
-        .iter()
-        .map(|row| row.iter().map(|span| span.text.clone()).collect())
-        .collect();
-    assert!(
-        rows.iter()
-            .any(|line| line.contains("auto-refused edit (standing answer)")),
-        "a refusal view gave on the user's behalf must be on the transcript too: {rows:?}"
+    assert_eq!(
+        m.ai_panel()
+            .pending_permission
+            .as_ref()
+            .map(|prompt| prompt.request_id),
+        Some(8)
     );
 }
 
@@ -4543,74 +4511,6 @@ fn a_plain_reject_leaves_the_next_request_of_that_kind_still_asking() {
             .as_ref()
             .map(|prompt| prompt.request_id),
         Some(8)
-    );
-}
-
-/// The visibility contract behind a closed panel: a standing answer makes
-/// the panel comfortable to close, and the transcript nobody is looking at
-/// is not a place an answer given on the user's behalf can be announced.
-#[test]
-fn an_auto_answer_with_the_panel_closed_says_so_on_screen() {
-    let mut m = pending_permission_model();
-    let _ = update(&mut m, key("2"));
-    let _ = update(
-        &mut m,
-        Msg::FeatureInvoke {
-            feature: "ai".to_string(),
-            verb: "close".to_string(),
-        },
-    );
-
-    let _ = update(&mut m, permission_requested_msg(8, everyday_options()));
-
-    assert!(
-        visible_texts(&m)
-            .iter()
-            .any(|line| line.contains("auto-allowed edit (standing answer)")),
-        "a closed panel must still say what view answered: {:?}",
-        visible_texts(&m)
-    );
-    assert!(
-        !m.ai_panel_overlay_open(),
-        "an answered question must not pop the panel open either"
-    );
-}
-
-/// The grant is scoped to the kind the user answered for, not to the
-/// session as a whole: a different tool still asks.
-#[test]
-fn a_standing_grant_for_one_tool_kind_leaves_another_kind_asking() {
-    let mut m = pending_permission_model();
-    let _ = update(
-        &mut m,
-        Msg::Key(Key {
-            notation: "2".to_string(),
-        }),
-    );
-
-    let effects = update(
-        &mut m,
-        Msg::Ai(crate::native::ai_event::AiEvent::PermissionRequested {
-            request_id: 9,
-            tool_call_id: "call_2".to_string(),
-            title: None,
-            tool_kind: Some("execute".to_string()),
-            options: everyday_options(),
-        }),
-    );
-
-    assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e, Effect::Ai(AiCommand::AnswerPermission { .. }))),
-        "a kind nobody granted must be asked about: {effects:?}"
-    );
-    assert_eq!(
-        m.ai_panel()
-            .pending_permission
-            .as_ref()
-            .map(|prompt| prompt.request_id),
-        Some(9)
     );
 }
 

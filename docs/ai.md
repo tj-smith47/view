@@ -168,13 +168,9 @@ wire's own word for what it does in brackets:
 Permission requested for Edit Taskfile.yml
   1 Deny (reject_once)
   2 Allow Once (allow_once)
-  3 Always Allow (all edit this session)
+  3 Always Allow (allow_always)
 press a number, <Esc> cancels
 ```
-
-The two answers that outlive the question, always-allow and always-reject, are
-labelled with what they cover (below). A request that named no tool kind cannot
-be scoped to one, so its rows keep the wire word and nothing stands after them.
 
 You answer with the digit. `<Esc>` answers too, cancelling the request,
 which is the one answer that exists whatever the agent offered. No letter
@@ -186,27 +182,10 @@ a color of its own.
 
 ### What the two "Always" answers do
 
-Answering always-allow or always-reject records a standing answer for that
-tool's kind, for this session only. A later request of the same kind is
-answered for you, and says so:
-
-```
-‼ auto-allowed edit (standing answer)
-‼ auto-refused execute (standing answer)
-```
-
-The line lands on the transcript. When the panel is closed it lands as a
-notice beside your buffer too. An answered request never pops the panel
-open.
-
-A different kind still asks, and answering the other way later replaces the
-standing answer. Nothing here is written to disk, so a new session,
-including one that came back after a crash, starts with none.
-
-view keeps this itself because the pinned adapter does not: it accepts the
-always-allow answer and then asks again on every later call. What view
-answered on your behalf is on the record with everything else the session
-did.
+The agent keeps an always-allow or an always-reject. Its own name for the
+option says what the answer covers, such as every `echo` command or every
+edit in the session. view sends the answer you chose and answers no later
+request for you, so any request the agent sends still opens the prompt.
 
 ## Reviewing an agent's edits
 

@@ -108,18 +108,17 @@ pub enum StyleRole {
     /// A permission option that lets this one call through and nothing
     /// after it.
     AiPermissionAllow,
-    /// A permission option that grants standing permission for every later
-    /// call of the same tool kind. Deliberately not [`Self::AiPermissionAllow`]:
-    /// it is the one answer whose consequence outlives the question, so it
-    /// must not read as the same act as allowing once.
+    /// A permission option that tells the agent to stop asking about later
+    /// calls. Its own role because it is the one answer whose consequence
+    /// outlives the question, so it must read as a different act from
+    /// allowing once.
     AiPermissionAlways,
     /// A permission option that refuses the call.
     AiPermissionReject,
-    /// A transcript row view itself wrote into the conversation, rather
-    /// than either party to it -- an answer given from a standing answer
-    /// being the case it exists for. Not a permission role: nothing here is
-    /// a question, and a row that paints like one would be waiting for a
-    /// key nobody needs to press.
+    /// A transcript row view itself wrote into the conversation, such as
+    /// what became of a diff review. Kept apart from the permission roles
+    /// because nothing here is a question, and a row that paints like one
+    /// would be waiting for a key nobody needs to press.
     AiNotice,
     /// A transcript tool call's status glyph once the call has completed.
     AiToolDone,

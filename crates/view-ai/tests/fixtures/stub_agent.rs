@@ -59,14 +59,13 @@
 //! - `ask-always` -- send a `session/request_permission` naming a
 //!   `toolCall.kind`, offering an always-allow among its options, and then
 //!   -- once it is answered -- a second request of the same kind. Reports
-//!   what came back for each. The pinned adapter re-prompts forever after
-//!   an always-allow, so the client keeps that promise itself; this is how
-//!   a standing grant is driven over a real wire.
+//!   what came back for each. It plays an agent that ignored the
+//!   always-allow, whose second request the client must put in front of
+//!   the user.
 //! - `refuse-always` -- the same two-request shape with the refusing half
 //!   of the vocabulary: a `toolCall.kind` of its own, an always-reject
 //!   among its options, and a second request of that kind once the first
-//!   is answered. A standing answer that only held one way would leave
-//!   this one asking again.
+//!   is answered.
 //! - `propose` -- announce a tool call and complete it with a
 //!   `ToolCallContent` `"diff"` item over `view-ai-stub-diff.txt` in this
 //!   process's own working directory. Any suffix after the word (`propose2`)
@@ -833,9 +832,7 @@ fn ask_permission(stdout: &mut std::io::Stdout, request_id: &str, tool_call_id: 
 }
 
 /// One `session/request_permission` that names its tool kind and offers an
-/// always-allow, which is what a standing grant is given against: the kind
-/// is the scope the client keys the grant on, and without it there is
-/// nothing for a later request to match.
+/// always-allow.
 fn ask_permission_always(stdout: &mut std::io::Stdout, request_id: &str, tool_call_id: &str) {
     request(
         stdout,
@@ -854,9 +851,7 @@ fn ask_permission_always(stdout: &mut std::io::Stdout, request_id: &str, tool_ca
 }
 
 /// The refusing twin of [`ask_permission_always`], under a tool kind of its
-/// own so the two standing answers cannot be proved by the same grant: an
-/// always-reject is the same promise in the other direction, and a client
-/// that keeps only the allow half leaves this request being asked forever.
+/// own.
 fn ask_permission_refuse(stdout: &mut std::io::Stdout, request_id: &str, tool_call_id: &str) {
     request(
         stdout,

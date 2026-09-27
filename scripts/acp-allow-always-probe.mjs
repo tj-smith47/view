@@ -3,8 +3,8 @@
 // (crates/view-ai/src/acp/driver.rs), answers the first permission request
 // with the adapter's own `allow_always` option id verbatim, and counts how
 // many further requests arrive for the same tool kind. One request means the
-// adapter honors the grant; more mean view's own standing-answer store is
-// what delivers the semantics the user consented to.
+// adapter honors the grant; more mean every always-allow the user gives in
+// view is asked again, since view answers no request on the user's behalf.
 //
 // The pin this is recorded against, and the assertion that makes a bump
 // re-run it, live in `crates/view-ai/src/provision.rs`.

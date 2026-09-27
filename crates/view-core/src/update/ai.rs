@@ -2,8 +2,8 @@
 
 use crate::model::Model;
 use crate::msg::Effect;
-use crate::native::ai_event::{AiCommand, AiEvent, PermissionOptionKind, PermissionOutcome};
-use crate::native::ai_panel::{DiffReviewState, PermissionPrompt, StandingAnswer};
+use crate::native::ai_event::{AiCommand, AiEvent, PermissionOutcome};
+use crate::native::ai_panel::{DiffReviewState, PermissionPrompt};
 use crate::native::keys::{Action, Resolved};
 
 use super::{ai_scroll_for, reaches_past_a_panel_owner, review, scroll_ai_transcript};
@@ -66,45 +66,6 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             tool_kind,
             options,
         } => {
-            // A kind this session already answered for good is answered
-            // here rather than asked again (see
-            // `AiPanelState::standing_answers`). Ahead of the overlap
-            // degrade below because it is not a degrade: this request gets
-            // the answer the user already gave for its kind, whatever else
-            // is on screen.
-            if let Some((kind, answer)) = tool_kind
-                .as_deref()
-                .and_then(|kind| Some((kind, model.ai_panel().standing_answer(kind)?)))
-            {
-                if let Some(option) = PermissionPrompt::standing_option(&options, answer) {
-                    let outcome = PermissionOutcome::Selected {
-                        option_id: option.option_id.clone(),
-                    };
-                    let line = standing_answer_line(kind, answer);
-                    // Both surfaces, because either one alone leaves an
-                    // answer view gave on the user's behalf invisible: the
-                    // transcript is the durable record of the conversation
-                    // it was part of, and it is unread behind a closed
-                    // panel -- which is exactly the state a standing answer
-                    // makes comfortable to sit in.
-                    let mut effects = if model.ai_panel_overlay_open() {
-                        Vec::new()
-                    } else {
-                        model.engine.record_native_notice(line.clone(), false)
-                    };
-                    model.ai_panel_mut().transcript.append_or_extend(
-                        None,
-                        &line,
-                        crate::native::ai_panel::TranscriptRole::Notice,
-                    );
-                    model.dirty = true;
-                    effects.push(Effect::Ai(AiCommand::AnswerPermission {
-                        request_id,
-                        outcome,
-                    }));
-                    return effects;
-                }
-            }
             if model.ai_panel().pending_permission.is_some() {
                 return vec![Effect::Ai(AiCommand::AnswerPermission {
                     request_id,
@@ -250,12 +211,6 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             panel.session_id = Some(session_id);
             panel.agent_name = agent;
             panel.local_error = None;
-            // A standing answer answers questions on the user's behalf, so
-            // it lasts exactly as long as the session it was given in --
-            // including across a recovery, where the agent that was asked
-            // is gone and the one that replaced it has never asked
-            // anything.
-            panel.clear_standing_answers();
             model.dirty = true;
         }
         // A proposal opens the panel's own diff review. Its hunks are
@@ -382,19 +337,6 @@ fn answers_the_prompt(event: &AiEvent) -> bool {
     )
 }
 
-/// What view says, in the transcript and in the toast behind a closed panel,
-/// when it answers a request from a standing answer rather than asking.
-///
-/// One wording for both surfaces so the toast and the record cannot drift,
-/// and it names the kind: "view answered for you" is only auditable if the
-/// user can tell which of their standing answers did it.
-fn standing_answer_line(tool_kind: &str, answer: StandingAnswer) -> String {
-    match answer {
-        StandingAnswer::Allow => format!("auto-allowed {tool_kind} (standing answer)"),
-        StandingAnswer::Reject => format!("auto-refused {tool_kind} (standing answer)"),
-    }
-}
-
 /// Opens the per-project AI trust confirm as the topmost overlay, the first
 /// time a session's `Msg::FeatureInvoke` names the `ai` feature with
 /// `model.ai_trusted` still false. `verb` is that `FeatureInvoke`'s own
@@ -476,22 +418,6 @@ pub(super) fn ai_panel_key(
         let key = chars.next().filter(|_| chars.next().is_none());
         if let Some(option) = key.and_then(|c| prompt.option_for_key(c)).cloned() {
             model.ai_panel_mut().pending_permission = None;
-            // What "always" means on this side of the wire: the
-            // answer is recorded against the request's own tool
-            // kind, and the next request naming that kind is
-            // answered without asking (see
-            // `AiPanelState::standing_answers` for why view
-            // keeps this rather than the adapter). Both
-            // directions, since both are answers the user asked
-            // to stand; the two once-answers record nothing.
-            let standing = match option.kind {
-                PermissionOptionKind::AllowAlways => Some(StandingAnswer::Allow),
-                PermissionOptionKind::RejectAlways => Some(StandingAnswer::Reject),
-                PermissionOptionKind::AllowOnce | PermissionOptionKind::RejectOnce => None,
-            };
-            if let Some((kind, answer)) = prompt.tool_kind.clone().zip(standing) {
-                model.ai_panel_mut().record_standing_answer(kind, answer);
-            }
             model.dirty = true;
             // The question is settled, so a review that was
             // waiting behind it gets the keyboard it needs:
@@ -1021,44 +947,10 @@ mod tests {
         assert_eq!(prompt.options, vec![allow_once("allow-once")]);
     }
 
-    /// A grant answers for the session it was given in and no other. A
-    /// recovered or replaced session is a new agent with new work, and the
-    /// user has answered nothing for it.
+    /// An agent that named no `toolCall.kind` is asked about like any other.
     #[test]
-    fn a_session_becoming_ready_drops_every_standing_grant() {
+    fn a_request_naming_no_tool_kind_is_asked_about() {
         let mut model = Model::new();
-        model
-            .ai_panel_mut()
-            .record_standing_answer("edit".to_string(), StandingAnswer::Allow);
-
-        let _ = update(
-            &mut model,
-            Msg::Ai(AiEvent::SessionReady {
-                session_id: "sess_2".to_string(),
-                agent: None,
-            }),
-        );
-
-        assert!(model.ai_panel().standing_answer("edit").is_none());
-        let effects = update(&mut model, permission_requested(1, "call_1", "allow-once"));
-        assert!(
-            !effects
-                .iter()
-                .any(|e| matches!(e, Effect::Ai(AiCommand::AnswerPermission { .. }))),
-            "a dropped grant must leave the question being asked: {effects:?}"
-        );
-        assert!(model.ai_panel().pending_permission.is_some());
-    }
-
-    /// An agent that named no `toolCall.kind` can be answered but never
-    /// grants anything: there is nothing to scope a later auto-answer to,
-    /// and "every tool" is not what answering one question means.
-    #[test]
-    fn a_request_naming_no_tool_kind_is_never_answered_by_a_grant() {
-        let mut model = Model::new();
-        model
-            .ai_panel_mut()
-            .record_standing_answer("edit".to_string(), StandingAnswer::Allow);
 
         let effects = update(
             &mut model,
@@ -1076,40 +968,6 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Effect::Ai(AiCommand::AnswerPermission { .. }))),
             "an unscoped request must be asked about: {effects:?}"
-        );
-        assert!(model.ai_panel().pending_permission.is_some());
-    }
-
-    /// A granted kind whose request offers no allow at all is asked about
-    /// rather than answered: a grant says "allow this kind", and there is
-    /// nothing here to allow with.
-    #[test]
-    fn a_granted_kind_offering_only_rejects_still_asks() {
-        let mut model = Model::new();
-        model
-            .ai_panel_mut()
-            .record_standing_answer("edit".to_string(), StandingAnswer::Allow);
-
-        let effects = update(
-            &mut model,
-            Msg::Ai(AiEvent::PermissionRequested {
-                request_id: 1,
-                tool_call_id: "call_1".to_string(),
-                title: None,
-                tool_kind: Some("edit".to_string()),
-                options: vec![crate::native::ai_event::PermissionOption {
-                    option_id: "reject-once".to_string(),
-                    name: "Reject".to_string(),
-                    kind: crate::native::ai_event::PermissionOptionKind::RejectOnce,
-                }],
-            }),
-        );
-
-        assert!(
-            !effects
-                .iter()
-                .any(|e| matches!(e, Effect::Ai(AiCommand::AnswerPermission { .. }))),
-            "nothing here allows anything: {effects:?}"
         );
         assert!(model.ai_panel().pending_permission.is_some());
     }
@@ -1260,7 +1118,7 @@ mod tests {
         let _ = crate::update::update(
             &mut model,
             Msg::AiProvisioning {
-                detail: "provisioning the AI agent claude-code 0.69.0".to_string(),
+                detail: "provisioning the AI agent claude-code 0.81.2".to_string(),
             },
         );
         assert!(
