@@ -92,6 +92,46 @@ fn a_view_command_hands_a_trailing_bar_command_to_nvim() {
     );
 }
 
+/// A key that invokes view answers with the keys nvim matches for it, the
+/// leader resolved, and a chord sending nvim keys of its own answers with
+/// none.
+#[test]
+fn an_invoking_claim_carries_the_keys_nvim_matches() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    engine
+        .handle
+        .eval_str("execute('let mapleader = \" \"')")
+        .unwrap();
+    let specs = [
+        MappingSpec {
+            feature: "ai",
+            lhs: Cow::Borrowed("<leader>ai"),
+            verb: "toggle",
+            rhs: Rhs::Invoke,
+        },
+        MappingSpec {
+            feature: "window",
+            lhs: Cow::Borrowed("<S-M-Left>"),
+            verb: "close",
+            rhs: Rhs::Invoke,
+        },
+        chord("<D-Left>"),
+    ];
+    engine.handle.register_mappings(&specs, channel).unwrap();
+    let claimed = next_claims(&rx);
+    let keys = |lhs: &str| {
+        claimed
+            .iter()
+            .find(|c| c.lhs == lhs)
+            .unwrap_or_else(|| panic!("no claim for {lhs}: {claimed:?}"))
+            .keys
+            .clone()
+    };
+    assert_eq!(keys("<leader>ai").as_deref(), Some("<Space>ai"));
+    assert_eq!(keys("<S-M-Left>").as_deref(), Some("<M-S-Left>"));
+    assert_eq!(keys("<D-Left>"), None);
+}
+
 /// A second registration that reissues the same chord must not report it as
 /// taken from a user: the previous run's own claim is not a user mapping,
 /// so the reissue's own claim for the same key must answer

@@ -440,8 +440,8 @@ pub(super) fn decode_mapping_report(result: &Value) -> MappingReport {
 }
 
 /// Decodes the claim rows themselves: an array of `{feature, lhs,
-/// had_user_mapping}`, one per key the chunk registered, in registration
-/// order.
+/// had_user_mapping, keys}`, one per key the chunk registered, in
+/// registration order. `keys` is present on a row that invokes view.
 ///
 /// A row missing `feature` or `lhs` is dropped rather than reported as a
 /// claim naming nothing, and a missing `had_user_mapping` reads as `false`:
@@ -462,6 +462,9 @@ fn decode_mapping_claims(result: &Value) -> Vec<MappingClaim> {
                 had_user_mapping: crate::wire::map_find(pairs, "had_user_mapping")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                keys: crate::wire::map_find(pairs, "keys")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
             })
         })
         .collect()

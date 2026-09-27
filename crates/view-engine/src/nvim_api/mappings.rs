@@ -20,9 +20,15 @@ use view_core::native::mappings::{
 /// The lua chunk [`EngineHandle::register_mappings`] runs inside nvim,
 /// taking view's channel id, the specs to register, every feature/verb pair
 /// the command can complete, the command's own name and
-/// [`REGISTER_COMMAND_CHUNK`] as its five varargs. Constant by construction for the same reason as
+/// [`REGISTER_COMMAND_CHUNK`] as its five varargs. Constant by
+/// construction for the same reason as
 /// [`FEED_KEYS_CHUNK`](super::FEED_KEYS_CHUNK): no caller data is
 /// interpolated into the Lua source.
+///
+/// A claim for a key that invokes view carries `keys`, the key sequence
+/// nvim matches for it with the leader resolved, spelled by `keytrans()`.
+/// View holds the keys typed behind that sequence until the invocation
+/// reports back, so they reach the surface it opens.
 ///
 /// One chunk for every key, and it answers with the whole claim list: what
 /// view claimed is one fact a user is told once, so it is established in one
@@ -176,6 +182,7 @@ for _, spec in ipairs(specs) do
     feature = spec.feature,
     lhs = spec.lhs,
     had_user_mapping = (taken[resolved] or taken[spec.lhs]) == true,
+    keys = (not spec.keys) and vim.fn.keytrans(resolved) or nil,
   }
 end
 vim.g.view_registered_keys = registered_now

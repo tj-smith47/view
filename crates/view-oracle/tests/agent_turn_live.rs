@@ -191,6 +191,60 @@ fn a_view_command_given_at_launch_opens_the_panel() {
     );
 }
 
+/// Keys written in the same burst as `<leader>ai` are typed into the panel
+/// it enters, and the buffer is left as it was.
+#[test]
+fn keys_typed_behind_the_leader_key_that_opens_the_panel_reach_it() {
+    let paths = common::ScratchPaths::new("agent-leader-typeahead");
+    let work = paths.isolated_home.join("work");
+    let resume = paths.isolated_home.join("resume");
+    let mut session = launch(&paths, &work, &resume, &[]);
+    open_and_trust(&mut session);
+    assert!(
+        session.wait_for(": Esc returns", BUDGET),
+        "the trusted panel never took the keyboard; screen:\n{}",
+        session.screen()
+    );
+    session.send(b"\x1b").unwrap();
+    assert!(
+        session.wait_for_screen(BUDGET, |screen| !every_row(screen)
+            .contains(": Esc returns")),
+        "Escape never left the composer; screen:\n{}",
+        session.screen()
+    );
+
+    // no config sets a leader here, so it is nvim's own backslash
+    session.send(b"\\aihello").unwrap();
+    assert!(
+        session.wait_for("> hello", BUDGET),
+        "the keys behind <leader>ai never reached the composer; screen:\n{}",
+        session.screen()
+    );
+
+    let after = work.join("after.txt");
+    session.send(b"\x1b").unwrap();
+    assert!(
+        session.wait_for_screen(BUDGET, |screen| !every_row(screen)
+            .contains(": Esc returns")),
+        "Escape never left the composer; screen:\n{}",
+        session.screen()
+    );
+    session
+        .send(format!("\x1b:silent write {}\r", after.display()).as_bytes())
+        .unwrap();
+    let written = view_test_support::host_deadline(BUDGET);
+    let started = std::time::Instant::now();
+    while !after.exists() && started.elapsed() < written {
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(50)));
+    }
+    assert_eq!(
+        std::fs::read_to_string(&after).unwrap_or_default(),
+        DIFF_SEED,
+        "the buffer changed under keys that were typed into the panel; screen:\n{}",
+        session.screen()
+    );
+}
+
 /// Alt with a key the user's own config maps runs that mapping from inside
 /// the panel: the panel lets go of the keyboard and nvim gets the Meta key
 /// whole, so the mapping fires and the composer types nothing.

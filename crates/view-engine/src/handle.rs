@@ -3889,6 +3889,7 @@ mod tests {
                     (Value::from("feature"), Value::from("picker")),
                     (Value::from("lhs"), Value::from("<leader>ff")),
                     (Value::from("had_user_mapping"), Value::from(true)),
+                    (Value::from("keys"), Value::from("<Space>ff")),
                 ])]),
             ),
             (
@@ -3901,6 +3902,7 @@ mod tests {
 
         assert_eq!(report.claimed.len(), 1);
         assert_eq!(report.claimed[0].lhs, "<leader>ff");
+        assert_eq!(report.claimed[0].keys.as_deref(), Some("<Space>ff"));
         assert!(report.colon_mapped);
     }
 

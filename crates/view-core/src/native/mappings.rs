@@ -82,6 +82,10 @@ pub struct MappingClaim {
     /// registered over it. `false` for a key that landed on nothing, which
     /// is not news and is never announced.
     pub had_user_mapping: bool,
+    /// The keys nvim matches for a key that invokes view, with the leader
+    /// resolved (`\ai`, `<Space>ai`), as `keytrans()` spells them. `None`
+    /// for a chord that sends nvim keys of its own, which invokes nothing.
+    pub keys: Option<String>,
 }
 
 // the ecosystem's own default keys deliberately, spelled the way a

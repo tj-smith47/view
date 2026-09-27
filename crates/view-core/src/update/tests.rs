@@ -7442,6 +7442,7 @@ fn claimed_keys_are_recorded_for_the_handover_report() {
         feature: "picker".to_string(),
         lhs: "<leader>ff".to_string(),
         had_user_mapping: true,
+        keys: None,
     }];
     let effects = update(
         &mut m,

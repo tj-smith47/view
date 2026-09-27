@@ -1,11 +1,11 @@
-//! Input held behind a submitted `:View` command line until view has run
-//! the command.
+//! Input held behind a submitted `:View` command line, or a key nvim maps
+//! to a view invocation, until view has run the invocation.
 //!
-//! nvim runs `:View ai open` and only then tells view about it, while the
-//! keys typed behind the `<CR>` are already on their way. Routed as they
-//! arrive, they reach nvim as normal-mode commands in the buffer the panel
-//! was opened from. Holding them until the command's notification comes
-//! back lets the focus that command sets decide where they go.
+//! nvim runs `:View ai open` or `<leader>ai` and only then tells view
+//! about it, while the keys typed behind them are already on their way.
+//! Routed as they arrive, they reach nvim as normal-mode commands in the
+//! buffer the panel was opened from. Holding them until the invocation's
+//! notification comes back lets the focus it sets decide where they go.
 
 use crate::model::Model;
 use crate::msg::{Effect, Msg};
@@ -27,15 +27,34 @@ enum Typed {
 }
 
 /// The command line being typed and the input held behind a submitted
-/// `:View`.
+/// `:View` or a key that invokes view.
 #[derive(Debug, Clone, Default)]
 pub struct SubmitHold {
     typed: Option<Typed>,
     held: Option<Vec<Msg>>,
     generation: u64,
+    /// Every key sequence nvim runs a view invocation on, one
+    /// [`canonical`] key per entry.
+    invoke_keys: Vec<Vec<String>>,
+    /// The latest keys sent to nvim in normal mode, as many as the longest
+    /// of `invoke_keys`.
+    recent: Vec<String>,
 }
 
 impl SubmitHold {
+    /// Learns the keys nvim runs a view invocation on from the claims the
+    /// registration answered with, the default keys and the desktop
+    /// chords alike.
+    pub fn learn_invoke_keys(&mut self, claims: &[crate::native::mappings::MappingClaim]) {
+        self.invoke_keys = claims
+            .iter()
+            .filter_map(|claim| claim.keys.as_deref())
+            .map(|keys| split_keys(keys).map(canonical).collect::<Vec<_>>())
+            .filter(|keys| !keys.is_empty())
+            .collect();
+        self.recent.clear();
+    }
+
     /// Whether `msg` ends a standing hold: the command's own notification,
     /// or the bound this hold armed.
     #[must_use]
@@ -73,11 +92,107 @@ impl SubmitHold {
 }
 
 /// Folds one key going to the engine into the tracked command line, and
-/// arms the hold when the key submits a line that runs `:View`.
+/// arms the hold when the key submits a line that runs `:View` or
+/// completes a key nvim maps to a view invocation.
 ///
 /// Called before the key is sent, so the model still describes the editor
 /// the key arrives at.
 pub fn fold_engine_key(model: &mut Model, notation: &str) -> Vec<Effect> {
+    if completes_invoke(model, notation) {
+        model.submit_hold.typed = None;
+        return arm(model);
+    }
+    fold_line(model, notation)
+}
+
+/// Whether `notation` completes one of the invoking keys, typed in normal
+/// mode, where those keys are mapped.
+///
+/// A key that takes the next one as its argument (`f`, the `a` of `\ai`)
+/// is no reason to stop: nvim matches a mapping before it reads a key as
+/// an argument.
+fn completes_invoke(model: &mut Model, notation: &str) -> bool {
+    let normal = model.engine.mode.current == "normal";
+    let hold = &mut model.submit_hold;
+    let longest = hold.invoke_keys.iter().map(Vec::len).max().unwrap_or(0);
+    if !normal || longest == 0 {
+        hold.recent.clear();
+        return false;
+    }
+    if hold.recent.len() >= longest {
+        hold.recent.remove(0);
+    }
+    hold.recent.push(canonical(notation));
+    let complete = hold
+        .invoke_keys
+        .iter()
+        .any(|keys| hold.recent.ends_with(keys));
+    if complete {
+        hold.recent.clear();
+    }
+    complete
+}
+
+/// The keys of `spelling`, one `<...>` token or one character each.
+fn split_keys(spelling: &str) -> impl Iterator<Item = &str> {
+    let mut rest = spelling;
+    std::iter::from_fn(move || {
+        let first = rest.chars().next()?;
+        let token = rest
+            .find('>')
+            .map(|end| &rest[..=end])
+            .filter(|token| first == '<' && crate::native::keys::well_formed(token))
+            .unwrap_or(&rest[..first.len_utf8()]);
+        rest = &rest[token.len()..];
+        Some(token)
+    })
+}
+
+/// One spelling for each key nvim reads as the same key: `keytrans()`
+/// writes `<M-S-Left>` and `<Space>` where view's input writes
+/// `<S-M-Left>` and a bare space, and a shifted letter is its capital.
+fn canonical(key: &str) -> String {
+    if let Some(c) = typed_char(key) {
+        return c.to_string();
+    }
+    let Some(mut rest) = key.strip_prefix('<').and_then(|k| k.strip_suffix('>')) else {
+        return key.to_string();
+    };
+    let [mut ctrl, mut shift, mut meta, mut sup] = [false; 4];
+    while rest.len() > 2 && rest.as_bytes()[1] == b'-' {
+        match rest.as_bytes()[0].to_ascii_uppercase() {
+            b'C' => ctrl = true,
+            b'S' => shift = true,
+            b'M' | b'A' => meta = true,
+            b'D' => sup = true,
+            _ => break,
+        }
+        rest = &rest[2..];
+    }
+    let mut chars = rest.chars();
+    let name = match (chars.next(), chars.next()) {
+        // a Ctrl letter is one key in either case
+        (Some(c), None) if c.is_alphabetic() => {
+            let capital = (shift || c.is_uppercase()) && !ctrl;
+            shift = false;
+            if capital {
+                c.to_uppercase().collect()
+            } else {
+                c.to_lowercase().collect()
+            }
+        }
+        (Some(_), None) => rest.to_string(),
+        _ => rest.to_ascii_lowercase(),
+    };
+    let modifiers: String = [(ctrl, "C-"), (shift, "S-"), (meta, "M-"), (sup, "D-")]
+        .into_iter()
+        .filter_map(|(on, spelled)| on.then_some(spelled))
+        .collect();
+    format!("<{modifiers}{name}>")
+}
+
+/// The command-line half of [`fold_engine_key`].
+fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
     let hold = &mut model.submit_hold;
     // an Escape typed quickly before its key arrives as one Meta key, which
     // nvim runs as `<Esc>` and then the key: `<M-:>` opens a command line
@@ -303,6 +418,99 @@ mod tests {
         let released = crate::update::update(&mut model, Msg::SubmitHoldExpired { generation });
         assert_eq!(inputs(&released), ["j"]);
         assert!(!model.submit_hold.is_holding());
+    }
+
+    /// A model that learned `keys` as the invoking keys nvim maps.
+    fn claiming(keys: &[Option<&str>]) -> Model {
+        let mut model = normal_mode();
+        let claims: Vec<_> = keys
+            .iter()
+            .map(|keys| crate::native::mappings::MappingClaim {
+                feature: "picker".to_string(),
+                lhs: "<leader>ff".to_string(),
+                had_user_mapping: false,
+                keys: keys.map(str::to_string),
+            })
+            .collect();
+        model.submit_hold.learn_invoke_keys(&claims);
+        model
+    }
+
+    fn picker_files() -> Msg {
+        Msg::FeatureInvoke {
+            feature: "picker".to_string(),
+            verb: "files".to_string(),
+        }
+    }
+
+    /// A default key with the leader resolved holds what is typed behind
+    /// it, and the picker it opens is what those keys filter.
+    #[test]
+    fn keys_behind_a_leader_map_reach_what_it_opened() {
+        let mut model = claiming(&[Some("<Space>ff")]);
+        let sent = type_keys(&mut model, &[" ", "f", "f"]);
+        assert_eq!(inputs(&sent), [" ", "f", "f"], "{sent:?}");
+        assert!(model.submit_hold.is_holding(), "{sent:?}");
+        let held = type_keys(&mut model, &["m", "a"]);
+        assert!(held.is_empty(), "held keys produce nothing: {held:?}");
+        let replayed = crate::update::update(&mut model, picker_files());
+        assert!(
+            replayed
+                .iter()
+                .any(|e| matches!(e, Effect::PickerQuery { needle, .. } if needle == "ma")),
+            "the held keys filter the picker: {replayed:?}"
+        );
+    }
+
+    /// A desktop chord holds the same way, whichever order the modifiers
+    /// are spelled in.
+    #[test]
+    fn keys_behind_a_desktop_chord_are_held() {
+        let mut model = claiming(&[Some("<M-S-Left>"), Some("<D-f>")]);
+        let _ = type_keys(&mut model, &["<S-M-Left>"]);
+        assert!(model.submit_hold.is_holding());
+
+        let mut model = claiming(&[Some("<M-S-Left>"), Some("<D-f>")]);
+        let _ = type_keys(&mut model, &["<D-f>"]);
+        assert!(model.submit_hold.is_holding());
+    }
+
+    /// A chord sending nvim keys of its own, the same keys typed in insert
+    /// mode, and a sequence broken by another key all go straight on.
+    #[test]
+    fn keys_that_invoke_nothing_hold_nothing() {
+        let mut model = claiming(&[None, Some("\\ai")]);
+        let sent = type_keys(&mut model, &["\\", "x", "a", "i", "j"]);
+        assert_eq!(inputs(&sent).len(), 5, "{sent:?}");
+        assert!(!model.submit_hold.is_holding());
+
+        let mut model = claiming(&[Some("\\ai")]);
+        model.engine.mode.current = "insert".to_string();
+        let _ = type_keys(&mut model, &["<Bslash>", "a", "i"]);
+        assert!(!model.submit_hold.is_holding());
+
+        let mut model = claiming(&[Some("\\ai")]);
+        let _ = type_keys(&mut model, &["<Bslash>", "a", "i"]);
+        assert!(model.submit_hold.is_holding(), "`<Bslash>` is `\\`");
+    }
+
+    #[test]
+    fn a_key_has_one_spelling_however_it_is_written() {
+        for (a, b) in [
+            ("<S-M-Left>", "<M-S-Left>"),
+            ("<M-T>", "<M-S-t>"),
+            ("<C-W>", "<C-w>"),
+            ("<Space>", " "),
+            ("<CR>", "<cr>"),
+            ("<A-x>", "<M-x>"),
+        ] {
+            assert_eq!(canonical(a), canonical(b), "{a} {b}");
+        }
+        assert_ne!(canonical("<M-q>"), canonical("<M-Q>"));
+        assert_eq!(
+            split_keys("<Space>a<lt>\\<M-S-Left>").collect::<Vec<_>>(),
+            ["<Space>", "a", "<lt>", "\\", "<M-S-Left>"]
+        );
     }
 
     #[test]

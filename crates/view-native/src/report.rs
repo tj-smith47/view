@@ -183,6 +183,7 @@ mod tests {
             feature: feature.to_string(),
             lhs: lhs.to_string(),
             had_user_mapping,
+            keys: None,
         }
     }
 

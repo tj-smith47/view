@@ -748,6 +748,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             colon_mapped,
             ..
         } => {
+            model.submit_hold.learn_invoke_keys(&claimed);
             model.record_claimed_keys(claimed);
             model.record_colon_mapped(colon_mapped);
             Vec::new()

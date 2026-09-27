@@ -314,7 +314,14 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
             log_with("native", || {
                 let keys: Vec<String> = claimed
                     .iter()
-                    .map(|c| format!("{}={}", c.lhs, c.had_user_mapping))
+                    .map(|c| {
+                        format!(
+                            "{}={}:{}",
+                            c.lhs,
+                            c.had_user_mapping,
+                            c.keys.as_deref().unwrap_or("-")
+                        )
+                    })
                     .collect();
                 format!("claimed {} colon-mapped={colon_mapped}", keys.join(","))
             });

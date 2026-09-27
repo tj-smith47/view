@@ -1722,6 +1722,7 @@ mod tests {
             feature: "picker".to_string(),
             lhs: "<leader>ff".to_string(),
             had_user_mapping: true,
+            keys: None,
         }];
 
         let mut session = NativeSession::all_enabled(7, Some(record.clone()));
@@ -2521,6 +2522,7 @@ cycle_surfaces = \"gz\"
             feature: "picker".to_string(),
             lhs: "<leader>ff".to_string(),
             had_user_mapping: true,
+            keys: None,
         }]);
         let _ = session.follow_up(&mut m, Stage::VimEnter);
         let _ = session.follow_up(&mut m, Stage::Claims);
