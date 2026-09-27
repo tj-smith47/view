@@ -8,6 +8,7 @@
 //! ever reaches here.
 
 use crate::native::ai_event::{PermissionOption, PermissionOptionKind};
+use crate::native::text::wrap_line;
 use crate::native::views::{Span, StyleRole};
 
 /// One outstanding permission request the agent is blocked on: which
@@ -92,30 +93,33 @@ impl PermissionPrompt {
     /// and friends), so an unanswered question does not paint as more
     /// transcript, and the answer with standing consequence does not paint
     /// as the answer without one.
+    ///
+    /// Each row is wrapped to `width` cells, an option's continuation
+    /// indented under its name: what an always-answer covers is the end of
+    /// the agent's own option name, and a row cut at the frame hides it.
     #[must_use]
-    pub fn render_rows(&self) -> Vec<Vec<Span>> {
-        let mut rows = vec![vec![Span::new(
-            self.prompt.clone(),
-            StyleRole::AiPermissionAsk,
-        )]];
-        rows.extend(self.options.iter().enumerate().map(|(index, option)| {
+    pub fn render_rows(&self, width: usize) -> Vec<Vec<Span>> {
+        let mut rows = hanging_rows("", &self.prompt, width, StyleRole::AiPermissionAsk);
+        for (index, option) in self.options.iter().enumerate() {
             // A tenth option and beyond has no digit to be answered with,
             // so it is not given one to press.
             let key = match index + 1 {
                 key @ 1..=9 => key.to_string(),
                 _ => UNREACHABLE_OPTION_MARK.to_string(),
             };
-            vec![Span::new(
-                format!(
-                    "{}{key} {} ({})",
-                    " ".repeat(OPTION_INDENT),
-                    option.name,
-                    kind_label(option.kind)
-                ),
+            rows.extend(hanging_rows(
+                &format!("{}{key} ", " ".repeat(OPTION_INDENT)),
+                &format!("{} ({})", option.name, kind_label(option.kind)),
+                width,
                 option_role(option.kind),
-            )]
-        }));
-        rows.push(vec![Span::new(KEY_HINT, StyleRole::AiPermissionAsk)]);
+            ));
+        }
+        rows.extend(hanging_rows(
+            "",
+            KEY_HINT,
+            width,
+            StyleRole::AiPermissionAsk,
+        ));
         rows
     }
 
@@ -128,13 +132,28 @@ impl PermissionPrompt {
     /// decision: an indent or a leading row counted twice is a caret one
     /// cell off the key it names.
     #[must_use]
-    pub fn answer_cell(&self) -> (usize, usize) {
+    pub fn answer_cell(&self, width: usize) -> (usize, usize) {
         if self.options.is_empty() {
             (0, 0)
         } else {
-            (1, OPTION_INDENT)
+            (wrap_line(&self.prompt, width.max(1)).len(), OPTION_INDENT)
         }
     }
+}
+
+/// `text` wrapped to `width` cells behind `lead`, with every row after the
+/// first indented by the lead's own width so a wrapped option reads as one
+/// entry. `lead` is ASCII, so its length is its width in cells.
+fn hanging_rows(lead: &str, text: &str, width: usize, role: StyleRole) -> Vec<Vec<Span>> {
+    let hang = " ".repeat(lead.len());
+    wrap_line(text, width.saturating_sub(lead.len()).max(1))
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let indent = if index == 0 { lead } else { hang.as_str() };
+            vec![Span::new(format!("{indent}{row}"), role)]
+        })
+        .collect()
 }
 
 /// What the hint row under a prompt's options says. The digits are on the
@@ -183,6 +202,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// Wide enough that no row in these tests wraps.
+    const WIDE: usize = 80;
 
     fn option(id: &str, kind: PermissionOptionKind) -> PermissionOption {
         PermissionOption {
@@ -269,7 +291,7 @@ mod tests {
                     option("Always Reject", PermissionOptionKind::RejectAlways),
                 ],
             );
-            let rows = prompt.render_rows();
+            let rows = prompt.render_rows(WIDE);
             assert_eq!(rows[1][0].text, "  1 Always Allow (allow_always)");
             assert_eq!(rows[2][0].text, "  2 Always Reject (reject_always)");
         }
@@ -288,7 +310,7 @@ mod tests {
                 option("Deny", PermissionOptionKind::RejectOnce),
             ],
         );
-        let rows = prompt.render_rows();
+        let rows = prompt.render_rows(WIDE);
         assert_eq!(rows.len(), 5, "the question, three options, the hint");
         assert_eq!(
             rows[0],
@@ -333,9 +355,54 @@ mod tests {
             .map(|n| option(&format!("opt-{n}"), PermissionOptionKind::AllowOnce))
             .collect();
         let prompt = PermissionPrompt::new(1, "call_1", None, None, options);
-        let rows = prompt.render_rows();
+        let rows = prompt.render_rows(WIDE);
         assert_eq!(rows[9][0].text, "  9 opt-9 (allow_once)");
         assert_eq!(rows[10][0].text, "  - opt-10 (allow_once)");
         assert!(prompt.option_for_key('9').is_some());
+    }
+
+    /// The name the pinned agent adapter sends for its always-allow, at the
+    /// width a pinned panel's frame leaves: the scope and the wire kind at
+    /// its end both reach the screen, and the caret still stands on the
+    /// first option's digit under a question that wrapped.
+    #[test]
+    fn a_long_option_wraps_under_its_name_and_keeps_its_wire_kind() {
+        let prompt = PermissionPrompt::new(
+            1,
+            "call_1",
+            Some("git init alpha in the project directory".to_string()),
+            None,
+            vec![
+                option("Yes", PermissionOptionKind::AllowOnce),
+                option(
+                    "Yes, and don't ask again for git init * commands",
+                    PermissionOptionKind::AllowAlways,
+                ),
+            ],
+        );
+        let width = 36;
+        let rows: Vec<String> = prompt
+            .render_rows(width)
+            .iter()
+            .map(|row| row.iter().map(|span| span.text.as_str()).collect())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "Permission requested for git init",
+                "alpha in the project directory",
+                "  1 Yes (allow_once)",
+                "  2 Yes, and don't ask again for git",
+                "    init * commands (allow_always)",
+                "press a number, <Esc> cancels",
+            ]
+        );
+        assert!(rows.iter().all(|row| row.chars().count() <= width));
+        let (row, col) = prompt.answer_cell(width);
+        assert_eq!(
+            &rows[row][col..=col],
+            "1",
+            "the caret stands on the first digit"
+        );
     }
 }

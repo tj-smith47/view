@@ -1274,40 +1274,8 @@ pub fn wrap_toast(lines: &[String], width: u16) -> Vec<String> {
     let inside = usize::from(width.saturating_sub(2)).max(1);
     lines
         .iter()
-        .flat_map(|line| wrap_line(line, inside))
+        .flat_map(|line| crate::native::text::wrap_line(line, inside))
         .collect()
-}
-
-/// One line broken into rows of at most `width` cells.
-fn wrap_line(line: &str, width: usize) -> Vec<String> {
-    let mut rows = vec![String::new()];
-    let mut used = 0_usize;
-    for cluster in crate::native::text::clusters(line) {
-        let cells = usize::from(crate::native::text::cluster_width(cluster));
-        if used > 0 && used.saturating_add(cells) > width {
-            if cluster == " " {
-                rows.push(String::new());
-                used = 0;
-                continue;
-            }
-            // the unfinished word moves down with the break, and the space
-            // before it goes, since a row ending in one reads as nothing
-            let carried = rows.last_mut().and_then(|row| {
-                let space = row.rfind(' ').filter(|&at| at > 0)?;
-                let word = row.split_off(space.saturating_add(1));
-                row.truncate(space);
-                Some(word)
-            });
-            let word = carried.unwrap_or_default();
-            used = usize::from(crate::native::text::text_width(&word));
-            rows.push(word);
-        }
-        if let Some(row) = rows.last_mut() {
-            row.push_str(cluster);
-        }
-        used = used.saturating_add(cells);
-    }
-    rows
 }
 
 #[cfg(test)]

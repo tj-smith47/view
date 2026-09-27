@@ -801,12 +801,17 @@ impl AiPanelState {
         }
         match &self.pending_permission {
             Some(prompt) => {
-                let mut rows = prompt.render_rows();
+                let header = header_width(panel_width);
+                let mut rows = prompt.render_rows(header);
                 if !has_keyboard {
-                    rows.push(vec![Span::plain(ENTER_HINT)]);
+                    rows.extend(
+                        crate::native::text::wrap_line(ENTER_HINT, header.max(1))
+                            .into_iter()
+                            .map(|row| vec![Span::plain(row)]),
+                    );
                 }
                 view.with_pending_permission(rows)
-                    .with_permission_answer(prompt.answer_cell())
+                    .with_permission_answer(prompt.answer_cell(header))
             }
             None => view,
         }
@@ -858,6 +863,15 @@ pub const PROMPT_COLS: usize = 2;
 pub fn composer_width(panel_width: usize) -> usize {
     let panel = u16::try_from(panel_width).unwrap_or(u16::MAX);
     usize::from(interior_text_width(panel)).saturating_sub(PROMPT_COLS)
+}
+
+/// The cells one header row of a `panel_width`-wide panel holds: the
+/// frame's interior, with no list marker, since `view-surface` paints header
+/// rows unmarked.
+fn header_width(panel_width: usize) -> usize {
+    usize::from(interior_text_width(
+        u16::try_from(panel_width).unwrap_or(u16::MAX),
+    ))
 }
 
 /// The cells one transcript row has, on a panel `panel_width` terminal
