@@ -239,6 +239,40 @@ fn opening_a_file_walks_the_users_keys_once() {
     assert_eq!(engine.handle.eval_str("g:walks").unwrap(), "1");
 }
 
+/// A plugin lazy.nvim loads on a tick after a file open's walk has run
+/// raises its own `User LazyLoad`, and the map it set is read by a walk of
+/// its own.
+#[test]
+fn a_lazy_load_after_a_file_open_walks_the_users_keys_again() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    engine
+        .handle
+        .eval_str("execute('let mapleader = \" \"')")
+        .unwrap();
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_user_keys(&rx);
+    let dir = view_test_support::ScratchDir::new("keys-rewalk").unwrap();
+    let file = dir.join("opened.lua");
+    engine
+        .handle
+        .eval_str(&format!("execute('edit {}')", file.display()))
+        .unwrap();
+    // lets the open's scheduled walk run before the map exists, so only a
+    // later walk can read it
+    engine
+        .handle
+        .eval_str("execute('lua vim.wait(200, function() return false end)')")
+        .unwrap();
+    for later in [
+        "execute('nnoremap <leader>lz :echo<CR>')",
+        "execute('doautocmd User LazyLoad')",
+    ] {
+        engine.handle.eval_str(later).unwrap();
+    }
+    let (keys, _) = next_user_keys(&rx);
+    assert!(keys.iter().any(|k| k == "<Space>lz"), "{keys:?}");
+}
+
 /// nvim's own default mappings are among the user's keys, and a surface
 /// with a window of its own passes them on the way a tile does. Its buffer
 /// is not modifiable, so a default that edits (`&` repeating the last `:s`,
