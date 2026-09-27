@@ -191,6 +191,45 @@ fn a_view_command_given_at_launch_opens_the_panel() {
     );
 }
 
+/// Alt with a key the user's own config maps runs that mapping from inside
+/// the panel: the panel lets go of the keyboard and nvim gets the Meta key
+/// whole, so the mapping fires and the composer types nothing.
+#[test]
+fn a_user_meta_mapping_fires_from_the_panel() {
+    let paths = common::ScratchPaths::new("agent-meta-map");
+    let work = paths.isolated_home.join("work");
+    let resume = paths.isolated_home.join("resume");
+    let fired = work.join("fired.txt");
+    let map = format!(
+        "nnoremap <M-y> <Cmd>call writefile(['fired'], '{}')<CR>",
+        fired.display()
+    );
+    let mut session = launch(&paths, &work, &resume, &["-c", &map]);
+    open_and_trust(&mut session);
+    assert!(
+        session.wait_for(": Esc returns", BUDGET),
+        "the trusted panel never took the keyboard; screen:\n{}",
+        session.screen()
+    );
+    session.send(b"\x1by").unwrap();
+    let deadline = view_test_support::host_deadline(BUDGET);
+    let started = std::time::Instant::now();
+    while !fired.exists() && started.elapsed() < deadline {
+        std::thread::sleep(view_test_support::host_deadline(Duration::from_millis(50)));
+    }
+    assert_eq!(
+        std::fs::read_to_string(&fired).unwrap_or_default(),
+        "fired\n",
+        "Alt+y in the panel never ran the user's <M-y> mapping; screen:\n{}",
+        session.screen()
+    );
+    assert!(
+        !every_row(session.screen_raw()).contains("> y"),
+        "the composer typed the y; screen:\n{}",
+        session.screen()
+    );
+}
+
 /// Keys written in the same burst as the `:View` command that opens the
 /// panel are typed into the panel. nvim runs the command before it reads
 /// the keys behind it, so a panel that took focus only once the command's

@@ -267,9 +267,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             if notation == "<Esc>" && !modal_was_open && model.engine.messages.dismiss_sticky() {
                 model.dirty = true;
             }
-            let mut effects = crate::native::submit_hold::fold_engine_key(model, &notation);
-            effects.insert(0, Effect::Rpc(RpcCall::Input { notation }));
-            effects
+            engine_input(model, notation)
         }
         Focus::Pane(NativeSurface::Tree) => surfaces::tree_key(model, &notation),
         Focus::Pane(NativeSurface::Agent) => surfaces::agent_pane_key(model, &notation),
@@ -416,12 +414,25 @@ pub(super) fn dismiss_top_prompt(model: &mut Model) {
     }
 }
 
-/// Routes one key, reading a Meta key no binding claims as `<Esc>` and then
-/// its key while a surface of view's own holds the keyboard.
+/// `notation` sent to nvim as typed, with the command-line tracking the
+/// typed-ahead hold keeps over every key the engine receives.
+fn engine_input(model: &mut Model, notation: String) -> Vec<Effect> {
+    let mut effects = crate::native::submit_hold::fold_engine_key(model, &notation);
+    effects.insert(0, Effect::Rpc(RpcCall::Input { notation }));
+    effects
+}
+
+/// Routes one key, reading a Meta key no binding claims as its `<Esc>`
+/// first while a surface of view's own holds the keyboard.
 ///
-/// nvim makes that same reading of the keys that reach it, so an `<Esc>`
-/// typed quickly before `:` leaves the agent panel and opens the command
-/// line, as it leaves insert mode.
+/// A terminal sends Alt+x and a quick `<Esc>` then `x` as the same bytes,
+/// so an `<Esc>` typed quickly before `:` arrives as `<M-:>`. The `<Esc>`
+/// leaves the surface. When it hands the keyboard to nvim, the Meta key
+/// follows it whole: nvim runs a mapping of it (a desktop chord, a user's
+/// own `<M-h>`) and reads an unmapped one as `<Esc>` and its key, as it
+/// does in insert mode. When the `<Esc>` leaves the keyboard on the
+/// surface, as it does answering a pending permission, the surface gets
+/// the key the `<Esc>` came off.
 pub(super) fn route_unescaped(
     model: &mut Model,
     notation: String,
@@ -440,7 +451,17 @@ pub(super) fn route_unescaped(
     match crate::native::keys::escaped_key(&notation) {
         Some(key) if native && unbound() => {
             let mut effects = route_key(model, "<Esc>".to_string(), modal_was_open);
-            effects.extend(route_key(model, key, modal_was_open));
+            // a windowed surface's `<Esc>` moves nvim's cursor, which
+            // `focus()` sees only once nvim redraws it there
+            let left_for_nvim = model.focus() == Focus::Engine
+                || effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Rpc(RpcCall::FocusPreviousWindow)));
+            if left_for_nvim {
+                effects.extend(engine_input(model, notation));
+            } else {
+                effects.extend(route_key(model, key, modal_was_open));
+            }
             effects
         }
         _ => route_key(model, notation, modal_was_open),

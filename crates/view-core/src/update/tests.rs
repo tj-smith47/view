@@ -5677,20 +5677,19 @@ fn shift_enter_breaks_the_line_too_and_neither_key_reaches_past_a_question() {
     assert!(!m.dirty);
 }
 
-/// An `<Esc>` typed quickly before `:` arrives as `<M-:>`, which leaves the
-/// entered panel and opens nvim's command line the way the two keys do. A
-/// Meta key the panel binds keeps its binding.
+/// An `<Esc>` typed quickly before `:` arrives as `<M-:>`. It leaves the
+/// entered panel, and nvim gets the Meta key whole, which it reads as the
+/// two keys when nothing maps it. A Meta key the panel binds keeps its
+/// binding.
 #[test]
-fn an_unbound_meta_key_on_the_panel_is_its_escape_and_then_its_key() {
+fn an_unbound_meta_key_on_the_panel_leaves_it_and_reaches_nvim_whole() {
     let mut m = entered_ai_panel_model();
     let effects = update(&mut m, key("<M-:>"));
     assert!(!m.ai_panel().focused, "the escape leaves the panel");
-    assert!(
-        effects.iter().any(|e| matches!(
-            e,
-            Effect::Rpc(RpcCall::Input { notation }) if notation == ":"
-        )),
-        "the `:` reaches nvim: {effects:?}"
+    assert_eq!(
+        meta_inputs(&effects),
+        ["<M-:>"],
+        "nvim gets the Meta key and no bare key: {effects:?}"
     );
     assert!(
         m.ai_panel().input().is_empty(),
@@ -5701,6 +5700,96 @@ fn an_unbound_meta_key_on_the_panel_is_its_escape_and_then_its_key() {
     let _ = update(&mut m, key("<M-CR>"));
     assert!(m.ai_panel().focused, "a bound Meta key stays in the panel");
     assert_eq!(m.ai_panel().input(), "\n");
+}
+
+/// Every `RpcCall::Input` notation among `effects`, in order.
+fn meta_inputs(effects: &[Effect]) -> Vec<&str> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Rpc(RpcCall::Input { notation }) => Some(notation.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The desktop close chord pressed in the entered floating panel is the
+/// chord: nvim holds its mapping, so it gets `<M-w>` whole, and a bare `w`
+/// would move the cursor a word in the buffer beside the panel.
+#[test]
+fn a_desktop_meta_chord_on_the_floating_panel_reaches_nvim_as_the_chord() {
+    let mut m = entered_ai_panel_model();
+    let effects = update(&mut m, key("<M-w>"));
+    assert_eq!(meta_inputs(&effects), ["<M-w>"], "{effects:?}");
+}
+
+/// On the windowed panel the `<Esc>` moves nvim's cursor out of the
+/// panel's window, and `focus()` still names the panel until nvim redraws
+/// the cursor. The `:` behind it goes to nvim with the `<Esc>`, and the
+/// composer stays empty.
+#[test]
+fn an_unbound_meta_key_on_the_windowed_panel_leaves_its_window_whole() {
+    let mut m = focused_windowed_agent();
+    let effects = update(&mut m, key("<M-:>"));
+    assert!(
+        matches!(
+            &effects[..],
+            [
+                Effect::Rpc(RpcCall::FocusPreviousWindow),
+                Effect::Rpc(RpcCall::Input { notation }),
+                ..
+            ] if notation == "<M-:>"
+        ),
+        "{effects:?}"
+    );
+    assert_eq!(meta_inputs(&effects), ["<M-:>"], "{effects:?}");
+    assert!(
+        m.ai_panel().input().is_empty(),
+        "the composer typed the `:`"
+    );
+}
+
+/// At a pending permission the `<Esc>` cancels the request and the panel
+/// keeps the keyboard, so the key behind it is the panel's: `<M-:>` types
+/// its `:` into the composer and sends nvim nothing.
+#[test]
+fn a_meta_key_at_a_pending_permission_stays_with_the_panel() {
+    let mut m = pending_permission_model();
+    let effects = update(&mut m, key("<M-:>"));
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Ai(AiCommand::AnswerPermission {
+                outcome: PermissionOutcome::Cancelled,
+                ..
+            })
+        )),
+        "{effects:?}"
+    );
+    assert!(meta_inputs(&effects).is_empty(), "{effects:?}");
+    assert!(m.ai_panel().focused, "the panel keeps the keyboard");
+    assert_eq!(m.ai_panel().input(), ":");
+}
+
+/// The windowed tree's own `d`, `a` and `r` raise its delete, create and
+/// rename prompts. Alt with the same letter is a chord for nvim and opens
+/// none of them.
+#[test]
+fn a_meta_letter_on_the_windowed_tree_raises_none_of_its_prompts() {
+    for notation in ["<M-d>", "<M-a>", "<M-r>"] {
+        let mut m = focused_windowed_tree();
+        let effects = update(&mut m, key(notation));
+        assert!(
+            matches!(
+                &effects[..],
+                [
+                    Effect::Rpc(RpcCall::FocusPreviousWindow),
+                    Effect::Rpc(RpcCall::Input { notation: sent }),
+                ] if sent == notation
+            ),
+            "{notation}: {effects:?}"
+        );
+    }
 }
 
 /// The cancel half of the same producer: `<C-c>` with nothing in flight has
