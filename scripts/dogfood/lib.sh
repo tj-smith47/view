@@ -10,17 +10,21 @@
 # with its removal (check-style.sh's check_temp_traps reads both from the
 # same file), so a caller never arms its own.
 cleanup() {
+  editor_pid=$(tmux -L "$SOCKET" list-panes -a -F '#{pane_pid}' 2>/dev/null | head -1) || editor_pid=
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
   if [ -n "${TAPE:-}" ]; then
     rm -f -- "$TAPE"
   fi
   if [ -n "${STATE_COPY:-}" ]; then
-    # the editor the server just hung up on writes its state as it exits,
-    # so a removal that races that write is taken again once it is done
-    if ! rm -rf -- "$STATE_COPY" 2>/dev/null; then
-      sleep 1
-      rm -rf -- "$STATE_COPY"
-    fi
+    # the editor the server just hung up on writes its theme cache into the
+    # state copy as it exits, seconds later on a loaded host, so the copy
+    # is removed once that process is gone, waiting ten seconds at most
+    n=0
+    while [ -n "$editor_pid" ] && kill -0 "$editor_pid" 2>/dev/null && [ "$n" -lt 100 ]; do
+      sleep 0.1
+      n=$((n + 1))
+    done
+    rm -rf -- "$STATE_COPY"
   fi
 }
 
