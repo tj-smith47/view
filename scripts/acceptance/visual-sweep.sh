@@ -1763,7 +1763,7 @@ drive_action() {
             fail "no desktop chord in $CHORDS_RS is the twin of the $feature $verb key"
             return 1
         }
-        local chord_desc
+        local chord_desc ring_steps=1
         chord_desc=$(mapping_desc "$chord") || return 1
         if [ "$chord_desc" = -none- ]; then
             fail "nothing maps $chord in this session, so view's $feature $verb chord never registered"
@@ -1771,6 +1771,7 @@ drive_action() {
         elif [ "$chord_desc" != "$(printf "$DESC_FORMAT" "$feature" "$verb")" ]; then
             skip "$chord is this config's own key (\"$chord_desc\"), which outranks view's $feature $verb chord"
         else
+            ring_steps=3
             before=$(scratch_col)
             command_line ':View ui cycle_surfaces'
             command_line ':View tree'
@@ -1781,7 +1782,24 @@ drive_action() {
             wait_until "$REACTION_SECS" "the tree floating over the buffer on $chord" \
                 shows "$BOX_TL $(basename -- "$ROOT")" >/dev/null || return 1
         fi
-        SAW="answers from a buffer tile in ${took}s, and its chord floats the tiled tree"
+        # and the key itself, typed inside the tiled tree, which answers
+        # none of its keys and passes them on to nvim. A chord that floated
+        # the tree left the ring at windowed, and three ring steps bring it
+        # round to windowed again
+        dismiss tree || return 1
+        while [ "$ring_steps" -gt 0 ]; do
+            command_line ':View ui cycle_surfaces'
+            ring_steps=$((ring_steps - 1))
+        done
+        before=$(scratch_col)
+        command_line ':View tree'
+        wait_until "$WAIT_SECS" 'the tree back in a tile of its own' \
+            scratch_right_of "$before" >/dev/null || return 1
+        "$@"
+        local inside
+        inside=$(wait_until "$REACTION_SECS" "the tree floating on $feature $verb typed inside it" \
+            shows "$BOX_TL $(basename -- "$ROOT")") || return 1
+        SAW="answers from a buffer tile in ${took}s, floats the tiled tree from inside it in ${inside}s, and its chord floats the tiled tree"
         ;;
     tabpage)
         n=${verb#to_tabpage_}

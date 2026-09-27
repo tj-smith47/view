@@ -5649,26 +5649,320 @@ fn an_unbound_meta_key_on_the_windowed_panel_leaves_its_window_whole() {
     );
 }
 
-/// At a pending permission the `<Esc>` cancels the request and the panel
-/// keeps the keyboard, so the key behind it is the panel's: `<M-:>` types
-/// its `:` into the composer and sends nvim nothing.
+/// At a pending permission the question keeps the keyboard. An Alt chord
+/// answers nothing, types nothing and sends nvim nothing, the way a letter
+/// does, on the entered floating panel and on the windowed one alike.
 #[test]
-fn a_meta_key_at_a_pending_permission_stays_with_the_panel() {
-    let mut m = pending_permission_model();
-    let effects = update(&mut m, key("<M-:>"));
+fn a_meta_key_at_a_pending_permission_answers_nothing_and_types_nothing() {
+    let windowed = || {
+        let mut m = focused_windowed_agent();
+        let _ = update(&mut m, permission_requested_msg(7, everyday_options()));
+        m
+    };
+    for (placement, build) in [
+        ("floating", pending_permission_model as fn() -> Model),
+        ("windowed", windowed),
+    ] {
+        for notation in ["<M-:>", "<M-1>", "<M-w>"] {
+            let mut m = build();
+            assert!(m.ai_panel().pending_permission.is_some(), "{placement}");
+            let effects = update(&mut m, key(notation));
+            assert!(
+                effects.is_empty(),
+                "{placement} {notation} did something: {effects:?}"
+            );
+            assert!(m.ai_panel().pending_permission.is_some(), "{placement}");
+            assert_eq!(m.ai_panel().input(), "", "{placement} {notation}");
+            assert_ne!(m.focus(), Focus::Engine, "{placement} {notation}");
+        }
+    }
+}
+
+/// A prompt nvim relays is nvim's own input loop, so an Alt chord goes to
+/// it whole, in the `<Esc>`'s place: splitting it cancelled the prompt and
+/// then handed nvim a bare key in normal mode, where `d` waits for a
+/// motion.
+#[test]
+fn a_meta_key_at_a_relayed_prompt_reaches_nvim_whole() {
+    for (shape, open) in [
+        (
+            "input()",
+            open_free_text_prompt as fn(&mut Model) -> OverlayId,
+        ),
+        ("confirm()", open_overlay),
+    ] {
+        let mut m = model();
+        let _ = open(&mut m);
+        let effects = update(&mut m, key("<M-d>"));
+        assert_eq!(meta_inputs(&effects), ["<M-d>"], "{shape}: {effects:?}");
+    }
+}
+
+/// `claims` as the invoking keys nvim reported at registration, each a
+/// feature and the keys it is matched on.
+fn claim_invocations(m: &mut Model, claims: &[(&str, &str)]) {
+    let claimed = claims
+        .iter()
+        .map(|(feature, keys)| crate::native::mappings::MappingClaim {
+            feature: (*feature).to_string(),
+            lhs: (*keys).to_string(),
+            had_user_mapping: false,
+            keys: Some((*keys).to_string()),
+        })
+        .collect();
+    let _ = update(
+        m,
+        Msg::MappingsClaimed {
+            claimed,
+            colon_mapped: false,
+            generation: 0,
+        },
+    );
+}
+
+/// The defaults the sequence tests type, with the leader resolved to
+/// `<Space>`.
+const LEADER_CLAIMS: [(&str, &str); 5] = [
+    ("window", "<Space>uf"),
+    ("window", "<Space>wz"),
+    ("ai", "<Space>ai"),
+    ("tree", "<Space>e"),
+    ("window", "<D-t>"),
+];
+
+fn typed(m: &mut Model, keys: &[&str]) -> Vec<Effect> {
+    keys.iter().flat_map(|k| update(m, key(k))).collect()
+}
+
+/// A leader default typed in the windowed tree reaches nvim with the
+/// cursor still in the tree, and the hold is armed behind it the way it is
+/// from a buffer tile. The `a` of `<Space>ai` belongs to the sequence and
+/// raises no create prompt.
+#[test]
+fn a_leader_default_in_the_windowed_tree_reaches_nvim() {
+    for sequence in [[" ", "u", "f"], [" ", "a", "i"]] {
+        let mut m = focused_windowed_tree();
+        m.engine.mode.current = "normal".to_string();
+        claim_invocations(&mut m, &LEADER_CLAIMS);
+        let effects = typed(&mut m, &sequence);
+        assert_eq!(meta_inputs(&effects), sequence, "{effects:?}");
+        assert!(
+            !effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Rpc(RpcCall::FocusPreviousWindow | RpcCall::TreeCreatePrompt { .. })
+            )),
+            "{sequence:?}: {effects:?}"
+        );
+        assert!(m.submit_hold.is_holding(), "{sequence:?}");
+    }
+}
+
+/// Keys that part from every sequence are the tree's own again: `<Space>a`
+/// begins `<Space>ai`, and an `x` after it leaves the `a` to open the
+/// create prompt, with nothing sent to nvim.
+#[test]
+fn keys_that_part_from_every_sequence_are_the_trees_own() {
+    let mut m = focused_windowed_tree();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    let effects = typed(&mut m, &[" ", "a", "x"]);
+    assert!(meta_inputs(&effects).is_empty(), "{effects:?}");
     assert!(
-        effects.iter().any(|effect| matches!(
-            effect,
-            Effect::Ai(AiCommand::AnswerPermission {
-                outcome: PermissionOutcome::Cancelled,
-                ..
-            })
-        )),
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Rpc(RpcCall::TreeCreatePrompt { .. }))),
         "{effects:?}"
     );
-    assert!(meta_inputs(&effects).is_empty(), "{effects:?}");
-    assert!(m.ai_panel().focused, "the panel keeps the keyboard");
-    assert_eq!(m.ai_panel().input(), ":");
+}
+
+/// The windowed message stream passes a leader default on the same way.
+#[test]
+fn a_leader_default_in_the_windowed_stream_reaches_nvim() {
+    let mut m = focused_windowed_notifications();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    let effects = typed(&mut m, &[" ", "w", "z"]);
+    assert_eq!(meta_inputs(&effects), [" ", "w", "z"], "{effects:?}");
+}
+
+/// The composer types the leader as text, the way insert mode does, on
+/// the windowed panel and the floating one.
+#[test]
+fn a_leader_key_in_the_composer_stays_text() {
+    for build in [
+        focused_windowed_agent as fn() -> Model,
+        entered_ai_panel_model,
+    ] {
+        let mut m = build();
+        claim_invocations(&mut m, &LEADER_CLAIMS);
+        let effects = typed(&mut m, &[" ", "a", "i"]);
+        assert!(meta_inputs(&effects).is_empty(), "{effects:?}");
+        assert_eq!(m.ai_panel().input(), " ai");
+    }
+}
+
+/// A Super chord for a verb on another feature leaves the floating tree
+/// the way its `<Esc>` does, then reaches nvim whole. The tree's own
+/// toggle stays, since that toggle is what closes it.
+#[test]
+fn a_view_chord_on_the_floating_tree_leaves_it_unless_it_is_the_trees_own() {
+    let mut m = tree_sidebar_model();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    let effects = update(&mut m, key("<D-t>"));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::TreeClose, Effect::Rpc(RpcCall::Input { notation }), ..] if notation == "<D-t>"
+        ),
+        "{effects:?}"
+    );
+
+    let mut m = tree_sidebar_model();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    let effects = typed(&mut m, &[" ", "e"]);
+    assert_eq!(meta_inputs(&effects), [" ", "e"], "{effects:?}");
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::TreeClose)),
+        "{effects:?}"
+    );
+}
+
+/// Whether the walk below covers a surface of this kind. Every kind is
+/// named, so a new one fails to compile here until it is walked or given
+/// its reason.
+fn walked(kind: &OverlayKind) -> bool {
+    match kind {
+        OverlayKind::Picker(_)
+        | OverlayKind::Tree(_)
+        | OverlayKind::MessageHistory(_)
+        | OverlayKind::Ai => true,
+        // nvim's own input loop reads every key
+        // (`a_meta_key_at_a_relayed_prompt_reaches_nvim_whole`)
+        OverlayKind::Prompt(_) => false,
+        // takes no keyboard
+        OverlayKind::EngineBusy(_) => false,
+    }
+}
+
+/// Every surface of view's own that takes the keyboard, on each placement
+/// it has, and whether it types text.
+fn keyboard_surfaces() -> Vec<(&'static str, Model, bool)> {
+    use crate::native::geometry::NativeSurface;
+    let invoked = |feature: &str, verb: &str| {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: feature.to_string(),
+                verb: verb.to_string(),
+            },
+        );
+        m
+    };
+    let mut surfaces = Vec::new();
+    for surface in NativeSurface::ALL {
+        match surface {
+            NativeSurface::Tree => {
+                surfaces.push(("windowed tree", focused_windowed_tree(), false));
+                surfaces.push(("floating tree", tree_sidebar_model(), false));
+            }
+            NativeSurface::Agent => {
+                surfaces.push(("windowed agent panel", focused_windowed_agent(), true));
+                surfaces.push(("floating agent panel", entered_ai_panel_model(), true));
+            }
+            NativeSurface::Notifications => {
+                surfaces.push((
+                    "windowed message stream",
+                    focused_windowed_notifications(),
+                    false,
+                ));
+                surfaces.push((
+                    "message history float",
+                    invoked("notifications", "history"),
+                    false,
+                ));
+            }
+            // nvim's own command line under either placement: every key is
+            // the engine's
+            NativeSurface::Palette => {}
+        }
+    }
+    surfaces.push(("picker", invoked("picker", "files"), true));
+    for (name, m, _) in &surfaces {
+        assert_ne!(
+            m.focus(),
+            Focus::Engine,
+            "{name} does not hold the keyboard"
+        );
+        if let Some(overlay) = m.focused_overlay() {
+            assert!(walked(&overlay.kind), "{name}");
+        }
+    }
+    surfaces
+}
+
+/// A key a surface of view's own does not answer reaches the router the
+/// buffer tiles use, on every surface: a desktop chord goes to nvim whole,
+/// an Alt key no one maps goes to nvim whole, and a leader default goes to
+/// nvim key by key where the surface types no text. A surface that types
+/// text keeps the leader as text, as insert mode does.
+#[test]
+fn every_surface_passes_on_the_keys_it_does_not_answer() {
+    let composer = |m: &Model, name: &str| match name {
+        "picker" => m
+            .focused_overlay()
+            .and_then(|overlay| match &overlay.kind {
+                OverlayKind::Picker(p) => Some(p.query().to_string()),
+                _ => None,
+            })
+            .unwrap_or_default(),
+        _ => m.ai_panel().input().to_string(),
+    };
+    for (index, (name, _, types_text)) in keyboard_surfaces().into_iter().enumerate() {
+        let fresh = || {
+            let mut m = keyboard_surfaces().swap_remove(index).1;
+            claim_invocations(&mut m, &LEADER_CLAIMS);
+            m
+        };
+
+        let mut m = fresh();
+        let effects = update(&mut m, key("<D-t>"));
+        assert_eq!(meta_inputs(&effects), ["<D-t>"], "{name}: {effects:?}");
+
+        let mut m = fresh();
+        let effects = update(&mut m, key("<M-x>"));
+        assert_eq!(meta_inputs(&effects), ["<M-x>"], "{name}: {effects:?}");
+
+        let mut m = fresh();
+        let effects = typed(&mut m, &[" ", "u", "f"]);
+        if types_text {
+            assert!(meta_inputs(&effects).is_empty(), "{name}: {effects:?}");
+            assert_eq!(composer(&m, name), " uf", "{name}");
+        } else {
+            assert_eq!(
+                meta_inputs(&effects),
+                [" ", "u", "f"],
+                "{name}: {effects:?}"
+            );
+        }
+    }
+}
+
+/// A `<C-w>` the windowed tree was holding goes to nvim ahead of a chord
+/// passed on from it, and nothing is left armed for the tree's next key.
+#[test]
+fn a_held_window_prefix_goes_out_ahead_of_a_chord() {
+    let mut m = focused_windowed_tree();
+    claim_invocations(&mut m, &[("window", "<M-t>")]);
+    let _ = update(&mut m, key("<C-w>"));
+    let effects = update(&mut m, key("<M-t>"));
+    assert_eq!(meta_inputs(&effects), ["<C-w>", "<M-t>"], "{effects:?}");
+    assert_eq!(m.pending_chord, None);
+    let effects = update(&mut m, key(">"));
+    assert!(
+        effects.is_empty(),
+        "the `>` after the chord resized the tree: {effects:?}"
+    );
 }
 
 /// The windowed tree's own `d`, `a` and `r` raise its delete, create and
@@ -5692,13 +5986,21 @@ fn a_meta_letter_on_the_windowed_tree_raises_none_of_its_prompts() {
     }
 }
 
-/// A chord nvim maps to one of view's verbs, pressed in the windowed tree,
-/// reaches nvim with the cursor still in the tree, which is the tile the
-/// verb acts on. A Meta chord and a Super chord alike.
+/// A chord nvim maps to one of view's verbs, pressed in a windowed tree,
+/// agent panel or message stream, reaches nvim with the cursor still in
+/// that window, which is the tile the verb acts on. A Meta chord and a
+/// Super chord alike.
 #[test]
-fn a_view_chord_in_the_windowed_tree_runs_on_the_tree() {
-    for notation in ["<M-t>", "<D-t>"] {
-        let mut m = focused_windowed_tree();
+fn a_view_chord_in_a_windowed_surface_runs_on_that_surface() {
+    for (build, notation) in [
+        focused_windowed_tree as fn() -> Model,
+        focused_windowed_agent,
+        focused_windowed_notifications,
+    ]
+    .into_iter()
+    .flat_map(|build| [(build, "<M-t>"), (build, "<D-t>")])
+    {
+        let mut m = build();
         let claimed = vec![crate::native::mappings::MappingClaim {
             feature: "window".to_string(),
             lhs: notation.to_string(),

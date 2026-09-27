@@ -33,12 +33,37 @@ pub struct SubmitHold {
     typed: Option<Typed>,
     held: Option<Vec<Msg>>,
     generation: u64,
-    /// Every key sequence nvim runs a view invocation on, one
-    /// [`canonical`] key per entry.
-    invoke_keys: Vec<Vec<String>>,
+    /// Every key sequence nvim runs a view invocation on.
+    invoke_keys: Vec<Invocation>,
     /// The latest keys sent to nvim in normal mode, as many as the longest
-    /// of `invoke_keys`.
-    recent: Vec<String>,
+    /// of `invoke_keys`, each with whether nvim read it as the argument of
+    /// the key before it.
+    recent: Vec<(String, bool)>,
+    /// Whether nvim reads the next normal-mode key as an argument: the key
+    /// before it takes one, and was not itself an argument.
+    argument_next: bool,
+    /// Keys a surface of view's own is holding while they spell the start
+    /// of an invoking sequence.
+    sequence: Vec<String>,
+}
+
+/// One key sequence nvim runs a view invocation on.
+#[derive(Debug, Clone)]
+struct Invocation {
+    feature: String,
+    /// One [`canonical`] key per entry.
+    keys: Vec<String>,
+}
+
+/// Where a run of keys stands against the invoking sequences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sequence {
+    /// The keys are a whole sequence, invoking this feature.
+    Complete(String),
+    /// The keys begin a longer sequence.
+    Prefix,
+    /// The keys begin no sequence.
+    Neither,
 }
 
 impl SubmitHold {
@@ -48,25 +73,65 @@ impl SubmitHold {
     pub fn learn_invoke_keys(&mut self, claims: &[crate::native::mappings::MappingClaim]) {
         self.invoke_keys = claims
             .iter()
-            .filter_map(|claim| claim.keys.as_deref())
-            .map(|keys| split_keys(keys).map(canonical).collect::<Vec<_>>())
-            .filter(|keys| !keys.is_empty())
+            .filter_map(|claim| {
+                let keys: Vec<_> = split_keys(claim.keys.as_deref()?).map(canonical).collect();
+                (!keys.is_empty()).then(|| Invocation {
+                    feature: claim.feature.clone(),
+                    keys,
+                })
+            })
             .collect();
         self.recent.clear();
+        self.sequence.clear();
     }
 
-    /// Whether `notation` alone is a chord nvim maps to one of view's own
-    /// verbs. Only a key carrying a modifier counts, so a text key typed
-    /// into a composer stays text whatever a config binds it to.
+    /// The feature `notation` alone invokes, when it is a chord nvim maps
+    /// to one of view's own verbs. Only a key carrying a modifier counts,
+    /// so a text key typed into a composer stays text whatever a config
+    /// binds it to.
     #[must_use]
-    pub fn invokes(&self, notation: &str) -> bool {
+    pub fn invokes(&self, notation: &str) -> Option<&str> {
         let key = canonical(notation);
-        key.starts_with('<')
-            && key.contains('-')
-            && self
-                .invoke_keys
-                .iter()
-                .any(|keys| matches!(keys.as_slice(), [only] if *only == key))
+        if !(key.starts_with('<') && key.contains('-')) {
+            return None;
+        }
+        self.invoke_keys
+            .iter()
+            .find(|invocation| matches!(invocation.keys.as_slice(), [only] if *only == key))
+            .map(|invocation| invocation.feature.as_str())
+    }
+
+    /// Where `keys`, typed in this order, stand against the invoking
+    /// sequences. A whole sequence wins over a longer one it begins: nvim
+    /// is handed the keys, and its own `'timeout'` decides between the two.
+    #[must_use]
+    pub fn sequence(&self, keys: &[String]) -> Sequence {
+        let typed: Vec<String> = keys.iter().map(|key| canonical(key)).collect();
+        if let Some(whole) = self
+            .invoke_keys
+            .iter()
+            .find(|invocation| invocation.keys == typed)
+        {
+            return Sequence::Complete(whole.feature.clone());
+        }
+        if self
+            .invoke_keys
+            .iter()
+            .any(|invocation| invocation.keys.starts_with(&typed))
+        {
+            return Sequence::Prefix;
+        }
+        Sequence::Neither
+    }
+
+    /// Hands back the keys a surface is holding, leaving none held.
+    pub fn take_sequence(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.sequence)
+    }
+
+    /// Holds `keys` as the start of an invoking sequence.
+    pub fn keep_sequence(&mut self, keys: Vec<String>) {
+        self.sequence = keys;
     }
 
     /// Whether `msg` ends a standing hold: the command's own notification,
@@ -122,27 +187,45 @@ pub fn fold_engine_key(model: &mut Model, notation: &str) -> Vec<Effect> {
 /// Whether `notation` completes one of the invoking keys, typed in normal
 /// mode, where those keys are mapped.
 ///
-/// A key that takes the next one as its argument (`f`, the `a` of `\ai`)
-/// is no reason to stop: nvim matches a mapping before it reads a key as
-/// an argument.
+/// Inside a sequence nvim matches the mapping before it reads a key as an
+/// argument, so the `a` of `\ai` still completes it. The first key is the
+/// exception: typed as the argument of `f`, `r` or `"`, nvim reads it
+/// literally and starts no mapping, so `f<Space>e` is a jump and then a
+/// motion. The argument is read off the keys this fold has seen, because
+/// the engine's own `literal_pending` is written only once a key is sent,
+/// after every key one update folds.
 fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     let normal = model.engine.mode.current == "normal";
     let hold = &mut model.submit_hold;
-    let longest = hold.invoke_keys.iter().map(Vec::len).max().unwrap_or(0);
+    let argument = std::mem::take(&mut hold.argument_next);
+    let longest = hold
+        .invoke_keys
+        .iter()
+        .map(|invocation| invocation.keys.len())
+        .max()
+        .unwrap_or(0);
     if !normal || longest == 0 {
         hold.recent.clear();
         return false;
     }
+    hold.argument_next =
+        !argument && crate::native::speculate::CMDLINE_LITERAL_KEYS.contains(&notation);
     if hold.recent.len() >= longest {
         hold.recent.remove(0);
     }
-    hold.recent.push(canonical(notation));
-    let complete = hold
-        .invoke_keys
-        .iter()
-        .any(|keys| hold.recent.ends_with(keys));
+    hold.recent.push((canonical(notation), argument));
+    let recent = &hold.recent;
+    let complete = hold.invoke_keys.iter().any(|invocation| {
+        let keys = &invocation.keys;
+        recent.len() >= keys.len() && {
+            let tail = &recent[recent.len() - keys.len()..];
+            tail.first().is_some_and(|(_, argument)| !argument)
+                && tail.iter().map(|(key, _)| key).eq(keys.iter())
+        }
+    });
     if complete {
         hold.recent.clear();
+        hold.argument_next = false;
     }
     complete
 }
@@ -506,6 +589,38 @@ mod tests {
         let mut model = claiming(&[Some("\\ai")]);
         let _ = type_keys(&mut model, &["<Bslash>", "a", "i"]);
         assert!(model.submit_hold.is_holding(), "`<Bslash>` is `\\`");
+    }
+
+    /// A first key typed as the argument of `f` or `r` starts no mapping in
+    /// nvim, so `f<Space>e` is a jump and then a motion: the keys behind it
+    /// go straight on. The same keys typed as a command still hold, and so
+    /// does a sequence whose later key is one that takes an argument.
+    #[test]
+    fn a_first_key_typed_as_an_argument_holds_nothing() {
+        for jump in ["f", "r", "t", "\""] {
+            let mut model = claiming(&[Some("<Space>e")]);
+            let sent = type_keys(&mut model, &[jump, " ", "e", "w", "o"]);
+            assert_eq!(inputs(&sent), [jump, " ", "e", "w", "o"], "{sent:?}");
+            assert!(!model.submit_hold.is_holding(), "{jump}<Space>e armed");
+        }
+
+        let mut model = claiming(&[Some("<Space>e")]);
+        let _ = type_keys(&mut model, &["f", "x", " ", "e"]);
+        assert!(model.submit_hold.is_holding(), "fx then <Space>e");
+
+        let mut model = claiming(&[Some("<Space>ai")]);
+        let _ = type_keys(&mut model, &[" ", "a", "i"]);
+        assert!(model.submit_hold.is_holding(), "<Space>ai");
+
+        let mut model = claiming(&[Some("<Space>ai"), Some("<Space>e")]);
+        let _ = type_keys(&mut model, &[" ", "a", "i"]);
+        let generation = model.submit_hold.generation;
+        let _ = crate::update::update(&mut model, Msg::SubmitHoldExpired { generation });
+        let _ = type_keys(&mut model, &[" ", "e"]);
+        assert!(
+            model.submit_hold.is_holding(),
+            "the `a` of the invocation before left the next key an argument"
+        );
     }
 
     #[test]

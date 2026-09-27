@@ -7,6 +7,7 @@ use crate::msg::{Effect, RpcCall};
 use crate::native::ai_panel::TranscriptScroll;
 use crate::native::geometry::NativeSurface;
 use crate::native::keys::{Action, Resolved};
+use crate::native::submit_hold::Sequence;
 use crate::native::toast::HoldOutcome;
 
 use super::{ai, message_history_key, path_to_wire, surfaces};
@@ -153,6 +154,11 @@ fn ai_panel_size(model: &Model) -> (usize, usize) {
 /// caller has to carry in because the bookkeeping above may already have
 /// closed it.
 fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<Effect> {
+    // a sequence is held by the surface it was typed on, and a key that
+    // reaches any other finds nothing held
+    if !holds_sequences(model) {
+        model.submit_hold.take_sequence();
+    }
     let cmdline_open = model.engine.cmdline.is_some();
     model.dirty |= model
         .engine
@@ -269,11 +275,16 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             }
             engine_input(model, notation)
         }
-        Focus::Pane(NativeSurface::Tree) => surfaces::tree_key(model, &notation),
-        Focus::Pane(NativeSurface::Agent) => surfaces::agent_pane_key(model, &notation),
-        Focus::Pane(NativeSurface::Notifications) => {
-            surfaces::notifications_pane_key(model, &notation)
+        Focus::Pane(NativeSurface::Tree) => {
+            sequence_key(model, notation, modal_was_open, surfaces::tree_key)
         }
+        Focus::Pane(NativeSurface::Agent) => surfaces::agent_pane_key(model, &notation),
+        Focus::Pane(NativeSurface::Notifications) => sequence_key(
+            model,
+            notation,
+            modal_was_open,
+            surfaces::notifications_pane_key,
+        ),
         Focus::Native(_) => match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
             // an nvim-relayed prompt answers by feeding the engine a
             // keystroke -- the engine is blocked in its own input
@@ -336,7 +347,9 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                 let generation = p.edit_query(&notation);
                 vec![picker_query(p, generation)]
             }
-            Some(OverlayKind::Tree(_)) => surfaces::tree_key(model, &notation),
+            Some(OverlayKind::Tree(_)) => {
+                sequence_key(model, notation, modal_was_open, surfaces::tree_key)
+            }
             // A pending permission request blocks the issuing agent's own
             // turn until answered; its digits and <Esc> reach it here
             // because `model.focus()` only ever names this overlay once
@@ -361,7 +374,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             // below is where that lives, so the history's own arm answers
             // only the keys that are its own.
             Some(OverlayKind::MessageHistory(_)) if notation != "<Esc>" => {
-                message_history_key(model, &notation)
+                sequence_key(model, notation, modal_was_open, message_history_key)
             }
             // the key belongs to the overlay on top of the stack,
             // and no other overlay kind carries a key handler yet,
@@ -427,16 +440,16 @@ fn engine_input(model: &mut Model, notation: String) -> Vec<Effect> {
 ///
 /// A terminal sends Alt+x and a quick `<Esc>` then `x` as the same bytes,
 /// so an `<Esc>` typed quickly before `:` arrives as `<M-:>`. The `<Esc>`
-/// leaves the surface. When it hands the keyboard to nvim, the Meta key
-/// follows it whole: nvim runs a mapping of it (a desktop chord, a user's
-/// own `<M-h>`) and reads an unmapped one as `<Esc>` and its key, as it
-/// does in insert mode. When the `<Esc>` leaves the keyboard on the
-/// surface, as it does answering a pending permission, the surface gets
-/// the key the `<Esc>` came off.
+/// leaves the surface, and the Meta key follows it whole to nvim, which
+/// runs a mapping of it (a desktop chord, a user's own `<M-h>`) and reads
+/// an unmapped one as `<Esc>` and its key, as it does in insert mode. At
+/// a prompt nvim relays, where nvim's own input loop reads the keys, the
+/// Meta key is sent in the `<Esc>`'s place. At a pending permission the
+/// question keeps the keyboard, and the Meta key answers nothing and types
+/// nothing.
 ///
-/// A chord nvim maps to one of view's own verbs, pressed in a surface that
-/// has a window of its own, goes to nvim with the cursor still in that
-/// window, so a verb acting on the focused tile acts on the surface.
+/// A chord nvim maps to one of view's own verbs goes to nvim whole from
+/// any surface of view's own (see [`forward_invocation`]).
 pub(super) fn route_unescaped(
     model: &mut Model,
     notation: String,
@@ -453,14 +466,22 @@ pub(super) fn route_unescaped(
             .key_bindings
             .resolve(model.pending_chord.as_deref(), &notation)
             .is_none();
-    // the verb acts on the tile the cursor stands in, so the chord leaves
-    // the cursor in the pane it was pressed in
-    if unbound && matches!(model.focus(), Focus::Pane(_)) && model.submit_hold.invokes(&notation) {
-        return engine_input(model, notation);
+    if unbound && !relays_a_prompt(model) {
+        if let Some(feature) = model.submit_hold.invokes(&notation).map(str::to_owned) {
+            return forward_invocation(model, vec![notation], &feature, modal_was_open);
+        }
     }
     match crate::native::keys::escaped_key(&notation) {
+        Some(_) if unbound && permission_owns_the_keys(model) => Vec::new(),
         Some(key) if unbound => {
             let mut effects = route_key(model, "<Esc>".to_string(), modal_was_open);
+            if let Some(sent) = effects.iter_mut().find_map(|effect| match effect {
+                Effect::Rpc(RpcCall::Input { notation: sent }) if sent == "<Esc>" => Some(sent),
+                _ => None,
+            }) {
+                *sent = notation;
+                return effects;
+            }
             // a windowed surface's `<Esc>` moves nvim's cursor, which
             // `focus()` sees only once nvim redraws it there
             let left_for_nvim = model.focus() == Focus::Engine
@@ -475,5 +496,143 @@ pub(super) fn route_unescaped(
             effects
         }
         _ => route_key(model, notation, modal_was_open),
+    }
+}
+
+/// Whether the focused overlay is a prompt nvim relays from its own input
+/// loop, which reads every key itself.
+fn relays_a_prompt(model: &mut Model) -> bool {
+    matches!(
+        model.focused_overlay_mut().map(|ov| &ov.kind),
+        Some(OverlayKind::Prompt(p))
+            if p.ai_trust_project_root().is_none()
+                && p.external_write_conflict_path().is_none()
+    )
+}
+
+/// Whether the agent panel has the keyboard with a permission request
+/// waiting on it, where only the keys [`reaches_past_a_panel_owner`] names
+/// and the question's own answers act.
+fn permission_owns_the_keys(model: &mut Model) -> bool {
+    let panel = match model.focus() {
+        Focus::Pane(NativeSurface::Agent) => true,
+        Focus::Native(_) => matches!(
+            model.focused_overlay_mut().map(|ov| &ov.kind),
+            Some(OverlayKind::Ai)
+        ),
+        _ => false,
+    };
+    panel && model.ai_panel().pending_permission.is_some()
+}
+
+/// Whether the focused surface answers keys of its own and types no text,
+/// so a key it does not answer may begin an invoking sequence.
+fn holds_sequences(model: &mut Model) -> bool {
+    match model.focus() {
+        Focus::Pane(NativeSurface::Tree | NativeSurface::Notifications) => true,
+        Focus::Native(_) => matches!(
+            model.focused_overlay_mut().map(|ov| &ov.kind),
+            Some(OverlayKind::Tree(_) | OverlayKind::MessageHistory(_))
+        ),
+        _ => false,
+    }
+}
+
+/// A key for a surface that answers keys of its own and types no text.
+///
+/// `answer` is the surface's own handler, `None` for a key it does not
+/// answer. Such a key that begins a key sequence nvim maps to a view
+/// invocation is held, and the keys after it with it, until they spell the
+/// whole sequence, which goes to nvim (see [`forward_invocation`]), or
+/// part from every sequence, when the held keys are the surface's own
+/// again. So `<Space>uf` in the tree floats it, and `<Space>ax` with no
+/// `<Space>a` sequence claimed opens the tree's create prompt on the `a`.
+fn sequence_key(
+    model: &mut Model,
+    notation: String,
+    modal_was_open: bool,
+    answer: fn(&mut Model, &str) -> Option<Vec<Effect>>,
+) -> Vec<Effect> {
+    let mut keys = model.submit_hold.take_sequence();
+    if keys.is_empty() {
+        if let Some(effects) = answer(model, &notation) {
+            return effects;
+        }
+        return match model.submit_hold.sequence(std::slice::from_ref(&notation)) {
+            Sequence::Complete(feature) => {
+                forward_invocation(model, vec![notation], &feature, modal_was_open)
+            }
+            Sequence::Prefix => {
+                model.submit_hold.keep_sequence(vec![notation]);
+                Vec::new()
+            }
+            Sequence::Neither => Vec::new(),
+        };
+    }
+    keys.push(notation);
+    match model.submit_hold.sequence(&keys) {
+        Sequence::Complete(feature) => forward_invocation(model, keys, &feature, modal_was_open),
+        Sequence::Prefix => {
+            model.submit_hold.keep_sequence(keys);
+            Vec::new()
+        }
+        Sequence::Neither => {
+            // the first key is one the surface answered nothing to
+            let mut effects = Vec::new();
+            let last = keys.pop();
+            for key in keys.into_iter().skip(1) {
+                effects.extend(answer(model, &key).unwrap_or_default());
+            }
+            if let Some(last) = last {
+                effects.extend(sequence_key(model, last, modal_was_open, answer));
+            }
+            effects
+        }
+    }
+}
+
+/// Sends `keys`, which spell a key nvim maps to a view invocation of
+/// `feature`, from a surface of view's own, with the typed-ahead hold armed
+/// behind them.
+///
+/// From a surface with a window of its own the cursor stays in that
+/// window, so a verb acting on the focused tile acts on the surface. A
+/// floating surface is left first, the way its `<Esc>` leaves it, so a
+/// verb that moves the cursor or the tabpage takes the keyboard with it.
+/// Two stay: a surface invoking its own feature, whose toggle is what
+/// closes it, and a panel with a permission request waiting, whose
+/// `<Esc>` would cancel the request.
+///
+/// A window-command prefix the tree or a panel was holding goes out ahead
+/// of the keys, as it does ahead of any other key those surfaces pass on.
+fn forward_invocation(
+    model: &mut Model,
+    keys: Vec<String>,
+    feature: &str,
+    modal_was_open: bool,
+) -> Vec<Effect> {
+    let prefix = model.pending_chord.take();
+    let mut effects = Vec::new();
+    if matches!(model.focus(), Focus::Pane(_)) {
+        if let Some(prefix) = prefix.filter(|prefix| prefix == "<C-w>") {
+            effects.extend(engine_input(model, prefix));
+        }
+    } else if focused_feature(model) != Some(feature) && !permission_owns_the_keys(model) {
+        effects.extend(route_key(model, "<Esc>".to_string(), modal_was_open));
+    }
+    for key in keys {
+        effects.extend(engine_input(model, key));
+    }
+    effects
+}
+
+/// The feature whose floating surface holds the keyboard.
+fn focused_feature(model: &mut Model) -> Option<&'static str> {
+    match model.focused_overlay_mut().map(|ov| &ov.kind)? {
+        OverlayKind::Tree(_) => Some("tree"),
+        OverlayKind::Ai => Some("ai"),
+        OverlayKind::MessageHistory(_) => Some("notifications"),
+        OverlayKind::Picker(_) => Some("picker"),
+        _ => None,
     }
 }

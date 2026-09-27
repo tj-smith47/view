@@ -1102,9 +1102,9 @@ pub(super) fn open_message_history(model: &mut Model) -> Vec<Effect> {
 /// `MessageHistoryState` a float would, so [`message_history_key`]'s own
 /// dispatch answers every key here exactly as it does for the floating
 /// overlay -- the pane is a placement of the same feature.
-pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Vec<Effect> {
+pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Option<Vec<Effect>> {
     if notation == "<Esc>" {
-        return vec![Effect::Rpc(RpcCall::FocusPreviousWindow)];
+        return Some(vec![Effect::Rpc(RpcCall::FocusPreviousWindow)]);
     }
     // `<C-w>` opens a real nvim window-command prefix, and this pane's own
     // resize chord (`<C-w>>`/`<C-w><`) is only two of the followers nvim
@@ -1116,34 +1116,34 @@ pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Vec<E
     let armed_before = model.pending_chord.as_deref() == Some("<C-w>");
     match take_binding(model, notation) {
         Some(Resolved::Act(Action::Resize(direction))) => {
-            return resize_windowed_stream(model, direction.widens());
+            return Some(resize_windowed_stream(model, direction.widens()));
         }
         // See `tree_key`'s matching arm: a follower that re-arms an
         // already-armed prefix is nvim's own doubled `<C-w>`, unarmed
         // and forwarded as the pair.
         Some(Resolved::Pending) if armed_before => {
             model.pending_chord = None;
-            return vec![
+            return Some(vec![
                 Effect::Rpc(RpcCall::Input {
                     notation: "<C-w>".to_string(),
                 }),
                 Effect::Rpc(RpcCall::Input {
                     notation: "<C-w>".to_string(),
                 }),
-            ];
+            ]);
         }
-        Some(Resolved::Pending) => return Vec::new(),
+        Some(Resolved::Pending) => return Some(Vec::new()),
         _ => {}
     }
     if armed_before {
-        return vec![
+        return Some(vec![
             Effect::Rpc(RpcCall::Input {
                 notation: "<C-w>".to_string(),
             }),
             Effect::Rpc(RpcCall::Input {
                 notation: notation.to_string(),
             }),
-        ];
+        ]);
     }
     message_history_key(model, notation)
 }
@@ -1236,7 +1236,7 @@ const HISTORY_CHROME_ROWS: u16 = 4;
 /// `model.tree_mut()` fresh instead, since a bound `&mut TreeState` would
 /// keep `model` borrowed across the `pop_focused_overlay` and `close_tree`
 /// calls the `<CR>` and `<Esc>` arms need.
-pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
+pub(super) fn tree_key(model: &mut Model, notation: &str) -> Option<Vec<Effect>> {
     // A windowed tree's own `<C-w>` chord is held the same way the
     // notification stream's is (see `notifications_pane_key`): the prefix
     // waits here after arming, so a follower this build resolves as its own
@@ -1248,10 +1248,10 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     match take_binding(model, notation) {
         Some(Resolved::Act(Action::Resize(direction))) => {
             if !model.resize_tree(direction.widens()) {
-                return Vec::new();
+                return Some(Vec::new());
             }
             model.dirty = true;
-            return resize_windowed_tree(model);
+            return Some(resize_windowed_tree(model));
         }
         // The composer's line break is the agent panel's alone,
         // and the tree answers it the way it answers any key no
@@ -1267,29 +1267,29 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         // nvim's own chord.
         Some(Resolved::Pending) if armed_before => {
             model.pending_chord = None;
-            return vec![
+            return Some(vec![
                 Effect::Rpc(RpcCall::Input {
                     notation: "<C-w>".to_string(),
                 }),
                 Effect::Rpc(RpcCall::Input {
                     notation: "<C-w>".to_string(),
                 }),
-            ];
+            ]);
         }
-        Some(Resolved::Pending) => return Vec::new(),
+        Some(Resolved::Pending) => return Some(Vec::new()),
         None => {}
     }
     if armed_before {
-        return vec![
+        return Some(vec![
             Effect::Rpc(RpcCall::Input {
                 notation: "<C-w>".to_string(),
             }),
             Effect::Rpc(RpcCall::Input {
                 notation: notation.to_string(),
             }),
-        ];
+        ]);
     }
-    match notation {
+    Some(match notation {
         // leaving a windowed tree is leaving its window, and the tile
         // stands: nvim's own layout is what put it there, and a key that
         // dissolved a window the user split for themselves would be view
@@ -1344,7 +1344,7 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
                     // opens in the window it runs in, so the file would
                     // land inside the sidebar
                     if model.tree_is_windowed() {
-                        return vec![Effect::Rpc(RpcCall::FocusPreviousWindow), open];
+                        return Some(vec![Effect::Rpc(RpcCall::FocusPreviousWindow), open]);
                     }
                     model.pop_focused_overlay();
                     vec![open]
@@ -1367,7 +1367,7 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         // this prompt holds focus.
         "a" => {
             let Some(t) = model.tree_mut() else {
-                return Vec::new();
+                return Some(Vec::new());
             };
             let generation = t.generation();
             vec![Effect::Rpc(RpcCall::TreeCreatePrompt { generation })]
@@ -1379,13 +1379,13 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         // a prompt's answer would have nothing to act on.
         "r" => {
             let Some(t) = model.tree_mut() else {
-                return Vec::new();
+                return Some(Vec::new());
             };
             let Some(entry) = t.selected_entry() else {
-                return Vec::new();
+                return Some(Vec::new());
             };
             if entry.is_dir {
-                return Vec::new();
+                return Some(Vec::new());
             }
             let current_name = entry
                 .path
@@ -1393,7 +1393,7 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let Some(old_path) = t.selected_path() else {
-                return Vec::new();
+                return Some(Vec::new());
             };
             let generation = t.generation();
             vec![Effect::Rpc(RpcCall::TreeRenamePrompt {
@@ -1406,16 +1406,16 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         // reason.
         "d" => {
             let Some(t) = model.tree_mut() else {
-                return Vec::new();
+                return Some(Vec::new());
             };
             let Some(entry) = t.selected_entry() else {
-                return Vec::new();
+                return Some(Vec::new());
             };
             if entry.is_dir {
-                return Vec::new();
+                return Some(Vec::new());
             }
             let Some(path) = t.selected_path() else {
-                return Vec::new();
+                return Some(Vec::new());
             };
             let generation = t.generation();
             vec![Effect::Rpc(RpcCall::TreeDeleteConfirm {
@@ -1423,8 +1423,8 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Vec<Effect> {
                 path: path_to_wire(&path),
             })]
         }
-        _ => Vec::new(),
-    }
+        _ => return None,
+    })
 }
 
 /// Every key this overlay answers, with what the docs page says about it.
@@ -1470,7 +1470,9 @@ pub(crate) const HISTORY_KEYS: &[(&str, &str)] = &[
 /// (`Messages::dismiss_read_sticky`), and this is how a user takes down the
 /// one line they are done with. nvim's own sticky errors carry no family,
 /// so `d` no-ops on them and `<Esc>` is their way out.
-pub(super) fn message_history_key(model: &mut Model, notation: &str) -> Vec<Effect> {
+///
+/// `None` for a key the overlay does not answer.
+pub(super) fn message_history_key(model: &mut Model, notation: &str) -> Option<Vec<Effect>> {
     // `gg` reaches the router as two `g` events -- `encode_key` emits one
     // notation per key event -- and `dispatch` drops the shared chord
     // prefix for every overlay but the sidebars, so the first half is held
@@ -1480,7 +1482,11 @@ pub(super) fn message_history_key(model: &mut Model, notation: &str) -> Vec<Effe
     // the two keys that reach past the overlay answer first, so neither is
     // holding a borrow of it while it touches the message log beside it
     match notation {
-        "y" => return copy_selection(history(model).and_then(MessageHistoryState::selected_text)),
+        "y" => {
+            return Some(copy_selection(
+                history(model).and_then(MessageHistoryState::selected_text),
+            ))
+        }
         // A dismissal retracts a standing notice; it never edits the
         // history, which is the record of what was said and stays true
         // whether or not the line is still up. An entry with no family --
@@ -1492,13 +1498,13 @@ pub(super) fn message_history_key(model: &mut Model, notation: &str) -> Vec<Effe
             if let Some(family) = family {
                 model.dirty |= model.engine.withdraw_native_notice(&family);
             }
-            return Vec::new();
+            return Some(Vec::new());
         }
         _ => {}
     }
     let page = history_page(model);
     let Some(state) = history_mut(model) else {
-        return Vec::new();
+        return Some(Vec::new());
     };
     let moved = match notation {
         "j" => state.move_selection(1),
@@ -1511,10 +1517,10 @@ pub(super) fn message_history_key(model: &mut Model, notation: &str) -> Vec<Effe
             false
         }
         "G" => state.select(usize::MAX),
-        _ => false,
+        _ => return None,
     };
     model.dirty |= moved;
-    Vec::new()
+    Some(Vec::new())
 }
 
 /// The half-page `<C-d>`/`<C-u>` move, derived from the open overlay's own
