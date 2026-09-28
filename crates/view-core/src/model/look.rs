@@ -233,21 +233,44 @@ impl super::Model {
     }
 }
 
-/// `overlay`'s box on a `term_w` by `term_h` band, grown to the rows a
+/// `overlay`'s box on a `term_w` by `band_h` band, grown to the rows a
 /// modal's wrapped message needs. The message wraps at the width the share
 /// gives, so those rows are only known once that width is.
-pub(super) fn grown_rect(overlay: &super::Overlay, term_w: u16, term_h: u16) -> OverlayRect {
+///
+/// A modal holds the keyboard, so one whose rows outgrow the band is
+/// placed on the whole `term_h` instead, over the rows around the band, and
+/// the second answer says so. A modal box too short for its frame and a
+/// row inside it is one row tall, which is drawn unframed.
+pub(super) fn grown_rect(
+    overlay: &super::Overlay,
+    term_w: u16,
+    band_h: u16,
+    term_h: u16,
+) -> (OverlayRect, bool) {
     let view = match &overlay.kind {
         super::OverlayKind::Prompt(state) => state.view(),
         super::OverlayKind::EngineBusy(state) => state.view(),
-        _ => return overlay.geometry.rect(term_w, term_h),
+        _ => return (overlay.geometry.rect(term_w, band_h), false),
     };
-    let width = overlay.geometry.rect(term_w, term_h).width;
+    let width = overlay.geometry.rect(term_w, band_h).width;
     let inner = crate::native::geometry::interior_text_width(width);
-    overlay
-        .geometry
-        .with_min_height(view.rows_at(inner).saturating_add(2))
-        .rect(term_w, term_h)
+    let needed = view.rows_at(inner).saturating_add(2);
+    let grown = overlay.geometry.with_min_height(needed);
+    let in_band = grown.rect(term_w, band_h);
+    let (rect, whole) = if in_band.height < needed && band_h < term_h {
+        (grown.rect(term_w, term_h), true)
+    } else {
+        (in_band, false)
+    };
+    if rect.height >= 3 {
+        return (rect, whole);
+    }
+    let short = OverlayRect {
+        row: rect.row.saturating_add(rect.height.saturating_sub(1) / 2),
+        height: rect.height.min(1),
+        ..rect
+    };
+    (short, whole)
 }
 
 #[cfg(test)]

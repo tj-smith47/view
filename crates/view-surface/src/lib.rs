@@ -1550,10 +1550,8 @@ fn prompt_cursor(model: &Model, overlay: &Overlay, state: &PromptState) -> (u16,
     let prefix_cols =
         u16::try_from(format!("{} ", overlay::PROMPT_MARK).chars().count()).unwrap_or(2);
     let input_len = u16::try_from(view.input.chars().count()).unwrap_or(u16::MAX);
-    let fit = view.fit(
-        view_core::native::geometry::interior_text_width(rect.width),
-        rect.height.saturating_sub(2),
-    );
+    let (text_width, interior) = overlay::interior_size(rect.width, rect.height);
+    let fit = view.fit(text_width, interior);
     let row = rect
         .row
         .saturating_add(row_off)
@@ -3734,13 +3732,19 @@ mod tests {
         );
     }
 
-    /// The real trust prompt on a 60-column terminal `height` rows tall:
-    /// its box's rows as text, borders trimmed, and the index of the row the
-    /// caret stands on.
-    fn clamped_trust_prompt(height: u16) -> (Vec<String>, usize) {
+    /// The real trust prompt on a 60-column terminal `height` rows tall,
+    /// with a tabline and a statusline row when `chrome` is set: its box's
+    /// rows as text, borders trimmed, and the index of the row the caret
+    /// stands on.
+    fn clamped_trust_prompt(height: u16, chrome: bool) -> (Vec<String>, usize) {
         let mut model = model_with_grid(60, height);
         model.term_width = 60;
         model.term_height = height;
+        if chrome {
+            model.showtabline = 2;
+            model.statusline_enabled = true;
+            assert_eq!(model.chrome_rows() + model.statusline_rows(), 2);
+        }
         model.cwd = std::path::PathBuf::from(
             "/home/someone/work/clients/a-project-with-a-long-name/services/the-api",
         );
@@ -3759,13 +3763,16 @@ mod tests {
             .find(|l| matches!(l.kind, LayerKind::Prompt(_)))
             .expect("the trust prompt is open");
         let rect = layer.rect;
+        assert!(rect.row + rect.height <= height, "{rect:?} is on screen");
+        let (top, left) = overlay::interior_origin(rect.width, rect.height);
+        let (_, interior) = overlay::interior_size(rect.width, rect.height);
         assert!(
-            cursor.row > rect.row && cursor.row < rect.row + rect.height - 1,
+            cursor.row >= rect.row + top && cursor.row < rect.row + top + interior,
             "caret row {} must be an interior row of the box {rect:?}",
             cursor.row
         );
         assert!(
-            cursor.col > rect.col && cursor.col < rect.col + rect.width,
+            cursor.col >= rect.col + left && cursor.col < rect.col + rect.width,
             "caret col {} must be inside the box {rect:?}",
             cursor.col
         );
@@ -3793,7 +3800,7 @@ mod tests {
     /// the input line.
     #[test]
     fn a_clamped_trust_prompt_keeps_its_input_line_and_choices() {
-        let (texts, caret) = clamped_trust_prompt(8);
+        let (texts, caret) = clamped_trust_prompt(8, false);
         assert!(
             texts[caret].starts_with(overlay::PROMPT_MARK),
             "the caret row is the input line: {texts:#?}"
@@ -3802,21 +3809,61 @@ mod tests {
             texts[caret - 1].ends_with('…'),
             "the question's last shown row says it was cut: {texts:#?}"
         );
+        assert_eq!(
+            texts[caret - 1].chars().count(),
+            texts[caret - 2].chars().count(),
+            "the cut row is filled to the width of the row above it: {texts:#?}"
+        );
         assert!(
             texts[caret + 1].ends_with("Yes") && texts[caret + 2].ends_with("No"),
             "both choices follow the input line: {texts:#?}"
         );
     }
 
-    /// A terminal too short for the input line and the choices keeps the
-    /// input line, and the caret on it.
+    /// A question cut to one row shows it filled past its first word, where
+    /// the wrap alone would leave `Trust` by itself.
     #[test]
-    fn a_trust_prompt_too_short_for_its_choices_keeps_its_input_line() {
-        let (texts, caret) = clamped_trust_prompt(4);
+    fn a_question_cut_to_one_row_fills_that_row() {
+        let (texts, caret) = clamped_trust_prompt(6, false);
+        assert_eq!(caret, 2, "one question row above the input: {texts:#?}");
+        assert!(
+            texts[1].starts_with("Trust /home/") && texts[1].ends_with('…'),
+            "the cut row is filled past its first word: {texts:#?}"
+        );
+    }
+
+    /// A terminal whose tabline and statusline leave the prompt too few
+    /// rows: the modal covers them, keeps its frame, and holds the input
+    /// line with both choices on the row under it.
+    #[test]
+    fn a_trust_prompt_covers_the_chrome_to_keep_its_choices() {
+        let (texts, caret) = clamped_trust_prompt(4, true);
+        assert_eq!(
+            texts.len(),
+            4,
+            "the box takes the whole terminal: {texts:#?}"
+        );
+        assert_eq!(
+            caret, 1,
+            "the caret row is the first interior row: {texts:#?}"
+        );
         assert!(
             texts[caret].starts_with(overlay::PROMPT_MARK),
             "the caret row is the input line: {texts:#?}"
         );
+        assert!(
+            texts[caret + 1].contains("Yes") && texts[caret + 1].contains("No"),
+            "both choices sit on the row under the input line: {texts:#?}"
+        );
+    }
+
+    /// Below three rows the prompt is its input line alone, unframed, with
+    /// the caret on it.
+    #[test]
+    fn a_trust_prompt_on_two_rows_is_its_input_line() {
+        let (texts, caret) = clamped_trust_prompt(2, true);
+        assert_eq!(texts, [overlay::PROMPT_MARK.to_string()], "{texts:#?}");
+        assert_eq!(caret, 0);
     }
 
     /// The composer wraps, and the caret follows the wrap: a prompt past the

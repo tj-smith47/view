@@ -2733,13 +2733,24 @@ mod tests {
         assert!(first < last && last < yes, "{}", screen.join("\n"));
     }
 
-    /// The trust prompt painted on a 60-column terminal `height` rows tall:
-    /// every screen row as text, and the row the caret stands on.
-    fn short_trust_prompt(height: u16) -> (Vec<String>, usize) {
+    /// The trust prompt painted on a 60-column terminal `height` rows tall,
+    /// with a tabline and a statusline row when `chrome` is set: every
+    /// screen row as text, and the row the caret stands on.
+    fn short_trust_prompt(height: u16, chrome: bool) -> (Vec<String>, usize) {
         let mut model = Model::with_term_size(60, height);
-        model
-            .engine
-            .apply_grid(GridOp::Resize { width: 60, height });
+        if chrome {
+            let mut surfaces = view_core::native::ext::shipped_multigrid();
+            surfaces.push(view_core::native::ext::Ext::Tabline);
+            model.attach_surfaces(surfaces);
+            model.showtabline = 2;
+            model.statusline_enabled = true;
+            assert_eq!(model.chrome_rows() + model.statusline_rows(), 2);
+        }
+        let (grid_w, grid_h) = model.grid_target();
+        model.engine.apply_grid(GridOp::Resize {
+            width: grid_w,
+            height: grid_h,
+        });
         model.cwd = std::path::PathBuf::from(
             "/home/someone/work/clients/a-project-with-a-long-name/services/the-api",
         );
@@ -2770,7 +2781,7 @@ mod tests {
     /// the caret is on the input line.
     #[test]
     fn a_short_terminal_paints_the_trust_prompts_answers() {
-        let (screen, caret) = short_trust_prompt(8);
+        let (screen, caret) = short_trust_prompt(8, false);
         let shown = screen.join("\n");
         assert!(
             is_empty_input_line(&screen[caret]),
@@ -2788,15 +2799,41 @@ mod tests {
         );
     }
 
-    /// Too short for the input line and the choices, the trust prompt
-    /// paints the input line with the caret on it.
+    /// A tabline and a statusline leave the trust prompt too few rows, so
+    /// it covers them: its frame, its input line with the caret on it, and
+    /// both choices on the row under it.
     #[test]
-    fn a_terminal_too_short_for_the_choices_paints_the_input_line() {
-        let (screen, caret) = short_trust_prompt(4);
+    fn a_short_terminal_with_chrome_paints_the_trust_prompts_frame_and_answers() {
+        let (screen, caret) = short_trust_prompt(4, true);
+        let shown = screen.join("\n");
+        assert!(
+            screen[0].contains("Confirm") && screen[3].contains(['╰', '+']),
+            "the frame covers the tabline and the statusline:\n{shown}"
+        );
+        assert_eq!(caret, 1, "the caret row is the input line:\n{shown}");
         assert!(
             is_empty_input_line(&screen[caret]),
-            "the caret row is the input line:\n{}",
-            screen.join("\n")
+            "the caret row is the input line:\n{shown}"
+        );
+        assert!(
+            screen[2].contains("> Yes") && screen[2].contains("No"),
+            "both choices sit under the input line:\n{shown}"
+        );
+    }
+
+    /// Below three rows the trust prompt paints its input line alone,
+    /// unframed, with the caret on it.
+    #[test]
+    fn a_two_row_terminal_paints_the_trust_prompts_input_line() {
+        let (screen, caret) = short_trust_prompt(2, true);
+        let shown = screen.join("\n");
+        assert!(
+            is_empty_input_line(&screen[caret]),
+            "the caret row is the input line:\n{shown}"
+        );
+        assert!(
+            !shown.contains("Confirm"),
+            "no frame carries a title:\n{shown}"
         );
     }
 

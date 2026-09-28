@@ -1304,13 +1304,19 @@ impl Model {
             .saturating_sub(top)
             .saturating_sub(self.statusline_rows())
             .saturating_sub(foot);
-        let rect = look::grown_rect(
+        let (rect, whole) = look::grown_rect(
             overlay,
             self.term_width.saturating_sub(ring_cols * 2),
             content.saturating_sub(ring_rows * 2),
+            self.term_height,
         );
+        let top = if whole {
+            0
+        } else {
+            top.saturating_add(ring_rows)
+        };
         OverlayRect {
-            row: rect.row.saturating_add(top).saturating_add(ring_rows),
+            row: rect.row.saturating_add(top),
             col: rect.col.saturating_add(ring_cols),
             ..rect
         }

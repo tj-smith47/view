@@ -605,38 +605,87 @@ impl PromptView {
     }
 
     /// How this prompt's rows fit an interior `width` cells wide and
-    /// `height` rows tall. The input line and the choices are laid first
-    /// and the question takes the rows left above them, cut from its end
-    /// with its last shown row ending in `…`. The rule under the input line
-    /// is drawn only on a spare row. An interior too short for the input
-    /// line and every choice holds the input line alone.
+    /// `height` rows tall. The input line and the choices are laid first,
+    /// one row per choice, or all on one row when the interior has a row
+    /// for them and too few for one each. The question takes the rows left
+    /// above them. A cut question's last shown row is filled from the rest
+    /// of the question up to `width` and ends in `…`. The rule under the
+    /// input line is drawn only on a spare row. A one-row interior holds
+    /// the input line alone.
     #[must_use]
     pub fn fit(&self, width: u16, height: u16) -> PromptFit {
         let height = usize::from(height);
-        let fixed = 1 + self.choices.len();
+        let count = self.choices.len();
+        let (choices, fixed) = if count == 0 || height > count {
+            (PromptChoices::Stacked, 1 + count)
+        } else if height >= 2 {
+            (PromptChoices::Inline, 2)
+        } else {
+            return PromptFit::default();
+        };
         if height < fixed {
             return PromptFit::default();
         }
         let room = height - fixed;
         let mut message = self.message_rows(width);
         if message.len() <= room {
-            let rule = room > message.len();
+            let rule = room > message.len() && choices == PromptChoices::Stacked;
             return PromptFit {
                 message,
-                choices: true,
+                choices,
                 rule,
             };
         }
         message.truncate(room);
-        if let Some(last) = message.last_mut() {
-            *last = ending_in_mark(last, width);
+        if !message.is_empty() {
+            let shown = message.len() - 1;
+            let rest = self.message_after(&message[..shown]);
+            message[shown] = if super::text::text_width(&rest) <= width {
+                rest
+            } else {
+                ending_in_mark(&rest, width)
+            };
         }
         PromptFit {
             message,
-            choices: true,
+            choices,
             rule: false,
         }
     }
+
+    /// The question past the rows `shown`, on one line: each wrapped row
+    /// is a run of the question, so each is found in turn from where the
+    /// last one ended.
+    fn message_after(&self, shown: &[String]) -> String {
+        let mut at = 0;
+        for row in shown {
+            if let Some(found) = self
+                .message
+                .get(at..)
+                .and_then(|rest| rest.find(row.as_str()))
+            {
+                at += found + row.len();
+            }
+        }
+        self.message
+            .get(at..)
+            .unwrap_or_default()
+            .trim_start()
+            .replace('\n', " ")
+    }
+}
+
+/// How [`PromptView::fit`] lays a prompt's choices.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PromptChoices {
+    /// Not laid: the interior holds the input line alone.
+    #[default]
+    Hidden,
+    /// One row per choice under the input line.
+    Stacked,
+    /// Every choice on the one row under the input line.
+    Inline,
 }
 
 /// A prompt laid into one interior, as [`PromptView::fit`] cut it. Paint
@@ -646,8 +695,8 @@ impl PromptView {
 pub struct PromptFit {
     /// The question rows shown above the input line.
     pub message: Vec<String>,
-    /// Whether the choices are laid under the input line.
-    pub choices: bool,
+    /// How the choices are laid under the input line.
+    pub choices: PromptChoices,
     /// Whether the rule between the input line and the choices is drawn.
     pub rule: bool,
 }
@@ -904,37 +953,52 @@ mod tests {
     use super::*;
 
     /// Every interior height a two-choice confirm can be given: the input
-    /// line and both choices are laid whenever they fit, the question takes
-    /// what is left, and a cut question's last row ends in `…` inside the
-    /// row's width.
+    /// line and both choices are laid whenever they fit, on one row when
+    /// only one is left for them, the question takes what is left, and a
+    /// cut question's last row is filled from the rest of the question and
+    /// ends in `…` inside the row's width.
     #[test]
     fn a_short_interior_cuts_the_question_and_keeps_the_answers() {
         let view = PromptView::new("Confirm", "one two three four five six seven")
             .with_choices(vec!["Yes".to_string(), "No".to_string()]);
         let whole = view.message_rows(9);
-        assert_eq!(whole.len(), 4, "{whole:?}");
+        assert_eq!(whole, ["one two", "three", "four five", "six seven"]);
+        let cut_rows = ["one two…", "three fo…", "four fiv…"];
         for height in 0..10u16 {
             let fit = view.fit(9, height);
             let room = usize::from(height).saturating_sub(3);
-            if height < 3 {
+            if height < 2 {
                 assert_eq!(fit, PromptFit::default(), "height {height}");
                 continue;
             }
-            assert!(fit.choices, "height {height}");
+            if height == 2 {
+                assert_eq!(fit.choices, PromptChoices::Inline, "height {height}");
+                assert!(fit.message.is_empty() && !fit.rule, "height {height}");
+                continue;
+            }
+            assert_eq!(fit.choices, PromptChoices::Stacked, "height {height}");
             assert_eq!(fit.message.len(), room.min(4), "height {height}");
             assert_eq!(fit.rule, room > 4, "height {height}");
-            let cut = room < 4;
-            let last = fit.message.last();
-            assert_eq!(
-                last.is_some_and(|row| row.ends_with('…')),
-                cut && room > 0,
-                "height {height}: {:?}",
-                fit.message
-            );
+            let last = fit.message.last().map(String::as_str);
+            match room {
+                0 => assert_eq!(last, None),
+                1..=3 => assert_eq!(last, Some(cut_rows[room - 1]), "height {height}"),
+                _ => assert_eq!(last, Some("six seven"), "height {height}"),
+            }
             for row in &fit.message {
                 assert!(super::super::text::text_width(row) <= 9, "{row:?}");
             }
         }
+    }
+
+    /// A free-text prompt keeps its input line on every interior of a row
+    /// or more.
+    #[test]
+    fn a_free_text_prompt_keeps_its_input_line_on_one_row() {
+        let view = PromptView::new("Rename", "new name");
+        assert_eq!(view.fit(9, 0), PromptFit::default());
+        let one = view.fit(9, 1);
+        assert!(one.message.is_empty() && one.choices == PromptChoices::Stacked);
     }
 
     #[test]

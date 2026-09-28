@@ -21,8 +21,8 @@ use unicode_width::UnicodeWidthChar;
 use view_core::model::TermCaps;
 use view_core::native::geometry::LIST_MARKER_COLS;
 use view_core::native::views::{
-    AiPanelView, GitMark, PaletteRow, PaletteView, PickerView, PromptView, Span, StatuslineView,
-    StyleRole, TreeRow, TreeView,
+    AiPanelView, GitMark, PaletteRow, PaletteView, PickerView, PromptChoices, PromptView, Span,
+    StatuslineView, StyleRole, TreeRow, TreeView,
 };
 
 use crate::LayerKind;
@@ -181,19 +181,18 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
     if width == 0 || height == 0 {
         return Rows::default();
     }
+    let (text_width, interior) = interior_size(width, height);
     if width < 2 || height < 2 {
-        let Some(body) = body(kind, width, height) else {
+        let Some(body) = body(kind, text_width, interior) else {
             return Rows::default();
         };
-        return content_rows(kind, &body, width, height, borders);
+        return content_rows(kind, &body, text_width, interior, borders);
     }
 
     // one blank column inside each vertical edge, dropped entirely when the
     // rect is too narrow to spare it: padding that eats the last two cells
     // of content is worse than an unpadded box
     let pad = u16::from(width >= 6);
-    let text_width = view_core::native::geometry::interior_text_width(width);
-    let interior = height - 2;
     let Some(body) = body(kind, text_width, interior) else {
         return Rows::default();
     };
@@ -254,6 +253,20 @@ pub(crate) fn interior_origin(width: u16, height: u16) -> (u16, u16) {
     }
     let pad = u16::from(width >= 6);
     (1, 1 + pad)
+}
+
+/// The text width and rows [`rows`] lays a `width` by `height` rect's
+/// content into: the whole rect when it is too small for a frame, the
+/// interior inside the frame and its padding otherwise.
+#[must_use]
+pub(crate) fn interior_size(width: u16, height: u16) -> (u16, u16) {
+    if width < 2 || height < 2 {
+        return (width, height);
+    }
+    (
+        view_core::native::geometry::interior_text_width(width),
+        height - 2,
+    )
 }
 
 /// Where the windowed palette band's first content cell lands relative to
@@ -945,6 +958,9 @@ fn prompt_body(view: &PromptView, width: u16, height: u16) -> Body {
         "{PROMPT_MARK} {}",
         view.input
     ))));
+    if fit.choices == PromptChoices::Inline {
+        header.push(Line::Text(plain_spans(inline_choices(view))));
+    }
     Body {
         title: view.title.clone(),
         // the same shape every other overlay with a text field uses: the
@@ -956,7 +972,7 @@ fn prompt_body(view: &PromptView, width: u16, height: u16) -> Body {
         items: view
             .choices
             .iter()
-            .filter(|_| fit.choices)
+            .filter(|_| fit.choices == PromptChoices::Stacked)
             .cloned()
             .map(plain_spans)
             .map(Line::Text)
@@ -967,6 +983,25 @@ fn prompt_body(view: &PromptView, width: u16, height: u16) -> Body {
         rule: fit.rule,
         footer: Vec::new(),
     }
+}
+
+/// Every choice on one row, each behind the marker it would carry on a row
+/// of its own, since the row highlight cannot say which answer it means.
+fn inline_choices(view: &PromptView) -> String {
+    let marked: Vec<String> = view
+        .choices
+        .iter()
+        .enumerate()
+        .map(|(i, choice)| {
+            let marker = if view.selected == Some(i) {
+                SELECTED_MARK
+            } else {
+                UNSELECTED_MARK
+            };
+            format!("{marker}{choice}")
+        })
+        .collect();
+    marked.join(" ")
 }
 
 fn palette_body(view: &PaletteView) -> Body {
