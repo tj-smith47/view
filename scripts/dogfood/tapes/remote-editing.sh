@@ -34,7 +34,7 @@ REMOTE_HOST=${REMOTE%%:*}
 SOCKET=view-cap-remote-$$
 . "$HERE/../lib.sh"
 
-BIN="${VIEW_BIN:-$(newest_build "$ROOT" view)}"
+BIN=$(absolute_path "${VIEW_BIN:-$(newest_build "$ROOT" view)}")
 [ -n "$BIN" ] || { echo "remote-editing.sh: no view binary; build one or set VIEW_BIN" >&2; exit 2; }
 command -v tmux >/dev/null 2>&1 || { echo "remote-editing.sh: tmux is not on PATH" >&2; exit 2; }
 command -v ssh >/dev/null 2>&1 || { echo "remote-editing.sh: ssh is not on PATH" >&2; exit 2; }
@@ -167,6 +167,6 @@ SENTENCE='Every key you press shows up at once, on a file on another machine.'
   tmux -L "$SOCKET" send-keys -t cap Escape
 ) &
 
-record_gif "$SOCKET" "$OUT" 11 220 50
+record_gif "$SOCKET" "$OUT" 9 220 50
 
 echo "remote-editing.sh: recorded $OUT" >&2

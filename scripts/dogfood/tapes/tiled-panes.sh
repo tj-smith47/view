@@ -20,13 +20,21 @@ OUT="${1:-$ROOT/assets/tapes/tiled-panes.gif}"
 SOCKET=view-cap-tiles-$$
 . "$HERE/../lib.sh"
 
-BIN="${VIEW_BIN:-$(newest_build "$ROOT" view)}"
+BIN=$(absolute_path "${VIEW_BIN:-$(newest_build "$ROOT" view)}")
 [ -n "$BIN" ] || { echo "tiled-panes.sh: no view binary; build one or set VIEW_BIN" >&2; exit 2; }
 command -v tmux >/dev/null 2>&1 || { echo "tiled-panes.sh: tmux is not on PATH" >&2; exit 2; }
 
 recording_state_home
 
 cd -- "$ROOT"
+# rust-analyzer checks the workspace as look.rs opens, and a check that has
+# to build lands its highlighting seconds into the recording, so the
+# target dir lib.sh names is brought up to date first
+if command -v cargo >/dev/null 2>&1; then
+  cargo check --workspace --all-targets --quiet ||
+    echo "tiled-panes.sh: cargo check failed, so rust-analyzer's own check" \
+      "may still be running while the tape records" >&2
+fi
 # --panes tiles: under a tiling desktop "auto" answers nvim, and the tape
 # shows the frames whichever desktop records it
 new_cap_session "$SOCKET" 220 50 -- "$BIN" --panes tiles \
@@ -47,7 +55,7 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" --panes tiles \
 ) &
 
 BODY='Show
-Sleep 12500ms'
-record_gif "$SOCKET" "$OUT" 12 220 50 "$BODY"
+Sleep 8500ms'
+record_gif "$SOCKET" "$OUT" 8 220 50 "$BODY"
 
 echo "tiled-panes.sh: recorded $OUT" >&2

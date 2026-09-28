@@ -30,9 +30,9 @@ OUT="${1:-$ROOT/assets/tapes/agent-panel.gif}"
 SOCKET=view-cap-agent-$$
 . "$HERE/../lib.sh"
 
-BIN="${VIEW_BIN:-$(newest_build "$ROOT" view)}"
+BIN=$(absolute_path "${VIEW_BIN:-$(newest_build "$ROOT" view)}")
 [ -n "$BIN" ] || { echo "agent-panel.sh: no view binary; build one or set VIEW_BIN" >&2; exit 2; }
-STUB_BIN="${VIEW_AI_STUB_BIN:-$(newest_build "$ROOT" view-ai-stub-agent)}"
+STUB_BIN=$(absolute_path "${VIEW_AI_STUB_BIN:-$(newest_build "$ROOT" view-ai-stub-agent)}")
 [ -n "$STUB_BIN" ] || {
   echo "agent-panel.sh: no view-ai-stub-agent binary; build one with" \
     "cargo build --release -p view-ai --features test-support" \
@@ -85,6 +85,8 @@ new_cap_session "$SOCKET" 220 50 -- \
   tmux -L "$SOCKET" send-keys -t cap 'propose' Enter
 ) &
 
-record_gif "$SOCKET" "$OUT" 10 220 50
+BODY='Show
+Sleep 4700ms'
+record_gif "$SOCKET" "$OUT" 5 220 50 "$BODY"
 
 echo "agent-panel.sh: recorded $OUT" >&2

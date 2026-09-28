@@ -291,6 +291,25 @@ newest_build() {
   printf '%s' "$found"
 }
 
+# WHY: a file opened under a person's config starts rust-analyzer, whose
+# cargo check makes and removes temp directories under the target dir, and
+# a file tree watching the recorded repo raises a notice naming one that
+# vanished. The editor inherits this from the tmux server the capture
+# starts, so its checks build in a cache outside the tree, warm from one
+# run to the next.
+CARGO_TARGET_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/view-dogfood-tapes/target"
+export CARGO_TARGET_DIR
+
+# WHY: a tape changes directory before it starts the editor, so a binary the
+# caller named relative to its own directory is resolved first. Prints an
+# empty path as it is. Usage: absolute_path PATH
+absolute_path() {
+  case "$1" in
+    (/*|'') printf '%s' "$1" ;;
+    (*) printf '%s/%s' "$PWD" "$1" ;;
+  esac
+}
+
 RECORDER_ATTACHED=view-recorder-attached
 SETTLED_MARK=view-tape-settled
 # the mark stands long enough for the recorder's screen poll to see it, and
