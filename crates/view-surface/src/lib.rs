@@ -1530,17 +1530,17 @@ fn ai_cursor(model: &Model, layers: &[Layer]) -> Option<CursorSpec> {
     })
 }
 
-/// The confirm-prompt's own cursor position: on the input row
-/// [`overlay::prompt_body`] draws before its choice list (every row the
-/// message wrapped to first, then `"> "` plus the answer typed so far),
-/// past the end of what has been typed -- correct because [`PromptState::accepts`]
-/// never permits mid-string editing, only append/backspace/submit/cancel,
-/// so the caret is always at the end of `input`. Resolves through
-/// [`Model::overlay_rect`], the same rect [`native_layer`] already paints
-/// the Prompt overlay's own box at (offset-unaware, like every other native
-/// overlay today) -- matching that painted position takes priority over
-/// also closing the box's own separate chrome-offset gap, which is not this
-/// fix's scope.
+/// The confirm-prompt's own cursor position. It stands on the input row
+/// [`overlay::prompt_body`] draws before its choice list: every row the
+/// message wrapped to comes first, then `"> "` plus the answer typed so far.
+/// The caret sits past the end of what has been typed.
+/// [`PromptState::accepts`] permits only append, backspace, submit and
+/// cancel, so the caret is always at the end of `input`.
+///
+/// Resolves through [`Model::overlay_rect`], the rect [`native_layer`]
+/// paints the Prompt overlay's box at. A box clamped to a short terminal
+/// can leave the input row below its last interior row, so the caret row is
+/// held to that last interior row.
 ///
 /// Takes the overlay its caller already resolved rather than looking one up
 /// itself: the stack's top and the overlay holding the keyboard are not the
@@ -1559,7 +1559,8 @@ fn prompt_cursor(model: &Model, overlay: &Overlay, state: &PromptState) -> (u16,
     let row = rect
         .row
         .saturating_add(row_off)
-        .saturating_add(u16::try_from(message_rows).unwrap_or(u16::MAX));
+        .saturating_add(u16::try_from(message_rows).unwrap_or(u16::MAX))
+        .min(rect.row.saturating_add(rect.height.saturating_sub(2)));
     let col = rect
         .col
         .saturating_add(col_off)
@@ -3733,6 +3734,43 @@ mod tests {
                 .trim_start_matches(['│', '|', ' '])
                 .starts_with(overlay::PROMPT_MARK),
             "the caret row is the input line: {texts:#?}"
+        );
+    }
+
+    /// On a terminal too short for the whole wrapped trust question the box
+    /// is clamped, and the caret stays inside it.
+    #[test]
+    fn a_clamped_trust_prompt_keeps_the_caret_inside_its_box() {
+        let mut model = model_with_grid(60, 8);
+        model.term_width = 60;
+        model.term_height = 8;
+        model.cwd = std::path::PathBuf::from(
+            "/home/someone/work/clients/a-project-with-a-long-name/services/the-api",
+        );
+        let _ = update(
+            &mut model,
+            Msg::FeatureInvoke {
+                feature: "ai".to_string(),
+                verb: "open".to_string(),
+            },
+        );
+        let surface = render(&model);
+        let cursor = surface.cursor.expect("the prompt places a caret");
+        let layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Prompt(_)))
+            .expect("the trust prompt is open");
+        let rect = layer.rect;
+        assert!(
+            cursor.row > rect.row && cursor.row < rect.row + rect.height - 1,
+            "caret row {} must be an interior row of the box {rect:?}",
+            cursor.row
+        );
+        assert!(
+            cursor.col > rect.col && cursor.col < rect.col + rect.width,
+            "caret col {} must be inside the box {rect:?}",
+            cursor.col
         );
     }
 

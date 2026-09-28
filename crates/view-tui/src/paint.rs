@@ -2708,13 +2708,6 @@ mod tests {
         assert_eq!(&buf[(0, 0)].symbol(), &"z");
     }
 
-    /// The agent panel is full height, so answering a composer keystroke by
-    /// dirtying every row it covers costs a whole-screen recomposite -- the
-    /// grid cells beside the panel included -- for one changed cell, and
-    /// that cost grows with the terminal rather than with what was typed.
-    /// Over a link with any latency it is what makes typing into the panel
-    /// feel slower than typing into the buffer, which is backwards: the
-    /// composer is native state and the buffer round-trips nvim.
     /// The trust question runs wider than its box on a 120-column
     /// terminal, and it wraps: the last word of it is on screen.
     #[test]
@@ -2740,6 +2733,13 @@ mod tests {
         assert!(first < last && last < yes, "{}", screen.join("\n"));
     }
 
+    /// The agent panel is full height, so answering a composer keystroke by
+    /// dirtying every row it covers costs a whole-screen recomposite -- the
+    /// grid cells beside the panel included -- for one changed cell, and
+    /// that cost grows with the terminal rather than with what was typed.
+    /// Over a link with any latency it is what makes typing into the panel
+    /// feel slower than typing into the buffer, which is backwards: the
+    /// composer is native state and the buffer round-trips nvim.
     #[test]
     fn a_composer_keystroke_damages_only_the_composer_row() {
         let mut model = Model::with_term_size(120, 40);
