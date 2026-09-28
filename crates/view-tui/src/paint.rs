@@ -4920,6 +4920,93 @@ mod tests {
         }
     }
 
+    /// A shadow whose terminal measured box drawing one cell wide emits a
+    /// bordered overlay with no cursor move behind any box glyph, on the
+    /// clipped path and the whole-frame path alike, and the same frame on
+    /// an unmeasured shadow moves the cursor behind them.
+    ///
+    /// Disconfirm: `emit_updates`' whole-frame path passing `false` puts a
+    /// cursor move behind the first frame's corner.
+    #[test]
+    fn a_measured_shadow_rides_every_border_run_on_the_terminals_advance() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 12);
+        let mut model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
+        set_term_size(&mut model, area.width, area.height);
+        let picker = || Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps);
+        let frames = [
+            (
+                "a box-bordered picker",
+                Surface::from_layers(vec![picker()]),
+            ),
+            ("the picker dismissed", Surface::from_layers(vec![])),
+        ];
+        for measured in [true, false] {
+            let mut shadow = Shadow::new();
+            assert!(shadow.resize(area), "a fresh shadow must size itself");
+            shadow.boxes_one_cell = measured;
+            for (step, (label, surface)) in frames.iter().enumerate() {
+                let grid_damage = model.take_paint_damage();
+                let overlay_damage = shadow.overlay_damage(surface);
+                let damage = Damage::from_frame(
+                    &grid_damage,
+                    model.chrome_rows(),
+                    &overlay_damage,
+                    step == 0,
+                );
+                shadow.compose(&model, surface, &damage);
+                let _ = assert_clipped_emission_matches_unclipped(&mut shadow, label);
+                let moves = redundant_moves_after_boxes(&drawn_bytes(|w| shadow.emit_updates(w)));
+                if measured {
+                    assert_eq!(moves, 0, "{label}: a border run is addressed once");
+                } else if step == 0 {
+                    assert!(moves > 0, "{label}: an unmeasured border re-addresses");
+                }
+                shadow.commit();
+            }
+        }
+    }
+
+    /// How many cursor moves in `bytes` follow a box-drawing glyph and name
+    /// the cell the terminal's own advance already reached. Every glyph is
+    /// taken as one cell wide, and every escape other than a cursor move as
+    /// moving nothing.
+    fn redundant_moves_after_boxes(bytes: &[u8]) -> usize {
+        let text = String::from_utf8_lossy(bytes);
+        let mut chars = text.chars();
+        let (mut at, mut after_box, mut redundant) = ((0_u16, 0_u16), false, 0);
+        while let Some(c) = chars.next() {
+            if c != '\x1b' {
+                at.1 += 1;
+                after_box = ('\u{2500}'..='\u{257f}').contains(&c);
+                continue;
+            }
+            let _ = chars.next();
+            let mut params = String::new();
+            let Some(end) = chars.by_ref().find(|&c| {
+                let param = c.is_ascii_digit() || c == ';';
+                if param {
+                    params.push(c);
+                }
+                !param
+            }) else {
+                break;
+            };
+            let Some((row, col)) = params.split_once(';').filter(|_| end == 'H') else {
+                continue;
+            };
+            let to = (
+                row.parse::<u16>().unwrap() - 1,
+                col.parse::<u16>().unwrap() - 1,
+            );
+            if to == at && after_box {
+                redundant += 1;
+            }
+            at = to;
+            after_box = false;
+        }
+        redundant
+    }
+
     /// One of the supplementary-private-use nerd-font icons the alpha
     /// dashboard draws: East_Asian_Width = Ambiguous, so `unicode-width`
     /// calls it one column and a terminal is free to draw it two.

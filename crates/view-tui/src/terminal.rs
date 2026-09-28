@@ -786,11 +786,6 @@ impl Term {
         // in the probe's own buffer, and every byte it has not is the
         // guarded input path's to recognize
         let outcome = probe.finish(std::time::Duration::ZERO);
-        // an answered box-glyph question that resolved the box charset is
-        // the terminal measuring `╭` one cell wide; a hint never gets here
-        if outcome.cpr_seen && outcome.caps.unicode_boxes {
-            self.shadow.boxes_one_cell = true;
-        }
         self.adopt_caps(outcome.caps)?;
         Ok(outcome)
     }
@@ -815,10 +810,7 @@ impl Term {
         if pushed {
             set_kitty_keyboard_pushed(true);
         }
-        // after the settle a capability only upgrades on a reply
-        // (`Replies::upgraded`), so a box charset gained here is a late
-        // answer to the box-glyph question measuring one cell
-        if caps.unicode_boxes && !self.caps.unicode_boxes {
+        if caps.boxes_measured {
             self.shadow.boxes_one_cell = true;
         }
         if caps != self.caps {
@@ -1259,29 +1251,85 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    /// A box charset gained after the settle is a late answer measuring `╭`
-    /// one cell wide, and borders ride on the terminal's advance from then
-    /// on. A charset the session already had moves nothing: it may have
-    /// come from the locale hint.
-    ///
-    /// Disconfirm: removing the check in `adopt_caps` leaves the first
-    /// shadow unmeasured.
-    #[test]
-    fn a_box_charset_gained_after_the_settle_is_a_measurement() {
-        let bare = TermCaps::from_probe(false, false, false);
-        let mut late = Term::frame_probe(bare);
-        late.adopt_caps(bare.with_unicode_boxes(true)).unwrap();
-        assert!(
-            late.shadow.boxes_one_cell,
-            "the late answer measured one cell"
-        );
+    /// A terminal that hands the probe `reply` in one read.
+    struct Answers(Option<Vec<u8>>);
 
-        let mut hinted = Term::frame_probe(bare.with_unicode_boxes(true));
-        hinted.adopt_caps(bare.with_unicode_boxes(true)).unwrap();
-        assert!(
-            !hinted.shadow.boxes_one_cell,
-            "a charset held all along is no measurement"
+    impl tiers::ReplySource for Answers {
+        fn next_chunk(&mut self, _budget: std::time::Duration) -> Option<Vec<u8>> {
+            self.0.take()
+        }
+    }
+
+    /// A terminal whose probe, started under a UTF-8 locale, heard `reply`
+    /// and has been settled.
+    fn settled_on(reply: &[u8]) -> std::mem::ManuallyDrop<Term> {
+        let hints = tiers::EnvHints {
+            colorterm: None,
+            locale: Some("en_US.UTF-8".to_owned()),
+        };
+        let mut term = Term::frame_probe(TermCaps::default());
+        term.probe = Some(
+            tiers::Probe::start(
+                Answers(Some(reply.to_vec())),
+                &mut Vec::new(),
+                std::time::Duration::from_secs(1),
+                &hints,
+            )
+            .unwrap(),
         );
+        term.settle_probe().unwrap();
+        term
+    }
+
+    /// The settle measures box drawing one cell wide only from the
+    /// terminal's own column-2 answer. A column-3 answer, or no answer
+    /// with the locale hinting UTF-8, leaves every border cell addressed.
+    ///
+    /// Disconfirm: `caps_from` leaving `boxes_measured` false fails the
+    /// first case.
+    #[test]
+    fn the_settle_measures_box_drawing_from_the_terminals_answer_alone() {
+        let cases: [(&[u8], bool, &str); 3] = [
+            (b"\x1b[1;2R\x1b[?1;2c", true, "a column-2 answer"),
+            (b"\x1b[1;3R\x1b[?1;2c", false, "a column-3 answer"),
+            (b"\x1b[?1;2c", false, "DA1 alone under a UTF-8 hint"),
+        ];
+        for (reply, measured, label) in cases {
+            let term = settled_on(reply);
+            assert_eq!(term.shadow.boxes_one_cell, measured, "{label}");
+        }
+        assert!(
+            settled_on(b"\x1b[?1;2c").caps.unicode_boxes,
+            "the hint alone still draws the box charset"
+        );
+    }
+
+    /// A column-2 answer arriving after the settle measures box drawing
+    /// even where the UTF-8 hint had already chosen the box charset, and a
+    /// column-3 one does not.
+    ///
+    /// Disconfirm: `Replies::upgraded` leaving `boxes_measured` at `known`
+    /// fails the first assertion.
+    #[test]
+    fn a_late_one_cell_answer_under_a_utf8_hint_is_a_measurement() {
+        for (late, measured) in [(&b"\x1b[1;2R"[..], true), (b"\x1b[1;3R", false)] {
+            let mut term = settled_on(b"");
+            let hinted = term.caps;
+            assert!(hinted.unicode_boxes && !term.shadow.boxes_one_cell);
+            let upgraded = tiers::scan_replies(late, true).upgraded(hinted);
+            assert_eq!(
+                upgraded != hinted,
+                measured,
+                "only a measurement is news to the loop"
+            );
+            term.adopt_caps(upgraded).unwrap();
+            assert_eq!(
+                term.shadow.boxes_one_cell,
+                measured,
+                "late answer {:?}",
+                String::from_utf8_lossy(late)
+            );
+        }
     }
 
     #[test]

@@ -485,6 +485,7 @@ impl<'a> Probe<'a> {
             .unwrap_or_else(|| UNICODE_BOXES.fallback.resolve(&self.hints));
         TermCaps::from_probe(replies.sync, truecolor, replies.kitty)
             .with_unicode_boxes(unicode_boxes)
+            .with_boxes_measured(replies.unicode_boxes == Some(true))
     }
 
     fn read_until(&mut self, deadline: Duration) {
@@ -681,6 +682,7 @@ impl Replies {
             known.kitty_kbd || self.kitty,
         )
         .with_unicode_boxes(known.unicode_boxes || self.unicode_boxes == Some(true))
+        .with_boxes_measured(known.boxes_measured || self.unicode_boxes == Some(true))
     }
 }
 
@@ -2301,11 +2303,13 @@ mod tests {
         // `tier` is excluded by construction, not by oversight: it is
         // derived by `TermCaps::from_probe` from the rows below and is
         // never probed, so a row for it would name a question no terminal
-        // is ever asked.
+        // is ever asked. `boxes_measured` records whether the
+        // `unicode_boxes` row's own probe answered, so it has no question
+        // or fallback of its own either.
         let probed: Vec<&str> = fields
             .iter()
             .map(String::as_str)
-            .filter(|name| *name != "tier")
+            .filter(|name| !["tier", "boxes_measured"].contains(name))
             .collect();
 
         for field in &probed {

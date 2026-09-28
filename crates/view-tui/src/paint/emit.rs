@@ -56,11 +56,11 @@ pub(crate) fn terminal_may_widen(symbol: &str) -> bool {
 /// given whether its startup probe measured a box-drawing glyph one cell
 /// wide.
 ///
-/// A terminal decides the width of every East_Asian_Width = Ambiguous
-/// character by one setting, so the probe's `╭` answering one cell answers
-/// for the whole box-drawing block, and a border drawn from it rides on the
-/// terminal's own advance. Every other class keeps [`terminal_may_widen`]'s
-/// answer: a nerd-font icon's width is the font's, which no probe asks.
+/// A terminal gives every box-drawing character the advance it gave `╭`,
+/// so the probe's answer covers the U+2500 to U+257F block and a border
+/// drawn from it rides on the terminal's own advance. Every other class
+/// keeps [`terminal_may_widen`]'s answer: a nerd-font icon's width is the
+/// font's, which no probe asks.
 pub(crate) fn may_widen(symbol: &str, boxes_one_cell: bool) -> bool {
     terminal_may_widen(symbol)
         && !(boxes_one_cell
@@ -209,9 +209,8 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
 /// cell wide (see [`may_widen`]), a run of box-drawing cells is addressed
 /// once at its start and rides on the terminal's advance after that. A
 /// cursor move per border cell is several times the glyph's own three
-/// bytes, and a
-/// frame that reaches a terminal behind tmux in several reads is shown by
-/// a slow client one read at a time.
+/// bytes, and a frame that reaches a terminal behind tmux in several reads
+/// is shown by a slow client one read at a time.
 ///
 /// # Errors
 ///

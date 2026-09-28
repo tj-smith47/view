@@ -128,8 +128,7 @@ Read as:
 tmux answers `\x1b[?2026$p` from 3.7 and, from the same release, applies a
 `\x1b[?2026h` and `\x1b[?2026l` pair written by the application in a pane
 (tmux `CHANGES`, "CHANGES FROM 3.6b TO 3.7"). Releases 3.1 to 3.6b do
-neither. The synchronized updates 3.2 added bracket tmux's own redraws toward
-the outer terminal.
+neither.
 
 tmux declines the truecolor readback whether or not it is told the outer
 terminal is RGB-capable. Inside tmux the probe cannot establish truecolor and
@@ -319,11 +318,16 @@ these captures show it.
    what a current Windows ConPTY sends, and the `truecolor_from_decrqss`
    shipped when this was captured rejected it. It now drops empty fields before
    matching, and capture H's reply is a row of that function's table test.
-2. The box-glyph probe's signal is the CPR **column**, distinct from its
-   presence: D and E both answer, and only the column differs. What it is shown
-   to detect is a terminal failing to decode UTF-8; a font gap and a
-   double-width wcwidth are unobserved here, so neither may be claimed from a
-   column of 2.
+2. The box-glyph probe's signal is the CPR **column**. D and E both answer,
+   and only the column differs. A column of 2 is the terminal's own advance
+   after `╭`, and view writes a run of box-drawing cells on that advance with
+   one cursor move at the run's start. A terminal that draws the glyph two
+   cells wide while it reports a column of 2 is unobserved. Termius is the one
+   terminal recorded drawing box glyphs two wide (commit `5e42c17a`), and its
+   reply to `\r╭\x1b[6n` is not recorded. That reply is captured from the
+   iPad, and it goes in a lettered section of its own after H, with a row in
+   the host matrix. A font that lacks the glyph is unobserved as well, so a
+   column of 2 says nothing about whether the border is legible.
 3. `Pm=0` on DECRPM is a real answer meaning unsupported, distinct from a
    missing one. Treating "no reply" and `;0$y` alike loses the distinction H
    provides.
