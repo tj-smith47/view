@@ -182,7 +182,7 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
         return Rows::default();
     }
     if width < 2 || height < 2 {
-        let Some(body) = body(kind, width) else {
+        let Some(body) = body(kind, width, height) else {
             return Rows::default();
         };
         return content_rows(kind, &body, width, height, borders);
@@ -193,10 +193,10 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
     // of content is worse than an unpadded box
     let pad = u16::from(width >= 6);
     let text_width = view_core::native::geometry::interior_text_width(width);
-    let Some(body) = body(kind, text_width) else {
+    let interior = height - 2;
+    let Some(body) = body(kind, text_width, interior) else {
         return Rows::default();
     };
-    let interior = height - 2;
     let laid = content_rows(kind, &body, text_width, interior, borders);
 
     let mut lines: Vec<Vec<Span>> = Vec::with_capacity(usize::from(height));
@@ -229,7 +229,7 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
 /// boxes where a person sees one.
 #[must_use]
 pub fn unframed_rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Rows {
-    let Some(body) = body(kind, width) else {
+    let Some(body) = body(kind, width, height) else {
         return Rows::default();
     };
     if width == 0 || height == 0 {
@@ -823,18 +823,19 @@ fn kept_tail<'a>(run: &'a [Line], fit: &RunFit) -> impl Iterator<Item = &'a Line
 
 /// The [`Body`] for a native overlay layer, or `None` for a layer kind that
 /// is not a native overlay at all. `text_width` is the cells a row of it
-/// holds, which a prompt's message wraps at.
+/// holds, which a prompt's message wraps at, and `height` the rows it is
+/// laid into.
 ///
 /// Exhaustive rather than wildcarded, so the `Some` arms here and
 /// [`LayerKind::is_native_overlay`]'s `true` arms cannot drift: a variant
 /// added to one without the other stops compiling instead of quietly
 /// producing a framed layer with nothing in it.
-fn body(kind: &LayerKind, text_width: u16) -> Option<Body> {
+fn body(kind: &LayerKind, text_width: u16, height: u16) -> Option<Body> {
     match kind {
         LayerKind::Picker(view) => Some(picker_body(view)),
         LayerKind::Tree(view) => Some(tree_body(view)),
         LayerKind::Statusline(view) => Some(statusline_body(view)),
-        LayerKind::Prompt(view) => Some(prompt_body(view, text_width)),
+        LayerKind::Prompt(view) => Some(prompt_body(view, text_width, height)),
         LayerKind::Palette(view) => Some(palette_body(view)),
         LayerKind::Stream(view) => Some(stream_body(view)),
         LayerKind::Ai(view) => Some(ai_body(view)),
@@ -931,10 +932,12 @@ fn statusline_body(view: &StatuslineView) -> Body {
 }
 
 /// `width` is the interior text width the message wraps at, the same one
-/// `Model::overlay_rect` counted the box's rows at.
-fn prompt_body(view: &PromptView, width: u16) -> Body {
-    let mut header: Vec<Line> = view
-        .message_rows(width)
+/// `Model::overlay_rect` counted the box's rows at, and `height` the
+/// interior rows [`PromptView::fit`] lays the prompt into.
+fn prompt_body(view: &PromptView, width: u16, height: u16) -> Body {
+    let fit = view.fit(width, height);
+    let mut header: Vec<Line> = fit
+        .message
         .into_iter()
         .map(|row| Line::Text(plain_spans(row)))
         .collect();
@@ -953,6 +956,7 @@ fn prompt_body(view: &PromptView, width: u16) -> Body {
         items: view
             .choices
             .iter()
+            .filter(|_| fit.choices)
             .cloned()
             .map(plain_spans)
             .map(Line::Text)
@@ -960,7 +964,7 @@ fn prompt_body(view: &PromptView, width: u16) -> Body {
         selected: view.selected,
         header_keep_tail: false,
         header_first: false,
-        rule: true,
+        rule: fit.rule,
         footer: Vec::new(),
     }
 }

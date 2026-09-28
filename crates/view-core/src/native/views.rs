@@ -603,6 +603,69 @@ impl PromptView {
         let rows = self.message_rows(width).len() + 2 + self.choices.len();
         u16::try_from(rows).unwrap_or(u16::MAX)
     }
+
+    /// How this prompt's rows fit an interior `width` cells wide and
+    /// `height` rows tall. The input line and the choices are laid first
+    /// and the question takes the rows left above them, cut from its end
+    /// with its last shown row ending in `…`. The rule under the input line
+    /// is drawn only on a spare row. An interior too short for the input
+    /// line and every choice holds the input line alone.
+    #[must_use]
+    pub fn fit(&self, width: u16, height: u16) -> PromptFit {
+        let height = usize::from(height);
+        let fixed = 1 + self.choices.len();
+        if height < fixed {
+            return PromptFit::default();
+        }
+        let room = height - fixed;
+        let mut message = self.message_rows(width);
+        if message.len() <= room {
+            let rule = room > message.len();
+            return PromptFit {
+                message,
+                choices: true,
+                rule,
+            };
+        }
+        message.truncate(room);
+        if let Some(last) = message.last_mut() {
+            *last = ending_in_mark(last, width);
+        }
+        PromptFit {
+            message,
+            choices: true,
+            rule: false,
+        }
+    }
+}
+
+/// A prompt laid into one interior, as [`PromptView::fit`] cut it. Paint
+/// and the caret both read it, so the input line is where both put it.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PromptFit {
+    /// The question rows shown above the input line.
+    pub message: Vec<String>,
+    /// Whether the choices are laid under the input line.
+    pub choices: bool,
+    /// Whether the rule between the input line and the choices is drawn.
+    pub rule: bool,
+}
+
+/// `row` with `…` as its last cell, dropping as much of its end as the
+/// mark needs to stay within `width` cells.
+fn ending_in_mark(row: &str, width: u16) -> String {
+    let mark = "…";
+    let mark_cells = super::text::text_width(mark);
+    let mut kept: Vec<&str> = super::text::clusters(row).collect();
+    let mut cells = super::text::text_width(row);
+    // a space before the mark reads as a gap in the question
+    while cells.saturating_add(mark_cells) > width.max(1) || kept.last() == Some(&" ") {
+        let Some(dropped) = kept.pop() else { break };
+        cells = cells.saturating_sub(super::text::cluster_width(dropped));
+    }
+    kept.push(mark);
+    kept.concat()
 }
 
 /// One command in a [`PaletteView`]: what it is called and the keys that
@@ -839,6 +902,40 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// Every interior height a two-choice confirm can be given: the input
+    /// line and both choices are laid whenever they fit, the question takes
+    /// what is left, and a cut question's last row ends in `…` inside the
+    /// row's width.
+    #[test]
+    fn a_short_interior_cuts_the_question_and_keeps_the_answers() {
+        let view = PromptView::new("Confirm", "one two three four five six seven")
+            .with_choices(vec!["Yes".to_string(), "No".to_string()]);
+        let whole = view.message_rows(9);
+        assert_eq!(whole.len(), 4, "{whole:?}");
+        for height in 0..10u16 {
+            let fit = view.fit(9, height);
+            let room = usize::from(height).saturating_sub(3);
+            if height < 3 {
+                assert_eq!(fit, PromptFit::default(), "height {height}");
+                continue;
+            }
+            assert!(fit.choices, "height {height}");
+            assert_eq!(fit.message.len(), room.min(4), "height {height}");
+            assert_eq!(fit.rule, room > 4, "height {height}");
+            let cut = room < 4;
+            let last = fit.message.last();
+            assert_eq!(
+                last.is_some_and(|row| row.ends_with('…')),
+                cut && room > 0,
+                "height {height}: {:?}",
+                fit.message
+            );
+            for row in &fit.message {
+                assert!(super::super::text::text_width(row) <= 9, "{row:?}");
+            }
+        }
+    }
 
     #[test]
     fn a_builder_chain_sets_every_field_it_names_and_leaves_the_rest_default() {

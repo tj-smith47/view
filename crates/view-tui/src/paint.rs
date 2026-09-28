@@ -2733,6 +2733,73 @@ mod tests {
         assert!(first < last && last < yes, "{}", screen.join("\n"));
     }
 
+    /// The trust prompt painted on a 60-column terminal `height` rows tall:
+    /// every screen row as text, and the row the caret stands on.
+    fn short_trust_prompt(height: u16) -> (Vec<String>, usize) {
+        let mut model = Model::with_term_size(60, height);
+        model
+            .engine
+            .apply_grid(GridOp::Resize { width: 60, height });
+        model.cwd = std::path::PathBuf::from(
+            "/home/someone/work/clients/a-project-with-a-long-name/services/the-api",
+        );
+        ai_verb(&mut model, "open");
+        let area = ratatui::layout::Rect::new(0, 0, 60, height);
+        let buf = full_paint(&model, area);
+        let screen = (0..height).map(|row| row_text(&buf, row, 0, 60)).collect();
+        let cursor = view_surface::render(&model)
+            .cursor
+            .expect("the prompt places a caret");
+        assert!(
+            cursor.row < height,
+            "caret row {} is off a {height}-row screen",
+            cursor.row
+        );
+        (screen, usize::from(cursor.row))
+    }
+
+    /// Whether a screen row carries a prompt's input line with nothing
+    /// typed: the prompt mark, and no choice beside it, which carries the
+    /// same mark when selected.
+    fn is_empty_input_line(row: &str) -> bool {
+        row.contains(" > ") && !row.contains("Yes") && !row.contains("No")
+    }
+
+    /// Too short for the whole question, the trust prompt paints its input
+    /// line and both choices, the question's last shown row ends in `…`, and
+    /// the caret is on the input line.
+    #[test]
+    fn a_short_terminal_paints_the_trust_prompts_answers() {
+        let (screen, caret) = short_trust_prompt(8);
+        let shown = screen.join("\n");
+        assert!(
+            is_empty_input_line(&screen[caret]),
+            "the caret row is the input line:\n{shown}"
+        );
+        assert!(
+            screen[caret - 1]
+                .trim_end_matches(['│', '|', ' '])
+                .ends_with('…'),
+            "the question's last shown row says it was cut:\n{shown}"
+        );
+        assert!(
+            screen[caret + 1].contains("Yes") && screen[caret + 2].contains("No"),
+            "both choices follow the input line:\n{shown}"
+        );
+    }
+
+    /// Too short for the input line and the choices, the trust prompt
+    /// paints the input line with the caret on it.
+    #[test]
+    fn a_terminal_too_short_for_the_choices_paints_the_input_line() {
+        let (screen, caret) = short_trust_prompt(4);
+        assert!(
+            is_empty_input_line(&screen[caret]),
+            "the caret row is the input line:\n{}",
+            screen.join("\n")
+        );
+    }
+
     /// The agent panel is full height, so answering a composer keystroke by
     /// dirtying every row it covers costs a whole-screen recomposite -- the
     /// grid cells beside the panel included -- for one changed cell, and

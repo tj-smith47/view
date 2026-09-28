@@ -1531,16 +1531,14 @@ fn ai_cursor(model: &Model, layers: &[Layer]) -> Option<CursorSpec> {
 }
 
 /// The confirm-prompt's own cursor position. It stands on the input row
-/// [`overlay::prompt_body`] draws before its choice list: every row the
-/// message wrapped to comes first, then `"> "` plus the answer typed so far.
-/// The caret sits past the end of what has been typed.
+/// [`overlay::prompt_body`] draws before its choice list: the question rows
+/// [`PromptView::fit`] kept come first, then `"> "` plus the answer typed
+/// so far. The caret sits past the end of what has been typed.
 /// [`PromptState::accepts`] permits only append, backspace, submit and
 /// cancel, so the caret is always at the end of `input`.
 ///
 /// Resolves through [`Model::overlay_rect`], the rect [`native_layer`]
-/// paints the Prompt overlay's box at. A box clamped to a short terminal
-/// can leave the input row below its last interior row, so the caret row is
-/// held to that last interior row.
+/// paints the Prompt overlay's box at.
 ///
 /// Takes the overlay its caller already resolved rather than looking one up
 /// itself: the stack's top and the overlay holding the keyboard are not the
@@ -1552,15 +1550,14 @@ fn prompt_cursor(model: &Model, overlay: &Overlay, state: &PromptState) -> (u16,
     let prefix_cols =
         u16::try_from(format!("{} ", overlay::PROMPT_MARK).chars().count()).unwrap_or(2);
     let input_len = u16::try_from(view.input.chars().count()).unwrap_or(u16::MAX);
-    // the input line sits under every row the message wrapped to
-    let message_rows = view
-        .message_rows(view_core::native::geometry::interior_text_width(rect.width))
-        .len();
+    let fit = view.fit(
+        view_core::native::geometry::interior_text_width(rect.width),
+        rect.height.saturating_sub(2),
+    );
     let row = rect
         .row
         .saturating_add(row_off)
-        .saturating_add(u16::try_from(message_rows).unwrap_or(u16::MAX))
-        .min(rect.row.saturating_add(rect.height.saturating_sub(2)));
+        .saturating_add(u16::try_from(fit.message.len()).unwrap_or(u16::MAX));
     let col = rect
         .col
         .saturating_add(col_off)
@@ -3737,13 +3734,13 @@ mod tests {
         );
     }
 
-    /// On a terminal too short for the whole wrapped trust question the box
-    /// is clamped, and the caret stays inside it.
-    #[test]
-    fn a_clamped_trust_prompt_keeps_the_caret_inside_its_box() {
-        let mut model = model_with_grid(60, 8);
+    /// The real trust prompt on a 60-column terminal `height` rows tall:
+    /// its box's rows as text, borders trimmed, and the index of the row the
+    /// caret stands on.
+    fn clamped_trust_prompt(height: u16) -> (Vec<String>, usize) {
+        let mut model = model_with_grid(60, height);
         model.term_width = 60;
-        model.term_height = 8;
+        model.term_height = height;
         model.cwd = std::path::PathBuf::from(
             "/home/someone/work/clients/a-project-with-a-long-name/services/the-api",
         );
@@ -3771,6 +3768,54 @@ mod tests {
             cursor.col > rect.col && cursor.col < rect.col + rect.width,
             "caret col {} must be inside the box {rect:?}",
             cursor.col
+        );
+        let rows = overlay::rows(
+            rect.width,
+            rect.height,
+            &layer.kind,
+            layer.borders.expect("a native overlay carries a charset"),
+        );
+        let texts = rows
+            .lines
+            .iter()
+            .map(|l| {
+                overlay::line_text(l)
+                    .trim_matches(['│', '|', ' '])
+                    .to_string()
+            })
+            .collect();
+        (texts, usize::from(cursor.row - rect.row))
+    }
+
+    /// On a terminal too short for the whole wrapped trust question the
+    /// input line and both choices stay in the box, the question is cut
+    /// from its end with `…` on its last shown row, and the caret stands on
+    /// the input line.
+    #[test]
+    fn a_clamped_trust_prompt_keeps_its_input_line_and_choices() {
+        let (texts, caret) = clamped_trust_prompt(8);
+        assert!(
+            texts[caret].starts_with(overlay::PROMPT_MARK),
+            "the caret row is the input line: {texts:#?}"
+        );
+        assert!(
+            texts[caret - 1].ends_with('…'),
+            "the question's last shown row says it was cut: {texts:#?}"
+        );
+        assert!(
+            texts[caret + 1].ends_with("Yes") && texts[caret + 2].ends_with("No"),
+            "both choices follow the input line: {texts:#?}"
+        );
+    }
+
+    /// A terminal too short for the input line and the choices keeps the
+    /// input line, and the caret on it.
+    #[test]
+    fn a_trust_prompt_too_short_for_its_choices_keeps_its_input_line() {
+        let (texts, caret) = clamped_trust_prompt(4);
+        assert!(
+            texts[caret].starts_with(overlay::PROMPT_MARK),
+            "the caret row is the input line: {texts:#?}"
         );
     }
 
