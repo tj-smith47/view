@@ -808,6 +808,13 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty |= model.expire_startup_hold(generation);
             Vec::new()
         }
+        Msg::LayoutHoldExpired { generation } => {
+            if generation == model.surface_conflicts.engine_generation() {
+                model.engine.release_held_layout();
+                model.dirty = true;
+            }
+            Vec::new()
+        }
         // the input hold belongs to the binary's native session, which
         // reads this message at the same dispatch
         Msg::ChordHoldExpired { .. } => Vec::new(),

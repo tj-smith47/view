@@ -424,7 +424,7 @@ impl Model {
         Self {
             engine: EngineModel {
                 grids: GridRegistry::new(),
-                held_frame: None,
+                held: held::Held::Nothing,
                 hl: HlTable::new(),
                 mode: ModeState::default(),
                 cmdline: None,
@@ -1391,7 +1391,7 @@ impl Model {
         };
         // the held frame never changes, and the live registry's damage is
         // left standing for the frame that hands the screen back to it
-        if self.engine.held_frame.is_some() {
+        if self.engine.holds_the_screen() {
             return crate::grid::GridDamage::full();
         }
         let mut grid = self.engine.grids.take_damage();
@@ -1429,16 +1429,10 @@ pub struct EngineModel {
     /// installs a tracker holding none of the damage the replacement caused
     /// and clips the next frame to nothing.
     grids: GridRegistry,
-    /// The registry the dead engine last painted and the highlight table
-    /// its cells were drawn with. The screen shows them from a restart
-    /// until the replacement puts a window on screen
-    /// ([`EngineModel::release_held_frame`]).
-    ///
-    /// The replacement's attach reaches that frame over several flushes, and
-    /// the ones before it carry a cleared grid and no window, so painting
-    /// the live registry through them paints an empty screen. Its first
-    /// batch also redefines the highlight ids the held cells carry.
-    held_frame: Option<(GridRegistry, HlTable)>,
+    /// What a restart keeps on screen in place of the replacement's own
+    /// frame, from the restart until the replacement's layout has settled
+    /// ([`EngineModel::settle_held`]).
+    held: held::Held,
     /// The highlight table, private for the same reason `grid` is; see
     /// [`EngineModel::hl`] and the mutators beside it. Whole-table
     /// replacement stays available through [`EngineModel::replace_hl`],
@@ -1680,7 +1674,7 @@ impl EngineModel {
     /// | `statusline`'s bridge segments | view's own bridge, re-fired on install | no |
     /// | `grids`' global cells | a fresh attach redraws every cell | no |
     /// | `grids`' window grids and every pane | grid ids are per-connection, so both the panes and the cells behind them belong to a session that ended | yes |
-    /// | `held_frame` | the replacement's first window on screen | no: it is taken here from `grids` and `hl` when no restart holds one yet, so the screen keeps the dead engine's last frame in its own colours |
+    /// | `held` | the replacement's layout settled | no: the frame on screen is taken here when no restart holds one yet, so the screen keeps the dead engine's last frame in its own colours |
     /// | `hl` | the replacement's own table replaces it | no |
     /// | `mode` | the replacement announces its modes on attach | no |
     /// | `messages`' `entries`, `toast_history` | scrollback, not a point-in-time state | no |
@@ -1700,10 +1694,7 @@ impl EngineModel {
         self.key_unanswered = None;
         self.literal_pending = false;
         self.popupmenu = None;
-        // a failed attempt comes back here holding the frame already, and
-        // the registry it would copy now is the empty one
-        self.held_frame
-            .get_or_insert_with(|| (self.grids.clone(), self.hl.clone()));
+        self.hold_frame();
         self.grids.forget_grids();
         self.tabline = None;
         self.mouse_on = false;
@@ -2167,7 +2158,7 @@ impl CmdlineState {
 
 mod buffers;
 mod focus;
-mod held;
+pub(crate) mod held;
 mod look;
 mod messages;
 pub(crate) mod notice;

@@ -535,6 +535,12 @@ pub enum Msg {
     StartupHoldExpired {
         generation: u64,
     },
+    /// The bound on a restart's held layout elapsed
+    /// ([`Effect::ScheduleLayoutHold`]). Hands the screen to the
+    /// replacement's own layout when `generation` is still the engine's.
+    LayoutHoldExpired {
+        generation: u64,
+    },
     /// The bound on held input elapsed ([`Effect::ScheduleChordHold`]): input
     /// that could begin a key not yet registered, and everything typed
     /// behind it. Arms the bound again while the
@@ -1514,6 +1520,14 @@ pub enum Effect {
     /// `generation` names the engine the deadline is armed for, and the
     /// expiry carries it back unchanged ([`Msg::StartupHoldExpired`]).
     ScheduleStartupHold {
+        after: Duration,
+        generation: u64,
+    },
+    /// Arms the bound on a restart's held layout: after `after` the timer
+    /// worker sends [`Msg::LayoutHoldExpired`] carrying `generation`. The
+    /// same one-shot thread as [`Effect::ScheduleStartupHold`]. Dropped, the
+    /// layout is held until the replacement's own windows settle.
+    ScheduleLayoutHold {
         after: Duration,
         generation: u64,
     },

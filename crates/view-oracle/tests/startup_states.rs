@@ -530,6 +530,96 @@ fn a_restart_keeps_the_last_frame_until_the_replacement_draws() {
     }
 }
 
+/// The file the restart-sidebar fixture opens, and the tree it reopens
+/// beside it after the attach.
+#[cfg(target_os = "linux")]
+const MAIN_FILE: &str = "RESTARTMAINFILE";
+#[cfg(target_os = "linux")]
+const SIDEBAR: &str = "RESTARTSIDEBAR";
+
+/// The columns of every frame edge on the top rows, where no notice
+/// stands at this size: the layout a screen shows.
+#[cfg(target_os = "linux")]
+fn frame_columns(screen: &vt100::Screen) -> Vec<Vec<u16>> {
+    (1..7)
+        .map(|row| {
+            (0..COLS)
+                .filter(|&col| {
+                    screen
+                        .cell(row, col)
+                        .is_some_and(|cell| matches!(cell.contents(), "╭" | "╮" | "│" | "╰" | "╯"))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Across a restart under a config that reopens its tree after the attach,
+/// every screen the terminal shows keeps the tree's tile and the file's
+/// tile where they stood, including the ones drawn before the config has
+/// reopened the tree.
+///
+/// Read per chunk the terminal absorbs, so the file's frame across the
+/// whole width cannot pass unseen.
+///
+/// Disconfirm: handing the screen to the live registry at the
+/// replacement's first window (`EngineModel::settle_held` answering
+/// `Held::Nothing` at once) fails on the file's tile spanning the tree's
+/// columns.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_restart_keeps_the_tiles_where_they_stood_until_the_config_reopens_its_tree() {
+    let paths = common::ScratchPaths::new("startup-states-sidebar");
+    common::plant_nvim_config(&paths.isolated_home, "restart-sidebar");
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+    cmd.env("VIEW_UI_PANES", "tiles");
+    let mut under_test = recording(cmd);
+    for needle in [MAIN_FILE, SIDEBAR] {
+        assert!(
+            under_test.wait_for(needle, view_test_support::host_deadline(BUDGET)),
+            "the fixture never showed {needle}; screen:\n{}",
+            under_test.screen()
+        );
+    }
+    hold_a_line(&mut under_test, "view");
+    let settled = frame_columns(under_test.screen_raw());
+    assert!(
+        settled.iter().all(|row| row.len() >= 3),
+        "the settled screen shows no two tiles side by side; screen:\n{}",
+        under_test.screen()
+    );
+    let session_pid = under_test.pid().expect("the session under test has a pid");
+    let engine = engine_child_of(session_pid).expect("view spawned an nvim child");
+    kill(engine);
+
+    let mut moved = None;
+    let mut before_the_tree = false;
+    let reopened = under_test.wait_for_screen(view_test_support::host_deadline(BUDGET), |screen| {
+        let text = screen.contents();
+        if frame_columns(screen) != settled {
+            moved.get_or_insert(text.clone());
+        }
+        let replaced = !text.contains(HELD) && text.contains(MAIN_FILE);
+        before_the_tree |= replaced && !text.contains(SIDEBAR);
+        replaced && text.contains(SIDEBAR)
+    });
+    assert_eq!(
+        moved, None,
+        "a screen between the restart and the tree's return moved the tiles"
+    );
+    assert!(
+        reopened,
+        "the replacement never reopened the tree; screen:\n{}",
+        under_test.screen()
+    );
+    assert!(
+        before_the_tree,
+        "no screen showed the replacement's file before its tree, so this \
+         asserted nothing about the wait for the config"
+    );
+}
+
 /// Waits until any of `needles` is written past `mark` in the recorded
 /// stream, and answers everything written from `mark` on.
 #[cfg(target_os = "linux")]

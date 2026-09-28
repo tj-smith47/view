@@ -26,6 +26,10 @@ pub struct GridId(pub u64);
 /// everything, which is why it is a paintable pane in both.
 pub const GLOBAL_GRID: GridId = GridId(1);
 
+/// A window on screen: its handle and the slot nvim placed it in, as
+/// `(row, col, width, height)`.
+pub type WindowSlot = (WinHandle, (u16, u16, u16, u16));
+
 /// Where a grid sits on screen, and what kind of surface it is.
 ///
 /// The content of a pane is an enum with one variant today because every
@@ -830,6 +834,62 @@ impl GridRegistry {
                 matches!(placed.kind, PaneKind::Window) && !placed.hidden && !placed.withheld
             })
         })
+    }
+
+    /// Every window on screen, as its handle and the slot nvim placed it in,
+    /// in ascending handle order.
+    #[must_use]
+    pub fn window_layout(&self) -> Vec<WindowSlot> {
+        let mut layout: Vec<_> = self
+            .slots
+            .iter()
+            .filter(|slot| slot.placed.as_ref().is_some_and(|p| !p.hidden))
+            .filter_map(|slot| slot.window.as_ref().map(|w| (w.win, w.slot)))
+            .collect();
+        layout.sort_unstable_by_key(|(win, _)| win.0);
+        layout
+    }
+
+    /// A copy of this registry drawn in `layout`: each window moved into the
+    /// slot `layout` gives its handle, and an empty window standing in every
+    /// slot no window here fills. `None` when a window here has no slot in
+    /// `layout`, since the layout it would be drawn in is then no longer
+    /// the one on screen.
+    #[must_use]
+    pub fn laid_out_as(&self, layout: &[WindowSlot]) -> Option<Self> {
+        let mut copy = self.clone();
+        let placed = self.window_layout();
+        for (win, _) in &placed {
+            let (_, slot) = layout.iter().find(|(held, _)| held == win)?;
+            let grid = self
+                .slots
+                .iter()
+                .find(|s| s.window.as_ref().is_some_and(|w| w.win == *win))
+                .map(|s| s.id)?;
+            copy.place_window(grid, *win, *slot);
+        }
+        // ids counted down from the top of the range, which nvim, counting
+        // up from 2, never names in a session
+        let mut spare = u64::MAX;
+        for (win, slot) in layout {
+            if placed.iter().any(|(live, _)| live == win) {
+                continue;
+            }
+            let mut grid = Grid::new();
+            grid.apply(GridOp::Resize {
+                width: slot.2,
+                height: slot.3,
+            });
+            copy.slots.push(Slot {
+                id: GridId(spare),
+                grid,
+                placed: None,
+                window: None,
+            });
+            copy.place_window(GridId(spare), *win, *slot);
+            spare = spare.saturating_sub(1);
+        }
+        Some(copy)
     }
 
     /// The grid nvim last placed the cursor in.

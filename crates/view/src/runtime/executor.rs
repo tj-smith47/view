@@ -639,6 +639,17 @@ impl<E: EngineOps> Executor<E> {
                 Flow::Continue
             }
             // the same one-shot thread, and the degrade `msg.rs` states
+            Effect::ScheduleLayoutHold { after, generation } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    spawn_or_log("layout-hold", move || {
+                        std::thread::sleep(after);
+                        let _ = tx.send(Msg::LayoutHoldExpired { generation });
+                    });
+                }
+                Flow::Continue
+            }
+            // the same one-shot thread, and the degrade `msg.rs` states
             Effect::ScheduleChordHold { after, generation } => {
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();

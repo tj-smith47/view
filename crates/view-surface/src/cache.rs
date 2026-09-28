@@ -107,9 +107,9 @@ impl Frame {
 ///   `grids` (via `grid`, which is the global grid's size, and via
 ///   `notice_column`, the one layer its panes, floats and cursor move; the
 ///   compositor paints the panes themselves off the `Model`),
-///   `held_frame` (the same way: `grid` is the painted grid's size, and
-///   the panes and the highlight table held with them are painted off the
-///   `Model`),
+///   `held` (the same way: `grid` is the painted grid's size, and the
+///   panes, the slots and the highlight table held with them are painted
+///   off the `Model`),
 ///   `hl` and `mode` (painters read them off the
 ///   `Model` on the reuse path), `window_status` (the tile segments are
 ///   painted off the `Model` the same way, and the row each one stands on

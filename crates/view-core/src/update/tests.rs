@@ -741,6 +741,155 @@ fn a_replacement_on_an_empty_buffer_takes_the_screen_when_its_window_is_placed()
     );
 }
 
+/// The slots every window on the painted screen stands in, in handle order.
+fn painted_slots(m: &Model) -> Vec<(u64, (u16, u16, u16, u16))> {
+    m.engine
+        .painted_grids()
+        .window_layout()
+        .into_iter()
+        .map(|(win, slot)| (win.0, slot))
+        .collect()
+}
+
+/// The replacement places the window both engines number 1003 across the
+/// whole width, the way an attach draws the file before the config reopens
+/// its sidebar. `extra` rides in the same batch.
+fn replacement_file_alone(m: &mut Model, extra: Vec<UiEvent>) -> Vec<Effect> {
+    let _ = update(m, replacement_chrome());
+    let mut batch = vec![UiEvent::WinPos {
+        grid: 2,
+        win: crate::events::WinHandle(1003),
+        startrow: 0,
+        startcol: 0,
+        width: 80,
+        height: 23,
+    }];
+    batch.extend(extra);
+    batch.extend(written(2, "f"));
+    update(m, Msg::Redraw(batch))
+}
+
+const HELD_SLOTS: [(u64, (u16, u16, u16, u16)); 2] =
+    [(1002, (0, 41, 39, 24)), (1003, (0, 0, 40, 24))];
+
+#[test]
+fn a_restart_draws_the_replacements_windows_in_the_dead_engines_slots() {
+    let mut m = vsplit_model();
+    let _ = update(&mut m, Msg::Redraw(written(6, "d")));
+    let _ = restart(&mut m);
+    let effects = replacement_file_alone(&mut m, Vec::new());
+    assert_eq!(
+        painted_slots(&m),
+        HELD_SLOTS,
+        "the screen took the replacement's layout before it settled"
+    );
+    assert_eq!(
+        painted_row(&m, 2).as_deref(),
+        Some("f"),
+        "the replacement's text waited for its layout"
+    );
+    assert_eq!(painted_row(&m, 6), None, "a dead window's text stayed");
+    let generation = m.surface_conflicts.engine_generation();
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::ScheduleLayoutHold { generation: g, .. } if *g == generation
+        )),
+        "the held layout has no bound: {effects:?}"
+    );
+    assert!(m.take_paint_damage().full, "a held layout repaints whole");
+
+    // the config reopens its sidebar in the dead engine's slot
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 4,
+                width: 39,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: 4,
+                win: crate::events::WinHandle(1002),
+                startrow: 0,
+                startcol: 41,
+                width: 39,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: 2,
+                win: crate::events::WinHandle(1003),
+                startrow: 0,
+                startcol: 0,
+                width: 40,
+                height: 24,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert!(
+        !m.engine.holds_the_screen(),
+        "the layout stayed held after the replacement filled its slots"
+    );
+    assert_eq!(painted_slots(&m), HELD_SLOTS);
+}
+
+/// The bound hands the screen to a replacement that never reopens the
+/// dead engine's sidebar, and an expiry the dead engine armed does not.
+#[test]
+fn a_held_layout_is_handed_back_when_its_bound_runs_out() {
+    let mut m = vsplit_model();
+    let _ = restart(&mut m);
+    let dead = m.surface_conflicts.engine_generation();
+    let _ = restart(&mut m);
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    let _ = update(&mut m, Msg::LayoutHoldExpired { generation: dead });
+    assert!(
+        m.engine.holds_the_screen(),
+        "a dead engine's bound released the replacement's layout"
+    );
+    let live = m.surface_conflicts.engine_generation();
+    let _ = update(&mut m, Msg::LayoutHoldExpired { generation: live });
+    assert_eq!(
+        painted_slots(&m),
+        [(1003, (0, 0, 80, 23))],
+        "the bound left the dead layout on screen"
+    );
+}
+
+/// A window the dead layout has no slot for means the replacement's screen
+/// is no longer the one held, so it is shown as it is.
+#[test]
+fn a_replacement_window_outside_the_held_slots_hands_the_screen_back() {
+    let mut m = vsplit_model();
+    let _ = restart(&mut m);
+    let effects = replacement_file_alone(
+        &mut m,
+        vec![
+            UiEvent::GridResize {
+                grid: 3,
+                width: 20,
+                height: 5,
+            },
+            UiEvent::WinPos {
+                grid: 3,
+                win: crate::events::WinHandle(1000),
+                startrow: 0,
+                startcol: 0,
+                width: 20,
+                height: 5,
+            },
+        ],
+    );
+    assert!(!m.engine.holds_the_screen());
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::ScheduleLayoutHold { .. })),
+        "a bound was armed for a hold that never began: {effects:?}"
+    );
+}
+
 #[test]
 fn a_single_grid_restart_paints_the_dead_engines_text_until_the_replacement_draws() {
     let mut m = Model::with_term_size(80, 24);
