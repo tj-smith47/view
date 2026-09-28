@@ -97,6 +97,19 @@ pub struct Layer {
     /// snapshot) draws the same border without a second capability lookup
     /// they could each answer differently.
     pub borders: Option<overlay::BorderSet>,
+    /// The side of the frame's box this layer leaves out, or `None` for a
+    /// frame drawn whole. A float docked beside gapless tiles shares its
+    /// tile-side column with them, and the tiles' lines own that column,
+    /// so `rect` stops one cell short of it.
+    pub open: Option<OpenSide>,
+}
+
+/// A vertical side of a [`Layer`]'s frame.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenSide {
+    Left,
+    Right,
 }
 
 /// What a [`Layer`] paints.
@@ -294,6 +307,26 @@ impl Layer {
             rect,
             kind,
             borders,
+            open: None,
+        }
+    }
+
+    /// The whole box this layer's frame is laid out on: `rect`, and the
+    /// column [`Self::open`] leaves out.
+    #[must_use]
+    pub fn frame_rect(&self) -> Rect {
+        let Rect {
+            row,
+            col,
+            width,
+            height,
+        } = self.rect;
+        match self.open {
+            Some(OpenSide::Left) => {
+                Rect::new(row, col.saturating_sub(1), width.saturating_add(1), height)
+            }
+            Some(OpenSide::Right) => Rect::new(row, col, width.saturating_add(1), height),
+            None => self.rect,
         }
     }
 }
@@ -1004,6 +1037,9 @@ pub(crate) const SPECULATED_LAYER_INDEX: usize = 1;
 /// [`PredictedCell`]).
 fn speculated_layer(model: &Model, origin: (u16, u16)) -> Option<Layer> {
     let registry = model.engine.painted_grids();
+    // pending cells almost always share the cursor's grid, so one lookup
+    // serves the whole burst
+    let mut shown: Option<(GridId, Option<(u16, u16)>)> = None;
     let cells: Vec<PredictedCell> = model
         .speculate
         .pending()
@@ -1013,17 +1049,26 @@ fn speculated_layer(model: &Model, origin: (u16, u16)) -> Option<Layer> {
             let (grid_w, grid_h) = registry.grid(cell.grid)?.size();
             // a grid painted cut at a shrunk slot's frame shows no cell
             // past the cut
-            let (grid_w, grid_h) = registry
-                .pane_text(cell.grid)
-                .map_or((grid_w, grid_h), |(_, _, w, h)| (w, h));
+            let text = registry.pane_text(cell.grid);
+            let (grid_w, grid_h) = text.map_or((grid_w, grid_h), |(_, _, w, h)| (w, h));
             if cell.row >= grid_h || cell.col >= grid_w {
                 return None;
             }
-            if model
-                .tile_columns(registry, cell.grid)
-                .is_some_and(|(first, last)| cell.col < first || cell.col > last)
-            {
-                return None;
+            // the global grid of a single-grid session is no tile, and no
+            // float closes it
+            if text.is_some() {
+                let columns = match shown {
+                    Some((grid, columns)) if grid == cell.grid => columns,
+                    _ => {
+                        let columns = model.tile_columns(registry, cell.grid);
+                        shown = Some((cell.grid, columns));
+                        columns
+                    }
+                };
+                let (first, last) = columns?;
+                if cell.col < first || cell.col > last {
+                    return None;
+                }
             }
             Some(PredictedCell {
                 row: cell.row.saturating_add(orow),
@@ -1065,11 +1110,24 @@ fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
     }
     let cells = model.overlay_rect(open);
     let kind = layer_kind(model, &open.kind, cells.height, cells.width)?;
-    Some(Layer::new(
+    let mut layer = Layer::new(
         Rect::new(cells.row, cells.col, cells.width, cells.height),
         kind,
         model.caps,
-    ))
+    );
+    layer.open = model.joined_anchor(open).map(|anchor| match anchor {
+        view_core::native::geometry::Anchor::Left => OpenSide::Right,
+        _ => OpenSide::Left,
+    });
+    match layer.open {
+        Some(OpenSide::Left) => {
+            layer.rect.col = layer.rect.col.saturating_add(1);
+            layer.rect.width = layer.rect.width.saturating_sub(1);
+        }
+        Some(OpenSide::Right) => layer.rect.width = layer.rect.width.saturating_sub(1),
+        None => {}
+    }
+    Some(layer)
 }
 
 /// [`native_layer`], with the blank gutter beside it under gapped tiles
@@ -1261,7 +1319,8 @@ fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<Cu
         let size = registry.grid(grid).map_or((width, height), Grid::size);
         // a grid nvim has yet to resize to a shrunk slot is painted cut at
         // its frame, and the caret stays on what is painted
-        let (size, row, col) = match registry.pane_text(grid) {
+        let text = registry.pane_text(grid);
+        let (size, row, col) = match text {
             Some((_, _, w, h)) => (
                 (w, h),
                 row.min(h.saturating_sub(1)),
@@ -1270,12 +1329,14 @@ fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<Cu
             None => (size, row, col),
         };
         // a docked float closes the tile's frame over a text column nvim
-        // still holds, and the caret stays off that border
+        // still holds, and the caret stays off that border; a tile it
+        // leaves no text column has nowhere to show one
         let (size, col) = match model.tile_columns(registry, grid) {
             Some((first, last)) => (
                 (size.0.min(last.saturating_add(1)), size.1),
                 col.max(first).min(last),
             ),
+            None if text.is_some() => return None,
             None => (size, col),
         };
         let local_col = speculated_col(model, grid, size, row, col);
@@ -1529,7 +1590,7 @@ fn query_cursor(rect: OverlayRect, query: &str) -> (u16, u16) {
 /// tile.
 fn ai_cursor(model: &Model, layers: &[Layer]) -> Option<CursorSpec> {
     let (rect, view) = layers.iter().find_map(|layer| match &layer.kind {
-        LayerKind::Ai(view) => Some((layer.rect, view)),
+        LayerKind::Ai(view) => Some((layer.frame_rect(), view)),
         _ => None,
     })?;
     let (row, col) = overlay::ai_caret(view, rect.width, rect.height)?;

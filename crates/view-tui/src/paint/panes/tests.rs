@@ -3685,7 +3685,8 @@ fn a_short_docked_float_closes_only_the_tile_beside_it() {
 /// The caret in a tile the agent panel closes stays on the tile's last
 /// visible text column, off the border, whether nvim's cursor is on the
 /// column under the border or on one under the panel, and a glyph
-/// predicted on either column is dropped.
+/// predicted on either column is dropped. A tile the panel leaves no text
+/// column shows neither.
 #[test]
 fn the_caret_stays_off_the_border_a_docked_float_closes() {
     let grid = LEFT + 1;
@@ -3732,6 +3733,95 @@ fn the_caret_stays_off_the_border_a_docked_float_closes() {
         });
         assert!(!predicted, "cursor at {at}: no glyph is predicted there");
     }
+    // a tile the panel leaves one column, its frame's, shows no text
+    // column at all: no caret and no predicted glyph
+    let size = (80, 24);
+    let gutter = agent_gutter(size);
+    let (grid_width, grid_height) = outer_grid_at(true, size, 0);
+    let col = gutter - 1;
+    let slots = vec![
+        (0, 0, col - 1, grid_height - 1),
+        (0, col, grid_width - col, grid_height - 1),
+    ];
+    let mut tiles = Tiles {
+        model: tiled_model_at(true, size, 0, &slots),
+        slots,
+    };
+    open_surface(
+        &mut tiles.model,
+        view_core::native::geometry::NativeSurface::Agent,
+        view_core::native::geometry::SurfacePlacement::Overlay,
+        view_core::native::geometry::Anchor::Right,
+        None,
+    );
+    tiles.model.ai_panel_mut().focused = false;
+    for at in [0, 3] {
+        drive(
+            &mut tiles.model,
+            vec![
+                UiEvent::GridCursorGoto {
+                    grid,
+                    row: 1,
+                    col: at,
+                },
+                UiEvent::Flush,
+            ],
+        );
+        let stamp =
+            view_core::native::speculate::SpecStamp::new(std::time::Duration::from_millis(1));
+        let at = u16::try_from(at).unwrap();
+        assert!(tiles
+            .model
+            .speculate
+            .predict("insert", GridId(grid), 'x', (1, at), stamp)
+            .is_some());
+        let surface = view_surface::render(&tiles.model);
+        assert_eq!(
+            surface.cursor, None,
+            "cursor at {at}: a tile with no text column shows no caret"
+        );
+        let predicted = surface.layers.iter().any(|layer| {
+            matches!(&layer.kind, view_surface::LayerKind::Speculated(cells) if !cells.is_empty())
+        });
+        assert!(!predicted, "cursor at {at}: no glyph is predicted there");
+    }
+}
+
+/// Glyphs predicted in two tiles in one frame are each held to their own
+/// tile's columns: the one on the border the agent panel closes the right
+/// tile with is dropped, and the one in the open left tile is painted.
+#[test]
+fn predictions_in_two_tiles_are_each_held_to_their_own_columns() {
+    let mut tiles = agent_overlay_beside_the_tiles(true);
+    tiles.model.ai_panel_mut().focused = false;
+    let open = tiles.model.overlays().last().expect("the panel is open");
+    let border = tiles.model.overlay_rect(open).col - 2;
+    let registry = tiles.model.engine.painted_grids();
+    let (_, pane_col) = registry.pane_origin(GridId(LEFT + 1)).expect("placed");
+    let on_border = border - view_surface::grid_origin(&tiles.model).1 - pane_col;
+    let stamp = view_core::native::speculate::SpecStamp::new(std::time::Duration::from_millis(1));
+    for (grid, col) in [(LEFT, on_border), (LEFT + 1, on_border)] {
+        assert!(tiles
+            .model
+            .speculate
+            .predict("insert", GridId(grid), 'x', (1, col), stamp)
+            .is_some());
+    }
+    let surface = view_surface::render(&tiles.model);
+    let cells: Vec<_> = surface
+        .layers
+        .iter()
+        .find_map(|layer| match &layer.kind {
+            view_surface::LayerKind::Speculated(cells) => Some(cells.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let grids: Vec<_> = cells.iter().map(|cell| cell.grid).collect();
+    assert_eq!(
+        grids,
+        [GridId(LEFT)],
+        "only the left tile's glyph: {cells:?}"
+    );
 }
 
 /// The agent panel floating at the right edge over the nested scene, whose
@@ -3753,18 +3843,24 @@ fn agent_overlay_beside_the_nested_tiles(gaps: bool) -> Tiles {
 /// column: the ring's top row meets it in `┬`, the row between the two
 /// stacked tiles in `┤` and their bottom edge in `┴`, and its rows beside
 /// the active tile carry the accent while the rest stay quiet. The tree
-/// docked left mirrors it on its right column.
+/// docked left mirrors it on its right column, and with both open each
+/// joins on its own column. The float's layer leaves that column to the
+/// lattice.
 #[test]
 fn a_gapless_docked_float_joins_the_lattice() {
     use view_core::native::geometry::{Anchor, NativeSurface, SurfacePlacement};
-    for (surface, anchor) in [
+    let (agent, tree) = (
         (NativeSurface::Agent, Anchor::Right),
         (NativeSurface::Tree, Anchor::Left),
+    );
+    for (docks, mirror) in [
+        (vec![agent], false),
+        (vec![tree], true),
+        (vec![tree, agent], false),
     ] {
         let mut tiles = tiled_nested(false);
-        let right = anchor == Anchor::Right;
-        // the stacked pair sits on the right; mirror it for a left dock
-        if !right {
+        // the stacked pair sits on the right; mirror it beside a left dock
+        if mirror {
             let (grid_width, _) = outer_grid_at(false, (TILED_WIDTH, TILED_HEIGHT), 0);
             let slots: Vec<_> = tiles
                 .slots
@@ -3776,13 +3872,15 @@ fn a_gapless_docked_float_joins_the_lattice() {
                 slots,
             };
         }
-        open_surface(
-            &mut tiles.model,
-            surface,
-            SurfacePlacement::Overlay,
-            anchor,
-            None,
-        );
+        for &(surface, anchor) in &docks {
+            open_surface(
+                &mut tiles.model,
+                surface,
+                SurfacePlacement::Overlay,
+                anchor,
+                None,
+            );
+        }
         drive(
             &mut tiles.model,
             vec![
@@ -3794,35 +3892,66 @@ fn a_gapless_docked_float_joins_the_lattice() {
                 UiEvent::Flush,
             ],
         );
-        let open = tiles.model.overlays().last().expect("the float is open");
-        let rect = tiles.model.overlay_rect(open);
-        let col = if right {
-            rect.col
-        } else {
-            rect.col + rect.width - 1
-        };
         let (origin_row, _) = view_surface::grid_origin(&tiles.model);
         let (_, _, _, top_height) = tiles.slots[1];
         let separator = origin_row + top_height;
-        let bottom = rect.row + rect.height - 1;
         let buf = tiled_frame(&tiles.model);
-        let at = |row: u16| buf[(col, row)].symbol().to_string();
-        let label = format!("{surface:?} {anchor:?}");
-        assert_eq!(at(rect.row), "┬", "{label}: the ring's top row");
-        let tee = if right { "┤" } else { "├" };
-        assert_eq!(at(separator), tee, "{label}: the stacked tiles' row");
-        assert_eq!(at(bottom), "┴", "{label}: the bottom edge");
-        for row in rect.row + 1..bottom {
-            if row != separator {
-                assert_eq!(at(row), "│", "{label}: row {row}");
-            }
-            let fg = buf[(col, row)].fg;
-            let beside_active = row <= separator;
-            assert_eq!(
-                fg == rgb(ACCENT_FG).unwrap(),
-                beside_active,
-                "{label}: row {row} accent is {beside_active}"
+        let layers = view_surface::render(&tiles.model).layers;
+        for open in tiles.model.overlays() {
+            let rect = tiles.model.overlay_rect(open);
+            let right = open.geometry.anchor == Anchor::Right;
+            let col = if right {
+                rect.col
+            } else {
+                rect.col + rect.width - 1
+            };
+            // the stacked pair, and the active tile on top of it, sit on
+            // the dock's side of the screen
+            let stacked = right != mirror;
+            let bottom = rect.row + rect.height - 1;
+            let at = |row: u16| buf[(col, row)].symbol().to_string();
+            let label = format!("{docks:?}: {:?}", open.geometry.anchor);
+            let layer = layers
+                .iter()
+                .find(|layer| {
+                    matches!(
+                        (&layer.kind, right),
+                        (view_surface::LayerKind::Ai(_), true)
+                            | (view_surface::LayerKind::Tree(_), false)
+                    )
+                })
+                .expect("the float paints a layer");
+            assert!(
+                !(layer.rect.col..layer.rect.col + layer.rect.width).contains(&col),
+                "{label}: the float's layer {:?} covers the join column {col}",
+                layer.rect
             );
+            let inside = if right { col + 1 } else { col - 1 };
+            for row in rect.row..=bottom {
+                let symbol = buf[(inside, row)].symbol().to_string();
+                assert!(
+                    !"╭╮╰╯│".contains(symbol.as_str()),
+                    "{label}: the float draws a second side {symbol:?} at row {row}"
+                );
+            }
+            assert_eq!(at(rect.row), "┬", "{label}: the ring's top row");
+            assert_eq!(at(bottom), "┴", "{label}: the bottom edge");
+            let tee = if right { "┤" } else { "├" };
+            for row in rect.row + 1..bottom {
+                let want = if stacked && row == separator {
+                    tee
+                } else {
+                    "│"
+                };
+                assert_eq!(at(row), want, "{label}: row {row}");
+                let fg = buf[(col, row)].fg;
+                let beside_active = stacked && row <= separator;
+                assert_eq!(
+                    fg == rgb(ACCENT_FG).unwrap(),
+                    beside_active,
+                    "{label}: row {row} accent is {beside_active}"
+                );
+            }
         }
     }
 }

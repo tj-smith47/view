@@ -241,12 +241,11 @@ impl super::Model {
     ///
     /// Such a float (the agent panel or the tree, while neither is
     /// windowed) is laid over tiles nvim laid out on the whole width, so
-    /// the part of a tile past the gutter is under it. The frame painter,
-    /// the notice column, mouse routing and the caret all read this box.
+    /// the part of a tile past the gutter is under it.
     #[must_use]
     pub fn tile_box(&self, pane: &Pane) -> Option<(u16, u16, u16, u16)> {
         let (closed, clipped) = self.closed_box(pane);
-        (!clipped || closed.2 >= MIN_FRAMED_SLOT.0).then_some(closed)
+        framed(closed, clipped).then_some(closed)
     }
 
     /// Where `grid`'s text shows on `registry`, as
@@ -257,6 +256,13 @@ impl super::Model {
     #[must_use]
     pub fn tile_text(&self, registry: &GridRegistry, grid: GridId) -> Option<(u16, u16, u16, u16)> {
         let text = registry.pane_text(grid)?;
+        // a caret and every predicted glyph ask this on each frame, and
+        // with no float docked the answer is the pane's text as it stands
+        if self.docks().next().is_none() {
+            return Some(text);
+        }
+        #[cfg(test)]
+        tests::PANE_LOOKUPS.with(|n| n.set(n.get() + 1));
         let Some(pane) = registry
             .panes_in_z_order()
             .into_iter()
@@ -268,7 +274,7 @@ impl super::Model {
         if !clipped {
             return Some(text);
         }
-        let ring = if self.tile_box(&pane).is_some() {
+        let ring = if framed(closed, clipped) {
             pane.origin.1.saturating_sub(pane.filled.1)
         } else {
             0
@@ -283,12 +289,34 @@ impl super::Model {
 
     /// The first and last of `grid`'s own columns [`Self::tile_text`]
     /// shows, the range a caret, a predicted glyph or a drag is held to.
+    /// `None` where it shows none of them, or `grid` is not on screen.
     #[must_use]
     pub fn tile_columns(&self, registry: &GridRegistry, grid: GridId) -> Option<(u16, u16)> {
         let (_, left, width, _) = self.tile_text(registry, grid)?;
+        let last = width.checked_sub(1)?;
         let (_, origin) = registry.pane_origin(grid)?;
         let first = left.saturating_sub(origin);
-        Some((first, first.saturating_add(width.saturating_sub(1))))
+        Some((first, first.saturating_add(last)))
+    }
+
+    /// The side of the screen `overlay` is docked to, where its tile-side
+    /// column is a column of the gapless tiles' lattice: a float docked to
+    /// the left or right, drawn as a float, under gapless tiles, and big
+    /// enough for a frame. `None` for every other overlay and look.
+    #[must_use]
+    pub fn joined_anchor(&self, overlay: &super::Overlay) -> Option<Anchor> {
+        if self.look.panes != Panes::Tiles || self.look.gaps {
+            return None;
+        }
+        if !self.draws_as_overlay(&overlay.kind) {
+            return None;
+        }
+        let anchor = overlay.geometry.anchor;
+        if !matches!(anchor, Anchor::Left | Anchor::Right) {
+            return None;
+        }
+        let rect = self.overlay_rect(overlay);
+        (rect.width >= 2 && rect.height >= 2).then_some(anchor)
     }
 
     /// `pane.filled` closed short of every docked gutter, and whether any
@@ -349,6 +377,12 @@ impl super::Model {
         }
         full.split_gutter(overlay.geometry.anchor)
     }
+}
+
+/// Whether a tile's box, closed by a docked float or not, still carries a
+/// frame.
+fn framed(closed: (u16, u16, u16, u16), clipped: bool) -> bool {
+    !clipped || closed.2 >= MIN_FRAMED_SLOT.0
 }
 
 /// `overlay`'s box on a `term_w` by `band_h` band, grown to the rows a
@@ -605,6 +639,41 @@ mod tests {
                 "{size:?}: a drag onto the border stays on the text: {drag:?}"
             );
         }
+    }
+
+    thread_local! {
+        /// Every pane lookup [`Model::tile_text`] has made on this thread.
+        pub(super) static PANE_LOOKUPS: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+    }
+
+    /// With no float docked, where a tile's text shows is the pane's own
+    /// text, answered with no pane lookup; a docked panel costs one per
+    /// question and closes the text short of its gutter.
+    #[test]
+    fn a_tile_with_no_docked_float_answers_its_text_without_a_pane_lookup() {
+        use crate::native::geometry::{Anchor, OverlayBox};
+        let mut scene =
+            crate::model::notice::tests::scene((220, 50), Look::new(Panes::Tiles, true), &[], 1)
+                .expect("one tile fits");
+        let model = &mut scene.model;
+        let grid = GridId(scene.tiles[0]);
+        let text = model.engine.grids().pane_text(grid);
+        let lookups = || PANE_LOOKUPS.with(std::cell::Cell::get);
+        let before = lookups();
+        assert_eq!(model.tile_text(model.engine.grids(), grid), text);
+        assert_eq!(lookups(), before, "no pane lookup without a dock");
+        model.push_overlay(
+            OverlayBox::new(30, 100).with_anchor(Anchor::Right),
+            super::super::OverlayKind::Ai,
+        );
+        let docked = model.tile_text(model.engine.grids(), grid);
+        assert_eq!(lookups(), before + 1, "one pane lookup with a dock");
+        let width = |text: Option<(u16, u16, u16, u16)>| text.map(|(_, _, w, _)| w);
+        assert!(
+            width(docked) < width(text),
+            "{docked:?} is closed short of the panel"
+        );
     }
 
     /// Gapless tiles and nvim's own picture have no frame box and move no

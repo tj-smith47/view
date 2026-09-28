@@ -665,9 +665,7 @@ impl OverlayShadow {
 /// that carries no framed rows of its own (the transient overlays, the
 /// speculated cells, the engine grid).
 fn lay_out(layer: &Layer) -> view_surface::overlay::Rows {
-    layer.borders.map_or_else(Default::default, |borders| {
-        view_surface::overlay::rows(layer.rect.width, layer.rect.height, &layer.kind, borders)
-    })
+    view_surface::overlay::layer_rows(layer)
 }
 
 /// Appends every terminal row `layer` covers.
@@ -899,7 +897,6 @@ fn composite_layers(
             | LayerKind::Ai(_) => {
                 let laid = layouts.and_then(|shadow| shadow.laid_for(index, layer));
                 paint_native_overlay(layer, laid, &theme, area, damage, buf);
-                panes::frames::paint_join(model, surface, layer, &theme, borders, damage, buf);
             }
             // LayerKind is #[non_exhaustive]: a future variant degrades to
             // painting nothing rather than failing to compile here
@@ -1457,6 +1454,7 @@ fn paint_native_overlay(
             paint_frame_cells(
                 &view_surface::overlay::line_text(line),
                 layer.rect.width,
+                layer.open,
                 area,
                 row,
                 frame,
@@ -1476,21 +1474,23 @@ fn paint_native_overlay(
 /// opinion about the frame in a module that deliberately holds none.
 /// `width` is the layer's own rect width, not `area`'s: when the terminal
 /// clipped the rect, the right-hand glyph was never painted and there is
-/// nothing at that column to restyle.
+/// nothing at that column to restyle. The side `open` names has no glyph.
 fn paint_frame_cells(
     line: &str,
     width: u16,
+    open: Option<view_surface::OpenSide>,
     area: ratatui::layout::Rect,
     row: u16,
     style: Style,
     buf: &mut Buffer,
 ) {
+    use view_surface::OpenSide;
     let mut chars = line.chars();
-    if let Some(left) = chars.next() {
+    if let Some(left) = chars.next().filter(|_| open != Some(OpenSide::Left)) {
         set_border_cell(buf, area.x, area.y + row, left, style);
     }
     let right = width.saturating_sub(1);
-    if right < area.width {
+    if right < area.width && open != Some(OpenSide::Right) {
         if let Some(glyph) = line.chars().next_back() {
             set_border_cell(buf, area.x + right, area.y + row, glyph, style);
         }

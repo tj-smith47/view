@@ -84,7 +84,7 @@ pub(crate) fn paint_frames(
     // other
     let foot = area.height.saturating_sub(model.cmdline_rows());
     let gap = ratatui_style(theme.normal());
-    let joins = joins(model, look, buf.area);
+    let joins = joins(model, buf.area);
     if look.gaps {
         let tiles = panes.iter().filter(|pane| is_tile(pane) && framed(pane));
         clear_bare(tiles, gap, area, foot, damage, buf);
@@ -577,24 +577,13 @@ impl Join {
 
 /// Every float that joins the gapless lattice: the agent panel and the
 /// tree, docked to a side and drawn as floats.
-fn joins(model: &Model, look: Look, screen: Rect) -> Vec<Join> {
-    if look.panes != Panes::Tiles || look.gaps {
-        return Vec::new();
-    }
+fn joins(model: &Model, screen: Rect) -> Vec<Join> {
     model
         .overlays()
         .iter()
-        .filter(|open| model.draws_as_overlay(&open.kind))
         .filter_map(|open| {
-            let right = match open.geometry.anchor {
-                Anchor::Left => false,
-                Anchor::Right => true,
-                _ => return None,
-            };
+            let right = model.joined_anchor(open)? == Anchor::Right;
             let rect = model.overlay_rect(open);
-            if rect.width < 2 || rect.height < 2 {
-                return None;
-            }
             let first = rect.col;
             let last = rect
                 .col
@@ -662,60 +651,6 @@ fn gapless_lattice(
         .map(|pane| perimeter(pane, joins, &cells, area))
         .unwrap_or_default();
     (lattice, edges)
-}
-
-/// Paints a joined float's tile-side column over the float's own border,
-/// once `layer` has been painted: the lattice's glyph and colour on every
-/// row of it, so the tiles' lines meet the float in a junction. Any other
-/// layer is left as it is.
-pub(crate) fn paint_join(
-    model: &Model,
-    surface: &view_surface::Surface,
-    layer: &view_surface::Layer,
-    theme: &Theme,
-    borders: BorderSet,
-    damage: &Damage,
-    buf: &mut Buffer,
-) {
-    use view_surface::LayerKind;
-    if !matches!(layer.kind, LayerKind::Ai(_) | LayerKind::Tree(_)) {
-        return;
-    }
-    let registry = model.engine.painted_grids();
-    let joins = joins(model, registry.look(), buf.area);
-    let Some(join) = joins
-        .iter()
-        .find(|join| (join.first, join.top) == (layer.rect.col, layer.rect.row))
-    else {
-        return;
-    };
-    let Some(area) = surface
-        .layers
-        .iter()
-        .find(|layer| matches!(layer.kind, LayerKind::EngineGrid))
-        .map(|layer| super::super::clip_to_frame(layer.rect, buf.area))
-    else {
-        return;
-    };
-    let panes = registry.panes_in_z_order();
-    let foot = area.height.saturating_sub(model.cmdline_rows());
-    let (lattice, edges) =
-        gapless_lattice(&panes, &joins, registry.cursor_grid(), area, foot, buf.area);
-    let (quiet, accent) = (quiet_style(theme), ratatui_style(theme.accent()));
-    for row in join.top..=join.bottom {
-        let cell = (row, join.col);
-        if !damage.covers(row) || !lattice.down.contains(&cell) {
-            continue;
-        }
-        let style = if edges.contains(&cell) { accent } else { quiet };
-        set_border_cell(
-            buf,
-            join.col,
-            row,
-            junction(&lattice, row, join.col, borders),
-            style,
-        );
-    }
 }
 
 /// Every screen cell the gapless lattice runs through: the column right of

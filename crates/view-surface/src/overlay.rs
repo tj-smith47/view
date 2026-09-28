@@ -26,7 +26,7 @@ use view_core::native::views::{
     StatuslineView, StyleRole, TreeRow, TreeView, INLINE_CHOICE_GAP,
 };
 
-use crate::LayerKind;
+use crate::{Layer, LayerKind, OpenSide};
 
 /// The horizontal edge glyph of the box-drawing border. Named beside
 /// [`LINE_V`] because the two are one decision: a frame whose edges came
@@ -164,6 +164,36 @@ pub struct Rows {
     /// same size predicate on its side is how the two come to disagree
     /// about a degenerate rect.
     pub framed: bool,
+}
+
+/// `layer`'s rows: [`rows`] laid out on its [`Layer::frame_rect`], less
+/// the column [`Layer::open`] leaves out, so each row is exactly as wide
+/// as `layer.rect`. Empty for a layer with no frame.
+#[must_use]
+pub fn layer_rows(layer: &Layer) -> Rows {
+    let Some(borders) = layer.borders else {
+        return Rows::default();
+    };
+    let frame = layer.frame_rect();
+    let mut laid = rows(frame.width, frame.height, &layer.kind, borders);
+    let Some(open) = layer.open else {
+        return laid;
+    };
+    for line in &mut laid.lines {
+        match open {
+            OpenSide::Left => {
+                if let Some(span) = line.iter_mut().find(|span| !span.text.is_empty()) {
+                    span.text.remove(0);
+                }
+            }
+            OpenSide::Right => {
+                if let Some(span) = line.iter_mut().rev().find(|span| !span.text.is_empty()) {
+                    span.text.pop();
+                }
+            }
+        }
+    }
+    laid
 }
 
 /// Lays `kind` out into a `width` by `height` rect framed by `borders`.

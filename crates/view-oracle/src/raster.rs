@@ -266,7 +266,7 @@ fn paint_layer<'a>(
 
 /// Writes a framed native overlay's rows into `canvas`.
 ///
-/// The rows themselves come from `view_surface::overlay::rows`, the same
+/// The rows themselves come from `view_surface::overlay::layer_rows`, the same
 /// layout pass the terminal painter blits, so this raster reproduces a
 /// native overlay exactly rather than approximating it the way the
 /// tabline/cmdline arms above approximate nvim's own chrome. That is what
@@ -277,11 +277,7 @@ fn paint_layer<'a>(
 /// A layer with no border charset is not a framed overlay at all and paints
 /// nothing, matching what the layout pass itself returns for one.
 fn paint_native_overlay(canvas: &mut Canvas<'_>, layer: &Layer) {
-    let Some(borders) = layer.borders else {
-        return;
-    };
-    let rows =
-        view_surface::overlay::rows(layer.rect.width, layer.rect.height, &layer.kind, borders);
+    let rows = view_surface::overlay::layer_rows(layer);
     for (r, line) in rows.lines.iter().enumerate() {
         let Ok(r) = u16::try_from(r) else { break };
         paint_text(
