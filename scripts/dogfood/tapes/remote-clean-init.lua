@@ -26,3 +26,14 @@ local theme = vim.env.VIEW_DOGFOOD_THEME
 if not (theme and theme ~= "" and pcall(vim.cmd.colorscheme, theme)) then
   vim.cmd.colorscheme("habamax")
 end
+
+-- a local config that clears Normal's background does it in a setup()
+-- call this init never runs, so the far side replays the result
+if vim.env.VIEW_DOGFOOD_TRANSPARENT == "1" then
+  for _, group in ipairs({ "Normal", "NormalNC" }) do
+    local hl = vim.api.nvim_get_hl(0, { name = group, link = false })
+    hl.bg = nil
+    hl.ctermbg = nil
+    vim.api.nvim_set_hl(0, group, hl)
+  end
+end
