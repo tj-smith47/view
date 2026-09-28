@@ -216,8 +216,9 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
 /// A colour switch writes only the colour that changes. A run of blank
 /// cells in one style on the terminal's default background that reaches
 /// `right`, the terminal's last column plus one, is one erase to the end
-/// of the line where that is shorter than the spaces. The screen a frame
-/// leaves is the one `CrosstermBackend::draw` leaves; the bytes differ.
+/// of the line where that is shorter than the spaces. An erase fills the
+/// cells with the pen's background and, on some terminals (tmux 3.6
+/// among them), the default foreground, as nvim's TUI clears a line end.
 ///
 /// # Errors
 ///
@@ -432,8 +433,9 @@ impl Pen {
     /// Erases from `run`'s first cell to the end of the line.
     fn erase_to_end<W: Write>(&mut self, writer: &mut W, run: BlankRun) -> std::io::Result<()> {
         self.address(writer, run.x, run.y)?;
-        // a terminal fills the erased cells with the pen's colours, and a
-        // block cursor resting on one later draws its foreground
+        // an erase fills the cells with the pen's background and, on some
+        // terminals, its foreground as well, the way nvim's TUI clears a
+        // line end; a block cursor resting on one draws that foreground
         self.style(writer, run.cell)?;
         queue!(writer, Clear(ClearType::UntilNewLine))?;
         // the erase leaves the cursor on the run's first cell, where no

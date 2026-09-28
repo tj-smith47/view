@@ -324,8 +324,8 @@ these captures show it.
    one cursor move at the run's start. A terminal that draws the glyph two
    cells wide while it reports a column of 2 is unobserved. Termius is the one
    terminal recorded drawing box glyphs two wide (commit `5e42c17a`), and its
-   reply to `\r╭\x1b[6n` is not recorded. That reply is captured from the
-   iPad, and it goes in a lettered section of its own after H, with a row in
+   reply to `\r╭\x1b[6n` is not recorded. That reply is to be captured from
+   the iPad, and it goes in a lettered section of its own after H, with a row in
    the host matrix. A font that lacks the glyph is unobserved as well, so a
    column of 2 says nothing about whether the border is legible.
 3. `Pm=0` on DECRPM is a real answer meaning unsupported, distinct from a

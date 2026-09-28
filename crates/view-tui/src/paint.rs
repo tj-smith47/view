@@ -4562,31 +4562,72 @@ mod tests {
     }
 
     /// The screen a terminal the size of `front` shows once it has drawn
-    /// `front` and then taken `bytes`.
+    /// `front` and then taken `bytes`, both streams stripped of the
+    /// underline colour.
     fn screen_after(front: &Buffer, bytes: &[u8]) -> vt100::Parser {
         let area = front.area;
         let mut parser = vt100::Parser::new(area.height, area.width, 0);
-        parser.process(&crossterm_bytes(&Buffer::empty(area), front));
-        parser.process(bytes);
+        parser.process(&without_underline_colour(&crossterm_bytes(
+            &Buffer::empty(area),
+            front,
+        )));
+        parser.process(&without_underline_colour(bytes));
         parser
+    }
+
+    /// `bytes` with the underline colour's SGR parameters (`58` with its
+    /// colour, and `59`) taken out. vt100 does not know `58` and reads the
+    /// colour's arguments as SGRs of their own: `58;5;1` sets bold.
+    fn without_underline_colour(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut rest = bytes;
+        while let Some(at) = rest.windows(2).position(|w| w == b"\x1b[") {
+            out.extend_from_slice(&rest[..at]);
+            let body = &rest[at + 2..];
+            let Some(end) = body.iter().position(|b| (0x40..=0x7e).contains(b)) else {
+                out.extend_from_slice(&rest[at..]);
+                return out;
+            };
+            let params = std::str::from_utf8(&body[..end]).unwrap();
+            if body[end] == b'm' && !params.is_empty() {
+                let mut kept = Vec::new();
+                let mut it = params.split(';');
+                while let Some(param) = it.next() {
+                    match param {
+                        "58" => {
+                            let args = if it.next() == Some("2") { 3 } else { 1 };
+                            for _ in 0..args {
+                                let _ = it.next();
+                            }
+                        }
+                        "59" => {}
+                        _ => kept.push(param),
+                    }
+                }
+                // an SGR left with no parameter would read as a reset
+                if !kept.is_empty() {
+                    out.extend_from_slice(format!("\x1b[{}m", kept.join(";")).as_bytes());
+                }
+            } else {
+                out.extend_from_slice(&rest[at..at + 2 + end + 1]);
+            }
+            rest = &body[end + 1..];
+        }
+        out.extend_from_slice(rest);
+        out
     }
 
     /// What a person sees in one cell: its text and the attributes drawn
     /// with it, or its two colours alone where the cell is blank and no
     /// attribute draws the foreground on it.
-    fn seen(cell: &vt100::Cell) -> (String, Option<vt100::Color>, vt100::Color, [bool; 5]) {
+    fn seen(cell: &vt100::Cell) -> (String, vt100::Color, vt100::Color, [bool; 5]) {
         if cell.contents().trim().is_empty() && !cell.inverse() && !cell.underline() {
             // a block cursor resting on a blank draws its foreground
-            return (
-                String::new(),
-                Some(cell.fgcolor()),
-                cell.bgcolor(),
-                [false; 5],
-            );
+            return (String::new(), cell.fgcolor(), cell.bgcolor(), [false; 5]);
         }
         (
             cell.contents().to_owned(),
-            Some(cell.fgcolor()),
+            cell.fgcolor(),
             cell.bgcolor(),
             [
                 cell.bold(),
@@ -4601,6 +4642,11 @@ mod tests {
     /// Asserts `got` leaves the screen `CrosstermBackend::draw` leaves for
     /// the whole-frame diff of `front` against `back`, cell by cell, and
     /// returns the two cursor positions.
+    ///
+    /// vt100 models bold, dim, italic, underline and inverse. It cannot
+    /// see crossed-out, hidden, blink or the underline colour, so those
+    /// four are held by the byte leg,
+    /// `emission_equals_crossterms_bytes_where_both_colours_change`.
     fn assert_crossterms_screen(
         front: &Buffer,
         back: &Buffer,
@@ -5112,8 +5158,9 @@ mod tests {
     /// emission loop encodes -- each modifier alone, the bold/dim intensity
     /// pair, colour changes and underline-colour changes -- over ASCII
     /// symbols only, and leaves a quarter of the cells equal to `front` so
-    /// the diff is non-contiguous.
-    fn seed_style_sweep(front: &mut Buffer, back: &mut Buffer) {
+    /// the diff is non-contiguous. Cell `i` takes the foreground `i % 5`
+    /// and the background `bg(i)` of five colours.
+    fn seed_style_sweep(front: &mut Buffer, back: &mut Buffer, bg: fn(usize) -> usize) {
         let modifiers = [
             Modifier::empty(),
             Modifier::BOLD,
@@ -5143,7 +5190,7 @@ mod tests {
                 let symbol = char::from(b'!' + u8::try_from(i % 90).unwrap()).to_string();
                 let style = Style::default()
                     .fg(colors[i % colors.len()])
-                    .bg(colors[(i / 3) % colors.len()])
+                    .bg(colors[bg(i) % colors.len()])
                     .underline_color(colors[(i / 7) % colors.len()])
                     .add_modifier(modifiers[i % modifiers.len()]);
                 back[(x, y)].set_symbol(&symbol).set_style(style);
@@ -5168,7 +5215,7 @@ mod tests {
         let area = ratatui::layout::Rect::new(0, 0, 16, 7);
         let mut front = Buffer::empty(area);
         let mut back = Buffer::empty(area);
-        seed_style_sweep(&mut front, &mut back);
+        seed_style_sweep(&mut front, &mut back, |i| i / 3);
         assert!(
             !crossterm_bytes(&front, &back).is_empty(),
             "the sweep produced no diff at all, so this pin asserts nothing"
@@ -5179,9 +5226,35 @@ mod tests {
         assert_eq!(got, want, "the cursor ends where crossterm leaves it");
     }
 
+    /// Where both colours change between every two cells the loop writes,
+    /// each switch is crossterm's own `SetColors` and no blank run forms,
+    /// so the emission has to equal crossterm's byte for byte. This leg
+    /// holds the attributes the screen oracle cannot see: crossed-out,
+    /// hidden, blink and the underline colour. The written cells step `i`
+    /// by one or two, and five colours change on either step.
+    ///
+    /// Disconfirm: `queue_modifier_diff` never writing `NotCrossedOut`.
+    #[test]
+    fn emission_equals_crossterms_bytes_where_both_colours_change() {
+        let area = ratatui::layout::Rect::new(0, 0, 16, 7);
+        let mut front = Buffer::empty(area);
+        let mut back = Buffer::empty(area);
+        seed_style_sweep(&mut front, &mut back, |i| i + 2);
+        let want = crossterm_bytes(&front, &back);
+        assert!(
+            !want.is_empty(),
+            "the sweep produced no diff at all, so this pin asserts nothing"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&resynced_bytes(&front, &back)),
+            String::from_utf8_lossy(&want),
+            "the emission's bytes differ from CrosstermBackend::draw's"
+        );
+    }
+
     /// A colour switch between cells on one background writes the
-    /// foreground alone. A blank run erased to the row end is erased in
-    /// its own foreground, which a block cursor resting there draws.
+    /// foreground alone. A blank run erased to the row end is erased under
+    /// its own colours.
     ///
     /// Disconfirm: `Pen::style` writing both colours on every switch.
     #[test]
