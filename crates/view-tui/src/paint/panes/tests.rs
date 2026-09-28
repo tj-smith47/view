@@ -2907,7 +2907,12 @@ fn the_tree_view_paints_into_its_native_panes_rect() {
 /// same handle), and carries one transcript line so the golden shows
 /// painted content.
 fn agent_in_the_right_tile(gaps: bool) -> Tiles {
-    let tiles = tiled(gaps);
+    agent_in_the_right_tile_at(gaps, (TILED_WIDTH, TILED_HEIGHT))
+}
+
+/// [`agent_in_the_right_tile`] on a terminal of `size`.
+fn agent_in_the_right_tile_at(gaps: bool, size: (u16, u16)) -> Tiles {
+    let tiles = tiled_at(gaps, size, 0);
     let slots = tiles.slots;
     let mut model = tiles.model;
     model.ai_trusted = true;
@@ -4524,33 +4529,43 @@ fn every_tiled_scene_has_a_golden_at_every_tier() {
 /// with.
 type MidResizeTile = ((u16, u16, u16, u16), (u16, u16), char);
 
-/// The vsplit laid out and drawn for a terminal of `from`, each window's
-/// grid filled edge to edge with its own letter, then placed again by nvim
-/// for a terminal of `to` with the grids still at their `from` sizes: the
-/// screen between a resize's `win_pos` and the redraw that resizes the
-/// window grids, which a config's `VimResized` handlers hold open.
-///
-/// Answers the model, each window's new slot, its grid's size and letter.
-fn mid_resize(gaps: bool, from: (u16, u16), to: (u16, u16)) -> (Model, Vec<MidResizeTile>) {
-    // no title or status segment the fixture writes carries either
-    let letters = ['#', '%'];
-    let mut model = tiled_at(gaps, from, 0).model;
-    let mut tiles = Vec::new();
-    let mut fill = Vec::new();
-    for (index, slot) in tiled_at(gaps, to, 0).slots.into_iter().enumerate() {
-        let grid = LEFT + index as u64;
-        let size = model
-            .engine
-            .grids()
-            .grid(GridId(grid))
-            .map(view_core::grid::Grid::size)
-            .expect("the window grid is sized");
-        let text = letters[index].to_string().repeat(usize::from(size.0));
-        fill.extend((0..size.1).map(|row| line(grid, u64::from(row), &text, 0)));
-        tiles.push((slot, size, letters[index]));
-    }
-    fill.push(UiEvent::Flush);
-    drive(&mut model, fill);
+/// What the fixture writes over the whole global grid before a resize: the
+/// old layout's separator, status and command-line rows stand in for it,
+/// and none of them may show once the resize is half applied.
+const STALE: &str = "@";
+
+/// A two-window fixture on a terminal of a size: [`tiled_at`] or
+/// [`stacked_at`].
+type Layout = fn(bool, (u16, u16), u16) -> Tiles;
+
+/// `layout`'s windows on a terminal of `size`, first to last, as `(grid,
+/// slot)`. `reversed` gives the first window the higher grid id, which is
+/// how nvim numbers the window its own `:vsplit` or `:split` opens, and
+/// which paints it after its neighbour.
+fn layout_slots(
+    layout: Layout,
+    gaps: bool,
+    size: (u16, u16),
+    reversed: bool,
+) -> Vec<(u64, (u16, u16, u16, u16))> {
+    let slots = layout(gaps, size, 0).slots;
+    let count = slots.len() as u64;
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            let index = index as u64;
+            let grid = if reversed { count - 1 - index } else { index };
+            (LEFT + grid, slot)
+        })
+        .collect()
+}
+
+/// Places every window of `layout` again for a terminal of `to`, and
+/// resizes the global grid to it, leaving the window grids at whatever size
+/// they had: the half of a resize nvim sends before a config's
+/// `VimResized` handlers run and the redraw that resizes the window grids.
+fn place_at(model: &mut Model, layout: Layout, gaps: bool, to: (u16, u16), reversed: bool) {
     let (grid_width, grid_height) = outer_grid_at(gaps, to, 0);
     model.term_width = to.0;
     model.term_height = to.1;
@@ -4559,36 +4574,96 @@ fn mid_resize(gaps: bool, from: (u16, u16), to: (u16, u16)) -> (Model, Vec<MidRe
         width: u64::from(grid_width),
         height: u64::from(grid_height),
     }];
-    for (index, ((row, col, width, height), _, _)) in tiles.iter().enumerate() {
+    for (grid, (row, col, width, height)) in layout_slots(layout, gaps, to, reversed) {
         placed.push(UiEvent::WinPos {
-            grid: LEFT + index as u64,
-            win: WinHandle(1000 + index as u64),
-            startrow: u64::from(*row),
-            startcol: u64::from(*col),
-            width: u64::from(*width),
-            height: u64::from(*height),
+            grid,
+            win: WinHandle(1000 + grid - LEFT),
+            startrow: u64::from(row),
+            startcol: u64::from(col),
+            width: u64::from(width),
+            height: u64::from(height),
         });
     }
     placed.push(UiEvent::Flush);
-    drive(&mut model, placed);
+    drive(model, placed);
+}
+
+/// `layout` laid out and drawn for a terminal of `from`, each window's
+/// grid filled edge to edge with its own letter and the global grid with
+/// [`STALE`], then placed again by nvim for a terminal of `to` with the
+/// grids still at their `from` sizes (see [`place_at`]).
+///
+/// Answers the model, each window's new slot, its grid's size and letter.
+fn mid_resize(
+    layout: Layout,
+    gaps: bool,
+    (from, to): ((u16, u16), (u16, u16)),
+    reversed: bool,
+) -> (Model, Vec<MidResizeTile>) {
+    // no title or status segment the fixture writes carries either
+    let letters = ['#', '%'];
+    // in grid order, which is the order the fixture numbers grids in
+    let mut from_slots = layout_slots(layout, gaps, from, reversed);
+    from_slots.sort_unstable();
+    let from_slots: Vec<_> = from_slots.into_iter().map(|(_, slot)| slot).collect();
+    let mut model = tiled_model_at(gaps, from, 0, &from_slots);
+    let (grid_width, grid_height) = outer_grid_at(gaps, from, 0);
+    let stale = STALE.repeat(usize::from(grid_width));
+    let mut fill: Vec<UiEvent> = (0..grid_height)
+        .map(|row| line(1, u64::from(row), &stale, 0))
+        .collect();
+    let mut tiles = Vec::new();
+    let slots = layout_slots(layout, gaps, to, reversed);
+    for (letter, (grid, slot)) in letters.into_iter().zip(slots) {
+        let size = model
+            .engine
+            .grids()
+            .grid(GridId(grid))
+            .map(view_core::grid::Grid::size)
+            .expect("the window grid is sized");
+        let text = letter.to_string().repeat(usize::from(size.0));
+        fill.extend((0..size.1).map(|row| line(grid, u64::from(row), &text, 0)));
+        tiles.push((slot, size, letter));
+    }
+    fill.push(UiEvent::Flush);
+    drive(&mut model, fill);
+    place_at(&mut model, layout, gaps, to, reversed);
     (model, tiles)
 }
 
 /// Every tile's text stays inside its frame, and its frame stands on the
 /// edge of its text, while a resize is half applied: grown, where the slot
-/// outgrows the grid, and shrunk, where the grid overhangs the slot and
-/// the left tile's letters would otherwise land in the right tile. Gapped
-/// and gapless alike, since nvim sends both looks the same two halves.
+/// outgrows the grid, and shrunk, where the grid overhangs the slot. With
+/// the first window painted last, as nvim numbers the one its own split
+/// opens, a shrunk first grid's letters would otherwise land in the tile
+/// beside or under it. Nothing the global grid kept from the old layout
+/// shows anywhere. Side by side and stacked, gapped and gapless alike,
+/// since nvim sends every layout and look the same two halves.
 #[test]
 fn a_tile_frame_follows_its_grid_through_a_half_applied_resize() {
     let (small, large) = ((60, 18), (TILED_WIDTH, TILED_HEIGHT));
-    for gaps in [true, false] {
+    let layouts: [(&str, Layout); 2] = [("vsplit", tiled_at), ("split", stacked_at)];
+    for ((name, layout), gaps, reversed) in layouts
+        .into_iter()
+        .flat_map(|layout| [true, false].map(|gaps| (layout, gaps)))
+        .flat_map(|(layout, gaps)| [false, true].map(|reversed| (layout, gaps, reversed)))
+    {
         for (from, to) in [(small, large), (large, small)] {
-            let (model, tiles) = mid_resize(gaps, from, to);
+            let (model, tiles) = mid_resize(layout, gaps, (from, to), reversed);
             let buf = tiled_frame(&model);
             let offset = model.look.grid_offset();
             let ring = u16::from(gaps);
-            let case = format!("gaps={gaps} {from:?} -> {to:?}");
+            let case = format!("{name} gaps={gaps} reversed={reversed} {from:?} -> {to:?}");
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    assert_ne!(
+                        buf[(x, y)].symbol(),
+                        STALE,
+                        "{case}: the old layout shows at ({x}, {y}):\n{}",
+                        screen_dump(&buf)
+                    );
+                }
+            }
             for ((row, col, width, height), (grid_width, grid_height), letter) in tiles {
                 let filled_width = width.min(grid_width + 2 * ring);
                 let filled_height = height.min(grid_height + 2 * ring);
@@ -4610,9 +4685,27 @@ fn a_tile_frame_follows_its_grid_through_a_half_applied_resize() {
                         );
                     }
                 }
-                // the first column past the text is the frame's own under
-                // either look: the ring's right side gapped, the lattice
-                // column gapless
+                // the columns either side of the text are the frame's own
+                // under either look: the ring's sides gapped, the lattice
+                // columns gapless
+                // and the corner above-left of it is where the frame's top
+                // edge meets its left one
+                if let (Some(before), Some(above)) = (left.checked_sub(1), top.checked_sub(1)) {
+                    assert!(
+                        "╭├┬┼".contains(buf[(before, above)].symbol()),
+                        "{case}: tile {letter}'s frame has no top-left corner at \
+                         ({before}, {above}):\n{}",
+                        screen_dump(&buf)
+                    );
+                }
+                if let Some(before) = left.checked_sub(1) {
+                    assert!(
+                        "│├┤┼".contains(buf[(before, top)].symbol()),
+                        "{case}: tile {letter}'s frame is not on its text's edge at \
+                         column {before}:\n{}",
+                        screen_dump(&buf)
+                    );
+                }
                 if right < buf.area.width {
                     assert!(
                         "│├┤┼┬┴╮╯".contains(buf[(right, top)].symbol()),
@@ -4622,6 +4715,55 @@ fn a_tile_frame_follows_its_grid_through_a_half_applied_resize() {
                     );
                 }
             }
+        }
+    }
+}
+
+/// The agent panel's caret stands right after the prompt mark of the
+/// composer the panel is painted with, settled and while a grow is half
+/// applied, and a click on the part of the grown slot the panel does not
+/// cover reaches no grid.
+#[test]
+fn the_agent_caret_sits_on_the_composer_the_panel_paints() {
+    for gaps in [true, false] {
+        for grown in [false, true] {
+            let case = format!("gaps={gaps} grown={grown}");
+            let mut model = agent_in_the_right_tile_at(gaps, (60, 18)).model;
+            drive(
+                &mut model,
+                vec![
+                    UiEvent::GridCursorGoto {
+                        grid: LEFT + 1,
+                        row: 0,
+                        col: 0,
+                    },
+                    UiEvent::Flush,
+                ],
+            );
+            if grown {
+                let to = (TILED_WIDTH, TILED_HEIGHT);
+                place_at(&mut model, tiled_at, gaps, to, false);
+                let (row, col, width, height) = tiled(gaps).slots[1];
+                let far = (col + width - 1, row + height - 1);
+                assert_eq!(
+                    model.engine.grids().hit_test(far.0, far.1),
+                    None,
+                    "{case}: a click on the bare part of the grown slot"
+                );
+            }
+            let buf = tiled_frame(&model);
+            let cursor = view_surface::render(&model)
+                .cursor
+                .unwrap_or_else(|| panic!("{case}: the focused panel has a caret"));
+            let (row, col) = (cursor.row, cursor.col);
+            let mark = col.checked_sub(2).map(|x| buf[(x, row)].symbol());
+            assert_eq!(
+                mark,
+                Some(">"),
+                "{case}: the caret at ({col}, {row}) is not after the composer's \
+                 prompt mark:\n{}",
+                screen_dump(&buf)
+            );
         }
     }
 }

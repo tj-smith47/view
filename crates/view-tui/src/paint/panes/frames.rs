@@ -60,11 +60,22 @@ pub(crate) fn paint_frames(
     // `cmdheight` at 0 and the last row is a window's status row like any
     // other
     let foot = area.height.saturating_sub(model.cmdline_rows());
+    let gap = ratatui_style(theme.normal());
     if look.gaps {
+        let tiles = panes.iter().filter(|pane| is_tile(pane) && framed(pane));
+        clear_bare(tiles, gap, area, foot, damage, buf);
         paint_gapped(
-            panes, look, active, theme, borders, quiet, accent, area, foot, damage, buf,
+            panes, look, active, borders, quiet, accent, area, damage, buf,
         );
     } else {
+        clear_bare(
+            panes.iter().filter(|pane| is_tile(pane)),
+            gap,
+            area,
+            foot,
+            damage,
+            buf,
+        );
         paint_gapless(
             panes, active, borders, quiet, accent, area, foot, damage, buf,
         );
@@ -105,7 +116,7 @@ fn quiet_style(theme: &Theme) -> Style {
 /// needs room for. A slot too small to spare the ring keeps its whole
 /// grid, and the registry places it at the slot's own origin.
 fn framed(pane: &Pane) -> bool {
-    let (row, col, _, _) = pane.slot;
+    let (row, col, _, _) = pane.filled;
     pane.origin != (row, col)
 }
 
@@ -358,30 +369,28 @@ fn write_edge(groups: &[Vec<Span>], base: Style, theme: &Theme, edge: Rect, buf:
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn paint_gapped(
-    panes: &[Pane],
-    look: Look,
-    active: Option<GridId>,
-    theme: &Theme,
-    borders: BorderSet,
-    quiet: Style,
-    accent: Style,
+/// Clears the separator column and status row nvim paints just past each
+/// of `tiles`' slots, and the part of the slot its grid does not cover, to
+/// the background the tiles sit on.
+///
+/// A stale separator left there survives every later redraw, because nvim
+/// believes the window's own grid covers it. The bare part of a slot holds
+/// whatever the global grid kept from the layout before a resize, an old
+/// status or command-line row among it, until nvim resizes the grid. A
+/// gapless lattice is drawn over these cells afterwards, which leaves only
+/// that bare part blank under it.
+fn clear_bare<'a>(
+    tiles: impl Iterator<Item = &'a Pane>,
+    gap: Style,
     area: Rect,
     foot: u16,
     damage: &Damage,
     buf: &mut Buffer,
 ) {
-    // the gap is the separator column and the status row nvim paints just
-    // past the slot, cleared here; a stale separator left there survives
-    // every later redraw, because nvim believes the window's own grid
-    // covers it
-    let gap = ratatui_style(theme.normal());
-    for pane in panes.iter().filter(|pane| is_tile(pane) && framed(pane)) {
+    for pane in tiles {
+        // the slot is read here because its part the grid leaves bare is
+        // what this clears
         let (row, col, width, height) = pane.slot;
-        // the part of the slot a grid nvim has yet to resize leaves bare
-        // is gap as well, since it holds whatever the global grid kept
-        // from the layout before the resize
         let (_, _, filled_width, filled_height) = pane.filled;
         // a row nvim keeps for its command line is where the mode message
         // and the answer to every prompt are written, so every clear stops
@@ -408,6 +417,20 @@ fn paint_gapped(
             buf,
         );
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_gapped(
+    panes: &[Pane],
+    look: Look,
+    active: Option<GridId>,
+    borders: BorderSet,
+    quiet: Style,
+    accent: Style,
+    area: Rect,
+    damage: &Damage,
+    buf: &mut Buffer,
+) {
     for pane in panes.iter().filter(|pane| is_tile(pane) && framed(pane)) {
         let Some((row, col, width, height)) = look.frame_box(pane.filled) else {
             continue;
@@ -517,9 +540,9 @@ fn paint_gapless(
 
 /// Every screen cell the gapless lattice runs through: the column right of
 /// each tile and the row under it, which are the cells nvim draws its
-/// separator and status row into, plus the ring's top row and its left and
-/// right columns, which are the edges the outermost tiles have no
-/// neighbour to share.
+/// separator and status row into, the column left of it and the row above
+/// it, plus the ring's top row and its left and right columns, which are
+/// the edges the outermost tiles have no neighbour to share.
 fn lattice(panes: &[Pane], area: Rect, foot: u16, screen: Rect) -> BTreeSet<Cell> {
     let mut cells = BTreeSet::new();
     // a row nvim keeps for its command line is where the mode message and
@@ -528,6 +551,20 @@ fn lattice(panes: &[Pane], area: Rect, foot: u16, screen: Rect) -> BTreeSet<Cell
     for pane in panes.iter().filter(|pane| is_tile(pane)) {
         let (row, col, width, height) = pane.filled;
         let (edge_col, edge_row) = (col.saturating_add(width), row.saturating_add(height));
+        // a tile's left and top edges are its neighbours' right and bottom
+        // ones in a settled layout; while a resize is half applied a
+        // neighbour's grid stops short of them, and the tile would stand
+        // open on that side
+        if let Some(left) = col.checked_sub(1) {
+            for r in row.saturating_sub(1)..=edge_row.min(foot.saturating_sub(1)) {
+                cells.insert((area.y.saturating_add(r), area.x.saturating_add(left)));
+            }
+        }
+        if let Some(top) = row.checked_sub(1) {
+            for c in col.saturating_sub(1)..=edge_col.min(area.width.saturating_sub(1)) {
+                cells.insert((area.y.saturating_add(top), area.x.saturating_add(c)));
+            }
+        }
         if edge_col < area.width {
             for r in row..=edge_row.min(foot.saturating_sub(1)) {
                 cells.insert((area.y.saturating_add(r), area.x.saturating_add(edge_col)));

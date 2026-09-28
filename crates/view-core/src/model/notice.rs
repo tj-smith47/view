@@ -175,7 +175,7 @@ impl Model {
         let area = panes
             .iter()
             .filter(|pane| matches!(pane.kind, PaneKind::Native { .. }) || sidebar(pane.id))
-            .map(|pane| pane.slot)
+            .map(|pane| pane.filled)
             .chain(self.side_panels())
             .fold(grid, cut);
         // a side panel or windowed surface that fills the grid leaves no
@@ -195,7 +195,7 @@ impl Model {
                     })
                     // a tile runs on under a side panel drawn over it, so
                     // only the part of it the area keeps is the tile's
-                    .map(|pane| within(shrink(pane.slot, inset_rows, inset_cols), area))
+                    .map(|pane| within(shrink(pane.filled, inset_rows, inset_cols), area))
                     .filter(|kept| kept.2 > 0 && kept.3 > 0)
                     .min_by_key(|&(row, col, width, height)| {
                         let at = (
@@ -249,7 +249,7 @@ impl Model {
             if !matches!(pane.kind, PaneKind::Float { .. }) {
                 continue;
             }
-            let (f_row, f_col, f_width, f_height) = pane.slot;
+            let (f_row, f_col, f_width, f_height) = pane.filled;
             let f_bottom = f_row.saturating_add(f_height);
             if f_width == 0
                 || f_height == 0
@@ -290,7 +290,7 @@ impl Model {
             .panes_in_z_order()
             .into_iter()
             .find(|pane| pane.id == focused)?
-            .slot;
+            .filled;
         if !overlaps(
             (cursor_row, rect.1, rect.2, 1),
             (cursor_row, window.1, window.2, 1),
@@ -718,8 +718,8 @@ pub(crate) mod tests {
             if model.look.panes == Panes::Tiles {
                 // a gapless frame is the lattice around the slot, and the
                 // lattice at the grid's own edge is the ring outside it
-                let (row, col, width, height) = focused.slot;
-                let frame = match model.look.frame_box(focused.slot) {
+                let (row, col, width, height) = focused.filled;
+                let frame = match model.look.frame_box(focused.filled) {
                     Some(frame) => edges(frame).to_vec(),
                     None => [
                         row.checked_sub(1).map(|up| (up, col, width, 1)),
@@ -1036,6 +1036,57 @@ pub(crate) mod tests {
             "the far end of the column stays"
         );
         assert_eq!(scene.model.notice_bounds(), before.rect);
+    }
+
+    /// While a grow is half applied, the new slot placed and the grid not
+    /// yet resized to it, a notice pinned to a tile's far corner stands
+    /// inside the frame drawn on the tile's text.
+    #[test]
+    fn a_tile_notice_stands_inside_the_frame_until_nvim_resizes_the_grid() {
+        for gaps in [true, false] {
+            let look = Look::new(Panes::Tiles, gaps);
+            let mut scene = scene((80, 24), look, &[], 1).expect("an 80x24 tile");
+            anchor_at(&mut scene.model, Anchor::BottomRight);
+            let grid = scene.tiles[0];
+            let (row, col, width, height) = scene.slots[0];
+            let (grid_w, grid_h) = scene.model.engine.grids().global().size();
+            let _ = update(
+                &mut scene.model,
+                Msg::Redraw(vec![
+                    UiEvent::GridResize {
+                        grid: 1,
+                        width: u64::from(grid_w + 20),
+                        height: u64::from(grid_h + 6),
+                    },
+                    UiEvent::WinPos {
+                        grid,
+                        win: WinHandle(1000 + grid),
+                        startrow: u64::from(row),
+                        startcol: u64::from(col),
+                        width: u64::from(width + 20),
+                        height: u64::from(height + 6),
+                    },
+                    UiEvent::Flush,
+                ]),
+            );
+            let tile = scene
+                .model
+                .engine
+                .grids()
+                .panes_in_z_order()
+                .into_iter()
+                .find(|pane| pane.id == GridId(grid))
+                .expect("the tile is placed");
+            assert_eq!(tile.slot.2, width + 20, "gaps={gaps}: the grow is placed");
+            let (f_row, f_col, f_width, f_height) = tile.filled;
+            let (n_row, n_col, n_width, n_height) = scene.model.notice_bounds();
+            assert!(
+                n_col + n_width <= f_col + f_width && n_row + n_height <= f_row + f_height,
+                "gaps={gaps}: the notice column {:?} reaches past the tile's text {:?}",
+                (n_row, n_col, n_width, n_height),
+                tile.filled
+            );
+        }
     }
 
     /// One tile at 80x24 under `anchor` with three notices up, and where

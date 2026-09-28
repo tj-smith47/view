@@ -76,8 +76,8 @@ pub struct Pane {
     /// carries its origin and the grid's own size here.
     pub slot: (u16, u16, u16, u16),
     /// The part of [`Self::slot`] the grid covers, ring included, as
-    /// `(row, col, width, height)`: the box a frame is drawn on and the
-    /// area the grid's text is painted in.
+    /// `(row, col, width, height)`: the box a frame is drawn on, around the
+    /// [`Self::text`] the grid's text is painted in.
     ///
     /// nvim announces a resized screen's new slots, runs the config's
     /// `VimResized` handlers, and only then resizes the window grids, so
@@ -91,6 +91,18 @@ pub struct Pane {
     /// Whether nvim has taken the pane off screen without destroying it, per
     /// `win_hide`/`win_external_pos`.
     pub hidden: bool,
+}
+
+impl Pane {
+    /// Where a grid of `size` shows its text in this pane, as `(row, col,
+    /// width, height)`: at [`Self::origin`], cut to [`Self::slot`] less the
+    /// ring the origin leaves, which is [`Self::filled`] less that ring.
+    /// Smaller than the grid while nvim has yet to resize it to a shrunk
+    /// slot, and the grid's own size otherwise.
+    #[must_use]
+    pub fn text(&self, size: (u16, u16)) -> (u16, u16, u16, u16) {
+        text(self.slot, self.origin, size)
+    }
 }
 
 /// One decoded operation as nvim addresses it: cells into a named grid, or a
@@ -865,7 +877,34 @@ impl GridRegistry {
     pub fn cursor_pos(&self) -> (u16, u16) {
         let (id, row, col) = self.cursor_local();
         let (orow, ocol) = self.pane_origin(id).unwrap_or((0, 0));
+        let (row, col) = self
+            .pane_text(id)
+            .map_or((row, col), |(_, _, width, height)| {
+                (
+                    row.min(height.saturating_sub(1)),
+                    col.min(width.saturating_sub(1)),
+                )
+            });
         (row.saturating_add(orow), col.saturating_add(ocol))
+    }
+
+    /// Where `grid`'s text is painted, as [`Pane::text`] answers for its
+    /// pane, in the space [`Self::pane_origin`] answers in. `None` for the
+    /// global grid and for a grid nvim has never placed or has since
+    /// hidden.
+    ///
+    /// A caret or a predicted glyph placed past this rect would stand on
+    /// the tile beside it, which is where the part of a grid nvim has yet
+    /// to resize to a shrunk slot would otherwise land.
+    #[must_use]
+    pub fn pane_text(&self, grid: GridId) -> Option<(u16, u16, u16, u16)> {
+        let slot = self.slots.iter().find(|slot| slot.id == grid)?;
+        let placed = slot.placed.as_ref().filter(|placed| !placed.hidden)?;
+        let size = slot.grid.size();
+        Some(slot.window.as_ref().map_or(
+            (placed.origin.0, placed.origin.1, size.0, size.1),
+            |window| text(window.slot, placed.origin, size),
+        ))
     }
 
     /// Drops every grid but the global one, and every placement with them,
@@ -889,10 +928,11 @@ impl GridRegistry {
         self.placement_dirty = true;
     }
 
-    /// Where `(col, row)` lands inside `pane`, if it lands inside it at all.
+    /// Where `(col, row)` lands inside `pane`, if it lands inside it at all:
+    /// on the text it paints, so a cell the painter cut from a grid nvim
+    /// has yet to resize to a shrunk slot belongs to whatever is under it.
     fn hit_pane(&self, pane: &Pane, col: u16, row: u16) -> Option<(GridId, u16, u16)> {
-        let (width, height) = self.grid(pane.id)?.size();
-        let (top, left) = pane.origin;
+        let (top, left, width, height) = pane.text(self.grid(pane.id)?.size());
         let (in_row, in_col) = (row.checked_sub(top)?, col.checked_sub(left)?);
         (in_col < width && in_row < height).then_some((pane.id, in_col, in_row))
     }
@@ -1034,18 +1074,28 @@ impl GridRegistry {
         self.native_surface(self.cursor_grid()?)
     }
 
-    /// `surface`'s own painted rect, `(row, col, width, height)` in the
-    /// global grid's coordinate space -- the same space [`Self::pane_origin`]
-    /// answers in, and what [`Self::panes_in_z_order`] paints the tile at.
-    /// `None` while no pane of that surface is placed, which is what a
-    /// caret in a windowed surface with no window open yet has to fall
-    /// back past.
+    /// `surface`'s own tile, `(row, col, width, height)` in the global
+    /// grid's coordinate space -- the same space [`Self::pane_origin`]
+    /// answers in: the [`Pane::filled`] box its frame is drawn on. `None`
+    /// while no pane of that surface is placed.
     #[must_use]
     pub fn native_pane_rect(&self, surface: NativeSurface) -> Option<(u16, u16, u16, u16)> {
         self.panes_in_z_order()
             .into_iter()
             .find(|pane| pane.kind.native_surface() == Some(surface))
-            .map(|pane| pane.slot)
+            .map(|pane| pane.filled)
+    }
+
+    /// The rect `surface`'s content is painted in, in the same space as
+    /// [`Self::native_pane_rect`]: [`Pane::text`] for its grid. `None`
+    /// while no pane of that surface is placed, which is what a caret in a
+    /// windowed surface with no window open yet has to fall back past.
+    #[must_use]
+    pub fn native_pane_text(&self, surface: NativeSurface) -> Option<(u16, u16, u16, u16)> {
+        self.panes_in_z_order()
+            .into_iter()
+            .find(|pane| pane.kind.native_surface() == Some(surface))
+            .and_then(|pane| self.grid(pane.id).map(|grid| pane.text(grid.size())))
     }
 
     /// The window view opened for `surface`, as nvim addresses it, or
@@ -1353,6 +1403,28 @@ fn inner_origin(look: Look, slot: (u16, u16, u16, u16), margin_top: u16) -> (u16
     (row.saturating_add(rows), col.saturating_add(cols))
 }
 
+/// The rows and columns of the ring a grid whose cell `(0, 0)` sits at
+/// `origin` inside `slot` leaves around it, as `(rows, cols)` counted on
+/// both sides together.
+fn ring(slot: (u16, u16, u16, u16), origin: (u16, u16)) -> (u16, u16) {
+    (
+        origin.0.saturating_sub(slot.0).saturating_mul(2),
+        origin.1.saturating_sub(slot.1).saturating_mul(2),
+    )
+}
+
+/// [`Pane::text`] for a grid of `size` whose cell `(0, 0)` sits at `origin`
+/// inside `slot`: the grid cut to the slot less its ring.
+fn text(slot: (u16, u16, u16, u16), origin: (u16, u16), size: (u16, u16)) -> (u16, u16, u16, u16) {
+    let (ring_rows, ring_cols) = ring(slot, origin);
+    (
+        origin.0,
+        origin.1,
+        size.0.min(slot.2.saturating_sub(ring_cols)),
+        size.1.min(slot.3.saturating_sub(ring_rows)),
+    )
+}
+
 /// [`Pane::filled`] for a window grid of `size` whose cell `(0, 0)` sits at
 /// `origin` inside `slot`: the slot cut down to the grid plus the same ring
 /// on the far sides as the origin leaves on the near ones.
@@ -1362,8 +1434,7 @@ fn filled(
     size: (u16, u16),
 ) -> (u16, u16, u16, u16) {
     let (row, col, width, height) = slot;
-    let ring_rows = origin.0.saturating_sub(row).saturating_mul(2);
-    let ring_cols = origin.1.saturating_sub(col).saturating_mul(2);
+    let (ring_rows, ring_cols) = ring(slot, origin);
     (
         row,
         col,
@@ -1953,6 +2024,32 @@ mod tests {
             resize(&mut registry, GridId(2), 60 - ring, 30 - ring);
             assert_eq!(pane_of(&registry, GridId(2)).filled, (0, 0, 60, 30));
         }
+    }
+
+    /// Between a shrink's `win_pos` and the `grid_resize` that answers it a
+    /// grid overhangs its slot and is painted cut at it, so a click past
+    /// the cut reaches the tile the cut exposes and the caret stays on the
+    /// cut text. The overhanging grid has the higher id, the way nvim
+    /// numbers the window `:vsplit` opens on the left, so it is tested
+    /// first.
+    #[test]
+    fn a_grid_cut_at_a_shrunk_slot_answers_clicks_and_the_caret_on_its_text() {
+        let mut registry = GridRegistry::new();
+        registry.set_look(tiles(false));
+        window_slot(&mut registry, GridId(3), (0, 0, 40, 20));
+        resize(&mut registry, GridId(3), 40, 20);
+        window_slot(&mut registry, GridId(2), (0, 41, 39, 20));
+        resize(&mut registry, GridId(2), 39, 20);
+        window_slot(&mut registry, GridId(3), (0, 0, 30, 20));
+        window_slot(&mut registry, GridId(2), (0, 31, 20, 20));
+        assert_eq!(registry.hit_test(35, 5), Some((GridId(2), 4, 5)));
+        assert_eq!(registry.hit_test(29, 5), Some((GridId(3), 29, 5)));
+        registry.apply(GridEvent::Cells {
+            grid: GridId(3),
+            op: GridOp::CursorGoto { row: 5, col: 35 },
+        });
+        assert_eq!(registry.cursor_pos(), (5, 29));
+        assert_eq!(registry.pane_text(GridId(3)), Some((0, 0, 30, 20)));
     }
 
     #[test]

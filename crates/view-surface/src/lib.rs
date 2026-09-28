@@ -1011,6 +1011,11 @@ fn speculated_layer(model: &Model, origin: (u16, u16)) -> Option<Layer> {
         .filter_map(|cell| {
             let (orow, ocol) = registry.pane_origin(cell.grid)?;
             let (grid_w, grid_h) = registry.grid(cell.grid)?.size();
+            // a grid painted cut at a shrunk slot's frame shows no cell
+            // past the cut
+            let (grid_w, grid_h) = registry
+                .pane_text(cell.grid)
+                .map_or((grid_w, grid_h), |(_, _, w, h)| (w, h));
             if cell.row >= grid_h || cell.col >= grid_w {
                 return None;
             }
@@ -1248,6 +1253,16 @@ fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<Cu
         // than the terminal would otherwise let a prediction past its own
         // right edge still claim the caret
         let size = registry.grid(grid).map_or((width, height), Grid::size);
+        // a grid nvim has yet to resize to a shrunk slot is painted cut at
+        // its frame, and the caret stays on what is painted
+        let (size, row, col) = match registry.pane_text(grid) {
+            Some((_, _, w, h)) => (
+                (w, h),
+                row.min(h.saturating_sub(1)),
+                col.min(w.saturating_sub(1)),
+            ),
+            None => (size, row, col),
+        };
         let local_col = speculated_col(model, grid, size, row, col);
         let (orow, ocol) = registry.pane_origin(grid).unwrap_or((0, 0));
         (
@@ -1341,7 +1356,7 @@ fn palette_cursor(model: &Model, cmdline: &CmdlineState) -> (u16, u16) {
 /// same reason [`overlay_cursor`] answers `None` for their overlay forms.
 ///
 /// Reads the pane's own painted rect off the grid registry
-/// (`GridRegistry::native_pane_rect`): a windowed pane is placed by nvim's
+/// (`GridRegistry::native_pane_text`): a windowed pane is placed by nvim's
 /// own window layout, so the frame's `layers` hold no rect to reuse the way
 /// [`ai_cursor`] does for the floating panel.
 fn pane_cursor(model: &Model, origin: (u16, u16)) -> Option<CursorSpec> {
@@ -1351,7 +1366,7 @@ fn pane_cursor(model: &Model, origin: (u16, u16)) -> Option<CursorSpec> {
     let (row, col, width, height) = model
         .engine
         .painted_grids()
-        .native_pane_rect(NativeSurface::Agent)?;
+        .native_pane_text(NativeSurface::Agent)?;
     let view = model
         .ai_panel()
         .view(usize::from(height), usize::from(width), true);

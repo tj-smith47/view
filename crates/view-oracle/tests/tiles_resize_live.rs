@@ -1,5 +1,5 @@
-//! A terminal resize under gapped tiles, read off the screen view paints
-//! while nvim is still between the two halves of it.
+//! A terminal resize under tiles, read off the screen view paints while
+//! nvim is still between the two halves of it.
 //!
 //! nvim announces the new window slots (`win_pos`) as soon as the screen is
 //! resized, runs the config's `VimResized` handlers, and only then sizes and
@@ -27,7 +27,10 @@ const SAMPLE: Duration = Duration::from_millis(50);
 /// redraw, the silence `window_fit_live.rs` settles a session on.
 const REDRAW: Duration = Duration::from_millis(200);
 
-/// A gapped tile's frame, as the rows and columns of its box.
+/// Every glyph a frame is drawn with, under either look.
+const FRAME_GLYPHS: &str = "─│╭╮╰╯┬┴├┤┼";
+
+/// A tile's frame, as the rows and columns of its box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Frame {
     top: u16,
@@ -43,16 +46,21 @@ fn glyph(screen: &vt100::Screen, row: u16, col: u16) -> String {
 }
 
 /// Every frame on screen, found from its top-left corner along its top and
-/// left edges.
+/// left edges. A gapped tile's corners are its own; a gapless tile shares
+/// the corners where its edges meet a neighbour's.
 fn frames(screen: &vt100::Screen, cols: u16, rows: u16) -> Vec<Frame> {
+    let is = |row: u16, col: u16, set: &str| {
+        let g = glyph(screen, row, col);
+        !g.is_empty() && set.contains(g.as_str())
+    };
     let mut found = Vec::new();
     for top in 0..rows {
         for left in 0..cols {
-            if glyph(screen, top, left) != "╭" {
+            if !is(top, left, "╭┬") {
                 continue;
             }
-            let right = (left + 1..cols).find(|&c| glyph(screen, top, c) == "╮");
-            let bottom = (top + 1..rows).find(|&r| glyph(screen, r, left) == "╰");
+            let right = (left + 1..cols).find(|&c| is(top, c, "╮┬"));
+            let bottom = (top + 1..rows).find(|&r| is(r, left, "╰┴"));
             if let (Some(right), Some(bottom)) = (right, bottom) {
                 found.push(Frame {
                     top,
@@ -67,12 +75,13 @@ fn frames(screen: &vt100::Screen, cols: u16, rows: u16) -> Vec<Frame> {
 }
 
 /// Where the screen shows a tile's text and its frame disagreeing, or
-/// `None` where every cell inside a frame is buffer text and no buffer
-/// text stands outside one.
+/// `None` where every cell inside a frame is buffer text, no buffer text
+/// stands outside one, and nothing but a frame line stands outside every
+/// frame.
 ///
 /// Every buffer line is wider than any tile and `nowrap` is set, so a
-/// tile whose grid fills its frame has a `#` in every cell inside it; no title or status segment
-/// writes one.
+/// tile whose grid fills its frame has a `#` in every cell inside it; no
+/// title or status segment writes one.
 fn mismatch(screen: &vt100::Screen, cols: u16, rows: u16) -> Option<String> {
     let frames = frames(screen, cols, rows);
     if frames.len() < 2 {
@@ -83,14 +92,24 @@ fn mismatch(screen: &vt100::Screen, cols: u16, rows: u16) -> Option<String> {
             .iter()
             .any(|f| row > f.top && row < f.bottom && col > f.left && col < f.right)
     };
+    let on_a_frame = |row: u16, col: u16| {
+        frames
+            .iter()
+            .any(|f| (f.top..=f.bottom).contains(&row) && (f.left..=f.right).contains(&col))
+    };
     for row in 0..rows {
         for col in 0..cols {
-            let text = glyph(screen, row, col) == "#";
+            let g = glyph(screen, row, col);
+            let text = g == "#";
             if inside(row, col) && !text {
                 return Some(format!("a blank inside a frame at row {row} col {col}"));
             }
             if !inside(row, col) && text {
                 return Some(format!("text outside every frame at row {row} col {col}"));
+            }
+            let blank = g.trim().is_empty() || FRAME_GLYPHS.contains(g.as_str());
+            if !on_a_frame(row, col) && !blank {
+                return Some(format!("{g:?} outside every frame at row {row} col {col}"));
             }
         }
     }
@@ -148,15 +167,17 @@ fn resize_and_watch(
     worst
 }
 
-#[test]
-fn a_tile_frame_stays_on_its_text_while_nvim_redraws_a_resize() {
+/// A vsplit under a slow `VimResized` handler, shrunk and grown back, with
+/// the look `gaps` names.
+fn resize_under(gaps: bool) {
+    let look = if gaps { "gapped" } else { "gapless" };
     let redraw = host_deadline(REDRAW);
     // long enough that a disagreement lasting the whole handler is several
     // redraw bounds past the one this test allows
     let handler = (redraw * 4).max(Duration::from_millis(1500));
     let watch = handler + host_deadline(Duration::from_secs(2));
 
-    let paths = common::ScratchPaths::new("tiles-resize");
+    let paths = common::ScratchPaths::new(&format!("tiles-resize-{look}"));
     let line = "#".repeat(400);
     let text: Vec<&str> = std::iter::repeat_n(line.as_str(), 80).collect();
     std::fs::write(&paths.scratch, text.join("\n") + "\n").unwrap();
@@ -165,16 +186,27 @@ fn a_tile_frame_stays_on_its_text_while_nvim_redraws_a_resize() {
     cmd.args(["--panes", "tiles"]);
     cmd.arg(paths.scratch.file_name().unwrap());
     common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+    let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
+    std::fs::write(config, format!("[ui]\ngaps = {gaps}\n")).unwrap();
     let mut session = PtySession::spawn_configured(cmd, COLS, ROWS).unwrap();
     assert!(
         session.wait_for("####", BUDGET),
-        "view never showed the file; screen:\n{}",
+        "{look}: view never showed the file; screen:\n{}",
         session.screen()
     );
 
     session.send(b"\x1b:set nowrap | vsplit\r").unwrap();
+    // equalizing on a resize is the common handler, and it moves the right
+    // window's slot away from the separator and status row the old layout
+    // left in the global grid
     session
-        .send(format!("\x1b:autocmd VimResized * sleep {}m\r", handler.as_millis()).as_bytes())
+        .send(
+            format!(
+                "\x1b:autocmd VimResized * wincmd = | sleep {}m\r",
+                handler.as_millis()
+            )
+            .as_bytes(),
+        )
         .unwrap();
     // the launch notices stand over a tile until dismissed
     let settled = |screen: &vt100::Screen| mismatch(screen, COLS, ROWS).is_none();
@@ -182,7 +214,7 @@ fn a_tile_frame_stays_on_its_text_while_nvim_redraws_a_resize() {
     while !session.wait_for_screen(host_deadline(Duration::from_millis(500)), settled) {
         assert!(
             dismissed < 8,
-            "the two tiles never settled before the resize; screen:\n{}",
+            "{look}: the two tiles never settled before the resize; screen:\n{}",
             session.screen()
         );
         session.send(b"\x1b:View notifications dismiss\r").unwrap();
@@ -194,15 +226,15 @@ fn a_tile_frame_stays_on_its_text_while_nvim_redraws_a_resize() {
         let (longest, first) = resize_and_watch(&mut session, cols, rows, watch);
         assert!(
             longest <= redraw,
-            "after the resize to {cols}x{rows} the tiles' text and frames \
-             disagreed for {longest:?}, past one redraw ({redraw:?}); the \
-             first screen of that stretch:\n{first}"
+            "{look}: after the resize to {cols}x{rows} the tiles' text and \
+             frames disagreed for {longest:?}, past one redraw ({redraw:?}); \
+             the first screen of that stretch:\n{first}"
         );
         let now = session.with_screen(|screen| mismatch(screen, cols, rows));
         assert_eq!(
             now,
             None,
-            "the tiles never settled at {cols}x{rows}; screen:\n{}",
+            "{look}: the tiles never settled at {cols}x{rows}; screen:\n{}",
             session.screen()
         );
     }
@@ -210,8 +242,16 @@ fn a_tile_frame_stays_on_its_text_while_nvim_redraws_a_resize() {
     assert_eq!(
         after,
         before,
-        "the frames came back somewhere other than where the grow restores \
-         the layout; screen:\n{}",
+        "{look}: the frames came back somewhere other than where the grow \
+         restores the layout; screen:\n{}",
         session.screen()
     );
+}
+
+/// Both looks in one session after another: two live sessions sampled at
+/// once would each slow the redraw the other is timing.
+#[test]
+fn a_tile_frame_stays_on_its_text_while_nvim_redraws_a_resize() {
+    resize_under(true);
+    resize_under(false);
 }

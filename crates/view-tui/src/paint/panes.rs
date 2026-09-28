@@ -89,13 +89,7 @@ pub(super) fn paint_panes(
         let Some(grid) = registry.grid(pane.id) else {
             continue;
         };
-        let (width, height) = grid.size();
-        let (top, left) = pane.origin;
-        // a grid nvim has not yet resized to a shrunk slot is wider or
-        // taller than the frame around it, and is cut at the frame
-        let (row, col, filled_width, filled_height) = pane.filled;
-        let width = width.min(filled_width.saturating_sub(left.saturating_sub(col) * 2));
-        let height = height.min(filled_height.saturating_sub(top.saturating_sub(row) * 2));
+        let (top, left, width, height) = pane.text(grid.size());
         let pane_area = clip_to_frame(Rect::new(top, left, width, height), area);
         if pane_area.width == 0 || pane_area.height == 0 {
             continue;
@@ -144,8 +138,7 @@ pub(super) fn native_panes(model: &Model, area: TermRect) -> Vec<(TermRect, Laye
         .iter()
         .filter_map(|pane| {
             let surface = pane.kind.native_surface()?;
-            let (width, height) = registry.grid(pane.id)?.size();
-            let (top, left) = pane.origin;
+            let (top, left, width, height) = pane.text(registry.grid(pane.id)?.size());
             let rect = clip_to_frame(Rect::new(top, left, width, height), area);
             if rect.width == 0 || rect.height == 0 {
                 return None;

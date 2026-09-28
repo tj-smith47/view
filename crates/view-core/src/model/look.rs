@@ -125,11 +125,13 @@ impl Look {
     }
 
     /// The box a gapped tile's frame is drawn on, as `(row, col, width,
-    /// height)`: the slot itself. `None` for a gapless or `"nvim"` look,
-    /// and for a slot too small to hold the box itself; a winbar's row is
-    /// judged by [`Look::frames`].
+    /// height)`: the box handed in, itself. `None` for a gapless or
+    /// `"nvim"` look, and for a box too small to hold the frame; a winbar's
+    /// row is judged by [`Look::frames`].
     ///
-    /// The frame painter and the edge text read this box. The windowed
+    /// The frame painter and the edge text hand in a tile's
+    /// [`Pane::filled`](crate::grid::registry::Pane::filled), the part of
+    /// its slot the grid covers, and read this box back. The windowed
     /// palette band and every overlay
     /// [`Model::overlay_rect`](crate::model::Model::overlay_rect) resolves
     /// inset one ring where [`Look::inset`] is non-zero, which is exactly
