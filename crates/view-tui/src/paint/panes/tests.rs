@@ -3839,6 +3839,25 @@ fn agent_overlay_beside_the_nested_tiles(gaps: bool) -> Tiles {
     tiles
 }
 
+/// The gapless nested scene with its stacked pair on the right, or
+/// mirrored onto the left.
+fn tiled_nested_beside(right: bool) -> Tiles {
+    let tiles = tiled_nested(false);
+    if right {
+        return tiles;
+    }
+    let (grid_width, _) = outer_grid_at(false, (TILED_WIDTH, TILED_HEIGHT), 0);
+    let slots: Vec<_> = tiles
+        .slots
+        .iter()
+        .map(|&(row, col, width, height)| (row, grid_width - col - width, width, height))
+        .collect();
+    Tiles {
+        model: tiled_model_at(false, (TILED_WIDTH, TILED_HEIGHT), 0, &slots),
+        slots,
+    }
+}
+
 /// Under gapless tiles the docked agent panel's left column is a lattice
 /// column: the ring's top row meets it in `┬`, the row between the two
 /// stacked tiles in `┤` and their bottom edge in `┴`, and its rows beside
@@ -3858,20 +3877,7 @@ fn a_gapless_docked_float_joins_the_lattice() {
         (vec![tree], true),
         (vec![tree, agent], false),
     ] {
-        let mut tiles = tiled_nested(false);
-        // the stacked pair sits on the right; mirror it beside a left dock
-        if mirror {
-            let (grid_width, _) = outer_grid_at(false, (TILED_WIDTH, TILED_HEIGHT), 0);
-            let slots: Vec<_> = tiles
-                .slots
-                .iter()
-                .map(|&(row, col, width, height)| (row, grid_width - col - width, width, height))
-                .collect();
-            tiles = Tiles {
-                model: tiled_model_at(false, (TILED_WIDTH, TILED_HEIGHT), 0, &slots),
-                slots,
-            };
-        }
+        let mut tiles = tiled_nested_beside(!mirror);
         for &(surface, anchor) in &docks {
             open_surface(
                 &mut tiles.model,
@@ -3952,6 +3958,91 @@ fn a_gapless_docked_float_joins_the_lattice() {
                     "{label}: row {row} accent is {beside_active}"
                 );
             }
+        }
+    }
+}
+
+/// Under gapless tiles the caret in a tile a docked float covers stays on
+/// the column beside the lattice column the float joins on, whether nvim's
+/// cursor is on that column or under the float, and a glyph predicted on
+/// either is dropped. The tree docked left mirrors the agent docked right.
+#[test]
+fn the_caret_stays_off_the_lattice_column_a_gapless_docked_float_joins() {
+    use view_core::native::geometry::{Anchor, NativeSurface, SurfacePlacement};
+    let grid = LEFT + 1;
+    for (surface, anchor) in [
+        (NativeSurface::Agent, Anchor::Right),
+        (NativeSurface::Tree, Anchor::Left),
+    ] {
+        let right = anchor == Anchor::Right;
+        let scene = || {
+            let mut tiles = tiled_nested_beside(right);
+            open_surface(
+                &mut tiles.model,
+                surface,
+                SurfacePlacement::Overlay,
+                anchor,
+                None,
+            );
+            // an entered panel holds the caret in its composer
+            if right {
+                tiles.model.ai_panel_mut().focused = false;
+            }
+            tiles
+        };
+        let probe = scene();
+        let open = probe.model.overlays().last().expect("the float is open");
+        let rect = probe.model.overlay_rect(open);
+        let join = if right {
+            rect.col
+        } else {
+            rect.col + rect.width - 1
+        };
+        let beside = if right { join - 1 } else { join + 1 };
+        let under = if right { join + 2 } else { join - 2 };
+        let registry = probe.model.engine.painted_grids();
+        let (_, pane_col) = registry.pane_origin(GridId(grid)).expect("placed");
+        let (_, text_col, text_width, _) = registry.pane_text(GridId(grid)).expect("placed");
+        let origin_col = view_surface::grid_origin(&probe.model).1;
+        let local = |col: u16| col - origin_col - pane_col;
+        for screen in [join, under] {
+            assert!(
+                (text_col..text_col + text_width).contains(&(screen - origin_col)),
+                "{anchor:?}: column {screen} is a text column of the tile"
+            );
+            let at = local(screen);
+            let mut tiles = scene();
+            drive(
+                &mut tiles.model,
+                vec![
+                    UiEvent::GridCursorGoto {
+                        grid,
+                        row: 1,
+                        col: u64::from(at),
+                    },
+                    UiEvent::Flush,
+                ],
+            );
+            let stamp =
+                view_core::native::speculate::SpecStamp::new(std::time::Duration::from_millis(1));
+            assert!(tiles
+                .model
+                .speculate
+                .predict("insert", GridId(grid), 'x', (1, at), stamp)
+                .is_some());
+            let surface = view_surface::render(&tiles.model);
+            let cursor = surface.cursor.expect("the frame places a caret");
+            assert_eq!(
+                cursor.col, beside,
+                "{anchor:?}, cursor at {screen}: the caret is beside the join column {join}"
+            );
+            let predicted = surface.layers.iter().any(|layer| {
+                matches!(&layer.kind, view_surface::LayerKind::Speculated(cells) if !cells.is_empty())
+            });
+            assert!(
+                !predicted,
+                "{anchor:?}, cursor at {screen}: no glyph is predicted there"
+            );
         }
     }
 }

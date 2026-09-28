@@ -234,14 +234,14 @@ impl super::Model {
     }
 
     /// The box a tile's frame is drawn on, as `(row, col, width, height)`
-    /// in grid cells: `pane.filled`, closed one cell short of the gutter of
-    /// every float docked to a side of the screen that shares rows with
-    /// it. `None` where a float leaves the tile narrower than
-    /// [`MIN_FRAMED_SLOT`], which is too narrow for a frame.
+    /// in grid cells: `pane.filled`, closed one cell short of the column
+    /// every float docked to a side of the screen that shares rows with it
+    /// closes the tiles at. `None` where a float leaves the tile narrower
+    /// than [`MIN_FRAMED_SLOT`], which is too narrow for a frame.
     ///
     /// Such a float (the agent panel or the tree, while neither is
     /// windowed) is laid over tiles nvim laid out on the whole width, so
-    /// the part of a tile past the gutter is under it.
+    /// the part of a tile past that column is under it.
     #[must_use]
     pub fn tile_box(&self, pane: &Pane) -> Option<(u16, u16, u16, u16)> {
         let (closed, clipped) = self.closed_box(pane);
@@ -250,9 +250,10 @@ impl super::Model {
 
     /// Where `grid`'s text shows on `registry`, as
     /// [`GridRegistry::pane_text`] answers, cut to what its window's
-    /// [`Self::tile_box`] leaves: inside the frame, or short of the gutter
-    /// where the tile is too narrow for one. A caret, a predicted glyph or
-    /// a click outside it would land on a border or under a float.
+    /// [`Self::tile_box`] leaves: inside the frame, or short of the column
+    /// a docked float closes it at where the tile is too narrow for one or
+    /// under gapless tiles. A caret, a predicted glyph or a click outside
+    /// it would land on a border or under a float.
     #[must_use]
     pub fn tile_text(&self, registry: &GridRegistry, grid: GridId) -> Option<(u16, u16, u16, u16)> {
         let text = registry.pane_text(grid)?;
@@ -305,6 +306,11 @@ impl super::Model {
     /// enough for a frame. `None` for every other overlay and look.
     #[must_use]
     pub fn joined_anchor(&self, overlay: &super::Overlay) -> Option<Anchor> {
+        self.joined_at(overlay, self.overlay_rect(overlay))
+    }
+
+    /// [`Self::joined_anchor`] for an overlay whose frame is `rect`.
+    fn joined_at(&self, overlay: &super::Overlay, rect: OverlayRect) -> Option<Anchor> {
         if self.look.panes != Panes::Tiles || self.look.gaps {
             return None;
         }
@@ -315,7 +321,6 @@ impl super::Model {
         if !matches!(anchor, Anchor::Left | Anchor::Right) {
             return None;
         }
-        let rect = self.overlay_rect(overlay);
         (rect.width >= 2 && rect.height >= 2).then_some(anchor)
     }
 
@@ -343,9 +348,10 @@ impl super::Model {
         ((row, col, width, height), clipped)
     }
 
-    /// The gutter of every float docked to the left or right of the screen
-    /// and drawn as a float, in grid cells. Only gapped tiles give a float
-    /// a gutter, so every other look has none.
+    /// The column every float docked to the left or right of the screen
+    /// and drawn as a float closes the tiles at, in grid cells: its gutter
+    /// under gapped tiles, and under gapless tiles the column it joins the
+    /// lattice on. Every other look has none.
     fn docks(&self) -> impl Iterator<Item = Dock> + '_ {
         let offset = self.look.grid_offset();
         let top = self.chrome_rows().saturating_add(offset);
@@ -358,12 +364,20 @@ impl super::Model {
                     Anchor::Right => true,
                     _ => return None,
                 };
-                let gutter = self.overlay_gutter(open)?;
+                let (rect, gutter) = self.overlay_split(open);
+                let (col, band) = match gutter {
+                    Some(gutter) => (gutter.col, gutter),
+                    None => {
+                        self.joined_at(open, rect)?;
+                        let far = rect.col.saturating_add(rect.width).checked_sub(1)?;
+                        (if right { rect.col } else { far }, rect)
+                    }
+                };
                 Some(Dock {
                     right,
-                    col: gutter.col.checked_sub(offset)?,
-                    row: gutter.row.saturating_sub(top),
-                    height: gutter.height,
+                    col: col.checked_sub(offset)?,
+                    row: band.row.saturating_sub(top),
+                    height: band.height,
                 })
             })
     }

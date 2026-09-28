@@ -207,6 +207,9 @@ pub fn layer_rows(layer: &Layer) -> Rows {
 /// A rect under two cells on either axis has no distinct edge cells to draw
 /// and yields plain content rows, matching what the message toast does at
 /// the same size rather than stacking corner glyphs on top of each other.
+///
+/// A [`Layer`] is laid out with [`layer_rows`], which accounts for
+/// [`Layer::open`].
 #[must_use]
 pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Rows {
     if width == 0 || height == 0 {
