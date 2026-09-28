@@ -1367,6 +1367,18 @@ fn pane_cursor(model: &Model, origin: (u16, u16)) -> Option<CursorSpec> {
         .engine
         .painted_grids()
         .native_pane_text(NativeSurface::Agent)?;
+    // the painter cuts the panel to the engine layer and to the terminal,
+    // and a terminal shrunk under a slot nvim has yet to move leaves the
+    // composer on the last row that survives the cut
+    let (grid_width, grid_height) = painted_grid_size(model);
+    let bound = |grid: u16, term: u16, start: u16, at: u16| {
+        grid.min(term.saturating_sub(start)).saturating_sub(at)
+    };
+    let width = width.min(bound(grid_width, model.term_width, origin.1, col));
+    let height = height.min(bound(grid_height, model.term_height, origin.0, row));
+    if width == 0 || height == 0 {
+        return None;
+    }
     let view = model
         .ai_panel()
         .view(usize::from(height), usize::from(width), true);

@@ -4437,6 +4437,9 @@ type SceneDump = fn((&'static str, bool, bool, bool, bool)) -> String;
 const TILED_SCENES: &[(&str, SceneDump)] = &[
     ("vsplit-tiles", |tier| tiles_dump(tier, tiled(true))),
     ("vsplit-gapless", |tier| tiles_dump(tier, tiled(false))),
+    ("vsplit-gapless-nested", |tier| {
+        tiles_dump(tier, tiled_nested(false))
+    }),
     ("vsplit-tiles-float", |tier| {
         tiles_dump(tier, tiled_float(true))
     }),
@@ -4719,16 +4722,83 @@ fn a_tile_frame_follows_its_grid_through_a_half_applied_resize() {
     }
 }
 
+/// A gapless resize by one cell leaves one grid a cell short of its slot,
+/// and the frame's edge beside that grid then runs next to a parallel one:
+/// the neighbour's edge between two tiles, the ring's on the outside. The
+/// two stay two plain lines. Every cell of a tile's side columns between
+/// its corners is a vertical line, and no cell of its top or bottom run
+/// between its corners is a tee.
+#[test]
+fn a_gapless_frame_one_cell_short_of_its_slot_stays_a_plain_line() {
+    type Leg = (&'static str, Layout, (u16, u16), (u16, u16), usize);
+    // `short` is the tile whose grid the grow leaves one cell short: the
+    // first sits against its neighbour, the last against the ring
+    let legs: [Leg; 4] = [
+        ("vsplit interior", tiled_at, (60, 18), (1, 0), 0),
+        ("vsplit outer", tiled_at, (61, 18), (1, 0), 1),
+        ("split interior", stacked_at, (60, 19), (0, 1), 0),
+        ("split outer", stacked_at, (60, 18), (0, 1), 1),
+    ];
+    for (name, layout, from, (dw, dh), short) in legs {
+        for reversed in [false, true] {
+            let to = (from.0 + dw, from.1 + dh);
+            let (model, tiles) = mid_resize(layout, false, (from, to), reversed);
+            let buf = tiled_frame(&model);
+            let offset = model.look.grid_offset();
+            let case = format!("{name} reversed={reversed} {from:?} -> {to:?}");
+            let shorts: Vec<usize> = tiles
+                .iter()
+                .enumerate()
+                .filter(|(_, ((_, _, w, h), (gw, gh), _))| w > gw || h > gh)
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(shorts, vec![short], "{case}: the leg's premise");
+            for ((row, col, width, height), (grid_width, grid_height), letter) in tiles {
+                let (left, top) = (offset + col, offset + row);
+                let right = left + width.min(grid_width);
+                let bottom = top + height.min(grid_height);
+                let sides = [left.checked_sub(1), Some(right)];
+                for x in sides.into_iter().flatten().filter(|&x| x < buf.area.width) {
+                    for y in top..bottom {
+                        assert_eq!(
+                            buf[(x, y)].symbol(),
+                            "│",
+                            "{case}: tile {letter}'s side at ({x}, {y}):\n{}",
+                            screen_dump(&buf)
+                        );
+                    }
+                }
+                let runs = [top.checked_sub(1), Some(bottom)];
+                for y in runs.into_iter().flatten().filter(|&y| y < buf.area.height) {
+                    for x in left..right {
+                        assert!(
+                            !"┬┴┼├┤".contains(buf[(x, y)].symbol()),
+                            "{case}: tile {letter}'s edge row at ({x}, {y}) is a tee:\n{}",
+                            screen_dump(&buf)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The agent panel's caret stands right after the prompt mark of the
-/// composer the panel is painted with, settled and while a grow is half
-/// applied, and a click on the part of the grown slot the panel does not
-/// cover reaches no grid.
+/// composer the panel is painted with: settled, while a grow is half
+/// applied, and on a terminal shrunk under a slot nvim has yet to move,
+/// where the panel is painted cut at the terminal's edge. A click on the
+/// part of the grown slot the panel does not cover reaches no grid.
 #[test]
 fn the_agent_caret_sits_on_the_composer_the_panel_paints() {
     for gaps in [true, false] {
-        for grown in [false, true] {
-            let case = format!("gaps={gaps} grown={grown}");
-            let mut model = agent_in_the_right_tile_at(gaps, (60, 18)).model;
+        for (grown, shrunk) in [(false, false), (true, false), (false, true)] {
+            let case = format!("gaps={gaps} grown={grown} shrunk={shrunk}");
+            let from = if shrunk {
+                (TILED_WIDTH, TILED_HEIGHT)
+            } else {
+                (60, 18)
+            };
+            let mut model = agent_in_the_right_tile_at(gaps, from).model;
             drive(
                 &mut model,
                 vec![
@@ -4751,11 +4821,19 @@ fn the_agent_caret_sits_on_the_composer_the_panel_paints() {
                     "{case}: a click on the bare part of the grown slot"
                 );
             }
+            if shrunk {
+                (model.term_width, model.term_height) = (60, 18);
+            }
             let buf = tiled_frame(&model);
             let cursor = view_surface::render(&model)
                 .cursor
                 .unwrap_or_else(|| panic!("{case}: the focused panel has a caret"));
             let (row, col) = (cursor.row, cursor.col);
+            assert!(
+                row < buf.area.height && col < buf.area.width,
+                "{case}: the caret at ({col}, {row}) is off the terminal:\n{}",
+                screen_dump(&buf)
+            );
             let mark = col.checked_sub(2).map(|x| buf[(x, row)].symbol());
             assert_eq!(
                 mark,

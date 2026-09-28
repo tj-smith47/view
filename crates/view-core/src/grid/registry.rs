@@ -733,8 +733,10 @@ impl GridRegistry {
         (!self.has_panes()).then_some((GLOBAL_GRID, col, row))
     }
 
-    /// Where screen `(col, row)` sits inside `grid`, clamped to that grid's
-    /// own box -- column first on both sides, as [`hit_test`] is.
+    /// Where screen `(col, row)` sits inside `grid`, clamped to the text
+    /// [`Self::pane_text`] says it paints -- column first on both sides, as
+    /// [`hit_test`] is. A grid nvim has yet to resize to a shrunk slot is
+    /// cut there, and a cell past the cut is one nobody sees selected.
     ///
     /// What a gesture already claimed by a grid reports while the pointer
     /// is outside it. A drag that leaves the window it started in is still
@@ -752,7 +754,10 @@ impl GridRegistry {
         if grid == GLOBAL_GRID {
             return Some((col, row));
         }
-        let (width, height) = self.grid(grid)?.size();
+        let size = self.grid(grid)?.size();
+        let (width, height) = self
+            .pane_text(grid)
+            .map_or(size, |(_, _, width, height)| (width, height));
         let (top, left) = self
             .slots
             .iter()
@@ -2050,6 +2055,20 @@ mod tests {
         });
         assert_eq!(registry.cursor_pos(), (5, 29));
         assert_eq!(registry.pane_text(GridId(3)), Some((0, 0, 30, 20)));
+    }
+
+    /// A drag that starts on a grid cut at a shrunk slot and crosses the
+    /// cut stops on the last cell painted, which is the last one the person
+    /// can see selected.
+    #[test]
+    fn a_drag_past_the_cut_of_a_shrunk_slot_lands_on_its_last_painted_cell() {
+        let mut registry = GridRegistry::new();
+        registry.set_look(tiles(false));
+        window_slot(&mut registry, GridId(3), (0, 0, 40, 20));
+        resize(&mut registry, GridId(3), 40, 20);
+        window_slot(&mut registry, GridId(3), (0, 0, 30, 15));
+        assert_eq!(registry.clamp_into(GridId(3), 35, 5), Some((29, 5)));
+        assert_eq!(registry.clamp_into(GridId(3), 5, 18), Some((5, 14)));
     }
 
     #[test]

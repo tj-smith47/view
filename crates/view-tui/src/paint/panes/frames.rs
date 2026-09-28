@@ -25,9 +25,32 @@ use view_surface::overlay::BorderSet;
 use super::super::text::{cluster_width, clusters, group_width, set_cluster};
 use super::super::{border_color, ratatui_style, rgb, set_border_cell, Damage};
 
-/// One cell of the lattice, as `(row, col)` in the engine layer's own
-/// coordinates.
+/// One cell of the lattice, as `(row, col)` on the screen.
 type Cell = (u16, u16);
+
+/// The gapless lattice's cells, kept apart by the direction of the run
+/// through each. A line joins two neighbouring cells only along a run both
+/// of them lie on, so two parallel runs one cell apart stay two lines; a
+/// corner lies on both of its runs.
+#[derive(Default)]
+struct Lattice {
+    across: BTreeSet<Cell>,
+    down: BTreeSet<Cell>,
+}
+
+impl Lattice {
+    fn across(&mut self, row: u16, cols: std::ops::RangeInclusive<u16>) {
+        self.across.extend(cols.map(|col| (row, col)));
+    }
+
+    fn down(&mut self, col: u16, rows: std::ops::RangeInclusive<u16>) {
+        self.down.extend(rows.map(|row| (row, col)));
+    }
+
+    fn cells(&self) -> BTreeSet<Cell> {
+        self.across.union(&self.down).copied().collect()
+    }
+}
 
 /// Paints the tiles' frames over the window panes already composited into
 /// `buf`, and under every float the caller paints after it.
@@ -521,11 +544,12 @@ fn paint_gapless(
     buf: &mut Buffer,
 ) {
     let lattice = lattice(panes, area, foot, buf.area);
+    let cells = lattice.cells();
     let edges: BTreeSet<Cell> = active
         .and_then(|id| panes.iter().find(|pane| is_tile(pane) && pane.id == id))
-        .map(|pane| perimeter(pane, &lattice, area))
+        .map(|pane| perimeter(pane, &cells, area))
         .unwrap_or_default();
-    for &(row, col) in &lattice {
+    for &(row, col) in &cells {
         if !damage.covers(row) {
             continue;
         }
@@ -542,55 +566,60 @@ fn paint_gapless(
 /// each tile and the row under it, which are the cells nvim draws its
 /// separator and status row into, the column left of it and the row above
 /// it, plus the ring's top row and its left and right columns, which are
-/// the edges the outermost tiles have no neighbour to share.
-fn lattice(panes: &[Pane], area: Rect, foot: u16, screen: Rect) -> BTreeSet<Cell> {
-    let mut cells = BTreeSet::new();
+/// the edges the outermost tiles have no neighbour to share. Each run
+/// reaches the corner cell past either end of the tile it closes.
+fn lattice(panes: &[Pane], area: Rect, foot: u16, screen: Rect) -> Lattice {
+    let mut lattice = Lattice::default();
+    let ring = area.y.checked_sub(1).zip(area.x.checked_sub(1));
+    let (first_row, first_col) = ring.unwrap_or((area.y, area.x));
+    let ring_right = area.x.saturating_add(area.width);
+    let last_col = if ring.is_some() && ring_right < screen.width {
+        ring_right
+    } else {
+        ring_right.saturating_sub(1)
+    };
     // a row nvim keeps for its command line is where the mode message and
     // the answer to every prompt are written, so no run of the lattice
     // reaches `foot` -- the same bound the gapped ring already stops at
+    let last_row = area.y.saturating_add(foot.saturating_sub(1));
     for pane in panes.iter().filter(|pane| is_tile(pane)) {
         let (row, col, width, height) = pane.filled;
-        let (edge_col, edge_row) = (col.saturating_add(width), row.saturating_add(height));
+        let (top, left) = (area.y.saturating_add(row), area.x.saturating_add(col));
+        let (bottom, right) = (top.saturating_add(height), left.saturating_add(width));
+        let rows = top.saturating_sub(1).max(first_row)..=bottom.min(last_row);
+        let cols = left.saturating_sub(1).max(first_col)..=right.min(last_col);
         // a tile's left and top edges are its neighbours' right and bottom
         // ones in a settled layout; while a resize is half applied a
         // neighbour's grid stops short of them, and the tile would stand
         // open on that side
-        if let Some(left) = col.checked_sub(1) {
-            for r in row.saturating_sub(1)..=edge_row.min(foot.saturating_sub(1)) {
-                cells.insert((area.y.saturating_add(r), area.x.saturating_add(left)));
-            }
+        if let Some(before) = left.checked_sub(1).filter(|&c| c >= first_col) {
+            lattice.down(before, rows.clone());
         }
-        if let Some(top) = row.checked_sub(1) {
-            for c in col.saturating_sub(1)..=edge_col.min(area.width.saturating_sub(1)) {
-                cells.insert((area.y.saturating_add(top), area.x.saturating_add(c)));
-            }
+        if let Some(above) = top.checked_sub(1).filter(|&r| r >= first_row) {
+            lattice.across(above, cols.clone());
         }
-        if edge_col < area.width {
-            for r in row..=edge_row.min(foot.saturating_sub(1)) {
-                cells.insert((area.y.saturating_add(r), area.x.saturating_add(edge_col)));
-            }
+        if right <= last_col {
+            lattice.down(right, rows);
         }
-        if edge_row < foot {
-            for c in col..=edge_col.min(area.width.saturating_sub(1)) {
-                cells.insert((area.y.saturating_add(edge_row), area.x.saturating_add(c)));
-            }
+        if row.saturating_add(height) < foot {
+            lattice.across(bottom, cols);
         }
     }
-    let (Some(top), Some(left)) = (area.y.checked_sub(1), area.x.checked_sub(1)) else {
-        return cells;
+    let Some((top, left)) = ring else {
+        return lattice;
     };
-    let bottom = cells.iter().map(|&(row, _)| row).max().unwrap_or(top);
-    let right = area.x.saturating_add(area.width);
-    for col in left..=right.min(screen.width.saturating_sub(1)) {
-        cells.insert((top, col));
+    let bottom = lattice
+        .cells()
+        .iter()
+        .map(|&(row, _)| row)
+        .max()
+        .unwrap_or(top);
+    lattice.across(top, left..=last_col);
+    lattice.down(left, top..=bottom);
+    if ring_right < screen.width {
+        lattice.down(ring_right, top..=bottom);
     }
-    for row in top..=bottom {
-        cells.insert((row, left));
-        if right < screen.width {
-            cells.insert((row, right));
-        }
-    }
-    cells
+    lattice
 }
 
 /// The lattice cells that are this tile's own edges: the ring one cell out
@@ -616,12 +645,14 @@ fn perimeter(pane: &Pane, lattice: &BTreeSet<Cell>, area: Rect) -> BTreeSet<Cell
 
 /// The glyph one lattice cell takes, from the four directions a line leaves
 /// it in.
-fn junction(lattice: &BTreeSet<Cell>, row: u16, col: u16, borders: BorderSet) -> char {
-    let linked = |r: u16, c: u16| lattice.contains(&(r, c));
-    let up = row.checked_sub(1).is_some_and(|r| linked(r, col));
-    let down = linked(row.saturating_add(1), col);
-    let left = col.checked_sub(1).is_some_and(|c| linked(row, c));
-    let right = linked(row, col.saturating_add(1));
+fn junction(lattice: &Lattice, row: u16, col: u16, borders: BorderSet) -> char {
+    let across =
+        |c: u16| lattice.across.contains(&(row, col)) && lattice.across.contains(&(row, c));
+    let along = |r: u16| lattice.down.contains(&(row, col)) && lattice.down.contains(&(r, col));
+    let up = row.checked_sub(1).is_some_and(along);
+    let down = along(row.saturating_add(1));
+    let left = col.checked_sub(1).is_some_and(across);
+    let right = across(col.saturating_add(1));
     let unicode = borders.horizontal != '-';
     let crossing = |glyph: char| if unicode { glyph } else { '+' };
     match (up, down, left, right) {
