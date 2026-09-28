@@ -1530,10 +1530,10 @@ fn ai_cursor(model: &Model, layers: &[Layer]) -> Option<CursorSpec> {
     })
 }
 
-/// The confirm-prompt's own cursor position: on the second header row
-/// [`overlay::prompt_body`] always draws before its choice list (the
-/// message line first, then `"> "` plus the answer typed so far), past the
-/// end of what has been typed -- correct because [`PromptState::accepts`]
+/// The confirm-prompt's own cursor position: on the input row
+/// [`overlay::prompt_body`] draws before its choice list (every row the
+/// message wrapped to first, then `"> "` plus the answer typed so far),
+/// past the end of what has been typed -- correct because [`PromptState::accepts`]
 /// never permits mid-string editing, only append/backspace/submit/cancel,
 /// so the caret is always at the end of `input`. Resolves through
 /// [`Model::overlay_rect`], the same rect [`native_layer`] already paints
@@ -1552,7 +1552,14 @@ fn prompt_cursor(model: &Model, overlay: &Overlay, state: &PromptState) -> (u16,
     let prefix_cols =
         u16::try_from(format!("{} ", overlay::PROMPT_MARK).chars().count()).unwrap_or(2);
     let input_len = u16::try_from(view.input.chars().count()).unwrap_or(u16::MAX);
-    let row = rect.row.saturating_add(row_off).saturating_add(1);
+    // the input line sits under every row the message wrapped to
+    let message_rows = view
+        .message_rows(view_core::native::geometry::interior_text_width(rect.width))
+        .len();
+    let row = rect
+        .row
+        .saturating_add(row_off)
+        .saturating_add(u16::try_from(message_rows).unwrap_or(u16::MAX));
     let col = rect
         .col
         .saturating_add(col_off)
@@ -3683,6 +3690,49 @@ mod tests {
             render(&model).cursor,
             Some(prompt_only),
             "the modal takes no keys, so the prompt keeps the caret it had"
+        );
+    }
+
+    /// A confirm question wider than its box wraps, and the caret stands on
+    /// the input line under the last row of it.
+    #[test]
+    fn a_wrapped_confirm_keeps_the_caret_on_its_input_line() {
+        let mut model = model_with_grid(120, 40);
+        model.term_width = 120;
+        model.term_height = 40;
+        let question = format!("{} to go on?", "a long confirm question".repeat(6));
+        apply(
+            &mut model,
+            UiEvent::MsgShow {
+                kind: "confirm".into(),
+                content: vec![(0, question)],
+                replace_last: false,
+            },
+        );
+        let surface = render(&model);
+        let cursor = surface.cursor.expect("the prompt places a caret");
+        let layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Prompt(_)))
+            .expect("the prompt is open");
+        let rows = overlay::rows(
+            layer.rect.width,
+            layer.rect.height,
+            &layer.kind,
+            layer.borders.expect("a native overlay carries a charset"),
+        );
+        let texts: Vec<String> = rows.lines.iter().map(|l| overlay::line_text(l)).collect();
+        let row = usize::from(cursor.row - layer.rect.row);
+        assert!(
+            texts[row - 1].contains("to go on?"),
+            "the caret row sits under the question's last row: {texts:#?}"
+        );
+        assert!(
+            texts[row]
+                .trim_start_matches(['│', '|', ' '])
+                .starts_with(overlay::PROMPT_MARK),
+            "the caret row is the input line: {texts:#?}"
         );
     }
 
