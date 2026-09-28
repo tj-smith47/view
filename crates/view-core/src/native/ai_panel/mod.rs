@@ -285,15 +285,13 @@ pub struct AiPanelState {
 }
 
 /// Two panels holding the same state are equal whatever their caches hold:
-/// [`AiPanelState::row_starts`] holds row boundaries of the text, derivable
-/// from the text at any moment, so a panel that has painted and one that has
-/// not are not two different panels.
+/// [`AiPanelState::row_starts`] and [`AiPanelState::row_width`] hold row
+/// boundaries of the text and the width they were folded at, derivable from
+/// the text at any moment.
 ///
-/// The destructure below is the mechanism, not this paragraph: every field
-/// is named, so a field added to [`AiPanelState`] fails to compile here
-/// until it is deliberately placed on one side of the line, rather than
-/// being excluded by the silence a positive list would have excluded it
-/// with. `Transcript`'s own `PartialEq` is the template.
+/// The destructure below names every field, so a field added to
+/// [`AiPanelState`] fails to compile here until it is placed on one side of
+/// the line. `Transcript`'s own `PartialEq` is the template.
 impl PartialEq for AiPanelState {
     fn eq(&self, other: &Self) -> bool {
         let Self {

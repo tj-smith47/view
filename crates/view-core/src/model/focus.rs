@@ -275,15 +275,30 @@ impl Model {
         {
             prompt.note_shown();
         }
-        let panel_open = self
+        let ai_entered = self.ai_panel.focused;
+        let tree_windowed = self.tree_is_windowed();
+        let agent_windowed = self.agent_is_windowed();
+        let notifications_windowed = self.notifications_is_windowed();
+        let focused_at = self.overlays.iter().rposition(|overlay| {
+            Self::takes_focus_now(
+                &overlay.kind,
+                ai_entered,
+                tree_windowed,
+                agent_windowed,
+                notifications_windowed,
+            )
+        });
+        // an overlay that takes the keys above the panel may cover it
+        let panel_uncovered = self
             .overlays
             .iter()
-            .any(|overlay| matches!(overlay.kind, OverlayKind::Ai));
+            .rposition(|overlay| matches!(overlay.kind, OverlayKind::Ai))
+            .is_some_and(|panel_at| focused_at.is_none_or(|at| at <= panel_at));
         if let Some(permission) = self
             .ai_panel
             .pending_permission
             .as_mut()
-            .filter(|_| panel_open)
+            .filter(|_| panel_uncovered)
         {
             permission.note_shown();
         }

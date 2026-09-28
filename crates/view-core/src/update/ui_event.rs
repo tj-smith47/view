@@ -232,7 +232,10 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // screen (see Model::takes_attach), and Model::chrome_painted
             // documents why it never resets
             model.chrome_painted = true;
-            if model.engine.cmdline.is_none() && model.engine.key_unanswered.is_none() {
+            // a line nvim showed open and now shows closed ended in a way
+            // the tracker does not model, a mapping that submits or the
+            // command-line window
+            if model.engine.cmdline.is_none() && model.submit_hold.line_opened() {
                 model.submit_hold.forget_line();
             }
             model.settle_held(true)
@@ -291,6 +294,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                     ov.geometry = p.overlay_box();
                 }
             }
+            model.submit_hold.note_line_shown(&cmdline);
             model.engine.cmdline = Some(cmdline);
             // the guess the palette was already drawing, answered: the
             // speculated state and this one render the same layer in the

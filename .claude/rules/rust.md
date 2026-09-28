@@ -501,12 +501,12 @@ paths: ["**/*.rs"] template-source: "rules/rust.md.tmpl"
   reached the terminal.** Keys typed at a surface arrive in the same pass as
   the event that raises a question over it: a batched `:View ai open` and a
   held `n` declined the AI trust question before it was drawn. `PromptState`
-  and the agent's `PermissionPrompt` carry a `shown` flag.
-  `Model::note_frame_painted` sets it on the focused prompt and on a
-  permission question in an open agent panel, and the runtime calls it
-  through `frame_reached_terminal` once a frame is drawn. A key or a paste
-  before then answers nothing, and a prompt stacked beneath the focused one
-  stays unshown until it is on top. `view-core`'s
+  and the agent's `PermissionPrompt` carry a `shown` flag. On the focused
+  prompt, and on a permission question in an open agent panel with no
+  overlay above it that takes the keys, `Model::note_frame_painted` sets it.
+  The runtime calls it through `frame_reached_terminal` once a frame is
+  drawn. A key or a paste before then answers nothing, and a prompt stacked
+  beneath the focused one stays unshown until it is on top. `view-core`'s
   `every_question_reads_keys_only_after_it_was_painted` opens each kind in
   its `QUESTIONS` table (nvim-relayed, AI trust, external-write conflict,
   agent permission), and a new kind of question joins by adding a row. The

@@ -84,6 +84,8 @@ enum Typed {
 #[derive(Debug, Clone, Default)]
 pub struct SubmitHold {
     typed: Option<Typed>,
+    /// Whether nvim has shown the tracked line open.
+    opened: bool,
     held: Option<(Armed, Vec<Msg>)>,
     generation: u64,
     /// Every key sequence nvim runs a view invocation on.
@@ -331,11 +333,36 @@ impl SubmitHold {
         self.typed.is_some()
     }
 
-    /// Drops the tracked line once nvim has answered every key and shows
-    /// no command line: the line ended in a way the tracker does not
-    /// model, a mapping that submits or the command-line window.
+    /// Drops the tracked line, so keys typed after it are read where
+    /// focus stands.
     pub(crate) fn forget_line(&mut self) {
-        self.typed = None;
+        self.set_typed(None);
+    }
+
+    /// Whether nvim has shown the tracked line open.
+    #[must_use]
+    pub(crate) fn line_opened(&self) -> bool {
+        self.opened
+    }
+
+    /// Reads a command line nvim shows: it is the tracked line when it is
+    /// the first level a `:` opens and holds a prefix of the keys typed
+    /// into it. A show left over from the line before, arriving after the
+    /// next `:` went out, is some other line's.
+    pub(crate) fn note_line_shown(&mut self, line: &crate::model::CmdlineState) {
+        let shown: String = line.content.iter().map(|(_, s)| s.as_str()).collect();
+        self.opened = line.level == 1
+            && line.firstc == ":"
+            && match &self.typed {
+                Some(Typed::Known(text)) => text.starts_with(&shown),
+                Some(Typed::Unknown) => true,
+                None => false,
+            };
+    }
+
+    fn set_typed(&mut self, typed: Option<Typed>) {
+        self.typed = typed;
+        self.opened = false;
     }
 }
 
@@ -347,7 +374,7 @@ impl SubmitHold {
 /// the key arrives at.
 pub fn fold_engine_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     if completes_invoke(model, notation) {
-        model.submit_hold.typed = None;
+        model.submit_hold.set_typed(None);
         return arm(model, Armed::Sequence);
     }
     fold_line(model, notation)
@@ -485,19 +512,22 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
     // nvim runs as `<Esc>` and then the key: `<M-:>` opens a command line
     // from any mode, and any other one leaves the line being typed
     if let Some(key) = crate::native::keys::escaped_key(notation) {
-        hold.typed = (key == ":").then(|| Typed::Known(String::new()));
+        hold.set_typed((key == ":").then(|| Typed::Known(String::new())));
         return Vec::new();
     }
     let Some(typed) = hold.typed.as_mut() else {
         if notation == ":" && may_open(model) {
-            model.submit_hold.typed = Some(Typed::Known(String::new()));
+            model
+                .submit_hold
+                .set_typed(Some(Typed::Known(String::new())));
         }
         return Vec::new();
     };
     match notation {
-        "<Esc>" | "<C-c>" | "<C-[>" => hold.typed = None,
+        "<Esc>" | "<C-c>" | "<C-[>" => hold.set_typed(None),
         "<CR>" | "<NL>" | "<C-m>" | "<C-j>" | "<kEnter>" => {
             let typed = hold.typed.take();
+            hold.opened = false;
             if submits_view(model, typed.as_ref()) {
                 return arm(model, Armed::Command);
             }
@@ -506,7 +536,7 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
             if let Typed::Known(text) = typed {
                 // a backspace on an empty line leaves the command line
                 if text.pop().is_none() {
-                    hold.typed = None;
+                    hold.set_typed(None);
                 }
             }
         }

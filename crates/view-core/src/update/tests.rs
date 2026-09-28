@@ -6420,27 +6420,9 @@ fn a_line_nvim_ended_on_its_own_gives_the_keys_back_to_the_tree() {
     m.engine.mode.current = "normal".to_string();
     let effects = typed(&mut m, &[":", "<C-s>"]);
     assert_eq!(meta_inputs(&effects), [":", "<C-s>"], "{effects:?}");
-    let _ = update(&mut m, Msg::Redraw(vec![confirm_choices(), UiEvent::Flush]));
-    let stamp = SpecStamp::new(Duration::ZERO);
-    m.engine.key_unanswered = Some(stamp);
-    let cursor_grid = m.engine.grids().cursor_local().0 .0;
-    let ended = vec![
-        UiEvent::CmdlineHide,
-        UiEvent::GridLine {
-            grid: cursor_grid,
-            row: 0,
-            col_start: 0,
-            cells: vec![crate::events::GridCell {
-                text: "x".into(),
-                hl_id: 0,
-                repeat: 1,
-            }],
-        },
-        UiEvent::Flush,
-    ];
-    // the loop folds the batch into speculation before `update` reads it
-    let _ = crate::native::speculate::fold_redraw(&mut m, &ended, stamp);
-    let _ = update(&mut m, Msg::Redraw(ended));
+    answer_batch(&mut m, vec![colon_line(""), UiEvent::Flush]);
+    let closed = line_closed(&m);
+    answer_batch(&mut m, closed);
 
     let effects = typed(&mut m, &["a"]);
     assert!(meta_inputs(&effects).is_empty(), "{effects:?}");
@@ -6451,6 +6433,83 @@ fn a_line_nvim_ended_on_its_own_gives_the_keys_back_to_the_tree() {
         ),
         "{effects:?}"
     );
+}
+
+/// The `cmdline_show` of a `:` line holding `text`.
+fn colon_line(text: &str) -> UiEvent {
+    UiEvent::CmdlineShow {
+        content: vec![(0, text.into())],
+        pos: text.len() as u64,
+        firstc: ":".into(),
+        prompt: String::new(),
+        indent: 0,
+        level: 1,
+    }
+}
+
+/// The batch nvim sends when a command line closes: the line hidden and
+/// the cursor's line redrawn.
+fn line_closed(m: &Model) -> Vec<UiEvent> {
+    vec![
+        UiEvent::CmdlineHide,
+        UiEvent::GridLine {
+            grid: m.engine.grids().cursor_local().0 .0,
+            row: 0,
+            col_start: 0,
+            cells: vec![crate::events::GridCell {
+                text: "x".into(),
+                hl_id: 0,
+                repeat: 1,
+            }],
+        },
+        UiEvent::Flush,
+    ]
+}
+
+/// Hands `batch` to the model the way the loop does, folded into
+/// speculation first with a key still unanswered.
+fn answer_batch(m: &mut Model, batch: Vec<UiEvent>) {
+    let stamp = SpecStamp::new(Duration::ZERO);
+    m.engine.key_unanswered = Some(stamp);
+    let _ = crate::native::speculate::fold_redraw(m, &batch, stamp);
+    let _ = update(m, Msg::Redraw(batch));
+}
+
+/// A redraw that answers the `:` before nvim shows the line, a timer's
+/// cursor move, leaves the rest of the line nvim's.
+#[test]
+fn a_redraw_before_the_line_is_shown_keeps_the_line_nvims() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let _ = typed(&mut m, &[":"]);
+    let cursor_grid = m.engine.grids().cursor_local().0 .0;
+    answer_batch(
+        &mut m,
+        vec![
+            UiEvent::GridCursorGoto {
+                grid: cursor_grid,
+                row: 0,
+                col: 0,
+            },
+            UiEvent::Flush,
+        ],
+    );
+    let effects = typed(&mut m, &["V"]);
+    assert_eq!(meta_inputs(&effects), ["V"], "{effects:?}");
+}
+
+/// The close of the line before reaches view after the next `:` went out,
+/// and the new line stays nvim's.
+#[test]
+fn the_previous_line_closing_keeps_the_next_line_nvims() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let _ = typed(&mut m, &[":", "w", "<CR>", ":"]);
+    answer_batch(&mut m, vec![colon_line("w"), UiEvent::Flush]);
+    let closed = line_closed(&m);
+    answer_batch(&mut m, closed);
+    let effects = typed(&mut m, &["V"]);
+    assert_eq!(meta_inputs(&effects), ["V"], "{effects:?}");
 }
 
 /// One question of each kind view shows, opened and handed the key that
@@ -6594,6 +6653,40 @@ fn a_question_under_another_reads_keys_only_once_it_is_on_top() {
     m.note_frame_painted();
     let third = update(&mut m, key("y"));
     assert!((QUESTIONS[1].answered)(&third), "{third:?}");
+}
+
+/// A frame painted with the picker over the agent panel may not show its
+/// permission question, so the `1` typed right after closing the picker
+/// answers nothing.
+#[test]
+fn a_permission_question_under_the_picker_reads_keys_only_once_uncovered() {
+    let permission = &QUESTIONS[3];
+    let mut m = model();
+    (permission.open)(&mut m);
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "picker".to_string(),
+            verb: String::new(),
+        },
+    );
+    assert!(
+        matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Picker(_))
+        ),
+        "{:?}",
+        m.overlays()
+    );
+    m.note_frame_painted();
+
+    let early = typed(&mut m, &["<Esc>", "1"]);
+    assert!(!(permission.answered)(&early), "{early:?}");
+    assert!((permission.still_open)(&m), "{early:?}");
+
+    m.note_frame_painted();
+    let answer = update(&mut m, key("1"));
+    assert!((permission.answered)(&answer), "{answer:?}");
 }
 
 /// A paste landing on a free-text prompt before it was painted types
