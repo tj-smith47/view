@@ -299,6 +299,14 @@ fn a_mark_just_past_an_ascii_budget_stays_with_the_character_it_marks() {
     assert_eq!(take_cells("ab", 3), ("ab".to_string(), 2));
 }
 
+/// A first word that is only a combining mark carries a cell but no glyph,
+/// so the first-word tier refuses it the same way the whole-title guard
+/// refuses a title of nothing but marks.
+#[test]
+fn a_first_word_that_is_only_a_mark_is_no_label() {
+    assert_eq!(title_label("\u{301} abc", 1), (String::new(), 0));
+}
+
 #[test]
 fn an_edge_too_short_to_mark_a_cut_still_carries_the_titles_first_word() {
     // two cells for the title and a wide first glyph: nothing survives the

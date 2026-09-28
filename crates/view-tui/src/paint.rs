@@ -1065,8 +1065,9 @@ fn paint_cluster_cell(
 /// Writes `spans` into row `row_offset` of `area`, each span styled by
 /// resolving its [`view_core::native::views::StyleRole`] through `resolve`,
 /// continuing the same column cursor across span boundaries so spans
-/// compose into one unbroken row exactly like [`paint_text_row`]'s single
-/// string does.
+/// compose into one unbroken row. Each span is split into clusters on its
+/// own, so a span that opens on a mark does not join the cluster before
+/// it the way [`paint_text_row`]'s single string does.
 ///
 /// `resolve` decides the whole story, including what a
 /// [`view_core::native::views::StyleRole::Plain`] span gets (typically the

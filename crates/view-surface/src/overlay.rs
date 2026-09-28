@@ -500,7 +500,13 @@ fn title_label(title: &str, budget: u16) -> (String, u16) {
         return measured(format!(" {kept}{TRUNCATION_MARK} "));
     }
     match title.split_whitespace().next().map(|w| (w, cells(w))) {
-        Some((word, word_cells)) if (1..=budget).contains(&word_cells) => {
+        // a word can measure a cell wide and still be only a mark (the same
+        // reason the whole-title guard above exists), so the visibility
+        // check applies here too
+        Some((word, word_cells))
+            if (1..=budget).contains(&word_cells)
+                && !word.chars().all(|ch| ch.width() == Some(0)) =>
+        {
             measured(format!(" {word} "))
         }
         _ => (String::new(), 0),
@@ -525,7 +531,9 @@ fn measured(label: String) -> (String, u16) {
 /// one text on the frame that could overrun it.
 fn take_cells(text: &str, budget: u16) -> (String, u16) {
     // an ASCII head one byte past the budget holds the kept prefix whole,
-    // one cell a byte, and ends no cluster early; testing only that head
+    // one cell a byte, and ends no cluster early, except a CR LF pair the
+    // head can split; the row is sanitized after the clip, so a split pair
+    // still counts as the two spaces it becomes. Testing only that head
     // keeps a clipped span from being scanned to its end
     let reach = usize::from(budget).saturating_add(1).min(text.len());
     if text.get(..reach).is_some_and(str::is_ascii) {
