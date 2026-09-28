@@ -786,6 +786,11 @@ impl Term {
         // in the probe's own buffer, and every byte it has not is the
         // guarded input path's to recognize
         let outcome = probe.finish(std::time::Duration::ZERO);
+        // an answered box-glyph question that resolved the box charset is
+        // the terminal measuring `╭` one cell wide; a hint never gets here
+        if outcome.cpr_seen && outcome.caps.unicode_boxes {
+            self.shadow.boxes_one_cell = true;
+        }
         self.adopt_caps(outcome.caps)?;
         Ok(outcome)
     }
@@ -809,6 +814,12 @@ impl Term {
         // nothing wrote
         if pushed {
             set_kitty_keyboard_pushed(true);
+        }
+        // after the settle a capability only upgrades on a reply
+        // (`Replies::upgraded`), so a box charset gained here is a late
+        // answer to the box-glyph question measuring one cell
+        if caps.unicode_boxes && !self.caps.unicode_boxes {
+            self.shadow.boxes_one_cell = true;
         }
         if caps != self.caps {
             // the frame on screen was painted under the old capabilities, in
@@ -1247,6 +1258,31 @@ pub fn spawn_input_thread(tx: SyncSender<Msg>, size: TermSizeCell) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// A box charset gained after the settle is a late answer measuring `╭`
+    /// one cell wide, and borders ride on the terminal's advance from then
+    /// on. A charset the session already had moves nothing: it may have
+    /// come from the locale hint.
+    ///
+    /// Disconfirm: removing the check in `adopt_caps` leaves the first
+    /// shadow unmeasured.
+    #[test]
+    fn a_box_charset_gained_after_the_settle_is_a_measurement() {
+        let bare = TermCaps::from_probe(false, false, false);
+        let mut late = Term::frame_probe(bare);
+        late.adopt_caps(bare.with_unicode_boxes(true)).unwrap();
+        assert!(
+            late.shadow.boxes_one_cell,
+            "the late answer measured one cell"
+        );
+
+        let mut hinted = Term::frame_probe(bare.with_unicode_boxes(true));
+        hinted.adopt_caps(bare.with_unicode_boxes(true)).unwrap();
+        assert!(
+            !hinted.shadow.boxes_one_cell,
+            "a charset held all along is no measurement"
+        );
+    }
 
     #[test]
     fn an_empty_size_cell_yields_nothing() {

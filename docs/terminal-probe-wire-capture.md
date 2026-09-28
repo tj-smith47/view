@@ -125,6 +125,12 @@ Read as:
 | CPR | `\x1b[1;2R` | `╭` advanced one cell |
 | DA1 | `\x1b[?1;2;4c` | class 1, last on the wire |
 
+tmux answers `\x1b[?2026$p` from 3.7 and, from the same release, applies a
+`\x1b[?2026h` and `\x1b[?2026l` pair written by the application in a pane
+(tmux `CHANGES`, "CHANGES FROM 3.6b TO 3.7"). Releases 3.1 to 3.6b do
+neither. The synchronized updates 3.2 added bracket tmux's own redraws toward
+the outer terminal.
+
 tmux declines the truecolor readback whether or not it is told the outer
 terminal is RGB-capable. Inside tmux the probe cannot establish truecolor and
 `COLORTERM` is the only signal left, and `0$r` is read as *no answer*

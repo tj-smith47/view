@@ -243,6 +243,12 @@ pub struct Shadow {
     /// Each windowed surface's pane rect and content as the terminal shows
     /// it, which answers which rows a surface's own state change repainted.
     native_panes: Vec<(ratatui::layout::Rect, LayerKind)>,
+    /// Whether the terminal's probe measured a box-drawing glyph one cell
+    /// wide, which lets a border ride on the terminal's own advance (see
+    /// `emit::may_widen`). Set once it is known and never cleared: a frame
+    /// drawn before it re-addressed every border cell, which is correct on
+    /// any terminal.
+    pub(crate) boxes_one_cell: bool,
     /// Frames composed, so the debug-build equivalence guard can name the
     /// frame a divergence appeared on.
     #[cfg(debug_assertions)]
@@ -316,7 +322,7 @@ impl<'a> StagedRuns<'a> {
             .iter()
             .take(self.runs.len())
             .flat_map(|run| {
-                emit::with_widened_neighbours(&run.front, &run.back, run.front.diff_iter(&run.back))
+                emit::with_widened_neighbours(&run.front, &run.back, self.shadow.boxes_one_cell)
             })
     }
 }
@@ -494,7 +500,7 @@ impl Shadow {
         let result = if clipping_pays(&runs, self.front.area.height) {
             self.emit_clipped(writer, &runs)
         } else {
-            emit::draw_resynced(writer, self.updates())
+            emit::draw_resynced(writer, self.updates(), self.boxes_one_cell)
         };
         self.runs = runs;
         result
@@ -504,7 +510,7 @@ impl Shadow {
     /// every cell of the frame just composed, plus the run to the right of
     /// every changed cell a terminal may draw two columns wide.
     fn updates(&self) -> impl Iterator<Item = (u16, u16, &Cell)> {
-        emit::with_widened_neighbours(&self.front, &self.back, self.front.diff_iter(&self.back))
+        emit::with_widened_neighbours(&self.front, &self.back, self.boxes_one_cell)
     }
 
     /// The same emission clipped to `runs`, one chained `draw` over the
@@ -521,8 +527,9 @@ impl Shadow {
         writer: &mut W,
         runs: &[(u16, u16)],
     ) -> std::io::Result<bool> {
+        let boxes_one_cell = self.boxes_one_cell;
         let staged = StagedRuns::stage(self, runs);
-        emit::draw_resynced(writer, staged.diffs())
+        emit::draw_resynced(writer, staged.diffs(), boxes_one_cell)
     }
 
     /// Exchanges each run's rows between the shadow's buffers and its staged
@@ -4565,7 +4572,8 @@ mod tests {
     /// it.
     #[must_use]
     fn assert_clipped_emission_matches_unclipped(shadow: &mut Shadow, label: &str) -> bool {
-        let expected = drawn_bytes(|w| emit::draw_resynced(w, shadow.updates()));
+        let expected =
+            drawn_bytes(|w| emit::draw_resynced(w, shadow.updates(), shadow.boxes_one_cell));
 
         // a frame carrying no glyph a terminal may widen has to reach the
         // wire exactly as `ratatui` would have written it. This is the leg
@@ -4920,10 +4928,17 @@ mod tests {
     /// The bytes a whole-frame diff of `front` against `back` puts on the
     /// wire through view's own emission loop.
     fn resynced_bytes(front: &Buffer, back: &Buffer) -> Vec<u8> {
+        resynced_bytes_on(front, back, false)
+    }
+
+    /// [`resynced_bytes`] on a terminal whose probe did or did not measure
+    /// box drawing one cell wide.
+    fn resynced_bytes_on(front: &Buffer, back: &Buffer, boxes_one_cell: bool) -> Vec<u8> {
         drawn_bytes(|w| {
             emit::draw_resynced(
                 w,
-                emit::with_widened_neighbours(front, back, front.diff_iter(back)),
+                emit::with_widened_neighbours(front, back, boxes_one_cell),
+                boxes_one_cell,
             )
         })
     }
@@ -5035,6 +5050,66 @@ mod tests {
             b"\x1b[1;3H \x1b[39m\x1b[49m\x1b[59m\x1b[0m",
             "a frame with no widening glyph repaints only what changed, and \
              still owes its address and its reset"
+        );
+    }
+
+    /// A border on a terminal whose probe measured `╭` one cell wide is
+    /// addressed once at its start and rides on the terminal's advance. On
+    /// a terminal nobody measured the same run is addressed after every
+    /// glyph, and a nerd-font icon is addressed after on both, since its
+    /// width is the font's.
+    ///
+    /// Disconfirm: `may_widen` returning `terminal_may_widen` alone puts
+    /// `ESC[1;2H` behind the corner on the measured terminal.
+    #[test]
+    fn a_measured_terminal_addresses_a_box_drawing_run_once() {
+        let area = ratatui::layout::Rect::new(0, 0, 6, 1);
+        let front = Buffer::empty(area);
+        let mut back = Buffer::empty(area);
+        let row = [
+            "\u{256d}", "\u{2500}", "\u{2500}", "\u{256e}", NERD_ICON, "x",
+        ];
+        for (x, symbol) in (0_u16..).zip(row) {
+            back[(x, 0)].set_symbol(symbol);
+        }
+        let trailer = "\x1b[39m\x1b[49m\x1b[59m\x1b[0m";
+
+        assert_eq!(
+            String::from_utf8(resynced_bytes_on(&front, &back, true)).unwrap(),
+            format!("\x1b[1;1H\u{256d}\u{2500}\u{2500}\u{256e}{NERD_ICON}\x1b[1;6Hx{trailer}"),
+            "one address for the border run, one behind the icon"
+        );
+        assert_eq!(
+            String::from_utf8(resynced_bytes_on(&front, &back, false)).unwrap(),
+            format!(
+                "\x1b[1;1H\u{256d}\x1b[1;2H\u{2500}\x1b[1;3H\u{2500}\x1b[1;4H\u{256e}\
+                 \x1b[1;5H{NERD_ICON}\x1b[1;6Hx{trailer}"
+            ),
+            "an unmeasured terminal keeps the address behind every glyph"
+        );
+    }
+
+    /// A box glyph replaced on a terminal that measured box drawing one
+    /// cell wide covered nothing past its own column, so its neighbour is
+    /// left to the diff.
+    ///
+    /// Disconfirm: `with_widened_neighbours` passing `false` to `may_widen`
+    /// repaints the neighbour, the first frame of
+    /// `a_reach_repaint_carries_the_address_and_the_trailer`.
+    #[test]
+    fn a_measured_terminal_repaints_no_neighbour_behind_a_box_glyph() {
+        let area = ratatui::layout::Rect::new(0, 0, 6, 1);
+        let mut front = Buffer::empty(area);
+        let mut back = Buffer::empty(area);
+        front[(2, 0)].set_symbol("\u{2502}");
+        front[(3, 0)].set_symbol("b");
+        back[(2, 0)].set_symbol(" ");
+        back[(3, 0)].set_symbol("b");
+
+        assert_eq!(
+            resynced_bytes_on(&front, &back, true),
+            b"\x1b[1;3H \x1b[39m\x1b[49m\x1b[59m\x1b[0m",
+            "only the changed cell is repainted"
         );
     }
 
@@ -5167,7 +5242,7 @@ mod tests {
 
     /// The coordinates a diff of `front` against `back` emits, in order.
     fn emitted_positions(front: &Buffer, back: &Buffer) -> Vec<(u16, u16)> {
-        emit::with_widened_neighbours(front, back, front.diff_iter(back))
+        emit::with_widened_neighbours(front, back, false)
             .map(|(x, y, _)| (x, y))
             .collect()
     }

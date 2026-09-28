@@ -25,7 +25,7 @@ use crossterm::style::{
     SetBackgroundColor, SetColors, SetForegroundColor, SetUnderlineColor,
 };
 use ratatui::backend::IntoCrossterm;
-use ratatui::buffer::{Buffer, BufferDiff, Cell, CellWidth};
+use ratatui::buffer::{Buffer, Cell, CellWidth};
 use ratatui::style::{Color, Modifier};
 use unicode_properties::emoji::is_regional_indicator;
 use unicode_properties::UnicodeEmoji;
@@ -50,6 +50,23 @@ pub(crate) fn terminal_may_widen(symbol: &str) -> bool {
         return false;
     }
     symbol.chars().any(|c| c == '\u{fe0f}' || char_may_widen(c))
+}
+
+/// Whether this terminal may draw `symbol` wider than `unicode_width` says,
+/// given whether its startup probe measured a box-drawing glyph one cell
+/// wide.
+///
+/// A terminal decides the width of every East_Asian_Width = Ambiguous
+/// character by one setting, so the probe's `╭` answering one cell answers
+/// for the whole box-drawing block, and a border drawn from it rides on the
+/// terminal's own advance. Every other class keeps [`terminal_may_widen`]'s
+/// answer: a nerd-font icon's width is the font's, which no probe asks.
+pub(crate) fn may_widen(symbol: &str, boxes_one_cell: bool) -> bool {
+    terminal_may_widen(symbol)
+        && !(boxes_one_cell
+            && symbol
+                .chars()
+                .all(|c| ('\u{2500}'..='\u{257f}').contains(&c)))
 }
 
 /// Whether a terminal may draw `c` alone wider than `unicode_width` says.
@@ -85,11 +102,11 @@ fn widening_excess(symbol: &str) -> u16 {
     u16::try_from(widening).unwrap_or(u16::MAX)
 }
 
-/// The cell diff, plus the columns to the right of every changed cell whose
-/// old or new symbol a terminal may draw wider than `ratatui` sized it: on
-/// such a terminal those columns hold the glyph's own excess, so they are
-/// stale whenever the glyph changes even though the model never touched
-/// them.
+/// The cell diff of `front` against `back`, plus the columns to the right
+/// of every changed cell whose old or new symbol a terminal may draw wider
+/// than `ratatui` sized it: on such a terminal those columns hold the
+/// glyph's own excess, so they are stale whenever the glyph changes even
+/// though the model never touched them.
 ///
 /// The reach past a changed cell starts at the first column past the new
 /// symbol's own [`CellWidth`] -- the columns inside that width are the ones
@@ -108,13 +125,17 @@ fn widening_excess(symbol: &str) -> u16 {
 /// Row-major left-to-right order is preserved, so [`draw_resynced`]'s
 /// adjacency logic is unchanged, and a column the diff already carries is
 /// left to the diff rather than yielded twice.
+///
+/// `boxes_one_cell` is the probe's measurement that box drawing takes one
+/// cell on this terminal (see [`may_widen`]); with it set a box-drawing
+/// glyph reaches no column past its own.
 pub(crate) fn with_widened_neighbours<'p, 'n>(
     front: &'p Buffer,
     back: &'n Buffer,
-    diff: BufferDiff<'p, 'n>,
+    boxes_one_cell: bool,
 ) -> impl Iterator<Item = (u16, u16, &'n Cell)> + use<'p, 'n> {
     let right = back.area.right();
-    let mut diff = diff.peekable();
+    let mut diff = front.diff_iter(back).peekable();
     let mut reach: Option<(u16, u16, u16)> = None;
     std::iter::from_fn(move || loop {
         let live = reach.filter(|&(next, end, _)| next < end);
@@ -142,8 +163,8 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
             (x, y, cell)
         };
         let old = front.cell((x, y));
-        let widened = terminal_may_widen(cell.symbol())
-            || old.is_some_and(|old| terminal_may_widen(old.symbol()));
+        let widened = may_widen(cell.symbol(), boxes_one_cell)
+            || old.is_some_and(|old| may_widen(old.symbol(), boxes_one_cell));
         if widened {
             let span = cell
                 .cell_width()
@@ -184,12 +205,21 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
 /// every cell already matched what the terminal shows would otherwise cost
 /// a write of pure trailer.
 ///
+/// With `boxes_one_cell` set, the probe having measured box drawing one
+/// cell wide (see [`may_widen`]), a run of box-drawing cells is addressed
+/// once at its start and rides on the terminal's advance after that. A
+/// cursor move per border cell is several times the glyph's own three
+/// bytes, and a
+/// frame that reaches a terminal behind tmux in several reads is shown by
+/// a slow client one read at a time.
+///
 /// # Errors
 ///
 /// Returns the writer's own error.
 pub(crate) fn draw_resynced<'a, W: Write>(
     writer: &mut W,
     content: impl Iterator<Item = (u16, u16, &'a Cell)>,
+    boxes_one_cell: bool,
 ) -> std::io::Result<bool> {
     let mut fg = Color::Reset;
     let mut bg = Color::Reset;
@@ -233,7 +263,8 @@ pub(crate) fn draw_resynced<'a, W: Write>(
             )?;
             underline_color = cell.underline_color;
         }
-        if cell.cell_width() >= 2 && terminal_may_widen(cell.symbol()) {
+        let widens = may_widen(cell.symbol(), boxes_one_cell);
+        if cell.cell_width() >= 2 && widens {
             // nvim's TUI writes the same two spaces and two backspaces ahead
             // of this class: on a terminal that draws the glyph one column
             // wide the second column is then blank rather than stale
@@ -242,7 +273,7 @@ pub(crate) fn draw_resynced<'a, W: Write>(
         queue!(writer, Print(cell.symbol()))?;
         emitted = true;
         covered_until = x.checked_add(cell.cell_width()).map(|next| (next, y));
-        if terminal_may_widen(cell.symbol()) {
+        if widens {
             // the terminal's own cursor is now somewhere this loop cannot
             // predict, so the next cell is addressed rather than assumed
             last_pos = None;
