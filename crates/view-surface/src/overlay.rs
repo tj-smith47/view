@@ -478,7 +478,8 @@ pub const fn title_cells(width: u16) -> (u16, u16) {
 ///
 /// One forward pass over the title, whichever tier answers: the cut walks
 /// back off the end of the prefix the first pass already measured rather
-/// than measuring the title again. This is on the layout pass every framed
+/// than measuring the title again, and the label is measured once more,
+/// at most `budget + 2` cells. This is on the layout pass every framed
 /// overlay takes every frame, and the panel's own share of a common
 /// terminal is in the cut tier.
 fn title_label(title: &str, budget: u16) -> (String, u16) {
@@ -490,24 +491,28 @@ fn title_label(title: &str, budget: u16) -> (String, u16) {
     }
     let (kept, kept_cells) = take_cells(title, budget);
     // what came back is a prefix, so equal byte lengths mean nothing was
-    // cut -- the whole title fit, and no second measurement of it is owed
+    // cut -- the whole title fit
     if kept.len() == title.len() {
-        return (format!(" {title} "), kept_cells + 2);
+        return measured(format!(" {title} "));
     }
-    let mark_cells = cells(TRUNCATION_MARK.encode_utf8(&mut [0; 4]));
     let (kept, kept_cells) = cut_before_mark(&kept, kept_cells, budget);
     if kept_cells > 0 {
-        return (
-            format!(" {kept}{TRUNCATION_MARK} "),
-            kept_cells + mark_cells + 2,
-        );
+        return measured(format!(" {kept}{TRUNCATION_MARK} "));
     }
     match title.split_whitespace().next().map(|w| (w, cells(w))) {
         Some((word, word_cells)) if (1..=budget).contains(&word_cells) => {
-            (format!(" {word} "), word_cells + 2)
+            measured(format!(" {word} "))
         }
         _ => (String::new(), 0),
     }
+}
+
+/// `label` and the cells the painter gives it, measured on the padded
+/// label it paints: a text opening on a mark, a variation selector or a
+/// joiner shares one cluster with the blank column before it.
+fn measured(label: String) -> (String, u16) {
+    let label_cells = cells(&label);
+    (label, label_cells)
 }
 
 /// The longest prefix of `text` that fits in `budget` display cells, and
@@ -519,6 +524,17 @@ fn title_label(title: &str, budget: u16) -> (String, u16) {
 /// over it are cut by one rule: a title measured any other way would be the
 /// one text on the frame that could overrun it.
 fn take_cells(text: &str, budget: u16) -> (String, u16) {
+    // an ASCII head one byte past the budget holds the kept prefix whole,
+    // one cell a byte, and ends no cluster early; testing only that head
+    // keeps a clipped span from being scanned to its end
+    let reach = usize::from(budget).saturating_add(1).min(text.len());
+    if text.get(..reach).is_some_and(str::is_ascii) {
+        let kept = text.get(..usize::from(budget)).unwrap_or(text);
+        return (
+            kept.to_string(),
+            u16::try_from(kept.len()).unwrap_or(budget),
+        );
+    }
     let mut out = String::new();
     let mut used = 0_u16;
     for cluster in clusters(text) {
@@ -1307,7 +1323,7 @@ fn prefixed(spans: &[Span], marker: &str) -> Vec<Span> {
 /// a golden is not a picture of anything.
 ///
 /// A one-line row is clipped first and sanitized after, which is the same
-/// text either way -- [`cell_width`] measures a control character as the
+/// text either way -- [`cluster_cells`] measures a control character as the
 /// one column the space it becomes will take -- and copies only the columns
 /// that survive. What a row holds is bounded by the frame; what a span
 /// holds is not, since a pasted prompt echoed into the transcript is as

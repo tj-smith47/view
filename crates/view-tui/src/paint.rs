@@ -1402,17 +1402,11 @@ fn paint_native_overlay(
                 buf,
             );
         } else if laid.selected == Some(row) {
-            // a selected row's whole-row reverse/highlight is a fact about
-            // the row, not about any one span in it, so it stays a single
-            // uniform style even though the row's spans may carry roles of
-            // their own
-            paint_text_row(
-                &view_surface::overlay::line_text(line),
-                selected,
-                area,
-                row,
-                buf,
-            );
+            // the highlight styles the whole row; cells are placed per span
+            // because the layout measured each span on its own, and a span
+            // opening on a mark joins the cluster before it once the row is
+            // one string
+            paint_span_row(line, |_| selected, area, row, buf);
         } else {
             // ordinary content rows resolve style per span -- this is what
             // lets the statusline's diagnostic glyphs, mode text, git
@@ -6577,6 +6571,42 @@ mod tests {
             };
             assert_eq!(cell.bg, expected, "row {row} background");
         }
+    }
+
+    /// A selected row whose text opens on a combining mark is placed span
+    /// by span, as the layout measured it, so its content runs to the cell
+    /// before the right border.
+    #[test]
+    fn a_selected_row_opening_on_a_mark_fills_the_row_to_its_border() {
+        let model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
+        let kind = LayerKind::Picker(
+            view_core::native::views::PickerView::new("Files")
+                .with_query("x")
+                .with_rows(vec!["src/main.rs".to_string(), "\u{301}x".to_string()])
+                .with_selected(1),
+        );
+        let borders = view_surface::overlay::BorderSet::for_caps(model.caps);
+        let laid = view_surface::overlay::rows(24, 7, &kind, borders);
+        let selected = laid.selected.expect("the picker has a selection");
+        let buf = paint_layer_alone(
+            &model,
+            Layer::new(Rect::new(1, 2, 24, 7), kind, model.caps),
+            30,
+            10,
+        );
+        let row = 1 + selected;
+        assert_eq!(
+            buf[(2 + 22, row)].symbol(),
+            " ",
+            "{:?}",
+            row_text(&buf, row, 2, 26)
+        );
+        assert_eq!(
+            buf[(2 + 23, row)].symbol(),
+            "│",
+            "{:?}",
+            row_text(&buf, row, 2, 26)
+        );
     }
 
     /// A styled span inside a float keeps the float's background, whatever

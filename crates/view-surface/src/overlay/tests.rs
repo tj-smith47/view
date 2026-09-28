@@ -25,7 +25,8 @@ fn picker() -> LayerKind {
 }
 
 fn widths(rows: &Rows) -> Vec<u16> {
-    rows.lines.iter().map(|l| cells(&line_text(l))).collect()
+    // per span, as the painter places them
+    rows.lines.iter().map(|l| span_cells(l)).collect()
 }
 
 /// One row's text with its two edge glyphs and the padding column inside
@@ -268,6 +269,34 @@ fn a_title_cut_beside_a_multi_character_emoji_keeps_its_label_and_corner() {
         assert_eq!(view_core::native::text::text_width(&top), width, "{top:?}");
         assert!(top.ends_with('╮'), "{top:?}");
     }
+}
+
+/// A title opening on a combining mark or a variation selector shares its
+/// first cluster with the blank column before it, so the label is measured
+/// as painted, whole or cut.
+#[test]
+fn a_title_opening_on_a_mark_keeps_its_corner_on_the_right_border() {
+    for (title, width, label) in [
+        ("\u{301}abc", 10, " \u{301}abc "),
+        ("\u{301}abcdefgh", 7, " \u{301}a… "),
+        ("\u{fe0f}abc", 10, " \u{fe0f}abc "),
+        ("\u{fe0f}abcdefgh", 7, " \u{fe0f}a… "),
+    ] {
+        let edge = rows(width, 5, &titled(title), BorderSet::ROUNDED);
+        let top = line_text(&edge.lines[0]);
+        assert_eq!(title_span(&edge).as_deref(), Some(label), "{top:?}");
+        assert_eq!(span_cells(&edge.lines[0]), width, "{top:?}");
+        assert!(top.ends_with('╮'), "{top:?}");
+    }
+}
+
+/// The ASCII head that settles a cut reaches one byte past the budget, so a
+/// mark standing just past it still joins the last kept character.
+#[test]
+fn a_mark_just_past_an_ascii_budget_stays_with_the_character_it_marks() {
+    assert_eq!(take_cells("abc\u{301}d", 3), ("abc\u{301}".to_string(), 3));
+    assert_eq!(take_cells("abcd", 3), ("abc".to_string(), 3));
+    assert_eq!(take_cells("ab", 3), ("ab".to_string(), 2));
 }
 
 #[test]

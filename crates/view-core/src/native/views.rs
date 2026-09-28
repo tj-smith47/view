@@ -1047,9 +1047,10 @@ mod tests {
         }
     }
 
-    /// Three choices stack only when every row of the full layout fits.
-    /// One row short of it, at an interior of one row more than the
-    /// choices, they sit on one row beside the rule and a question row.
+    /// Three choices stack only at an interior of seven rows, where every
+    /// row of the full layout fits. At three to six rows they sit on one
+    /// row under a question row, and from four rows the rule sits between
+    /// the two.
     #[test]
     fn three_choices_short_of_the_full_layout_sit_on_one_row_beside_the_rule() {
         let view =
