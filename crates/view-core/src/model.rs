@@ -2175,7 +2175,7 @@ mod rows;
 mod window_status;
 
 pub use buffers::{reopen_order, unsaved_files, BufferEntry};
-pub use look::{Detected, Look, Panes, MIN_FRAMED_SLOT};
+pub use look::{Detected, Joined, Look, Panes, MIN_FRAMED_SLOT};
 pub use messages::{format_at, wrap_toast, MessageEntry, MessageId, Messages};
 pub use notice::{NoticeColumn, NOTICE_COLUMN_MAX};
 pub use rows::{grid_room_for, grid_target_for, ENGINE_MIN_SIZE, SIZE_FLOOR};

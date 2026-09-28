@@ -19,6 +19,20 @@ struct Dock {
     height: u16,
 }
 
+/// Where a float docked to a side of the screen joins the gapless tiles'
+/// lattice, as [`super::Model::joined`] answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Joined {
+    /// The side of the screen the float is docked to.
+    pub anchor: Anchor,
+    /// The terminal column the float shares with the lattice: its first
+    /// column docked right, its last on screen docked left.
+    pub col: u16,
+    /// The cells the float's frame covers.
+    pub rect: OverlayRect,
+}
+
 /// How window layout is drawn.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,11 +320,18 @@ impl super::Model {
     /// enough for a frame. `None` for every other overlay and look.
     #[must_use]
     pub fn joined_anchor(&self, overlay: &super::Overlay) -> Option<Anchor> {
+        self.joined(overlay).map(|joined| joined.anchor)
+    }
+
+    /// Where `overlay` joins the gapless tiles' lattice, for every overlay
+    /// [`Self::joined_anchor`] answers a side for. `None` for the rest.
+    #[must_use]
+    pub fn joined(&self, overlay: &super::Overlay) -> Option<Joined> {
         self.joined_at(overlay, self.overlay_rect(overlay))
     }
 
-    /// [`Self::joined_anchor`] for an overlay whose frame is `rect`.
-    fn joined_at(&self, overlay: &super::Overlay, rect: OverlayRect) -> Option<Anchor> {
+    /// [`Self::joined`] for an overlay whose frame is `rect`.
+    fn joined_at(&self, overlay: &super::Overlay, rect: OverlayRect) -> Option<Joined> {
         if self.look.panes != Panes::Tiles || self.look.gaps {
             return None;
         }
@@ -321,7 +342,20 @@ impl super::Model {
         if !matches!(anchor, Anchor::Left | Anchor::Right) {
             return None;
         }
-        (rect.width >= 2 && rect.height >= 2).then_some(anchor)
+        if rect.width < 2 || rect.height < 2 {
+            return None;
+        }
+        let last = rect
+            .col
+            .saturating_add(rect.width)
+            .min(self.term_width)
+            .checked_sub(1)?;
+        let col = if anchor == Anchor::Right {
+            rect.col
+        } else {
+            last
+        };
+        (col <= last).then_some(Joined { anchor, col, rect })
     }
 
     /// `pane.filled` closed short of every docked gutter, and whether any
@@ -367,11 +401,7 @@ impl super::Model {
                 let (rect, gutter) = self.overlay_split(open);
                 let (col, band) = match gutter {
                     Some(gutter) => (gutter.col, gutter),
-                    None => {
-                        self.joined_at(open, rect)?;
-                        let far = rect.col.saturating_add(rect.width).checked_sub(1)?;
-                        (if right { rect.col } else { far }, rect)
-                    }
+                    None => (self.joined_at(open, rect)?.col, rect),
                 };
                 Some(Dock {
                     right,
@@ -598,7 +628,10 @@ mod tests {
     /// size: a press on the column the panel's gutter closes the tile's
     /// frame on reaches no window, and a press one column further in
     /// reaches the tile at its last visible text column. A drag that
-    /// wanders onto the border is held to that column too.
+    /// wanders onto the border is held to that column too. Under gapless
+    /// tiles the same holds for the column the agent panel docked right,
+    /// or the tree docked left, joins the lattice on, and for a column
+    /// under the float.
     #[test]
     fn a_press_on_the_border_a_docked_float_closes_reaches_no_window() {
         use crate::msg::{Effect, MouseInput, Msg, RpcCall};
@@ -652,6 +685,74 @@ mod tests {
                 matches!(&drag[..], [Effect::Rpc(RpcCall::InputMouse { col, .. })] if *col == last),
                 "{size:?}: a drag onto the border stays on the text: {drag:?}"
             );
+        }
+        for anchor in [Anchor::Right, Anchor::Left] {
+            for size in [(220, 50), (60, 16)] {
+                let label = format!("gapless, {anchor:?}, {size:?}");
+                let mut scene = crate::model::notice::tests::scene(
+                    size,
+                    Look::new(Panes::Tiles, false),
+                    &[],
+                    1,
+                )
+                .expect("one tile fits");
+                let model = &mut scene.model;
+                let right = anchor == Anchor::Right;
+                let kind = if right {
+                    super::super::OverlayKind::Ai
+                } else {
+                    super::super::OverlayKind::Tree(crate::native::tree::TreeState::open(
+                        ".".into(),
+                    ))
+                };
+                model.push_overlay(OverlayBox::new(30, 100).with_anchor(anchor), kind);
+                let open = model.overlays().last().expect("the float is open");
+                let join = model.joined(open).expect("the float joins the lattice").col;
+                let grid = GridId(scene.tiles[0]);
+                let pane = model
+                    .engine
+                    .grids()
+                    .panes_in_z_order()
+                    .into_iter()
+                    .find(|pane| pane.id == grid)
+                    .expect("the tile is placed");
+                let offset = model.look.grid_offset();
+                let beside = if right { join - 1 } else { join + 1 };
+                let under = if right { join + 2 } else { join - 2 };
+                let text = beside - offset - pane.origin.1;
+                let screen_row = pane.filled.0 + 2 + model.chrome_rows() + offset;
+                let mut press = |action: &str, col: u16| {
+                    crate::update::update(
+                        model,
+                        Msg::Mouse(MouseInput {
+                            button: "left".into(),
+                            action: action.into(),
+                            modifier: String::new(),
+                            row: screen_row,
+                            col,
+                        }),
+                    )
+                };
+                for col in [join, under] {
+                    let effects = press("press", col);
+                    assert!(
+                        effects.is_empty(),
+                        "{label}: a press at {col} reaches nothing: {effects:?}"
+                    );
+                }
+                let inside = press("press", beside);
+                assert!(
+                    matches!(&inside[..], [Effect::Rpc(RpcCall::InputMouse { col, .. })] if *col == text),
+                    "{label}: a press beside the join reaches the tile at {text}: {inside:?}"
+                );
+                for col in [join, under] {
+                    let drag = press("drag", col);
+                    assert!(
+                        matches!(&drag[..], [Effect::Rpc(RpcCall::InputMouse { col, .. })] if *col == text),
+                        "{label}: a drag onto {col} is held to {text}: {drag:?}"
+                    );
+                }
+            }
         }
     }
 

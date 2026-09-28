@@ -868,6 +868,68 @@ pub(crate) mod tests {
         assert!(scenes > 5_000, "the walk reached only {scenes} scenes");
     }
 
+    /// Under gapless tiles, the agent panel docked right over all but a
+    /// sliver of the right tile, too narrow for a frame, leaves the stack
+    /// in the left tile's text, anchored top-right. The tree docked left
+    /// mirrors it, anchored top-left.
+    #[test]
+    fn a_tile_a_gapless_docked_float_leaves_too_narrow_takes_no_notice() {
+        for (dock, corner) in [
+            (Anchor::Right, Anchor::TopRight),
+            (Anchor::Left, Anchor::TopLeft),
+        ] {
+            let right = dock == Anchor::Right;
+            let (covered, kept) = if right { (1, 0) } else { (0, 1) };
+            let mut found = 0;
+            for share in 1..100 {
+                let mut scene = scene((100, 30), Look::new(Panes::Tiles, false), &[], 2)
+                    .expect("two tiles fit");
+                let model = &mut scene.model;
+                anchor_at(model, corner);
+                let kind = if right {
+                    OverlayKind::Ai
+                } else {
+                    OverlayKind::Tree(TreeState::open(".".into()))
+                };
+                model.push_overlay(OverlayBox::new(share, 100).with_anchor(dock), kind);
+                let open = model.overlays().last().expect("the float is open");
+                let Some(joined) = model.joined(open) else {
+                    continue;
+                };
+                let join = joined.col;
+                let offset = model.look.grid_offset();
+                let (_, col, width, _) = scene.slots[covered];
+                let sliver = if right {
+                    (join - offset).saturating_sub(col)
+                } else {
+                    (col + width).saturating_sub(join - offset + 1)
+                };
+                if !(1..MIN_FRAMED_SLOT.0).contains(&sliver) {
+                    continue;
+                }
+                found += 1;
+                let label = format!("{dock:?} at {share}%");
+                let text = model
+                    .engine
+                    .grids()
+                    .pane_text(GridId(scene.tiles[kept]))
+                    .expect("the kept tile shows text");
+                let column = model.notice_column().rect;
+                assert!(column.2 > 0 && column.3 > 0, "{label}: the column is empty");
+                assert_eq!(
+                    within(column, text),
+                    column,
+                    "{label}: the column {column:?} sits in the kept tile's text {text:?}"
+                );
+                assert!(
+                    !(column.1..column.1 + column.2).contains(&(join - offset)),
+                    "{label}: the column {column:?} is off the join column {join}"
+                );
+            }
+            assert!(found > 0, "{dock:?}: some share leaves a sliver");
+        }
+    }
+
     /// The message history floating in the top-right corner over one gapped
     /// tile closes no frame, so the stack beside it stands flush against
     /// its box, with no column left blank for a border that is not drawn.

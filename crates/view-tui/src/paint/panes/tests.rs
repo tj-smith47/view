@@ -3992,12 +3992,7 @@ fn the_caret_stays_off_the_lattice_column_a_gapless_docked_float_joins() {
         };
         let probe = scene();
         let open = probe.model.overlays().last().expect("the float is open");
-        let rect = probe.model.overlay_rect(open);
-        let join = if right {
-            rect.col
-        } else {
-            rect.col + rect.width - 1
-        };
+        let join = probe.model.joined(open).expect("the float joins").col;
         let beside = if right { join - 1 } else { join + 1 };
         let under = if right { join + 2 } else { join - 2 };
         let registry = probe.model.engine.painted_grids();

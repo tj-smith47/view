@@ -582,8 +582,9 @@ fn joins(model: &Model, screen: Rect) -> Vec<Join> {
         .overlays()
         .iter()
         .filter_map(|open| {
-            let right = model.joined_anchor(open)? == Anchor::Right;
-            let rect = model.overlay_rect(open);
+            let joined = model.joined(open)?;
+            let right = joined.anchor == Anchor::Right;
+            let rect = joined.rect;
             let first = rect.col;
             let last = rect
                 .col
@@ -596,7 +597,7 @@ fn joins(model: &Model, screen: Rect) -> Vec<Join> {
                 .min(screen.y.saturating_add(screen.height))
                 .checked_sub(1)?;
             Some(Join {
-                col: if right { first } else { last },
+                col: joined.col,
                 top: rect.row,
                 bottom,
                 first,
