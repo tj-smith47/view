@@ -255,8 +255,7 @@ impl super::Model {
     /// Records the floats docked to a side of the screen on the grid
     /// registry, and answers whether they moved since the last call.
     ///
-    /// Every message [`crate::update::update`] folds ends here, so only an
-    /// overlay opened past it, with [`Self::push_overlay`], needs the call.
+    /// [`Self::push_overlay`] leaves the registry's docks as they stood.
     pub fn follow_the_docks(&mut self) -> bool {
         // the registry a restart holds is given the same docks as the live
         // one, so either answers what was last recorded

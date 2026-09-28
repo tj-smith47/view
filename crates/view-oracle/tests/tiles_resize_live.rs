@@ -270,12 +270,49 @@ fn apart(screen: &vt100::Screen, cols: u16, rows: u16) -> Option<String> {
     None
 }
 
-/// The gapped vsplit with the agent panel docked on the right, through the
-/// same shrink and grow: the tile the panel covers part of closes its own
-/// frame one gap short of the panel's at every size. A gapless tile shares
-/// that edge with the panel, which the paint tests read.
-fn panel_beside_the_tiles() {
-    let paths = common::ScratchPaths::new("tiles-resize-panel");
+/// The digit at column `index` of the wrapped line: it steps by one every
+/// column and once more every ten, so a line wrapped at any width short of
+/// a hundred columns off the frame's shows a different digit where its
+/// second screen row starts.
+fn wrapped_digit(index: u16) -> String {
+    ((index % 10 + index / 10) % 10).to_string()
+}
+
+/// Where a tile left of the panel shows the first line anywhere but from
+/// its first column to its frame, wrapped there onto the row under it, or
+/// `None` where every such tile does. The rightmost frame is the panel's.
+fn wraps_beside_the_panel(screen: &vt100::Screen, cols: u16, rows: u16) -> Option<String> {
+    let frames = frames(screen, cols, rows);
+    let panel = frames.iter().max_by_key(|frame| frame.left)?;
+    let tiles: Vec<&Frame> = frames.iter().filter(|f| f.right <= panel.left).collect();
+    if tiles.is_empty() {
+        return Some(format!("no tile beside {panel:?} among {frames:?}"));
+    }
+    for tile in tiles {
+        let width = tile.right - tile.left - 1;
+        for (row, first) in [(tile.top + 1, 0), (tile.top + 2, width)] {
+            for col in tile.left + 1..tile.right {
+                let want = wrapped_digit(first + col - tile.left - 1);
+                let g = glyph(screen, row, col);
+                if g != want {
+                    return Some(format!(
+                        "{g:?} at row {row} col {col} inside {tile:?}, where {want} wraps"
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The vsplit with the agent panel docked on the right, through the same
+/// shrink and grow. The tile the panel covers part of wraps its first line
+/// at its own frame at every size, and a gapped tile closes its frame one
+/// gap short of the panel's. A gapless tile shares that edge with the
+/// panel, which the paint tests read.
+fn panel_beside_the_tiles(gaps: bool) {
+    let look = if gaps { "gapped" } else { "gapless" };
+    let paths = common::ScratchPaths::new(&format!("tiles-resize-panel-{look}"));
     let line = "#".repeat(400);
     let text: Vec<&str> = std::iter::repeat_n(line.as_str(), 80).collect();
     std::fs::write(&paths.scratch, text.join("\n") + "\n").unwrap();
@@ -291,7 +328,7 @@ fn panel_beside_the_tiles() {
     std::fs::write(
         config,
         format!(
-            "[ui]\ngaps = true\n\n[ai]\nagent = [{:?}, {:?}]\n",
+            "[ui]\ngaps = {gaps}\n\n[ai]\nagent = [{:?}, {:?}]\n",
             stub.to_string_lossy(),
             resume.to_string_lossy()
         ),
@@ -300,7 +337,7 @@ fn panel_beside_the_tiles() {
     let mut session = PtySession::spawn_configured(cmd, COLS, ROWS).unwrap();
     assert!(
         session.wait_for("####", BUDGET),
-        "panel: view never showed the file; screen:\n{}",
+        "{look} panel: view never showed the file; screen:\n{}",
         session.screen()
     );
     session.send(b"\x1b:set nowrap | vsplit\r").unwrap();
@@ -310,7 +347,7 @@ fn panel_beside_the_tiles() {
     while !session.wait_for_screen(host_deadline(Duration::from_millis(500)), settled) {
         assert!(
             dismissed < 8,
-            "panel: the two tiles never settled; screen:\n{}",
+            "{look} panel: the two tiles never settled; screen:\n{}",
             session.screen()
         );
         session.send(b"\x1b:View notifications dismiss\r").unwrap();
@@ -319,7 +356,7 @@ fn panel_beside_the_tiles() {
     session.send(b"\x1b:View ai open\r").unwrap();
     assert!(
         session.wait_for("Trust ", BUDGET),
-        "panel: a fresh workspace raised no trust prompt; screen:\n{}",
+        "{look} panel: a fresh workspace raised no trust prompt; screen:\n{}",
         session.screen()
     );
     session.send(b"y").unwrap();
@@ -328,23 +365,40 @@ fn panel_beside_the_tiles() {
             let contents = screen.contents();
             !contents.contains("Trust ") && contents.contains("view-ai-stub-agent")
         }),
-        "panel: the panel never opened; screen:\n{}",
+        "{look} panel: the panel never opened; screen:\n{}",
         session.screen()
     );
+    let digits: String = (0..400).map(wrapped_digit).collect();
+    session
+        .send(format!("\x1b:call setline(1, '{digits}') | windo set wrap\r").as_bytes())
+        .unwrap();
     let redraw = host_deadline(REDRAW);
     let watch = host_deadline(Duration::from_secs(2));
     for (cols, rows) in [(COLS, ROWS), SHRUNK, (COLS, ROWS)] {
-        let (longest, first) = resize_and_watch(&mut session, cols, rows, watch, apart);
+        if gaps {
+            let (longest, first) = resize_and_watch(&mut session, cols, rows, watch, apart);
+            assert!(
+                longest <= redraw,
+                "panel: at {cols}x{rows} two frames touched for {longest:?}, past \
+                 one redraw ({redraw:?}); the first screen of that stretch:\n{first}"
+            );
+            let now = session.with_screen(|screen| apart(screen, cols, rows));
+            assert_eq!(
+                now,
+                None,
+                "panel: at {cols}x{rows}; screen:\n{}",
+                session.screen()
+            );
+        } else {
+            session.resize(cols, rows).unwrap();
+        }
         assert!(
-            longest <= redraw,
-            "panel: at {cols}x{rows} two frames touched for {longest:?}, past \
-             one redraw ({redraw:?}); the first screen of that stretch:\n{first}"
-        );
-        let now = session.with_screen(|screen| apart(screen, cols, rows));
-        assert_eq!(
-            now,
-            None,
-            "panel: at {cols}x{rows}; screen:\n{}",
+            session.wait_for_screen(BUDGET, |screen| {
+                wraps_beside_the_panel(screen, cols, rows).is_none()
+            }),
+            "{look} panel: at {cols}x{rows} the tile beside the panel never \
+             wrapped its first line at its frame; {:?}; screen:\n{}",
+            session.with_screen(|screen| wraps_beside_the_panel(screen, cols, rows)),
             session.screen()
         );
     }
@@ -448,6 +502,7 @@ fn tree_beside_the_tiles() {
 fn a_tile_frame_stays_on_its_text_while_nvim_redraws_a_resize() {
     resize_under(true);
     resize_under(false);
-    panel_beside_the_tiles();
+    panel_beside_the_tiles(true);
+    panel_beside_the_tiles(false);
     tree_beside_the_tiles();
 }

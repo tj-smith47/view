@@ -1450,6 +1450,126 @@ fn a_held_frame_keeps_the_notice_column_it_was_placed_in() {
     );
 }
 
+/// A tree toggled while a restart holds the screen moves the held tile's
+/// text beside it, the replacement's window in that slot asks nvim for the
+/// part the tree leaves, and closing the tree over the held layout puts the
+/// text back at the slot's origin.
+#[test]
+fn a_tree_toggled_during_a_restart_moves_the_held_tiles_text() {
+    use crate::model::{Look, Panes};
+    use crate::native::geometry::{Anchor, SurfaceLayout, SurfacePlacement};
+    let look = Look::new(Panes::Tiles, true);
+    let mut scene =
+        crate::model::notice::tests::scene((160, 40), look, &[], 2).expect("two tiles fit");
+    let m = &mut scene.model;
+    m.surfaces.set_layout(
+        NativeSurface::Tree,
+        SurfaceLayout::new(SurfacePlacement::Overlay, Anchor::Left, 30),
+    );
+    let dead = GridId(scene.tiles[0]);
+    let (row, col, width, height) = scene.slots[0];
+    let full_origin = m.engine.grids().pane_origin(dead).expect("placed").1;
+    let toggle = |m: &mut Model| {
+        update(
+            m,
+            Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        )
+    };
+
+    let _ = restart(m);
+    assert!(m.engine.holds_the_frame(), "the restart holds the frame");
+    let _ = toggle(m);
+    let open = m.overlays().last().expect("the tree is open");
+    let dock = m
+        .overlay_gutter(open)
+        .expect("a gapped float has a gutter")
+        .col
+        - m.look.grid_offset();
+    let ring = 1;
+    assert_eq!(
+        m.engine
+            .painted_grids()
+            .pane_origin(dead)
+            .map(|(_, col)| col),
+        Some(dock + 1 + ring),
+        "the held frame paints the tile's text under the tree"
+    );
+    assert_eq!(
+        m.engine.grids().docks(),
+        m.engine.painted_grids().docks(),
+        "the live and the held registry disagree on the docks"
+    );
+
+    let fresh = 7;
+    let (target_w, target_h) = m.grid_target();
+    let effects = update(
+        m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 1,
+                width: u64::from(target_w),
+                height: u64::from(target_h),
+            },
+            UiEvent::GridClear { grid: 1 },
+            UiEvent::GridResize {
+                grid: fresh,
+                width: u64::from(width - 2 * ring),
+                height: u64::from(height - 2 * ring),
+            },
+            UiEvent::WinPos {
+                grid: fresh,
+                win: crate::events::WinHandle(1000 + scene.tiles[0]),
+                startrow: u64::from(row),
+                startcol: u64::from(col),
+                width: u64::from(width),
+                height: u64::from(height),
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert!(
+        m.engine.holds_the_screen() && !m.engine.holds_the_frame(),
+        "the replacement's window left the held layout"
+    );
+    let shown_width = col + width - dock - 1;
+    let requests: Vec<(u16, u16)> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Rpc(RpcCall::TryResizeGrid {
+                grid,
+                width,
+                height,
+            }) if *grid == GridId(fresh) => Some((*width, *height)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        requests,
+        vec![(shown_width - 2 * ring, height - 2 * ring)],
+        "the replacement's window asks for the part the tree leaves"
+    );
+
+    let _ = toggle(m);
+    assert!(m.overlays().is_empty(), "the tree is closed");
+    assert!(
+        m.engine.holds_the_screen() && !m.engine.holds_the_frame(),
+        "closing the tree left the held layout"
+    );
+    for (registry, which) in [
+        (m.engine.painted_grids(), "held layout"),
+        (m.engine.grids(), "live registry"),
+    ] {
+        assert_eq!(
+            registry.pane_origin(GridId(fresh)).map(|(_, col)| col),
+            Some(full_origin),
+            "the {which} keeps the text beside the closed tree"
+        );
+    }
+}
+
 /// The held cells carry the dead engine's highlight ids, which the
 /// replacement's first batch redefines.
 #[test]

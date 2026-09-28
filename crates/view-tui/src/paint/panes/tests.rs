@@ -4050,7 +4050,8 @@ fn a_gapless_docked_float_joins_the_lattice() {
 /// the column beside the lattice column the float joins on, whether nvim's
 /// cursor is on that column or under the float, and a glyph predicted on
 /// either is dropped. The tile the tree docked left covers shows its first
-/// column beside the join.
+/// column beside the join, predicts a glyph there, and holds the caret on
+/// the tile's last text column while nvim's grid still runs past it.
 #[test]
 fn the_caret_stays_off_the_lattice_column_a_gapless_docked_float_joins() {
     use view_core::native::geometry::{Anchor, NativeSurface, SurfacePlacement};
@@ -4085,18 +4086,25 @@ fn the_caret_stays_off_the_lattice_column_a_gapless_docked_float_joins() {
         let (grid_width, _) = registry.grid(GridId(grid)).expect("placed").size();
         // the fixture never answers the resize the float asks for, so a
         // grid docked right still runs under the float; one docked left
-        // starts past the join, where nvim's first column stands
+        // starts past the join, where nvim's first column stands, and runs
+        // past the tile's far edge. Each entry is the cursor's grid column,
+        // the column its glyph is predicted on, and the caret's column.
         let columns = if right {
-            vec![join - origin_col - pane_col, grid_width - 1]
+            vec![
+                (join - origin_col - pane_col, None, beside),
+                (grid_width - 1, None, beside),
+            ]
         } else {
             assert_eq!(
                 origin_col + pane_col,
                 beside,
                 "{anchor:?}: text starts beside"
             );
-            vec![]
+            let (_, _, text_width, _) = registry.pane_text(GridId(grid)).expect("placed");
+            let last = beside + text_width - 1;
+            vec![(0, Some(beside), beside + 1), (grid_width - 1, None, last)]
         };
-        for at in columns {
+        for (at, glyph, caret) in columns {
             let screen = origin_col + pane_col + at;
             let mut tiles = scene();
             drive(
@@ -4120,15 +4128,16 @@ fn the_caret_stays_off_the_lattice_column_a_gapless_docked_float_joins() {
             let surface = view_surface::render(&tiles.model);
             let cursor = surface.cursor.expect("the frame places a caret");
             assert_eq!(
-                cursor.col, beside,
-                "{anchor:?}, cursor at {screen}: the caret is beside the join column {join}"
+                cursor.col, caret,
+                "{anchor:?}, cursor at {screen}: the caret's column, the float joining at {join}"
             );
-            let predicted = surface.layers.iter().any(|layer| {
+            let predicted = surface.layers.iter().find_map(|layer| {
                 matches!(&layer.kind, view_surface::LayerKind::Speculated(cells) if !cells.is_empty())
+                    .then_some(layer.rect.col)
             });
-            assert!(
-                !predicted,
-                "{anchor:?}, cursor at {screen}: no glyph is predicted there"
+            assert_eq!(
+                predicted, glyph,
+                "{anchor:?}, cursor at {screen}: the column a glyph is predicted on"
             );
         }
     }
