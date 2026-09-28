@@ -23,7 +23,7 @@ use view_core::native::geometry::LIST_MARKER_COLS;
 use view_core::native::text::{cut_before_mark, TRUNCATION_MARK};
 use view_core::native::views::{
     AiPanelView, GitMark, PaletteRow, PaletteView, PickerView, PromptChoices, PromptView, Span,
-    StatuslineView, StyleRole, TreeRow, TreeView,
+    StatuslineView, StyleRole, TreeRow, TreeView, INLINE_CHOICE_GAP,
 };
 
 use crate::LayerKind;
@@ -947,12 +947,17 @@ fn prompt_body(view: &PromptView, width: u16, height: u16) -> Body {
         "{PROMPT_MARK} {}",
         view.input
     ))));
-    let inline = fit.choices == PromptChoices::Inline;
-    if inline {
+    let one_row = match fit.choices {
+        PromptChoices::Inline => Some(inline_choices(view, None)),
+        PromptChoices::One(index) => Some(inline_choices(view, Some(index))),
+        _ => None,
+    };
+    let inline = one_row.is_some();
+    if let Some(row) = one_row {
         if fit.rule {
             header.push(Line::Rule);
         }
-        header.push(Line::Text(plain_spans(inline_choices(view))));
+        header.push(Line::Text(plain_spans(row)));
     }
     Body {
         title: view.title.clone(),
@@ -977,13 +982,15 @@ fn prompt_body(view: &PromptView, width: u16, height: u16) -> Body {
     }
 }
 
-/// Every choice on one row, each behind the marker it would carry on a row
-/// of its own, since the row highlight cannot say which answer it means.
-fn inline_choices(view: &PromptView) -> String {
+/// Every choice on one row, or the choice at `only` alone, each behind the
+/// marker it would carry on a row of its own, since the row highlight
+/// cannot say which answer it means.
+fn inline_choices(view: &PromptView, only: Option<usize>) -> String {
     let marked: Vec<String> = view
         .choices
         .iter()
         .enumerate()
+        .filter(|(i, _)| only.is_none_or(|index| index == *i))
         .map(|(i, choice)| {
             let marker = if view.selected == Some(i) {
                 SELECTED_MARK
@@ -993,7 +1000,7 @@ fn inline_choices(view: &PromptView) -> String {
             format!("{marker}{choice}")
         })
         .collect();
-    marked.join(" ")
+    marked.join(INLINE_CHOICE_GAP)
 }
 
 fn palette_body(view: &PaletteView) -> Body {

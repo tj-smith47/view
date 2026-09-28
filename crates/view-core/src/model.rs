@@ -1284,7 +1284,9 @@ impl Model {
     /// covers the tabline and the statusline as well, and both of those
     /// carry live editor state the user still needs while the panel is open
     /// -- the ruler and the search count among it. The share stays a share
-    /// of what an overlay may actually have.
+    /// of what an overlay may actually have. A Prompt or EngineBusy box
+    /// covers the tabline and the statusline when it outgrows the rows
+    /// between them, per `look::grown_rect`.
     ///
     /// Under tiles the band also loses the command-line row nvim keeps at
     /// the foot, since the frames stop above it. Under gapped tiles it

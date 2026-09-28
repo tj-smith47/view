@@ -345,6 +345,89 @@ mod tests {
         }
     }
 
+    /// A Prompt and an EngineBusy modal on a 60-column terminal, each
+    /// with the rows its every row needs framed.
+    fn modals() -> Vec<(super::super::Overlay, u16)> {
+        use crate::native::supervision::{EngineBusyState, SinceStamp, WedgeKind};
+        let mut model = crate::model::Model::with_term_size(60, 24);
+        let prompt = crate::native::prompt::PromptState::ai_trust_prompt(
+            std::path::PathBuf::from("/p"),
+            "open".to_string(),
+            "Trust /home/someone/work/a-project to launch an AI agent?".to_string(),
+        );
+        model.push_overlay(
+            prompt.overlay_box(),
+            super::super::OverlayKind::Prompt(prompt),
+        );
+        model.push_overlay(
+            crate::native::geometry::OverlayBox::new(60, 30),
+            super::super::OverlayKind::EngineBusy(EngineBusyState::new(
+                WedgeKind::ReadSide,
+                SinceStamp::default(),
+            )),
+        );
+        model
+            .overlays
+            .iter()
+            .map(|overlay| {
+                let view = match &overlay.kind {
+                    super::super::OverlayKind::Prompt(state) => state.view(),
+                    super::super::OverlayKind::EngineBusy(state) => state.view(),
+                    _ => unreachable!("only modals are pushed"),
+                };
+                let width = overlay.geometry.rect(60, 24).width;
+                let inner = crate::native::geometry::interior_text_width(width);
+                (overlay.clone(), view.rows_at(inner) + 2)
+            })
+            .collect()
+    }
+
+    /// A band one row short of every row a modal needs, the rule under its
+    /// input line included, still places the modal on the whole terminal:
+    /// the rule sets the input line apart from a selected choice, so it is
+    /// a row the modal needs.
+    #[test]
+    fn a_band_one_row_short_of_the_rule_covers_the_bars_since_the_rule_is_required() {
+        for (overlay, needed) in modals() {
+            let band_h = needed - 1;
+            let (rect, whole) = grown_rect(&overlay, 60, band_h, band_h + 2);
+            assert!(whole, "{:?} short of its rule", overlay.kind);
+            assert_eq!((rect.row, rect.height), (0, needed), "{:?}", overlay.kind);
+            let (_, whole) = grown_rect(&overlay, 60, needed, needed + 2);
+            assert!(!whole, "{:?} with every row in the band", overlay.kind);
+        }
+    }
+
+    /// Every band a modal can be given on every terminal up to three rows
+    /// taller: it leaves the band exactly when the band is short of its
+    /// rows and the terminal has more, stays on the terminal, and is one
+    /// unframed row when fewer than three rows are left for it.
+    #[test]
+    fn a_modal_leaves_the_band_only_when_short_and_stays_on_the_terminal() {
+        for (overlay, needed) in modals() {
+            for band_h in 0..=needed + 2 {
+                for term_h in band_h..=band_h + 3 {
+                    let at = format!("{:?} band {band_h} term {term_h}", overlay.kind);
+                    let (rect, whole) = grown_rect(&overlay, 60, band_h, term_h);
+                    let expect_whole = needed > band_h && band_h < term_h;
+                    assert_eq!(whole, expect_whole, "{at}");
+                    let bound = if whole { term_h } else { band_h };
+                    assert!(rect.row + rect.height <= bound, "{at}: {rect:?}");
+                    let framed = overlay
+                        .geometry
+                        .with_min_height(needed)
+                        .rect(60, bound)
+                        .height;
+                    let height = if framed >= 3 { framed } else { framed.min(1) };
+                    assert_eq!(rect.height, height, "{at}");
+                    if bound >= needed {
+                        assert!(rect.height >= needed, "{at}: every row shown");
+                    }
+                }
+            }
+        }
+    }
+
     /// Gapless tiles and nvim's own picture have no frame box and move no
     /// grid.
     #[test]

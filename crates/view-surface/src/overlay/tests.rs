@@ -598,6 +598,40 @@ fn a_prompt_carries_its_question_its_input_and_its_choices() {
     assert_eq!(framed.selected, Some(5));
 }
 
+/// Choices too wide to sit side by side paint the selected one alone on
+/// the row under the input line, whole and behind its marker.
+#[test]
+fn a_narrow_short_prompt_paints_its_selected_choice_alone() {
+    use view_core::native::views::PromptView;
+    let view = PromptView::new("Confirm", "Save?").with_choices(vec![
+        "Yes".into(),
+        "No".into(),
+        "Cancel".into(),
+    ]);
+    let texts = |view: PromptView| -> Vec<String> {
+        let framed = rows(13, 5, &LayerKind::Prompt(view), BorderSet::ASCII);
+        framed.lines.iter().map(|l| line_text(l)).collect()
+    };
+    let selected = texts(view.clone().with_selected(2));
+    assert_eq!(
+        selected[1].trim_matches(['|', ' ']),
+        "Save?",
+        "{selected:#?}"
+    );
+    assert_eq!(selected[2].trim_matches(['|', ' ']), ">", "{selected:#?}");
+    assert_eq!(
+        selected[3].trim_matches('|').trim_end(),
+        " > Cancel",
+        "{selected:#?}"
+    );
+    let first = texts(view);
+    assert_eq!(
+        first[3].trim_matches('|').trim_end(),
+        "   Yes",
+        "{first:#?}"
+    );
+}
+
 /// The prompt has to reach the painted frame, not only `AiPanelView`'s own
 /// field. A pending permission's question and its options render into the
 /// header at the top, and the rule and the composer stay at the bottom.

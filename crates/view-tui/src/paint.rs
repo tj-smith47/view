@@ -2777,8 +2777,8 @@ mod tests {
     }
 
     /// Too short for the whole question, the trust prompt paints its input
-    /// line, the rule and both choices, the question's last shown row ends
-    /// in `…`, and the caret is on the input line.
+    /// line, the rule and both choices on one row, the question's last
+    /// shown row ends in `…`, and the caret is on the input line.
     #[test]
     fn a_short_terminal_paints_the_trust_prompts_answers() {
         let (screen, caret) = short_trust_prompt(8, false);
@@ -2798,8 +2798,8 @@ mod tests {
             "the rule sets the input line apart from the choices:\n{shown}"
         );
         assert!(
-            screen[caret + 2].contains("Yes") && screen[caret + 3].contains("No"),
-            "both choices follow the rule:\n{shown}"
+            screen[caret + 2].contains("Yes") && screen[caret + 2].contains("No"),
+            "both choices share the row under the rule:\n{shown}"
         );
     }
 

@@ -3795,9 +3795,9 @@ mod tests {
     }
 
     /// On a terminal too short for the whole wrapped trust question the
-    /// input line and both choices stay in the box, the question is cut
-    /// from its end with `…` on its last shown row, and the caret stands on
-    /// the input line.
+    /// input line and both choices, on one row under the rule, stay in the
+    /// box, the question is cut from its end with `…` on its last shown
+    /// row, and the caret stands on the input line.
     #[test]
     fn a_clamped_trust_prompt_keeps_its_input_line_and_choices() {
         let (texts, caret) = clamped_trust_prompt(9, false);
@@ -3819,8 +3819,8 @@ mod tests {
             "the rule sits under the input line: {texts:#?}"
         );
         assert!(
-            texts[caret + 2].ends_with("Yes") && texts[caret + 3].ends_with("No"),
-            "both choices follow the rule: {texts:#?}"
+            texts[caret + 2].contains("Yes") && texts[caret + 2].ends_with("No"),
+            "both choices share the row under the rule: {texts:#?}"
         );
     }
 
@@ -3829,30 +3829,29 @@ mod tests {
     }
 
     /// The rows a clamped confirm keeps, in the order it gives them out:
-    /// the input line, the choices, the rule between them, then the
-    /// question. Interior heights 2, 3 and 4 on a terminal with no chrome.
+    /// the input line, the choices on one row, one question row, the rule,
+    /// then the rest of the question. Interior heights 2, 3, 4 and 5 on a
+    /// terminal with no chrome.
     #[test]
-    fn a_clamped_confirm_gives_the_rule_a_row_before_the_question() {
+    fn a_clamped_confirm_gives_a_question_row_before_the_rule() {
+        let both = |row: &str| row.contains("Yes") && row.ends_with("No");
         let (texts, caret) = clamped_trust_prompt(4, false);
         assert_eq!(caret, 1, "no question row: {texts:#?}");
-        assert!(
-            texts[2].contains("Yes") && texts[2].contains("No"),
-            "two rows hold the input line and the choices, no rule: {texts:#?}"
-        );
+        assert!(both(&texts[2]), "input and choices, no rule: {texts:#?}");
         let (texts, caret) = clamped_trust_prompt(5, false);
-        assert_eq!(caret, 1, "no question row: {texts:#?}");
-        assert!(is_rule(&texts[2]), "the rule under the input: {texts:#?}");
-        assert!(
-            texts[3].contains("Yes") && texts[3].contains("No"),
-            "the choices share the row under the rule: {texts:#?}"
-        );
+        assert_eq!(caret, 2, "one question row: {texts:#?}");
+        assert!(texts[1].ends_with('…'), "the question is cut: {texts:#?}");
+        assert!(both(&texts[3]), "the choices under the input: {texts:#?}");
         let (texts, caret) = clamped_trust_prompt(6, false);
-        assert_eq!(caret, 1, "no question row: {texts:#?}");
-        assert!(is_rule(&texts[2]), "the rule under the input: {texts:#?}");
-        assert!(
-            texts[3].ends_with("Yes") && texts[4].ends_with("No"),
-            "one row per choice under the rule: {texts:#?}"
-        );
+        assert_eq!(caret, 2, "one question row: {texts:#?}");
+        assert!(is_rule(&texts[3]), "the rule under the input: {texts:#?}");
+        assert!(both(&texts[4]), "the choices under the rule: {texts:#?}");
+        let (texts, caret) = clamped_trust_prompt(7, false);
+        assert_eq!(caret, 3, "two question rows: {texts:#?}");
+        assert_eq!(texts[1], "Trust", "{texts:#?}");
+        assert!(texts[2].ends_with('…'), "the question is cut: {texts:#?}");
+        assert!(is_rule(&texts[4]), "the rule under the input: {texts:#?}");
+        assert!(both(&texts[5]), "the choices under the rule: {texts:#?}");
     }
 
     /// A box one column wide and three rows tall is laid unframed, and the
@@ -3902,7 +3901,7 @@ mod tests {
     /// the wrap alone would leave `Trust` by itself.
     #[test]
     fn a_question_cut_to_one_row_fills_that_row() {
-        let (texts, caret) = clamped_trust_prompt(7, false);
+        let (texts, caret) = clamped_trust_prompt(5, false);
         assert_eq!(caret, 2, "one question row above the input: {texts:#?}");
         assert!(
             texts[1].starts_with("Trust /home/") && texts[1].ends_with('…'),
