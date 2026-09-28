@@ -8,7 +8,7 @@
 //! that goes wrong.
 
 use unicode_segmentation::{Graphemes, UnicodeSegmentation};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::views::Span;
 
@@ -86,6 +86,28 @@ pub fn group_width(group: &[Span]) -> u16 {
         .iter()
         .map(|span| text_width(&span.text))
         .fold(0, u16::saturating_add)
+}
+
+/// The glyph a cut text ends with, so a shortened one reads as cut.
+pub const TRUNCATION_MARK: char = '…';
+
+/// The longest prefix of `text`, which takes `cells` cells, that leaves
+/// room for [`TRUNCATION_MARK`] within `budget` cells and ends in no
+/// whitespace, and the cells that prefix takes.
+#[must_use]
+pub fn cut_before_mark(text: &str, cells: u16, budget: u16) -> (&str, u16) {
+    let mark_cells = u16::try_from(TRUNCATION_MARK.width().unwrap_or(1)).unwrap_or(1);
+    let mut kept: Vec<&str> = clusters(text).collect();
+    let mut cells = cells;
+    // a space before the mark reads as a gap in the text
+    while cells.saturating_add(mark_cells) > budget
+        || kept.last().is_some_and(|c| c.trim().is_empty())
+    {
+        let Some(dropped) = kept.pop() else { break };
+        cells = cells.saturating_sub(cluster_width(dropped));
+    }
+    let len = kept.iter().map(|c| c.len()).sum();
+    (text.get(..len).unwrap_or_default(), cells)
 }
 
 /// One line broken into rows of at most `width` cells: at the last space

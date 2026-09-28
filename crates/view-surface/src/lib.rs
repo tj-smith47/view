@@ -3800,7 +3800,7 @@ mod tests {
     /// the input line.
     #[test]
     fn a_clamped_trust_prompt_keeps_its_input_line_and_choices() {
-        let (texts, caret) = clamped_trust_prompt(8, false);
+        let (texts, caret) = clamped_trust_prompt(9, false);
         assert!(
             texts[caret].starts_with(overlay::PROMPT_MARK),
             "the caret row is the input line: {texts:#?}"
@@ -3815,8 +3815,86 @@ mod tests {
             "the cut row is filled to the width of the row above it: {texts:#?}"
         );
         assert!(
-            texts[caret + 1].ends_with("Yes") && texts[caret + 2].ends_with("No"),
-            "both choices follow the input line: {texts:#?}"
+            is_rule(&texts[caret + 1]),
+            "the rule sits under the input line: {texts:#?}"
+        );
+        assert!(
+            texts[caret + 2].ends_with("Yes") && texts[caret + 3].ends_with("No"),
+            "both choices follow the rule: {texts:#?}"
+        );
+    }
+
+    fn is_rule(row: &str) -> bool {
+        !row.is_empty() && row.chars().all(|c| matches!(c, '─' | '-'))
+    }
+
+    /// The rows a clamped confirm keeps, in the order it gives them out:
+    /// the input line, the choices, the rule between them, then the
+    /// question. Interior heights 2, 3 and 4 on a terminal with no chrome.
+    #[test]
+    fn a_clamped_confirm_gives_the_rule_a_row_before_the_question() {
+        let (texts, caret) = clamped_trust_prompt(4, false);
+        assert_eq!(caret, 1, "no question row: {texts:#?}");
+        assert!(
+            texts[2].contains("Yes") && texts[2].contains("No"),
+            "two rows hold the input line and the choices, no rule: {texts:#?}"
+        );
+        let (texts, caret) = clamped_trust_prompt(5, false);
+        assert_eq!(caret, 1, "no question row: {texts:#?}");
+        assert!(is_rule(&texts[2]), "the rule under the input: {texts:#?}");
+        assert!(
+            texts[3].contains("Yes") && texts[3].contains("No"),
+            "the choices share the row under the rule: {texts:#?}"
+        );
+        let (texts, caret) = clamped_trust_prompt(6, false);
+        assert_eq!(caret, 1, "no question row: {texts:#?}");
+        assert!(is_rule(&texts[2]), "the rule under the input: {texts:#?}");
+        assert!(
+            texts[3].ends_with("Yes") && texts[4].ends_with("No"),
+            "one row per choice under the rule: {texts:#?}"
+        );
+    }
+
+    /// A box one column wide and three rows tall is laid unframed, and the
+    /// caret stands on the row paint gives the input line.
+    #[test]
+    fn a_one_column_prompt_puts_its_caret_on_the_painted_input_line() {
+        let mut model = model_with_grid(2, 3);
+        model.term_width = 2;
+        model.term_height = 3;
+        apply(
+            &mut model,
+            UiEvent::MsgShow {
+                kind: "confirm".into(),
+                content: vec![(0, "Go on?".to_string())],
+                replace_last: false,
+            },
+        );
+        let surface = render(&model);
+        let cursor = surface.cursor.expect("the prompt places a caret");
+        let layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Prompt(_)))
+            .expect("the prompt is open");
+        let rect = layer.rect;
+        assert_eq!((rect.width, rect.height), (1, 3), "{rect:?}");
+        let rows = overlay::rows(
+            rect.width,
+            rect.height,
+            &layer.kind,
+            layer.borders.expect("a native overlay carries a charset"),
+        );
+        let texts: Vec<String> = rows.lines.iter().map(|l| overlay::line_text(l)).collect();
+        let input = texts
+            .iter()
+            .position(|t| t.starts_with(overlay::PROMPT_MARK))
+            .expect("an input line is painted");
+        assert_eq!(input, 2, "two question rows above the input: {texts:#?}");
+        assert_eq!(
+            usize::from(cursor.row - rect.row),
+            input,
+            "the caret row is the painted input line: {texts:#?}"
         );
     }
 
@@ -3824,7 +3902,7 @@ mod tests {
     /// the wrap alone would leave `Trust` by itself.
     #[test]
     fn a_question_cut_to_one_row_fills_that_row() {
-        let (texts, caret) = clamped_trust_prompt(6, false);
+        let (texts, caret) = clamped_trust_prompt(7, false);
         assert_eq!(caret, 2, "one question row above the input: {texts:#?}");
         assert!(
             texts[1].starts_with("Trust /home/") && texts[1].ends_with('…'),

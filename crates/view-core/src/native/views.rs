@@ -605,31 +605,42 @@ impl PromptView {
     }
 
     /// How this prompt's rows fit an interior `width` cells wide and
-    /// `height` rows tall. The input line and the choices are laid first,
-    /// one row per choice, or all on one row when the interior has a row
-    /// for them and too few for one each. The question takes the rows left
-    /// above them. A cut question's last shown row is filled from the rest
-    /// of the question up to `width` and ends in `…`. The rule under the
-    /// input line is drawn only on a spare row. A one-row interior holds
-    /// the input line alone.
+    /// `height` rows tall. Rows are given out in this order: the input
+    /// line, the choices (one row per choice, else all on one row), the
+    /// rule between them, and the question in the rows left above. So a
+    /// two-row interior holds the input line and the choices with no rule,
+    /// and a one-row interior the input line alone. A prompt with no
+    /// choices draws the rule only on a row the question leaves spare. A
+    /// cut question's last shown row is filled from the rest of the
+    /// question up to `width` and ends in `…`.
     #[must_use]
     pub fn fit(&self, width: u16, height: u16) -> PromptFit {
         let height = usize::from(height);
         let count = self.choices.len();
-        let (choices, fixed) = if count == 0 || height > count {
-            (PromptChoices::Stacked, 1 + count)
-        } else if height >= 2 {
-            (PromptChoices::Inline, 2)
+        let stacked_or_inline = |rows: usize| {
+            if rows >= count {
+                (PromptChoices::Stacked, count)
+            } else {
+                (PromptChoices::Inline, 1)
+            }
+        };
+        let ((choices, choice_rows), rule) = if count == 0 {
+            ((PromptChoices::Stacked, 0), false)
+        } else if height >= 3 {
+            (stacked_or_inline(height - 2), true)
+        } else if height == 2 {
+            (stacked_or_inline(1), false)
         } else {
             return PromptFit::default();
         };
+        let fixed = 1 + choice_rows + usize::from(rule);
         if height < fixed {
             return PromptFit::default();
         }
         let room = height - fixed;
         let mut message = self.message_rows(width);
         if message.len() <= room {
-            let rule = room > message.len() && choices == PromptChoices::Stacked;
+            let rule = rule || room > message.len();
             return PromptFit {
                 message,
                 choices,
@@ -649,7 +660,7 @@ impl PromptView {
         PromptFit {
             message,
             choices,
-            rule: false,
+            rule,
         }
     }
 
@@ -701,20 +712,12 @@ pub struct PromptFit {
     pub rule: bool,
 }
 
-/// `row` with `…` as its last cell, dropping as much of its end as the
-/// mark needs to stay within `width` cells.
+/// `row` with [`TRUNCATION_MARK`](super::text::TRUNCATION_MARK) as its
+/// last cell, dropping as much of its end as the mark needs to stay within
+/// `width` cells.
 fn ending_in_mark(row: &str, width: u16) -> String {
-    let mark = "…";
-    let mark_cells = super::text::text_width(mark);
-    let mut kept: Vec<&str> = super::text::clusters(row).collect();
-    let mut cells = super::text::text_width(row);
-    // a space before the mark reads as a gap in the question
-    while cells.saturating_add(mark_cells) > width.max(1) || kept.last() == Some(&" ") {
-        let Some(dropped) = kept.pop() else { break };
-        cells = cells.saturating_sub(super::text::cluster_width(dropped));
-    }
-    kept.push(mark);
-    kept.concat()
+    let (kept, _) = super::text::cut_before_mark(row, super::text::text_width(row), width.max(1));
+    format!("{kept}{}", super::text::TRUNCATION_MARK)
 }
 
 /// One command in a [`PaletteView`]: what it is called and the keys that
@@ -952,11 +955,11 @@ mod tests {
 
     use super::*;
 
-    /// Every interior height a two-choice confirm can be given: the input
-    /// line and both choices are laid whenever they fit, on one row when
-    /// only one is left for them, the question takes what is left, and a
-    /// cut question's last row is filled from the rest of the question and
-    /// ends in `…` inside the row's width.
+    /// Every interior height a two-choice confirm can be given: rows go to
+    /// the input line, then the choices (on one row when too few are left
+    /// for one each), then the rule, then the question. A cut question's
+    /// last row is filled from the rest of the question and ends in `…`
+    /// inside the row's width.
     #[test]
     fn a_short_interior_cuts_the_question_and_keeps_the_answers() {
         let view = PromptView::new("Confirm", "one two three four five six seven")
@@ -966,19 +969,17 @@ mod tests {
         let cut_rows = ["one two…", "three fo…", "four fiv…"];
         for height in 0..10u16 {
             let fit = view.fit(9, height);
-            let room = usize::from(height).saturating_sub(3);
-            if height < 2 {
-                assert_eq!(fit, PromptFit::default(), "height {height}");
-                continue;
-            }
-            if height == 2 {
-                assert_eq!(fit.choices, PromptChoices::Inline, "height {height}");
-                assert!(fit.message.is_empty() && !fit.rule, "height {height}");
-                continue;
-            }
-            assert_eq!(fit.choices, PromptChoices::Stacked, "height {height}");
+            let (choices, rule, room) = match height {
+                0 | 1 => {
+                    assert_eq!(fit, PromptFit::default(), "height {height}");
+                    continue;
+                }
+                2 => (PromptChoices::Inline, false, 0),
+                3 => (PromptChoices::Inline, true, 0),
+                _ => (PromptChoices::Stacked, true, usize::from(height) - 4),
+            };
+            assert_eq!((fit.choices, fit.rule), (choices, rule), "height {height}");
             assert_eq!(fit.message.len(), room.min(4), "height {height}");
-            assert_eq!(fit.rule, room > 4, "height {height}");
             let last = fit.message.last().map(String::as_str);
             match room {
                 0 => assert_eq!(last, None),
@@ -999,6 +1000,61 @@ mod tests {
         assert_eq!(view.fit(9, 0), PromptFit::default());
         let one = view.fit(9, 1);
         assert!(one.message.is_empty() && one.choices == PromptChoices::Stacked);
+    }
+
+    /// An interior zero or one cell wide has room for the mark alone on a
+    /// cut row.
+    #[test]
+    fn a_cut_row_one_cell_wide_or_less_is_the_mark() {
+        let view = PromptView::new("Confirm", "one two three")
+            .with_choices(vec!["Yes".to_string(), "No".to_string()]);
+        for width in [0, 1] {
+            assert_eq!(view.fit(width, 5).message, ["…"], "width {width}");
+        }
+    }
+
+    /// A wide glyph that would straddle the cut is dropped, and the mark
+    /// takes the cell after the last glyph that fits whole.
+    #[test]
+    fn a_cut_row_drops_a_wide_glyph_that_straddles_the_mark() {
+        let view = PromptView::new("Confirm", "a日本語の質問")
+            .with_choices(vec!["Yes".to_string(), "No".to_string()]);
+        assert_eq!(view.message_rows(9), ["a日本語の", "質問"]);
+        let fit = view.fit(9, 5);
+        assert_eq!(fit.message, ["a日本語…"]);
+        assert_eq!(super::super::text::text_width(&fit.message[0]), 8);
+    }
+
+    /// A cut row that the wrap leaves blank, a line break in the question,
+    /// is filled from the line after it.
+    #[test]
+    fn a_blank_cut_row_is_filled_from_the_next_line() {
+        let view = PromptView::new("Confirm", "one\n\ntwo three four five")
+            .with_choices(vec!["Yes".to_string(), "No".to_string()]);
+        assert_eq!(view.message_rows(9)[..2], ["one", ""]);
+        assert_eq!(view.fit(9, 6).message, ["one", "two thre…"]);
+    }
+
+    /// A prompt with no choices gives the question every row past the
+    /// input line and draws the rule under the input line only on a row
+    /// the question leaves spare.
+    #[test]
+    fn a_prompt_with_no_choices_gives_the_rule_a_spare_row_only() {
+        let view = PromptView::new("Rename", "one two three four five six seven");
+        for height in 0..8u16 {
+            let fit = view.fit(9, height);
+            if height == 0 {
+                assert_eq!(fit, PromptFit::default());
+                continue;
+            }
+            let room = usize::from(height) - 1;
+            assert_eq!(fit.choices, PromptChoices::Stacked, "height {height}");
+            assert_eq!(fit.message.len(), room.min(4), "height {height}");
+            assert_eq!(fit.rule, room > 4, "height {height}");
+            if room == 1 {
+                assert_eq!(fit.message, ["one two…"], "height {height}");
+            }
+        }
     }
 
     #[test]

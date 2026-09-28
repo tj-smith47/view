@@ -20,6 +20,7 @@
 use unicode_width::UnicodeWidthChar;
 use view_core::model::TermCaps;
 use view_core::native::geometry::LIST_MARKER_COLS;
+use view_core::native::text::{cut_before_mark, TRUNCATION_MARK};
 use view_core::native::views::{
     AiPanelView, GitMark, PaletteRow, PaletteView, PickerView, PromptChoices, PromptView, Span,
     StatuslineView, StyleRole, TreeRow, TreeView,
@@ -398,13 +399,6 @@ fn picker_split_rows(
     }
 }
 
-/// The glyph a title cut to fit its edge ends with, so a shortened name
-/// reads as cut rather than as the whole of a shorter one. One cell at
-/// every tier, matching the mark a picker's own truncated rows already
-/// carry: the charset a frame is drawn from says what the terminal renders
-/// for a border, never what a title made of buffer-supplied text holds.
-const TRUNCATION_MARK: char = '…';
-
 /// The frame's top row: the two corners with the title, in the longest form
 /// that fits, set into the horizontal run between them.
 ///
@@ -489,7 +483,7 @@ pub const fn title_cells(width: u16) -> (u16, u16) {
 /// terminal is in the cut tier.
 fn title_label(title: &str, budget: u16) -> (String, u16) {
     let title = title.trim();
-    let (mut kept, mut kept_cells) = take_cells(title, budget);
+    let (kept, kept_cells) = take_cells(title, budget);
     // what came back is a prefix, so equal byte lengths mean nothing was
     // cut -- the whole title fit, and no second measurement of it is owed
     if kept.len() == title.len() {
@@ -500,12 +494,7 @@ fn title_label(title: &str, budget: u16) -> (String, u16) {
         };
     }
     let mark_cells = cell_width(TRUNCATION_MARK);
-    // the mark is paid for out of the prefix's own tail, and a space handed
-    // to it would read as a gap in the title rather than as a cut
-    while kept_cells.saturating_add(mark_cells) > budget || kept.ends_with(char::is_whitespace) {
-        let Some(dropped) = kept.pop() else { break };
-        kept_cells = kept_cells.saturating_sub(cell_width(dropped));
-    }
+    let (kept, kept_cells) = cut_before_mark(&kept, kept_cells, budget);
     if kept_cells > 0 {
         return (
             format!(" {kept}{TRUNCATION_MARK} "),
@@ -958,16 +947,19 @@ fn prompt_body(view: &PromptView, width: u16, height: u16) -> Body {
         "{PROMPT_MARK} {}",
         view.input
     ))));
-    if fit.choices == PromptChoices::Inline {
+    let inline = fit.choices == PromptChoices::Inline;
+    if inline {
+        if fit.rule {
+            header.push(Line::Rule);
+        }
         header.push(Line::Text(plain_spans(inline_choices(view))));
     }
     Body {
         title: view.title.clone(),
-        // the same shape every other overlay with a text field uses: the
-        // typed line above the rule, the selectable rows below it. The
-        // prompt mark and the selection marker are the same glyph, so an
-        // input line sharing a side of the rule with the choices reads as
-        // a second selected row
+        // the typed line above the rule and the selectable rows below it.
+        // The prompt mark and the selection marker are the same glyph, so
+        // the rule is what sets the input line apart from a selected row,
+        // and `PromptView::fit` gives it a row before any question row
         header,
         items: view
             .choices
@@ -980,7 +972,7 @@ fn prompt_body(view: &PromptView, width: u16, height: u16) -> Body {
         selected: view.selected,
         header_keep_tail: false,
         header_first: false,
-        rule: fit.rule,
+        rule: fit.rule && !inline,
         footer: Vec::new(),
     }
 }

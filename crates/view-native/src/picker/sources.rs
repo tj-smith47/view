@@ -323,7 +323,7 @@ fn truncate_line(line: &str) -> String {
         return line.to_string();
     }
     let mut truncated: String = line.chars().take(LIVE_GREP_LINE_CHAR_LIMIT).collect();
-    truncated.push('…');
+    truncated.push(view_core::native::text::TRUNCATION_MARK);
     truncated
 }
 
