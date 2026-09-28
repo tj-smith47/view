@@ -212,9 +212,9 @@ else
 fi
 
 # a tape that opens a Rust file warms the target dir before its session
-# starts, the way cap.sh does
+# starts, and so does cap.sh when the file it opens is one
 for script in "$TAPES/tiled-panes.sh" "$HERE/dogfood/cap.sh"; do
-    warm_at=$(grep -n '^warm_cargo_target ' "$script" | head -1 | cut -d: -f1) || true
+    warm_at=$(grep -n 'warm_cargo_target "\$ROOT"' "$script" | head -1 | cut -d: -f1) || true
     session_at=$(grep -n '^new_cap_session ' "$script" | head -1 | cut -d: -f1) || true
     if [ -n "$warm_at" ] && [ -n "$session_at" ] && [ "$warm_at" -lt "$session_at" ]; then
         report ok "$(basename -- "$script") warms the target dir before its session"
@@ -223,6 +223,28 @@ for script in "$TAPES/tiled-panes.sh" "$HERE/dogfood/cap.sh"; do
             "warm_cargo_target at line ${warm_at:-none}, new_cap_session at line ${session_at:-none}"
     fi
 done
+
+# cap.sh warms the target dir for a Rust file alone, run against the same
+# stand-ins, so no session starts and no capture is made
+while IFS='|' read -r opens warms; do
+    rm -f "$WORK/cargo.log"
+    set +e
+    PATH="$WORK/bin:$PATH" XDG_CACHE_HOME=$WORK/cache VIEW_BIN=$WORK/bin/tmux \
+        sh "$HERE/dogfood/cap.sh" --settle 0 "$WORK/cap/out.txt" -- "$opens" \
+        2>"$WORK/cap.err"
+    rc=$?
+    set -e
+    if [ -e "$WORK/cargo.log" ]; then warmed=yes; else warmed=no; fi
+    if [ "$rc" = 0 ] && [ "$warmed" = "$warms" ]; then
+        report ok "a cap.sh capture of $opens warms the target dir: $warms"
+    else
+        report fail "a cap.sh capture of $opens warms the target dir: $warms" \
+            "status $rc, warmed: $warmed, said: $(cat "$WORK/cap.err")"
+    fi
+done <<'EOF'
+crates/view-core/src/model/look.rs|yes
+README.md|no
+EOF
 
 shipped=0
 for tape in "$TAPES"/*.sh; do

@@ -91,7 +91,13 @@ BIN="${VIEW_BIN:-$(newest_build "$ROOT" view)}"
 command -v tmux >/dev/null 2>&1 || { echo "cap.sh: tmux is not on PATH" >&2; exit 2; }
 
 mkdir -p -- "$(dirname -- "$OUT")"
-warm_cargo_target "$ROOT" cap.sh
+# rust-analyzer attaches to a Rust file and to nothing else, so any other
+# capture has no check to wait for
+for arg in "$@"; do
+  case "$arg" in
+    (*.rs) warm_cargo_target "$ROOT" cap.sh; break ;;
+  esac
+done
 
 new_cap_session "$SOCKET" "$COLS" "$ROWS" -- "$BIN" "$@"
 sleep "$SETTLE"
