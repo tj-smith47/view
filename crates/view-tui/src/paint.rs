@@ -899,6 +899,7 @@ fn composite_layers(
             | LayerKind::Ai(_) => {
                 let laid = layouts.and_then(|shadow| shadow.laid_for(index, layer));
                 paint_native_overlay(layer, laid, &theme, area, damage, buf);
+                panes::frames::paint_join(model, surface, layer, &theme, borders, damage, buf);
             }
             // LayerKind is #[non_exhaustive]: a future variant degrades to
             // painting nothing rather than failing to compile here

@@ -1,0 +1,53 @@
+╭──────────────────────────────────────┬────────────────┬ Stub: Esc returns ───╮
+│left                                  │right           │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      ├ right.rs E 1 ──┤                      │
+│                                      │under           │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │                      │
+│                                      │                │ ──────────────────── │
+│                                      │                │ >                    │
+╰ left.rs -- INSERT -- 1:1 ────────────┴ under.rs E 2 ──┴──────────────────────╯
+--- fg ---
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBCCCCCCCCCCCCCCCCCCCDDDD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCABBBBBBBBBBBBBBBBBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+ACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCACCCCCCCCCCCCCCCCBCCCCCCCCCCCCCCCCCCCCCCD
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBDDDDDDDDDDDDDDDDDDDDDDD
+A = Rgb(137, 180, 250)
+B = Rgb(204, 221, 238)
+C = Reset
+D = Rgb(128, 128, 128)

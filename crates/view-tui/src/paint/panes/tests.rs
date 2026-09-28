@@ -3734,6 +3734,99 @@ fn the_caret_stays_off_the_border_a_docked_float_closes() {
     }
 }
 
+/// The agent panel floating at the right edge over the nested scene, whose
+/// right column is split in two.
+fn agent_overlay_beside_the_nested_tiles(gaps: bool) -> Tiles {
+    let mut tiles = tiled_nested(gaps);
+    open_surface(
+        &mut tiles.model,
+        view_core::native::geometry::NativeSurface::Agent,
+        view_core::native::geometry::SurfacePlacement::Overlay,
+        view_core::native::geometry::Anchor::Right,
+        None,
+    );
+    tiles.model.ai_panel_mut().agent_name = Some("Stub".to_owned());
+    tiles
+}
+
+/// Under gapless tiles the docked agent panel's left column is a lattice
+/// column: the ring's top row meets it in `┬`, the row between the two
+/// stacked tiles in `┤` and their bottom edge in `┴`, and its rows beside
+/// the active tile carry the accent while the rest stay quiet. The tree
+/// docked left mirrors it on its right column.
+#[test]
+fn a_gapless_docked_float_joins_the_lattice() {
+    use view_core::native::geometry::{Anchor, NativeSurface, SurfacePlacement};
+    for (surface, anchor) in [
+        (NativeSurface::Agent, Anchor::Right),
+        (NativeSurface::Tree, Anchor::Left),
+    ] {
+        let mut tiles = tiled_nested(false);
+        let right = anchor == Anchor::Right;
+        // the stacked pair sits on the right; mirror it for a left dock
+        if !right {
+            let (grid_width, _) = outer_grid_at(false, (TILED_WIDTH, TILED_HEIGHT), 0);
+            let slots: Vec<_> = tiles
+                .slots
+                .iter()
+                .map(|&(row, col, width, height)| (row, grid_width - col - width, width, height))
+                .collect();
+            tiles = Tiles {
+                model: tiled_model_at(false, (TILED_WIDTH, TILED_HEIGHT), 0, &slots),
+                slots,
+            };
+        }
+        open_surface(
+            &mut tiles.model,
+            surface,
+            SurfacePlacement::Overlay,
+            anchor,
+            None,
+        );
+        drive(
+            &mut tiles.model,
+            vec![
+                UiEvent::GridCursorGoto {
+                    grid: LEFT + 1,
+                    row: 0,
+                    col: 0,
+                },
+                UiEvent::Flush,
+            ],
+        );
+        let open = tiles.model.overlays().last().expect("the float is open");
+        let rect = tiles.model.overlay_rect(open);
+        let col = if right {
+            rect.col
+        } else {
+            rect.col + rect.width - 1
+        };
+        let (origin_row, _) = view_surface::grid_origin(&tiles.model);
+        let (_, _, _, top_height) = tiles.slots[1];
+        let separator = origin_row + top_height;
+        let bottom = rect.row + rect.height - 1;
+        let buf = tiled_frame(&tiles.model);
+        let at = |row: u16| buf[(col, row)].symbol().to_string();
+        let label = format!("{surface:?} {anchor:?}");
+        assert_eq!(at(rect.row), "┬", "{label}: the ring's top row");
+        let tee = if right { "┤" } else { "├" };
+        assert_eq!(at(separator), tee, "{label}: the stacked tiles' row");
+        assert_eq!(at(bottom), "┴", "{label}: the bottom edge");
+        for row in rect.row + 1..bottom {
+            if row != separator {
+                assert_eq!(at(row), "│", "{label}: row {row}");
+            }
+            let fg = buf[(col, row)].fg;
+            let beside_active = row <= separator;
+            assert_eq!(
+                fg == rgb(ACCENT_FG).unwrap(),
+                beside_active,
+                "{label}: row {row} accent is {beside_active}"
+            );
+        }
+    }
+}
+
 /// The agent panel floating at the right edge over the two-tile scene, the
 /// placement a config that names none opens it at.
 fn agent_overlay_beside_the_tiles(gaps: bool) -> Tiles {
@@ -4725,6 +4818,9 @@ const TILED_SCENES: &[(&str, SceneDump)] = &[
     }),
     ("agent-overlay", |tier| {
         tiles_dump(tier, agent_overlay_beside_the_tiles(true))
+    }),
+    ("agent-overlay-gapless-nested", |tier| {
+        tiles_dump(tier, agent_overlay_beside_the_nested_tiles(false))
     }),
     ("palette-windowed", |tier| {
         tiles_dump(tier, palette_in_the_bottom_band(true))

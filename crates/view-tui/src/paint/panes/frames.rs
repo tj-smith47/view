@@ -15,7 +15,7 @@ use ratatui::style::Style;
 use std::collections::BTreeSet;
 use view_core::grid::registry::{GridId, Pane, GLOBAL_GRID};
 use view_core::model::{Look, Model, Panes, TileKind, WindowStatus};
-use view_core::native::geometry::NativeSurface;
+use view_core::native::geometry::{Anchor, NativeSurface};
 use view_core::native::statusline::StatuslineState;
 use view_core::native::surfaces::{view_draws, Surface};
 use view_core::native::views::{Span, StyleRole};
@@ -84,6 +84,7 @@ pub(crate) fn paint_frames(
     // other
     let foot = area.height.saturating_sub(model.cmdline_rows());
     let gap = ratatui_style(theme.normal());
+    let joins = joins(model, look, buf.area);
     if look.gaps {
         let tiles = panes.iter().filter(|pane| is_tile(pane) && framed(pane));
         clear_bare(tiles, gap, area, foot, damage, buf);
@@ -100,10 +101,12 @@ pub(crate) fn paint_frames(
             buf,
         );
         paint_gapless(
-            panes, active, borders, quiet, accent, area, foot, damage, buf,
+            panes, &joins, active, borders, quiet, accent, area, foot, damage, buf,
         );
     }
-    paint_edges(model, panes, look, active, theme, area, foot, damage, buf);
+    paint_edges(
+        model, panes, look, &joins, active, theme, area, foot, damage, buf,
+    );
 }
 
 /// Whether a pane is one of the tiles a frame is drawn around: the global
@@ -160,6 +163,7 @@ fn paint_edges(
     model: &Model,
     panes: &[Pane],
     look: Look,
+    joins: &[Join],
     active: Option<GridId>,
     theme: &Theme,
     area: Rect,
@@ -213,7 +217,7 @@ fn paint_edges(
                 paint_segments(status, None, is_active, state, theme, edge, buf);
             }
         } else if let Some(edge) =
-            gapless_edge(pane, area, foot, buf.area).filter(|edge| damage.covers(edge.y))
+            gapless_edge(pane, joins, area, foot, buf.area).filter(|edge| damage.covers(edge.y))
         {
             paint_segments(status, Some(title()), is_active, state, theme, edge, buf);
         }
@@ -256,24 +260,22 @@ fn gapped_edges(
 /// `None` where that row is one nvim keeps for its command line, the
 /// bound [`lattice`] stops at, since no frame is drawn there to write
 /// into.
-fn gapless_edge(pane: &Pane, area: Rect, foot: u16, screen: Rect) -> Option<Rect> {
+fn gapless_edge(pane: &Pane, joins: &[Join], area: Rect, foot: u16, screen: Rect) -> Option<Rect> {
     let (row, col, width, height) = pane.filled;
     let edge_row = row.saturating_add(height);
     if edge_row >= foot {
         return None;
     }
-    let left = area.x.saturating_add(col).saturating_sub(1);
-    let right = area
-        .x
-        .saturating_add(col.saturating_add(width))
-        .min(screen.x.saturating_add(screen.width).saturating_sub(1));
+    let y = area.y.saturating_add(edge_row);
+    let (left, right) = joined_sides(
+        joins,
+        y..=y,
+        area.x.saturating_add(col).saturating_sub(1),
+        area.x.saturating_add(col.saturating_add(width)),
+    );
+    let right = right.min(screen.x.saturating_add(screen.width).saturating_sub(1));
     clipped(
-        Rect::new(
-            left,
-            area.y.saturating_add(edge_row),
-            right.saturating_sub(left).saturating_add(1),
-            1,
-        ),
+        Rect::new(left, y, right.saturating_sub(left).saturating_add(1), 1),
         screen,
     )
 }
@@ -544,9 +546,82 @@ fn box_edge(
     );
 }
 
+/// A float docked to the left or right of the screen under gapless tiles,
+/// in screen cells. Its tile-side column is a lattice column, the way the
+/// column between two tiles is, so the lines of the tiles beside it meet
+/// it in a junction.
+#[derive(Debug, Clone, Copy)]
+struct Join {
+    /// The float's column on the tiles' side.
+    col: u16,
+    top: u16,
+    bottom: u16,
+    /// The float's first and last columns.
+    first: u16,
+    last: u16,
+    right: bool,
+}
+
+impl Join {
+    /// Whether a run at `col` on `row` lies under the float, past the
+    /// column it joins on.
+    fn covers(self, row: u16, col: u16) -> bool {
+        let beyond = if self.right {
+            col > self.col
+        } else {
+            col < self.col
+        };
+        row > self.top && row < self.bottom && beyond
+    }
+}
+
+/// Every float that joins the gapless lattice: the agent panel and the
+/// tree, docked to a side and drawn as floats.
+fn joins(model: &Model, look: Look, screen: Rect) -> Vec<Join> {
+    if look.panes != Panes::Tiles || look.gaps {
+        return Vec::new();
+    }
+    model
+        .overlays()
+        .iter()
+        .filter(|open| model.draws_as_overlay(&open.kind))
+        .filter_map(|open| {
+            let right = match open.geometry.anchor {
+                Anchor::Left => false,
+                Anchor::Right => true,
+                _ => return None,
+            };
+            let rect = model.overlay_rect(open);
+            if rect.width < 2 || rect.height < 2 {
+                return None;
+            }
+            let first = rect.col;
+            let last = rect
+                .col
+                .saturating_add(rect.width)
+                .min(screen.x.saturating_add(screen.width))
+                .checked_sub(1)?;
+            let bottom = rect
+                .row
+                .saturating_add(rect.height)
+                .min(screen.y.saturating_add(screen.height))
+                .checked_sub(1)?;
+            Some(Join {
+                col: if right { first } else { last },
+                top: rect.row,
+                bottom,
+                first,
+                last,
+                right,
+            })
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_gapless(
     panes: &[Pane],
+    joins: &[Join],
     active: Option<GridId>,
     borders: BorderSet,
     quiet: Style,
@@ -556,13 +631,8 @@ fn paint_gapless(
     damage: &Damage,
     buf: &mut Buffer,
 ) {
-    let lattice = lattice(panes, area, foot, buf.area);
-    let cells = lattice.cells();
-    let edges: BTreeSet<Cell> = active
-        .and_then(|id| panes.iter().find(|pane| is_tile(pane) && pane.id == id))
-        .map(|pane| perimeter(pane, &cells, area))
-        .unwrap_or_default();
-    for &(row, col) in &cells {
+    let (lattice, edges) = gapless_lattice(panes, joins, active, area, foot, buf.area);
+    for (row, col) in lattice.cells() {
         if !damage.covers(row) {
             continue;
         }
@@ -575,13 +645,102 @@ fn paint_gapless(
     }
 }
 
+/// The gapless lattice and the cells of it the active tile's frame is
+/// drawn on.
+fn gapless_lattice(
+    panes: &[Pane],
+    joins: &[Join],
+    active: Option<GridId>,
+    area: Rect,
+    foot: u16,
+    screen: Rect,
+) -> (Lattice, BTreeSet<Cell>) {
+    let lattice = lattice(panes, joins, area, foot, screen);
+    let cells = lattice.cells();
+    let edges = active
+        .and_then(|id| panes.iter().find(|pane| is_tile(pane) && pane.id == id))
+        .map(|pane| perimeter(pane, joins, &cells, area))
+        .unwrap_or_default();
+    (lattice, edges)
+}
+
+/// Paints a joined float's tile-side column over the float's own border,
+/// once `layer` has been painted: the lattice's glyph and colour on every
+/// row of it, so the tiles' lines meet the float in a junction. Any other
+/// layer is left as it is.
+pub(crate) fn paint_join(
+    model: &Model,
+    surface: &view_surface::Surface,
+    layer: &view_surface::Layer,
+    theme: &Theme,
+    borders: BorderSet,
+    damage: &Damage,
+    buf: &mut Buffer,
+) {
+    use view_surface::LayerKind;
+    if !matches!(layer.kind, LayerKind::Ai(_) | LayerKind::Tree(_)) {
+        return;
+    }
+    let registry = model.engine.painted_grids();
+    let joins = joins(model, registry.look(), buf.area);
+    let Some(join) = joins
+        .iter()
+        .find(|join| (join.first, join.top) == (layer.rect.col, layer.rect.row))
+    else {
+        return;
+    };
+    let Some(area) = surface
+        .layers
+        .iter()
+        .find(|layer| matches!(layer.kind, LayerKind::EngineGrid))
+        .map(|layer| super::super::clip_to_frame(layer.rect, buf.area))
+    else {
+        return;
+    };
+    let panes = registry.panes_in_z_order();
+    let foot = area.height.saturating_sub(model.cmdline_rows());
+    let (lattice, edges) =
+        gapless_lattice(&panes, &joins, registry.cursor_grid(), area, foot, buf.area);
+    let (quiet, accent) = (quiet_style(theme), ratatui_style(theme.accent()));
+    for row in join.top..=join.bottom {
+        let cell = (row, join.col);
+        if !damage.covers(row) || !lattice.down.contains(&cell) {
+            continue;
+        }
+        let style = if edges.contains(&cell) { accent } else { quiet };
+        set_border_cell(
+            buf,
+            join.col,
+            row,
+            junction(&lattice, row, join.col, borders),
+            style,
+        );
+    }
+}
+
 /// Every screen cell the gapless lattice runs through: the column right of
 /// each tile and the row under it, which are the cells nvim draws its
 /// separator and status row into, the column left of it and the row above
 /// it, plus the ring's top row and its left and right columns, which are
 /// the edges the outermost tiles have no neighbour to share. Each run
 /// reaches the corner cell past either end of the tile it closes.
-fn lattice(panes: &[Pane], area: Rect, foot: u16, screen: Rect) -> Lattice {
+///
+/// A joined float's tile-side column and its top and bottom rows are runs
+/// of the lattice too, and a tile's run under the float stops at that
+/// column, so each line meeting it ends in a tee.
+fn lattice(panes: &[Pane], joins: &[Join], area: Rect, foot: u16, screen: Rect) -> Lattice {
+    let mut lattice = tile_lattice(panes, area, foot, screen);
+    for join in joins {
+        lattice.across.retain(|&(row, col)| !join.covers(row, col));
+        lattice.down(join.col, join.top..=join.bottom);
+        lattice.across(join.top, join.first..=join.last);
+        lattice.across(join.bottom, join.first..=join.last);
+    }
+    lattice
+}
+
+/// The runs the tiles and the ring put in the lattice.
+fn tile_lattice(panes: &[Pane], area: Rect, foot: u16, screen: Rect) -> Lattice {
     let mut lattice = Lattice::default();
     let ring = area.y.checked_sub(1).zip(area.x.checked_sub(1));
     let (first_row, first_col) = ring.unwrap_or((area.y, area.x));
@@ -648,12 +807,18 @@ fn lattice(panes: &[Pane], area: Rect, foot: u16, screen: Rect) -> Lattice {
 
 /// The lattice cells that are this tile's own edges: the ring one cell out
 /// from its slot on all four sides. A side the lattice does not reach is
-/// the terminal's own edge, which nothing draws.
-fn perimeter(pane: &Pane, lattice: &BTreeSet<Cell>, area: Rect) -> BTreeSet<Cell> {
+/// the terminal's own edge, which nothing draws. A joined float's column
+/// is the side of a tile it covers part of.
+fn perimeter(pane: &Pane, joins: &[Join], lattice: &BTreeSet<Cell>, area: Rect) -> BTreeSet<Cell> {
     let (row, col, width, height) = pane.filled;
     let (row, col) = (area.y.saturating_add(row), area.x.saturating_add(col));
     let (top, bottom) = (row.saturating_sub(1), row.saturating_add(height));
-    let (left, right) = (col.saturating_sub(1), col.saturating_add(width));
+    let (left, right) = joined_sides(
+        joins,
+        top..=bottom,
+        col.saturating_sub(1),
+        col.saturating_add(width),
+    );
     let mut cells = BTreeSet::new();
     for c in left..=right {
         cells.insert((top, c));
@@ -665,6 +830,30 @@ fn perimeter(pane: &Pane, lattice: &BTreeSet<Cell>, area: Rect) -> BTreeSet<Cell
     }
     cells.retain(|cell| lattice.contains(cell));
     cells
+}
+
+/// A tile's left and right lattice columns, `left` and `right`, moved to
+/// the column of each joined float that covers part of the tile on any of
+/// `rows`.
+fn joined_sides(
+    joins: &[Join],
+    rows: std::ops::RangeInclusive<u16>,
+    mut left: u16,
+    mut right: u16,
+) -> (u16, u16) {
+    for join in joins {
+        if *rows.start() > join.bottom || *rows.end() < join.top {
+            continue;
+        }
+        if left < join.col && right > join.col {
+            if join.right {
+                right = join.col;
+            } else {
+                left = join.col;
+            }
+        }
+    }
+    (left, right)
 }
 
 /// The glyph one lattice cell takes, from the four directions a line leaves
