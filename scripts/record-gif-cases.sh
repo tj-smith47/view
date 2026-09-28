@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+#
+# Cases for the first-frame contract in scripts/dogfood/lib.sh. record_gif
+# keeps a recording hidden until the mark show_when_settled raises, a tape
+# body opens with its own Show, and every tape's driver waits for the
+# recorder and then for the settled editor before it types into or resizes
+# the pane. A tape that broke any of the three recorded its own setup, or
+# showed nothing for its whole length, and no check short of reading the
+# gif frame by frame saw it.
+#
+# record_gif runs against stand-ins for vhs, tmux and fc-list, so no
+# recording is made and no terminal is needed.
+set -euo pipefail
+
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+LIB=$HERE/dogfood/lib.sh
+TAPES=$HERE/dogfood/tapes
+# shellcheck source=scripts/lib/scratch.sh
+. "$HERE/lib/scratch.sh"
+FAILED=0
+
+WORK=$(mktemp -d "$(scratch_root)/record-gif-cases-XXXXXX")
+cleanup_cases() {
+    rm -rf -- "$WORK"
+}
+trap cleanup_cases EXIT
+
+# shellcheck source=scripts/lib/case-report.sh
+. "$HERE/lib/case-report.sh"
+
+mkdir -p "$WORK/bin" "$WORK/cache"
+printf '#!/bin/sh\ncp -- "$1" "%s/tape.out"\n' "$WORK" >"$WORK/bin/vhs"
+printf '#!/bin/sh\nexit 0\n' >"$WORK/bin/tmux"
+printf '#!/bin/sh\necho stand-in\n' >"$WORK/bin/fc-list"
+chmod +x "$WORK/bin/vhs" "$WORK/bin/tmux" "$WORK/bin/fc-list"
+
+# Sources lib.sh in a subshell of its own, since the library arms an EXIT
+# trap, and runs the words given against the stand-ins.
+in_lib() {
+    (
+        PATH="$WORK/bin:$PATH"
+        XDG_CACHE_HOME=$WORK/cache
+        SOCKET=record-gif-cases
+        # shellcheck source=scripts/dogfood/lib.sh
+        . "$LIB"
+        "$@"
+    )
+}
+
+NL='
+'
+
+# the body contract: Show first, after Sleep lines at most
+while IFS='|' read -r verdict body name; do
+    body=$(printf '%b' "$body")
+    if in_lib tape_body_opens_on_show "$body"; then
+        got=accept
+    else
+        got=refuse
+    fi
+    if [ "$got" = "$verdict" ]; then
+        report ok "body: $name"
+    else
+        report fail "body: $name" "expected $verdict, got $got"
+    fi
+done <<'CASES'
+accept|Show|a bare Show
+accept|Show\nSleep 3s|Show and its length
+accept|Sleep 1s\nShow\nSleep 5s|a Sleep ahead of the Show
+accept|\nShow\nSleep 2s|a blank line ahead of the Show
+refuse|Sleep 2s|no Show at all
+refuse|Type "x"\nShow|a key typed ahead of the Show
+refuse|Sleep 1s\nHide\nShow|a Hide ahead of the Show
+refuse|Wait /x/\nShow|a Wait of its own ahead of the Show
+refuse|show\nSleep 1s|a Show spelled in the wrong case
+CASES
+
+# record_gif refuses a body that breaks the contract before vhs is run
+rm -f "$WORK/tape.out"
+set +e
+in_lib record_gif record-gif-cases "$WORK/out.gif" 5 80 20 "Type \"x\"${NL}Show" \
+    2>"$WORK/refused.err"
+rc=$?
+set -e
+if [ "$rc" = 2 ] && [ ! -e "$WORK/tape.out" ] && grep -q 'opens with its own Show' "$WORK/refused.err"; then
+    report ok "record_gif refuses a body that types ahead of its Show"
+else
+    report fail "record_gif refuses a body that types ahead of its Show" \
+        "status $rc, vhs ran: $([ -e "$WORK/tape.out" ] && echo yes || echo no)"
+fi
+
+# the tape record_gif hands vhs: hidden through the attach and the wait for
+# the mark, shown only by the body
+lib_value() {
+    printf '%s' "${!1}"
+}
+ceiling=$(in_lib lib_value SETTLE_CEILING_TENTHS)
+mark=$(in_lib lib_value SETTLED_MARK)
+check_emitted() {
+    local name=$1 body=$2 expected=$3
+    rm -f "$WORK/tape.out"
+    if [ -n "$body" ]; then
+        in_lib record_gif record-gif-cases "$WORK/out.gif" 7 80 20 "$body" || true
+    else
+        in_lib record_gif record-gif-cases "$WORK/out.gif" 7 80 20 || true
+    fi
+    if [ ! -e "$WORK/tape.out" ]; then
+        report fail "tape: $name" "vhs was never run"
+        return
+    fi
+    local got
+    got=$(sed -n '/^Hide$/,$p' "$WORK/tape.out")
+    if [ "$got" = "$expected" ]; then
+        report ok "tape: $name"
+    else
+        report fail "tape: $name" "vhs was handed${NL}$got${NL}where the case expects${NL}$expected"
+    fi
+}
+prefix="Hide
+Type \"tmux -L record-gif-cases attach -t cap\"
+Enter
+Wait+Screen@$((ceiling / 10 + 15))s /$mark/
+Sleep 600ms"
+check_emitted "no body shows at the mark for the tape's length" "" \
+    "$prefix
+Show
+Sleep 7s"
+check_emitted "a body plays from the mark" "Show${NL}Sleep 4s${NL}Hide${NL}Sleep 2s${NL}Show" \
+    "$prefix
+Show
+Sleep 4s
+Hide
+Sleep 2s
+Show"
+
+# the recorder waits past the driver: a driver that gives up has said why
+# before the recording fails
+wait_s=$(sed -n 's/^Wait+Screen@\([0-9]*\)s .*/\1/p' "$WORK/tape.out")
+if [ -n "$ceiling" ] && [ -n "$wait_s" ] && [ "$((wait_s * 10))" -gt "$ceiling" ]; then
+    report ok "the recorder's ceiling sits past the driver's"
+else
+    report fail "the recorder's ceiling sits past the driver's" \
+        "recorder ${wait_s:-?} s against the driver's ${ceiling:-?} tenths"
+fi
+
+# Grades one tape script: a record_gif call that passes a body passes
+# "$BODY", the body keeps the contract, and the driver waits for the
+# recorder, then for the settled editor, then types or resizes.
+grade_tape() {
+    local tape=$1 calls body wait_at settle_at verb_at
+    calls=$(grep -c '^record_gif ' "$tape" || true)
+    if [ "$calls" = 0 ]; then
+        echo "no record_gif call"
+        return
+    fi
+    if grep '^record_gif ' "$tape" | grep -Ev '^record_gif "\$SOCKET" "\$OUT" [0-9]+ [0-9]+ [0-9]+( "\$BODY")?$' >/dev/null; then
+        echo "a record_gif call passes a body other than \"\$BODY\""
+        return
+    fi
+    if grep -q '^BODY=' "$tape"; then
+        body=$(awk -v q="'" '
+            !on && index($0, "BODY=" q) == 1 { on = 1; $0 = substr($0, 7) }
+            on && substr($0, length($0)) == q { print substr($0, 1, length($0) - 1); exit }
+            on { print }' "$tape")
+        if ! in_lib tape_body_opens_on_show "$body"; then
+            echo "its BODY does not open with Show"
+            return
+        fi
+    fi
+    wait_at=$(grep -n 'wait_for_recorder "\$SOCKET"' "$tape" | head -1 | cut -d: -f1) || true
+    settle_at=$(grep -n 'show_when_settled "\$SOCKET"' "$tape" | head -1 | cut -d: -f1) || true
+    verb_at=$(grep -nE 'tmux -L "\$SOCKET" (send-keys|resize-window)' "$tape" | head -1 | cut -d: -f1) || true
+    if [ -z "$wait_at" ] || [ -z "$settle_at" ]; then
+        echo "its driver never waits for the recorder and the settled editor"
+    elif [ "$settle_at" -lt "$wait_at" ]; then
+        echo "its driver waits for the settled editor before the recorder"
+    elif [ -n "$verb_at" ] && [ "$verb_at" -lt "$settle_at" ]; then
+        echo "its driver types or resizes at line $verb_at, before the settled editor"
+    fi
+}
+
+shipped=0
+for tape in "$TAPES"/*.sh; do
+    [ -e "$tape" ] || continue
+    shipped=$((shipped + 1))
+    finding=$(grade_tape "$tape")
+    if [ -z "$finding" ]; then
+        report ok "shipped: $(basename -- "$tape")"
+    else
+        report fail "shipped: $(basename -- "$tape")" "$finding"
+    fi
+done
+if [ "$shipped" -lt 4 ]; then
+    report fail "shipped tapes" "the walk read $shipped tape scripts under $TAPES"
+fi
+
+# planted tapes, each breaking one rule the walk grades
+plant() {
+    printf '%s\n' "$2" >"$WORK/$1.sh"
+}
+plant keys-first '(
+  wait_for_recorder "$SOCKET"
+  tmux -L "$SOCKET" send-keys -t cap x
+  show_when_settled "$SOCKET"
+) &
+record_gif "$SOCKET" "$OUT" 5 220 50'
+plant no-settle '(
+  wait_for_recorder "$SOCKET"
+  tmux -L "$SOCKET" send-keys -t cap x
+) &
+record_gif "$SOCKET" "$OUT" 5 220 50'
+plant settle-before-attach '(
+  show_when_settled "$SOCKET"
+  wait_for_recorder "$SOCKET"
+) &
+record_gif "$SOCKET" "$OUT" 5 220 50'
+plant hidden-body "(
+  wait_for_recorder \"\$SOCKET\"
+  show_when_settled \"\$SOCKET\"
+) &
+BODY='Sleep 3s
+Type \"x\"
+Show'
+record_gif \"\$SOCKET\" \"\$OUT\" 5 220 50 \"\$BODY\""
+plant inline-body "(
+  wait_for_recorder \"\$SOCKET\"
+  show_when_settled \"\$SOCKET\"
+) &
+record_gif \"\$SOCKET\" \"\$OUT\" 5 220 50 'Type x'"
+for planted in keys-first no-settle settle-before-attach hidden-body inline-body; do
+    finding=$(grade_tape "$WORK/$planted.sh")
+    if [ -n "$finding" ]; then
+        report ok "planted $planted is refused: $finding"
+    else
+        report fail "planted $planted" "the walk passed it"
+    fi
+done
+
+exit "$FAILED"

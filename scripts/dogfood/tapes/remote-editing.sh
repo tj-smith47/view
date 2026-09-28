@@ -97,10 +97,7 @@ new_cap_session "$SOCKET" 220 50 -- \
 SENTENCE='Every key you press shows up at once, on a file on another machine.'
 (
   wait_for_recorder "$SOCKET"
-  start=$(date +%s)
-  sleep 4
-  dismiss_launch_notices "$SOCKET"
-  sleep_until_elapsed "$start" 9
+  show_when_settled "$SOCKET" "$(basename -- "${REMOTE#*:}")"
   sleep 1
   tmux -L "$SOCKET" send-keys -t cap O
   sleep 0.4
@@ -113,9 +110,6 @@ SENTENCE='Every key you press shows up at once, on a file on another machine.'
   tmux -L "$SOCKET" send-keys -t cap Escape
 ) &
 
-BODY='Sleep 8s
-Show
-Sleep 11s'
-record_gif "$SOCKET" "$OUT" 11 220 50 "$BODY"
+record_gif "$SOCKET" "$OUT" 11 220 50
 
 echo "remote-editing.sh: recorded $OUT" >&2

@@ -16,14 +16,8 @@ FAILED=0
 # shellcheck source=/dev/null
 QA_RESPAWN_SOURCED=1 . "$LOOP"
 
-report() {
-    if [ "$1" = ok ]; then
-        printf 'ok   %s\n' "$2"
-    else
-        printf 'FAIL %s: %s\n' "$2" "$3"
-        FAILED=1
-    fi
-}
+# shellcheck source=scripts/lib/case-report.sh
+. "$SCRIPT_DIR/lib/case-report.sh"
 
 # `task audit` runs this file inside `task ci`, and CI's windows leg runs
 # that under Git Bash, which ships no pgrep. The two cases below grade a

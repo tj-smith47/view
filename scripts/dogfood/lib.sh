@@ -78,17 +78,25 @@ new_cap_session() {
 # measured. A caller passes the `-x`/`-y` its session was created at,
 # the way every tape script's `-x 220 -y 50` becomes
 # `record_gif ... 220 50`.
-# $6, when given, is the tape body played after the attach in place of
-# `Sleep 500ms`, `Show` and one Sleep of $3 seconds. It starts hidden, so
-# a body opens with the Sleep that covers the editor's start and the
-# driver's setup, then its own `Show`: the first frame of the gif is the
-# settled editor, whatever the attach and the setup took.
+# The recording stays hidden until the driver's show_when_settled raises
+# its mark, so the first frame is the settled editor however long the
+# start took. $6, when given, is the tape body played from that moment in
+# place of `Show` and one Sleep of $3 seconds; tape_body_opens_on_show
+# says what it may open with.
 record_gif() {
   socket=$1
   out=$2
   seconds=$3
   cols=${4:?record_gif: pass the tmux session -x columns}
   rows=${5:?record_gif: pass the tmux session -y rows}
+  body=${6:-"Show
+Sleep ${seconds}s"}
+  tape_body_opens_on_show "$body" || {
+    echo "record_gif: a tape body opens with its own Show, after Sleep" \
+      "lines at most, and this one does not:" >&2
+    printf '%s\n' "$body" >&2
+    return 2
+  }
   command -v vhs >/dev/null 2>&1 || {
     echo "record_gif: vhs is not on PATH (go install" \
       "github.com/charmbracelet/vhs@latest)" >&2
@@ -134,13 +142,11 @@ record_gif() {
     printf 'Hide\n'
     printf 'Type "tmux -L %s attach -t cap"\n' "$socket"
     printf 'Enter\n'
-    if [ -n "${6:-}" ]; then
-      printf '%s\n' "$6"
-    else
-      printf 'Sleep 500ms\n'
-      printf 'Show\n'
-      printf 'Sleep %ss\n' "$seconds"
-    fi
+    # the recorder's ceiling sits past the driver's own, so a driver that
+    # gives up has said why on stderr before the recording fails
+    printf 'Wait+Screen@%ss /%s/\n' "$((SETTLE_CEILING_TENTHS / 10 + 15))" "$SETTLED_MARK"
+    printf 'Sleep %sms\n' "$SETTLED_MARK_CLEARS_MS"
+    printf '%s\n' "$body"
   } >"$TAPE"
   tmux -L "$socket" set-hook -g client-attached "wait-for -S $RECORDER_ATTACHED"
   vhs "$TAPE"
@@ -158,49 +164,96 @@ wait_for_recorder() {
   tmux -L "$1" wait-for "$RECORDER_ATTACHED"
 }
 
-# WHY: a first launch under a config leaves a "your config also draws ..."
-# notice standing (surface_conflict.rs, record_native_notice_sticky_once),
-# and the next one takes the top slot only once the one ahead of it has
-# cleared, so the dismiss verb is repeated against the live pane. The cap
-# keeps a notice that never clears from hanging the tape.
-# Usage: dismiss_launch_notices SOCKET
-dismiss_launch_notices() {
-  n=0
-  while [ "$n" -lt 8 ]; do
-    pane=$(tmux -L "$1" capture-pane -p -t cap)
+# WHY: the start of a tape takes as long as the editor, the config and an
+# ssh connection take that day, so the recording shows from a condition
+# and never from a clock. The pane is read at the recording's frame rate:
+# a launch notice is dismissed as it appears (a first launch under a
+# config leaves a "your config also draws ..." notice standing, and the
+# next takes the top slot once the one ahead has cleared), and the editor
+# is settled once the pane, colours included, has held still for a
+# second with TEXT on it when TEXT is given. Then the mark record_gif's
+# tape waits for is flashed on tmux's message line, and this returns once
+# the mark has cleared, at the moment the tape shows. A pane that never
+# settles fails here by name, and the recorder fails after it.
+# Usage: show_when_settled SOCKET [TEXT]
+show_when_settled() {
+  last=
+  still=0
+  tenths=0
+  while [ "$tenths" -lt "$SETTLE_CEILING_TENTHS" ]; do
+    pane=$(tmux -L "$1" capture-pane -p -t cap) || pane=
     case "$pane" in
       (*'which view owns'*|*'gives it back'*|*'give them back'*)
         tmux -L "$1" send-keys -t cap ':View notifications dismiss' Enter
         sleep 0.8
-        ;;
-      (*)
-        break
+        tenths=$((tenths + 8))
+        still=0
+        last=
+        continue
         ;;
     esac
-    n=$((n + 1))
+    styled=$(tmux -L "$1" capture-pane -p -e -t cap) || styled=
+    case "$pane" in
+      (*"${2:-}"*)
+        if [ -n "$styled" ] && [ "$styled" = "$last" ]; then
+          still=$((still + 1))
+        else
+          still=0
+        fi
+        ;;
+      (*) still=0 ;;
+    esac
+    if [ "$still" -ge 10 ]; then
+      tmux -L "$1" display-message -d "$SETTLED_MARK_SHOWN_MS" "$SETTLED_MARK"
+      sleep "$(awk -v ms="$SETTLED_MARK_CLEARS_MS" 'BEGIN { print ms / 1000 }')"
+      return 0
+    fi
+    last=$styled
+    sleep 0.1
+    tenths=$((tenths + 1))
   done
+  echo "show_when_settled: the pane on socket $1 did not hold still" \
+    "${2:+with \"$2\" on it }for a second within" \
+    "$((SETTLE_CEILING_TENTHS / 10)) s, so the tape has no settled editor" \
+    "to show" >&2
+  return 1
 }
 
-# WHY: a driver whose setup takes a varying while (notices to dismiss, an
-# ssh connection to open) has to start its visible part at the moment the
-# tape body shows it, so it waits out the rest of a deadline counted from
-# the attach. date +%s is the clock POSIX sh has, and the start it reads
-# drops its fraction, so the wait can end up to one second early: a body's
-# hidden lead ends a second before the deadline it is paired with.
-# Usage: start=$(date +%s); ...; sleep_until_elapsed "$start" SECONDS
-sleep_until_elapsed() {
-  while [ $(( $(date +%s) - $1 )) -lt "$2" ]; do
-    sleep 0.2
-  done
+# WHY: record_gif shows the recording at the settled mark, and a body that
+# typed, hid or waited before its own Show would record that step on no
+# frame at all, or open the gif on whatever the body did first. So a body
+# opens with Show, after Sleep lines at most. Usage: tape_body_opens_on_show
+# BODY (status 0 when it does)
+tape_body_opens_on_show() {
+  printf '%s\n' "$1" | {
+    while IFS= read -r line; do
+      case "$line" in
+        (Show) exit 0 ;;
+        ('Sleep '*|'') ;;
+        (*) exit 1 ;;
+      esac
+    done
+    exit 1
+  }
 }
 
-# WHY: lazy.nvim opens its update report over the editor whenever its last
-# check is older than its frequency, and a tape records whatever is on
-# screen. Each tape runs against a copy of the state directory with that
-# check stamped to now, so the person's own state is never written. The
-# copy leaves nvim's swap files behind, so a crash in some earlier session
-# raises no swap prompt in the recording. Usage: recording_state_home
-# (exports XDG_STATE_HOME; cleanup() removes the copy).
+# WHY: lazy.nvim's checker reports updates already fetched into the
+# plugin clones on every start, from a list it keeps in memory, so no
+# state a tape can stamp holds it off. A tape hands view this as
+# `--cmd "$QUIET_LAZY"`, which view passes to the editor it starts and to
+# any it restarts, and the report stays off that recording while the
+# person's config is left as it is. The tape scripts that source this file
+# read it.
+# shellcheck disable=SC2034
+QUIET_LAZY='lua vim.api.nvim_create_autocmd("User", { pattern = "LazyDone", once = true, callback = function() require("lazy.core.config").options.checker.notify = false end })'
+
+# WHY: lazy.nvim fetches into the person's plugin clones whenever its last
+# check is older than its frequency. Each tape runs against a copy of the
+# state directory with that check stamped to now, so no clone is fetched
+# into and the person's own state is never written. The copy leaves nvim's
+# swap files behind, so a crash in some earlier session raises no swap
+# prompt in the recording. Usage: recording_state_home (exports
+# XDG_STATE_HOME; cleanup() removes the copy).
 recording_state_home() {
   real="${XDG_STATE_HOME:-$HOME/.local/state}"
   statedir="${XDG_CACHE_HOME:-$HOME/.cache}/view-dogfood-tapes"
@@ -239,5 +292,11 @@ newest_build() {
 }
 
 RECORDER_ATTACHED=view-recorder-attached
+SETTLED_MARK=view-tape-settled
+# the mark stands long enough for the recorder's screen poll to see it, and
+# the tape shows once it has gone
+SETTLED_MARK_SHOWN_MS=400
+SETTLED_MARK_CLEARS_MS=600
+SETTLE_CEILING_TENTHS=300
 
 trap cleanup EXIT INT TERM

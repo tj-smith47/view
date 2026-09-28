@@ -64,13 +64,12 @@ cleanup_agent_panel() {
 trap cleanup_agent_panel EXIT INT TERM
 
 cd -- "$WORKDIR"
-new_cap_session "$SOCKET" 220 50 -- "$BIN" --config "$CFG" view-ai-stub-diff.txt
+new_cap_session "$SOCKET" 220 50 -- \
+  "$BIN" --config "$CFG" view-ai-stub-diff.txt --cmd "$QUIET_LAZY"
 (
   wait_for_recorder "$SOCKET"
-  start=$(date +%s)
+  show_when_settled "$SOCKET" view-ai-stub-diff.txt
   sleep 1.5
-  dismiss_launch_notices "$SOCKET"
-  sleep_until_elapsed "$start" 5
   tmux -L "$SOCKET" send-keys -t cap ':View ai open' Enter
   sleep 1
   # 'y' only where the trust prompt is up: a project trusted in an earlier
@@ -86,9 +85,6 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" --config "$CFG" view-ai-stub-diff.txt
   tmux -L "$SOCKET" send-keys -t cap 'propose' Enter
 ) &
 
-BODY='Sleep 3500ms
-Show
-Sleep 10s'
-record_gif "$SOCKET" "$OUT" 10 220 50 "$BODY"
+record_gif "$SOCKET" "$OUT" 10 220 50
 
 echo "agent-panel.sh: recorded $OUT" >&2

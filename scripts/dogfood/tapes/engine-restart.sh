@@ -30,10 +30,11 @@ command -v tmux >/dev/null 2>&1 || { echo "engine-restart.sh: tmux is not on PAT
 recording_state_home
 
 cd -- "$ROOT"
-new_cap_session "$SOCKET" 220 50 -- "$BIN" README.md
+new_cap_session "$SOCKET" 220 50 -- "$BIN" README.md --cmd "$QUIET_LAZY"
 (
   wait_for_recorder "$SOCKET"
-  sleep 1
+  show_when_settled "$SOCKET" README.md
+  sleep 0.5
   tmux -L "$SOCKET" send-keys -t cap O 'A line typed before the engine hangs.' Escape
   # past the config's 'updatetime', so a config that keeps swap files has
   # flushed the line before the engine stops
@@ -43,7 +44,8 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" README.md
   if [ -n "$NVIM_PID" ]; then
     kill -STOP "$NVIM_PID"
     # the banner rises after the 10s wedge threshold plus up to one 2s probe,
-    # so by 12.5s it is up, and BODY below shows it from 12.5s for 2.5s
+    # so 12.5s after the stop it is up, and BODY below shows it from then
+    # for 2.5s
     sleep 15
     tmux -L "$SOCKET" send-keys -t cap F5
   fi
@@ -51,8 +53,7 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" README.md
 
 # the gif cuts the wedge threshold out: the banner's readout still counts
 # the whole wait, and the restart plays out after <F5> in full
-BODY='Sleep 500ms
-Show
+BODY='Show
 Sleep 4s
 Hide
 Sleep 12s

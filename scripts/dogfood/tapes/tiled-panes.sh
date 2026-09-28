@@ -6,8 +6,9 @@
 # text capture and no gif, so this script drives its own tmux session the
 # same way cap.sh does, and hands it to record_gif in lib.sh.
 #
-# The launch notices are dismissed while the gif is still hidden, so none
-# stands over a tile.
+# The two files open side by side from the command line, and the launch
+# notices are dismissed while the gif is still hidden, so the first frame
+# is the settled layout with nothing standing over a tile.
 #
 # Usage: scripts/dogfood/tapes/tiled-panes.sh [outfile]
 set -eu
@@ -28,15 +29,11 @@ recording_state_home
 cd -- "$ROOT"
 # --panes tiles: under a tiling desktop "auto" answers nvim, and the tape
 # shows the frames whichever desktop records it
-new_cap_session "$SOCKET" 220 50 -- "$BIN" --panes tiles README.md
+new_cap_session "$SOCKET" 220 50 -- "$BIN" --panes tiles \
+  crates/view-core/src/update/look.rs README.md -O --cmd "$QUIET_LAZY"
 (
   wait_for_recorder "$SOCKET"
-  start=$(date +%s)
-  sleep 2
-  tmux -L "$SOCKET" send-keys -t cap ':vsplit crates/view-core/src/update/look.rs' Enter
-  sleep 1.5
-  dismiss_launch_notices "$SOCKET"
-  sleep_until_elapsed "$start" 10
+  show_when_settled "$SOCKET" README.md
   sleep 1.5
   tmux -L "$SOCKET" resize-window -t cap -x 150 -y 38
   sleep 2.5
@@ -49,8 +46,7 @@ new_cap_session "$SOCKET" 220 50 -- "$BIN" --panes tiles README.md
   tmux -L "$SOCKET" send-keys -t cap Enter
 ) &
 
-BODY='Sleep 9s
-Show
+BODY='Show
 Sleep 12500ms'
 record_gif "$SOCKET" "$OUT" 12 220 50 "$BODY"
 
