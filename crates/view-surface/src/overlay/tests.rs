@@ -247,6 +247,29 @@ fn a_wide_glyph_that_would_straddle_the_cut_is_dropped_rather_than_halved() {
     assert_eq!(title_span(&narrow).as_deref(), Some(" a… "));
 }
 
+/// A title cut beside an emoji carrying a variation selector or a ZWJ
+/// sequence is measured the way the painter advances over it, so the label
+/// is not blanked and the top run ends on the corner.
+#[test]
+fn a_title_cut_beside_a_multi_character_emoji_keeps_its_label_and_corner() {
+    for (title, width, label) in [
+        ("x❤\u{fe0f}yz", 6, " x… "),
+        ("x❤\u{fe0f}yz", 8, " x❤\u{fe0f}… "),
+        (
+            "a👨\u{200d}👩\u{200d}👧bcdef",
+            9,
+            " a👨\u{200d}👩\u{200d}👧b… ",
+        ),
+        ("a👨\u{200d}👩\u{200d}👧bcdef", 7, " a… "),
+    ] {
+        let edge = rows(width, 5, &titled(title), BorderSet::ROUNDED);
+        let top = line_text(&edge.lines[0]);
+        assert_eq!(title_span(&edge).as_deref(), Some(label), "{top:?}");
+        assert_eq!(view_core::native::text::text_width(&top), width, "{top:?}");
+        assert!(top.ends_with('╮'), "{top:?}");
+    }
+}
+
 #[test]
 fn an_edge_too_short_to_mark_a_cut_still_carries_the_titles_first_word() {
     // two cells for the title and a wide first glyph: nothing survives the

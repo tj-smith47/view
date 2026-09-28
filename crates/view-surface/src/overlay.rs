@@ -20,7 +20,7 @@
 use unicode_width::UnicodeWidthChar;
 use view_core::model::TermCaps;
 use view_core::native::geometry::LIST_MARKER_COLS;
-use view_core::native::text::{cut_before_mark, TRUNCATION_MARK};
+use view_core::native::text::{cluster_width, clusters, cut_before_mark, TRUNCATION_MARK};
 use view_core::native::views::{
     AiPanelView, GitMark, PaletteRow, PaletteView, PickerView, PromptChoices, PromptView, Span,
     StatuslineView, StyleRole, TreeRow, TreeView, INLINE_CHOICE_GAP,
@@ -483,17 +483,18 @@ pub const fn title_cells(width: u16) -> (u16, u16) {
 /// terminal is in the cut tier.
 fn title_label(title: &str, budget: u16) -> (String, u16) {
     let title = title.trim();
+    // a lone mark still takes the cell the painter gives its cluster, so
+    // what is seen is asked of the characters; the first one usually answers
+    if title.chars().all(|ch| ch.width() == Some(0)) {
+        return (String::new(), 0);
+    }
     let (kept, kept_cells) = take_cells(title, budget);
     // what came back is a prefix, so equal byte lengths mean nothing was
     // cut -- the whole title fit, and no second measurement of it is owed
     if kept.len() == title.len() {
-        return if kept_cells == 0 {
-            (String::new(), 0)
-        } else {
-            (format!(" {title} "), kept_cells + 2)
-        };
+        return (format!(" {title} "), kept_cells + 2);
     }
-    let mark_cells = cell_width(TRUNCATION_MARK);
+    let mark_cells = cells(TRUNCATION_MARK.encode_utf8(&mut [0; 4]));
     let (kept, kept_cells) = cut_before_mark(&kept, kept_cells, budget);
     if kept_cells > 0 {
         return (
@@ -520,12 +521,12 @@ fn title_label(title: &str, budget: u16) -> (String, u16) {
 fn take_cells(text: &str, budget: u16) -> (String, u16) {
     let mut out = String::new();
     let mut used = 0_u16;
-    for ch in text.chars() {
-        let w = cell_width(ch);
+    for cluster in clusters(text) {
+        let w = cluster_cells(cluster);
         if used.saturating_add(w) > budget {
             break;
         }
-        out.push(ch);
+        out.push_str(cluster);
         used = used.saturating_add(w);
     }
     (out, used)
@@ -963,8 +964,7 @@ fn prompt_body(view: &PromptView, width: u16, height: u16) -> Body {
         title: view.title.clone(),
         // the typed line above the rule and the selectable rows below it.
         // The prompt mark and the selection marker are the same glyph, so
-        // the rule is what sets the input line apart from a selected row,
-        // and `PromptView::fit` gives it a row before any question row
+        // the rule is what sets the input line apart from a selected row
         header,
         items: view
             .choices
@@ -1450,22 +1450,22 @@ fn min_gap(gap: u16, next_is_empty: bool) -> u16 {
 /// `text`'s width in terminal display cells, saturating rather than
 /// wrapping on a string too wide to count in a `u16`.
 fn cells(text: &str) -> u16 {
-    text.chars()
-        .map(cell_width)
+    clusters(text)
+        .map(cluster_cells)
         .fold(0_u16, |acc, c| acc.saturating_add(c))
 }
 
-/// One character's width in terminal display cells. A combining mark
-/// occupies none; a control character occupies the one column the space
-/// [`sanitized`] replaces it with will, so a row measures the same before
-/// and after that replacement.
-fn cell_width(ch: char) -> u16 {
-    // measured as the space [`sanitized`] turns it into, so a row clipped
-    // before it is sanitized holds the same text as one sanitized first
-    if ch.is_control() {
-        return 1;
+/// One grapheme cluster's width in terminal display cells, the columns the
+/// painter advances by for it. A cluster holding a control character
+/// occupies one column per character, the spaces [`sanitized`] replaces
+/// them with, so a row measures the same before and after that replacement.
+fn cluster_cells(cluster: &str) -> u16 {
+    // a control character stands in a cluster of its own, or beside the
+    // one other in a CR LF pair
+    if cluster.len() > 1 && cluster.chars().any(char::is_control) {
+        return u16::try_from(cluster.chars().count()).unwrap_or(u16::MAX);
     }
-    u16::try_from(ch.width().unwrap_or(0)).unwrap_or(u16::MAX)
+    cluster_width(cluster)
 }
 
 #[cfg(test)]

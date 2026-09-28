@@ -382,12 +382,11 @@ mod tests {
             .collect()
     }
 
-    /// A band one row short of every row a modal needs, the rule under its
-    /// input line included, still places the modal on the whole terminal:
-    /// the rule sets the input line apart from a selected choice, so it is
-    /// a row the modal needs.
+    /// `whole` is decided on the full layout's rows
+    /// (`PromptView::rows_at`), so a band one row short of it places the
+    /// modal on the whole terminal even where the compact layout would fit.
     #[test]
-    fn a_band_one_row_short_of_the_rule_covers_the_bars_since_the_rule_is_required() {
+    fn a_band_one_row_short_of_the_full_layout_covers_the_bars() {
         for (overlay, needed) in modals() {
             let band_h = needed - 1;
             let (rect, whole) = grown_rect(&overlay, 60, band_h, band_h + 2);

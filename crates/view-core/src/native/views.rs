@@ -601,8 +601,14 @@ impl PromptView {
     /// message, the input line, the rule under it and one row per choice.
     #[must_use]
     pub fn rows_at(&self, width: u16) -> u16 {
-        let rows = self.message_rows(width).len() + 2 + self.choices.len();
+        let rows = self.full_rows(self.message_rows(width).len());
         u16::try_from(rows).unwrap_or(u16::MAX)
+    }
+
+    /// The rows of the full layout for a question `message` rows long,
+    /// which both a modal's placement and its paint decide on.
+    fn full_rows(&self, message: usize) -> usize {
+        message + 2 + self.choices.len()
     }
 
     /// How this prompt's rows fit an interior `width` cells wide and
@@ -634,7 +640,7 @@ impl PromptView {
                 choices: PromptChoices::Stacked,
             };
         }
-        if height >= message.len() + 2 + count {
+        if height >= self.full_rows(message.len()) {
             return PromptFit {
                 message,
                 choices: PromptChoices::Stacked,
@@ -1036,6 +1042,42 @@ mod tests {
         }
         for (height, choices, rule, message) in expected {
             let fit = view.fit(10, height);
+            assert_eq!((fit.choices, fit.rule), (choices, rule), "height {height}");
+            assert_eq!(fit.message, message, "height {height}");
+        }
+    }
+
+    /// Three choices stack only when every row of the full layout fits.
+    /// One row short of it, at an interior of one row more than the
+    /// choices, they sit on one row beside the rule and a question row.
+    #[test]
+    fn three_choices_short_of_the_full_layout_sit_on_one_row_beside_the_rule() {
+        let view =
+            PromptView::new("Confirm", "one two three four five six seven").with_choices(vec![
+                "Yes".to_string(),
+                "No".to_string(),
+                "Cancel".to_string(),
+            ]);
+        assert_eq!(
+            view.message_rows(20),
+            ["one two three four", "five six seven"]
+        );
+        assert_eq!(view.rows_at(20), 7);
+        let inline = PromptChoices::Inline;
+        let expected: [(u16, PromptChoices, bool, &[&str]); 5] = [
+            (3, inline, false, &["one two three four…"]),
+            (4, inline, true, &["one two three four…"]),
+            (5, inline, true, &["one two three four", "five six seven"]),
+            (6, inline, true, &["one two three four", "five six seven"]),
+            (
+                7,
+                PromptChoices::Stacked,
+                true,
+                &["one two three four", "five six seven"],
+            ),
+        ];
+        for (height, choices, rule, message) in expected {
+            let fit = view.fit(20, height);
             assert_eq!((fit.choices, fit.rule), (choices, rule), "height {height}");
             assert_eq!(fit.message, message, "height {height}");
         }

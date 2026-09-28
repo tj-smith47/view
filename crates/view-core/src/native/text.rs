@@ -51,6 +51,21 @@ impl<'a> Iterator for Clusters<'a> {
     }
 }
 
+impl DoubleEndedIterator for Clusters<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Ascii(text, at) => {
+                let run: &str = text;
+                let end = run.len().checked_sub(1).filter(|end| end >= at)?;
+                let (rest, last) = (run.get(..end)?, run.get(end..)?);
+                *text = rest;
+                Some(last)
+            }
+            Self::Segmented(graphemes) => graphemes.next_back(),
+        }
+    }
+}
+
 /// The cells one grapheme cluster takes, which is both what a fit check
 /// counts and what a run advances by.
 ///
@@ -91,23 +106,28 @@ pub fn group_width(group: &[Span]) -> u16 {
 /// The glyph a cut text ends with, so a shortened one reads as cut.
 pub const TRUNCATION_MARK: char = '…';
 
-/// The longest prefix of `text`, which takes `cells` cells, that leaves
-/// room for [`TRUNCATION_MARK`] within `budget` cells and ends in no
-/// whitespace, and the cells that prefix takes.
+/// The longest prefix of `text` that leaves room for [`TRUNCATION_MARK`]
+/// within `budget` cells and ends in no whitespace, and the cells that
+/// prefix takes.
+///
+/// `cells` is `text`'s [`text_width`]: the cut subtracts each cluster it
+/// drops by [`cluster_width`], so a count taken any other way describes a
+/// prefix other than the one returned.
 #[must_use]
 pub fn cut_before_mark(text: &str, cells: u16, budget: u16) -> (&str, u16) {
     let mark_cells = u16::try_from(TRUNCATION_MARK.width().unwrap_or(1)).unwrap_or(1);
-    let mut kept: Vec<&str> = clusters(text).collect();
+    let mut end = text.len();
     let mut cells = cells;
-    // a space before the mark reads as a gap in the text
-    while cells.saturating_add(mark_cells) > budget
-        || kept.last().is_some_and(|c| c.trim().is_empty())
-    {
-        let Some(dropped) = kept.pop() else { break };
-        cells = cells.saturating_sub(cluster_width(dropped));
+    let mut back = clusters(text);
+    while let Some(last) = back.next_back() {
+        // a space before the mark reads as a gap in the text
+        if cells.saturating_add(mark_cells) <= budget && !last.trim().is_empty() {
+            break;
+        }
+        end = end.saturating_sub(last.len());
+        cells = cells.saturating_sub(cluster_width(last));
     }
-    let len = kept.iter().map(|c| c.len()).sum();
-    (text.get(..len).unwrap_or_default(), cells)
+    (text.get(..end).unwrap_or_default(), cells)
 }
 
 /// One line broken into rows of at most `width` cells: at the last space
@@ -168,5 +188,37 @@ mod tests {
     fn an_ascii_run_walks_one_byte_per_cell() {
         assert_eq!(clusters("main.rs").collect::<Vec<_>>().len(), 7);
         assert_eq!(text_width("main.rs"), 7);
+    }
+
+    #[test]
+    fn a_walk_from_both_ends_meets_once_in_the_middle() {
+        for text in ["abc", "a❤\u{fe0f}c"] {
+            let mut walk = clusters(text);
+            assert_eq!(walk.next(), Some("a"), "{text:?}");
+            assert_eq!(walk.next_back(), Some("c"), "{text:?}");
+            assert!(walk.next_back().is_some(), "{text:?}");
+            assert_eq!((walk.next(), walk.next_back()), (None, None), "{text:?}");
+        }
+    }
+
+    /// The cut counts a dropped cluster the way [`text_width`] counted it,
+    /// so an emoji carrying a variation selector or a ZWJ sequence leaves
+    /// the returned width equal to the returned prefix's.
+    #[test]
+    fn a_cut_returns_the_width_of_the_prefix_it_keeps() {
+        for (text, budget, kept) in [
+            ("x❤\u{fe0f}yz", 4, "x❤\u{fe0f}"),
+            ("x❤\u{fe0f}yz", 3, "x"),
+            ("a👨\u{200d}👩\u{200d}👧bc", 4, "a👨\u{200d}👩\u{200d}👧"),
+            ("a👨\u{200d}👩\u{200d}👧bc", 3, "a"),
+            ("ab cd", 4, "ab"),
+        ] {
+            let (prefix, cells) = cut_before_mark(text, text_width(text), budget);
+            assert_eq!(
+                (prefix, cells),
+                (kept, text_width(kept)),
+                "{text:?} at {budget}"
+            );
+        }
     }
 }
