@@ -126,7 +126,8 @@ enum Argument {
     /// `<C-v>` and `<C-q>`: one key inserted as it is.
     Literal,
     /// `<C-k>`: the two keys of a digraph, abandoned by an `<Esc>` first.
-    /// A special key given first is inserted by its name, and ends it.
+    /// A first key whose base key is special is inserted by its name, and
+    /// ends it.
     Digraph,
 }
 
@@ -278,7 +279,12 @@ impl SubmitHold {
             .is_some_and(|sent| now.age_since(sent) >= backstop)
         {
             self.ended_at = None;
-            self.settle_ends(mode);
+            // a line tracked now opened after every counted end, and its
+            // own `:` is still unanswered while the mode is outside the
+            // command line
+            if !crate::native::speculate::is_cmdline_mode(mode) {
+                self.unhidden = 0;
+            }
         }
     }
 
@@ -632,24 +638,24 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
     let hold = &mut model.submit_hold;
     // an Escape typed quickly before its key arrives as one Meta key, which
     // nvim runs as `<Esc>` and then the key: `<M-:>` opens a command line
-    // from any mode, and any other one leaves the line being typed
-    if let Some(key) = crate::native::keys::escaped_key(notation) {
+    // from any mode, and any other one leaves the line being typed. nvim
+    // reads an argument with mappings off, so there it stays one key.
+    let argument_pending = matches!(
+        hold.typed,
+        Some(Typed::Unknown {
+            argument: Some(_),
+            ..
+        })
+    );
+    if let Some(key) = crate::native::keys::escaped_key(notation).filter(|_| !argument_pending) {
         let next = (key == ":").then(|| Typed::Known(String::new()));
         match &mut hold.typed {
-            // the `<Esc>` is an argument or leaves the expression line, and
-            // the key is typed into the line it returns to
-            Some(Typed::Unknown { nested, argument })
-                if argument.is_some_and(|of| of != Argument::Backslash) || nested.is_some() =>
-            {
-                match argument.take() {
-                    Some(of) if of != Argument::Backslash => {
-                        if let Some(line) = nested.as_deref_mut() {
-                            *line = Typed::unknown();
-                        }
-                    }
-                    _ => *nested = None,
-                }
-            }
+            // the `<Esc>` leaves the expression line, and the key is typed
+            // into the line it returns to
+            Some(Typed::Unknown {
+                nested: nested @ Some(_),
+                ..
+            }) => *nested = None,
             Some(_) => {
                 hold.end_line(next);
             }
@@ -746,18 +752,49 @@ fn argument_of(notation: &str) -> Option<Argument> {
     }
 }
 
-/// Whether nvim reads `notation` as a special key: a `<...>` name that is
-/// no character and no control character. `<kEnter>` reaches the command
-/// line as `<CR>`.
+/// Whether nvim reads `notation` as a special key, judged by its base key
+/// with the modifiers set aside. A modified character is still a
+/// character, and the keypad's character keys reach the command line as
+/// their characters. `<C-@>` is `<Nul>`, and a shifted `<Tab>` is
+/// `<S-Tab>`, both special.
 fn special_key(notation: &str) -> bool {
-    let control = notation
-        .strip_prefix("<C-")
+    let Some(mut base) = notation
+        .strip_prefix('<')
         .and_then(|rest| rest.strip_suffix('>'))
-        .is_some_and(|key| key.chars().count() == 1);
-    notation.starts_with('<')
-        && typed_char(notation).is_none()
-        && !control
-        && !matches!(notation, "<CR>" | "<NL>" | "<Tab>" | "<Esc>" | "<kEnter>")
+    else {
+        return false;
+    };
+    let [mut ctrl, mut shift] = [false; 2];
+    while base.len() > 2 && base.as_bytes()[1] == b'-' {
+        match base.as_bytes()[0].to_ascii_uppercase() {
+            b'C' => ctrl = true,
+            b'S' => shift = true,
+            b'M' | b'A' | b'D' | b'T' => {}
+            _ => break,
+        }
+        base = &base[2..];
+    }
+    let named = |names: &[&str]| names.iter().any(|name| base.eq_ignore_ascii_case(name));
+    if base.chars().count() == 1 {
+        return ctrl && base == "@";
+    }
+    if base.eq_ignore_ascii_case("Tab") {
+        return shift;
+    }
+    let keypad = base
+        .strip_prefix('k')
+        .is_some_and(|key| key.len() == 1 && key.as_bytes()[0].is_ascii_digit())
+        || named(&[
+            "kPlus",
+            "kMinus",
+            "kMultiply",
+            "kDivide",
+            "kPoint",
+            "kComma",
+            "kEqual",
+            "kEnter",
+        ]);
+    !(keypad || named(&["Space", "lt", "Bslash", "Bar", "CR", "NL", "Esc"]))
 }
 
 /// Whether a `:` reaching the engine now can open a command line: the
@@ -1221,7 +1258,7 @@ mod tests {
     /// still open, and how many first-level ends went out.
     #[test]
     fn keys_taking_an_argument_end_the_line_only_where_nvim_does() {
-        let rows: [(&[&str], bool, u32); 33] = [
+        let rows: [(&[&str], bool, u32); 48] = [
             (&["<C-r>", "<CR>"], true, 0),
             (&["<C-r>", "<Esc>"], true, 0),
             (&["<C-r>", "<C-o>", "<CR>"], true, 0),
@@ -1242,7 +1279,10 @@ mod tests {
             (&["<C-\\>", "<CR>"], false, 1),
             (&["<C-\\>", "<Esc>"], false, 1),
             (&["<C-\\>", "<C-r>", "=", "1", "<CR>"], true, 0),
-            (&["<C-\\>", "<M-x>"], false, 1),
+            (&["<C-\\>", "<M-x>"], true, 0),
+            (&["<C-\\>", "<M-x>", "<CR>"], false, 1),
+            (&["<C-k>", "<M-x>", "<CR>"], true, 0),
+            (&["<C-r>", "=", "<C-\\>", "<M-x>", "<CR>"], true, 0),
             (&["<C-r>", "<C-p>", "<CR>"], false, 1),
             (&["<C-r>", "<C-o>", "<C-p>", "<CR>"], false, 1),
             (&["<C-k>", "<Left>", "<CR>"], false, 1),
@@ -1250,6 +1290,18 @@ mod tests {
             (&["<C-k>", "<Tab>", "<CR>"], true, 0),
             (&["<C-k>", "<C-a>", "<CR>"], true, 0),
             (&["<C-k>", "<kEnter>", "<CR>"], true, 0),
+            (&["<C-k>", "<S-CR>", "<CR>"], true, 0),
+            (&["<C-k>", "<C-S-CR>", "<CR>"], true, 0),
+            (&["<C-k>", "<C-CR>", "<CR>"], true, 0),
+            (&["<C-k>", "<C-Tab>", "<CR>"], true, 0),
+            (&["<C-k>", "<C-Space>", "<CR>"], true, 0),
+            (&["<C-k>", "<D-1>", "<CR>"], true, 0),
+            (&["<C-k>", "<k1>", "<CR>"], true, 0),
+            (&["<C-k>", "<kPlus>", "<CR>"], true, 0),
+            (&["<C-k>", "<kMinus>", "<CR>"], true, 0),
+            (&["<C-k>", "<C-@>", "<CR>"], false, 1),
+            (&["<C-k>", "<S-Tab>", "<CR>"], false, 1),
+            (&["<C-k>", "<C-Left>", "<CR>"], false, 1),
             (&["<C-r>", "=", "<BS>", "<CR>"], false, 1),
             (&["<C-r>", "=", "1", "<BS>", "<BS>", "<CR>"], false, 1),
             (&["<C-r>", "=", "<C-r>", "=", "<BS>", "<CR>"], false, 1),

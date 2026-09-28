@@ -6974,6 +6974,30 @@ fn a_line_end_nvim_never_hid_is_forgotten_once_it_ages() {
     assert!(gives_the_tree_its_key(&effects), "{effects:?}");
 }
 
+/// The same aged line end is forgotten when the next `:` reaches the
+/// tracker before the loop's pass does.
+#[test]
+fn a_line_end_nvim_never_hid_is_forgotten_when_a_colon_comes_first() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let _ = sent_at_zero(&mut m, &["i", ":", "<Esc>"]);
+    let insert = UiEvent::ModeChange {
+        mode: "insert".into(),
+        mode_idx: 1,
+    };
+    answer_batch(&mut m, vec![insert, UiEvent::Flush]);
+    answer_batch(&mut m, vec![normal_mode_change(), UiEvent::Flush]);
+    let aged = SpecStamp::new(crate::native::speculate::cmdline_backstop(&m));
+    let _ = typed(&mut m, &[":"]);
+    crate::native::speculate::fold_expiry(&mut m, aged);
+    let _ = typed(&mut m, &["<C-s>"]);
+    answer_batch(&mut m, vec![colon_line(""), UiEvent::Flush]);
+    let closed = line_closed(&m);
+    answer_batch(&mut m, closed);
+    let effects = typed(&mut m, &["a"]);
+    assert!(gives_the_tree_its_key(&effects), "{effects:?}");
+}
+
 /// A second-level line opened inside the tracked one leaves it shown
 /// open, so the two closing together give the keys back to the tree.
 #[test]
