@@ -300,6 +300,21 @@ newest_build() {
 CARGO_TARGET_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/view-dogfood-tapes/target"
 export CARGO_TARGET_DIR
 
+# WHY: rust-analyzer checks the workspace as a Rust file opens, and a check
+# that has to build lands its highlighting and diagnostics seconds into the
+# capture, so the cache above is brought up to date first. Cold it builds
+# the whole workspace, which is why it runs niced and says so first. A tree
+# that does not check would put its errors on screen, so the capture stops.
+# Usage: warm_cargo_target REPO_ROOT CALLER_NAME
+warm_cargo_target() {
+  command -v cargo >/dev/null 2>&1 || return 0
+  echo "$2: warming the cargo target dir $CARGO_TARGET_DIR" >&2
+  if ! (cd -- "$1" && nice -n 15 cargo check --workspace --all-targets); then
+    echo "$2: cargo check failed, so nothing is recorded" >&2
+    exit 2
+  fi
+}
+
 # WHY: a tape changes directory before it starts the editor, so a binary the
 # caller named relative to its own directory is resolved first. Prints an
 # empty path as it is. Usage: absolute_path PATH

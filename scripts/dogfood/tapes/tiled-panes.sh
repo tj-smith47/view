@@ -25,16 +25,9 @@ BIN=$(absolute_path "${VIEW_BIN:-$(newest_build "$ROOT" view)}")
 command -v tmux >/dev/null 2>&1 || { echo "tiled-panes.sh: tmux is not on PATH" >&2; exit 2; }
 
 recording_state_home
+warm_cargo_target "$ROOT" tiled-panes.sh
 
 cd -- "$ROOT"
-# rust-analyzer checks the workspace as look.rs opens, and a check that has
-# to build lands its highlighting seconds into the recording, so the
-# target dir lib.sh names is brought up to date first
-if command -v cargo >/dev/null 2>&1; then
-  cargo check --workspace --all-targets --quiet ||
-    echo "tiled-panes.sh: cargo check failed, so rust-analyzer's own check" \
-      "may still be running while the tape records" >&2
-fi
 # --panes tiles: under a tiling desktop "auto" answers nvim, and the tape
 # shows the frames whichever desktop records it
 new_cap_session "$SOCKET" 220 50 -- "$BIN" --panes tiles \

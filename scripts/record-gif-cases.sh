@@ -179,6 +179,51 @@ grade_tape() {
     fi
 }
 
+# warm_cargo_target runs a niced workspace check and stops the capture when
+# the tree does not check
+printf '#!/bin/sh\necho "cargo $*" >>"%s/cargo.log"\necho "error: stand-in" >&2\nexit "${CARGO_STAND_IN_STATUS:-0}"\n' \
+    "$WORK" >"$WORK/bin/cargo"
+printf '#!/bin/sh\necho "nice $*" >>"%s/cargo.log"\nshift 2\nexec "$@"\n' \
+    "$WORK" >"$WORK/bin/nice"
+chmod +x "$WORK/bin/cargo" "$WORK/bin/nice"
+rm -f "$WORK/cargo.log"
+set +e
+in_lib warm_cargo_target "$WORK" cases 2>"$WORK/warm.err"
+rc=$?
+set -e
+if [ "$rc" = 0 ] && grep -qx 'nice -n 15 cargo check --workspace --all-targets' "$WORK/cargo.log" &&
+    grep -qx 'cargo check --workspace --all-targets' "$WORK/cargo.log" &&
+    grep -q "cases: warming the cargo target dir $WORK/cache/view-dogfood-tapes/target" "$WORK/warm.err"; then
+    report ok "warm_cargo_target checks the workspace niced and says so first"
+else
+    report fail "warm_cargo_target checks the workspace niced and says so first" \
+        "status $rc, cargo ran: $(cat "$WORK/cargo.log" 2>/dev/null), said: $(cat "$WORK/warm.err")"
+fi
+set +e
+CARGO_STAND_IN_STATUS=101 in_lib warm_cargo_target "$WORK" cases 2>"$WORK/warm.err"
+rc=$?
+set -e
+if [ "$rc" = 2 ] && grep -q 'cases: cargo check failed' "$WORK/warm.err" &&
+    grep -qx 'error: stand-in' "$WORK/warm.err"; then
+    report ok "warm_cargo_target stops the capture and shows why when the tree does not check"
+else
+    report fail "warm_cargo_target stops the capture and shows why when the tree does not check" \
+        "status $rc, said: $(cat "$WORK/warm.err")"
+fi
+
+# a tape that opens a Rust file warms the target dir before its session
+# starts, the way cap.sh does
+for script in "$TAPES/tiled-panes.sh" "$HERE/dogfood/cap.sh"; do
+    warm_at=$(grep -n '^warm_cargo_target ' "$script" | head -1 | cut -d: -f1) || true
+    session_at=$(grep -n '^new_cap_session ' "$script" | head -1 | cut -d: -f1) || true
+    if [ -n "$warm_at" ] && [ -n "$session_at" ] && [ "$warm_at" -lt "$session_at" ]; then
+        report ok "$(basename -- "$script") warms the target dir before its session"
+    else
+        report fail "$(basename -- "$script") warms the target dir before its session" \
+            "warm_cargo_target at line ${warm_at:-none}, new_cap_session at line ${session_at:-none}"
+    fi
+done
+
 shipped=0
 for tape in "$TAPES"/*.sh; do
     [ -e "$tape" ] || continue
