@@ -3484,66 +3484,253 @@ fn a_left_anchored_overlay_stands_a_gap_clear_of_the_tile_it_covers() {
 /// wide terminal and on a small one: its two corners on the float's side
 /// one gap clear of the float, and its border on every row between them.
 /// The right-hand column is split, so the float stands beside two tiles
-/// at once whichever side it docks to.
+/// at once whichever side it docks to. With the tree docked left and the
+/// agent docked right together, the single tile is one both cover part of.
 #[test]
 fn a_tile_beside_a_docked_float_keeps_its_whole_frame() {
     use view_core::native::geometry::{Anchor, NativeSurface, SurfacePlacement};
-    for size in [(220u16, 50u16), (60, 16)] {
-        for (surface, anchor) in [
-            (NativeSurface::Agent, Anchor::Right),
+    let legs: [&[(NativeSurface, Anchor)]; 4] = [
+        &[(NativeSurface::Agent, Anchor::Right)],
+        &[(NativeSurface::Tree, Anchor::Left)],
+        &[(NativeSurface::Tree, Anchor::Right)],
+        &[
             (NativeSurface::Tree, Anchor::Left),
-            (NativeSurface::Tree, Anchor::Right),
+            (NativeSurface::Agent, Anchor::Right),
+        ],
+    ];
+    for size in [(220u16, 50u16), (60, 16)] {
+        for (scene, fixture) in [
+            ("nested", nested_at as fn(bool, (u16, u16)) -> Tiles),
+            ("single", single_at),
         ] {
-            let mut tiles = nested_at(true, size);
-            open_surface(
-                &mut tiles.model,
-                surface,
-                SurfacePlacement::Overlay,
-                anchor,
-                None,
-            );
-            let open = tiles
-                .model
-                .overlays()
-                .last()
-                .expect("the scene opened a float");
-            let rect = tiles.model.overlay_rect(open);
-            let buf = tiled_frame(&tiles.model);
-            let right = anchor == Anchor::Right;
-            let (side, gutter) = if right {
-                (rect.col - 2, rect.col - 1)
-            } else {
-                (rect.col + rect.width + 1, rect.col + rect.width)
-            };
-            let (opens, closes) = if right {
-                ("╮", "╯")
-            } else {
-                ("╭", "╰")
-            };
-            let (origin_row, origin_col) = view_surface::grid_origin(&tiles.model);
-            let beside: Vec<_> = tiles
-                .slots
-                .iter()
-                .filter(|&&(_, col, width, _)| {
-                    origin_col + col <= side && origin_col + col + width > side
-                })
-                .collect();
-            let label = format!("{size:?} {surface:?} {anchor:?}");
-            assert!(
-                !beside.is_empty(),
-                "{label}: the float covers part of a tile"
-            );
-            for &(row, _, _, height) in beside {
-                let (top, bottom) = (origin_row + row, origin_row + row + height - 1);
-                let at = |r: u16| buf[(side, r)].symbol().to_string();
-                assert_eq!(at(top), opens, "{label}: corner at ({side}, {top})");
-                assert_eq!(at(bottom), closes, "{label}: corner at ({side}, {bottom})");
-                for r in top + 1..bottom {
-                    assert_eq!(at(r), "│", "{label}: border at ({side}, {r})");
-                    assert_eq!(buf[(gutter, r)].symbol(), " ", "{label}: gutter at {r}");
+            for leg in legs {
+                let mut tiles = fixture(true, size);
+                for &(surface, anchor) in leg {
+                    open_surface(
+                        &mut tiles.model,
+                        surface,
+                        SurfacePlacement::Overlay,
+                        anchor,
+                        None,
+                    );
+                }
+                let buf = tiled_frame(&tiles.model);
+                let (origin_row, origin_col) = view_surface::grid_origin(&tiles.model);
+                for open in tiles.model.overlays() {
+                    let rect = tiles.model.overlay_rect(open);
+                    let right = open.geometry.anchor == Anchor::Right;
+                    let (side, gutter) = if right {
+                        (rect.col - 2, rect.col - 1)
+                    } else {
+                        (rect.col + rect.width + 1, rect.col + rect.width)
+                    };
+                    let (opens, closes) = if right {
+                        ("╮", "╯")
+                    } else {
+                        ("╭", "╰")
+                    };
+                    let beside: Vec<_> = tiles
+                        .slots
+                        .iter()
+                        .filter(|&&(_, col, width, _)| {
+                            origin_col + col <= side && origin_col + col + width > side
+                        })
+                        .collect();
+                    let label = format!("{size:?} {scene} {leg:?} {:?}", open.geometry.anchor);
+                    assert!(
+                        !beside.is_empty(),
+                        "{label}: the float covers part of a tile"
+                    );
+                    for &(row, _, _, height) in beside {
+                        let (top, bottom) = (origin_row + row, origin_row + row + height - 1);
+                        let at = |r: u16| buf[(side, r)].symbol().to_string();
+                        assert_eq!(at(top), opens, "{label}: corner at ({side}, {top})");
+                        assert_eq!(at(bottom), closes, "{label}: corner at ({side}, {bottom})");
+                        for r in top + 1..bottom {
+                            assert_eq!(at(r), "│", "{label}: border at ({side}, {r})");
+                            assert_eq!(buf[(gutter, r)].symbol(), " ", "{label}: gutter at {r}");
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+/// One window filling a terminal of `size`, with its status row under it.
+fn single_at(gaps: bool, size: (u16, u16)) -> Tiles {
+    let (grid_width, grid_height) = outer_grid_at(gaps, size, 0);
+    let slots = vec![(0, 0, grid_width, grid_height - 1)];
+    Tiles {
+        model: tiled_model_at(gaps, size, 0, &slots),
+        slots,
+    }
+}
+
+/// Where the gutter of the agent panel docked right stands on a
+/// `size` terminal under gapped tiles, in the grid's own columns.
+fn agent_gutter(size: (u16, u16)) -> u16 {
+    let mut tiles = single_at(true, size);
+    open_surface(
+        &mut tiles.model,
+        view_core::native::geometry::NativeSurface::Agent,
+        view_core::native::geometry::SurfacePlacement::Overlay,
+        view_core::native::geometry::Anchor::Right,
+        None,
+    );
+    let open = tiles.model.overlays().last().expect("the panel is open");
+    let gutter = tiles
+        .model
+        .overlay_gutter(open)
+        .expect("gapped tiles give a gutter");
+    gutter.col - view_surface::grid_origin(&tiles.model).1
+}
+
+/// A tile the agent panel leaves one or two columns of, too few for a
+/// frame, is drawn with none: no corner and no border beside the gutter.
+#[test]
+fn a_tile_the_docked_float_leaves_too_narrow_draws_no_frame() {
+    let size = (80, 24);
+    let gutter = agent_gutter(size);
+    let (grid_width, grid_height) = outer_grid_at(true, size, 0);
+    for kept in [1u16, 2] {
+        let col = gutter - kept;
+        let slots = vec![
+            (0, 0, col - 1, grid_height - 1),
+            (0, col, grid_width - col, grid_height - 1),
+        ];
+        let mut tiles = Tiles {
+            model: tiled_model_at(true, size, 0, &slots),
+            slots,
+        };
+        open_surface(
+            &mut tiles.model,
+            view_core::native::geometry::NativeSurface::Agent,
+            view_core::native::geometry::SurfacePlacement::Overlay,
+            view_core::native::geometry::Anchor::Right,
+            None,
+        );
+        let pane = tiles
+            .model
+            .engine
+            .painted_grids()
+            .panes_in_z_order()
+            .into_iter()
+            .find(|pane| pane.id == GridId(LEFT + 1))
+            .expect("the right tile is placed");
+        assert_eq!(tiles.model.tile_box(&pane), None, "{kept} columns kept");
+        let buf = tiled_frame(&tiles.model);
+        let (origin_row, origin_col) = view_surface::grid_origin(&tiles.model);
+        for c in col..gutter {
+            for r in origin_row..origin_row + grid_height - 1 {
+                let symbol = buf[(origin_col + c, r)].symbol().to_string();
+                assert!(
+                    !"╭╮╰╯│─".contains(symbol.as_str()),
+                    "{kept} columns kept: a frame glyph {symbol:?} at ({c}, {r})"
+                );
+            }
+        }
+    }
+}
+
+/// A docked float half the band tall, beside two stacked tiles, closes
+/// the frame of the tile whose rows it shares and leaves the other's
+/// right border where nvim laid it out.
+#[test]
+fn a_short_docked_float_closes_only_the_tile_beside_it() {
+    use view_core::native::geometry::{Anchor, OverlayBox};
+    let size = (80, 24);
+    let (grid_width, grid_height) = outer_grid_at(true, size, 0);
+    let slots = vec![(0, 0, grid_width, 4), (5, 0, grid_width, grid_height - 6)];
+    let mut tiles = Tiles {
+        model: tiled_model_at(true, size, 0, &slots),
+        slots,
+    };
+    tiles.model.push_overlay(
+        OverlayBox::new(30, 20).with_anchor(Anchor::Right),
+        view_core::model::OverlayKind::Ai,
+    );
+    let open = tiles.model.overlays().last().expect("the panel is open");
+    let rect = tiles.model.overlay_rect(open);
+    let (origin_row, origin_col) = view_surface::grid_origin(&tiles.model);
+    assert!(
+        rect.row > origin_row + 4,
+        "the float stands clear of the top tile's rows: {rect:?}"
+    );
+    let buf = tiled_frame(&tiles.model);
+    let far = origin_col + grid_width - 1;
+    assert_eq!(
+        buf[(far, origin_row)].symbol(),
+        "╮",
+        "the top tile's corner"
+    );
+    assert_eq!(
+        buf[(far, origin_row + 3)].symbol(),
+        "╯",
+        "the top tile's corner"
+    );
+    let side = rect.col - 2;
+    assert_eq!(
+        buf[(side, origin_row + 5)].symbol(),
+        "╮",
+        "the lower tile is closed"
+    );
+    assert_eq!(
+        buf[(side, origin_row + grid_height - 2)].symbol(),
+        "╯",
+        "the lower tile is closed"
+    );
+}
+
+/// The caret in a tile the agent panel closes stays on the tile's last
+/// visible text column, off the border, whether nvim's cursor is on the
+/// column under the border or on one under the panel, and a glyph
+/// predicted on either column is dropped.
+#[test]
+fn the_caret_stays_off_the_border_a_docked_float_closes() {
+    let grid = LEFT + 1;
+    let probe = agent_overlay_beside_the_tiles(true);
+    let registry = probe.model.engine.painted_grids();
+    let (_, _, inner_width, _) = registry
+        .pane_text(GridId(grid))
+        .expect("the right tile is placed");
+    let (_, pane_col) = registry.pane_origin(GridId(grid)).expect("placed");
+    let open = probe.model.overlays().last().expect("the panel is open");
+    let border = probe.model.overlay_rect(open).col - 2;
+    let on_border = border - view_surface::grid_origin(&probe.model).1 - pane_col;
+    for at in [on_border, inner_width - 1] {
+        let mut tiles = agent_overlay_beside_the_tiles(true);
+        // an entered panel holds the caret in its composer
+        tiles.model.ai_panel_mut().focused = false;
+        drive(
+            &mut tiles.model,
+            vec![
+                UiEvent::GridCursorGoto {
+                    grid,
+                    row: 1,
+                    col: u64::from(at),
+                },
+                UiEvent::Flush,
+            ],
+        );
+        let stamp =
+            view_core::native::speculate::SpecStamp::new(std::time::Duration::from_millis(1));
+        assert!(tiles
+            .model
+            .speculate
+            .predict("insert", GridId(grid), 'x', (1, at), stamp)
+            .is_some());
+        let surface = view_surface::render(&tiles.model);
+        let cursor = surface.cursor.expect("the frame places a caret");
+        assert_eq!(
+            cursor.col,
+            border - 1,
+            "cursor at {at}: the caret is off the border"
+        );
+        let predicted = surface.layers.iter().any(|layer| {
+            matches!(&layer.kind, view_surface::LayerKind::Speculated(cells) if !cells.is_empty())
+        });
+        assert!(!predicted, "cursor at {at}: no glyph is predicted there");
     }
 }
 

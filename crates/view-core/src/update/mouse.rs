@@ -96,7 +96,15 @@ fn position_owner(model: &Model, input: &MouseInput) -> Option<MouseCapture> {
         .checked_sub(model.chrome_rows())?
         .checked_sub(offset)?;
     let col = input.col.checked_sub(offset)?;
-    let (grid, _, _) = model.engine.grids().hit_test(col, row)?;
+    let grids = model.engine.grids();
+    let (grid, _, _) = grids.hit_test(col, row)?;
+    // the column a docked float's gutter closes a tile's frame on is its
+    // border, over text nvim still holds there
+    if let Some((_, left, width, _)) = model.tile_text(grids, grid) {
+        if col < left || col >= left.saturating_add(width) {
+            return None;
+        }
+    }
     Some(MouseCapture::Engine(grid))
 }
 
@@ -145,6 +153,9 @@ fn effect(model: &Model, input: MouseInput, grid: GridId) -> Vec<Effect> {
     else {
         return Vec::new();
     };
+    let col = model
+        .tile_columns(model.engine.grids(), grid)
+        .map_or(col, |(first, last)| col.max(first).min(last));
     vec![Effect::Rpc(RpcCall::InputMouse {
         button: input.button,
         action: input.action,

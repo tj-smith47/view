@@ -6,7 +6,18 @@
 //! spawn's geometry `--cmd`, the registry's inner-size requests, and the
 //! compositor's frame.
 
-use crate::native::geometry::OverlayRect;
+use crate::grid::registry::{GridId, GridRegistry, Pane};
+use crate::native::geometry::{Anchor, OverlayRect};
+
+/// The blank gutter column beside a float docked to one side of the
+/// screen, in grid cells, with the rows it runs down.
+#[derive(Debug, Clone, Copy)]
+struct Dock {
+    right: bool,
+    col: u16,
+    row: u16,
+    height: u16,
+}
 
 /// How window layout is drawn.
 #[non_exhaustive]
@@ -222,6 +233,113 @@ impl super::Model {
         self.overlay_split(overlay).1
     }
 
+    /// The box a tile's frame is drawn on, as `(row, col, width, height)`
+    /// in grid cells: `pane.filled`, closed one cell short of the gutter of
+    /// every float docked to a side of the screen that shares rows with
+    /// it. `None` where a float leaves the tile narrower than
+    /// [`MIN_FRAMED_SLOT`], which is too narrow for a frame.
+    ///
+    /// Such a float (the agent panel or the tree, while neither is
+    /// windowed) is laid over tiles nvim laid out on the whole width, so
+    /// the part of a tile past the gutter is under it. The frame painter,
+    /// the notice column, mouse routing and the caret all read this box.
+    #[must_use]
+    pub fn tile_box(&self, pane: &Pane) -> Option<(u16, u16, u16, u16)> {
+        let (closed, clipped) = self.closed_box(pane);
+        (!clipped || closed.2 >= MIN_FRAMED_SLOT.0).then_some(closed)
+    }
+
+    /// Where `grid`'s text shows on `registry`, as
+    /// [`GridRegistry::pane_text`] answers, cut to what its window's
+    /// [`Self::tile_box`] leaves: inside the frame, or short of the gutter
+    /// where the tile is too narrow for one. A caret, a predicted glyph or
+    /// a click outside it would land on a border or under a float.
+    #[must_use]
+    pub fn tile_text(&self, registry: &GridRegistry, grid: GridId) -> Option<(u16, u16, u16, u16)> {
+        let text = registry.pane_text(grid)?;
+        let Some(pane) = registry
+            .panes_in_z_order()
+            .into_iter()
+            .find(|pane| pane.id == grid && pane.kind.is_window())
+        else {
+            return Some(text);
+        };
+        let (closed, clipped) = self.closed_box(&pane);
+        if !clipped {
+            return Some(text);
+        }
+        let ring = if self.tile_box(&pane).is_some() {
+            pane.origin.1.saturating_sub(pane.filled.1)
+        } else {
+            0
+        };
+        let left = text.1.max(closed.1.saturating_add(ring));
+        let right = text
+            .1
+            .saturating_add(text.2)
+            .min(closed.1.saturating_add(closed.2).saturating_sub(ring));
+        Some((text.0, left, right.saturating_sub(left), text.3))
+    }
+
+    /// The first and last of `grid`'s own columns [`Self::tile_text`]
+    /// shows, the range a caret, a predicted glyph or a drag is held to.
+    #[must_use]
+    pub fn tile_columns(&self, registry: &GridRegistry, grid: GridId) -> Option<(u16, u16)> {
+        let (_, left, width, _) = self.tile_text(registry, grid)?;
+        let (_, origin) = registry.pane_origin(grid)?;
+        let first = left.saturating_sub(origin);
+        Some((first, first.saturating_add(width.saturating_sub(1))))
+    }
+
+    /// `pane.filled` closed short of every docked gutter, and whether any
+    /// gutter closed it.
+    fn closed_box(&self, pane: &Pane) -> ((u16, u16, u16, u16), bool) {
+        let (row, mut col, mut width, height) = pane.filled;
+        let mut clipped = false;
+        for dock in self.docks() {
+            let rows =
+                row < dock.row.saturating_add(dock.height) && dock.row < row.saturating_add(height);
+            let end = col.saturating_add(width);
+            if !rows {
+                continue;
+            }
+            if dock.right && col < dock.col && end > dock.col {
+                width = dock.col.saturating_sub(col);
+                clipped = true;
+            } else if !dock.right && col <= dock.col && end > dock.col.saturating_add(1) {
+                col = dock.col.saturating_add(1);
+                width = end.saturating_sub(col);
+                clipped = true;
+            }
+        }
+        ((row, col, width, height), clipped)
+    }
+
+    /// The gutter of every float docked to the left or right of the screen
+    /// and drawn as a float, in grid cells. Only gapped tiles give a float
+    /// a gutter, so every other look has none.
+    fn docks(&self) -> impl Iterator<Item = Dock> + '_ {
+        let offset = self.look.grid_offset();
+        let top = self.chrome_rows().saturating_add(offset);
+        self.overlays()
+            .iter()
+            .filter(|open| self.draws_as_overlay(&open.kind))
+            .filter_map(move |open| {
+                let right = match open.geometry.anchor {
+                    Anchor::Left => false,
+                    Anchor::Right => true,
+                    _ => return None,
+                };
+                let gutter = self.overlay_gutter(open)?;
+                Some(Dock {
+                    right,
+                    col: gutter.col.checked_sub(offset)?,
+                    row: gutter.row.saturating_sub(top),
+                    height: gutter.height,
+                })
+            })
+    }
+
     fn overlay_split(&self, overlay: &super::Overlay) -> (OverlayRect, Option<OverlayRect>) {
         let full = self.overlay_box(overlay);
         // a gapless frame shares its edge with the tile beside it, which is
@@ -275,6 +393,7 @@ pub(super) fn grown_rect(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
     use super::*;
 
     /// Every slot size a gapped tile can be given, with and without a
@@ -424,6 +543,67 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A gapped tile under the docked agent panel, at a wide and a small
+    /// size: a press on the column the panel's gutter closes the tile's
+    /// frame on reaches no window, and a press one column further in
+    /// reaches the tile at its last visible text column. A drag that
+    /// wanders onto the border is held to that column too.
+    #[test]
+    fn a_press_on_the_border_a_docked_float_closes_reaches_no_window() {
+        use crate::msg::{Effect, MouseInput, Msg, RpcCall};
+        use crate::native::geometry::{Anchor, OverlayBox};
+        for size in [(220, 50), (60, 16)] {
+            let mut scene =
+                crate::model::notice::tests::scene(size, Look::new(Panes::Tiles, true), &[], 1)
+                    .expect("one tile fits");
+            let model = &mut scene.model;
+            model.push_overlay(
+                OverlayBox::new(30, 100).with_anchor(Anchor::Right),
+                super::super::OverlayKind::Ai,
+            );
+            let grid = GridId(scene.tiles[0]);
+            let pane = model
+                .engine
+                .grids()
+                .panes_in_z_order()
+                .into_iter()
+                .find(|pane| pane.id == grid)
+                .expect("the tile is placed");
+            let (row, col, width, _) = model.tile_box(&pane).expect("the tile keeps a frame");
+            assert!(width < pane.filled.2, "{size:?}: the panel closes the tile");
+            let offset = model.look.grid_offset();
+            let border = col + width - 1;
+            let screen_row = row + 2 + model.chrome_rows() + offset;
+            let mut press = |action: &str, col: u16| {
+                crate::update::update(
+                    model,
+                    Msg::Mouse(MouseInput {
+                        button: "left".into(),
+                        action: action.into(),
+                        modifier: String::new(),
+                        row: screen_row,
+                        col: col + offset,
+                    }),
+                )
+            };
+            assert!(
+                press("press", border).is_empty(),
+                "{size:?}: a press on the border at {border} reaches nothing"
+            );
+            let last = border - 1 - pane.origin.1;
+            let inside = press("press", border - 1);
+            assert!(
+                matches!(&inside[..], [Effect::Rpc(RpcCall::InputMouse { col, .. })] if *col == last),
+                "{size:?}: a press one column in reaches the tile: {inside:?}"
+            );
+            let drag = press("drag", border);
+            assert!(
+                matches!(&drag[..], [Effect::Rpc(RpcCall::InputMouse { col, .. })] if *col == last),
+                "{size:?}: a drag onto the border stays on the text: {drag:?}"
+            );
         }
     }
 

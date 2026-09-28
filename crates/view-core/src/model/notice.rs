@@ -193,10 +193,8 @@ impl Model {
                     .filter(|pane| {
                         pane.id != GLOBAL_GRID && pane.kind == PaneKind::Window && !sidebar(pane.id)
                     })
-                    // a tile runs on under a side panel drawn over it and
-                    // closes its frame where the area ends, so the ring
-                    // comes off the part the area keeps
-                    .map(|pane| shrink(within(pane.filled, area), inset_rows, inset_cols))
+                    .filter_map(|pane| self.tile_box(pane))
+                    .map(|frame| within(shrink(frame, inset_rows, inset_cols), area))
                     .filter(|kept| kept.2 > 0 && kept.3 > 0)
                     .min_by_key(|&(row, col, width, height)| {
                         let at = (
@@ -868,6 +866,34 @@ pub(crate) mod tests {
             }
         }
         assert!(scenes > 5_000, "the walk reached only {scenes} scenes");
+    }
+
+    /// The message history floating in the top-right corner over one gapped
+    /// tile closes no frame, so the stack beside it stands flush against
+    /// its box, with no column left blank for a border that is not drawn.
+    #[test]
+    fn a_corner_float_closes_no_frame_the_stack_keeps_clear_of() {
+        for size in [(220, 50), (80, 24)] {
+            let mut scene =
+                scene(size, Look::new(Panes::Tiles, true), &[], 1).expect("one tile fits");
+            let model = &mut scene.model;
+            anchor_at(model, Anchor::TopRight);
+            let state =
+                crate::native::palette::MessageHistoryState::snapshot(&model.engine.toast_history);
+            model.push_overlay(
+                OverlayBox::new(30, 70).with_anchor(Anchor::TopRight),
+                OverlayKind::MessageHistory(state),
+            );
+            let open = model.overlays().last().expect("the history is open");
+            let float = model.overlay_box(open);
+            let offset = model.look.grid_offset();
+            let (_, col, width, _) = model.notice_column().rect;
+            assert_eq!(
+                col + width + offset,
+                float.col,
+                "{size:?}: the stack ends where the history's box begins"
+            );
+        }
     }
 
     /// The agent panel windowed into the only window there is: nothing is

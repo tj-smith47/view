@@ -1019,6 +1019,12 @@ fn speculated_layer(model: &Model, origin: (u16, u16)) -> Option<Layer> {
             if cell.row >= grid_h || cell.col >= grid_w {
                 return None;
             }
+            if model
+                .tile_columns(registry, cell.grid)
+                .is_some_and(|(first, last)| cell.col < first || cell.col > last)
+            {
+                return None;
+            }
             Some(PredictedCell {
                 row: cell.row.saturating_add(orow),
                 col: cell.col.saturating_add(ocol),
@@ -1262,6 +1268,15 @@ fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<Cu
                 col.min(w.saturating_sub(1)),
             ),
             None => (size, row, col),
+        };
+        // a docked float closes the tile's frame over a text column nvim
+        // still holds, and the caret stays off that border
+        let (size, col) = match model.tile_columns(registry, grid) {
+            Some((first, last)) => (
+                (size.0.min(last.saturating_add(1)), size.1),
+                col.max(first).min(last),
+            ),
+            None => (size, col),
         };
         let local_col = speculated_col(model, grid, size, row, col);
         let (orow, ocol) = registry.pane_origin(grid).unwrap_or((0, 0));
