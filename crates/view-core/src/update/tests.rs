@@ -6820,6 +6820,32 @@ fn a_line_end_nvim_never_hid_is_forgotten_at_the_next_mode() {
     let _ = sent_at_zero(&mut m, &[":", "<Esc>"]);
     let aged = SpecStamp::new(crate::native::speculate::cmdline_backstop(&m));
     answer_batch_at(&mut m, vec![normal_mode_change(), UiEvent::Flush], aged);
+    crate::native::speculate::fold_expiry(&mut m, aged);
+    let _ = typed(&mut m, &[":", "<C-s>"]);
+    answer_batch(&mut m, vec![colon_line(""), UiEvent::Flush]);
+    let closed = line_closed(&m);
+    answer_batch(&mut m, closed);
+    let effects = typed(&mut m, &["a"]);
+    assert!(gives_the_tree_its_key(&effects), "{effects:?}");
+}
+
+/// A line end nvim never hides, whose modes were all reported before it
+/// aged, is forgotten on the loop's pass once it is older than the
+/// backstop, so a later line nvim ends on its own gives the keys back to
+/// the tree.
+#[test]
+fn a_line_end_nvim_never_hid_is_forgotten_once_it_ages() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let _ = sent_at_zero(&mut m, &["i", ":", "<Esc>"]);
+    let insert = UiEvent::ModeChange {
+        mode: "insert".into(),
+        mode_idx: 1,
+    };
+    answer_batch(&mut m, vec![insert, UiEvent::Flush]);
+    answer_batch(&mut m, vec![normal_mode_change(), UiEvent::Flush]);
+    let aged = SpecStamp::new(crate::native::speculate::cmdline_backstop(&m));
+    crate::native::speculate::fold_expiry(&mut m, aged);
     let _ = typed(&mut m, &[":", "<C-s>"]);
     answer_batch(&mut m, vec![colon_line(""), UiEvent::Flush]);
     let closed = line_closed(&m);

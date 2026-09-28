@@ -78,12 +78,39 @@ enum Typed {
     /// (a completion, a history recall). The engine's own `cmdline_show`
     /// is read at the `<CR>` in its place.
     Unknown {
-        /// Whether an expression line opened at the second level, with this
-        /// line waiting beneath it.
-        nested: bool,
+        /// The expression line open at the second level, with this line
+        /// waiting beneath it.
+        nested: Option<Box<Typed>>,
         /// The key the next one is read as the argument of.
         argument: Option<Argument>,
     },
+}
+
+impl Typed {
+    fn unknown() -> Self {
+        Self::Unknown {
+            nested: None,
+            argument: None,
+        }
+    }
+
+    /// Folds a key that types into or deletes from the line, and says
+    /// whether it was a backspace on an empty line, which leaves it.
+    fn edit(&mut self, notation: &str) -> bool {
+        let Self::Known(text) = self else {
+            return false;
+        };
+        // `<Del>` at the end of the line, where the modelled cursor always
+        // stands, deletes the character before it as a backspace does
+        if matches!(notation, "<BS>" | "<C-h>" | "<Del>" | "<kDel>") {
+            return text.pop().is_none();
+        }
+        match typed_char(notation) {
+            Some(c) if text.len() < TRACKED_MAX => text.push(c),
+            _ => *self = Self::unknown(),
+        }
+        false
+    }
 }
 
 /// A command-line key that reads the key after it as its argument, so an
@@ -93,10 +120,13 @@ enum Argument {
     /// `<C-r>`: the register to insert, where `=` opens an expression line.
     Register,
     /// `<C-\>`: `e` opens an expression line, and `<C-n>` or `<C-g>` leave.
+    /// nvim inserts the `<C-\>` before any other key and reads that key
+    /// as typed on its own.
     Backslash,
     /// `<C-v>` and `<C-q>`: one key inserted as it is.
     Literal,
     /// `<C-k>`: the two keys of a digraph, abandoned by an `<Esc>` first.
+    /// A special key given first is inserted by its name, and ends it.
     Digraph,
 }
 
@@ -216,15 +246,17 @@ impl SubmitHold {
     /// normal mode before it.
     pub fn note_mode_reported(&mut self, mode: &str) {
         self.mode_unsure = false;
-        // a line end counted for a `:` nvim read as text never gets its
-        // hide. A mode outside the command line with no line tracked says
-        // no hide is still to come only once the newest end is older than
-        // the backstop, since a report sent before nvim read that end
-        // says nothing of it
-        if self.typed.is_none()
-            && self.ended_at.is_none()
-            && !crate::native::speculate::is_cmdline_mode(mode)
-        {
+        // a report sent before nvim read the newest end says nothing of it
+        if self.ended_at.is_none() {
+            self.settle_ends(mode);
+        }
+    }
+
+    /// Forgets the counted line ends when no line is tracked and `mode`
+    /// is outside the command line: a line end counted for a `:` nvim read
+    /// as text never gets its hide.
+    fn settle_ends(&mut self, mode: &str) {
+        if self.typed.is_none() && !crate::native::speculate::is_cmdline_mode(mode) {
             self.unhidden = 0;
         }
     }
@@ -237,13 +269,16 @@ impl SubmitHold {
     }
 
     /// Lets the newest line end go once it is older than `backstop` at
-    /// `now`, after which a mode report may close the ends still counted.
-    pub(crate) fn age_line_ends(&mut self, now: SpecStamp, backstop: Duration) {
+    /// `now`. nvim has read it by then, so `mode`, the last one reported,
+    /// answers it, and a later mode report may close the ends still
+    /// counted.
+    pub(crate) fn age_line_ends(&mut self, now: SpecStamp, backstop: Duration, mode: &str) {
         if self
             .ended_at
             .is_some_and(|sent| now.age_since(sent) >= backstop)
         {
             self.ended_at = None;
+            self.settle_ends(mode);
         }
     }
 
@@ -431,8 +466,7 @@ impl SubmitHold {
     /// `:` of view's opened. A `q:` window and a mapping's own `:` line
     /// read the same as a typed one and spend it all the same.
     pub(crate) fn note_line_hidden(&mut self, level: u64, line: Option<&CmdlineState>) {
-        let typed_line =
-            line.is_none_or(|line| line.level == 1 && line.firstc == ":" && line.prompt.is_empty());
+        let typed_line = line.is_none_or(|line| line.level == 1 && line.firstc == ":");
         if level == 1 && typed_line {
             self.unhidden = self.unhidden.saturating_sub(1);
         }
@@ -604,9 +638,16 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
         match &mut hold.typed {
             // the `<Esc>` is an argument or leaves the expression line, and
             // the key is typed into the line it returns to
-            Some(Typed::Unknown { nested, argument }) if argument.is_some() || *nested => {
-                if argument.take().is_none() {
-                    *nested = false;
+            Some(Typed::Unknown { nested, argument })
+                if argument.is_some_and(|of| of != Argument::Backslash) || nested.is_some() =>
+            {
+                match argument.take() {
+                    Some(of) if of != Argument::Backslash => {
+                        if let Some(line) = nested.as_deref_mut() {
+                            *line = Typed::unknown();
+                        }
+                    }
+                    _ => *nested = None,
                 }
             }
             Some(_) => {
@@ -626,74 +667,70 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
     };
     if let Typed::Unknown { nested, argument } = typed {
         if let Some(of) = argument.take() {
-            match (of, notation) {
-                // these three change how the register is inserted and wait
+            let taken = match (of, notation) {
+                // these two change how the register is inserted and wait
                 // for its name
-                (Argument::Register, "<C-r>" | "<C-o>" | "<C-p>") => {
+                (Argument::Register, "<C-r>" | "<C-o>") => {
                     *argument = Some(Argument::Register);
+                    true
                 }
-                (Argument::Register, "=") | (Argument::Backslash, "e") => *nested = true,
+                (Argument::Register, "=") | (Argument::Backslash, "e") if nested.is_none() => {
+                    *nested = Some(Box::new(Typed::Known(String::new())));
+                    true
+                }
+                // an expression line refuses a second one inside it
+                (Argument::Register, "=") => true,
                 (Argument::Backslash, "<C-n>" | "<C-g>") => {
-                    if !std::mem::take(nested) {
+                    if nested.take().is_none() {
                         hold.end_line(None);
                     }
+                    return Vec::new();
                 }
-                (Argument::Digraph, "<Esc>") => {}
-                (Argument::Digraph, _) => *argument = Some(Argument::Literal),
-                _ => {}
+                (Argument::Digraph, key) if key != "<Esc>" && !special_key(key) => {
+                    *argument = Some(Argument::Literal);
+                    true
+                }
+                (of, _) => {
+                    // whatever was inserted into an expression line is
+                    // unknown to view
+                    if let Some(line) = nested.as_deref_mut() {
+                        *line = Typed::unknown();
+                    }
+                    of != Argument::Backslash
+                }
+            };
+            if taken {
+                return Vec::new();
             }
-            return Vec::new();
         }
-        if *nested {
+        if let Some(line) = nested {
             // ending the expression line returns to the line beneath it
             if LEAVES_LINE.contains(&notation) || SUBMITS_LINE.contains(&notation) {
-                *nested = false;
-            } else {
-                *argument = argument_of(notation);
+                *nested = None;
+            } else if let Some(of) = argument_of(notation) {
+                *argument = Some(of);
+            } else if line.edit(notation) {
+                *nested = None;
             }
             return Vec::new();
         }
     }
     if let Some(of) = argument_of(notation) {
         *typed = Typed::Unknown {
-            nested: false,
+            nested: None,
             argument: Some(of),
         };
         return Vec::new();
     }
-    match notation {
-        _ if LEAVES_LINE.contains(&notation) => {
-            hold.end_line(None);
+    if LEAVES_LINE.contains(&notation) {
+        hold.end_line(None);
+    } else if SUBMITS_LINE.contains(&notation) {
+        let typed = hold.end_line(None);
+        if submits_view(model, typed.as_ref()) {
+            return arm(model, Armed::Command);
         }
-        _ if SUBMITS_LINE.contains(&notation) => {
-            let typed = hold.end_line(None);
-            if submits_view(model, typed.as_ref()) {
-                return arm(model, Armed::Command);
-            }
-        }
-        // `<Del>` at the end of the line, where the modelled cursor always
-        // stands, deletes the character before it as a backspace does
-        "<BS>" | "<C-h>" | "<Del>" | "<kDel>" => {
-            if let Typed::Known(text) = typed {
-                // a backspace on an empty line leaves the command line
-                if text.pop().is_none() {
-                    hold.end_line(None);
-                }
-            }
-        }
-        _ => {
-            if let Typed::Known(text) = typed {
-                match typed_char(notation) {
-                    Some(c) if text.len() < TRACKED_MAX => text.push(c),
-                    _ => {
-                        *typed = Typed::Unknown {
-                            nested: false,
-                            argument: None,
-                        }
-                    }
-                }
-            }
-        }
+    } else if typed.edit(notation) {
+        hold.end_line(None);
     }
     Vec::new()
 }
@@ -707,6 +744,20 @@ fn argument_of(notation: &str) -> Option<Argument> {
         "<C-k>" => Some(Argument::Digraph),
         _ => None,
     }
+}
+
+/// Whether nvim reads `notation` as a special key: a `<...>` name that is
+/// no character and no control character. `<kEnter>` reaches the command
+/// line as `<CR>`.
+fn special_key(notation: &str) -> bool {
+    let control = notation
+        .strip_prefix("<C-")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .is_some_and(|key| key.chars().count() == 1);
+    notation.starts_with('<')
+        && typed_char(notation).is_none()
+        && !control
+        && !matches!(notation, "<CR>" | "<NL>" | "<Tab>" | "<Esc>" | "<kEnter>")
 }
 
 /// Whether a `:` reaching the engine now can open a command line: the
@@ -1164,12 +1215,13 @@ mod tests {
 
     /// A key read as the argument of the one before it ends no line, an
     /// expression line ends back into the line beneath it, and `<C-\>`
-    /// `<C-n>` leaves the line. Each row is what nvim 0.12's ext_cmdline
-    /// reports for those keys: whether the `:` line is still open, and how
-    /// many first-level ends went out.
+    /// `<C-n>` leaves the line. `<C-\>` before any other key, and `<C-k>`
+    /// before a special key, take no second key. Each row is what nvim
+    /// 0.12's ext_cmdline reports for those keys: whether the `:` line is
+    /// still open, and how many first-level ends went out.
     #[test]
     fn keys_taking_an_argument_end_the_line_only_where_nvim_does() {
-        let rows: [(&[&str], bool, u32); 17] = [
+        let rows: [(&[&str], bool, u32); 33] = [
             (&["<C-r>", "<CR>"], true, 0),
             (&["<C-r>", "<Esc>"], true, 0),
             (&["<C-r>", "<C-o>", "<CR>"], true, 0),
@@ -1187,6 +1239,30 @@ mod tests {
             (&["<C-r>", "=", "1", "<Esc>"], true, 0),
             (&["<C-r>", "=", "<M-x>"], true, 0),
             (&["<C-r>", "=", "1", "<CR>", "<CR>"], false, 1),
+            (&["<C-\\>", "<CR>"], false, 1),
+            (&["<C-\\>", "<Esc>"], false, 1),
+            (&["<C-\\>", "<C-r>", "=", "1", "<CR>"], true, 0),
+            (&["<C-\\>", "<M-x>"], false, 1),
+            (&["<C-r>", "<C-p>", "<CR>"], false, 1),
+            (&["<C-r>", "<C-o>", "<C-p>", "<CR>"], false, 1),
+            (&["<C-k>", "<Left>", "<CR>"], false, 1),
+            (&["<C-k>", "<BS>", "<CR>"], false, 1),
+            (&["<C-k>", "<Tab>", "<CR>"], true, 0),
+            (&["<C-k>", "<C-a>", "<CR>"], true, 0),
+            (&["<C-k>", "<kEnter>", "<CR>"], true, 0),
+            (&["<C-r>", "=", "<BS>", "<CR>"], false, 1),
+            (&["<C-r>", "=", "1", "<BS>", "<BS>", "<CR>"], false, 1),
+            (&["<C-r>", "=", "<C-r>", "=", "<BS>", "<CR>"], false, 1),
+            (
+                &["<C-r>", "=", "<C-\\>", "e", "<BS>", "<BS>", "<CR>"],
+                true,
+                0,
+            ),
+            (
+                &["<C-r>", "=", "<C-v>", "x", "<BS>", "<BS>", "<CR>"],
+                true,
+                0,
+            ),
         ];
         for (keys, open, ends) in rows {
             let mut model = normal_mode();

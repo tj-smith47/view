@@ -328,8 +328,7 @@ fn fold_cmdline_key(model: &mut Model, notation: &str, now: SpecStamp) {
 /// with its own `getchar()`, one inside a mapping the gate cannot see, and
 /// an engine that says nothing at all. [`cmdline_backstop`] is what sizes
 /// that wait to the link instead of to the glyphs' own bound.
-fn expire_cmdline_speculation(model: &mut Model, now: SpecStamp) {
-    let bound = cmdline_backstop(model);
+fn expire_cmdline_speculation(model: &mut Model, now: SpecStamp, bound: Duration) {
     if model
         .engine
         .cmdline_speculated
@@ -953,7 +952,6 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
     let mut settled = false;
     let mut shows_cmdline = false;
     let mut answers_input = false;
-    let mut reports_mode = false;
     for ev in redraw {
         match ev {
             UiEvent::GridCursorGoto { grid, .. } => {
@@ -966,7 +964,6 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
             UiEvent::ModeChange { .. } => {
                 settled = true;
                 answers_input = true;
-                reports_mode = true;
             }
             UiEvent::CmdlineShow { .. } => {
                 shows_cmdline = true;
@@ -1002,10 +999,6 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
     if settled {
         model.engine.literal_pending = false;
     }
-    if reports_mode {
-        let backstop = cmdline_backstop(model);
-        model.submit_hold.age_line_ends(now, backstop);
-    }
     if moved_cursor_there && !shows_cmdline {
         withdraw_cmdline_speculation(model);
     }
@@ -1017,9 +1010,14 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
 /// Belongs at a call site reached whether or not a redraw arrived: a redraw
 /// that never comes is the condition [`SPECULATION_MAX_AGE`] and
 /// [`cmdline_backstop`] exist for, for the predicted glyphs and for the
-/// speculated palette alike.
+/// speculated palette alike. A command-line end view counted is aged here
+/// too, since the hide it waits for may never come.
 pub fn fold_expiry(model: &mut Model, now: SpecStamp) {
-    expire_cmdline_speculation(model, now);
+    let backstop = cmdline_backstop(model);
+    expire_cmdline_speculation(model, now, backstop);
+    model
+        .submit_hold
+        .age_line_ends(now, backstop, &model.engine.mode.current);
     // the pending list is read before anything else so a steady-state pass
     // costs one null check and one length compare: expiring an empty list is
     // a no-op, and a session outside a typing burst takes that pass forever
