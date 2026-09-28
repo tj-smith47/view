@@ -6584,7 +6584,11 @@ fn line_closed(m: &Model) -> Vec<UiEvent> {
 /// Hands `batch` to the model the way the loop does, folded into
 /// speculation first with a key still unanswered.
 fn answer_batch(m: &mut Model, batch: Vec<UiEvent>) {
-    let stamp = SpecStamp::new(Duration::ZERO);
+    answer_batch_at(m, batch, SpecStamp::new(Duration::ZERO));
+}
+
+/// [`answer_batch`] arriving at `stamp`, with the key it answers sent then.
+fn answer_batch_at(m: &mut Model, batch: Vec<UiEvent>, stamp: SpecStamp) {
     m.engine.key_unanswered = Some(stamp);
     let _ = crate::native::speculate::fold_redraw(m, &batch, stamp);
     let _ = update(m, Msg::Redraw(batch));
@@ -6642,6 +6646,134 @@ fn gives_the_tree_its_key(effects: &[Effect]) -> bool {
         )
 }
 
+/// Types `keys`, each key nvim is sent folded in at the start of the
+/// session's clock the way the loop folds a call it sends.
+fn sent_at_zero(m: &mut Model, keys: &[&str]) -> Vec<Effect> {
+    let mut all = Vec::new();
+    for k in keys {
+        let effects = update(m, key(k));
+        for effect in &effects {
+            if let Effect::Rpc(call) = effect {
+                crate::native::speculate::fold_engine_call(m, call, SpecStamp::new(Duration::ZERO));
+            }
+        }
+        all.extend(effects);
+    }
+    all
+}
+
+/// A search shown and closed while the previous `:` line is still to be
+/// hidden spends none of the count, so the next line stays nvim's.
+#[test]
+fn a_search_closing_ahead_of_the_previous_line_keeps_the_next_line_nvims() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let _ = typed(&mut m, &[":", "w", "<CR>", ":"]);
+    let search = UiEvent::CmdlineShow {
+        content: vec![(0, "foo".into())],
+        pos: 3,
+        firstc: "/".into(),
+        prompt: String::new(),
+        indent: 0,
+        level: 1,
+    };
+    answer_batch(&mut m, vec![search, UiEvent::Flush]);
+    answer_batch(
+        &mut m,
+        vec![
+            UiEvent::CmdlineHide { level: 1 },
+            normal_mode_change(),
+            UiEvent::Flush,
+        ],
+    );
+    answer_batch(&mut m, vec![colon_line(""), UiEvent::Flush]);
+    answer_batch(&mut m, vec![colon_line("w"), UiEvent::Flush]);
+    let mut closed = line_closed(&m);
+    closed.insert(2, normal_mode_change());
+    answer_batch(&mut m, closed);
+    let effects = typed(&mut m, &["q"]);
+    assert_eq!(meta_inputs(&effects), ["q"], "{effects:?}");
+}
+
+/// The first of two submitted lines reporting normal mode leaves the
+/// second's hide counted, so a line typed after both stays nvim's.
+#[test]
+fn a_mode_reported_ahead_of_a_counted_hide_keeps_the_next_line_nvims() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let _ = sent_at_zero(&mut m, &[":", "w", "<CR>", ":", "w", "<CR>"]);
+    let submitted = |m: &mut Model| {
+        answer_batch(m, vec![colon_line(""), UiEvent::Flush]);
+        answer_batch(m, vec![colon_line("w"), UiEvent::Flush]);
+        let mut closed = line_closed(m);
+        closed.insert(2, normal_mode_change());
+        answer_batch(m, closed);
+    };
+    submitted(&mut m);
+    let _ = sent_at_zero(&mut m, &[":"]);
+    submitted(&mut m);
+    let effects = typed(&mut m, &["q"]);
+    assert_eq!(meta_inputs(&effects), ["q"], "{effects:?}");
+}
+
+/// `<Del>` on an empty line leaves it the way a backspace does, and the
+/// tree has its keys back once nvim has hidden the line.
+#[test]
+fn a_delete_on_an_empty_line_gives_the_keys_back_to_the_tree() {
+    for del in ["<Del>", "<kDel>"] {
+        let mut m = focused_windowed_tree();
+        m.engine.mode.current = "normal".to_string();
+        let _ = typed(&mut m, &[":", del]);
+        answer_batch(
+            &mut m,
+            vec![
+                UiEvent::CmdlineHide { level: 1 },
+                normal_mode_change(),
+                UiEvent::Flush,
+            ],
+        );
+        let effects = typed(&mut m, &["a"]);
+        assert!(gives_the_tree_its_key(&effects), "{del}: {effects:?}");
+    }
+}
+
+/// `<CR>` in the expression line a `<C-r>` `=` opens returns to the line
+/// beneath it, which stays nvim's. That second-level line closing while
+/// the line before is still to be hidden spends none of the count.
+#[test]
+fn an_expression_line_ending_returns_to_the_line_beneath() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let line = [":", "<C-r>", "=", "1", "<CR>", "x"];
+    let effects = typed(&mut m, &line);
+    assert_eq!(meta_inputs(&effects), line, "{effects:?}");
+
+    let _ = typed(&mut m, &["<CR>", ":", "1"]);
+    let expression = UiEvent::CmdlineShow {
+        content: vec![(0, "1".into())],
+        pos: 1,
+        firstc: "=".into(),
+        prompt: String::new(),
+        indent: 0,
+        level: 2,
+    };
+    answer_batch(&mut m, vec![expression, colon_line(""), UiEvent::Flush]);
+    answer_batch(
+        &mut m,
+        vec![
+            UiEvent::CmdlineHide { level: 2 },
+            colon_line("1"),
+            UiEvent::Flush,
+        ],
+    );
+    answer_batch(&mut m, vec![colon_line("1x"), UiEvent::Flush]);
+    let mut closed = line_closed(&m);
+    closed.insert(2, normal_mode_change());
+    answer_batch(&mut m, closed);
+    let effects = typed(&mut m, &["q"]);
+    assert_eq!(meta_inputs(&effects), ["q"], "{effects:?}");
+}
+
 /// The line before, shown and closed after the next line went out holding
 /// the same text, leaves the next line nvim's.
 #[test]
@@ -6685,8 +6817,9 @@ fn a_line_left_unshown_keeps_the_next_line_nvims() {
 fn a_line_end_nvim_never_hid_is_forgotten_at_the_next_mode() {
     let mut m = focused_windowed_tree();
     m.engine.mode.current = "normal".to_string();
-    let _ = typed(&mut m, &[":", "<Esc>"]);
-    answer_batch(&mut m, vec![normal_mode_change(), UiEvent::Flush]);
+    let _ = sent_at_zero(&mut m, &[":", "<Esc>"]);
+    let aged = SpecStamp::new(crate::native::speculate::cmdline_backstop(&m));
+    answer_batch_at(&mut m, vec![normal_mode_change(), UiEvent::Flush], aged);
     let _ = typed(&mut m, &[":", "<C-s>"]);
     answer_batch(&mut m, vec![colon_line(""), UiEvent::Flush]);
     let closed = line_closed(&m);

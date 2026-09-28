@@ -875,6 +875,7 @@ pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
             // gate shut for the rest of the session
             model.engine.literal_pending = CMDLINE_LITERAL_KEYS.contains(&notation.as_str());
             fold_keystroke(model, notation, now);
+            model.submit_hold.note_key_sent(now);
         }
         RpcCall::Paste { .. } | RpcCall::InputMouse { .. } => {
             // a click reaches nvim as the key a pending `f` or `m` reads for
@@ -952,6 +953,7 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
     let mut settled = false;
     let mut shows_cmdline = false;
     let mut answers_input = false;
+    let mut reports_mode = false;
     for ev in redraw {
         match ev {
             UiEvent::GridCursorGoto { grid, .. } => {
@@ -964,6 +966,7 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
             UiEvent::ModeChange { .. } => {
                 settled = true;
                 answers_input = true;
+                reports_mode = true;
             }
             UiEvent::CmdlineShow { .. } => {
                 shows_cmdline = true;
@@ -998,6 +1001,10 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
     // command waiting for one of its own
     if settled {
         model.engine.literal_pending = false;
+    }
+    if reports_mode {
+        let backstop = cmdline_backstop(model);
+        model.submit_hold.age_line_ends(now, backstop);
     }
     if moved_cursor_there && !shows_cmdline {
         withdraw_cmdline_speculation(model);

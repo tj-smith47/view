@@ -10,8 +10,9 @@
 use std::time::Duration;
 
 use crate::events::UiEvent;
-use crate::model::Model;
+use crate::model::{CmdlineState, Model};
 use crate::msg::{Effect, Msg};
+use crate::native::speculate::SpecStamp;
 
 /// The longest a tracked command line grows before it is given up on: a
 /// `:` typed in insert mode is text, and the tracker would otherwise keep
@@ -76,8 +77,34 @@ enum Typed {
     /// A key since the `:` edited the line in a way view does not model
     /// (a completion, a history recall). The engine's own `cmdline_show`
     /// is read at the `<CR>` in its place.
-    Unknown,
+    Unknown {
+        /// Whether an expression line opened at the second level, with this
+        /// line waiting beneath it.
+        nested: bool,
+        /// The key the next one is read as the argument of.
+        argument: Option<Argument>,
+    },
 }
+
+/// A command-line key that reads the key after it as its argument, so an
+/// `<Esc>` or a `<CR>` there ends no line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Argument {
+    /// `<C-r>`: the register to insert, where `=` opens an expression line.
+    Register,
+    /// `<C-\>`: `e` opens an expression line, and `<C-n>` or `<C-g>` leave.
+    Backslash,
+    /// `<C-v>` and `<C-q>`: one key inserted as it is.
+    Literal,
+    /// `<C-k>`: the two keys of a digraph, abandoned by an `<Esc>` first.
+    Digraph,
+}
+
+/// The keys that leave a command line.
+const LEAVES_LINE: [&str; 3] = ["<Esc>", "<C-c>", "<C-["];
+
+/// The keys that submit a command line.
+const SUBMITS_LINE: [&str; 5] = ["<CR>", "<NL>", "<C-m>", "<C-j>", "<kEnter>"];
 
 /// The command line being typed and the input held behind a submitted
 /// `:View` or a key that invokes view.
@@ -88,6 +115,11 @@ pub struct SubmitHold {
     opened: bool,
     /// Lines the tracker has seen end that nvim has not yet hidden.
     unhidden: u32,
+    /// Whether a line end was folded whose key has not yet been sent.
+    end_unsent: bool,
+    /// When the newest line end went to nvim, while it is younger than
+    /// the command-line backstop.
+    ended_at: Option<SpecStamp>,
     held: Option<(Armed, Vec<Msg>)>,
     generation: u64,
     /// Every key sequence nvim runs a view invocation on.
@@ -185,10 +217,33 @@ impl SubmitHold {
     pub fn note_mode_reported(&mut self, mode: &str) {
         self.mode_unsure = false;
         // a line end counted for a `:` nvim read as text never gets its
-        // hide, and a mode outside the command line with no line tracked
-        // says no hide is still to come
-        if self.typed.is_none() && !crate::native::speculate::is_cmdline_mode(mode) {
+        // hide. A mode outside the command line with no line tracked says
+        // no hide is still to come only once the newest end is older than
+        // the backstop, since a report sent before nvim read that end
+        // says nothing of it
+        if self.typed.is_none()
+            && self.ended_at.is_none()
+            && !crate::native::speculate::is_cmdline_mode(mode)
+        {
             self.unhidden = 0;
+        }
+    }
+
+    /// Stamps a line end folded from the key now going to nvim at `now`.
+    pub(crate) fn note_key_sent(&mut self, now: SpecStamp) {
+        if std::mem::take(&mut self.end_unsent) {
+            self.ended_at = Some(now);
+        }
+    }
+
+    /// Lets the newest line end go once it is older than `backstop` at
+    /// `now`, after which a mode report may close the ends still counted.
+    pub(crate) fn age_line_ends(&mut self, now: SpecStamp, backstop: Duration) {
+        if self
+            .ended_at
+            .is_some_and(|sent| now.age_since(sent) >= backstop)
+        {
+            self.ended_at = None;
         }
     }
 
@@ -358,21 +413,27 @@ impl SubmitHold {
     /// still unhidden, every show is that older line's. Otherwise a first
     /// level `:` show holding a prefix of the keys typed is the tracked
     /// line open.
-    pub(crate) fn note_line_shown(&mut self, line: &crate::model::CmdlineState) {
+    pub(crate) fn note_line_shown(&mut self, line: &CmdlineState) {
         if self.unhidden > 0 || line.level != 1 || line.firstc != ":" {
             return;
         }
         let shown: String = line.content.iter().map(|(_, s)| s.as_str()).collect();
         self.opened |= match &self.typed {
             Some(Typed::Known(text)) => text.starts_with(&shown),
-            Some(Typed::Unknown) => true,
+            Some(_) => true,
             None => false,
         };
     }
 
-    /// Reads nvim closing the command line at `level`.
-    pub(crate) fn note_line_hidden(&mut self, level: u64) {
-        if level == 1 {
+    /// Reads nvim closing the command line at `level`, where `line` is the
+    /// one it last showed. Only a `:` line, or one hidden before it was
+    /// shown, spends a counted end: a search or a prompt ends no line a
+    /// `:` of view's opened. A `q:` window and a mapping's own `:` line
+    /// read the same as a typed one and spend it all the same.
+    pub(crate) fn note_line_hidden(&mut self, level: u64, line: Option<&CmdlineState>) {
+        let typed_line =
+            line.is_none_or(|line| line.level == 1 && line.firstc == ":" && line.prompt.is_empty());
+        if level == 1 && typed_line {
             self.unhidden = self.unhidden.saturating_sub(1);
         }
     }
@@ -386,6 +447,7 @@ impl SubmitHold {
     /// `next` in its place.
     fn end_line(&mut self, next: Option<Typed>) -> Option<Typed> {
         self.unhidden = self.unhidden.saturating_add(1);
+        self.end_unsent = true;
         let ended = self.typed.take();
         self.set_typed(next);
         ended
@@ -539,10 +601,18 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
     // from any mode, and any other one leaves the line being typed
     if let Some(key) = crate::native::keys::escaped_key(notation) {
         let next = (key == ":").then(|| Typed::Known(String::new()));
-        if hold.typed.is_some() {
-            hold.end_line(next);
-        } else {
-            hold.set_typed(next);
+        match &mut hold.typed {
+            // the `<Esc>` is an argument or leaves the expression line, and
+            // the key is typed into the line it returns to
+            Some(Typed::Unknown { nested, argument }) if argument.is_some() || *nested => {
+                if argument.take().is_none() {
+                    *nested = false;
+                }
+            }
+            Some(_) => {
+                hold.end_line(next);
+            }
+            None => hold.set_typed(next),
         }
         return Vec::new();
     }
@@ -554,17 +624,56 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
         }
         return Vec::new();
     };
+    if let Typed::Unknown { nested, argument } = typed {
+        if let Some(of) = argument.take() {
+            match (of, notation) {
+                // these three change how the register is inserted and wait
+                // for its name
+                (Argument::Register, "<C-r>" | "<C-o>" | "<C-p>") => {
+                    *argument = Some(Argument::Register);
+                }
+                (Argument::Register, "=") | (Argument::Backslash, "e") => *nested = true,
+                (Argument::Backslash, "<C-n>" | "<C-g>") => {
+                    if !std::mem::take(nested) {
+                        hold.end_line(None);
+                    }
+                }
+                (Argument::Digraph, "<Esc>") => {}
+                (Argument::Digraph, _) => *argument = Some(Argument::Literal),
+                _ => {}
+            }
+            return Vec::new();
+        }
+        if *nested {
+            // ending the expression line returns to the line beneath it
+            if LEAVES_LINE.contains(&notation) || SUBMITS_LINE.contains(&notation) {
+                *nested = false;
+            } else {
+                *argument = argument_of(notation);
+            }
+            return Vec::new();
+        }
+    }
+    if let Some(of) = argument_of(notation) {
+        *typed = Typed::Unknown {
+            nested: false,
+            argument: Some(of),
+        };
+        return Vec::new();
+    }
     match notation {
-        "<Esc>" | "<C-c>" | "<C-[>" => {
+        _ if LEAVES_LINE.contains(&notation) => {
             hold.end_line(None);
         }
-        "<CR>" | "<NL>" | "<C-m>" | "<C-j>" | "<kEnter>" => {
+        _ if SUBMITS_LINE.contains(&notation) => {
             let typed = hold.end_line(None);
             if submits_view(model, typed.as_ref()) {
                 return arm(model, Armed::Command);
             }
         }
-        "<BS>" | "<C-h>" => {
+        // `<Del>` at the end of the line, where the modelled cursor always
+        // stands, deletes the character before it as a backspace does
+        "<BS>" | "<C-h>" | "<Del>" | "<kDel>" => {
             if let Typed::Known(text) = typed {
                 // a backspace on an empty line leaves the command line
                 if text.pop().is_none() {
@@ -576,12 +685,28 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
             if let Typed::Known(text) = typed {
                 match typed_char(notation) {
                     Some(c) if text.len() < TRACKED_MAX => text.push(c),
-                    _ => *typed = Typed::Unknown,
+                    _ => {
+                        *typed = Typed::Unknown {
+                            nested: false,
+                            argument: None,
+                        }
+                    }
                 }
             }
         }
     }
     Vec::new()
+}
+
+/// The argument `notation` makes the next command-line key.
+fn argument_of(notation: &str) -> Option<Argument> {
+    match notation {
+        "<C-r>" => Some(Argument::Register),
+        "<C-\\>" => Some(Argument::Backslash),
+        "<C-v>" | "<C-q>" => Some(Argument::Literal),
+        "<C-k>" => Some(Argument::Digraph),
+        _ => None,
+    }
 }
 
 /// Whether a `:` reaching the engine now can open a command line: the
@@ -1035,5 +1160,44 @@ mod tests {
         assert_eq!(typed_char("a"), Some('a'));
         assert_eq!(typed_char("<Space>"), Some(' '));
         assert_eq!(typed_char("<Tab>"), None);
+    }
+
+    /// A key read as the argument of the one before it ends no line, an
+    /// expression line ends back into the line beneath it, and `<C-\>`
+    /// `<C-n>` leaves the line. Each row is what nvim 0.12's ext_cmdline
+    /// reports for those keys: whether the `:` line is still open, and how
+    /// many first-level ends went out.
+    #[test]
+    fn keys_taking_an_argument_end_the_line_only_where_nvim_does() {
+        let rows: [(&[&str], bool, u32); 17] = [
+            (&["<C-r>", "<CR>"], true, 0),
+            (&["<C-r>", "<Esc>"], true, 0),
+            (&["<C-r>", "<C-o>", "<CR>"], true, 0),
+            (&["<C-v>", "<Esc>"], true, 0),
+            (&["<C-q>", "<CR>"], true, 0),
+            (&["<C-k>", "<CR>"], true, 0),
+            (&["<C-k>", "a", "<Esc>"], true, 0),
+            (&["<C-k>", "<Esc>", "<CR>"], false, 1),
+            (&["<C-\\>", "<C-n>"], false, 1),
+            (&["<C-\\>", "<C-g>"], false, 1),
+            (&["<C-\\>", "x", "<CR>"], false, 1),
+            (&["<C-\\>", "e", "1", "<CR>"], true, 0),
+            (&["<C-r>", "=", "<C-r>", "<CR>"], true, 0),
+            (&["<C-r>", "=", "<C-\\>", "<C-n>"], true, 0),
+            (&["<C-r>", "=", "1", "<Esc>"], true, 0),
+            (&["<C-r>", "=", "<M-x>"], true, 0),
+            (&["<C-r>", "=", "1", "<CR>", "<CR>"], false, 1),
+        ];
+        for (keys, open, ends) in rows {
+            let mut model = normal_mode();
+            let _ = type_keys(&mut model, &[":"]);
+            let _ = type_keys(&mut model, keys);
+            let hold = &model.submit_hold;
+            assert_eq!(
+                (hold.types_a_line(), hold.unhidden),
+                (open, ends),
+                "{keys:?}"
+            );
+        }
     }
 }
