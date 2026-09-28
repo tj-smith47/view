@@ -921,6 +921,22 @@ pub(crate) mod tests {
                     column,
                     "{label}: the column {column:?} sits in the kept tile's text {text:?}"
                 );
+                assert_eq!(
+                    column.0, text.0,
+                    "{label}: anchored at the kept text's top row"
+                );
+                if right {
+                    assert_eq!(
+                        column.1 + column.2,
+                        text.1 + text.2,
+                        "{label}: anchored top-right, at the kept text's right edge"
+                    );
+                } else {
+                    assert_eq!(
+                        column.1, text.1,
+                        "{label}: anchored top-left, at the kept text's left edge"
+                    );
+                }
                 assert!(
                     !(column.1..column.1 + column.2).contains(&(join - offset)),
                     "{label}: the column {column:?} is off the join column {join}"

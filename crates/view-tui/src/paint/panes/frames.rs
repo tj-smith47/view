@@ -586,11 +586,7 @@ fn joins(model: &Model, screen: Rect) -> Vec<Join> {
             let right = joined.anchor == Anchor::Right;
             let rect = joined.rect;
             let first = rect.col;
-            let last = rect
-                .col
-                .saturating_add(rect.width)
-                .min(screen.x.saturating_add(screen.width))
-                .checked_sub(1)?;
+            let last = joined.last;
             let bottom = rect
                 .row
                 .saturating_add(rect.height)

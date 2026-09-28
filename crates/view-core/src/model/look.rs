@@ -29,6 +29,9 @@ pub struct Joined {
     /// The terminal column the float shares with the lattice: its first
     /// column docked right, its last on screen docked left.
     pub col: u16,
+    /// The float's last column on screen, clamped to the terminal width
+    /// the same way `col` is for a left dock.
+    pub last: u16,
     /// The cells the float's frame covers.
     pub rect: OverlayRect,
 }
@@ -355,7 +358,12 @@ impl super::Model {
         } else {
             last
         };
-        (col <= last).then_some(Joined { anchor, col, rect })
+        (col <= last).then_some(Joined {
+            anchor,
+            col,
+            last,
+            rect,
+        })
     }
 
     /// `pane.filled` closed short of every docked gutter, and whether any
@@ -622,6 +630,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A float box reaching past the screen edge cannot put the tiles'
+    /// join column past the last column on screen: docked left, the join
+    /// column clamps to the terminal's own last column; docked right, a
+    /// box starting past that column joins nothing.
+    #[test]
+    fn joined_at_clamps_a_float_reaching_past_the_screen_edge() {
+        use crate::native::geometry::{Anchor, OverlayBox};
+        let mut model =
+            crate::model::Model::with_term_size(100, 30).with_look(Look::new(Panes::Tiles, false));
+        model.push_overlay(
+            OverlayBox::new(30, 100).with_anchor(Anchor::Left),
+            super::super::OverlayKind::Tree(crate::native::tree::TreeState::open(".".into())),
+        );
+        let tree = model.overlays().first().cloned().expect("the tree is open");
+        let past_right = OverlayRect {
+            row: 1,
+            col: 0,
+            width: model.term_width + 5,
+            height: 10,
+        };
+        let joined = model
+            .joined_at(&tree, past_right)
+            .expect("still docked, clamped on screen");
+        assert_eq!(joined.col, model.term_width - 1);
+
+        model.push_overlay(
+            OverlayBox::new(30, 100).with_anchor(Anchor::Right),
+            super::super::OverlayKind::Ai,
+        );
+        let agent = model.overlays().last().cloned().expect("the agent is open");
+        for col in [model.term_width, model.term_width + 3] {
+            let off_screen = OverlayRect {
+                row: 1,
+                col,
+                width: 10,
+                height: 10,
+            };
+            assert!(
+                model.joined_at(&agent, off_screen).is_none(),
+                "a box starting at {col} is entirely off screen"
+            );
+        }
+        let on_screen = OverlayRect {
+            row: 1,
+            col: model.term_width - 2,
+            width: 10,
+            height: 10,
+        };
+        let joined = model
+            .joined_at(&agent, on_screen)
+            .expect("docked right, first column on screen");
+        assert_eq!(joined.col, model.term_width - 2);
     }
 
     /// A gapped tile under the docked agent panel, at a wide and a small
