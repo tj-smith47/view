@@ -4042,6 +4042,75 @@ fn the_caret_stays_off_the_lattice_column_a_gapless_docked_float_joins() {
     }
 }
 
+/// The agent panel painted before its agent has answered is the panel the
+/// agent's first event leaves: its bottom border drawn, and the tile beside
+/// it closed on the same column from the tile's top row to its bottom one.
+#[test]
+fn the_agent_panel_paints_its_whole_frame_before_the_agent_answers() {
+    use view_core::native::geometry::{Anchor, NativeSurface, SurfacePlacement};
+    let painted = |tiles: &Tiles, gaps: bool| {
+        let open = tiles
+            .model
+            .overlays()
+            .iter()
+            .find(|open| matches!(open.kind, view_core::model::OverlayKind::Ai))
+            .expect("the panel is open");
+        let rect = tiles.model.overlay_rect(open);
+        let buf = tiled_frame(&tiles.model);
+        let bottom: String = (rect.col..rect.col + rect.width)
+            .map(|col| buf[(col, rect.row + rect.height - 1)].symbol().to_string())
+            .collect();
+        let side = if gaps { rect.col - 2 } else { rect.col };
+        let (origin_row, _) = view_surface::grid_origin(&tiles.model);
+        let (row, _, _, height) = tiles.slots[1];
+        let column: Vec<String> = (origin_row + row..origin_row + row + height)
+            .map(|r| buf[(side, r)].symbol().to_string())
+            .collect();
+        let cursor = view_surface::render(&tiles.model)
+            .cursor
+            .expect("the panel places a caret");
+        (rect, bottom, column, (cursor.col, cursor.row))
+    };
+    for gaps in [true, false] {
+        let mut tiles = tiled_at(gaps, (220, 50), 0);
+        open_surface(
+            &mut tiles.model,
+            NativeSurface::Agent,
+            SurfacePlacement::Overlay,
+            Anchor::Right,
+            None,
+        );
+        let opening = painted(&tiles, gaps);
+        let _ = update(
+            &mut tiles.model,
+            Msg::Ai(view_core::native::ai_event::AiEvent::SessionReady {
+                session_id: "s".to_string(),
+                agent: Some("view-ai-stub-agent".to_string()),
+            }),
+        );
+        let ready = painted(&tiles, gaps);
+        for (state, (rect, bottom, column, caret)) in [("opening", &opening), ("ready", &ready)] {
+            let label = format!("gaps={gaps} {state}");
+            let run = usize::from(rect.width) - 2;
+            let ruled = bottom.chars().skip(1).take(run).all(|c| c == '─');
+            assert!(
+                ruled && bottom.ends_with('╯'),
+                "{label}: the panel's bottom border is drawn: {bottom:?}"
+            );
+            assert!(
+                column.iter().all(|glyph| glyph != " "),
+                "{label}: the tile is closed on one column top to bottom: {column:?}"
+            );
+            assert_eq!(
+                caret.1,
+                rect.row + rect.height - 2,
+                "{label}: the caret sits on the composer row"
+            );
+        }
+        assert_eq!(opening, ready, "gaps={gaps}: the frame changed once ready");
+    }
+}
+
 /// The agent panel floating at the right edge over the two-tile scene, the
 /// placement a config that names none opens it at.
 fn agent_overlay_beside_the_tiles(gaps: bool) -> Tiles {

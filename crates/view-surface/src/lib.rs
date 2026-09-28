@@ -3721,6 +3721,63 @@ mod tests {
         );
     }
 
+    /// The agent panel painted between the open and the agent's first
+    /// event is the panel that event leaves: the same rect, and the caret
+    /// on the composer row, the last one inside the bottom border.
+    #[test]
+    fn the_agent_panel_opens_at_the_rect_and_caret_its_ready_session_keeps() {
+        use view_core::model::{Look, Panes};
+        use view_core::native::ai_event::AiEvent;
+
+        let placed = |model: &Model| {
+            let open = model
+                .overlays()
+                .iter()
+                .find(|open| matches!(open.kind, OverlayKind::Ai))
+                .expect("the panel is open");
+            let rect = model.overlay_rect(open);
+            let cursor = render(model).cursor.expect("the panel places a caret");
+            (rect, (cursor.col, cursor.row))
+        };
+        for (panes, gaps) in [
+            (Panes::Tiles, true),
+            (Panes::Tiles, false),
+            (Panes::Nvim, true),
+        ] {
+            let mut model = model_with_grid(220, 50);
+            model.term_width = 220;
+            model.term_height = 50;
+            model.look = Look::new(panes, gaps);
+            model.ai_trusted = true;
+            let _ = update(
+                &mut model,
+                Msg::FeatureInvoke {
+                    feature: "ai".to_string(),
+                    verb: "open".to_string(),
+                },
+            );
+            let opening = placed(&model);
+            let _ = update(
+                &mut model,
+                Msg::Ai(AiEvent::SessionReady {
+                    session_id: "s".to_string(),
+                    agent: Some("view-ai-stub-agent".to_string()),
+                }),
+            );
+            let ready = placed(&model);
+            let label = format!("{panes:?} gaps={gaps}");
+            assert_eq!(opening.0, ready.0, "{label}: the rect moved once ready");
+            for (state, (rect, (_, row))) in [("opening", opening), ("ready", ready)] {
+                assert_eq!(
+                    row,
+                    rect.row + rect.height - 2,
+                    "{label} {state}: the caret sits on the composer row"
+                );
+            }
+            assert_eq!(opening.1, ready.1, "{label}: the caret moved once ready");
+        }
+    }
+
     /// A busy modal over a confirm prompt takes no keys either, so the
     /// prompt underneath it is still what the answer reaches -- and the
     /// caret must not follow the stack's top away from it.
