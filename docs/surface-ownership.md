@@ -32,7 +32,8 @@ The table below is generated from `SURFACES` in
 - **proving scenario / state** is every compat state whose probes assert
   that surface's `ext_*` attach. The attach is what decides whether view
   draws the surface. `-- none --` is a coverage gap printed where you can
-  see it.
+  see it. A state may also run under the tiled layout, and that run keeps
+  the state's name.
 
 ## The matrix
 
