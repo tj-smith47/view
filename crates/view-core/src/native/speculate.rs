@@ -795,7 +795,7 @@ fn answered_by(redraw: &[UiEvent], cell: &PredictedCell) -> bool {
         | UiEvent::ModeChange { .. }
         | UiEvent::CmdlineShow { .. }
         | UiEvent::CmdlinePos { .. }
-        | UiEvent::CmdlineHide
+        | UiEvent::CmdlineHide { .. }
         | UiEvent::MsgShow { .. }
         | UiEvent::MsgClear
         | UiEvent::MsgShowmode { .. }

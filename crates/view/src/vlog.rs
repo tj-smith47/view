@@ -463,7 +463,7 @@ fn event_kind(ev: &view_core::events::UiEvent) -> &'static str {
         UiEvent::ModeChange { .. } => "mode_change",
         UiEvent::CmdlineShow { .. } => "cmdline_show",
         UiEvent::CmdlinePos { .. } => "cmdline_pos",
-        UiEvent::CmdlineHide => "cmdline_hide",
+        UiEvent::CmdlineHide { .. } => "cmdline_hide",
         UiEvent::MsgShow { .. } => "msg_show",
         UiEvent::MsgClear => "msg_clear",
         UiEvent::MsgShowmode { .. } => "msg_showmode",
@@ -2149,7 +2149,7 @@ mod tests {
                 indent: 0,
                 level: 1,
             },
-            UiEvent::CmdlineHide,
+            UiEvent::CmdlineHide { level: 1 },
         ]);
         felt.note_dispatched(Dispatch::of(&batch), &model);
 
@@ -2175,7 +2175,7 @@ mod tests {
         let (mut felt, lines) = FeltLog::recording();
         felt.note_dispatched(Dispatch::Input, &model);
         model.engine.cmdline_speculated = None;
-        let hide_only = Msg::Redraw(vec![UiEvent::CmdlineHide]);
+        let hide_only = Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }]);
         felt.note_dispatched(Dispatch::of(&hide_only), &model);
         let written = lines.lock().unwrap().clone();
         assert!(
@@ -2777,7 +2777,7 @@ mod tests {
         dispatch(
             &mut felt,
             &mut model,
-            Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+            Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }, UiEvent::Flush]),
         );
         felt.note_pass(&model, true);
         assert!(

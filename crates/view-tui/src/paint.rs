@@ -2408,7 +2408,10 @@ mod tests {
             "cmdline overlay must paint over the grid's bottom row while shown"
         );
 
-        apply(&mut model, view_core::events::UiEvent::CmdlineHide);
+        apply(
+            &mut model,
+            view_core::events::UiEvent::CmdlineHide { level: 1 },
+        );
         let surface = view_surface::render(&model);
         terminal.draw(|f| composite(&model, &surface, f)).unwrap();
         let buf = terminal.backend().buffer().clone();

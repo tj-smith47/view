@@ -196,8 +196,9 @@ pub enum UiEvent {
     },
     /// The command line cursor moved to `pos` without its content changing.
     CmdlinePos { pos: u64, level: u64 },
-    /// The command line closed.
-    CmdlineHide,
+    /// The command line at `level` closed. Every level-1 line that ends
+    /// sends exactly one, even one nvim never showed.
+    CmdlineHide { level: u64 },
     /// A message was shown. `replace_last` means it supersedes the most
     /// recently shown message instead of appending a new one (nvim's
     /// progress-indicator convention, e.g. successive search-match counts).

@@ -260,9 +260,9 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             {
                 crate::native::speculate::withdraw_cmdline_speculation(model);
             }
+            model.submit_hold.note_mode_reported(&mode);
             model.engine.mode.current = mode;
             model.engine.mode.current_idx = mode_idx;
-            model.submit_hold.note_mode_reported();
             Vec::new()
         }
         UiEvent::CmdlineShow {
@@ -318,7 +318,8 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             }
             Vec::new()
         }
-        UiEvent::CmdlineHide => {
+        UiEvent::CmdlineHide { level } => {
+            model.submit_hold.note_line_hidden(level);
             model.engine.cmdline = None;
             crate::native::speculate::withdraw_cmdline_speculation(model);
             // the answer landing, so the box goes with it: nvim sends no

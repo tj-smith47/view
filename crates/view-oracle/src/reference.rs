@@ -752,7 +752,7 @@ impl ReferenceSession {
             | UiEvent::ModeInfoSet { .. }
             | UiEvent::CmdlineShow { .. }
             | UiEvent::CmdlinePos { .. }
-            | UiEvent::CmdlineHide
+            | UiEvent::CmdlineHide { .. }
             | UiEvent::MsgShow { .. }
             | UiEvent::MsgClear
             | UiEvent::MsgShowmode { .. }

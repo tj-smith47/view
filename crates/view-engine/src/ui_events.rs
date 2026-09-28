@@ -65,9 +65,11 @@ fn decode_event(name: &str, tuple: &Value) -> UiEvent {
         "mode_change" => decode_mode_change(args).unwrap_or_else(unknown),
         "cmdline_show" => decode_cmdline_show(args).unwrap_or_else(unknown),
         "cmdline_pos" => decode_cmdline_pos(args).unwrap_or_else(unknown),
-        // level/abort carry no state this decoder models: any arity hides
-        // the cmdline, same as `flush`/`msg_clear`/`popupmenu_hide` below
-        "cmdline_hide" => UiEvent::CmdlineHide,
+        // any arity hides the cmdline: an older nvim sends no level, and a
+        // hide dropped as unknown would leave the line drawn
+        "cmdline_hide" => UiEvent::CmdlineHide {
+            level: args.first().and_then(as_u64).unwrap_or(1),
+        },
         "msg_show" => decode_msg_show(args).unwrap_or_else(unknown),
         "msg_clear" => UiEvent::MsgClear,
         "msg_showmode" => decode_msg_showmode(args).unwrap_or_else(unknown),
@@ -1189,9 +1191,20 @@ mod tests {
                     level: 1,
                 },
                 UiEvent::CmdlinePos { pos: 0, level: 1 },
-                UiEvent::CmdlineHide,
+                UiEvent::CmdlineHide { level: 1 },
             ]
         );
+    }
+
+    #[test]
+    fn decodes_cmdline_hide_level_and_its_absence() {
+        let hide =
+            |args: Vec<Value>| decode_redraw(&[arr(vec![Value::from("cmdline_hide"), arr(args)])]);
+        assert_eq!(
+            hide(vec![Value::from(2), Value::from(true)]),
+            vec![UiEvent::CmdlineHide { level: 2 }]
+        );
+        assert_eq!(hide(vec![]), vec![UiEvent::CmdlineHide { level: 1 }]);
     }
 
     #[test]

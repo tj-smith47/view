@@ -1668,7 +1668,7 @@ fn key_in_native_focus_is_consumed_and_esc_forwards_without_closing() {
     // overlay's lazy-dismiss timing then closes it on the next key,
     // exactly like the underlying toast (see the `Msg::Key` handler's
     // own doc comment)
-    let _ = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide]));
+    let _ = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }]));
     let effects = update(
         &mut m,
         Msg::Key(Key {
@@ -2912,7 +2912,7 @@ fn cmdline_show_pos_hide_set_and_clear_state() {
     );
     assert_eq!(m.engine.cmdline.as_ref().unwrap().pos, 2);
 
-    let _ = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide]));
+    let _ = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }]));
     assert!(m.engine.cmdline.is_none());
 }
 
@@ -2956,7 +2956,7 @@ fn a_confirm_questions_toast_lives_exactly_as_long_as_the_prompt_does() {
 
     let _ = update(
         &mut m,
-        Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+        Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }, UiEvent::Flush]),
     );
     let _ = update(&mut m, Msg::Redraw(vec![prompt(), UiEvent::Flush]));
     let _ = update(
@@ -2969,7 +2969,7 @@ fn a_confirm_questions_toast_lives_exactly_as_long_as_the_prompt_does() {
 
     let _ = update(
         &mut m,
-        Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+        Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }, UiEvent::Flush]),
     );
     let _ = update(
         &mut m,
@@ -3046,7 +3046,7 @@ fn a_cancelled_prompt_retires_on_the_cmdline_hide_that_key_causes() {
     );
     let _ = update(
         &mut m,
-        Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+        Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }, UiEvent::Flush]),
     );
     assert!(
         m.overlays().is_empty(),
@@ -3126,7 +3126,7 @@ fn a_cmdline_hide_before_any_key_of_ours_leaves_the_prompt_for_the_next_key() {
 
     let _ = update(
         &mut m,
-        Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+        Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }, UiEvent::Flush]),
     );
     assert!(
         matches!(
@@ -3193,7 +3193,7 @@ fn a_second_distinct_confirm_replaces_the_first_with_no_intervening_keystroke() 
     let _ = update(
         &mut m,
         Msg::Redraw(vec![
-            UiEvent::CmdlineHide,
+            UiEvent::CmdlineHide { level: 1 },
             msg_show("Discard changes?"),
             cmdline_show("[D]iscard, (C)ancel: "),
             UiEvent::Flush,
@@ -3266,7 +3266,7 @@ fn a_confirms_box_grows_when_its_choices_arrive_wider_than_its_question() {
     let _ = update(
         &mut m,
         Msg::Redraw(vec![
-            UiEvent::CmdlineHide,
+            UiEvent::CmdlineHide { level: 1 },
             msg_show("Save?"),
             cmdline_show(&format!("[Y]{long}, (N)o: ")),
             UiEvent::Flush,
@@ -6504,7 +6504,7 @@ fn colon_line(text: &str) -> UiEvent {
 /// the cursor's line redrawn.
 fn line_closed(m: &Model) -> Vec<UiEvent> {
     vec![
-        UiEvent::CmdlineHide,
+        UiEvent::CmdlineHide { level: 1 },
         UiEvent::GridLine {
             grid: m.engine.grids().cursor_local().0 .0,
             row: 0,
@@ -6563,6 +6563,103 @@ fn the_previous_line_closing_keeps_the_next_line_nvims() {
     answer_batch(&mut m, closed);
     let effects = typed(&mut m, &["V"]);
     assert_eq!(meta_inputs(&effects), ["V"], "{effects:?}");
+}
+
+fn normal_mode_change() -> UiEvent {
+    UiEvent::ModeChange {
+        mode: "normal".into(),
+        mode_idx: 0,
+    }
+}
+
+fn gives_the_tree_its_key(effects: &[Effect]) -> bool {
+    meta_inputs(effects).is_empty()
+        && matches!(
+            effects.last(),
+            Some(Effect::Rpc(RpcCall::TreeCreatePrompt { .. }))
+        )
+}
+
+/// The line before, shown and closed after the next line went out holding
+/// the same text, leaves the next line nvim's.
+#[test]
+fn the_previous_line_shown_and_closed_late_keeps_the_next_line_nvims() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let _ = typed(&mut m, &[":", "w", "<CR>", ":", "w"]);
+    answer_batch(&mut m, vec![colon_line(""), UiEvent::Flush]);
+    answer_batch(&mut m, vec![colon_line("w"), UiEvent::Flush]);
+    let mut closed = line_closed(&m);
+    closed.insert(2, normal_mode_change());
+    answer_batch(&mut m, closed);
+    let effects = typed(&mut m, &["q"]);
+    assert_eq!(meta_inputs(&effects), ["q"], "{effects:?}");
+
+    answer_batch(&mut m, vec![colon_line(""), UiEvent::Flush]);
+    let effects = typed(&mut m, &["q"]);
+    assert_eq!(meta_inputs(&effects), ["q"], "{effects:?}");
+}
+
+/// A line left with `<Esc>` is hidden with no show before it, and that
+/// hide leaves the next line nvim's.
+#[test]
+fn a_line_left_unshown_keeps_the_next_line_nvims() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let _ = typed(&mut m, &[":", "<Esc>", ":"]);
+    answer_batch(&mut m, vec![colon_line(""), UiEvent::Flush]);
+    answer_batch(
+        &mut m,
+        vec![UiEvent::CmdlineHide { level: 1 }, UiEvent::Flush],
+    );
+    let effects = typed(&mut m, &["V"]);
+    assert_eq!(meta_inputs(&effects), ["V"], "{effects:?}");
+}
+
+/// A line end nvim never hides, a `:` it read as text, is forgotten at
+/// the next mode outside the command line, and a later line nvim ends on
+/// its own still gives the keys back to the tree.
+#[test]
+fn a_line_end_nvim_never_hid_is_forgotten_at_the_next_mode() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let _ = typed(&mut m, &[":", "<Esc>"]);
+    answer_batch(&mut m, vec![normal_mode_change(), UiEvent::Flush]);
+    let _ = typed(&mut m, &[":", "<C-s>"]);
+    answer_batch(&mut m, vec![colon_line(""), UiEvent::Flush]);
+    let closed = line_closed(&m);
+    answer_batch(&mut m, closed);
+    let effects = typed(&mut m, &["a"]);
+    assert!(gives_the_tree_its_key(&effects), "{effects:?}");
+}
+
+/// A second-level line opened inside the tracked one leaves it shown
+/// open, so the two closing together give the keys back to the tree.
+#[test]
+fn a_nested_line_leaves_the_tracked_line_shown_open() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let _ = typed(&mut m, &[":", "<C-r>", "="]);
+    answer_batch(&mut m, vec![colon_line(""), UiEvent::Flush]);
+    let nested = UiEvent::CmdlineShow {
+        content: vec![],
+        pos: 0,
+        firstc: "=".into(),
+        prompt: String::new(),
+        indent: 0,
+        level: 2,
+    };
+    answer_batch(&mut m, vec![nested, UiEvent::Flush]);
+    answer_batch(
+        &mut m,
+        vec![
+            UiEvent::CmdlineHide { level: 2 },
+            UiEvent::CmdlineHide { level: 1 },
+            UiEvent::Flush,
+        ],
+    );
+    let effects = typed(&mut m, &["a"]);
+    assert!(gives_the_tree_its_key(&effects), "{effects:?}");
 }
 
 /// One question of each kind view shows, opened and handed the key that
@@ -6698,7 +6795,7 @@ fn a_question_under_another_reads_keys_only_once_it_is_on_top() {
     assert!((QUESTIONS[0].answered)(&first), "{first:?}");
     let _ = update(
         &mut m,
-        Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+        Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }, UiEvent::Flush]),
     );
     let second = update(&mut m, key("y"));
     assert!(!(QUESTIONS[1].answered)(&second), "{second:?}");
@@ -7682,7 +7779,7 @@ fn a_prompt_opening_over_an_open_picker_takes_focus_and_returns_it_on_resolve() 
 
     let _ = update(
         &mut m,
-        Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+        Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }, UiEvent::Flush]),
     );
     let _ = update(
         &mut m,
@@ -14775,7 +14872,7 @@ fn a_cmdline_hide_while_speculating_withdraws_the_palette() {
     });
     m.dirty = false;
 
-    let _ = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide]));
+    let _ = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }]));
 
     assert!(m.engine.cmdline_speculated.is_none());
     assert!(m.dirty);
@@ -17196,7 +17293,7 @@ fn the_windowed_palette_opens_and_closes_with_no_rpc() {
         "no open was ever issued for a generation to advance"
     );
 
-    let effects = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide]));
+    let effects = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }]));
     assert!(
         !effects
             .iter()

@@ -44,10 +44,7 @@ impl Model {
     /// redirect the engine's own keystrokes. It takes the keyboard only
     /// once the user has deliberately entered it -- `ai_entered`, read from
     /// [`crate::native::ai_panel::AiPanelState::focused`] -- never by side
-    /// effect of an agent auto-opening it. Takes the flag as a plain
-    /// `bool`, so [`Self::focused_overlay_mut`] and
-    /// [`Self::pop_focused_overlay`] can read `ai_panel.focused` once and
-    /// release that borrow before borrowing `overlays` mutably.
+    /// effect of an agent auto-opening it.
     const fn takes_focus_now(
         kind: &OverlayKind,
         ai_entered: bool,
@@ -97,30 +94,23 @@ impl Model {
     /// surface that is.
     #[must_use]
     pub fn focused_overlay(&self) -> Option<&Overlay> {
-        let ai_entered = self.ai_panel.focused;
-        let tree_windowed = self.tree_is_windowed();
-        let agent_windowed = self.agent_is_windowed();
-        let notifications_windowed = self.notifications_is_windowed();
-        self.overlays.iter().rev().find(|overlay| {
-            Self::takes_focus_now(
-                &overlay.kind,
-                ai_entered,
-                tree_windowed,
-                agent_windowed,
-                notifications_windowed,
-            )
-        })
+        self.focused_at().and_then(|at| self.overlays.get(at))
     }
 
     /// The topmost focus-taking overlay, for a feature that needs to fold
     /// its own state forward as input arrives.
     #[must_use]
     pub fn focused_overlay_mut(&mut self) -> Option<&mut Overlay> {
+        self.focused_at().and_then(|at| self.overlays.get_mut(at))
+    }
+
+    /// Where the overlay [`Self::focus`] names sits in the stack.
+    fn focused_at(&self) -> Option<usize> {
         let ai_entered = self.ai_panel.focused;
         let tree_windowed = self.tree_is_windowed();
         let agent_windowed = self.agent_is_windowed();
         let notifications_windowed = self.notifications_is_windowed();
-        self.overlays.iter_mut().rev().find(|overlay| {
+        self.overlays.iter().rposition(|overlay| {
             Self::takes_focus_now(
                 &overlay.kind,
                 ai_entered,
@@ -138,19 +128,7 @@ impl Model {
     /// above it, and popping that instead would close an annunciator the
     /// user never addressed while leaving the overlay they did address open.
     pub fn pop_focused_overlay(&mut self) -> Option<Overlay> {
-        let ai_entered = self.ai_panel.focused;
-        let tree_windowed = self.tree_is_windowed();
-        let agent_windowed = self.agent_is_windowed();
-        let notifications_windowed = self.notifications_is_windowed();
-        let pos = self.overlays.iter().rposition(|overlay| {
-            Self::takes_focus_now(
-                &overlay.kind,
-                ai_entered,
-                tree_windowed,
-                agent_windowed,
-                notifications_windowed,
-            )
-        })?;
+        let pos = self.focused_at()?;
         Some(self.take_overlay_at(pos))
     }
 
@@ -275,19 +253,7 @@ impl Model {
         {
             prompt.note_shown();
         }
-        let ai_entered = self.ai_panel.focused;
-        let tree_windowed = self.tree_is_windowed();
-        let agent_windowed = self.agent_is_windowed();
-        let notifications_windowed = self.notifications_is_windowed();
-        let focused_at = self.overlays.iter().rposition(|overlay| {
-            Self::takes_focus_now(
-                &overlay.kind,
-                ai_entered,
-                tree_windowed,
-                agent_windowed,
-                notifications_windowed,
-            )
-        });
+        let focused_at = self.focused_at();
         // an overlay that takes the keys above the panel may cover it
         let panel_uncovered = self
             .overlays
