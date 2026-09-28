@@ -4727,22 +4727,54 @@ fn a_tile_frame_follows_its_grid_through_a_half_applied_resize() {
 /// the neighbour's edge between two tiles, the ring's on the outside. The
 /// two stay two plain lines. Every cell of a tile's side columns between
 /// its corners is a vertical line, and no cell of its top or bottom run
-/// between its corners is a tee.
+/// between its corners is a tee. Below a tile's bottom corner a side column
+/// carries a line only where another tile's frame stands.
 #[test]
 fn a_gapless_frame_one_cell_short_of_its_slot_stays_a_plain_line() {
-    type Leg = (&'static str, Layout, (u16, u16), (u16, u16), usize);
-    // `short` is the tile whose grid the grow leaves one cell short: the
-    // first sits against its neighbour, the last against the ring
-    let legs: [Leg; 4] = [
-        ("vsplit interior", tiled_at, (60, 18), (1, 0), 0),
-        ("vsplit outer", tiled_at, (61, 18), (1, 0), 1),
-        ("split interior", stacked_at, (60, 19), (0, 1), 0),
-        ("split outer", stacked_at, (60, 18), (0, 1), 1),
+    type Leg = (
+        &'static str,
+        Layout,
+        (u16, u16),
+        (u16, u16),
+        usize,
+        Option<usize>,
+    );
+    // `short` is the tile whose grid the grow leaves one cell short, and
+    // `settled` the one whose grid is then resized to its new slot.
+    // `vsplit interior` and `split interior` hold the edge the short tile
+    // shares with its neighbour, `vsplit outer` the ring's right column.
+    // `split outer` has no parallel run under its short bottom tile, since
+    // the gapless ring has no bottom run, and holds that tile's own frame.
+    // `vsplit bottom` resizes one of the two bottom-row grids, so the ring
+    // column beside the short tile ends at that tile's corner.
+    let legs: [Leg; 5] = [
+        ("vsplit interior", tiled_at, (60, 18), (1, 0), 0, None),
+        ("vsplit outer", tiled_at, (61, 18), (1, 0), 1, None),
+        ("split interior", stacked_at, (60, 19), (0, 1), 0, None),
+        ("split outer", stacked_at, (60, 18), (0, 1), 1, None),
+        ("vsplit bottom", tiled_at, (60, 18), (0, 1), 1, Some(0)),
     ];
-    for (name, layout, from, (dw, dh), short) in legs {
+    for (name, layout, from, (dw, dh), short, settled) in legs {
         for reversed in [false, true] {
             let to = (from.0 + dw, from.1 + dh);
-            let (model, tiles) = mid_resize(layout, false, (from, to), reversed);
+            let (mut model, mut tiles) = mid_resize(layout, false, (from, to), reversed);
+            if let Some(index) = settled {
+                let (grid, (_, _, width, height)) =
+                    layout_slots(layout, false, to, reversed)[index];
+                // a gapless grid fills its slot
+                drive(
+                    &mut model,
+                    vec![
+                        UiEvent::GridResize {
+                            grid,
+                            width: u64::from(width),
+                            height: u64::from(height),
+                        },
+                        UiEvent::Flush,
+                    ],
+                );
+                tiles[index].1 = (width, height);
+            }
             let buf = tiled_frame(&model);
             let offset = model.look.grid_offset();
             let case = format!("{name} reversed={reversed} {from:?} -> {to:?}");
@@ -4753,17 +4785,54 @@ fn a_gapless_frame_one_cell_short_of_its_slot_stays_a_plain_line() {
                 .map(|(index, _)| index)
                 .collect();
             assert_eq!(shorts, vec![short], "{case}: the leg's premise");
-            for ((row, col, width, height), (grid_width, grid_height), letter) in tiles {
-                let (left, top) = (offset + col, offset + row);
-                let right = left + width.min(grid_width);
-                let bottom = top + height.min(grid_height);
+            let boxes: Vec<_> = tiles
+                .iter()
+                .map(
+                    |&((row, col, width, height), (grid_width, grid_height), letter)| {
+                        let (left, top) = (offset + col, offset + row);
+                        let right = left + width.min(grid_width);
+                        let bottom = top + height.min(grid_height);
+                        (letter, left, top, right, bottom)
+                    },
+                )
+                .collect();
+            let side_cells = |&(_, left, top, right, bottom): &(char, u16, u16, u16, u16)| {
+                let sides = [left.checked_sub(1), Some(right)];
+                sides
+                    .into_iter()
+                    .flatten()
+                    .flat_map(move |x| (top.saturating_sub(1)..=bottom).map(move |y| (x, y)))
+            };
+            let framed: std::collections::BTreeSet<(u16, u16)> =
+                boxes.iter().flat_map(side_cells).collect();
+            // where a neighbour's run ends on this tile's side, a tee there
+            // is a real junction
+            let corners: std::collections::BTreeSet<(u16, u16)> = boxes
+                .iter()
+                .flat_map(side_cells)
+                .filter(|&(x, y)| {
+                    boxes.iter().any(|&(_, left, top, right, bottom)| {
+                        (x + 1 == left || x == right)
+                            && (Some(y) == top.checked_sub(1) || y == bottom)
+                    })
+                })
+                .collect();
+            for (letter, left, top, right, bottom) in boxes.iter().copied() {
                 let sides = [left.checked_sub(1), Some(right)];
                 for x in sides.into_iter().flatten().filter(|&x| x < buf.area.width) {
-                    for y in top..bottom {
+                    for y in (top..bottom).filter(|&y| !corners.contains(&(x, y))) {
                         assert_eq!(
                             buf[(x, y)].symbol(),
                             "│",
                             "{case}: tile {letter}'s side at ({x}, {y}):\n{}",
+                            screen_dump(&buf)
+                        );
+                    }
+                    for y in (bottom + 1..buf.area.height).filter(|&y| !framed.contains(&(x, y))) {
+                        assert!(
+                            !"│├┤┼".contains(buf[(x, y)].symbol()),
+                            "{case}: tile {letter}'s side runs on below its corner at \
+                             ({x}, {y}):\n{}",
                             screen_dump(&buf)
                         );
                     }
@@ -4777,6 +4846,75 @@ fn a_gapless_frame_one_cell_short_of_its_slot_stays_a_plain_line() {
                             screen_dump(&buf)
                         );
                     }
+                }
+            }
+        }
+    }
+}
+
+/// A gapless left tile beside a stacked pair keeps its tees where a line
+/// really meets another while one grid is a cell short of its slot. With
+/// the left grid a column short its edge is a plain line beside the
+/// separator, which keeps the `├` under the upper right tile, and the two
+/// columns meet the ring's top row as `┬┬` and the bottom row as `┴┴`. With
+/// the upper right grid a row short its bottom run and the lower tile's top
+/// run are stacked `├` over `├` on the separator and `┤` over `┤` on the
+/// ring's right column, with no tee between them.
+#[test]
+fn a_gapless_junction_stays_on_its_lines_through_a_half_applied_resize() {
+    for (name, index, (dw, dh)) in [("left narrow", 0, (1, 0)), ("upper short", 1, (0, 1))] {
+        let nested = tiled_nested(false);
+        let mut model = nested.model;
+        let offset = model.look.grid_offset();
+        let (_, _, width, height) = nested.slots[index];
+        drive(
+            &mut model,
+            vec![
+                UiEvent::GridResize {
+                    grid: LEFT + index as u64,
+                    width: u64::from(width - dw),
+                    height: u64::from(height - dh),
+                },
+                UiEvent::Flush,
+            ],
+        );
+        let buf = tiled_frame(&model);
+        let at = |x: u16, y: u16| buf[(x, y)].symbol().to_string();
+        let dump = screen_dump(&buf);
+        let (upper_row, sep, _, upper_height) = nested.slots[1];
+        let sep = offset + sep - 1;
+        let under = offset + upper_row + upper_height;
+        let (ring_top, ring_right, foot) = (offset - 1, buf.area.width - 1, buf.area.height - 1);
+        if index == 0 {
+            let edge = sep - 1;
+            for y in ring_top + 1..foot {
+                let want = if y == under { "├" } else { "│" };
+                assert_eq!(
+                    at(sep, y),
+                    want,
+                    "{name}: separator at ({sep}, {y}):\n{dump}"
+                );
+                assert_eq!(
+                    at(edge, y),
+                    "│",
+                    "{name}: left edge at ({edge}, {y}):\n{dump}"
+                );
+            }
+            let pair = |y: u16| format!("{}{}", at(edge, y), at(sep, y));
+            assert_eq!(pair(ring_top), "┬┬", "{name}: ring top:\n{dump}");
+            assert_eq!(pair(foot), "┴┴", "{name}: bottom row:\n{dump}");
+        } else {
+            for (x, glyph) in [(sep, "├"), (ring_right, "┤")] {
+                for y in [under - 1, under] {
+                    assert_eq!(at(x, y), glyph, "{name}: junction at ({x}, {y}):\n{dump}");
+                }
+            }
+            for y in [under - 1, under] {
+                for x in sep + 1..ring_right {
+                    assert!(
+                        !"┬┴┼├┤".contains(at(x, y).as_str()),
+                        "{name}: a run at ({x}, {y}) is a tee:\n{dump}"
+                    );
                 }
             }
         }

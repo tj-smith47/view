@@ -608,15 +608,26 @@ fn lattice(panes: &[Pane], area: Rect, foot: u16, screen: Rect) -> Lattice {
     let Some((top, left)) = ring else {
         return lattice;
     };
-    let bottom = lattice
-        .cells()
-        .iter()
-        .map(|&(row, _)| row)
-        .max()
-        .unwrap_or(top);
+    // each ring column ends at the lowest corner of the tiles beside it: a
+    // tile whose grid is still a row short while its neighbour's is resized
+    // closes its side one row higher, and nothing runs on under it
+    let lowest = |beside: &dyn Fn(&Pane) -> bool| {
+        panes
+            .iter()
+            .filter(|pane| is_tile(pane) && beside(pane))
+            .map(|pane| {
+                let (row, _, _, height) = pane.filled;
+                area.y
+                    .saturating_add(row)
+                    .saturating_add(height)
+                    .min(last_row)
+            })
+            .fold(top, u16::max)
+    };
     lattice.across(top, left..=last_col);
-    lattice.down(left, top..=bottom);
+    lattice.down(left, top..=lowest(&|pane| pane.slot.1 == 0));
     if ring_right < screen.width {
+        let bottom = lowest(&|pane| pane.slot.1.saturating_add(pane.slot.2) >= area.width);
         lattice.down(ring_right, top..=bottom);
     }
     lattice
