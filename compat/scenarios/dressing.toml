@@ -176,3 +176,17 @@ steps = [
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
 ]
+
+# native-only again under the tiled layout, where view's own prompt opens
+# over framed tiles. The other states read the statusline or command-line
+# row, which the tiled layout gives to a tile's frame, so they have no twin.
+[[states]]
+name = "native-only"
+panes = "tiles"
+fixture = "minimal"
+steps = [
+  { send = ":lua vim.ui.input({ prompt = 'dressing-prompt' }, function() end)<CR>" },
+  { wait_for = "dressing-prompt", timeout_ms = 30000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+]

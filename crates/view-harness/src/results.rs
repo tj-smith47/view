@@ -25,6 +25,11 @@ pub struct ScenarioResult {
     pub class: String,
     pub fixture: Option<String>,
     pub state: String,
+    /// The window layout the row ran under (`nvim` or `tiles`), so a tiles
+    /// twin and the nvim state it repeats are two rows. A results file
+    /// written before the column existed ran every row under `nvim`.
+    #[serde(default = "nvim_panes")]
+    pub panes: String,
     pub engine_pin: String,
     pub status: ScenarioStatus,
     /// `None` when `status` is [`ScenarioStatus::Skipped`] (no step ever
@@ -44,6 +49,10 @@ pub struct ScenarioResult {
     /// staleness rule ("every engine-pin bump re-runs the matrix and
     /// re-dates the page") keys off this, not a full timestamp.
     pub date: String,
+}
+
+fn nvim_panes() -> String {
+    "nvim".to_string()
 }
 
 /// `YYYY-MM-DD` for the current instant, in UTC. Hand-rolled rather than a
@@ -164,6 +173,7 @@ mod tests {
                 class: "ui-owning".to_string(),
                 fixture: Some("heavy".to_string()),
                 state: "present".to_string(),
+                panes: "tiles".to_string(),
                 engine_pin: "v0.12.4".to_string(),
                 status: ScenarioStatus::Ok,
                 failing_step: None,
@@ -186,6 +196,19 @@ mod tests {
         assert_eq!(loaded.results.len(), 1);
         assert_eq!(loaded.results[0].plugin, "lualine");
         assert_eq!(loaded.results[0].status, ScenarioStatus::Ok);
+        assert_eq!(loaded.results[0].panes, "tiles");
+    }
+
+    #[test]
+    fn a_row_written_before_the_panes_column_reads_as_nvim() {
+        let mut json = serde_json::to_value(sample()).unwrap();
+        json["results"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("panes")
+            .expect("the sample carries a panes column to remove");
+        let loaded: ResultsFile = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.results[0].panes, "nvim");
     }
 
     /// Reference values independently computed via Python's

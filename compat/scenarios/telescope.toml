@@ -90,9 +90,12 @@ steps = [
   # anything at all. The anonymous needle names the surface, because this
   # fixture's noice would raise a true anonymous line about the message
   # area, and a bare "a plugin is drawing over" could not tell them apart.
+  # It stops at "command" because the tiled layout's narrower box wraps the
+  # line right after that word, where an absence would pass having read
+  # nothing.
   { assert_absent = "TelescopePrompt is drawing over" },
   { assert_absent = "TelescopeResults is drawing over" },
-  { assert_absent = "a plugin is drawing over the command line" },
+  { assert_absent = "a plugin is drawing over the command" },
   # noice's health float draws in the message area and is a true claim,
   # and it carries no name view can use -- `markdown` is the filetype its
   # own on_open sets so the message renders, not a name for the plugin --
@@ -104,10 +107,59 @@ steps = [
   # twice. One notice per plugin, whichever of the two mechanisms saw it.
   # The suppression is the claimant's coverage rather than its notice line,
   # so it survives the <Esc> that took the line down.
-  { assert_absent = "a plugin is drawing over the message area" },
+  { assert_absent = "a plugin is drawing over the message" },
   { assert_absent = "markdown is drawing over" },
   # A second <Esc> from the picker's normal mode dismisses it.
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
+]
+
+# Both states again under the tiled layout, where the picker's floats open
+# over framed tiles.
+[[states]]
+name = "present"
+panes = "tiles"
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.telescope ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = ":Telescope help_tags<CR>" },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 30000 },
+  { send = "nvim_buf_atta" },
+  { wait_for = "nvim_buf_attach()", timeout_ms = 30000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 30000 },
+]
+
+[[states]]
+name = "unaccommodated"
+panes = "tiles"
+accommodations = false
+native = {}
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.telescope ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { wait_for = "view: your config also draws the", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 30000 },
+  { wait_for = "native.notifications", timeout_ms = 30000 },
+  { send = ":Telescope help_tags<CR>" },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 30000 },
+  { send = "nvim_buf_atta" },
+  { wait_for = "nvim_buf_attach()", timeout_ms = 30000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { probe = "luaeval('(function() vim.g.view_compat_armed_at = vim.uv.hrtime() return \"armed\" end)()')", expect = "armed" },
+  { wait_for_probe = "luaeval('((vim.uv.hrtime() - vim.g.view_compat_armed_at) > 400000000) and \"settled\" or \"waiting\"')", expect = "settled", timeout_ms = 30000 },
+  { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "open" },
+  { assert_absent = "TelescopePrompt is drawing over" },
+  { assert_absent = "TelescopeResults is drawing over" },
+  { assert_absent = "a plugin is drawing over the command" },
+  { assert_absent = "a plugin is drawing over the message" },
+  { assert_absent = "markdown is drawing over" },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 30000 },
 ]

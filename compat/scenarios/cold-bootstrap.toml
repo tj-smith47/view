@@ -68,3 +68,25 @@ steps = [
   { assert_absent = "E5108" },
   { probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true" },
 ]
+
+# The present state again under the tiled layout: a from-scratch bootstrap
+# whose install window and notices open over framed tiles.
+[[states]]
+name = "present"
+panes = "tiles"
+steps = [
+  { send = "<CR>" },
+  { wait_for_probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = "ihello<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { wait_for = "view: your config also draws", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 60000 },
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
+  { wait_for = "hello", timeout_ms = 60000 },
+  { assert_absent = "E5108" },
+  { probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true" },
+]

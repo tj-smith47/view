@@ -127,7 +127,37 @@ struct RawState {
     fixture: Option<String>,
     #[serde(default = "accommodations_default")]
     accommodations: bool,
+    panes: Option<String>,
     steps: Vec<RawStep>,
+}
+
+/// The window layout a state runs under, which the runner hands the session
+/// as `VIEW_UI_PANES` so the planted `view.toml` is never rewritten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Panes {
+    /// Nvim's own window picture, the line every fixture commits.
+    Nvim,
+    /// A frame per window, with each tile's status in its frame.
+    Tiles,
+}
+
+impl Panes {
+    /// The value `[ui] panes` and `VIEW_UI_PANES` spell this layout with.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Panes::Nvim => "nvim",
+            Panes::Tiles => "tiles",
+        }
+    }
+}
+
+fn validate_panes(raw: Option<&str>) -> Result<Panes, ScenarioError> {
+    match raw {
+        None | Some("nvim") => Ok(Panes::Nvim),
+        Some("tiles") => Ok(Panes::Tiles),
+        Some(other) => Err(ScenarioError::UnsupportedPanes(other.to_string())),
+    }
 }
 
 /// `true`: every state that says nothing keeps the fixture's accommodations,
@@ -221,6 +251,10 @@ pub struct ScenarioStateEntry {
     /// the file says otherwise). See [`RawState`] for why this is a field
     /// and not a property of the state's name.
     pub accommodations: bool,
+    /// The layout this state runs under: [`Panes::Nvim`] unless the file
+    /// names `tiles`, which only a twin of an nvim state of the same name
+    /// may do.
+    pub panes: Panes,
     pub steps: Vec<Step>,
 }
 
@@ -256,8 +290,27 @@ pub enum ScenarioError {
     NoStates,
     /// Two `[[states]]` entries in the same file named the same state,
     /// leaving the runner unable to tell which one a report line describes.
-    #[error("state {name:?} is declared more than once")]
-    DuplicateStateName { name: String },
+    #[error("state {name:?} is declared more than once under panes = {panes:?}")]
+    DuplicateStateName { name: String, panes: &'static str },
+    /// A `[[states]]` entry's `panes` named neither layout.
+    #[error("unsupported panes {0:?} (expected \"nvim\" or \"tiles\")")]
+    UnsupportedPanes(String),
+    /// A `panes = "tiles"` state has no nvim state of the same name to be
+    /// the twin of.
+    #[error(
+        "state {state:?} runs under panes = \"tiles\" with no nvim state of the same name; \
+         a tiles state is the twin of an nvim state and repeats its steps"
+    )]
+    TwinWithoutNvimState { state: String },
+    /// A `panes = "tiles"` state differs from its nvim twin in something
+    /// other than a wait's timeout, so it would be asserting another
+    /// subject under the same name.
+    #[error(
+        "the tiles twin of state {state:?} differs from its nvim state in {what}; \
+         a twin repeats the nvim state's steps, fixture, native table and \
+         accommodations, changing only how long a wait may take"
+    )]
+    TwinDiverges { state: String, what: String },
     /// A `ui-owning` scenario (one whose plugin the engine can supersede,
     /// and that is not exempted by `cold_bootstrap`) declared fewer than
     /// the four states [`REQUIRED_UI_OWNING_STATES`] names: a ui-owning
@@ -554,6 +607,7 @@ fn validate_state(raw: &str) -> Result<ScenarioState, ScenarioError> {
 /// including every step it carries.
 fn validate_state_entry(raw: RawState) -> Result<ScenarioStateEntry, ScenarioError> {
     let name = validate_state(&raw.name)?;
+    let panes = validate_panes(raw.panes.as_deref())?;
     let steps = raw
         .steps
         .into_iter()
@@ -565,8 +619,66 @@ fn validate_state_entry(raw: RawState) -> Result<ScenarioStateEntry, ScenarioErr
         native: raw.native,
         fixture: raw.fixture,
         accommodations: raw.accommodations,
+        panes,
         steps,
     })
+}
+
+/// `step` with every wait's deadline zeroed: the tiles startup stack holds
+/// the top rows longer than nvim's, so a twin may wait longer and still be
+/// the same step.
+fn without_timeout(step: &Step) -> Step {
+    let mut step = step.clone();
+    match &mut step {
+        Step::WaitFor { timeout, .. }
+        | Step::WaitForCell { timeout, .. }
+        | Step::WaitForProbe { timeout, .. } => *timeout = Duration::ZERO,
+        _ => {}
+    }
+    step
+}
+
+/// Fails a tiles state that has no nvim state of its name, or that differs
+/// from it in anything but a wait's timeout.
+fn check_tiles_twins(states: &[ScenarioStateEntry]) -> Result<(), ScenarioError> {
+    for twin in states.iter().filter(|state| state.panes == Panes::Tiles) {
+        let name = state_name(twin.name).to_string();
+        let Some(nvim) = states
+            .iter()
+            .find(|state| state.panes == Panes::Nvim && state.name == twin.name)
+        else {
+            return Err(ScenarioError::TwinWithoutNvimState { state: name });
+        };
+        let diverges = |what: String| ScenarioError::TwinDiverges {
+            state: name.clone(),
+            what,
+        };
+        if twin.fixture != nvim.fixture {
+            return Err(diverges("fixture".to_string()));
+        }
+        if twin.native != nvim.native {
+            return Err(diverges("native".to_string()));
+        }
+        if twin.accommodations != nvim.accommodations {
+            return Err(diverges("accommodations".to_string()));
+        }
+        if twin.steps.len() != nvim.steps.len() {
+            return Err(diverges(format!(
+                "its step count ({} against {})",
+                twin.steps.len(),
+                nvim.steps.len()
+            )));
+        }
+        if let Some(index) = twin
+            .steps
+            .iter()
+            .zip(&nvim.steps)
+            .position(|(a, b)| without_timeout(a) != without_timeout(b))
+        {
+            return Err(diverges(format!("step {index}")));
+        }
+    }
+    Ok(())
 }
 
 /// Rejects `cold_bootstrap = true` on any file but [`COLD_BOOTSTRAP_STEM`].
@@ -602,13 +714,16 @@ fn validate_state_completeness(
         return Err(ScenarioError::NoStates);
     }
     let mut seen: BTreeSet<&'static str> = BTreeSet::new();
+    let mut seen_under: BTreeSet<(&'static str, Panes)> = BTreeSet::new();
     for state in states {
         let name = state_name(state.name);
-        if !seen.insert(name) {
+        if !seen_under.insert((name, state.panes)) {
             return Err(ScenarioError::DuplicateStateName {
                 name: name.to_string(),
+                panes: state.panes.as_str(),
             });
         }
+        seen.insert(name);
     }
     if class == PluginClass::UiOwning && !cold_bootstrap {
         let missing: Vec<String> = REQUIRED_UI_OWNING_STATES
@@ -734,6 +849,7 @@ fn parse_from(raw_toml: &str, source_stem: Option<&str>) -> Result<ScenarioFile,
     check_accommodation_declines(raw.fixture.as_deref(), source_stem, &states)?;
     check_own_window_closed_polls(&raw.plugin, &states)?;
     validate_state_completeness(class, raw.cold_bootstrap, &states)?;
+    check_tiles_twins(&states)?;
 
     Ok(ScenarioFile {
         plugin: raw.plugin,
@@ -760,8 +876,10 @@ fn parse_from(raw_toml: &str, source_stem: Option<&str>) -> Result<ScenarioFile,
 /// [`ScenarioError::NoStates`]/[`ScenarioError::DuplicateStateName`]/[`ScenarioError::IncompleteUiOwningStates`]/[`ScenarioError::UnauthorizedColdBootstrap`]/[`ScenarioError::UnauthorizedAccommodationDecline`]/[`ScenarioError::AccommodationDeclineWithoutFixture`]
 /// if the `states` list itself is invalid,
 /// [`ScenarioError::VacuousOwnWindowWait`] if a state polls toward its own
-/// plugin's window being closed without first proving it open, or any of
-/// the per-step errors [`validate_step`] can raise.
+/// plugin's window being closed without first proving it open,
+/// [`ScenarioError::UnsupportedPanes`]/[`ScenarioError::TwinWithoutNvimState`]/[`ScenarioError::TwinDiverges`]
+/// if a state's `panes` is invalid or a tiles twin does not repeat its nvim
+/// state, or any of the per-step errors [`validate_step`] can raise.
 pub fn parse(raw_toml: &str) -> Result<ScenarioFile, ScenarioError> {
     parse_from(raw_toml, None)
 }
@@ -990,8 +1108,101 @@ states = []
         );
         let err = parse(&toml).expect_err("two states sharing a name must be a hard error");
         assert!(
-            matches!(err, ScenarioError::DuplicateStateName { ref name } if name == "present"),
+            matches!(err, ScenarioError::DuplicateStateName { ref name, .. } if name == "present"),
             "expected DuplicateStateName{{\"present\"}}, got {err:?}"
+        );
+    }
+
+    /// `VALID` with a second `present` state appended, `extra` naming its
+    /// panes and steps.
+    fn with_twin(extra: &str) -> String {
+        format!(
+            "{}\n[[states]]\nname = \"present\"\n{extra}\n",
+            VALID.trim_end()
+        )
+    }
+
+    const TWIN_STEPS: &str = r#"steps = [
+  { send = "ihello<Esc>" },
+  { wait_for = "hello", timeout_ms = 30000 },
+  { assert_absent = "E5108" },
+  { probe = "luaeval('lualine ~= nil')", expect = "true" },
+]"#;
+
+    #[test]
+    fn a_tiles_twin_repeating_its_nvim_state_parses_with_a_longer_wait() {
+        let scenario = parse(&with_twin(&format!("panes = \"tiles\"\n{TWIN_STEPS}")))
+            .expect("a twin that repeats its nvim state must parse");
+        assert_eq!(scenario.states[0].panes, Panes::Nvim);
+        assert_eq!(scenario.states[1].panes, Panes::Tiles);
+        assert_eq!(
+            scenario.states[1].steps[1],
+            Step::WaitFor {
+                needle: "hello".to_string(),
+                timeout: Duration::from_millis(30000),
+            }
+        );
+    }
+
+    #[test]
+    fn a_panes_value_outside_the_two_is_refused() {
+        let err = parse(&with_twin(&format!("panes = \"gaps\"\n{TWIN_STEPS}")))
+            .expect_err("panes = \"gaps\" names no layout");
+        assert!(
+            matches!(err, ScenarioError::UnsupportedPanes(ref value) if value == "gaps"),
+            "expected UnsupportedPanes(\"gaps\"), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_tiles_twin_with_a_step_of_its_own_is_refused() {
+        let differing = TWIN_STEPS.replace("E5108", "E5113");
+        let err = parse(&with_twin(&format!("panes = \"tiles\"\n{differing}")))
+            .expect_err("a twin asserting another needle is another subject");
+        assert!(
+            matches!(err, ScenarioError::TwinDiverges { ref state, ref what }
+                if state == "present" && what == "step 2"),
+            "expected TwinDiverges at step 2, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_tiles_twin_with_a_native_table_of_its_own_is_refused() {
+        let err = parse(&with_twin(&format!(
+            "panes = \"tiles\"\nnative = {{ tree = false }}\n{TWIN_STEPS}"
+        )))
+        .expect_err("a twin on another config is another subject");
+        assert!(
+            matches!(err, ScenarioError::TwinDiverges { ref what, .. } if what == "native"),
+            "expected TwinDiverges in native, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_tiles_state_with_no_nvim_state_of_its_name_is_refused() {
+        let toml = VALID.replace(
+            "name = \"present\"\n",
+            "name = \"present\"\npanes = \"tiles\"\n",
+        );
+        let err = parse(&toml).expect_err("a twin of nothing proves nothing about tiles");
+        assert!(
+            matches!(err, ScenarioError::TwinWithoutNvimState { ref state } if state == "present"),
+            "expected TwinWithoutNvimState, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn two_tiles_twins_of_one_state_are_refused() {
+        let twin = format!("panes = \"tiles\"\n{TWIN_STEPS}");
+        let toml = format!(
+            "{}\n[[states]]\nname = \"present\"\n{twin}\n",
+            with_twin(&twin).trim_end()
+        );
+        let err = parse(&toml).expect_err("two twins under one layout are one row twice");
+        assert!(
+            matches!(err, ScenarioError::DuplicateStateName { ref name, panes: "tiles" }
+                if name == "present"),
+            "expected DuplicateStateName under tiles, got {err:?}"
         );
     }
 

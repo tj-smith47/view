@@ -41,3 +41,20 @@ steps = [
   # The engine-side effect: an attached, live treesitter highlighter.
   { wait_for_probe = "luaeval('vim.treesitter.highlighter.active[vim.api.nvim_get_current_buf()] ~= nil')", expect = "true", timeout_ms = 10000 },
 ]
+
+# The present state again under the tiled layout.
+[[states]]
+name = "present"
+panes = "tiles"
+steps = [
+  { wait_for_probe = "luaeval('package.loaded[\"nvim-treesitter\"] ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('require(\"nvim-treesitter.parsers\").has_parser(\"lua\")')", expect = "true", timeout_ms = 180000 },
+  { send = ":enew<CR>" },
+  { send = ":setfiletype lua<CR>" },
+  { send = "ilocal compat = 1<Esc>" },
+  { wait_for_probe = "getline('.')", expect = "local compat = 1", timeout_ms = 30000 },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { wait_for_probe = "luaeval('require(\"nvim-treesitter.configs\").is_enabled(\"highlight\", \"lua\", vim.api.nvim_get_current_buf())')", expect = "true", timeout_ms = 30000 },
+  { wait_for_probe = "luaeval('vim.treesitter.highlighter.active[vim.api.nvim_get_current_buf()] ~= nil')", expect = "true", timeout_ms = 30000 },
+]

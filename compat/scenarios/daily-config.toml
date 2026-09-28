@@ -36,3 +36,17 @@ steps = [
   { assert_absent = "E5108" },
   { probe = "1+1", expect = "2" },
 ]
+
+# The present state again under the tiled layout, where the fresh buffer
+# opens in a framed tile.
+[[states]]
+name = "present"
+panes = "tiles"
+steps = [
+  { send = ":enew<CR>" },
+  { send = "ihello from daily-config<Esc>" },
+  { probe = "mode()", expect = "n" },
+  { wait_for = "hello from daily-config", timeout_ms = 30000 },
+  { assert_absent = "E5108" },
+  { probe = "1+1", expect = "2" },
+]

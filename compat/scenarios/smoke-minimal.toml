@@ -44,3 +44,19 @@ native = { tabline = true }
 steps = [
   { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_tabline == true)')", expect = "true" },
 ]
+
+# The present state again under the tiled layout, where the buffer sits in a
+# framed tile. native-only has no twin: the tiled layout attaches
+# `ext_tabline` on its own, so its probe would read true whatever the switch
+# said.
+[[states]]
+name = "present"
+panes = "tiles"
+steps = [
+  { send = "ihello from compat<Esc>" },
+  { probe = "mode()", expect = "n" },
+  { wait_for_probe = "getline(1)", expect = "hello from compat", timeout_ms = 30000 },
+  { wait_for = "hello from compat", timeout_ms = 60000 },
+  { assert_absent = "E5108" },
+  { probe = "1+1", expect = "2" },
+]

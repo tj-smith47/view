@@ -22,7 +22,7 @@ use view_harness::fixture::{
 use view_harness::results::{
     today_date_string, write_results, ResultsFile, ScenarioResult, ScenarioStatus,
 };
-use view_harness::scenario::{self, ScenarioFile, ScenarioStateEntry};
+use view_harness::scenario::{self, Panes, ScenarioFile, ScenarioStateEntry};
 use view_oracle::compat::{
     engine_error_reference, reset_hermetic_home, run_plugin_bootstrap, state_name, CompatSession,
     ErrorBaseline, PluginClass, ScenarioState,
@@ -498,6 +498,7 @@ fn scenario_result(
         class: class_str(scenario.class).to_string(),
         fixture: effective_fixture.map(str::to_string),
         state: state_name(state.name).to_string(),
+        panes: state.panes.as_str().to_string(),
         engine_pin: pin.to_string(),
         status: outcome.status,
         failing_step: outcome.failing_step,
@@ -956,21 +957,28 @@ fn run_scenario(
     cmd.env("XDG_STATE_HOME", &ready.xdg_state_home);
     cmd.env("XDG_CACHE_HOME", &ready.xdg_cache_home);
     cmd.env("VIEW_COMPAT_SOCK", &sock_path);
+    // set on every row, nvim included: the fixture-less daily config's own
+    // view.toml may choose tiles, and a row records the layout it ran under
+    cmd.env("VIEW_UI_PANES", state.panes.as_str());
     // the one host variable a launch's own wire trace needs, allow-listed
     // here because `make_hermetic` sweeps `VIEW_LOG` along with everything
     // else: the routing evidence in docs/toast-routing-wire-capture.md was
     // read out of a file this produced, and a trace nobody can re-obtain is
-    // evidence that expires. One file per (plugin, state), so the states of
-    // one run do not interleave into something unreadable
+    // evidence that expires. One file per (plugin, state, panes), so the
+    // states of one run do not interleave into something unreadable
     if let Some(dir) = std::env::var_os("VIEW_COMPAT_LOG") {
         let dir = std::path::PathBuf::from(dir);
         if std::fs::create_dir_all(&dir).is_ok() {
             cmd.env(
                 "VIEW_LOG",
                 dir.join(format!(
-                    "{}-{}.log",
+                    "{}-{}{}.log",
                     scenario.plugin,
-                    state_name(state.name)
+                    state_name(state.name),
+                    match state.panes {
+                        Panes::Nvim => "",
+                        Panes::Tiles => "-tiles",
+                    }
                 )),
             );
         }
@@ -1190,9 +1198,16 @@ fn collect_scenarios(path: &Path) -> Result<Vec<(PathBuf, ScenarioFile)>> {
 /// outside this repo's own planning notes.
 const EXPECTED_RED: [RedRow; 0] = [];
 
-/// One [`EXPECTED_RED`] row: scenario stem, state, the task that clears it,
-/// and what a reader of the evidence page is told has to become true.
-type RedRow = (&'static str, &'static str, &'static str, &'static str);
+/// One [`EXPECTED_RED`] row: scenario stem, state, the layout it runs under
+/// (`nvim` or `tiles`), the task that clears it, and what a reader of the
+/// evidence page is told has to become true.
+type RedRow = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
 
 /// The scenario file's own stem -- not `plugin`, since two scenario files
 /// can name the same plugin (`lualine.toml` and `cold-bootstrap.toml` both
@@ -1213,8 +1228,10 @@ fn expected_red_clears_when(result: &ScenarioResult, manifest: &[RedRow]) -> Opt
     let stem = scenario_stem(result);
     manifest
         .iter()
-        .find(|(scenario, state, _, _)| *scenario == stem && *state == result.state)
-        .map(|(_, _, _, clears_when)| *clears_when)
+        .find(|(scenario, state, panes, _, _)| {
+            *scenario == stem && *state == result.state && *panes == result.panes
+        })
+        .map(|(_, _, _, _, clears_when)| *clears_when)
 }
 
 /// Reconciles one row against [`EXPECTED_RED`], in place: a listed red
@@ -1269,10 +1286,11 @@ fn apply_red_expectation_over(result: &mut ScenarioResult, manifest: &[RedRow]) 
 /// Prints one scenario's report line in a fixed shape:
 ///
 /// ```text
-/// compat: lualine (heavy, present) ... OK (4 steps, 2.1s)
+/// compat: lualine (heavy, present, nvim) ... OK (4 steps, 2.1s)
 /// ```
 fn print_scenario_result(result: &ScenarioResult) {
     let fixture = result.fixture.as_deref().unwrap_or("none");
+    let place = format!("{fixture}, {}, {}", result.state, result.panes);
     // the scenario file's own stem, not result.plugin: more than one
     // scenario file can share a plugin name (lualine.toml and
     // cold-bootstrap.toml are both "lualine"), which would otherwise make
@@ -1284,8 +1302,7 @@ fn print_scenario_result(result: &ScenarioResult) {
     let secs = result.elapsed_ms as f64 / 1000.0;
     match result.status {
         ScenarioStatus::Ok => println!(
-            "compat: {scenario} ({fixture}, {}) ... OK ({} steps, {secs:.1}s){}",
-            result.state,
+            "compat: {scenario} ({place}) ... OK ({} steps, {secs:.1}s){}",
             result.steps_total,
             result
                 .detail
@@ -1297,8 +1314,7 @@ fn print_scenario_result(result: &ScenarioResult) {
                 .failing_step
                 .map_or_else(|| "epilogue".to_string(), |i| i.to_string());
             println!(
-                "compat: {scenario} ({fixture}, {}) ... FAILED at step {step_label} ({} steps total, {secs:.1}s): {}",
-                result.state,
+                "compat: {scenario} ({place}) ... FAILED at step {step_label} ({} steps total, {secs:.1}s): {}",
                 result.steps_total,
                 result.detail.as_deref().unwrap_or("unknown failure")
             );
@@ -1308,15 +1324,13 @@ fn print_scenario_result(result: &ScenarioResult) {
                 .failing_step
                 .map_or_else(|| "epilogue".to_string(), |i| i.to_string());
             println!(
-                "compat: {scenario} ({fixture}, {}) ... RED-AS-EXPECTED at step {step_label} ({} steps total, {secs:.1}s): {}",
-                result.state,
+                "compat: {scenario} ({place}) ... RED-AS-EXPECTED at step {step_label} ({} steps total, {secs:.1}s): {}",
                 result.steps_total,
                 result.detail.as_deref().unwrap_or("unknown failure")
             );
         }
         ScenarioStatus::Skipped => println!(
-            "compat: {scenario} ({fixture}, {}) ... SKIPPED: {}",
-            result.state,
+            "compat: {scenario} ({place}) ... SKIPPED: {}",
             result.detail.as_deref().unwrap_or("")
         ),
     }
@@ -1465,6 +1479,7 @@ mod tests {
             native: None,
             fixture: None,
             accommodations: true,
+            panes: Panes::Nvim,
             steps: Vec::new(),
         };
         assert_eq!(
@@ -1509,6 +1524,7 @@ mod tests {
             class: "ui-owning".to_string(),
             fixture: Some("heavy".to_string()),
             state: state.to_string(),
+            panes: "nvim".to_string(),
             engine_pin: "v0.0.0".to_string(),
             status,
             failing_step: Some(2),
@@ -1529,13 +1545,14 @@ mod tests {
     const SYNTHETIC: [RedRow; 1] = [(
         "smoke-minimal",
         "present",
+        "nvim",
         "T0",
         "the fixture this row invents is fixed",
     )];
 
     #[test]
     fn a_listed_red_row_reports_as_expected_and_names_its_clearing_task() {
-        let (scenario, state, _, clears_when) = SYNTHETIC[0];
+        let (scenario, state, _, _, clears_when) = SYNTHETIC[0];
         let mut result = red_row(scenario, state, ScenarioStatus::Failed);
         apply_red_expectation_over(&mut result, &SYNTHETIC);
         assert_eq!(result.status, ScenarioStatus::ExpectedFailure);
@@ -1550,7 +1567,7 @@ mod tests {
     fn a_listed_row_that_passes_fails_the_run_as_a_stale_manifest() {
         // The half that keeps the manifest from becoming a permanent
         // waiver: a row nobody has to remove is a failure nobody has to fix.
-        let (scenario, state, _, _) = SYNTHETIC[0];
+        let (scenario, state, _, _, _) = SYNTHETIC[0];
         let mut result = red_row(scenario, state, ScenarioStatus::Ok);
         apply_red_expectation_over(&mut result, &SYNTHETIC);
         assert_eq!(result.status, ScenarioStatus::Failed);
@@ -1565,7 +1582,7 @@ mod tests {
         // The row asserts something about a run; a state that did not run
         // asserts nothing, and honoring the skip would let the manifest
         // outlive the scenario it names.
-        let (scenario, state, _, _) = SYNTHETIC[0];
+        let (scenario, state, _, _, _) = SYNTHETIC[0];
         let mut result = red_row(scenario, state, ScenarioStatus::Skipped);
         result.detail = Some("VIEW_DAILY_CONFIG is unset".to_string());
         apply_red_expectation_over(&mut result, &SYNTHETIC);
@@ -1592,7 +1609,7 @@ mod tests {
     /// and that no run can ever contradict.
     #[test]
     fn every_expected_red_row_names_a_state_that_actually_exists() {
-        for (scenario, state, task, _) in EXPECTED_RED {
+        for (scenario, state, panes, task, _) in EXPECTED_RED {
             let path = workspace_root()
                 .join("compat")
                 .join("scenarios")
@@ -1603,11 +1620,120 @@ mod tests {
                 loaded
                     .states
                     .iter()
-                    .any(|entry| state_name(entry.name) == state),
-                "EXPECTED_RED names {scenario}/{state} (clears with {task}), which the scenario \
-                 file does not declare"
+                    .any(|entry| state_name(entry.name) == state && entry.panes.as_str() == panes),
+                "EXPECTED_RED names {scenario}/{state} under {panes} (clears with {task}), which \
+                 the scenario file does not declare"
             );
         }
+    }
+
+    #[test]
+    fn a_listed_nvim_row_leaves_its_tiles_twin_to_fail_on_its_own() {
+        let (scenario, state, _, _, _) = SYNTHETIC[0];
+        let mut result = red_row(scenario, state, ScenarioStatus::Failed);
+        result.panes = "tiles".to_string();
+        apply_red_expectation_over(&mut result, &SYNTHETIC);
+        assert_eq!(result.status, ScenarioStatus::Failed);
+        assert_eq!(result.detail.as_deref(), Some("some failure"));
+    }
+
+    /// States that run under nvim's own window layout only, each with the
+    /// reason its subject does not survive the tiled layout: it reads a row
+    /// nvim's bars own (the statusline, the command line under it) or a
+    /// flag the tiled layout sets on its own.
+    const NVIM_ONLY: [(&str, &str, &str); 12] = [
+        (
+            "dressing",
+            "deferred",
+            "reads the command-line row under cmdheight=0",
+        ),
+        ("dressing", "superseded", "reads the statusline row's cells"),
+        (
+            "dressing",
+            "unaccommodated",
+            "reads the statusline row's cells",
+        ),
+        (
+            "fidget",
+            "deferred",
+            "reads the command-line row under cmdheight=0",
+        ),
+        ("fidget", "superseded", "reads the statusline row's cells"),
+        (
+            "fidget",
+            "unaccommodated",
+            "reads the statusline row's cells",
+        ),
+        ("lualine", "deferred", "reads the statusline row's cells"),
+        ("lualine", "superseded", "reads the statusline row's cells"),
+        (
+            "lualine",
+            "native-only",
+            "reads the statusline's scroll indicator; a tile frame carries its own ruler",
+        ),
+        (
+            "lualine",
+            "unaccommodated",
+            "reads the statusline row's cells",
+        ),
+        (
+            "noice",
+            "deferred",
+            "probes the ext_tabline flag the tiled layout sets",
+        ),
+        (
+            "smoke-minimal",
+            "native-only",
+            "probes the ext_tabline flag the tiled layout sets",
+        ),
+    ];
+
+    /// Every nvim state either has a tiles twin or is listed in
+    /// [`NVIM_ONLY`] with its reason, and every listed row still names an
+    /// nvim state with no twin, so a new scenario state has to answer the
+    /// question and a stale row fails.
+    #[test]
+    fn every_nvim_state_has_a_tiles_twin_or_a_reason_it_has_none() {
+        let dir = workspace_root().join("compat").join("scenarios");
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|err| panic!("reading {}: {err}", dir.display()))
+            .map(|entry| entry.expect("scenario dir entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        entries.sort();
+        let mut untwinned = BTreeSet::new();
+        for path in &entries {
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("scenario file stem")
+                .to_string();
+            let loaded = scenario::load_file(path)
+                .unwrap_or_else(|err| panic!("loading {}: {err}", path.display()));
+            for entry in &loaded.states {
+                let has_twin = loaded
+                    .states
+                    .iter()
+                    .any(|other| other.panes == Panes::Tiles && other.name == entry.name);
+                if entry.panes == Panes::Nvim && !has_twin {
+                    untwinned.insert((stem.clone(), state_name(entry.name).to_string()));
+                }
+            }
+        }
+        let listed: BTreeSet<(String, String)> = NVIM_ONLY
+            .iter()
+            .map(|(stem, state, _)| ((*stem).to_string(), (*state).to_string()))
+            .collect();
+        let unexplained: Vec<_> = untwinned.difference(&listed).collect();
+        let stale: Vec<_> = listed.difference(&untwinned).collect();
+        assert!(
+            unexplained.is_empty(),
+            "these nvim states have no tiles twin and no NVIM_ONLY row: {unexplained:?}"
+        );
+        assert!(
+            stale.is_empty(),
+            "these NVIM_ONLY rows name no untwinned nvim state: {stale:?}"
+        );
     }
 
     /// A plugin directory is warm only as a complete clone, and the warm
@@ -1744,6 +1870,7 @@ mod tests {
             native: None,
             fixture: None,
             accommodations: false,
+            panes: Panes::Nvim,
             steps: Vec::new(),
         };
         assert_eq!(accommodations_env(&declining), Some("0"));
@@ -1757,6 +1884,7 @@ mod tests {
             native: None,
             fixture: None,
             accommodations: true,
+            panes: Panes::Nvim,
             steps: Vec::new(),
         };
         assert_eq!(
@@ -1780,6 +1908,7 @@ mod tests {
             native: Some(explicit.clone()),
             fixture: None,
             accommodations: true,
+            panes: Panes::Nvim,
             steps: Vec::new(),
         };
         assert_eq!(
@@ -1792,6 +1921,7 @@ mod tests {
             native: None,
             fixture: None,
             accommodations: true,
+            panes: Panes::Nvim,
             steps: Vec::new(),
         };
         assert_eq!(

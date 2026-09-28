@@ -2924,15 +2924,36 @@ mod tests {
         boxes
     }
 
-    /// The width of the terminal every compat scenario runs in, read from
-    /// the harness that sets it.
-    fn compat_cols() -> u16 {
+    /// One side of the terminal every compat scenario runs in, read from
+    /// the harness that sets it: `COMPAT_COLS` or `COMPAT_ROWS`.
+    fn compat_size(name: &str) -> u16 {
+        let prefix = format!("const {name}: u16 = ");
         include_str!("../../../view-harness/src/bin/oracle/compat.rs")
             .lines()
-            .find_map(|line| line.strip_prefix("const COMPAT_COLS: u16 = "))
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
             .and_then(|rest| rest.strip_suffix(';'))
-            .and_then(|cols| cols.parse().ok())
-            .expect("the compat harness declares its terminal width")
+            .and_then(|size| size.parse().ok())
+            .expect("the compat harness declares its terminal size")
+    }
+
+    /// Every width the notice column takes on the compat terminal, under
+    /// either layout a scenario state runs in and with or without gaps: a
+    /// tile's own frame and inset leave the tiled column narrower.
+    fn compat_notice_widths() -> Vec<u16> {
+        let size = (compat_size("COMPAT_COLS"), compat_size("COMPAT_ROWS"));
+        let mut widths: Vec<u16> = Vec::new();
+        for panes in [crate::model::Panes::Nvim, crate::model::Panes::Tiles] {
+            for gaps in [true, false] {
+                let look = crate::model::Look::new(panes, gaps);
+                let scene = crate::model::notice::tests::scene(size, look, &[], 1)
+                    .expect("the compat terminal holds one tile");
+                let width = scene.model.notice_column().rect.2;
+                if !widths.contains(&width) {
+                    widths.push(width);
+                }
+            }
+        }
+        widths
     }
 
     /// A needle a scenario waits for or asserts absent from the launch box
@@ -2959,9 +2980,13 @@ mod tests {
         }
         let launches = fixture_launches();
         assert_eq!(launches.len(), 15, "the walk lost a box shape");
-        let width = crate::model::NOTICE_COLUMN_MAX.min(compat_cols() / 2);
+        let widths = compat_notice_widths();
+        assert!(widths.len() > 1, "the layouts gave one width: {widths:?}");
         let mut graded = 0;
-        for lines in &launches {
+        for (lines, width) in launches
+            .iter()
+            .flat_map(|lines| widths.iter().map(move |width| (lines, *width)))
+        {
             let rows = crate::model::wrap_toast(lines, width);
             for (path, needle) in &needles {
                 if !lines.iter().any(|line| line.contains(needle.as_str())) {
@@ -2970,8 +2995,8 @@ mod tests {
                 graded += 1;
                 assert!(
                     rows.iter().any(|row| row.contains(needle.as_str())),
-                    "{}: {needle:?} straddles a row of the box as the harness \
-                     wraps it:\n  {}",
+                    "{}: {needle:?} straddles a row of the {width}-column box \
+                     as the harness wraps it:\n  {}",
                     path.display(),
                     rows.join("\n  ")
                 );

@@ -163,3 +163,70 @@ steps = [
   # that isn't shared with the plugin-present states above.
   { wait_for = "init.lua", timeout_ms = 15000 },
 ]
+
+# Every state again under the tiled layout, where the tree lists its files
+# in a tile of its own or in view's sidebar beside the framed tiles.
+[[states]]
+name = "unaccommodated"
+panes = "tiles"
+accommodations = false
+native = {}
+steps = [
+  { wait_for_probe = "luaeval('package.loaded[\"neo-tree\"] ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { wait_for = "view: your config also draws", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 60000 },
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
+  { send = "\\e" },
+  { wait_for = "lazy-lock.json", timeout_ms = 60000 },
+  { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"neo-tree\" then return \"open\" end end return \"closed\" end)()')", expect = "closed" },
+]
+
+[[states]]
+name = "superseded"
+panes = "tiles"
+steps = [
+  { wait_for_probe = "luaeval('package.loaded[\"neo-tree\"] ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { wait_for = "view: your config also draws", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 60000 },
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
+  { send = "\\e" },
+  { wait_for = "lazy-lock.json", timeout_ms = 60000 },
+  { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"neo-tree\" then return \"open\" end end return \"closed\" end)()')", expect = "closed" },
+]
+
+[[states]]
+name = "deferred"
+panes = "tiles"
+native = { tree = false }
+steps = [
+  { wait_for_probe = "luaeval('package.loaded[\"neo-tree\"] ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { wait_for = "view: your config also draws", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 60000 },
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
+  { send = "\\e" },
+  { assert_absent = "lazy-lock.json" },
+  { send = ":Neotree<CR>" },
+  { wait_for = "lazy-lock.json", timeout_ms = 60000 },
+  { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"neo-tree\" then return \"open\" end end return \"closed\" end)()')", expect = "open" },
+]
+
+[[states]]
+name = "native-only"
+panes = "tiles"
+fixture = "minimal"
+steps = [
+  { send = "\\e" },
+  { wait_for = "init.lua", timeout_ms = 60000 },
+]

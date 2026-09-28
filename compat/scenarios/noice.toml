@@ -196,3 +196,57 @@ steps = [
   { wait_for = "Messages", timeout_ms = 30000 },
   { send = "<Esc>" },
 ]
+
+# unaccommodated, superseded and native-only again under the tiled layout.
+# deferred has no twin: it probes `ext_tabline` detached, and the tiled
+# layout attaches it on its own.
+[[states]]
+name = "unaccommodated"
+panes = "tiles"
+accommodations = false
+native = {}
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.noice ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { wait_for = "view: your config also draws the", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 30000 },
+  { wait_for = "native.notifications", timeout_ms = 30000 },
+  { wait_for = "Startup messages: <leader>fm", timeout_ms = 30000 },
+  { wait_for_probe = "luaeval('(function() if package.loaded[\"noice\"] == nil then return \"unloaded\" end if require(\"noice.config\").is_running() then return \"running\" end return \"off\" end)()')", expect = "running", timeout_ms = 30000 },
+  { probe = "luaeval('(function() local ok, n = pcall(require, \"notify\") if not ok then return \"no-mod\" end for _, rec in ipairs(n.history()) do for _, line in ipairs(rec.message or {}) do if line:find(\"work when the GUI has\", 1, true) then return \"raised\" end end end return \"absent\" end)()')", expect = "absent" },
+  { assert_absent = "Noice can't work when the GUI has" },
+  { assert_absent = "has been overwritten by another plugin" },
+  { wait_for_probe = "luaeval('(function() local n = 0 for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.api.nvim_win_get_config(w).relative ~= \"\" then n = n + 1 end end return tostring(n) end)()')", expect = "0", timeout_ms = 30000 },
+  { assert_absent = "a plugin is drawing over" },
+  { send = "\\fm" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "<Esc>" },
+]
+
+[[states]]
+name = "superseded"
+panes = "tiles"
+steps = [
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_cmdline == true)')", expect = "true" },
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_messages == true)')", expect = "true" },
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_popupmenu == true)')", expect = "true" },
+  { wait_for_probe = "luaeval('package.loaded.noice ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() if package.loaded[\"noice\"] == nil then return \"unloaded\" end if require(\"noice.config\").is_running() then return \"running\" end return \"off\" end)()')", expect = "running", timeout_ms = 30000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = ":lua vim.notify('noice-compat-marker')<CR>" },
+  { wait_for = "noice-compat-marker", timeout_ms = 60000 },
+  { probe = "luaeval('(function() local ok, m = pcall(require, \"noice.message.manager\") if not ok then return \"no-mod\" end local msgs = m.get({ event = \"notify\" }, { history = true }) for _, msg in ipairs(msgs) do if tostring(msg:content()):find(\"noice%-compat%-marker\") then return \"routed\" end end return \"absent\" end)()')", expect = "absent" },
+  { send = "\\fm" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "<Esc>" },
+]
+
+[[states]]
+name = "native-only"
+panes = "tiles"
+fixture = "minimal"
+steps = [
+  { send = "\\fm" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "<Esc>" },
+]

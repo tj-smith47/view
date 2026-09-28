@@ -191,12 +191,14 @@ steps = [
   { wait_for = "prefabricated  Text", timeout_ms = 15000 },
   # And the notice a user reads about it, named by what the window calls
   # itself and carrying the line that ends the overlap. The `present` state
-  # above is that line applied.
-  { wait_for = "cmp_menu is drawing over the command line", timeout_ms = 15000 },
+  # above is that line applied. Both needles stop at "command" because the
+  # box wraps at a width the layout decides, and the tiled layout's box
+  # breaks the line right after that word.
+  { wait_for = "view: cmp_menu is drawing over the command", timeout_ms = 15000 },
   { wait_for = "native.palette = false gives it back", timeout_ms = 5000 },
   # Not the anonymous wording: a window that names itself is named, and
   # nothing else on this row claims it.
-  { assert_absent = "a plugin is drawing over the command line" },
+  { assert_absent = "a plugin is drawing over the command" },
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { assert_absent = "> pre" },
@@ -213,6 +215,91 @@ steps = [
   { send = "q" },
   { send = "x" },
   { wait_for = "> :e zqx", timeout_ms = 15000 },
+  { assert_absent = "Text" },
+  { send = "<Esc>" },
+]
+
+# Both states again under the tiled layout, where both menus open over
+# framed tiles and the command line they complete sits below them.
+[[states]]
+name = "present"
+panes = "tiles"
+native = { picker = false, tree = false, statusline = false, notifications = false, palette = false }
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.cmp ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = "iprefabricated<CR>" },
+  { send = "p" },
+  { probe = "mode()", expect = "i" },
+  { send = "r" },
+  { probe = "mode()", expect = "i" },
+  { send = "e" },
+  { probe = "mode()", expect = "i" },
+  { send = "f" },
+  { wait_for_probe = "luaeval('require(\"cmp\").visible()')", expect = "true", timeout_ms = 30000 },
+  { wait_for_probe = "luaeval('(function() for _, e in ipairs(require(\"cmp\").get_entries()) do if e.completion_item.label == \"prefabricated\" then return \"offered\" end end return \"absent\" end)()')", expect = "offered", timeout_ms = 30000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { probe = "luaeval('require(\"cmp\").visible()')", expect = "false" },
+  { probe = "luaeval('(function() local cmp = require(\"cmp\") cmp.setup.cmdline(\":\", { mapping = cmp.mapping.preset.cmdline(), sources = { { name = \"buffer\" } } }) return \"armed\" end)()')", expect = "armed" },
+  { send = ":" },
+  { send = "e" },
+  { send = " " },
+  { send = "p" },
+  { send = "r" },
+  { send = "e" },
+  { wait_for_probe = "luaeval('require(\"cmp\").visible()')", expect = "true", timeout_ms = 30000 },
+  { wait_for = "prefabricated  Text", timeout_ms = 30000 },
+  { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"cmp_menu\" then if vim.api.nvim_win_get_config(w).hide == true then return \"hidden\" end return \"showing\" end end return \"none\" end)()')", expect = "showing" },
+  { assert_absent = "> :e pre" },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+]
+
+[[states]]
+name = "unaccommodated"
+panes = "tiles"
+accommodations = false
+native = {}
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.cmp ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { probe = "luaeval('(function() local cmp = require(\"cmp\") cmp.setup.cmdline(\":\", { mapping = cmp.mapping.preset.cmdline(), sources = { { name = \"buffer\" } } }) return \"armed\" end)()')", expect = "armed" },
+  { probe = "luaeval('(function() vim.api.nvim_buf_set_lines(0, 0, -1, false, { \"prefabricated preflight\" }) return \"seeded\" end)()')", expect = "seeded" },
+  { send = "o" },
+  { send = "p" },
+  { probe = "mode()", expect = "i" },
+  { send = "r" },
+  { probe = "mode()", expect = "i" },
+  { send = "e" },
+  { probe = "mode()", expect = "i" },
+  { send = "f" },
+  { wait_for_probe = "luaeval('require(\"cmp\").visible()')", expect = "true", timeout_ms = 30000 },
+  { assert_absent = "cmp_menu is drawing over" },
+  { send = "<C-c>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { send = ":" },
+  { send = "e" },
+  { send = " " },
+  { send = "p" },
+  { send = "r" },
+  { send = "e" },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"cmp_menu\" then if vim.api.nvim_win_get_config(w).hide == true then return \"hidden\" end return \"showing\" end end return \"none\" end)()')", expect = "showing", timeout_ms = 30000 },
+  { wait_for = "> :e pre", timeout_ms = 30000 },
+  { wait_for = "prefabricated  Text", timeout_ms = 30000 },
+  { wait_for = "view: cmp_menu is drawing over the command", timeout_ms = 30000 },
+  { wait_for = "native.palette = false gives it back", timeout_ms = 30000 },
+  { assert_absent = "a plugin is drawing over the command" },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { assert_absent = "> pre" },
+  { send = ":" },
+  { send = "e" },
+  { send = " " },
+  { send = "z" },
+  { send = "q" },
+  { send = "x" },
+  { wait_for = "> :e zqx", timeout_ms = 30000 },
   { assert_absent = "Text" },
   { send = "<Esc>" },
 ]

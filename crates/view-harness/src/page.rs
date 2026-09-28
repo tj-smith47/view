@@ -106,7 +106,9 @@ pub fn render_page(results: &ResultsFile, current_pin: &str) -> Result<RenderedP
          the scenario fixture's lazy.nvim lockfile\n\
          (`compat/fixtures/<fixture>/nvim/lazy-lock.json`); `-` marks a row\n\
          whose scenario has no fixture or whose fixture lockfile does not\n\
-         name the plugin.\n\n",
+         name the plugin. A state may also run under the tiled layout, where\n\
+         every window has a frame of its own, and the Panes column names the\n\
+         layout each row ran under.\n\n",
     );
     page.push_str("## Reading a result cell\n\n");
     page.push_str(
@@ -127,16 +129,17 @@ pub fn render_page(results: &ResultsFile, current_pin: &str) -> Result<RenderedP
          `task compat` run before the page can regenerate.\n\n",
     );
     page.push_str("## Results\n\n");
-    page.push_str("| Plugin | Version | Engine pin | Scenario | State | Result | Date |\n");
-    page.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
+    page.push_str("| Plugin | Version | Engine pin | Scenario | State | Panes | Result | Date |\n");
+    page.push_str("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for row in &results.results {
         page.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
             escape_cell(&row.plugin),
             escape_cell(row.plugin_version.as_deref().unwrap_or("-")),
             escape_cell(&row.engine_pin),
             escape_cell(scenario_stem(row)),
             escape_cell(&row.state),
+            escape_cell(&row.panes),
             escape_cell(&result_cell(row)),
             escape_cell(&row.date),
         ));
@@ -211,6 +214,7 @@ mod tests {
             class: "ui-owning".to_string(),
             fixture: Some("heavy".to_string()),
             state: "present".to_string(),
+            panes: "nvim".to_string(),
             engine_pin: "v0.12.4".to_string(),
             status: ScenarioStatus::Ok,
             failing_step: None,
@@ -222,7 +226,8 @@ mod tests {
     }
 
     fn sample() -> ResultsFile {
-        let ok = row("lualine", "lualine");
+        let mut ok = row("lualine", "lualine");
+        ok.panes = "tiles".to_string();
         let mut failed = row("noice", "noice");
         failed.status = ScenarioStatus::Failed;
         failed.failing_step = Some(2);
@@ -287,18 +292,18 @@ mod tests {
         let page = render_page(&sample(), "v0.12.4").expect("matching pin must render");
         assert_eq!(page.rows, 5);
         assert_eq!(page.engine_pin, "v0.12.4");
-        assert!(page
-            .markdown
-            .contains("| Plugin | Version | Engine pin | Scenario | State | Result | Date |"));
-        assert!(page
-            .markdown
-            .contains("| lualine | abc1234 | v0.12.4 | lualine | present | OK | 2026-07-19 |"));
         assert!(page.markdown.contains(
-            "| noice | abc1234 | v0.12.4 | noice | present | \
+            "| Plugin | Version | Engine pin | Scenario | State | Panes | Result | Date |"
+        ));
+        assert!(page.markdown.contains(
+            "| lualine | abc1234 | v0.12.4 | lualine | present | tiles | OK | 2026-07-19 |"
+        ));
+        assert!(page.markdown.contains(
+            "| noice | abc1234 | v0.12.4 | noice | present | nvim | \
              FAILED at step 2: screen never showed marker | 2026-07-19 |"
         ));
         assert!(page.markdown.contains(
-            "| daily-config | - | v0.12.4 | daily-config | present | \
+            "| daily-config | - | v0.12.4 | daily-config | present | nvim | \
              SKIPPED: VIEW_DAILY_CONFIG is unset | 2026-07-19 |"
         ));
         // A planned red and a subtraction are only evidence if the committed
@@ -306,12 +311,12 @@ mod tests {
         // FAILED or a plain OK is the suppression these two states exist to
         // end, moved into the artifact.
         assert!(page.markdown.contains(
-            "| fidget | abc1234 | v0.12.4 | fidget | unaccommodated | \
+            "| fidget | abc1234 | v0.12.4 | fidget | unaccommodated | nvim | \
              EXPECTED FAILURE: expected red until view raises its own notice: \
              E5108 in the notifier | 2026-07-19 |"
         ));
         assert!(page.markdown.contains(
-            "| neo-tree | abc1234 | v0.12.4 | neo-tree | unaccommodated | \
+            "| neo-tree | abc1234 | v0.12.4 | neo-tree | unaccommodated | nvim | \
              OK (engine-noise subtracted: E216: No such group) | 2026-07-19 |"
         ));
         let lualine_pos = page

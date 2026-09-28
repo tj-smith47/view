@@ -106,3 +106,17 @@ steps = [
   { wait_for = "hello", timeout_ms = 15000 },
   { assert_absent = "E5108" },
 ]
+
+# native-only again under the tiled layout. The other states read the
+# statusline or command-line row, which the tiled layout gives to a tile's
+# frame, so they have no twin.
+[[states]]
+name = "native-only"
+panes = "tiles"
+fixture = "minimal"
+steps = [
+  { send = "ihello<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { wait_for = "hello", timeout_ms = 60000 },
+  { assert_absent = "E5108" },
+]

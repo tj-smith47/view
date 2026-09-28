@@ -243,3 +243,98 @@ steps = [
   { wait_for = "Messages", timeout_ms = 30000 },
   { send = "<Esc>" },
 ]
+
+# Every state again under the tiled layout, where toasts and the history
+# overlay open over framed tiles.
+[[states]]
+name = "unaccommodated"
+panes = "tiles"
+accommodations = false
+native = {}
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.notify ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { wait_for = "view: your config also draws", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 60000 },
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
+  { send = ":lua require('notify')('notify-compat-marker', nil, { timeout = 60000 })<CR>" },
+  { assert_absent = "view: notify is drawing over" },
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
+  { wait_for = "notify-compat-marker", timeout_ms = 60000 },
+  { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"notify%-compat%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 30000 },
+  { send = ":lua vim.notify('vim-notify-marker')<CR>" },
+  { wait_for = "vim-notify-marker", timeout_ms = 60000 },
+  { probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"vim%-notify%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "absent" },
+  { send = "\\fm" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "<Esc>" },
+]
+
+[[states]]
+name = "superseded"
+panes = "tiles"
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.notify ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { wait_for = "view: your config also draws", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 60000 },
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
+  { send = ":lua require('notify')('notify-compat-marker', nil, { timeout = 60000 })<CR>" },
+  { assert_absent = "view: notify is drawing over" },
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
+  { wait_for = "notify-compat-marker", timeout_ms = 60000 },
+  { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"notify%-compat%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 30000 },
+  { send = ":lua vim.notify('vim-notify-marker')<CR>" },
+  { wait_for = "vim-notify-marker", timeout_ms = 60000 },
+  { probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"vim%-notify%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "absent" },
+  { send = "\\fm" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "<Esc>" },
+]
+
+[[states]]
+name = "deferred"
+panes = "tiles"
+native = { notifications = false }
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.notify ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { assert_absent = "(vim.notify" },
+  { assert_absent = "notify is drawing over" },
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_messages == true)')", expect = "false" },
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_cmdline == true)')", expect = "true" },
+  { send = ":lua require('notify')('notify-compat-marker')<CR>" },
+  { wait_for = "notify-compat-marker", timeout_ms = 60000 },
+  { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"notify%-compat%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 30000 },
+  { send = ":lua vim.notify('vim-notify-marker')<CR>" },
+  { wait_for = "vim-notify-marker", timeout_ms = 60000 },
+  { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"vim%-notify%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 30000 },
+  { send = "\\fm" },
+  { assert_absent = "Messages" },
+]
+
+[[states]]
+name = "native-only"
+panes = "tiles"
+fixture = "minimal"
+steps = [
+  { send = "\\fm" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "<Esc>" },
+]

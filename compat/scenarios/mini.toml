@@ -28,3 +28,16 @@ steps = [
   # the line assertion above keeps passing against the literal text
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
 ]
+
+# The present state again under the tiled layout.
+[[states]]
+name = "present"
+panes = "tiles"
+steps = [
+  { wait_for_probe = "luaeval('package.loaded[\"mini.pairs\"] ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = "ilocal t = (" },
+  { wait_for_probe = "getline('.')", expect = "local t = ()", timeout_ms = 30000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+]

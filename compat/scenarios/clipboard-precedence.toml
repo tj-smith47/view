@@ -34,3 +34,19 @@ fixture = "minimal"
 steps = [
   { wait_for_probe = "g:clipboard.name", expect = "view", timeout_ms = 5000 },
 ]
+
+# Both states again under the tiled layout, which takes the same startup path.
+[[states]]
+name = "present"
+panes = "tiles"
+steps = [
+  { wait_for_probe = "g:clipboard.name", expect = "user-provider", timeout_ms = 30000 },
+]
+
+[[states]]
+name = "native-only"
+panes = "tiles"
+fixture = "minimal"
+steps = [
+  { wait_for_probe = "g:clipboard.name", expect = "view", timeout_ms = 30000 },
+]
