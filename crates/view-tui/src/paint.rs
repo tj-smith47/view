@@ -2715,6 +2715,31 @@ mod tests {
     /// Over a link with any latency it is what makes typing into the panel
     /// feel slower than typing into the buffer, which is backwards: the
     /// composer is native state and the buffer round-trips nvim.
+    /// The trust question runs wider than its box on a 120-column
+    /// terminal, and it wraps: the last word of it is on screen.
+    #[test]
+    fn the_trust_prompt_at_120_columns_shows_its_last_word() {
+        let mut model = Model::with_term_size(120, 40);
+        model.engine.apply_grid(GridOp::Resize {
+            width: 120,
+            height: 40,
+        });
+        model.cwd = std::path::PathBuf::from("/home/someone/work/a-project-with-a-long-name");
+        ai_verb(&mut model, "open");
+        let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+        let buf = full_paint(&model, area);
+        let screen: Vec<String> = (0..40).map(|row| row_text(&buf, row, 0, 120)).collect();
+        let at = |needle: &str| screen.iter().position(|row| row.contains(needle));
+        let (Some(first), Some(last), Some(yes)) = (at("Trust /home"), at("project."), at("Yes"))
+        else {
+            panic!(
+                "the whole question and its choices are painted:\n{}",
+                screen.join("\n")
+            );
+        };
+        assert!(first < last && last < yes, "{}", screen.join("\n"));
+    }
+
     #[test]
     fn a_composer_keystroke_damages_only_the_composer_row() {
         let mut model = Model::with_term_size(120, 40);

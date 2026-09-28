@@ -1304,7 +1304,8 @@ impl Model {
             .saturating_sub(top)
             .saturating_sub(self.statusline_rows())
             .saturating_sub(foot);
-        let rect = overlay.geometry.rect(
+        let rect = look::grown_rect(
+            overlay,
             self.term_width.saturating_sub(ring_cols * 2),
             content.saturating_sub(ring_rows * 2),
         );

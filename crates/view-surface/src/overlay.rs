@@ -178,13 +178,13 @@ pub struct Rows {
 /// the same size rather than stacking corner glyphs on top of each other.
 #[must_use]
 pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Rows {
-    let Some(body) = body(kind) else {
-        return Rows::default();
-    };
     if width == 0 || height == 0 {
         return Rows::default();
     }
     if width < 2 || height < 2 {
+        let Some(body) = body(kind, width) else {
+            return Rows::default();
+        };
         return content_rows(kind, &body, width, height, borders);
     }
 
@@ -193,6 +193,9 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
     // of content is worse than an unpadded box
     let pad = u16::from(width >= 6);
     let text_width = view_core::native::geometry::interior_text_width(width);
+    let Some(body) = body(kind, text_width) else {
+        return Rows::default();
+    };
     let interior = height - 2;
     let laid = content_rows(kind, &body, text_width, interior, borders);
 
@@ -226,7 +229,7 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
 /// boxes where a person sees one.
 #[must_use]
 pub fn unframed_rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Rows {
-    let Some(body) = body(kind) else {
+    let Some(body) = body(kind, width) else {
         return Rows::default();
     };
     if width == 0 || height == 0 {
@@ -819,18 +822,19 @@ fn kept_tail<'a>(run: &'a [Line], fit: &RunFit) -> impl Iterator<Item = &'a Line
 }
 
 /// The [`Body`] for a native overlay layer, or `None` for a layer kind that
-/// is not a native overlay at all.
+/// is not a native overlay at all. `text_width` is the cells a row of it
+/// holds, which a prompt's message wraps at.
 ///
 /// Exhaustive rather than wildcarded, so the `Some` arms here and
 /// [`LayerKind::is_native_overlay`]'s `true` arms cannot drift: a variant
 /// added to one without the other stops compiling instead of quietly
 /// producing a framed layer with nothing in it.
-fn body(kind: &LayerKind) -> Option<Body> {
+fn body(kind: &LayerKind, text_width: u16) -> Option<Body> {
     match kind {
         LayerKind::Picker(view) => Some(picker_body(view)),
         LayerKind::Tree(view) => Some(tree_body(view)),
         LayerKind::Statusline(view) => Some(statusline_body(view)),
-        LayerKind::Prompt(view) => Some(prompt_body(view)),
+        LayerKind::Prompt(view) => Some(prompt_body(view, text_width)),
         LayerKind::Palette(view) => Some(palette_body(view)),
         LayerKind::Stream(view) => Some(stream_body(view)),
         LayerKind::Ai(view) => Some(ai_body(view)),
@@ -926,7 +930,18 @@ fn statusline_body(view: &StatuslineView) -> Body {
     }
 }
 
-fn prompt_body(view: &PromptView) -> Body {
+/// `width` is the interior text width the message wraps at, the same one
+/// `Model::overlay_rect` counted the box's rows at.
+fn prompt_body(view: &PromptView, width: u16) -> Body {
+    let mut header: Vec<Line> = view
+        .message_rows(width)
+        .into_iter()
+        .map(|row| Line::Text(plain_spans(row)))
+        .collect();
+    header.push(Line::Text(plain_spans(format!(
+        "{PROMPT_MARK} {}",
+        view.input
+    ))));
     Body {
         title: view.title.clone(),
         // the same shape every other overlay with a text field uses: the
@@ -934,10 +949,7 @@ fn prompt_body(view: &PromptView) -> Body {
         // prompt mark and the selection marker are the same glyph, so an
         // input line sharing a side of the rule with the choices reads as
         // a second selected row
-        header: vec![
-            Line::Text(plain_spans(view.message.clone())),
-            Line::Text(plain_spans(format!("{PROMPT_MARK} {}", view.input))),
-        ],
+        header,
         items: view
             .choices
             .iter()

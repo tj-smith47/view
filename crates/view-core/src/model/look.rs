@@ -233,6 +233,23 @@ impl super::Model {
     }
 }
 
+/// `overlay`'s box on a `term_w` by `term_h` band, grown to the rows a
+/// modal's wrapped message needs. The message wraps at the width the share
+/// gives, so those rows are only known once that width is.
+pub(super) fn grown_rect(overlay: &super::Overlay, term_w: u16, term_h: u16) -> OverlayRect {
+    let view = match &overlay.kind {
+        super::OverlayKind::Prompt(state) => state.view(),
+        super::OverlayKind::EngineBusy(state) => state.view(),
+        _ => return overlay.geometry.rect(term_w, term_h),
+    };
+    let width = overlay.geometry.rect(term_w, term_h).width;
+    let inner = crate::native::geometry::interior_text_width(width);
+    overlay
+        .geometry
+        .with_min_height(view.rows_at(inner).saturating_add(2))
+        .rect(term_w, term_h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +292,34 @@ mod tests {
         assert!(!look.frames((min_w - 1, min_h), 0));
         assert!(!look.frames((min_w, min_h - 1), 0));
         assert!(look.frames((min_w, min_h), 0));
+    }
+
+    /// A modal whose wrapped question needs more rows than its share gets
+    /// them, so its choices stay on screen.
+    #[test]
+    fn a_prompt_box_grows_to_the_rows_its_wrapped_question_needs() {
+        let mut model = crate::model::Model::with_term_size(60, 24);
+        let state = crate::native::prompt::PromptState::ai_trust_prompt(
+            std::path::PathBuf::from("/p"),
+            "open".to_string(),
+            "Trust /home/someone/work/a-project-with-a-long-name to launch an AI \
+             agent? Agents can read and write files in this project."
+                .to_string(),
+        );
+        let share = state.overlay_box().rect(60, 24).height;
+        let view = state.view();
+        model.push_overlay(
+            state.overlay_box(),
+            super::super::OverlayKind::Prompt(state),
+        );
+        assert_eq!(model.overlays.len(), 1, "the prompt is open");
+        for overlay in &model.overlays {
+            let rect = model.overlay_rect(overlay);
+            let inner = crate::native::geometry::interior_text_width(rect.width);
+            let needed = view.rows_at(inner) + 2;
+            assert!(needed > share, "the question outgrows the share");
+            assert_eq!(rect.height, needed, "the box holds every row");
+        }
     }
 
     /// Gapless tiles and nvim's own picture have no frame box and move no

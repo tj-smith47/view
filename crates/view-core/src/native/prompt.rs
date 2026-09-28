@@ -404,6 +404,8 @@ impl PromptState {
     /// Where this prompt sits on the terminal: a centered modal no wider
     /// than the text it actually holds, and never more than
     /// [`PROMPT_WIDTH_PCT`] of the terminal however long the question runs.
+    /// A question wider than that wraps, and `Model::overlay_rect` grows
+    /// the box past [`PROMPT_HEIGHT_PCT`] when the wrapped rows need it.
     ///
     /// The one place a prompt's placement is decided, so every raiser
     /// (nvim's own `confirm`, the AI trust gate, the external-write
@@ -420,7 +422,12 @@ impl PromptState {
         let view = self.view();
         // the marker widths `view_surface::overlay` prefixes: the prompt
         // mark on the input line, the selection marker on every choice
-        let widest = cells(&view.message)
+        let widest = view
+            .message
+            .split('\n')
+            .map(cells)
+            .max()
+            .unwrap_or(0)
             .max(cells(&view.title).saturating_add(TITLE_MARGIN))
             .max(cells(&view.input).saturating_add(MARKER_CELLS))
             .max(
@@ -676,6 +683,44 @@ mod tests {
         let state = PromptState::from_entry(&entry("confirm", &"q".repeat(400))).unwrap();
         let rect = state.overlay_box().rect(263, 88);
         assert_eq!(rect.width, 263 * 60 / 100, "the share stays the ceiling");
+    }
+
+    const LONG_TRUST: &str = "Trust /home/someone/work/a-project-with-a-long-name to \
+        launch an AI agent? Agents can read and write files in this project.";
+
+    #[test]
+    fn a_question_wider_than_its_box_wraps_and_keeps_every_glyph() {
+        let state = PromptState::ai_trust_prompt(
+            PathBuf::from("/p"),
+            "open".to_string(),
+            LONG_TRUST.to_string(),
+        );
+        let view = state.view();
+        let rows = view.message_rows(40);
+        assert!(rows.len() > 1, "{rows:?}");
+        assert!(
+            rows.iter()
+                .all(|row| crate::native::text::text_width(row) <= 40),
+            "a row runs past the box: {rows:?}"
+        );
+        let glyphs = |text: &str| text.chars().filter(|c| *c != ' ').collect::<String>();
+        assert_eq!(
+            glyphs(&rows.concat()),
+            glyphs(LONG_TRUST),
+            "a glyph was lost at a break"
+        );
+        let expected = u16::try_from(rows.len() + 4).unwrap();
+        assert_eq!(
+            view.rows_at(40),
+            expected,
+            "message, input, rule, 2 choices"
+        );
+    }
+
+    #[test]
+    fn a_question_sent_over_several_lines_keeps_its_breaks() {
+        let state = PromptState::from_entry(&entry("confirm", "first\nsecond")).unwrap();
+        assert_eq!(state.view().message_rows(80), ["first", "second"]);
     }
 
     #[test]

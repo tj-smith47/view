@@ -212,6 +212,9 @@ pub struct OverlayBox {
     /// its whole share. A cap narrower than the share wins; a cap wider
     /// than it is ignored, so the share stays the ceiling it always was.
     pub max_width: Option<u16>,
+    /// The fewest rows this overlay is drawn in, or `None` to take its
+    /// share. A floor taller than the share wins, up to the whole terminal.
+    pub min_height: Option<u16>,
 }
 
 impl OverlayBox {
@@ -228,6 +231,7 @@ impl OverlayBox {
             height_pct: height_pct.min(100),
             anchor: Anchor::Center,
             max_width: None,
+            min_height: None,
         }
     }
 
@@ -246,6 +250,25 @@ impl OverlayBox {
     pub fn with_max_width(self, cells: u16) -> Self {
         Self {
             max_width: Some(cells),
+            ..self
+        }
+    }
+
+    /// The same box drawn at least `rows` tall, whatever its share works
+    /// out to: what a modal whose text wraps asks for, so its last rows stay
+    /// on screen where a share sized for a shorter question would cut them.
+    ///
+    /// ```
+    /// use view_core::native::geometry::OverlayBox;
+    /// let modal = OverlayBox::new(60, 40).with_min_height(12);
+    /// assert_eq!(modal.rect(80, 20).height, 12);
+    /// assert_eq!(modal.rect(80, 50).height, 20);
+    /// assert_eq!(modal.rect(80, 10).height, 10);
+    /// ```
+    #[must_use]
+    pub fn with_min_height(self, rows: u16) -> Self {
+        Self {
+            min_height: Some(rows),
             ..self
         }
     }
@@ -274,7 +297,9 @@ impl OverlayBox {
             Some(cap) => share(term_w, self.width_pct).min(cap),
             None => share(term_w, self.width_pct),
         };
-        let height = share(term_h, self.height_pct);
+        let height = share(term_h, self.height_pct)
+            .max(self.min_height.unwrap_or(0))
+            .min(term_h);
         let centered_row = term_h.saturating_sub(height) / 2;
         let centered_col = term_w.saturating_sub(width) / 2;
         let (row, col) = match self.anchor {

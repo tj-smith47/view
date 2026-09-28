@@ -584,6 +584,25 @@ impl PromptView {
             ..self
         }
     }
+
+    /// The message broken into rows of at most `width` cells: at every
+    /// line break it carries, then at the last space that fits.
+    #[must_use]
+    pub fn message_rows(&self, width: u16) -> Vec<String> {
+        let width = usize::from(width).max(1);
+        self.message
+            .split('\n')
+            .flat_map(|line| super::text::wrap_line(line, width))
+            .collect()
+    }
+
+    /// The interior rows this prompt fills at `width` cells: its wrapped
+    /// message, the input line, the rule under it and one row per choice.
+    #[must_use]
+    pub fn rows_at(&self, width: u16) -> u16 {
+        let rows = self.message_rows(width).len() + 2 + self.choices.len();
+        u16::try_from(rows).unwrap_or(u16::MAX)
+    }
 }
 
 /// One command in a [`PaletteView`]: what it is called and the keys that
