@@ -1430,6 +1430,7 @@ pub fn run(
             let damage = model.take_paint_damage();
             flushed = term.draw_surface(&model, surface, &damage)?; // a frame's own terminal I/O error aborts; engine errors never do, and neither does the OSC52 drain above (fire-and-forget, see its own comment)
             model.dirty = false;
+            model.note_frame_painted();
             last_paint = Instant::now();
         }
         // read once per pass rather than inside the branch: an input the
@@ -3792,6 +3793,7 @@ mod tests {
                     verb: String::new(),
                 },
             );
+            model.note_frame_painted();
             let flow = dispatch(
                 &mut model,
                 &executor,

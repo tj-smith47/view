@@ -1680,13 +1680,20 @@ fn window_status(name: &str, index: usize) -> WindowStatus {
 }
 
 fn tiled_frame(model: &Model) -> Buffer {
+    tiled_frame_and_caret(model).0
+}
+
+/// [`tiled_frame`], with the caret the render it painted placed, as
+/// `(col, row)`.
+fn tiled_frame_and_caret(model: &Model) -> (Buffer, Option<(u16, u16)>) {
     let surface = view_surface::render(model);
     let backend = TestBackend::new(model.term_width, model.term_height);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| composite_into(f.buffer_mut(), model, &surface, &Damage::full()))
         .unwrap();
-    terminal.backend().buffer().clone()
+    let caret = surface.cursor.map(|cursor| (cursor.col, cursor.row));
+    (terminal.backend().buffer().clone(), caret)
 }
 
 /// Every column carrying a vertical frame run, and every row carrying a
@@ -4056,7 +4063,7 @@ fn the_agent_panel_paints_its_whole_frame_before_the_agent_answers() {
             .find(|open| matches!(open.kind, view_core::model::OverlayKind::Ai))
             .expect("the panel is open");
         let rect = tiles.model.overlay_rect(open);
-        let buf = tiled_frame(&tiles.model);
+        let (buf, painted_caret) = tiled_frame_and_caret(&tiles.model);
         let bottom: String = (rect.col..rect.col + rect.width)
             .map(|col| buf[(col, rect.row + rect.height - 1)].symbol().to_string())
             .collect();
@@ -4069,7 +4076,13 @@ fn the_agent_panel_paints_its_whole_frame_before_the_agent_answers() {
         let cursor = view_surface::render(&tiles.model)
             .cursor
             .expect("the panel places a caret");
-        (rect, bottom, column, (cursor.col, cursor.row))
+        let caret = (cursor.col, cursor.row);
+        assert_eq!(
+            painted_caret,
+            Some(caret),
+            "the frame painted and a second render place one caret"
+        );
+        (rect, bottom, column, caret)
     };
     for gaps in [true, false] {
         let mut tiles = tiled_at(gaps, (220, 50), 0);

@@ -287,7 +287,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             // doc): it resolves locally, so this returns
             // Effect::AiTrustSet instead of forwarding the key.
             Some(OverlayKind::Prompt(p)) => {
-                if !p.accepts(&notation) {
+                if !p.shown() || !p.accepts(&notation) {
                     return Vec::new();
                 }
                 if let Some(project_root) = p.ai_trust_project_root() {
@@ -557,7 +557,8 @@ fn passes_user_keys(model: &Model) -> bool {
 /// floats it, and `<Space>ax` with no `<Space>a` sequence mapped opens the
 /// tree's create prompt on the `a`. The sequences are view's own
 /// invocations, and on a surface with a window of its own the user's own
-/// mappings too.
+/// mappings too. A `:` opens nvim's command line, and every key after it
+/// is typed there until the line is submitted or left.
 fn sequence_key(
     model: &mut Model,
     notation: String,
@@ -566,6 +567,11 @@ fn sequence_key(
 ) -> Vec<Effect> {
     let mut keys = model.submit_hold.take_sequence();
     if keys.is_empty() {
+        // nvim opens its command line from any window, and a line typed
+        // inside one round trip reaches here before nvim reports it open
+        if notation == ":" || model.engine.cmdline.is_some() || model.submit_hold.types_a_line() {
+            return engine_input(model, notation);
+        }
         if let Some(effects) = answer(model, &notation) {
             return effects;
         }

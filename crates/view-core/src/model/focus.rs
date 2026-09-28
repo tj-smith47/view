@@ -263,4 +263,15 @@ impl Model {
         self.take_overlay_at(pos);
         true
     }
+
+    /// Records that the frame rendered from this model reached the
+    /// terminal, which is what lets an open prompt read keys (see
+    /// [`crate::native::prompt::PromptState::note_shown`]).
+    pub fn note_frame_painted(&mut self) {
+        for overlay in &mut self.overlays {
+            if let OverlayKind::Prompt(prompt) = &mut overlay.kind {
+                prompt.note_shown();
+            }
+        }
+    }
 }

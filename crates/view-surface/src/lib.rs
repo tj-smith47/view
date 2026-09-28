@@ -4076,6 +4076,85 @@ mod tests {
         assert_eq!(caret, 0);
     }
 
+    /// `:View ai open`, its Enter and an `n` typed inside one round trip,
+    /// from the editor and from the floating tree, reach nvim as a command
+    /// line and leave the trust question open. The `n` answers nothing
+    /// until a frame has shown the question, and after that it declines.
+    #[test]
+    fn a_trust_prompt_reads_no_key_typed_before_it_was_painted() {
+        use view_core::msg::{Effect, Key, RpcCall};
+        use view_core::native::tree::TreeState;
+
+        let line = [
+            ":", "V", "i", "e", "w", " ", "a", "i", " ", "o", "p", "e", "n", "<CR>",
+        ];
+        let press = |model: &mut Model, notation: &str| {
+            update(
+                model,
+                Msg::Key(Key {
+                    notation: notation.to_string(),
+                }),
+            )
+        };
+        let prompt_layers = |model: &Model| {
+            render(model)
+                .layers
+                .iter()
+                .filter(|l| matches!(l.kind, LayerKind::Prompt(_)))
+                .count()
+        };
+        for tree in [false, true] {
+            let mut model = model_with_grid(80, 24);
+            model.term_width = 80;
+            model.term_height = 24;
+            model.engine.mode.current = "normal".to_string();
+            if tree {
+                model.push_overlay(
+                    OverlayBox::new(30, 100).with_anchor(Anchor::Left),
+                    OverlayKind::Tree(TreeState::open(std::path::PathBuf::from("/p"))),
+                );
+            }
+            let mut effects = Vec::new();
+            for notation in line.iter().chain(&["n"]) {
+                effects.extend(press(&mut model, notation));
+            }
+            let sent: Vec<&str> = effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::Rpc(RpcCall::Input { notation }) => Some(notation.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(sent, line, "tree={tree}: {effects:?}");
+
+            let effects = update(
+                &mut model,
+                Msg::FeatureInvoke {
+                    feature: "ai".to_string(),
+                    verb: "open".to_string(),
+                },
+            );
+            assert!(
+                !effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::AiTrustSet { .. })),
+                "tree={tree}: a key typed before the question answered it: {effects:?}"
+            );
+            assert_eq!(prompt_layers(&model), 1, "tree={tree}: question open");
+
+            model.note_frame_painted();
+            let effects = press(&mut model, "n");
+            assert!(
+                matches!(
+                    effects.as_slice(),
+                    [Effect::AiTrustSet { trusted: false, .. }]
+                ),
+                "tree={tree}: an `n` after the question was shown declines it: {effects:?}"
+            );
+            assert_eq!(prompt_layers(&model), 0, "tree={tree}: answered");
+        }
+    }
+
     /// The composer wraps, and the caret follows the wrap: a prompt past the
     /// panel's width puts it on the last row painted, one cell past the tail
     /// the wrap kept.

@@ -323,6 +323,13 @@ impl SubmitHold {
     pub fn is_holding(&self) -> bool {
         self.held.is_some()
     }
+
+    /// Whether a `:` view sent has opened a command line that no key since
+    /// has submitted or left.
+    #[must_use]
+    pub(crate) fn types_a_line(&self) -> bool {
+        self.typed.is_some()
+    }
 }
 
 /// Folds one key going to the engine into the tracked command line, and

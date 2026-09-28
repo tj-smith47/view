@@ -473,6 +473,7 @@ mod tests {
             checktime_reply(1, &[("/proj/src/lib.rs", CheckTimeOutcome::Conflict)]),
         );
         assert_eq!(model.overlays().len(), 1);
+        model.note_frame_painted();
 
         let effects = update(
             &mut model,

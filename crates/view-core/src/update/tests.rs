@@ -127,6 +127,7 @@ fn open_overlay(model: &mut Model) -> OverlayId {
         unreachable!("some_overlay_kind always returns OverlayKind::Prompt")
     };
     p.learn_cmdline(&cmdline);
+    p.note_shown();
     model.engine.cmdline = Some(cmdline);
     model.push_overlay(OverlayBox::new(50, 50), kind)
 }
@@ -150,6 +151,7 @@ fn open_typed_prompt(model: &mut Model, prompt: &str) -> OverlayId {
         unreachable!("some_overlay_kind always returns OverlayKind::Prompt")
     };
     p.learn_cmdline(&cmdline);
+    p.note_shown();
     model.engine.cmdline = Some(cmdline);
     model.push_overlay(OverlayBox::new(50, 50), kind)
 }
@@ -2583,6 +2585,7 @@ fn a_cancelled_prompt_retires_on_the_cmdline_hide_that_key_causes() {
         ),
         "the confirm must be on screen before it can be cancelled"
     );
+    m.note_frame_painted();
 
     let _ = update(
         &mut m,
@@ -3954,6 +3957,7 @@ fn bare_ai_on_an_untrusted_model_opens_the_trust_prompt_and_the_redispatch_opens
              trust: {:?}",
         m.overlays()
     );
+    m.note_frame_painted();
     let key_effects = update(
         &mut m,
         Msg::Key(Key {
@@ -4276,6 +4280,7 @@ fn answering_yes_on_the_trust_prompt_emits_ai_trust_set_true_and_closes_it() {
             verb: "panel".to_string(),
         },
     );
+    m.note_frame_painted();
     let effects = update(
         &mut m,
         Msg::Key(Key {
@@ -4312,6 +4317,7 @@ fn a_bare_cr_selects_the_bracketed_yes_default() {
             verb: String::new(),
         },
     );
+    m.note_frame_painted();
     let effects = update(
         &mut m,
         Msg::Key(Key {
@@ -4337,6 +4343,7 @@ fn answering_no_on_the_trust_prompt_emits_ai_trust_set_false() {
             verb: String::new(),
         },
     );
+    m.note_frame_painted();
     let effects = update(
         &mut m,
         Msg::Key(Key {
@@ -4363,6 +4370,7 @@ fn esc_on_the_trust_prompt_declines_it_too() {
             verb: String::new(),
         },
     );
+    m.note_frame_painted();
     let effects = update(
         &mut m,
         Msg::Key(Key {
@@ -5952,6 +5960,34 @@ fn keys_that_part_from_every_sequence_are_the_trees_own() {
     );
 }
 
+/// A command line typed in the windowed tree inside one round trip is
+/// nvim's, key for key, and a submitted `:View` holds what follows it the
+/// way it does from a buffer. A line left with `<Esc>` gives the keys back
+/// to the tree.
+#[test]
+fn a_command_line_typed_in_the_windowed_tree_reaches_nvim() {
+    let line = [
+        ":", "V", "i", "e", "w", " ", "a", "i", " ", "o", "p", "e", "n", "<CR>",
+    ];
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let effects = typed(&mut m, &line);
+    assert_eq!(meta_inputs(&effects), line, "{effects:?}");
+    assert!(m.submit_hold.is_holding(), "{effects:?}");
+
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let effects = typed(&mut m, &[":", "a", "<Esc>", "a"]);
+    assert_eq!(meta_inputs(&effects), [":", "a", "<Esc>"], "{effects:?}");
+    assert!(
+        matches!(
+            effects.last(),
+            Some(Effect::Rpc(RpcCall::TreeCreatePrompt { .. }))
+        ),
+        "{effects:?}"
+    );
+}
+
 /// `keys` as the user's own normal-mode mappings, with nvim waiting
 /// `timeoutlen` on a prefix.
 fn user_mappings(m: &mut Model, keys: &[&str], timeoutlen: Option<Duration>) {
@@ -6746,6 +6782,7 @@ fn a_trusted_project_never_reprompts_within_the_same_session() {
             verb: String::new(),
         },
     );
+    m.note_frame_painted();
     let _ = update(
         &mut m,
         Msg::Key(Key {
@@ -8736,6 +8773,7 @@ fn an_untrusted_toggle_answered_with_y_opens_the_panel_via_the_same_verb_it_star
         m.overlays().last().map(|o| &o.kind),
         Some(OverlayKind::Prompt(_))
     ));
+    m.note_frame_painted();
 
     let effects = update(
         &mut m,

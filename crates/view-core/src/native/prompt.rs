@@ -127,6 +127,9 @@ pub struct PromptState {
     /// the wire-identical one an unmatched key's re-arm produces. See
     /// [`PromptState::note_answer`].
     answered: bool,
+    /// Whether a frame carrying this question has reached the terminal.
+    /// See [`PromptState::note_shown`].
+    shown: bool,
 }
 
 impl PromptState {
@@ -145,6 +148,7 @@ impl PromptState {
             answer: Answer::Pending,
             origin: Origin::Engine,
             answered: false,
+            shown: false,
         })
     }
 
@@ -177,6 +181,7 @@ impl PromptState {
             ]),
             origin: Origin::AiTrust { project_root, verb },
             answered: false,
+            shown: false,
         }
     }
 
@@ -209,6 +214,7 @@ impl PromptState {
             ]),
             origin: Origin::ExternalWriteConflict { path },
             answered: false,
+            shown: false,
         }
     }
 
@@ -391,6 +397,24 @@ impl PromptState {
     /// waiting for some later, unrelated keystroke to notice.
     pub(crate) fn note_answer(&mut self, notation: &str) {
         self.answered = self.resolves(notation);
+    }
+
+    /// Records that a frame carrying this question reached the terminal.
+    ///
+    /// A key read before then was typed at whatever stood there before the
+    /// question: the tail of the command that raised it, or keys held
+    /// behind that command and replayed once it ran. The `n` of a batched
+    /// `:View ai open` would otherwise decline the AI trust question
+    /// nobody saw.
+    pub fn note_shown(&mut self) {
+        self.shown = true;
+    }
+
+    /// Whether [`note_shown`](Self::note_shown) has run, so a key may
+    /// answer this question.
+    #[must_use]
+    pub fn shown(&self) -> bool {
+        self.shown
     }
 
     /// Whether the last key forwarded from this prompt was one that ends
