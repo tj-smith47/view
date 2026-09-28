@@ -892,6 +892,7 @@ pub(crate) mod tests {
                     OverlayKind::Tree(TreeState::open(".".into()))
                 };
                 model.push_overlay(OverlayBox::new(share, 100).with_anchor(dock), kind);
+                model.follow_the_docks();
                 let open = model.overlays().last().expect("the float is open");
                 let Some(joined) = model.joined(open) else {
                     continue;

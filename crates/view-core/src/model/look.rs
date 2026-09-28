@@ -6,18 +6,8 @@
 //! spawn's geometry `--cmd`, the registry's inner-size requests, and the
 //! compositor's frame.
 
-use crate::grid::registry::{GridId, GridRegistry, Pane};
+use crate::grid::registry::{closed, Dock, Pane};
 use crate::native::geometry::{Anchor, OverlayRect};
-
-/// The blank gutter column beside a float docked to one side of the
-/// screen, in grid cells, with the rows it runs down.
-#[derive(Debug, Clone, Copy)]
-struct Dock {
-    right: bool,
-    col: u16,
-    row: u16,
-    height: u16,
-}
 
 /// Where a float docked to a side of the screen joins the gapless tiles'
 /// lattice, as [`super::Model::joined`] answers.
@@ -251,70 +241,33 @@ impl super::Model {
     }
 
     /// The box a tile's frame is drawn on, as `(row, col, width, height)`
-    /// in grid cells: `pane.filled`, closed one cell short of the column
-    /// every float docked to a side of the screen that shares rows with it
-    /// closes the tiles at. `None` where a float leaves the tile narrower
-    /// than [`MIN_FRAMED_SLOT`], which is too narrow for a frame.
-    ///
-    /// Such a float (the agent panel or the tree, while neither is
-    /// windowed) is laid over tiles nvim laid out on the whole width, so
-    /// the part of a tile past that column is under it.
+    /// in grid cells: `pane.filled`, which a float docked to a side of the
+    /// screen closes short of the column it closes the tiles at. `None`
+    /// where such a float leaves the tile narrower than
+    /// [`MIN_FRAMED_SLOT`], which is too narrow for a frame.
     #[must_use]
     pub fn tile_box(&self, pane: &Pane) -> Option<(u16, u16, u16, u16)> {
-        let (closed, clipped) = self.closed_box(pane);
-        framed(closed, clipped).then_some(closed)
+        let docks = self.engine.painted_grids().docks();
+        let clipped = !docks.is_empty() && closed(pane.slot, docks) != pane.slot;
+        (!clipped || pane.filled.2 >= MIN_FRAMED_SLOT.0).then_some(pane.filled)
     }
 
-    /// Where `grid`'s text shows on `registry`, as
-    /// [`GridRegistry::pane_text`] answers, cut to what its window's
-    /// [`Self::tile_box`] leaves: inside the frame, or short of the column
-    /// a docked float closes it at where the tile is too narrow for one or
-    /// under gapless tiles. A caret, a predicted glyph or a click outside
-    /// it would land on a border or under a float.
-    #[must_use]
-    pub fn tile_text(&self, registry: &GridRegistry, grid: GridId) -> Option<(u16, u16, u16, u16)> {
-        let text = registry.pane_text(grid)?;
-        // a caret and every predicted glyph ask this on each frame, and
-        // with no float docked the answer is the pane's text as it stands
-        if self.docks().next().is_none() {
-            return Some(text);
+    /// Records the floats docked to a side of the screen on the grid
+    /// registry, and answers whether they moved since the last call.
+    ///
+    /// Every message [`crate::update::update`] folds ends here, so only an
+    /// overlay opened past it, with [`Self::push_overlay`], needs the call.
+    pub fn follow_the_docks(&mut self) -> bool {
+        // the registry a restart holds is given the same docks as the live
+        // one, so either answers what was last recorded
+        if self
+            .docks()
+            .eq(self.engine.painted_grids().docks().iter().copied())
+        {
+            return false;
         }
-        #[cfg(test)]
-        tests::PANE_LOOKUPS.with(|n| n.set(n.get() + 1));
-        let Some(pane) = registry
-            .panes_in_z_order()
-            .into_iter()
-            .find(|pane| pane.id == grid && pane.kind.is_window())
-        else {
-            return Some(text);
-        };
-        let (closed, clipped) = self.closed_box(&pane);
-        if !clipped {
-            return Some(text);
-        }
-        let ring = if framed(closed, clipped) {
-            pane.origin.1.saturating_sub(pane.filled.1)
-        } else {
-            0
-        };
-        let left = text.1.max(closed.1.saturating_add(ring));
-        let right = text
-            .1
-            .saturating_add(text.2)
-            .min(closed.1.saturating_add(closed.2).saturating_sub(ring));
-        Some((text.0, left, right.saturating_sub(left), text.3))
-    }
-
-    /// The first and last of `grid`'s own columns [`Self::tile_text`]
-    /// shows, the range a caret, a predicted glyph or a drag is held to.
-    /// `None` where it shows none of them, or `grid` is not on screen.
-    #[must_use]
-    pub fn tile_columns(&self, registry: &GridRegistry, grid: GridId) -> Option<(u16, u16)> {
-        let (_, left, width, _) = self.tile_text(registry, grid)?;
-        let last = width.checked_sub(1)?;
-        let (_, origin) = registry.pane_origin(grid)?;
-        let first = left.saturating_sub(origin);
-        Some((first, first.saturating_add(last)))
+        let docks: Vec<Dock> = self.docks().collect();
+        self.engine.set_docks(&docks)
     }
 
     /// The side of the screen `overlay` is docked to, where its tile-side
@@ -366,30 +319,6 @@ impl super::Model {
         })
     }
 
-    /// `pane.filled` closed short of every docked gutter, and whether any
-    /// gutter closed it.
-    fn closed_box(&self, pane: &Pane) -> ((u16, u16, u16, u16), bool) {
-        let (row, mut col, mut width, height) = pane.filled;
-        let mut clipped = false;
-        for dock in self.docks() {
-            let rows =
-                row < dock.row.saturating_add(dock.height) && dock.row < row.saturating_add(height);
-            let end = col.saturating_add(width);
-            if !rows {
-                continue;
-            }
-            if dock.right && col < dock.col && end > dock.col {
-                width = dock.col.saturating_sub(col);
-                clipped = true;
-            } else if !dock.right && col <= dock.col && end > dock.col.saturating_add(1) {
-                col = dock.col.saturating_add(1);
-                width = end.saturating_sub(col);
-                clipped = true;
-            }
-        }
-        ((row, col, width, height), clipped)
-    }
-
     /// The column every float docked to the left or right of the screen
     /// and drawn as a float closes the tiles at, in grid cells: its gutter
     /// under gapped tiles, and under gapless tiles the column it joins the
@@ -429,12 +358,6 @@ impl super::Model {
         }
         full.split_gutter(overlay.geometry.anchor)
     }
-}
-
-/// Whether a tile's box, closed by a docked float or not, still carries a
-/// frame.
-fn framed(closed: (u16, u16, u16, u16), clipped: bool) -> bool {
-    !clipped || closed.2 >= MIN_FRAMED_SLOT.0
 }
 
 /// `overlay`'s box on a `term_w` by `band_h` band, grown to the rows a
@@ -481,6 +404,7 @@ pub(super) fn grown_rect(
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+    use crate::grid::registry::GridId;
 
     /// Every slot size a gapped tile can be given, with and without a
     /// winbar: the frame is the slot's own outer ring, the grid sits one
@@ -707,6 +631,7 @@ mod tests {
                 OverlayBox::new(30, 100).with_anchor(Anchor::Right),
                 super::super::OverlayKind::Ai,
             );
+            model.follow_the_docks();
             let grid = GridId(scene.tiles[0]);
             let pane = model
                 .engine
@@ -716,7 +641,7 @@ mod tests {
                 .find(|pane| pane.id == grid)
                 .expect("the tile is placed");
             let (row, col, width, _) = model.tile_box(&pane).expect("the tile keeps a frame");
-            assert!(width < pane.filled.2, "{size:?}: the panel closes the tile");
+            assert!(width < pane.slot.2, "{size:?}: the panel closes the tile");
             let offset = model.look.grid_offset();
             let border = col + width - 1;
             let screen_row = row + 2 + model.chrome_rows() + offset;
@@ -768,6 +693,7 @@ mod tests {
                     ))
                 };
                 model.push_overlay(OverlayBox::new(30, 100).with_anchor(anchor), kind);
+                model.follow_the_docks();
                 let open = model.overlays().last().expect("the float is open");
                 let join = model.joined(open).expect("the float joins the lattice").col;
                 let grid = GridId(scene.tiles[0]);
@@ -816,41 +742,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    thread_local! {
-        /// Every pane lookup [`Model::tile_text`] has made on this thread.
-        pub(super) static PANE_LOOKUPS: std::cell::Cell<usize> =
-            const { std::cell::Cell::new(0) };
-    }
-
-    /// With no float docked, where a tile's text shows is the pane's own
-    /// text, answered with no pane lookup; a docked panel costs one per
-    /// question and closes the text short of its gutter.
-    #[test]
-    fn a_tile_with_no_docked_float_answers_its_text_without_a_pane_lookup() {
-        use crate::native::geometry::{Anchor, OverlayBox};
-        let mut scene =
-            crate::model::notice::tests::scene((220, 50), Look::new(Panes::Tiles, true), &[], 1)
-                .expect("one tile fits");
-        let model = &mut scene.model;
-        let grid = GridId(scene.tiles[0]);
-        let text = model.engine.grids().pane_text(grid);
-        let lookups = || PANE_LOOKUPS.with(std::cell::Cell::get);
-        let before = lookups();
-        assert_eq!(model.tile_text(model.engine.grids(), grid), text);
-        assert_eq!(lookups(), before, "no pane lookup without a dock");
-        model.push_overlay(
-            OverlayBox::new(30, 100).with_anchor(Anchor::Right),
-            super::super::OverlayKind::Ai,
-        );
-        let docked = model.tile_text(model.engine.grids(), grid);
-        assert_eq!(lookups(), before + 1, "one pane lookup with a dock");
-        let width = |text: Option<(u16, u16, u16, u16)>| text.map(|(_, _, w, _)| w);
-        assert!(
-            width(docked) < width(text),
-            "{docked:?} is closed short of the panel"
-        );
     }
 
     /// Gapless tiles and nvim's own picture have no frame box and move no

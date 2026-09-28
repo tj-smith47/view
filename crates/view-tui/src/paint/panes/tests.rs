@@ -3564,6 +3564,74 @@ fn a_tile_beside_a_docked_float_keeps_its_whole_frame() {
     }
 }
 
+/// Every tile a docked float covers part of shows its text from the
+/// grid's first column, in the first cell inside its frame or past the
+/// lattice column the float joins on, whichever side the float docks to.
+#[test]
+fn a_tile_beside_a_docked_float_shows_its_text_inside_its_frame() {
+    use view_core::native::geometry::{Anchor, NativeSurface, SurfacePlacement};
+    let legs = [
+        (NativeSurface::Tree, Anchor::Left),
+        (NativeSurface::Tree, Anchor::Right),
+        (NativeSurface::Agent, Anchor::Right),
+        (NativeSurface::Agent, Anchor::Left),
+    ];
+    for (gaps, size) in [true, false]
+        .into_iter()
+        .flat_map(|gaps| [(220u16, 50u16), (60, 16)].map(|size| (gaps, size)))
+    {
+        for (scene, fixture) in [
+            ("nested", nested_at as fn(bool, (u16, u16)) -> Tiles),
+            ("single", single_at),
+        ] {
+            for (surface, anchor) in legs {
+                let mut tiles = fixture(gaps, size);
+                open_surface(
+                    &mut tiles.model,
+                    surface,
+                    SurfacePlacement::Overlay,
+                    anchor,
+                    None,
+                );
+                let buf = tiled_frame(&tiles.model);
+                let (origin_row, origin_col) = view_surface::grid_origin(&tiles.model);
+                let open = tiles.model.overlays().last().expect("the float is open");
+                let rect = tiles.model.overlay_rect(open);
+                let right = anchor == Anchor::Right;
+                // the tile's edge on the float's side: its frame's border
+                // one gap clear of the float, or the lattice column the
+                // float joins on
+                let side = match (gaps, right) {
+                    (true, true) => rect.col - 2,
+                    (true, false) => rect.col + rect.width + 1,
+                    (false, _) => tiles.model.joined(open).expect("the float joins").col,
+                };
+                let ring = u16::from(gaps);
+                let label = format!("gaps={gaps} {size:?} {scene} {surface:?} {anchor:?}");
+                let mut covered = 0;
+                for (index, &(row, col, width, _)) in tiles.slots.iter().enumerate() {
+                    if origin_col + col > side || origin_col + col + width <= side {
+                        continue;
+                    }
+                    covered += 1;
+                    let first = if right {
+                        origin_col + col + ring
+                    } else {
+                        side + 1
+                    };
+                    let glyph = &TILE_TEXT[index.min(TILE_TEXT.len() - 1)][..1];
+                    assert_eq!(
+                        buf[(first, origin_row + row + ring)].symbol(),
+                        glyph,
+                        "{label}: tile {index}'s first column at {first}"
+                    );
+                }
+                assert!(covered > 0, "{label}: the float covers part of a tile");
+            }
+        }
+    }
+}
+
 /// One window filling a terminal of `size`, with its status row under it.
 fn single_at(gaps: bool, size: (u16, u16)) -> Tiles {
     let (grid_width, grid_height) = outer_grid_at(gaps, size, 0);
@@ -3657,6 +3725,7 @@ fn a_short_docked_float_closes_only_the_tile_beside_it() {
         OverlayBox::new(30, 20).with_anchor(Anchor::Right),
         view_core::model::OverlayKind::Ai,
     );
+    tiles.model.follow_the_docks();
     let open = tiles.model.overlays().last().expect("the panel is open");
     let rect = tiles.model.overlay_rect(open);
     let (origin_row, origin_col) = view_surface::grid_origin(&tiles.model);
@@ -3692,21 +3761,25 @@ fn a_short_docked_float_closes_only_the_tile_beside_it() {
 /// The caret in a tile the agent panel closes stays on the tile's last
 /// visible text column, off the border, whether nvim's cursor is on the
 /// column under the border or on one under the panel, and a glyph
-/// predicted on either column is dropped. A tile the panel leaves no text
-/// column shows neither.
+/// predicted on either column is dropped. A tile the panel leaves one
+/// column, too few for a frame, shows its text bare in that column, with
+/// the caret held to it.
 #[test]
 fn the_caret_stays_off_the_border_a_docked_float_closes() {
     let grid = LEFT + 1;
     let probe = agent_overlay_beside_the_tiles(true);
     let registry = probe.model.engine.painted_grids();
-    let (_, _, inner_width, _) = registry
-        .pane_text(GridId(grid))
-        .expect("the right tile is placed");
+    // the fixture never answers the resize the panel asks for, so the
+    // grid still runs under the panel the way it does until nvim does
+    let (grid_width, _) = registry
+        .grid(GridId(grid))
+        .expect("the right tile is placed")
+        .size();
     let (_, pane_col) = registry.pane_origin(GridId(grid)).expect("placed");
     let open = probe.model.overlays().last().expect("the panel is open");
     let border = probe.model.overlay_rect(open).col - 2;
     let on_border = border - view_surface::grid_origin(&probe.model).1 - pane_col;
-    for at in [on_border, inner_width - 1] {
+    for at in [on_border, grid_width - 1] {
         let mut tiles = agent_overlay_beside_the_tiles(true);
         // an entered panel holds the caret in its composer
         tiles.model.ai_panel_mut().focused = false;
@@ -3740,8 +3813,6 @@ fn the_caret_stays_off_the_border_a_docked_float_closes() {
         });
         assert!(!predicted, "cursor at {at}: no glyph is predicted there");
     }
-    // a tile the panel leaves one column, its frame's, shows no text
-    // column at all: no caret and no predicted glyph
     let size = (80, 24);
     let gutter = agent_gutter(size);
     let (grid_width, grid_height) = outer_grid_at(true, size, 0);
@@ -3783,14 +3854,20 @@ fn the_caret_stays_off_the_border_a_docked_float_closes() {
             .predict("insert", GridId(grid), 'x', (1, at), stamp)
             .is_some());
         let surface = view_surface::render(&tiles.model);
+        let caret = surface.cursor.map(|cursor| cursor.col);
         assert_eq!(
-            surface.cursor, None,
-            "cursor at {at}: a tile with no text column shows no caret"
+            caret,
+            Some(view_surface::grid_origin(&tiles.model).1 + col),
+            "cursor at {at}: the caret is held to the one column shown"
         );
-        let predicted = surface.layers.iter().any(|layer| {
-            matches!(&layer.kind, view_surface::LayerKind::Speculated(cells) if !cells.is_empty())
+        let stray = surface.layers.iter().any(|layer| {
+            matches!(&layer.kind, view_surface::LayerKind::Speculated(cells)
+                if cells.iter().any(|cell| cell.col != col))
         });
-        assert!(!predicted, "cursor at {at}: no glyph is predicted there");
+        assert!(
+            !stray,
+            "cursor at {at}: no glyph is predicted off the column shown"
+        );
     }
 }
 
@@ -3972,7 +4049,8 @@ fn a_gapless_docked_float_joins_the_lattice() {
 /// Under gapless tiles the caret in a tile a docked float covers stays on
 /// the column beside the lattice column the float joins on, whether nvim's
 /// cursor is on that column or under the float, and a glyph predicted on
-/// either is dropped. The tree docked left mirrors the agent docked right.
+/// either is dropped. The tile the tree docked left covers shows its first
+/// column beside the join.
 #[test]
 fn the_caret_stays_off_the_lattice_column_a_gapless_docked_float_joins() {
     use view_core::native::geometry::{Anchor, NativeSurface, SurfacePlacement};
@@ -4001,18 +4079,25 @@ fn the_caret_stays_off_the_lattice_column_a_gapless_docked_float_joins() {
         let open = probe.model.overlays().last().expect("the float is open");
         let join = probe.model.joined(open).expect("the float joins").col;
         let beside = if right { join - 1 } else { join + 1 };
-        let under = if right { join + 2 } else { join - 2 };
         let registry = probe.model.engine.painted_grids();
         let (_, pane_col) = registry.pane_origin(GridId(grid)).expect("placed");
-        let (_, text_col, text_width, _) = registry.pane_text(GridId(grid)).expect("placed");
         let origin_col = view_surface::grid_origin(&probe.model).1;
-        let local = |col: u16| col - origin_col - pane_col;
-        for screen in [join, under] {
-            assert!(
-                (text_col..text_col + text_width).contains(&(screen - origin_col)),
-                "{anchor:?}: column {screen} is a text column of the tile"
+        let (grid_width, _) = registry.grid(GridId(grid)).expect("placed").size();
+        // the fixture never answers the resize the float asks for, so a
+        // grid docked right still runs under the float; one docked left
+        // starts past the join, where nvim's first column stands
+        let columns = if right {
+            vec![join - origin_col - pane_col, grid_width - 1]
+        } else {
+            assert_eq!(
+                origin_col + pane_col,
+                beside,
+                "{anchor:?}: text starts beside"
             );
-            let at = local(screen);
+            vec![]
+        };
+        for at in columns {
+            let screen = origin_col + pane_col + at;
             let mut tiles = scene();
             drive(
                 &mut tiles.model,

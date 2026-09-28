@@ -65,6 +65,8 @@ pub(crate) fn set_look(model: &mut Model, look: Look) -> Vec<Effect> {
     let before = model.look;
     model.engine.grids_mut().set_look(look);
     model.look = look;
+    // the docks follow the look, and a window they close asks once
+    model.follow_the_docks();
     model.dirty = true;
     // ahead of the size: the tab line is a row the outer grid does not
     // get, so the surface moves first and one resize carries the new

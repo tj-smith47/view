@@ -350,12 +350,104 @@ fn panel_beside_the_tiles() {
     }
 }
 
-/// Both looks in one session after another, then the panel beside the
-/// tiles: two live sessions sampled at once would each slow the redraw the
-/// other is timing.
+/// Where a tile beside the tree shows anything but its own buffer inside
+/// its frame, or `None` where every frame right of the leftmost one holds
+/// its buffer from the first column: `@` there and `#` in every other
+/// cell. The leftmost frame is the tree's once it is open.
+fn text_beside_the_tree(screen: &vt100::Screen, cols: u16, rows: u16) -> Option<String> {
+    let frames = frames(screen, cols, rows);
+    let tree = frames.iter().min_by_key(|frame| frame.left)?;
+    let tiles: Vec<&Frame> = frames.iter().filter(|f| f.left > tree.right).collect();
+    if tiles.is_empty() {
+        return Some(format!("no tile beside {tree:?} among {frames:?}"));
+    }
+    for tile in tiles {
+        for row in tile.top + 1..tile.bottom {
+            for col in tile.left + 1..tile.right {
+                let want = if col == tile.left + 1 { "@" } else { "#" };
+                let g = glyph(screen, row, col);
+                if g != want {
+                    return Some(format!("{g:?} at row {row} col {col} inside {tile:?}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The gapped vsplit with the tree docked on the left over part of the
+/// left tile, through the same shrink and grow: that tile shows its
+/// buffer from the first column, inside the frame it closes beside the
+/// tree, at every size.
+fn tree_beside_the_tiles() {
+    let paths = common::ScratchPaths::new("tiles-resize-tree");
+    let line = format!("@{}", "#".repeat(399));
+    let text: Vec<&str> = std::iter::repeat_n(line.as_str(), 80).collect();
+    std::fs::write(&paths.scratch, text.join("\n") + "\n").unwrap();
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.cwd(paths.scratch.parent().unwrap());
+    cmd.args(["--panes", "tiles"]);
+    cmd.arg(paths.scratch.file_name().unwrap());
+    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+    let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
+    std::fs::write(config, "[ui]\ngaps = true\n").unwrap();
+    let mut session = PtySession::spawn_configured(cmd, COLS, ROWS).unwrap();
+    assert!(
+        session.wait_for("@###", BUDGET),
+        "tree: view never showed the file; screen:\n{}",
+        session.screen()
+    );
+    session.send(b"\x1b:set nowrap | vsplit\r").unwrap();
+    // a launch notice is a frame of its own standing over a tile
+    let settled = |screen: &vt100::Screen| text_beside_the_tree(screen, COLS, ROWS).is_none();
+    let mut dismissed = 0;
+    while !session.wait_for_screen(host_deadline(Duration::from_millis(500)), settled) {
+        assert!(
+            dismissed < 8,
+            "tree: the two tiles never settled; screen:\n{}",
+            session.screen()
+        );
+        session.send(b"\x1b:View notifications dismiss\r").unwrap();
+        dismissed += 1;
+    }
+    session.send(b"\x1b:View tree\r").unwrap();
+    assert!(
+        session.wait_for_screen(BUDGET, |screen| {
+            frames(screen, COLS, ROWS).len() >= 3 && settled(screen)
+        }),
+        "tree: the tile beside the tree never showed its first column; {:?}; \
+         screen:\n{}",
+        session.with_screen(|screen| text_beside_the_tree(screen, COLS, ROWS)),
+        session.screen()
+    );
+    let redraw = host_deadline(REDRAW);
+    let watch = host_deadline(Duration::from_secs(2));
+    for (cols, rows) in [SHRUNK, (COLS, ROWS)] {
+        let (longest, first) =
+            resize_and_watch(&mut session, cols, rows, watch, text_beside_the_tree);
+        assert!(
+            longest <= redraw,
+            "tree: at {cols}x{rows} a tile beside the tree showed something \
+             other than its text for {longest:?}, past one redraw ({redraw:?}); \
+             the first screen of that stretch:\n{first}"
+        );
+        let now = session.with_screen(|screen| text_beside_the_tree(screen, cols, rows));
+        assert_eq!(
+            now,
+            None,
+            "tree: at {cols}x{rows}; screen:\n{}",
+            session.screen()
+        );
+    }
+}
+
+/// Both looks in one session after another, then the panel and the tree
+/// beside the tiles: two live sessions sampled at once would each slow the
+/// redraw the other is timing.
 #[test]
 fn a_tile_frame_stays_on_its_text_while_nvim_redraws_a_resize() {
     resize_under(true);
     resize_under(false);
     panel_beside_the_tiles();
+    tree_beside_the_tiles();
 }

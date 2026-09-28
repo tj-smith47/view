@@ -9249,6 +9249,100 @@ fn tree_toggle_opens_a_sidebar_and_issues_both_the_scan_and_the_git_scan() {
     );
 }
 
+/// A tree or agent panel docked over part of a tile, left or right, gapped
+/// or gapless, asks nvim to lay the tile's text out in the part it leaves
+/// and places the grid there; closing it asks for the whole slot again.
+#[test]
+fn a_float_docked_over_a_tile_moves_its_text_beside_the_float() {
+    use crate::model::{Look, Panes};
+    use crate::native::geometry::{Anchor, SurfaceLayout, SurfacePlacement};
+    let legs = [
+        (NativeSurface::Tree, "tree", Anchor::Left),
+        (NativeSurface::Tree, "tree", Anchor::Right),
+        (NativeSurface::Agent, "ai", Anchor::Right),
+        (NativeSurface::Agent, "ai", Anchor::Left),
+    ];
+    for gaps in [true, false] {
+        for (surface, feature, anchor) in legs {
+            let label = format!("gaps={gaps} {feature} {anchor:?}");
+            let look = Look::new(Panes::Tiles, gaps);
+            let mut scene =
+                crate::model::notice::tests::scene((160, 40), look, &[], 1).expect("one tile fits");
+            let m = &mut scene.model;
+            m.ai_trusted = true;
+            m.surfaces.set_layout(
+                surface,
+                SurfaceLayout::new(SurfacePlacement::Overlay, anchor, 30),
+            );
+            let grid = GridId(scene.tiles[0]);
+            let (_, col, width, height) = scene.slots[0];
+            let full_origin = m.engine.grids().pane_origin(grid).expect("placed").1;
+            let toggle = |m: &mut Model| {
+                update(
+                    m,
+                    Msg::FeatureInvoke {
+                        feature: feature.to_string(),
+                        verb: "toggle".to_string(),
+                    },
+                )
+            };
+            let requests = |effects: &[Effect]| -> Vec<(u16, u16)> {
+                effects
+                    .iter()
+                    .filter_map(|effect| match effect {
+                        Effect::Rpc(RpcCall::TryResizeGrid {
+                            grid: asked,
+                            width,
+                            height,
+                        }) if *asked == grid => Some((*width, *height)),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let effects = toggle(m);
+            let open = m.overlays().last().expect("the float is open");
+            let offset = m.look.grid_offset();
+            let dock = match m.overlay_gutter(open) {
+                Some(gutter) => gutter.col,
+                None => m.joined(open).expect("the float joins the lattice").col,
+            } - offset;
+            let ring = u16::from(gaps);
+            let (shown_col, shown_width) = if anchor == Anchor::Left {
+                (dock + 1, col + width - dock - 1)
+            } else {
+                (col, dock - col)
+            };
+            assert!(
+                shown_width < width,
+                "{label}: the float covers part of the tile"
+            );
+            assert_eq!(
+                requests(&effects),
+                vec![(shown_width - 2 * ring, height - 2 * ring)],
+                "{label}: the tile asks for the part the float leaves"
+            );
+            assert_eq!(
+                m.engine.grids().pane_origin(grid).map(|(_, col)| col),
+                Some(shown_col + ring),
+                "{label}: the text starts inside the part the float leaves"
+            );
+            let effects = toggle(m);
+            assert!(m.overlays().is_empty(), "{label}: the float is closed");
+            let whole = look.inner_request((width, height), 0);
+            assert_eq!(
+                requests(&effects),
+                vec![whole],
+                "{label}: the tile asks for its whole slot again"
+            );
+            assert_eq!(
+                m.engine.grids().pane_origin(grid).map(|(_, col)| col),
+                Some(full_origin),
+                "{label}: the text goes back to the slot's origin"
+            );
+        }
+    }
+}
+
 #[test]
 fn tree_toggle_again_closes_the_sidebar_and_cancels_its_scan_worker() {
     let mut m = model();

@@ -81,7 +81,8 @@ pub struct Pane {
     pub slot: (u16, u16, u16, u16),
     /// The part of [`Self::slot`] the grid covers, ring included, as
     /// `(row, col, width, height)`: the box a frame is drawn on, around the
-    /// [`Self::text`] the grid's text is painted in.
+    /// [`Self::text`] the grid's text is painted in. A float docked to a
+    /// side of the screen cuts it off at the column it closes the tiles at.
     ///
     /// nvim announces a resized screen's new slots, runs the config's
     /// `VimResized` handlers, and only then resizes the window grids, so
@@ -99,13 +100,13 @@ pub struct Pane {
 
 impl Pane {
     /// Where a grid of `size` shows its text in this pane, as `(row, col,
-    /// width, height)`: at [`Self::origin`], cut to [`Self::slot`] less the
-    /// ring the origin leaves, which is [`Self::filled`] less that ring.
-    /// Smaller than the grid while nvim has yet to resize it to a shrunk
-    /// slot, and the grid's own size otherwise.
+    /// width, height)`: at [`Self::origin`], cut to [`Self::filled`] less
+    /// the ring the origin leaves. Smaller than the grid while nvim has
+    /// yet to resize it to a shrunk slot, and the grid's own size
+    /// otherwise.
     #[must_use]
     pub fn text(&self, size: (u16, u16)) -> (u16, u16, u16, u16) {
-        text(self.slot, self.origin, size)
+        text(self.filled, self.origin, size)
     }
 }
 
@@ -249,13 +250,28 @@ impl Slot {
     fn filled(&self) -> Option<(u16, u16, u16, u16)> {
         let window = self.window.as_ref()?;
         let placed = self.placed.as_ref()?;
-        Some(filled(window.slot, placed.origin, self.grid.size()))
+        Some(filled(window.shown, placed.origin, self.grid.size()))
     }
 }
 
-/// What a standing inner request answers for: the slot nvim gave the
-/// window, the look it was sized under, and the rows the winbar adds.
+/// What a standing inner request answers for: the part of its slot the
+/// window is shown in, the look it was sized under, and the rows the
+/// winbar adds.
 type RequestKey = ((u16, u16, u16, u16), Look, u16);
+
+/// The column a float docked to the left or right of the screen closes
+/// the tiles at, with the rows it runs down, in grid cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Dock {
+    /// Whether the float is docked to the right of the screen.
+    pub(crate) right: bool,
+    /// The column: past it for a right dock, before it for a left one.
+    pub(crate) col: u16,
+    /// The first row the float runs down.
+    pub(crate) row: u16,
+    /// How many rows it runs down.
+    pub(crate) height: u16,
+}
 
 /// The layout nvim keeps for one ordinary window, and the inner size view
 /// has asked for inside it.
@@ -265,6 +281,9 @@ struct Window {
     win: WinHandle,
     /// The slot, as `(row, col, width, height)`.
     slot: (u16, u16, u16, u16),
+    /// The part of `slot` no docked float covers, which is where the
+    /// window's grid is placed and what it is sized to.
+    shown: (u16, u16, u16, u16),
     /// `win_viewport_margins`'s top for this grid: rows nvim adds on top
     /// of whatever inner height it is asked for.
     margin_top: u16,
@@ -336,6 +355,9 @@ pub struct GridRegistry {
     /// leaves behind belong to whatever was under it, so the layout
     /// changing is the one thing a per-pane row list cannot express.
     placement_dirty: bool,
+    /// The floats docked to a side of the screen, which close the window
+    /// slots they cover part of.
+    docks: Vec<Dock>,
 }
 
 impl GridRegistry {
@@ -349,6 +371,7 @@ impl GridRegistry {
             claims: Vec::new(),
             look: Look::default(),
             placement_dirty: false,
+            docks: Vec::new(),
         }
     }
 
@@ -608,7 +631,7 @@ impl GridRegistry {
                     let own = (p.origin.0, p.origin.1, size.0, size.1);
                     (own, own)
                 },
-                |window| (window.slot, filled(window.slot, p.origin, size)),
+                |window| (window.slot, filled(window.shown, p.origin, size)),
             );
             Pane {
                 id: slot.id,
@@ -968,7 +991,7 @@ impl GridRegistry {
         let size = slot.grid.size();
         Some(slot.window.as_ref().map_or(
             (placed.origin.0, placed.origin.1, size.0, size.1),
-            |window| text(window.slot, placed.origin, size),
+            |window| text(window.shown, placed.origin, size),
         ))
     }
 
@@ -1022,6 +1045,7 @@ impl GridRegistry {
     /// the origin the current look puts inside it.
     fn place_window(&mut self, grid: GridId, win: WinHandle, slot: (u16, u16, u16, u16)) {
         let look = self.look;
+        let shown = closed(slot, &self.docks);
         if let Some(entry) = self.slot_mut(grid) {
             let margin_top = entry.window.as_ref().map_or(0, |window| window.margin_top);
             let requested = entry
@@ -1032,11 +1056,12 @@ impl GridRegistry {
             entry.window = Some(Window {
                 win,
                 slot,
+                shown,
                 margin_top,
                 requested,
             });
         }
-        let origin = inner_origin(look, slot, self.margin_top(grid));
+        let origin = inner_origin(look, shown, self.margin_top(grid));
         let kind = self.window_kind(win);
         // a grid_line that beat the claim here left engine cells standing
         // under a pane view paints itself
@@ -1228,9 +1253,9 @@ impl GridRegistry {
             return;
         }
         window.margin_top = top;
-        let slot = window.slot;
+        let shown = window.shown;
         let win = window.win;
-        let origin = inner_origin(look, slot, top);
+        let origin = inner_origin(look, shown, top);
         let kind = self.window_kind(win);
         self.place(grid, origin, kind, 0);
     }
@@ -1258,8 +1283,8 @@ impl GridRegistry {
         else {
             return (0, 0);
         };
-        let (row, col, width, height) = window.slot;
-        let origin = inner_origin(self.look, (row, col, width, height), window.margin_top);
+        let (row, col, _, _) = window.slot;
+        let origin = inner_origin(self.look, window.shown, window.margin_top);
         (origin.0.saturating_sub(row), origin.1.saturating_sub(col))
     }
 
@@ -1273,20 +1298,44 @@ impl GridRegistry {
             return false;
         }
         self.look = look;
-        for index in 0..self.slots.len() {
-            let Some(window) = self.slots.get(index).and_then(|slot| slot.window.as_ref()) else {
+        self.replace_windows();
+        true
+    }
+
+    /// The floats docked to a side of the screen, and whether this call
+    /// changed them.
+    ///
+    /// A window a float covers part of is shown in the part it leaves, so
+    /// a change moves those windows' origins and what they owe nvim, the
+    /// same way a look change does.
+    pub(crate) fn set_docks(&mut self, docks: &[Dock]) -> bool {
+        if self.docks == docks {
+            return false;
+        }
+        docks.clone_into(&mut self.docks);
+        self.replace_windows();
+        true
+    }
+
+    /// The floats [`Self::set_docks`] last recorded.
+    pub(crate) fn docks(&self) -> &[Dock] {
+        &self.docks
+    }
+
+    /// Moves every window grid to where the look and the docks put it.
+    fn replace_windows(&mut self) {
+        let look = self.look;
+        for entry in &mut self.slots {
+            let Some(window) = entry.window.as_mut() else {
                 continue;
             };
-            let (slot, margin_top) = (window.slot, window.margin_top);
-            let origin = inner_origin(look, slot, margin_top);
-            if let Some(entry) = self.slots.get_mut(index) {
-                if let Some(placed) = entry.placed.as_mut() {
-                    placed.origin = origin;
-                }
+            window.shown = closed(window.slot, &self.docks);
+            let origin = inner_origin(look, window.shown, window.margin_top);
+            if let Some(placed) = entry.placed.as_mut() {
+                placed.origin = origin;
             }
         }
         self.placement_dirty = true;
-        true
     }
 
     /// How window layout is currently drawn.
@@ -1376,10 +1425,11 @@ impl GridRegistry {
     /// since the last request this registry answered for it under this
     /// `look` and this top margin.
     ///
-    /// Keyed on `(slot, look, margin_top)`, since the slot alone is not enough:
-    /// a gaps flip changes what every window owes while leaving slots whose
-    /// neighbours absorb the ring change exactly where they were, and a
-    /// slot-only key would drop the re-send that flip exists to make.
+    /// Keyed on the part of the slot no docked float covers, the look and
+    /// the top margin, since the slot alone is not enough: a gaps flip
+    /// changes what every window owes while leaving slots whose neighbours
+    /// absorb the ring change exactly where they were, and a slot-only key
+    /// would drop the re-send that flip exists to make.
     ///
     /// Every `nvim_ui_try_resize_grid` costs a full redraw of the window it
     /// names, so the guard is what keeps an attach from relaying out a
@@ -1388,13 +1438,20 @@ impl GridRegistry {
     pub fn pending_inner_request(&mut self, grid: GridId, look: Look) -> Option<(u16, u16)> {
         let entry = self.slots.iter_mut().find(|slot| slot.id == grid)?;
         let window = entry.window.as_mut()?;
-        let key = (window.slot, look, window.margin_top);
+        let key = (window.shown, look, window.margin_top);
         if window.requested == Some(key) {
             return None;
         }
         window.requested = Some(key);
-        let (_, _, width, height) = window.slot;
-        Some(look.inner_request((width, height), window.margin_top))
+        let (_, _, width, height) = window.shown;
+        let request = look.inner_request((width, height), window.margin_top);
+        // a window a docked float covers part of asks for the part it is
+        // shown in even where it carries no frame, since nvim otherwise
+        // lays its text out under the float
+        if request == (0, 0) && window.shown != window.slot {
+            return Some((width, height.saturating_sub(window.margin_top)));
+        }
+        Some(request)
     }
 
     /// Whether view is holding `grid`'s float off the screen.
@@ -1466,6 +1523,29 @@ fn inner_origin(look: Look, slot: (u16, u16, u16, u16), margin_top: u16) -> (u16
     }
     let (rows, cols) = look.inset();
     (row.saturating_add(rows), col.saturating_add(cols))
+}
+
+/// `slot` closed short of every dock that covers part of it: a float
+/// docked right ends it before its column, one docked left starts it past
+/// its column. A slot a float covers whole, or not at all, is left as it
+/// stands.
+pub(crate) fn closed(slot: (u16, u16, u16, u16), docks: &[Dock]) -> (u16, u16, u16, u16) {
+    let (row, mut col, mut width, height) = slot;
+    for dock in docks {
+        let rows =
+            row < dock.row.saturating_add(dock.height) && dock.row < row.saturating_add(height);
+        let end = col.saturating_add(width);
+        if !rows {
+            continue;
+        }
+        if dock.right && col < dock.col && end > dock.col {
+            width = dock.col.saturating_sub(col);
+        } else if !dock.right && col <= dock.col && end > dock.col.saturating_add(1) {
+            col = dock.col.saturating_add(1);
+            width = end.saturating_sub(col);
+        }
+    }
+    (row, col, width, height)
 }
 
 /// The rows and columns of the ring a grid whose cell `(0, 0)` sits at

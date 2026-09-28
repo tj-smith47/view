@@ -1037,9 +1037,6 @@ pub(crate) const SPECULATED_LAYER_INDEX: usize = 1;
 /// [`PredictedCell`]).
 fn speculated_layer(model: &Model, origin: (u16, u16)) -> Option<Layer> {
     let registry = model.engine.painted_grids();
-    // pending cells almost always share the cursor's grid, so one lookup
-    // serves the whole burst
-    let mut shown: Option<(GridId, Option<(u16, u16)>)> = None;
     let cells: Vec<PredictedCell> = model
         .speculate
         .pending()
@@ -1047,28 +1044,12 @@ fn speculated_layer(model: &Model, origin: (u16, u16)) -> Option<Layer> {
         .filter_map(|cell| {
             let (orow, ocol) = registry.pane_origin(cell.grid)?;
             let (grid_w, grid_h) = registry.grid(cell.grid)?.size();
-            // a grid painted cut at a shrunk slot's frame shows no cell
-            // past the cut
+            // a grid painted cut at a shrunk slot's frame, or short of a
+            // docked float, shows no cell past the cut
             let text = registry.pane_text(cell.grid);
             let (grid_w, grid_h) = text.map_or((grid_w, grid_h), |(_, _, w, h)| (w, h));
             if cell.row >= grid_h || cell.col >= grid_w {
                 return None;
-            }
-            // the global grid of a single-grid session is no tile, and no
-            // float closes it
-            if text.is_some() {
-                let columns = match shown {
-                    Some((grid, columns)) if grid == cell.grid => columns,
-                    _ => {
-                        let columns = model.tile_columns(registry, cell.grid);
-                        shown = Some((cell.grid, columns));
-                        columns
-                    }
-                };
-                let (first, last) = columns?;
-                if cell.col < first || cell.col > last {
-                    return None;
-                }
             }
             Some(PredictedCell {
                 row: cell.row.saturating_add(orow),
@@ -1317,27 +1298,16 @@ fn cursor_spec(model: &Model, origin: (u16, u16), layers: &[Layer]) -> Option<Cu
         // than the terminal would otherwise let a prediction past its own
         // right edge still claim the caret
         let size = registry.grid(grid).map_or((width, height), Grid::size);
-        // a grid nvim has yet to resize to a shrunk slot is painted cut at
-        // its frame, and the caret stays on what is painted
-        let text = registry.pane_text(grid);
-        let (size, row, col) = match text {
+        // a grid nvim has yet to resize to a shrunk slot, or to the part a
+        // docked float leaves, is painted cut there, and the caret stays
+        // on what is painted
+        let (size, row, col) = match registry.pane_text(grid) {
             Some((_, _, w, h)) => (
                 (w, h),
                 row.min(h.saturating_sub(1)),
                 col.min(w.saturating_sub(1)),
             ),
             None => (size, row, col),
-        };
-        // a docked float closes the tile's frame over a text column nvim
-        // still holds, and the caret stays off that border; a tile it
-        // leaves no text column has nowhere to show one
-        let (size, col) = match model.tile_columns(registry, grid) {
-            Some((first, last)) => (
-                (size.0.min(last.saturating_add(1)), size.1),
-                col.max(first).min(last),
-            ),
-            None if text.is_some() => return None,
-            None => (size, col),
         };
         let local_col = speculated_col(model, grid, size, row, col);
         let (orow, ocol) = registry.pane_origin(grid).unwrap_or((0, 0));

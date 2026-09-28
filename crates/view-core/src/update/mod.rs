@@ -218,6 +218,14 @@ fn update_one(model: &mut Model, msg: Msg) -> Vec<Effect> {
             effects.push(Effect::Rpc(RpcCall::TryResize { width, height }));
         }
     }
+    // a float opened, closed or resized against a side of the screen, a
+    // placement step and a terminal resize all move the part of each
+    // tile nvim's text is shown in, so the windows it closes ask nvim to
+    // lay their text out there
+    if model.follow_the_docks() {
+        model.dirty = true;
+        effects.append(&mut look::request_all(model));
+    }
     let departed = model
         .engine
         .messages

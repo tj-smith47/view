@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use super::{EngineModel, Model, MouseCapture, WindowStatus};
 use crate::events::WinHandle;
-use crate::grid::registry::{GridRegistry, WindowSlot};
+use crate::grid::registry::{Dock, GridRegistry, WindowSlot};
 use crate::grid::Grid;
 use crate::hl::HlTable;
 use crate::msg::Effect;
@@ -175,6 +175,22 @@ impl EngineModel {
     #[must_use]
     pub(crate) fn holds_the_frame(&self) -> bool {
         matches!(self.held.hold, Hold::Frame { .. })
+    }
+
+    /// Records the floats docked to a side of the screen on the live
+    /// registry and on the one a restart holds, and answers whether that
+    /// changed the live one.
+    pub(crate) fn set_docks(&mut self, docks: &[Dock]) -> bool {
+        match &mut self.held.hold {
+            Hold::Nothing => {}
+            Hold::Frame { grids, .. } => {
+                grids.set_docks(docks);
+            }
+            Hold::Layout { drawn, .. } => {
+                drawn.set_docks(docks);
+            }
+        }
+        self.grids.set_docks(docks)
     }
 
     /// Takes the frame on screen as the one a restart holds.

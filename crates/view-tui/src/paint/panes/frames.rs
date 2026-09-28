@@ -428,15 +428,18 @@ fn clear_bare<'a>(
         // the slot is read here because its part the grid leaves bare is
         // what this clears
         let (row, col, width, height) = pane.slot;
-        let (_, _, filled_width, filled_height) = pane.filled;
+        let (_, filled_col, filled_width, filled_height) = pane.filled;
         // a row nvim keeps for its command line is where the mode message
         // and the answer to every prompt are written, so every clear stops
         // above `foot`; any other row under a slot is the status row
         let under = u16::from(row.saturating_add(height) < foot);
+        let filled_end = filled_col.saturating_add(filled_width);
         clear(
             row,
-            col.saturating_add(filled_width),
-            width.saturating_sub(filled_width).saturating_add(1),
+            filled_end,
+            col.saturating_add(width)
+                .saturating_sub(filled_end)
+                .saturating_add(1),
             height.saturating_add(under),
             gap,
             area,
