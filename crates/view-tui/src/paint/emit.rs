@@ -1,6 +1,6 @@
-//! What a composed frame puts on the wire: view's own copy of ratatui's
-//! crossterm emission loop, with the cursor re-sync a terminal that draws
-//! some glyphs two columns wide needs.
+//! What a composed frame puts on the wire: view's own emission loop, grown
+//! from ratatui's crossterm one, with the cursor re-sync a terminal that
+//! draws some glyphs two columns wide needs.
 //!
 //! `ratatui::backend::CrosstermBackend::draw` moves the cursor only when the
 //! next cell is not the immediate successor of the last one, letting adjacent
@@ -24,6 +24,7 @@ use crossterm::style::{
     Attribute as CtAttribute, Color as CtColor, Colors as CtColors, Print, SetAttribute,
     SetBackgroundColor, SetColors, SetForegroundColor, SetUnderlineColor,
 };
+use crossterm::terminal::{Clear, ClearType};
 use ratatui::backend::IntoCrossterm;
 use ratatui::buffer::{Buffer, Cell, CellWidth};
 use ratatui::style::{Color, Modifier};
@@ -186,10 +187,10 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
     })
 }
 
-/// Writes `content` the way `CrosstermBackend::draw` does -- same style
-/// diffing, same trailing reset -- and, after any cell whose symbol a
-/// terminal may draw wider than the shadow assumes, addresses the next cell
-/// absolutely instead of trusting the terminal's advance.
+/// Writes `content` as `CrosstermBackend::draw` does, with its trailing
+/// reset, and, after any cell whose symbol a terminal may draw wider than
+/// the shadow assumes, addresses the next cell absolutely instead of
+/// trusting the terminal's advance.
 ///
 /// Two consequences of addressing absolutely, both of which the crossterm
 /// loop is free of because it never moves mid-run. A cell inside the span
@@ -212,6 +213,12 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
 /// bytes, and a frame that reaches a terminal behind tmux in several reads
 /// is shown by a slow client one read at a time.
 ///
+/// A colour switch writes only the colour that changes. A run of blank
+/// cells in one style on the terminal's default background that reaches
+/// `right`, the terminal's last column plus one, is one erase to the end
+/// of the line where that is shorter than the spaces. The screen a frame
+/// leaves is the one `CrosstermBackend::draw` leaves; the bytes differ.
+///
 /// # Errors
 ///
 /// Returns the writer's own error.
@@ -219,66 +226,56 @@ pub(crate) fn draw_resynced<'a, W: Write>(
     writer: &mut W,
     content: impl Iterator<Item = (u16, u16, &'a Cell)>,
     boxes_one_cell: bool,
+    right: u16,
 ) -> std::io::Result<bool> {
-    let mut fg = Color::Reset;
-    let mut bg = Color::Reset;
-    let mut underline_color = Color::Reset;
-    let mut modifier = Modifier::empty();
-    let mut last_pos: Option<(u16, u16)> = None;
-    let mut covered_until: Option<(u16, u16)> = None;
-    let mut emitted = false;
+    let mut pen = Pen::default();
+    let mut blanks: Option<BlankRun> = None;
     for (x, y, cell) in content {
         // `ratatui` yields the trailing column of a VS16 emoji as a clear,
         // on the assumption a backend prints it straight after the glyph and
         // lets the terminal's own advance place it; addressed absolutely it
         // lands on the glyph's second half instead and the terminal drops
         // the glyph
-        if matches!(covered_until, Some((cx, cy)) if cy == y && x < cx) {
+        if matches!(pen.covered_until, Some((cx, cy)) if cy == y && x < cx) {
             continue;
         }
-        if !matches!(last_pos, Some((px, py)) if px.checked_add(1) == Some(x) && y == py) {
-            queue!(writer, MoveTo(x, y))?;
+        let erasable = cell.bg == Color::Reset && is_blank(cell);
+        let starts = BlankRun { x, y, len: 1, cell };
+        blanks = match blanks {
+            Some(run)
+                if erasable
+                    && run.y == y
+                    && run.end() == Some(x)
+                    && run.cell.style() == cell.style() =>
+            {
+                Some(BlankRun {
+                    len: run.len.saturating_add(1),
+                    ..run
+                })
+            }
+            Some(run) => {
+                pen.spaces(writer, run)?;
+                erasable.then_some(starts)
+            }
+            None => erasable.then_some(starts),
+        };
+        if erasable {
+            if let Some(run) = blanks.filter(|_| x.saturating_add(1) >= right) {
+                if run.len > ERASE_LEN {
+                    pen.erase_to_end(writer, run)?;
+                } else {
+                    pen.spaces(writer, run)?;
+                }
+                blanks = None;
+            }
+            continue;
         }
-        last_pos = Some((x, y));
-        if cell.modifier != modifier {
-            queue_modifier_diff(writer, modifier, cell.modifier)?;
-            modifier = cell.modifier;
-        }
-        if cell.fg != fg || cell.bg != bg {
-            queue!(
-                writer,
-                SetColors(CtColors::new(
-                    cell.fg.into_crossterm(),
-                    cell.bg.into_crossterm(),
-                ))
-            )?;
-            fg = cell.fg;
-            bg = cell.bg;
-        }
-        if cell.underline_color != underline_color {
-            queue!(
-                writer,
-                SetUnderlineColor(cell.underline_color.into_crossterm())
-            )?;
-            underline_color = cell.underline_color;
-        }
-        let widens = may_widen(cell.symbol(), boxes_one_cell);
-        if cell.cell_width() >= 2 && widens {
-            // nvim's TUI writes the same two spaces and two backspaces ahead
-            // of this class: on a terminal that draws the glyph one column
-            // wide the second column is then blank rather than stale
-            queue!(writer, Print("  \u{8}\u{8}"))?;
-        }
-        queue!(writer, Print(cell.symbol()))?;
-        emitted = true;
-        covered_until = x.checked_add(cell.cell_width()).map(|next| (next, y));
-        if widens {
-            // the terminal's own cursor is now somewhere this loop cannot
-            // predict, so the next cell is addressed rather than assumed
-            last_pos = None;
-        }
+        pen.put(writer, x, y, cell, boxes_one_cell)?;
     }
-    if emitted {
+    if let Some(run) = blanks {
+        pen.spaces(writer, run)?;
+    }
+    if pen.emitted {
         queue!(
             writer,
             SetForegroundColor(CtColor::Reset),
@@ -287,7 +284,165 @@ pub(crate) fn draw_resynced<'a, W: Write>(
             SetAttribute(CtAttribute::Reset),
         )?;
     }
-    Ok(emitted)
+    Ok(pen.emitted)
+}
+
+/// The attributes under which a space shows the foreground colour.
+const SHOWS_FG: Modifier = Modifier::REVERSED
+    .union(Modifier::UNDERLINED)
+    .union(Modifier::CROSSED_OUT);
+
+/// The bytes of `CSI K`, which a run of spaces has to outgrow before the
+/// erase is the shorter of the two.
+const ERASE_LEN: u16 = 3;
+
+/// Whether `cell` shows nothing but its background.
+fn is_blank(cell: &Cell) -> bool {
+    cell.symbol() == " " && !cell.modifier.intersects(SHOWS_FG)
+}
+
+/// Adjacent blank cells in one style on the default background, held until
+/// the loop knows whether they reach the end of the line.
+#[derive(Clone, Copy)]
+struct BlankRun<'a> {
+    x: u16,
+    y: u16,
+    len: u16,
+    cell: &'a Cell,
+}
+
+impl BlankRun<'_> {
+    /// The column past the run's last cell.
+    fn end(self) -> Option<u16> {
+        self.x.checked_add(self.len)
+    }
+}
+
+/// The terminal's cursor and SGR state as the escapes queued so far leave
+/// them.
+struct Pen {
+    fg: Color,
+    bg: Color,
+    underline_color: Color,
+    modifier: Modifier,
+    last_pos: Option<(u16, u16)>,
+    covered_until: Option<(u16, u16)>,
+    emitted: bool,
+}
+
+impl Default for Pen {
+    fn default() -> Self {
+        Self {
+            fg: Color::Reset,
+            bg: Color::Reset,
+            underline_color: Color::Reset,
+            modifier: Modifier::empty(),
+            last_pos: None,
+            covered_until: None,
+            emitted: false,
+        }
+    }
+}
+
+impl Pen {
+    /// Moves the cursor to `(x, y)` unless the terminal's advance already
+    /// put it there.
+    fn address<W: Write>(&mut self, writer: &mut W, x: u16, y: u16) -> std::io::Result<()> {
+        if !matches!(self.last_pos, Some((px, py)) if px.checked_add(1) == Some(x) && y == py) {
+            queue!(writer, MoveTo(x, y))?;
+        }
+        self.last_pos = Some((x, y));
+        Ok(())
+    }
+
+    /// Sets every attribute `cell` is drawn with, writing only the colours
+    /// that change.
+    fn style<W: Write>(&mut self, writer: &mut W, cell: &Cell) -> std::io::Result<()> {
+        if cell.modifier != self.modifier {
+            queue_modifier_diff(writer, self.modifier, cell.modifier)?;
+            self.modifier = cell.modifier;
+        }
+        match (cell.fg != self.fg, cell.bg != self.bg) {
+            (true, true) => queue!(
+                writer,
+                SetColors(CtColors::new(
+                    cell.fg.into_crossterm(),
+                    cell.bg.into_crossterm(),
+                ))
+            )?,
+            (true, false) => queue!(writer, SetForegroundColor(cell.fg.into_crossterm()))?,
+            (false, true) => queue!(writer, SetBackgroundColor(cell.bg.into_crossterm()))?,
+            (false, false) => {}
+        }
+        self.fg = cell.fg;
+        self.bg = cell.bg;
+        if cell.underline_color != self.underline_color {
+            queue!(
+                writer,
+                SetUnderlineColor(cell.underline_color.into_crossterm())
+            )?;
+            self.underline_color = cell.underline_color;
+        }
+        Ok(())
+    }
+
+    /// Writes one cell.
+    fn put<W: Write>(
+        &mut self,
+        writer: &mut W,
+        x: u16,
+        y: u16,
+        cell: &Cell,
+        boxes_one_cell: bool,
+    ) -> std::io::Result<()> {
+        self.address(writer, x, y)?;
+        self.style(writer, cell)?;
+        let widens = may_widen(cell.symbol(), boxes_one_cell);
+        if cell.cell_width() >= 2 && widens {
+            // nvim's TUI writes the same two spaces and two backspaces ahead
+            // of this class: on a terminal that draws the glyph one column
+            // wide the second column is then blank rather than stale
+            queue!(writer, Print("  \u{8}\u{8}"))?;
+        }
+        queue!(writer, Print(cell.symbol()))?;
+        self.emitted = true;
+        self.covered_until = x.checked_add(cell.cell_width()).map(|next| (next, y));
+        if widens {
+            // the terminal's own cursor is now somewhere this loop cannot
+            // predict, so the next cell is addressed rather than assumed
+            self.last_pos = None;
+        }
+        Ok(())
+    }
+
+    /// Writes `run` as spaces.
+    fn spaces<W: Write>(&mut self, writer: &mut W, run: BlankRun) -> std::io::Result<()> {
+        self.address(writer, run.x, run.y)?;
+        self.style(writer, run.cell)?;
+        for _ in 0..run.len {
+            queue!(writer, Print(' '))?;
+        }
+        let last = run.end().map(|end| end.saturating_sub(1));
+        self.last_pos = last.map(|x| (x, run.y));
+        self.covered_until = run.end().map(|end| (end, run.y));
+        self.emitted = true;
+        Ok(())
+    }
+
+    /// Erases from `run`'s first cell to the end of the line.
+    fn erase_to_end<W: Write>(&mut self, writer: &mut W, run: BlankRun) -> std::io::Result<()> {
+        self.address(writer, run.x, run.y)?;
+        // a terminal fills the erased cells with the pen's colours, and a
+        // block cursor resting on one later draws its foreground
+        self.style(writer, run.cell)?;
+        queue!(writer, Clear(ClearType::UntilNewLine))?;
+        // the erase leaves the cursor on the run's first cell, where no
+        // later cell of the frame is written without an address
+        self.last_pos = None;
+        self.covered_until = None;
+        self.emitted = true;
+        Ok(())
+    }
 }
 
 /// Queues the attribute escapes that turn `from` into `to`, in the order

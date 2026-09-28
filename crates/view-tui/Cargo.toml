@@ -88,6 +88,9 @@ view-test-support = { version = "0.0.1", path = "../view-test-support" }
 # it in tests, never the reverse. Dev-only so no shipping binary carries the
 # oracle's differential-testing machinery.
 view-oracle = { version = "0.0.1", path = "../view-oracle" }
+# the screen the emission loop's escapes leave, compared cell by cell with
+# the screen ratatui's own backend leaves
+vt100 = "0.16.2"
 
 # tests/input_buffered_reply.rs owns a pty of its own and puts it on
 # descriptor 0, so `has_buffered` can be asked about a real terminal

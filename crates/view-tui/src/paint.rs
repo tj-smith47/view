@@ -500,7 +500,12 @@ impl Shadow {
         let result = if clipping_pays(&runs, self.front.area.height) {
             self.emit_clipped(writer, &runs)
         } else {
-            emit::draw_resynced(writer, self.updates(), self.boxes_one_cell)
+            emit::draw_resynced(
+                writer,
+                self.updates(),
+                self.boxes_one_cell,
+                self.front.area.right(),
+            )
         };
         self.runs = runs;
         result
@@ -528,8 +533,9 @@ impl Shadow {
         runs: &[(u16, u16)],
     ) -> std::io::Result<bool> {
         let boxes_one_cell = self.boxes_one_cell;
+        let right = self.front.area.right();
         let staged = StagedRuns::stage(self, runs);
-        emit::draw_resynced(writer, staged.diffs(), boxes_one_cell)
+        emit::draw_resynced(writer, staged.diffs(), boxes_one_cell, right)
     }
 
     /// Exchanges each run's rows between the shadow's buffers and its staged
@@ -4555,6 +4561,76 @@ mod tests {
         bytes
     }
 
+    /// The screen a terminal the size of `front` shows once it has drawn
+    /// `front` and then taken `bytes`.
+    fn screen_after(front: &Buffer, bytes: &[u8]) -> vt100::Parser {
+        let area = front.area;
+        let mut parser = vt100::Parser::new(area.height, area.width, 0);
+        parser.process(&crossterm_bytes(&Buffer::empty(area), front));
+        parser.process(bytes);
+        parser
+    }
+
+    /// What a person sees in one cell: its text and the attributes drawn
+    /// with it, or its two colours alone where the cell is blank and no
+    /// attribute draws the foreground on it.
+    fn seen(cell: &vt100::Cell) -> (String, Option<vt100::Color>, vt100::Color, [bool; 5]) {
+        if cell.contents().trim().is_empty() && !cell.inverse() && !cell.underline() {
+            // a block cursor resting on a blank draws its foreground
+            return (
+                String::new(),
+                Some(cell.fgcolor()),
+                cell.bgcolor(),
+                [false; 5],
+            );
+        }
+        (
+            cell.contents().to_owned(),
+            Some(cell.fgcolor()),
+            cell.bgcolor(),
+            [
+                cell.bold(),
+                cell.dim(),
+                cell.italic(),
+                cell.underline(),
+                cell.inverse(),
+            ],
+        )
+    }
+
+    /// Asserts `got` leaves the screen `CrosstermBackend::draw` leaves for
+    /// the whole-frame diff of `front` against `back`, cell by cell, and
+    /// returns the two cursor positions.
+    fn assert_crossterms_screen(
+        front: &Buffer,
+        back: &Buffer,
+        got: &[u8],
+        label: &str,
+    ) -> ((u16, u16), (u16, u16)) {
+        let got = screen_after(front, got);
+        let want = screen_after(front, &crossterm_bytes(front, back));
+        let area = front.area;
+        for row in 0..area.height {
+            for col in 0..area.width {
+                let (Some(g), Some(w)) =
+                    (got.screen().cell(row, col), want.screen().cell(row, col))
+                else {
+                    panic!("({row},{col}) lies outside a {area:?} screen");
+                };
+                assert_eq!(
+                    seen(g),
+                    seen(w),
+                    "cell ({row},{col}) differs from what CrosstermBackend::draw \
+                     leaves, in: {label}"
+                );
+            }
+        }
+        (
+            got.screen().cursor_position(),
+            want.screen().cursor_position(),
+        )
+    }
+
     /// Asserts the row-clipped emission is byte-identical to the whole-buffer
     /// diff of the same two buffers, on both the forced-clip path and the
     /// path [`Shadow::emit_updates`] picks for itself. Leaves `shadow`
@@ -4566,20 +4642,26 @@ mod tests {
     /// label names.
     ///
     /// Returns whether the frame reached the `CrosstermBackend::draw`
-    /// comparison -- it reaches it only when nothing in the diff widens.
-    /// Each caller pins the returned count per frame: the leg is silent
-    /// when it skips, so nothing else would say a frame stopped exercising
-    /// it.
+    /// screen comparison -- it reaches it only when nothing in the diff
+    /// widens. Each caller pins the returned count per frame: the leg is
+    /// silent when it skips, so nothing else would say a frame stopped
+    /// exercising it.
     #[must_use]
     fn assert_clipped_emission_matches_unclipped(shadow: &mut Shadow, label: &str) -> bool {
-        let expected =
-            drawn_bytes(|w| emit::draw_resynced(w, shadow.updates(), shadow.boxes_one_cell));
+        let expected = drawn_bytes(|w| {
+            emit::draw_resynced(
+                w,
+                shadow.updates(),
+                shadow.boxes_one_cell,
+                shadow.front.area.right(),
+            )
+        });
 
-        // a frame carrying no glyph a terminal may widen has to reach the
-        // wire exactly as `ratatui` would have written it. This is the leg
-        // that holds real composed frames -- theme styles, overlays, borders,
-        // whatever a fixture paints -- against that, which the synthetic
-        // style sweep cannot do
+        // a frame carrying no glyph a terminal may widen has to leave the
+        // screen `ratatui` would have left. This is the leg that holds real
+        // composed frames -- theme styles, overlays, borders, whatever a
+        // fixture paints -- against that, which the synthetic style sweep
+        // cannot do
         let mut changed = 0_usize;
         let mut widens = false;
         for (x, y, cell) in shadow.front.diff_iter(&shadow.back) {
@@ -4596,12 +4678,7 @@ mod tests {
              comparisons hold nothing to the wire"
         );
         if !widens {
-            assert_eq!(
-                expected,
-                crossterm_bytes(&shadow.front, &shadow.back),
-                "view's emission loop diverged from CrosstermBackend::draw on a \
-                 frame with nothing to re-sync after, in: {label}"
-            );
+            let _ = assert_crossterms_screen(&shadow.front, &shadow.back, &expected, label);
         }
 
         let mut runs = Vec::new();
@@ -4856,16 +4933,16 @@ mod tests {
         }
     }
 
-    /// The crossterm-equality leg fires only on a frame carrying nothing to
+    /// The crossterm-screen leg fires only on a frame carrying nothing to
     /// re-sync after, and every overlay view draws with the box-drawing
     /// border charset carries one on its own frame. A terminal whose
     /// box-glyph probe came back negative gets the ASCII charset instead,
     /// and its list markers are ASCII too, so an overlay stack drawn for it
     /// is the one chrome shape that can be held against `ratatui`'s own
-    /// backend byte for byte -- which is what the grid fixture above cannot
+    /// backend cell for cell -- which is what the grid fixture above cannot
     /// reach, its frames being grid text.
     #[test]
-    fn ascii_bordered_chrome_emits_exactly_what_crossterm_emits() {
+    fn ascii_bordered_chrome_leaves_the_screen_crossterm_leaves() {
         let area = ratatui::layout::Rect::new(0, 0, 40, 12);
         let mut model = caps_model(true, true, true, NO_BOX_GLYPHS);
         set_term_size(&mut model, area.width, area.height);
@@ -5026,6 +5103,7 @@ mod tests {
                 w,
                 emit::with_widened_neighbours(front, back, boxes_one_cell),
                 boxes_one_cell,
+                back.area.right(),
             )
         })
     }
@@ -5076,30 +5154,102 @@ mod tests {
         }
     }
 
-    /// The copied emission loop has to stay byte-identical to the one it was
-    /// copied from wherever the re-sync does not fire, or every escape view
-    /// writes drifts from what `ratatui` would have written and nothing else
-    /// in the tree compares the two. The sweep is ASCII by construction, so
-    /// `terminal_may_widen` is false for every cell and the only difference
-    /// left to measure is the style encoding.
+    /// The emission loop has to leave the screen the loop it was copied from
+    /// leaves wherever the re-sync does not fire, or every style view draws
+    /// drifts from what `ratatui` would have drawn and nothing else in the
+    /// tree compares the two. The sweep is ASCII and carries no blank cell,
+    /// so every cell's text, colours and attributes are compared, and the
+    /// cursor ends where crossterm's does.
+    ///
+    /// Disconfirm: `Pen::style` skipping the foreground half of a colour
+    /// switch fails on the first cell whose foreground alone changed.
     #[test]
-    fn emission_matches_crossterms_where_no_glyph_widens() {
+    fn emission_leaves_crossterms_screen_where_no_glyph_widens() {
         let area = ratatui::layout::Rect::new(0, 0, 16, 7);
         let mut front = Buffer::empty(area);
         let mut back = Buffer::empty(area);
         seed_style_sweep(&mut front, &mut back);
-
-        let expected = crossterm_bytes(&front, &back);
         assert!(
-            !expected.is_empty(),
+            !crossterm_bytes(&front, &back).is_empty(),
             "the sweep produced no diff at all, so this pin asserts nothing"
         );
+
+        let (got, want) =
+            assert_crossterms_screen(&front, &back, &resynced_bytes(&front, &back), "the sweep");
+        assert_eq!(got, want, "the cursor ends where crossterm leaves it");
+    }
+
+    /// A colour switch between cells on one background writes the
+    /// foreground alone. A blank run erased to the row end is erased in
+    /// its own foreground, which a block cursor resting there draws.
+    ///
+    /// Disconfirm: `Pen::style` writing both colours on every switch.
+    #[test]
+    fn a_colour_switch_writes_only_the_colour_that_changes() {
+        let area = ratatui::layout::Rect::new(0, 0, 6, 2);
+        let mut front = Buffer::empty(area);
+        for x in 0..6 {
+            front[(x, 1)].set_symbol("x");
+        }
+        let mut back = Buffer::empty(area);
+        let border = Style::default().fg(Color::Blue).bg(Color::Rgb(1, 2, 3));
+        let text = Style::default().fg(Color::White).bg(Color::Rgb(1, 2, 3));
+        for x in 0..5 {
+            let (symbol, style) = if x == 0 || x == 4 {
+                ("|", border)
+            } else {
+                (" ", text)
+            };
+            back[(x, 0)].set_symbol(symbol).set_style(style);
+        }
+        back[(0, 1)].set_symbol("y");
+        for x in 1..6 {
+            back[(x, 1)].set_style(Style::default().fg(Color::Red));
+        }
+
+        let bytes = resynced_bytes(&front, &back);
+        let _ = assert_crossterms_screen(&front, &back, &bytes, "a bordered blank run");
         assert_eq!(
-            resynced_bytes(&front, &back),
-            expected,
-            "view's emission loop diverged from CrosstermBackend::draw on a \
-             frame with nothing to re-sync after"
+            String::from_utf8(bytes).unwrap(),
+            "\x1b[1;1H\x1b[38;5;4;48;2;1;2;3m|\x1b[38;5;15m   \x1b[38;5;4m|\
+             \x1b[2;1H\x1b[39;49my\x1b[38;5;1m\x1b[K\x1b[39m\x1b[49m\x1b[59m\x1b[0m",
+            "the text colour alone switches, and the erase carries red"
         );
+    }
+
+    /// A run of blank cells on the default background that reaches the
+    /// row end is one erase to the end of the line. A run on another
+    /// background, or one that stops short of the row end, stays spaces.
+    ///
+    /// Disconfirm: `draw_resynced` never erasing writes the six spaces.
+    #[test]
+    fn a_blank_run_to_the_row_end_is_one_erase() {
+        let area = ratatui::layout::Rect::new(0, 0, 8, 3);
+        let mut front = Buffer::empty(area);
+        for y in 0..3 {
+            for x in 0..8 {
+                front[(x, y)].set_symbol("x");
+            }
+        }
+        let mut back = Buffer::empty(area);
+        back[(0, 0)].set_symbol("a");
+        back[(1, 0)].set_symbol("b");
+        back.set_style(
+            ratatui::layout::Rect::new(0, 1, 8, 1),
+            Style::default().bg(Color::Red),
+        );
+        back[(6, 2)].set_symbol("z");
+        back[(7, 2)].set_symbol("z");
+
+        let bytes = resynced_bytes(&front, &back);
+        assert_eq!(
+            String::from_utf8(bytes.clone()).unwrap(),
+            "\x1b[1;1Hab\x1b[K\x1b[2;1H\x1b[48;5;1m        \
+             \x1b[3;1H\x1b[49m      zz\x1b[39m\x1b[49m\x1b[59m\x1b[0m",
+            "the default-background run to the row end erases; the red row and \
+             the run stopping short print their spaces"
+        );
+        let _ = assert_crossterms_screen(&front, &back, &bytes, "erased row ends");
     }
 
     /// The shape the reach walk exists for: a box-drawing glyph a terminal
@@ -5217,13 +5367,17 @@ mod tests {
     /// `ESC[1;4H` + two spaces, addressing column 3 and never column 2.
     #[test]
     fn clearing_a_pair_of_regional_indicators_repaints_the_column_it_covered() {
-        let area = ratatui::layout::Rect::new(0, 0, 5, 1);
+        let area = ratatui::layout::Rect::new(0, 0, 6, 1);
         let mut front = Buffer::empty(area);
         let mut back = Buffer::empty(area);
         front[(0, 0)].set_symbol("a");
         front[(1, 0)].set_symbol("\u{1f1ef}\u{1f1f5}");
         back[(0, 0)].set_symbol(" ");
         back[(1, 0)].set_symbol(" ");
+        // a glyph that stays in the last column keeps the blanks short of
+        // the row end, where they would be erased whatever the reach did
+        front[(5, 0)].set_symbol("q");
+        back[(5, 0)].set_symbol("q");
 
         assert_eq!(
             resynced_bytes(&front, &back),

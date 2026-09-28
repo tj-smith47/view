@@ -2834,6 +2834,7 @@ dependencies = [
  "view-oracle",
  "view-surface",
  "view-test-support",
+ "vt100",
 ]
 
 [[package]]
