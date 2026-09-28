@@ -82,7 +82,8 @@ new_cap_session() {
 # its mark, so the first frame is the settled editor however long the
 # start took. $6, when given, is the tape body played from that moment in
 # place of `Show` and one Sleep of $3 seconds; tape_body_opens_on_show
-# says what it may open with.
+# says what it may open with. An empty $2 writes no gif, which is how
+# record_still below takes a frame and nothing else.
 record_gif() {
   socket=$1
   out=$2
@@ -126,12 +127,16 @@ Sleep ${seconds}s"}
   margin_rows=1
   width=$(( (cols + margin_cols) * cell_w + pad_w ))
   height=$(( (rows + margin_rows) * cell_h + pad_h ))
-  mkdir -p -- "$(dirname -- "$out")"
+  if [ -n "$out" ]; then
+    mkdir -p -- "$(dirname -- "$out")"
+  fi
   tapedir="${XDG_CACHE_HOME:-$HOME/.cache}/view-dogfood-tapes"
   mkdir -p -- "$tapedir"
   TAPE=$(mktemp "$tapedir/tape-XXXXXX.tape")
   {
-    printf 'Output "%s"\n' "$out"
+    if [ -n "$out" ]; then
+      printf 'Output "%s"\n' "$out"
+    fi
     printf 'Require tmux\n'
     printf 'Set Width %s\n' "$width"
     printf 'Set Height %s\n' "$height"
@@ -152,6 +157,23 @@ Sleep ${seconds}s"}
   vhs "$TAPE"
   rm -f -- "$TAPE"
   TAPE=
+}
+
+# WHY: a still shows one scene the driver builds after the editor has
+# settled, and how long that takes depends on the config and the agent, so
+# the frame is taken when the driver raises the settled mark a second
+# time. vhs writes a Screenshot only as it renders the frame after it,
+# hence the Sleep behind it. $3 and $4 are the tmux
+# session's own columns and rows, as for record_gif.
+# Usage: record_still SOCKET OUT.png COLS ROWS
+record_still() {
+  mkdir -p -- "$(dirname -- "$2")"
+  record_gif "$1" "" 0 "${3:?record_still: pass the tmux session -x columns}" \
+    "${4:?record_still: pass the tmux session -y rows}" "Show
+Wait+Screen@$((SETTLE_CEILING_TENTHS / 10 + 15))s /$SETTLED_MARK/
+Sleep ${SETTLED_MARK_CLEARS_MS}ms
+Screenshot \"$2\"
+Sleep 100ms"
 }
 
 # WHY: a tape body that cuts a wait with Hide and Show is timed from the

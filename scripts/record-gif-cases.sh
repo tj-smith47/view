@@ -143,18 +143,48 @@ else
         "recorder ${wait_s:-?} s against the driver's ${ceiling:-?} tenths"
 fi
 
+# a still writes no gif, and takes its frame at the second mark once that
+# mark has cleared
+rm -f "$WORK/tape.out"
+in_lib record_still record-gif-cases "$WORK/still/out.png" 80 20 || true
+if [ ! -e "$WORK/tape.out" ]; then
+    report fail "still: the tape record_still hands vhs" "vhs was never run"
+else
+    got=$(sed -n '/^Hide$/,$p' "$WORK/tape.out")
+    expected="$prefix
+Show
+Wait+Screen@$((ceiling / 10 + 15))s /$mark/
+Sleep 600ms
+Screenshot \"$WORK/still/out.png\"
+Sleep 100ms"
+    if grep '^Output ' "$WORK/tape.out" >/dev/null; then
+        report fail "still: the tape record_still hands vhs" "it names an Output: $(grep '^Output ' "$WORK/tape.out")"
+    elif [ ! -d "$WORK/still" ]; then
+        report fail "still: the tape record_still hands vhs" "the still's directory was never made"
+    elif [ "$got" != "$expected" ]; then
+        report fail "still: the tape record_still hands vhs" \
+            "vhs was handed${NL}$got${NL}where the case expects${NL}$expected"
+    else
+        report ok "still: the tape record_still hands vhs"
+    fi
+fi
+
+
 # Grades one tape script: a record_gif call that passes a body passes
 # "$BODY", the body keeps the contract, and the driver waits for the
-# recorder, then for the settled editor, then types or resizes.
+# recorder, then for the settled editor, then types or resizes. A
+# record_still call passes no body, and its driver raises the mark a second
+# time after its last key.
 grade_tape() {
-    local tape=$1 calls body wait_at settle_at verb_at
-    calls=$(grep -c '^record_gif ' "$tape" || true)
+    local tape=$1 calls body wait_at settle_at verb_at settles last_settle last_verb
+    calls=$(grep -cE '^record_(gif|still) ' "$tape" || true)
     if [ "$calls" = 0 ]; then
-        echo "no record_gif call"
+        echo "no record_gif or record_still call"
         return
     fi
-    if grep '^record_gif ' "$tape" | grep -Ev '^record_gif "\$SOCKET" "\$OUT" [0-9]+ [0-9]+ [0-9]+( "\$BODY")?$' >/dev/null; then
-        echo "a record_gif call passes a body other than \"\$BODY\""
+    if grep -E '^record_(gif|still) ' "$tape" |
+        grep -Ev '^record_gif "\$SOCKET" "\$OUT" [0-9]+ [0-9]+ [0-9]+( "\$BODY")?$|^record_still "\$SOCKET" "\$OUT" [0-9]+ [0-9]+$' >/dev/null; then
+        echo "a record_gif call passes a body other than \"\$BODY\", or a record_still call passes one at all"
         return
     fi
     if grep -q '^BODY=' "$tape"; then
@@ -176,6 +206,18 @@ grade_tape() {
         echo "its driver waits for the settled editor before the recorder"
     elif [ -n "$verb_at" ] && [ "$verb_at" -lt "$settle_at" ]; then
         echo "its driver types or resizes at line $verb_at, before the settled editor"
+    elif grep '^record_still ' "$tape" >/dev/null; then
+        # a still is taken at the second mark, so a driver that raises one
+        # mark, or raises its second ahead of its last key, leaves the
+        # recorder waiting or the frame taken on a half-built scene
+        settles=$(grep -c 'show_when_settled "\$SOCKET"' "$tape" || true)
+        last_settle=$(grep -n 'show_when_settled "\$SOCKET"' "$tape" | tail -1 | cut -d: -f1) || true
+        last_verb=$(grep -nE 'tmux -L "\$SOCKET" (send-keys|resize-window)' "$tape" | tail -1 | cut -d: -f1) || true
+        if [ "$settles" -lt 2 ]; then
+            echo "its driver raises the settled mark once, and the still waits for a second"
+        elif [ -n "$last_verb" ] && [ "$last_settle" -lt "$last_verb" ]; then
+            echo "its driver types or resizes at line $last_verb, after the mark the still is taken at"
+        fi
     fi
 }
 
@@ -213,7 +255,7 @@ fi
 
 # a tape that opens a Rust file warms the target dir before its session
 # starts, and so does cap.sh when the file it opens is one
-for script in "$TAPES/tiled-panes.sh" "$HERE/dogfood/cap.sh"; do
+for script in "$TAPES/tiled-panes.sh" "$TAPES/hero.sh" "$HERE/dogfood/cap.sh"; do
     warm_at=$(grep -n 'warm_cargo_target "\$ROOT"' "$script" | head -1 | cut -d: -f1) || true
     session_at=$(grep -n '^new_cap_session ' "$script" | head -1 | cut -d: -f1) || true
     if [ -n "$warm_at" ] && [ -n "$session_at" ] && [ "$warm_at" -lt "$session_at" ]; then
@@ -294,7 +336,27 @@ plant inline-body "(
   show_when_settled \"\$SOCKET\"
 ) &
 record_gif \"\$SOCKET\" \"\$OUT\" 5 220 50 'Type x'"
-for planted in keys-first no-settle settle-before-attach hidden-body inline-body; do
+plant still-one-mark '(
+  wait_for_recorder "$SOCKET"
+  show_when_settled "$SOCKET"
+) &
+record_still "$SOCKET" "$OUT" 220 50'
+plant still-mark-before-keys '(
+  wait_for_recorder "$SOCKET"
+  show_when_settled "$SOCKET"
+  show_when_settled "$SOCKET" x
+  tmux -L "$SOCKET" send-keys -t cap x
+) &
+record_still "$SOCKET" "$OUT" 220 50'
+plant still-body "(
+  wait_for_recorder \"\$SOCKET\"
+  show_when_settled \"\$SOCKET\"
+  show_when_settled \"\$SOCKET\" x
+) &
+BODY='Show'
+record_still \"\$SOCKET\" \"\$OUT\" 220 50 \"\$BODY\""
+for planted in keys-first no-settle settle-before-attach hidden-body inline-body \
+    still-one-mark still-mark-before-keys still-body; do
     finding=$(grade_tape "$WORK/$planted.sh")
     if [ -n "$finding" ]; then
         report ok "planted $planted is refused: $finding"
