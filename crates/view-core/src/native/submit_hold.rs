@@ -173,10 +173,9 @@ fn line_key(notation: &str) -> LineKey {
         } else {
             LineKey::Cancel
         }
-    } else if named(&["CR", "NL", "kEnter"]) || ctrl_only && named(&["m", "j"]) {
+    } else if named(&["CR", "NL", "kEnter"]) || key.ctrl && named(&["m", "j"]) {
         LineKey::Submit
-    } else if named(&["BS", "kDel"]) || named(&["Del"]) && !key.shift || ctrl_only && named(&["h"])
-    {
+    } else if named(&["BS", "kDel"]) || named(&["Del"]) && !key.shift || key.ctrl && named(&["h"]) {
         LineKey::Delete
     } else {
         LineKey::Other
@@ -744,7 +743,10 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
             Some(Typed::Unknown {
                 nested: nested @ Some(_),
                 ..
-            }) => *nested = None,
+            }) => {
+                *nested = None;
+                return fold_line(model, &key);
+            }
             Some(_) => {
                 hold.end_line(next);
             }
@@ -1348,12 +1350,12 @@ mod tests {
     /// `<C-n>` leaves the line. `<C-\>` before any other key, and `<C-k>`
     /// before a special key, take no second key. A key leaves, submits or
     /// deletes by its base key, and `<C-c>` interrupts every argument but
-    /// a literal one. Each row is what nvim
-    /// 0.12's ext_cmdline reports for those keys: whether the `:` line is
-    /// still open, and how many first-level ends went out.
+    /// a literal one. Each row is what nvim 0.12's ext_cmdline reports for
+    /// those keys: whether the `:` line is still open, and how many
+    /// first-level ends went out.
     #[test]
     fn keys_taking_an_argument_end_the_line_only_where_nvim_does() {
-        let rows: [(&[&str], bool, u32); 96] = [
+        let rows: [(&[&str], bool, u32); 112] = [
             (&["<C-r>", "<CR>"], true, 0),
             (&["<C-r>", "<Esc>"], true, 0),
             (&["<C-r>", "<C-o>", "<CR>"], true, 0),
@@ -1460,6 +1462,25 @@ mod tests {
             (&["<C-r>", "=", "<C-k>", "<C-c>"], true, 0),
             (&["<C-r>", "=", "<C-k>", "a", "<C-c>"], true, 0),
             (&["<C-r>", "=", "<C-\\>", "<C-c>"], true, 0),
+            // a Meta key closes an expression line, then its base key is
+            // typed into the line beneath
+            (&["<C-r>", "=", "<M-Esc>"], false, 1),
+            (&["<C-r>", "=", "<M-CR>"], false, 1),
+            (&["<C-r>", "=", "<M-:>"], true, 0),
+            // a Ctrl `m`, `j` or `h` submits or deletes with other modifiers
+            (&["<C-S-m>"], false, 1),
+            (&["<C-S-M>"], false, 1),
+            (&["<C-S-j>"], false, 1),
+            (&["<C-D-m>"], false, 1),
+            (&["<C-T-m>"], false, 1),
+            (&["<C-S-D-j>"], false, 1),
+            (&["<C-S-h>"], false, 1),
+            (&["<C-D-h>"], false, 1),
+            (&["a", "b", "<C-S-h>", "<C-S-h>", "<C-S-h>"], false, 1),
+            (&["<C-r>", "=", "<C-S-m>", "<CR>"], false, 1),
+            (&["<C-r>", "=", "<C-S-h>", "<CR>"], false, 1),
+            (&["<C-\\>", "<C-S-m>"], false, 1),
+            (&["<C-k>", "<C-S-m>"], true, 0),
         ];
         let mismatches: Vec<String> = rows
             .into_iter()
