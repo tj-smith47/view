@@ -1,50 +1,50 @@
                                                                                 
- + left.rs ---------------------------+ + right.rs ----- + Stub: Esc returns -+ 
- |left                                | |right           |                    | 
- |                                    | |                |                    | 
- |                                    | |                |                    | 
- |                                    | |                |                    | 
- |                                    | |                |                    | 
- |                                    | |                |                    | 
- |                                    | |                |                    | 
- |                                    | |                |                    | 
- |                                    | |                |                    | 
- |                                    | |                |                    | 
- |                                    | |                |                    | 
- |                                    | |                |                    | 
- |                                    | |                |                    | 
- |                                    | |                |                    | 
- |                                    | |                |                    | 
- |                                    | |                |   ⠋ what does the  | 
- |                                    | |                |     gaps toggle do | 
- |                                    | |                |     ?              | 
- |                                    | |                | ------------------ | 
- |                                    | |                | >                  | 
- + -- INSERT -- 1:1 ------------------+ + E 1 2:1 ------ +--------------------+ 
+ + left.rs ---------------------------+ + right.rs ----+ + Stub: Esc returns -+ 
+ |left                                | |right         | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |                    | 
+ |                                    | |              | |   ⠋ what does the  | 
+ |                                    | |              | |     gaps toggle do | 
+ |                                    | |              | |     ?              | 
+ |                                    | |              | | ------------------ | 
+ |                                    | |              | | >                  | 
+ + -- INSERT -- 1:1 ------------------+ + E 1 2:1 -----+ +--------------------+ 
                                                                                 
 --- fg ---
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCADAAAAAAAAAAAAAAAAAAADDA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAACADAAAAAAAAAAAAAAAAAAAADA
 ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCADDDDDDDDDDDDDDDDDDDDDDA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 A = Reset

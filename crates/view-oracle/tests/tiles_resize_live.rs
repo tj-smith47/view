@@ -135,13 +135,14 @@ fn dump(screen: &vt100::Screen, cols: u16, rows: u16) -> String {
 }
 
 /// Resizes to `cols`x`rows`, samples the screen until `watch` has passed,
-/// and answers the longest stretch it saw the text and the frames
-/// disagree, with the first screen of that stretch.
+/// and answers the longest stretch `check` found something wrong on it,
+/// with the first screen of that stretch.
 fn resize_and_watch(
     session: &mut PtySession,
     cols: u16,
     rows: u16,
     watch: Duration,
+    check: fn(&vt100::Screen, u16, u16) -> Option<String>,
 ) -> (Duration, String) {
     session.resize(cols, rows).unwrap();
     let started = Instant::now();
@@ -150,7 +151,7 @@ fn resize_and_watch(
     while started.elapsed() < watch {
         std::thread::sleep(host_deadline(SAMPLE));
         let seen = session.with_screen(|screen| {
-            mismatch(screen, cols, rows).map(|why| (why, dump(screen, cols, rows)))
+            check(screen, cols, rows).map(|why| (why, dump(screen, cols, rows)))
         });
         match (seen, &run) {
             (Some((why, screen)), None) => {
@@ -223,7 +224,7 @@ fn resize_under(gaps: bool) {
     let before = session.with_screen(|screen| frames(screen, COLS, ROWS));
 
     for (cols, rows) in [SHRUNK, (COLS, ROWS)] {
-        let (longest, first) = resize_and_watch(&mut session, cols, rows, watch);
+        let (longest, first) = resize_and_watch(&mut session, cols, rows, watch, mismatch);
         assert!(
             longest <= redraw,
             "{look}: after the resize to {cols}x{rows} the tiles' text and \
@@ -248,10 +249,113 @@ fn resize_under(gaps: bool) {
     );
 }
 
-/// Both looks in one session after another: two live sessions sampled at
-/// once would each slow the redraw the other is timing.
+/// Where two frames on screen touch or overlap, or `None` where a tile's
+/// and the panel's both stand and every two side by side have a blank
+/// column between them. A tile the panel covers whole is under it, which
+/// is why the shrunk vsplit may show one tile.
+fn apart(screen: &vt100::Screen, cols: u16, rows: u16) -> Option<String> {
+    let frames = frames(screen, cols, rows);
+    if frames.len() < 2 {
+        return Some(format!("{} frames on screen", frames.len()));
+    }
+    for (index, a) in frames.iter().enumerate() {
+        for b in &frames[index + 1..] {
+            let rows_meet = a.top <= b.bottom && b.top <= a.bottom;
+            let cols_meet = a.left <= b.right + 1 && b.left <= a.right + 1;
+            if rows_meet && cols_meet {
+                return Some(format!("{a:?} and {b:?} touch"));
+            }
+        }
+    }
+    None
+}
+
+/// The gapped vsplit with the agent panel docked on the right, through the
+/// same shrink and grow: the tile the panel covers part of closes its own
+/// frame one gap short of the panel's at every size. A gapless tile shares
+/// that edge with the panel, which the paint tests read.
+fn panel_beside_the_tiles() {
+    let paths = common::ScratchPaths::new("tiles-resize-panel");
+    let line = "#".repeat(400);
+    let text: Vec<&str> = std::iter::repeat_n(line.as_str(), 80).collect();
+    std::fs::write(&paths.scratch, text.join("\n") + "\n").unwrap();
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.cwd(paths.scratch.parent().unwrap());
+    cmd.args(["--panes", "tiles"]);
+    cmd.arg(paths.scratch.file_name().unwrap());
+    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+    let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
+    let stub = common::built_bin("view-ai", "view-ai-stub-agent", &["test-support"]);
+    // the stub's second argument only holds a turn nobody starts here
+    let resume = paths.isolated_home.join("resume");
+    std::fs::write(
+        config,
+        format!(
+            "[ui]\ngaps = true\n\n[ai]\nagent = [{:?}, {:?}]\n",
+            stub.to_string_lossy(),
+            resume.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let mut session = PtySession::spawn_configured(cmd, COLS, ROWS).unwrap();
+    assert!(
+        session.wait_for("####", BUDGET),
+        "panel: view never showed the file; screen:\n{}",
+        session.screen()
+    );
+    session.send(b"\x1b:set nowrap | vsplit\r").unwrap();
+    // a launch notice is a frame of its own standing over a tile
+    let settled = |screen: &vt100::Screen| mismatch(screen, COLS, ROWS).is_none();
+    let mut dismissed = 0;
+    while !session.wait_for_screen(host_deadline(Duration::from_millis(500)), settled) {
+        assert!(
+            dismissed < 8,
+            "panel: the two tiles never settled; screen:\n{}",
+            session.screen()
+        );
+        session.send(b"\x1b:View notifications dismiss\r").unwrap();
+        dismissed += 1;
+    }
+    session.send(b"\x1b:View ai open\r").unwrap();
+    assert!(
+        session.wait_for("Trust ", BUDGET),
+        "panel: a fresh workspace raised no trust prompt; screen:\n{}",
+        session.screen()
+    );
+    session.send(b"y").unwrap();
+    assert!(
+        session.wait_for_screen(BUDGET, |screen| {
+            let contents = screen.contents();
+            !contents.contains("Trust ") && contents.contains("view-ai-stub-agent")
+        }),
+        "panel: the panel never opened; screen:\n{}",
+        session.screen()
+    );
+    let redraw = host_deadline(REDRAW);
+    let watch = host_deadline(Duration::from_secs(2));
+    for (cols, rows) in [(COLS, ROWS), SHRUNK, (COLS, ROWS)] {
+        let (longest, first) = resize_and_watch(&mut session, cols, rows, watch, apart);
+        assert!(
+            longest <= redraw,
+            "panel: at {cols}x{rows} two frames touched for {longest:?}, past \
+             one redraw ({redraw:?}); the first screen of that stretch:\n{first}"
+        );
+        let now = session.with_screen(|screen| apart(screen, cols, rows));
+        assert_eq!(
+            now,
+            None,
+            "panel: at {cols}x{rows}; screen:\n{}",
+            session.screen()
+        );
+    }
+}
+
+/// Both looks in one session after another, then the panel beside the
+/// tiles: two live sessions sampled at once would each slow the redraw the
+/// other is timing.
 #[test]
 fn a_tile_frame_stays_on_its_text_while_nvim_redraws_a_resize() {
     resize_under(true);
     resize_under(false);
+    panel_beside_the_tiles();
 }

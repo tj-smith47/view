@@ -15,7 +15,7 @@ use ratatui::style::Style;
 use std::collections::BTreeSet;
 use view_core::grid::registry::{GridId, Pane, GLOBAL_GRID};
 use view_core::model::{Look, Model, Panes, TileKind, WindowStatus};
-use view_core::native::geometry::NativeSurface;
+use view_core::native::geometry::{Anchor, NativeSurface};
 use view_core::native::statusline::StatuslineState;
 use view_core::native::surfaces::{view_draws, Surface};
 use view_core::native::views::{Span, StyleRole};
@@ -84,11 +84,12 @@ pub(crate) fn paint_frames(
     // other
     let foot = area.height.saturating_sub(model.cmdline_rows());
     let gap = ratatui_style(theme.normal());
+    let docks = docked_gutters(model, area);
     if look.gaps {
         let tiles = panes.iter().filter(|pane| is_tile(pane) && framed(pane));
         clear_bare(tiles, gap, area, foot, damage, buf);
         paint_gapped(
-            panes, look, active, borders, quiet, accent, area, damage, buf,
+            panes, look, &docks, active, borders, quiet, accent, area, damage, buf,
         );
     } else {
         clear_bare(
@@ -103,7 +104,9 @@ pub(crate) fn paint_frames(
             panes, active, borders, quiet, accent, area, foot, damage, buf,
         );
     }
-    paint_edges(model, panes, look, active, theme, area, foot, damage, buf);
+    paint_edges(
+        model, panes, look, &docks, active, theme, area, foot, damage, buf,
+    );
 }
 
 /// Whether a pane is one of the tiles a frame is drawn around: the global
@@ -143,6 +146,58 @@ fn framed(pane: &Pane) -> bool {
     pane.origin != (row, col)
 }
 
+/// The blank gutter column beside one side-docked float, in the
+/// engine-grid layer's coordinates, and which side of the screen the
+/// float stands on.
+#[derive(Debug, Clone, Copy)]
+struct Dock {
+    right: bool,
+    col: u16,
+}
+
+/// Every float docked to a side of the screen under gapped tiles: the
+/// agent panel and the tree while they are not windowed.
+///
+/// Such a float is laid over tiles nvim laid out on the whole width, so
+/// the tile it covers part of would otherwise lose the side of its frame
+/// that stands under it.
+fn docked_gutters(model: &Model, area: Rect) -> Vec<Dock> {
+    model
+        .overlays()
+        .iter()
+        .filter(|open| model.draws_as_overlay(&open.kind))
+        .filter_map(|open| {
+            let right = match open.geometry.anchor {
+                Anchor::Left => false,
+                Anchor::Right => true,
+                _ => return None,
+            };
+            let gutter = model.overlay_gutter(open)?;
+            Some(Dock {
+                right,
+                col: gutter.col.checked_sub(area.x)?,
+            })
+        })
+        .collect()
+}
+
+/// A gapped tile's frame box, closed short of the gutter of each docked
+/// float that covers part of it. A tile that ends before the gutter keeps
+/// its box as nvim laid it out.
+fn docked_box(look: Look, pane: &Pane, docks: &[Dock]) -> Option<(u16, u16, u16, u16)> {
+    let (row, mut col, mut width, height) = look.frame_box(pane.filled)?;
+    for dock in docks {
+        let end = col.saturating_add(width);
+        if dock.right && col < dock.col && end > dock.col {
+            width = dock.col.saturating_sub(col);
+        } else if !dock.right && col <= dock.col && end > dock.col.saturating_add(1) {
+            col = dock.col.saturating_add(1);
+            width = end.saturating_sub(col);
+        }
+    }
+    Some((row, col, width, height))
+}
+
 /// Writes each tile's buffer name and status segments into the frame the
 /// two painters above have just drawn, over the line glyphs already there.
 ///
@@ -154,6 +209,7 @@ fn paint_edges(
     model: &Model,
     panes: &[Pane],
     look: Look,
+    docks: &[Dock],
     active: Option<GridId>,
     theme: &Theme,
     area: Rect,
@@ -199,7 +255,7 @@ fn paint_edges(
             if !framed(pane) {
                 continue;
             }
-            let (top, bottom) = gapped_edges(look, pane, area, buf.area);
+            let (top, bottom) = gapped_edges(look, pane, docks, area, buf.area);
             if let Some(edge) = top.filter(|edge| damage.covers(edge.y)) {
                 paint_name(title(), is_active, theme, edge, buf);
             }
@@ -216,8 +272,14 @@ fn paint_edges(
 
 /// A gapped tile's top and bottom frame edges as screen rects, in the same
 /// coordinates [`box_edge`] draws the box in.
-fn gapped_edges(look: Look, pane: &Pane, area: Rect, screen: Rect) -> (Option<Rect>, Option<Rect>) {
-    let Some((top, left, box_w, box_h)) = look.frame_box(pane.filled) else {
+fn gapped_edges(
+    look: Look,
+    pane: &Pane,
+    docks: &[Dock],
+    area: Rect,
+    screen: Rect,
+) -> (Option<Rect>, Option<Rect>) {
+    let Some((top, left, box_w, box_h)) = docked_box(look, pane, docks) else {
         return (None, None);
     };
     let bottom = top.saturating_add(box_h).saturating_sub(1);
@@ -446,6 +508,7 @@ fn clear_bare<'a>(
 fn paint_gapped(
     panes: &[Pane],
     look: Look,
+    docks: &[Dock],
     active: Option<GridId>,
     borders: BorderSet,
     quiet: Style,
@@ -455,7 +518,7 @@ fn paint_gapped(
     buf: &mut Buffer,
 ) {
     for pane in panes.iter().filter(|pane| is_tile(pane) && framed(pane)) {
-        let Some((row, col, width, height)) = look.frame_box(pane.filled) else {
+        let Some((row, col, width, height)) = docked_box(look, pane, docks) else {
             continue;
         };
         let style = if active == Some(pane.id) {

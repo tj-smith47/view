@@ -1439,7 +1439,12 @@ fn stacked_at(gaps: bool, size: (u16, u16), chrome_rows: u16) -> Tiles {
 /// The same vsplit with the right-hand column split again, so a frame meets
 /// three neighbours and the lattice has an interior crossing.
 fn tiled_nested(gaps: bool) -> Tiles {
-    let (grid_width, grid_height) = outer_grid(gaps, TILED_HEIGHT);
+    nested_at(gaps, (TILED_WIDTH, TILED_HEIGHT))
+}
+
+/// [`tiled_nested`] on a terminal of `size`.
+fn nested_at(gaps: bool, size: (u16, u16)) -> Tiles {
+    let (grid_width, grid_height) = outer_grid_at(gaps, size, 0);
     let left_width = (grid_width - 1) / 2;
     let right_col = left_width + 1;
     let right_width = grid_width - right_col;
@@ -1458,7 +1463,7 @@ fn tiled_nested(gaps: bool) -> Tiles {
         ),
     ];
     Tiles {
-        model: tiled_model(gaps, TILED_HEIGHT, &slots),
+        model: tiled_model_at(gaps, size, 0, &slots),
         slots,
     }
 }
@@ -3450,13 +3455,13 @@ fn inner_side_of_the_frame(tiles: &Tiles, against_right: bool) -> (String, Strin
 }
 
 /// Under gapped tiles the right-anchored agent panel stands one blank
-/// column clear of the tile it covers, and that tile's top border runs up
-/// to the column.
+/// column clear of the tile it covers, and that tile's top border turns
+/// its corner just before the column.
 #[test]
 fn a_right_anchored_overlay_stands_a_gap_clear_of_the_tile_it_covers() {
     let (gutter, border) = inner_side_of_the_frame(&agent_overlay_beside_the_tiles(true), true);
     assert_eq!(gutter, " ");
-    assert!(["-", "─"].contains(&border.as_str()), "{border:?}");
+    assert!(["+", "╮"].contains(&border.as_str()), "{border:?}");
 }
 
 /// The left-anchored tree mirrors it on the frame's right side.
@@ -3472,7 +3477,74 @@ fn a_left_anchored_overlay_stands_a_gap_clear_of_the_tile_it_covers() {
     );
     let (gutter, border) = inner_side_of_the_frame(&tiles, false);
     assert_eq!(gutter, " ");
-    assert!(["-", "─"].contains(&border.as_str()), "{border:?}");
+    assert!(["+", "╭"].contains(&border.as_str()), "{border:?}");
+}
+
+/// Every tile a docked float covers part of keeps its whole frame on a
+/// wide terminal and on a small one: its two corners on the float's side
+/// one gap clear of the float, and its border on every row between them.
+/// The right-hand column is split, so the float stands beside two tiles
+/// at once whichever side it docks to.
+#[test]
+fn a_tile_beside_a_docked_float_keeps_its_whole_frame() {
+    use view_core::native::geometry::{Anchor, NativeSurface, SurfacePlacement};
+    for size in [(220u16, 50u16), (60, 16)] {
+        for (surface, anchor) in [
+            (NativeSurface::Agent, Anchor::Right),
+            (NativeSurface::Tree, Anchor::Left),
+            (NativeSurface::Tree, Anchor::Right),
+        ] {
+            let mut tiles = nested_at(true, size);
+            open_surface(
+                &mut tiles.model,
+                surface,
+                SurfacePlacement::Overlay,
+                anchor,
+                None,
+            );
+            let open = tiles
+                .model
+                .overlays()
+                .last()
+                .expect("the scene opened a float");
+            let rect = tiles.model.overlay_rect(open);
+            let buf = tiled_frame(&tiles.model);
+            let right = anchor == Anchor::Right;
+            let (side, gutter) = if right {
+                (rect.col - 2, rect.col - 1)
+            } else {
+                (rect.col + rect.width + 1, rect.col + rect.width)
+            };
+            let (opens, closes) = if right {
+                ("╮", "╯")
+            } else {
+                ("╭", "╰")
+            };
+            let (origin_row, origin_col) = view_surface::grid_origin(&tiles.model);
+            let beside: Vec<_> = tiles
+                .slots
+                .iter()
+                .filter(|&&(_, col, width, _)| {
+                    origin_col + col <= side && origin_col + col + width > side
+                })
+                .collect();
+            let label = format!("{size:?} {surface:?} {anchor:?}");
+            assert!(
+                !beside.is_empty(),
+                "{label}: the float covers part of a tile"
+            );
+            for &(row, _, _, height) in beside {
+                let (top, bottom) = (origin_row + row, origin_row + row + height - 1);
+                let at = |r: u16| buf[(side, r)].symbol().to_string();
+                assert_eq!(at(top), opens, "{label}: corner at ({side}, {top})");
+                assert_eq!(at(bottom), closes, "{label}: corner at ({side}, {bottom})");
+                for r in top + 1..bottom {
+                    assert_eq!(at(r), "│", "{label}: border at ({side}, {r})");
+                    assert_eq!(buf[(gutter, r)].symbol(), " ", "{label}: gutter at {r}");
+                }
+            }
+        }
+    }
 }
 
 /// The agent panel floating at the right edge over the two-tile scene, the

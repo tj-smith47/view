@@ -193,9 +193,10 @@ impl Model {
                     .filter(|pane| {
                         pane.id != GLOBAL_GRID && pane.kind == PaneKind::Window && !sidebar(pane.id)
                     })
-                    // a tile runs on under a side panel drawn over it, so
-                    // only the part of it the area keeps is the tile's
-                    .map(|pane| within(shrink(pane.filled, inset_rows, inset_cols), area))
+                    // a tile runs on under a side panel drawn over it and
+                    // closes its frame where the area ends, so the ring
+                    // comes off the part the area keeps
+                    .map(|pane| shrink(within(pane.filled, area), inset_rows, inset_cols))
                     .filter(|kept| kept.2 > 0 && kept.3 > 0)
                     .min_by_key(|&(row, col, width, height)| {
                         let at = (
