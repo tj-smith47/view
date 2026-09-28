@@ -330,6 +330,13 @@ impl SubmitHold {
     pub(crate) fn types_a_line(&self) -> bool {
         self.typed.is_some()
     }
+
+    /// Drops the tracked line once nvim has answered every key and shows
+    /// no command line: the line ended in a way the tracker does not
+    /// model, a mapping that submits or the command-line window.
+    pub(crate) fn forget_line(&mut self) {
+        self.typed = None;
+    }
 }
 
 /// Folds one key going to the engine into the tracked command line, and
@@ -519,7 +526,7 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
 /// last mode nvim reported reads one of the modes `:` does that in, or a
 /// key still in flight may have put it there. The literal-taking keys
 /// read the `:` as their argument.
-fn may_open(model: &Model) -> bool {
+pub(crate) fn may_open(model: &Model) -> bool {
     !model.engine.literal_pending
         && (model.engine.key_unanswered.is_some()
             || crate::native::speculate::CMDLINE_GATE_MODES

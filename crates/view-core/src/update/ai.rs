@@ -396,6 +396,12 @@ pub(super) fn ai_panel_key(
     notation: &str,
     binding: Option<Resolved>,
 ) -> Vec<Effect> {
+    // a key read before the question was painted was typed at the
+    // composer the question replaced, so it answers nothing and types
+    // nothing
+    if matches!(&model.ai_panel().pending_permission, Some(p) if !p.shown()) {
+        return Vec::new();
+    }
     if let Some(prompt) = model.ai_panel().pending_permission.clone() {
         // <Esc> settles the request as `Cancelled` rather than
         // any offered option -- the one answer that exists

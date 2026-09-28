@@ -41,8 +41,10 @@ pub(super) fn paste_into_focused_surface(model: &mut Model, text: &str) -> Vec<E
         // `Prompt` arm in `route_key`), because the engine is blocked inside
         // `vim.fn.input()` waiting for exactly them
         Some(OverlayKind::Prompt(p)) if p.takes_typed_text() => {
+            // a paste landing before the question was painted was meant
+            // for whatever stood there before it
             let keys = as_prompt_keys(text);
-            if keys.is_empty() {
+            if keys.is_empty() || !p.shown() {
                 return Vec::new();
             }
             return vec![Effect::Rpc(RpcCall::Input { notation: keys })];

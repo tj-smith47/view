@@ -496,3 +496,19 @@ paths: ["**/*.rs"] template-source: "rules/rust.md.tmpl"
   `git show HEAD:scripts/comment-frames.ceiling` holds is refused, so a row
   only comes down. The tree held over five thousand frames when the count
   began, and each one made a reader hold an alternative the code never takes.
+
+- **A question view shows reads no key typed before the frame that shows it
+  reached the terminal.** Keys typed at a surface arrive in the same pass as
+  the event that raises a question over it: a batched `:View ai open` and a
+  held `n` declined the AI trust question before it was drawn. `PromptState`
+  and the agent's `PermissionPrompt` carry a `shown` flag.
+  `Model::note_frame_painted` sets it on the focused prompt and on a
+  permission question in an open agent panel, and the runtime calls it
+  through `frame_reached_terminal` once a frame is drawn. A key or a paste
+  before then answers nothing, and a prompt stacked beneath the focused one
+  stays unshown until it is on top. `view-core`'s
+  `every_question_reads_keys_only_after_it_was_painted` opens each kind in
+  its `QUESTIONS` table (nvim-relayed, AI trust, external-write conflict,
+  agent permission), and a new kind of question joins by adding a row. The
+  engine supervision modal is exempt: its answers are `<C-c>`, `<F5>` and
+  `<C-q>`, chords a person does not type by accident at a buffer.

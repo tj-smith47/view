@@ -4709,6 +4709,7 @@ fn pending_permission_model() -> Model {
         },
     );
     let _ = update(&mut m, permission_requested_msg(7, everyday_options()));
+    m.note_frame_painted();
     m
 }
 
@@ -4722,6 +4723,7 @@ fn auto_opened_permission_model() -> Model {
     let mut m = model();
     m.ai_trusted = true;
     let _ = update(&mut m, permission_requested_msg(7, everyday_options()));
+    m.note_frame_painted();
     m
 }
 
@@ -4882,6 +4884,7 @@ fn an_always_reject_answer_leaves_the_next_request_of_that_kind_asking() {
         },
     );
     let _ = update(&mut m, permission_requested_msg(7, refusing_options()));
+    m.note_frame_painted();
 
     let effects = update(&mut m, key("3"));
     match effects.as_slice() {
@@ -4922,6 +4925,7 @@ fn a_plain_reject_leaves_the_next_request_of_that_kind_still_asking() {
         },
     );
     let _ = update(&mut m, permission_requested_msg(7, refusing_options()));
+    m.note_frame_painted();
 
     let _ = update(&mut m, key("2"));
     let effects = update(&mut m, permission_requested_msg(8, refusing_options()));
@@ -5342,6 +5346,7 @@ fn ctrl_d_with_no_banner_scrolls_nothing_behind_an_unanswered_permission() {
         "the premise: the reader has scrolled off the tail"
     );
     let _ = update(&mut m, permission_requested_msg(7, everyday_options()));
+    m.note_frame_painted();
     assert!(
         m.ai_panel().local_error.is_none(),
         "the premise: no banner for <C-d> to dismiss"
@@ -5760,6 +5765,7 @@ fn esc_on_a_focused_pending_permission_cancels_it_even_with_only_allow_options_o
             ],
         ),
     );
+    m.note_frame_painted();
 
     let effects = update(
         &mut m,
@@ -6230,20 +6236,27 @@ fn keys_that_part_from_every_sequence_are_the_trees_own() {
     );
 }
 
-/// A command line typed in the windowed tree inside one round trip is
-/// nvim's, key for key, and a submitted `:View` holds what follows it the
-/// way it does from a buffer. A line left with `<Esc>` gives the keys back
-/// to the tree.
+/// A command line typed inside one round trip in any surface that answers
+/// keys of its own is nvim's, key for key, and a submitted `:View` holds
+/// what follows it the way it does from a buffer. A line left with `<Esc>`
+/// gives the keys back to the tree.
 #[test]
 fn a_command_line_typed_in_the_windowed_tree_reaches_nvim() {
     let line = [
         ":", "V", "i", "e", "w", " ", "a", "i", " ", "o", "p", "e", "n", "<CR>",
     ];
-    let mut m = focused_windowed_tree();
-    m.engine.mode.current = "normal".to_string();
-    let effects = typed(&mut m, &line);
-    assert_eq!(meta_inputs(&effects), line, "{effects:?}");
-    assert!(m.submit_hold.is_holding(), "{effects:?}");
+    for (name, build) in [
+        ("windowed tree", focused_windowed_tree as fn() -> Model),
+        ("floating tree", tree_sidebar_model),
+        ("windowed stream", focused_windowed_notifications),
+        ("message history", || model_with_history(&[])),
+    ] {
+        let mut m = build();
+        m.engine.mode.current = "normal".to_string();
+        let effects = typed(&mut m, &line);
+        assert_eq!(meta_inputs(&effects), line, "{name}: {effects:?}");
+        assert!(m.submit_hold.is_holding(), "{name}: {effects:?}");
+    }
 
     let mut m = focused_windowed_tree();
     m.engine.mode.current = "normal".to_string();
@@ -6255,6 +6268,238 @@ fn a_command_line_typed_in_the_windowed_tree_reaches_nvim() {
             Some(Effect::Rpc(RpcCall::TreeCreatePrompt { .. }))
         ),
         "{effects:?}"
+    );
+}
+
+/// A `:` nvim would type as text reaches the surface: behind a floating
+/// tree opened from insert mode it is no command line, so the keys after
+/// it stay the tree's.
+#[test]
+fn a_colon_nvim_would_type_as_text_opens_no_line_from_the_tree() {
+    let mut m = tree_sidebar_model();
+    m.engine.mode.current = "insert".to_string();
+    let effects = typed(&mut m, &[":", "a"]);
+    assert!(meta_inputs(&effects).is_empty(), "{effects:?}");
+    assert!(!m.submit_hold.types_a_line());
+}
+
+/// A line nvim ends on its own, a mapping that submits it here, stops
+/// taking the tree's keys once nvim has answered every key and shows no
+/// command line.
+#[test]
+fn a_line_nvim_ended_on_its_own_gives_the_keys_back_to_the_tree() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    let effects = typed(&mut m, &[":", "<C-s>"]);
+    assert_eq!(meta_inputs(&effects), [":", "<C-s>"], "{effects:?}");
+    let _ = update(&mut m, Msg::Redraw(vec![confirm_choices(), UiEvent::Flush]));
+    let stamp = SpecStamp::new(Duration::ZERO);
+    m.engine.key_unanswered = Some(stamp);
+    let cursor_grid = m.engine.grids().cursor_local().0 .0;
+    let ended = vec![
+        UiEvent::CmdlineHide,
+        UiEvent::GridLine {
+            grid: cursor_grid,
+            row: 0,
+            col_start: 0,
+            cells: vec![crate::events::GridCell {
+                text: "x".into(),
+                hl_id: 0,
+                repeat: 1,
+            }],
+        },
+        UiEvent::Flush,
+    ];
+    // the loop folds the batch into speculation before `update` reads it
+    let _ = crate::native::speculate::fold_redraw(&mut m, &ended, stamp);
+    let _ = update(&mut m, Msg::Redraw(ended));
+
+    let effects = typed(&mut m, &["a"]);
+    assert!(meta_inputs(&effects).is_empty(), "{effects:?}");
+    assert!(
+        matches!(
+            effects.last(),
+            Some(Effect::Rpc(RpcCall::TreeCreatePrompt { .. }))
+        ),
+        "{effects:?}"
+    );
+}
+
+/// One question of each kind view shows, opened and handed the key that
+/// answers it.
+struct Question {
+    name: &'static str,
+    open: fn(&mut Model),
+    key: &'static str,
+    answered: fn(&[Effect]) -> bool,
+    still_open: fn(&Model) -> bool,
+}
+
+fn a_prompt_is_on_top(m: &Model) -> bool {
+    matches!(
+        m.overlays().last().map(|ov| &ov.kind),
+        Some(OverlayKind::Prompt(_))
+    )
+}
+
+const QUESTIONS: [Question; 4] = [
+    Question {
+        name: "nvim-relayed confirm",
+        open: |m| {
+            let _ = update(m, Msg::Redraw(vec![confirm_question(), UiEvent::Flush]));
+            let _ = update(m, Msg::Redraw(vec![confirm_choices(), UiEvent::Flush]));
+        },
+        key: "y",
+        answered: |effects| {
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Rpc(RpcCall::Input { notation }) if notation == "y"))
+        },
+        still_open: a_prompt_is_on_top,
+    },
+    Question {
+        name: "AI trust",
+        open: |m| {
+            let _ = update(
+                m,
+                Msg::FeatureInvoke {
+                    feature: "ai".to_string(),
+                    verb: "panel".to_string(),
+                },
+            );
+        },
+        key: "y",
+        answered: |effects| {
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::AiTrustSet { trusted: true, .. }))
+        },
+        still_open: a_prompt_is_on_top,
+    },
+    Question {
+        name: "external write conflict",
+        open: |m| {
+            let _ = update(
+                m,
+                Msg::CheckTimeReply {
+                    request_id: 1,
+                    results: vec![(
+                        std::path::PathBuf::from("/proj/src/lib.rs"),
+                        crate::msg::CheckTimeOutcome::Conflict,
+                    )],
+                },
+            );
+        },
+        key: "<CR>",
+        answered: |effects| {
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Rpc(RpcCall::Checktime { force: true, .. })))
+        },
+        still_open: a_prompt_is_on_top,
+    },
+    Question {
+        name: "agent permission",
+        open: |m| {
+            *m = entered_ai_panel_model();
+            let _ = update(m, permission_requested_msg(7, everyday_options()));
+        },
+        key: "1",
+        answered: |effects| {
+            effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::Ai(AiCommand::AnswerPermission {
+                        request_id: 7,
+                        outcome: PermissionOutcome::Selected { option_id },
+                    }) if option_id == "allow-once"
+                )
+            })
+        },
+        still_open: |m| m.ai_panel().pending_permission.is_some(),
+    },
+];
+
+/// Every question view shows reads no key typed before a frame showing it
+/// reached the terminal, and reads its answer once one has.
+#[test]
+fn every_question_reads_keys_only_after_it_was_painted() {
+    for question in &QUESTIONS {
+        let name = question.name;
+        let mut m = model();
+        (question.open)(&mut m);
+        assert!((question.still_open)(&m), "{name}: the question opens");
+
+        let early = update(&mut m, key(question.key));
+        assert!(
+            !(question.answered)(&early),
+            "{name}: a key typed before the question was painted answered it: {early:?}"
+        );
+        assert!((question.still_open)(&m), "{name}: {early:?}");
+
+        m.note_frame_painted();
+        let answer = update(&mut m, key(question.key));
+        assert!((question.answered)(&answer), "{name}: {answer:?}");
+    }
+}
+
+/// A question stacked beneath the focused one is covered in every frame
+/// until the one above it closes, so a quick second `y` after answering
+/// the top prompt does not trust the project.
+#[test]
+fn a_question_under_another_reads_keys_only_once_it_is_on_top() {
+    let mut m = model();
+    (QUESTIONS[0].open)(&mut m);
+    (QUESTIONS[1].open)(&mut m);
+    assert_eq!(m.overlays().len(), 2, "the trust question waits underneath");
+    m.note_frame_painted();
+
+    let first = update(&mut m, key("y"));
+    assert!((QUESTIONS[0].answered)(&first), "{first:?}");
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+    );
+    let second = update(&mut m, key("y"));
+    assert!(!(QUESTIONS[1].answered)(&second), "{second:?}");
+
+    m.note_frame_painted();
+    let third = update(&mut m, key("y"));
+    assert!((QUESTIONS[1].answered)(&third), "{third:?}");
+}
+
+/// A paste landing on a free-text prompt before it was painted types
+/// nothing into it.
+#[test]
+fn a_paste_before_the_question_was_painted_types_nothing() {
+    let mut m = model();
+    let cmdline = CmdlineState {
+        content: vec![],
+        pos: 0,
+        firstc: String::new(),
+        prompt: "New file: ".into(),
+        indent: 0,
+        level: 1,
+    };
+    let mut kind = some_overlay_kind();
+    let OverlayKind::Prompt(p) = &mut kind else {
+        unreachable!("some_overlay_kind always returns OverlayKind::Prompt")
+    };
+    p.learn_cmdline(&cmdline);
+    m.engine.cmdline = Some(cmdline);
+    let _ = m.push_overlay(OverlayBox::new(50, 50), kind);
+
+    let early = update(&mut m, Msg::Paste("src/main.rs".into()));
+    assert!(rpc_calls(&early).is_empty(), "{early:?}");
+
+    m.note_frame_painted();
+    let pasted = update(&mut m, Msg::Paste("src/main.rs".into()));
+    assert!(
+        matches!(
+            &pasted[..],
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "src/main.rs"
+        ),
+        "{pasted:?}"
     );
 }
 
@@ -14978,7 +15223,12 @@ fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
             permission_requested_msg(7, everyday_options()),
             1,
         ),
-        ("the permission answered", Box::new(|_| {}), key("1"), 0),
+        (
+            "the permission answered",
+            Box::new(|m| m.note_frame_painted()),
+            key("1"),
+            0,
+        ),
         (
             "the session ready, with no turn yet",
             Box::new(|_| {}),
@@ -16024,6 +16274,7 @@ fn esc_with_a_pending_permission_still_cancels_it_when_windowed() {
         None,
         vec![],
     ));
+    m.note_frame_painted();
 
     let effects = update(&mut m, key("<Esc>"));
 

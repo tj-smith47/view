@@ -1016,6 +1016,14 @@ const ATTACH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1);
 /// queue empty and never reaches this bound.
 const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 
+/// Settles the model once the frame rendered from it reached the terminal:
+/// nothing is owed until it changes again, and an open question may now
+/// read keys.
+fn frame_reached_terminal(model: &mut Model) {
+    model.dirty = false;
+    model.note_frame_painted();
+}
+
 /// What is left of [`ATTACH_DEADLINE`] at `now`, or `None` once view has
 /// attached.
 ///
@@ -1429,8 +1437,7 @@ pub fn run(
             let surface = surface_cache.render(&model);
             let damage = model.take_paint_damage();
             flushed = term.draw_surface(&model, surface, &damage)?; // a frame's own terminal I/O error aborts; engine errors never do, and neither does the OSC52 drain above (fire-and-forget, see its own comment)
-            model.dirty = false;
-            model.note_frame_painted();
+            frame_reached_terminal(&mut model);
             last_paint = Instant::now();
         }
         // read once per pass rather than inside the branch: an input the
@@ -3784,7 +3791,8 @@ mod tests {
                 speculate: crate::speculate::SpeculationClock::default(),
             };
 
-            let _ = dispatch(
+            // the loop's own paint step is what lets the question read keys
+            let frame = painted(
                 &mut model,
                 &executor,
                 &mut follow_ups,
@@ -3793,7 +3801,7 @@ mod tests {
                     verb: String::new(),
                 },
             );
-            model.note_frame_painted();
+            assert!(frame.is_some(), "opening the trust question paints it");
             let flow = dispatch(
                 &mut model,
                 &executor,
@@ -4316,7 +4324,11 @@ mod tests {
     ) -> Option<view_surface::Surface> {
         model.dirty = false;
         let _ = dispatch(model, executor, follow_ups, msg);
-        model.dirty.then(|| view_surface::render(model))
+        let surface = model.dirty.then(|| view_surface::render(model));
+        if surface.is_some() {
+            frame_reached_terminal(model);
+        }
+        surface
     }
 
     /// The shell's own half of the confirmation, driven without waiting out

@@ -464,10 +464,14 @@ impl Session {
 
     /// Captures the current [`Surface`] (leg (b): deterministic capture),
     /// through the same cached renderer the production runtime loop paints
-    /// from, so successive captures exercise its frame-to-frame reuse.
+    /// from, so successive captures exercise its frame-to-frame reuse. A
+    /// capture counts as a painted frame, so an open question reads keys
+    /// after it the way it does in the loop.
     #[must_use]
     pub fn surface(&mut self) -> Surface {
-        self.cache.render(&self.model).clone()
+        let surface = self.cache.render(&self.model).clone();
+        self.model.note_frame_painted();
+        surface
     }
 
     /// Renders the current [`Surface`] to plain text via [`raster::screen_text`].
@@ -954,10 +958,14 @@ impl EngineSession {
     /// Captures the current [`Surface`] (leg (b): deterministic capture, at
     /// the engine-attached tier), through the same cached renderer the
     /// production runtime loop paints from, so successive captures across a
-    /// corpus entry's settle points exercise its frame-to-frame reuse.
+    /// corpus entry's settle points exercise its frame-to-frame reuse. A
+    /// capture counts as a painted frame, so an open question reads keys
+    /// after it the way it does in the loop.
     #[must_use]
     pub fn surface(&mut self) -> Surface {
-        self.cache.render(&self.model).clone()
+        let surface = self.cache.render(&self.model).clone();
+        self.model.note_frame_painted();
+        surface
     }
 
     /// Renders the current [`Surface`] to plain text via [`raster::screen_text`].

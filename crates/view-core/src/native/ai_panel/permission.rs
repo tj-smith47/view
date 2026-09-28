@@ -31,6 +31,9 @@ pub struct PermissionPrompt {
     /// [`crate::native::ai_event::AiEvent::PermissionRequested`]'s own doc
     /// states for the event this prompt is built from.
     pub options: Vec<PermissionOption>,
+    /// Whether a frame carrying this question has reached the terminal.
+    /// See [`PermissionPrompt::note_shown`].
+    shown: bool,
 }
 
 impl PermissionPrompt {
@@ -56,7 +59,23 @@ impl PermissionPrompt {
             prompt: format!("Permission requested for {name}"),
             tool_kind,
             options,
+            shown: false,
         }
+    }
+
+    /// Records that a frame carrying this question reached the terminal.
+    ///
+    /// A digit read before then was typed at the composer the question
+    /// replaced, and `1` would allow a tool call nobody was asked about.
+    pub fn note_shown(&mut self) {
+        self.shown = true;
+    }
+
+    /// Whether [`note_shown`](Self::note_shown) has run, so a key may
+    /// answer this question.
+    #[must_use]
+    pub fn shown(&self) -> bool {
+        self.shown
     }
 
     /// The offered option `key` selects: the digit keys, one per offered

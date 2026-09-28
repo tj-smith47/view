@@ -265,13 +265,27 @@ impl Model {
     }
 
     /// Records that the frame rendered from this model reached the
-    /// terminal, which is what lets an open prompt read keys (see
+    /// terminal, which is what lets the focused prompt and the agent's
+    /// permission question read keys (see
     /// [`crate::native::prompt::PromptState::note_shown`]).
     pub fn note_frame_painted(&mut self) {
-        for overlay in &mut self.overlays {
-            if let OverlayKind::Prompt(prompt) = &mut overlay.kind {
-                prompt.note_shown();
-            }
+        // a prompt stacked beneath the focused one is covered in the frame
+        if let Some(OverlayKind::Prompt(prompt)) =
+            self.focused_overlay_mut().map(|overlay| &mut overlay.kind)
+        {
+            prompt.note_shown();
+        }
+        let panel_open = self
+            .overlays
+            .iter()
+            .any(|overlay| matches!(overlay.kind, OverlayKind::Ai));
+        if let Some(permission) = self
+            .ai_panel
+            .pending_permission
+            .as_mut()
+            .filter(|_| panel_open)
+        {
+            permission.note_shown();
         }
     }
 }
