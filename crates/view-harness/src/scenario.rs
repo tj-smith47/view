@@ -869,17 +869,27 @@ fn parse_from(raw_toml: &str, source_stem: Option<&str>) -> Result<ScenarioFile,
 ///
 /// # Errors
 ///
-/// Returns [`ScenarioError::Toml`] on malformed TOML or an unrecognized
-/// field, [`ScenarioError::UnsupportedSchema`] if `schema` is not
-/// [`SUPPORTED_SCHEMA`], [`ScenarioError::UnknownClass`]/[`ScenarioError::UnsupportedState`]
-/// if `class`/a state's `name` do not name a recognized value,
-/// [`ScenarioError::NoStates`]/[`ScenarioError::DuplicateStateName`]/[`ScenarioError::IncompleteUiOwningStates`]/[`ScenarioError::UnauthorizedColdBootstrap`]/[`ScenarioError::UnauthorizedAccommodationDecline`]/[`ScenarioError::AccommodationDeclineWithoutFixture`]
-/// if the `states` list itself is invalid,
-/// [`ScenarioError::VacuousOwnWindowWait`] if a state polls toward its own
-/// plugin's window being closed without first proving it open,
-/// [`ScenarioError::UnsupportedPanes`]/[`ScenarioError::TwinWithoutNvimState`]/[`ScenarioError::TwinDiverges`]
-/// if a state's `panes` is invalid or a tiles twin does not repeat its nvim
-/// state, or any of the per-step errors [`validate_step`] can raise.
+/// Returns:
+///
+/// - [`ScenarioError::Toml`] on malformed TOML or an unrecognized field;
+/// - [`ScenarioError::UnsupportedSchema`] if `schema` is not
+///   [`SUPPORTED_SCHEMA`];
+/// - [`ScenarioError::UnknownClass`] or
+///   [`ScenarioError::UnsupportedState`] if `class` or a state's `name`
+///   does not name a recognized value;
+/// - [`ScenarioError::NoStates`], [`ScenarioError::DuplicateStateName`],
+///   [`ScenarioError::IncompleteUiOwningStates`],
+///   [`ScenarioError::UnauthorizedColdBootstrap`],
+///   [`ScenarioError::UnauthorizedAccommodationDecline`] or
+///   [`ScenarioError::AccommodationDeclineWithoutFixture`] if the `states`
+///   list itself is invalid;
+/// - [`ScenarioError::VacuousOwnWindowWait`] if a state polls toward its
+///   own plugin's window being closed without first proving it open;
+/// - [`ScenarioError::UnsupportedPanes`],
+///   [`ScenarioError::TwinWithoutNvimState`] or
+///   [`ScenarioError::TwinDiverges`] if a state's `panes` is invalid or a
+///   tiles twin does not repeat its nvim state;
+/// - any of the per-step errors [`validate_step`] can raise.
 pub fn parse(raw_toml: &str) -> Result<ScenarioFile, ScenarioError> {
     parse_from(raw_toml, None)
 }

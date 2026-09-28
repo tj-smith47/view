@@ -123,6 +123,20 @@ while read -r var name; do
         [ -n "$(rust_const "$rs" "$name" 2>/dev/null)" ]
 done <<<"$CONST_SITES"
 
+# The `char` constants the sweep greps out of a source by hand. The
+# truncation mark moved to another file once and the sweep stopped at that
+# read with no message on every host that could run it.
+CHAR_SITES=$(grep -oE 'grep -oE "const [A-Z_]+: char = .*" "\$[A-Z_]+_RS"' "$SWEEP" |
+    sed -E 's/.*const ([A-Z_]+): char.*"\$([A-Z_]+_RS)"/\2 \1/') || true
+check_that "the sweep reads at least one char constant this file grades" \
+    [ -n "$CHAR_SITES" ]
+while read -r var name; do
+    [ -n "$name" ] || continue
+    rs=${!var}
+    check_that "the sweep reads the char $name out of ${rs#"$ROOT"/}" \
+        grep -qE "const $name: char = '.+'" "$rs"
+done <<<"$CHAR_SITES"
+
 rust_const "$PALETTE_RS" A_CONSTANT_NO_SOURCE_DECLARES >/dev/null 2>&1
 check "a constant no source declares fails rather than reading as an empty title" 1 $?
 
@@ -177,7 +191,7 @@ eval "$(awk '/^entry_shape\(\) \{/,/^\}/' "$SWEEP")"
 eval "$(awk '/^entry_points_of\(\) \{/,/^\}/' "$SWEEP")"
 eval "$(awk '/^marker_for\(\) \{/,/^\}/' "$SWEEP")"
 eval "$(awk '/^PICKER_MARKERS=\$\(awk/,/^'"'"' "\$SURFACES_RS" "\$PICKER_RS"\)$/' "$SWEEP")"
-DRIVES=$(awk '/^drive_action\(\) \{/,/^\}/' "$SWEEP" | grep -E '^    [a-z][a-z |]*\)$' | tr -d ' )' | tr '|' '\n')
+DRIVES=$(awk '/^drive_action\(\) \{/,/^\}/' "$SWEEP" | grep -E '^    \([a-z][a-z |]*\)$' | tr -d ' ()' | tr '|' '\n')
 # read by the sweep functions evaluated above, which shellcheck cannot follow
 # shellcheck disable=SC2034
 ROOT=/sweep/root HISTORY_TITLE=history PANEL_TITLE=panel NARROW_FOCUSED_TITLE=narrow PROMPT_MARK='>'
@@ -228,8 +242,67 @@ check_that "an edit to a source the dep-info lists makes the binary stale" \
     [ "$(newer_source "$BIN")" = "$BUILT/crates/a/src/with space.rs" ]
 touch -t 202601010000 "$BUILT/crates/a/src/with space.rs"
 rm "$BIN.d"
-[ "$(newer_source "$BIN")" = "$BUILT/crates/a/tests/live.rs" ]
-check "with no dep-info every source under crates/ is compared" 0 $?
+check_that "with no dep-info every source under crates/ is compared" \
+    [ "$(newer_source "$BIN")" = "$BUILT/crates/a/tests/live.rs" ]
+
+# The box readers the tiled legs assert with, on planted captures. A cell is
+# `row col bg rev und glyph`, the shape `capture` writes.
+eval "$(awk '/^box_text_joined\(\) \{/,/^\}/' "$SWEEP")"
+eval "$(awk '/^text_before_caret\(\) \{/,/^\}/' "$SWEEP")"
+eval "$(awk '/^blank_tile_frames\(\) \{/,/^\}/' "$SWEEP")"
+settle() { :; }
+V=$'\342\224\202'
+# read by the sweep functions evaluated above
+# shellcheck disable=SC2034
+BOX_TL=$'\342\225\255' BOX_TR=$'\342\225\256' BOX_BL=$'\342\225\260' \
+    BOX_BR=$'\342\225\257' BOX_V=$V BOX_H=$'\342\224\200' \
+    NORMAL_BG=n FLOAT_BG=f CELLS=$BUILT/cells
+# one planted row: its number, the background every cell takes, then one
+# glyph per column from column 0
+plant_row() {
+    local row=$1 bg=$2 col=0
+    shift 2
+    for g in "$@"; do
+        printf '%s\t%s\t%s\t0\t0\t%s\n' "$row" "$col" "$bg" "$g"
+        col=$((col + 1))
+    done
+}
+
+{
+    plant_row 0 f "$V" A B C D "$V"
+    plant_row 1 f "$V" E ' ' ' ' ' ' "$V"
+    plant_row 2 f "$V" ' ' ' ' ' ' ' ' "$V"
+} >"$CELLS"
+check_that "the caret directly after the marker reads it" \
+    [ "$(text_before_caret 1 2)" = "text ABCDE" ]
+check_that "the caret after a marker wrapped at the row end reads it" \
+    [ "$(text_before_caret 1 1)" = "text ABCD" ]
+check_that "a caret one blank cell past the marker reads a blank" \
+    [ "$(text_before_caret 1 3)" = "blank" ]
+check_that "a caret on a later empty row reads a blank" \
+    [ "$(text_before_caret 2 1)" = "blank" ]
+
+{
+    plant_row 0 f "$V" A B C D "$V"
+    plant_row 1 f "$V" E F ' ' ' ' "$V"
+    plant_row 2 f ' ' ' ' "$V" G H I J "$V"
+    plant_row 3 f ' ' ' ' "$V" K L ' ' ' ' "$V"
+} >"$CELLS"
+check_that "two stacked boxes read as one line each" \
+    [ "$(box_text_joined)" = $'ABCDEF\nGHIJKL' ]
+holds EFGH "$(box_text_joined)"
+check "a needle across two boxes is not found" 1 $?
+
+{
+    plant_row 0 n "$V" "$BOX_H"
+    plant_row 1 f "$V" "$BOX_H"
+    plant_row 2 x "$V" "$BOX_H"
+} >"$CELLS"
+blank_tile_frames
+check_that "a tile frame on Normal is blanked" \
+    [ "$(awk -F'\t' '$1 == 0 { printf "[%s]", $6 }' "$CELLS")" = "[ ][ ]" ]
+check_that "an overlay border on another background survives the blanking" \
+    [ "$(awk -F'\t' '$1 > 0 && $6 != " " { n++ } END { print n }' "$CELLS")" = 4 ]
 
 printf '%s cases, %s failures\n' "$cases" "$failures"
 [ "$failures" -eq 0 ] || exit 1

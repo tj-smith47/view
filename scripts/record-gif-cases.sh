@@ -169,7 +169,6 @@ Sleep 100ms"
     fi
 fi
 
-
 # Grades one tape script: a record_gif call that passes a body passes
 # "$BODY", the body keeps the contract, and the driver waits for the
 # recorder, then for the settled editor, then types or resizes. A

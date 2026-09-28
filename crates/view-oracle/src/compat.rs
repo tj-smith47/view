@@ -796,7 +796,15 @@ impl CompatSession {
                 }
             }
             Step::AssertAbsent(needle) => {
-                if self.pty.screen().contains(needle.as_str()) {
+                // a notice box wraps its text, and an absence read one row
+                // at a time passes on a needle the wrap broke in two
+                let present = self.pty.with_screen(|screen| {
+                    screen.contents().contains(needle.as_str())
+                        || boxed_texts(&screen_cells(screen))
+                            .iter()
+                            .any(|text| text.contains(needle.as_str()))
+                });
+                if present {
                     Err(CompatError::ForbiddenTextPresent {
                         needle: needle.clone(),
                     })
@@ -1141,6 +1149,65 @@ fn parse_engine_references(stdout: &str) -> Vec<ErrorBaseline> {
         rest = tail;
     }
     out
+}
+
+/// Each cell of `screen` as the text it shows: a blank cell as a space and
+/// the right half of a wide glyph as nothing, so a row's cells concatenate
+/// to what a reader sees.
+fn screen_cells(screen: &vt100::Screen) -> Vec<Vec<String>> {
+    let (rows, cols) = screen.size();
+    (0..rows)
+        .map(|row| {
+            (0..cols)
+                .map(|col| match screen.cell(row, col) {
+                    Some(cell) if cell.is_wide_continuation() => String::new(),
+                    Some(cell) if cell.has_contents() => cell.contents().to_string(),
+                    _ => " ".to_string(),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The text inside each framed box in `cells`, its rows joined with a
+/// space and again with nothing between them, so a needle the box wrapped
+/// at a space or inside a word reads whole.
+///
+/// A box is a top-left corner, the next top-right corner on its row, and
+/// the rows under them whose cells in both of those columns are vertical
+/// edges. Rows of two boxes are never joined, since a row belongs to a box
+/// only through that box's own edge columns.
+fn boxed_texts(cells: &[Vec<String>]) -> Vec<String> {
+    const TOP_LEFT: [&str; 2] = ["╭", "+"];
+    const TOP_RIGHT: [&str; 2] = ["╮", "+"];
+    const VERTICAL: [&str; 2] = ["│", "|"];
+    let is = |set: &[&str], cell: Option<&String>| cell.is_some_and(|c| set.contains(&c.as_str()));
+    let mut texts = Vec::new();
+    for (top, row) in cells.iter().enumerate() {
+        for lo in (0..row.len()).filter(|col| is(&TOP_LEFT, row.get(*col))) {
+            let Some(hi) = (lo + 1..row.len()).find(|col| is(&TOP_RIGHT, row.get(*col))) else {
+                continue;
+            };
+            let lines: Vec<String> = cells
+                .iter()
+                .skip(top + 1)
+                .take_while(|inner| is(&VERTICAL, inner.get(lo)) && is(&VERTICAL, inner.get(hi)))
+                .map(|inner| {
+                    inner
+                        .get(lo + 1..hi)
+                        .unwrap_or_default()
+                        .concat()
+                        .trim()
+                        .to_string()
+                })
+                .collect();
+            if lines.len() > 1 {
+                texts.push(lines.join(" "));
+                texts.push(lines.concat());
+            }
+        }
+    }
+    texts
 }
 
 /// Scans `text` for an E-numbered Vim error (`E` followed by a digit,
@@ -1511,6 +1578,55 @@ mod tests {
         ] {
             assert_eq!(parse_state_name(state_name(state)), Some(state));
         }
+    }
+
+    fn cells_of(rows: &[&str]) -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|row| row.chars().map(|c| c.to_string()).collect())
+            .collect()
+    }
+
+    /// A needle a notice box wrapped at a space or inside a word reads
+    /// whole, in either border charset, and the tails of two boxes side by
+    /// side or stacked never join into one.
+    #[test]
+    fn a_needle_a_box_wrapped_reads_whole_and_two_boxes_never_join() {
+        let rounded = cells_of(&[
+            "buffer text ╭──────────────╮",
+            "            │has been      │",
+            "            │overwritten by│",
+            "            │another plugin│",
+            "            ╰──────────────╯",
+        ]);
+        let texts = boxed_texts(&rounded);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("has been overwritten by another plugin")),
+            "{texts:?}"
+        );
+        let ascii = cells_of(&["+-----+", "|REENT|", "|ERED |", "+-----+"]);
+        let texts = boxed_texts(&ascii);
+        assert!(texts.iter().any(|t| t.contains("REENTERED")), "{texts:?}");
+        let apart = cells_of(&[
+            "╭─────╮ ╭─────╮",
+            "│left │ │right│",
+            "│one  │ │two  │",
+            "╰─────╯ ╰─────╯",
+            "╭─────╮",
+            "│below│",
+            "│three│",
+            "╰─────╯",
+        ]);
+        let texts = boxed_texts(&apart);
+        for crossing in ["left right", "one two", "one below", "two below"] {
+            assert!(
+                !texts.iter().any(|t| t.contains(crossing)),
+                "{crossing:?} joined across boxes: {texts:?}"
+            );
+        }
+        assert!(texts.iter().any(|t| t == "left one"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "below three"), "{texts:?}");
     }
 
     /// One reference capture's worth of marked stdout, as the deferred Lua

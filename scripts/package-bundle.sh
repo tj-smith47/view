@@ -22,19 +22,19 @@ RUNTIME_DIR="libexec/view/share/nvim/runtime"
 # provider is win32yank.exe from that same directory.
 engine_asset() {
   case "$1" in
-    x86_64-unknown-linux-gnu) echo "nvim-linux-x86_64.tar.gz" ;;
-    aarch64-unknown-linux-gnu) echo "nvim-linux-arm64.tar.gz" ;;
-    x86_64-apple-darwin) echo "nvim-macos-x86_64.tar.gz" ;;
-    aarch64-apple-darwin) echo "nvim-macos-arm64.tar.gz" ;;
-    x86_64-pc-windows-msvc) echo "nvim-win64.zip" ;;
-    *) echo "PACKAGE FAIL: no pinned engine asset for target $1" >&2; return 1 ;;
+    (x86_64-unknown-linux-gnu) echo "nvim-linux-x86_64.tar.gz" ;;
+    (aarch64-unknown-linux-gnu) echo "nvim-linux-arm64.tar.gz" ;;
+    (x86_64-apple-darwin) echo "nvim-macos-x86_64.tar.gz" ;;
+    (aarch64-apple-darwin) echo "nvim-macos-arm64.tar.gz" ;;
+    (x86_64-pc-windows-msvc) echo "nvim-win64.zip" ;;
+    (*) echo "PACKAGE FAIL: no pinned engine asset for target $1" >&2; return 1 ;;
   esac
 }
 
 exe_suffix() {
   case "$1" in
-    *-windows-*) echo ".exe" ;;
-    *) echo "" ;;
+    (*-windows-*) echo ".exe" ;;
+    (*) echo "" ;;
   esac
 }
 
@@ -54,8 +54,8 @@ engine_prefix() {
   mkdir -p "$workdir"
   curl -fsSL -o "$workdir/$asset" "$url"
   case "$asset" in
-    *.zip) unzip -q "$workdir/$asset" -d "$workdir" ;;
-    *) tar xzf "$workdir/$asset" -C "$workdir" ;;
+    (*.zip) unzip -q "$workdir/$asset" -d "$workdir" ;;
+    (*) tar xzf "$workdir/$asset" -C "$workdir" ;;
   esac
   # A glob rather than `find | head`: closing the pipe on the first match
   # leaves find killed by SIGPIPE under `set -o pipefail`, and taking the
@@ -105,16 +105,16 @@ archive() {
     # exist or is not a valid file system path"), and cygpath'ing it works
     # but writes backslash-separated entry names that every non-Windows
     # unzip reads as part of the file name.
-    *.zip) "${SYSTEMROOT:-C:/Windows}/System32/tar.exe" -C "$parent" -a -cf "$out" "$base" ;;
-    *) tar -C "$parent" -czf "$out" "$base" ;;
+    (*.zip) "${SYSTEMROOT:-C:/Windows}/System32/tar.exe" -C "$parent" -a -cf "$out" "$base" ;;
+    (*) tar -C "$parent" -czf "$out" "$base" ;;
   esac
 }
 
 case "${1:-}" in
-  asset) engine_asset "${2:?target}" ;;
-  stage) stage "${2:?target}" "${3:?view binary}" "${4:?root}" ;;
-  archive) archive "${2:?root}" "${3:?output path}" ;;
-  *)
+  (asset) engine_asset "${2:?target}" ;;
+  (stage) stage "${2:?target}" "${3:?view binary}" "${4:?root}" ;;
+  (archive) archive "${2:?root}" "${3:?output path}" ;;
+  (*)
     echo "usage: $0 asset <target>" >&2
     echo "       $0 stage <target> <view-binary> <root>" >&2
     echo "       $0 archive <root> <output-path>" >&2

@@ -1638,32 +1638,10 @@ mod tests {
     }
 
     /// States that run under nvim's own window layout only, each with the
-    /// reason its subject does not survive the tiled layout: it reads a row
-    /// nvim's bars own (the statusline, the command line under it) or a
-    /// flag the tiled layout sets on its own.
-    const NVIM_ONLY: [(&str, &str, &str); 12] = [
-        (
-            "dressing",
-            "deferred",
-            "reads the command-line row under cmdheight=0",
-        ),
-        ("dressing", "superseded", "reads the statusline row's cells"),
-        (
-            "dressing",
-            "unaccommodated",
-            "reads the statusline row's cells",
-        ),
-        (
-            "fidget",
-            "deferred",
-            "reads the command-line row under cmdheight=0",
-        ),
-        ("fidget", "superseded", "reads the statusline row's cells"),
-        (
-            "fidget",
-            "unaccommodated",
-            "reads the statusline row's cells",
-        ),
+    /// reason its subject does not survive the tiled layout: it reads the
+    /// statusline row nvim's bar owns or a flag the tiled layout sets on its
+    /// own.
+    const NVIM_ONLY: [(&str, &str, &str); 6] = [
         ("lualine", "deferred", "reads the statusline row's cells"),
         ("lualine", "superseded", "reads the statusline row's cells"),
         (

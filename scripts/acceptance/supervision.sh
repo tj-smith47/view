@@ -242,7 +242,7 @@ assert_restart_recovered() {
     local last_row
     last_row=$(pane | grep -v '^$' | tail -1)
     case "$last_row" in
-    :*)
+    (:*)
         fail "the last row still reads '$last_row' after the restart, so the dead engine's command line is painted over its replacement"
         return 1
         ;;
@@ -442,8 +442,8 @@ RESTART_KEY=$(tmux_named_key "$(const_str "$SUPERVISION_RS" RESTART_NOTATION)")
 PANEL_TITLE=$(agent_panel_title '' "$STUB_BIN") || exit 1
 FOCUSED_TITLE=$(agent_panel_title focused "$STUB_BIN" | cut -c1-$((${#PANEL_TITLE} + 1)))
 case "$FOCUSED_TITLE" in
-*:) ;;
-*)
+(*:) ;;
+(*)
     printf 'FAIL: the entered agent panel title no longer opens with the name and its separator (%s), so a truncated title cannot be told from the unfocused one\n' \
         "${FOCUSED_TITLE:-nothing this can read}" >&2
     exit 1

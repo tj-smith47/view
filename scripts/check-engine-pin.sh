@@ -5,8 +5,8 @@ set -euo pipefail
 pin="$(tr -d '[:space:]' < .engine-pin)"
 [ -n "$pin" ] || { echo "PIN FAIL: .engine-pin is empty"; exit 1; }
 case "$pin" in
-  v[0-9]*.[0-9]*.[0-9]*) ;;
-  *) echo "PIN FAIL: '$pin' is not a vX.Y.Z tag"; exit 1 ;;
+  (v[0-9]*.[0-9]*.[0-9]*) ;;
+  (*) echo "PIN FAIL: '$pin' is not a vX.Y.Z tag"; exit 1 ;;
 esac
 fail=0
 # every OS leg must read the pin file itself: one read per install step,
@@ -54,10 +54,10 @@ check_workflow() {
 # lower it.
 floor_for() {
   case "$1" in
-    .github/workflows/ci.yml) echo 16 ;;
-    .github/workflows/bench.yml) echo 3 ;;
-    .github/workflows/release.yml) echo 1 ;;
-    *) echo "" ;;
+    (.github/workflows/ci.yml) echo 16 ;;
+    (.github/workflows/bench.yml) echo 3 ;;
+    (.github/workflows/release.yml) echo 1 ;;
+    (*) echo "" ;;
   esac
 }
 # The release config and the packaging it drives ship the engine rather than

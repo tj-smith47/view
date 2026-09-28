@@ -1155,7 +1155,7 @@ permission_row() {
     # does not know how to fill: fail rather than assert a row with a `{}`
     # in it that no screen will ever show.
     case "$fmt" in
-        *'{'*)
+        (*'{'*)
             printf 'FAIL: %s option row template %s has a field this script cannot fill\n' \
                 "$PERMISSION_RS" "$fmt" >&2
             return 1

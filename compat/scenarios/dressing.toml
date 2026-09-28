@@ -11,11 +11,11 @@
 # `ext_cmdline` for a state that left `palette` on, and drawn by nvim into
 # the last grid row for one that turned it off.
 # The deferred state's `native` table does turn every feature off at the
-# config level even though dressing itself can't observe that; this
-# fixture also carries lualine, so column 85 of the statusline row (the
-# same discriminator lualine.toml uses) still differs between the two
-# states, and asserting it here is what stops a runner bug that silently
-# ignores the `native` table from passing both states by coincidence.
+# config level even though dressing itself can't observe that; the
+# `cmdheight` probe there is what stops a runner bug that silently ignores
+# the `native` table from passing both states by coincidence. The
+# statusline cells that differ between the states are lualine.toml's
+# subject and are asserted there.
 schema = 1
 plugin = "dressing"
 class = "ui-owning"
@@ -72,8 +72,8 @@ steps = [
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
   # config-level cross-check, not a dressing behavior: native wins here, so
-  # row 29 stays the statusline row and lualine's own separator glyph never
-  # reaches column 85 (see lualine.toml).
+  # row 29 stays the statusline row and lualine's own separator glyph
+  # (U+E0B2) never reaches column 85 (see lualine.toml).
   { assert_cell_not = { row = 29, col = 85, glyph = "" } },
 ]
 
@@ -125,8 +125,8 @@ steps = [
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
   # config-level cross-check, not a dressing behavior: native wins here, so
-  # row 29 stays the statusline row and lualine's own separator glyph never
-  # reaches column 85 (see lualine.toml).
+  # row 29 stays the statusline row and lualine's own separator glyph
+  # (U+E0B2) never reaches column 85 (see lualine.toml).
   { assert_cell_not = { row = 29, col = 85, glyph = "" } },
 ]
 
@@ -152,16 +152,10 @@ steps = [
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
-  # config-level cross-check, not a dressing behavior: native.statusline is
-  # off here, so lualine's own setup() keeps laststatus and paints its
-  # separator glyph into column 85 (see lualine.toml).
-  #
-  # Row 28, not the last row 29 lualine.toml asserts: this state also turns
-  # palette and notifications off, which detaches ext_cmdline and
-  # ext_messages, so view leaves `cmdheight` alone and nvim keeps the last
-  # row for its own command line. The statusline sits above it.
+  # A config-level cross-check that the runner applied this state's
+  # `native` table: palette and notifications off detach ext_cmdline and
+  # ext_messages, so view leaves `cmdheight` at nvim's own 1.
   { probe = "luaeval('tostring(vim.o.cmdheight)')", expect = "1" },
-  { wait_for_cell = { row = 28, col = 85, expected = "" }, timeout_ms = 5000 },
 ]
 
 [[states]]
@@ -177,9 +171,76 @@ steps = [
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
 ]
 
-# native-only again under the tiled layout, where view's own prompt opens
-# over framed tiles. The other states read the statusline or command-line
-# row, which the tiled layout gives to a tile's frame, so they have no twin.
+# Every state again under the tiled layout, where dressing's float and
+# view's own prompt open over framed tiles. Row 29 is a tile's frame
+# there, so the statusline cross-check holds without lualine's glyph.
+[[states]]
+name = "unaccommodated"
+panes = "tiles"
+accommodations = false
+native = {}
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.dressing ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { wait_for = "view: your config also draws", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 60000 },
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
+  { send = ":lua vim.ui.input({ prompt = 'dressing-prompt' }, function() end)<CR>" },
+  { wait_for = "dressing-prompt", timeout_ms = 60000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 30000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 30000 },
+  { assert_cell_not = { row = 29, col = 85, glyph = "" } },
+]
+
+[[states]]
+name = "superseded"
+panes = "tiles"
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.dressing ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { wait_for = "view: your config also draws", timeout_ms = 60000 },
+  { wait_for = "(vim.notify", timeout_ms = 60000 },
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 60000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
+  { send = ":lua vim.ui.input({ prompt = 'dressing-prompt' }, function() end)<CR>" },
+  { wait_for = "dressing-prompt", timeout_ms = 60000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 30000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 30000 },
+  { assert_cell_not = { row = 29, col = 85, glyph = "" } },
+]
+
+[[states]]
+name = "deferred"
+panes = "tiles"
+native = { picker = false, tree = false, statusline = false, notifications = false, palette = false }
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.dressing ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = "<Esc>" },
+  { send = ":lua vim.ui.input({ prompt = 'dressing-prompt' }, function() end)<CR>" },
+  { wait_for = "dressing-prompt", timeout_ms = 60000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 30000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 30000 },
+  { probe = "luaeval('tostring(vim.o.cmdheight)')", expect = "1" },
+]
+
 [[states]]
 name = "native-only"
 panes = "tiles"

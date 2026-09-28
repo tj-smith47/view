@@ -51,15 +51,15 @@ fi
 CHECKER=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --checker)
+    (--checker)
       CHECKER="${2:-}"
       shift 2
       ;;
-    -h | --help)
+    (-h | --help)
       printf 'usage: %s [--checker PATH]\n' "$0"
       exit 0
       ;;
-    *)
+    (*)
       printf 'unknown argument: %s\n' "$1" >&2
       exit 2
       ;;
@@ -3381,13 +3381,13 @@ note() { missed=$(printf '%s%s\n' "${missed:+$missed
 }" "$1"); }
 out=$(bash "$CHECKER" --script-comments "$CASE" 2>&1)
 case "$out" in
-  *"scripts/leg:2: "*) ;;
-  *) note 'check-style.sh did not grade the comment in scripts/leg' ;;
+  (*"scripts/leg:2: "*) ;;
+  (*) note 'check-style.sh did not grade the comment in scripts/leg' ;;
 esac
 out=$(bash "$TREE/scripts/check-portability.sh" "$CASE" 2>&1)
 case "$out" in
-  *scripts/leg*) ;;
-  *) note 'check-portability.sh did not scan scripts/leg' ;;
+  (*scripts/leg*) ;;
+  (*) note 'check-portability.sh did not scan scripts/leg' ;;
 esac
 script_population_read "$CASE" > /dev/null
 if [ "$SCRIPT_POPULATION" != "scripts/leg" ]; then
@@ -4277,7 +4277,7 @@ expect_frames() {
   out=$(env -u COMMENT_FRAMES_BASE bash "$CHECKER" --comment-frames "$CASE" 2>&1)
   rc=$?
   named=1
-  case "$out" in *"$want_line"*) ;; *) named=0 ;; esac
+  case "$out" in (*"$want_line"*) ;; (*) named=0 ;; esac
   if [ "$rc" = "$want_rc" ] && [ "$named" = 1 ]; then
     printf 'ok %s - %s\n' "$n" "$desc"
     return
@@ -4404,7 +4404,7 @@ out=$(COMMENT_FRAMES_BASE=HEAD~1 bash "$CHECKER" --comment-frames "$CASE" 2>&1)
 rc=$?
 desc='a ceiling raised and committed on top of its own base, caught via COMMENT_FRAMES_BASE=HEAD~1'
 named=1
-case "$out" in *'demo 1, above the 0 HEAD holds'*) ;; *) named=0 ;; esac
+case "$out" in (*'demo 1, above the 0 HEAD holds'*) ;; (*) named=0 ;; esac
 if [ "$rc" = 1 ] && [ "$named" = 1 ]; then
   printf 'ok %s - %s\n' "$n" "$desc"
 else
@@ -4424,7 +4424,7 @@ out=$(COMMENT_FRAMES_BASE=cd5bdcb91b97fd90f9a68e3ff9ed8258800e3104 \
 rc=$?
 desc='a ref the repository does not have names itself in the failure'
 named=1
-case "$out" in *'does not have: cd5bdcb91b97fd90f9a68e3ff9ed8258800e3104'*) ;; *) named=0 ;; esac
+case "$out" in (*'does not have: cd5bdcb91b97fd90f9a68e3ff9ed8258800e3104'*) ;; (*) named=0 ;; esac
 if [ "$rc" = 1 ] && [ "$named" = 1 ]; then
   printf 'ok %s - %s\n' "$n" "$desc"
 else

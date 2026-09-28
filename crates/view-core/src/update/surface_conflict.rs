@@ -2956,13 +2956,9 @@ mod tests {
         widths
     }
 
-    /// A needle a scenario waits for or asserts absent from the launch box
-    /// sits on one row of it as the compat harness's terminal wraps it,
-    /// because both steps read one screen row at a time. Graded against
-    /// every box a fixture can raise, since the channels a box names move
-    /// where a needle stands in it.
-    #[test]
-    fn every_compat_needle_from_the_launch_box_fits_one_row() {
+    /// Every needle a compat scenario waits for or asserts absent, with the
+    /// file that names it.
+    fn compat_needles() -> Vec<(std::path::PathBuf, String)> {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compat/scenarios");
         let mut needles: Vec<(std::path::PathBuf, String)> = Vec::new();
         for entry in std::fs::read_dir(&dir).expect("the compat scenarios") {
@@ -2971,19 +2967,23 @@ mod tests {
                 continue;
             }
             let scenario = std::fs::read_to_string(&path).expect("a readable scenario");
-            // an absence a needle straddles holds whatever the box says
             for step in ["wait_for", "assert_absent"] {
                 for needle in step_needles(&scenario, step) {
                     needles.push((path.clone(), needle));
                 }
             }
         }
-        let launches = fixture_launches();
-        assert_eq!(launches.len(), 15, "the walk lost a box shape");
+        needles
+    }
+
+    /// Asserts every needle a box's lines carry sits on one row of that box
+    /// at every compat notice width, and returns how many it graded.
+    fn grade_needles_against(boxes: &[Vec<String>]) -> usize {
+        let needles = compat_needles();
         let widths = compat_notice_widths();
         assert!(widths.len() > 1, "the layouts gave one width: {widths:?}");
         let mut graded = 0;
-        for (lines, width) in launches
+        for (lines, width) in boxes
             .iter()
             .flat_map(|lines| widths.iter().map(move |width| (lines, *width)))
         {
@@ -3002,7 +3002,68 @@ mod tests {
                 );
             }
         }
+        graded
+    }
+
+    /// A needle a scenario waits for or asserts absent from the launch box
+    /// sits on one row of it as the compat harness's terminal wraps it,
+    /// because a wait reads one screen row at a time. Graded against every
+    /// box a fixture can raise, since the channels a box names move where a
+    /// needle stands in it.
+    #[test]
+    fn every_compat_needle_from_the_launch_box_fits_one_row() {
+        let launches = fixture_launches();
+        assert_eq!(launches.len(), 15, "the walk lost a box shape");
+        let graded = grade_needles_against(&launches);
         assert!(graded > 50, "the walk graded nothing: {graded}");
+    }
+
+    /// Every conflict notice a compat needle can come from: the anonymous
+    /// family and each identity a needle names, over every set of surfaces
+    /// a claimant can take, with and without a config read.
+    fn fixture_conflict_notices() -> Vec<Vec<String>> {
+        let mut families = vec![super::ANONYMOUS_FAMILY.to_string()];
+        for (_, needle) in compat_needles() {
+            let Some((identity, _)) = needle.split_once(" is drawing over") else {
+                continue;
+            };
+            let identity = identity.strip_prefix("view: ").unwrap_or(identity);
+            let family = if identity == "a plugin" {
+                super::ANONYMOUS_FAMILY.to_string()
+            } else {
+                super::family(Some(identity))
+            };
+            if !families.contains(&family) {
+                families.push(family);
+            }
+        }
+        let surfaces = crate::native::surfaces::SURFACES;
+        let mut notices = Vec::new();
+        for family in &families {
+            for mask in 1..(1u32 << surfaces.len()) {
+                let claimed: Vec<Surface> = surfaces
+                    .iter()
+                    .enumerate()
+                    .filter(|(bit, _)| mask & (1 << bit) != 0)
+                    .map(|(_, row)| row.surface)
+                    .collect();
+                for read in [true, false] {
+                    let text = super::notice(family, &claimed, read);
+                    notices.push(text.split('\n').map(str::to_string).collect());
+                }
+            }
+        }
+        notices
+    }
+
+    /// The same one-row rule for the conflict notices a float raises at
+    /// runtime, which is where the nvim-cmp and telescope needles come from.
+    #[test]
+    fn every_compat_needle_from_a_conflict_notice_fits_one_row() {
+        let notices = fixture_conflict_notices();
+        assert!(notices.len() > 1000, "the walk lost a notice shape");
+        let graded = grade_needles_against(&notices);
+        assert!(graded > 1000, "the walk graded nothing: {graded}");
     }
 
     #[test]

@@ -28,19 +28,19 @@ set -eu
 # a flag that does not.
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --)
+        (--)
             shift
             break
             ;;
-        -?*)
+        (-?*)
             cluster="${1#-}"
             shift
             while [ -n "$cluster" ]; do
                 flag="$(printf '%.1s' "$cluster")"
                 cluster="${cluster#?}"
                 case "$flag" in
-                    [46AaCfGgKkMNnqsTtVvXxYy]) ;;
-                    [BbcDEeFIiJLlmOoPpQRSWw])
+                    ([46AaCfGgKkMNnqsTtVvXxYy]) ;;
+                    ([BbcDEeFIiJLlmOoPpQRSWw])
                         # the value is the rest of the cluster when there is
                         # one, and the next argument otherwise
                         if [ -n "$cluster" ]; then
@@ -58,14 +58,14 @@ while [ "$#" -gt 0 ]; do
                     # permissive than the real client (OpenSSH rejects the
                     # option outright), and a double must never accept what
                     # the real one would reject.
-                    *)
+                    (*)
                         echo "fake-ssh: unrecognized option -$flag" >&2
                         exit 255
                         ;;
                 esac
             done
             ;;
-        *)
+        (*)
             break
             ;;
     esac
@@ -76,7 +76,7 @@ if [ "$#" -lt 1 ]; then
     exit 255
 fi
 case "$1" in
-    -*)
+    (-*)
         echo "fake-ssh: $1 is not a hostname" >&2
         exit 255
         ;;

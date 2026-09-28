@@ -28,16 +28,16 @@ ROOT=""
 SELF_TEST=1
 while [ $# -gt 0 ]; do
   case "$1" in
-    --root)
+    (--root)
       ROOT="${2:-}"
       SELF_TEST=0
       shift 2
       ;;
-    -h | --help)
+    (-h | --help)
       printf 'usage: %s [--root DIR]\n' "$0"
       exit 0
       ;;
-    *)
+    (*)
       printf 'unknown argument: %s\n' "$1" >&2
       exit 2
       ;;
@@ -100,9 +100,9 @@ scan() {
     ' "$file") || scan_status=1
     while read -r line; do
       case "$line" in
-        MARKER) walked_markers=$((walked_markers + 1)) ;;
-        '') ;;
-        *) printf '%s\n' "$line" >&2 ;;
+        (MARKER) walked_markers=$((walked_markers + 1)) ;;
+        ('') ;;
+        (*) printf '%s\n' "$line" >&2 ;;
       esac
     done <<EOF
 $findings
@@ -155,19 +155,19 @@ for case_file in "$CASES"/*.lua; do
   rc=$?
   rm -rf -- "$work"
   case "$name" in
-    bad-*)
+    (bad-*)
       if [ "$rc" -eq 0 ]; then
         printf 'ACCOMMODATION FAIL: %s must be rejected, but the check passed it\n' "$name" >&2
         status=1
       fi
       ;;
-    good-*)
+    (good-*)
       if [ "$rc" -ne 0 ]; then
         printf 'ACCOMMODATION FAIL: %s must be accepted, but the check rejected it\n' "$name" >&2
         status=1
       fi
       ;;
-    *)
+    (*)
       printf 'ACCOMMODATION FAIL: %s must be named bad-* or good-*\n' "$name" >&2
       status=1
       ;;

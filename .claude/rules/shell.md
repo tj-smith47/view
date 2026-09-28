@@ -20,7 +20,7 @@ any quote it counts swallows the rest.
 | shape | 3.2 says | write instead |
 |---|---|---|
 | `declare -A m=([k]=v)` | `k: unbound variable` under `set -u` | a `case`, or newline-joined strings fed to `grep -Fqx` by here-string (`grep -Fqx -- "$x" <<<"$list"`) and never by a pipe. A quiet `grep` exits at its first match, SIGPIPEs the producer, and under `pipefail` the hit comes back a miss (`no_condition_reads_a_pipe_with_a_quiet_grep` in `view-oracle`'s shell guards refuses the pipe) |
-| a paren or a quote inside `$( )` or `<( )` that the reader counts and the writer did not mean: a `case` pattern with no leading paren, or a `)` or an apostrophe in a comment | `syntax error near unexpected token`, or ``bad substitution: no closing `)' `` | give every `case` pattern its leading paren (`case "$x" in (*.*) … ;; esac`) and reword the comment. Keep the `case` word on its header line too. That spelling is the proxy a line scanner can see, and it is how the first instance is caught |
+| a paren or a quote inside `$( )` or `<( )` that the reader counts and the writer did not mean: a `case` pattern with no leading paren, or a `)` or an apostrophe in a comment | `syntax error near unexpected token`, or ``bad substitution: no closing `)' `` | give every `case` pattern its leading paren (`case "$x" in (*.*) … ;; esac`) and reword the comment. Keep the `case` word on its header line too |
 | `${x//a/b}` on anything longer than a word | nothing. It rescans the string per match and runs unbounded | `sed`/`tr` for a rewrite; `[[ $x == *[![:space:]]* ]]` (or its negation) for an emptiness test |
 
 The last row's class is the every-match substitution and nothing wider.
@@ -41,13 +41,15 @@ The same ban covers `mapfile`, `readarray`, `[[ -v x ]]`, `${x,,}`, `${x^^}`,
 `\|&`, `&>>` and `;;&`.
 
 The middle row names two instances, and each has a gate of its own. The first, a
-`case` pattern with no leading paren, is visible only to a parser, so what a
-scan bans in its place is the proxy: a `case` whose word runs onto the next
-line. That spelling took the whole style case matrix out of the 3.2 leg, and
-every `case` in this population puts its `in` on the header line, so a `case`
-with no `in` beside it is the tell. The defect the row names is the missing
-paren: a split header whose patterns carry their parens extracts cleanly, and a
-one-line header whose patterns lack them breaks exactly as the split one does.
+`case` pattern with no leading paren, is read directly by `lint:shell`
+(`scripts/lint-shell.sh`, graded by `scripts/lint-shell-cases.sh`). A pattern
+stands after the header's `in` and after each `;;`, and every header in this
+population keeps its `in` on the header line, so a line scanner
+finds each pattern position and refuses one that does not open with `(`. That
+holds inside a one-line `case … esac` and a nested `case` alike, and here-doc
+bodies and quoted strings are text it skips. A split header is the proxy the
+drift cases read as well: that spelling took the whole style case matrix out of
+the 3.2 leg.
 
 The second instance, a comment inside a multi-line `$( )` or `<( )` whose own
 parens do not balance, or which carries an odd number of quotes, is read
@@ -66,12 +68,12 @@ position, one walks every comment sitting inside a `$( )` or a `<( )`, one
 parses each script under `/bin/bash` when that is a pre-4 bash, and one runs the
 drift check over the shipped tree, read-only, inside
 `perl -e 'alarm 120; exec @ARGV'` and under that same stock `/bin/bash`. The
-parse leg is the only one that sees the leading-paren-less `case` pattern, and
-it runs on the host the contract is about. The timed leg catches a cost both
-reading legs and every case tree are blind to, since a planted file is orders of
-magnitude smaller than the baselines that ship; it runs under whatever that
-interpreter turns out to be, since an overrun is a cost regression under any
-bash, with the pattern substitution the first cause to check.
+parse leg sees the leading-paren-less `case` pattern on the host the contract
+is about, and `lint:shell` sees it on every host. The timed leg catches a cost
+both reading legs and every case tree are blind to, since a planted file is
+orders of magnitude smaller than the baselines that ship; it runs under whatever
+that interpreter turns out to be, since an overrun is a cost regression under
+any bash, with the pattern substitution the first cause to check.
 
 The same care applies to the awk these gates are written in, where the undefined
 construct is a backslash inside a bracket expression: `/[ \t]+/` and

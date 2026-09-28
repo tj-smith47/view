@@ -16,15 +16,15 @@ set -uo pipefail
 CHECKER=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --checker)
+        (--checker)
             CHECKER="${2:-}"
             shift 2
             ;;
-        -h | --help)
+        (-h | --help)
             printf 'usage: %s [--checker PATH]\n' "$0"
             exit 0
             ;;
-        *)
+        (*)
             printf 'unknown argument: %s\n' "$1" >&2
             exit 2
             ;;
@@ -80,7 +80,7 @@ expect() {
     local grepped="absent"
     if [ -n "$want_grep" ]; then
         case "$out" in
-            *"$want_grep"*) grepped="present" ;;
+            (*"$want_grep"*) grepped="present" ;;
         esac
     fi
     if [ "$rc" = "$want_rc" ] && [ "$grepped" = "$want_grepped" ]; then
@@ -140,7 +140,7 @@ expect 0 '' 'an inline #[cfg(test)] mod tests block is excluded up to its own bo
 counts_out=$(cd "$CASE" && bash "$CHECKER" --counts . 2>&1)
 n=$((n + 1))
 case "$counts_out" in
-    *$'\t'"crates/x/src/inline.rs")
+    (*$'\t'"crates/x/src/inline.rs")
         line=$(printf '%s\n' "$counts_out" | grep -F "crates/x/src/inline.rs")
         prod_count="${line%%$'\t'*}"
         if [ "$prod_count" = "950" ]; then
@@ -151,7 +151,7 @@ case "$counts_out" in
                 "$n" "$prod_count"
         fi
         ;;
-    *)
+    (*)
         failures=$((failures + 1))
         printf 'not ok %s - tree-wide --counts reports the same 950-line boundary for the inline block\n  crates/x/src/inline.rs missing from --counts output\n' "$n"
         printf '%s\n' "$counts_out" | sed 's/^/  | /'

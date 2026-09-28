@@ -130,9 +130,9 @@ done < <(awk '
 # for whoever runs the harness and is not checked here.
 while IFS=$'\t' read -r spec_row kind metric; do
   case "$kind" in
-    diagnostic) want="Diagnostic" ;;
-    resource) want="Resource" ;;
-    *) continue ;;
+    (diagnostic) want="Diagnostic" ;;
+    (resource) want="Resource" ;;
+    (*) continue ;;
   esac
   row="$(sed "s/$arrow/->/g; s/\`//g" "$spec" | grep -F "$spec_row" | head -1 || true)"
   if ! grep -qF "$want" <<<"$row"; then
@@ -364,7 +364,7 @@ if [[ -d "$baselines_dir" && -f "$bench_page" ]]; then
     class="$(basename "$class_file" .toml)"
     # a sidecar (dev-linux.headroom, dev-linux.measured) is not a class: it
     # keeps its class's name and a suffix, and records no ratio of its own.
-    case "$class" in *.*) continue ;; esac
+    case "$class" in (*.*) continue ;; esac
     seated=0
     grep -q '^\[withdrawn\.first_paint\.' "$class_file" && seated=1
     listed=0
@@ -397,8 +397,8 @@ vocab_leaf=""
 while IFS=$'\t' read -r kind name; do
   [[ -n "$name" ]] || continue
   case "$kind" in
-    s) vocab_scenario="$vocab_scenario$name"$'\n' ;;
-    *) vocab_leaf="$vocab_leaf$name"$'\n' ;;
+    (s) vocab_scenario="$vocab_scenario$name"$'\n' ;;
+    (*) vocab_leaf="$vocab_leaf$name"$'\n' ;;
   esac
 done < <(
   awk '

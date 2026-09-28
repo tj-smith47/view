@@ -214,8 +214,8 @@ resolve_mod_file() {
     base="${decl_file##*/}"
     base="${base%.rs}"
     case "$base" in
-        mod | lib | main) cand_dir="$dir" ;;
-        *) cand_dir="$dir/$base" ;;
+        (mod | lib | main) cand_dir="$dir" ;;
+        (*) cand_dir="$dir/$base" ;;
     esac
     RESOLVED=""
     for c in "$cand_dir/$name.rs" "$cand_dir/$name/mod.rs"; do
@@ -317,7 +317,7 @@ if [[ $# -gt 0 ]]; then
         # Filename skips (*_tests.rs and friends) used to live here and made
         # the hook pass a production module the authoritative gate fails.
         case "$f" in
-            *crates/*/tests/* | *crates/*/benches/*) continue ;;
+            (*crates/*/tests/* | *crates/*/benches/*) continue ;;
         esac
         grep -qE '^[[:space:]]*#!\[cfg\(test\)\]' -- "$f" && continue
         is_test_only_via_parent "$f" && continue
@@ -349,7 +349,7 @@ fi
 ALL_RS=()
 while IFS= read -r _f; do
     case "$_f" in
-        '"'*)
+        ('"'*)
             echo "audit-god-files: git could not list $_f literally, so this gate" >&2
             echo "  cannot tell which file it names; rename it out of the quoted form" >&2
             exit 1
@@ -435,7 +435,7 @@ refuse_unkeyable() { # usage: refuse_unkeyable <path> <where it came from>
         exit 1
     fi
     case "$1" in
-        *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/.-]*)
+        (*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/.-]*)
             echo "audit-god-files: $1 has characters this gate cannot key on;" >&2
             echo "  rename it, or widen both the alphabet here and map_name's escapes" >&2
             echo "  it came from $2" >&2
@@ -486,7 +486,7 @@ done < <(grep -rlE '^[[:space:]]*#!\[cfg\(test\)\]' -- "${ALL_RS[@]}" 2>/dev/nul
 
 for f in "${ALL_RS[@]}"; do
     case "$f" in
-        crates/*/tests/* | crates/*/benches/*)
+        (crates/*/tests/* | crates/*/benches/*)
             mark_test_file "$f"
             continue
             ;;

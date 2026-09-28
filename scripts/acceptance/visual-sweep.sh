@@ -69,6 +69,7 @@ PALETTE_RS=$REPO_ROOT/crates/view-core/src/native/palette.rs
 SURFACES_RS=$REPO_ROOT/crates/view-core/src/update/surfaces.rs
 CHORDS_RS=$REPO_ROOT/crates/view-core/src/native/chords.rs
 OVERLAY_RS=$REPO_ROOT/crates/view-surface/src/overlay.rs
+TEXT_RS=$REPO_ROOT/crates/view-core/src/native/text.rs
 NVIM_API_RS=$REPO_ROOT/crates/view-engine/src/nvim_api.rs
 # the mod file above is being split into sibling files under this directory;
 # an anchor that has moved between them (mappings.rs holds this one today) is
@@ -305,7 +306,7 @@ BOX_H=$(border_glyph ROUNDED horizontal)
 # really is absent.
 for glyph in "$BOX_TL" "$BOX_TR" "$BOX_BL" "$BOX_BR" "$BOX_V" "$BOX_H"; do
     case "$glyph" in
-    '' | ' ' | '-' | '|' | '+' | '=')
+    ('' | ' ' | '-' | '|' | '+' | '=')
         printf 'FAIL: a ROUNDED border glyph in %s reads as %s, which ordinary text is full of, so no reader here could tell a box from a buffer\n' \
             "$OVERLAY_RS" "${glyph:-nothing this can read}" >&2
         exit 1
@@ -489,14 +490,16 @@ capture() {
 # Takes the tiles' own frames out of the last capture, which is how a leg run
 # a second time under tiles reads its overlays. Every reader above pairs the
 # leftmost frame glyph on a row with the next one, and a tile's edge stands
-# left of every overlay. A tile frame is painted on the colorscheme's Normal
-# background and an overlay's on NormalFloat, and the fixture keeps the two
-# apart, so the background tells the two frames apart.
+# left of every overlay. The blanking assumes a tile frame is painted on
+# the colorscheme's Normal background, which the frame painter takes its
+# style from, and that no overlay edge sits on Normal: an overlay is drawn
+# on NormalFloat or a highlight of its own, and the fixture keeps Normal
+# apart from each of those. So only a frame glyph on Normal is blanked.
 blank_tile_frames() {
-    LC_ALL=C awk -F'\t' -v OFS='\t' -v float_bg="$FLOAT_BG" \
+    LC_ALL=C awk -F'\t' -v OFS='\t' -v normal_bg="$NORMAL_BG" \
         -v frame="$BOX_TL $BOX_TR $BOX_BL $BOX_BR $BOX_V $BOX_H" '
         BEGIN { n = split(frame, g, " "); for (i = 1; i <= n; i++) is_frame[g[i]] = 1 }
-        $3 != float_bg && ($6 in is_frame) { $6 = " " }
+        $3 == normal_bg && ($6 in is_frame) { $6 = " " }
         { print }' "$CELLS" >"$CELLS.tiles"
     mv "$CELLS.tiles" "$CELLS"
 }
@@ -752,14 +755,14 @@ assert_caret_after() {
         # follows its tail, so the framed text behind the caret is read
         local shown
         read -r row col shown <<<"$(caret_cell)"
-        got=$(box_text_joined "$row" "$col")
+        got=$(text_before_caret "$row" "$col")
         case "$shown:$got" in
-        (1:*"$text")
+        (1:"text "*"$text")
             pass "$what: the caret stands one cell past '$text', wrapped onto row $row"
             return 0
             ;;
         esac
-        fail "$what: '$text' is not on one row, and the framed text behind the caret at row $row col $col (visible $shown) ends '${got: -20}'"
+        fail "$what: '$text' is not on one row, and the caret at row $row col $col (visible $shown) has '${got: -20}' behind it"
         return 1
     fi
     read -r row col _ _ <<<"$span"
@@ -875,13 +878,13 @@ entry_rows() {
 # own order for an associative array: unordered rows joined are a different
 # string every run.
 #
-# Given a row and a column, only the cells before that one are joined, which
-# is the text a caret standing there has behind it.
-#
-#   box_text_joined 41 124
+# One box per output line: consecutive framed rows whose edges stand in the
+# same two columns are one box, and a row whose edges move, or a row with no
+# edge between two framed ones, starts the next. So the tail of one box and
+# the head of another are never joined into a needle neither holds.
 box_text_joined() {
     settle
-    LC_ALL=C awk -F'\t' -v stop_row="${1:--1}" -v stop_col="${2:-0}" '
+    LC_ALL=C awk -F'\t' '
         {
             glyph[$1 "," $2] = $6
             if ($6 == "\342\224\202") {
@@ -891,13 +894,60 @@ box_text_joined() {
             if ($1 > last) last = $1
         }
         END {
-            if (stop_row >= 0 && last > stop_row) last = stop_row
+            open = 0
             for (r = 0; r <= last; r++) {
-                if (!(r in lo) || !(r in hi)) continue
+                if (!(r in lo) || hi[r] <= lo[r]) {
+                    if (open) printf "\n"
+                    open = 0
+                    continue
+                }
+                if (open && (lo[r] != lo[r - 1] || hi[r] != hi[r - 1])) printf "\n"
+                open = 1
                 for (c = lo[r] + 1; c < hi[r]; c++) {
-                    if (r == stop_row && c >= stop_col) break
                     g = glyph[r "," c]
                     if (g != "" && g != " ") printf "%s", g
+                }
+            }
+            if (open) printf "\n"
+        }' "$CELLS"
+}
+
+# The framed text of the caret's own box up to `row` `col`, the cell the
+# caret stands in, on one line after `text`, when the cell right before the
+# caret holds the last glyph typed: the cell to its left on the same row, or
+# the last interior cell of the row above when the caret stands in its
+# row's first interior column. Otherwise one word naming what stands there
+# instead: `blank` for an empty cell or row behind the caret, and `nobox`
+# for a caret outside every framed row.
+#
+#   text_before_caret 41 124
+text_before_caret() {
+    settle
+    LC_ALL=C awk -F'\t' -v r="$1" -v c="$2" '
+        function filled(g) { return g != "" && g != " " }
+        {
+            glyph[$1 "," $2] = $6
+            if ($6 == "\342\224\202") {
+                if (!($1 in lo) || $2 < lo[$1]) lo[$1] = $2
+                if (!($1 in hi) || $2 > hi[$1]) hi[$1] = $2
+            }
+        }
+        END {
+            if (!(r in lo) || c <= lo[r] || c >= hi[r]) { print "nobox"; exit }
+            if (c - 1 > lo[r]) {
+                behind = filled(glyph[r "," (c - 1)])
+            } else {
+                p = r - 1
+                behind = (p in lo) && lo[p] == lo[r] && hi[p] == hi[r] && filled(glyph[p "," (hi[p] - 1)])
+            }
+            if (!behind) { print "blank"; exit }
+            top = r
+            while ((top - 1) in lo && lo[top - 1] == lo[r] && hi[top - 1] == hi[r]) top--
+            printf "text "
+            for (y = top; y <= r; y++) {
+                for (x = lo[r] + 1; x < hi[r]; x++) {
+                    if (y == r && x >= c) break
+                    if (filled(glyph[y "," x])) printf "%s", glyph[y "," x]
                 }
             }
             printf "\n"
@@ -1302,16 +1352,16 @@ PANEL_TITLE=$(agent_panel_title '' "$STUB_BIN") || exit 1
 NAMED_FOCUSED_TITLE=$(agent_panel_title focused) || exit 1
 
 # The glyph a title too long for its top edge is cut with, read out of the
-# framing that appends it.
-TRUNCATION_MARK=$(grep -oE "const TRUNCATION_MARK: char = '.*'" "$OVERLAY_RS" |
-    sed -E "s/.*= '(.*)'/\1/")
+# text helpers that declare it for every cut.
+TRUNCATION_MARK=$(grep -oE "const TRUNCATION_MARK: char = '.*'" "$TEXT_RS" |
+    sed -E "s/.*= '(.*)'/\1/") || true
 # A mark that is blank, or that a frame is already drawn with, would be on
 # screen whether a title was cut or not, and the leg below would report a
 # surviving title over an edge that had lost one.
 case "$TRUNCATION_MARK" in
-'' | ' ' | '-' | '|' | '+' | '─' | '│' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘')
+('' | ' ' | '-' | '|' | '+' | '─' | '│' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘')
     printf 'FAIL: the truncation mark in %s is %s, which a framed box is full of already, so finding it on screen would prove nothing about a cut title\n' \
-        "$OVERLAY_RS" "${TRUNCATION_MARK:-nothing this can read}" >&2
+        "$TEXT_RS" "${TRUNCATION_MARK:-nothing this can read}" >&2
     exit 1
     ;;
 esac
@@ -1321,8 +1371,8 @@ esac
 # stopped opening with the panel's name would leave the narrow leg proving
 # only that some box is on screen.
 case "$FOCUSED_TITLE" in
-"$PANEL_TITLE"*) NARROW_FOCUSED_TITLE=$PANEL_TITLE ;;
-*)
+("$PANEL_TITLE"*) NARROW_FOCUSED_TITLE=$PANEL_TITLE ;;
+(*)
     printf 'FAIL: the focused title (%s) no longer opens with the panel name (%s), so the head a narrow edge keeps names no panel; give leg_narrow_title its own marker\n' \
         "$FOCUSED_TITLE" "$PANEL_TITLE" >&2
     exit 1
@@ -1337,7 +1387,7 @@ TOAST_PAUSE_MARK=$(border_glyph ROUNDED pause)
 # whether the stack was frozen or not, and the leg below would report a
 # freeze that never happened.
 case "$TOAST_PAUSE_MARK" in
-'' | ' ' | '-' | '|' | '+' | '─' | '│' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘')
+('' | ' ' | '-' | '|' | '+' | '─' | '│' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘')
     printf 'FAIL: the pause mark in %s is %s, which a framed box is full of already, so finding it on screen would prove nothing about a frozen stack\n' \
         "$OVERLAY_RS" "${TOAST_PAUSE_MARK:-nothing this can read}" >&2
     exit 1
@@ -1374,8 +1424,8 @@ BOX_H=$(border_glyph ROUNDED horizontal)
 DESC_FORMAT=$(grep -rhoE "desc = string\\.format\\('[^']+'" "$NVIM_API_RS" "$NVIM_API_DIR" |
     sed -E "s/.*'(.*)'/\\1/" | head -1) || true
 case $DESC_FORMAT in
-*%s*%s*) ;;
-*)
+(*%s*%s*) ;;
+(*)
     printf 'FAIL: %s no longer builds its mapping descriptions from a two-slot format (got %s), so no leg can tell view own key from the config own\n' \
         "$NVIM_API_DIR" "${DESC_FORMAT:-nothing}" >&2
     exit 1
@@ -1434,17 +1484,17 @@ marker_for() {
     # by the same path as an unknown feature
     case "$feature/$verb" in
     # the picker's verbs are a table of their own, so the arm is the feature
-    picker/*) marker=$(printf '%s\n' "$PICKER_MARKERS" | awk -F'\t' -v v="$verb" '$1 == v { print $2 }') ;;
+    (picker/*) marker=$(printf '%s\n' "$PICKER_MARKERS" | awk -F'\t' -v v="$verb" '$1 == v { print $2 }') ;;
     # the tree titles itself with the name of the directory it opened on,
     # which is this leg's own working tree
-    tree/toggle) marker=$(basename -- "$ROOT") ;;
-    notifications/history) marker=$HISTORY_TITLE ;;
-    ai/toggle) marker=$PANEL_TITLE ;;
+    (tree/toggle) marker=$(basename -- "$ROOT") ;;
+    (notifications/history) marker=$HISTORY_TITLE ;;
+    (ai/toggle) marker=$PANEL_TITLE ;;
     # not an entry point of its own: the pair form is how every marker in
     # this script is asked for, and a narrow pane's panel is a different
     # thing on screen from the same panel on a wide one
-    ai/focus-narrow) marker=$NARROW_FOCUSED_TITLE ;;
-    palette/open) marker="$PROMPT_MARK :" ;;
+    (ai/focus-narrow) marker=$NARROW_FOCUSED_TITLE ;;
+    (palette/open) marker="$PROMPT_MARK :" ;;
     esac
     [ -n "$marker" ] || {
         printf 'FAIL: nothing here knows what the %s %s surface paints, so driving it would prove nothing; give it a marker\n' \
@@ -1469,15 +1519,15 @@ marker_for() {
 # every default key through this on `task ci`.
 entry_shape() {
     case "$1/$2" in
-    picker/* | tree/toggle | notifications/history | ai/toggle | ai/focus-narrow | palette/open)
+    (picker/* | tree/toggle | notifications/history | ai/toggle | ai/focus-narrow | palette/open)
         printf 'surface' ;;
-    notifications/pause) printf 'pause' ;;
-    notifications/dismiss) printf 'dismiss' ;;
-    ui/gaps) printf 'gaps' ;;
-    ui/cycle_surfaces) printf 'cycle' ;;
-    window/new | window/zoom | window/fit | window/flip | window/float) printf '%s' "$2" ;;
-    window/to_tabpage_[1-9]) printf 'tabpage' ;;
-    *)
+    (notifications/pause) printf 'pause' ;;
+    (notifications/dismiss) printf 'dismiss' ;;
+    (ui/gaps) printf 'gaps' ;;
+    (ui/cycle_surfaces) printf 'cycle' ;;
+    (window/new | window/zoom | window/fit | window/flip | window/float) printf '%s' "$2" ;;
+    (window/to_tabpage_[1-9]) printf 'tabpage' ;;
+    (*)
         printf 'FAIL: nothing here knows what the %s %s key changes on screen, so pressing it would prove nothing; give it a shape\n' \
             "$1" "$2" >&2
         return 1
@@ -1745,7 +1795,7 @@ drive_action() {
     shape=$(entry_shape "$feature" "$verb") || return 1
     start_session "action-$verb" 'visual sweep seed line' "$TILES_LAUNCHER" || return 1
     case "$shape" in
-    dismiss)
+    (dismiss)
         command_line ':bogus'
         wait_for 'Not an editor command' "$WAIT_SECS" 'the error toast' >/dev/null || return 1
         "$@"
@@ -1753,7 +1803,7 @@ drive_action() {
             lacks 'Not an editor command') || return 1
         SAW="takes the standing toast down in ${took}s"
         ;;
-    gaps)
+    (gaps)
         wait_until "$WAIT_SECS" 'the blank column left of the tiles' reads left_edge gap >/dev/null ||
             return 1
         "$@"
@@ -1764,7 +1814,7 @@ drive_action() {
             reads left_edge gap >/dev/null || return 1
         SAW="closes the gap round the tiles in ${took}s and opens it again"
         ;;
-    cycle)
+    (cycle)
         before=$(scratch_col)
         [ -n "$before" ] || {
             fail 'the seeded buffer has no titled tile to measure the ring step against'
@@ -1776,19 +1826,19 @@ drive_action() {
             scratch_right_of "$before") || return 1
         SAW="opens the next surface in a tile of its own (the tree, in ${took}s)"
         ;;
-    new)
+    (new)
         wait_until "$WAIT_SECS" 'the one tile' reads tile_layout one >/dev/null || return 1
         "$@"
         took=$(wait_until "$REACTION_SECS" "a second tile on $feature $verb" \
             reads tile_layout beside) || return 1
         SAW="adds a tile beside the first in ${took}s"
         ;;
-    zoom | flip | fit)
+    (zoom | flip | fit)
         command_line ':silent vsplit'
         wait_until "$WAIT_SECS" 'two tiles side by side' reads tile_layout beside >/dev/null ||
             return 1
         case "$shape" in
-        zoom)
+        (zoom)
             "$@"
             took=$(wait_until "$REACTION_SECS" "one tile filling the lattice on $feature $verb" \
                 reads tile_layout one) || return 1
@@ -1797,7 +1847,7 @@ drive_action() {
                 reads tile_layout beside >/dev/null || return 1
             SAW="fills the lattice with one tile in ${took}s and gives the other back"
             ;;
-        flip)
+        (flip)
             "$@"
             took=$(wait_until "$REACTION_SECS" "the pair stacked on $feature $verb" \
                 reads tile_layout stacked) || return 1
@@ -1806,7 +1856,7 @@ drive_action() {
                 reads tile_layout beside >/dev/null || return 1
             SAW="stacks the pair in ${took}s and sets it side by side again"
             ;;
-        fit)
+        (fit)
             before=$(second_tile_col)
             "$@"
             took=$(wait_until "$REACTION_SECS" "the focused tile resized on $feature $verb" \
@@ -1815,7 +1865,7 @@ drive_action() {
             ;;
         esac
         ;;
-    float)
+    (float)
         # the verb acts on the surface the cursor stands in, and in the
         # buffer's own tile it answers that there is none
         "$@"
@@ -1871,7 +1921,7 @@ drive_action() {
             shows "$BOX_TL $(basename -- "$ROOT")") || return 1
         SAW="answers from a buffer tile in ${took}s, floats the tiled tree from inside it in ${inside}s, and its chord floats the tiled tree"
         ;;
-    tabpage)
+    (tabpage)
         n=${verb#to_tabpage_}
         source=9
         [ "$n" != 9 ] || source=1
@@ -1889,7 +1939,7 @@ drive_action() {
             shows "$BOX_TL tab$n.txt" "$BOX_TL scratch.txt") || return 1
         SAW="carries the window to tabpage $n in ${took}s"
         ;;
-    *)
+    (*)
         fail "drive_action has no drive for the $shape shape"
         return 1
         ;;

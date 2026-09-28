@@ -49,8 +49,8 @@ now() {
     local t
     t=$(date +%s.%N)
     case "$t" in
-    *N*) date +%s ;;
-    *) printf '%s\n' "$t" ;;
+    (*N*) date +%s ;;
+    (*) printf '%s\n' "$t" ;;
     esac
 }
 
@@ -96,9 +96,9 @@ dump_dir() {
 # a subprocess on every leg of every script here.
 target_root() {
     case "${CARGO_TARGET_DIR:-}" in
-    "") printf '%s/target\n' "$REPO_ROOT" ;;
-    /*) printf '%s\n' "$CARGO_TARGET_DIR" ;;
-    *) printf '%s/%s\n' "$REPO_ROOT" "$CARGO_TARGET_DIR" ;;
+    ("") printf '%s/target\n' "$REPO_ROOT" ;;
+    (/*) printf '%s\n' "$CARGO_TARGET_DIR" ;;
+    (*) printf '%s/%s\n' "$REPO_ROOT" "$CARGO_TARGET_DIR" ;;
     esac
 }
 
@@ -549,7 +549,7 @@ agent_panel_title() {
         name=$(basename -- "$program")
         # `file_stem` keeps a leading dot and drops only the last extension
         case "$name" in
-        ?*.*) name=${name%.*} ;;
+        (?*.*) name=${name%.*} ;;
         esac
     else
         name=$(grep -oE '"agentInfo": \{[^}]*"title": "[^"]+"' \
@@ -615,7 +615,7 @@ pane() { tmux capture-pane -t "$SESSION" -p 2>/dev/null || true; }
 # between rows, so a needle written across a row boundary would match here
 # where a line-at-a-time search never matched. Every needle passed in today
 # is a single on-screen string.
-holds() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+holds() { case "$2" in (*"$1"*) return 0 ;; (*) return 1 ;; esac; }
 
 # Whether `haystack` matches the extended regular expression `needle`. The
 # no-pipe form of `grep -qE`, for the same reason `holds` is `grep -qF`'s.
@@ -653,12 +653,12 @@ tmux_key() {
     # one at a time: `<leader><leader>` spells the leader twice
     while :; do
         case "$typed" in
-        *'<leader>'*) typed=${typed/<leader>/"$LEADER"} ;;
-        *) break ;;
+        (*'<leader>'*) typed=${typed/<leader>/"$LEADER"} ;;
+        (*) break ;;
         esac
     done
     case "$typed" in
-    *'<'* | *'>'*)
+    (*'<'* | *'>'*)
         printf 'FAIL: %s carries a key notation this script cannot type; teach tmux_key to spell it\n' "$lhs" >&2
         return 1
         ;;

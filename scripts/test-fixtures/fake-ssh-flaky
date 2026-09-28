@@ -26,7 +26,7 @@ INNER=${VIEW_STUB_INNER:-$FIXTURES/fake-ssh}
 if [ -n "${VIEW_STUB_REFUSALS:-}" ] && [ -f "$VIEW_STUB_REFUSALS" ]; then
     remaining=$(cat "$VIEW_STUB_REFUSALS")
     case "$remaining" in
-        '' | *[!0-9]*)
+        ('' | *[!0-9]*)
             echo "fake-ssh-flaky: $VIEW_STUB_REFUSALS holds '$remaining', not a count" >&2
             exit 2
             ;;

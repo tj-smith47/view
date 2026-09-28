@@ -88,5 +88,71 @@ if [ -n "$bare" ]; then
   exit 1
 fi
 
+# A `case` pattern carries its leading paren, because bash 3.2 reads the `)`
+# of a bare one inside a `$( )` as the end of the substitution
+# (.claude/rules/shell.md). A pattern stands after the header's `in` and
+# after each `;;`, so those positions are what is read, the one-line
+# `case … esac` included. The fallthrough terminators are bash 4 and the
+# portability check refuses them. The rule covers the scripts under
+# scripts/, so the walk does too.
+own=()
+for script in "${files[@]}"; do
+  case "$script" in (scripts/*) own+=("$script") ;; esac
+done
+unparened=""
+[ "${#own[@]}" -eq 0 ] || unparened=$(awk -v SQ="'" "$SCRIPT_CODE_AWK"'
+  function bare_arm(where, s) {
+    if (s !~ /^\(/) { print where ": a case pattern with no leading paren: " s }
+  }
+  FNR == 1 { arms = 0 }
+  {
+    top = script_code_top()
+    text = (HD != "" || top == SQ || top == "\"")
+    script_code_scan($0)
+    if (text) { next }
+    s = CODE
+    sub(/^[[:space:]]+/, "", s)
+    sub(/[[:space:]]+$/, "", s)
+    if (s == "") { next }
+    where = FILENAME ":" FNR
+    if (arms > 0 && want[arms]) {
+      if (s ~ /^esac([^[:alnum:]_]|$)/) { arms--; next }
+      bare_arm(where, s)
+      want[arms] = (s ~ /;;$/)
+      next
+    }
+    if (match(s, /(^|[^[:alnum:]_])case[[:space:]]+[^[:space:]]+[[:space:]]+in([[:space:]]|$)/)) {
+      rest = substr(s, RSTART + RLENGTH)
+      sub(/^[[:space:]]+/, "", rest)
+      if (rest ~ /(^|[[:space:];])esac([^[:alnum:]_]|$)/) {
+        n = split(rest, seg, ";;")
+        for (k = 1; k <= n; k++) {
+          t = seg[k]
+          sub(/^[[:space:]]+/, "", t)
+          sub(/[[:space:]]+$/, "", t)
+          if (t ~ /^esac([^[:alnum:]_]|$)/) { break }
+          bare_arm(where, t)
+        }
+        next
+      }
+      arms++
+      want[arms] = 1
+      if (rest != "") {
+        bare_arm(where, rest)
+        want[arms] = (rest ~ /;;$/)
+      }
+      next
+    }
+    if (arms > 0) {
+      if (s ~ /^esac([^[:alnum:]_]|$)/) { arms--; next }
+      if (s ~ /;;$/) { want[arms] = 1 }
+    }
+  }
+' "${own[@]}")
+if [ -n "$unparened" ]; then
+  printf '%s\n' "$unparened" >&2
+  exit 1
+fi
+
 shellcheck -S warning -- "${files[@]}"
 echo "lint:shell: ${#files[@]} scripts clean"

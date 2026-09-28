@@ -32,7 +32,7 @@ survivors=0
 rows=0
 
 while IFS=$'\t' read -r file old new test_args; do
-  case "$file" in ''|'#'*) continue ;; esac
+  case "$file" in (''|'#'*) continue ;; esac
   rows=$((rows + 1))
   printf '\n=== %s\n    replacing: %.60s\n' "$file" "$old"
 

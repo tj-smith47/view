@@ -109,7 +109,7 @@ while IFS= read -r file; do
   [ -n "$file" ] || continue
   # this script names every banned spelling literally in order to define the
   # patterns above, so it is out of its own scan
-  case "$file" in "scripts/$SELF") continue ;; esac
+  case "$file" in ("scripts/$SELF") continue ;; esac
   targets+=("$file")
 done <<EOF
 $SCRIPT_POPULATION

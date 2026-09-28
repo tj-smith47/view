@@ -16,15 +16,15 @@ set -uo pipefail
 CHECKER=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --checker)
+    (--checker)
       CHECKER="${2:-}"
       shift 2
       ;;
-    -h | --help)
+    (-h | --help)
       printf 'usage: %s [--checker PATH]\n' "$0"
       exit 0
       ;;
-    *)
+    (*)
       printf 'unknown argument: %s\n' "$1" >&2
       exit 2
       ;;
@@ -76,7 +76,7 @@ expect() {
   rc=$?
   fired=silent
   case "$out" in
-    *re-evaluat*) fired=fire ;;
+    (*re-evaluat*) fired=fire ;;
   esac
   if [ "$rc" = "$want_rc" ] && [ "$fired" = "$want_reevaluation" ]; then
     printf 'ok %s - %s\n' "$n" "$desc"

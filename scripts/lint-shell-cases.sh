@@ -13,15 +13,15 @@ set -uo pipefail
 CHECKER=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --checker)
+    (--checker)
       CHECKER="${2:-}"
       shift 2
       ;;
-    -h | --help)
+    (-h | --help)
       printf 'usage: %s [--checker PATH]\n' "$0"
       exit 0
       ;;
-    *)
+    (*)
       printf 'unknown argument: %s\n' "$1" >&2
       exit 2
       ;;
@@ -71,7 +71,7 @@ expect() {
   rc=$?
   lines=$(printf '%s\n' "$out" | grep -c '^scripts/[pqr]\.sh:' || true)
   case "$out" in
-    *"$want"*)
+    (*"$want"*)
       if [ "$rc" = "$want_rc" ] && [ "$lines" = "$want_lines" ]; then
         printf 'ok %s - %s\n' "$n" "$desc"
         return
@@ -245,6 +245,92 @@ printf '%s\n' '
 OUTER
 commit_case
 expect 0 'scripts clean' 0 'a directive in a here-doc body or a quoted string is text and passes'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+case "${1:-}" in
+  (a | b)
+    echo ab
+    ;;
+  (*) echo other ;;
+esac
+case "${1:-}" in (x) echo x ;; (*) ;; esac
+x=$(case "${1:-}" in (y) echo y ;; esac)
+echo "$x"
+EOF
+commit_case
+expect 0 'scripts clean' 0 'case patterns that carry their leading paren pass'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+case "${1:-}" in
+  (a)
+    echo a
+    ;;
+  b)
+    echo b
+    ;;
+esac
+EOF
+commit_case
+expect 1 'scripts/p.sh:7: a case pattern with no leading paren: b)' 1 \
+  'a bare pattern on its own line after an arm is refused'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+case "${1:-}" in
+  *) echo any ;;
+esac
+EOF
+commit_case
+expect 1 'scripts/p.sh:4: a case pattern with no leading paren: *) echo any ;;' 1 \
+  'a bare first pattern with its command on the same line is refused'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+case "${1:-}" in (x) echo x ;; *) ;; esac
+EOF
+commit_case
+expect 1 'scripts/p.sh:3: a case pattern with no leading paren: *)' 1 \
+  'a bare pattern in a one-line case is refused'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+case "${1:-}" in
+  (a)
+    case "${2:-}" in
+      (b) echo b ;;
+      c) echo c ;;
+    esac
+    ;;
+  (*) ;;
+esac
+cat <<'DOC'
+case x in
+  y) not code
+esac
+DOC
+EOF
+commit_case
+expect 1 'scripts/p.sh:7: a case pattern with no leading paren: c) echo c ;;' 1 \
+  'a bare pattern in a nested case is refused and a here-doc body is text'
+
+# the rule covers the scripts under scripts/, and a script outside it is
+# linted for everything else
+new_case
+plant p.sh <<'EOF'
+set -eu
+echo clean
+EOF
+commit_case
+mkdir -p "$CASE/compat"
+printf '#!/usr/bin/env bash\nset -eu\ncase "${1:-}" in\n  a) echo a ;;\nesac\n' >"$CASE/compat/u.sh"
+expect 0 'scripts clean' 0 'a bare pattern outside scripts/ is left to its own rules'
 
 # task commit runs the lint before it stages a new file, so a script git
 # does not track yet is linted too

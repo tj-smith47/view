@@ -1325,7 +1325,7 @@ EOF
     # loop unrun and is reported
     for name in $names; do
       case "$removed" in
-        *" $name "*)
+        (*" $name "*)
           paired=1
           break
           ;;

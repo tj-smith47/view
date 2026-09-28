@@ -55,7 +55,7 @@ printf 'view acceptance: RTT injection (%s, %s)\n' \
 named_class=
 for arg in "$@"; do
     case $arg in
-    --class | --class=*) named_class=1 ;;
+    (--class | --class=*) named_class=1 ;;
     esac
 done
 [ -n "$named_class" ] || set -- --class "$CLASS" "$@"
