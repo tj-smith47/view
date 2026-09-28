@@ -1290,6 +1290,59 @@ fn a_second_restart_keeps_the_names_of_the_held_slots() {
     );
 }
 
+/// A window that fills a held slot by handle coincidence, then dies again
+/// before ever reporting its own status, still lets the next replacement
+/// find that slot by name.
+#[test]
+fn a_slot_filled_before_its_report_keeps_its_name_past_a_second_restart() {
+    let status = |name: &str| crate::model::WindowStatus {
+        name: name.into(),
+        ..crate::model::WindowStatus::default()
+    };
+    let mut m = vsplit_model();
+    for (win, name) in [(1003, "README.md"), (1002, "NvimTree_1")] {
+        let _ = update(
+            &mut m,
+            Msg::WindowStatus {
+                win: crate::events::WinHandle(win),
+                status: status(name),
+            },
+        );
+    }
+    let _ = restart(&mut m);
+    // the first replacement's file lands on the dead file's own handle,
+    // and dies again before it ever reports its own status
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    let _ = restart(&mut m);
+    let _ = update(&mut m, replacement_chrome());
+    let _ = update(
+        &mut m,
+        Msg::WindowStatus {
+            win: crate::events::WinHandle(1004),
+            status: status("README.md"),
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::WinPos {
+                grid: 2,
+                win: crate::events::WinHandle(1004),
+                startrow: 0,
+                startcol: 0,
+                width: 80,
+                height: 23,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert_eq!(
+        painted_slots(&m),
+        [(1002, (0, 41, 39, 24)), (1004, (0, 0, 40, 24))],
+        "the replacement's file missed the slot its handle once filled"
+    );
+}
+
 #[test]
 fn a_single_grid_restart_paints_the_dead_engines_text_until_the_replacement_draws() {
     let mut m = Model::with_term_size(80, 24);

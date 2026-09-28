@@ -185,15 +185,12 @@ impl EngineModel {
             *armed = false;
             return;
         }
-        let live = self.grids.window_layout();
-        // a stand-in's buffer was read at the restart before this one, and
-        // its handle names no window of the engine now dying
+        // a stand-in's buffer carries over even once the engine now dying
+        // filled its slot: that window may die again before it ever
+        // reports its own name, and the carried one is all the next
+        // replacement has to match it by
         let names = match &self.held.hold {
-            Hold::Layout { names, .. } => names
-                .iter()
-                .filter(|(held, _)| !live.iter().any(|(win, _)| win == *held))
-                .map(|(held, name)| (*held, name.clone()))
-                .collect(),
+            Hold::Layout { names, .. } => names.clone(),
             Hold::Nothing | Hold::Frame { .. } => Names::new(),
         };
         self.held.hold = Hold::Frame {
