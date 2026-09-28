@@ -883,12 +883,282 @@ fn a_replacement_window_outside_the_held_slots_hands_the_screen_back() {
             },
         ],
     );
-    assert!(!m.engine.holds_the_screen());
+    assert!(
+        !m.engine.holds_the_screen(),
+        "a window outside the held slots left the dead layout on screen"
+    );
     assert!(
         !effects
             .iter()
             .any(|e| matches!(e, Effect::ScheduleLayoutHold { .. })),
         "a bound was armed for a hold that never began: {effects:?}"
+    );
+}
+
+/// A press on the held layout reaches the window painted under it, in the
+/// coordinates it is painted at; a press on a slot no live window fills
+/// reaches nothing, and neither does one on the held dead frame, whose grid
+/// ids can name the replacement's grids.
+#[test]
+fn a_press_during_a_restart_reaches_only_the_window_painted_under_it() {
+    let mut m = vsplit_model();
+    let _ = restart(&mut m);
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 6,
+                width: 80,
+                height: 23,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    let effects = update(&mut m, click(3, 10));
+    assert!(
+        effects.is_empty(),
+        "a press on the held dead frame reached the replacement: {effects:?}"
+    );
+
+    let mut m = vsplit_model();
+    let _ = restart(&mut m);
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    let effects = update(&mut m, click(3, 10));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::InputMouse {
+                grid: GridId(2),
+                row: 3,
+                col: 10,
+                ..
+            })]
+        ),
+        "a press on the held file tile missed its window: {effects:?}"
+    );
+    let effects = update(&mut m, click(3, 50));
+    assert!(
+        effects.is_empty(),
+        "a press on the tree's stand-in reached the engine: {effects:?}"
+    );
+
+    // the file held right of the tree, where the live one starts at 0
+    let mut m = split_model([(6, 1003, 41, 39), (5, 1002, 0, 40)]);
+    let _ = restart(&mut m);
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    let effects = update(&mut m, click(3, 50));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::InputMouse {
+                grid: GridId(2),
+                row: 3,
+                col: 9,
+                ..
+            })]
+        ),
+        "a press on the held file tile missed the text painted there: \
+         {effects:?}"
+    );
+}
+
+/// An 80x24 screen holding two windows, each given as grid, handle, first
+/// column and width.
+fn split_model(windows: [(u64, u64, u64, u64); 2]) -> Model {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    let mut batch = Vec::new();
+    for (grid, win, col, width) in windows {
+        batch.push(UiEvent::GridResize {
+            grid,
+            width,
+            height: 24,
+        });
+        batch.push(UiEvent::WinPos {
+            grid,
+            win: crate::events::WinHandle(win),
+            startrow: 0,
+            startcol: col,
+            width,
+            height: 24,
+        });
+    }
+    batch.push(UiEvent::Flush);
+    let _ = update(&mut m, Msg::Redraw(batch));
+    m
+}
+
+/// A resize moves the replacement's windows to the new size, which the
+/// dead engine's slots no longer fit.
+#[test]
+fn a_resize_hands_a_held_layout_back() {
+    let mut m = vsplit_model();
+    let _ = restart(&mut m);
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    assert!(m.engine.holds_the_screen());
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 100,
+            height: 30,
+        },
+    );
+    assert!(
+        !m.engine.holds_the_screen(),
+        "a resize left the dead engine's slots on screen"
+    );
+}
+
+/// The dead engine's file window was not the one a fresh engine numbers
+/// first, so the replacement's file finds its slot by the buffer it shows,
+/// and the dead frame stays up until that buffer is reported.
+#[test]
+fn a_replacement_window_numbered_differently_takes_the_slot_of_its_buffer() {
+    let status = |name: &str| crate::model::WindowStatus {
+        name: name.into(),
+        ..crate::model::WindowStatus::default()
+    };
+    let mut m = split_model([(6, 1004, 0, 40), (5, 1002, 41, 39)]);
+    for (win, name) in [(1004, "README.md"), (1002, "NvimTree_1")] {
+        let _ = update(
+            &mut m,
+            Msg::WindowStatus {
+                win: crate::events::WinHandle(win),
+                status: status(name),
+            },
+        );
+    }
+    let _ = restart(&mut m);
+    let _ = update(&mut m, replacement_chrome());
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::WinPos {
+                grid: 2,
+                win: crate::events::WinHandle(1000),
+                startrow: 0,
+                startcol: 0,
+                width: 80,
+                height: 23,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert!(
+        m.engine.holds_the_frame(),
+        "the dead frame went before the replacement's file was named"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::ScheduleLayoutHold { .. })),
+        "the first window armed no bound: {effects:?}"
+    );
+    // a batch nvim has not flushed yet leaves the report for its flush
+    let mut unflushed = written(2, "f");
+    unflushed.pop();
+    let _ = update(&mut m, Msg::Redraw(unflushed));
+    let _ = update(
+        &mut m,
+        Msg::WindowStatus {
+            win: crate::events::WinHandle(1000),
+            status: status("README.md"),
+        },
+    );
+    assert!(
+        m.engine.holds_the_frame(),
+        "a report settled the hold on a half-applied batch"
+    );
+    let _ = update(&mut m, Msg::Redraw(vec![UiEvent::Flush]));
+    assert_eq!(
+        painted_slots(&m),
+        [(1000, (0, 0, 40, 24)), (1002, (0, 41, 39, 24))],
+        "the replacement's file missed its buffer's slot"
+    );
+}
+
+/// Text on a multigrid replacement's global grid is no window put up, and
+/// the dead frame stays over it.
+#[test]
+fn a_replacements_global_grid_text_keeps_the_dead_frame() {
+    let mut m = vsplit_model();
+    let _ = update(&mut m, Msg::Redraw(written(6, "d")));
+    let _ = restart(&mut m);
+    let mut global = vec![
+        UiEvent::GridResize {
+            grid: 1,
+            width: 80,
+            height: 24,
+        },
+        UiEvent::GridClear { grid: 1 },
+    ];
+    global.extend(written(1, "g"));
+    let _ = update(&mut m, Msg::Redraw(global));
+    assert_eq!(
+        painted_row(&m, 6).as_deref(),
+        Some("d"),
+        "the global grid's text replaced the dead frame with empty slots"
+    );
+}
+
+/// Every held window back, at a size other than the held one, is the
+/// replacement's layout settled: holding it longer delays the same change.
+#[test]
+fn a_held_layout_is_handed_back_once_every_slot_is_filled() {
+    let mut m = vsplit_model();
+    let _ = restart(&mut m);
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 4,
+                width: 30,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: 4,
+                win: crate::events::WinHandle(1002),
+                startrow: 0,
+                startcol: 50,
+                width: 30,
+                height: 24,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert!(
+        !m.engine.holds_the_screen(),
+        "every held window came back and the dead slots stayed"
+    );
+}
+
+/// A restart while the layout is held keeps holding the dead engine's
+/// slots, and the first replacement's bound leaves the second one's hold.
+#[test]
+fn a_second_restart_during_the_held_layout_holds_the_same_slots() {
+    let mut m = vsplit_model();
+    let _ = restart(&mut m);
+    let first = m.surface_conflicts.engine_generation();
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    let _ = restart(&mut m);
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    assert_eq!(
+        painted_slots(&m),
+        HELD_SLOTS,
+        "the second restart held the first replacement's layout"
+    );
+    let _ = update(&mut m, Msg::LayoutHoldExpired { generation: first });
+    assert_eq!(
+        painted_slots(&m),
+        HELD_SLOTS,
+        "the first replacement's bound released the second one's hold"
     );
 }
 
@@ -11157,6 +11427,7 @@ fn armed_hold_generation(effects: &[Effect]) -> u64 {
 fn restart(m: &mut Model) -> Vec<Effect> {
     let closed = super::forget_native_windows(m);
     m.engine.forget_overlays();
+    m.engine.name_held_windows(&m.window_status);
     m.forget_engine_conflicts();
     closed
 }

@@ -369,10 +369,12 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         },
         Msg::Mouse(input) => mouse::route(model, input),
         Msg::Redraw(events) => {
+            let flushed = matches!(events.last(), Some(crate::events::UiEvent::Flush));
             let mut effects = Vec::new();
             for ev in events {
                 effects.extend(apply_ui_event(model, ev));
             }
+            model.engine.note_batch(flushed);
             effects
         }
         // loop plumbing tokens: the loop resolves the damage behind
@@ -484,6 +486,8 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }
             model.term_width = width;
             model.term_height = height;
+            // the held slots fit the size the screen had
+            model.engine.release_held_layout();
             // the paint area is sourced from these fields, so the frame that
             // renders them is this frontend's own concern: `grid_target`
             // clamps, so a resize that leaves the grid unchanged draws no

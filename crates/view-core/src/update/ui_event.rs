@@ -232,13 +232,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // screen (see Model::takes_attach), and Model::chrome_painted
             // documents why it never resets
             model.chrome_painted = true;
-            if model.engine.settle_held() {
-                return vec![Effect::ScheduleLayoutHold {
-                    after: crate::model::held::RESTART_LAYOUT_HOLD,
-                    generation: model.surface_conflicts.engine_generation(),
-                }];
-            }
-            Vec::new()
+            model.settle_held(true)
         }
         UiEvent::ModeInfoSet {
             cursor_style_enabled,

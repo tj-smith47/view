@@ -99,7 +99,9 @@ pub(super) fn on_window_status(
     }
     model.window_status.insert(win, status);
     damage_frame_edges(model, win);
-    Vec::new()
+    // a held frame waits on a window's buffer to find its slot, and the
+    // report can come after the flush that placed it
+    model.settle_held(false)
 }
 
 /// The cursor position `win_viewport` carries, folded into the window's

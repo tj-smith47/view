@@ -372,6 +372,7 @@ pub(crate) fn restart_engine(
     // command line of its own to correct one left behind
     // ([`EngineModel::forget_overlays`])
     model.engine.forget_overlays();
+    model.engine.name_held_windows(&model.window_status);
     // window handles restart from 1000 in the replacement, so a handle held
     // past the death names one of its windows
     // ([`SurfaceConflicts::forget_engine`])

@@ -424,7 +424,7 @@ impl Model {
         Self {
             engine: EngineModel {
                 grids: GridRegistry::new(),
-                held: held::Held::Nothing,
+                held: held::Held::default(),
                 hl: HlTable::new(),
                 mode: ModeState::default(),
                 cmdline: None,
