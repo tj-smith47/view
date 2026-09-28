@@ -203,10 +203,11 @@ impl EngineModel {
         };
     }
 
-    /// Records the buffer each window of the held frame showed that the
-    /// frame has no name for yet, from the statuses the dead engine
-    /// reported, so that a replacement window numbered differently still
-    /// finds its slot.
+    /// Records the buffer each window of the held frame showed, from the
+    /// statuses the dead engine reported, so that a replacement window
+    /// numbered differently still finds its slot. A window's own report
+    /// here replaces any name it was carried into this frame with, since
+    /// the carried name was only ever a placeholder for this one.
     fn name_held_windows(&mut self, status: &HashMap<WinHandle, WindowStatus>) {
         if let Hold::Frame {
             grids,
@@ -220,7 +221,7 @@ impl EngineModel {
             }
             for (win, _) in grids.window_layout() {
                 if let Some(status) = status.get(&win) {
-                    names.entry(win).or_insert_with(|| status.name.clone());
+                    names.insert(win, status.name.clone());
                 }
             }
             *named = true;

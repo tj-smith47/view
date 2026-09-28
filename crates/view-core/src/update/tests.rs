@@ -1343,6 +1343,68 @@ fn a_slot_filled_before_its_report_keeps_its_name_past_a_second_restart() {
     );
 }
 
+/// A window's own status report replaces the name it was carried into a
+/// held slot with, so a later window matches on what it last reported,
+/// the only name from a generation it actually showed.
+#[test]
+fn a_windows_own_report_supersedes_the_name_it_was_carried_with() {
+    let status = |name: &str| crate::model::WindowStatus {
+        name: name.into(),
+        ..crate::model::WindowStatus::default()
+    };
+    let mut m = vsplit_model();
+    for (win, name) in [(1003, "README.md"), (1002, "NvimTree_1")] {
+        let _ = update(
+            &mut m,
+            Msg::WindowStatus {
+                win: crate::events::WinHandle(win),
+                status: status(name),
+            },
+        );
+    }
+    let _ = restart(&mut m);
+    // the first replacement lands on the dead file's own handle, shows a
+    // different buffer, and reports that before it dies again
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    let _ = update(
+        &mut m,
+        Msg::WindowStatus {
+            win: crate::events::WinHandle(1003),
+            status: status("notes.md"),
+        },
+    );
+    let _ = restart(&mut m);
+    let _ = update(&mut m, replacement_chrome());
+    // the next replacement's file lands under a new handle and reports
+    // the name 1003's own window actually last held
+    let _ = update(
+        &mut m,
+        Msg::WindowStatus {
+            win: crate::events::WinHandle(1004),
+            status: status("notes.md"),
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::WinPos {
+                grid: 2,
+                win: crate::events::WinHandle(1004),
+                startrow: 0,
+                startcol: 0,
+                width: 80,
+                height: 23,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert_eq!(
+        painted_slots(&m),
+        [(1002, (0, 41, 39, 24)), (1004, (0, 0, 40, 24))],
+        "the window's own report should have replaced the carried name"
+    );
+}
+
 #[test]
 fn a_single_grid_restart_paints_the_dead_engines_text_until_the_replacement_draws() {
     let mut m = Model::with_term_size(80, 24);
