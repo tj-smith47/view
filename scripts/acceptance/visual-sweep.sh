@@ -121,6 +121,12 @@ ROOT=""
 # remove it whichever leg created it.
 RESUME_FILE=""
 CURRENT_LEG=startup
+# The launcher a leg's sessions start through, and the suffix its reports
+# carry: the nvim launcher first, then the tiles one for a leg run again
+# under tiles.
+LEG_LAUNCHER=""
+LEG_TAG=""
+BLANK_TILE_FRAMES=0
 DUMP_DIR=$(dump_dir view-visual-sweep)
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-work-XXXXXX")
 CAP=$WORK/pane.esc
@@ -292,11 +298,12 @@ BOX_TR=$(border_glyph ROUNDED top_right)
 BOX_BL=$(border_glyph ROUNDED bottom_left)
 BOX_BR=$(border_glyph ROUNDED bottom_right)
 BOX_V=$(border_glyph ROUNDED vertical)
+BOX_H=$(border_glyph ROUNDED horizontal)
 # A corner that came back empty, or one a terminal draws in ordinary text,
 # would make every box reader below answer "no box on screen" for a screen
 # full of them -- silently, since that is also the honest answer when the box
 # really is absent.
-for glyph in "$BOX_TL" "$BOX_TR" "$BOX_BL" "$BOX_BR" "$BOX_V"; do
+for glyph in "$BOX_TL" "$BOX_TR" "$BOX_BL" "$BOX_BR" "$BOX_V" "$BOX_H"; do
     case "$glyph" in
     '' | ' ' | '-' | '|' | '+' | '=')
         printf 'FAIL: a ROUNDED border glyph in %s reads as %s, which ordinary text is full of, so no reader here could tell a box from a buffer\n' \
@@ -473,9 +480,25 @@ END {
 capture() {
     tmux capture-pane -t "$SESSION" -p -e >"$CAP" 2>/dev/null || : >"$CAP"
     LC_ALL=C awk "$CELL_AWK" "$CAP" >"$CELLS"
+    [ "$BLANK_TILE_FRAMES" = 0 ] || blank_tile_frames
     LC_ALL=C awk -F'\t' '
         { if (NR > 1 && $1 != prev) printf "\n"; printf "%s", $6; prev = $1 }
         END { if (NR > 0) printf "\n" }' "$CELLS" >"$SCREEN"
+}
+
+# Takes the tiles' own frames out of the last capture, which is how a leg run
+# a second time under tiles reads its overlays. Every reader above pairs the
+# leftmost frame glyph on a row with the next one, and a tile's edge stands
+# left of every overlay. A tile frame is painted on the colorscheme's Normal
+# background and an overlay's on NormalFloat, and the fixture keeps the two
+# apart, so the background tells the two frames apart.
+blank_tile_frames() {
+    LC_ALL=C awk -F'\t' -v OFS='\t' -v float_bg="$FLOAT_BG" \
+        -v frame="$BOX_TL $BOX_TR $BOX_BL $BOX_BR $BOX_V $BOX_H" '
+        BEGIN { n = split(frame, g, " "); for (i = 1; i <= n; i++) is_frame[g[i]] = 1 }
+        $3 != float_bg && ($6 in is_frame) { $6 = " " }
+        { print }' "$CELLS" >"$CELLS.tiles"
+    mv "$CELLS.tiles" "$CELLS"
 }
 
 fail() {
@@ -670,7 +693,9 @@ wait_in_box() {
     start=$(now)
     while :; do
         capture
-        if holds "$text" "$(box_text)"; then
+        # the joined read is the one a marker a wrap broke across two rows
+        # still passes
+        if holds "$text" "$(box_text)" || holds "$text" "$(box_text_joined)"; then
             elapsed "$start" "$(now)"
             return 0
         fi
@@ -722,10 +747,21 @@ assert_caret_after() {
     local text="$1" what="$2" span row col got want
     settle
     span=$(text_span "$text")
-    [ -n "$span" ] || {
-        fail "$what: '$text' is not on screen at all, so there is no insertion point to check"
+    if [ -z "$span" ]; then
+        # a wrap can break the text across two rows, and the caret then
+        # follows its tail, so the framed text behind the caret is read
+        local shown
+        read -r row col shown <<<"$(caret_cell)"
+        got=$(box_text_joined "$row" "$col")
+        case "$shown:$got" in
+        (1:*"$text")
+            pass "$what: the caret stands one cell past '$text', wrapped onto row $row"
+            return 0
+            ;;
+        esac
+        fail "$what: '$text' is not on one row, and the framed text behind the caret at row $row col $col (visible $shown) ends '${got: -20}'"
         return 1
-    }
+    fi
     read -r row col _ _ <<<"$span"
     want="$row $((col + ${#text})) 1"
     got=$(caret_cell)
@@ -838,9 +874,14 @@ entry_rows() {
 # from the cells rather than from [`box_text`], whose rows come out in awk's
 # own order for an associative array: unordered rows joined are a different
 # string every run.
+#
+# Given a row and a column, only the cells before that one are joined, which
+# is the text a caret standing there has behind it.
+#
+#   box_text_joined 41 124
 box_text_joined() {
     settle
-    LC_ALL=C awk -F'\t' '
+    LC_ALL=C awk -F'\t' -v stop_row="${1:--1}" -v stop_col="${2:-0}" '
         {
             glyph[$1 "," $2] = $6
             if ($6 == "\342\224\202") {
@@ -850,9 +891,11 @@ box_text_joined() {
             if ($1 > last) last = $1
         }
         END {
+            if (stop_row >= 0 && last > stop_row) last = stop_row
             for (r = 0; r <= last; r++) {
                 if (!(r in lo) || !(r in hi)) continue
                 for (c = lo[r] + 1; c < hi[r]; c++) {
+                    if (r == stop_row && c >= stop_col) break
                     g = glyph[r "," c]
                     if (g != "" && g != " ") printf "%s", g
                 }
@@ -882,9 +925,14 @@ assert_chrome() {
 # cache lives, already warmed. Everything a leg writes that another leg must
 # not see (the AI trust store, the working tree it opens) is its own.
 start_session() {
-    local tag="$1" seed="$2" launcher="${3:-$LAUNCHER}" ruler=','
-    # a tile writes its cursor position into its own frame as `row:col`
-    [ "$launcher" != "$TILES_LAUNCHER" ] || ruler=':'
+    local tag="$1" seed="$2" launcher="${3:-$LEG_LAUNCHER}" ruler=','
+    BLANK_TILE_FRAMES=0
+    if [ "$launcher" = "$TILES_LAUNCHER" ]; then
+        # a tile writes its cursor position into its own frame as `row:col`
+        ruler=':'
+        # a session that names the tiles launcher itself reads their frames
+        [ -n "${3:-}" ] || BLANK_TILE_FRAMES=1
+    fi
     SESSION="view-visual-$$-$tag"
     ROOT=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-$tag-XXXXXX")
     ROOTS+=("$ROOT")
@@ -1072,8 +1120,8 @@ fi
 #
 # `--panes nvim` because every reader here takes the leftmost frame on a row
 # for an overlay's edge and the cells left of it for the buffer, which holds
-# only where nvim draws its windows unframed. A tile's own frame stands left
-# of every overlay under the tiled looks.
+# only where nvim draws its windows unframed. The tiled launcher below runs
+# each leg again with the tile frames blanked out of every capture.
 LAUNCHER=$RUN_SUPPORT/launch.sh
 {
     printf '#!/usr/bin/env bash\nexec %q --config %q --panes nvim' "$VIEW_BIN" "$VIEW_TOML"
@@ -1558,6 +1606,24 @@ done
 end_session
 pass "the colorscheme reaches view's own theme cache (NormalFloat bg $FLOAT_BG)"
 
+# The tiled layout draws the tab line, and the first launch under it says so
+# in a box that later launches on the same state record to the history
+# alone. One launch here says it, so a leg run again under tiles starts from
+# the stack its nvim run started from.
+SESSION="view-visual-$$-warm-tiles"
+SESSIONS+=("$SESSION")
+tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" -c "$warm_root" \
+    "env XDG_CONFIG_HOME=$SWEEP_CONFIG \
+         XDG_DATA_HOME=$DATA_HOME \
+         XDG_STATE_HOME=$STATE_HOME \
+         XDG_CACHE_HOME=$warm_root/xdg_cache_home \
+         VIEW_LOG=$warm_root/view.log \
+         TERM=xterm-256color COLORTERM=truecolor \
+         $TILES_LAUNCHER $warm_root/scratch.txt"
+wait_for 'view: now drawing' "$WAIT_SECS" "the tiled launch's notice" >/dev/null
+end_session
+pass "the tiled layout's launch notice is told once, ahead of the tiled legs"
+
 # Waits until `check` and its arguments answer yes against a fresh capture,
 # printing the seconds it took.
 #
@@ -1832,7 +1898,7 @@ drive_action() {
 }
 
 leg_entry_points() {
-    CURRENT_LEG='entry-points'
+    CURRENT_LEG="entry-points$LEG_TAG"
     start_session entry 'visual sweep seed line'
 
     # The bare form first, and against a project no trust store has heard
@@ -1962,7 +2028,7 @@ ACTIONS
 }
 
 leg_toast_and_history() {
-    CURRENT_LEG='toast-and-history'
+    CURRENT_LEG="toast-and-history$LEG_TAG"
     start_session toast 'visual sweep seed line'
 
     # A toast lands over the cursor row, whose highlight runs the full width
@@ -2091,7 +2157,7 @@ leg_toast_and_history() {
 # terminal was told: a unit test can assert a layer's index, only a capture
 # can say the glyphs reached the cells.
 leg_toast_beside_panel() {
-    CURRENT_LEG='toast-beside-panel'
+    CURRENT_LEG="toast-beside-panel$LEG_TAG"
     local toast='Not an editor command' span trow tcol edges own panel
     start_session overlap 'visual sweep seed line'
     command_line ':View ai'
@@ -2140,7 +2206,7 @@ leg_toast_beside_panel() {
 }
 
 leg_panel_typing() {
-    CURRENT_LEG='panel-typing'
+    CURRENT_LEG="panel-typing$LEG_TAG"
     start_session typing 'visual sweep seed line'
     command_line ':View ai'
     wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
@@ -2240,7 +2306,7 @@ leg_panel_typing() {
 # a box a laptop user meets anonymous, with no way to tell it from the
 # picker or the tree.
 leg_narrow_title() {
-    CURRENT_LEG='narrow-title'
+    CURRENT_LEG="narrow-title$LEG_TAG"
     # scoped to this leg, and read by `start_session` as it starts the pane
     local COLS=$NARROW_COLS marker
     start_session narrow 'visual sweep seed line'
@@ -2289,7 +2355,7 @@ paste_into_pane() {
 }
 
 leg_panel_paste() {
-    CURRENT_LEG='panel-paste'
+    CURRENT_LEG="panel-paste$LEG_TAG"
     local mark=PASTEMARK tree_mark=TREEPASTE echoed copies
     start_session paste 'visual sweep seed line'
     command_line ':View ai'
@@ -2461,7 +2527,7 @@ open_inline_review() {
 }
 
 leg_inline_review() {
-    CURRENT_LEG='inline-review'
+    CURRENT_LEG="inline-review$LEG_TAG"
     local proposed=$REVIEW_PROPOSED replaced=$REVIEW_REPLACED header='hunk 1/1' key
     open_inline_review
 
@@ -2524,7 +2590,7 @@ leg_inline_review() {
 # what it should be here, as it does for the others; nothing in this file
 # names a color.
 leg_review_stale() {
-    CURRENT_LEG='review-stale'
+    CURRENT_LEG="review-stale$LEG_TAG"
     local staled="$REVIEW_REPLACED STALE"
     open_inline_review
 
@@ -2559,7 +2625,7 @@ leg_review_stale() {
 # next `>` on a width. The width itself is state no capture holds, so every
 # assertion below reads the panel's own frame edge instead.
 leg_resize_chord() {
-    CURRENT_LEG='resize-chord'
+    CURRENT_LEG="resize-chord$LEG_TAG"
     start_session chord 'visual sweep seed line'
     command_line ':View ai'
     wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
@@ -2717,7 +2783,7 @@ leg_resize_chord() {
 # it is read from tmux and joined to the capture here rather than pinned in
 # a surface test alone.
 leg_permission_caret() {
-    CURRENT_LEG='permission-caret'
+    CURRENT_LEG="permission-caret$LEG_TAG"
     start_session permission 'visual sweep seed line'
     command_line ':View ai'
     wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
@@ -2782,7 +2848,7 @@ leg_permission_caret() {
 # unit tests; what neither can see is a real SIGWINCH arriving mid-frame and
 # the rows the terminal is left holding, which is what this reads.
 leg_transcript_reflow() {
-    CURRENT_LEG='transcript-reflow'
+    CURRENT_LEG="transcript-reflow$LEG_TAG"
     start_session reflow 'visual sweep seed line'
     command_line ':View ai'
     wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
@@ -2853,8 +2919,8 @@ else
         # resolve to the last leg and would report a green run of a leg
         # nobody asked for
         case $want in
-        '' | *[!0-9]*) leg="" ;;
-        *) [ "$want" -ge 1 ] && leg=${LEGS[$((want - 1))]:-} || leg="" ;;
+        ('' | *[!0-9]*) leg="" ;;
+        (*) [ "$want" -ge 1 ] && leg=${LEGS[$((want - 1))]:-} || leg="" ;;
         esac
         [ -n "$leg" ] || {
             printf 'FAIL: there is no leg %s (1..%s)\n' "$want" "${#LEGS[@]}" >&2
@@ -2863,6 +2929,14 @@ else
         selected+=("$leg")
     done
 fi
-for leg in "${selected[@]}"; do "$leg"; done
+# Every leg runs a second time under the tiled layout, because each one reads
+# an overlay, and an overlay has to hold under both layouts a person can pick.
+for leg in "${selected[@]}"; do
+    LEG_LAUNCHER=$LAUNCHER LEG_TAG=''
+    "$leg"
+    LEG_LAUNCHER=$TILES_LAUNCHER LEG_TAG='-tiles'
+    "$leg"
+done
 
-printf 'visual sweep: %s of %s legs green\n' "${#selected[@]}" "${#LEGS[@]}"
+printf 'visual sweep: %s of %s legs green, under the nvim and the tiled layout\n' \
+    "${#selected[@]}" "${#LEGS[@]}"
