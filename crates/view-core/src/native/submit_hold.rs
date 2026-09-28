@@ -102,7 +102,7 @@ impl Typed {
         };
         // `<Del>` at the end of the line, where the modelled cursor always
         // stands, deletes the character before it as a backspace does
-        if matches!(notation, "<BS>" | "<C-h>" | "<Del>" | "<kDel>") {
+        if line_key(notation) == LineKey::Delete {
             return text.pop().is_none();
         }
         match typed_char(notation) {
@@ -114,7 +114,8 @@ impl Typed {
 }
 
 /// A command-line key that reads the key after it as its argument, so an
-/// `<Esc>` or a `<CR>` there ends no line.
+/// `<Esc>` or a `<CR>` there ends no line. A `<C-c>` there interrupts
+/// every one of them but a literal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Argument {
     /// `<C-r>`: the register to insert, where `=` opens an expression line.
@@ -125,17 +126,62 @@ enum Argument {
     Backslash,
     /// `<C-v>` and `<C-q>`: one key inserted as it is.
     Literal,
-    /// `<C-k>`: the two keys of a digraph, abandoned by an `<Esc>` first.
-    /// A first key whose base key is special is inserted by its name, and
-    /// ends it.
+    /// `<C-k>`: the first key of a digraph, abandoned by an escape. A first
+    /// key whose base key is special is inserted by its name, and ends it.
     Digraph,
+    /// The second key of a digraph.
+    DigraphSecond,
 }
 
-/// The keys that leave a command line.
-const LEAVES_LINE: [&str; 3] = ["<Esc>", "<C-c>", "<C-["];
+/// What a key does to the command line it is typed into, judged by its
+/// base key with the modifiers set aside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineKey {
+    /// An `<Esc>` with any modifiers, or a Ctrl `[`: leaves the line, and
+    /// abandons a digraph.
+    Escape,
+    /// `<C-c>` alone: leaves the line, and interrupts a key waiting for its
+    /// argument.
+    Interrupt,
+    /// A Ctrl `c` with other modifiers: leaves the line, and is an ordinary
+    /// key as an argument.
+    Cancel,
+    Submit,
+    /// A backspace, or a delete at the end of the line. A shifted `<Del>`
+    /// is inserted by its name.
+    Delete,
+    Other,
+}
 
-/// The keys that submit a command line.
-const SUBMITS_LINE: [&str; 5] = ["<CR>", "<NL>", "<C-m>", "<C-j>", "<kEnter>"];
+impl LineKey {
+    fn leaves(self) -> bool {
+        matches!(self, Self::Escape | Self::Interrupt | Self::Cancel)
+    }
+}
+
+fn line_key(notation: &str) -> LineKey {
+    let Some(key) = modified(notation) else {
+        return LineKey::Other;
+    };
+    let named = |names: &[&str]| names.iter().any(|name| key.base.eq_ignore_ascii_case(name));
+    let ctrl_only = key.ctrl && !(key.shift || key.alt || key.meta || key.cmd);
+    if named(&["Esc"]) || key.ctrl && key.base == "[" {
+        LineKey::Escape
+    } else if key.ctrl && named(&["c"]) {
+        if ctrl_only {
+            LineKey::Interrupt
+        } else {
+            LineKey::Cancel
+        }
+    } else if named(&["CR", "NL", "kEnter"]) || ctrl_only && named(&["m", "j"]) {
+        LineKey::Submit
+    } else if named(&["BS", "kDel"]) || named(&["Del"]) && !key.shift || ctrl_only && named(&["h"])
+    {
+        LineKey::Delete
+    } else {
+        LineKey::Other
+    }
+}
 
 /// The command line being typed and the input held behind a submitted
 /// `:View` or a key that invokes view.
@@ -597,21 +643,18 @@ fn canonical(key: &str) -> String {
     if let Some(c) = typed_char(key) {
         return c.to_string();
     }
-    let Some(mut rest) = key.strip_prefix('<').and_then(|k| k.strip_suffix('>')) else {
+    let Some(Modified {
+        ctrl,
+        mut shift,
+        alt,
+        meta,
+        cmd,
+        base,
+    }) = modified(key)
+    else {
         return key.to_string();
     };
-    let [mut ctrl, mut shift, mut meta, mut sup] = [false; 4];
-    while rest.len() > 2 && rest.as_bytes()[1] == b'-' {
-        match rest.as_bytes()[0].to_ascii_uppercase() {
-            b'C' => ctrl = true,
-            b'S' => shift = true,
-            b'M' | b'A' => meta = true,
-            b'D' => sup = true,
-            _ => break,
-        }
-        rest = &rest[2..];
-    }
-    let mut chars = rest.chars();
+    let mut chars = base.chars();
     let name = match (chars.next(), chars.next()) {
         // a Ctrl letter is one key in either case
         (Some(c), None) if c.is_alphabetic() => {
@@ -623,14 +666,60 @@ fn canonical(key: &str) -> String {
                 c.to_lowercase().collect()
             }
         }
-        (Some(_), None) => rest.to_string(),
-        _ => rest.to_ascii_lowercase(),
+        (Some(_), None) => base.to_string(),
+        _ => base.to_ascii_lowercase(),
     };
-    let modifiers: String = [(ctrl, "C-"), (shift, "S-"), (meta, "M-"), (sup, "D-")]
-        .into_iter()
-        .filter_map(|(on, spelled)| on.then_some(spelled))
-        .collect();
+    let modifiers: String = [
+        (ctrl, "C-"),
+        (shift, "S-"),
+        (alt, "M-"),
+        (cmd, "D-"),
+        (meta, "T-"),
+    ]
+    .into_iter()
+    .filter_map(|(on, spelled)| on.then_some(spelled))
+    .collect();
     format!("<{modifiers}{name}>")
+}
+
+/// The modifiers a `<>` key notation carries, and the key they modify.
+#[derive(Debug, Clone, Copy)]
+struct Modified<'a> {
+    ctrl: bool,
+    shift: bool,
+    /// `M-` or `A-`.
+    alt: bool,
+    /// `T-`.
+    meta: bool,
+    /// `D-`.
+    cmd: bool,
+    base: &'a str,
+}
+
+/// Splits a `<>` key notation into its modifiers and its base key, or
+/// `None` for a key written as its character.
+fn modified(notation: &str) -> Option<Modified<'_>> {
+    let mut base = notation.strip_prefix('<')?.strip_suffix('>')?;
+    let [mut ctrl, mut shift, mut alt, mut meta, mut cmd] = [false; 5];
+    while base.len() > 2 && base.as_bytes()[1] == b'-' {
+        match base.as_bytes()[0].to_ascii_uppercase() {
+            b'C' => ctrl = true,
+            b'S' => shift = true,
+            b'M' | b'A' => alt = true,
+            b'T' => meta = true,
+            b'D' => cmd = true,
+            _ => break,
+        }
+        base = &base[2..];
+    }
+    Some(Modified {
+        ctrl,
+        shift,
+        alt,
+        meta,
+        cmd,
+        base,
+    })
 }
 
 /// The command-line half of [`fold_engine_key`].
@@ -692,8 +781,20 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
                     }
                     return Vec::new();
                 }
-                (Argument::Digraph, key) if key != "<Esc>" && !special_key(key) => {
-                    *argument = Some(Argument::Literal);
+                // the interrupt ends the line it was typed into, and the
+                // register's reaches the line beneath an expression line too
+                (of @ (Argument::Register | Argument::Digraph | Argument::DigraphSecond), key)
+                    if line_key(key) == LineKey::Interrupt =>
+                {
+                    if of == Argument::Register || nested.take().is_none() {
+                        hold.end_line(None);
+                    }
+                    return Vec::new();
+                }
+                (Argument::Digraph, key)
+                    if line_key(key) != LineKey::Escape && !special_key(key) =>
+                {
+                    *argument = Some(Argument::DigraphSecond);
                     true
                 }
                 (of, _) => {
@@ -711,7 +812,8 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
         }
         if let Some(line) = nested {
             // ending the expression line returns to the line beneath it
-            if LEAVES_LINE.contains(&notation) || SUBMITS_LINE.contains(&notation) {
+            let key = line_key(notation);
+            if key.leaves() || key == LineKey::Submit {
                 *nested = None;
             } else if let Some(of) = argument_of(notation) {
                 *argument = Some(of);
@@ -728,9 +830,10 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
         };
         return Vec::new();
     }
-    if LEAVES_LINE.contains(&notation) {
+    let key = line_key(notation);
+    if key.leaves() {
         hold.end_line(None);
-    } else if SUBMITS_LINE.contains(&notation) {
+    } else if key == LineKey::Submit {
         let typed = hold.end_line(None);
         if submits_view(model, typed.as_ref()) {
             return arm(model, Armed::Command);
@@ -758,22 +861,12 @@ fn argument_of(notation: &str) -> Option<Argument> {
 /// their characters. `<C-@>` is `<Nul>`, and a shifted `<Tab>` is
 /// `<S-Tab>`, both special.
 fn special_key(notation: &str) -> bool {
-    let Some(mut base) = notation
-        .strip_prefix('<')
-        .and_then(|rest| rest.strip_suffix('>'))
+    let Some(Modified {
+        ctrl, shift, base, ..
+    }) = modified(notation)
     else {
         return false;
     };
-    let [mut ctrl, mut shift] = [false; 2];
-    while base.len() > 2 && base.as_bytes()[1] == b'-' {
-        match base.as_bytes()[0].to_ascii_uppercase() {
-            b'C' => ctrl = true,
-            b'S' => shift = true,
-            b'M' | b'A' | b'D' | b'T' => {}
-            _ => break,
-        }
-        base = &base[2..];
-    }
     let named = |names: &[&str]| names.iter().any(|name| base.eq_ignore_ascii_case(name));
     if base.chars().count() == 1 {
         return ctrl && base == "@";
@@ -1253,12 +1346,14 @@ mod tests {
     /// A key read as the argument of the one before it ends no line, an
     /// expression line ends back into the line beneath it, and `<C-\>`
     /// `<C-n>` leaves the line. `<C-\>` before any other key, and `<C-k>`
-    /// before a special key, take no second key. Each row is what nvim
+    /// before a special key, take no second key. A key leaves, submits or
+    /// deletes by its base key, and `<C-c>` interrupts every argument but
+    /// a literal one. Each row is what nvim
     /// 0.12's ext_cmdline reports for those keys: whether the `:` line is
     /// still open, and how many first-level ends went out.
     #[test]
     fn keys_taking_an_argument_end_the_line_only_where_nvim_does() {
-        let rows: [(&[&str], bool, u32); 48] = [
+        let rows: [(&[&str], bool, u32); 96] = [
             (&["<C-r>", "<CR>"], true, 0),
             (&["<C-r>", "<Esc>"], true, 0),
             (&["<C-r>", "<C-o>", "<CR>"], true, 0),
@@ -1315,17 +1410,69 @@ mod tests {
                 true,
                 0,
             ),
+            // a key leaves, submits or deletes by its base key
+            (&["<C-k>", "<M-Esc>", "<CR>"], false, 1),
+            (&["<C-k>", "<S-Esc>", "<CR>"], false, 1),
+            (&["<C-k>", "<C-Esc>", "<CR>"], false, 1),
+            (&["<C-k>", "<C-[>", "<CR>"], false, 1),
+            (&["<C-k>", "<C-S-[>"], true, 0),
+            (&["<C-\\>", "<M-Esc>"], false, 1),
+            (&["<C-\\>", "<S-Esc>"], false, 1),
+            (&["<C-\\>", "<M-CR>"], false, 1),
+            (&["<C-\\>", "<S-CR>"], false, 1),
+            (&["<C-\\>", "<C-CR>"], false, 1),
+            (&["<C-r>", "<M-Esc>"], true, 0),
+            (&["<C-v>", "<M-Esc>"], true, 0),
+            (&["<S-CR>"], false, 1),
+            (&["<C-CR>"], false, 1),
+            (&["<C-S-CR>"], false, 1),
+            (&["<S-NL>"], false, 1),
+            (&["<S-kEnter>"], false, 1),
+            (&["<C-M>"], false, 1),
+            (&["<C-J>"], false, 1),
+            (&["<S-Esc>"], false, 1),
+            (&["<C-Esc>"], false, 1),
+            (&["<C-[>"], false, 1),
+            (&["<C-S-[>"], false, 1),
+            (&["<C-S-c>"], false, 1),
+            (&["a", "b", "<S-BS>", "<S-BS>", "<S-BS>"], false, 1),
+            (&["a", "b", "<C-BS>", "<C-BS>", "<C-BS>"], false, 1),
+            (&["a", "b", "<D-Del>", "<S-kDel>", "<C-S-BS>"], false, 1),
+            (&["<C-kDel>"], false, 1),
+            (&["<C-H>"], false, 1),
+            (&["<S-Del>"], true, 0),
+            (&["a", "b", "<C-S-Del>"], true, 0),
+            (&["<C-r>", "=", "<S-Esc>", "<CR>"], false, 1),
+            (&["<C-r>", "=", "<S-CR>", "<CR>"], false, 1),
+            // `<C-c>` interrupts a key waiting for its argument, but a literal
+            (&["<C-k>", "<C-c>"], false, 1),
+            (&["<C-k>", "<C-C>"], false, 1),
+            (&["<C-k>", "a", "<C-c>"], false, 1),
+            (&["<C-k>", "<C-S-c>"], true, 0),
+            (&["<C-r>", "<C-c>"], false, 1),
+            (&["<C-r>", "<C-o>", "<C-c>"], false, 1),
+            (&["<C-r>", "<C-S-c>"], true, 0),
+            (&["<C-v>", "<C-c>"], true, 0),
+            (&["<C-q>", "<C-c>"], true, 0),
+            (&["<C-\\>", "<C-c>"], false, 1),
+            (&["<C-r>", "=", "<C-c>"], true, 0),
+            (&["<C-r>", "=", "<C-r>", "<C-c>"], false, 1),
+            (&["<C-r>", "=", "<C-k>", "<C-c>"], true, 0),
+            (&["<C-r>", "=", "<C-k>", "a", "<C-c>"], true, 0),
+            (&["<C-r>", "=", "<C-\\>", "<C-c>"], true, 0),
         ];
-        for (keys, open, ends) in rows {
-            let mut model = normal_mode();
-            let _ = type_keys(&mut model, &[":"]);
-            let _ = type_keys(&mut model, keys);
-            let hold = &model.submit_hold;
-            assert_eq!(
-                (hold.types_a_line(), hold.unhidden),
-                (open, ends),
-                "{keys:?}"
-            );
-        }
+        let mismatches: Vec<String> = rows
+            .into_iter()
+            .filter_map(|(keys, open, ends)| {
+                let mut model = normal_mode();
+                let _ = type_keys(&mut model, &[":"]);
+                let _ = type_keys(&mut model, keys);
+                let hold = &model.submit_hold;
+                let got = (hold.types_a_line(), hold.unhidden);
+                let expected = (open, ends);
+                (got != expected).then(|| format!("{keys:?} nvim {expected:?} model {got:?}"))
+            })
+            .collect();
+        assert!(mismatches.is_empty(), "\n{}", mismatches.join("\n"));
     }
 }
