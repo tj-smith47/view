@@ -480,20 +480,15 @@ fn cells(model: &mut Model, grid: u64, op: GridOp) -> Vec<Effect> {
     Vec::new()
 }
 
-/// Applies one window-placement operation, producing no effects. Nothing
-/// repaints differently for it yet: the compositor still draws the global
-/// grid alone.
 /// Drops the status the bridge reported for the window `grid` was showing,
 /// before the event that takes the grid away makes the handle unreadable.
-///
-/// nvim never reuses a window handle, so a record left behind is one
-/// nothing will ever read again.
 fn forget_window_status(model: &mut Model, grid: GridId) {
     if let Some(win) = model.engine.grids().window_handle(grid) {
         model.window_status.remove(&win);
     }
 }
 
+/// Applies one window-placement operation, producing no effects.
 fn place(model: &mut Model, ev: GridEvent) -> Vec<Effect> {
     model.engine.apply_grid_event(ev);
     Vec::new()

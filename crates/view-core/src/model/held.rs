@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use super::{EngineModel, Model, WindowStatus};
+use super::{EngineModel, Model, MouseCapture, WindowStatus};
 use crate::events::WinHandle;
 use crate::grid::registry::{GridRegistry, WindowSlot};
 use crate::grid::Grid;
@@ -54,6 +54,10 @@ enum Hold {
         hl: HlTable,
         /// The buffer each held window showed.
         names: Names,
+        /// Whether `names` has been read from the dead engine's statuses.
+        /// A frame held over from a failed attempt has been, and a status
+        /// reported since then names a window of that attempt.
+        named: bool,
         /// Whether the replacement has put a window up, which is when
         /// [`RESTART_LAYOUT_HOLD`] starts.
         armed: bool,
@@ -169,7 +173,7 @@ impl EngineModel {
     /// Whether the screen shows the dead engine's own frame, whose grid ids
     /// name none of the replacement's grids.
     #[must_use]
-    pub fn holds_the_frame(&self) -> bool {
+    pub(crate) fn holds_the_frame(&self) -> bool {
         matches!(self.held.hold, Hold::Frame { .. })
     }
 
@@ -179,32 +183,50 @@ impl EngineModel {
         // the registry it would copy now is the empty one
         if let Hold::Frame { armed, .. } = &mut self.held.hold {
             *armed = false;
-        } else {
-            self.held.hold = Hold::Frame {
-                grids: self.painted_grids().clone(),
-                hl: self.hl.clone(),
-                names: Names::new(),
-                armed: false,
-                layout: true,
-            };
+            return;
         }
+        let live = self.grids.window_layout();
+        // a stand-in's buffer was read at the restart before this one, and
+        // its handle names no window of the engine now dying
+        let names = match &self.held.hold {
+            Hold::Layout { names, .. } => names
+                .iter()
+                .filter(|(held, _)| !live.iter().any(|(win, _)| win == *held))
+                .map(|(held, name)| (*held, name.clone()))
+                .collect(),
+            Hold::Nothing | Hold::Frame { .. } => Names::new(),
+        };
+        self.held.hold = Hold::Frame {
+            grids: self.painted_grids().clone(),
+            hl: self.hl.clone(),
+            names,
+            named: false,
+            armed: false,
+            layout: true,
+        };
     }
 
-    /// Records the buffer each window of the held frame showed, from the
-    /// statuses the dead engine reported, so that a replacement window
-    /// numbered differently still finds its slot.
-    pub fn name_held_windows(&mut self, status: &HashMap<WinHandle, WindowStatus>) {
-        // a frame held over from a failed attempt keeps its names, since a
-        // replacement that reported may have reused their handles
-        if let Hold::Frame { grids, names, .. } = &mut self.held.hold {
-            if !names.is_empty() {
+    /// Records the buffer each window of the held frame showed that the
+    /// frame has no name for yet, from the statuses the dead engine
+    /// reported, so that a replacement window numbered differently still
+    /// finds its slot.
+    fn name_held_windows(&mut self, status: &HashMap<WinHandle, WindowStatus>) {
+        if let Hold::Frame {
+            grids,
+            names,
+            named,
+            ..
+        } = &mut self.held.hold
+        {
+            if *named {
                 return;
             }
-            *names = grids
-                .window_layout()
-                .into_iter()
-                .filter_map(|(win, _)| status.get(&win).map(|s| (win, s.name.clone())))
-                .collect();
+            for (win, _) in grids.window_layout() {
+                if let Some(status) = status.get(&win) {
+                    names.entry(win).or_insert_with(|| status.name.clone());
+                }
+            }
+            *named = true;
         }
     }
 
@@ -292,6 +314,18 @@ impl EngineModel {
 }
 
 impl Model {
+    /// Records the buffer each window of the held frame showed, then drops
+    /// what the dead engine's windows leave behind: their statuses, whose
+    /// handles the replacement numbers its own windows with, and a mouse
+    /// gesture captured on one of their grids.
+    pub fn forget_engine_windows(&mut self) {
+        self.engine.name_held_windows(&self.window_status);
+        self.window_status.clear();
+        if matches!(self.mouse_capture, Some(MouseCapture::Engine(_))) {
+            self.mouse_capture = None;
+        }
+    }
+
     /// [`EngineModel::settle_held`] against the statuses the replacement
     /// has reported, and the bound a hold that began here owes. Off a
     /// flush, it waits for one while the live registry is mid-batch.

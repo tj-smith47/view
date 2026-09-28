@@ -1162,6 +1162,134 @@ fn a_second_restart_during_the_held_layout_holds_the_same_slots() {
     );
 }
 
+/// A gesture pressed on the dead engine's window ends at the restart, and
+/// neither its drag nor a press on the held frame reaches the replacement.
+#[test]
+fn a_gesture_begun_before_a_restart_reaches_nothing_after_it() {
+    let mut m = vsplit_model();
+    let _ = update(&mut m, click(3, 10));
+    assert_eq!(m.mouse_capture(), Some(MouseCapture::Engine(GridId(6))));
+    let _ = restart(&mut m);
+    assert_eq!(
+        m.mouse_capture(),
+        None,
+        "a gesture captured on the dead engine outlived the restart"
+    );
+    for action in ["drag", "release", "press"] {
+        let effects = update(&mut m, mouse(action, 3, 10));
+        assert!(
+            effects.is_empty(),
+            "a {action} on the held dead frame reached the replacement: \
+             {effects:?}"
+        );
+    }
+    assert_eq!(
+        m.mouse_capture(),
+        None,
+        "a press on the held dead frame claimed a gesture"
+    );
+}
+
+/// A status for a hidden dead window names nothing in the replacement,
+/// which numbers its own windows with the same handles.
+#[test]
+fn a_dead_windows_status_does_not_name_the_replacements_window() {
+    let status = |name: &str| crate::model::WindowStatus {
+        name: name.into(),
+        ..crate::model::WindowStatus::default()
+    };
+    let mut m = split_model([(6, 1004, 0, 40), (5, 1002, 41, 39)]);
+    for (win, name) in [
+        (1004, "README.md"),
+        (1002, "NvimTree_1"),
+        (1000, "other.rs"),
+    ] {
+        let _ = update(
+            &mut m,
+            Msg::WindowStatus {
+                win: crate::events::WinHandle(win),
+                status: status(name),
+            },
+        );
+    }
+    let _ = restart(&mut m);
+    let _ = update(&mut m, replacement_chrome());
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::WinPos {
+                grid: 2,
+                win: crate::events::WinHandle(1000),
+                startrow: 0,
+                startcol: 0,
+                width: 80,
+                height: 23,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert!(
+        m.engine.holds_the_frame(),
+        "a dead window's status ended the wait for the replacement's"
+    );
+}
+
+/// A second restart while the layout is held keeps the buffer each
+/// stand-in showed, so the tree the next replacement opens under a new
+/// handle still finds its slot.
+#[test]
+fn a_second_restart_keeps_the_names_of_the_held_slots() {
+    let status = |name: &str| crate::model::WindowStatus {
+        name: name.into(),
+        ..crate::model::WindowStatus::default()
+    };
+    let mut m = vsplit_model();
+    for (win, name) in [(1003, "README.md"), (1002, "NvimTree_1")] {
+        let _ = update(
+            &mut m,
+            Msg::WindowStatus {
+                win: crate::events::WinHandle(win),
+                status: status(name),
+            },
+        );
+    }
+    let _ = restart(&mut m);
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    let _ = restart(&mut m);
+    let _ = update(&mut m, replacement_chrome());
+    let _ = update(
+        &mut m,
+        Msg::WindowStatus {
+            win: crate::events::WinHandle(1001),
+            status: status("NvimTree_1"),
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 4,
+                width: 20,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: 4,
+                win: crate::events::WinHandle(1001),
+                startrow: 0,
+                startcol: 60,
+                width: 20,
+                height: 24,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert_eq!(
+        painted_slots(&m),
+        [(1001, (0, 41, 39, 24)), (1003, (0, 0, 40, 24))],
+        "the tree reopened under a new handle missed its held slot"
+    );
+}
+
 #[test]
 fn a_single_grid_restart_paints_the_dead_engines_text_until_the_replacement_draws() {
     let mut m = Model::with_term_size(80, 24);
@@ -11672,7 +11800,7 @@ fn armed_hold_generation(effects: &[Effect]) -> u64 {
 fn restart(m: &mut Model) -> Vec<Effect> {
     let closed = super::forget_native_windows(m);
     m.engine.forget_overlays();
-    m.engine.name_held_windows(&m.window_status);
+    m.forget_engine_windows();
     m.forget_engine_conflicts();
     closed
 }

@@ -34,7 +34,11 @@ pub(super) fn route(model: &mut Model, input: MouseInput) -> Vec<Effect> {
     }
     let owner = match input.action.as_str() {
         "press" => {
-            let owner = position_owner(model, &input);
+            // a refused press claims no gesture, whose grid id could name
+            // one of the replacement's grids once the hold is gone
+            let owner = position_owner(model, &input).filter(
+                |owner| !matches!(owner, MouseCapture::Engine(grid) if refused(model, *grid)),
+            );
             if let Some(owner) = owner {
                 model.capture_mouse(owner);
             }
@@ -96,14 +100,8 @@ fn position_owner(model: &Model, input: &MouseInput) -> Option<MouseCapture> {
         .checked_sub(model.chrome_rows())?
         .checked_sub(offset)?;
     let col = input.col.checked_sub(offset)?;
-    // a held dead frame's grid ids can name the replacement's grids
-    if model.engine.holds_the_frame() {
-        return None;
-    }
     let grids = model.engine.painted_grids();
     let (grid, _, _) = grids.hit_test(col, row)?;
-    // a held slot's stand-in has no grid in the engine to send to
-    model.engine.grids().grid(grid)?;
     // the column a docked float's gutter closes a tile's frame on is its
     // border, over text nvim still holds there
     if let Some((_, left, width, _)) = model.tile_text(grids, grid) {
@@ -138,6 +136,13 @@ fn pill_press(model: &Model, input: &MouseInput) -> Option<RpcCall> {
     })
 }
 
+/// Whether an event for `grid` has no engine grid to reach: a held dead
+/// frame's grid ids can name the replacement's grids, and a held slot's
+/// stand-in has no grid in the engine at all.
+fn refused(model: &Model, grid: GridId) -> bool {
+    model.engine.holds_the_frame() || model.engine.grids().grid(grid).is_none()
+}
+
 /// Maps one mouse event already routed to `grid` into the
 /// `RpcCall::InputMouse` that delivers it there.
 ///
@@ -146,6 +151,9 @@ fn pill_press(model: &Model, input: &MouseInput) -> Option<RpcCall> {
 /// up into the tabline, and while the pointer is inside the grid the clamp
 /// is the same translation the hit test made.
 fn effect(model: &Model, input: MouseInput, grid: GridId) -> Vec<Effect> {
+    if refused(model, grid) {
+        return Vec::new();
+    }
     let offset = model.look.grid_offset();
     let row = input
         .row
