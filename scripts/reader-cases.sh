@@ -128,14 +128,36 @@ done <<<"$CONST_SITES"
 # read with no message on every host that could run it.
 CHAR_SITES=$(grep -oE 'grep -oE "const [A-Z_]+: char = .*" "\$[A-Z_]+_RS"' "$SWEEP" |
     sed -E 's/.*const ([A-Z_]+): char.*"\$([A-Z_]+_RS)"/\2 \1/') || true
-check_that "the sweep reads at least one char constant this file grades" \
-    [ -n "$CHAR_SITES" ]
+# counted against every `: char` mention for the reason the `rust_const`
+# count above gives; the one subtracted is `border_glyph`'s alias read,
+# which the call sites below grade
+CHAR_SEEN=$(printf '%s\n' "$CHAR_SITES" | grep -c . || true)
+CHAR_ALL=$(grep -c ': char' "$SWEEP" || true)
+check_that "every char constant the sweep reads is a site this file grades" \
+    [ "$CHAR_SEEN" -eq "$((CHAR_ALL - 1))" ]
 while read -r var name; do
     [ -n "$name" ] || continue
     rs=${!var}
     check_that "the sweep reads the char $name out of ${rs#"$ROOT"/}" \
         grep -qE "const $name: char = '.+'" "$rs"
 done <<<"$CHAR_SITES"
+
+# Each `border_glyph` call resolves a `BorderSet` field, through a `const`
+# alias where the field is written as one, so a charset or alias that moved
+# out of the file it reads is an empty glyph here as well as in the sweep.
+eval "$(awk '/^border_glyph\(\) \{/,/^\}/' "$SWEEP")"
+GLYPH_SITES=$(grep -oE '\$\(border_glyph [A-Z_]+ [a-z_]+\)' "$SWEEP" |
+    sed -E 's/^\$\(border_glyph ([A-Z_]+) ([a-z_]+)\)$/\1 \2/' | LC_ALL=C sort -u) || true
+GLYPH_SEEN=$(grep -cE '\$\(border_glyph [A-Z_]+ [a-z_]+\)' "$SWEEP" || true)
+GLYPH_ALL=$(grep -c '$(border_glyph' "$SWEEP" || true)
+check_that "every border_glyph call in the sweep is a site this file grades" \
+    [ "$GLYPH_SEEN" -eq "$GLYPH_ALL" ]
+check_that "the sweep reads at least one border glyph" [ "$GLYPH_ALL" -gt 0 ]
+while read -r set field; do
+    [ -n "$field" ] || continue
+    check_that "the sweep reads the $set $field glyph out of ${OVERLAY_RS#"$ROOT"/}" \
+        [ -n "$(border_glyph "$set" "$field")" ]
+done <<<"$GLYPH_SITES"
 
 rust_const "$PALETTE_RS" A_CONSTANT_NO_SOURCE_DECLARES >/dev/null 2>&1
 check "a constant no source declares fails rather than reading as an empty title" 1 $?

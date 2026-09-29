@@ -340,9 +340,9 @@ host_class() {
         return
     fi
     case "$(uname -s)" in
-    Darwin) printf 'dev-macos\n' ;;
-    CYGWIN* | MINGW* | MSYS*) printf 'dev-windows\n' ;;
-    *) printf 'dev-linux\n' ;;
+    (Darwin) printf 'dev-macos\n' ;;
+    (CYGWIN* | MINGW* | MSYS*) printf 'dev-windows\n' ;;
+    (*) printf 'dev-linux\n' ;;
     esac
 }
 

@@ -13,9 +13,10 @@
 # The deferred state's `native` table does turn every feature off at the
 # config level even though dressing itself can't observe that; the
 # `cmdheight` probe there is what stops a runner bug that silently ignores
-# the `native` table from passing both states by coincidence. The
-# statusline cells that differ between the states are lualine.toml's
-# subject and are asserted there.
+# the `native` table from passing both states by coincidence. lualine's
+# bar under the same three features off (row 28, above nvim's command
+# line) is asserted by lualine.toml's deferred state, which has no tiles
+# twin to hold a frame over that row.
 schema = 1
 plugin = "dressing"
 class = "ui-owning"

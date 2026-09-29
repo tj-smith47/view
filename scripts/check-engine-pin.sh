@@ -109,8 +109,8 @@ done
 for workflow in .github/workflows/ci.yml .github/workflows/bench.yml \
   .github/workflows/release.yml; do
   case " $installers " in
-    *" $workflow "*) ;;
-    *) echo "PIN FAIL: $workflow not found, or it no longer installs nvim"; fail=1 ;;
+    (*" $workflow "*) ;;
+    (*) echo "PIN FAIL: $workflow not found, or it no longer installs nvim"; fail=1 ;;
   esac
 done
 # The single_grid knob's lifespan is welded to the pin: the promise to

@@ -92,8 +92,10 @@ fi
 # of a bare one inside a `$( )` as the end of the substitution
 # (.claude/rules/shell.md). A pattern stands after the header's `in` and
 # after each `;;`, so those positions are what is read, the one-line
-# `case … esac` included. The fallthrough terminators are bash 4 and the
-# portability check refuses them. The rule covers the scripts under
+# `case … esac` and a header opened on an arm line included. A `case`
+# keyword whose `in` the line does not carry is reported, because the
+# patterns under it would go unread. The fallthrough terminators are bash 4
+# and the portability check refuses them. The rule covers the scripts under
 # scripts/, so the walk does too.
 own=()
 for script in "${files[@]}"; do
@@ -103,6 +105,99 @@ unparened=""
 [ "${#own[@]}" -eq 0 ] || unparened=$(awk -v SQ="'" "$SCRIPT_CODE_AWK"'
   function bare_arm(where, s) {
     if (s !~ /^\(/) { print where ": a case pattern with no leading paren: " s }
+  }
+  function top_of(st) { return substr(st, length(st), 1) }
+  function word_at(s, i, w,    a) {
+    if (substr(s, i, length(w)) != w) { return 0 }
+    a = substr(s, i + length(w), 1)
+    return (a == "" || a ~ /[[:space:]]/)
+  }
+  # The position after the header `in`, 0 for a line with no `case`
+  # keyword, -1 for a keyword whose `in` is not on the line. The word
+  # between them may hold quotes, `$( )`, `$(( ))` and `${ }` with blanks
+  # inside, so `in` counts only outside all of them.
+  function case_header(s,    i, n, c, st, top, kw, lvl) {
+    n = length(s); st = ""; kw = 0
+    for (i = 1; i <= n; i++) {
+      c = substr(s, i, 1); top = top_of(st)
+      if (top == SQ) {
+        if (c == SQ) { st = substr(st, 1, length(st) - 1) }
+        continue
+      }
+      if (c == "\\") { i++; continue }
+      if (c == "$" && (substr(s, i + 1, 1) == "(" || substr(s, i + 1, 1) == "{")) {
+        st = st substr(s, i + 1, 1); i++; continue
+      }
+      if (top == "\"") {
+        if (c == "\"") { st = substr(st, 1, length(st) - 1) }
+        continue
+      }
+      if (c == SQ || c == "\"" || c == "(") { st = st c; continue }
+      if ((c == ")" && top == "(") || (c == "}" && top == "{")) {
+        st = substr(st, 1, length(st) - 1)
+        if (kw && length(st) < lvl) { return -1 }
+        continue
+      }
+      if (!kw && word_at(s, i, "case") && (i == 1 || substr(s, i - 1, 1) ~ /[[:space:];&|(]/)) {
+        kw = 1; lvl = length(st); i += 3; continue
+      }
+      if (kw && length(st) == lvl && word_at(s, i, "in") && substr(s, i - 1, 1) ~ /[[:space:]]/) {
+        return i + 2
+      }
+    }
+    return kw ? -1 : 0
+  }
+  # where the pattern of an arm line ends: its closing paren outside quotes
+  function pattern_end(s,    i, n, c, q, d) {
+    n = length(s); q = ""; d = 0
+    for (i = 1; i <= n; i++) {
+      c = substr(s, i, 1)
+      if (q != "") { if (c == q) { q = "" }; continue }
+      if (c == "\\") { i++; continue }
+      if (c == SQ || c == "\"") { q = c; continue }
+      if (c == "(" && i > 1) { d++; continue }
+      if (c == ")") { if (d == 0) { return i }; d-- }
+    }
+    return 0
+  }
+  function arm(where, s,    e, body) {
+    bare_arm(where, s)
+    want[arms] = (s ~ /;;$/)
+    e = pattern_end(s)
+    if (e == 0) { return }
+    body = substr(s, e + 1)
+    sub(/^[[:space:]]+/, "", body)
+    if (body != "") { header(where, body) }
+  }
+  function header(where, s,    at, rest, n, k, t, seg) {
+    if (s !~ /(^|[^[:alnum:]_])case([^[:alnum:]_]|$)/) { return 0 }
+    at = case_header(s)
+    if (at == 0) { return 0 }
+    if (at < 0) {
+      print where ": a case keyword with no `in` after it on its line, so its patterns go unread: " s
+      return 1
+    }
+    rest = substr(s, at)
+    sub(/^[[:space:]]+/, "", rest)
+    if (rest ~ /(^|[[:space:];])esac([^[:alnum:]_]|$)/) {
+      n = split(rest, seg, ";;")
+      for (k = 1; k <= n; k++) {
+        t = seg[k]
+        sub(/^[[:space:]]+/, "", t)
+        sub(/[[:space:]]+$/, "", t)
+        if (t ~ /^esac([^[:alnum:]_]|$)/) { break }
+        bare_arm(where, t)
+      }
+      return 1
+    }
+    arms++
+    want[arms] = 1
+    if (rest != "") { arm(where, rest) }
+    return 1
+  }
+  function close_level(s) {
+    arms--
+    if (arms > 0 && s ~ /;;$/) { want[arms] = 1 }
   }
   FNR == 1 { arms = 0 }
   {
@@ -116,35 +211,13 @@ unparened=""
     if (s == "") { next }
     where = FILENAME ":" FNR
     if (arms > 0 && want[arms]) {
-      if (s ~ /^esac([^[:alnum:]_]|$)/) { arms--; next }
-      bare_arm(where, s)
-      want[arms] = (s ~ /;;$/)
+      if (s ~ /^esac([^[:alnum:]_]|$)/) { close_level(s); next }
+      arm(where, s)
       next
     }
-    if (match(s, /(^|[^[:alnum:]_])case[[:space:]]+[^[:space:]]+[[:space:]]+in([[:space:]]|$)/)) {
-      rest = substr(s, RSTART + RLENGTH)
-      sub(/^[[:space:]]+/, "", rest)
-      if (rest ~ /(^|[[:space:];])esac([^[:alnum:]_]|$)/) {
-        n = split(rest, seg, ";;")
-        for (k = 1; k <= n; k++) {
-          t = seg[k]
-          sub(/^[[:space:]]+/, "", t)
-          sub(/[[:space:]]+$/, "", t)
-          if (t ~ /^esac([^[:alnum:]_]|$)/) { break }
-          bare_arm(where, t)
-        }
-        next
-      }
-      arms++
-      want[arms] = 1
-      if (rest != "") {
-        bare_arm(where, rest)
-        want[arms] = (rest ~ /;;$/)
-      }
-      next
-    }
+    if (header(where, s)) { next }
     if (arms > 0) {
-      if (s ~ /^esac([^[:alnum:]_]|$)/) { arms--; next }
+      if (s ~ /^esac([^[:alnum:]_]|$)/) { close_level(s); next }
       if (s ~ /;;$/) { want[arms] = 1 }
     }
   }

@@ -320,6 +320,71 @@ commit_case
 expect 1 'scripts/p.sh:7: a case pattern with no leading paren: c) echo c ;;' 1 \
   'a bare pattern in a nested case is refused and a here-doc body is text'
 
+new_case
+plant p.sh <<'EOF'
+set -eu
+case " ${1:-} in " in
+  (x) echo x ;;
+  *" in "*) echo in ;;
+esac
+EOF
+commit_case
+expect 1 'scripts/p.sh:5: a case pattern with no leading paren: *" in "*) echo in ;;' 1 \
+  'a bare pattern under a quoted word holding a blank is refused'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+case "$(printf '%s ' in x)" in
+  x) echo x ;;
+esac
+EOF
+commit_case
+expect 1 'scripts/p.sh:4: a case pattern with no leading paren: x) echo x ;;' 1 \
+  'a bare pattern under a substitution word holding a blank is refused'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+i=4
+in=1
+case $(( in + i % 3 )) in
+  (0) echo 0 ;;
+  1) echo 1 ;;
+esac
+EOF
+commit_case
+expect 1 'scripts/p.sh:7: a case pattern with no leading paren: 1) echo 1 ;;' 1 \
+  'a bare pattern under an arithmetic word is refused'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+case "${1:-}" in
+  (a) case "${2:-}" in
+    (x) echo x ;;
+    b) echo b ;;
+  esac ;;
+  c) echo c ;;
+esac
+EOF
+commit_case
+expect 1 'scripts/p.sh:6: a case pattern with no leading paren: b) echo b ;;
+scripts/p.sh:8: a case pattern with no leading paren: c) echo c ;;' 2 \
+  'a header opened on an arm line is read, and its esac closes only its own level'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+case "${1:-}"
+  in
+  a) echo a ;;
+esac
+EOF
+commit_case
+expect 1 'scripts/p.sh:3: a case keyword with no `in` after it on its line' 1 \
+  'a case keyword that yields no header is refused'
+
 # the rule covers the scripts under scripts/, and a script outside it is
 # linted for everything else
 new_case

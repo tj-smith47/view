@@ -1397,8 +1397,8 @@ fi
 # how many passed, and this says which ones were never asked.
 for leg in "${LEGS[@]}"; do
     case " ${selected[*]} " in
-    *" $leg "*) ;;
-    *) printf 'SKIP: %s -- not selected for this run\n' "$leg" ;;
+    (*" $leg "*) ;;
+    (*) printf 'SKIP: %s -- not selected for this run\n' "$leg" ;;
     esac
 done
 for leg in "${selected[@]}"; do "$leg"; done

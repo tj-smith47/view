@@ -481,9 +481,9 @@ plant_spawns() {
   i=0
   while [ "$i" -lt "$2" ]; do
     case $((i % 3)) in
-      0) printf 'let mut cmd = Command::new(program);\n' >> "$CASE/$1" ;;
-      1) printf 'let mut cmd = CommandBuilder::new(program);\n' >> "$CASE/$1" ;;
-      *) printf 'let worker = builder.spawn(move || run());\n' >> "$CASE/$1" ;;
+      (0) printf 'let mut cmd = Command::new(program);\n' >> "$CASE/$1" ;;
+      (1) printf 'let mut cmd = CommandBuilder::new(program);\n' >> "$CASE/$1" ;;
+      (*) printf 'let worker = builder.spawn(move || run());\n' >> "$CASE/$1" ;;
     esac
     i=$((i + 1))
   done
@@ -3579,8 +3579,8 @@ new_pin_case
 } > "$CASE/tail.sh"
 missed=""
 case "$(guarded_list_tails "$CASE/tail.sh")" in
-  *': live') ;;
-  *) missed="a guarded list written last in a function went unread" ;;
+  (*': live') ;;
+  (*) missed="a guarded list written last in a function went unread" ;;
 esac
 expect_pin 'the guarded-list walk reads a list written last in a function with no || true' "$missed"
 
