@@ -155,7 +155,9 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
         // the one case with no panel content yet for a user to notice the
         // banner sitting in: the agent panel may not even be open, and a
         // silent failure the first time someone tries the feature reads as
-        // "nothing happened" rather than "it broke."
+        // "nothing happened" rather than "it broke." `panel.ever_ready` is
+        // reset when a prompt starts a session after the last one went
+        // idle, so a later start failing gets the same notice.
         AiEvent::SessionCrashed { message } => {
             let panel = model.ai_panel_mut();
             panel.transcript.end_turn();
@@ -546,6 +548,13 @@ pub(super) fn ai_panel_key(
             // A prompt sent from a scrolled-back panel would
             // otherwise stream its answer somewhere off screen.
             panel.follow_transcript_tail();
+            // A prompt with no live session starts a new one, whose own
+            // start can fail: `session_id` is `None` exactly when the
+            // worker is about to spawn, so this run's earlier success no
+            // longer answers for the session about to be attempted.
+            if panel.session_id.is_none() {
+                panel.ever_ready = false;
+            }
             model.dirty = true;
             // `view-core` cannot assemble this prompt's context
             // itself: every block `view_ai::context::assemble`
@@ -1138,6 +1147,57 @@ mod tests {
         assert!(
             effects.is_empty(),
             "a crash after a ready session is panel-local only: {effects:?}"
+        );
+    }
+
+    /// A prompt that starts a new session after an earlier one crashed
+    /// pays for that new session's own start failure with the same notice
+    /// a first attempt would have gotten: the reset ties the toast to the
+    /// attempt actually being made.
+    #[test]
+    fn a_prompt_that_restarts_a_crashed_session_also_toasts_if_the_restart_fails() {
+        let mut model = Model::new();
+        let _ = update(&mut model, session_ready("s1"));
+        let _ = update(
+            &mut model,
+            Msg::Ai(AiEvent::SessionCrashed {
+                message: "the agent exited".to_string(),
+            }),
+        );
+        assert_eq!(model.ai_panel().session_id, None);
+
+        model.ai_panel_mut().push_input("try again");
+        let submitted = ai_panel_key(&mut model, "<CR>", None);
+        assert!(
+            matches!(
+                submitted.as_slice(),
+                [Effect::AiPromptSubmit { text }] if text == "try again"
+            ),
+            "the prompt still submits toward the new spawn: {submitted:?}"
+        );
+        assert!(
+            !model.ai_panel().ever_ready,
+            "the earlier session's success no longer answers for this attempt"
+        );
+
+        let effects = update(
+            &mut model,
+            Msg::Ai(AiEvent::SessionCrashed {
+                message: "could not spawn the claude-code agent".to_string(),
+            }),
+        );
+
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ScheduleToastExpiry { .. })),
+            "the restart's own failure must schedule a toast, got {effects:?}"
+        );
+        let entry = model.engine.messages.entries.last().expect("a notice");
+        let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(
+            text.contains("AI agent failed to start"),
+            "the message log must name the failure: {text:?}"
         );
     }
 

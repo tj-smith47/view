@@ -194,20 +194,22 @@ fn the_agent_word_leaves_its_row_while_the_row_and_the_tiles_hold_still() {
          (settled: {settled}); screen:\n{}",
         session.screen()
     );
-    let mut shifted = false;
+    let mut moved: Option<String> = None;
     assert!(
         session.wait_for_screen(BUDGET, |screen| {
-            shifted |= !pill_row_up(screen) || tiles_top(screen) != top;
+            if moved.is_none() && (!pill_row_up(screen) || tiles_top(screen) != top) {
+                moved = Some(every_row(screen));
+            }
             every_row(screen).contains("Review")
         }),
         "the released turn never raised its review; screen:\n{}",
         session.screen()
     );
     assert!(
-        !shifted,
+        moved.is_none(),
         "the row left or the tiles moved off row {top:?} while the review rose; \
-         screen:\n{}",
-        session.screen()
+         first offending frame:\n{}",
+        moved.unwrap_or_default()
     );
     // a cell a repaint missed comes back with the next frame that repaints
     // around it, so the screen is watched for a while after the word went

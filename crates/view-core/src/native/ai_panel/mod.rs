@@ -78,9 +78,10 @@ impl UsageStats {
 pub struct AiPanelState {
     /// The live session's id, cleared when that session ends.
     pub session_id: Option<String>,
-    /// Whether any session has reached `SessionReady` in this run. A crash
-    /// with none behind it is a failure to start, which gets a notice of its
-    /// own.
+    /// Whether the session being started or currently running has reached
+    /// `SessionReady`, reset when a prompt starts a new one after the last
+    /// went idle. A crash with none behind it is a failure to start, which
+    /// gets a notice of its own.
     pub ever_ready: bool,
     /// Agent output, folded per message id as chunks stream in, and tool
     /// calls folded per `tool_call_id` as their status advances.
