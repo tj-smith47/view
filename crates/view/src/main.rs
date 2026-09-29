@@ -1729,9 +1729,10 @@ impl Drop for RedrawLogOnReturn {
     }
 }
 
-/// Waits a bounded time for the redraw log's last lines, and prints the
-/// write that cut the log short, if one did. Called only once the terminal
-/// is restored, since fd 2 reaches the terminal again from then.
+/// Waits a bounded time for the redraw log's last lines, and prints why the
+/// log may end early, when a write failed or the wait ran out. Called only
+/// once the terminal is restored, since fd 2 reaches the terminal again
+/// from then.
 fn finish_redraw_log() {
     if let Err(e) = view_engine::redraw_log::finish(native::REDRAW_LOG_QUIT_WAIT) {
         eprintln!("view: {e}");

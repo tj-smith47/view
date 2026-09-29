@@ -11,7 +11,7 @@
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -30,12 +30,31 @@ struct Log {
 }
 
 /// A write to the `VIEW_REDRAW_LOG` file that failed. The writer stops at
-/// it, so the file ends before the line it names.
+/// it, so the file holds nothing past the batch that starts at the line it
+/// names, and may hold part of that batch.
 #[derive(Debug, thiserror::Error)]
-#[error("VIEW_REDRAW_LOG write failed at line {line}: {source}, the log stops there")]
+#[error(
+    "VIEW_REDRAW_LOG write failed at line {line}: {source}, \
+     the log stops in the batch that starts there"
+)]
 pub struct WriteError {
     line: u64,
     source: std::io::Error,
+}
+
+/// Why the last lines of the `VIEW_REDRAW_LOG` file may be missing.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum FinishError {
+    /// A write failed and stopped the writer.
+    #[error(transparent)]
+    Write(#[from] WriteError),
+    /// The writer was still writing when the wait ran out.
+    #[error("VIEW_REDRAW_LOG was still writing after {wait:?} at exit, the file may end early")]
+    Busy {
+        /// How long [`finish`] waited.
+        wait: Duration,
+    },
 }
 
 /// Starts the thread that writes each text it receives to `file`, until
@@ -114,19 +133,22 @@ fn open(path: Option<OsString>) -> Result<Option<Mutex<Log>>, OpenError> {
 ///
 /// # Errors
 ///
-/// Returns the [`WriteError`] that stopped the writer, when one did.
-pub fn finish(wait: Duration) -> Result<(), WriteError> {
+/// Returns [`FinishError::Write`] with the write that stopped the writer,
+/// when one did, and [`FinishError::Busy`] when the writer was still
+/// writing after `wait`.
+pub fn finish(wait: Duration) -> Result<(), FinishError> {
     sink().map_or(Ok(()), |sink| close(sink, wait))
 }
 
-fn close(sink: &Mutex<Log>, wait: Duration) -> Result<(), WriteError> {
+fn close(sink: &Mutex<Log>, wait: Duration) -> Result<(), FinishError> {
     let done = {
         let mut log = sink.lock().unwrap_or_else(PoisonError::into_inner);
         log.lines = None;
         log.done.take()
     };
     match done.map(|done| done.recv_timeout(wait)) {
-        Some(Ok(Some(failed))) => Err(failed),
+        Some(Ok(Some(failed))) => Err(failed.into()),
+        Some(Err(RecvTimeoutError::Timeout)) => Err(FinishError::Busy { wait }),
         _ => Ok(()),
     }
 }
@@ -327,7 +349,7 @@ mod tests {
 
     /// A file whose first write waits until the test lets it through.
     struct Held {
-        file: std::fs::File,
+        file: Box<dyn std::io::Write + Send>,
         released: mpsc::Receiver<()>,
     }
 
@@ -366,7 +388,7 @@ mod tests {
         let dir = ScratchDir::new("redraw-log").unwrap();
         let path = dir.path().join("redraw.log");
         let (release, released) = mpsc::channel();
-        let file = std::fs::File::create(&path).unwrap();
+        let file = Box::new(std::fs::File::create(&path).unwrap());
         let sink = Mutex::new(spawn(Box::new(Held { file, released })).unwrap());
         let (done, returned) = mpsc::channel();
         std::thread::scope(|s| {
@@ -389,26 +411,35 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "0 a\n1 b\n2 c\n");
     }
 
-    /// `close` gives a writer stuck on the disk `wait` and then returns,
-    /// leaving the writer where it is.
+    /// `close` gives a writer stuck on the disk `wait`, then returns an
+    /// error saying the file may end early, leaving the writer where it is.
     ///
     /// Disconfirm: `close` waiting on `done.recv()` with no timeout, as the
-    /// join it replaced did, is still waiting at the deadline.
+    /// join it replaced did, is still waiting at the deadline, and `close`
+    /// mapping `Timeout` to `Ok` answers with no error.
     #[test]
     fn closing_returns_after_its_wait_when_the_file_never_answers() {
-        let dir = ScratchDir::new("redraw-log").unwrap();
-        let file = std::fs::File::create(dir.path().join("redraw.log")).unwrap();
         let (release, released) = mpsc::channel();
+        let file = Box::new(std::io::sink());
         let sink = Mutex::new(spawn(Box::new(Held { file, released })).unwrap());
         write(&sink, ["a".to_string()]);
         let (done, returned) = mpsc::channel();
         std::thread::scope(|s| {
             s.spawn(|| {
-                let _ = done.send(close(&sink, Duration::from_millis(50)).is_ok());
+                let shown = close(&sink, Duration::from_millis(50)).map_err(|e| e.to_string());
+                let _ = done.send(shown);
             });
             let answer = returned.recv_timeout(patient());
             drop(release);
-            assert_eq!(answer, Ok(true), "close waited on the held file");
+            assert_eq!(
+                answer,
+                Ok(Err(
+                    "VIEW_REDRAW_LOG was still writing after 50ms at exit, \
+                        the file may end early"
+                        .to_string()
+                )),
+                "close waited on the held file, or answered a busy writer with Ok"
+            );
         });
     }
 
@@ -447,7 +478,8 @@ mod tests {
             .to_string();
         assert_eq!(
             shown,
-            "VIEW_REDRAW_LOG write failed at line 2: no space left, the log stops there"
+            "VIEW_REDRAW_LOG write failed at line 2: no space left, \
+             the log stops in the batch that starts there"
         );
     }
 

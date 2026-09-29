@@ -294,8 +294,9 @@ struct RecordWriter {
 /// behind it is a hang.
 const RECORD_QUIT_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// How long quitting waits for the redraw log's queued lines. Each is one
-/// append of a few hundred bytes, so the record writes' bound covers it.
+/// How long quitting waits for the redraw log's queued lines. What is
+/// queued at quit is the last few batches, a few kilobytes of appends, so
+/// the record writes' bound covers it.
 pub(crate) const REDRAW_LOG_QUIT_WAIT: std::time::Duration = RECORD_QUIT_WAIT;
 
 impl RecordWriter {

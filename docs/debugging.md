@@ -63,8 +63,10 @@ VIEW_REDRAW_LOG=~/redraw.log view src/main.rs
 ```
 
 The numbers run in the order the lines were written, across every thread. When
-a write to the file fails, the log stops at that line, and view names the line
-on exit. Attach this file to a bug report about text drawn in the wrong place,
-or left behind after a window or the terminal changed size.
+a write to the file fails, the log stops in the batch that starts at that line,
+and view names the line on exit. When the file is still being written as view
+exits, the log may end early, and view says so on exit. Attach this file to a
+bug report about text drawn in the wrong place, or left behind after a window or
+the terminal changed size.
 
 The two variables can be set together.
