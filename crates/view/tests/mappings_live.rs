@@ -651,3 +651,88 @@ fn literal_taking_key(command: &str) -> Option<String> {
     }
     (key.chars().count() == 1).then(|| key.to_string())
 }
+
+/// The command tables a `:` line is read with, re-derived from the engine
+/// they were read off.
+///
+/// `TAKES_BAR` is `:help :bar`'s list and `MODIFIERS` is
+/// `:help :command-modifiers`' list, both transcribed by hand, so a version
+/// bump that adds or drops a command drifts them silently. Every table's
+/// fewest-characters count is asked of the engine's own `fullcommand()`.
+///
+/// Skipped where the runtime ships no documentation, for the reason the
+/// literal-key test above gives.
+#[test]
+fn the_command_tables_match_the_pinned_engines_help() {
+    use view_core::native::submit_hold::commands::{MODIFIERS, SCRIPT_COMMANDS, TAKES_BAR};
+
+    let session = Session::start("command-tables");
+    let doc = Path::new(&session.eval("$VIMRUNTIME")).join("doc");
+    let (Ok(cmdline), Ok(map)) = (
+        std::fs::read_to_string(doc.join("cmdline.txt")),
+        std::fs::read_to_string(doc.join("map.txt")),
+    ) else {
+        eprintln!(
+            "skipped: {} holds no cmdline.txt and map.txt to re-derive the tables from",
+            doc.display()
+        );
+        return;
+    };
+
+    let (named, forms) = bar_commands(&cmdline);
+    let names = |table: &[(&'static str, usize)]| -> Vec<&'static str> {
+        table.iter().map(|&(name, _)| name).collect()
+    };
+    assert_eq!(names(&TAKES_BAR), named, ":help :bar lists these commands");
+    assert_eq!(
+        forms,
+        [":read !", ":write !", ":[range]!"],
+        ":help :bar lists these filter forms, which `takes_bar` reads apart from the table"
+    );
+    assert_eq!(
+        names(&MODIFIERS),
+        command_modifiers(&map),
+        ":help :command-modifiers lists these modifiers"
+    );
+
+    for &(full, shortest) in TAKES_BAR.iter().chain(&SCRIPT_COMMANDS).chain(&MODIFIERS) {
+        let runs = |typed: &str| session.eval(&format!("fullcommand('{typed}')")) == full;
+        assert!(
+            runs(&full[..shortest]),
+            "`:{}` runs `:{full}`",
+            &full[..shortest]
+        );
+        assert!(
+            shortest == 1 || !runs(&full[..shortest - 1]),
+            "`:{}` already runs `:{full}`, so {shortest} is not the fewest characters",
+            &full[..shortest - 1]
+        );
+    }
+}
+
+/// The commands `:help :bar` lists by name, and the forms it lists with
+/// an argument (`:read !`), in the order the file gives them.
+fn bar_commands(help: &str) -> (Vec<&str>, Vec<&str>) {
+    let (named, forms) = help
+        .lines()
+        .skip_while(|line| !line.contains("*:bar*"))
+        .skip_while(|line| !line.starts_with("    :"))
+        .take_while(|line| line.starts_with("    :"))
+        .map(str::trim)
+        .partition::<Vec<_>, _>(|entry| entry[1..].chars().all(|c| c.is_ascii_alphanumeric()));
+    (named.into_iter().map(|entry| &entry[1..]).collect(), forms)
+}
+
+/// The modifiers `:help :command-modifiers` lists, in its order.
+fn command_modifiers(help: &str) -> Vec<&str> {
+    let Some(start) = help.find("*:command-modifiers*") else {
+        return Vec::new();
+    };
+    let paragraph = &help[start..];
+    let end = paragraph.find("Note that").unwrap_or(paragraph.len());
+    paragraph[..end]
+        .split('|')
+        .filter_map(|token| token.strip_prefix(':'))
+        .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase()))
+        .collect()
+}

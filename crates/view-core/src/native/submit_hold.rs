@@ -7,7 +7,7 @@
 //! buffer the panel was opened from. Holding them until the invocation's
 //! notification comes back lets the focus it sets decide where they go.
 
-mod commands;
+pub mod commands;
 
 use std::time::Duration;
 
@@ -283,7 +283,7 @@ pub struct SubmitHold {
     /// Every text the tracked line has held while view knew it, oldest
     /// first. nvim showing one of them is showing keys still in flight,
     /// whatever the edit that led away from it.
-    states: Vec<String>,
+    states: Vec<State>,
     /// Whether nvim has shown the tracked line open.
     opened: bool,
     /// Lines the tracker has seen end that nvim has not yet hidden.
@@ -324,6 +324,24 @@ pub struct SubmitHold {
     /// Whether the user's config turned `'timeout'` off, so nvim waits
     /// for the next key however long it takes.
     timeout_off: bool,
+}
+
+/// One text the tracked line held.
+#[derive(Debug, Clone)]
+struct State {
+    typed: String,
+    /// What the user's command-line mappings made of `typed` where that
+    /// differs from it. Expanded as the key that gave the line this text
+    /// is folded, so the `<CR>` reading every state compares text only.
+    mapped: Option<String>,
+}
+
+/// Whether nvim showing `shown` is showing keys still in flight: a text
+/// `states` records, or what the user's mappings made of one.
+fn in_flight(states: &[State], shown: &str) -> bool {
+    states
+        .iter()
+        .any(|state| state.typed == shown || state.mapped.as_deref() == Some(shown))
 }
 
 /// One key sent to nvim in normal mode.
@@ -443,6 +461,11 @@ impl SubmitHold {
             .map(|map| map.lhs.chars().count())
             .max()
             .unwrap_or(0);
+        let states = std::mem::take(&mut self.states);
+        self.states = states
+            .into_iter()
+            .map(|state| self.state(state.typed))
+            .collect();
     }
 
     /// `typed` as nvim puts it on the line once its command-line mappings
@@ -613,20 +636,15 @@ impl SubmitHold {
         self.expand_abbreviation(line, end)
     }
 
-    /// The text nvim shows for `typed` while keys after it are still on
-    /// their way.
-    fn shown_for(&self, typed: &str) -> String {
-        self.expand_mappings(typed, false)
-            .map_or_else(|| typed.to_string(), |line| line.text)
-    }
-
-    /// Whether nvim showing `shown` is showing keys still in flight: a
-    /// text `states` records, or what the user's mappings made of one.
-    /// The texts themselves are compared first, since nvim has usually
-    /// caught up and shows the newest of them.
-    fn in_flight(&self, states: &[String], shown: &str) -> bool {
-        states.iter().any(|state| state == shown)
-            || self.longest_lhs > 0 && states.iter().any(|state| self.shown_for(state) == shown)
+    /// `typed` recorded with the text nvim shows for it while keys after
+    /// it are still on their way.
+    fn state(&self, typed: String) -> State {
+        let mapped = (self.longest_lhs > 0)
+            .then(|| self.expand_mappings(&typed, false))
+            .flatten()
+            .map(|line| line.text)
+            .filter(|mapped| *mapped != typed);
+        State { typed, mapped }
     }
 
     /// Ends the tracked line when the key just typed into it completed a
@@ -883,7 +901,7 @@ impl SubmitHold {
         }
         let shown: String = line.content.iter().map(|(_, s)| s.as_str()).collect();
         self.opened = match &self.typed {
-            Some(Typed::Known(_)) => self.in_flight(&self.states, &shown),
+            Some(Typed::Known(_)) => in_flight(&self.states, &shown),
             Some(_) => true,
             None => false,
         };
@@ -916,7 +934,8 @@ impl SubmitHold {
             return;
         };
         if self.states.len() < TRACKED_MAX {
-            self.states.push(text.clone());
+            let state = self.state(text.clone());
+            self.states.push(state);
         } else {
             self.typed = Some(Typed::unknown());
         }
@@ -973,7 +992,10 @@ fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         .map(|invocation| invocation.keys.len())
         .max()
         .unwrap_or(0);
-    if !normal || longest == 0 {
+    // keys typed on a tracked `:` line are its text, whatever mode nvim
+    // last reported: a line view sends itself opens with no `:` folded
+    // here to mark the mode unsure
+    if !normal || longest == 0 || hold.typed.is_some() {
         hold.recent.clear();
         return false;
     }
@@ -1302,7 +1324,7 @@ pub(crate) fn may_open(model: &Model) -> bool {
 /// its keys, and the user's command-line mappings and abbreviations expand
 /// the keys it has not read yet. An abbreviation that ends the line is
 /// expanded by the `<CR>` itself, after nvim's last show of the line.
-fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[String]) -> bool {
+fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[State]) -> bool {
     let hold = &model.submit_hold;
     let shown = model
         .engine
@@ -1323,7 +1345,7 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[St
         )
     };
     match (typed, shown) {
-        (Some(Typed::Known(_)), Some(shown)) if opened && !hold.in_flight(states, &shown) => {
+        (Some(Typed::Known(_)), Some(shown)) if opened && !in_flight(states, &shown) => {
             shown_view(&shown)
         }
         (Some(Typed::Known(text)), _) => names_view(&hold.expand_typed(text, true).text),
@@ -1679,32 +1701,185 @@ mod tests {
         assert!(held.is_empty(), "{held:?}");
     }
 
+    /// Ten command-line rows, one of them the `%%` that types the current
+    /// file's directory through an expression only nvim can evaluate.
+    const TEN_ROWS: [(&str, &str, bool, bool, bool); 10] = [
+        ("%%", "<C-r>=expand('%:h').'/'<CR>", false, true, false),
+        ("q1", "one", false, true, false),
+        ("q2", "two", false, true, false),
+        ("q3", "three", false, true, false),
+        ("q4", "four", false, true, false),
+        ("q5", "five", false, true, false),
+        ("q6", "six", false, true, false),
+        ("q7", "seven", false, true, false),
+        ("q8", "eight", false, true, false),
+        ("q9", "nine", false, true, false),
+    ];
+
+    /// The keys of the longest line view tracks: `e %%` and then letters,
+    /// 255 characters in all.
+    fn longest_line() -> Vec<String> {
+        let mut keys: Vec<String> = ["e", "<Space>", "%", "%"].map(String::from).into();
+        keys.extend((0..TRACKED_MAX - 5).map(|at| ((b'a' + (at % 26) as u8) as char).to_string()));
+        keys
+    }
+
+    /// `rows` learned, the longest line typed and shown as `shown` makes
+    /// of the text typed.
+    fn typed_longest(rows: bool, shown: impl Fn(&Model, &str) -> String) -> Model {
+        let mut model = normal_mode();
+        if rows {
+            cmdline_maps(&mut model, &TEN_ROWS);
+        }
+        let keys = longest_line();
+        let typed: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let _ = type_keys(&mut model, &[":"]);
+        show_line(&mut model, "");
+        let _ = type_keys(&mut model, &typed);
+        let text = "e %%".to_string() + &keys[4..].concat();
+        let shown = shown(&model, &text);
+        show_line(&mut model, &shown);
+        model
+    }
+
+    /// nvim's line for the `%%` config: the expression typed the directory
+    /// view cannot compute, so the line matches no text view recorded.
+    fn expanded_by_nvim(_: &Model, text: &str) -> String {
+        text.replacen("%%", "src/", 1)
+    }
+
     /// The `<CR>` of the longest line view tracks runs no mapping
-    /// expansion where the config maps nothing on the command line, and
-    /// one where nvim shows the newest text the keys gave the line.
+    /// expansion where the config maps nothing on the command line or
+    /// where nvim shows a line no recorded text matches, and one where
+    /// nvim shows what the mappings made of the newest text.
     #[test]
     fn a_submitted_line_expands_no_mapping_it_need_not() {
-        let text: Vec<String> = (0..TRACKED_MAX - 1)
-            .map(|at| ((b'a' + (at % 26) as u8) as char).to_string())
+        type Shown = fn(&Model, &str) -> String;
+        let newest_mapped: Shown = |model, text| model.submit_hold.expand_typed(text, false).text;
+        let cases: [(bool, Shown, usize); 3] = [
+            (false, expanded_by_nvim, 0),
+            (true, expanded_by_nvim, 0),
+            (true, newest_mapped, 1),
+        ];
+        for (at, (rows, shown, expected)) in cases.into_iter().enumerate() {
+            let mut model = typed_longest(rows, shown);
+            assert!(model.submit_hold.line_opened(), "case {at}");
+            EXPANSIONS.with(|count| count.set(0));
+            let sent = type_keys(&mut model, &["<CR>"]);
+            assert!(!arms(&sent), "case {at}: {sent:?}");
+            let expansions = EXPANSIONS.with(std::cell::Cell::get);
+            assert_eq!(expansions, expected, "case {at}");
+        }
+    }
+
+    /// The median of `runs` timings of `measured`, each taken on a fresh
+    /// `prepared` model.
+    fn median_of(
+        runs: usize,
+        prepared: impl Fn() -> Model,
+        measured: impl Fn(&mut Model),
+    ) -> Duration {
+        let mut took: Vec<Duration> = (0..runs)
+            .map(|_| {
+                let mut model = prepared();
+                let started = std::time::Instant::now();
+                measured(&mut model);
+                started.elapsed()
+            })
             .collect();
-        let typed: Vec<&str> = text.iter().map(String::as_str).collect();
-        let newest = text.concat();
-        // with rows, the in-flight line is read once through the mappings,
-        // as the keys typed decide it
-        for (rows, shown, expected) in [(false, "something else", 0), (true, newest.as_str(), 1)] {
+        took.sort_unstable();
+        took[runs / 2]
+    }
+
+    /// The last key of the longest line view tracks and the `<CR>` that
+    /// submits it, under ten command-line rows and a shown line no
+    /// recorded text matches, each stay under ten times the median this
+    /// host measured for it. The key expands its line once; the `<CR>`
+    /// compares text alone.
+    #[test]
+    fn the_last_key_and_the_cr_of_a_mapped_line_stay_under_ten_times_their_median() {
+        // debug-build medians of this test on dev-linux
+        const RUNS: usize = 21;
+        const KEY_MEDIAN_US: u64 = 533;
+        const CR_MEDIAN_US: u64 = 35;
+        let key_median = Duration::from_micros(KEY_MEDIAN_US);
+        let cr_median = Duration::from_micros(CR_MEDIAN_US);
+        let keys = longest_line();
+        let (last, head) = (&keys[keys.len() - 1], &keys[..keys.len() - 1]);
+        let before_last = || {
             let mut model = normal_mode();
-            if rows {
-                cmdline_maps(&mut model, &[("zz", "View", false, true, false)]);
-            }
+            cmdline_maps(&mut model, &TEN_ROWS);
+            let typed: Vec<&str> = head.iter().map(String::as_str).collect();
             let _ = type_keys(&mut model, &[":"]);
             show_line(&mut model, "");
             let _ = type_keys(&mut model, &typed);
-            show_line(&mut model, shown);
-            EXPANSIONS.with(|count| count.set(0));
-            let sent = type_keys(&mut model, &["<CR>"]);
-            assert!(!arms(&sent), "rows {rows}: {sent:?}");
-            let expansions = EXPANSIONS.with(std::cell::Cell::get);
-            assert_eq!(expansions, expected, "rows {rows}");
+            model
+        };
+        let key = median_of(RUNS, before_last, |model| {
+            let _ = type_keys(model, &[last]);
+        });
+        let cr = median_of(
+            RUNS,
+            || typed_longest(true, expanded_by_nvim),
+            |model| {
+                let _ = type_keys(model, &["<CR>"]);
+            },
+        );
+        eprintln!("median last key {key:?}, median <CR> {cr:?}");
+        assert!(
+            key <= view_test_support::host_deadline(key_median * 10),
+            "the last key of a 255-character line under ten rows took a median {key:?}"
+        );
+        assert!(
+            cr <= view_test_support::host_deadline(cr_median * 10),
+            "the <CR> of a 255-character line under ten rows took a median {cr:?}"
+        );
+    }
+
+    /// A `:` line view opens itself is read as typed text until it ends:
+    /// a claimed sequence its keys spell completes nothing, whatever mode
+    /// nvim last reported.
+    #[test]
+    fn keys_on_a_reopened_line_complete_no_sequence() {
+        let mut model = claiming(&[Some("<Space>p")]);
+        let _ = crate::update::update(
+            &mut model,
+            Msg::FeatureInvoke {
+                feature: String::new(),
+                verb: String::new(),
+            },
+        );
+        let sent = type_keys(&mut model, &["<Space>", "p"]);
+        assert!(!arms(&sent), "{sent:?}");
+        assert!(model.submit_hold.types_a_line());
+        let sent = type_keys(
+            &mut model,
+            &[
+                "<BS>", "<BS>", "a", "i", "<Space>", "o", "p", "e", "n", "<CR>",
+            ],
+        );
+        assert!(arms(&sent), "{sent:?}");
+        let held = type_keys(&mut model, &["j"]);
+        assert!(held.is_empty(), "{held:?}");
+    }
+
+    /// `:silent View ai open` and `:vert View ai open` run `:View`.
+    #[test]
+    fn a_view_command_behind_a_modifier_arms_the_hold() {
+        for modifier in ["silent", "vert"] {
+            let mut model = normal_mode();
+            let mut keys = vec![":".to_string()];
+            let line = format!("{modifier} View ai open");
+            keys.extend(line.chars().map(|c| match c {
+                ' ' => "<Space>".to_string(),
+                c => c.to_string(),
+            }));
+            keys.push("<CR>".to_string());
+            let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+            let sent = type_keys(&mut model, &keys);
+            assert!(arms(&sent), "{modifier}: {sent:?}");
+            let held = type_keys(&mut model, &["j"]);
+            assert!(held.is_empty(), "{modifier}: {held:?}");
         }
     }
 

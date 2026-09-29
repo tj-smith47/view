@@ -729,18 +729,11 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             if feature == "keys" {
                 return keys_invoke(model, &verb);
             }
-            // a bare `:View` (both tokens empty) is the discoverability
-            // entry point: nothing was asked for, so nothing was invoked,
-            // but nvim's own command-line completion for `:View` already
-            // lists every registered feature/verb form (see
-            // `nvim_api::register_mappings`), so reopening the command line
-            // pre-seeded with the command name puts that completion one
-            // `<Tab>` away inside the palette itself -- a strictly better
-            // answer than a toast alone to a user wondering what to type.
-            // Every other unmatched (feature, verb) pair -- a typo, a form
-            // this build has registered no handler for -- still only gets
-            // the notice below; reopening the cmdline for those would
-            // replay whatever malformed thing was just typed.
+            // a bare `:View` asks for nothing, and nvim's completion for
+            // `:View` lists every registered form, so the line reopened
+            // with the command name puts that list one `<Tab>` away. Any
+            // other unmatched pair gets the notice alone, since reopening
+            // the line would replay the typo just submitted.
             if feature.is_empty() && verb.is_empty() {
                 model.dirty = true;
                 let mut effects = model

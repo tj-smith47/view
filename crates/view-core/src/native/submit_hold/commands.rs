@@ -6,7 +6,7 @@
 pub(super) fn names_view(line: &str) -> bool {
     let mut rest = line;
     loop {
-        let command = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+        let command = skip_modifiers(rest);
         let word = command_word(command);
         if word.starts_with('V') && "View".starts_with(word) {
             return true;
@@ -14,7 +14,7 @@ pub(super) fn names_view(line: &str) -> bool {
         if takes_bar(command) {
             return false;
         }
-        let Some(bar) = next_bar(command) else {
+        let Some(bar) = unescaped(command, '|') else {
             return false;
         };
         rest = &command[bar + 1..];
@@ -29,12 +29,16 @@ fn command_word(command: &str) -> &str {
         .unwrap_or_default()
 }
 
+/// Whether `word` is `full` or an abbreviation nvim runs as it, given the
+/// fewest characters (`shortest`) it accepts.
+fn abbreviates(word: &str, full: &str, shortest: usize) -> bool {
+    word.len() >= shortest && full.starts_with(word)
+}
+
 /// The commands `:help :bar` lists as reading a `|` as their argument,
-/// with the shortest abbreviation nvim accepts for each. `:read !`,
-/// `:write !` and `:[range]!` are read by [`takes_bar`], and the script
-/// commands and `:tabdo` join the list because the engine's command
-/// table gives them no `|` handling either.
-const TAKES_BAR: [(&str, usize); 34] = [
+/// with the fewest characters nvim accepts for each. `:read !`,
+/// `:write !`, `:[range]!` and user commands are read by [`takes_bar`].
+pub const TAKES_BAR: [(&str, usize); 29] = [
     ("argdo", 5),
     ("autocmd", 2),
     ("bufdo", 4),
@@ -52,6 +56,7 @@ const TAKES_BAR: [(&str, usize); 34] = [
     ("ldo", 2),
     ("lfdo", 3),
     ("lhelpgrep", 2),
+    ("lsp", 3),
     ("make", 3),
     ("normal", 4),
     ("perlfile", 5),
@@ -59,17 +64,84 @@ const TAKES_BAR: [(&str, usize); 34] = [
     ("python", 2),
     ("registers", 3),
     ("sign", 3),
+    ("tabdo", 4),
     ("terminal", 2),
     ("vglobal", 1),
     ("windo", 4),
-    ("tabdo", 4),
+];
+
+/// The script commands the engine's command table gives no `|` handling,
+/// which `:help :bar` leaves out, with the fewest characters nvim accepts
+/// for each.
+pub const SCRIPT_COMMANDS: [(&str, usize); 20] = [
     ("lua", 3),
     ("luado", 4),
     ("luafile", 4),
-    ("python3", 7),
+    ("perl", 2),
+    ("perldo", 5),
     ("py3", 3),
+    ("py3do", 4),
+    ("py3file", 4),
+    ("pydo", 3),
+    ("python3", 7),
+    ("pythonx", 7),
     ("pyx", 3),
+    ("pyxdo", 4),
+    ("pyxfile", 4),
+    ("ruby", 3),
+    ("rubydo", 5),
+    ("rubyfile", 5),
+    ("tcl", 3),
+    ("tcldo", 4),
+    ("tclfile", 4),
 ];
+
+/// The command modifiers `:help :command-modifiers` lists, with the fewest
+/// characters nvim accepts for each. A modifier runs the command written
+/// after it on the same line.
+pub const MODIFIERS: [(&str, usize); 23] = [
+    ("aboveleft", 3),
+    ("belowright", 2),
+    ("botright", 2),
+    ("browse", 3),
+    ("confirm", 4),
+    ("hide", 3),
+    ("horizontal", 2),
+    ("keepalt", 5),
+    ("keepjumps", 5),
+    ("keepmarks", 3),
+    ("keeppatterns", 5),
+    ("leftabove", 5),
+    ("lockmarks", 3),
+    ("noautocmd", 3),
+    ("noswapfile", 3),
+    ("rightbelow", 6),
+    ("sandbox", 3),
+    ("silent", 3),
+    ("tab", 3),
+    ("topleft", 2),
+    ("unsilent", 3),
+    ("verbose", 4),
+    ("vertical", 4),
+];
+
+/// `command` past its leading colons and the modifiers written before its
+/// name, each with the count or `!` it takes.
+fn skip_modifiers(command: &str) -> &str {
+    let mut rest = command;
+    loop {
+        rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+        let counted = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+        let word = command_word(counted);
+        if !MODIFIERS
+            .iter()
+            .any(|&(full, shortest)| abbreviates(word, full, shortest))
+        {
+            return rest;
+        }
+        rest = counted[word.len()..].trim_start_matches('!');
+    }
+}
 
 /// Whether `command` reads the rest of its line, `|` included, as its
 /// argument. A user command reads it unless it was defined with `-bar`,
@@ -81,16 +153,18 @@ fn takes_bar(command: &str) -> bool {
     }
     let word = command_word(command);
     let after = &command[word.len()..];
-    let abbreviates =
-        |full: &str, shortest: usize| word.len() >= shortest && full.starts_with(word);
     let filter = after.trim_start().starts_with('!');
-    word.starts_with(|c: char| c.is_ascii_uppercase())
-        || abbreviates("read", 1) && filter
-        // `:w!` forces the write, and only `:w !` filters
-        || abbreviates("write", 1) && filter && after.starts_with(char::is_whitespace)
-        || TAKES_BAR
+    let listed = |table: &[(&str, usize)]| {
+        table
             .iter()
-            .any(|&(full, shortest)| abbreviates(full, shortest))
+            .any(|&(full, shortest)| abbreviates(word, full, shortest))
+    };
+    word.starts_with(|c: char| c.is_ascii_uppercase())
+        || abbreviates(word, "read", 1) && filter
+        // `:w!` forces the write, and only `:w !` filters
+        || abbreviates(word, "write", 1) && filter && after.starts_with(char::is_whitespace)
+        || listed(&TAKES_BAR)
+        || listed(&SCRIPT_COMMANDS)
 }
 
 /// `command` past the line range written before its name.
@@ -109,13 +183,7 @@ fn skip_range(command: &str) -> &str {
             }
             Some(delimiter @ ('/' | '?')) => {
                 let pattern = chars.as_str();
-                let mut escaped = false;
-                let end = pattern.find(|c: char| {
-                    let ends = !escaped && c == delimiter;
-                    escaped = !escaped && c == '\\';
-                    ends
-                });
-                end.map_or("", |end| &pattern[end + 1..])
+                unescaped(pattern, delimiter).map_or("", |end| &pattern[end + 1..])
             }
             Some('\\') if rest[1..].starts_with(['/', '?', '&']) => &rest[2..],
             _ => return rest,
@@ -123,14 +191,14 @@ fn skip_range(command: &str) -> &str {
     }
 }
 
-/// Where the `|` that ends `command` stands. A backslash before one makes
-/// it part of the argument.
-fn next_bar(command: &str) -> Option<usize> {
+/// Where the first `target` in `text` stands that no backslash makes part
+/// of the text.
+fn unescaped(text: &str, target: char) -> Option<usize> {
     let mut escaped = false;
-    command.char_indices().find_map(|(at, c)| {
-        let ends = !escaped && c == '|';
+    text.char_indices().find_map(|(at, c)| {
+        let found = !escaped && c == target;
         escaped = !escaped && c == '\\';
-        ends.then_some(at)
+        found.then_some(at)
     })
 }
 
@@ -159,6 +227,7 @@ mod tests {
             "echo 1|w|View",
             "w!|View",
             "set ft=x\\|y|View",
+            "hide|View",
         ] {
             assert!(names_view(line), "{line:?}");
         }
@@ -175,10 +244,45 @@ mod tests {
             "w !cat|View",
             "Foo x|View",
             "windo e|View",
+            "tabdo e|View",
+            "lsp restart|View",
             "lua print(1)|View",
+            "py3file x.py|View",
+            "rubyd x|View",
+            "tcl x|View",
+            "silent normal x|View",
             "echo 'a\\|View'",
             "'<,'>normal x|View",
+            "/a\\/b/normal x|View",
         ] {
+            assert!(!names_view(line), "{line:?}");
+        }
+    }
+
+    /// A modifier runs the command after it, so `View` written behind one
+    /// or several is the command the line runs.
+    #[test]
+    fn a_view_command_behind_a_modifier_is_read() {
+        for line in [
+            "silent View ai open",
+            "silent! View",
+            "sil View",
+            "vert View",
+            "vertical View",
+            "tab View",
+            "3tab View",
+            "2verbose View",
+            "topleft View",
+            "botright vert View",
+            "aboveleft keepalt View",
+            "belowright keepjumps keepmarks keeppatterns View",
+            "lockmarks noautocmd noswapfile confirm View",
+            "hide unsilent View",
+            "w|silent View",
+        ] {
+            assert!(names_view(line), "{line:?}");
+        }
+        for line in ["silent echo 1", "si View", "3View", "silentView"] {
             assert!(!names_view(line), "{line:?}");
         }
     }
