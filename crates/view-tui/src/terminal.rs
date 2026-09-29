@@ -2062,7 +2062,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// Show and hide are each a change, not a per-frame restatement.
+    /// A frame that paints no cell states the caret only when it changes:
+    /// one hide when the caret leaves, one show when it comes back.
     #[test]
     fn the_caret_is_shown_once_when_it_comes_back() {
         for sync in [false, true] {
