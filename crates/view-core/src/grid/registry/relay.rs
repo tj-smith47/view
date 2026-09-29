@@ -9,13 +9,15 @@ impl GridRegistry {
     /// in every slot no window here fills. `placed` is this registry's
     /// [`Self::window_layout`]. `held` gives, by index into `layout`, the
     /// cells that slot showed before. A window or stand-in claimed for a
-    /// native pane not placed yet shows a blank grid. An unclaimed stand-in
-    /// shows its held cells, and so does an unclaimed window here nvim has
-    /// not drawn any text into yet.
+    /// native pane not placed yet shows a blank grid, whatever its slot
+    /// held. An unclaimed stand-in shows its held cells, and so does an
+    /// unclaimed window here nvim has not drawn any text into yet.
     ///
     /// `drawn` keeps its own grids, and each is compared with the cells it
     /// now stands for and copied over, into its own buffers, only where the
-    /// two differ. Answers how many grids were copied, or `None`, leaving
+    /// two differ. A copy allocates only for a cell whose text outgrows the
+    /// buffer it had, and for a grid whose size moved or whose id `drawn`
+    /// has not held before. Answers how many grids were copied, or `None`, leaving
     /// `drawn` as it was, when a window here has no slot in `layout`, since
     /// the layout it would be drawn in is then no longer the one on screen,
     /// or when `reported` says every slot is a window here that reported
@@ -41,11 +43,11 @@ impl GridRegistry {
                 .find(|s| s.window.as_ref().is_some_and(|w| w.win == *win))?;
             let has_text = entry.grid.has_text();
             texted &= has_text;
-            let cells = match (has_text, held.get(index)) {
+            let blank = self.clears_when_placed(entry.id, *win);
+            let cells = match (has_text || blank, held.get(index)) {
                 (false, Some(Some(cells))) => Some(cells),
                 _ => None,
             };
-            let blank = self.clears_when_placed(entry.id, *win);
             windows.push((entry.id, *win, *slot, cells, blank));
         }
         if reported && texted {
@@ -299,6 +301,46 @@ mod tests {
             drawn.window_grid(WinHandle(1004)).map(Grid::size),
             Some((30, 10))
         );
+    }
+
+    /// A claimed window nvim has drawn no text into is blank whatever its
+    /// slot held.
+    ///
+    /// Disconfirm: taking the held cells for a window without text before
+    /// asking whether it is claimed shows "held" in the pane.
+    #[test]
+    fn a_claimed_window_without_text_is_blank_over_held_cells() {
+        let mut live = GridRegistry::new();
+        live.apply(cells(
+            GridId(3),
+            GridOp::Resize {
+                width: 20,
+                height: 10,
+            },
+        ));
+        live.apply(GridEvent::Window {
+            grid: GridId(3),
+            win: WinHandle(1004),
+            startrow: 0,
+            startcol: 0,
+            width: 20,
+            height: 10,
+        });
+        live.claims.push((WinHandle(1004), NativeSurface::Tree));
+        let layout = [(WinHandle(1004), (0, 0, 20, 10))];
+        let mut before = Grid::new();
+        before.apply(GridOp::Resize {
+            width: 20,
+            height: 10,
+        });
+        before.apply(text("held"));
+        let mut drawn = GridRegistry::new();
+
+        assert!(relay(&live, &layout, &[Some(before.clone())], &mut drawn).is_some());
+        assert_eq!(relay(&live, &layout, &[Some(before)], &mut drawn), Some(0));
+        assert!(drawn
+            .window_grid(WinHandle(1004))
+            .is_some_and(|g| !g.has_text()));
     }
 
     /// A stand-in that showed coloured blanks is redrawn blank once its slot

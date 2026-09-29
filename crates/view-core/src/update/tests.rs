@@ -1220,6 +1220,77 @@ fn a_held_layout_is_relaid_in_the_buffers_it_already_drew() {
     );
 }
 
+/// The allocations one flush makes while a restart holds the layout: a
+/// flush that changed nothing, one that copies a grid, and the one that
+/// hands the layout back. The counts are exact, so a flush that starts
+/// allocating per cell or per window fails here with the number it made.
+///
+/// Disconfirm: a derived `Clone` for `Cell` counts one more allocation on
+/// the copying flush for every cell of the copied grid.
+#[test]
+fn a_held_layout_flush_allocates_a_fixed_count() {
+    use crate::events::{GridCell, WinHandle};
+    let mut m = vsplit_model();
+    let _ = restart(&mut m);
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    let _ = update(&mut m, Msg::Redraw(vec![UiEvent::Flush]));
+    assert!(m.engine.holds_the_screen(), "the layout was not held");
+    let flush = |m: &mut Model| {
+        crate::ALLOCATOR.reset();
+        let _ = m.settle_held(true);
+        crate::ALLOCATOR.count()
+    };
+
+    assert_eq!(flush(&mut m), 3, "a flush that changed no cell");
+
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::GridLine {
+            grid: 2,
+            row: 0,
+            col_start: 0,
+            cells: vec![GridCell {
+                text: "g".into(),
+                hl_id: 0,
+                repeat: 1,
+            }],
+        }]),
+    );
+    assert_eq!(flush(&mut m), 3, "a flush that copies one grid");
+    assert_eq!(
+        m.engine
+            .painted_grids()
+            .window_grid(WinHandle(1003))
+            .map(|grid| grid.row_text(0).starts_with('g')),
+        Some(true),
+        "the copying flush left the held grid as it was"
+    );
+
+    report(&mut m, 1002, "NvimTree_1");
+    report(&mut m, 1003, "README.md");
+    let mut back = vec![
+        UiEvent::GridResize {
+            grid: 4,
+            width: 30,
+            height: 24,
+        },
+        UiEvent::WinPos {
+            grid: 4,
+            win: WinHandle(1002),
+            startrow: 0,
+            startcol: 50,
+            width: 30,
+            height: 24,
+        },
+    ];
+    back.extend(written(4, "t"));
+    back.pop();
+    let _ = update(&mut m, Msg::Redraw(back));
+    assert!(m.engine.holds_the_screen());
+    assert_eq!(flush(&mut m), 2, "the flush that hands the layout back");
+    assert!(!m.engine.holds_the_screen());
+}
+
 /// The bound hands the screen to a replacement that never reopens the
 /// dead engine's sidebar, and an expiry the dead engine armed does not.
 #[test]

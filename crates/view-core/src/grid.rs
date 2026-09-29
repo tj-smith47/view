@@ -7,12 +7,28 @@
 pub mod registry;
 
 /// A single grid cell: display text and the highlight group it was painted with.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Cell {
     /// The text to display, generally a single grapheme.
     pub text: String,
     /// The highlight group id this cell was painted with.
     pub hl_id: u64,
+}
+
+impl Clone for Cell {
+    fn clone(&self) -> Self {
+        Self {
+            text: self.text.clone(),
+            hl_id: self.hl_id,
+        }
+    }
+
+    // a derived Clone replaces the String, so copying a grid over another
+    // of its size would allocate once per cell
+    fn clone_from(&mut self, source: &Self) {
+        self.text.clone_from(&source.text);
+        self.hl_id = source.hl_id;
+    }
 }
 
 impl Default for Cell {
@@ -263,11 +279,12 @@ impl Grid {
     }
 
     /// Makes this grid `size` wide and tall with its cursor at `cursor` and
-    /// every cell [`Cell::default`], in its own buffers, and answers whether
-    /// anything changed. A cell is blank only with a space in highlight 0,
-    /// so whitespace drawn in a colour counts as a change. A grid already
+    /// every cell blank, in its own buffers, and answers whether anything
+    /// changed. A cell is blank only with a space or no text in highlight
+    /// 0, so whitespace drawn in a colour counts as a change. A grid already
     /// `size` is blanked cell by cell in place, keeping each cell's text
-    /// buffer.
+    /// buffer, and a cell with empty text, the right half of a wide
+    /// character, keeps it empty, which paints as a space.
     pub(crate) fn blank_to(&mut self, size: (u16, u16), cursor: (u16, u16)) -> bool {
         if self.size() != size {
             (self.width, self.height) = size;
@@ -283,9 +300,13 @@ impl Grid {
         let mut changed = self.cursor() != cursor;
         self.cursor_goto(cursor.0, cursor.1);
         for cell in &mut self.cells {
-            if cell.text != " " || cell.hl_id != 0 {
-                cell.text.clear();
-                cell.text.push(' ');
+            // an empty String has no buffer, and pushing into it allocates
+            let blank = cell.text.is_empty() || cell.text == " ";
+            if !blank || cell.hl_id != 0 {
+                if !blank {
+                    cell.text.clear();
+                    cell.text.push(' ');
+                }
                 cell.hl_id = 0;
                 changed = true;
             }
@@ -505,17 +526,40 @@ mod tests {
         g.apply(GridOp::PutLine {
             row: 0,
             col_start: 0,
-            cells: vec![("x".into(), 4, 10)],
+            cells: vec![("x".into(), 4, 9), (String::new(), 4, 1)],
         });
         let texts = |g: &Grid| g.cells.iter().map(|c| c.text.as_ptr()).collect::<Vec<_>>();
         let (buffer, before) = (g.buffer(), texts(&g));
 
         assert!(g.blank_to((10, 3), (1, 2)));
         assert_eq!((g.buffer(), texts(&g)), (buffer, before));
+        assert_eq!(
+            g.cell(0, 9).map(|c| (c.text.capacity(), c.hl_id)),
+            Some((0, 0))
+        );
         assert!(!g.has_text());
         assert_eq!(g.cell(0, 0).map(|c| c.hl_id), Some(0));
         assert_eq!(g.cursor(), (1, 2));
         assert!(!g.blank_to((10, 3), (1, 2)));
+    }
+
+    /// Disconfirm: a derived `Clone` for `Cell` moves every text pointer.
+    #[test]
+    fn following_a_grid_of_the_same_size_keeps_each_cells_text_buffer() {
+        let mut g = grid_10x3();
+        let mut source = grid_10x3();
+        source.apply(GridOp::PutLine {
+            row: 1,
+            col_start: 0,
+            cells: vec![("y".into(), 2, 10)],
+        });
+        let texts = |g: &Grid| g.cells.iter().map(|c| c.text.as_ptr()).collect::<Vec<_>>();
+        let (buffer, before) = (g.buffer(), texts(&g));
+
+        assert!(g.follow(&source));
+        assert_eq!((g.buffer(), texts(&g)), (buffer, before));
+        assert_eq!(g.row_text(1), "yyyyyyyyyy");
+        assert_eq!(g.cell(1, 0).map(|c| c.hl_id), Some(2));
     }
 
     #[test]

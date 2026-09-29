@@ -149,14 +149,15 @@ fn fit<'a>(
                 .any(|(held, _)| shown.contains_key(held) && !taken(held));
             return if open { Fit::Unnamed } else { Fit::Outside };
         };
-        let Some(slot) = fitted
-            .to_mut()
-            .iter_mut()
-            .find(|(held, _)| shown.get(held).map(|s| &s.name) == Some(name) && !taken(held))
+        let Some(index) = fitted
+            .iter()
+            .position(|(held, _)| shown.get(held).map(|s| &s.name) == Some(name) && !taken(held))
         else {
             return Fit::Outside;
         };
-        slot.0 = *win;
+        if let Some(slot) = fitted.to_mut().get_mut(index) {
+            slot.0 = *win;
+        }
     }
     Fit::Slots(fitted)
 }
