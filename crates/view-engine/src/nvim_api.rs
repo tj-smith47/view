@@ -3031,6 +3031,7 @@ impl EngineHandle {
     /// Returns `EngineError::Closed` if the connection's writer thread has
     /// already exited.
     pub fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError> {
+        crate::redraw_log::note(|| format!("try_resize width={width} height={height}"));
         self.notify(
             "nvim_ui_try_resize",
             vec![Value::from(width), Value::from(height)],
@@ -3054,6 +3055,9 @@ impl EngineHandle {
     /// Returns `EngineError::Closed` if the connection's writer thread has
     /// already exited.
     pub fn try_resize_grid(&self, grid: u64, width: u16, height: u16) -> Result<(), EngineError> {
+        crate::redraw_log::note(|| {
+            format!("try_resize_grid grid={grid} width={width} height={height}")
+        });
         self.notify(
             "nvim_ui_try_resize_grid",
             vec![Value::from(grid), Value::from(width), Value::from(height)],

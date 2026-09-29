@@ -358,6 +358,22 @@ pub struct GridRegistry {
     /// The floats docked to a side of the screen, which close the window
     /// slots they cover part of.
     docks: Vec<Dock>,
+    /// The size each grid's last `grid_resize` named. nvim diffs every
+    /// `grid_line` against its own copy of the grid at that size, so a grid
+    /// here of any other size paints cells nvim never sent.
+    announced: std::collections::HashMap<GridId, (u16, u16)>,
+}
+
+/// A grid holding a size other than the one its last `grid_resize` named,
+/// as `(width, height)` pairs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnannouncedSize {
+    /// The grid out of step.
+    pub grid: GridId,
+    /// The size view holds for it.
+    pub held: (u16, u16),
+    /// The size its last `grid_resize` named.
+    pub announced: (u16, u16),
 }
 
 impl GridRegistry {
@@ -372,7 +388,26 @@ impl GridRegistry {
             look: Look::default(),
             placement_dirty: false,
             docks: Vec::new(),
+            announced: std::collections::HashMap::new(),
         }
+    }
+
+    /// The first grid whose size differs from the one its last
+    /// `grid_resize` named.
+    #[must_use]
+    pub fn unannounced_size(&self) -> Option<UnannouncedSize> {
+        self.announced.iter().find_map(|(&grid, &announced)| {
+            let held = if grid == GLOBAL_GRID {
+                self.global.size()
+            } else {
+                self.slots.iter().find(|slot| slot.id == grid)?.grid.size()
+            };
+            (held != announced).then_some(UnannouncedSize {
+                grid,
+                held,
+                announced,
+            })
+        })
     }
 
     /// The global grid, for reading.
@@ -485,6 +520,7 @@ impl GridRegistry {
             // screen's own surface on one is not a recoverable state
             GridEvent::Destroy { grid } if grid != GLOBAL_GRID => {
                 self.slots.retain(|slot| slot.id != grid);
+                self.announced.remove(&grid);
             }
             GridEvent::Window {
                 grid,
@@ -583,6 +619,9 @@ impl GridRegistry {
                 self.placement_dirty = true;
             }
             self.cursor = Some(grid);
+        }
+        if let GridOp::Resize { width, height } = op {
+            self.announced.insert(grid, (width, height));
         }
         // view paints a native pane itself, so the engine's cells for the
         // scratch buffer under it are read and dropped. The cursor and the

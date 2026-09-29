@@ -10,6 +10,7 @@ mod hidden_buffers;
 pub mod nvim_api;
 mod outbox;
 pub mod process;
+pub mod redraw_log;
 pub mod rpc;
 pub mod stall;
 #[cfg(all(unix, feature = "bench-taps"))]

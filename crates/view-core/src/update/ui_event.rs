@@ -226,6 +226,14 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             Vec::new()
         }
         UiEvent::Flush => {
+            #[cfg(debug_assertions)]
+            {
+                let unannounced = model.engine.grids().unannounced_size();
+                debug_assert!(
+                    unannounced.is_none(),
+                    "a grid at flush holds a size nvim never announced: {unannounced:?}"
+                );
+            }
             model.dirty = true;
             // idempotent past the first Flush: view attaches after the
             // config has been sourced, so this one carries the settled

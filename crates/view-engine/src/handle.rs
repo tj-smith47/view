@@ -1025,6 +1025,7 @@ impl EngineHandle {
                                 let events = decode_redraw(&params);
                                 #[cfg(all(unix, feature = "bench-taps"))]
                                 crate::tap::tap(crate::tap::TAG_REDRAW_PARSED);
+                                crate::redraw_log::batch(&events);
                                 pump.fold_redraw(events);
                             } else if method == "view_invoke" {
                                 // best-effort, unlike `view_vim_enter`

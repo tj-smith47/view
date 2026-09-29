@@ -19794,3 +19794,145 @@ fn a_bare_keys_profile_invoke_requests_a_report_and_flips_nothing() {
         "naming a profile must not request the report"
     );
 }
+
+fn text_line(grid: u64, row: u64, col_start: u64, text: &str) -> UiEvent {
+    UiEvent::GridLine {
+        grid,
+        row,
+        col_start,
+        cells: text
+            .chars()
+            .map(|c| crate::events::GridCell {
+                text: c.to_string(),
+                hl_id: 0,
+                repeat: 1,
+            })
+            .collect(),
+    }
+}
+
+fn win_pos(grid: u64, win: u64, startcol: u64, width: u64, height: u64) -> UiEvent {
+    UiEvent::WinPos {
+        grid,
+        win: crate::events::WinHandle(win),
+        startrow: 0,
+        startcol,
+        width,
+        height,
+    }
+}
+
+fn grid_resize(grid: u64, width: u64, height: u64) -> UiEvent {
+    UiEvent::GridResize {
+        grid,
+        width,
+        height,
+    }
+}
+
+/// The op sequence `VIEW_REDRAW_LOG` recorded for a tiled NvimTree, look.rs
+/// and README.md layout shrunk from 220x50 to 150x38 under a login config.
+/// nvim answers the shrink with the new slots and every window grid at its
+/// standing request, which leaves README's grid 91 columns wide in a 23
+/// column slot, and only view's own request brings it down to 21x34.
+///
+/// Each flush holds every grid at the size its last `grid_resize` named,
+/// README's grid keeps the top-left corner nvim's own copy keeps, and the
+/// requests view sends are the inner sizes nvim then announced.
+///
+/// Disconfirm: `Grid::resize` keeping the old width fails the flush
+/// assertion at the first flush after the shrink.
+#[test]
+fn a_recorded_tile_shrink_leaves_every_grid_at_the_size_nvim_last_announced() {
+    let mut m = model();
+    let _ = super::look::set_look(
+        &mut m,
+        crate::model::Look::new(crate::model::Panes::Tiles, true),
+    );
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 220,
+            height: 50,
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            grid_resize(1, 218, 49),
+            UiEvent::GridClear { grid: 1 },
+            win_pos(5, 1003, 31, 93, 48),
+            win_pos(2, 1000, 125, 93, 48),
+            grid_resize(7, 28, 46),
+            grid_resize(5, 91, 46),
+            grid_resize(2, 91, 46),
+            win_pos(7, 1004, 0, 30, 48),
+            text_line(2, 1, 0, "    2 <img src=\"assets/view-logo.svg\""),
+            UiEvent::Flush,
+        ]),
+    );
+
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 150,
+            height: 38,
+        },
+    );
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![
+            grid_resize(1, 148, 37),
+            UiEvent::GridClear { grid: 1 },
+            win_pos(7, 1004, 0, 30, 36),
+            win_pos(5, 1003, 31, 93, 36),
+            win_pos(2, 1000, 125, 23, 36),
+            grid_resize(7, 28, 46),
+            grid_resize(5, 91, 46),
+            grid_resize(2, 91, 46),
+            UiEvent::Flush,
+        ]),
+    );
+    let mut requests: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Rpc(RpcCall::TryResizeGrid {
+                grid,
+                width,
+                height,
+            }) => Some((grid.0, *width, *height)),
+            _ => None,
+        })
+        .collect();
+    requests.sort_unstable();
+    assert_eq!(
+        requests,
+        vec![(2, 21, 34), (5, 91, 34), (7, 28, 34)],
+        "the shrunk slots owe the inner sizes nvim announced next: {effects:?}"
+    );
+
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            grid_resize(7, 28, 34),
+            grid_resize(5, 91, 34),
+            grid_resize(2, 21, 34),
+            text_line(2, 1, 6, "ter\">"),
+            UiEvent::Flush,
+        ]),
+    );
+    let grids = m.engine.grids();
+    assert_eq!(grids.unannounced_size(), None);
+    for (grid, size) in [(1, (148, 37)), (7, (28, 34)), (5, (91, 34)), (2, (21, 34))] {
+        assert_eq!(
+            grids.grid(GridId(grid)).map(crate::grid::Grid::size),
+            Some(size),
+            "grid {grid}"
+        );
+    }
+    assert_eq!(
+        grids.grid(GridId(2)).map(|g| g.row_text(1)).as_deref(),
+        Some("    2 ter\">src=\"asset"),
+        "the copied corner keeps what nvim's own copy keeps, under the cells it rewrote"
+    );
+}

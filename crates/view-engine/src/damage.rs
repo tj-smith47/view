@@ -1010,6 +1010,7 @@ impl PumpShared {
     fn take_damage(&self) -> (Vec<UiEvent>, Option<Instant>) {
         let mut buf = self.damage.lock().unwrap_or_else(PoisonError::into_inner);
         let events = buf.take();
+        crate::redraw_log::drained(&events);
         (events, buf.drained_at())
     }
 }
