@@ -1791,48 +1791,62 @@ mod tests {
         took[runs / 2]
     }
 
-    /// The last key of the longest line view tracks and the `<CR>` that
-    /// submits it, under ten command-line rows and a shown line no
-    /// recorded text matches, each stay under ten times the median this
-    /// host measured for it. The key expands its line once; the `<CR>`
-    /// compares text alone.
+    /// Under ten command-line rows, the last key of the longest line view
+    /// tracks costs at most 8 times the last key of a 64-character line (the
+    /// key expands its line once, about 4 times; an expansion per recorded
+    /// text is about 16 times), and the `<CR>` of that line, shown as no
+    /// recorded text matches, costs at most 5 times the `<CR>` of the same
+    /// line with no rows (the `<CR>` compares text alone). Each side is a
+    /// median of the same run: the test runs in debug on three CI hosts
+    /// beside the binary's other tests, and an absolute taken on one host
+    /// is a flake on another.
     #[test]
-    fn the_last_key_and_the_cr_of_a_mapped_line_stay_under_ten_times_their_median() {
-        // debug-build medians of this test on dev-linux
+    fn the_last_key_and_the_cr_of_a_mapped_line_scale_with_the_line() {
         const RUNS: usize = 21;
-        const KEY_MEDIAN_US: u64 = 533;
-        const CR_MEDIAN_US: u64 = 35;
-        let key_median = Duration::from_micros(KEY_MEDIAN_US);
-        let cr_median = Duration::from_micros(CR_MEDIAN_US);
+        const SHORT: usize = 64;
         let keys = longest_line();
-        let (last, head) = (&keys[keys.len() - 1], &keys[..keys.len() - 1]);
-        let before_last = || {
-            let mut model = normal_mode();
-            cmdline_maps(&mut model, &TEN_ROWS);
-            let typed: Vec<&str> = head.iter().map(String::as_str).collect();
-            let _ = type_keys(&mut model, &[":"]);
-            show_line(&mut model, "");
-            let _ = type_keys(&mut model, &typed);
-            model
+        let last_key = |length: usize| {
+            let (last, head) = (&keys[length - 1], &keys[..length - 1]);
+            let before_last = || {
+                let mut model = normal_mode();
+                cmdline_maps(&mut model, &TEN_ROWS);
+                let typed: Vec<&str> = head.iter().map(String::as_str).collect();
+                let _ = type_keys(&mut model, &[":"]);
+                show_line(&mut model, "");
+                let _ = type_keys(&mut model, &typed);
+                model
+            };
+            median_of(RUNS, before_last, |model| {
+                let _ = type_keys(model, &[last]);
+            })
         };
-        let key = median_of(RUNS, before_last, |model| {
-            let _ = type_keys(model, &[last]);
-        });
-        let cr = median_of(
-            RUNS,
-            || typed_longest(true, expanded_by_nvim),
-            |model| {
-                let _ = type_keys(model, &["<CR>"]);
-            },
+        let cr = |rows: bool| {
+            median_of(
+                RUNS,
+                || typed_longest(rows, expanded_by_nvim),
+                |model| {
+                    let _ = type_keys(model, &["<CR>"]);
+                },
+            )
+        };
+        let (key_short, key_long) = (last_key(SHORT), last_key(keys.len()));
+        let (cr_bare, cr_rows) = (cr(false), cr(true));
+        let ratio = |over: Duration, under: Duration| over.as_secs_f64() / under.as_secs_f64();
+        eprintln!(
+            "median last key {key_short:?} at {SHORT}, {key_long:?} at {}; \
+             median <CR> {cr_bare:?} with no rows, {cr_rows:?} with ten",
+            keys.len()
         );
-        eprintln!("median last key {key:?}, median <CR> {cr:?}");
         assert!(
-            key <= view_test_support::host_deadline(key_median * 10),
-            "the last key of a 255-character line under ten rows took a median {key:?}"
+            ratio(key_long, key_short) <= 8.0,
+            "the last key of a {}-character line took a median {key_long:?}, \
+             against {key_short:?} at {SHORT} characters",
+            keys.len()
         );
         assert!(
-            cr <= view_test_support::host_deadline(cr_median * 10),
-            "the <CR> of a 255-character line under ten rows took a median {cr:?}"
+            ratio(cr_rows, cr_bare) <= 5.0,
+            "the <CR> of the longest line under ten rows took a median {cr_rows:?}, \
+             against {cr_bare:?} with no rows"
         );
     }
 

@@ -96,17 +96,18 @@ pub const SCRIPT_COMMANDS: [(&str, usize); 20] = [
     ("tclfile", 4),
 ];
 
-/// The command modifiers `:help :command-modifiers` lists, with the fewest
-/// characters nvim accepts for each. A modifier runs the command written
-/// after it on the same line.
-pub const MODIFIERS: [(&str, usize); 23] = [
+/// The command modifiers `:help :command-modifiers` lists that run a user
+/// command written after them on the same line, with the fewest characters
+/// nvim's modifier parser accepts for each. `:sandbox` is on that list and
+/// refuses a user command, so it is left out.
+pub const MODIFIERS: [(&str, usize); 22] = [
     ("aboveleft", 3),
-    ("belowright", 2),
+    ("belowright", 3),
     ("botright", 2),
     ("browse", 3),
     ("confirm", 4),
     ("hide", 3),
-    ("horizontal", 2),
+    ("horizontal", 3),
     ("keepalt", 5),
     ("keepjumps", 5),
     ("keepmarks", 3),
@@ -116,7 +117,6 @@ pub const MODIFIERS: [(&str, usize); 23] = [
     ("noautocmd", 3),
     ("noswapfile", 3),
     ("rightbelow", 6),
-    ("sandbox", 3),
     ("silent", 3),
     ("tab", 3),
     ("topleft", 2),
@@ -125,21 +125,46 @@ pub const MODIFIERS: [(&str, usize); 23] = [
     ("vertical", 4),
 ];
 
+/// `:filter`, with the fewest characters nvim's modifier parser accepts.
+/// `:help :command-modifiers` leaves it off because `<mods>` does not carry
+/// it, and the parser runs the command written after its pattern.
+pub const FILTER: (&str, usize) = ("filter", 4);
+
 /// `command` past its leading colons and the modifiers written before its
-/// name, each with the count or `!` it takes.
+/// name, each with the count or `!` it takes, and `:filter` with its
+/// pattern.
 fn skip_modifiers(command: &str) -> &str {
     let mut rest = command;
     loop {
         rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
         let counted = rest.trim_start_matches(|c: char| c.is_ascii_digit());
         let word = command_word(counted);
-        if !MODIFIERS
+        let after = &counted[word.len()..];
+        rest = if abbreviates(word, FILTER.0, FILTER.1) {
+            skip_filter_pattern(after)
+        } else if MODIFIERS
             .iter()
             .any(|&(full, shortest)| abbreviates(word, full, shortest))
         {
+            after.trim_start_matches('!')
+        } else {
             return rest;
+        };
+    }
+}
+
+/// `after` past the `!` and the pattern a `:filter` takes. A pattern opened
+/// by a character that cannot start a name ends at the next unescaped copy
+/// of that character, and any other pattern ends at whitespace.
+fn skip_filter_pattern(after: &str) -> &str {
+    let after = after.trim_start();
+    let pattern = after.strip_prefix('!').unwrap_or(after).trim_start();
+    match pattern.chars().next() {
+        Some(delimiter) if !(delimiter.is_alphanumeric() || delimiter == '_') => {
+            let body = &pattern[delimiter.len_utf8()..];
+            unescaped(body, delimiter).map_or("", |end| &body[end + delimiter.len_utf8()..])
         }
-        rest = counted[word.len()..].trim_start_matches('!');
+        _ => pattern.trim_start_matches(|c: char| !c.is_whitespace()),
     }
 }
 
@@ -279,10 +304,26 @@ mod tests {
             "lockmarks noautocmd noswapfile confirm View",
             "hide unsilent View",
             "w|silent View",
+            "filter /x/ View",
+            "filt! x View",
+            "filter /a\\/b/ View",
+            "bel View",
+            "hor View",
         ] {
             assert!(names_view(line), "{line:?}");
         }
-        for line in ["silent echo 1", "si View", "3View", "silentView"] {
+        for line in [
+            "silent echo 1",
+            "si View",
+            "3View",
+            "silentView",
+            "be View",
+            "ho View",
+            "sandbox View",
+            "fil /x/ View",
+            "filter View",
+            "filter /x View",
+        ] {
             assert!(!names_view(line), "{line:?}");
         }
     }

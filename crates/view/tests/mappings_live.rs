@@ -656,17 +656,33 @@ fn literal_taking_key(command: &str) -> Option<String> {
 /// they were read off.
 ///
 /// `TAKES_BAR` is `:help :bar`'s list and `MODIFIERS` is
-/// `:help :command-modifiers`' list, both transcribed by hand, so a version
-/// bump that adds or drops a command drifts them silently. Every table's
-/// fewest-characters count is asked of the engine's own `fullcommand()`.
+/// `:help :command-modifiers`' list less `:sandbox`, both transcribed by
+/// hand, so a version bump that adds or drops a command drifts them
+/// silently. The commands' fewest-characters counts are asked of the
+/// engine's own `fullcommand()`. The modifiers' counts are asked of the
+/// modifier parser, which keeps its own minimums, by running a user `View`
+/// behind each one at its count and at one character fewer.
 ///
 /// Skipped where the runtime ships no documentation, for the reason the
 /// literal-key test above gives.
 #[test]
 fn the_command_tables_match_the_pinned_engines_help() {
-    use view_core::native::submit_hold::commands::{MODIFIERS, SCRIPT_COMMANDS, TAKES_BAR};
+    use view_core::native::submit_hold::commands::{FILTER, MODIFIERS, SCRIPT_COMMANDS, TAKES_BAR};
 
-    let session = Session::start("command-tables");
+    let session = Session::start_with(
+        "command-tables",
+        "vim.cmd([[\n\
+         command! -nargs=* View let g:ran = 1\n\
+         function! Ran(line)\n\
+           let g:ran = 0\n\
+           try\n\
+             exe a:line\n\
+           catch\n\
+           endtry\n\
+           return g:ran\n\
+         endfunction\n\
+         ]])\n",
+    );
     let doc = Path::new(&session.eval("$VIMRUNTIME")).join("doc");
     let (Ok(cmdline), Ok(map)) = (
         std::fs::read_to_string(doc.join("cmdline.txt")),
@@ -689,13 +705,19 @@ fn the_command_tables_match_the_pinned_engines_help() {
         [":read !", ":write !", ":[range]!"],
         ":help :bar lists these filter forms, which `takes_bar` reads apart from the table"
     );
+    let mut listed = command_modifiers(&map);
+    assert!(
+        listed.contains(&"sandbox"),
+        ":help :command-modifiers no longer lists :sandbox, which MODIFIERS leaves out"
+    );
+    listed.retain(|&name| name != "sandbox");
     assert_eq!(
         names(&MODIFIERS),
-        command_modifiers(&map),
-        ":help :command-modifiers lists these modifiers"
+        listed,
+        ":help :command-modifiers lists these modifiers besides :sandbox"
     );
 
-    for &(full, shortest) in TAKES_BAR.iter().chain(&SCRIPT_COMMANDS).chain(&MODIFIERS) {
+    for &(full, shortest) in TAKES_BAR.iter().chain(&SCRIPT_COMMANDS) {
         let runs = |typed: &str| session.eval(&format!("fullcommand('{typed}')")) == full;
         assert!(
             runs(&full[..shortest]),
@@ -706,6 +728,36 @@ fn the_command_tables_match_the_pinned_engines_help() {
             shortest == 1 || !runs(&full[..shortest - 1]),
             "`:{}` already runs `:{full}`, so {shortest} is not the fewest characters",
             &full[..shortest - 1]
+        );
+    }
+
+    let runs_view = |line: &str| session.eval(&format!("Ran('{line}')")) == "1";
+    assert!(
+        !runs_view("sandbox View"),
+        "`:sandbox View` runs a user command, so MODIFIERS should list :sandbox"
+    );
+    let rows = MODIFIERS
+        .iter()
+        .map(|&(full, shortest)| (full, shortest, ""))
+        .chain([(FILTER.0, FILTER.1, " /x/")]);
+    for (full, shortest, pattern) in rows {
+        let line = |length: usize| format!("{}{pattern} View", &full[..length]);
+        assert!(
+            runs_view(&line(shortest)),
+            "`:{}` does not run `:View`",
+            line(shortest)
+        );
+        // `:keep` stops short of `:keepalt` and still reads as `:keepmarks`
+        let shorter = &full[..shortest - 1];
+        let another_reads_it = MODIFIERS.iter().any(|&(other, least)| {
+            other != full && other.starts_with(shorter) && shorter.len() >= least
+        });
+        assert_eq!(
+            runs_view(&line(shortest - 1)),
+            another_reads_it,
+            "`:{}` runs `:View` exactly when another modifier row reads it, \
+             so {shortest} is the fewest characters of `:{full}`",
+            line(shortest - 1)
         );
     }
 }
