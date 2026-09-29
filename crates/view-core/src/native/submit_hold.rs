@@ -8,6 +8,7 @@
 //! notification comes back lets the focus it sets decide where they go.
 
 pub mod commands;
+mod refused;
 
 use std::time::Duration;
 
@@ -812,8 +813,7 @@ impl SubmitHold {
     /// the bound this hold armed, or, for a hold a key sequence armed, a
     /// mode nvim reports leaving normal mode for, which says the sequence
     /// ran no mapping.
-    #[must_use]
-    pub fn releases(&self, msg: &Msg) -> bool {
+    fn ended_by(&self, msg: &Msg) -> bool {
         let Some((armed, _)) = &self.held else {
             return false;
         };
@@ -1351,6 +1351,22 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[St
         (Some(Typed::Known(text)), _) => names_view(&hold.expand_typed(text, true).text),
         (_, shown) => shown.is_some_and(|shown| shown_view(&shown)),
     }
+}
+
+/// Whether `msg` ends the standing hold: the command's own notification,
+/// the bound it armed, a mode that says a key sequence ran no mapping, or
+/// an error nvim reports behind the line that armed it. nvim runs nothing
+/// on a line it refuses (a pattern that does not compile, a bad range, an
+/// unknown command), so no notification follows the error.
+///
+/// Costs one pass over a redraw batch while a hold stands, and nothing
+/// otherwise.
+#[must_use]
+pub fn releases(model: &Model, msg: &Msg) -> bool {
+    let hold = &model.submit_hold;
+    hold.ended_by(msg)
+        || hold.is_holding()
+            && matches!(msg, Msg::Redraw(events) if refused::reports_error(model, events))
 }
 
 /// Starts a hold, bounded by the link's own backstop so a command that
@@ -2083,6 +2099,168 @@ mod tests {
         let released = crate::update::update(&mut model, Msg::SubmitHoldExpired { generation });
         assert_eq!(inputs(&released), ["j"]);
         assert!(!model.submit_hold.is_holding());
+    }
+
+    const REFUSED: [&str; 17] = [
+        ":", "f", "i", "l", "t", "e", "r", "<Space>", "/", "<Bslash>", "(", "/", "<Space>", "V",
+        "i", "e", "w",
+    ];
+
+    /// A model attached with `surfaces` that has submitted
+    /// `:filter /\(/ View`, a line nvim refuses with E54, and is holding
+    /// the keys typed behind it.
+    fn refused_line(surfaces: Vec<crate::native::ext::Ext>, behind: &[&str]) -> Model {
+        let mut model = normal_mode();
+        model.attach_surfaces(surfaces);
+        let _ = type_keys(&mut model, &REFUSED);
+        let _ = type_keys(&mut model, &["<CR>"]);
+        assert!(model.submit_hold.is_holding());
+        let held = type_keys(&mut model, behind);
+        assert!(held.is_empty(), "{held:?}");
+        model
+    }
+
+    fn message(kind: &str, text: &str) -> UiEvent {
+        UiEvent::MsgShow {
+            kind: kind.to_string(),
+            content: vec![(25, text.to_string())],
+            replace_last: false,
+        }
+    }
+
+    /// An error nvim reports for the submitted line releases the keys held
+    /// behind it in that update, and the update does nothing else a model
+    /// holding no keys would not do.
+    #[test]
+    fn an_error_on_the_submitted_line_releases_the_keys_at_once() {
+        use crate::native::ext::Ext;
+        let surfaces = || vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages];
+        let batch = || {
+            Msg::Redraw(vec![
+                UiEvent::CmdlineHide { level: 1 },
+                message("emsg", "E54: Unmatched \\("),
+                UiEvent::ModeChange {
+                    mode: "normal".to_string(),
+                    mode_idx: 0,
+                },
+            ])
+        };
+        let mut held = refused_line(surfaces(), &["j", "k"]);
+        let mut empty = refused_line(surfaces(), &[]);
+        let released = crate::update::update(&mut held, batch());
+        let alone = crate::update::update(&mut empty, batch());
+        assert_eq!(inputs(&released), ["j", "k"], "{released:?}");
+        assert!(!held.submit_hold.is_holding());
+        let rest: Vec<_> = released
+            .iter()
+            .filter(|e| !matches!(e, Effect::Rpc(crate::msg::RpcCall::Input { .. })))
+            .map(|e| format!("{e:?}"))
+            .collect();
+        let alone: Vec<_> = alone.iter().map(|e| format!("{e:?}")).collect();
+        assert_eq!(rest, alone);
+    }
+
+    /// A message that is no error, and an error nvim reports before it has
+    /// hidden the submitted line, which belongs to a line typed ahead of
+    /// it, release nothing.
+    #[test]
+    fn a_message_that_is_no_error_on_the_line_releases_nothing() {
+        use crate::native::ext::Ext;
+        let surfaces = || vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages];
+        let mut model = refused_line(surfaces(), &["j"]);
+        let sent = crate::update::update(
+            &mut model,
+            Msg::Redraw(vec![
+                UiEvent::CmdlineHide { level: 1 },
+                message("echo", "hello"),
+            ]),
+        );
+        assert!(inputs(&sent).is_empty(), "{sent:?}");
+        assert!(model.submit_hold.is_holding());
+
+        let mut model = normal_mode();
+        model.attach_surfaces(surfaces());
+        let _ = type_keys(&mut model, &[":", "b", "o", "g", "u", "s", "<CR>"]);
+        let _ = type_keys(&mut model, &[":", "V", "i", "e", "w", "<CR>", "j"]);
+        assert!(model.submit_hold.is_holding());
+        let sent = crate::update::update(
+            &mut model,
+            Msg::Redraw(vec![
+                UiEvent::CmdlineHide { level: 1 },
+                message("emsg", "E492: Not an editor command: bogus"),
+            ]),
+        );
+        assert!(inputs(&sent).is_empty(), "{sent:?}");
+        assert!(model.submit_hold.is_holding());
+    }
+
+    /// Where nvim draws its own messages, the error is the message row
+    /// opening in `ErrorMsg`, laid over whatever `MsgArea` holds.
+    #[test]
+    fn an_error_nvim_draws_itself_releases_the_keys() {
+        use crate::events::GridCell;
+        use crate::native::ext::Ext;
+        let cell = |text: &str, hl_id: u64| GridCell {
+            text: text.to_string(),
+            hl_id,
+            repeat: 1,
+        };
+        let line = |hl_id: u64| UiEvent::GridLine {
+            grid: 1,
+            row: 9,
+            col_start: 0,
+            cells: vec![cell("E", hl_id), cell("5", hl_id), cell("4", hl_id)],
+        };
+        let define = |id: u64, fg: Option<u32>, bg: Option<u32>| UiEvent::HlAttrDefine {
+            id,
+            fg,
+            bg,
+            bold: false,
+            italic: false,
+            underline: false,
+            reverse: false,
+        };
+        // the ids and colours nvim 0.12.4 sends with and without a
+        // `MsgArea` background
+        for (area_bg, drawn, released) in [
+            (None, line(25), true),
+            (Some(0x22_2222), line(60), true),
+            (None, line(1), false),
+        ] {
+            let mut model = normal_mode();
+            model.attach_surfaces(vec![Ext::LineGrid]);
+            let _ = crate::update::update(
+                &mut model,
+                Msg::Redraw(vec![
+                    UiEvent::GridResize {
+                        grid: 1,
+                        width: 80,
+                        height: 10,
+                    },
+                    define(1, None, None),
+                    define(25, Some(0xff_c0b9), None),
+                    define(59, Some(0xaa_aaaa), area_bg),
+                    UiEvent::HlGroupSet {
+                        name: "ErrorMsg".to_string(),
+                        hl_id: 25,
+                    },
+                    UiEvent::HlGroupSet {
+                        name: "MsgArea".to_string(),
+                        hl_id: if area_bg.is_some() { 59 } else { 1 },
+                    },
+                ]),
+            );
+            let _ = type_keys(&mut model, &REFUSED);
+            let _ = type_keys(&mut model, &["<CR>", "j"]);
+            assert!(model.submit_hold.is_holding());
+            let sent = crate::update::update(
+                &mut model,
+                Msg::Redraw(vec![define(60, Some(0xff_c0b9), area_bg), drawn]),
+            );
+            let expected: &[&str] = if released { &["j"] } else { &[] };
+            assert_eq!(inputs(&sent), expected, "MsgArea bg {area_bg:?}");
+            assert_eq!(model.submit_hold.is_holding(), !released);
+        }
     }
 
     /// A model that learned `keys` as the invoking keys nvim maps.

@@ -1,5 +1,7 @@
 //! Which commands a `:` line runs, read the way nvim splits it at `|`.
 
+use unicode_segmentation::UnicodeSegmentation;
+
 /// Whether one of the `|`-separated commands on `line` is `View` or an
 /// abbreviation nvim would run as it. A command that reads the `|` as its
 /// argument ends the reading.
@@ -161,7 +163,13 @@ fn skip_filter_pattern(after: &str) -> &str {
     let after = after.trim_start();
     let pattern = after.strip_prefix('!').unwrap_or(after).trim_start();
     match pattern.chars().next() {
-        Some(delimiter) if !(delimiter.is_alphanumeric() || delimiter == '_') => {
+        // nvim tests the first byte against `'isident'`, whose default
+        // holds every byte that starts a multibyte character
+        Some(delimiter)
+            if !(delimiter.is_ascii_alphanumeric()
+                || delimiter == '_'
+                || !delimiter.is_ascii()) =>
+        {
             let body = &pattern[delimiter.len_utf8()..];
             pattern_end(body, delimiter).map_or("", |end| {
                 body[end + delimiter.len_utf8()..].trim_start_matches(['g', 'j', 'f'])
@@ -248,8 +256,10 @@ fn pattern_end(body: &str, delimiter: char) -> Option<usize> {
                 at = collection_end(body, at + 1)?;
                 1
             }
+            // nvim reads this collection from the `[` itself, so a `^`, `]`
+            // or `-` after it reads as it would further in
             ('\\', Some('[')) if !magic => {
-                at = collection_end(body, at + 2)?;
+                at = collection_end(body, at + 1)?;
                 1
             }
             ('\\', Some(next)) => {
@@ -315,10 +325,16 @@ fn collection_end(body: &str, start: usize) -> Option<usize> {
             }
             '[' => {
                 let item = chars.as_str();
+                // nvim takes a character with its composing characters, and
+                // stops the cluster at an ASCII byte
                 let single = |mark: char| {
-                    let mut inner = item.strip_prefix(mark)?.chars();
-                    inner.next()?;
-                    inner.as_str().strip_prefix(mark)?.strip_prefix(']')
+                    let inner = item.strip_prefix(mark)?;
+                    let cluster = inner.graphemes(true).next()?;
+                    let first = cluster.chars().next()?.len_utf8();
+                    let len = cluster[first..]
+                        .find(|c: char| c.is_ascii())
+                        .map_or(cluster.len(), |cut| first + cut);
+                    inner[len..].strip_prefix(mark)?.strip_prefix(']')
                 };
                 let class = || {
                     let name = item.strip_prefix(':')?;
@@ -428,6 +444,11 @@ mod tests {
             "filter /\\V[/ View",
             "filter /\\V\\[/]/ View",
             "filter /\\M[/]/ View",
+            "filter /\\V\\[:alpha:]/]/ View",
+            "filter /\\V\\[=a=]/]/ View",
+            // a decomposed é, `e` and U+0301
+            "filter /[[=e\u{301}=]/]/ View",
+            "filter /[[.e\u{301}.]/]/ View",
             "bel View",
             "hor View",
         ] {
@@ -447,6 +468,9 @@ mod tests {
             "filter /[/ View",
             "filter /\\M\\[/]/ View",
             "filter /[[:nope:]/]/ View",
+            "filter /\\V\\[]/]/ View",
+            "filter «x y« View",
+            "filter \u{2014}x y\u{2014} View",
         ] {
             assert!(!names_view(line), "{line:?}");
         }

@@ -15,12 +15,13 @@ use std::path::Path;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use view_core::model::Look;
-use view_core::msg::{Msg, RpcCall};
+use view_core::model::{Look, Model};
+use view_core::msg::{Effect, Key, Msg, RpcCall};
 use view_core::native::mappings::MappingClaim;
 use view_core::native::registry;
 use view_core::native::speculate::CMDLINE_LITERAL_KEYS;
 use view_core::native::surfaces::Taken;
+use view_core::update::update;
 use view_engine::process::Engine;
 use view_native::config::NativeConfig;
 use view_native::mappings::register_plan;
@@ -57,6 +58,8 @@ const LEADER: &str = ",";
 struct Session {
     engine: Engine,
     rx: Receiver<Msg>,
+    /// Where the redraw traffic a `Msg::RedrawReady` announces is drained.
+    damage: view_engine::DamagePump,
     /// Held so the fixture's config directory outlives the nvim reading it.
     _dir: ScratchDir,
 }
@@ -68,6 +71,11 @@ impl Session {
 
     /// The same fixture with `extra` appended to its `init.lua`.
     fn start_with(name: &str, extra: &str) -> Self {
+        Self::start_attached(name, extra, view_engine::UI_EXT_OPTIONS)
+    }
+
+    /// The same fixture attached with `surfaces`.
+    fn start_attached(name: &str, extra: &str, surfaces: &[&str]) -> Self {
         let dir = common::fixture(
             &format!("mappings-live-{name}"),
             &format!(
@@ -78,14 +86,12 @@ impl Session {
             ),
         );
         let cfg = common::isolated_reading(&dir.join("init.lua"));
-        let (engine, _pump, rx) = common::spawn_with_pump(cfg, 256);
-        engine
-            .handle
-            .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
-            .unwrap();
+        let (engine, damage, rx) = common::spawn_with_pump(cfg, 256);
+        engine.handle.ui_attach(80, 24, surfaces).unwrap();
         Self {
             engine,
             rx,
+            damage,
             _dir: dir,
         }
     }
@@ -437,6 +443,115 @@ fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
         Some(("picker".to_string(), "grep".to_string())),
         "the command must invoke the feature it names"
     );
+}
+
+/// Applies every `Msg` the pump delivers to `model`, sending nvim the keys
+/// the updates route to it, until `done` answers for the model an update
+/// left and the message it applied. `None` when nothing answers within
+/// `budget`.
+fn pump<T>(
+    session: &Session,
+    model: &mut Model,
+    budget: Duration,
+    done: impl Fn(&Model, &Msg) -> Option<T>,
+) -> Option<T> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let msg = match session.rx.recv_timeout(left).ok()? {
+            Msg::RedrawReady => Msg::Redraw(session.damage.take_damage()),
+            msg => msg,
+        };
+        let effects = update(model, msg.clone());
+        send(session, &effects);
+        if let Some(found) = done(model, &msg) {
+            return Some(found);
+        }
+    }
+}
+
+/// Sends nvim the keys `effects` route to it.
+fn send(session: &Session, effects: &[Effect]) {
+    for effect in effects {
+        if let Effect::Rpc(RpcCall::Input { notation }) = effect {
+            session.engine.handle.input(notation).unwrap();
+        }
+    }
+}
+
+/// Types `keys` into `model`, answering the keys it sent nvim.
+fn type_into(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String> {
+    let mut sent = Vec::new();
+    for key in keys {
+        let effects = update(
+            model,
+            Msg::Key(Key {
+                notation: (*key).to_string(),
+            }),
+        );
+        send(session, &effects);
+        sent.extend(effects.iter().filter_map(|effect| match effect {
+            Effect::Rpc(RpcCall::Input { notation }) => Some(notation.clone()),
+            _ => None,
+        }));
+    }
+    sent
+}
+
+/// A `:View` line nvim refuses runs nothing, so the error it reports for
+/// the line releases the keys held behind it, whichever way nvim hands
+/// its messages over. The pump never delivers the hold's own bound, so
+/// the release is the error's.
+#[test]
+fn keys_behind_a_view_line_nvim_refuses_reach_nvim_on_its_error() {
+    use view_core::native::ext::Ext;
+    let line = [
+        ":", "f", "i", "l", "t", "e", "r", "<Space>", "/", "<Bslash>", "(", "/", "<Space>", "V",
+        "i", "e", "w", "<Space>", "a", "i", "<Space>", "o", "p", "e", "n",
+    ];
+    for (name, surfaces) in [
+        ("messages", vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages]),
+        ("grid", vec![Ext::LineGrid]),
+        (
+            "multigrid",
+            vec![Ext::LineGrid, Ext::Cmdline, Ext::Multigrid],
+        ),
+    ] {
+        let names: Vec<_> = surfaces.iter().map(|surface| surface.as_str()).collect();
+        let session = Session::start_attached(&format!("refused-{name}"), "", &names);
+        let mut model = Model::with_term_size(80, 24);
+        model.attach_surfaces(surfaces);
+        session.register(&NativeConfig::all_enabled());
+        pump(&session, &mut model, ARRIVAL, |_, msg| {
+            matches!(msg, Msg::MappingsClaimed { .. }).then_some(())
+        })
+        .expect("the registration must answer with its claim list");
+        // view tracks a `:` as a line only in a mode nvim has reported
+        assert_eq!(model.engine.mode.current, "normal", "{name}");
+        assert_eq!(type_into(&session, &mut model, &line).len(), line.len());
+        assert_eq!(type_into(&session, &mut model, &["<CR>"]), ["<CR>"]);
+        assert!(
+            model.submit_hold.is_holding(),
+            "{name}: the line names View"
+        );
+        let typed = ["i", "h", "e", "l", "l", "o"];
+        assert!(type_into(&session, &mut model, &typed).is_empty(), "{name}");
+
+        let released = pump(&session, &mut model, ARRIVAL, |model, msg| {
+            if matches!(msg, Msg::FeatureInvoke { .. }) {
+                return Some(Err(format!("{msg:?}")));
+            }
+            (!model.submit_hold.is_holding()).then_some(Ok(matches!(msg, Msg::Redraw(_))))
+        });
+        assert_eq!(
+            released,
+            Some(Ok(true)),
+            "{name}: the error nvim reports must release the held keys"
+        );
+        assert_eq!(session.eval("getline(1)"), "hello", "{name}");
+        assert_eq!(session.eval("winnr('$')"), "1", "{name}: no window opened");
+        assert_eq!(session.invoke(SILENCE), None, "{name}: nothing was invoked");
+    }
 }
 
 /// The `:` reading the palette's speculation is gated on, taken off the same

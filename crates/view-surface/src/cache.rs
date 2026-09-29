@@ -734,6 +734,20 @@ mod tests {
             "`fold_keystroke` predicts a key's glyph from the live engine's cursor, \
              which is where nvim will draw it",
         ),
+        (
+            "view-core/src/native/submit_hold/refused.rs",
+            "pub(super)fnreports_error(model:&Model,events:&[UiEvent])->bool{",
+            "engine.grids()",
+            "`reports_error` reads a redraw batch for an error the live engine \
+             drew into its own message grid, and paints nothing",
+        ),
+        (
+            "view-core/src/native/submit_hold/refused.rs",
+            "fndrawn_as_error(model:&Model,events:&[UiEvent],hl_id:u64)->bool{",
+            "engine.hl()",
+            "`drawn_as_error` compares a cell the live engine drew with the \
+             highlights that engine defined, and paints nothing",
+        ),
     ];
 
     /// `Model::forget_engine_windows`'s signature with its whitespace

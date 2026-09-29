@@ -181,8 +181,8 @@ pub(crate) fn dispatch<E: EngineOps>(
     // engine is down is still answered
     // the pass that ends a `:View` hold replays input, which waits here like
     // the input it is
-    let holding =
-        (is_held_kind(&msg) || model.submit_hold.releases(&msg)) && follow_ups.native.holds_input();
+    let holding = (is_held_kind(&msg) || view_core::native::submit_hold::releases(model, &msg))
+        && follow_ups.native.holds_input();
     follow_ups.native.note_vim_enter(&msg);
     let mut flow = Flow::Continue;
     // ahead of the fold's own effects: what a guess this batch took back

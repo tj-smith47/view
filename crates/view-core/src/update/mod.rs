@@ -145,7 +145,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     let Some(msg) = model.submit_hold.hold(msg) else {
         return Vec::new();
     };
-    let releases = model.submit_hold.releases(&msg);
+    let releases = crate::native::submit_hold::releases(model, &msg);
     let mut effects = update_one(model, msg);
     // replayed after the command has run, so the focus it set routes them.
     // A replayed `:View` submit arms a fresh hold, which the rest are then

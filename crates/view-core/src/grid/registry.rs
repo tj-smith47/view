@@ -742,6 +742,23 @@ impl GridRegistry {
             && (col.saturating_add(1)..grid.size().0).all(blank)
     }
 
+    /// Whether nvim draws its own messages into grid `id`: the grid placed
+    /// as the message area, or, where no other grid is named, the global
+    /// grid it composites that area into.
+    #[must_use]
+    pub fn draws_messages(&self, id: GridId) -> bool {
+        if self.slots.is_empty() {
+            return id == GLOBAL_GRID;
+        }
+        self.slots.iter().any(|slot| {
+            slot.id == id
+                && slot
+                    .placed
+                    .as_ref()
+                    .is_some_and(|p| matches!(p.kind, PaneKind::Message { .. }))
+        })
+    }
+
     /// The grid the cursor's message-area reading is taken from, with the
     /// cursor local to it, or `None` when the cursor is nowhere near a
     /// message area.
