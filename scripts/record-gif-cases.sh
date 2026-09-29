@@ -28,9 +28,13 @@ trap cleanup_cases EXIT
 # shellcheck source=scripts/lib/case-report.sh
 . "$HERE/lib/case-report.sh"
 
+VHS_WANTED=$(sed -n 's/^RECORD_GIF_VHS_VERSION=//p' "$LIB")
 mkdir -p "$WORK/bin" "$WORK/cache"
-printf '#!/bin/sh\ncp -- "$1" "%s/tape.out"\n' "$WORK" >"$WORK/bin/vhs"
-printf '#!/bin/sh\nexit 0\n' >"$WORK/bin/tmux"
+# the stand-ins report the versions record_gif requires unless a case
+# names another
+printf '#!/bin/sh\nif [ "$1" = --version ]; then echo "${VHS_STAND_IN:-vhs version %s}"; exit 0; fi\ncp -- "$1" "%s/tape.out"\n' \
+    "$VHS_WANTED" "$WORK" >"$WORK/bin/vhs"
+printf '#!/bin/sh\nif [ "$1" = -V ]; then echo "${TMUX_STAND_IN:-tmux 3.7c}"; fi\nexit 0\n' >"$WORK/bin/tmux"
 printf '#!/bin/sh\necho stand-in\n' >"$WORK/bin/fc-list"
 chmod +x "$WORK/bin/vhs" "$WORK/bin/tmux" "$WORK/bin/fc-list"
 
@@ -88,6 +92,55 @@ else
     report fail "record_gif refuses a body that types ahead of its Show" \
         "status $rc, vhs ran: $([ -e "$WORK/tape.out" ] && echo yes || echo no)"
 fi
+
+# the version build.sh stamps is the one record_gif requires, so a rebuilt
+# recorder is never refused by the rig it was built for
+if [ -n "$VHS_WANTED" ] &&
+    grep -qx "VIEW_VHS_VERSION=$VHS_WANTED" "$HERE/dogfood/vhs/build.sh"; then
+    report ok "build.sh stamps the vhs version record_gif requires ($VHS_WANTED)"
+else
+    report fail "build.sh stamps the vhs version record_gif requires" \
+        "lib.sh requires '${VHS_WANTED}', build.sh stamps '$(sed -n 's/^VIEW_VHS_VERSION=//p' "$HERE/dogfood/vhs/build.sh")'"
+fi
+
+# record_gif runs only under the patched vhs and a tmux that applies the
+# synchronized-output bracket, and a refusal names what it found
+while IFS='|' read -r verdict tool reported; do
+    rm -f "$WORK/tape.out"
+    set +e
+    if [ "$tool" = vhs ]; then
+        VHS_STAND_IN=$reported in_lib record_gif record-gif-cases "$WORK/out.gif" 5 80 20 \
+            2>"$WORK/version.err"
+    else
+        TMUX_STAND_IN=$reported in_lib record_gif record-gif-cases "$WORK/out.gif" 5 80 20 \
+            2>"$WORK/version.err"
+    fi
+    rc=$?
+    set -e
+    if [ -e "$WORK/tape.out" ]; then ran=yes; else ran=no; fi
+    name="$verdict $tool reporting \"$reported\""
+    if [ "$verdict" = accept ] && [ "$rc" = 0 ] && [ "$ran" = yes ]; then
+        report ok "$name"
+    elif [ "$verdict" = refuse ] && [ "$rc" = 2 ] && [ "$ran" = no ] &&
+        grep -qF "\"$reported\"" "$WORK/version.err" &&
+        { [ "$tool" = tmux ] || grep -qF 'scripts/dogfood/vhs/build.sh' "$WORK/version.err"; }; then
+        report ok "$name"
+    else
+        report fail "$name" "status $rc, vhs ran: $ran, said: $(cat "$WORK/version.err")"
+    fi
+done <<'CASES'
+refuse|vhs|vhs version v0.11.0
+refuse|vhs|vhs version v0.11.0-view10
+refuse|vhs|vhs version unknown (built from source)
+accept|vhs|vhs version v0.11.0-view1
+refuse|tmux|tmux 3.6b
+refuse|tmux|tmux 2.9a
+refuse|tmux|tmux master
+accept|tmux|tmux 3.7
+accept|tmux|tmux 3.10
+accept|tmux|tmux 4.0
+accept|tmux|tmux next-3.8
+CASES
 
 # the tape record_gif hands vhs: hidden through the attach and the wait for
 # the mark, shown only by the body

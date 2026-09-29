@@ -1,0 +1,62 @@
+--- a/vhs.go
++++ b/vhs.go
+@@ -2,6 +2,7 @@
+ 
+ import (
+ 	"context"
++	"encoding/base64"
+ 	"errors"
+ 	"fmt"
+ 	"log"
+@@ -351,10 +352,9 @@
+ 					continue
+ 				}
+ 
+-				cursor, cursorErr := vhs.CursorCanvas.CanvasToImage("image/png", quality)
+-				text, textErr := vhs.TextCanvas.CanvasToImage("image/png", quality)
+-				if textErr != nil || cursorErr != nil {
+-					ch <- fmt.Errorf("error: %v, %v", textErr, cursorErr)
++				cursor, text, err := vhs.captureLayers()
++				if err != nil {
++					ch <- err
+ 					continue
+ 				}
+ 
+@@ -410,3 +410,37 @@
+ 
+ 	vhs.Options.Screenshot.enableFrameCapture(path)
+ }
++
++// captureLayers reads the cursor and text canvases in one evaluation, so
++// xterm.js cannot render a frame between the two reads and composite an
++// older cursor over newer text.
++func (vhs *VHS) captureLayers() ([]byte, []byte, error) {
++	res, err := vhs.Page.Eval(`(format, quality) => [
++		document.querySelector("canvas.xterm-cursor-layer").toDataURL(format, quality),
++		document.querySelector("canvas.xterm-text-layer").toDataURL(format, quality),
++	]`, "image/png", quality)
++	if err != nil {
++		return nil, nil, fmt.Errorf("error capturing frame: %w", err)
++	}
++	layers := res.Value.Arr()
++	if len(layers) != 2 {
++		return nil, nil, fmt.Errorf("error capturing frame: %d layers", len(layers))
++	}
++	cursor, err := decodeDataURL(layers[0].Str())
++	if err != nil {
++		return nil, nil, err
++	}
++	text, err := decodeDataURL(layers[1].Str())
++	if err != nil {
++		return nil, nil, err
++	}
++	return cursor, text, nil
++}
++
++func decodeDataURL(url string) ([]byte, error) {
++	_, data, ok := strings.Cut(url, ",")
++	if !ok {
++		return nil, errors.New("error capturing frame: not a data URL")
++	}
++	return base64.StdEncoding.DecodeString(data)
++}

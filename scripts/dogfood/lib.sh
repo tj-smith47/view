@@ -99,10 +99,35 @@ Sleep ${seconds}s"}
     return 2
   }
   command -v vhs >/dev/null 2>&1 || {
-    echo "record_gif: vhs is not on PATH (go install" \
-      "github.com/charmbracelet/vhs@latest)" >&2
+    echo "record_gif: vhs is not on PATH (build it with" \
+      "scripts/dogfood/vhs/build.sh)" >&2
     return 2
   }
+  # stock vhs reads the cursor and text layers of a frame in two calls, and
+  # a frame the terminal draws between them records the old cursor over the
+  # new text
+  vhs_found=$(vhs --version 2>/dev/null) || vhs_found=
+  case "$vhs_found" in
+    (*" $RECORD_GIF_VHS_VERSION") ;;
+    (*)
+      echo "record_gif: $(command -v vhs) reports \"$vhs_found\", and a tape" \
+        "is recorded with vhs $RECORD_GIF_VHS_VERSION. Build it with" \
+        "scripts/dogfood/vhs/build.sh and put its install directory ahead" \
+        "of this one on PATH" >&2
+      return 2
+      ;;
+  esac
+  # tmux applies the synchronized-output bracket view writes from 3.7 on,
+  # and an older one records half-drawn frames
+  tmux_found=$(tmux -V 2>/dev/null) || tmux_found=
+  if ! printf '%s\n' "$tmux_found" | awk '$1 == "tmux" {
+      sub(/^next-/, "", $2); split($2, v, ".")
+      if (v[1] ~ /^[0-9]+$/ && (v[1] > 3 || (v[1] == 3 && v[2] + 0 >= 7))) ok = 1
+    } END { exit !ok }'; then
+    echo "record_gif: $(command -v tmux) reports \"$tmux_found\", and a tape" \
+      "needs tmux 3.7 or later" >&2
+    return 2
+  fi
   font=${RECORD_GIF_FONT:-JetBrainsMono Nerd Font}
   command -v fc-list >/dev/null 2>&1 || {
     echo "record_gif: fc-list is not on PATH, so the tape font cannot be" \
@@ -348,6 +373,8 @@ absolute_path() {
 }
 
 RECORDER_ATTACHED=view-recorder-attached
+# the version scripts/dogfood/vhs/build.sh stamps on the vhs it builds
+RECORD_GIF_VHS_VERSION=v0.11.0-view1
 SETTLED_MARK=view-tape-settled
 # the mark stands long enough for the recorder's screen poll to see it, and
 # the tape shows once it has gone
