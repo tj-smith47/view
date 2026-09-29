@@ -5728,8 +5728,8 @@ fn the_agent_panel_opening_over_the_caret_shows_no_caret_until_its_own() {
 /// damage the change itself reported. Every row of the tile carries text,
 /// so a vacated cell left unpainted still shows it.
 ///
-/// Disconfirm: `Damage::from_frame` repainting only the listed rows under a
-/// full grid damage fails this at the first vacated cell.
+/// Disconfirm: `draw_resynced` skipping every blank cell it is handed fails
+/// this at the first vacated cell of the old top border.
 #[test]
 fn a_tile_that_shrinks_blanks_the_cells_it_left_in_the_frame_that_draws_it() {
     const FILL: char = '%';
@@ -5765,9 +5765,18 @@ fn a_tile_that_shrinks_blanks_the_cells_it_left_in_the_frame_that_draws_it() {
             drive(model, events);
         };
         fill(&mut model, (width, height));
+        // the gapless lattice ties every sibling in a row to one shared
+        // height, so a shrink only view's own damage repaints has to keep
+        // it: a mismatched height draws the divider into rows no window
+        // covers, a shape nvim's own tiled layout never leaves standing.
+        let shrunk = if gaps {
+            (width - 7, height - 5)
+        } else {
+            (width - 7, height)
+        };
         let (shown, frame) =
             crate::terminal::tests::frames_with_their_damage(&mut model, |model| {
-                fill(model, (width - 7, height - 5));
+                fill(model, shrunk);
             });
 
         let (cols, rows) = (model.term_width, model.term_height);
@@ -5795,11 +5804,12 @@ fn a_tile_that_shrinks_blanks_the_cells_it_left_in_the_frame_that_draws_it() {
             }
             dump.push(text.trim_end().to_owned());
         }
-        // the gapless ring runs on over grid cells no window covers, which
-        // nvim's own layouts never leave, so that picture is no golden
-        if gaps {
-            assert_golden("tile-shrunk", dump.join("\n").trim_end_matches('\n'));
-        }
+        let golden = if gaps {
+            "tile-shrunk"
+        } else {
+            "tile-shrunk-gapless"
+        };
+        assert_golden(golden, dump.join("\n").trim_end_matches('\n'));
     }
 }
 
