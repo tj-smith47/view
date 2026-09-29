@@ -495,11 +495,177 @@ fn tree_beside_the_tiles() {
     }
 }
 
+/// Every frame on screen as [`frames`] finds it, and a frame the screen's
+/// edge cuts off, which a layout nvim has yet to move to a shrunk terminal
+/// leaves for a frame or two, reaching that edge.
+fn frames_or_cut(screen: &vt100::Screen, cols: u16, rows: u16) -> Vec<Frame> {
+    let is = |row: u16, col: u16, set: &str| {
+        let g = glyph(screen, row, col);
+        !g.is_empty() && set.contains(g.as_str())
+    };
+    let mut found = Vec::new();
+    for top in 0..rows {
+        for left in 0..cols {
+            if !is(top, left, "╭┬") || !is(top + 1, left, "│├┤┼") {
+                continue;
+            }
+            let right = (left + 1..cols)
+                .find(|&c| is(top, c, "╮┬"))
+                .unwrap_or(cols - 1);
+            let bottom = (top + 1..rows)
+                .find(|&r| is(r, left, "╰┴"))
+                .unwrap_or(rows - 1);
+            found.push(Frame {
+                top,
+                left,
+                bottom,
+                right,
+            });
+        }
+    }
+    found
+}
+
+/// Where a digit of the wrapped text stands off every frame, edges
+/// included, or `None` where each one is on a tile. A status row carries
+/// its own digits on a frame's bottom edge.
+fn strays(screen: &vt100::Screen, cols: u16, rows: u16) -> Option<String> {
+    let frames = frames_or_cut(screen, cols, rows);
+    if frames.is_empty() {
+        return Some("no frame on screen".to_string());
+    }
+    for row in 0..rows {
+        for col in 0..cols {
+            let g = glyph(screen, row, col);
+            if !g.chars().all(|ch| ch.is_ascii_digit()) || g.is_empty() {
+                continue;
+            }
+            let on_a_frame = frames
+                .iter()
+                .any(|f| (f.top..=f.bottom).contains(&row) && (f.left..=f.right).contains(&col));
+            if !on_a_frame {
+                return Some(format!("{g:?} off every frame at row {row} col {col}"));
+            }
+        }
+    }
+    None
+}
+
+/// Every screen a painted frame in `raw` leaves `term` showing, once
+/// `term` has taken the size the frames were painted for. A terminal
+/// without synchronized output is handed each frame's cells between a hide
+/// and the show of the caret the frame places.
+fn painted_screens(term: &mut vt100::Parser, raw: &[u8]) -> Vec<(usize, String, Option<String>)> {
+    const SHOW: &[u8] = b"\x1b[?25h";
+    let (rows, cols) = term.screen().size();
+    let mut screens = Vec::new();
+    let mut from = 0;
+    while let Some(at) = raw[from..].windows(SHOW.len()).position(|w| w == SHOW) {
+        let end = from + at + SHOW.len();
+        term.process(&raw[from..end]);
+        let screen = term.screen();
+        screens.push((end, dump(screen, cols, rows), strays(screen, cols, rows)));
+        from = end;
+    }
+    term.process(&raw[from..]);
+    screens
+}
+
+/// A vsplit whose windows wrap one long line of digits, shrunk and grown
+/// back under a slow `VimResized` handler, with the look `gaps` names: in
+/// every frame view paints, no digit stands off a tile's frame, the rows a
+/// shrinking tile vacates included.
+fn wrapped_text_stays_inside_its_frame(gaps: bool) {
+    let look = if gaps { "gapped" } else { "gapless" };
+    let redraw = host_deadline(REDRAW);
+    let handler = (redraw * 4).max(Duration::from_millis(1500));
+    let watch = handler + host_deadline(Duration::from_secs(2));
+
+    let paths = common::ScratchPaths::new(&format!("tiles-resize-wrap-{look}"));
+    let digits: String = (0..400).map(wrapped_digit).collect();
+    let text: Vec<&str> = std::iter::repeat_n(digits.as_str(), 80).collect();
+    std::fs::write(&paths.scratch, text.join("\n") + "\n").unwrap();
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.cwd(paths.scratch.parent().unwrap());
+    cmd.args(["--panes", "tiles"]);
+    cmd.arg(paths.scratch.file_name().unwrap());
+    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+    let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
+    std::fs::write(config, format!("[ui]\ngaps = {gaps}\n")).unwrap();
+    let mut session = PtySession::spawn_configured(cmd, COLS, ROWS).unwrap();
+    assert!(
+        session.wait_for("01234567", BUDGET),
+        "{look} wrap: view never showed the file; screen:\n{}",
+        session.screen()
+    );
+    session.send(b"\x1b:set wrap | vsplit\r").unwrap();
+    session
+        .send(
+            format!(
+                "\x1b:autocmd VimResized * wincmd = | sleep {}m\r",
+                handler.as_millis()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    // a launch notice and the command line are frames of their own; the
+    // split has landed once two frames stand side by side
+    let settled = |screen: &vt100::Screen| {
+        let frames = frames(screen, COLS, ROWS);
+        matches!(frames.as_slice(), [a, b] if a.top == b.top && a.bottom == b.bottom)
+            && strays(screen, COLS, ROWS).is_none()
+    };
+    let mut dismissed = 0;
+    while !session.wait_for_screen(host_deadline(Duration::from_millis(500)), settled) {
+        assert!(
+            dismissed < 8,
+            "{look} wrap: the two tiles never settled before the resize; screen:\n{}",
+            session.screen()
+        );
+        session.send(b"\x1b:View notifications dismiss\r").unwrap();
+        dismissed += 1;
+    }
+    // the replay starts from the screen the recording starts on, so a cell
+    // no frame after the resize repaints keeps what it showed before it
+    session.record_raw_output_up_to(64 << 20);
+    let mut term = vt100::Parser::new(ROWS, COLS, 0);
+    term.process(&session.with_screen(vt100::Screen::contents_formatted));
+    let mut replayed = session.raw_output().len();
+    for (cols, rows) in [SHRUNK, (COLS, ROWS)] {
+        let from = session.raw_output().len();
+        term.process(&session.raw_output()[replayed..from]);
+        session.resize(cols, rows).unwrap();
+        term.screen_mut().set_size(rows, cols);
+        std::thread::sleep(watch);
+        replayed = session.raw_output().len();
+        let raw = session.raw_output()[from..replayed].to_vec();
+        let screens = painted_screens(&mut term, &raw);
+        assert!(
+            screens.len() >= 2,
+            "{look} wrap: at {cols}x{rows} view painted {} frames after the \
+             resize; screen:\n{}",
+            screens.len(),
+            session.screen()
+        );
+        for (index, (at, screen, stray)) in screens.iter().enumerate() {
+            assert!(
+                stray.is_none(),
+                "{look} wrap: at {cols}x{rows}, frame {index} of {} (ending at \
+                 byte {at}): {}; the screen it left:\n{screen}",
+                screens.len(),
+                stray.as_deref().unwrap_or_default()
+            );
+        }
+    }
+}
+
 /// Both looks in one session after another, then the panel and the tree
 /// beside the tiles: two live sessions sampled at once would each slow the
 /// redraw the other is timing.
 #[test]
 fn a_tile_frame_stays_on_its_text_while_nvim_redraws_a_resize() {
+    wrapped_text_stays_inside_its_frame(true);
+    wrapped_text_stays_inside_its_frame(false);
     resize_under(true);
     resize_under(false);
     panel_beside_the_tiles(true);

@@ -5722,6 +5722,87 @@ fn the_agent_panel_opening_over_the_caret_shows_no_caret_until_its_own() {
     }
 }
 
+/// A tile shrinking by rows and by columns while the terminal keeps its
+/// size: the frame that draws the tile's new border leaves every cell of
+/// its old rect showing what the layout now puts there, painted from the
+/// damage the change itself reported. Every row of the tile carries text,
+/// so a vacated cell left unpainted still shows it.
+///
+/// Disconfirm: `Damage::from_frame` repainting only the listed rows under a
+/// full grid damage fails this at the first vacated cell.
+#[test]
+fn a_tile_that_shrinks_blanks_the_cells_it_left_in_the_frame_that_draws_it() {
+    const FILL: char = '%';
+    for gaps in [true, false] {
+        let look = if gaps { "gapped" } else { "gapless" };
+        let tiles = tiled(gaps);
+        let mut model = tiles.model;
+        let grid = LEFT + 1;
+        let (row, col, width, height) = tiles.slots[1];
+        let fill = |model: &mut Model, (width, height): (u16, u16)| {
+            let (inner_width, inner_height) = match model.look.inner_request((width, height), 0) {
+                (0, 0) => (width, height),
+                inner => inner,
+            };
+            let text = FILL.to_string().repeat(usize::from(inner_width));
+            let mut events = vec![
+                UiEvent::WinPos {
+                    grid,
+                    win: WinHandle(1001),
+                    startrow: u64::from(row),
+                    startcol: u64::from(col),
+                    width: u64::from(width),
+                    height: u64::from(height),
+                },
+                UiEvent::GridResize {
+                    grid,
+                    width: u64::from(inner_width),
+                    height: u64::from(inner_height),
+                },
+            ];
+            events.extend((0..inner_height).map(|r| line(grid, u64::from(r), &text, 0)));
+            events.push(UiEvent::Flush);
+            drive(model, events);
+        };
+        fill(&mut model, (width, height));
+        let (shown, frame) =
+            crate::terminal::tests::frames_with_their_damage(&mut model, |model| {
+                fill(model, (width - 7, height - 5));
+            });
+
+        let (cols, rows) = (model.term_width, model.term_height);
+        let mut term = vt100::Parser::new(rows, cols, 0);
+        term.process(&shown);
+        term.process(&frame);
+        let screen = term.screen();
+        let want = tiled_frame(&model);
+        let mut dump = Vec::new();
+        for y in 0..rows {
+            let mut text = String::new();
+            for x in 0..cols {
+                let seen = screen
+                    .cell(y, x)
+                    .map(|cell| cell.contents().to_owned())
+                    .filter(|glyph| !glyph.is_empty())
+                    .unwrap_or_else(|| " ".to_owned());
+                let owed = want[(x, y)].symbol();
+                assert_eq!(
+                    seen, owed,
+                    "{look}: ({x}, {y}) shows {seen:?} after the shrink, where the \
+                     layout now puts {owed:?}"
+                );
+                text.push_str(&seen);
+            }
+            dump.push(text.trim_end().to_owned());
+        }
+        // the gapless ring runs on over grid cells no window covers, which
+        // nvim's own layouts never leave, so that picture is no golden
+        if gaps {
+            assert_golden("tile-shrunk", dump.join("\n").trim_end_matches('\n'));
+        }
+    }
+}
+
 /// The agent panel's caret stands right after the prompt mark of the
 /// composer the panel is painted with: settled, while a grow is half
 /// applied, and on a terminal shrunk under a slot nvim has yet to move,

@@ -1294,6 +1294,27 @@ pub(crate) mod tests {
         (shown, frame)
     }
 
+    /// The bytes a terminal without synchronized output is handed for
+    /// `model` painted whole, and then for the frame `change` leaves it
+    /// needing, painted from the damage the model itself reports.
+    pub(crate) fn frames_with_their_damage(
+        model: &mut Model,
+        change: impl FnOnce(&mut Model),
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mut term = Term::frame_probe(TermCaps::default());
+        let _ = model.take_paint_damage();
+        let shown = frame_bytes(
+            &mut term,
+            model,
+            &view_surface::render(model),
+            &GridDamage::full(),
+        );
+        change(model);
+        let damage = model.take_paint_damage();
+        let frame = frame_bytes(&mut term, model, &view_surface::render(model), &damage);
+        (shown, frame)
+    }
+
     /// A terminal that hands the probe `reply` in one read.
     struct Answers(Option<Vec<u8>>);
 
