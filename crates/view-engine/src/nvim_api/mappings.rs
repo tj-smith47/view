@@ -126,6 +126,13 @@ use view_core::native::mappings::{
 /// file open raises three or four of the events, so the events of one tick
 /// share a single walk scheduled after them.
 ///
+/// The same read answers with the user's command-line mappings and
+/// abbreviations (`maplist()` rows in mode `c` or `!`), each as its
+/// `keytrans()` lhs, its rhs and its `abbr`, `noremap` and `expr` flags, a
+/// Lua callback counted as `expr`. nvim expands them after view has sent
+/// the keys, so the input hold behind a `:View` reads a submitted line
+/// through them. They ride the `user_keys` event as its third argument.
+///
 /// The command registers unconditionally, outside the spec loop: a user who
 /// turned every default key off, or every feature, still has a way in.
 pub(crate) const REGISTER_MAPPINGS_CHUNK: &str = "\
@@ -156,10 +163,30 @@ local function read_user_keys()
       keys[#keys + 1] = vim.fn.keytrans(m.lhsraw or m.lhs)
     end
   end
-  return keys, vim.o.timeout and vim.o.timeoutlen or -1
+  local cmdline, seen = {}, {}
+  for _, abbr in ipairs({ false, true }) do
+    for _, m in ipairs(vim.fn.maplist(abbr)) do
+      if m.mode == 'c' or m.mode == '!' then
+        local row = {
+          lhs = vim.fn.keytrans(m.lhsraw or m.lhs),
+          rhs = m.rhs or '',
+          abbr = abbr,
+          noremap = m.noremap == 1,
+          expr = m.expr == 1 or m.callback ~= nil,
+        }
+        cmdline[#cmdline + 1] = row
+        seen[#seen + 1] = table.concat({ row.lhs, row.rhs,
+          tostring(abbr), tostring(row.noremap), tostring(row.expr) },
+          '\\0')
+      end
+    end
+  end
+  local wait = vim.o.timeout and vim.o.timeoutlen or -1
+  return keys, wait, cmdline, table.concat(seen, '\\n')
 end
-local user_keys, timeoutlen = read_user_keys()
+local user_keys, timeoutlen, cmdline_maps, cmdline_read = read_user_keys()
 local user_read = table.concat(user_keys, ' ') .. ' ' .. timeoutlen
+  .. '\\n' .. cmdline_read
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
   if vim.api.nvim_buf_is_loaded(buf) then
     note(vim.api.nvim_buf_get_keymap(buf, 'n'))
@@ -176,11 +203,12 @@ local group = vim.api.nvim_create_augroup('view_colon_map', { clear = true })
 local keys_pending = false
 local function reread_keys()
   keys_pending = false
-  local keys, wait = read_user_keys()
-  local read = table.concat(keys, ' ') .. ' ' .. wait
+  local keys, wait, maps, maps_read = read_user_keys()
+  local read = table.concat(keys, ' ') .. ' ' .. wait .. '\\n' .. maps_read
   if read ~= user_read then
     user_read = read
-    pcall(vim.rpcnotify, channel, 'view_bridge', 'user_keys', keys, wait)
+    pcall(vim.rpcnotify, channel, 'view_bridge', 'user_keys', keys, wait,
+      maps)
   end
 end
 local function reread()
@@ -234,6 +262,7 @@ return {
   colon_mapped = colon,
   user_keys = user_keys,
   timeoutlen = timeoutlen,
+  cmdline_maps = cmdline_maps,
 }";
 
 /// The lua chunk that creates the `:View` command, taking view's channel id,
@@ -313,6 +342,8 @@ pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
 /// `'timeoutlen'` beside them, in the same reply.
 pub(crate) const MAPPINGS_USER_KEYS_KEY: &str = "user_keys";
 pub(crate) const MAPPINGS_TIMEOUT_KEY: &str = "timeoutlen";
+/// The user's command-line mappings and abbreviations, in the same reply.
+pub(crate) const MAPPINGS_CMDLINE_KEY: &str = "cmdline_maps";
 
 impl super::EngineHandle {
     /// Registers `specs` as real nvim mappings and the `:View` command in

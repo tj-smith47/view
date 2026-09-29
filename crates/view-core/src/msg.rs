@@ -302,6 +302,9 @@ pub enum Msg {
         keys: Vec<String>,
         /// `'timeoutlen'`, or `None` where `'timeout'` is off.
         timeoutlen: Option<Duration>,
+        /// The command-line mappings and abbreviations, which the input
+        /// hold reads a submitted line through.
+        cmdline: Vec<crate::native::submit_hold::CmdlineMap>,
     },
     /// nvim's own `:messages` as it stood at `VimEnter`, read once by the
     /// takeover ([`RpcCall::Takeover`]).

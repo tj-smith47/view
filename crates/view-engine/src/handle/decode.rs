@@ -16,6 +16,7 @@ use view_core::events::WinHandle;
 use view_core::model::{BufferEntry, TileKind, WindowStatus};
 use view_core::msg::{DeleteConfirmOutcome, EngineRequest, Msg, RegisterType, ReplyToken};
 use view_core::native::mappings::MappingClaim;
+use view_core::native::submit_hold::CmdlineMap;
 use view_core::native::surfaces::{FloatAnchor, FloatSighting};
 
 use super::{saturate_u32, AttachedBuf};
@@ -204,7 +205,7 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
         // the user's keys and `'timeoutlen'` read again on the same events,
         // sent only when they moved: a config that maps on `VeryLazy` has
         // mapped nothing yet when the registration reads them
-        "user_keys" => Some(user_keys_from(Some(first), rest.first()).into_msg()),
+        "user_keys" => Some(user_keys_from(Some(first), rest.first(), rest.get(1)).into_msg()),
         _ => None,
     }
 }
@@ -429,6 +430,7 @@ pub(super) struct UserKeys {
     pub(super) keys: Vec<String>,
     /// `None` where `'timeout'` is off.
     pub(super) timeoutlen: Option<Duration>,
+    pub(super) cmdline: Vec<CmdlineMap>,
 }
 
 /// nvim's own default, read where a reply carries no `'timeoutlen'`.
@@ -437,6 +439,7 @@ impl Default for UserKeys {
         Self {
             keys: Vec::new(),
             timeoutlen: Some(view_core::msg::DEFAULT_TIMEOUTLEN),
+            cmdline: Vec::new(),
         }
     }
 }
@@ -446,23 +449,58 @@ impl UserKeys {
         Msg::UserMappingsRead {
             keys: self.keys,
             timeoutlen: self.timeoutlen,
+            cmdline: self.cmdline,
         }
     }
 }
 
-/// Decodes the user's keys under `user_keys` and `'timeoutlen'` under
-/// `timeoutlen`, where a negative one says `'timeout'` is off. A key that
-/// is not a string is dropped.
+/// Decodes the user's keys under `user_keys`, `'timeoutlen'` under
+/// `timeoutlen`, where a negative one says `'timeout'` is off, and the
+/// command-line mappings under `cmdline_maps`. A key that is not a string
+/// is dropped.
 fn decode_user_keys(pairs: &[(Value, Value)]) -> UserKeys {
     user_keys_from(
         crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_USER_KEYS_KEY),
         crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_TIMEOUT_KEY),
+        crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_CMDLINE_KEY),
     )
 }
 
-/// The user's keys and `'timeoutlen'` out of the two values that carry
-/// them, in a registration's reply or on the bridge.
-fn user_keys_from(keys: Option<&Value>, timeoutlen: Option<&Value>) -> UserKeys {
+/// Decodes the rows of `REGISTER_MAPPINGS_CHUNK`'s command-line reading.
+/// A row missing its `lhs` or `rhs` is dropped, and a missing flag reads
+/// as `false`. An empty Lua table crosses as a map, which holds no row.
+fn decode_cmdline_maps(rows: Option<&Value>) -> Vec<CmdlineMap> {
+    let flag = |pairs: &[(Value, Value)], key: &str| {
+        crate::wire::map_find(pairs, key)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    rows.and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let pairs = row.as_map()?;
+                    Some(CmdlineMap {
+                        lhs: crate::wire::map_find(pairs, "lhs")?.as_str()?.to_owned(),
+                        rhs: crate::wire::map_find(pairs, "rhs")?.as_str()?.to_owned(),
+                        abbr: flag(pairs, "abbr"),
+                        noremap: flag(pairs, "noremap"),
+                        expr: flag(pairs, "expr"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The user's keys, `'timeoutlen'` and command-line mappings out of the
+/// three values that carry them, in a registration's reply or on the
+/// bridge.
+fn user_keys_from(
+    keys: Option<&Value>,
+    timeoutlen: Option<&Value>,
+    cmdline: Option<&Value>,
+) -> UserKeys {
     let keys = keys
         .and_then(Value::as_array)
         .map(|keys| {
@@ -475,7 +513,11 @@ fn user_keys_from(keys: Option<&Value>, timeoutlen: Option<&Value>) -> UserKeys 
         Some(ms) => u64::try_from(ms).ok().map(Duration::from_millis),
         None => UserKeys::default().timeoutlen,
     };
-    UserKeys { keys, timeoutlen }
+    UserKeys {
+        keys,
+        timeoutlen,
+        cmdline: decode_cmdline_maps(cmdline),
+    }
 }
 
 /// Decodes a mapping registration's reply: the claim rows under `claims`,

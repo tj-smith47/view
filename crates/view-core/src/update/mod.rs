@@ -779,8 +779,13 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.record_colon_mapped(mapped);
             Vec::new()
         }
-        Msg::UserMappingsRead { keys, timeoutlen } => {
+        Msg::UserMappingsRead {
+            keys,
+            timeoutlen,
+            cmdline,
+        } => {
             model.submit_hold.learn_user_keys(&keys, timeoutlen);
+            model.submit_hold.learn_cmdline_maps(&cmdline);
             Vec::new()
         }
         Msg::SequenceExpired { generation } => route::expire_sequence(model, generation),

@@ -7634,6 +7634,7 @@ fn user_mappings(m: &mut Model, keys: &[&str], timeoutlen: Option<Duration>) {
         Msg::UserMappingsRead {
             keys: keys.iter().map(|keys| (*keys).to_string()).collect(),
             timeoutlen,
+            cmdline: Vec::new(),
         },
     );
 }

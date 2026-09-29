@@ -179,6 +179,43 @@ fn line_key(notation: &str) -> LineKey {
     }
 }
 
+/// A command-line mapping or abbreviation the user's config defines, as
+/// the engine reads it from `maplist()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmdlineMap {
+    /// The keys it is typed as, spelled by `keytrans()`.
+    pub lhs: String,
+    /// What nvim puts on the line in their place, in key notation.
+    pub rhs: String,
+    /// An abbreviation, expanded when the word ends.
+    pub abbr: bool,
+    /// Whether nvim leaves `rhs` unmapped.
+    pub noremap: bool,
+    /// An `<expr>` or Lua-callback mapping, whose text only nvim knows.
+    pub expr: bool,
+}
+
+/// A [`CmdlineMap`] reduced to the text it matches on a line.
+#[derive(Debug, Clone)]
+struct Expansion {
+    lhs: String,
+    /// `None` for an expansion only nvim can compute.
+    rhs: Option<String>,
+    abbr: bool,
+    noremap: bool,
+}
+
+/// How many times a remapped rhs is expanded again. nvim's own
+/// `'maxmapdepth'` bounds a recursive one at 1000 and then errors, which
+/// runs no command.
+const MAP_DEPTH: usize = 16;
+
+/// The characters in nvim's default `'iskeyword'`, which end an
+/// abbreviation where one stops.
+fn is_keyword(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || u32::from(c) >= 192
+}
+
 /// The command line being typed and the input held behind a submitted
 /// `:View` or a key that invokes view.
 #[derive(Debug, Clone, Default)]
@@ -204,6 +241,9 @@ pub struct SubmitHold {
     /// Every key sequence the user's own config maps in normal mode, one
     /// [`canonical`] key per entry.
     user_keys: Vec<Vec<String>>,
+    /// The user's command-line mappings and abbreviations whose keys type
+    /// text.
+    cmdline_maps: Vec<Expansion>,
     /// The latest keys sent to nvim in normal mode, as many as the longest
     /// of `invoke_keys`.
     recent: std::collections::VecDeque<Folded>,
@@ -287,6 +327,89 @@ impl SubmitHold {
         self.timeout_off = timeoutlen.is_none();
         self.timeoutlen = timeoutlen;
         self.sequence.clear();
+    }
+
+    /// Learns the user's command-line mappings and abbreviations, which
+    /// can make a line `:View` that no typed key spelled. A lhs holding a
+    /// key that types no character never matches typed text and is left
+    /// out.
+    pub fn learn_cmdline_maps(&mut self, maps: &[CmdlineMap]) {
+        let text =
+            |spelled: &str| -> Option<String> { key_tokens(spelled).map(notation_char).collect() };
+        self.cmdline_maps = maps
+            .iter()
+            .filter_map(|map| {
+                let lhs = text(&map.lhs).filter(|lhs| !lhs.is_empty())?;
+                // a key in the rhs that types no character (a `<CR>`) ends
+                // the text the line holds
+                let rhs = (!map.expr).then(|| {
+                    key_tokens(&map.rhs)
+                        .map_while(notation_char)
+                        .collect::<String>()
+                });
+                Some(Expansion {
+                    lhs,
+                    rhs,
+                    abbr: map.abbr,
+                    noremap: map.noremap,
+                })
+            })
+            .collect();
+    }
+
+    /// `typed` as nvim puts it on the line once its command-line mappings
+    /// have run on the keys at its start, or `typed` itself where an
+    /// expansion only nvim can compute stands in the way.
+    fn expand_mappings(&self, typed: &str) -> String {
+        let mut line = typed.to_string();
+        for _ in 0..MAP_DEPTH {
+            let Some(map) = self
+                .cmdline_maps
+                .iter()
+                .filter(|map| !map.abbr && line.starts_with(&map.lhs))
+                .max_by_key(|map| map.lhs.len())
+            else {
+                break;
+            };
+            let Some(rhs) = &map.rhs else {
+                return typed.to_string();
+            };
+            line = format!("{rhs}{}", &line[map.lhs.len()..]);
+            // nvim remaps no rhs that begins with its own lhs
+            if map.noremap || rhs.starts_with(&map.lhs) {
+                break;
+            }
+        }
+        line
+    }
+
+    /// `line` with its command word expanded as nvim expands an
+    /// abbreviation: at the `<CR>` that ends the line, and, where
+    /// `in_flight` says nvim has yet to read the keys after the word, at
+    /// the non-keyword character that follows it.
+    fn expand_abbreviation(&self, line: &str, in_flight: bool) -> String {
+        let rest = line.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+        let start = line.len() - rest.len();
+        let end = rest.find(|c: char| !is_keyword(c)).unwrap_or(rest.len());
+        if !in_flight && end < rest.len() {
+            return line.to_string();
+        }
+        let word = &rest[..end];
+        match self
+            .cmdline_maps
+            .iter()
+            .find(|map| map.abbr && map.lhs == word)
+            .and_then(|map| map.rhs.as_deref())
+        {
+            Some(rhs) => format!("{}{rhs}{}", &line[..start], &rest[end..]),
+            None => line.to_string(),
+        }
+    }
+
+    /// The line nvim runs for `typed`, keys still on their way to it: its
+    /// mappings, then its abbreviations.
+    fn expand_typed(&self, typed: &str) -> String {
+        self.expand_abbreviation(&self.expand_mappings(typed), true)
     }
 
     /// Notes that nvim reported `mode`, which answers every key that left
@@ -499,15 +622,18 @@ impl SubmitHold {
     /// Reads a command line nvim shows. nvim hides every first-level line
     /// that ends before it shows the next, so while a line view saw end is
     /// still unhidden, every show is that older line's. Otherwise a first
-    /// level `:` show holding a prefix of the keys typed is the tracked
-    /// line open.
+    /// level `:` show holding a prefix of the keys typed, or what the
+    /// user's command-line mappings made of one, is the tracked line open.
     pub(crate) fn note_line_shown(&mut self, line: &CmdlineState) {
-        if self.unhidden > 0 || line.level != 1 || line.firstc != ":" {
+        if self.opened || self.unhidden > 0 || line.level != 1 || line.firstc != ":" {
             return;
         }
         let shown: String = line.content.iter().map(|(_, s)| s.as_str()).collect();
-        self.opened |= match &self.typed {
-            Some(Typed::Known(_)) => self.states.contains(&shown),
+        self.opened = match &self.typed {
+            Some(Typed::Known(_)) => self
+                .states
+                .iter()
+                .any(|state| *state == shown || self.expand_mappings(state) == shown),
             Some(_) => true,
             None => false,
         };
@@ -918,9 +1044,13 @@ pub(crate) fn may_open(model: &Model) -> bool {
 /// has shown none or is showing a text those keys gave the line on the way
 /// (`states`), since the keys after it are still in flight.
 ///
-/// A `cnoremap` can put `View` on a line whose keys never spelled it, and
-/// only the engine's line says so.
+/// A `cnoremap` or a `cabbrev` can put `View` on a line whose keys never
+/// spelled it. The engine's line shows a mapping's text once nvim has read
+/// its keys, and the user's command-line mappings and abbreviations expand
+/// the keys it has not read yet. An abbreviation that ends the line is
+/// expanded by the `<CR>` itself, after nvim's last show of the line.
 fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[String]) -> bool {
+    let hold = &model.submit_hold;
     let shown = model
         .engine
         .cmdline
@@ -934,10 +1064,12 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[St
         });
     match (typed, shown) {
         (Some(Typed::Known(_)), Some(shown)) if opened && !states.contains(&shown) => {
-            names_view(&shown)
+            names_view(&hold.expand_abbreviation(&shown, false))
         }
-        (Some(Typed::Known(text)), _) => names_view(text),
-        (_, shown) => shown.is_some_and(|shown| names_view(&shown)),
+        (Some(Typed::Known(text)), _) => names_view(&hold.expand_typed(text)),
+        (_, shown) => {
+            shown.is_some_and(|shown| names_view(&hold.expand_abbreviation(&shown, false)))
+        }
     }
 }
 
@@ -1073,6 +1205,106 @@ mod tests {
             &["<BS>", "<BS>", "e", "<Space>", "f", "o", "o", "<CR>"],
         );
         assert!(!arms(&sent), "{sent:?}");
+    }
+
+    fn cmdline_maps(model: &mut Model, maps: &[(&str, &str, bool, bool, bool)]) {
+        let _ = crate::update::update(
+            model,
+            Msg::UserMappingsRead {
+                keys: Vec::new(),
+                timeoutlen: None,
+                cmdline: maps
+                    .iter()
+                    .map(|&(lhs, rhs, abbr, noremap, expr)| CmdlineMap {
+                        lhs: lhs.to_string(),
+                        rhs: rhs.to_string(),
+                        abbr,
+                        noremap,
+                        expr,
+                    })
+                    .collect(),
+            },
+        );
+    }
+
+    /// `cabbrev vo View ai open`: nvim expands the word at the `<CR>`,
+    /// after its last show of the line, so `:vo<CR>` runs `:View` whether
+    /// nvim has shown `vo` or none of it.
+    #[test]
+    fn a_command_line_abbreviation_for_view_arms_the_hold() {
+        for shown in [true, false] {
+            let mut model = normal_mode();
+            cmdline_maps(&mut model, &[("vo", "View ai open", true, false, false)]);
+            let _ = type_keys(&mut model, &[":", "v", "o"]);
+            if shown {
+                show_line(&mut model, "vo");
+            }
+            let sent = type_keys(&mut model, &["<CR>"]);
+            assert!(arms(&sent), "shown {shown}: {sent:?}");
+            let held = type_keys(&mut model, &["j"]);
+            assert!(held.is_empty(), "shown {shown}: {held:?}");
+        }
+    }
+
+    /// `cnoremap vv View ai open` with `:vv` reaching nvim in one batch:
+    /// nvim's first show is already the expansion, which opens the line,
+    /// and the line arms whether that show arrived before the `<CR>` or
+    /// not.
+    #[test]
+    fn a_batched_command_line_mapping_for_view_arms_the_hold() {
+        for shown in [true, false] {
+            let mut model = normal_mode();
+            cmdline_maps(&mut model, &[("vv", "View ai open", false, true, false)]);
+            let _ = type_keys(&mut model, &[":", "v", "v"]);
+            if shown {
+                show_line(&mut model, "View ai open");
+                assert!(model.submit_hold.line_opened());
+            }
+            let sent = type_keys(&mut model, &["<CR>"]);
+            assert!(arms(&sent), "shown {shown}: {sent:?}");
+        }
+
+        // a remapped rhs is mapped again, and a `noremap` one is not
+        for (noremap, armed) in [(false, true), (true, false)] {
+            let mut model = normal_mode();
+            cmdline_maps(
+                &mut model,
+                &[
+                    ("zz", "vv", false, noremap, false),
+                    ("vv", "View ai open", false, true, false),
+                ],
+            );
+            let sent = type_keys(&mut model, &[":", "z", "z", "<CR>"]);
+            assert_eq!(arms(&sent), armed, "noremap {noremap}: {sent:?}");
+        }
+    }
+
+    /// An `<expr>` mapping or abbreviation computes its text inside nvim,
+    /// so the keys typed decide, and `ww` names no command view runs. The
+    /// expression `View` reads as `:View` if it is taken for text.
+    #[test]
+    fn an_expr_command_line_mapping_leaves_the_typed_keys_deciding() {
+        for abbr in [false, true] {
+            let mut model = normal_mode();
+            cmdline_maps(&mut model, &[("ww", "View", abbr, false, true)]);
+            let sent = type_keys(&mut model, &[":", "w", "w", "<CR>"]);
+            assert!(!arms(&sent), "abbr {abbr}: {sent:?}");
+        }
+    }
+
+    /// An abbreviation to another command arms nothing, even where its own
+    /// word is a prefix of `View` nvim would otherwise run as `:View`.
+    #[test]
+    fn an_abbreviation_for_another_command_arms_nothing() {
+        for (lhs, keys) in [
+            ("ve", &[":", "v", "e", "<CR>"][..]),
+            ("V", &[":", "V", "<CR>"]),
+        ] {
+            let mut model = normal_mode();
+            cmdline_maps(&mut model, &[(lhs, "vsplit", true, false, false)]);
+            let sent = type_keys(&mut model, keys);
+            assert!(!arms(&sent), "{lhs}: {sent:?}");
+        }
     }
 
     const OPEN_PICKER: [&str; 20] = [

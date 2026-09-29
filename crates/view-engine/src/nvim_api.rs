@@ -40,8 +40,8 @@ use decode::{
 pub(crate) use decode::{decode_ai_fs_reply, decode_checktime_reply};
 use mappings::mapping_args;
 pub(crate) use mappings::{
-    command_entries_lua, MAPPINGS_CLAIMS_KEY, MAPPINGS_COLON_KEY, MAPPINGS_TIMEOUT_KEY,
-    MAPPINGS_USER_KEYS_KEY, REGISTER_COMMAND_CHUNK, REGISTER_MAPPINGS_CHUNK,
+    command_entries_lua, MAPPINGS_CLAIMS_KEY, MAPPINGS_CMDLINE_KEY, MAPPINGS_COLON_KEY,
+    MAPPINGS_TIMEOUT_KEY, MAPPINGS_USER_KEYS_KEY, REGISTER_COMMAND_CHUNK, REGISTER_MAPPINGS_CHUNK,
 };
 pub(crate) use window_status::REGISTER_WINDOW_STATUS_CHUNK;
 
@@ -4703,6 +4703,7 @@ mod tests {
             format!("  {MAPPINGS_COLON_KEY} = colon,\n"),
             format!("  {MAPPINGS_USER_KEYS_KEY} = user_keys,\n"),
             format!("  {MAPPINGS_TIMEOUT_KEY} = timeoutlen,\n"),
+            format!("  {MAPPINGS_CMDLINE_KEY} = cmdline_maps,\n"),
         ] {
             assert!(
                 REGISTER_MAPPINGS_CHUNK.contains(&answer),

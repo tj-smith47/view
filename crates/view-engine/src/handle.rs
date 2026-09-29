@@ -3993,20 +3993,57 @@ mod tests {
     }
 
     /// The user's keys read again after registration arrive on the bridge
-    /// in the shape a registration's reply carries them.
+    /// in the shape a registration's reply carries them, the command-line
+    /// mappings beside them.
     #[test]
     fn a_bridge_user_keys_event_decodes_the_late_reading() {
+        let row = |lhs: &str, abbr: bool| {
+            Value::Map(vec![
+                (Value::from("lhs"), Value::from(lhs)),
+                (Value::from("rhs"), Value::from("View ai open")),
+                (Value::from("abbr"), Value::from(abbr)),
+                (Value::from("noremap"), Value::from(true)),
+                (Value::from("expr"), Value::from(false)),
+            ])
+        };
         let decoded = decode_bridge_event(&[
             Value::from("user_keys"),
             Value::Array(vec![Value::from("<Space>fg")]),
             Value::from(300),
+            Value::Array(vec![row("vo", true), Value::from(3), row("vv", false)]),
+        ]);
+        let Some(Msg::UserMappingsRead {
+            keys,
+            timeoutlen,
+            cmdline,
+        }) = &decoded
+        else {
+            unreachable!("got {decoded:?}");
+        };
+        assert_eq!(keys, &["<Space>fg"]);
+        assert_eq!(*timeoutlen, Some(Duration::from_millis(300)));
+        let read: Vec<_> = cmdline
+            .iter()
+            .map(|map| (map.lhs.as_str(), map.rhs.as_str(), map.abbr, map.noremap))
+            .collect();
+        assert_eq!(
+            read,
+            [
+                ("vo", "View ai open", true, true),
+                ("vv", "View ai open", false, true)
+            ]
+        );
+
+        // a config with no command-line mapping sends an empty Lua table,
+        // which crosses as a map
+        let decoded = decode_bridge_event(&[
+            Value::from("user_keys"),
+            Value::Array(Vec::new()),
+            Value::from(300),
+            Value::Map(Vec::new()),
         ]);
         assert!(
-            matches!(
-                &decoded,
-                Some(Msg::UserMappingsRead { keys, timeoutlen })
-                    if keys == &["<Space>fg"] && *timeoutlen == Some(Duration::from_millis(300))
-            ),
+            matches!(&decoded, Some(Msg::UserMappingsRead { cmdline, .. }) if cmdline.is_empty()),
             "got {decoded:?}"
         );
     }

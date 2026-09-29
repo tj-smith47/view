@@ -147,7 +147,9 @@ fn a_registration_reads_the_users_own_keys_and_timeoutlen() {
     engine.handle.register_mappings(&[], channel).unwrap();
     let (keys, timeoutlen) = loop {
         match rx.recv_timeout(view_test_support::host_deadline(TICK)) {
-            Ok(Msg::UserMappingsRead { keys, timeoutlen }) => break (keys, timeoutlen),
+            Ok(Msg::UserMappingsRead {
+                keys, timeoutlen, ..
+            }) => break (keys, timeoutlen),
             Ok(Msg::MappingsClaimed { .. }) => panic!("the claims came before the user's keys"),
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
@@ -163,13 +165,74 @@ fn a_registration_reads_the_users_own_keys_and_timeoutlen() {
 fn next_user_keys(rx: &mpsc::Receiver<Msg>) -> (Vec<String>, Option<Duration>) {
     loop {
         match rx.recv_timeout(view_test_support::host_deadline(TICK)) {
-            Ok(Msg::UserMappingsRead { keys, timeoutlen }) => return (keys, timeoutlen),
+            Ok(Msg::UserMappingsRead {
+                keys, timeoutlen, ..
+            }) => return (keys, timeoutlen),
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
                 panic!("no Msg::UserMappingsRead arrived within the deadline")
             }
         }
     }
+}
+
+/// The command-line mappings of the next `Msg::UserMappingsRead` on `rx`,
+/// as `(lhs, rhs, abbr, expr)`.
+fn next_cmdline_maps(rx: &mpsc::Receiver<Msg>) -> Vec<(String, String, bool, bool)> {
+    loop {
+        match rx.recv_timeout(view_test_support::host_deadline(TICK)) {
+            Ok(Msg::UserMappingsRead { cmdline, .. }) => {
+                return cmdline
+                    .into_iter()
+                    .map(|map| (map.lhs, map.rhs, map.abbr, map.expr))
+                    .collect()
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                panic!("no Msg::UserMappingsRead arrived within the deadline")
+            }
+        }
+    }
+}
+
+fn row(lhs: &str, rhs: &str, abbr: bool, expr: bool) -> (String, String, bool, bool) {
+    (lhs.to_string(), rhs.to_string(), abbr, expr)
+}
+
+/// The registration reads the user's command-line abbreviations and
+/// mappings from the real engine, an `<expr>` one flagged, and a
+/// `cabbrev` a config sets on `User VeryLazy` is read again on the bridge.
+#[test]
+fn a_registration_reads_the_users_command_line_abbreviations_and_mappings() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    for setup in [
+        "execute('cabbrev vo View ai open')",
+        "execute('cnoremap vv View ai open')",
+        "execute('cmap <expr> ww \"View\"')",
+        "execute('autocmd User VeryLazy cabbrev vl View tree toggle')",
+    ] {
+        engine.handle.eval_str(setup).unwrap();
+    }
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let maps = next_cmdline_maps(&rx);
+    for expected in [
+        row("vo", "View ai open", true, false),
+        row("vv", "View ai open", false, false),
+        row("ww", "\"View\"", false, true),
+    ] {
+        assert!(maps.contains(&expected), "{expected:?} in {maps:?}");
+    }
+    assert!(!maps.iter().any(|map| map.0 == "vl"), "{maps:?}");
+
+    engine
+        .handle
+        .eval_str("execute('doautocmd User VeryLazy')")
+        .unwrap();
+    let maps = next_cmdline_maps(&rx);
+    assert!(
+        maps.contains(&row("vl", "View tree toggle", true, false)),
+        "{maps:?}"
+    );
 }
 
 /// A mapping a config sets on `User VeryLazy`, after the registration read
