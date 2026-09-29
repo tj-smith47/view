@@ -860,7 +860,9 @@ impl Term {
     /// terminal does not already show. The cursor's position is re-stated
     /// when a cell was repainted (the emission left the terminal's own
     /// cursor somewhere else) or when the position itself moved; its show
-    /// and its hide are each written on the change alone; its DECSCUSR
+    /// and its hide are each written on the change alone, except at a
+    /// terminal without `sync`, where a frame that repaints cells hides the
+    /// caret ahead of them and shows it once placed; its DECSCUSR
     /// shape likewise; and terminal mouse capture
     /// (`EnableMouseCapture`/`DisableMouseCapture`) tracks
     /// `model.engine.mouse_on` the same way. Capture is off by default and
@@ -1021,9 +1023,26 @@ impl Term {
         self.shadow.compose(model, surface, &damage);
         #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_COMPOSED);
+        // a terminal that cannot hold a frame back draws each write as it
+        // lands, so a shown caret travels with the emission and is seen over
+        // cells of a half-painted frame; it stays hidden until the frame
+        // places it. The hide is written ahead of the cells and taken back
+        // when none were, the way the bracket is.
+        let hide_at = self.frame_buf.borrow().len();
+        let hide_for_cells = !model.caps.sync && self.cursor_shown != Some(false);
+        if hide_for_cells {
+            crossterm::queue!(sink, crossterm::cursor::Hide)?;
+        }
         // the frame's escapes join everything else already queued into the
         // shared frame buffer, so the whole frame still leaves in one write
         let painted_cells = self.shadow.emit_updates(&mut sink)?;
+        if hide_for_cells {
+            if painted_cells {
+                self.cursor_shown = Some(false);
+            } else {
+                self.frame_buf.borrow_mut().truncate(hide_at);
+            }
+        }
         self.shadow.commit();
         self.last_offset = Some(offset);
         match surface.cursor {
@@ -1036,13 +1055,16 @@ impl Term {
                     self.inner.set_cursor_position(at)?;
                     self.last_cursor = Some(at);
                 }
-                if self.cursor_shown != Some(true) {
-                    self.inner.show_cursor()?;
-                    self.cursor_shown = Some(true);
-                }
+                // the shape lands before the show, so a terminal drawing
+                // between the two never shows the caret in the shape of the
+                // mode it just left
                 if self.last_cursor_shape != Some(spec.shape) {
                     write_cursor_shape(&mut sink, spec.shape)?;
                     self.last_cursor_shape = Some(spec.shape);
+                }
+                if self.cursor_shown != Some(true) {
+                    self.inner.show_cursor()?;
+                    self.cursor_shown = Some(true);
                 }
             }
             None => {
@@ -1247,9 +1269,30 @@ pub fn spawn_input_thread(tx: SyncSender<Msg>, size: TermSizeCell) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// The bytes a terminal without synchronized output is handed for
+    /// `before` painted whole and then for `after` painted whole, each with
+    /// its own rendered caret, for a caller whose models this module cannot
+    /// build.
+    pub(crate) fn unsynced_frames(before: &Model, after: &Model) -> (Vec<u8>, Vec<u8>) {
+        let mut term = Term::frame_probe(TermCaps::default());
+        let shown = frame_bytes(
+            &mut term,
+            before,
+            &view_surface::render(before),
+            &GridDamage::full(),
+        );
+        let frame = frame_bytes(
+            &mut term,
+            after,
+            &view_surface::render(after),
+            &GridDamage::full(),
+        );
+        (shown, frame)
+    }
 
     /// A terminal that hands the probe `reply` in one read.
     struct Answers(Option<Vec<u8>>);
@@ -1831,43 +1874,153 @@ mod tests {
 
     /// A frame that did repaint a cell owes the trailer once and the cursor
     /// position again -- the emission left the terminal's own caret after the
-    /// last glyph it printed -- and still owes no show.
+    /// last glyph it printed. A synchronizing terminal owes no show; one
+    /// that draws each write as it lands has the caret hidden ahead of the
+    /// cells and shown once it is placed.
     #[test]
     fn a_repainted_cell_carries_one_trailer_and_restates_the_cursor() {
-        let mut model = probe_model(TermCaps::default());
-        let mut surface = view_surface::render(&model);
-        surface.cursor = caret_at(&model, 7, 3);
-        let mut term = Term::frame_probe(model.caps);
-        let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+        for sync in [false, true] {
+            let mut model = probe_model(TermCaps::from_probe(sync, true, true));
+            let mut surface = view_surface::render(&model);
+            surface.cursor = caret_at(&model, 7, 3);
+            let mut term = Term::frame_probe(model.caps);
+            let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
 
-        model.engine.apply_grid(view_core::grid::GridOp::PutLine {
-            row: 1,
-            col_start: 3,
-            cells: vec![("X".to_string(), 0, 1)],
-        });
-        let painted = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+            model.engine.apply_grid(view_core::grid::GridOp::PutLine {
+                row: 1,
+                col_start: 3,
+                cells: vec![("X".to_string(), 0, 1)],
+            });
+            let painted = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
 
-        assert_eq!(
-            occurrences(&painted, SGR_TRAILER),
-            1,
-            "the trailer resets what this frame's own styles set, so it is \
-             written once after the cells; frame: {painted:?}"
-        );
-        let caret = cup(7, 3);
-        assert_eq!(
-            occurrences(&painted, &caret),
-            1,
-            "the caret is re-addressed once, after the glyph the emission left \
-             the terminal's cursor behind; frame: {painted:?}"
-        );
+            assert_eq!(
+                occurrences(&painted, SGR_TRAILER),
+                1,
+                "sync={sync}: the trailer resets what this frame's own styles \
+                 set, so it is written once after the cells; frame: {painted:?}"
+            );
+            let caret = cup(7, 3);
+            assert_eq!(
+                occurrences(&painted, &caret),
+                1,
+                "sync={sync}: the caret is re-addressed once, after the glyph \
+                 the emission left the terminal's cursor behind; frame: {painted:?}"
+            );
+            let tail = if sync {
+                [caret.as_slice(), SYNC_END].concat()
+            } else {
+                [caret.as_slice(), SHOW_CURSOR].concat()
+            };
+            assert!(
+                painted.ends_with(&tail),
+                "sync={sync}: the caret's CUP closes the frame; frame: {painted:?}"
+            );
+            let (hides, shows) = if sync { (0, 0) } else { (1, 1) };
+            assert_eq!(
+                (
+                    occurrences(&painted, HIDE_CURSOR),
+                    occurrences(&painted, SHOW_CURSOR)
+                ),
+                (hides, shows),
+                "sync={sync}: frame: {painted:?}"
+            );
+        }
+    }
+
+    /// Feeds `frame` to a terminal already showing `shown`, one byte at a
+    /// time, and fails at the first byte after which the terminal shows its
+    /// caret over a screen already holding part of `frame` anywhere but
+    /// where the whole frame leaves it, or over a glyph the whole frame does
+    /// not leave under it. A terminal without synchronized output draws
+    /// whenever it likes, so every such byte is a screen a person can see.
+    pub(crate) fn assert_the_caret_waits_for_its_frame(
+        shown: &[u8],
+        frame: &[u8],
+        (width, height): (u16, u16),
+        label: &str,
+    ) {
+        let glyph = |screen: &vt100::Screen, (row, col): (u16, u16)| {
+            screen.cell(row, col).map(|cell| cell.contents().to_owned())
+        };
+        let mut whole = vt100::Parser::new(height, width, 0);
+        whole.process(shown);
+        whole.process(frame);
+        let placed = whole.screen().cursor_position();
+        let placed_glyph = glyph(whole.screen(), placed);
         assert!(
-            painted.ends_with(&caret),
-            "the caret's CUP is the frame's last word; frame: {painted:?}"
+            !whole.screen().hide_cursor(),
+            "{label}: the whole frame leaves the caret hidden"
         );
+
+        let mut term = vt100::Parser::new(height, width, 0);
+        term.process(shown);
+        let before = term.screen().contents();
+        for (at, byte) in frame.iter().enumerate() {
+            term.process(&[*byte]);
+            let screen = term.screen();
+            if screen.hide_cursor() || screen.contents() == before {
+                continue;
+            }
+            let caret = screen.cursor_position();
+            let under = glyph(screen, caret);
+            assert!(
+                caret == placed && under == placed_glyph,
+                "{label}: after byte {at} of {} the terminal shows its caret at \
+                 (row, col) {caret:?} over {under:?}, where the frame places it \
+                 at {placed:?} over {placed_glyph:?}",
+                frame.len()
+            );
+        }
+    }
+
+    /// nvim's answer to `O` on a first line holding `<div`: every row one
+    /// lower, row 0 blank, and the caret standing on the cell it stood on.
+    /// A terminal drawing partway through the frame shows a caret that has
+    /// either run ahead with the emission or still stands over the `<` the
+    /// grid no longer holds there.
+    ///
+    /// Disconfirm: dropping the hide `queue_frame` writes ahead of the cells
+    /// fails this at the first cell of row 0.
+    #[test]
+    fn a_row_scrolled_under_a_standing_caret_never_shows_the_glyph_it_left() {
+        let mut model = probe_model(TermCaps::default());
+        for (row, text) in [(0, "<div"), (1, "<img"), (2, "# view")] {
+            model.engine.apply_grid(view_core::grid::GridOp::PutLine {
+                row,
+                col_start: 0,
+                cells: text.chars().map(|ch| (ch.to_string(), 0, 1)).collect(),
+            });
+        }
+        let mut surface = view_surface::render(&model);
+        surface.cursor = caret_at(&model, 0, 0);
+        let mut term = Term::frame_probe(model.caps);
+        let shown = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+
+        model.engine.apply_grid(view_core::grid::GridOp::Scroll {
+            top: 0,
+            bot: 4,
+            left: 0,
+            right: 20,
+            rows: -1,
+        });
+        model.engine.apply_grid(view_core::grid::GridOp::PutLine {
+            row: 0,
+            col_start: 0,
+            cells: vec![(" ".to_string(), 0, 20)],
+        });
+        let frame = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+
+        assert_the_caret_waits_for_its_frame(&shown, &frame, (20, 4), "O on line 1");
+        let mut screen = vt100::Parser::new(4, 20, 0);
+        screen.process(&shown);
+        screen.process(&frame);
         assert_eq!(
-            occurrences(&painted, SHOW_CURSOR),
-            0,
-            "the caret was already shown, so this frame states nothing about it"
+            (
+                screen.screen().cell(0, 0).map(vt100::Cell::contents),
+                screen.screen().cell(1, 0).map(vt100::Cell::contents)
+            ),
+            (Some(" "), Some("<")),
+            "the caret's cell reads the scrolled grid"
         );
     }
 
@@ -1881,9 +2034,9 @@ mod tests {
 
         let hidden = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
         assert!(
-            hidden.ends_with(HIDE_CURSOR),
-            "a surface carrying no caret hides the terminal's, and the hide is \
-             the frame's last word; frame: {hidden:?}"
+            occurrences(&hidden, HIDE_CURSOR) == 1,
+            "a surface carrying no caret hides the terminal's, once; frame: \
+             {hidden:?}"
         );
 
         surface.cursor = caret_at(&model, 1, 1);
@@ -1892,9 +2045,9 @@ mod tests {
         let shown = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
         assert_eq!(
             shown,
-            [cup(1, 1), SHOW_CURSOR.to_vec(), shape].concat(),
-            "the caret coming back is a position, a show and the shape no frame \
-             has stated yet, in that order and nothing else"
+            [cup(1, 1), shape, SHOW_CURSOR.to_vec()].concat(),
+            "the caret coming back is a position, the shape no frame has stated \
+             yet and a show, in that order and nothing else"
         );
 
         let again = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
@@ -1929,8 +2082,9 @@ mod tests {
         surface.cursor = None;
         let painted = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
         assert!(
-            painted.ends_with(HIDE_CURSOR),
-            "the frame that hides the caret must still say so; frame: {painted:?}"
+            painted.starts_with(HIDE_CURSOR) && occurrences(&painted, HIDE_CURSOR) == 1,
+            "the frame that hides the caret must still say so, once; frame: \
+             {painted:?}"
         );
 
         surface.cursor = caret_at(&model, 2, 1);

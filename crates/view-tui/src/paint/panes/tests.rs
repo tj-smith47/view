@@ -5667,6 +5667,61 @@ fn a_gapless_junction_stays_on_its_lines_through_a_half_applied_resize() {
     }
 }
 
+/// The agent panel opening over the tile the caret stood in, on a terminal
+/// that draws each write as it lands: at no point partway through the frame
+/// does the terminal show a caret inside the panel, or anywhere else, but on
+/// the composer the frame ends on.
+///
+/// Disconfirm: dropping the hide `queue_frame` writes ahead of the cells
+/// fails this at the first cell the panel paints.
+#[test]
+fn the_agent_panel_opening_over_the_caret_shows_no_caret_until_its_own() {
+    for gaps in [true, false] {
+        let size = (TILED_WIDTH, TILED_HEIGHT);
+        let mut before = tiled_at(gaps, size, 0).model;
+        let (_, col, _, height) = tiled_at(gaps, size, 0).slots[1];
+        drive(
+            &mut before,
+            vec![
+                UiEvent::GridCursorGoto {
+                    grid: LEFT + 1,
+                    row: u64::from(height / 2),
+                    col: 0,
+                },
+                UiEvent::Flush,
+            ],
+        );
+        let mut after = agent_in_the_right_tile_at(gaps, size).model;
+        drive(
+            &mut after,
+            vec![
+                UiEvent::GridCursorGoto {
+                    grid: LEFT + 1,
+                    row: 0,
+                    col: 0,
+                },
+                UiEvent::Flush,
+            ],
+        );
+        assert!(!after.caps.sync, "the fixture terminal draws as bytes land");
+        let standing = view_surface::render(&before)
+            .cursor
+            .expect("the editor has a caret before the panel opens");
+        assert!(
+            standing.col >= col,
+            "gaps={gaps}: the caret stands in the tile the panel takes"
+        );
+
+        let (shown, frame) = crate::terminal::tests::unsynced_frames(&before, &after);
+        crate::terminal::tests::assert_the_caret_waits_for_its_frame(
+            &shown,
+            &frame,
+            size,
+            &format!("gaps={gaps}: the agent panel opening"),
+        );
+    }
+}
+
 /// The agent panel's caret stands right after the prompt mark of the
 /// composer the panel is painted with: settled, while a grow is half
 /// applied, and on a terminal shrunk under a slot nvim has yet to move,
