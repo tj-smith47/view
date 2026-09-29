@@ -350,14 +350,9 @@ mod tests {
         write(&sink, ["d".to_string(), "e".to_string()]);
         assert_eq!(sink.lock().unwrap().dropped, 3);
         drop(release);
-        let deadline = std::time::Instant::now() + patient();
-        while std::fs::read_to_string(&path).unwrap() != "0 a\n1 b\n" {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the queued batch never reached the file"
-            );
-            std::thread::yield_now();
-        }
+        // `b` reaching the file means the thread took it off the queue,
+        // which leaves room for `f`
+        entered.recv().unwrap();
         write(&sink, ["f".to_string()]);
         close(&sink, patient()).unwrap();
         assert_eq!(
@@ -372,23 +367,14 @@ mod tests {
     /// closure.
     #[test]
     fn a_stopped_writer_builds_no_lines() {
-        let sink = Mutex::new(spawn(Box::new(Full { accepted: 0 })).unwrap());
-        let deadline = std::time::Instant::now() + patient();
-        while sink.lock().unwrap().writer.is_open() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the writer never stopped"
-            );
-            write(&sink, ["a".to_string()]);
-            std::thread::yield_now();
-        }
+        let sink = Mutex::new(spawn(Box::new(std::io::sink())).unwrap());
+        let _ = sink.lock().unwrap().writer.close();
         let mut built = false;
         super::write(&sink, || {
             built = true;
             ["b".to_string()]
         });
         assert!(!built, "a line was built for a writer that had stopped");
-        assert!(close(&sink, patient()).is_err());
     }
 
     #[test]

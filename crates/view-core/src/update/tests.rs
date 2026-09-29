@@ -1172,6 +1172,54 @@ fn a_held_layout_copies_the_highlight_table_only_when_it_moved() {
     assert_eq!(marker(&m), None, "the moved table was not rebuilt");
 }
 
+/// A flush during a held layout copies the replacement's new cells into
+/// the grids already drawn in the held slots, each in its own buffer.
+///
+/// Disconfirm: replacing the drawn registry with a fresh copy of the live
+/// one on each flush moves every buffer at the first flush.
+#[test]
+fn a_held_layout_is_relaid_in_the_buffers_it_already_drew() {
+    use crate::events::WinHandle;
+    let mut m = vsplit_model();
+    let _ = restart(&mut m);
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    assert!(m.engine.holds_the_screen(), "the layout was not held");
+    let buffers = |m: &Model| -> Vec<Option<*const crate::grid::Cell>> {
+        painted_slots(m)
+            .iter()
+            .map(|(win, _)| {
+                m.engine
+                    .painted_grids()
+                    .window_grid(WinHandle(*win))
+                    .map(crate::grid::Grid::buffer)
+            })
+            .collect()
+    };
+    let before = buffers(&m);
+    assert_eq!(before.len(), 2, "both held slots are drawn");
+
+    let _ = update(&mut m, Msg::Redraw(vec![UiEvent::Flush]));
+    assert!(m.engine.holds_the_screen());
+    assert_eq!(buffers(&m), before, "a flush replaced the drawn grids");
+
+    let _ = update(&mut m, Msg::Redraw(written(2, "g")));
+    assert!(m.engine.holds_the_screen());
+    assert_eq!(
+        buffers(&m),
+        before,
+        "a changed grid was drawn in a new buffer"
+    );
+    let file = m
+        .engine
+        .painted_grids()
+        .window_grid(WinHandle(1003))
+        .map(|grid| grid.row_text(0));
+    assert!(
+        file.is_some_and(|row| row.starts_with('g')),
+        "the held layout missed the replacement's new cells"
+    );
+}
+
 /// The bound hands the screen to a replacement that never reopens the
 /// dead engine's sidebar, and an expiry the dead engine armed does not.
 #[test]

@@ -12,9 +12,8 @@
 //! Nothing here depends on any other crate in the workspace, so every one of
 //! them may depend on this.
 //!
-//! [`writer`] is here for the same reach: the thread that owns a file's
-//! writes serves the engine's redraw log and the editor's first-run record,
-//! two crates with no edge between them.
+//! [`writer`] lives here for the same reach, so any crate may hand its file
+//! writes to a thread of their own.
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod writer;

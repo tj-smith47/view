@@ -85,7 +85,7 @@ enum Hold {
     },
     /// The windows the dead engine last had on screen, and the
     /// replacement's registry drawn in them
-    /// ([`GridRegistry::laid_out_as`]).
+    /// ([`GridRegistry::relay_into`]).
     ///
     /// The attach draws the file alone, and a config reopens its sidebars
     /// from its own startup autocmds after that, so painting the live
@@ -350,13 +350,14 @@ impl EngineModel {
             ..
         } = &mut self.held.hold
         {
-            let next = match fit(slots, shown, &live, status) {
-                Fit::Slots(fitted) if !settled(&fitted) => self.grids.laid_out_as(&fitted, cells),
-                Fit::Slots(_) | Fit::Unnamed | Fit::Outside => None,
+            let relaid = match fit(slots, shown, &live, status) {
+                Fit::Slots(fitted) if !settled(&fitted) => {
+                    self.grids.relay_into(&fitted, cells, drawn).is_some()
+                }
+                Fit::Slots(_) | Fit::Unnamed | Fit::Outside => false,
             };
-            match next {
-                Some(next) => *drawn = next,
-                None => self.held.hold = Hold::Nothing,
+            if !relaid {
+                self.held.hold = Hold::Nothing;
             }
         }
         self.rebuild_held_hl(false);

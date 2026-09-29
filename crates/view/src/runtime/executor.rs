@@ -1000,9 +1000,19 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .unwrap_or(source);
+        // any spelling of the call: a path, `thread::sleep(` after a `use`
+        // of `std::thread`, or a bare `sleep(` after a `use` of the function
+        let calls = production
+            .match_indices("sleep(")
+            .filter(|(at, _)| {
+                production[..*at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+            })
+            .count();
         assert_eq!(
-            production.matches("std::thread::sleep(").count(),
-            1,
+            calls, 1,
             "a timer arm sleeps on a thread of its own; route it through one_shot"
         );
     }

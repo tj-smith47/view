@@ -2,8 +2,8 @@
 //! a caller never waits on.
 //!
 //! A write made on the thread that asked for it holds that thread behind the
-//! disk, and the threads that log are the ones that must not wait: the
-//! dispatch loop and the RPC reader. The queue is bounded because a disk that
+//! disk, so a thread that must not wait on a disk hands its writes to one
+//! that may. The queue is bounded because a disk that
 //! stops answering would otherwise grow it for the life of the process; a
 //! caller told the queue is full decides what the dropped item costs.
 
@@ -191,6 +191,41 @@ mod tests {
             writer.finish_within(Duration::from_secs(30)),
             Finished::Failed(1)
         );
+    }
+
+    /// Sends once when dropped, which marks the end of the thread that
+    /// owned it.
+    struct Gone(mpsc::Sender<()>);
+
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    /// A send that finds the thread ended closes the writer.
+    ///
+    /// Disconfirm: `try_send` leaving the queue in place on a disconnect
+    /// answers `is_open` true after it.
+    #[test]
+    fn a_send_to_an_ended_thread_closes_the_writer() {
+        let (gone_tx, gone) = mpsc::channel::<()>();
+        let guard = Gone(gone_tx);
+        let mut writer = BackgroundWriter::<u32, u32>::start("test-writer", 1, move |n| {
+            // the closure owns the guard, so it drops once the thread's
+            // loop has ended and let go of its queue
+            let _held = &guard;
+            Err(n)
+        })
+        .unwrap();
+        writer.try_send(1).unwrap();
+        gone.recv().unwrap();
+        assert!(writer.is_open(), "nothing has told the writer yet");
+        assert!(matches!(
+            writer.try_send(2),
+            Err(TrySendError::Disconnected(2))
+        ));
+        assert!(!writer.is_open());
     }
 
     /// A thread stuck in apply holds the wait for `wait` and no longer.

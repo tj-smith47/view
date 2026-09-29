@@ -242,6 +242,33 @@ impl Grid {
         self.cells.iter().any(|cell| !cell.text.trim().is_empty())
     }
 
+    /// Makes this grid a copy of `source` in its own buffers, and answers
+    /// whether anything was copied. Size, cursor and cells are compared
+    /// first, so a source that matches already costs that comparison alone.
+    pub(crate) fn follow(&mut self, source: &Self) -> bool {
+        if self.size() == source.size()
+            && self.cursor() == source.cursor()
+            && self.cells == source.cells
+        {
+            return false;
+        }
+        self.width = source.width;
+        self.height = source.height;
+        self.cursor_row = source.cursor_row;
+        self.cursor_col = source.cursor_col;
+        self.cells.clone_from(&source.cells);
+        self.dirty_full = source.dirty_full;
+        self.dirty_rows.clone_from(&source.dirty_rows);
+        true
+    }
+
+    /// Where the cell buffer lives, so a test can tell a grid copied into
+    /// in place from one replaced by a fresh copy.
+    #[cfg(test)]
+    pub(crate) fn buffer(&self) -> *const Cell {
+        self.cells.as_ptr()
+    }
+
     /// Renumbers every cell's highlight id through `to`.
     pub(crate) fn map_hl(&mut self, to: impl Fn(u64) -> u64) {
         for cell in &mut self.cells {

@@ -13,6 +13,8 @@ use crate::grid::{Grid, GridDamage, GridOp};
 use crate::model::Look;
 use crate::native::geometry::NativeSurface;
 
+mod relay;
+
 /// A grid's identity as nvim assigns it. The global grid keeps the id the
 /// engine gives it rather than a sentinel, so single-grid and multigrid
 /// sessions share one code path.
@@ -920,61 +922,6 @@ impl GridRegistry {
             .filter(|slot| slot.placed.as_ref().is_some_and(|p| !p.hidden))
             .find(|slot| slot.window.as_ref().is_some_and(|w| w.win == win))
             .map(|slot| &slot.grid)
-    }
-
-    /// A copy of this registry drawn in `layout`: each window moved into the
-    /// slot `layout` gives its handle, and a window standing in every slot
-    /// no window here fills. `held` gives, by index into `layout`, the cells
-    /// that slot showed before; a stand-in shows them, and so does a window
-    /// here nvim has not drawn any text into yet. `None` when a window here
-    /// has no slot in `layout`, since the layout it would be drawn in is
-    /// then no longer the one on screen.
-    #[must_use]
-    pub fn laid_out_as(&self, layout: &[WindowSlot], held: &[Option<Grid>]) -> Option<Self> {
-        let mut copy = self.clone();
-        let placed = self.window_layout();
-        for (win, _) in &placed {
-            let index = layout.iter().position(|(slot_win, _)| slot_win == win)?;
-            let (_, slot) = layout.get(index)?;
-            let entry = self
-                .slots
-                .iter()
-                .find(|s| s.window.as_ref().is_some_and(|w| w.win == *win))?;
-            let grid = entry.id;
-            copy.place_window(grid, *win, *slot);
-            if let (false, Some(Some(cells))) = (entry.grid.has_text(), held.get(index)) {
-                if let Some(drawn) = copy.slots.iter_mut().find(|s| s.id == grid) {
-                    drawn.grid = cells.clone();
-                }
-            }
-        }
-        // ids counted down from the top of the range, which nvim, counting
-        // up from 2, never names in a session
-        let mut spare = u64::MAX;
-        for (index, (win, slot)) in layout.iter().enumerate() {
-            if placed.iter().any(|(live, _)| live == win) {
-                continue;
-            }
-            let grid = if let Some(Some(cells)) = held.get(index) {
-                cells.clone()
-            } else {
-                let mut grid = Grid::new();
-                grid.apply(GridOp::Resize {
-                    width: slot.2,
-                    height: slot.3,
-                });
-                grid
-            };
-            copy.slots.push(Slot {
-                id: GridId(spare),
-                grid,
-                placed: None,
-                window: None,
-            });
-            copy.place_window(GridId(spare), *win, *slot);
-            spare = spare.saturating_sub(1);
-        }
-        Some(copy)
     }
 
     /// The grid nvim last placed the cursor in.
