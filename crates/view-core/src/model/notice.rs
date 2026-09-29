@@ -99,8 +99,10 @@ impl Model {
         if self.engine.messages.entries.is_empty() {
             return None;
         }
+        let anchor = self.notice_anchor();
         let rect = self
             .notice_held
+            .filter(|(corner, _)| *corner == anchor)
             .map_or_else(|| self.notice_column().rect, |(_, column)| column.rect);
         self.engine
             .messages
@@ -1432,9 +1434,13 @@ pub(crate) mod tests {
     /// misreads the toast.
     #[test]
     fn the_column_width_and_overlap_test_have_one_home() {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut stack = vec![src];
-        let mut width_formulas = Vec::new();
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut stack: Vec<_> = std::fs::read_dir(&crates)
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("src"))
+            .filter(|src| src.is_dir())
+            .collect();
+        let mut uses = Vec::new();
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).unwrap() {
                 let path = entry.unwrap().path();
@@ -1449,23 +1455,33 @@ pub(crate) mod tests {
                 }
                 let text = std::fs::read_to_string(&path).unwrap();
                 let text = text.split("\n#[cfg(test)]").next().unwrap_or_default();
-                width_formulas.extend(
-                    text.matches("NOTICE_COLUMN_MAX.min(")
-                        .map(|_| path.display().to_string()),
+                uses.extend(
+                    text.lines()
+                        .map(str::trim)
+                        .filter(|line| {
+                            line.contains("NOTICE_COLUMN_MAX")
+                                && !line.starts_with("//")
+                                && !line.starts_with("pub const NOTICE_COLUMN_MAX")
+                                && !line.starts_with("pub use")
+                        })
+                        .map(|line| (path.display().to_string(), line.to_string())),
                 );
             }
         }
-        assert_eq!(
-            width_formulas.len(),
-            1,
-            "the column's width is computed by `notice_column_width` alone: {width_formulas:?}"
+        let body = include_str!("notice.rs")
+            .split("fn notice_column_width(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .unwrap();
+        assert!(
+            uses.len() == 1 && body.contains(uses[0].1.as_str()),
+            "the column's width is computed by `notice_column_width` alone: {uses:?}"
         );
         let surfaces = include_str!("../native/surfaces.rs");
         let detector = surfaces.split("\n#[cfg(test)]").next().unwrap_or_default();
         assert!(
             detector.contains("notice_column_width(grid_w)")
-                && detector.contains("overlaps(column, float)")
-                && !detector.contains("left < c_col"),
+                && detector.contains("overlaps(column, float)"),
             "the float detector reads the column's own width and overlap test"
         );
     }

@@ -901,7 +901,7 @@ mod tests {
             .entries
             .iter()
             .filter(|entry| entry.is_native())
-            .filter_map(|entry| entry.content.first().map(|(_, line)| line.clone()))
+            .filter_map(|entry| entry.content().first().map(|(_, line)| line.clone()))
             .collect()
     }
 
@@ -1586,7 +1586,7 @@ mod tests {
                     .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
                 assert!(
                     !model.engine.messages.entries.iter().any(|entry| entry
-                        .content
+                        .content()
                         .iter()
                         .any(|(_, line)| line.contains("set it back"))),
                     "{channel} announced={announced}: the history line reached the stack"

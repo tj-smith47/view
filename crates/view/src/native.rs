@@ -1351,7 +1351,7 @@ mod tests {
             .messages
             .entries
             .iter()
-            .flat_map(|e| e.content.iter().map(|(_, t)| t.as_str()))
+            .flat_map(|e| e.content().iter().map(|(_, t)| t.as_str()))
             .collect()
     }
 

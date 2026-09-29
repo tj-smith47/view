@@ -1180,7 +1180,7 @@ mod tests {
             "the restart's own failure must schedule a toast, got {effects:?}"
         );
         let entry = model.engine.messages.entries.last().expect("a notice");
-        let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+        let text: String = entry.content().iter().map(|(_, t)| t.as_str()).collect();
         assert!(
             text.contains("AI agent failed to start"),
             "the message log must name the failure: {text:?}"
@@ -1285,7 +1285,7 @@ mod tests {
             "a spawn failure must schedule a toast, got {effects:?}"
         );
         let entry = model.engine.messages.entries.last().expect("a notice");
-        let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+        let text: String = entry.content().iter().map(|(_, t)| t.as_str()).collect();
         assert!(
             text.contains("could not provision the claude-code agent"),
             "the toast must name what the agent reported: {text:?}"

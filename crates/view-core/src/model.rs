@@ -177,7 +177,9 @@ pub struct Model {
     /// The corner the last `update` stacked notices from and the column it
     /// placed them in, or `None` while nothing is on the stack. The next
     /// placement from the same corner keeps that column's end until the
-    /// cursor or the hunk under review enters it.
+    /// cursor or the hunk under review enters it. The column is current
+    /// only while every layout input moves through `update`; readers check
+    /// the corner against the anchor of the moment.
     pub(crate) notice_held: Option<(crate::native::geometry::Anchor, NoticeColumn)>,
     /// `[ui] tile_titles`: the title a tile titled by its filetype takes
     /// instead, set once at startup.
@@ -1990,7 +1992,7 @@ impl EngineModel {
             .messages
             .entries
             .iter()
-            .any(|e| e.is_native() && !e.is_condition() && e.content == content)
+            .any(|e| e.is_native() && !e.is_condition() && e.content() == content)
         {
             return Vec::new();
         }
@@ -2075,7 +2077,7 @@ impl EngineModel {
             .entries
             .iter()
             .find(|e| is_standing_native_notice(e, prefix))
-            .map(|e| e.content.iter().map(|(_, line)| line.as_str()).collect())
+            .map(|e| e.content().iter().map(|(_, line)| line.as_str()).collect())
     }
 }
 
@@ -2087,7 +2089,7 @@ fn is_standing_native_notice(entry: &MessageEntry, prefix: &str) -> bool {
     entry.is_native()
         && !entry.is_condition()
         && entry
-            .content
+            .content()
             .first()
             .is_some_and(|(_, line)| line.starts_with(prefix))
 }

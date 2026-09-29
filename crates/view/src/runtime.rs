@@ -3831,7 +3831,7 @@ mod tests {
                 .entries
                 .last()
                 .expect("the degrade must self-announce a notice");
-            let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+            let text: String = entry.content().iter().map(|(_, t)| t.as_str()).collect();
             assert!(
                 text.contains(":View ai"),
                 "the notice must name the way back in, got {text:?}"
@@ -4487,7 +4487,7 @@ mod tests {
             .entries
             .last()
             .expect("an unwired executor must not drop the confirmation in silence");
-        let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+        let text: String = entry.content().iter().map(|(_, t)| t.as_str()).collect();
         assert_eq!(
             text,
             "out-of-band write detection is degraded: /proj/src/lib.rs could not \

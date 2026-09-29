@@ -883,11 +883,11 @@ mod tests {
         assert_eq!(entry.kind, "native");
         assert!(
             entry
-                .content
+                .content()
                 .iter()
                 .any(|(_, text)| text.contains("failed to write theme cache")),
             "the notice must name the failure, got {:?}",
-            entry.content
+            entry.content()
         );
     }
 }

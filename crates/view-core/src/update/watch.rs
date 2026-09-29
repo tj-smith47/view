@@ -555,7 +555,7 @@ mod tests {
                 "a vanished file must leave the user a notice, got effects {effects:?}"
             );
             let entry = model.engine.messages.entries.last().expect("a notice");
-            let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+            let text: String = entry.content().iter().map(|(_, t)| t.as_str()).collect();
             assert_eq!(
                 text,
                 format!(
@@ -882,7 +882,7 @@ mod tests {
             "one line, not a stack: {:?}",
             model.engine.messages.entries
         );
-        let line = &model.engine.messages.entries[0].content[0].1;
+        let line = &model.engine.messages.entries[0].content()[0].1;
         assert!(
             line.ends_with("your buffer still holds your edits"),
             "the line wears the current wording: {line}"

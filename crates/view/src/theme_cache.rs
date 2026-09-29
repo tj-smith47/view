@@ -693,7 +693,7 @@ mod tests {
                 .engine
                 .toast_history
                 .entries()
-                .flat_map(|entry| entry.content.iter().map(|(_, text)| text.clone()))
+                .flat_map(|entry| entry.content().iter().map(|(_, text)| text.clone()))
                 .collect::<Vec<_>>()
         };
         let mut model = view_core::model::Model::with_term_size(80, 24);

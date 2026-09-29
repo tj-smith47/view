@@ -263,7 +263,7 @@ impl MessageHistoryState {
 /// the overlay actually draws.
 fn entry_text(entry: &MessageEntry) -> String {
     entry
-        .content
+        .content()
         .iter()
         .map(|(_, text)| text.as_str())
         .collect()

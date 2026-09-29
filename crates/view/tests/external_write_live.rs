@@ -364,7 +364,7 @@ fn a_removed_watched_file_is_announced_once_the_grace_confirms_it() {
         .entries
         .last()
         .expect("a file that stayed gone must leave the user a notice");
-    let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+    let text: String = entry.content().iter().map(|(_, t)| t.as_str()).collect();
     assert_eq!(
         text,
         format!(

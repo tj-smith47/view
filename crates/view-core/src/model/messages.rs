@@ -24,7 +24,9 @@ pub struct MessageId(u64);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageEntry {
     pub kind: String,
-    pub content: Vec<(u64, String)>,
+    /// Private so every edit goes through [`Self::set_content`], which
+    /// empties the wrap cache the new text would otherwise be painted from.
+    content: Vec<(u64, String)>,
     /// Whether this entry is the one locally-raised condition notice (see
     /// `Messages::set_native_condition`) rather than a record of something
     /// that happened. Marked rather than matched on text or kind, so
@@ -79,6 +81,19 @@ impl PartialEq for WrapCache {
 impl Eq for WrapCache {}
 
 impl MessageEntry {
+    /// The entry's text as decoded off the wire: `(highlight id, text)`
+    /// chunks in the order they are shown.
+    #[must_use]
+    pub fn content(&self) -> &[(u64, String)] {
+        &self.content
+    }
+
+    /// Replaces the entry's text and empties its wrap cache.
+    pub(crate) fn set_content(&mut self, content: Vec<(u64, String)>) {
+        self.content = content;
+        self.wrapped = WrapCache::default();
+    }
+
     /// The entry's lines wrapped to a box `width` cells wide, from the
     /// cache when it was built for this width.
     fn wrapped(&self, width: u16) -> std::borrow::Cow<'_, [String]> {
@@ -1022,8 +1037,7 @@ impl Messages {
             if raised.content == content {
                 return false;
             }
-            raised.content = content;
-            raised.wrapped = WrapCache::default();
+            raised.set_content(content);
             return true;
         }
         // raised through `push_native` and marked afterwards, rather than
@@ -1318,6 +1332,24 @@ mod tests {
                 "the file you".into(),
                 "opened".into()
             ])
+        );
+    }
+
+    /// The wrap cache is emptied by `set_content` alone, so an entry's text
+    /// stays private to this module and every other crate reads it through
+    /// `content()`.
+    #[test]
+    fn an_entrys_text_is_written_only_through_set_content() {
+        let fields = include_str!("messages.rs")
+            .split("pub struct MessageEntry {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .unwrap_or_default();
+        assert!(
+            fields
+                .lines()
+                .any(|line| line.trim() == "content: Vec<(u64, String)>,"),
+            "`MessageEntry::content` is a private field: {fields}"
         );
     }
 

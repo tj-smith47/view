@@ -496,7 +496,7 @@ fn pressing_d_on_a_file_with_a_loaded_modified_buffer_refuses_the_delete_and_rec
         .last()
         .expect("the refusal must reach the message surface");
     assert_eq!(
-        notice.content,
+        notice.content(),
         vec![(0, "view: buffer open. Close it first".to_string())]
     );
 

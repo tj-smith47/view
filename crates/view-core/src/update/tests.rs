@@ -3784,7 +3784,7 @@ fn msg_show_appends_and_replace_last_overwrites() {
     );
     assert_eq!(m.engine.messages.entries.len(), 2);
     assert_eq!(
-        m.engine.messages.entries.last().unwrap().content,
+        m.engine.messages.entries.last().unwrap().content(),
         vec![(73, "replaced".to_string())]
     );
 
@@ -4743,7 +4743,7 @@ fn an_unregistered_invoke_says_so_rather_than_going_quiet() {
         .entries
         .last()
         .expect("the invoke must reach the user through the message surface");
-    let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+    let text: String = entry.content().iter().map(|(_, t)| t.as_str()).collect();
     assert!(
         text.contains("picker files"),
         "an unrecognized invoke must fall back to the usage line, not go quiet, \
@@ -4959,7 +4959,7 @@ fn an_unknown_feature_with_no_verb_still_gets_the_notice() {
         .entries
         .last()
         .expect("the invoke must reach the user through the message surface");
-    let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+    let text: String = entry.content().iter().map(|(_, t)| t.as_str()).collect();
     assert!(
         text.starts_with(":View "),
         "an unresolvable feature must still fall to the usage line, not \
@@ -8298,7 +8298,7 @@ fn ai_trust_resolved_false_toasts_the_way_back_in() {
         .entries
         .last()
         .expect("the notice must reach the message surface");
-    let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+    let text: String = entry.content().iter().map(|(_, t)| t.as_str()).collect();
     assert!(
         text.contains(":View ai"),
         "the notice must name the way back in, got {text:?}"
@@ -8826,7 +8826,7 @@ fn a_bare_view_command_is_answered_with_what_it_could_have_asked_for() {
         .entries
         .last()
         .expect("a bare :View must still reach the user");
-    let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+    let text: String = entry.content().iter().map(|(_, t)| t.as_str()).collect();
     assert!(
         !text.contains("  "),
         "a bare invocation must not render its two empty tokens as a gap, got {text:?}"
@@ -9637,7 +9637,7 @@ fn a_verb_this_build_does_not_answer_is_told_the_ones_it_does() {
         },
     );
     let entry = m.engine.messages.entries.last().expect("a notice");
-    let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+    let text: String = entry.content().iter().map(|(_, t)| t.as_str()).collect();
     assert!(
         text.contains("picker files"),
         "an unanswerable verb must be told the forms that work, got {text:?}"
@@ -10551,9 +10551,9 @@ fn tree_create_prompt_reply_rejects_an_absolute_path() {
         .last()
         .expect("the refusal must surface a visible notice");
     assert!(
-        entry.content.iter().any(|(_, t)| t.contains("invalid")),
+        entry.content().iter().any(|(_, t)| t.contains("invalid")),
         "expected an \"invalid file name\" notice, got {:?}",
-        entry.content
+        entry.content()
     );
 }
 
@@ -10661,9 +10661,9 @@ fn tree_rename_prompt_reply_rejects_an_absolute_path() {
         .last()
         .expect("the refusal must surface a visible notice");
     assert!(
-        entry.content.iter().any(|(_, t)| t.contains("invalid")),
+        entry.content().iter().any(|(_, t)| t.contains("invalid")),
         "expected an \"invalid file name\" notice, got {:?}",
-        entry.content
+        entry.content()
     );
 }
 
@@ -15786,7 +15786,7 @@ fn a_panes_flip_brings_the_pill_or_hands_the_row_back() {
             .last()
             .map(|entry| {
                 entry
-                    .content
+                    .content()
                     .iter()
                     .map(|(_, text)| text.as_str())
                     .collect()
@@ -15986,7 +15986,7 @@ fn view_panes_with_no_argument_reports_the_mode_and_its_marker() {
         .last()
         .map(|entry| {
             entry
-                .content
+                .content()
                 .iter()
                 .map(|(_, text)| text.as_str())
                 .collect()
@@ -16018,7 +16018,7 @@ fn view_panes_reports_the_row_drawn_hidden_or_left_to_nvim() {
             .last()
             .map(|entry| {
                 entry
-                    .content
+                    .content()
                     .iter()
                     .map(|(_, text)| text.as_str())
                     .collect()
