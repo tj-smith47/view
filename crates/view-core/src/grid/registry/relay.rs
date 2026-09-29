@@ -17,12 +17,12 @@ impl GridRegistry {
     /// now stands for and copied over, into its own buffers, only where the
     /// two differ. A copy allocates only for a cell whose text outgrows the
     /// buffer it had, and for a grid whose size moved or whose id `drawn`
-    /// has not held before. Answers how many grids were copied, or `None`, leaving
-    /// `drawn` as it was, when a window here has no slot in `layout`, since
-    /// the layout it would be drawn in is then no longer the one on screen,
-    /// or when `reported` says every slot is a window here that reported
-    /// its status and each of them has drawn text, since the replacement
-    /// then draws every slot itself.
+    /// has not held before. Answers how many grids were copied, or `None`,
+    /// leaving `drawn` as it was, when a window here has no slot in
+    /// `layout`, since the layout it would be drawn in is then no longer the
+    /// one on screen, or when `reported` says every slot is a window here
+    /// that reported its status and each of them has drawn text, since the
+    /// replacement then draws every slot itself.
     #[must_use]
     pub(crate) fn relay_into(
         &self,

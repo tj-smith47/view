@@ -1241,7 +1241,11 @@ fn a_held_layout_flush_allocates_a_fixed_count() {
         crate::ALLOCATOR.count()
     };
 
-    assert_eq!(flush(&mut m), 3, "a flush that changed no cell");
+    assert_eq!(
+        flush(&mut m),
+        3,
+        "a flush that changed no cell: live layout, relay windows, drawn slots"
+    );
 
     let _ = update(
         &mut m,
@@ -1256,7 +1260,11 @@ fn a_held_layout_flush_allocates_a_fixed_count() {
             }],
         }]),
     );
-    assert_eq!(flush(&mut m), 3, "a flush that copies one grid");
+    assert_eq!(
+        flush(&mut m),
+        3,
+        "a flush that copies one grid: live layout, relay windows, drawn slots"
+    );
     assert_eq!(
         m.engine
             .painted_grids()
@@ -1287,7 +1295,11 @@ fn a_held_layout_flush_allocates_a_fixed_count() {
     back.pop();
     let _ = update(&mut m, Msg::Redraw(back));
     assert!(m.engine.holds_the_screen());
-    assert_eq!(flush(&mut m), 2, "the flush that hands the layout back");
+    assert_eq!(
+        flush(&mut m),
+        2,
+        "the flush that hands the layout back: live layout, relay windows"
+    );
     assert!(!m.engine.holds_the_screen());
 }
 
