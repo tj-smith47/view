@@ -620,8 +620,8 @@ fn paint_gapless(
     damage: &Damage,
     buf: &mut Buffer,
 ) {
-    let (lattice, edges) = gapless_lattice(panes, joins, active, area, foot, buf.area);
-    for (row, col) in lattice.cells() {
+    let (lattice, cells, edges) = gapless_lattice(panes, joins, active, area, foot, buf.area);
+    for (row, col) in cells {
         if !damage.covers(row) {
             continue;
         }
@@ -634,8 +634,8 @@ fn paint_gapless(
     }
 }
 
-/// The gapless lattice and the cells of it the active tile's frame is
-/// drawn on.
+/// The gapless lattice, every cell it runs through, and the cells of it
+/// the active tile's frame is drawn on.
 fn gapless_lattice(
     panes: &[Pane],
     joins: &[Join],
@@ -643,14 +643,14 @@ fn gapless_lattice(
     area: Rect,
     foot: u16,
     screen: Rect,
-) -> (Lattice, BTreeSet<Cell>) {
+) -> (Lattice, BTreeSet<Cell>, BTreeSet<Cell>) {
     let lattice = lattice(panes, joins, area, foot, screen);
     let cells = lattice.cells();
     let edges = active
         .and_then(|id| panes.iter().find(|pane| is_tile(pane) && pane.id == id))
         .map(|pane| perimeter(pane, joins, &cells, area))
         .unwrap_or_default();
-    (lattice, edges)
+    (lattice, cells, edges)
 }
 
 /// Every screen cell the gapless lattice runs through: the column right of

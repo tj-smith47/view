@@ -279,7 +279,8 @@ fn start_toast_exit(model: &mut Model, departed: Option<(Vec<Vec<Span>>, usize)>
     // already running, because two chains ticking one clock advance it twice
     // per interval and the stack arrives in half the time it was given
     let already_ticking = model.toast_motion.is_some();
-    model.toast_motion = Some(ToastMotion::exit_right(lines, slot));
+    let width = model.notice_column().rect.2;
+    model.toast_motion = Some(ToastMotion::exit_right(lines, slot, width));
     model.dirty = true;
     if already_ticking {
         return Vec::new();

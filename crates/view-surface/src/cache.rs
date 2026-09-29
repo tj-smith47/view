@@ -88,7 +88,10 @@ impl Frame {
 ///   decided it, read by the `:View ui panes` notice and the config report),
 ///   `mouse_capture`, `mouse_on`, `colon_mapped` (it gates whether a `:` is
 ///   speculated at all, and `cmdline_speculated` is the state that reaches
-///   a layer), `key_unanswered`, `key_round_trips`, `key_round_trips_at` and
+///   a layer), `pending_chord` (it closes the same gate, and holds
+///   nothing any layer draws), `ai_fs` (an agent's file request reaches
+///   the screen only as a prompt in the panel, which is an overlay),
+///   `key_unanswered`,`key_round_trips`, `key_round_trips_at` and
 ///   `literal_pending`
 ///   (the gate's own terms and the link reading that bounds a guess, read
 ///   only when a `:` is folded or a batch arrives), `next_overlay_id`,
@@ -109,7 +112,10 @@ impl Frame {
 ///   compositor paints the panes themselves off the `Model`),
 ///   `held` (the same way: `grid` is the painted grid's size, and the
 ///   panes, the slots and the highlight table held with them are painted
-///   off the `Model`),
+///   off the `Model`), `notice_held` (via `notice_column`, which resolves
+///   the held column against the anchor of the moment),
+///   `surface_conflicts` (a conflict reaches the screen as a notice on
+///   `messages`),
 ///   `hl` and `mode` (painters read them off the
 ///   `Model` on the reuse path), `window_status` (the tile segments are
 ///   painted off the `Model` the same way, and the row each one stands on
@@ -452,7 +458,11 @@ mod tests {
             .lines()
             .filter_map(|line| {
                 let declaration = line.trim();
-                let declaration = declaration.strip_prefix("pub ").unwrap_or(declaration);
+                let declaration = match declaration.strip_prefix("pub") {
+                    Some(rest) if rest.starts_with(' ') => rest.trim_start(),
+                    Some(rest) if rest.starts_with('(') => rest.split_once(") ")?.1,
+                    _ => declaration,
+                };
                 let (name, _) = declaration.split_once(':')?;
                 (!name.is_empty()
                     && name
@@ -463,6 +473,16 @@ mod tests {
             .collect();
         assert!(!names.is_empty(), "{header} parsed to no fields at all");
         names
+    }
+
+    #[test]
+    fn the_field_walk_reads_a_field_of_every_visibility() {
+        let source = "pub struct S {\n    pub a: u8,\n    pub(crate) b: u8,\n    \
+                      pub(super) c: u8,\n    pub(in crate::x) d: u8,\n    e: u8,\n}";
+        assert_eq!(
+            declared_fields(source, "pub struct S {"),
+            ["a", "b", "c", "d", "e"]
+        );
     }
 
     /// The class pin behind `Inputs`: a paint-relevant field added to the

@@ -1784,3 +1784,30 @@ fn a_picker_with_no_preview_keeps_the_single_column_layout() {
         );
     }
 }
+
+/// A row without control characters measures what the chrome's shared
+/// measure says it does, and a control character counts one column per
+/// character, the spaces the painter stands in for it.
+#[test]
+fn an_overlay_row_measures_what_the_shared_measure_does() {
+    for text in ["main.rs", "cafe\u{301}.rs", "日本", "👩\u{200d}💻 ok", ""] {
+        assert_eq!(
+            cells(text),
+            view_core::native::text::text_width(text),
+            "{text:?}"
+        );
+    }
+    assert_eq!(cells("a\r\nb"), 4);
+}
+
+/// The panel's caret stands in the interior the frame was laid out with,
+/// so the border arithmetic lives in `interior_size` alone.
+#[test]
+fn the_interior_height_is_computed_in_one_place() {
+    let source = include_str!("../overlay.rs");
+    assert_eq!(
+        source.matches("height - 2").count(),
+        1,
+        "a second copy of the border arithmetic in overlay.rs"
+    );
+}

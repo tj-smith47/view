@@ -20,7 +20,9 @@
 use unicode_width::UnicodeWidthChar;
 use view_core::model::TermCaps;
 use view_core::native::geometry::LIST_MARKER_COLS;
-use view_core::native::text::{cluster_width, clusters, cut_before_mark, TRUNCATION_MARK};
+use view_core::native::text::{
+    cluster_width, clusters, cut_before_mark, text_width_by, TRUNCATION_MARK,
+};
 use view_core::native::views::{
     AiPanelView, GitMark, PaletteRow, PaletteView, PickerView, PromptChoices, PromptView, Span,
     StatuslineView, StyleRole, TreeRow, TreeView, INLINE_CHOICE_GAP,
@@ -1230,11 +1232,7 @@ fn composer_lines(rows: &[String]) -> Vec<Line> {
 /// `CursorSpec` requires, and inside the surface that holds the keys.
 pub(crate) fn ai_caret(view: &AiPanelView, width: u16, height: u16) -> Option<(u16, u16)> {
     let (row_off, col_off) = interior_origin(width, height);
-    let interior = if width < 2 || height < 2 {
-        height
-    } else {
-        height - 2
-    };
+    let interior = interior_size(width, height).1;
     ai_caret_at(view, width, height, interior, row_off, col_off)
 }
 
@@ -1510,9 +1508,7 @@ fn min_gap(gap: u16, next_is_empty: bool) -> u16 {
 /// `text`'s width in terminal display cells, saturating rather than
 /// wrapping on a string too wide to count in a `u16`.
 fn cells(text: &str) -> u16 {
-    clusters(text)
-        .map(cluster_cells)
-        .fold(0_u16, |acc, c| acc.saturating_add(c))
+    text_width_by(text, cluster_cells)
 }
 
 /// One grapheme cluster's width in terminal display cells, the columns the

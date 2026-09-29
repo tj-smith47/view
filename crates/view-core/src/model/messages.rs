@@ -199,6 +199,15 @@ impl MessageEntry {
         self.condition
     }
 
+    /// The role every row of this entry's toast is painted in.
+    fn toast_role(&self) -> StyleRole {
+        if self.condition {
+            StyleRole::Warning
+        } else {
+            StyleRole::Plain
+        }
+    }
+
     #[must_use]
     pub fn is_persistent(&self) -> bool {
         self.condition || Self::is_persistent_kind(&self.kind)
@@ -688,9 +697,10 @@ impl Messages {
         self.armed_lines = top
             .and_then(|id| self.entries.iter().find(|e| e.id() == id))
             .map(|e| {
+                let role = e.toast_role();
                 e.lines()
                     .into_iter()
-                    .map(|l| vec![Span::plain(l)])
+                    .map(|l| vec![Span::new(l, role)])
                     .collect()
             })
             .unwrap_or_default();
@@ -1238,11 +1248,7 @@ impl Messages {
             .zip(self.keep_visible_in(max_rows, width))
             .filter(|(_, shown)| *shown)
             .map(|(e, _)| {
-                let role = if e.condition {
-                    StyleRole::Warning
-                } else {
-                    StyleRole::Plain
-                };
+                let role = e.toast_role();
                 e.wrapped(width)
                     .iter()
                     .map(|l| vec![Span::new(l.clone(), role)])

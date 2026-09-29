@@ -1200,10 +1200,13 @@ enum Break {
 /// row's end and never a cell of it, so a text ending on one ends on an
 /// empty row, which is where the next character goes.
 ///
-/// Cells are the ASCII-doubling upper bound this crate measures text with:
-/// one per ASCII character, two for anything else. Over-wide leaves a
-/// column unused at the frame's edge; under-wide would push a glyph past
-/// it, which is the failure that loses text.
+/// [`Break::Cell`] measures with the ASCII-doubling upper bound the caret
+/// is placed with: one per ASCII character, two for anything else.
+/// Over-wide leaves a column unused at the frame's edge; under-wide would
+/// push a glyph past it, which is the failure that loses text.
+/// [`Break::Word`] is [`crate::native::text::wrap_line`], line by line, so
+/// prose in the transcript breaks in the column every other prose row of
+/// the panel breaks in.
 ///
 /// `keep` bounds the allocation, not only the result: a row scrolling off
 /// the top is emptied and reused as the row opening at the bottom, so a
@@ -1213,6 +1216,20 @@ enum Break {
 /// last ones are.
 fn wrap(input: &str, width: usize, keep: usize, breaks: Break) -> Vec<String> {
     let mut rows: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    if breaks == Break::Word {
+        for line in input
+            .split("\r\n")
+            .flat_map(|line| line.split(['\n', '\r']))
+        {
+            for row in crate::native::text::wrap_line(line, width) {
+                if rows.len() >= keep {
+                    rows.pop_front();
+                }
+                rows.push_back(row);
+            }
+        }
+        return rows.into();
+    }
     rows.push_back(String::new());
     let mut used = 0_usize;
     let mut chars = input.chars().peekable();
@@ -1230,23 +1247,8 @@ fn wrap(input: &str, width: usize, keep: usize, breaks: Break) -> Vec<String> {
         // `used > 0` keeps a glyph wider than the whole row on a row of its
         // own instead of opening an empty one ahead of it
         if used > 0 && used + cells > width {
-            // a space landing on the break *is* the break: kept, it would
-            // open the next row on whitespace the reader cannot see and
-            // cannot delete
-            if breaks == Break::Word && ch == ' ' {
-                open_row(&mut rows, keep);
-                used = 0;
-                continue;
-            }
-            let carried = (breaks == Break::Word)
-                .then(|| rows.back_mut().and_then(take_partial_word))
-                .flatten();
             open_row(&mut rows, keep);
             used = 0;
-            if let (Some(word), Some(row)) = (carried, rows.back_mut()) {
-                used = word.chars().map(char_cells).sum();
-                row.push_str(&word);
-            }
         }
         if let Some(row) = rows.back_mut() {
             row.push(ch);
@@ -1254,19 +1256,6 @@ fn wrap(input: &str, width: usize, keep: usize, breaks: Break) -> Vec<String> {
         used += cells;
     }
     rows.into()
-}
-
-/// Takes the unfinished word off the end of `row`, or `None` when the row
-/// is one word with nowhere to break -- which is the case that falls back
-/// to the cell break.
-///
-/// The space goes with it: it is the break, and left behind it would be a
-/// cell of trailing whitespace on a row nothing else can reach.
-fn take_partial_word(row: &mut String) -> Option<String> {
-    let space = row.rfind(' ')?;
-    let word = (space + 1 < row.len()).then(|| row.split_off(space + 1))?;
-    row.pop();
-    Some(word)
 }
 
 /// Opens [`wrap`]'s next row, reusing the string of the row falling off the
@@ -1753,6 +1742,26 @@ mod tests {
 
         assert_eq!(rows, vec!["x".repeat(width), "y".to_string()]);
         assert_eq!(composer_cursor_of(&rows), (1, 1));
+    }
+
+    /// Transcript prose and every other prose row of the panel break in
+    /// the same column, a ZWJ emoji included, and each of the three line
+    /// endings is one break.
+    #[test]
+    fn prose_wraps_as_every_other_prose_row_does() {
+        let line = "the agent 👩\u{200d}💻 wrote a sentence long enough to wrap twice";
+        for width in [7, 12, 20] {
+            assert_eq!(
+                wrap(line, width, usize::MAX, Break::Word),
+                crate::native::text::wrap_line(line, width),
+                "width {width}"
+            );
+        }
+        assert_eq!(
+            wrap("a\r\nb\rc\nd\r", 10, usize::MAX, Break::Word),
+            ["a", "b", "c", "d", ""]
+        );
+        assert_eq!(wrap("one two three", 5, 2, Break::Word), ["two", "three"]);
     }
 
     /// One paint costs what the panel can paint, never what was on the

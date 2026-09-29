@@ -88,9 +88,14 @@ pub fn cluster_width(cluster: &str) -> u16 {
 /// One string's width in terminal cells.
 #[must_use]
 pub fn text_width(text: &str) -> u16 {
-    clusters(text)
-        .map(cluster_width)
-        .fold(0, u16::saturating_add)
+    text_width_by(text, cluster_width)
+}
+
+/// One string's width in terminal cells, each grapheme cluster measured by
+/// `cluster`, saturating at `u16::MAX`.
+#[must_use]
+pub fn text_width_by(text: &str, cluster: impl Fn(&str) -> u16) -> u16 {
+    clusters(text).map(cluster).fold(0, u16::saturating_add)
 }
 
 /// One group of spans' width in terminal cells, which is what a row has

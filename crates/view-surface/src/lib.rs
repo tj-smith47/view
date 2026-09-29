@@ -759,17 +759,9 @@ fn toast_layers(model: &Model, column: NoticeColumn, origin: (u16, u16)) -> Vec<
         .visible_toasts_in(usize::from(column_h).max(3), column_w);
     let leaving = model.toast_motion.as_ref().map(|motion| {
         let (lines, slot) = motion.exiting();
-        let text: Vec<String> = lines
-            .iter()
-            .map(|spans| overlay::line_text(spans))
-            .collect();
-        let lines: Vec<Vec<Span>> = view_core::model::wrap_toast(&text, column_w)
-            .into_iter()
-            .map(|line| vec![Span::plain(line)])
-            .collect();
-        let (width, height) = toast_box(&lines, column_w);
+        let (width, height) = toast_box(lines, column_w);
         Leaving {
-            lines,
+            lines: lines.to_vec(),
             slot: slot.min(stack.len()),
             height,
             x_offset: motion.cells_of(width),

@@ -199,9 +199,9 @@ pub struct ToastMotion {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MotionPhase {
-    /// The departing notice's lines, and the slot it is vacating: the boxes
-    /// at that slot and below are the ones that slide up, the ones above it
-    /// do not move.
+    /// The departing notice's rows, wrapped to the column it leaves, and
+    /// the slot it is vacating: the boxes at that slot and below are the
+    /// ones that slide up, the ones above it do not move.
     ExitRight {
         lines: Vec<Vec<crate::native::views::Span>>,
         slot: usize,
@@ -209,9 +209,30 @@ pub enum MotionPhase {
 }
 
 impl ToastMotion {
-    /// The motion a notice leaving `slot` starts, on its first frame.
+    /// The motion a notice leaving `slot` starts, on its first frame, with
+    /// its `lines` wrapped to a box `width` cells wide. Each row keeps the
+    /// role of the line it came from.
+    ///
+    /// Wrapped here once, because every frame of the slide paints the same
+    /// box.
     #[must_use]
-    pub(crate) fn exit_right(lines: Vec<Vec<crate::native::views::Span>>, slot: usize) -> Self {
+    pub(crate) fn exit_right(
+        lines: Vec<Vec<crate::native::views::Span>>,
+        slot: usize,
+        width: u16,
+    ) -> Self {
+        let lines = lines
+            .into_iter()
+            .flat_map(|spans| {
+                let role = spans
+                    .first()
+                    .map_or(crate::native::views::StyleRole::Plain, |span| span.role);
+                let text: String = spans.into_iter().map(|span| span.text).collect();
+                crate::model::wrap_toast(&[text], width)
+                    .into_iter()
+                    .map(move |row| vec![crate::native::views::Span::new(row, role)])
+            })
+            .collect();
         Self {
             phase: MotionPhase::ExitRight { lines, slot },
             elapsed_steps: 0,
@@ -386,9 +407,31 @@ mod tests {
     /// Ease-in for exits: the first frames barely move and the last covers
     /// the most ground, and the settled frame is at full travel rather than
     /// short of it -- a motion that ended short would pop the last cells.
+    /// The departing box is wrapped to its column when the slide starts,
+    /// and a condition notice slides out in the colour it stood in.
+    #[test]
+    fn the_exit_wraps_its_box_once_and_keeps_each_lines_role() {
+        use crate::native::views::{Span, StyleRole};
+        let lines = vec![
+            vec![Span::new("one two three", StyleRole::Warning)],
+            vec![Span::plain("x")],
+        ];
+        let motion = ToastMotion::exit_right(lines, 1, 9);
+        let (rows, slot) = motion.exiting();
+        assert_eq!(slot, 1);
+        assert_eq!(
+            rows,
+            [
+                vec![Span::new("one two", StyleRole::Warning)],
+                vec![Span::new("three", StyleRole::Warning)],
+                vec![Span::plain("x")],
+            ]
+        );
+    }
+
     #[test]
     fn the_exit_eases_in_and_arrives_on_its_last_painted_frame() {
-        let mut motion = ToastMotion::exit_right(vec![], 0);
+        let mut motion = ToastMotion::exit_right(vec![], 0, 40);
         let mut covered = Vec::new();
         loop {
             covered.push(motion.cells_of(36));
