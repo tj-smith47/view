@@ -790,7 +790,7 @@ engine state drift).
 | Statusline | lualine | mode (`msg_showmode`, incl. macro `recording @q`), pending `showcmd`, file, diagnostics (RPC), git branch, ruler/position; single-line |
 | Notifications | nvim-notify / noice messages | `ext_messages` with kind-aware routing (table below), `vim.notify` re-pointed at the engine default (§5.5) so a plugin's own float never composites over view's chrome; a slot-timed toast stack, a pause key, and a scrollable history with per-entry copy and dismissal (§7.1 motion, table below); kills "Press ENTER" without ever eating a prompt |
 | Command palette | noice cmdline | `ext_cmdline` → centered floating palette with completion rendering (`ext_popupmenu` when sourced from cmdline) |
-| Key profiles (amended 2026-09-23, tiled UI) | a tiling desktop's window keys (omarchy's chords) | `[keys] profile = "auto" \| "desktop" \| "editor"`. `desktop` registers the 46 omarchy chords as view's window, surface and tabpage keys, on `Super` where the terminal speaks the kitty keyboard protocol and `Alt` everywhere else (`[keys] desktop_modifier`); `editor` leaves those chords to the desktop and keeps nvim's leader keys. `auto` derives `desktop` on an ssh session or a bare tty and `editor` on a GUI desktop, macOS or Windows. Each chord is a `[keys.desktop]` row; an empty value unbinds it. Chords are registered behind the takeover's claims, and input typed during launch is held until they are, up to a bound (`docs/keymaps.md`, Key profiles) |
+| Key profiles (amended 2026-09-23, tiled UI) | a tiling desktop's window keys (omarchy's chords) | `[keys] profile = "auto" \| "desktop" \| "editor"`. `desktop` registers the 47 omarchy chords as view's window, surface and tabpage keys, on `Super` where the terminal speaks the kitty keyboard protocol and `Alt` everywhere else (`[keys] desktop_modifier`); `editor` leaves those chords to the desktop and keeps nvim's leader keys. `auto` derives `desktop` on an ssh session or a bare tty and `editor` on a GUI desktop, macOS or Windows. Each chord is a `[keys.desktop]` row; an empty value unbinds it. Chords are registered behind the takeover's claims, and input typed during launch is held until they are, up to a bound (`docs/keymaps.md`, Key profiles) |
 
 Invented capabilities — also v0.1 core (ruled 2026-08-05; plans authored at
 the P4 exit, supervision and remote editing sequenced first). These are not
@@ -916,6 +916,12 @@ panes = "auto"             # auto | tiles | nvim -- tiles: a frame per
                            # bar. auto = nvim under a tiling window manager,
                            # else tiles (amended 2026-09-23, tiled UI)
 gaps = true                # false: neighbouring frames share their edges
+fit_active = false         # true: every window you move into is fitted to
+                           # its longest visible line
+pill_caps = "auto"         # auto | round | flat -- how each top-row pill
+                           # ends; auto = round where box glyphs are one
+                           # cell wide
+tile_titles = {}           # filetype -> title for a tile a plugin fills
 
 [ui.tokens]
 accent = "auto"            # the active tile's frame colour; auto = derive
@@ -978,7 +984,7 @@ profile = "auto"           # auto | desktop | editor (§9, Key profiles)
 desktop_modifier = "auto"  # auto | super | alt -- auto = super where the
                            # terminal speaks the kitty keyboard protocol
 
-[keys.desktop]             # one row per chord, 46 rows, each at its default
+[keys.desktop]             # one row per chord, 47 rows, each at its default
 # focus_left = "<D-Left>"  # a written row is taken as written; "" unbinds
 
 [supervision]

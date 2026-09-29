@@ -96,7 +96,7 @@ desktop_modifier = "auto"   # "auto" | "super" | "alt"
 # exactly as written, on any desktop_modifier, so uncommenting one without
 # also changing its spelling opts that chord out of the alt respelling.
 # Each is a registry key like any other, so each takes an
-# environment layer too: VIEW_KEYS_DESKTOP_FOCUS_LEFT and 45 siblings. An
+# environment layer too: VIEW_KEYS_DESKTOP_FOCUS_LEFT and 46 siblings. An
 # empty value unbinds the chord.
 [keys.desktop]
 # focus_left   = "<D-Left>"
