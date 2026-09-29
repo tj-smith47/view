@@ -1531,7 +1531,11 @@ pub fn run(
         // connection, and `WedgeKind::Dead` is a verdict it may reach
         state.connection_lost |= matches!(msg, Msg::EngineStopped { .. });
         retry_parked_claims(&msg, follow_ups.native, &pump);
-        let mut queue = admission_stack(pump.admit(msg));
+        let admitted = pump.admit(msg);
+        if let Some((before, folded_at)) = &admitted.before {
+            crate::vlog::log_redraw_census(before, *folded_at);
+        }
+        let mut queue = admitted.into_stack();
         let mut drained_residue = false;
         while let Some(msg) = queue.pop() {
             felt.note_input(&msg, &model, || pump.staged());
@@ -1574,18 +1578,6 @@ pub fn run(
             }
         }
     }
-}
-
-/// The loop's queue for an admitted message, popped from the back: what nvim
-/// drew before an invocation is applied first, and what it drew after waits
-/// for the residue drain.
-fn admission_stack(admitted: view_engine::Admitted) -> Vec<Msg> {
-    let mut queue = vec![admitted.msg];
-    if let Some((before, folded_at)) = admitted.before {
-        crate::vlog::log_redraw_census(&before, folded_at);
-        queue.push(Msg::Redraw(before));
-    }
-    queue
 }
 
 #[cfg(test)]
@@ -5977,7 +5969,7 @@ mod tests {
             "{invocation:?}"
         );
 
-        let mut queue = admission_stack(pump.admit(invocation));
+        let mut queue = pump.admit(invocation).into_stack();
         assert!(
             matches!(queue.pop(), Some(Msg::Redraw(ref events)) if *events == drawn),
             "the earlier redraw must be applied first"

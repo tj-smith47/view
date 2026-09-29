@@ -520,13 +520,8 @@ fn dispatched(session: &Session, received: Msg) -> Vec<Msg> {
         Msg::RedrawReady => Msg::Redraw(damage.take_damage_folded().0),
         msg => msg,
     };
-    let admitted = damage.admit(received);
-    let mut out: Vec<Msg> = admitted
-        .before
-        .map(|(events, _)| Msg::Redraw(events))
-        .into_iter()
-        .collect();
-    out.push(admitted.msg);
+    let mut out = damage.admit(received).into_stack();
+    out.reverse();
     let residue = damage.take_damage_folded().0;
     if !residue.is_empty() {
         out.push(Msg::Redraw(residue));

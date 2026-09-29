@@ -1200,6 +1200,21 @@ pub struct Admitted {
     pub msg: Msg,
 }
 
+impl Admitted {
+    /// The queue for this admission, popped from the back: what nvim drew
+    /// before an invocation is applied first, and the invocation itself
+    /// after. The one ordering both `runtime::run`'s loop and a test driver
+    /// replaying its admission need, kept beside `admit` so both call it.
+    #[must_use]
+    pub fn into_stack(self) -> Vec<Msg> {
+        let mut queue = vec![self.msg];
+        if let Some((before, _)) = self.before {
+            queue.push(Msg::Redraw(before));
+        }
+        queue
+    }
+}
+
 impl DamagePump {
     /// Clears the pending flag and drains every compacted event staged up
     /// to the last `Flush`, in one lock acquisition. Non-blocking: this
@@ -1464,6 +1479,32 @@ mod tests {
     use super::*;
     use view_core::model::Model;
     use view_core::update::update;
+
+    /// `into_stack` pops the message first when nothing preceded it, and
+    /// the earlier redraw first when something did.
+    ///
+    /// Disconfirm: pushing `self.msg` after the `before` branch fails the
+    /// second assertion here (the invocation pops first).
+    #[test]
+    fn into_stack_orders_a_preceding_redraw_ahead_of_the_message() {
+        let bare = Admitted {
+            before: None,
+            msg: Msg::RedrawReady,
+        };
+        let mut queue = bare.into_stack();
+        assert!(matches!(queue.pop(), Some(Msg::RedrawReady)));
+        assert!(queue.is_empty());
+
+        let drawn = vec![UiEvent::Flush];
+        let preceded = Admitted {
+            before: Some((drawn.clone(), None)),
+            msg: Msg::RedrawReady,
+        };
+        let mut queue = preceded.into_stack();
+        assert!(matches!(queue.pop(), Some(Msg::Redraw(ref events)) if *events == drawn));
+        assert!(matches!(queue.pop(), Some(Msg::RedrawReady)));
+        assert!(queue.is_empty());
+    }
 
     /// The drain releases the damage lock before it logs, so the reader
     /// thread's fold never waits on the redraw log.
