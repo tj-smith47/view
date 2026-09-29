@@ -3238,7 +3238,14 @@ mod tests {
         let body = after.split_once("\n}").expect("just found above").0;
         let mut names = Vec::new();
         for line in body.lines() {
-            let declaration = line.trim().strip_prefix("pub ").unwrap_or(line.trim());
+            let line = line.trim();
+            let declaration = match line.strip_prefix("pub") {
+                Some(rest) if rest.starts_with(' ') => rest.trim_start(),
+                Some(rest) if rest.starts_with('(') => {
+                    rest.split_once(") ").map_or(line, |(_, rest)| rest)
+                }
+                _ => line,
+            };
             let Some((name, _)) = declaration.split_once(':') else {
                 continue;
             };
@@ -3252,6 +3259,16 @@ mod tests {
         }
         assert!(!names.is_empty(), "{header} parsed to no fields at all");
         names
+    }
+
+    #[test]
+    fn the_field_walk_reads_a_field_of_every_visibility() {
+        let source = "pub struct S {\n    pub a: u8,\n    pub(crate) b: u8,\n    \
+                      pub(super) c: u8,\n    pub(in crate::x) d: u8,\n    e: u8,\n}";
+        assert_eq!(
+            declared_fields(source, "pub struct S {"),
+            ["a", "b", "c", "d", "e"]
+        );
     }
 
     /// The doc comment sitting directly above `signature` in `source`.
