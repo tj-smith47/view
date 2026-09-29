@@ -746,9 +746,18 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 let mut effects = model
                     .engine
                     .record_native_notice(feature_invoke_notice(&feature, &verb, false), false);
-                effects.push(Effect::Rpc(RpcCall::Input {
-                    notation: format!(":{} ", crate::native::mappings::COMMAND),
-                }));
+                let notation = format!(":{} ", crate::native::mappings::COMMAND);
+                // the reopened line is folded as if typed, so the keys
+                // typed on it and behind its `<CR>` are read the same way
+                let mut folded = Vec::new();
+                for key in notation.chars() {
+                    folded.extend(crate::native::submit_hold::fold_engine_key(
+                        model,
+                        &key.to_string(),
+                    ));
+                }
+                effects.push(Effect::Rpc(RpcCall::Input { notation }));
+                effects.extend(folded);
                 return effects;
             }
             // no native feature has an overlay to open yet, and returning

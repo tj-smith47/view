@@ -7,7 +7,11 @@
 //! buffer the panel was opened from. Holding them until the invocation's
 //! notification comes back lets the focus it sets decide where they go.
 
+mod commands;
+
 use std::time::Duration;
+
+use commands::names_view;
 
 use crate::events::UiEvent;
 use crate::model::{CmdlineState, Model};
@@ -218,6 +222,9 @@ struct Line {
     text: String,
     /// Whether a `<CR>` the mappings put on the line submitted it.
     submits: bool,
+    /// Whether a rhs typed `<C-u>` ahead of `text`, which erases what the
+    /// line held before it.
+    clears: bool,
 }
 
 impl Line {
@@ -225,6 +232,7 @@ impl Line {
         Self {
             text: text.to_string(),
             submits: false,
+            clears: false,
         }
     }
 }
@@ -250,6 +258,9 @@ enum Match<'a> {
     Unmapped,
     /// A longer lhs may still match once more keys arrive, so nvim waits.
     Waiting,
+    /// A `<nowait>` lhs begins a longer one, so which runs depends on how
+    /// many keys nvim has read at once.
+    Unknowable,
     Map(&'a Expansion),
 }
 
@@ -292,6 +303,9 @@ pub struct SubmitHold {
     /// The user's command-line mappings and abbreviations whose keys type
     /// text.
     cmdline_maps: Vec<Expansion>,
+    /// The most characters any lhs in `cmdline_maps` that is a mapping
+    /// spells, or 0 where there is none.
+    longest_lhs: usize,
     /// The latest keys sent to nvim in normal mode, as many as the longest
     /// of `invoke_keys`.
     recent: std::collections::VecDeque<Folded>,
@@ -394,10 +408,17 @@ impl SubmitHold {
             .filter_map(|map| {
                 let lhs = text(&map.lhs).filter(|lhs| !lhs.is_empty())?;
                 // the text ends at the first key in the rhs that types no
-                // character, and a `<CR>` there submits the line
+                // character, and a `<CR>` there submits the line. A `<C-u>`
+                // erases the line up to the cursor, which view models at
+                // the end of it
                 let rhs = (!map.expr).then(|| {
                     let mut line = Line::typed("");
                     for key in key_tokens(&map.rhs) {
+                        if canonical(key) == "<C-u>" {
+                            line.text.clear();
+                            line.clears = true;
+                            continue;
+                        }
                         let Some(c) = notation_char(key) else {
                             line.submits = line_key(key) == LineKey::Submit;
                             break;
@@ -415,6 +436,13 @@ impl SubmitHold {
                 })
             })
             .collect();
+        self.longest_lhs = self
+            .cmdline_maps
+            .iter()
+            .filter(|map| !map.abbr)
+            .map(|map| map.lhs.chars().count())
+            .max()
+            .unwrap_or(0);
     }
 
     /// `typed` as nvim puts it on the line once its command-line mappings
@@ -428,19 +456,27 @@ impl SubmitHold {
     /// that begins with its own lhs leaves that first character unmapped
     /// and the rest remapped (`:help recursive_mapping`).
     fn expand_mappings(&self, typed: &str, submitted: bool) -> Option<Line> {
+        if self.longest_lhs == 0 {
+            return Some(Line::typed(typed));
+        }
+        #[cfg(test)]
+        tests::EXPANSIONS.with(|count| count.set(count.get() + 1));
         let mut keys: std::collections::VecDeque<Pending> =
             typed.chars().map(|c| (Some(c), true)).collect();
         let mut text = String::new();
+        let mut clears = false;
         let mut depth = 0;
         while let Some(&(key, remap)) = keys.front() {
             let Some(c) = key else {
                 return Some(Line {
                     text,
                     submits: true,
+                    clears,
                 });
             };
             let map = match remap.then(|| self.mapping_at(&keys, submitted)) {
                 Some(Match::Waiting) => break,
+                Some(Match::Unknowable) => return None,
                 Some(Match::Map(map)) => map,
                 Some(Match::Unmapped) | None => {
                     text.push(c);
@@ -455,6 +491,10 @@ impl SubmitHold {
                 return None;
             }
             keys.drain(..map.lhs.chars().count());
+            if rhs.clears {
+                text.clear();
+                clears = true;
+            }
             let own_lhs = rhs.text.starts_with(&map.lhs);
             let inserted: Vec<Pending> = rhs
                 .text
@@ -471,33 +511,44 @@ impl SubmitHold {
         Some(Line {
             text,
             submits: false,
+            clears,
         })
     }
 
-    /// The mapping nvim runs on the keys at the head of `keys`. With the
-    /// keys arriving one at a time, nvim runs the longest lhs they spell
-    /// once no longer lhs can still match, and a `<nowait>` lhs as soon as
-    /// it is spelled. A lhs matches only keys nvim may remap.
+    /// The mapping nvim runs on the keys at the head of `keys`: the longest
+    /// lhs they spell, once no longer lhs can still match. A lhs matches
+    /// only keys nvim may remap, and no more keys are read than the longest
+    /// lhs holds.
+    ///
+    /// A `<nowait>` lhs that begins a longer one is [`Match::Unknowable`].
+    /// nvim runs it as soon as it is spelled when the keys arrive one read
+    /// at a time, and runs the longer one when they were already typed.
+    /// `nvim_input` queues each key at once, and while nvim is busy between
+    /// keys (a `CmdlineChanged` handler) the keys waiting reach its
+    /// typeahead in one read.
     fn mapping_at(&self, keys: &std::collections::VecDeque<Pending>, submitted: bool) -> Match<'_> {
-        let head: String = keys
-            .iter()
-            .map_while(|&(key, remap)| key.filter(|_| remap))
-            .collect();
+        let head = || keys.iter().map_while(|&(key, remap)| key.filter(|_| remap));
         let mappings = || self.cmdline_maps.iter().filter(|map| !map.abbr);
         let mut found = None;
-        for (at, c) in head.char_indices() {
-            let spelled = &head[..at + c.len_utf8()];
-            let mut whole = mappings().filter(|map| map.lhs == spelled);
-            if let Some(map) = whole.clone().find(|map| map.nowait) {
-                return Match::Map(map);
+        let mut read = 0;
+        for n in 1..=self.longest_lhs {
+            if head().nth(n - 1).is_none() {
+                break;
+            }
+            read = n;
+            let spells = |map: &Expansion| map.lhs.chars().take(n).eq(head().take(n));
+            let longer = mappings().any(|map| map.lhs.chars().nth(n).is_some() && spells(map));
+            let mut whole =
+                mappings().filter(|map| map.lhs.chars().nth(n).is_none() && spells(map));
+            if whole.clone().any(|map| map.nowait) && longer {
+                return Match::Unknowable;
             }
             found = whole.next().or(found);
-            if !mappings().any(|map| map.lhs.len() > spelled.len() && map.lhs.starts_with(spelled))
-            {
+            if !longer {
                 return found.map_or(Match::Unmapped, Match::Map);
             }
         }
-        if !submitted && head.chars().count() == keys.len() {
+        if !submitted && read == keys.len() {
             return Match::Waiting;
         }
         found.map_or(Match::Unmapped, Match::Map)
@@ -532,15 +583,18 @@ impl SubmitHold {
         let rhs = match self.expand_mappings(&rhs.text, true) {
             Some(mapped) if !map.noremap => Line {
                 submits: mapped.submits || rhs.submits,
+                clears: mapped.clears || rhs.clears,
                 text: mapped.text,
             },
             _ => rhs.clone(),
         };
         // the keys after a `<CR>` the rhs holds reach whatever runs next
         let after = if rhs.submits { "" } else { &rest[word_end..] };
+        let before = if rhs.clears { "" } else { &line.text[..start] };
         Line {
-            text: format!("{}{}{after}", &line.text[..start], rhs.text),
+            text: format!("{before}{}{after}", rhs.text),
             submits: line.submits || rhs.submits,
+            clears: line.clears || rhs.clears,
         }
     }
 
@@ -564,6 +618,15 @@ impl SubmitHold {
     fn shown_for(&self, typed: &str) -> String {
         self.expand_mappings(typed, false)
             .map_or_else(|| typed.to_string(), |line| line.text)
+    }
+
+    /// Whether nvim showing `shown` is showing keys still in flight: a
+    /// text `states` records, or what the user's mappings made of one.
+    /// The texts themselves are compared first, since nvim has usually
+    /// caught up and shows the newest of them.
+    fn in_flight(&self, states: &[String], shown: &str) -> bool {
+        states.iter().any(|state| state == shown)
+            || self.longest_lhs > 0 && states.iter().any(|state| self.shown_for(state) == shown)
     }
 
     /// Ends the tracked line when the key just typed into it completed a
@@ -806,10 +869,7 @@ impl SubmitHold {
         }
         let shown: String = line.content.iter().map(|(_, s)| s.as_str()).collect();
         self.opened = match &self.typed {
-            Some(Typed::Known(_)) => self
-                .states
-                .iter()
-                .any(|state| *state == shown || self.shown_for(state) == shown),
+            Some(Typed::Known(_)) => self.in_flight(&self.states, &shown),
             Some(_) => true,
             None => false,
         };
@@ -1248,29 +1308,13 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[St
                 .text,
         )
     };
-    // a shown line that some earlier text of the keys gave, directly or
-    // through a mapping, is keys still in flight
-    let in_flight = |shown: &String| {
-        states
-            .iter()
-            .any(|state| state == shown || hold.shown_for(state) == *shown)
-    };
     match (typed, shown) {
-        (Some(Typed::Known(_)), Some(shown)) if opened && !in_flight(&shown) => shown_view(&shown),
+        (Some(Typed::Known(_)), Some(shown)) if opened && !hold.in_flight(states, &shown) => {
+            shown_view(&shown)
+        }
         (Some(Typed::Known(text)), _) => names_view(&hold.expand_typed(text, true).text),
         (_, shown) => shown.is_some_and(|shown| shown_view(&shown)),
     }
-}
-
-/// Whether `line`'s command word is `View` or an abbreviation nvim would
-/// run as it.
-fn names_view(line: &str) -> bool {
-    let line = line.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
-    let word = line
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .next()
-        .unwrap_or_default();
-    word.starts_with('V') && "View".starts_with(word)
 }
 
 /// Starts a hold, bounded by the link's own backstop so a command that
@@ -1289,14 +1333,9 @@ fn arm(model: &mut Model, armed: Armed) -> Vec<Effect> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_command_word_is_read_with_its_abbreviations() {
-        for line in ["View ai open", "Vie ai", "  :View", "View!", "V"] {
-            assert!(names_view(line), "{line:?}");
-        }
-        for line in ["", "vim", "Vex", "Views", "set ft=View", "edit View"] {
-            assert!(!names_view(line), "{line:?}");
-        }
+    thread_local! {
+        /// How many times this thread has run the mapping expansion.
+        pub(super) static EXPANSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
     fn key(notation: &str) -> Msg {
@@ -1536,11 +1575,12 @@ mod tests {
         }
     }
 
-    /// A `<nowait>` lhs runs as soon as it is typed, before a longer lhs
-    /// it begins can match.
+    /// A `<nowait>` lhs that begins a longer one runs first or loses to it
+    /// depending on how many keys nvim reads at once, so the expansion is
+    /// left to nvim. Without `<nowait>` the longer one runs.
     #[test]
-    fn a_nowait_mapping_runs_before_a_longer_one() {
-        for (nowait, expected) in [(true, "View ai openx"), (false, "echo")] {
+    fn a_nowait_mapping_beginning_a_longer_one_is_left_to_nvim() {
+        for (nowait, expected) in [(true, None), (false, Some("echo"))] {
             let mut model = normal_mode();
             learn_maps(
                 &mut model,
@@ -1549,7 +1589,99 @@ mod tests {
                     flagged("vvx", "echo", false, false),
                 ],
             );
-            assert_eq!(mapped(&model, "vvx"), expected, "nowait {nowait}");
+            let line = model.submit_hold.expand_mappings("vvx", true);
+            assert_eq!(
+                line.map(|line| line.text).as_deref(),
+                expected,
+                "nowait {nowait}"
+            );
+        }
+        // with no longer lhs it begins, a `<nowait>` lhs runs as any other
+        let mut model = normal_mode();
+        learn_maps(&mut model, vec![flagged("vv", "View ai open", true, false)]);
+        assert_eq!(mapped(&model, "vvx"), "View ai openx");
+    }
+
+    /// `cnoremap vo <C-u>View ai open<CR>`: the `<C-u>` erases the line
+    /// before the rest of the rhs is typed, so the line runs `:View`
+    /// whatever was typed ahead of `vo`.
+    #[test]
+    fn a_rhs_clearing_the_line_runs_what_it_types_after() {
+        for keys in [&[":", "v", "o"][..], &[":", "e", "<Space>", "v", "o"]] {
+            let mut model = normal_mode();
+            cmdline_maps(
+                &mut model,
+                &[("vo", "<C-u>View ai open<CR>", false, true, false)],
+            );
+            let sent = type_keys(&mut model, keys);
+            assert!(arms(&sent), "{keys:?}: {sent:?}");
+            let held = type_keys(&mut model, &["j"]);
+            assert!(held.is_empty(), "{keys:?}: {held:?}");
+        }
+    }
+
+    /// `:w|View ai open<CR>` runs `:View` as the second command.
+    #[test]
+    fn a_view_command_after_a_bar_arms_the_hold() {
+        let mut model = normal_mode();
+        let mut keys = vec![":", "w", "|"];
+        keys.extend(["V", "i", "e", "w", "<Space>", "a", "i", "<CR>"]);
+        let sent = type_keys(&mut model, &keys);
+        assert!(arms(&sent), "{sent:?}");
+        let held = type_keys(&mut model, &["j"]);
+        assert!(held.is_empty(), "{held:?}");
+    }
+
+    /// A bare `:View` reopens the line holding `View `, and the keys typed
+    /// on it are tracked as a typed line's are: the `<CR>` that submits it
+    /// holds the keys behind it.
+    #[test]
+    fn keys_behind_a_reopened_view_line_are_held() {
+        let mut model = normal_mode();
+        let reopened = crate::update::update(
+            &mut model,
+            Msg::FeatureInvoke {
+                feature: String::new(),
+                verb: String::new(),
+            },
+        );
+        assert_eq!(inputs(&reopened), vec![":View ".to_string()]);
+        assert!(model.submit_hold.types_a_line());
+        let sent = type_keys(
+            &mut model,
+            &["a", "i", "<Space>", "o", "p", "e", "n", "<CR>"],
+        );
+        assert!(arms(&sent), "{sent:?}");
+        let held = type_keys(&mut model, &["j"]);
+        assert!(held.is_empty(), "{held:?}");
+    }
+
+    /// The `<CR>` of the longest line view tracks runs no mapping
+    /// expansion where the config maps nothing on the command line, and
+    /// one where nvim shows the newest text the keys gave the line.
+    #[test]
+    fn a_submitted_line_expands_no_mapping_it_need_not() {
+        let text: Vec<String> = (0..TRACKED_MAX - 1)
+            .map(|at| ((b'a' + (at % 26) as u8) as char).to_string())
+            .collect();
+        let typed: Vec<&str> = text.iter().map(String::as_str).collect();
+        let newest = text.concat();
+        // with rows, the in-flight line is read once through the mappings,
+        // as the keys typed decide it
+        for (rows, shown, expected) in [(false, "something else", 0), (true, newest.as_str(), 1)] {
+            let mut model = normal_mode();
+            if rows {
+                cmdline_maps(&mut model, &[("zz", "View", false, true, false)]);
+            }
+            let _ = type_keys(&mut model, &[":"]);
+            show_line(&mut model, "");
+            let _ = type_keys(&mut model, &typed);
+            show_line(&mut model, shown);
+            EXPANSIONS.with(|count| count.set(0));
+            let sent = type_keys(&mut model, &["<CR>"]);
+            assert!(!arms(&sent), "rows {rows}: {sent:?}");
+            let expansions = EXPANSIONS.with(std::cell::Cell::get);
+            assert_eq!(expansions, expected, "rows {rows}");
         }
     }
 

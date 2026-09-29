@@ -3069,10 +3069,9 @@ impl EngineHandle {
     /// `nvim_paste(String data, Boolean crlf, Integer phase)` signature),
     /// with no line-ending translation (`crlf = false`): terminal input
     /// already arrives with the pty's own newline convention, so nvim must
-    /// not perform an additional CRLF fixup on top of it. Routing paste
-    /// through `nvim_paste` rather than replaying it as `nvim_input`
-    /// keystrokes avoids mid-paste mappings, autoindent mangling, and a
-    /// separate undo unit per line.
+    /// not perform an additional CRLF fixup on top of it. `nvim_paste`
+    /// inserts the text with no mappings or autoindent applied to it, as
+    /// one undo unit.
     ///
     /// Fire-and-forget for the same reason as [`input`](Self::input): a
     /// bracketed paste must not block the paint loop waiting for nvim to
