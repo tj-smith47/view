@@ -4004,6 +4004,8 @@ mod tests {
                 (Value::from("abbr"), Value::from(abbr)),
                 (Value::from("noremap"), Value::from(true)),
                 (Value::from("expr"), Value::from(false)),
+                (Value::from("nowait"), Value::from(!abbr)),
+                (Value::from("buffer"), Value::from(abbr)),
             ])
         };
         let decoded = decode_bridge_event(&[
@@ -4024,13 +4026,22 @@ mod tests {
         assert_eq!(*timeoutlen, Some(Duration::from_millis(300)));
         let read: Vec<_> = cmdline
             .iter()
-            .map(|map| (map.lhs.as_str(), map.rhs.as_str(), map.abbr, map.noremap))
+            .map(|map| {
+                (
+                    map.lhs.as_str(),
+                    map.rhs.as_str(),
+                    map.abbr,
+                    map.noremap,
+                    map.nowait,
+                    map.buffer,
+                )
+            })
             .collect();
         assert_eq!(
             read,
             [
-                ("vo", "View ai open", true, true),
-                ("vv", "View ai open", false, true)
+                ("vo", "View ai open", true, true, false, true),
+                ("vv", "View ai open", false, true, true, false)
             ]
         );
 

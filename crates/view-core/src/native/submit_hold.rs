@@ -193,6 +193,12 @@ pub struct CmdlineMap {
     pub noremap: bool,
     /// An `<expr>` or Lua-callback mapping, whose text only nvim knows.
     pub expr: bool,
+    /// A `<nowait>` mapping, which nvim runs without waiting for a longer
+    /// lhs it begins.
+    pub nowait: bool,
+    /// Local to the current buffer, which nvim prefers over a global one
+    /// with the same lhs.
+    pub buffer: bool,
 }
 
 /// A [`CmdlineMap`] reduced to the text it matches on a line.
@@ -200,14 +206,56 @@ pub struct CmdlineMap {
 struct Expansion {
     lhs: String,
     /// `None` for an expansion only nvim can compute.
-    rhs: Option<String>,
+    rhs: Option<Line>,
     abbr: bool,
     noremap: bool,
+    nowait: bool,
 }
 
-/// How many times a remapped rhs is expanded again. nvim's own
-/// `'maxmapdepth'` bounds a recursive one at 1000 and then errors, which
-/// runs no command.
+/// A command line as nvim holds it after its mappings have run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Line {
+    text: String,
+    /// Whether a `<CR>` the mappings put on the line submitted it.
+    submits: bool,
+}
+
+impl Line {
+    fn typed(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            submits: false,
+        }
+    }
+}
+
+/// Which key nvim reads as the end of the command word when it looks for
+/// an abbreviation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordEnd {
+    /// The `<CR>` that submits the line.
+    Submit,
+    /// A non-keyword character typed after the word.
+    Typed,
+    /// Whichever of the two follows the word.
+    Either,
+}
+
+/// A key waiting for nvim's mappings: a character, or `None` for a
+/// `<CR>` a rhs holds, with whether nvim may map it.
+type Pending = (Option<char>, bool);
+
+/// What nvim's mappings do at the head of the keys it has not yet read.
+enum Match<'a> {
+    Unmapped,
+    /// A longer lhs may still match once more keys arrive, so nvim waits.
+    Waiting,
+    Map(&'a Expansion),
+}
+
+/// How many mappings run in a row with no key reaching the line. nvim's
+/// own `'maxmapdepth'` bounds a recursive one at 1000 and then errors,
+/// which runs no command.
 const MAP_DEPTH: usize = 16;
 
 /// The characters in nvim's default `'iskeyword'`, which end an
@@ -336,80 +384,208 @@ impl SubmitHold {
     pub fn learn_cmdline_maps(&mut self, maps: &[CmdlineMap]) {
         let text =
             |spelled: &str| -> Option<String> { key_tokens(spelled).map(notation_char).collect() };
+        let local = |map: &CmdlineMap| {
+            maps.iter()
+                .any(|other| other.buffer && other.abbr == map.abbr && other.lhs == map.lhs)
+        };
         self.cmdline_maps = maps
             .iter()
+            .filter(|map| map.buffer || !local(map))
             .filter_map(|map| {
                 let lhs = text(&map.lhs).filter(|lhs| !lhs.is_empty())?;
-                // a key in the rhs that types no character (a `<CR>`) ends
-                // the text the line holds
+                // the text ends at the first key in the rhs that types no
+                // character, and a `<CR>` there submits the line
                 let rhs = (!map.expr).then(|| {
-                    key_tokens(&map.rhs)
-                        .map_while(notation_char)
-                        .collect::<String>()
+                    let mut line = Line::typed("");
+                    for key in key_tokens(&map.rhs) {
+                        let Some(c) = notation_char(key) else {
+                            line.submits = line_key(key) == LineKey::Submit;
+                            break;
+                        };
+                        line.text.push(c);
+                    }
+                    line
                 });
                 Some(Expansion {
                     lhs,
                     rhs,
                     abbr: map.abbr,
                     noremap: map.noremap,
+                    nowait: map.nowait,
                 })
             })
             .collect();
     }
 
     /// `typed` as nvim puts it on the line once its command-line mappings
-    /// have run on the keys at its start, or `typed` itself where an
-    /// expansion only nvim can compute stands in the way.
-    fn expand_mappings(&self, typed: &str) -> String {
-        let mut line = typed.to_string();
-        for _ in 0..MAP_DEPTH {
-            let Some(map) = self
-                .cmdline_maps
-                .iter()
-                .filter(|map| !map.abbr && line.starts_with(&map.lhs))
-                .max_by_key(|map| map.lhs.len())
-            else {
-                break;
+    /// have run, or `None` where an expansion only nvim can compute stands
+    /// in the way. `submitted` says a `<CR>` follows, so a lhs that the
+    /// keys so far begin can no longer match, where otherwise nvim waits
+    /// for the keys still to come and the line holds none of them yet.
+    ///
+    /// nvim reads the keys left to right and maps wherever a lhs matches
+    /// keys it may remap. A `noremap` rhs is not mapped again, and a rhs
+    /// that begins with its own lhs leaves that first character unmapped
+    /// and the rest remapped (`:help recursive_mapping`).
+    fn expand_mappings(&self, typed: &str, submitted: bool) -> Option<Line> {
+        let mut keys: std::collections::VecDeque<Pending> =
+            typed.chars().map(|c| (Some(c), true)).collect();
+        let mut text = String::new();
+        let mut depth = 0;
+        while let Some(&(key, remap)) = keys.front() {
+            let Some(c) = key else {
+                return Some(Line {
+                    text,
+                    submits: true,
+                });
             };
-            let Some(rhs) = &map.rhs else {
-                return typed.to_string();
+            let map = match remap.then(|| self.mapping_at(&keys, submitted)) {
+                Some(Match::Waiting) => break,
+                Some(Match::Map(map)) => map,
+                Some(Match::Unmapped) | None => {
+                    text.push(c);
+                    keys.pop_front();
+                    depth = 0;
+                    continue;
+                }
             };
-            line = format!("{rhs}{}", &line[map.lhs.len()..]);
-            // nvim remaps no rhs that begins with its own lhs
-            if map.noremap || rhs.starts_with(&map.lhs) {
-                break;
+            let rhs = map.rhs.as_ref()?;
+            depth += 1;
+            if depth > MAP_DEPTH {
+                return None;
+            }
+            keys.drain(..map.lhs.chars().count());
+            let own_lhs = rhs.text.starts_with(&map.lhs);
+            let inserted: Vec<Pending> = rhs
+                .text
+                .chars()
+                .map(Some)
+                .chain(rhs.submits.then_some(None))
+                .enumerate()
+                .map(|(at, key)| (key, !map.noremap && !(at == 0 && own_lhs)))
+                .collect();
+            for key in inserted.into_iter().rev() {
+                keys.push_front(key);
             }
         }
-        line
+        Some(Line {
+            text,
+            submits: false,
+        })
+    }
+
+    /// The mapping nvim runs on the keys at the head of `keys`. With the
+    /// keys arriving one at a time, nvim runs the longest lhs they spell
+    /// once no longer lhs can still match, and a `<nowait>` lhs as soon as
+    /// it is spelled. A lhs matches only keys nvim may remap.
+    fn mapping_at(&self, keys: &std::collections::VecDeque<Pending>, submitted: bool) -> Match<'_> {
+        let head: String = keys
+            .iter()
+            .map_while(|&(key, remap)| key.filter(|_| remap))
+            .collect();
+        let mappings = || self.cmdline_maps.iter().filter(|map| !map.abbr);
+        let mut found = None;
+        for (at, c) in head.char_indices() {
+            let spelled = &head[..at + c.len_utf8()];
+            let mut whole = mappings().filter(|map| map.lhs == spelled);
+            if let Some(map) = whole.clone().find(|map| map.nowait) {
+                return Match::Map(map);
+            }
+            found = whole.next().or(found);
+            if !mappings().any(|map| map.lhs.len() > spelled.len() && map.lhs.starts_with(spelled))
+            {
+                return found.map_or(Match::Unmapped, Match::Map);
+            }
+        }
+        if !submitted && head.chars().count() == keys.len() {
+            return Match::Waiting;
+        }
+        found.map_or(Match::Unmapped, Match::Map)
     }
 
     /// `line` with its command word expanded as nvim expands an
-    /// abbreviation: at the `<CR>` that ends the line, and, where
-    /// `in_flight` says nvim has yet to read the keys after the word, at
-    /// the non-keyword character that follows it.
-    fn expand_abbreviation(&self, line: &str, in_flight: bool) -> String {
-        let rest = line.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
-        let start = line.len() - rest.len();
-        let end = rest.find(|c: char| !is_keyword(c)).unwrap_or(rest.len());
-        if !in_flight && end < rest.len() {
-            return line.to_string();
-        }
-        let word = &rest[..end];
-        match self
+    /// abbreviation, where `end` says which key after the word nvim has
+    /// read. An abbreviation's rhs is mapped again unless it is a
+    /// `noreabbrev`.
+    fn expand_abbreviation(&self, line: Line, end: WordEnd) -> Line {
+        let rest = line
+            .text
+            .trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+        let start = line.text.len() - rest.len();
+        let word_end = rest.find(|c: char| !is_keyword(c)).unwrap_or(rest.len());
+        let at_line_end = word_end == rest.len();
+        let triggered = match end {
+            WordEnd::Submit => at_line_end,
+            WordEnd::Typed => !at_line_end,
+            WordEnd::Either => true,
+        };
+        let word = &rest[..word_end];
+        let Some((map, rhs)) = self
             .cmdline_maps
             .iter()
+            .filter(|_| triggered)
             .find(|map| map.abbr && map.lhs == word)
-            .and_then(|map| map.rhs.as_deref())
-        {
-            Some(rhs) => format!("{}{rhs}{}", &line[..start], &rest[end..]),
-            None => line.to_string(),
+            .and_then(|map| Some((map, map.rhs.as_ref()?)))
+        else {
+            return line;
+        };
+        let rhs = match self.expand_mappings(&rhs.text, true) {
+            Some(mapped) if !map.noremap => Line {
+                submits: mapped.submits || rhs.submits,
+                text: mapped.text,
+            },
+            _ => rhs.clone(),
+        };
+        // the keys after a `<CR>` the rhs holds reach whatever runs next
+        let after = if rhs.submits { "" } else { &rest[word_end..] };
+        Line {
+            text: format!("{}{}{after}", &line.text[..start], rhs.text),
+            submits: line.submits || rhs.submits,
         }
     }
 
-    /// The line nvim runs for `typed`, keys still on their way to it: its
-    /// mappings, then its abbreviations.
-    fn expand_typed(&self, typed: &str) -> String {
-        self.expand_abbreviation(&self.expand_mappings(typed), true)
+    /// The line nvim holds for `typed`, its mappings run and then its
+    /// abbreviations. `submitted` says the `<CR>` typed after it has gone
+    /// out, where otherwise the keys after it are still to come.
+    fn expand_typed(&self, typed: &str, submitted: bool) -> Line {
+        let line = self
+            .expand_mappings(typed, submitted)
+            .unwrap_or_else(|| Line::typed(typed));
+        let end = if submitted || line.submits {
+            WordEnd::Either
+        } else {
+            WordEnd::Typed
+        };
+        self.expand_abbreviation(line, end)
+    }
+
+    /// The text nvim shows for `typed` while keys after it are still on
+    /// their way.
+    fn shown_for(&self, typed: &str) -> String {
+        self.expand_mappings(typed, false)
+            .map_or_else(|| typed.to_string(), |line| line.text)
+    }
+
+    /// Ends the tracked line when the key just typed into it completed a
+    /// mapping or an abbreviation whose rhs submits it, and says whether
+    /// that line runs `:View`.
+    fn submit_by_mapping(&mut self) -> Option<bool> {
+        let Some(Typed::Known(text)) = &self.typed else {
+            return None;
+        };
+        let submitting = self
+            .cmdline_maps
+            .iter()
+            .any(|map| map.rhs.as_ref().is_some_and(|rhs| rhs.submits));
+        if !submitting {
+            return None;
+        }
+        let line = self.expand_typed(text, false);
+        if !line.submits {
+            return None;
+        }
+        self.end_line(None);
+        Some(names_view(&line.text))
     }
 
     /// Notes that nvim reported `mode`, which answers every key that left
@@ -633,7 +809,7 @@ impl SubmitHold {
             Some(Typed::Known(_)) => self
                 .states
                 .iter()
-                .any(|state| *state == shown || self.expand_mappings(state) == shown),
+                .any(|state| *state == shown || self.shown_for(state) == shown),
             Some(_) => true,
             None => false,
         };
@@ -978,6 +1154,9 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
         hold.end_line(None);
     } else {
         hold.note_edited();
+        if hold.submit_by_mapping() == Some(true) {
+            return arm(model, Armed::Command);
+        }
     }
     Vec::new()
 }
@@ -1062,14 +1241,24 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[St
                 .map(|(_, s)| s.as_str())
                 .collect::<String>()
         });
+    let shown_view = |shown: &str| {
+        names_view(
+            &hold
+                .expand_abbreviation(Line::typed(shown), WordEnd::Submit)
+                .text,
+        )
+    };
+    // a shown line that some earlier text of the keys gave, directly or
+    // through a mapping, is keys still in flight
+    let in_flight = |shown: &String| {
+        states
+            .iter()
+            .any(|state| state == shown || hold.shown_for(state) == *shown)
+    };
     match (typed, shown) {
-        (Some(Typed::Known(_)), Some(shown)) if opened && !states.contains(&shown) => {
-            names_view(&hold.expand_abbreviation(&shown, false))
-        }
-        (Some(Typed::Known(text)), _) => names_view(&hold.expand_typed(text)),
-        (_, shown) => {
-            shown.is_some_and(|shown| names_view(&hold.expand_abbreviation(&shown, false)))
-        }
+        (Some(Typed::Known(_)), Some(shown)) if opened && !in_flight(&shown) => shown_view(&shown),
+        (Some(Typed::Known(text)), _) => names_view(&hold.expand_typed(text, true).text),
+        (_, shown) => shown.is_some_and(|shown| shown_view(&shown)),
     }
 }
 
@@ -1208,23 +1397,189 @@ mod tests {
     }
 
     fn cmdline_maps(model: &mut Model, maps: &[(&str, &str, bool, bool, bool)]) {
+        learn_maps(
+            model,
+            maps.iter()
+                .map(|&(lhs, rhs, abbr, noremap, expr)| CmdlineMap {
+                    lhs: lhs.to_string(),
+                    rhs: rhs.to_string(),
+                    abbr,
+                    noremap,
+                    expr,
+                    nowait: false,
+                    buffer: false,
+                })
+                .collect(),
+        );
+    }
+
+    fn learn_maps(model: &mut Model, cmdline: Vec<CmdlineMap>) {
         let _ = crate::update::update(
             model,
             Msg::UserMappingsRead {
                 keys: Vec::new(),
                 timeoutlen: None,
-                cmdline: maps
-                    .iter()
-                    .map(|&(lhs, rhs, abbr, noremap, expr)| CmdlineMap {
-                        lhs: lhs.to_string(),
-                        rhs: rhs.to_string(),
-                        abbr,
-                        noremap,
-                        expr,
-                    })
-                    .collect(),
+                cmdline,
             },
         );
+    }
+
+    /// A `cnoremap` row with `nowait` and `buffer` set as given.
+    fn flagged(lhs: &str, rhs: &str, nowait: bool, buffer: bool) -> CmdlineMap {
+        CmdlineMap {
+            lhs: lhs.to_string(),
+            rhs: rhs.to_string(),
+            abbr: false,
+            noremap: true,
+            expr: false,
+            nowait,
+            buffer,
+        }
+    }
+
+    fn mapped(model: &Model, typed: &str) -> String {
+        model.submit_hold.expand_typed(typed, true).text
+    }
+
+    /// A rhs ending in `<CR>` submits the line at the key that completes
+    /// the lhs: a `:View` there arms the hold and holds the keys behind
+    /// it, and any other command leaves no line tracked for a later
+    /// `<CR>` to read.
+    #[test]
+    fn a_mapping_whose_rhs_submits_ends_the_line_at_its_last_key() {
+        for abbr in [false, true] {
+            let mut model = normal_mode();
+            cmdline_maps(&mut model, &[("vv", "View ai open<CR>", abbr, true, false)]);
+            let keys: &[&str] = if abbr {
+                &[":", "v", "v", "<Space>"]
+            } else {
+                &[":", "v", "v"]
+            };
+            let sent = type_keys(&mut model, keys);
+            assert!(arms(&sent), "abbr {abbr}: {sent:?}");
+            let held = type_keys(&mut model, &["j"]);
+            assert!(held.is_empty(), "abbr {abbr}: {held:?}");
+            assert!(!model.submit_hold.types_a_line(), "abbr {abbr}");
+        }
+
+        let mut model = normal_mode();
+        cmdline_maps(&mut model, &[("ww", "w<CR>", false, true, false)]);
+        let sent = type_keys(&mut model, &[":", "w", "w"]);
+        assert!(!arms(&sent), "{sent:?}");
+        assert!(!model.submit_hold.types_a_line());
+    }
+
+    /// Mappings apply wherever their lhs is typed, as nvim reads the keys
+    /// left to right: after a leading space and after a range.
+    #[test]
+    fn a_mapping_expands_wherever_its_keys_are_typed() {
+        let mut model = normal_mode();
+        cmdline_maps(&mut model, &[("vv", "View ai open", false, true, false)]);
+        assert_eq!(mapped(&model, " vv"), " View ai open");
+        assert_eq!(mapped(&model, "%vv"), "%View ai open");
+        assert_eq!(
+            mapped(&model, "echo vv|vv"),
+            "echo View ai open|View ai open"
+        );
+        let sent = type_keys(&mut model, &[":", "<Space>", "v", "v", "<CR>"]);
+        assert!(arms(&sent), "{sent:?}");
+        // `:View` takes no range, so nvim refuses the line
+        let mut model = normal_mode();
+        cmdline_maps(&mut model, &[("vv", "View ai open", false, true, false)]);
+        let sent = type_keys(&mut model, &[":", "%", "v", "v", "<CR>"]);
+        assert!(!arms(&sent), "{sent:?}");
+    }
+
+    /// nvim maps the keys typed after a `noremap` rhs again.
+    #[test]
+    fn keys_after_a_noremap_rhs_are_mapped_again() {
+        let mut model = normal_mode();
+        cmdline_maps(
+            &mut model,
+            &[
+                ("zz", "", false, true, false),
+                ("vv", "View ai open", false, true, false),
+            ],
+        );
+        assert_eq!(mapped(&model, "zzvv"), "View ai open");
+    }
+
+    /// A rhs that begins with its own lhs leaves that first character
+    /// unmapped and maps the rest.
+    #[test]
+    fn a_rhs_beginning_with_its_lhs_maps_all_but_its_first_character() {
+        let mut model = normal_mode();
+        cmdline_maps(
+            &mut model,
+            &[
+                ("v", "vw", false, false, false),
+                ("w", "iew ai open", false, true, false),
+            ],
+        );
+        assert_eq!(mapped(&model, "v"), "view ai open");
+    }
+
+    /// An abbreviation's rhs is mapped again, and a `noreabbrev`'s is not.
+    #[test]
+    fn an_abbreviation_rhs_is_mapped_unless_noreabbrev() {
+        for (noremap, armed) in [(false, true), (true, false)] {
+            let mut model = normal_mode();
+            cmdline_maps(
+                &mut model,
+                &[
+                    ("vo", "vv", true, noremap, false),
+                    ("vv", "View ai open", false, true, false),
+                ],
+            );
+            let sent = type_keys(&mut model, &[":", "v", "o", "<CR>"]);
+            assert_eq!(arms(&sent), armed, "noremap {noremap}: {sent:?}");
+        }
+    }
+
+    /// A `<nowait>` lhs runs as soon as it is typed, before a longer lhs
+    /// it begins can match.
+    #[test]
+    fn a_nowait_mapping_runs_before_a_longer_one() {
+        for (nowait, expected) in [(true, "View ai openx"), (false, "echo")] {
+            let mut model = normal_mode();
+            learn_maps(
+                &mut model,
+                vec![
+                    flagged("vv", "View ai open", nowait, false),
+                    flagged("vvx", "echo", false, false),
+                ],
+            );
+            assert_eq!(mapped(&model, "vvx"), expected, "nowait {nowait}");
+        }
+    }
+
+    /// A buffer-local row wins over a global one with the same lhs,
+    /// whichever order `maplist()` gave them in.
+    #[test]
+    fn a_buffer_local_mapping_wins_over_a_global_one() {
+        let local = flagged("vv", "View ai open", false, true);
+        let global = flagged("vv", "vsplit", false, false);
+        for rows in [vec![local.clone(), global.clone()], vec![global, local]] {
+            let mut model = normal_mode();
+            learn_maps(&mut model, rows);
+            assert_eq!(mapped(&model, "vv"), "View ai open");
+        }
+    }
+
+    /// A first show equal to an earlier typed text's expansion is keys
+    /// still in flight, so the keys typed after it decide: `:vv` shown as
+    /// `View ai open`, then erased and replaced within one round trip.
+    #[test]
+    fn a_shown_expansion_of_an_earlier_text_is_keys_in_flight() {
+        let mut model = normal_mode();
+        cmdline_maps(&mut model, &[("vv", "View ai open", false, true, false)]);
+        let _ = type_keys(&mut model, &[":", "v", "v"]);
+        let _ = type_keys(&mut model, &["<BS>"; 2]);
+        let _ = type_keys(&mut model, &["e", "<Space>", "f"]);
+        show_line(&mut model, "View ai open");
+        assert!(model.submit_hold.line_opened());
+        let sent = type_keys(&mut model, &["<CR>"]);
+        assert!(!arms(&sent), "{sent:?}");
     }
 
     /// `cabbrev vo View ai open`: nvim expands the word at the `<CR>`,

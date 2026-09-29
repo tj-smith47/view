@@ -486,6 +486,8 @@ fn decode_cmdline_maps(rows: Option<&Value>) -> Vec<CmdlineMap> {
                         abbr: flag(pairs, "abbr"),
                         noremap: flag(pairs, "noremap"),
                         expr: flag(pairs, "expr"),
+                        nowait: flag(pairs, "nowait"),
+                        buffer: flag(pairs, "buffer"),
                     })
                 })
                 .collect()

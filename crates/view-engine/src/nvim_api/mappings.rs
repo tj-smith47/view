@@ -128,10 +128,16 @@ use view_core::native::mappings::{
 ///
 /// The same read answers with the user's command-line mappings and
 /// abbreviations (`maplist()` rows in mode `c` or `!`), each as its
-/// `keytrans()` lhs, its rhs and its `abbr`, `noremap` and `expr` flags, a
-/// Lua callback counted as `expr`. nvim expands them after view has sent
-/// the keys, so the input hold behind a `:View` reads a submitted line
-/// through them. They ride the `user_keys` event as its third argument.
+/// `keytrans()` lhs, its rhs and its `abbr`, `noremap`, `expr`, `nowait`
+/// and `buffer` flags, a Lua callback counted as `expr`. nvim expands them
+/// after view has sent the keys, so the input hold behind a `:View` reads
+/// a submitted line through them. They ride the `user_keys` event as its
+/// third argument.
+///
+/// Two more events re-read them, beside the five above: `SourcePost`, for
+/// a config sourced again, and `CmdlineLeave` on a `:` line, for a
+/// `:cabbrev` or `:cunmap` typed at the prompt. The read is scheduled, so
+/// it runs after the command that line submits.
 ///
 /// The command registers unconditionally, outside the spec loop: a user who
 /// turned every default key off, or every feature, still has a way in.
@@ -173,11 +179,13 @@ local function read_user_keys()
           abbr = abbr,
           noremap = m.noremap == 1,
           expr = m.expr == 1 or m.callback ~= nil,
+          nowait = m.nowait == 1,
+          buffer = (m.buffer or 0) ~= 0,
         }
         cmdline[#cmdline + 1] = row
         seen[#seen + 1] = table.concat({ row.lhs, row.rhs,
-          tostring(abbr), tostring(row.noremap), tostring(row.expr) },
-          '\\0')
+          tostring(abbr), tostring(row.noremap), tostring(row.expr),
+          tostring(row.nowait), tostring(row.buffer) }, '\\0')
       end
     end
   end
@@ -229,6 +237,12 @@ vim.api.nvim_create_autocmd('User', {
 })
 vim.api.nvim_create_autocmd({ 'BufEnter', 'FileType', 'BufWinEnter' }, {
   group = group,
+  callback = reread,
+})
+vim.api.nvim_create_autocmd('SourcePost', { group = group, callback = reread })
+vim.api.nvim_create_autocmd('CmdlineLeave', {
+  group = group,
+  pattern = ':',
   callback = reread,
 })
 local claimed = {}

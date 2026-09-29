@@ -233,6 +233,30 @@ fn a_registration_reads_the_users_command_line_abbreviations_and_mappings() {
         maps.contains(&row("vl", "View tree toggle", true, false)),
         "{maps:?}"
     );
+
+    // a sourced file and a command typed at the prompt fire none of the
+    // buffer or lazy-load events
+    let dir = view_test_support::ScratchDir::new("cmdline-maps-reread").unwrap();
+    let sourced = dir.join("abbrevs.vim");
+    std::fs::write(&sourced, "cabbrev vs View tree toggle\n").unwrap();
+    engine
+        .handle
+        .eval_str(&format!("execute('source {}')", sourced.display()))
+        .unwrap();
+    let maps = next_cmdline_maps(&rx);
+    assert!(
+        maps.contains(&row("vs", "View tree toggle", true, false)),
+        "{maps:?}"
+    );
+    engine.handle.input(":cabbrev vx View ai open<CR>").unwrap();
+    let maps = next_cmdline_maps(&rx);
+    assert!(
+        maps.contains(&row("vx", "View ai open", true, false)),
+        "{maps:?}"
+    );
+    engine.handle.input(":cunabbrev vx<CR>").unwrap();
+    let maps = next_cmdline_maps(&rx);
+    assert!(!maps.iter().any(|map| map.0 == "vx"), "{maps:?}");
 }
 
 /// A mapping a config sets on `User VeryLazy`, after the registration read
