@@ -1289,6 +1289,19 @@ impl DamagePump {
     pub fn route_claims_for_test(&self, msg: Msg) {
         self.shared.route_claims(msg);
     }
+
+    /// Folds `events` as the reader folds a decoded `redraw` batch.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fold_redraw_for_test(&self, events: Vec<UiEvent>) {
+        self.shared.fold_redraw(events);
+    }
+
+    /// Routes a `:View feature verb` invocation as the reader routes one.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn route_invocation_for_test(&self, feature: &str, verb: &str) {
+        self.shared
+            .route_invocation(feature.to_string(), verb.to_string());
+    }
 }
 
 /// Deterministic synthetic "redraw storm" generator, and the fold+drain

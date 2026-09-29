@@ -1531,14 +1531,7 @@ pub fn run(
         // connection, and `WedgeKind::Dead` is a verdict it may reach
         state.connection_lost |= matches!(msg, Msg::EngineStopped { .. });
         retry_parked_claims(&msg, follow_ups.native, &pump);
-        let admitted = pump.admit(msg);
-        // a stack: what nvim drew before an invocation is popped first, and
-        // what it drew after waits for the residue drain
-        let mut queue = vec![admitted.msg];
-        if let Some((before, folded_at)) = admitted.before {
-            crate::vlog::log_redraw_census(&before, folded_at);
-            queue.push(Msg::Redraw(before));
-        }
+        let mut queue = admission_stack(pump.admit(msg));
         let mut drained_residue = false;
         while let Some(msg) = queue.pop() {
             felt.note_input(&msg, &model, || pump.staged());
@@ -1581,6 +1574,18 @@ pub fn run(
             }
         }
     }
+}
+
+/// The loop's queue for an admitted message, popped from the back: what nvim
+/// drew before an invocation is applied first, and what it drew after waits
+/// for the residue drain.
+fn admission_stack(admitted: view_engine::Admitted) -> Vec<Msg> {
+    let mut queue = vec![admitted.msg];
+    if let Some((before, folded_at)) = admitted.before {
+        crate::vlog::log_redraw_census(&before, folded_at);
+        queue.push(Msg::Redraw(before));
+    }
+    queue
 }
 
 #[cfg(test)]
@@ -5953,6 +5958,32 @@ mod tests {
             !exit.by_signal,
             "an engine that exited on its own instruction died of no signal"
         );
+    }
+
+    /// The loop applies what nvim drew before an invocation ahead of the
+    /// invocation itself.
+    #[test]
+    fn the_loop_applies_an_invocations_earlier_redraw_first() {
+        use view_core::events::UiEvent;
+        let (tx, rx) = mpsc::sync_channel::<Msg>(8);
+        let pump = view_engine::DamagePump::attached_for_test(tx);
+        let drawn = vec![UiEvent::GridClear { grid: 1 }, UiEvent::Flush];
+        pump.fold_redraw_for_test(drawn.clone());
+        pump.route_invocation_for_test("picker", "grep");
+        assert!(matches!(rx.try_recv(), Ok(Msg::RedrawReady)));
+        let invocation = rx.try_recv().expect("the invocation is queued");
+        assert!(
+            matches!(invocation, Msg::FeatureInvoke { .. }),
+            "{invocation:?}"
+        );
+
+        let mut queue = admission_stack(pump.admit(invocation));
+        assert!(
+            matches!(queue.pop(), Some(Msg::Redraw(ref events)) if *events == drawn),
+            "the earlier redraw must be applied first"
+        );
+        assert!(matches!(queue.pop(), Some(Msg::FeatureInvoke { .. })));
+        assert!(queue.is_empty());
     }
 
     /// A claims reply parked behind a full channel reaches the loop on the

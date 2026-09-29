@@ -27,8 +27,7 @@ use super::{saturate_u32, AttachedBuf};
 ///
 /// The pair is not validated here: nvim is where a user types `:View`
 /// followed by any two words, so deciding an unknown pair is not actionable
-/// belongs to the one arm that knows what this build can act on, not to the
-/// reader thread.
+/// belongs to the one arm that knows what this build can act on.
 pub(super) fn decode_feature_invoke(params: &[Value]) -> Option<(String, String)> {
     let [feature, verb, ..] = params else {
         return None;

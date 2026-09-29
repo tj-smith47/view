@@ -460,16 +460,53 @@ fn pump<T>(
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         let received = session.rx.recv_timeout(left).ok()?;
-        let mut found = None;
-        for msg in dispatched(session, received) {
-            let effects = update(model, msg.clone());
-            send(session, &effects);
-            found = found.or_else(|| done(model, &msg));
-        }
+        let found = applied(
+            model,
+            dispatched(session, received),
+            |effects| send(session, effects),
+            &done,
+        );
         if found.is_some() {
             return found;
         }
     }
+}
+
+/// Applies every one of `msgs` to `model`, handing `send` the effects of
+/// each, and returns the first answer `done` gives.
+fn applied<T>(
+    model: &mut Model,
+    msgs: Vec<Msg>,
+    mut send: impl FnMut(&[Effect]),
+    done: &impl Fn(&Model, &Msg) -> Option<T>,
+) -> Option<T> {
+    let mut found = None;
+    for msg in msgs {
+        let effects = update(model, msg.clone());
+        send(&effects);
+        found = found.or_else(|| done(model, &msg));
+    }
+    found
+}
+
+/// A wakeup whose first message answers is still applied whole.
+#[test]
+fn a_wakeup_is_applied_whole_when_an_early_message_answers() {
+    let mut model = Model::with_term_size(80, 24);
+    let found = applied(
+        &mut model,
+        vec![
+            Msg::Redraw(vec![UiEvent::Flush]),
+            Msg::Resized {
+                width: 90,
+                height: 30,
+            },
+        ],
+        |_| {},
+        &|_, msg| matches!(msg, Msg::Redraw(_)).then_some(()),
+    );
+    assert!(found.is_some());
+    assert_eq!((model.term_width, model.term_height), (90, 30));
 }
 
 /// The messages the runtime loop dispatches for `received`, in its order:
