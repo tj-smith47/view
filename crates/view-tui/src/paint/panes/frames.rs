@@ -182,7 +182,7 @@ fn paint_edges(
             .engine
             .painted_grids()
             .window_handle(pane.id)
-            .and_then(|win| model.window_status.get(&win))
+            .and_then(|win| model.painted_status(win))
         else {
             continue;
         };

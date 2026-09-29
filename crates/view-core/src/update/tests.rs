@@ -830,10 +830,212 @@ fn a_restart_draws_the_replacements_windows_in_the_dead_engines_slots() {
         ]),
     );
     assert!(
+        m.engine.holds_the_screen(),
+        "the layout was handed back before the sidebar drew or reported"
+    );
+    let _ = update(&mut m, Msg::Redraw(written(4, "t")));
+    report(&mut m, 1003, "README.md");
+    assert!(
+        m.engine.holds_the_screen(),
+        "the layout was handed back before the sidebar reported"
+    );
+    report(&mut m, 1002, "NvimTree_1");
+    assert!(
         !m.engine.holds_the_screen(),
         "the layout stayed held after the replacement filled its slots"
     );
     assert_eq!(painted_slots(&m), HELD_SLOTS);
+}
+
+/// Across a restart each tile keeps the title, segments and rows it last
+/// showed until the replacement reports and draws its own: through the held
+/// frame, then the held layout, where the sidebar's slot shows the dead
+/// engine's cells in the dead engine's colours.
+#[test]
+fn a_restart_keeps_each_tiles_title_and_rows_until_the_replacement_reports_its_own() {
+    let title = |m: &Model, win: u64| {
+        m.painted_status(crate::events::WinHandle(win))
+            .map(|s| (s.name.clone(), s.modified))
+    };
+    let mut m = vsplit_model();
+    let mut tree = vec![UiEvent::HlAttrDefine {
+        id: 7,
+        fg: Some(0x00aa00),
+        bg: None,
+        bold: true,
+        italic: false,
+        underline: false,
+        reverse: false,
+    }];
+    tree.push(UiEvent::GridLine {
+        grid: 5,
+        row: 0,
+        col_start: 0,
+        cells: vec![crate::events::GridCell {
+            text: "tree".into(),
+            hl_id: 7,
+            repeat: 1,
+        }],
+    });
+    tree.extend(written(6, "d"));
+    let _ = update(&mut m, Msg::Redraw(tree));
+    let _ = update(
+        &mut m,
+        Msg::WindowStatus {
+            win: crate::events::WinHandle(1003),
+            status: crate::model::WindowStatus {
+                name: "README.md".into(),
+                modified: true,
+                ..crate::model::WindowStatus::default()
+            },
+        },
+    );
+    report(&mut m, 1002, "NvimTree_1");
+    let _ = restart(&mut m);
+    assert_eq!(
+        title(&m, 1003),
+        Some(("README.md".into(), true)),
+        "the held frame's file tile lost its title"
+    );
+    assert_eq!(
+        title(&m, 1002),
+        Some(("NvimTree_1".into(), false)),
+        "the held frame's sidebar lost its title"
+    );
+
+    // the replacement's first window, drawn in the dead engine's slots, and
+    // the replacement's own meaning for the id the dead sidebar's cells use
+    let _ = replacement_file_alone(
+        &mut m,
+        vec![
+            UiEvent::HlAttrDefine {
+                id: 7,
+                fg: Some(0xaa0000),
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+            UiEvent::GridLine {
+                grid: 2,
+                row: 1,
+                col_start: 0,
+                cells: vec![crate::events::GridCell {
+                    text: "x".into(),
+                    hl_id: 7,
+                    repeat: 1,
+                }],
+            },
+        ],
+    );
+    assert_eq!(painted_slots(&m), HELD_SLOTS);
+    let file_cell = m
+        .engine
+        .painted_grids()
+        .grid(GridId(2))
+        .and_then(|grid| grid.cell(1, 0))
+        .map(|cell| m.engine.painted_hl().attr(cell.hl_id).and_then(|a| a.fg));
+    assert_eq!(
+        file_cell,
+        Some(Some(0xaa0000)),
+        "the replacement's cells took the dead engine's colours"
+    );
+    assert_eq!(
+        title(&m, 1003),
+        Some(("README.md".into(), true)),
+        "the file tile lost its title before the replacement reported it"
+    );
+    assert_eq!(
+        title(&m, 1002),
+        Some(("NvimTree_1".into(), false)),
+        "the sidebar's stand-in lost its title"
+    );
+    let stand_in = |m: &Model| {
+        let grids = m.engine.painted_grids();
+        let grid = grids.window_grid(crate::events::WinHandle(1002))?;
+        let cell = grid.cell(0, 0)?;
+        Some((
+            grid.row_text(0).trim_end().to_string(),
+            m.engine.painted_hl().attr(cell.hl_id).and_then(|a| a.fg),
+        ))
+    };
+    assert_eq!(
+        stand_in(&m),
+        Some(("tree".into(), Some(0x00aa00))),
+        "the sidebar's slot lost the rows it showed"
+    );
+
+    // the replacement's report replaces the file tile's title
+    report(&mut m, 1003, "README.md");
+    assert_eq!(title(&m, 1003), Some(("README.md".into(), false)));
+
+    // the config reopens its sidebar, which draws nothing at first
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 4,
+                width: 39,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: 4,
+                win: crate::events::WinHandle(1002),
+                startrow: 0,
+                startcol: 41,
+                width: 39,
+                height: 24,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert!(
+        m.engine.holds_the_screen(),
+        "the blank sidebar took the slot"
+    );
+    assert_eq!(
+        stand_in(&m),
+        Some(("tree".into(), Some(0x00aa00))),
+        "the reopened sidebar showed blank rows before it drew"
+    );
+    assert_eq!(
+        title(&m, 1002),
+        Some(("NvimTree_1".into(), false)),
+        "the reopened sidebar lost its title before it reported"
+    );
+
+    // its report replaces the title, and the rows wait for its text
+    report(&mut m, 1002, "NvimTree_2");
+    assert_eq!(title(&m, 1002), Some(("NvimTree_2".into(), false)));
+    assert_eq!(
+        stand_in(&m),
+        Some(("tree".into(), Some(0x00aa00))),
+        "the reported sidebar showed blank rows before it drew"
+    );
+
+    let _ = update(&mut m, Msg::Redraw(written(4, "t")));
+    assert!(
+        !m.engine.holds_the_screen(),
+        "the layout stayed held after every window drew and reported"
+    );
+    assert_eq!(title(&m, 1003), Some(("README.md".into(), false)));
+    assert_eq!(title(&m, 1002), Some(("NvimTree_2".into(), false)));
+    assert_eq!(painted_row(&m, 4).as_deref(), Some("t"));
+}
+
+/// The replacement reports `win` showing a buffer named `name`.
+fn report(m: &mut Model, win: u64, name: &str) {
+    let _ = update(
+        m,
+        Msg::WindowStatus {
+            win: crate::events::WinHandle(win),
+            status: crate::model::WindowStatus {
+                name: name.into(),
+                ..crate::model::WindowStatus::default()
+            },
+        },
+    );
 }
 
 /// The bound hands the screen to a replacement that never reopens the
@@ -1107,13 +1309,16 @@ fn a_replacements_global_grid_text_keeps_the_dead_frame() {
     );
 }
 
-/// Every held window back, at a size other than the held one, is the
-/// replacement's layout settled: holding it longer delays the same change.
+/// Every held window back, at a size other than the held one, drawn and
+/// reported, is the replacement's layout settled: holding it longer delays
+/// the same change.
 #[test]
 fn a_held_layout_is_handed_back_once_every_slot_is_filled() {
     let mut m = vsplit_model();
     let _ = restart(&mut m);
     let _ = replacement_file_alone(&mut m, Vec::new());
+    report(&mut m, 1002, "NvimTree_1");
+    report(&mut m, 1003, "README.md");
     let _ = update(
         &mut m,
         Msg::Redraw(vec![
@@ -1130,9 +1335,9 @@ fn a_held_layout_is_handed_back_once_every_slot_is_filled() {
                 width: 30,
                 height: 24,
             },
-            UiEvent::Flush,
         ]),
     );
+    let _ = update(&mut m, Msg::Redraw(written(4, "t")));
     assert!(
         !m.engine.holds_the_screen(),
         "every held window came back and the dead slots stayed"

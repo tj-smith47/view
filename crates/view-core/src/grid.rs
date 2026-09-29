@@ -242,6 +242,13 @@ impl Grid {
         self.cells.iter().any(|cell| !cell.text.trim().is_empty())
     }
 
+    /// Renumbers every cell's highlight id through `to`.
+    pub(crate) fn map_hl(&mut self, to: impl Fn(u64) -> u64) {
+        for cell in &mut self.cells {
+            cell.hl_id = to(cell.hl_id);
+        }
+    }
+
     /// Concatenated text of every cell in `row`, left to right. Returns an empty
     /// string if `row` is out of bounds. Intended for debugging and tests.
     #[must_use]

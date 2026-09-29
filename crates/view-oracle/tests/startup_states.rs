@@ -554,18 +554,24 @@ fn frame_columns(screen: &vt100::Screen) -> Vec<Vec<u16>> {
         .collect()
 }
 
+/// The titles the restart-sidebar fixture's two tiles carry.
+#[cfg(target_os = "linux")]
+const TITLES: [&str; 2] = ["restartmain", "restarttree"];
+
 /// Across a restart under a config that reopens its tree after the attach,
 /// every screen the terminal shows keeps the tree's tile and the file's
-/// tile where they stood, including the ones drawn before the config has
-/// reopened the tree.
+/// tile where they stood, each with its title and the tree with the rows
+/// it last showed, including the ones drawn before the config has reopened
+/// the tree.
 ///
 /// Read per chunk the terminal absorbs, so the file's frame across the
-/// whole width cannot pass unseen.
+/// whole width cannot pass unseen, and neither can a frame with no title.
 ///
 /// Disconfirm: handing the screen to the live registry at the
 /// replacement's first window (`EngineModel::settle_held` answering
 /// `Held::Nothing` at once) fails on the file's tile spanning the tree's
-/// columns.
+/// columns; reading tile titles off the live statuses alone
+/// (`Model::painted_status`) fails on a screen with no title.
 #[test]
 #[cfg(target_os = "linux")]
 fn a_restart_keeps_the_tiles_where_they_stood_until_the_config_reopens_its_tree() {
@@ -591,22 +597,40 @@ fn a_restart_keeps_the_tiles_where_they_stood_until_the_config_reopens_its_tree(
     );
     let session_pid = under_test.pid().expect("the session under test has a pid");
     let engine = engine_child_of(session_pid).expect("view spawned an nvim child");
+    let dead_tree = format!("{SIDEBAR} {engine}");
+    assert!(
+        TITLES
+            .iter()
+            .chain([&dead_tree.as_str()])
+            .all(|needle| under_test.screen().contains(needle)),
+        "the settled screen lacks a title or the tree's line; screen:\n{}",
+        under_test.screen()
+    );
     kill(engine);
 
     let mut moved = None;
+    let mut bare = None;
     let mut before_the_tree = false;
     let reopened = under_test.wait_for_screen(view_test_support::host_deadline(BUDGET), |screen| {
         let text = screen.contents();
         if frame_columns(screen) != settled {
             moved.get_or_insert(text.clone());
         }
+        if !TITLES.iter().all(|title| text.contains(title)) || !text.contains(SIDEBAR) {
+            bare.get_or_insert(text.clone());
+        }
         let replaced = !text.contains(HELD) && text.contains(MAIN_FILE);
-        before_the_tree |= replaced && !text.contains(SIDEBAR);
-        replaced && text.contains(SIDEBAR)
+        before_the_tree |= replaced && text.contains(&dead_tree);
+        replaced && text.contains(SIDEBAR) && !text.contains(&dead_tree)
     });
     assert_eq!(
         moved, None,
         "a screen between the restart and the tree's return moved the tiles"
+    );
+    assert_eq!(
+        bare, None,
+        "a screen between the restart and the tree's return lost a title or \
+         the tree's rows"
     );
     assert!(
         reopened,

@@ -168,7 +168,7 @@ impl Model {
             self.engine
                 .painted_grids()
                 .window_handle(id)
-                .and_then(|win| self.window_status.get(&win))
+                .and_then(|win| self.painted_status(win))
                 .is_some_and(|status| matches!(status.kind, TileKind::Sidebar { .. }))
         };
         let grid = (0, 0, grid_w, grid_h);
@@ -319,7 +319,7 @@ impl Model {
             .engine
             .painted_grids()
             .window_handle(grid)
-            .and_then(|win| self.window_status.get(&win))
+            .and_then(|win| self.painted_status(win))
             .filter(|status| status.buf == buffer.0)?;
         // each open hunk as the buffer line its virtual lines are drawn
         // under, the count of them, and its first and end rows

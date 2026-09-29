@@ -9,7 +9,7 @@ use super::{EngineModel, Model, MouseCapture, WindowStatus};
 use crate::events::WinHandle;
 use crate::grid::registry::{Dock, GridRegistry, WindowSlot};
 use crate::grid::Grid;
-use crate::hl::HlTable;
+use crate::hl::{HlAttr, HlTable};
 use crate::msg::Effect;
 
 /// How long the replacement's windows are drawn in the dead engine's slots
@@ -19,8 +19,25 @@ use crate::msg::Effect;
 /// that never reopens one hands the screen back to its own layout here.
 pub(crate) const RESTART_LAYOUT_HOLD: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The buffer name each window of the held frame showed, by handle.
-type Names = HashMap<WinHandle, String>;
+/// What the dead engine last reported for each window of the held frame, by
+/// handle: the buffer a replacement window is matched by, and the title and
+/// segments its tile keeps until the replacement reports its own.
+type Shown = HashMap<WinHandle, WindowStatus>;
+
+/// Where the dead engine's highlight ids are moved to in the table a held
+/// layout paints with, clear of the ids the replacement defines, which
+/// nvim counts up from 1.
+const HELD_HL_BASE: u64 = 1 << 32;
+
+/// A dead engine's highlight id as the held layout's table numbers it. Id 0
+/// is the default colours in every engine, so it stays.
+fn held_hl(id: u64) -> u64 {
+    if id == 0 {
+        0
+    } else {
+        id.saturating_add(HELD_HL_BASE)
+    }
+}
 
 /// What a restart keeps on screen in place of the replacement's own frame.
 #[derive(Debug, Clone, Default)]
@@ -52,9 +69,9 @@ enum Hold {
         grids: GridRegistry,
         /// The dead engine's highlight table.
         hl: HlTable,
-        /// The buffer each held window showed.
-        names: Names,
-        /// Whether `names` has been read from the dead engine's statuses.
+        /// What each held window showed.
+        shown: Shown,
+        /// Whether `shown` has been read from the dead engine's statuses.
         /// A frame held over from a failed attempt has been, and a status
         /// reported since then names a window of that attempt.
         named: bool,
@@ -72,16 +89,25 @@ enum Hold {
     ///
     /// The attach draws the file alone, and a config reopens its sidebars
     /// from its own startup autocmds after that, so painting the live
-    /// registry puts the file across the whole width and then back. The
-    /// cells are the replacement's from its first window: only the slots
-    /// are the dead engine's.
+    /// registry puts the file across the whole width and then back. A slot
+    /// shows the dead engine's cells until the replacement draws text in
+    /// it, and its tile the dead engine's title and segments until the
+    /// replacement reports its window.
     Layout {
         /// The dead engine's windows, as handle and slot.
         slots: Vec<WindowSlot>,
-        /// The buffer each of those windows showed.
-        names: Names,
+        /// What each of those windows showed.
+        shown: Shown,
+        /// The cells each slot showed, by index into `slots`, with their
+        /// highlight ids moved by [`held_hl`].
+        cells: Vec<Option<Grid>>,
+        /// The dead engine's highlight attributes, under the ids `cells`
+        /// carries.
+        attrs: Vec<(u64, HlAttr)>,
         /// The live registry drawn in `slots`.
         drawn: GridRegistry,
+        /// The live highlight table with `attrs` added.
+        hl: HlTable,
     },
 }
 
@@ -100,7 +126,7 @@ enum Fit {
 /// again and the dead engine's file window may have had another handle.
 fn fit(
     slots: &[WindowSlot],
-    names: &Names,
+    shown: &Shown,
     live: &[WindowSlot],
     status: &HashMap<WinHandle, WindowStatus>,
 ) -> Fit {
@@ -115,12 +141,12 @@ fn fit(
             // buffer to match
             let open = fitted
                 .iter()
-                .any(|(held, _)| names.contains_key(held) && !taken(held));
+                .any(|(held, _)| shown.contains_key(held) && !taken(held));
             return if open { Fit::Unnamed } else { Fit::Outside };
         };
         let Some(slot) = fitted
             .iter_mut()
-            .find(|(held, _)| names.get(held) == Some(name) && !taken(held))
+            .find(|(held, _)| shown.get(held).map(|s| &s.name) == Some(name) && !taken(held))
         else {
             return Fit::Outside;
         };
@@ -152,14 +178,15 @@ impl EngineModel {
     }
 
     /// The highlight table the screen's cells are drawn with, for the
-    /// compositor: the dead engine's while a restart holds its frame, and
+    /// compositor: the dead engine's while a restart holds its frame, the
+    /// live one with the dead engine's added while it holds the layout, and
     /// [`Self::hl`] otherwise.
     #[must_use]
     #[inline]
     pub fn painted_hl(&self) -> &HlTable {
         match &self.held.hold {
-            Hold::Frame { hl, .. } => hl,
-            Hold::Nothing | Hold::Layout { .. } => &self.hl,
+            Hold::Frame { hl, .. } | Hold::Layout { hl, .. } => hl,
+            Hold::Nothing => &self.hl,
         }
     }
 
@@ -205,29 +232,30 @@ impl EngineModel {
         // filled its slot: that window may die again before it ever
         // reports its own name, and the carried one is all the next
         // replacement has to match it by
-        let names = match &self.held.hold {
-            Hold::Layout { names, .. } => names.clone(),
-            Hold::Nothing | Hold::Frame { .. } => Names::new(),
+        let shown = match &self.held.hold {
+            Hold::Layout { shown, .. } => shown.clone(),
+            Hold::Nothing | Hold::Frame { .. } => Shown::new(),
         };
         self.held.hold = Hold::Frame {
             grids: self.painted_grids().clone(),
-            hl: self.hl.clone(),
-            names,
+            hl: self.painted_hl().clone(),
+            shown,
             named: false,
             armed: false,
             layout: true,
         };
     }
 
-    /// Records the buffer each window of the held frame showed, from the
-    /// statuses the dead engine reported, so that a replacement window
-    /// numbered differently still finds its slot. A window's own report
-    /// here replaces any name it was carried into this frame with, since
-    /// the carried name was only ever a placeholder for this one.
+    /// Records what each window of the held frame showed, from the statuses
+    /// the dead engine reported, so that a replacement window numbered
+    /// differently still finds its slot and each tile keeps its title. A
+    /// window's own report here replaces any status it was carried into
+    /// this frame with, since the carried one was only ever a placeholder
+    /// for this one.
     fn name_held_windows(&mut self, status: &HashMap<WinHandle, WindowStatus>) {
         if let Hold::Frame {
             grids,
-            names,
+            shown,
             named,
             ..
         } = &mut self.held.hold
@@ -237,7 +265,7 @@ impl EngineModel {
             }
             for (win, _) in grids.window_layout() {
                 if let Some(status) = status.get(&win) {
-                    names.insert(win, status.name.clone());
+                    shown.insert(win, status.clone());
                 }
             }
             *named = true;
@@ -252,15 +280,17 @@ impl EngineModel {
     /// Moves the hold on: from the dead frame to the dead layout once the
     /// replacement puts up a window the slots can hold, and from the layout
     /// to the live registry once the replacement's own windows fill every
-    /// slot or one of them stands outside every slot. Answers whether the
-    /// replacement put its first window up here, which is when
-    /// [`RESTART_LAYOUT_HOLD`] starts.
+    /// slot, have each reported their status and drawn text, or one of
+    /// them stands outside every slot. Answers whether the replacement put
+    /// its first window up here, which is when [`RESTART_LAYOUT_HOLD`]
+    /// starts.
     fn settle_held(&mut self, status: &HashMap<WinHandle, WindowStatus>) -> bool {
         let mut began = false;
         let live = self.grids.window_layout();
         if let Hold::Frame {
             grids,
-            names,
+            hl,
+            shown,
             armed,
             layout,
             ..
@@ -280,33 +310,62 @@ impl EngineModel {
             }
             // the dead frame is a whole screen, and stays up until the
             // window it cannot place yet reports its buffer
-            if matches!(fit(&slots, names, &live, status), Fit::Unnamed) {
+            if matches!(fit(&slots, shown, &live, status), Fit::Unnamed) {
                 *armed = true;
                 return began;
             }
+            let cells = slots
+                .iter()
+                .map(|(win, _)| {
+                    let mut grid = grids.window_grid(*win)?.clone();
+                    grid.map_hl(held_hl);
+                    Some(grid)
+                })
+                .collect();
+            let attrs = hl.attrs().map(|(id, attr)| (held_hl(id), attr)).collect();
             self.held.hold = Hold::Layout {
                 slots,
-                names: std::mem::take(names),
+                shown: std::mem::take(shown),
+                cells,
+                attrs,
                 drawn: GridRegistry::new(),
+                hl: HlTable::new(),
             };
         }
-        if let Hold::Layout { slots, names, .. } = &self.held.hold {
-            self.held.hold = match fit(slots, names, &live, status) {
-                Fit::Slots(fitted) => {
-                    let filled = fitted
-                        .iter()
-                        .all(|(held, _)| live.iter().any(|(w, _)| w == held));
-                    match self.grids.laid_out_as(&fitted) {
-                        Some(drawn) if !filled => Hold::Layout {
+        let settled = |fitted: &[WindowSlot]| {
+            fitted.iter().all(|(held, _)| {
+                status.contains_key(held)
+                    && self.grids.window_grid(*held).is_some_and(Grid::has_text)
+            })
+        };
+        if let Hold::Layout {
+            slots,
+            shown,
+            cells,
+            attrs,
+            ..
+        } = &self.held.hold
+        {
+            let next = match fit(slots, shown, &live, status) {
+                Fit::Slots(fitted) if !settled(&fitted) => {
+                    self.grids.laid_out_as(&fitted, cells).map(|drawn| {
+                        let mut hl = self.hl.clone();
+                        for (id, attr) in attrs {
+                            hl.define_attr(*id, *attr);
+                        }
+                        Hold::Layout {
                             slots: slots.clone(),
-                            names: names.clone(),
+                            shown: shown.clone(),
+                            cells: cells.clone(),
+                            attrs: attrs.clone(),
                             drawn,
-                        },
-                        _ => Hold::Nothing,
-                    }
+                            hl,
+                        }
+                    })
                 }
-                Fit::Unnamed | Fit::Outside => Hold::Nothing,
+                Fit::Slots(_) | Fit::Unnamed | Fit::Outside => None,
             };
+            self.held.hold = next.unwrap_or_default();
         }
         began && self.holds_the_screen()
     }
@@ -328,8 +387,8 @@ impl EngineModel {
 }
 
 impl Model {
-    /// Records the buffer each window of the held frame showed, then drops
-    /// what the dead engine's windows leave behind: their statuses, whose
+    /// Records what each window of the held frame showed, then drops what
+    /// the dead engine's windows leave behind: their statuses, whose
     /// handles the replacement numbers its own windows with, and a mouse
     /// gesture captured on one of their grids.
     pub fn forget_engine_windows(&mut self) {
@@ -337,6 +396,25 @@ impl Model {
         self.window_status.clear();
         if matches!(self.mouse_capture, Some(MouseCapture::Engine(_))) {
             self.mouse_capture = None;
+        }
+    }
+
+    /// The status a tile's frame shows for `win`, a window of
+    /// [`EngineModel::painted_grids`]: what the dead engine last reported
+    /// while a restart holds its frame, and while it holds the layout, the
+    /// replacement's report once there is one and the dead engine's for
+    /// its slot until then.
+    #[must_use]
+    pub fn painted_status(&self, win: WinHandle) -> Option<&WindowStatus> {
+        match &self.engine.held.hold {
+            Hold::Nothing => self.window_status.get(&win),
+            Hold::Frame { shown, .. } => shown.get(&win),
+            // a stand-in carries the dead engine's handle, which the
+            // replacement may have given a window of its own elsewhere
+            Hold::Layout { shown, .. } if self.engine.grids.window_slot(win).is_some() => {
+                self.window_status.get(&win).or_else(|| shown.get(&win))
+            }
+            Hold::Layout { shown, .. } => shown.get(&win),
         }
     }
 

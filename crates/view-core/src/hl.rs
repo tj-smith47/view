@@ -133,6 +133,11 @@ impl HlTable {
         self.attrs.get(&hl_id).copied()
     }
 
+    /// Every id nvim has defined, with its attributes, in no order.
+    pub(crate) fn attrs(&self) -> impl Iterator<Item = (u64, HlAttr)> + '_ {
+        self.attrs.iter().map(|(id, attr)| (*id, *attr))
+    }
+
     /// The `hl_id` a builtin UI element name currently resolves to, or
     /// `None` before nvim has associated one.
     #[must_use]
