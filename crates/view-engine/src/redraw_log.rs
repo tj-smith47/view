@@ -3,24 +3,48 @@
 //! reconstructing the op sequence behind a screen whose grids disagree
 //! with nvim's.
 //!
-//! [`init`] reads the variable and opens the file once, at startup. Unset,
-//! every entry point is one `OnceLock` read that finds `None` and formats
-//! nothing.
+//! [`init`] reads the variable and opens the file once, at startup, handing
+//! it to a writer thread of its own; [`finish`] hands that thread the last
+//! lines and waits for them to reach the file. Unset, every entry point is
+//! one `OnceLock` read that finds `None` and formats nothing.
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
-use std::io::Write as _;
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, OnceLock, PoisonError};
+use std::thread::JoinHandle;
 
 use view_core::events::UiEvent;
 
-/// The open file and the number its next line carries. The number lives
-/// behind the file's own lock, so lines from different threads are numbered
-/// in the order they reach the file.
+/// The number the next line carries, and the channel to the thread that
+/// owns the file. Numbering and sending share one lock, so the channel
+/// carries lines in the order they are numbered; the send never blocks, so
+/// no caller waits on the disk.
 struct Log {
-    file: Box<dyn std::io::Write + Send>,
     seq: u64,
+    lines: Option<Sender<String>>,
+    writer: Option<JoinHandle<()>>,
+}
+
+/// Starts the thread that writes each text it receives to `file`, until
+/// every sender is gone or a write fails.
+fn spawn(mut file: Box<dyn std::io::Write + Send>) -> std::io::Result<Log> {
+    let (lines, texts) = mpsc::channel::<String>();
+    let writer = std::thread::Builder::new()
+        .name("redraw-log".into())
+        .spawn(move || {
+            for text in texts {
+                if file.write_all(text.as_bytes()).is_err() {
+                    break;
+                }
+            }
+        })?;
+    Ok(Log {
+        seq: 0,
+        lines: Some(lines),
+        writer: Some(writer),
+    })
 }
 
 static SINK: OnceLock<Option<Mutex<Log>>> = OnceLock::new();
@@ -59,12 +83,31 @@ fn open(path: Option<OsString>) -> Result<Option<Mutex<Log>>, OpenError> {
     let Some(path) = path else {
         return Ok(None);
     };
-    match OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(file) => Ok(Some(Mutex::new(Log {
-            file: Box::new(file),
-            seq: 0,
-        }))),
-        Err(source) => Err(OpenError { path, source }),
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|file| spawn(Box::new(file)))
+        .map(|log| Some(Mutex::new(log)))
+        .map_err(|source| OpenError { path, source })
+}
+
+/// Hands the writer thread the last lines and waits until they reach the
+/// file. A line written after this is dropped.
+pub fn finish() {
+    if let Some(sink) = sink() {
+        close(sink);
+    }
+}
+
+fn close(sink: &Mutex<Log>) {
+    let writer = {
+        let mut log = sink.lock().unwrap_or_else(PoisonError::into_inner);
+        log.lines = None;
+        log.writer.take()
+    };
+    if let Some(writer) = writer {
+        let _ = writer.join();
     }
 }
 
@@ -102,13 +145,13 @@ pub(crate) fn drained(events: &[UiEvent]) {
     }
 }
 
-/// Numbers `lines` under the log's lock and hands them to the file in one
-/// write, so a full redraw costs the reader thread one syscall.
+/// Numbers `lines` under the log's lock and sends them to the writer
+/// thread as one text, which that thread writes to the file in one call.
 fn write(sink: &Mutex<Log>, lines: impl IntoIterator<Item = String>) {
     let mut log = sink.lock().unwrap_or_else(PoisonError::into_inner);
     let text = numbered(&mut log.seq, lines);
-    if !text.is_empty() {
-        let _ = log.file.write_all(text.as_bytes());
+    if let Some(lines) = log.lines.as_ref().filter(|_| !text.is_empty()) {
+        let _ = lines.send(text);
     }
 }
 
@@ -234,10 +277,7 @@ mod tests {
     #[test]
     fn a_batch_is_one_numbered_write_and_the_sequence_carries_on() {
         let writes = Writes::default();
-        let sink = Mutex::new(Log {
-            file: Box::new(writes.clone()),
-            seq: 0,
-        });
+        let sink = Mutex::new(spawn(Box::new(writes.clone())).unwrap());
         write(
             &sink,
             [
@@ -253,6 +293,7 @@ mod tests {
             .filter_map(describe),
         );
         write(&sink, ["drain events=3".to_string()]);
+        close(&sink);
         assert_eq!(
             *writes.0.lock().unwrap(),
             vec![
@@ -261,6 +302,88 @@ mod tests {
             ]
         );
         assert_eq!(numbered(&mut 7, ["a".into(), "b".into()]), "7 a\n8 b\n");
+    }
+
+    /// A file whose first write waits until the test lets it through.
+    struct Held {
+        file: std::fs::File,
+        released: mpsc::Receiver<()>,
+    }
+
+    impl std::io::Write for Held {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let _ = self.released.recv();
+            self.file.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    /// A file that takes a while to accept each write, as a slow disk does.
+    struct Slow(std::fs::File);
+
+    impl std::io::Write for Slow {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            self.0.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.flush()
+        }
+    }
+
+    /// `write` returns while the file has not accepted a byte, and what
+    /// it sent reaches the file in number order once the file does.
+    ///
+    /// Disconfirm: writing to the file on the caller's thread leaves the
+    /// writes stuck on the held file past the deadline.
+    #[test]
+    fn a_write_returns_while_the_file_is_held() {
+        let dir = ScratchDir::new("redraw-log").unwrap();
+        let path = dir.path().join("redraw.log");
+        let (release, released) = mpsc::channel();
+        let file = std::fs::File::create(&path).unwrap();
+        let sink = Mutex::new(spawn(Box::new(Held { file, released })).unwrap());
+        let (done, returned) = mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                write(&sink, ["a".to_string()]);
+                write(&sink, ["b".to_string(), "c".to_string()]);
+                let _ = done.send(());
+            });
+            let in_time = returned
+                .recv_timeout(view_test_support::host_deadline(
+                    std::time::Duration::from_secs(2),
+                ))
+                .is_ok();
+            let unwritten = std::fs::read_to_string(&path).unwrap();
+            drop(release);
+            assert!(in_time, "a write waited on the held file");
+            assert_eq!(unwritten, "", "the file took a write while held");
+        });
+        close(&sink);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "0 a\n1 b\n2 c\n");
+    }
+
+    /// `close` returns only once every line sent before it is in the file.
+    ///
+    /// Disconfirm: `close` hanging up without joining the writer reads the
+    /// file before the slow write lands.
+    #[test]
+    fn closing_waits_for_the_last_lines_to_reach_the_file() {
+        let dir = ScratchDir::new("redraw-log").unwrap();
+        let path = dir.path().join("redraw.log");
+        let file = std::fs::File::create(&path).unwrap();
+        let sink = Mutex::new(spawn(Box::new(Slow(file))).unwrap());
+        write(&sink, ["a".to_string(), "b".to_string()]);
+        write(&sink, ["c".to_string()]);
+        close(&sink);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "0 a\n1 b\n2 c\n");
+        write(&sink, ["d".to_string()]);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "0 a\n1 b\n2 c\n");
     }
 
     /// Disconfirm: `open` answering an unopenable path with no log and no

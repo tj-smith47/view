@@ -32,8 +32,10 @@ Attach this file to a bug report about startup, a crash or an engine restart.
 ## Recording the redraw sequence
 
 Set `VIEW_REDRAW_LOG` to a file path, and view appends one numbered line for
-each grid resize, window placement, grid line and flush nvim sends, and for
-each resize view asks nvim for:
+each grid resize, window placement, grid clear, grid line and flush nvim sends,
+for each resize view asks nvim for, for each terminal resize (`resized`), for
+each time an engine restart holds or releases the screen (`held_screen`), and
+for each batch view draws (`drain`):
 
 ```text
 711 grid_resize grid=1 width=148 height=37

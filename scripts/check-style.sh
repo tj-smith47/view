@@ -606,6 +606,7 @@ crates/view-bench/src/remote_ui.rs 1 the headless control server, tied: it has n
 crates/view-bench/src/scenarios/echo_speculated_rtt.rs 3 an interpreter probe that runs to completion, and the relay fixture the row waits out and kills
 crates/view-bench/src/session.rs 1 a pty session leader, ended by the kernel when the master closes
 crates/view-engine/src/process.rs 4 the engine and the remote leg ssh client, both tied through spawn_engine_child, each started again by the ETXTBSY retry
+crates/view-engine/src/redraw_log.rs 1 the thread that writes the redraw log, which ends with the process
 crates/view-harness/src/bin/bench.rs 1 a sysctl read, waited on to completion
 crates/view-harness/src/bin/bench/replicates.rs 1 a git read, waited on to completion
 crates/view-harness/src/bin/oracle/compat.rs 3 a cargo build and a reference nvim, both waited on to completion, and a pty-hosted view ended by its master closing

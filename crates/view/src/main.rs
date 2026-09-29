@@ -1090,6 +1090,7 @@ fn main() -> Result<()> {
     if let Err(e) = view_engine::redraw_log::init() {
         eprintln!("view: {e}");
     }
+    let _redraw_log = RedrawLogOnReturn;
     // the writer first: preparing the tie can itself be refused (a pipe,
     // a thread, a /bin/sh), and a refusal raised with nowhere to write it
     // is the one that says no child of this session is tied
@@ -1636,6 +1637,7 @@ fn main() -> Result<()> {
         term.restore_now();
         vlog::log("exit", "terminal restored");
         follow_ups.native.finish_record();
+        view_engine::redraw_log::finish();
         // after restore_now, not before: persist_theme's own diagnostic (on
         // a cache-write failure) is a plain stderr write, and the terminal
         // is raw-mode/alternate-screen owned until the line above -- see
@@ -1687,6 +1689,7 @@ fn main() -> Result<()> {
     // after the restore, so a stalled disk holds a restored terminal for
     // at most the writer's bound
     follow_ups.native.finish_record();
+    view_engine::redraw_log::finish();
     persist_theme(&model, &config_path);
     report_fatal_reason(&model);
     vlog::log_with("exit", || format!("leaving code={exit_code}"));
@@ -1712,6 +1715,17 @@ fn persist_theme(model: &Model, config_path: &Option<std::path::PathBuf>) {
         ) {
             eprintln!("{notice}");
         }
+    }
+}
+
+/// Hands the redraw log's last lines to its file when `main` returns an
+/// error. The quit paths leave through `std::process::exit`, which runs no
+/// destructor, so each of them calls `redraw_log::finish` itself.
+struct RedrawLogOnReturn;
+
+impl Drop for RedrawLogOnReturn {
+    fn drop(&mut self) {
+        view_engine::redraw_log::finish();
     }
 }
 
@@ -2217,9 +2231,11 @@ mod tests {
     /// even runs, so there is no startup for it to be ahead of.
     ///
     /// `view_engine::redraw_log::init` stands beside `vlog::init` and costs
-    /// the same: one environment read, and one open when `VIEW_REDRAW_LOG`
-    /// is set. It runs here so a path that cannot be opened is reported on
-    /// stderr before the terminal is taken.
+    /// one environment read, and one open and one writer thread when
+    /// `VIEW_REDRAW_LOG` is set. That thread spawns no process, so it runs
+    /// ahead of `prepare_to_tie_children` safely. It runs here so a path
+    /// that cannot be opened is reported on stderr before the terminal is
+    /// taken.
     #[test]
     fn only_the_config_prologue_runs_before_the_engine_spawn() {
         assert_eq!(
