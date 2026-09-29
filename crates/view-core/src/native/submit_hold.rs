@@ -66,11 +66,7 @@ const LEAVES_NORMAL_AFTER: [(&str, &str); 19] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Armed {
     /// A submitted `:View` command line.
-    Command {
-        /// The global grid's top row of nvim's message area, from
-        /// `refused::message_top`.
-        message_top: u16,
-    },
+    Command,
     /// A key sequence nvim maps to a view invocation.
     Sequence,
 }
@@ -653,9 +649,9 @@ impl SubmitHold {
     }
 
     /// Ends the tracked line when the key just typed into it completed a
-    /// mapping or an abbreviation whose rhs submits it, and hands back the
-    /// text that line submits.
-    fn submit_by_mapping(&mut self) -> Option<String> {
+    /// mapping or an abbreviation whose rhs submits it, and says whether
+    /// that line runs `:View`.
+    fn submit_by_mapping(&mut self) -> Option<bool> {
         let Some(Typed::Known(text)) = &self.typed else {
             return None;
         };
@@ -671,7 +667,7 @@ impl SubmitHold {
             return None;
         }
         self.end_line(None);
-        Some(line.text)
+        Some(names_view(&line.text))
     }
 
     /// Notes that nvim reported `mode`, which answers every key that left
@@ -1248,22 +1244,14 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
         let states = std::mem::take(&mut hold.states);
         let typed = hold.end_line(None);
         if submits_view(model, opened, typed.as_ref(), &states) {
-            let line = match typed {
-                Some(Typed::Known(_)) => states
-                    .last()
-                    .map(|state| state.mapped.as_deref().unwrap_or(&state.typed)),
-                _ => None,
-            };
-            let message_top = refused::message_top(model, line);
-            return arm(model, Armed::Command { message_top });
+            return arm(model, Armed::Command);
         }
     } else if typed.edit(notation) {
         hold.end_line(None);
     } else {
         hold.note_edited();
-        if let Some(line) = hold.submit_by_mapping().filter(|line| names_view(line)) {
-            let message_top = refused::message_top(model, Some(&line));
-            return arm(model, Armed::Command { message_top });
+        if hold.submit_by_mapping() == Some(true) {
+            return arm(model, Armed::Command);
         }
     }
     Vec::new()
@@ -1380,12 +1368,8 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[St
 pub fn releases(model: &Model, msg: &Msg) -> bool {
     let hold = &model.submit_hold;
     hold.ended_by(msg)
-        || match (&hold.held, msg) {
-            (Some((Armed::Command { message_top }, _)), Msg::Redraw(events)) => {
-                refused::reports_error(model, events, *message_top)
-            }
-            _ => false,
-        }
+        || matches!(hold.held, Some((Armed::Command, _)))
+            && matches!(msg, Msg::Redraw(events) if refused::reports_error(model, events))
 }
 
 /// Starts a hold, bounded by the link's own backstop so a command that
@@ -2298,13 +2282,8 @@ mod tests {
     }
 
     /// Where nvim draws the whole screen, a diagnostic sign drawn at column
-    /// 0 in `ErrorMsg`'s own id releases nothing: before the valid line's
-    /// mode change into the command line, and on a window row nvim
-    /// redraws as it leaves the command line after `:View` ran. The second
-    /// is nvim 0.12.4's two flushes for a `:View` line wrapping onto two
-    /// rows of a 30-column screen with a sign on every line, drained
-    /// together, as keys typed inside one round trip and as keys whose
-    /// command line nvim had already shown.
+    /// 0 in `ErrorMsg`'s own id, before the valid line's mode change into
+    /// the command line, releases nothing.
     #[test]
     fn an_error_sign_on_the_screen_releases_nothing() {
         use crate::native::ext::Ext;
@@ -2336,170 +2315,6 @@ mod tests {
         );
         assert!(inputs(&sent).is_empty(), "{sent:?}");
         assert!(model.submit_hold.is_holding());
-
-        let wrapped = || {
-            vec![
-                text_line(9, 0, ":View ai open please explain t", 1),
-                scroll(8, 1),
-                text_line(7, 0, " ", 41),
-                text_line(9, 0, "his function in detail", 1),
-                UiEvent::GridCursorGoto {
-                    grid: 1,
-                    row: 9,
-                    col: 0,
-                },
-                mode("cmdline_normal"),
-                UiEvent::Flush,
-            ]
-        };
-        let left = || {
-            vec![
-                UiEvent::GridLine {
-                    grid: 1,
-                    row: 7,
-                    col_start: 0,
-                    cells: vec![cell("E", 25), cell(" ", 25), cell("x", 0), cell("7", 0)],
-                },
-                text_line(8, 0, "<Name] [+] 1,1", 41),
-                text_line(9, 0, " ", 1),
-                UiEvent::GridCursorGoto {
-                    grid: 1,
-                    row: 0,
-                    col: 2,
-                },
-                mode("normal"),
-                UiEvent::Flush,
-            ]
-        };
-        let typed = "View ai open please explain this function in detail";
-        for shown_first in [false, true] {
-            let mut model = normal_mode();
-            model.attach_surfaces(vec![Ext::LineGrid]);
-            let _ = crate::update::update(&mut model, error_highlights(None));
-            let _ = crate::update::update(&mut model, resize(30));
-            let keys: Vec<String> = std::iter::once(":".to_string())
-                .chain(typed.chars().map(|c| c.to_string()))
-                .collect();
-            let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
-            let _ = type_keys(&mut model, &keys);
-            let mut batch = left();
-            if shown_first {
-                let _ = crate::update::update(&mut model, Msg::Redraw(wrapped()));
-            } else {
-                batch.splice(0..0, wrapped());
-            }
-            let _ = type_keys(&mut model, &["<CR>", "j"]);
-            assert!(model.submit_hold.is_holding(), "shown first: {shown_first}");
-            let sent = crate::update::update(&mut model, Msg::Redraw(batch));
-            assert!(
-                inputs(&sent).is_empty(),
-                "shown first {shown_first}: {sent:?}"
-            );
-            assert!(model.submit_hold.is_holding(), "shown first: {shown_first}");
-        }
-    }
-
-    /// A line on the global grid opening at `col` of `row`, every cell in
-    /// `hl_id`.
-    fn text_line(row: u64, col: u64, text: &str, hl_id: u64) -> UiEvent {
-        UiEvent::GridLine {
-            grid: 1,
-            row,
-            col_start: col,
-            cells: text.chars().map(|c| cell(&c.to_string(), hl_id)).collect(),
-        }
-    }
-
-    /// The global grid's rows from `top` down to the 10-row screen's
-    /// bottom scrolling up by `rows`, as nvim makes room for its messages.
-    fn scroll(top: u64, rows: i64) -> UiEvent {
-        UiEvent::GridScroll {
-            grid: 1,
-            top,
-            bot: 10,
-            left: 0,
-            right: 30,
-            rows,
-        }
-    }
-
-    /// The 10-row screen at `width` columns.
-    fn resize(width: u64) -> Msg {
-        Msg::Redraw(vec![UiEvent::GridResize {
-            grid: 1,
-            width,
-            height: 10,
-        }])
-    }
-
-    /// An error nvim draws above the command line's top row counts where
-    /// nvim scrolled the screen up to make room for it, and on the upper
-    /// row of a `:View` line that wrapped onto two. The batches are nvim
-    /// 0.12.4's for `:filter /\(/ View ai open`, the wrapped one at 20
-    /// columns.
-    #[test]
-    fn an_error_above_the_command_line_releases_where_nvim_moved_it_there() {
-        use crate::native::ext::Ext;
-        let e54 = |row: u64| text_line(row, 0, "E54: Unmatched \\(", 25);
-        let press_enter = |row: u64| text_line(row, 0, "Press ENTER", 16);
-        let submitted = [" ", "a", "i", " ", "o", "p", "e", "n", "<CR>", "j"];
-        let cases = [
-            (
-                "two lines after one row's scroll",
-                80,
-                vec![
-                    scroll(8, 1),
-                    text_line(7, 0, " ", 41),
-                    e54(8),
-                    press_enter(9),
-                ],
-                true,
-            ),
-            (
-                "two lines after two rows' scroll",
-                80,
-                vec![
-                    scroll(7, 2),
-                    text_line(6, 0, " ", 41),
-                    e54(8),
-                    press_enter(9),
-                ],
-                true,
-            ),
-            (
-                "two lines with no scroll",
-                80,
-                vec![e54(8), press_enter(9)],
-                false,
-            ),
-            (
-                "the line wrapped onto two rows",
-                20,
-                vec![
-                    e54(8),
-                    text_line(8, 18, "  ", 1),
-                    press_enter(9),
-                    scroll(6, 1),
-                    text_line(9, 0, "command to continue", 16),
-                ],
-                true,
-            ),
-        ];
-        for (name, width, errors, released) in cases {
-            let mut model = normal_mode();
-            model.attach_surfaces(vec![Ext::LineGrid]);
-            let _ = crate::update::update(&mut model, error_highlights(None));
-            let _ = crate::update::update(&mut model, resize(width));
-            let _ = type_keys(&mut model, &REFUSED);
-            let _ = type_keys(&mut model, &submitted);
-            assert!(model.submit_hold.is_holding(), "{name}");
-            let mut batch = errors;
-            batch.push(mode("normal"));
-            let sent = crate::update::update(&mut model, Msg::Redraw(batch));
-            let expected: &[&str] = if released { &["j"] } else { &[] };
-            assert_eq!(inputs(&sent), expected, "{name}");
-            assert_eq!(model.submit_hold.is_holding(), !released, "{name}");
-        }
     }
 
     fn cell(text: &str, hl_id: u64) -> crate::events::GridCell {

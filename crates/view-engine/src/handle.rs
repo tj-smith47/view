@@ -1035,7 +1035,7 @@ impl EngineHandle {
                                 // dropped key would, and is not worth
                                 // tearing the connection down for
                                 if let Some(msg) = decode_feature_invoke(&params) {
-                                    let _ = pump.route_msg(msg);
+                                    pump.route_invocation(msg);
                                 }
                             } else if method == "view_bridge" {
                                 // best-effort for the same reason

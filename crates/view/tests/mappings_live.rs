@@ -20,7 +20,7 @@ use view_core::model::{Look, Model};
 use view_core::msg::{Effect, Key, Msg, RpcCall};
 use view_core::native::mappings::MappingClaim;
 use view_core::native::registry;
-use view_core::native::speculate::CMDLINE_LITERAL_KEYS;
+use view_core::native::speculate::{is_cmdline_mode, CMDLINE_LITERAL_KEYS};
 use view_core::native::surfaces::Taken;
 use view_core::update::update;
 use view_engine::process::Engine;
@@ -459,16 +459,40 @@ fn pump<T>(
     let deadline = std::time::Instant::now() + budget;
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        let msg = match session.rx.recv_timeout(left).ok()? {
-            Msg::RedrawReady => Msg::Redraw(session.damage.take_damage()),
-            msg => msg,
-        };
-        let effects = update(model, msg.clone());
-        send(session, &effects);
-        if let Some(found) = done(model, &msg) {
-            return Some(found);
+        let received = session.rx.recv_timeout(left).ok()?;
+        for msg in dispatched(session, received) {
+            let effects = update(model, msg.clone());
+            send(session, &effects);
+            if let Some(found) = done(model, &msg) {
+                return Some(found);
+            }
         }
     }
+}
+
+/// The messages the runtime loop dispatches for `received`, in its order:
+/// a redraw token drains up to an invocation not yet received, an
+/// invocation applies what nvim drew before it first, and every wakeup
+/// ends with the drain of what is left.
+fn dispatched(session: &Session, received: Msg) -> Vec<Msg> {
+    let damage = &session.damage;
+    let mut out = Vec::new();
+    match received {
+        Msg::RedrawReady => out.push(Msg::Redraw(damage.take_damage_folded().0)),
+        msg @ Msg::FeatureInvoke { .. } => {
+            let before = damage.invocation_delivered().0;
+            if !before.is_empty() {
+                out.push(Msg::Redraw(before));
+            }
+            out.push(msg);
+        }
+        msg => out.push(msg),
+    }
+    let residue = damage.take_damage_folded().0;
+    if !residue.is_empty() {
+        out.push(Msg::Redraw(residue));
+    }
+    out
 }
 
 /// Sends nvim the keys `effects` route to it.
@@ -512,36 +536,35 @@ fn keys_behind_a_view_line_nvim_refuses_reach_nvim_on_its_error() {
         "i", "e", "w", "<Space>", "a", "i", "<Space>", "o", "p", "e", "n",
     ];
     let bogus = [":", "b", "o", "g", "u", "s", "<CR>"];
-    for (name, surfaces, after_error) in [
+    let grid = || vec![Ext::LineGrid];
+    let cmdline = || vec![Ext::LineGrid, Ext::Cmdline];
+    let multigrid = || vec![Ext::LineGrid, Ext::Cmdline, Ext::Multigrid];
+    for (name, surfaces, after_error, options, signs) in [
         (
             "messages",
             vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages],
             false,
-        ),
-        ("grid", vec![Ext::LineGrid], false),
-        (
-            "multigrid",
-            vec![Ext::LineGrid, Ext::Cmdline, Ext::Multigrid],
+            "",
             false,
         ),
-        (
-            "multigrid-after-error",
-            vec![Ext::LineGrid, Ext::Cmdline, Ext::Multigrid],
-            true,
-        ),
-        (
-            "cmdline-after-error",
-            vec![Ext::LineGrid, Ext::Cmdline],
-            true,
-        ),
+        ("grid", grid(), false, "", true),
+        ("grid-laststatus-0", grid(), false, LASTSTATUS_0, true),
+        ("grid-cmdheight-0", grid(), false, CMDHEIGHT_0, true),
+        ("grid-cmdheight-2", grid(), false, CMDHEIGHT_2, true),
+        ("cmdline-cmdheight-2", cmdline(), false, CMDHEIGHT_2, true),
+        ("multigrid", multigrid(), false, "", false),
+        ("multigrid-after-error", multigrid(), true, "", false),
+        ("cmdline-after-error", cmdline(), true, "", false),
     ] {
-        // where nvim draws the whole screen, every window row shows a sign
-        // in `ErrorMsg`'s id on a screen narrow enough to wrap a `:View`
-        // line
-        let signs = surfaces == [Ext::LineGrid];
-        let (extra, width) = if signs { (SIGNS, 30) } else { ("", 80) };
+        // every window row shows a sign in `ErrorMsg`'s id, on a screen
+        // narrow enough to wrap a `:View` line where nvim draws it
+        let (extra, width) = if signs {
+            (format!("{options}{SIGNS}"), 30)
+        } else {
+            (options.to_string(), 80)
+        };
         let names: Vec<_> = surfaces.iter().map(|surface| surface.as_str()).collect();
-        let session = Session::start_attached(&format!("refused-{name}"), extra, &names, width);
+        let session = Session::start_attached(&format!("refused-{name}"), &extra, &names, width);
         let mut model = Model::with_term_size(width, 24);
         model.attach_surfaces(surfaces);
         model.ai_trusted = true;
@@ -595,6 +618,16 @@ fn keys_behind_a_view_line_nvim_refuses_reach_nvim_on_its_error() {
     }
 }
 
+/// No statusline under a single window, so a wrapped command line borrows
+/// a window row.
+const LASTSTATUS_0: &str = "vim.o.laststatus = 0\n";
+
+/// No command-line row, so the command line overlays window rows.
+const CMDHEIGHT_0: &str = "vim.o.cmdheight = 0\nvim.o.laststatus = 0\n";
+
+/// A two-row command line, whose first row nvim draws an error on.
+const CMDHEIGHT_2: &str = "vim.o.cmdheight = 2\n";
+
 /// Forty empty lines, each with a sign nvim draws in `ErrorMsg`'s id.
 const SIGNS: &str = "\
 vim.api.nvim_buf_set_lines(0, 0, -1, false, vim.fn['repeat']({ '' }, 40))
@@ -606,11 +639,12 @@ for i = 0, 39 do
 end
 ";
 
-/// A valid `:View` line wrapping onto two rows of a screen whose window
-/// rows show error signs, typed with the keys behind it inside one round
-/// trip. nvim redraws those rows as it leaves the command line after the
-/// invocation, and the keys wait for the invocation and reach the composer
-/// it opened.
+/// A valid `:View` line, wrapping onto two rows where nvim draws the
+/// command line, on a screen whose window rows show error signs, typed
+/// with the keys behind it inside one round trip and read in the runtime
+/// loop's order. nvim redraws those rows as it leaves the command line
+/// after the invocation, and the keys wait for the invocation and reach
+/// the composer it opened.
 fn keys_behind_a_wrapped_view_line_reach_what_it_opened(session: &Session, model: &mut Model) {
     // the silence watch before this read past redraw tokens without
     // taking their damage, and no token follows until it is taken
@@ -638,43 +672,55 @@ fn keys_behind_a_wrapped_view_line_reach_what_it_opened(session: &Session, model
     assert!(model.submit_hold.is_holding(), "the line names View");
     assert!(type_into(session, model, &["a", "b", "c"]).is_empty());
 
-    // the invocation is kept back until nvim has left the command line,
-    // so the redraw that leaves it is read with the hold still standing,
-    // as the runtime reads it when that redraw is drained first
-    let mut invocation = None;
-    loop {
-        let msg = session
-            .wait_for(ARRIVAL, |msg| {
-                matches!(msg, Msg::FeatureInvoke { .. } | Msg::RedrawReady).then(|| msg.clone())
-            })
-            .expect("nvim must invoke the feature and leave the command line");
-        let events = match msg {
+    // nothing is read until nvim has answered a request behind the line,
+    // so the redraw that leaves the command line is already staged when
+    // the token ahead of the invocation is drained
+    let arrived = std::cell::RefCell::new(Vec::new());
+    session
+        .wait_for(ARRIVAL, |msg| {
+            arrived.borrow_mut().push(msg.clone());
+            matches!(msg, Msg::FeatureInvoke { .. }).then_some(())
+        })
+        .expect("nvim must invoke the feature");
+    session.eval("1");
+
+    let invoked = std::cell::Cell::new(false);
+    let left = std::cell::Cell::new(false);
+    let observe = |model: &Model, msg: &Msg| {
+        match msg {
             Msg::FeatureInvoke { .. } => {
-                invocation = Some(msg);
-                continue;
+                assert!(
+                    !model.submit_hold.is_holding(),
+                    "the invocation ends the hold"
+                );
+                invoked.set(true);
             }
-            Msg::RedrawReady => session.damage.take_damage(),
-            _ => continue,
-        };
-        let left_line = invocation.is_some()
-            && events
-                .iter()
-                .any(|event| matches!(event, UiEvent::ModeChange { mode, .. } if mode == "normal"));
-        send(session, &update(model, Msg::Redraw(events)));
-        assert!(
-            model.submit_hold.is_holding(),
-            "a redraw before the invocation released the keys"
-        );
-        if left_line {
-            break;
+            Msg::Redraw(events) => {
+                assert!(
+                    invoked.get() || model.submit_hold.is_holding(),
+                    "a redraw before the invocation released the keys"
+                );
+                for event in events {
+                    if let UiEvent::ModeChange { mode, .. } = event {
+                        left.set(!is_cmdline_mode(mode));
+                    }
+                }
+            }
+            _ => {}
+        }
+        (invoked.get() && left.get()).then_some(())
+    };
+    let mut done = None;
+    for received in arrived.take() {
+        for msg in dispatched(session, received) {
+            send(session, &update(model, msg.clone()));
+            done = done.or(observe(model, &msg));
         }
     }
-    let invocation = invocation.expect("the line invoked the feature");
-    send(session, &update(model, invocation));
-    assert!(
-        !model.submit_hold.is_holding(),
-        "the invocation ends the hold"
-    );
+    if done.is_none() {
+        pump(session, model, ARRIVAL, observe)
+            .expect("nvim must leave the command line after the invocation");
+    }
     assert_eq!(model.ai_panel().input(), "abc");
     assert_eq!(session.eval("getline(1)"), "hello");
     assert_eq!(session.eval("mode()"), "n");

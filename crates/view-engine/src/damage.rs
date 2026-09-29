@@ -54,6 +54,33 @@
 //! clear would see `pending == true` already and skip sending a token, yet
 //! the drain that already ran never observed that fold's event, leaving it
 //! staged with nothing to wake the consumer for it.
+//!
+//! # Invocation barrier
+//!
+//! A `Msg::FeatureInvoke` ends a held `:View` line, and nvim redraws the
+//! screen as it leaves that line, so a redraw nvim sent after the
+//! invocation read before it can release the held keys into the buffer.
+//! The runtime's drain keeps the wire order:
+//!
+//! 1. The reader, routing the invocation, records a barrier at the end of
+//!    the flushed prefix staged so far, then sends the message. A refused
+//!    send removes the barrier again.
+//! 2. [`DamagePump::take_damage_folded`] drains up to the oldest barrier
+//!    and no further. What stands past it stays staged with `pending`
+//!    armed, since the invocation already in the channel is the wakeup for
+//!    it.
+//! 3. The runtime, receiving the invocation, calls
+//!    [`DamagePump::invocation_delivered`], which drains whatever still
+//!    stands before that barrier, for the runtime to apply ahead of the
+//!    invocation, and removes the barrier.
+//! 4. The runtime's drain after the invocation takes the rest.
+//!
+//! Barriers pair with invocations in channel order, one each. A drain
+//! that ignores them ([`DamagePump::take_damage`]) moves a barrier it
+//! passes to the front of the buffer, so the pairing holds for a consumer
+//! that uses both. Compaction never crosses a flushed prefix
+//! ([`DamageBuffer::compaction_start`]), and a barrier always stands at
+//! the end of one, so no event past a barrier marks one before it dead.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -151,6 +178,18 @@ pub(crate) struct DamageBuffer {
     /// The reading [`take`](Self::take) handed its caller, kept so a caller
     /// that drains and then asks can still be answered in the same lock.
     drained_at: Option<Instant>,
+    /// One per invocation routed and not yet delivered, oldest first (see
+    /// the module docs' invocation barrier).
+    barriers: VecDeque<Barrier>,
+}
+
+/// Where an invocation was routed among the staged events.
+#[derive(Clone, Copy)]
+struct Barrier {
+    /// The length of the flushed prefix staged before it.
+    end: usize,
+    /// When the fold that staged the `Flush` ending that prefix ran.
+    flushed_at: Option<Instant>,
 }
 
 impl DamageBuffer {
@@ -289,16 +328,75 @@ impl DamageBuffer {
     /// Events staged after that `Flush` (a batch still in progress) are
     /// left in place for the next call. Returns an empty `Vec` if nothing
     /// has reached a `Flush` yet.
+    ///
+    /// Passes every barrier: one it drains past moves to the front.
     pub(crate) fn take(&mut self) -> Vec<UiEvent> {
         self.pending = false;
         self.drained_at = None;
         let Some(flush_idx) = self.flush_index else {
             return Vec::new();
         };
-        self.flush_index = None;
-        self.drained_at = self.flushed_at.take();
+        let flushed_at = self.flushed_at;
+        self.drain_to(flush_idx + 1, flushed_at)
+    }
+
+    /// [`take`](Self::take), stopping at the oldest barrier. Where flushed
+    /// events stand past it, `pending` stays armed: the invocation in the
+    /// channel is the wakeup for them.
+    pub(crate) fn take_to_barrier(&mut self) -> Vec<UiEvent> {
+        let Some(&barrier) = self
+            .barriers
+            .front()
+            .filter(|barrier| barrier.end < self.compaction_start())
+        else {
+            return self.take();
+        };
+        self.pending = true;
+        self.drained_at = None;
+        self.drain_to(barrier.end, barrier.flushed_at)
+    }
+
+    /// Records a barrier where an invocation is being routed.
+    pub(crate) fn raise_barrier(&mut self) {
+        self.barriers.push_back(Barrier {
+            end: self.compaction_start(),
+            flushed_at: self.flushed_at,
+        });
+    }
+
+    /// Removes the barrier [`raise_barrier`](Self::raise_barrier) just
+    /// recorded, for an invocation the channel refused.
+    pub(crate) fn lower_barrier(&mut self) {
+        self.barriers.pop_back();
+    }
+
+    /// Removes the oldest barrier once its invocation has been received,
+    /// draining what still stands before it for the receiver to apply
+    /// first.
+    pub(crate) fn pass_barrier(&mut self) -> Vec<UiEvent> {
+        self.drained_at = None;
+        let Some(barrier) = self.barriers.pop_front() else {
+            return Vec::new();
+        };
+        self.drain_to(barrier.end, barrier.flushed_at)
+    }
+
+    /// Drains the first `end` staged events, which end at a `Flush`, and
+    /// moves every index into `staged` down by `end`.
+    fn drain_to(&mut self, end: usize, flushed_at: Option<Instant>) -> Vec<UiEvent> {
+        if end == 0 {
+            return Vec::new();
+        }
+        self.drained_at = flushed_at;
+        self.flush_index = self.flush_index.and_then(|i| i.checked_sub(end));
+        if self.flush_index.is_none() {
+            self.flushed_at = None;
+        }
+        for barrier in &mut self.barriers {
+            barrier.end = barrier.end.saturating_sub(end);
+        }
         self.staged
-            .drain(..=flush_idx)
+            .drain(..end)
             .filter(|s| s.alive)
             .map(|s| s.event)
             .collect()
@@ -670,6 +768,35 @@ impl PumpShared {
         }
     }
 
+    /// Routes a `Msg::FeatureInvoke` best-effort, as
+    /// [`route_msg`](Self::route_msg) does, behind a barrier at the damage
+    /// staged so far (see the module docs' invocation barrier). Before a
+    /// sink is attached it stages with no barrier: the loop that drains in
+    /// order is not running yet.
+    pub(crate) fn route_invocation(&self, msg: Msg) {
+        let sink = {
+            let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
+            route.retry_deferred();
+            let Some(sink) = route.sink.clone() else {
+                route.presink.push_back(msg);
+                return;
+            };
+            sink
+        };
+        // raised before the send: the runtime can receive the message the
+        // moment it is sent
+        self.damage
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .raise_barrier();
+        if sink.try_send(msg).is_err() {
+            self.damage
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .lower_barrier();
+        }
+    }
+
     /// Routes a `Msg::BufDetached` without ever dropping it on a full sink.
     ///
     /// Unlike `route_msg`'s `Err`, which the reader thread treats as fatal
@@ -1007,15 +1134,22 @@ impl PumpShared {
         buf.has_staged()
     }
 
-    fn take_damage(&self) -> (Vec<UiEvent>, Option<Instant>) {
-        self.take_damage_with(crate::redraw_log::drained)
+    fn take_damage(
+        &self,
+        drain: impl FnOnce(&mut DamageBuffer) -> Vec<UiEvent>,
+    ) -> (Vec<UiEvent>, Option<Instant>) {
+        self.take_damage_with(drain, crate::redraw_log::drained)
     }
 
-    /// Drains the buffer and hands the drained events to `log` once the
-    /// damage lock is released.
-    fn take_damage_with(&self, log: impl FnOnce(&[UiEvent])) -> (Vec<UiEvent>, Option<Instant>) {
+    /// Drains the buffer through `drain` and hands the drained events to
+    /// `log` once the damage lock is released.
+    fn take_damage_with(
+        &self,
+        drain: impl FnOnce(&mut DamageBuffer) -> Vec<UiEvent>,
+        log: impl FnOnce(&[UiEvent]),
+    ) -> (Vec<UiEvent>, Option<Instant>) {
         let mut buf = self.damage.lock().unwrap_or_else(PoisonError::into_inner);
-        let events = buf.take();
+        let events = drain(&mut buf);
         let drained_at = buf.drained_at();
         // the reader thread folds into this buffer, so a log write made
         // under its lock would hold the fold behind the log
@@ -1048,21 +1182,38 @@ pub struct SinkCutover {
 impl DamagePump {
     /// Clears the pending flag and drains every compacted event staged up
     /// to the last `Flush`, in one lock acquisition. Non-blocking: this
-    /// never waits on the reader thread.
+    /// never waits on the reader thread. Drains past a routed invocation,
+    /// for a consumer that never reports one delivered.
     #[must_use]
     pub fn take_damage(&self) -> Vec<UiEvent> {
-        self.shared.take_damage().0
+        self.shared.take_damage(DamageBuffer::take).0
     }
 
-    /// The same drain, with the moment the reader thread folded the batch
-    /// being returned -- the moment those bytes were on the wire, which is
-    /// several milliseconds before a busy loop reaches them and is what a
-    /// caller dating engine traffic wants. `None` where the drain returned
-    /// nothing. One lock acquisition, as
-    /// [`take_damage`](Self::take_damage) is.
+    /// The runtime's drain: up to the last `Flush` staged before the oldest
+    /// invocation not yet reported through
+    /// [`invocation_delivered`](Self::invocation_delivered), with the moment
+    /// the reader thread folded the batch being returned -- the moment
+    /// those bytes were on the wire, which is several milliseconds before a
+    /// busy loop reaches them and is what a caller dating engine traffic
+    /// wants. `None` where the drain returned nothing. One lock
+    /// acquisition, as [`take_damage`](Self::take_damage) is.
+    ///
+    /// A batch that straddles an invocation takes the loop one more drain,
+    /// after the invocation; with no invocation in flight this is
+    /// `take_damage`.
     #[must_use]
     pub fn take_damage_folded(&self) -> (Vec<UiEvent>, Option<Instant>) {
-        self.shared.take_damage()
+        self.shared.take_damage(DamageBuffer::take_to_barrier)
+    }
+
+    /// Reports a `Msg::FeatureInvoke` received, and drains what nvim drew
+    /// before sending it that no drain has taken yet, for the caller to
+    /// apply ahead of it. Every invocation a consumer of
+    /// [`take_damage_folded`](Self::take_damage_folded) receives is
+    /// reported here, or the damage nvim draws after it is never drained.
+    #[must_use]
+    pub fn invocation_delivered(&self) -> (Vec<UiEvent>, Option<Instant>) {
+        self.shared.take_damage(DamageBuffer::pass_barrier)
     }
 
     /// Whether the reader has already staged a batch nobody has drained.
@@ -1278,7 +1429,7 @@ mod tests {
         let shared = PumpShared::new();
         shared.fold_redraw(vec![line(0, 0, 3), UiEvent::Flush]);
         let mut logged = None;
-        let (events, _) = shared.take_damage_with(|events| {
+        let (events, _) = shared.take_damage_with(DamageBuffer::take, |events| {
             assert!(
                 shared.damage.try_lock().is_ok(),
                 "the drain logs while it holds the damage lock"
@@ -1683,6 +1834,108 @@ mod tests {
         let drained = pump.take_damage();
         assert_eq!(
             drained,
+            vec![line(0, 0, 1), UiEvent::Flush, line(1, 0, 1), UiEvent::Flush]
+        );
+    }
+
+    fn invoke() -> Msg {
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        }
+    }
+
+    /// The runtime's drain stops at the flush an invocation was routed
+    /// behind, and the rest waits for the invocation to be delivered,
+    /// whichever of the drain and the delivery comes first. A clear and a
+    /// covering line nvim sent after the invocation leave the line before
+    /// it standing.
+    #[test]
+    fn the_runtimes_drain_never_passes_an_invocation_it_has_not_received() {
+        let flush_a = || vec![line(0, 0, 3), UiEvent::Flush];
+        let flush_b = || {
+            vec![
+                UiEvent::GridClear { grid: 1 },
+                line(0, 0, 10),
+                UiEvent::Flush,
+            ]
+        };
+        for drained_first in [true, false] {
+            let shared = PumpShared::new();
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(8);
+            let (pump, _cutover) = shared.attach_sink(tx);
+            shared.fold_redraw(flush_a());
+            shared.route_invocation(invoke());
+            shared.fold_redraw(flush_b());
+            assert!(matches!(rx.try_recv(), Ok(Msg::RedrawReady)));
+            assert!(matches!(rx.try_recv(), Ok(Msg::FeatureInvoke { .. })));
+            assert!(rx.try_recv().is_err(), "B is announced by the invocation");
+
+            if drained_first {
+                assert_eq!(pump.take_damage_folded().0, flush_a());
+                assert!(
+                    shared.damage.lock().unwrap().is_pending(),
+                    "the rest is left pending behind the invocation"
+                );
+                assert_eq!(pump.take_damage_folded().0, Vec::<UiEvent>::new());
+                assert_eq!(pump.invocation_delivered().0, Vec::<UiEvent>::new());
+            } else {
+                assert_eq!(pump.invocation_delivered().0, flush_a());
+            }
+            assert_eq!(
+                pump.take_damage_folded().0,
+                flush_b(),
+                "drained first: {drained_first}"
+            );
+        }
+    }
+
+    /// A drain that ignores barriers keeps each paired with its own
+    /// invocation, so the runtime's drain still stops for one it has not
+    /// received.
+    #[test]
+    fn a_drain_past_a_barrier_keeps_it_paired_with_its_invocation() {
+        let shared = PumpShared::new();
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<Msg>(8);
+        let (pump, _cutover) = shared.attach_sink(tx);
+        shared.fold_redraw(vec![line(0, 0, 1), UiEvent::Flush]);
+        shared.route_invocation(invoke());
+        shared.fold_redraw(vec![line(1, 0, 1), UiEvent::Flush]);
+        assert_eq!(pump.take_damage().len(), 4);
+        shared.route_invocation(invoke());
+        shared.fold_redraw(vec![line(2, 0, 1), UiEvent::Flush]);
+        for invocation in 1..=2 {
+            assert_eq!(
+                pump.take_damage_folded().0,
+                Vec::<UiEvent>::new(),
+                "invocation {invocation} not delivered"
+            );
+            assert_eq!(pump.invocation_delivered().0, Vec::<UiEvent>::new());
+        }
+        assert_eq!(
+            pump.take_damage_folded().0,
+            vec![line(2, 0, 1), UiEvent::Flush]
+        );
+    }
+
+    /// An invocation the channel refused leaves no barrier behind, since
+    /// nothing will ever report it delivered.
+    #[test]
+    fn a_refused_invocation_leaves_no_barrier() {
+        let shared = PumpShared::new();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(1);
+        let (pump, _cutover) = shared.attach_sink(tx.clone());
+        tx.try_send(Msg::Resized {
+            width: 1,
+            height: 1,
+        })
+        .expect("channel has capacity for the dummy fill");
+        shared.fold_redraw(vec![line(0, 0, 1), UiEvent::Flush]);
+        shared.route_invocation(invoke());
+        shared.fold_redraw(vec![line(1, 0, 1), UiEvent::Flush]);
+        assert!(matches!(rx.try_recv(), Ok(Msg::Resized { .. })));
+        assert_eq!(
+            pump.take_damage_folded().0,
             vec![line(0, 0, 1), UiEvent::Flush, line(1, 0, 1), UiEvent::Flush]
         );
     }
