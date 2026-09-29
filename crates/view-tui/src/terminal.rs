@@ -1055,9 +1055,9 @@ impl Term {
                     self.inner.set_cursor_position(at)?;
                     self.last_cursor = Some(at);
                 }
-                // the shape lands before the show, so a terminal drawing
-                // between the two never shows the caret in the shape of the
-                // mode it just left
+                // the shape is written before the show, so a terminal
+                // drawing between the two never shows the caret in the
+                // shape of the mode it just left
                 if self.last_cursor_shape != Some(spec.shape) {
                     write_cursor_shape(&mut sink, spec.shape)?;
                     self.last_cursor_shape = Some(spec.shape);
@@ -2027,35 +2027,53 @@ pub(crate) mod tests {
     /// Show and hide are each a change, not a per-frame restatement.
     #[test]
     fn the_caret_is_shown_once_when_it_comes_back() {
-        let model = probe_model(TermCaps::default());
-        let mut surface = view_surface::render(&model);
-        surface.cursor = None;
-        let mut term = Term::frame_probe(model.caps);
+        for sync in [false, true] {
+            let model = probe_model(TermCaps::from_probe(sync, true, true));
+            let mut surface = view_surface::render(&model);
+            surface.cursor = None;
+            let mut term = Term::frame_probe(model.caps);
 
-        let hidden = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
-        assert!(
-            occurrences(&hidden, HIDE_CURSOR) == 1,
-            "a surface carrying no caret hides the terminal's, once; frame: \
-             {hidden:?}"
-        );
+            let hidden = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+            if !sync {
+                assert!(
+                    occurrences(&hidden, HIDE_CURSOR) == 1,
+                    "sync={sync}: a surface carrying no caret hides the \
+                     terminal's, once; frame: {hidden:?}"
+                );
+            }
 
-        surface.cursor = caret_at(&model, 1, 1);
-        let mut shape = Vec::new();
-        write_cursor_shape(&mut shape, surface.cursor.unwrap().shape).unwrap();
-        let shown = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
-        assert_eq!(
-            shown,
-            [cup(1, 1), shape, SHOW_CURSOR.to_vec()].concat(),
-            "the caret coming back is a position, the shape no frame has stated \
-             yet and a show, in that order and nothing else"
-        );
+            surface.cursor = caret_at(&model, 1, 1);
+            let mut shape = Vec::new();
+            write_cursor_shape(&mut shape, surface.cursor.unwrap().shape).unwrap();
+            let shown = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+            let expected = if sync {
+                [
+                    SYNC_BEGIN,
+                    cup(1, 1).as_slice(),
+                    shape.as_slice(),
+                    SHOW_CURSOR,
+                    SYNC_END,
+                ]
+                .concat()
+            } else {
+                [cup(1, 1), shape, SHOW_CURSOR.to_vec()].concat()
+            };
+            assert_eq!(
+                shown, expected,
+                "sync={sync}: the caret coming back is a position, the shape \
+                 no frame has stated yet and a show, in that order and \
+                 nothing else, inside the sync bracket when the terminal \
+                 has one; frame: {shown:?}"
+            );
 
-        let again = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
-        assert_eq!(
-            occurrences(&again, SHOW_CURSOR),
-            0,
-            "a caret that never left is shown no second time; frame: {again:?}"
-        );
+            let again = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+            assert_eq!(
+                occurrences(&again, SHOW_CURSOR),
+                0,
+                "sync={sync}: a caret that never left is shown no second \
+                 time; frame: {again:?}"
+            );
+        }
     }
 
     /// A frame that repainted cells with the caret hidden left the
