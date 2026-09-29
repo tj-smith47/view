@@ -1000,9 +1000,7 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .unwrap_or(source);
-        // every naming of a sleeping function counts, so a call through any
-        // path, an alias `use`d with `as`, the function passed as a value,
-        // and its `_ms` and `_until` siblings each add one
+        // a sleep outside the helper is a timer the degrade path cannot see
         let calls = production
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))

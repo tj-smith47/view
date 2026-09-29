@@ -6,37 +6,50 @@ use crate::grid::Grid;
 impl GridRegistry {
     /// Lays this registry out in `drawn` as drawn in `layout`: each window
     /// moved into the slot `layout` gives its handle, and a window standing
-    /// in every slot no window here fills. `held` gives, by index into
-    /// `layout`, the cells that slot showed before; a stand-in shows them,
-    /// and so does a window here nvim has not drawn any text into yet.
+    /// in every slot no window here fills. `placed` is this registry's
+    /// [`Self::window_layout`]. `held` gives, by index into `layout`, the
+    /// cells that slot showed before. A window or stand-in claimed for a
+    /// native pane not placed yet shows a blank grid. An unclaimed stand-in
+    /// shows its held cells, and so does an unclaimed window here nvim has
+    /// not drawn any text into yet.
     ///
     /// `drawn` keeps its own grids, and each is compared with the cells it
     /// now stands for and copied over, into its own buffers, only where the
     /// two differ. Answers how many grids were copied, or `None`, leaving
     /// `drawn` as it was, when a window here has no slot in `layout`, since
-    /// the layout it would be drawn in is then no longer the one on screen.
+    /// the layout it would be drawn in is then no longer the one on screen,
+    /// or when `reported` says every slot is a window here that reported
+    /// its status and each of them has drawn text, since the replacement
+    /// then draws every slot itself.
     #[must_use]
-    pub fn relay_into(
+    pub(crate) fn relay_into(
         &self,
+        placed: &[WindowSlot],
         layout: &[WindowSlot],
         held: &[Option<Grid>],
+        reported: bool,
         drawn: &mut Self,
     ) -> Option<usize> {
-        let placed = self.window_layout();
         let mut windows = Vec::with_capacity(placed.len());
-        for (win, _) in &placed {
+        let mut texted = true;
+        for (win, _) in placed {
             let index = layout.iter().position(|(slot_win, _)| slot_win == win)?;
             let (_, slot) = layout.get(index)?;
             let entry = self
                 .slots
                 .iter()
                 .find(|s| s.window.as_ref().is_some_and(|w| w.win == *win))?;
-            let cells = match (entry.grid.has_text(), held.get(index)) {
+            let has_text = entry.grid.has_text();
+            texted &= has_text;
+            let cells = match (has_text, held.get(index)) {
                 (false, Some(Some(cells))) => Some(cells),
                 _ => None,
             };
             let blank = self.clears_when_placed(entry.id, *win);
             windows.push((entry.id, *win, *slot, cells, blank));
+        }
+        if reported && texted {
+            return None;
         }
         let mut copied = usize::from(drawn.global.follow(&self.global));
         drawn.cursor = self.cursor;
@@ -113,6 +126,15 @@ mod tests {
         GridEvent::Cells { grid, op }
     }
 
+    fn relay(
+        live: &GridRegistry,
+        layout: &[WindowSlot],
+        held: &[Option<Grid>],
+        drawn: &mut GridRegistry,
+    ) -> Option<usize> {
+        live.relay_into(&live.window_layout(), layout, held, false, drawn)
+    }
+
     fn text(row: &str) -> GridOp {
         GridOp::PutLine {
             row: 0,
@@ -164,10 +186,10 @@ mod tests {
         let held = [Some(stand_in), None];
         let mut drawn = GridRegistry::new();
 
-        assert_eq!(live.relay_into(&layout, &held, &mut drawn), Some(3));
-        assert_eq!(live.relay_into(&layout, &held, &mut drawn), Some(0));
+        assert_eq!(relay(&live, &layout, &held, &mut drawn), Some(3));
+        assert_eq!(relay(&live, &layout, &held, &mut drawn), Some(0));
         live.apply(cells(GridId(2), text("g")));
-        assert_eq!(live.relay_into(&layout, &held, &mut drawn), Some(1));
+        assert_eq!(relay(&live, &layout, &held, &mut drawn), Some(1));
         assert_eq!(
             drawn.window_grid(WinHandle(1003)).map(|g| g.row_text(0)),
             live.window_grid(WinHandle(1003)).map(|g| g.row_text(0)),
@@ -177,10 +199,51 @@ mod tests {
             .is_some_and(|g| g.row_text(0).starts_with('d')));
 
         let elsewhere = [(WinHandle(1002), (0, 41, 39, 23))];
-        assert_eq!(live.relay_into(&elsewhere, &held, &mut drawn), None);
+        assert_eq!(relay(&live, &elsewhere, &held, &mut drawn), None);
         assert!(
             drawn.window_grid(WinHandle(1003)).is_some(),
             "a layout the live window has no slot in changed drawn"
+        );
+    }
+
+    /// A layout whose every slot is a window that reported its status and
+    /// drew text is left to the replacement, and one still missing text is
+    /// relaid.
+    ///
+    /// Disconfirm: ignoring `reported` relays the settled layout.
+    #[test]
+    fn a_reported_layout_with_text_in_every_slot_is_not_relaid() {
+        let mut live = GridRegistry::new();
+        live.apply(cells(
+            GridId(2),
+            GridOp::Resize {
+                width: 40,
+                height: 23,
+            },
+        ));
+        live.apply(GridEvent::Window {
+            grid: GridId(2),
+            win: WinHandle(1003),
+            startrow: 0,
+            startcol: 0,
+            width: 40,
+            height: 23,
+        });
+        let layout = [(WinHandle(1003), (0, 0, 40, 23))];
+        let placed = live.window_layout();
+        let mut drawn = GridRegistry::new();
+
+        assert!(live
+            .relay_into(&placed, &layout, &[None], true, &mut drawn)
+            .is_some());
+        live.apply(cells(GridId(2), text("f")));
+        assert_eq!(
+            live.relay_into(&placed, &layout, &[None], false, &mut drawn),
+            Some(1)
+        );
+        assert_eq!(
+            live.relay_into(&placed, &layout, &[None], true, &mut drawn),
+            None
         );
     }
 
@@ -224,8 +287,8 @@ mod tests {
         let held = [None, Some(before)];
         let mut drawn = GridRegistry::new();
 
-        assert_eq!(live.relay_into(&layout, &held, &mut drawn), Some(2));
-        assert_eq!(live.relay_into(&layout, &held, &mut drawn), Some(0));
+        assert_eq!(relay(&live, &layout, &held, &mut drawn), Some(2));
+        assert_eq!(relay(&live, &layout, &held, &mut drawn), Some(0));
         for win in [WinHandle(1004), WinHandle(1005)] {
             assert!(
                 drawn.window_grid(win).is_some_and(|g| !g.has_text()),
@@ -266,10 +329,8 @@ mod tests {
         });
         let mut drawn = GridRegistry::new();
 
-        assert!(live
-            .relay_into(&layout, &[Some(coloured)], &mut drawn)
-            .is_some());
-        assert_eq!(live.relay_into(&layout, &[None], &mut drawn), Some(1));
+        assert!(relay(&live, &layout, &[Some(coloured)], &mut drawn).is_some());
+        assert_eq!(relay(&live, &layout, &[None], &mut drawn), Some(1));
         assert_eq!(
             drawn
                 .window_grid(WinHandle(1002))

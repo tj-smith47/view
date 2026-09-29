@@ -3,6 +3,7 @@
 //! replacement puts a window up, then the replacement's windows in the dead
 //! engine's slots until the replacement's own layout has settled.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use super::{EngineModel, Model, MouseCapture, WindowStatus};
@@ -115,9 +116,10 @@ enum Hold {
 }
 
 /// Where the replacement's windows stand against the held slots.
-enum Fit {
-    /// The held slots, each relabelled with the live window that fills it.
-    Slots(Vec<WindowSlot>),
+enum Fit<'a> {
+    /// The held slots, each relabelled with the live window that fills it,
+    /// and copied only when a live window took its slot by buffer.
+    Slots(Cow<'a, [WindowSlot]>),
     /// A live window has no slot by handle, and its buffer is not known yet.
     Unnamed,
     /// A live window fills no held slot.
@@ -127,13 +129,13 @@ enum Fit {
 /// Matches each live window to a held slot: by handle, or else by the
 /// buffer it shows, since a fresh engine numbers its windows from 1000
 /// again and the dead engine's file window may have had another handle.
-fn fit(
-    slots: &[WindowSlot],
+fn fit<'a>(
+    slots: &'a [WindowSlot],
     shown: &Shown,
     live: &[WindowSlot],
     status: &HashMap<WinHandle, WindowStatus>,
-) -> Fit {
-    let mut fitted = slots.to_vec();
+) -> Fit<'a> {
+    let mut fitted = Cow::Borrowed(slots);
     for (win, _) in live {
         if fitted.iter().any(|(held, _)| held == win) {
             continue;
@@ -148,6 +150,7 @@ fn fit(
             return if open { Fit::Unnamed } else { Fit::Outside };
         };
         let Some(slot) = fitted
+            .to_mut()
             .iter_mut()
             .find(|(held, _)| shown.get(held).map(|s| &s.name) == Some(name) && !taken(held))
         else {
@@ -336,12 +339,6 @@ impl EngineModel {
                 hl_from: None,
             };
         }
-        let settled = |fitted: &[WindowSlot]| {
-            fitted.iter().all(|(held, _)| {
-                status.contains_key(held)
-                    && self.grids.window_grid(*held).is_some_and(Grid::has_text)
-            })
-        };
         if let Hold::Layout {
             slots,
             shown,
@@ -351,10 +348,15 @@ impl EngineModel {
         } = &mut self.held.hold
         {
             let relaid = match fit(slots, shown, &live, status) {
-                Fit::Slots(fitted) if !settled(&fitted) => {
-                    self.grids.relay_into(&fitted, cells, drawn).is_some()
+                Fit::Slots(fitted) => {
+                    let reported = fitted.iter().all(|(held, _)| {
+                        status.contains_key(held) && live.iter().any(|(win, _)| win == held)
+                    });
+                    self.grids
+                        .relay_into(&live, &fitted, cells, reported, drawn)
+                        .is_some()
                 }
-                Fit::Slots(_) | Fit::Unnamed | Fit::Outside => false,
+                Fit::Unnamed | Fit::Outside => false,
             };
             if !relaid {
                 self.held.hold = Hold::Nothing;

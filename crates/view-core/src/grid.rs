@@ -265,24 +265,36 @@ impl Grid {
     /// Makes this grid `size` wide and tall with its cursor at `cursor` and
     /// every cell [`Cell::default`], in its own buffers, and answers whether
     /// anything changed. A cell is blank only with a space in highlight 0,
-    /// so whitespace drawn in a colour counts as a change.
+    /// so whitespace drawn in a colour counts as a change. A grid already
+    /// `size` is blanked cell by cell in place, keeping each cell's text
+    /// buffer.
     pub(crate) fn blank_to(&mut self, size: (u16, u16), cursor: (u16, u16)) -> bool {
-        let blank = self
-            .cells
-            .iter()
-            .all(|cell| cell.text == " " && cell.hl_id == 0);
-        if blank && self.size() == size && self.cursor() == cursor {
-            return false;
+        if self.size() != size {
+            (self.width, self.height) = size;
+            self.cells.clear();
+            self.cells
+                .resize(usize::from(size.0) * usize::from(size.1), Cell::default());
+            self.dirty_rows.clear();
+            self.dirty_rows.resize(usize::from(size.1), false);
+            self.cursor_goto(cursor.0, cursor.1);
+            self.dirty_full = true;
+            return true;
         }
-        (self.width, self.height) = size;
-        self.cells.clear();
-        self.cells
-            .resize(usize::from(size.0) * usize::from(size.1), Cell::default());
-        self.dirty_rows.clear();
-        self.dirty_rows.resize(usize::from(size.1), false);
+        let mut changed = self.cursor() != cursor;
         self.cursor_goto(cursor.0, cursor.1);
-        self.dirty_full = true;
-        true
+        for cell in &mut self.cells {
+            if cell.text != " " || cell.hl_id != 0 {
+                cell.text.clear();
+                cell.text.push(' ');
+                cell.hl_id = 0;
+                changed = true;
+            }
+        }
+        if changed {
+            self.dirty_rows.fill(false);
+            self.dirty_full = true;
+        }
+        changed
     }
 
     /// Where the cell buffer lives, so a test can tell a grid copied into
@@ -480,6 +492,30 @@ mod tests {
             height: 3,
         });
         g
+    }
+
+    /// Blanking a grid already the right size keeps its cell buffer and
+    /// every cell's text buffer.
+    ///
+    /// Disconfirm: rebuilding the cells with `Cell::default()` moves the
+    /// text buffers.
+    #[test]
+    fn blanking_a_grid_of_the_same_size_allocates_no_cell() {
+        let mut g = grid_10x3();
+        g.apply(GridOp::PutLine {
+            row: 0,
+            col_start: 0,
+            cells: vec![("x".into(), 4, 10)],
+        });
+        let texts = |g: &Grid| g.cells.iter().map(|c| c.text.as_ptr()).collect::<Vec<_>>();
+        let (buffer, before) = (g.buffer(), texts(&g));
+
+        assert!(g.blank_to((10, 3), (1, 2)));
+        assert_eq!((g.buffer(), texts(&g)), (buffer, before));
+        assert!(!g.has_text());
+        assert_eq!(g.cell(0, 0).map(|c| c.hl_id), Some(0));
+        assert_eq!(g.cursor(), (1, 2));
+        assert!(!g.blank_to((10, 3), (1, 2)));
     }
 
     #[test]
