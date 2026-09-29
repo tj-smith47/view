@@ -77,7 +77,7 @@ fn a_view_command_hands_a_trailing_bar_command_to_nvim() {
         .unwrap();
     let invoked = loop {
         match rx.recv_timeout(view_test_support::host_deadline(TICK)) {
-            Ok(Msg::FeatureInvoke { feature, verb }) => break (feature, verb),
+            Ok(Msg::FeatureInvoke { feature, verb, .. }) => break (feature, verb),
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
                 panic!("no Msg::FeatureInvoke arrived within the deadline")

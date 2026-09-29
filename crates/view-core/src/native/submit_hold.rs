@@ -1705,6 +1705,7 @@ mod tests {
         let reopened = crate::update::update(
             &mut model,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: String::new(),
                 verb: String::new(),
             },
@@ -1882,6 +1883,7 @@ mod tests {
         let _ = crate::update::update(
             &mut model,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: String::new(),
                 verb: String::new(),
             },
@@ -2052,6 +2054,7 @@ mod tests {
         let replayed = crate::update::update(
             &mut model,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "picker".to_string(),
                 verb: "files".to_string(),
             },
@@ -2489,6 +2492,7 @@ mod tests {
 
     fn picker_files() -> Msg {
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         }

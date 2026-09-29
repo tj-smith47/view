@@ -26,7 +26,7 @@ pub mod ui_events;
 mod winpipe;
 mod wire;
 
-pub use damage::{DamagePump, SinkCutover};
+pub use damage::{Admitted, DamagePump, SinkCutover};
 pub use handle::{EngineError, EngineHandle};
 pub use heartbeat::{
     wedge_kind, HeartbeatProber, HeartbeatWatch, Liveness, HEARTBEAT_PROBE_INTERVAL,

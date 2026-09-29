@@ -62,6 +62,7 @@ fn open_tree(root: &std::path::Path) -> Model {
     let _ = update(
         &mut model,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },

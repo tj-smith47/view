@@ -1191,6 +1191,7 @@ mod tests {
         let effects = update(
             &mut model,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "ai".to_string(),
                 verb: "toggle".to_string(),
             },

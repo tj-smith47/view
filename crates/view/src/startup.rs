@@ -1865,7 +1865,7 @@ mod tests {
                     Err(_) => break false,
                 },
             };
-            if let Msg::FeatureInvoke { feature, verb } = &msg {
+            if let Msg::FeatureInvoke { feature, verb, .. } = &msg {
                 if feature == "window" && verb == "zoom" {
                     break true;
                 }
@@ -1977,7 +1977,7 @@ mod tests {
                     Err(_) => break false,
                 },
             };
-            if let Msg::FeatureInvoke { feature, verb } = &msg {
+            if let Msg::FeatureInvoke { feature, verb, .. } = &msg {
                 if feature == "window" && verb == "zoom" {
                     break true;
                 }
@@ -2105,7 +2105,7 @@ mod tests {
             seen.push(format!("{msg:?}").chars().take(80).collect::<String>());
             let is_zoom_invoke = matches!(
                 &msg,
-                Msg::FeatureInvoke { feature, verb } if feature == "window" && verb == "zoom"
+                Msg::FeatureInvoke { feature, verb, .. } if feature == "window" && verb == "zoom"
             );
             let vim_enter = matches!(
                 msg,

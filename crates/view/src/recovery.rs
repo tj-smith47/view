@@ -1101,6 +1101,7 @@ mod tests {
         for effect in view_core::update::update(
             &mut model,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "tree".to_string(),
                 verb: "toggle".to_string(),
             },

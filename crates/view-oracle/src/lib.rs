@@ -653,6 +653,7 @@ impl EngineSession {
         let effects = update(
             &mut self.model,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "ui".to_string(),
                 verb: format!("panes {mode}"),
             },

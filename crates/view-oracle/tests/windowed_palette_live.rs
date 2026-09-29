@@ -485,6 +485,7 @@ fn a_ring_step_with_the_cmdline_open_touches_neither_nvim_nor_the_tile() {
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ui".to_string(),
             verb: "cycle_surfaces".to_string(),
         })

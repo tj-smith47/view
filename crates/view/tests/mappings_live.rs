@@ -171,7 +171,7 @@ impl Session {
 
     fn invoke(&self, budget: Duration) -> Option<(String, String)> {
         self.wait_for(budget, |msg| match msg {
-            Msg::FeatureInvoke { feature, verb } => Some((feature.clone(), verb.clone())),
+            Msg::FeatureInvoke { feature, verb, .. } => Some((feature.clone(), verb.clone())),
             _ => None,
         })
     }
@@ -448,8 +448,8 @@ fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
 
 /// Applies every `Msg` the pump delivers to `model`, sending nvim the keys
 /// the updates route to it, until `done` answers for the model an update
-/// left and the message it applied. `None` when nothing answers within
-/// `budget`.
+/// left and the message it applied, the first answer returned once the
+/// whole wakeup is applied. `None` when nothing answers within `budget`.
 fn pump<T>(
     session: &Session,
     model: &mut Model,
@@ -460,34 +460,36 @@ fn pump<T>(
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         let received = session.rx.recv_timeout(left).ok()?;
+        let mut found = None;
         for msg in dispatched(session, received) {
             let effects = update(model, msg.clone());
             send(session, &effects);
-            if let Some(found) = done(model, &msg) {
-                return Some(found);
-            }
+            found = found.or_else(|| done(model, &msg));
+        }
+        if found.is_some() {
+            return found;
         }
     }
 }
 
 /// The messages the runtime loop dispatches for `received`, in its order:
-/// a redraw token drains up to an invocation not yet received, an
-/// invocation applies what nvim drew before it first, and every wakeup
-/// ends with the drain of what is left.
+/// a redraw token drains up to an invocation not yet received,
+/// [`view_engine::DamagePump::admit`] puts what nvim drew before an
+/// invocation ahead of it, and every wakeup ends with the drain of what is
+/// left.
 fn dispatched(session: &Session, received: Msg) -> Vec<Msg> {
     let damage = &session.damage;
-    let mut out = Vec::new();
-    match received {
-        Msg::RedrawReady => out.push(Msg::Redraw(damage.take_damage_folded().0)),
-        msg @ Msg::FeatureInvoke { .. } => {
-            let before = damage.invocation_delivered().0;
-            if !before.is_empty() {
-                out.push(Msg::Redraw(before));
-            }
-            out.push(msg);
-        }
-        msg => out.push(msg),
-    }
+    let received = match received {
+        Msg::RedrawReady => Msg::Redraw(damage.take_damage_folded().0),
+        msg => msg,
+    };
+    let admitted = damage.admit(received);
+    let mut out: Vec<Msg> = admitted
+        .before
+        .map(|(events, _)| Msg::Redraw(events))
+        .into_iter()
+        .collect();
+    out.push(admitted.msg);
     let residue = damage.take_damage_folded().0;
     if !residue.is_empty() {
         out.push(Msg::Redraw(residue));

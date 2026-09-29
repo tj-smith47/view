@@ -1531,16 +1531,13 @@ pub fn run(
         // connection, and `WedgeKind::Dead` is a verdict it may reach
         state.connection_lost |= matches!(msg, Msg::EngineStopped { .. });
         retry_parked_claims(&msg, follow_ups.native, &pump);
-        let invoked = matches!(msg, Msg::FeatureInvoke { .. });
-        let mut queue = vec![msg];
-        if invoked {
-            // popped first: what nvim drew before the invocation is applied
-            // before it, and what it drew after waits for the residue drain
-            let (before, folded_at) = pump.invocation_delivered();
-            if !before.is_empty() {
-                crate::vlog::log_redraw_census(&before, folded_at);
-                queue.push(Msg::Redraw(before));
-            }
+        let admitted = pump.admit(msg);
+        // a stack: what nvim drew before an invocation is popped first, and
+        // what it drew after waits for the residue drain
+        let mut queue = vec![admitted.msg];
+        if let Some((before, folded_at)) = admitted.before {
+            crate::vlog::log_redraw_census(&before, folded_at);
+            queue.push(Msg::Redraw(before));
         }
         let mut drained_residue = false;
         while let Some(msg) = queue.pop() {
@@ -3817,6 +3814,7 @@ mod tests {
                 &executor,
                 &mut follow_ups,
                 Msg::FeatureInvoke {
+                    generation: None,
                     feature: "ai".to_string(),
                     verb: String::new(),
                 },

@@ -163,7 +163,7 @@ impl Driver {
             notation: notation.to_string(),
         }));
         self.wait_for(|msg| match msg {
-            Msg::FeatureInvoke { feature, verb } => Some((feature.clone(), verb.clone())),
+            Msg::FeatureInvoke { feature, verb, .. } => Some((feature.clone(), verb.clone())),
             _ => None,
         })
         .unwrap_or_else(|| panic!("{notation} never produced a FeatureInvoke"))

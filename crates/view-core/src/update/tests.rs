@@ -1943,6 +1943,7 @@ fn a_tree_toggled_during_a_restart_moves_the_held_tiles_text() {
         update(
             m,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "tree".to_string(),
                 verb: "toggle".to_string(),
             },
@@ -2683,6 +2684,7 @@ fn a_paste_at_a_native_surface_with_no_text_input_answers_with_a_notice() {
         let _ = update(
             &mut m,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "tree".to_string(),
                 verb: "toggle".to_string(),
             },
@@ -2799,6 +2801,7 @@ fn a_paste_at_the_focused_picker_filters_on_what_was_pasted() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         },
@@ -2824,6 +2827,7 @@ fn an_empty_paste_changes_nothing_at_any_surface() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         },
@@ -4106,6 +4110,7 @@ fn esc_spends_on_the_entered_panel_before_the_sticky_toast() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -4915,6 +4920,7 @@ fn an_unregistered_invoke_says_so_rather_than_going_quiet() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "wat".to_string(),
             verb: "huh".to_string(),
         },
@@ -4983,6 +4989,7 @@ fn a_feature_invoke_while_a_blocked_prompt_is_topmost_does_not_steal_focus() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         },
@@ -5027,6 +5034,7 @@ fn bare_ai_on_a_trusted_model_toggles_the_panel() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: String::new(),
         },
@@ -5047,6 +5055,7 @@ fn bare_ai_on_an_untrusted_model_opens_the_trust_prompt_and_the_redispatch_opens
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: String::new(),
         },
@@ -5102,6 +5111,7 @@ fn bare_picker_opens_the_files_picker() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: String::new(),
         },
@@ -5127,6 +5137,7 @@ fn an_unknown_feature_with_no_verb_still_gets_the_notice() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "wat".to_string(),
             verb: String::new(),
         },
@@ -5162,6 +5173,7 @@ fn an_untrusted_ai_invoke_opens_the_trust_prompt_instead_of_going_further() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: String::new(),
         },
@@ -5189,6 +5201,7 @@ fn an_ai_invoke_while_disabled_gets_a_notice_and_never_opens_the_trust_prompt() 
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -5217,6 +5230,7 @@ fn an_ai_invoke_with_the_default_model_reaches_the_trust_gate_not_the_disabled_n
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -5239,6 +5253,7 @@ fn a_trusted_ai_invoke_never_opens_the_trust_prompt() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -5268,6 +5283,7 @@ fn a_second_ai_invoke_before_answering_replaces_the_prompt_rather_than_stacking(
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: String::new(),
         },
@@ -5275,6 +5291,7 @@ fn a_second_ai_invoke_before_answering_replaces_the_prompt_rather_than_stacking(
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: String::new(),
         },
@@ -5306,6 +5323,7 @@ fn an_ai_invoke_while_a_blocked_prompt_is_topmost_does_not_steal_focus() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: String::new(),
         },
@@ -5343,6 +5361,7 @@ fn a_second_ai_invoke_while_a_blocked_prompt_is_topmost_still_replaces_in_place(
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: String::new(),
         },
@@ -5355,6 +5374,7 @@ fn a_second_ai_invoke_while_a_blocked_prompt_is_topmost_still_replaces_in_place(
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: String::new(),
         },
@@ -5379,6 +5399,7 @@ fn answering_yes_on_the_trust_prompt_emits_ai_trust_set_true_and_closes_it() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "panel".to_string(),
         },
@@ -5416,6 +5437,7 @@ fn a_bare_cr_selects_the_bracketed_yes_default() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: String::new(),
         },
@@ -5442,6 +5464,7 @@ fn answering_no_on_the_trust_prompt_emits_ai_trust_set_false() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: String::new(),
         },
@@ -5469,6 +5492,7 @@ fn esc_on_the_trust_prompt_declines_it_too() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: String::new(),
         },
@@ -5537,6 +5561,7 @@ fn pending_permission_model() -> Model {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -5712,6 +5737,7 @@ fn an_always_reject_answer_leaves_the_next_request_of_that_kind_asking() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -5753,6 +5779,7 @@ fn a_plain_reject_leaves_the_next_request_of_that_kind_still_asking() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -5881,6 +5908,7 @@ fn scrollable_ai_panel_model(lines: usize) -> Model {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -6222,6 +6250,7 @@ fn tree_sidebar_model() -> Model {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -6345,6 +6374,7 @@ fn a_reopened_panel_comes_back_the_width_it_was_left_at() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "close".to_string(),
         },
@@ -6352,6 +6382,7 @@ fn a_reopened_panel_comes_back_the_width_it_was_left_at() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -6370,6 +6401,7 @@ fn the_panel_opens_at_the_configured_width() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -6422,6 +6454,7 @@ fn the_tree_opens_at_the_configured_width() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -6503,6 +6536,7 @@ fn a_chord_prefix_does_not_survive_focus_leaving_the_sidebar() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -6584,6 +6618,7 @@ fn esc_on_a_focused_pending_permission_cancels_it_even_with_only_allow_options_o
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -6634,6 +6669,7 @@ fn esc_on_an_entered_panel_with_nothing_pending_un_enters_it_without_closing() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -6667,6 +6703,7 @@ fn entered_ai_panel_model() -> Model {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -6683,6 +6720,7 @@ fn key(notation: &str) -> Msg {
 
 fn gaps_invoke() -> Msg {
     Msg::FeatureInvoke {
+        generation: None,
         feature: "ui".to_string(),
         verb: "gaps".to_string(),
     }
@@ -6690,6 +6728,7 @@ fn gaps_invoke() -> Msg {
 
 fn cycle_surfaces_invoke() -> Msg {
     Msg::FeatureInvoke {
+        generation: None,
         feature: "ui".to_string(),
         verb: "cycle_surfaces".to_string(),
     }
@@ -7535,6 +7574,7 @@ const QUESTIONS: [Question; 4] = [
             let _ = update(
                 m,
                 Msg::FeatureInvoke {
+                    generation: None,
                     feature: "ai".to_string(),
                     verb: "panel".to_string(),
                 },
@@ -7651,6 +7691,7 @@ fn a_permission_question_under_the_picker_reads_keys_only_once_uncovered() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: String::new(),
         },
@@ -7879,6 +7920,7 @@ fn a_held_sequence_dies_when_a_view_command_takes_the_keyboard() {
     let (mut m, _) = tree_holding_the_leader();
     m.ai_trusted = true;
     let ai = |verb: &str| Msg::FeatureInvoke {
+        generation: None,
         feature: "ai".to_string(),
         verb: verb.to_string(),
     };
@@ -7999,6 +8041,7 @@ fn keyboard_surfaces() -> Vec<(&'static str, Model, bool)> {
         let _ = update(
             &mut m,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: feature.to_string(),
                 verb: verb.to_string(),
             },
@@ -8294,6 +8337,7 @@ fn a_y_typed_after_closing_the_panel_with_a_permission_still_pending_reaches_the
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "close".to_string(),
         },
@@ -8332,6 +8376,7 @@ fn a_y_typed_while_another_overlay_holds_focus_reaches_that_overlay_not_the_perm
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -8408,6 +8453,7 @@ fn an_unmatched_key_leaves_the_trust_prompt_open() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: String::new(),
         },
@@ -8500,6 +8546,7 @@ fn a_trusted_project_never_reprompts_within_the_same_session() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: String::new(),
         },
@@ -8533,6 +8580,7 @@ fn a_trusted_project_never_reprompts_within_the_same_session() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -8556,6 +8604,7 @@ fn a_prompt_opening_over_an_open_picker_takes_focus_and_returns_it_on_resolve() 
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         },
@@ -8648,6 +8697,7 @@ fn esc_on_an_open_picker_emits_picker_close() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         },
@@ -8694,6 +8744,7 @@ fn picker_results_issues_a_preview_request_for_the_selected_candidate() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         },
@@ -8732,6 +8783,7 @@ fn two_result_batches_with_the_same_selection_issue_one_preview_request() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         },
@@ -8788,6 +8840,7 @@ fn a_preview_reply_for_a_stale_generation_is_dropped() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         },
@@ -8849,6 +8902,7 @@ fn a_loaded_preview_reply_applies_its_lines_and_issues_no_fallback() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         },
@@ -8905,6 +8959,7 @@ fn an_unloaded_preview_reply_issues_a_disk_fallback_effect() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         },
@@ -8953,6 +9008,7 @@ fn a_picker_preview_file_reply_applies_disk_fallback_lines() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         },
@@ -8994,6 +9050,7 @@ fn a_bare_view_command_is_answered_with_what_it_could_have_asked_for() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: String::new(),
             verb: String::new(),
         },
@@ -9035,6 +9092,7 @@ fn a_bare_view_command_reopens_the_cmdline_seeded_with_the_command_name() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: String::new(),
             verb: String::new(),
         },
@@ -9058,6 +9116,7 @@ fn an_unmatched_named_invocation_gets_only_the_notice_not_a_cmdline_reopen() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "nonexistent".to_string(),
         },
@@ -9082,6 +9141,7 @@ fn a_native_invoke_notice_is_wired_through_the_same_choke_point_as_a_wire_toast(
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: String::new(),
             verb: String::new(),
         },
@@ -9214,6 +9274,7 @@ fn only_the_top_slot_arms_a_timer() {
 /// `<leader>fp`, as the model sees it.
 fn invoke_pause() -> Msg {
     Msg::FeatureInvoke {
+        generation: None,
         feature: "notifications".to_string(),
         verb: "pause".to_string(),
     }
@@ -9821,6 +9882,7 @@ fn a_verb_this_build_does_not_answer_is_told_the_ones_it_does() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "nonesuch".to_string(),
         },
@@ -9860,6 +9922,7 @@ fn tree_toggle_opens_a_sidebar_and_issues_both_the_scan_and_the_git_scan() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -9922,6 +9985,7 @@ fn a_float_docked_over_a_tile_moves_its_text_beside_the_float() {
                 update(
                     m,
                     Msg::FeatureInvoke {
+                        generation: None,
                         feature: feature.to_string(),
                         verb: "toggle".to_string(),
                     },
@@ -9990,6 +10054,7 @@ fn tree_toggle_again_closes_the_sidebar_and_cancels_its_scan_worker() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -9997,6 +10062,7 @@ fn tree_toggle_again_closes_the_sidebar_and_cancels_its_scan_worker() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10039,6 +10105,7 @@ fn tree_toggle_while_a_blocked_prompt_is_topmost_opens_beneath_it_without_steali
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10091,6 +10158,7 @@ fn ai_panel_toggle_pushes_then_pops_the_overlay() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10122,6 +10190,7 @@ fn ai_panel_toggle_pushes_then_pops_the_overlay() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10143,6 +10212,7 @@ fn ai_panel_toggle_re_enters_an_open_panel_the_user_has_escaped_out_of() {
     let mut m = model();
     m.ai_trusted = true;
     let toggle = || Msg::FeatureInvoke {
+        generation: None,
         feature: "ai".to_string(),
         verb: "toggle".to_string(),
     };
@@ -10225,6 +10295,7 @@ fn ai_panel_toggle_while_a_blocked_prompt_is_topmost_opens_beneath_it_without_st
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10292,6 +10363,7 @@ fn a_second_ai_panel_toggle_under_the_same_blocked_prompt_closes_the_panel_it_en
         other => unreachable!("MsgShow must open a Prompt overlay: {other:?}"),
     };
     let toggle = || Msg::FeatureInvoke {
+        generation: None,
         feature: "ai".to_string(),
         verb: "toggle".to_string(),
     };
@@ -10323,6 +10395,7 @@ fn ai_panel_toggle_while_a_picker_is_topmost_opens_beneath_it_without_stealing_f
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         },
@@ -10340,6 +10413,7 @@ fn ai_panel_toggle_while_a_picker_is_topmost_opens_beneath_it_without_stealing_f
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10401,6 +10475,7 @@ fn ai_panel_toggle_while_engine_busy_is_topmost_opens_beneath_it_without_occludi
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10449,6 +10524,7 @@ fn ai_panel_overlay_opens_at_the_edge_its_own_surfaces_anchor_names() {
     let _ = update(
         &mut left,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10476,6 +10552,7 @@ fn ai_panel_overlay_opens_at_the_edge_its_own_surfaces_anchor_names() {
     let _ = update(
         &mut right,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10497,6 +10574,7 @@ fn ai_panel_open_is_a_no_op_when_the_panel_is_already_open() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -10507,6 +10585,7 @@ fn ai_panel_open_is_a_no_op_when_the_panel_is_already_open() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -10531,6 +10610,7 @@ fn ai_panel_close_is_a_no_op_when_the_panel_is_already_closed() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "close".to_string(),
         },
@@ -10550,6 +10630,7 @@ fn ai_panel_close_pops_an_open_panel_and_marks_dirty() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10560,6 +10641,7 @@ fn ai_panel_close_pops_an_open_panel_and_marks_dirty() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "close".to_string(),
         },
@@ -10581,6 +10663,7 @@ fn an_untrusted_toggle_answered_with_y_opens_the_panel_via_the_same_verb_it_star
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10627,6 +10710,7 @@ fn close_tree_releases_its_own_mouse_capture_but_not_a_different_overlays() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10671,6 +10755,7 @@ fn model_with_open_tree() -> (Model, u64) {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10920,6 +11005,7 @@ fn a_buffer_write_callback_with_a_tree_open_reissues_the_git_scan() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -10972,6 +11058,7 @@ fn a_focus_callback_with_a_tree_open_reissues_the_git_scan() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -11014,6 +11101,7 @@ fn a_write_callback_while_a_refresh_is_in_flight_coalesces_into_it() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -11081,6 +11169,7 @@ fn a_timed_out_git_reply_does_not_permanently_suppress_future_refreshes() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -11178,6 +11267,7 @@ fn notifications_history_invoke_opens_a_message_history_overlay_and_marks_dirty(
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         },
@@ -11209,6 +11299,7 @@ fn esc_through_the_generic_native_fallback_closes_message_history_and_marks_dirt
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         },
@@ -11257,6 +11348,7 @@ fn open_history(model: &mut Model) {
     let _ = update(
         model,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         },
@@ -12618,6 +12710,7 @@ fn a_dead_engines_choices_are_answered_over_an_overlay_that_holds_the_keyboard()
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -12666,6 +12759,7 @@ fn a_modal_over_a_focused_overlay_leaves_that_overlays_keys_alone() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -13924,6 +14018,7 @@ fn wrote_anything(effects: &[Effect]) -> bool {
 /// No review vocabulary reaches `update()` as a key any more.
 fn review_msg(verb: &str) -> Msg {
     Msg::FeatureInvoke {
+        generation: None,
         feature: "review".to_string(),
         verb: verb.to_string(),
     }
@@ -15856,6 +15951,7 @@ fn the_ui_panes_form_completes_and_dispatches() {
         let _ = update(
             &mut m,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "ui".to_string(),
                 verb: format!("panes {word}"),
             },
@@ -15901,6 +15997,7 @@ fn a_panes_flip_reissues_the_hold_the_look_decides() {
             let effects = update(
                 &mut m,
                 Msg::FeatureInvoke {
+                    generation: None,
                     feature: "ui".to_string(),
                     verb: format!("panes {word}"),
                 },
@@ -15941,6 +16038,7 @@ fn a_panes_flip_brings_the_pill_or_hands_the_row_back() {
         let effects = update(
             &mut m,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "ui".to_string(),
                 verb: format!("panes {word}"),
             },
@@ -15998,6 +16096,7 @@ fn a_panes_flip_leaves_a_spelled_tabline_where_the_user_put_it() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ui".to_string(),
             verb: "panes nvim".to_string(),
         },
@@ -16164,6 +16263,7 @@ fn view_panes_with_no_argument_reports_the_mode_and_its_marker() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ui".to_string(),
             verb: "panes".to_string(),
         },
@@ -16197,6 +16297,7 @@ fn view_panes_reports_the_row_drawn_hidden_or_left_to_nvim() {
         let _ = update(
             m,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "ui".to_string(),
                 verb: "panes".to_string(),
             },
@@ -16477,6 +16578,7 @@ fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
     m.ai_trusted = true;
     assert_eq!(m.chrome_rows(), 0, "one workspace under tiles drew a row");
     let ai = |verb: &str| Msg::FeatureInvoke {
+        generation: None,
         feature: "ai".to_string(),
         verb: verb.to_string(),
     };
@@ -16733,6 +16835,7 @@ fn windowed_tree_model() -> Model {
 /// The `<leader>e` verb, as the mapping sends it.
 fn tree_toggle() -> Msg {
     Msg::FeatureInvoke {
+        generation: None,
         feature: "tree".to_string(),
         verb: "toggle".to_string(),
     }
@@ -16970,6 +17073,7 @@ fn a_flush_leaves_an_open_overlays_focus_alone() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "picker".to_string(),
             verb: "files".to_string(),
         },
@@ -17474,6 +17578,7 @@ fn windowed_agent_model() -> Model {
 /// The `<leader>ai` verb, as the mapping sends it.
 fn agent_toggle() -> Msg {
     Msg::FeatureInvoke {
+        generation: None,
         feature: "ai".to_string(),
         verb: "toggle".to_string(),
     }
@@ -17768,6 +17873,7 @@ fn windowed_notifications_model() -> Model {
 /// sends it.
 fn notifications_toggle() -> Msg {
     Msg::FeatureInvoke {
+        generation: None,
         feature: "notifications".to_string(),
         verb: "history".to_string(),
     }
@@ -18450,6 +18556,7 @@ fn leader_leader_invoke_opens_the_command_line() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "palette".to_string(),
             verb: "open".to_string(),
         },
@@ -18493,6 +18600,7 @@ fn every_registered_feature_invoke_has_a_dispatch_handler() {
         let _ = update(
             &mut m,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: feature.to_string(),
                 verb: verb.to_string(),
             },
@@ -18661,6 +18769,7 @@ fn closing_a_pending_windowed_agent_retires_its_open_instead_of_leaving_it_to_la
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -18671,6 +18780,7 @@ fn closing_a_pending_windowed_agent_retires_its_open_instead_of_leaving_it_to_la
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "close".to_string(),
         },
@@ -18976,6 +19086,7 @@ fn a_second_surface_opening_onto_a_shared_edge_carries_its_size_into_the_first_o
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },
@@ -19327,6 +19438,7 @@ fn a_window_command_the_resize_chord_does_not_claim_still_reaches_nvim_from_the_
 /// key sends it.
 fn window_invoke(verb: &str) -> Msg {
     Msg::FeatureInvoke {
+        generation: None,
         feature: "window".to_string(),
         verb: verb.to_string(),
     }
@@ -19775,6 +19887,7 @@ fn fit_active_is_sent_at_vim_enter_and_again_when_the_look_moves_the_inset() {
     let gapless = update(
         &mut on,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ui".to_string(),
             verb: "gaps".to_string(),
         },
@@ -19867,6 +19980,7 @@ fn dismiss_takes_down_the_newest_toast_and_nothing_else() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "dismiss".to_string(),
         },
@@ -19893,6 +20007,7 @@ fn dismiss_leaves_a_standing_condition_alone() {
     let effects = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "dismiss".to_string(),
         },
@@ -19957,6 +20072,7 @@ fn a_bare_keys_profile_invoke_requests_a_report_and_flips_nothing() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "keys".to_string(),
             verb: "profile".to_string(),
         },
@@ -19974,6 +20090,7 @@ fn a_bare_keys_profile_invoke_requests_a_report_and_flips_nothing() {
     let _ = update(
         &mut m,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "keys".to_string(),
             verb: "profile desktop".to_string(),
         },

@@ -2257,6 +2257,7 @@ mod tests {
         let _ = view_core::update::update(
             model,
             view_core::msg::Msg::FeatureInvoke {
+                generation: None,
                 feature: "ai".to_string(),
                 verb: verb.to_string(),
             },
@@ -2268,6 +2269,7 @@ mod tests {
         let _ = view_core::update::update(
             model,
             view_core::msg::Msg::FeatureInvoke {
+                generation: None,
                 feature: "notifications".to_string(),
                 verb: "pause".to_string(),
             },
@@ -2280,6 +2282,7 @@ mod tests {
         let _ = view_core::update::update(
             model,
             view_core::msg::Msg::FeatureInvoke {
+                generation: None,
                 feature: "tree".to_string(),
                 verb: "toggle".to_string(),
             },

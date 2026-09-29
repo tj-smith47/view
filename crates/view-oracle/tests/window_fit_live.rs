@@ -48,6 +48,7 @@ fn keys(engine: &mut EngineSession, notation: &str) {
 fn invoke(engine: &mut EngineSession, feature: &str, verb: &str) {
     engine
         .feed(Msg::FeatureInvoke {
+            generation: None,
             feature: feature.to_string(),
             verb: verb.to_string(),
         })

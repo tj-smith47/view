@@ -2793,6 +2793,7 @@ fn tree_in_the_left_tile(gaps: bool) -> Tiles {
     let effects = update(
         &mut model,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         },
@@ -2939,6 +2940,7 @@ fn agent_in_the_right_tile_at(gaps: bool, size: (u16, u16)) -> Tiles {
     let effects = update(
         &mut model,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -3202,6 +3204,7 @@ fn every_text_taking_native_surface_puts_its_caret_inside_its_own_painted_rect()
     let _ = update(
         &mut model,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "toggle".to_string(),
         },
@@ -3320,6 +3323,7 @@ fn notifications_in_the_left_tile(gaps: bool) -> Tiles {
     let effects = update(
         &mut model,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         },
@@ -3389,6 +3393,7 @@ fn notifications_in_the_bottom_band(gaps: bool) -> Tiles {
     let effects = update(
         &mut model,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         },
@@ -4269,6 +4274,7 @@ fn open_surface(
     let effects = update(
         model,
         Msg::FeatureInvoke {
+            generation: None,
             feature: feature.to_string(),
             verb: verb.to_string(),
         },

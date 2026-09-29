@@ -1034,8 +1034,8 @@ impl EngineHandle {
                                 // the user one keypress, exactly as a
                                 // dropped key would, and is not worth
                                 // tearing the connection down for
-                                if let Some(msg) = decode_feature_invoke(&params) {
-                                    pump.route_invocation(msg);
+                                if let Some((feature, verb)) = decode_feature_invoke(&params) {
+                                    pump.route_invocation(feature, verb);
                                 }
                             } else if method == "view_bridge" {
                                 // best-effort for the same reason

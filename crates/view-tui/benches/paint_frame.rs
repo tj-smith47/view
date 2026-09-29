@@ -421,6 +421,7 @@ fn agent_panel_model() -> Model {
     let _ = update(
         &mut model,
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         },

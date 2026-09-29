@@ -217,6 +217,12 @@ pub enum Msg {
     /// can type any words after `:View`, so the arm that handles this is
     /// what decides an unknown pair is not actionable.
     FeatureInvoke {
+        /// The connection whose reader routed this, as
+        /// [`Msg::EngineStopped`] carries one, or `None` for an invocation
+        /// view raised itself. The loop orders a connection's redraw around
+        /// that connection's own invocations, and one routed by an engine
+        /// being replaced can still be queued once the replacement is live.
+        generation: Option<u64>,
         feature: String,
         verb: String,
     },

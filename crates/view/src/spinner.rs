@@ -73,6 +73,7 @@ mod tests {
         let _ = update(
             &mut model,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "ai".to_string(),
                 verb: "open".to_string(),
             },
@@ -138,6 +139,7 @@ mod tests {
         let _ = update(
             &mut model,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "ai".to_string(),
                 verb: "open".to_string(),
             },
@@ -188,6 +190,7 @@ mod tests {
         let _ = update(
             &mut model,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "ai".to_string(),
                 verb: "close".to_string(),
             },

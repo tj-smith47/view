@@ -783,6 +783,7 @@ fn windowed_tree_session(dir: &Path) -> view_oracle::EngineSession {
 fn open_the_tree(engine: &mut view_oracle::EngineSession) {
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -808,6 +809,7 @@ fn close_the_tree_alone_on_its_tabpage(engine: &mut view_oracle::EngineSession) 
     );
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -1071,6 +1073,7 @@ fn a_windowed_tree_keeps_its_tile_as_the_windows_of_a_split_close() {
     let before = nvim_window_sizes(&mut engine).len();
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -1139,6 +1142,7 @@ fn a_windowed_tree_keeps_its_tile_as_the_windows_of_a_split_close() {
     // grid_destroy and nothing else
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -1175,6 +1179,7 @@ fn a_windowed_tree_keeps_its_tile_as_the_windows_of_a_split_close() {
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -1204,6 +1209,7 @@ fn a_windowed_tree_keeps_its_tile_as_the_windows_of_a_split_close() {
     );
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -1350,6 +1356,7 @@ fn the_tree_leaves_the_persons_window_options_where_they_were() {
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -1398,6 +1405,7 @@ fn the_tree_alone_on_an_inner_tabpage_closes_with_its_tabpage() {
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -1521,6 +1529,7 @@ fn a_file_put_in_the_trees_window_takes_it_back_from_view() {
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -1729,6 +1738,7 @@ fn cycle_surfaces_moves_the_trees_window_against_real_nvim() {
     // opens or closes
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ui".to_string(),
             verb: "cycle_surfaces".to_string(),
         })
@@ -1745,6 +1755,7 @@ fn cycle_surfaces_moves_the_trees_window_against_real_nvim() {
     // left with the one window it started the battery with
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ui".to_string(),
             verb: "cycle_surfaces".to_string(),
         })
@@ -1770,6 +1781,7 @@ fn cycle_surfaces_moves_the_trees_window_against_real_nvim() {
     // step is a no-op -- proven by nvim's window count holding at one
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ui".to_string(),
             verb: "cycle_surfaces".to_string(),
         })
@@ -1905,6 +1917,7 @@ fn a_ring_step_opens_and_closes_three_surfaces_windows_against_real_nvim() {
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -1912,12 +1925,14 @@ fn a_ring_step_opens_and_closes_three_surfaces_windows_against_real_nvim() {
     engine.trust_ai();
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         })
         .expect("the agent panel opens as an overlay");
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         })
@@ -1932,6 +1947,7 @@ fn a_ring_step_opens_and_closes_three_surfaces_windows_against_real_nvim() {
     // ring position 1: windowed -- all three open in the same fold
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ui".to_string(),
             verb: "cycle_surfaces".to_string(),
         })
@@ -1964,6 +1980,7 @@ fn a_ring_step_opens_and_closes_three_surfaces_windows_against_real_nvim() {
     // must close, or a shared generation's dropped reply leaves it orphaned
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ui".to_string(),
             verb: "cycle_surfaces".to_string(),
         })
@@ -2020,6 +2037,7 @@ fn the_tree_stacks_above_the_agent_panel_however_they_open_against_real_nvim() {
     // says must still end with the tree on top
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         })
@@ -2027,6 +2045,7 @@ fn the_tree_stacks_above_the_agent_panel_however_they_open_against_real_nvim() {
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -2059,6 +2078,7 @@ fn a_ring_step_opens_every_default_surface_at_its_designed_windowed_position_aga
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -2066,12 +2086,14 @@ fn a_ring_step_opens_every_default_surface_at_its_designed_windowed_position_aga
     engine.trust_ai();
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         })
         .expect("the agent panel opens as an overlay");
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         })
@@ -2080,6 +2102,7 @@ fn a_ring_step_opens_every_default_surface_at_its_designed_windowed_position_aga
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ui".to_string(),
             verb: "cycle_surfaces".to_string(),
         })
@@ -2145,6 +2168,7 @@ fn a_ring_cycles_all_four_surfaces_through_every_position_against_real_nvim() {
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -2152,12 +2176,14 @@ fn a_ring_cycles_all_four_surfaces_through_every_position_against_real_nvim() {
     engine.trust_ai();
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         })
         .expect("the agent panel opens as an overlay");
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         })
@@ -2171,6 +2197,7 @@ fn a_ring_cycles_all_four_surfaces_through_every_position_against_real_nvim() {
     for stop in stops {
         engine
             .feed(view_core::msg::Msg::FeatureInvoke {
+                generation: None,
                 feature: "ui".to_string(),
                 verb: "cycle_surfaces".to_string(),
             })
@@ -2252,18 +2279,21 @@ fn a_ring_cycles_all_four_surfaces_through_every_position_against_real_nvim() {
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
         .expect("the tree closes");
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "close".to_string(),
         })
         .expect("the agent panel closes");
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         })
@@ -2305,6 +2335,7 @@ fn the_cost_of_one_ring_step_with_all_four_surfaces_open() {
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -2312,12 +2343,14 @@ fn the_cost_of_one_ring_step_with_all_four_surfaces_open() {
     engine.trust_ai();
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         })
         .expect("the agent panel opens as an overlay");
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         })
@@ -2329,6 +2362,7 @@ fn the_cost_of_one_ring_step_with_all_four_surfaces_open() {
         let start = Instant::now();
         engine
             .feed(view_core::msg::Msg::FeatureInvoke {
+                generation: None,
                 feature: "ui".to_string(),
                 verb: "cycle_surfaces".to_string(),
             })
@@ -2387,6 +2421,7 @@ fn the_ticker_opens_and_closes_its_own_window_against_real_nvim() {
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         })
@@ -2420,6 +2455,7 @@ fn the_ticker_opens_and_closes_its_own_window_against_real_nvim() {
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         })
@@ -2467,6 +2503,7 @@ fn a_windowed_stream_leaves_focus_on_escape_and_forwards_a_window_command_agains
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         })
@@ -2583,6 +2620,7 @@ fn a_windowed_agent_panel_forwards_an_unclaimed_window_command_against_real_nvim
     engine.trust_ai();
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         })
@@ -2648,6 +2686,7 @@ fn resizing_one_windowed_sidebar_carries_its_width_to_a_sibling_stacked_beside_i
     engine.trust_ai();
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: "open".to_string(),
         })
@@ -2655,6 +2694,7 @@ fn resizing_one_windowed_sidebar_carries_its_width_to_a_sibling_stacked_beside_i
     assert!(engine.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE).unwrap());
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "notifications".to_string(),
             verb: "history".to_string(),
         })
@@ -2750,6 +2790,7 @@ fn opening_a_windowed_surface_with_no_room_for_the_split_leaves_eventignore_unto
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -2763,6 +2804,7 @@ fn opening_a_windowed_surface_with_no_room_for_the_split_leaves_eventignore_unto
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ui".to_string(),
             verb: "cycle_surfaces".to_string(),
         })
@@ -2801,6 +2843,7 @@ fn opening_a_windowed_surface_from_inside_the_command_line_window_leaves_eventig
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })
@@ -2818,6 +2861,7 @@ fn opening_a_windowed_surface_from_inside_the_command_line_window_leaves_eventig
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "ui".to_string(),
             verb: "cycle_surfaces".to_string(),
         })
@@ -2860,6 +2904,7 @@ fn a_post_split_failure_on_the_new_window_leaves_no_window_behind_against_real_n
 
     engine
         .feed(view_core::msg::Msg::FeatureInvoke {
+            generation: None,
             feature: "tree".to_string(),
             verb: "toggle".to_string(),
         })

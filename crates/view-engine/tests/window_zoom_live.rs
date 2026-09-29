@@ -41,6 +41,7 @@ fn drain(rx: &mpsc::Receiver<Msg>, pump: &view_engine::damage::DamagePump) -> Ve
 
 fn zoom_invoke() -> Msg {
     Msg::FeatureInvoke {
+        generation: None,
         feature: "window".to_string(),
         verb: "zoom".to_string(),
     }

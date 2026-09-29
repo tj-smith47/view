@@ -22,21 +22,18 @@ use view_core::native::surfaces::{FloatAnchor, FloatSighting};
 use super::{saturate_u32, AttachedBuf};
 
 /// Decodes a `view_invoke` notification's `(feature, verb)` positional
-/// params into [`Msg::FeatureInvoke`], or `None` when the notification does
-/// not carry that pair.
+/// params, which the pump routes as a [`Msg::FeatureInvoke`] tagged with its
+/// connection, or `None` when the notification does not carry that pair.
 ///
 /// The pair is not validated here: nvim is where a user types `:View`
 /// followed by any two words, so deciding an unknown pair is not actionable
 /// belongs to the one arm that knows what this build can act on, not to the
 /// reader thread.
-pub(super) fn decode_feature_invoke(params: &[Value]) -> Option<Msg> {
+pub(super) fn decode_feature_invoke(params: &[Value]) -> Option<(String, String)> {
     let [feature, verb, ..] = params else {
         return None;
     };
-    Some(Msg::FeatureInvoke {
-        feature: feature.as_str()?.to_owned(),
-        verb: verb.as_str()?.to_owned(),
-    })
+    Some((feature.as_str()?.to_owned(), verb.as_str()?.to_owned()))
 }
 
 /// The leader `view_vim_enter`'s one positional param carries: the config's

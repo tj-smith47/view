@@ -546,7 +546,9 @@ fn pressing_a_review_key_in_the_buffer_invokes_the_verb() {
     while verb.is_none() {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         match s.rx.recv_timeout(left) {
-            Ok(Msg::FeatureInvoke { feature, verb: v }) if feature == "review" => verb = Some(v),
+            Ok(Msg::FeatureInvoke {
+                feature, verb: v, ..
+            }) if feature == "review" => verb = Some(v),
             Ok(_) => {}
             Err(_) => break,
         }

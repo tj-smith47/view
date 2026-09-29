@@ -2746,6 +2746,7 @@ mod tests {
             let _ = update(
                 model,
                 Msg::FeatureInvoke {
+                    generation: None,
                     feature: "notifications".to_string(),
                     verb: "pause".to_string(),
                 },
@@ -3746,6 +3747,7 @@ mod tests {
             let _ = update(
                 &mut model,
                 Msg::FeatureInvoke {
+                    generation: None,
                     feature: "ai".to_string(),
                     verb: "open".to_string(),
                 },
@@ -3878,6 +3880,7 @@ mod tests {
         let _ = update(
             &mut model,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "ai".to_string(),
                 verb: "open".to_string(),
             },
@@ -4124,6 +4127,7 @@ mod tests {
             let effects = update(
                 &mut model,
                 Msg::FeatureInvoke {
+                    generation: None,
                     feature: "ai".to_string(),
                     verb: "open".to_string(),
                 },

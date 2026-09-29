@@ -558,7 +558,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             wedge,
             observed_for,
         } => note_engine_liveness(model, wedge, observed_for),
-        Msg::FeatureInvoke { feature, verb } => {
+        Msg::FeatureInvoke { feature, verb, .. } => {
             // A bare `:View <feature>` (no verb) means "just open it":
             // resolved to the feature's own first `default_maps()` entry
             // ahead of every gate below, so a trust prompt this triggers
@@ -1320,6 +1320,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 update(
                     model,
                     Msg::FeatureInvoke {
+                        generation: None,
                         feature: "ai".to_string(),
                         verb,
                     },

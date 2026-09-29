@@ -845,6 +845,7 @@ mod tests {
         let _ = update(
             &mut model,
             Msg::FeatureInvoke {
+                generation: None,
                 feature: "ai".to_string(),
                 verb: "close".to_string(),
             },
@@ -1341,6 +1342,7 @@ mod tests {
 
     fn ai_feature_invoke(verb: &str) -> Msg {
         Msg::FeatureInvoke {
+            generation: None,
             feature: "ai".to_string(),
             verb: verb.to_string(),
         }

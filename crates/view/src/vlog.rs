@@ -252,7 +252,7 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
                 )
             });
         }
-        Msg::FeatureInvoke { feature, verb } => {
+        Msg::FeatureInvoke { feature, verb, .. } => {
             log_with("native", || format!("invoke feature={feature} verb={verb}"));
         }
         // The payload, not a kind label: an AI triage question is almost

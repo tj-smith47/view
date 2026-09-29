@@ -201,6 +201,7 @@ fn sides(leg: &Leg, prelude: &str) -> (EngineSession, ReferenceSession) {
         if !gaps {
             engine
                 .feed(view_core::msg::Msg::FeatureInvoke {
+                    generation: None,
                     feature: "ui".to_string(),
                     verb: "gaps".to_string(),
                 })

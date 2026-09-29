@@ -992,6 +992,7 @@ mod tests {
             let _ = crate::update::update(
                 &mut model,
                 crate::msg::Msg::FeatureInvoke {
+                    generation: None,
                     feature: "ai".to_string(),
                     verb: "dismiss".to_string(),
                 },
