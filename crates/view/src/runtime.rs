@@ -191,10 +191,12 @@ pub(crate) fn dispatch<E: EngineOps>(
     if let Msg::Resized { width, height } = &msg {
         view_engine::redraw_log::note(|| format!("resized width={width} height={height}"));
     }
-    let held_before = model.engine.holds_the_screen();
+    let held_before = view_engine::redraw_log::enabled().then(|| model.engine.holds_the_screen());
     effects.extend(update(model, msg));
-    if held_before != model.engine.holds_the_screen() {
-        view_engine::redraw_log::note(|| format!("held_screen={}", !held_before));
+    if let Some(held_before) = held_before {
+        if held_before != model.engine.holds_the_screen() {
+            view_engine::redraw_log::note(|| format!("held_screen={}", !held_before));
+        }
     }
     // the answer to nvim's `VimEnter` request is kept aside here and
     // written below, between the takeover batch and the attach: the

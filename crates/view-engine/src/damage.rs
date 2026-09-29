@@ -1010,8 +1010,12 @@ impl PumpShared {
     fn take_damage(&self) -> (Vec<UiEvent>, Option<Instant>) {
         let mut buf = self.damage.lock().unwrap_or_else(PoisonError::into_inner);
         let events = buf.take();
+        let drained_at = buf.drained_at();
+        // the reader thread folds into this buffer, so a log write made
+        // under its lock would hold the fold behind the file
+        drop(buf);
         crate::redraw_log::drained(&events);
-        (events, buf.drained_at())
+        (events, drained_at)
     }
 }
 
@@ -1258,6 +1262,27 @@ mod tests {
     use super::*;
     use view_core::model::Model;
     use view_core::update::update;
+
+    /// The drain releases the damage lock before it writes to the redraw
+    /// log, so the reader thread's fold never waits on the log's file.
+    ///
+    /// Disconfirm: moving the log call above `drop(buf)` fails here.
+    #[test]
+    fn the_drain_writes_its_log_line_after_releasing_the_damage_lock() {
+        let source = include_str!("damage.rs");
+        let start = source
+            .find("fn take_damage(&self) -> (Vec<UiEvent>, Option<Instant>) {")
+            .unwrap();
+        let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
+        let dropped = body
+            .find("drop(buf);")
+            .expect("the drain holds its lock to the end");
+        let logged = body.find("redraw_log::").unwrap();
+        assert!(
+            dropped < logged,
+            "the drain writes to the redraw log under the damage lock:\n{body}"
+        );
+    }
 
     #[test]
     fn take_damage_drains_up_to_last_flush_and_leaves_partial_staged() {

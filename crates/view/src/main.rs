@@ -1087,6 +1087,9 @@ fn main() -> Result<()> {
     // work the design spec's 50ms target is meant to cover
     let process_start = Instant::now();
     vlog::init(process_start);
+    if let Err(e) = view_engine::redraw_log::init() {
+        eprintln!("view: {e}");
+    }
     // the writer first: preparing the tie can itself be refused (a pipe,
     // a thread, a /bin/sh), and a refusal raised with nowhere to write it
     // is the one that says no child of this session is tied
@@ -2212,6 +2215,11 @@ mod tests {
     /// that is never followed by a spawn at all: `--print-caps` answers
     /// from the terminal alone and exits the process before `engine_config`
     /// even runs, so there is no startup for it to be ahead of.
+    ///
+    /// `view_engine::redraw_log::init` stands beside `vlog::init` and costs
+    /// the same: one environment read, and one open when `VIEW_REDRAW_LOG`
+    /// is set. It runs here so a path that cannot be opened is reported on
+    /// stderr before the terminal is taken.
     #[test]
     fn only_the_config_prologue_runs_before_the_engine_spawn() {
         assert_eq!(
@@ -2219,6 +2227,8 @@ mod tests {
             vec![
                 "Instant::now",
                 "vlog::init",
+                "Err",
+                "view_engine::redraw_log::init",
                 "view_proc::record_refusals_with",
                 "view_proc::prepare_to_tie_children",
                 "Cli::parse",
@@ -2346,6 +2356,11 @@ mod tests {
                 "eprintln!(\"view: {NO_TERMINAL_NOTICE}\")",
                 "the notice a terminal-less session is told goes into the \
                  sink nobody has been told about",
+            ),
+            (
+                "view_engine::redraw_log::init()",
+                "a VIEW_REDRAW_LOG path that cannot be opened is reported \
+                 into the sink",
             ),
         ] {
             assert!(

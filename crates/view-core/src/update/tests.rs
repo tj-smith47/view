@@ -19936,3 +19936,47 @@ fn a_recorded_tile_shrink_leaves_every_grid_at_the_size_nvim_last_announced() {
         "the copied corner keeps what nvim's own copy keeps, under the cells it rewrote"
     );
 }
+
+/// The replacement engine reuses the dead one's grid ids, and a flush that
+/// places one of them before sizing it holds that grid at no size either
+/// engine announced for it.
+///
+/// Disconfirm: `forget_grids` keeping every announced size fails the flush
+/// assertion at the replacement's first flush.
+#[test]
+fn a_restart_forgets_the_sizes_the_dead_engine_announced() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            grid_resize(1, 80, 23),
+            grid_resize(2, 80, 22),
+            win_pos(2, 1000, 0, 80, 22),
+            UiEvent::Flush,
+        ]),
+    );
+    let _ = restart(&mut m);
+
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![win_pos(2, 1000, 0, 40, 22), UiEvent::Flush]),
+    );
+    assert_eq!(m.engine.grids().unannounced_size(), None);
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![grid_resize(2, 40, 22), UiEvent::Flush]),
+    );
+    let grids = m.engine.grids();
+    assert_eq!(grids.unannounced_size(), None);
+    assert_eq!(
+        grids.grid(GridId(2)).map(crate::grid::Grid::size),
+        Some((40, 22))
+    );
+}

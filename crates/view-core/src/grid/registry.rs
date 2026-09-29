@@ -392,8 +392,8 @@ impl GridRegistry {
         }
     }
 
-    /// The first grid whose size differs from the one its last
-    /// `grid_resize` named.
+    /// A grid whose size differs from the one its last `grid_resize`
+    /// named.
     #[must_use]
     pub fn unannounced_size(&self) -> Option<UnannouncedSize> {
         self.announced.iter().find_map(|(&grid, &announced)| {
@@ -1073,6 +1073,10 @@ impl GridRegistry {
         // kept past the death would place the person's next split as a
         // surface pane and paint the surface over their buffer
         self.claims.clear();
+        // the replacement numbers its grids from 2 again, and a size the
+        // dead engine announced would fail the flush check on a slot its
+        // `win_pos` creates ahead of its own `grid_resize`
+        self.announced.retain(|&id, _| id == GLOBAL_GRID);
         // every box those grids held is gone from the screen at once, and
         // no cell op will ever name the rows they occupied
         self.placement_dirty = true;
