@@ -2775,6 +2775,38 @@ mod tests {
         );
     }
 
+    /// The leaving box paints the rows its motion was wrapped to, in the
+    /// roles they carry, whatever width the column has now. The motion is
+    /// wrapped for a column 40 cells wide and the terminal is 20, which is
+    /// a resize in the middle of the slide, so a frame that re-wrapped
+    /// would split the one held row in two.
+    #[test]
+    fn the_leaving_toast_paints_the_rows_its_motion_holds() {
+        use view_core::native::toast::ToastMotion;
+        use view_core::native::views::StyleRole;
+        let mut model = model_with_grid(20, 12);
+        model.caps.tier = view_core::model::Tier::Full;
+        let motion = ToastMotion::exit_right(
+            vec![vec![Span::new("one two three", StyleRole::Warning)]],
+            0,
+            40,
+        );
+        let held = motion.exiting().0.to_vec();
+        assert_eq!(held.len(), 1, "the fixture holds one row");
+        model.toast_motion = Some(motion);
+        let surface = render(&model);
+        let leaving = surface
+            .layers
+            .iter()
+            .rev()
+            .find_map(|layer| match &layer.kind {
+                LayerKind::Toast { lines, .. } => Some(lines.clone()),
+                _ => None,
+            })
+            .expect("the leaving box is on screen on its first frame");
+        assert_eq!(leaving, held);
+    }
+
     /// Each toast layer's `(slot, paused)` in paint order.
     fn pause_marks(surface: &Surface) -> Vec<(usize, bool)> {
         surface

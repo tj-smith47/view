@@ -1208,12 +1208,12 @@ enum Break {
 /// prose in the transcript breaks in the column every other prose row of
 /// the panel breaks in.
 ///
-/// `keep` bounds the allocation, not only the result: a row scrolling off
-/// the top is emptied and reused as the row opening at the bottom, so a
-/// prompt thousands of characters long costs `keep` strings per frame
-/// instead of one per row it would have had. It still walks the whole
-/// input, because where the breaks fall is what decides which rows the
-/// last ones are.
+/// Under [`Break::Cell`], `keep` bounds the allocation as well as the
+/// result: a row scrolling off the top is emptied and reused as the row
+/// opening at the bottom, so a prompt thousands of characters long costs
+/// `keep` strings per frame. It still walks the whole input, because where
+/// the breaks fall is what decides which rows the last ones are. Under
+/// [`Break::Word`], `keep` bounds only the result.
 fn wrap(input: &str, width: usize, keep: usize, breaks: Break) -> Vec<String> {
     let mut rows: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     if breaks == Break::Word {

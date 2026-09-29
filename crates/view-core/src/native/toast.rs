@@ -216,7 +216,7 @@ impl ToastMotion {
     /// Wrapped here once, because every frame of the slide paints the same
     /// box.
     #[must_use]
-    pub(crate) fn exit_right(
+    pub fn exit_right(
         lines: Vec<Vec<crate::native::views::Span>>,
         slot: usize,
         width: u16,
@@ -404,9 +404,6 @@ mod tests {
         assert_eq!(MOTION_STEP * u32::from(MOTION_STEPS), MOTION_SLOW);
     }
 
-    /// Ease-in for exits: the first frames barely move and the last covers
-    /// the most ground, and the settled frame is at full travel rather than
-    /// short of it -- a motion that ended short would pop the last cells.
     /// The departing box is wrapped to its column when the slide starts,
     /// and a condition notice slides out in the colour it stood in.
     #[test]
@@ -429,6 +426,9 @@ mod tests {
         );
     }
 
+    /// Ease-in for exits: the first frames barely move and the last covers
+    /// the most ground, and the settled frame is at full travel, since a
+    /// motion that ended short would pop the last cells.
     #[test]
     fn the_exit_eases_in_and_arrives_on_its_last_painted_frame() {
         let mut motion = ToastMotion::exit_right(vec![], 0, 40);

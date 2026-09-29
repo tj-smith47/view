@@ -91,7 +91,7 @@ impl Frame {
 ///   a layer), `pending_chord` (it closes the same gate, and holds
 ///   nothing any layer draws), `ai_fs` (an agent's file request reaches
 ///   the screen only as a prompt in the panel, which is an overlay),
-///   `key_unanswered`,`key_round_trips`, `key_round_trips_at` and
+///   `key_unanswered`, `key_round_trips`, `key_round_trips_at` and
 ///   `literal_pending`
 ///   (the gate's own terms and the link reading that bounds a guess, read
 ///   only when a `:` is folded or a batch arrives), `next_overlay_id`,

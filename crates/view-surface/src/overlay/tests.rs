@@ -1805,9 +1805,35 @@ fn an_overlay_row_measures_what_the_shared_measure_does() {
 #[test]
 fn the_interior_height_is_computed_in_one_place() {
     let source = include_str!("../overlay.rs");
-    assert_eq!(
-        source.matches("height - 2").count(),
-        1,
-        "a second copy of the border arithmetic in overlay.rs"
+    let mut seen = false;
+    let mut inside = false;
+    let copies: Vec<&str> = source
+        .lines()
+        .filter(|line| {
+            if line.starts_with("pub(crate) fn interior_size(") {
+                seen = true;
+                inside = true;
+            }
+            if inside {
+                inside = *line != "}";
+                return false;
+            }
+            let code = line.split("//").next().unwrap_or_default();
+            // `- 20` is another number, so the digit after the 2 is read
+            let subtracts_two = code.contains("sub(2)")
+                || code
+                    .split("- 2")
+                    .skip(1)
+                    .any(|rest| !rest.starts_with(|c: char| c.is_ascii_digit()));
+            subtracts_two
+                && code
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|word| word.contains("height"))
+        })
+        .collect();
+    assert!(seen, "overlay.rs no longer declares interior_size");
+    assert!(
+        copies.is_empty(),
+        "a second copy of the border arithmetic in overlay.rs: {copies:?}"
     );
 }
