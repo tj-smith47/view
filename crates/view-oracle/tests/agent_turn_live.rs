@@ -3,9 +3,8 @@
 //!
 //! The pill's word is derived in `view-core` from the panel's turn flag and
 //! pinned there, and none of that says what a person sees once the turn
-//! ends: the row carrying the word has to leave the screen, and a row that
-//! leaves while nvim's resize reply is still in flight can leave its old
-//! cells standing. The ways into the panel are here too, since each is a
+//! ends: the word has to leave its row while the row and every tile under
+//! it hold still. The ways into the panel are here too, since each is a
 //! claim about which keys reach it and when. This drives the binary a user
 //! runs against the stub agent and reads every cell.
 #![cfg(unix)]
@@ -23,8 +22,8 @@ use view_oracle::PtySession;
 const COLS: u16 = 132;
 const ROWS: u16 = 30;
 const BUDGET: Duration = Duration::from_secs(30);
-/// How long the pill's row may stand once the review has risen: the turn
-/// ends in the stub's next message, a few milliseconds later, and a pill
+/// How long the agent word may stand once the review has risen: the turn
+/// ends in the stub's next message, a few milliseconds later, and a word
 /// standing past the 100 ms a person perceives reads as a turn still
 /// running.
 const PILL_AFTER_REVIEW: Duration = Duration::from_millis(100);
@@ -110,42 +109,60 @@ fn answer_trust(session: &mut PtySession) {
     );
 }
 
-/// Whether the pill has left the top row. Under tiles that row is the
-/// lattice's top gap, which an idle session leaves blank.
-fn pill_row_gone(screen: &vt100::Screen) -> bool {
-    row_text(screen, 0).trim().is_empty()
+/// The first screen row a tile's frame opens on, or `None` before any tile
+/// is drawn.
+fn tiles_top(screen: &vt100::Screen) -> Option<u16> {
+    (0..ROWS).find(|&row| row_text(screen, row).contains('╭'))
 }
 
-/// Every frame from the prompt to the end of the turn is read. The word
-/// has to show while the turn is held, and the first frame on which the
-/// pill's row has left the screen carries no cell of it: a row that leaves
-/// while its old cells still stand is the defect this reads for. The row
-/// leaves within [`PILL_AFTER_REVIEW`] of the review rising.
+/// Whether the pill stands on the top row. Under tiles a row with nothing
+/// to name is the lattice's top gap, which is blank.
+fn pill_row_up(screen: &vt100::Screen) -> bool {
+    !row_text(screen, 0).trim().is_empty()
+}
+
+/// Every frame from the open panel to the end of the turn is read. The
+/// pill's row is up with the panel before any turn, the word shows while
+/// the turn is held, and the first frame without the word still carries
+/// the row with every tile on the row it opened on. The word leaves within
+/// [`PILL_AFTER_REVIEW`] of the review rising.
 #[test]
-fn the_agent_word_is_gone_on_the_frame_its_row_leaves() {
+fn the_agent_word_leaves_its_row_while_the_row_and_the_tiles_hold_still() {
     let paths = common::ScratchPaths::new("agent-turn");
     let work = paths.isolated_home.join("work");
     let resume = paths.isolated_home.join("resume");
     let mut session = launch(&paths, &work, &resume, &[]);
     open_and_trust(&mut session);
+    assert!(
+        session.wait_for_screen(BUDGET, |screen| pill_row_up(screen)
+            && tiles_top(screen).is_some()),
+        "the open panel put no row up before any turn; screen:\n{}",
+        session.screen()
+    );
+    let top = tiles_top(session.screen_raw());
 
     session.send(b"propose-when-released\r").unwrap();
     let mut saw_running = false;
+    let mut shifted: Option<String> = None;
     let mut left: Option<String> = None;
     let mut review_at: Option<(Instant, String)> = None;
-    let mut pill_after_review = Duration::ZERO;
+    let mut word_after_review = Duration::ZERO;
     let settled = session.wait_for_screen(BUDGET, |screen| {
+        if !pill_row_up(screen) || tiles_top(screen) != top {
+            shifted = Some(every_row(screen));
+            return true;
+        }
         if !saw_running {
-            if every_row(screen).contains("running") && !pill_row_gone(screen) {
+            if row_text(screen, 0).contains("running") {
                 saw_running = true;
                 std::fs::write(&resume, b"").unwrap();
             }
             return false;
         }
-        if pill_row_gone(screen) {
+        if !every_row(screen).contains("running") {
             left = Some(every_row(screen));
             if let Some((at, _)) = &review_at {
-                pill_after_review = at.elapsed();
+                word_after_review = at.elapsed();
             }
             return true;
         }
@@ -154,12 +171,15 @@ fn the_agent_word_is_gone_on_the_frame_its_row_leaves() {
         }
         false
     });
+    if let Some(frame) = shifted {
+        panic!("the row left or the tiles moved off row {top:?} during the turn:\n{frame}");
+    }
     // the review rises with the edit, and the stub ends the turn in the
     // message after it, so the two may stand on separate frames
     if let Some((_, frame)) = review_at {
         assert!(
-            pill_after_review <= PILL_AFTER_REVIEW,
-            "the pill's row stood {pill_after_review:?} after the review rose, past \
+            word_after_review <= PILL_AFTER_REVIEW,
+            "the agent word stood {word_after_review:?} after the review rose, past \
              {PILL_AFTER_REVIEW:?}; the first frame with the review:\n{frame}"
         );
     }
@@ -168,28 +188,25 @@ fn the_agent_word_is_gone_on_the_frame_its_row_leaves() {
         "a held turn never put the agent word on the pill's row; screen:\n{}",
         session.screen()
     );
-    let left = left.unwrap_or_else(|| {
-        panic!(
-            "the pill's row never left the screen after the turn was released \
-             (settled: {settled}); screen:\n{}",
-            session.screen()
-        )
-    });
     assert!(
-        !left.contains("running"),
-        "the frame on which the pill's row left still carries the agent word:\n{left}"
+        left.is_some(),
+        "the agent word never left the screen after the turn was released \
+         (settled: {settled}); screen:\n{}",
+        session.screen()
     );
     assert!(
         session.wait_for("Review", BUDGET),
         "the released turn never raised its review; screen:\n{}",
         session.screen()
     );
-    // a cell the row's departure left unpainted comes back with the next
-    // frame that repaints around it, so the word is watched for a while
-    // after it went
+    // a cell a repaint missed comes back with the next frame that repaints
+    // around it, so the screen is watched for a while after the word went
     assert!(
-        !session.wait_for_screen(STAYS_GONE, |screen| every_row(screen).contains("running")),
-        "the agent word came back after the turn ended; screen:\n{}",
+        !session.wait_for_screen(STAYS_GONE, |screen| every_row(screen).contains("running")
+            || !pill_row_up(screen)
+            || tiles_top(screen) != top),
+        "after the turn the word came back, the row left, or the tiles moved off row \
+         {top:?}; screen:\n{}",
         session.screen()
     );
 }

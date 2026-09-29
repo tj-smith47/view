@@ -83,7 +83,7 @@ carries something the tiles' own frames do not show:
 - a second tabpage
 - two or more listed buffers, with `tabline_shows = "buffers"`
 - the host of a `--remote` session
-- an agent that is running, waiting on you, or has crashed
+- an agent session or its panel, between turns as well as during one
 
 With none of those the row is gone and the tiles take its line. Under
 `panes = "nvim"` it follows your `showtabline`: `0` keeps the row off, `1`

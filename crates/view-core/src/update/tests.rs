@@ -16005,17 +16005,20 @@ fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
         .truncate(1);
     m.ai_trusted = true;
     assert_eq!(m.chrome_rows(), 0, "one workspace under tiles drew a row");
-    let _ = update(
-        &mut m,
-        Msg::FeatureInvoke {
-            feature: "ai".to_string(),
-            verb: "open".to_string(),
-        },
-    );
-    assert_eq!(m.chrome_rows(), 0, "opening the idle agent drew a row");
+    let ai = |verb: &str| Msg::FeatureInvoke {
+        feature: "ai".to_string(),
+        verb: verb.to_string(),
+    };
 
     type Setup = Box<dyn Fn(&mut Model)>;
     let steps: Vec<(&str, Setup, Msg, u16)> = vec![
+        ("the agent panel opened", Box::new(|_| {}), ai("open"), 1),
+        (
+            "the panel closed before any session",
+            Box::new(|_| {}),
+            ai("close"),
+            0,
+        ),
         (
             "a second tabpage",
             Box::new(|_| {}),
@@ -16048,8 +16051,14 @@ fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
         ),
         ("a buffer wiped", Box::new(|_| {}), buffers(&["a.rs"]), 0),
         (
-            "a permission asked of an idle agent",
+            "the agent panel reopened",
             Box::new(|m| m.tabline_shows = crate::native::pill::TablineShows::Tabs),
+            ai("open"),
+            1,
+        ),
+        (
+            "a permission asked of an idle agent",
+            Box::new(|_| {}),
             permission_requested_msg(7, everyday_options()),
             1,
         ),
@@ -16057,7 +16066,7 @@ fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
             "the permission answered",
             Box::new(|m| m.note_frame_painted()),
             key("1"),
-            0,
+            1,
         ),
         (
             "the session ready, with no turn yet",
@@ -16066,9 +16075,9 @@ fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
                 session_id: "s-1".to_string(),
                 agent: None,
             }),
-            0,
+            1,
         ),
-        ("a prompt typed", Box::new(|_| {}), key("h"), 0),
+        ("a prompt typed", Box::new(|_| {}), key("h"), 1),
         ("the prompt submitted", Box::new(|_| {}), key("<CR>"), 1),
         (
             "a permission asked mid-turn",
@@ -16082,7 +16091,13 @@ fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
             Msg::Ai(AiEvent::TurnEnded {
                 stop_reason: crate::native::ai_event::StopReason::EndTurn,
             }),
-            0,
+            1,
+        ),
+        (
+            "the panel closed with the session still up",
+            Box::new(|_| {}),
+            ai("close"),
+            1,
         ),
         (
             "the session crashed",
@@ -16099,7 +16114,7 @@ fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
                 session_id: "s-2".to_string(),
                 agent: None,
             }),
-            0,
+            1,
         ),
         (
             "showtabline=2 under the nvim look",

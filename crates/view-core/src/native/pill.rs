@@ -457,7 +457,8 @@ pub const DEFAULT_SHOWTABLINE: u8 = 1;
 ///
 /// Under tiles the row stands only while it says something nothing else on
 /// screen says ([`has_unique_content`]): each tile's frame already carries
-/// its own buffer name, so a row naming one workspace is a banner. Under
+/// its own buffer name, so a row naming one workspace is a banner. An agent
+/// session keeps it standing between turns, so the tiles hold their rows. Under
 /// `panes = "nvim"` it is the row nvim itself would have drawn, so it
 /// follows the user's own `showtabline`.
 #[must_use]
@@ -477,17 +478,27 @@ pub fn shows(model: &Model) -> bool {
 
 /// Whether the row carries anything a person cannot read elsewhere: a
 /// second tabpage, two or more listed buffers under `"buffers"`, a remote
-/// host, or an agent that is doing something.
+/// host, or an agent session or panel.
 ///
-/// O(1): counts and flags with no allocation, since `update()` reads it on
-/// every fold.
+/// Counts and flags with no allocation, since `update()` reads it on every
+/// fold.
 #[must_use]
 pub fn has_unique_content(model: &Model) -> bool {
     let tabs = model.engine.tabline.as_ref().map_or(0, |t| t.tabs.len());
     tabs > 1
         || (model.tabline_shows == TablineShows::Buffers && model.buffers.len() >= 2)
         || model.remote.is_some()
-        || !shown_agent(model).is_empty()
+        || agent_present(model)
+}
+
+/// Whether an agent session or its panel exists, whatever the turn state.
+///
+/// A row that stood only while a turn ran shifted every tile down a row as
+/// each turn began and back up as it ended.
+fn agent_present(model: &Model) -> bool {
+    !shown_agent(model).is_empty()
+        || (model.ai_enabled
+            && (model.ai_panel().session_id.is_some() || model.ai_panel_overlay_open()))
 }
 
 /// [`shows`] from the five answers it reads, for the callers that have
@@ -810,9 +821,14 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Agent {
         Disabled,
+        /// No session and no panel.
         Idle,
-        /// A session open between turns.
+        /// The panel open with no session behind it yet.
+        PanelOpen,
+        /// A session between turns, its panel closed.
         Open,
+        /// A session between turns, its panel open.
+        OpenPanel,
         Running,
         Waiting,
         Crashed,
@@ -820,7 +836,9 @@ mod tests {
 
     /// Under tiles the row stands exactly while it says something the
     /// frames do not: a second tabpage, two listed buffers under
-    /// `"buffers"`, a remote host, or an agent word past `idle`. Under
+    /// `"buffers"`, a remote host, or an agent session or panel in any
+    /// turn state, since a row that came and went with each turn moved
+    /// every tile a row. Under
     /// `panes = "nvim"` the user's own `showtabline` decides it, since a
     /// threshold hardcoded to a second tabpage took the always-on row away
     /// from a user who had set 2 and gave a row to one who had set 0. A
@@ -830,7 +848,9 @@ mod tests {
         let agents = [
             Agent::Disabled,
             Agent::Idle,
+            Agent::PanelOpen,
             Agent::Open,
+            Agent::OpenPanel,
             Agent::Running,
             Agent::Waiting,
             Agent::Crashed,
@@ -849,7 +869,7 @@ mod tests {
                 let unique = tabs > 1
                     || (shows_buffers && buffers >= 2)
                     || remote
-                    || matches!(agent, Agent::Running | Agent::Waiting | Agent::Crashed);
+                    || !matches!(agent, Agent::Disabled | Agent::Idle);
                 for (panes, showtabline, owns) in
                     [Panes::Tiles, Panes::Nvim].into_iter().flat_map(|panes| {
                         (0..=2_u8).flat_map(move |showtabline| {
@@ -883,7 +903,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(walked, 4 * 4 * 2 * 2 * 6 * 2 * 3 * 2);
+        assert_eq!(walked, 4 * 4 * 2 * 2 * 8 * 2 * 3 * 2);
     }
 
     /// One model of the walk above, built from its three groups of answers.
@@ -917,8 +937,8 @@ mod tests {
             .collect();
         let panel = model.ai_panel_mut();
         match agent {
-            Agent::Disabled | Agent::Idle => {}
-            Agent::Open => panel.session_id = Some("s-1".to_string()),
+            Agent::Disabled | Agent::Idle | Agent::PanelOpen => {}
+            Agent::Open | Agent::OpenPanel => panel.session_id = Some("s-1".to_string()),
             Agent::Running => {
                 panel.session_id = Some("s-1".to_string());
                 panel.turn_in_flight = true;
@@ -933,6 +953,12 @@ mod tests {
                 ));
             }
             Agent::Crashed => panel.local_error = Some("gone".to_string()),
+        }
+        if matches!(agent, Agent::PanelOpen | Agent::OpenPanel) {
+            let _ = model.push_overlay(
+                crate::native::geometry::OverlayBox::new(40, 100),
+                crate::model::OverlayKind::Ai,
+            );
         }
         model.ai_enabled = agent != Agent::Disabled;
         model
