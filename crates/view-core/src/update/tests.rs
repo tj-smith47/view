@@ -16100,12 +16100,30 @@ fn a_row_that_appears_or_leaves_resizes_the_grid_once() {
             1,
         ),
         (
+            "the panel reopened with the session up",
+            Box::new(|_| {}),
+            ai("open"),
+            1,
+        ),
+        (
             "the session crashed",
             Box::new(|_| {}),
             Msg::Ai(AiEvent::SessionCrashed {
                 message: "gone".to_string(),
             }),
             1,
+        ),
+        (
+            "the panel closed over the crash",
+            Box::new(|_| {}),
+            ai("close"),
+            1,
+        ),
+        (
+            "the crash dismissed with the panel closed",
+            Box::new(|_| {}),
+            ai("dismiss"),
+            0,
         ),
         (
             "the session recovered",

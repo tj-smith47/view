@@ -177,6 +177,33 @@ mod tests {
         panel.local_error = Some("agent process exited".to_string());
         let status = AiStatus::derive(&panel, true, "claude-code", true);
         assert_eq!(status.session_state, SessionState::Crashed);
+
+        let mut model = crate::model::Model::new();
+        model.ai_enabled = true;
+        let events = [
+            crate::native::ai_event::AiEvent::SessionReady {
+                session_id: "s1".to_string(),
+                agent: None,
+            },
+            crate::native::ai_event::AiEvent::SessionCrashed {
+                message: "agent process exited".to_string(),
+            },
+        ];
+        for event in events {
+            let _ = crate::update::update(&mut model, crate::msg::Msg::Ai(event));
+        }
+        let _ = crate::update::update(
+            &mut model,
+            crate::msg::Msg::FeatureInvoke {
+                feature: "ai".to_string(),
+                verb: "dismiss".to_string(),
+            },
+        );
+        assert_eq!(
+            SessionState::derive(model.ai_panel(), true),
+            SessionState::Trusted,
+            "a session that crashed and was dismissed is no longer active"
+        );
     }
 
     #[test]

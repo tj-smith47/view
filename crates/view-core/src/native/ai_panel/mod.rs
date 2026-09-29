@@ -76,7 +76,12 @@ impl UsageStats {
 #[must_use]
 #[derive(Debug, Clone)]
 pub struct AiPanelState {
+    /// The live session's id, cleared when that session ends.
     pub session_id: Option<String>,
+    /// Whether any session has reached `SessionReady` in this run. A crash
+    /// with none behind it is a failure to start, which gets a notice of its
+    /// own.
+    pub ever_ready: bool,
     /// Agent output, folded per message id as chunks stream in, and tool
     /// calls folded per `tool_call_id` as their status advances.
     pub transcript: Transcript,
@@ -296,6 +301,7 @@ impl PartialEq for AiPanelState {
     fn eq(&self, other: &Self) -> bool {
         let Self {
             session_id,
+            ever_ready,
             transcript,
             input,
             breaks,
@@ -317,6 +323,7 @@ impl PartialEq for AiPanelState {
             row_width: _,
         } = self;
         *session_id == other.session_id
+            && *ever_ready == other.ever_ready
             && *transcript == other.transcript
             && *input == other.input
             && *breaks == other.breaks
@@ -354,6 +361,7 @@ impl AiPanelState {
     pub fn new() -> Self {
         Self {
             session_id: None,
+            ever_ready: false,
             transcript: Transcript::new(),
             input: String::new(),
             breaks: Vec::new(),

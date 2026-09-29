@@ -493,8 +493,8 @@ pub fn has_unique_content(model: &Model) -> bool {
 
 /// Whether an agent session or its panel exists, whatever the turn state.
 ///
-/// A row that stood only while a turn ran shifted every tile down a row as
-/// each turn began and back up as it ended.
+/// Standing between turns too keeps every tile on its row as a turn starts
+/// and ends.
 fn agent_present(model: &Model) -> bool {
     !shown_agent(model).is_empty()
         || (model.ai_enabled
@@ -535,6 +535,7 @@ mod tests {
 
     use super::*;
     use crate::events::{TabEntry, TabHandle};
+    use crate::native::ai_event::AiEvent;
 
     fn tabline(current: u64, names: &[&str]) -> TablineState {
         TablineState {
@@ -832,13 +833,17 @@ mod tests {
         Running,
         Waiting,
         Crashed,
+        /// A session that crashed after it was ready, its banner dismissed
+        /// and its panel closed.
+        Ended,
     }
 
     /// Under tiles the row stands exactly while it says something the
     /// frames do not: a second tabpage, two listed buffers under
     /// `"buffers"`, a remote host, or an agent session or panel in any
-    /// turn state, since a row that came and went with each turn moved
-    /// every tile a row. Under
+    /// turn state, since the tiles keep their rows across a turn. A
+    /// session that crashed and whose banner was dismissed, with the panel
+    /// closed, has left, and the row with it. Under
     /// `panes = "nvim"` the user's own `showtabline` decides it, since a
     /// threshold hardcoded to a second tabpage took the always-on row away
     /// from a user who had set 2 and gave a row to one who had set 0. A
@@ -854,6 +859,7 @@ mod tests {
             Agent::Running,
             Agent::Waiting,
             Agent::Crashed,
+            Agent::Ended,
         ];
         let mut walked = 0;
         for (tabs, buffers, shows_buffers, remote) in (0..=3_usize).flat_map(|tabs| {
@@ -869,7 +875,7 @@ mod tests {
                 let unique = tabs > 1
                     || (shows_buffers && buffers >= 2)
                     || remote
-                    || !matches!(agent, Agent::Disabled | Agent::Idle);
+                    || !matches!(agent, Agent::Disabled | Agent::Idle | Agent::Ended);
                 for (panes, showtabline, owns) in
                     [Panes::Tiles, Panes::Nvim].into_iter().flat_map(|panes| {
                         (0..=2_u8).flat_map(move |showtabline| {
@@ -903,7 +909,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(walked, 4 * 4 * 2 * 2 * 8 * 2 * 3 * 2);
+        assert_eq!(walked, 4 * 4 * 2 * 2 * 9 * 2 * 3 * 2);
     }
 
     /// One model of the walk above, built from its three groups of answers.
@@ -937,7 +943,7 @@ mod tests {
             .collect();
         let panel = model.ai_panel_mut();
         match agent {
-            Agent::Disabled | Agent::Idle | Agent::PanelOpen => {}
+            Agent::Disabled | Agent::Idle | Agent::PanelOpen | Agent::Ended => {}
             Agent::Open | Agent::OpenPanel => panel.session_id = Some("s-1".to_string()),
             Agent::Running => {
                 panel.session_id = Some("s-1".to_string());
@@ -961,6 +967,27 @@ mod tests {
             );
         }
         model.ai_enabled = agent != Agent::Disabled;
+        if agent == Agent::Ended {
+            let ended = [
+                AiEvent::SessionReady {
+                    session_id: "s-1".to_string(),
+                    agent: None,
+                },
+                AiEvent::SessionCrashed {
+                    message: "gone".to_string(),
+                },
+            ];
+            for event in ended {
+                let _ = crate::update::update(&mut model, crate::msg::Msg::Ai(event));
+            }
+            let _ = crate::update::update(
+                &mut model,
+                crate::msg::Msg::FeatureInvoke {
+                    feature: "ai".to_string(),
+                    verb: "dismiss".to_string(),
+                },
+            );
+        }
         model
     }
 

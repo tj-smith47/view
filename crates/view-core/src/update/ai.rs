@@ -150,8 +150,8 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
         // surface: `AiPanelState::local_error`'s own doc states why this is
         // never a transient toast on its own -- a crashed long-running
         // session is easy to miss in four seconds -- so the only thing this
-        // arm ever schedules a toast for is a session that never reached
-        // `SessionReady` at all (`panel.session_id` still `None`). That is
+        // arm ever schedules a toast for is a run in which no session has
+        // reached `SessionReady` (`panel.ever_ready` still false). That is
         // the one case with no panel content yet for a user to notice the
         // banner sitting in: the agent panel may not even be open, and a
         // silent failure the first time someone tries the feature reads as
@@ -161,7 +161,10 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             panel.transcript.end_turn();
             panel.pending_permission = None;
             panel.turn_in_flight = false;
-            let never_became_ready = panel.session_id.is_none();
+            let never_became_ready = !panel.ever_ready;
+            // The dead session's id goes with it, so the top row and the
+            // doctor stop reporting an agent that is gone.
+            panel.session_id = None;
             // A queued proposal is unread by construction, and the session
             // that authored it is gone: opening it later would put the user
             // in front of a decision made on behalf of an agent that
@@ -209,6 +212,7 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
         AiEvent::SessionReady { session_id, agent } => {
             let panel = model.ai_panel_mut();
             panel.session_id = Some(session_id);
+            panel.ever_ready = true;
             panel.agent_name = agent;
             panel.local_error = None;
             model.dirty = true;
@@ -1112,6 +1116,29 @@ mod tests {
         );
         assert_eq!(model.ai_panel().pending_permission, None);
         assert!(model.dirty);
+    }
+
+    /// A crash takes the dead session's id with it, and a second crash
+    /// report after that (the worker's answer to a command sent to no
+    /// session) still reads as a session that once worked.
+    #[test]
+    fn a_crash_after_a_ready_session_clears_its_id_and_never_reads_as_a_failed_start() {
+        let mut model = Model::new();
+        let _ = update(&mut model, session_ready("s1"));
+        let crash = || {
+            Msg::Ai(AiEvent::SessionCrashed {
+                message: "no active AI session for this command".to_string(),
+            })
+        };
+        let _ = update(&mut model, crash());
+        assert_eq!(model.ai_panel().session_id, None);
+
+        let effects = update(&mut model, crash());
+
+        assert!(
+            effects.is_empty(),
+            "a crash after a ready session is panel-local only: {effects:?}"
+        );
     }
 
     /// The wait a first run pays is announced where a user sees it with the
