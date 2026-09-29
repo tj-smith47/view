@@ -860,9 +860,9 @@ impl Term {
     /// terminal does not already show. The cursor's position is re-stated
     /// when a cell was repainted (the emission left the terminal's own
     /// cursor somewhere else) or when the position itself moved; its show
-    /// and its hide are each written on the change alone, except at a
-    /// terminal without `sync`, where a frame that repaints cells hides the
-    /// caret ahead of them and shows it once placed; its DECSCUSR
+    /// and its hide are each written on the change alone, except that a
+    /// frame that repaints cells hides the caret ahead of them and shows it
+    /// once placed, inside the sync bracket too; its DECSCUSR
     /// shape likewise; and terminal mouse capture
     /// (`EnableMouseCapture`/`DisableMouseCapture`) tracks
     /// `model.engine.mouse_on` the same way. Capture is off by default and
@@ -1025,11 +1025,14 @@ impl Term {
         crate::tap::tap(crate::tap::TAG_COMPOSED);
         // a terminal that cannot hold a frame back draws each write as it
         // lands, so a shown caret travels with the emission and is seen over
-        // cells of a half-painted frame; it stays hidden until the frame
-        // places it. The hide is written ahead of the cells and taken back
-        // when none were, the way the bracket is.
+        // cells of a half-painted frame. tmux 3.7c holds a bracketed frame's
+        // cells but relays each read's caret position to its own client at
+        // once, so a frame split across reads moves a shown caret over the
+        // previous screen. The caret stays hidden until the frame places it,
+        // bracket or none. The hide is written ahead of the cells and taken
+        // back when none were, the way the bracket is.
         let hide_at = self.frame_buf.borrow().len();
-        let hide_for_cells = !model.caps.sync && self.cursor_shown != Some(false);
+        let hide_for_cells = self.cursor_shown != Some(false);
         if hide_for_cells {
             crossterm::queue!(sink, crossterm::cursor::Hide)?;
         }
@@ -1273,12 +1276,11 @@ pub(crate) mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    /// The bytes a terminal without synchronized output is handed for
-    /// `before` painted whole and then for `after` painted whole, each with
-    /// its own rendered caret, for a caller whose models this module cannot
-    /// build.
-    pub(crate) fn unsynced_frames(before: &Model, after: &Model) -> (Vec<u8>, Vec<u8>) {
-        let mut term = Term::frame_probe(TermCaps::default());
+    /// The bytes the terminal `before.caps` describes is handed for `before`
+    /// painted whole and then for `after` painted whole, each with its own
+    /// rendered caret, for a caller whose models this module cannot build.
+    pub(crate) fn whole_frames(before: &Model, after: &Model) -> (Vec<u8>, Vec<u8>) {
+        let mut term = Term::frame_probe(before.caps);
         let shown = frame_bytes(
             &mut term,
             before,
@@ -1895,9 +1897,11 @@ pub(crate) mod tests {
 
     /// A frame that did repaint a cell owes the trailer once and the cursor
     /// position again -- the emission left the terminal's own caret after the
-    /// last glyph it printed. A synchronizing terminal owes no show; one
-    /// that draws each write as it lands has the caret hidden ahead of the
-    /// cells and shown once it is placed.
+    /// last glyph it printed. The caret is hidden ahead of the cells and
+    /// shown once it is placed, inside the sync bracket where there is one.
+    ///
+    /// Disconfirm: gating the hide on `!model.caps.sync` again fails the
+    /// sync leg on the hide and show count.
     #[test]
     fn a_repainted_cell_carries_one_trailer_and_restates_the_cursor() {
         for sync in [false, true] {
@@ -1928,21 +1932,21 @@ pub(crate) mod tests {
                  the emission left the terminal's cursor behind; frame: {painted:?}"
             );
             let tail = if sync {
-                [caret.as_slice(), SYNC_END].concat()
+                [caret.as_slice(), SHOW_CURSOR, SYNC_END].concat()
             } else {
                 [caret.as_slice(), SHOW_CURSOR].concat()
             };
             assert!(
                 painted.ends_with(&tail),
-                "sync={sync}: the caret's CUP closes the frame; frame: {painted:?}"
+                "sync={sync}: the caret's CUP and its show close the frame; \
+                 frame: {painted:?}"
             );
-            let (hides, shows) = if sync { (0, 0) } else { (1, 1) };
             assert_eq!(
                 (
                     occurrences(&painted, HIDE_CURSOR),
                     occurrences(&painted, SHOW_CURSOR)
                 ),
-                (hides, shows),
+                (1, 1),
                 "sync={sync}: frame: {painted:?}"
             );
         }
@@ -1954,6 +1958,8 @@ pub(crate) mod tests {
     /// where the whole frame leaves it, or over a glyph the whole frame does
     /// not leave under it. A terminal without synchronized output draws
     /// whenever it likes, so every such byte is a screen a person can see.
+    /// A bracketed frame is read the same way, because a multiplexer that
+    /// holds its cells still relays where a shown caret stands at each read.
     pub(crate) fn assert_the_caret_waits_for_its_frame(
         shown: &[u8],
         frame: &[u8],
@@ -2001,10 +2007,16 @@ pub(crate) mod tests {
     /// grid no longer holds there.
     ///
     /// Disconfirm: dropping the hide `queue_frame` writes ahead of the cells
-    /// fails this at the first cell of row 0.
+    /// fails this at the first cell of row 0, on either terminal.
     #[test]
     fn a_row_scrolled_under_a_standing_caret_never_shows_the_glyph_it_left() {
-        let mut model = probe_model(TermCaps::default());
+        for sync in [false, true] {
+            a_row_scrolled_under_a_standing_caret(sync);
+        }
+    }
+
+    fn a_row_scrolled_under_a_standing_caret(sync: bool) {
+        let mut model = probe_model(TermCaps::from_probe(sync, true, true));
         for (row, text) in [(0, "<div"), (1, "<img"), (2, "# view")] {
             model.engine.apply_grid(view_core::grid::GridOp::PutLine {
                 row,
@@ -2031,7 +2043,12 @@ pub(crate) mod tests {
         });
         let frame = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
 
-        assert_the_caret_waits_for_its_frame(&shown, &frame, (20, 4), "O on line 1");
+        assert_the_caret_waits_for_its_frame(
+            &shown,
+            &frame,
+            (20, 4),
+            &format!("sync={sync}: O on line 1"),
+        );
         let mut screen = vt100::Parser::new(4, 20, 0);
         screen.process(&shown);
         screen.process(&frame);
@@ -2055,13 +2072,11 @@ pub(crate) mod tests {
             let mut term = Term::frame_probe(model.caps);
 
             let hidden = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
-            if !sync {
-                assert!(
-                    occurrences(&hidden, HIDE_CURSOR) == 1,
-                    "sync={sync}: a surface carrying no caret hides the \
-                     terminal's, once; frame: {hidden:?}"
-                );
-            }
+            assert!(
+                occurrences(&hidden, HIDE_CURSOR) == 1,
+                "sync={sync}: a surface carrying no caret hides the \
+                 terminal's, once; frame: {hidden:?}"
+            );
 
             surface.cursor = caret_at(&model, 1, 1);
             let mut shape = Vec::new();

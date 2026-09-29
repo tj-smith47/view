@@ -5668,15 +5668,16 @@ fn a_gapless_junction_stays_on_its_lines_through_a_half_applied_resize() {
 }
 
 /// The agent panel opening over the tile the caret stood in, on a terminal
-/// that draws each write as it lands: at no point partway through the frame
-/// does the terminal show a caret inside the panel, or anywhere else, but on
-/// the composer the frame ends on.
+/// that draws each write as it lands and on one that holds the frame for
+/// its sync bracket: at no point partway through the frame does the
+/// terminal show a caret inside the panel, or anywhere else, but on the
+/// composer the frame ends on.
 ///
 /// Disconfirm: dropping the hide `queue_frame` writes ahead of the cells
 /// fails this at the first cell the panel paints.
 #[test]
 fn the_agent_panel_opening_over_the_caret_shows_no_caret_until_its_own() {
-    for gaps in [true, false] {
+    for (gaps, sync) in [(true, false), (false, false), (true, true), (false, true)] {
         let size = (TILED_WIDTH, TILED_HEIGHT);
         let mut before = tiled_at(gaps, size, 0).model;
         let (_, col, _, height) = tiled_at(gaps, size, 0).slots[1];
@@ -5703,7 +5704,8 @@ fn the_agent_panel_opening_over_the_caret_shows_no_caret_until_its_own() {
                 UiEvent::Flush,
             ],
         );
-        assert!(!after.caps.sync, "the fixture terminal draws as bytes land");
+        before.caps.sync = sync;
+        after.caps.sync = sync;
         let standing = view_surface::render(&before)
             .cursor
             .expect("the editor has a caret before the panel opens");
@@ -5712,12 +5714,12 @@ fn the_agent_panel_opening_over_the_caret_shows_no_caret_until_its_own() {
             "gaps={gaps}: the caret stands in the tile the panel takes"
         );
 
-        let (shown, frame) = crate::terminal::tests::unsynced_frames(&before, &after);
+        let (shown, frame) = crate::terminal::tests::whole_frames(&before, &after);
         crate::terminal::tests::assert_the_caret_waits_for_its_frame(
             &shown,
             &frame,
             size,
-            &format!("gaps={gaps}: the agent panel opening"),
+            &format!("gaps={gaps} sync={sync}: the agent panel opening"),
         );
     }
 }
