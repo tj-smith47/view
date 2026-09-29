@@ -540,8 +540,16 @@ mod tests {
     /// view-core's model sources are walked too: the notice column the
     /// compositor paints every frame places its boxes from them, and a
     /// live read there sets a toast over the held tree or cursor line.
+    /// So is view-core's `native/`, whose views, geometry, statusline,
+    /// speculation and supervision the painters call every frame.
     /// A live read a painter reaches that paints nothing is named in
     /// [`LIVE_READS`] with its grounds.
+    ///
+    /// Any mention of the `window_status` field is refused, since a loop
+    /// over it or the whole map handed to a helper reads it as surely as
+    /// a lookup does. The field's own declaration and the module sharing
+    /// its name are named in [`DECLARATIONS`]. Comment lines are read as
+    /// empty, since no frame is painted from one.
     #[test]
     fn every_painter_reads_the_painted_registry() {
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -549,6 +557,7 @@ mod tests {
             crates.join("view-surface/src"),
             crates.join("view-tui/src"),
             crates.join("view-core/src/model"),
+            crates.join("view-core/src/native"),
         ];
         let mut files = vec![crates.join("view-core/src/model.rs")];
         while let Some(dir) = dirs.pop() {
@@ -569,10 +578,26 @@ mod tests {
         let mut live = Vec::new();
         for path in &files {
             let source = std::fs::read_to_string(path).expect("a listed source");
+            // a doc line keeps its `///`, which ends a function's body below
             let mut flat: String = production(&source)
-                .chars()
+                .lines()
+                .map(|line| match line.trim_start() {
+                    doc if doc.starts_with("///") => "///",
+                    comment if comment.starts_with("//") => "",
+                    _ => line,
+                })
+                .flat_map(str::chars)
                 .filter(|c| !c.is_whitespace())
                 .collect();
+            for (file, declaration, _grounds) in DECLARATIONS {
+                if !path.ends_with(file) {
+                    continue;
+                }
+                if !flat.contains(declaration) {
+                    live.push(format!("{file} no longer spells `{declaration}`"));
+                }
+                flat = flat.replace(declaration, "");
+            }
             for (file, signature, read, _grounds) in LIVE_READS {
                 if !path.ends_with(file) {
                     continue;
@@ -597,11 +622,7 @@ mod tests {
                 "engine.grids()",
                 "engine.grid()",
                 "engine.hl()",
-                "window_status.get(",
-                "window_status[",
-                "window_status.iter(",
-                "window_status.values(",
-                "window_status.contains_key(",
+                "window_status",
             ] {
                 if flat.contains(read) {
                     live.push(format!("{} reads {read}", path.display()));
@@ -641,6 +662,86 @@ mod tests {
             "window_status.get(",
             "`Model::painted_status` is the painted read: a held layout's slot a \
              live window fills takes that window's report once it arrives",
+        ),
+        (
+            "view-core/src/model/held.rs",
+            FORGET_ENGINE_WINDOWS,
+            "window_status",
+            "`Model::forget_engine_windows` hands the dead engine's statuses to \
+             the hold as a restart begins, which is how the held frame gets them",
+        ),
+        (
+            "view-core/src/model/held.rs",
+            FORGET_ENGINE_WINDOWS,
+            "window_status",
+            "`Model::forget_engine_windows` clears the live statuses once the \
+             hold has them, since the replacement reuses their handles",
+        ),
+        (
+            "view-core/src/model/held.rs",
+            "pub(crate)fnsettle_held(&mutself,at_flush:bool)->Vec<Effect>{",
+            "window_status",
+            "`Model::settle_held` runs on a flush and checks the replacement's \
+             reports against the held layout, painting nothing itself",
+        ),
+        (
+            "view-core/src/native/surfaces.rs",
+            "pubfnclaims_at(row:i64,col:i64,width:u16,height:u16,anchor:FloatAnchor,\
+             model:&Model,)->Option<Surface>{",
+            "engine.grid()",
+            "`claims_at` classifies a float placement nvim just sent, against the \
+             grid that placement lands on, and paints nothing",
+        ),
+        (
+            "view-core/src/native/speculate.rs",
+            "fnfold_cmdline_key(model:&mutModel,notation:&str,now:SpecStamp){",
+            "engine.grids()",
+            "`fold_cmdline_key` folds a key on its way to nvim and records the \
+             grid the key was typed on, which is the live engine's",
+        ),
+        (
+            "view-core/src/native/speculate.rs",
+            "fnfold_cmdline_batch(model:&mutModel,redraw:&[UiEvent],now:SpecStamp)\
+             ->Vec<Effect>{",
+            "engine.grids()",
+            "`fold_cmdline_batch` judges a redraw batch against the live engine \
+             that sent it, and paints nothing",
+        ),
+        (
+            "view-core/src/native/speculate.rs",
+            "fnfold_keystroke(model:&mutModel,notation:&str,now:SpecStamp){",
+            "engine.grids()",
+            "`fold_keystroke` predicts a key's glyph from the live engine's cursor, \
+             which is where nvim will draw it",
+        ),
+    ];
+
+    /// `Model::forget_engine_windows`'s signature with its whitespace
+    /// taken out.
+    const FORGET_ENGINE_WINDOWS: &str = "pubfnforget_engine_windows(&mutself){";
+
+    /// Spellings of `window_status` that read nothing: the file, the
+    /// spelling with its whitespace taken out, and the grounds.
+    const DECLARATIONS: &[(&str, &str, &str)] = &[
+        (
+            "view-core/src/model.rs",
+            "pubwindow_status:std::collections::HashMap<crate::events::WinHandle,WindowStatus>,",
+            "the field's declaration on `Model`",
+        ),
+        (
+            "view-core/src/model.rs",
+            "window_status:std::collections::HashMap::new(),",
+            "`Model::new` starting the field empty",
+        ),
+        (
+            "view-core/src/model.rs",
+            "modwindow_status;",
+            "the module that defines `WindowStatus`, which shares the field's name",
+        ),
+        (
+            "view-core/src/model.rs",
+            "pubusewindow_status::{",
+            "the module's re-exports",
         ),
     ];
 
