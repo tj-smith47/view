@@ -202,7 +202,7 @@ pub struct SubmitHold {
     user_keys: Vec<Vec<String>>,
     /// The latest keys sent to nvim in normal mode, as many as the longest
     /// of `invoke_keys`.
-    recent: Vec<Folded>,
+    recent: std::collections::VecDeque<Folded>,
     /// The key whose argument nvim reads the next normal-mode key as: the
     /// key before it takes one, and was not itself an argument.
     argument_of: Option<String>,
@@ -591,9 +591,9 @@ fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         Some(before) => LEAVES_NORMAL_AFTER.contains(&(before, key.as_str())),
     };
     if hold.recent.len() >= longest {
-        hold.recent.remove(0);
+        hold.recent.pop_front();
     }
-    hold.recent.push(Folded {
+    hold.recent.push_back(Folded {
         key,
         argument: argument_of.is_some(),
         mode_unsure,
@@ -601,12 +601,15 @@ fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     let recent = &hold.recent;
     let complete = hold.invoke_keys.iter().any(|invocation| {
         let keys = &invocation.keys;
-        recent.len() >= keys.len() && {
-            let tail = &recent[recent.len() - keys.len()..];
-            tail.first()
+        recent.len().checked_sub(keys.len()).is_some_and(|start| {
+            recent
+                .get(start)
                 .is_some_and(|first| !first.argument && !first.mode_unsure)
-                && tail.iter().map(|folded| &folded.key).eq(keys.iter())
-        }
+                && recent
+                    .range(start..)
+                    .map(|folded| &folded.key)
+                    .eq(keys.iter())
+        })
     });
     if complete {
         // the keys inside the sequence were the mapping's, and left no

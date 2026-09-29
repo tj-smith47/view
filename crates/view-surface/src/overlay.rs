@@ -876,7 +876,10 @@ fn kept_tail<'a>(run: &'a [Line], fit: &RunFit) -> impl Iterator<Item = &'a Line
     let (last, rest) = run
         .split_last()
         .map_or((None, &[][..]), |(last, rest)| (Some(last), rest));
-    rest[rest.len() - fit.rest..]
+    rest.len()
+        .checked_sub(fit.rest)
+        .and_then(|start| rest.get(start..))
+        .unwrap_or_default()
         .iter()
         .chain(last.filter(|_| fit.last))
 }

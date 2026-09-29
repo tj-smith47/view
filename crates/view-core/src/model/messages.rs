@@ -64,11 +64,11 @@ pub struct MessageEntry {
     wrapped: WrapCache,
 }
 
-/// An entry's wrapped rows with the width and the text they were wrapped
-/// from. Every cache compares equal, since it restates the entry's own
-/// text.
+/// An entry's wrapped rows with the width they were wrapped to. Every
+/// cache compares equal, since it restates the entry's own text, and an
+/// edit of that text empties it.
 #[derive(Debug, Clone, Default)]
-struct WrapCache(Option<(u16, u64, Vec<String>)>);
+struct WrapCache(Option<(u16, Vec<String>)>);
 
 impl PartialEq for WrapCache {
     fn eq(&self, _: &Self) -> bool {
@@ -79,33 +79,22 @@ impl PartialEq for WrapCache {
 impl Eq for WrapCache {}
 
 impl MessageEntry {
-    /// A fingerprint of the entry's text, which is what a wrap depends on.
-    fn text_key(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.content.hash(&mut hasher);
-        hasher.finish()
-    }
-
     /// The entry's lines wrapped to a box `width` cells wide, from the
-    /// cache when it was built for this width and this text.
+    /// cache when it was built for this width.
     fn wrapped(&self, width: u16) -> std::borrow::Cow<'_, [String]> {
         match &self.wrapped.0 {
-            Some((at, key, rows)) if *at == width && *key == self.text_key() => {
-                std::borrow::Cow::Borrowed(rows)
-            }
+            Some((at, rows)) if *at == width => std::borrow::Cow::Borrowed(rows),
             _ => std::borrow::Cow::Owned(wrap_toast(&self.lines(), width)),
         }
     }
 
-    /// Fills the cache for `width`, wrapping only when the width or the
-    /// text moved since the last fill.
+    /// Fills the cache for `width`, wrapping only when the width moved or
+    /// the text was edited since the last fill.
     fn rewrap(&mut self, width: u16) {
-        let key = self.text_key();
-        if matches!(&self.wrapped.0, Some((at, k, _)) if *at == width && *k == key) {
+        if matches!(&self.wrapped.0, Some((at, _)) if *at == width) {
             return;
         }
-        self.wrapped = WrapCache(Some((width, key, wrap_toast(&self.lines(), width))));
+        self.wrapped = WrapCache(Some((width, wrap_toast(&self.lines(), width))));
     }
 
     /// The instant the fold that pushed this entry ran, per
@@ -1034,6 +1023,7 @@ impl Messages {
                 return false;
             }
             raised.content = content;
+            raised.wrapped = WrapCache::default();
             return true;
         }
         // raised through `push_native` and marked afterwards, rather than
@@ -1309,6 +1299,26 @@ mod tests {
         let _ = messages.arm_top_slot();
         assert!(messages.armed_slot.is_some(), "the drawn toast is armed");
         assert_eq!(messages.armed_visible_slot(20, 40), Some(0));
+    }
+
+    /// A condition whose text is edited in place wraps its new text at the
+    /// width its old text was already wrapped to.
+    #[test]
+    fn an_edited_condition_is_wrapped_from_its_new_text() {
+        let mut messages = Messages::default();
+        let _ = messages.set_native_condition(Some("short"));
+        messages.rewrap(14);
+        let _ = messages.set_native_condition(Some("written to the file you opened"));
+        messages.rewrap(14);
+        let condition = messages.entries.iter().find(|e| e.condition);
+        assert_eq!(
+            condition.map(|e| e.wrapped(14).into_owned()),
+            Some(vec![
+                "written to".to_string(),
+                "the file you".into(),
+                "opened".into()
+            ])
+        );
     }
 
     /// A notice longer than the column breaks at the last space that fits,

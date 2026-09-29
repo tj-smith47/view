@@ -174,11 +174,11 @@ pub struct Model {
     /// (`update::ui_event`), so a session that opens and closes splits all
     /// day holds one record per window on screen and no more.
     pub window_status: std::collections::HashMap<crate::events::WinHandle, WindowStatus>,
-    /// The corner the last `update` stacked notices from and whether it
-    /// drew them from the column's top, or `None` while nothing is on the
-    /// stack. The next placement from the same corner keeps that end until
-    /// the cursor or the hunk under review enters it.
-    pub(crate) notice_held: Option<(crate::native::geometry::Anchor, bool)>,
+    /// The corner the last `update` stacked notices from and the column it
+    /// placed them in, or `None` while nothing is on the stack. The next
+    /// placement from the same corner keeps that column's end until the
+    /// cursor or the hunk under review enters it.
+    pub(crate) notice_held: Option<(crate::native::geometry::Anchor, NoticeColumn)>,
     /// `[ui] tile_titles`: the title a tile titled by its filetype takes
     /// instead, set once at startup.
     pub tile_titles: TileTitles,

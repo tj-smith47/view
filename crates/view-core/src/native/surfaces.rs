@@ -25,7 +25,8 @@
 //! Nothing here does I/O or allocates per observation: [`claims`] is
 //! integer arithmetic over one rect and the grid's size.
 
-use crate::model::{Model, NOTICE_COLUMN_MAX};
+use crate::model::notice::{notice_column_width, overlaps};
+use crate::model::Model;
 use crate::native::channels::{Channel, Region};
 use crate::native::ext::Ext;
 
@@ -440,7 +441,7 @@ pub fn claims_at(
     let anchor = model.notice_anchor();
     // a plugin's notifier stacks in the grid's own corner whatever view has
     // open there, so that corner is read beside the column view uses
-    let corner_width = NOTICE_COLUMN_MAX.min((grid_w / 2).max(1));
+    let corner_width = notice_column_width(grid_w);
     let grid_corner = (
         0,
         if anchor.is_left_corner() {
@@ -451,6 +452,9 @@ pub fn claims_at(
         corner_width,
         grid_h,
     );
+    // `span` clips to the grid, so every edge fits a grid cell
+    let cell = |at: i64| u16::try_from(at).unwrap_or(u16::MAX);
+    let float = (cell(top), cell(left), cell(right - left + 1), cell(rows));
     let over_the_stack = |column: (u16, u16, u16, u16)| {
         let (c_row, c_col, c_width, c_height) = column;
         let (c_row, c_col) = (i64::from(c_row), i64::from(c_col));
@@ -468,15 +472,7 @@ pub fn claims_at(
         } else {
             right >= c_col + i64::from(c_width) - 1
         };
-        c_width > 0
-            && c_height > 0
-            && top < c_row + i64::from(c_height)
-            && bottom >= c_row
-            && left < c_col + i64::from(c_width)
-            && right >= c_col
-            && near_the_anchor
-            && on_the_outer_side
-            && rows <= chrome_rows
+        overlaps(column, float) && near_the_anchor && on_the_outer_side && rows <= chrome_rows
     };
     let hit = crate::native::channels::CHANNELS.iter().find(|entry| {
         entry.channels.iter().any(|channel| match channel {
@@ -752,14 +748,10 @@ impl SurfaceConflicts {
     /// launch box names, and answers whether that is news: a channel
     /// reported again adds nothing.
     pub fn tell_held(&mut self, surface: Surface, channel: &str) -> bool {
-        let index = match self.told.iter().position(|(told, _)| *told == surface) {
-            Some(index) => index,
-            None => {
-                self.told.push((surface, Vec::new()));
-                self.told.len() - 1
-            }
-        };
-        let Some((_, channels)) = self.told.get_mut(index) else {
+        if !self.told.iter().any(|(told, _)| *told == surface) {
+            self.told.push((surface, Vec::new()));
+        }
+        let Some((_, channels)) = self.told.iter_mut().find(|(told, _)| *told == surface) else {
             return false;
         };
         if channels.iter().any(|told| told == channel) {

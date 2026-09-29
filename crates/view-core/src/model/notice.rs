@@ -73,12 +73,12 @@ impl Model {
         let held = self
             .notice_held
             .filter(|(corner, _)| *corner == anchor)
-            .map(|(_, from_top)| from_top);
+            .map(|(_, column)| column.from_top);
         self.place_column(held)
     }
 
-    /// Records the end the stack is drawn from this update, and wraps every
-    /// notice to the column's width. A session with nothing on the stack
+    /// Records the column the stack is drawn in this update, and wraps
+    /// every notice to its width. A session with nothing on the stack
     /// records nothing, so the next notice starts from the anchor.
     pub(crate) fn place_notices(&mut self) {
         if self.engine.messages.entries.is_empty() && self.toast_motion.is_none() {
@@ -86,18 +86,22 @@ impl Model {
             return;
         }
         let column = self.notice_column();
-        self.notice_held = Some((self.notice_anchor(), column.from_top));
+        self.notice_held = Some((self.notice_anchor(), column));
         self.engine.messages.rewrap(column.rect.2);
     }
 
     /// Where the armed toast sits among the boxes the column is showing.
     /// Skips the geometry outright on an empty stack, which is every
-    /// message on a session with nothing up.
+    /// message on a session with nothing up, and reads the column the last
+    /// `update` placed where there is one, so a message costs one column
+    /// placement.
     pub(crate) fn armed_toast_slot(&self) -> Option<usize> {
         if self.engine.messages.entries.is_empty() {
             return None;
         }
-        let rect = self.notice_column().rect;
+        let rect = self
+            .notice_held
+            .map_or_else(|| self.notice_column().rect, |(_, column)| column.rect);
         self.engine
             .messages
             .armed_visible_slot(usize::from(rect.3).max(3), rect.2)
@@ -201,12 +205,12 @@ impl Model {
                             if top { row } else { far(row, height) },
                             if left { col } else { far(col, width) },
                         );
-                        corner.0.abs_diff(at.0) + corner.1.abs_diff(at.1)
+                        u32::from(corner.0.abs_diff(at.0)) + u32::from(corner.1.abs_diff(at.1))
                     })
             })
             .flatten();
         let base = tile.unwrap_or_else(|| shrink(area, inset_rows, inset_cols));
-        let width = NOTICE_COLUMN_MAX.min((area.2 / 2).max(1)).min(base.2);
+        let width = notice_column_width(area.2).min(base.2);
         let col = if left {
             base.1
         } else {
@@ -370,8 +374,15 @@ const fn far(start: u16, len: u16) -> u16 {
     start.saturating_add(len).saturating_sub(1)
 }
 
+/// The notice column's width in an area `area_w` cells wide: half of it,
+/// up to [`NOTICE_COLUMN_MAX`]. The float detector reads the same width off
+/// the grid's own corner, where a plugin's notifier stacks.
+pub(crate) fn notice_column_width(area_w: u16) -> u16 {
+    NOTICE_COLUMN_MAX.min((area_w / 2).max(1))
+}
+
 /// Whether two rects share a cell.
-fn overlaps(a: Cells, b: Cells) -> bool {
+pub(crate) fn overlaps(a: Cells, b: Cells) -> bool {
     a.2 > 0
         && a.3 > 0
         && b.2 > 0
@@ -1413,5 +1424,49 @@ pub(crate) mod tests {
             }
             assert!(moves >= 2, "{anchor:?}: the stack moved {moves} times");
         }
+    }
+
+    /// The column's width and its overlap test are written once: the float
+    /// detector classifies a plugin's toast by the same width and the same
+    /// cell test the column is placed by, so a copy that drifts from them
+    /// misreads the toast.
+    #[test]
+    fn the_column_width_and_overlap_test_have_one_home() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        let mut width_formulas = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs")
+                    || path.file_name().is_some_and(|name| name == "tests.rs")
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let text = text.split("\n#[cfg(test)]").next().unwrap_or_default();
+                width_formulas.extend(
+                    text.matches("NOTICE_COLUMN_MAX.min(")
+                        .map(|_| path.display().to_string()),
+                );
+            }
+        }
+        assert_eq!(
+            width_formulas.len(),
+            1,
+            "the column's width is computed by `notice_column_width` alone: {width_formulas:?}"
+        );
+        let surfaces = include_str!("../native/surfaces.rs");
+        let detector = surfaces.split("\n#[cfg(test)]").next().unwrap_or_default();
+        assert!(
+            detector.contains("notice_column_width(grid_w)")
+                && detector.contains("overlaps(column, float)")
+                && !detector.contains("left < c_col"),
+            "the float detector reads the column's own width and overlap test"
+        );
     }
 }

@@ -684,9 +684,9 @@ impl PromptView {
             return message;
         }
         message.truncate(rows);
-        if let Some(shown) = message.len().checked_sub(1) {
-            let rest = self.message_after(&message[..shown]);
-            message[shown] = if super::text::text_width(&rest) <= width {
+        if let Some((last, shown)) = message.split_last_mut() {
+            let rest = self.message_after(shown);
+            *last = if super::text::text_width(&rest) <= width {
                 rest
             } else {
                 ending_in_mark(&rest, width)

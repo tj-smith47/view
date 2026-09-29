@@ -196,6 +196,9 @@ pub fn switches() -> Vec<&'static str> {
 /// such walk with no edit to it.
 #[must_use]
 pub fn switch_sets() -> Vec<Vec<&'static str>> {
+    // every switch gates some surface, so a registry this size keeps the
+    // subset mask below inside a `u32`
+    const _: () = assert!(ALL.len() < 32, "switch_sets counts subsets in a u32 mask");
     let ids = switches();
     (0..1u32 << ids.len())
         .map(|mask| {
