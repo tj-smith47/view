@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
+use view_core::events::UiEvent;
 use view_core::model::{Look, Model};
 use view_core::msg::{Effect, Key, Msg, RpcCall};
 use view_core::native::mappings::MappingClaim;
@@ -500,8 +501,9 @@ fn type_into(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String>
 
 /// A `:View` line nvim refuses runs nothing, so the error it reports for
 /// the line releases the keys held behind it, whichever way nvim hands
-/// its messages over. The pump never delivers the hold's own bound, so
-/// the release is the error's.
+/// its messages over, and where the message row already shows an earlier
+/// error the new one is drawn against. The pump never delivers the hold's
+/// own bound, so the release is the error's.
 #[test]
 fn keys_behind_a_view_line_nvim_refuses_reach_nvim_on_its_error() {
     use view_core::native::ext::Ext;
@@ -509,12 +511,28 @@ fn keys_behind_a_view_line_nvim_refuses_reach_nvim_on_its_error() {
         ":", "f", "i", "l", "t", "e", "r", "<Space>", "/", "<Bslash>", "(", "/", "<Space>", "V",
         "i", "e", "w", "<Space>", "a", "i", "<Space>", "o", "p", "e", "n",
     ];
-    for (name, surfaces) in [
-        ("messages", vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages]),
-        ("grid", vec![Ext::LineGrid]),
+    let bogus = [":", "b", "o", "g", "u", "s", "<CR>"];
+    for (name, surfaces, after_error) in [
+        (
+            "messages",
+            vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages],
+            false,
+        ),
+        ("grid", vec![Ext::LineGrid], false),
         (
             "multigrid",
             vec![Ext::LineGrid, Ext::Cmdline, Ext::Multigrid],
+            false,
+        ),
+        (
+            "multigrid-after-error",
+            vec![Ext::LineGrid, Ext::Cmdline, Ext::Multigrid],
+            true,
+        ),
+        (
+            "cmdline-after-error",
+            vec![Ext::LineGrid, Ext::Cmdline],
+            true,
         ),
     ] {
         let names: Vec<_> = surfaces.iter().map(|surface| surface.as_str()).collect();
@@ -528,6 +546,20 @@ fn keys_behind_a_view_line_nvim_refuses_reach_nvim_on_its_error() {
         .expect("the registration must answer with its claim list");
         // view tracks a `:` as a line only in a mode nvim has reported
         assert_eq!(model.engine.mode.current, "normal", "{name}");
+        if after_error {
+            assert_eq!(type_into(&session, &mut model, &bogus), bogus);
+            pump(&session, &mut model, ARRIVAL, |model, msg| {
+                let Msg::Redraw(events) = msg else {
+                    return None;
+                };
+                let drawn = events.iter().any(|event| {
+                    matches!(event, UiEvent::GridLine { col_start: 0, cells, .. }
+                        if cells.first().is_some_and(|cell| cell.text == "E"))
+                });
+                (drawn && model.engine.mode.current == "normal").then_some(())
+            })
+            .expect("nvim must draw the E492 its line reports");
+        }
         assert_eq!(type_into(&session, &mut model, &line).len(), line.len());
         assert_eq!(type_into(&session, &mut model, &["<CR>"]), ["<CR>"]);
         assert!(

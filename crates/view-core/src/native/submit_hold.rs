@@ -1357,15 +1357,18 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[St
 /// the bound it armed, a mode that says a key sequence ran no mapping, or
 /// an error nvim reports behind the line that armed it. nvim runs nothing
 /// on a line it refuses (a pattern that does not compile, a bad range, an
-/// unknown command), so no notification follows the error.
+/// unknown command), so no notification follows the error. Only a
+/// submitted line is read for one: a `<Cmd>` mapping leaves the mode
+/// where it was, so nothing orders its error.
 ///
-/// Costs one pass over a redraw batch while a hold stands, and nothing
-/// otherwise.
+/// With no hold standing this is two `Option` tests. While a `:View`
+/// line's hold stands, a redraw batch costs what
+/// `refused::reports_error` states.
 #[must_use]
 pub fn releases(model: &Model, msg: &Msg) -> bool {
     let hold = &model.submit_hold;
     hold.ended_by(msg)
-        || hold.is_holding()
+        || matches!(hold.held, Some((Armed::Command, _)))
             && matches!(msg, Msg::Redraw(events) if refused::reports_error(model, events))
 }
 
@@ -2160,9 +2163,43 @@ mod tests {
         assert_eq!(rest, alone);
     }
 
-    /// A message that is no error, and an error nvim reports before it has
-    /// hidden the submitted line, which belongs to a line typed ahead of
-    /// it, release nothing.
+    fn mode(mode: &str) -> UiEvent {
+        UiEvent::ModeChange {
+            mode: mode.to_string(),
+            mode_idx: 0,
+        }
+    }
+
+    fn shown(firstc: &str, text: &str) -> UiEvent {
+        UiEvent::CmdlineShow {
+            content: vec![(0, text.to_string())],
+            pos: 0,
+            firstc: firstc.to_string(),
+            prompt: String::new(),
+            indent: 0,
+            level: 1,
+        }
+    }
+
+    /// A model attached with `surfaces` that has submitted `ahead` and
+    /// then `:View ai open`, and is holding a `j` typed behind it.
+    fn typed_ahead(surfaces: Vec<crate::native::ext::Ext>, ahead: &[&str]) -> Model {
+        let mut model = normal_mode();
+        model.attach_surfaces(surfaces);
+        let _ = type_keys(&mut model, ahead);
+        let view = [
+            ":", "V", "i", "e", "w", " ", "a", "i", " ", "o", "p", "e", "n", "<CR>", "j",
+        ];
+        let _ = type_keys(&mut model, &view);
+        assert!(model.submit_hold.is_holding());
+        model
+    }
+
+    /// A message that is no error releases nothing, and neither does an
+    /// error nvim follows with a mode change into the command line, which
+    /// says it is reading the next line and the error was an earlier
+    /// line's. The batches are nvim 0.12.4's for keys typed inside one
+    /// round trip.
     #[test]
     fn a_message_that_is_no_error_on_the_line_releases_nothing() {
         use crate::native::ext::Ext;
@@ -2173,45 +2210,123 @@ mod tests {
             Msg::Redraw(vec![
                 UiEvent::CmdlineHide { level: 1 },
                 message("echo", "hello"),
+                mode("normal"),
             ]),
         );
         assert!(inputs(&sent).is_empty(), "{sent:?}");
         assert!(model.submit_hold.is_holding());
 
+        let bogus = [":", "b", "o", "g", "u", "s", "<CR>"];
+        let search = ["/", "(", "<CR>"];
+        let cases = [
+            // two flushes drained together, the second sent after the
+            // notification the pump has not yet delivered
+            (
+                "E492 ahead, drained with the View line's end",
+                surfaces(),
+                &bogus[..],
+                vec![
+                    UiEvent::CmdlineHide { level: 1 },
+                    message("emsg", "E492: Not an editor command: bogus"),
+                    shown(":", "View ai open"),
+                    mode("cmdline_normal"),
+                    UiEvent::CmdlineHide { level: 1 },
+                    mode("normal"),
+                ],
+            ),
+            (
+                "E492 ahead, messages and the command line",
+                surfaces(),
+                &bogus[..],
+                vec![
+                    UiEvent::CmdlineHide { level: 1 },
+                    message("emsg", "E492: Not an editor command: bogus"),
+                    shown(":", "View ai open"),
+                    mode("cmdline_normal"),
+                ],
+            ),
+            (
+                "E492 ahead, messages alone",
+                vec![Ext::LineGrid, Ext::Messages],
+                &bogus[..],
+                vec![
+                    UiEvent::CmdlineHide { level: 1 },
+                    message("emsg", "E492: Not an editor command: bogus"),
+                    shown(":", "View ai open"),
+                    mode("cmdline_normal"),
+                ],
+            ),
+            (
+                "E486 behind a search hide",
+                surfaces(),
+                &search[..],
+                vec![
+                    UiEvent::CmdlineHide { level: 1 },
+                    message("search_cmd", "/("),
+                    mode("normal"),
+                    message("emsg", "E486: Pattern not found: ("),
+                    shown(":", "View ai open"),
+                    mode("cmdline_normal"),
+                ],
+            ),
+        ];
+        let mut released = Vec::new();
+        for (name, surfaces, ahead, batch) in cases {
+            let mut model = typed_ahead(surfaces, ahead);
+            let sent = crate::update::update(&mut model, Msg::Redraw(batch));
+            if !inputs(&sent).is_empty() || !model.submit_hold.is_holding() {
+                released.push(name);
+            }
+        }
+        assert!(released.is_empty(), "released early: {released:?}");
+    }
+
+    /// Where nvim draws the whole screen, a diagnostic sign drawn at column
+    /// 0 in `ErrorMsg`'s own id, before the valid line's mode change into
+    /// the command line, releases nothing.
+    #[test]
+    fn an_error_sign_on_the_screen_releases_nothing() {
+        use crate::native::ext::Ext;
         let mut model = normal_mode();
-        model.attach_surfaces(surfaces());
-        let _ = type_keys(&mut model, &[":", "b", "o", "g", "u", "s", "<CR>"]);
-        let _ = type_keys(&mut model, &[":", "V", "i", "e", "w", "<CR>", "j"]);
+        model.attach_surfaces(vec![Ext::LineGrid]);
+        let _ = crate::update::update(&mut model, error_highlights(None));
+        let view = [
+            ":", "V", "i", "e", "w", " ", "a", "i", " ", "o", "p", "e", "n", "<CR>", "j",
+        ];
+        let _ = type_keys(&mut model, &view);
         assert!(model.submit_hold.is_holding());
         let sent = crate::update::update(
             &mut model,
             Msg::Redraw(vec![
-                UiEvent::CmdlineHide { level: 1 },
-                message("emsg", "E492: Not an editor command: bogus"),
+                UiEvent::GridLine {
+                    grid: 1,
+                    row: 7,
+                    col_start: 0,
+                    cells: vec![cell("E", 25), cell(" ", 25), cell("x", 0)],
+                },
+                UiEvent::GridLine {
+                    grid: 1,
+                    row: 9,
+                    col_start: 0,
+                    cells: vec![cell(":", 1), cell("V", 1)],
+                },
+                mode("cmdline_normal"),
             ]),
         );
         assert!(inputs(&sent).is_empty(), "{sent:?}");
         assert!(model.submit_hold.is_holding());
     }
 
-    /// Where nvim draws its own messages, the error is the message row
-    /// opening in `ErrorMsg`, laid over whatever `MsgArea` holds.
-    #[test]
-    fn an_error_nvim_draws_itself_releases_the_keys() {
-        use crate::events::GridCell;
-        use crate::native::ext::Ext;
-        let cell = |text: &str, hl_id: u64| GridCell {
+    fn cell(text: &str, hl_id: u64) -> crate::events::GridCell {
+        crate::events::GridCell {
             text: text.to_string(),
             hl_id,
             repeat: 1,
-        };
-        let line = |hl_id: u64| UiEvent::GridLine {
-            grid: 1,
-            row: 9,
-            col_start: 0,
-            cells: vec![cell("E", hl_id), cell("5", hl_id), cell("4", hl_id)],
-        };
-        let define = |id: u64, fg: Option<u32>, bg: Option<u32>| UiEvent::HlAttrDefine {
+        }
+    }
+
+    fn define(id: u64, fg: Option<u32>, bg: Option<u32>) -> UiEvent {
+        UiEvent::HlAttrDefine {
             id,
             fg,
             bg,
@@ -2219,6 +2334,44 @@ mod tests {
             italic: false,
             underline: false,
             reverse: false,
+        }
+    }
+
+    /// The 10-row screen, and the ids and colours nvim 0.12.4 defines for
+    /// `ErrorMsg` and `MsgArea`, with `area_bg` as the message area's
+    /// background.
+    fn error_highlights(area_bg: Option<u32>) -> Msg {
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 1,
+                width: 80,
+                height: 10,
+            },
+            define(1, None, None),
+            define(25, Some(0xff_c0b9), None),
+            define(59, Some(0xaa_aaaa), area_bg),
+            UiEvent::HlGroupSet {
+                name: "ErrorMsg".to_string(),
+                hl_id: 25,
+            },
+            UiEvent::HlGroupSet {
+                name: "MsgArea".to_string(),
+                hl_id: if area_bg.is_some() { 59 } else { 1 },
+            },
+        ])
+    }
+
+    /// Where nvim draws its own messages, the error is the message row
+    /// opening in `ErrorMsg`, laid over whatever `MsgArea` holds, and
+    /// then the mode leaving the command line.
+    #[test]
+    fn an_error_nvim_draws_itself_releases_the_keys() {
+        use crate::native::ext::Ext;
+        let line = |hl_id: u64| UiEvent::GridLine {
+            grid: 1,
+            row: 9,
+            col_start: 0,
+            cells: vec![cell("E", hl_id), cell("5", hl_id), cell("4", hl_id)],
         };
         // the ids and colours nvim 0.12.4 sends with and without a
         // `MsgArea` background
@@ -2229,37 +2382,94 @@ mod tests {
         ] {
             let mut model = normal_mode();
             model.attach_surfaces(vec![Ext::LineGrid]);
-            let _ = crate::update::update(
-                &mut model,
-                Msg::Redraw(vec![
-                    UiEvent::GridResize {
-                        grid: 1,
-                        width: 80,
-                        height: 10,
-                    },
-                    define(1, None, None),
-                    define(25, Some(0xff_c0b9), None),
-                    define(59, Some(0xaa_aaaa), area_bg),
-                    UiEvent::HlGroupSet {
-                        name: "ErrorMsg".to_string(),
-                        hl_id: 25,
-                    },
-                    UiEvent::HlGroupSet {
-                        name: "MsgArea".to_string(),
-                        hl_id: if area_bg.is_some() { 59 } else { 1 },
-                    },
-                ]),
-            );
+            let _ = crate::update::update(&mut model, error_highlights(area_bg));
             let _ = type_keys(&mut model, &REFUSED);
             let _ = type_keys(&mut model, &["<CR>", "j"]);
             assert!(model.submit_hold.is_holding());
             let sent = crate::update::update(
                 &mut model,
-                Msg::Redraw(vec![define(60, Some(0xff_c0b9), area_bg), drawn]),
+                Msg::Redraw(vec![
+                    define(60, Some(0xff_c0b9), area_bg),
+                    drawn,
+                    mode("normal"),
+                ]),
             );
             let expected: &[&str] = if released { &["j"] } else { &[] };
             assert_eq!(inputs(&sent), expected, "MsgArea bg {area_bg:?}");
             assert_eq!(model.submit_hold.is_holding(), !released);
+        }
+    }
+
+    /// Where the message row already shows an error, nvim starts the next
+    /// one at column 1, and the line counts when column 0 is still drawn
+    /// as an error: as the grid holds it, or as a line earlier in the
+    /// batch draws it. The batches are nvim 0.12.4's for `:bogus<CR>` and
+    /// then `:filter /\(/ View`.
+    #[test]
+    fn an_error_nvim_diffs_against_the_one_shown_releases_the_keys() {
+        use crate::native::ext::Ext;
+        let e54 = || UiEvent::GridLine {
+            grid: 1,
+            row: 9,
+            col_start: 1,
+            cells: vec![cell("5", 25), cell("4", 25), cell(":", 25)],
+        };
+        let row_opens = |text: &str, hl_id: u64| UiEvent::GridLine {
+            grid: 1,
+            row: 9,
+            col_start: 0,
+            cells: vec![cell(text, hl_id)],
+        };
+        let cases = [
+            (
+                "E492 on the grid",
+                Some(25),
+                vec![e54(), mode("normal")],
+                true,
+            ),
+            ("a blank row", Some(1), vec![e54(), mode("normal")], false),
+            // the line typed ahead, drained in the same batch
+            (
+                "E492 earlier in the batch",
+                None,
+                vec![
+                    UiEvent::CmdlineHide { level: 1 },
+                    row_opens("E", 25),
+                    shown(":", "filter /\\(/ View"),
+                    mode("cmdline_normal"),
+                    UiEvent::CmdlineHide { level: 1 },
+                    e54(),
+                    mode("normal"),
+                ],
+                true,
+            ),
+            (
+                "a row the batch blanked",
+                Some(25),
+                vec![row_opens(" ", 1), e54(), mode("normal")],
+                false,
+            ),
+            (
+                "a grid the batch cleared",
+                Some(25),
+                vec![UiEvent::GridClear { grid: 1 }, e54(), mode("normal")],
+                false,
+            ),
+        ];
+        for (name, on_grid, batch, released) in cases {
+            let mut model = normal_mode();
+            model.attach_surfaces(vec![Ext::LineGrid, Ext::Cmdline]);
+            let _ = crate::update::update(&mut model, error_highlights(None));
+            if let Some(hl_id) = on_grid {
+                let _ = crate::update::update(&mut model, Msg::Redraw(vec![row_opens("E", hl_id)]));
+            }
+            let _ = type_keys(&mut model, &REFUSED);
+            let _ = type_keys(&mut model, &["<CR>", "j"]);
+            assert!(model.submit_hold.is_holding(), "{name}");
+            let sent = crate::update::update(&mut model, Msg::Redraw(batch));
+            let expected: &[&str] = if released { &["j"] } else { &[] };
+            assert_eq!(inputs(&sent), expected, "{name}");
+            assert_eq!(model.submit_hold.is_holding(), !released, "{name}");
         }
     }
 

@@ -1,86 +1,144 @@
 //! An error nvim reports for the line that armed a hold, which says the
 //! line ran nothing and no notification will follow.
 
+use std::collections::HashMap;
+
 use crate::events::UiEvent;
 use crate::grid::registry::GridId;
-use crate::hl::HlAttr;
+use crate::hl::{HlAttr, HlTable};
 use crate::model::Model;
-use crate::native::ext::Ext;
+use crate::native::speculate::is_cmdline_mode;
 
-/// Whether `events` report an error once nvim has hidden every line the
-/// hold counts ended: a `msg_show` of kind `emsg`, or a line nvim draws
-/// into its own message area opening in the highlight it draws errors in.
-/// An error before those hides belongs to a line typed ahead of the one
-/// that armed the hold. Without `ext_cmdline` nvim sends no hide, and the
-/// first error counts.
+/// Whether `events` report an error for the submitted line and then leave
+/// the command line: a `msg_show` of kind `emsg`, or a line nvim draws
+/// into its own message area whose first cell, and its row's column 0,
+/// are drawn as an error. nvim reads a line typed ahead as soon as the
+/// one before it ends, so a mode change into the command line after an
+/// error says that error was the earlier line's. nvim reports modes in
+/// every attach.
+///
+/// Costs one pass over the batch, one more for its highlight definitions
+/// at the first line drawn into the message area, and a look back for
+/// column 0 on an error line that starts past it.
 pub(super) fn reports_error(model: &Model, events: &[UiEvent]) -> bool {
-    let mut unhidden = if model.owns(Ext::Cmdline) {
-        model.submit_hold.unhidden
-    } else {
-        0
-    };
-    events.iter().any(|event| match event {
-        UiEvent::CmdlineHide { level: 1 } => {
-            unhidden = unhidden.saturating_sub(1);
-            false
+    let grids = model.engine.grids();
+    let mut error = None;
+    let mut reported = false;
+    for (at, event) in events.iter().enumerate() {
+        match event {
+            UiEvent::ModeChange { mode, .. } if is_cmdline_mode(mode) => reported = false,
+            UiEvent::ModeChange { .. } if reported => return true,
+            UiEvent::MsgShow { kind, .. } if kind == "emsg" => reported = true,
+            UiEvent::GridLine {
+                grid,
+                row,
+                col_start,
+                cells,
+            } if grids.draws_messages(GridId(*grid)) => {
+                let Some(first) = cells.first() else {
+                    continue;
+                };
+                let Some(error) = error.get_or_insert_with(|| error_attr(model, events)) else {
+                    continue;
+                };
+                if !error.draws(first.hl_id) {
+                    continue;
+                }
+                // nvim diffs an error against the one the row already
+                // shows, and starts the line past the cells they share
+                let head = if *col_start == 0 {
+                    Some(first.hl_id)
+                } else {
+                    column_zero(&events[..at], *grid, *row).unwrap_or_else(|| {
+                        let row = u16::try_from(*row).ok()?;
+                        let cell = grids.grid(GridId(*grid))?.cell(row, 0)?;
+                        Some(cell.hl_id)
+                    })
+                };
+                reported |= head.is_some_and(|id| error.draws(id));
+            }
+            _ => {}
         }
-        UiEvent::MsgShow { kind, .. } => unhidden == 0 && kind == "emsg",
+    }
+    false
+}
+
+/// The highlight column 0 of `row` on `grid` holds once `before` is
+/// applied: `Some(None)` where `before` clears, scrolls or resizes the
+/// grid, and `None` where it leaves that cell as the grid holds it.
+fn column_zero(before: &[UiEvent], grid: u64, row: u64) -> Option<Option<u64>> {
+    before.iter().rev().find_map(|event| match event {
         UiEvent::GridLine {
-            grid,
+            grid: g,
+            row: r,
             col_start: 0,
             cells,
-            ..
-        } => {
-            unhidden == 0
-                && model.engine.grids().draws_messages(GridId(*grid))
-                && cells
-                    .first()
-                    .is_some_and(|cell| drawn_as_error(model, events, cell.hl_id))
+        } if *g == grid && *r == row => Some(cells.first().map(|cell| cell.hl_id)),
+        UiEvent::GridClear { grid: g }
+        | UiEvent::GridScroll { grid: g, .. }
+        | UiEvent::GridResize { grid: g, .. }
+            if *g == grid =>
+        {
+            Some(None)
         }
-        _ => false,
+        _ => None,
     })
 }
 
-/// Whether a message-area cell drawn in `hl_id` is drawn as an error.
-/// nvim lays `ErrorMsg` over `MsgArea`, so where a colorscheme colours the
-/// message area the cell's id is a combination `hl_group_set` never names,
-/// and its attributes are compared instead. The batch defines that id
-/// ahead of the line and is applied after this reads it.
-fn drawn_as_error(model: &Model, events: &[UiEvent], hl_id: u64) -> bool {
-    let hl = model.engine.hl();
-    let Some(error_id) = hl.group("ErrorMsg") else {
-        return false;
-    };
-    if hl_id == error_id {
-        return true;
+/// How nvim draws an error in its message area.
+struct ErrorAttr<'a> {
+    id: u64,
+    /// `ErrorMsg` laid over `MsgArea`: where a colorscheme colours the
+    /// message area, nvim draws the error in a combined id `hl_group_set`
+    /// never names.
+    drawn: HlAttr,
+    hl: &'a HlTable,
+    /// The attributes the batch defines, which is applied after this
+    /// reads it.
+    defined: HashMap<u64, HlAttr>,
+}
+
+impl ErrorAttr<'_> {
+    fn draws(&self, hl_id: u64) -> bool {
+        hl_id == self.id
+            || self
+                .defined
+                .get(&hl_id)
+                .copied()
+                .or_else(|| self.hl.attr(hl_id))
+                == Some(self.drawn)
     }
-    let attr = |id: u64| {
-        events
-            .iter()
-            .find_map(|event| match *event {
-                UiEvent::HlAttrDefine {
-                    id: defined,
-                    fg,
-                    bg,
-                    bold,
-                    italic,
-                    underline,
-                    reverse,
-                } if defined == id => Some(HlAttr {
-                    fg,
-                    bg,
-                    bold,
-                    italic,
-                    underline,
-                    reverse,
-                }),
-                _ => None,
-            })
-            .or_else(|| hl.attr(id))
-    };
-    let Some(error) = attr(error_id) else {
-        return false;
-    };
+}
+
+/// How `events` and the highlights already defined draw an error, or
+/// `None` before nvim has named `ErrorMsg`.
+fn error_attr<'a>(model: &'a Model, events: &[UiEvent]) -> Option<ErrorAttr<'a>> {
+    let hl = model.engine.hl();
+    let id = hl.group("ErrorMsg")?;
+    let mut defined = HashMap::new();
+    for event in events {
+        if let UiEvent::HlAttrDefine {
+            id,
+            fg,
+            bg,
+            bold,
+            italic,
+            underline,
+            reverse,
+        } = *event
+        {
+            defined.entry(id).or_insert(HlAttr {
+                fg,
+                bg,
+                bold,
+                italic,
+                underline,
+                reverse,
+            });
+        }
+    }
+    let attr = |id: u64| defined.get(&id).copied().or_else(|| hl.attr(id));
+    let error = attr(id)?;
     let drawn = hl
         .group("MsgArea")
         .and_then(attr)
@@ -92,5 +150,10 @@ fn drawn_as_error(model: &Model, events: &[UiEvent], hl_id: u64) -> bool {
             underline: error.underline || area.underline,
             reverse: error.reverse || area.reverse,
         });
-    attr(hl_id) == Some(drawn)
+    Some(ErrorAttr {
+        id,
+        drawn,
+        hl,
+        defined,
+    })
 }
