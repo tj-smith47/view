@@ -14,7 +14,7 @@ An agentic, Rust-fast terminal editor with a modern UI and Neovim mechanics.
 [Performance](#performance) &bull; [Roadmap](#roadmap) &bull;
 [Building](#building-from-source)
 
-![view editing Rust code, Dracula themed, with a plugin-heavy lazy.nvim config loaded](assets/view-screenshot.png)
+![view in Dracula with a file tree, a Rust file in its own frame, and an agent's proposed change under review beside the agent panel](assets/view-screenshot.png)
 
 </div>
 
@@ -235,6 +235,9 @@ target/release/view yourfile.rs
 
 Best experience on kitty, ghostty, or WezTerm; view degrades gracefully on
 less capable terminals.
+
+To record what view does in a session, see
+[docs/debugging.md](docs/debugging.md).
 
 ## License
 
