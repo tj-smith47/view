@@ -108,6 +108,9 @@ enum Hold {
         drawn: GridRegistry,
         /// The live highlight table with `attrs` added.
         hl: HlTable,
+        /// The live table's [`HlTable::revision`] `hl` was built from, or
+        /// `None` before it was built.
+        hl_from: Option<u64>,
     },
 }
 
@@ -330,6 +333,7 @@ impl EngineModel {
                 attrs,
                 drawn: GridRegistry::new(),
                 hl: HlTable::new(),
+                hl_from: None,
             };
         }
         let settled = |fitted: &[WindowSlot]| {
@@ -342,27 +346,20 @@ impl EngineModel {
             slots,
             shown,
             cells,
-            attrs,
+            drawn,
             ..
-        } = &self.held.hold
+        } = &mut self.held.hold
         {
             let next = match fit(slots, shown, &live, status) {
-                Fit::Slots(fitted) if !settled(&fitted) => self
-                    .grids
-                    .laid_out_as(&fitted, cells)
-                    .map(|drawn| Hold::Layout {
-                        slots: slots.clone(),
-                        shown: shown.clone(),
-                        cells: cells.clone(),
-                        attrs: attrs.clone(),
-                        drawn,
-                        hl: HlTable::new(),
-                    }),
+                Fit::Slots(fitted) if !settled(&fitted) => self.grids.laid_out_as(&fitted, cells),
                 Fit::Slots(_) | Fit::Unnamed | Fit::Outside => None,
             };
-            self.held.hold = next.unwrap_or_default();
+            match next {
+                Some(next) => *drawn = next,
+                None => self.held.hold = Hold::Nothing,
+            }
         }
-        self.refresh_held_hl();
+        self.rebuild_held_hl(false);
         began && self.holds_the_screen()
     }
 
@@ -370,11 +367,36 @@ impl EngineModel {
     /// engine's attributes added. A theme change lands in the live table
     /// between flushes, and the repaint it damages reads this one.
     pub(super) fn refresh_held_hl(&mut self) {
-        if let Hold::Layout { attrs, hl, .. } = &mut self.held.hold {
+        self.rebuild_held_hl(true);
+    }
+
+    /// The held layout's own table, so a test can tell a rebuilt table from
+    /// a kept one.
+    #[cfg(test)]
+    pub(crate) fn held_hl_mut(&mut self) -> Option<&mut HlTable> {
+        match &mut self.held.hold {
+            Hold::Layout { hl, .. } => Some(hl),
+            Hold::Nothing | Hold::Frame { .. } => None,
+        }
+    }
+
+    /// Rebuilds the held layout's table when `always`, or when the live
+    /// table has moved since it was built. A flush that changed no
+    /// highlight then copies no table.
+    fn rebuild_held_hl(&mut self, always: bool) {
+        let revision = self.hl.revision();
+        if let Hold::Layout {
+            attrs, hl, hl_from, ..
+        } = &mut self.held.hold
+        {
+            if !always && *hl_from == Some(revision) {
+                return;
+            }
             *hl = self.hl.clone();
             for (id, attr) in attrs.iter() {
                 hl.define_attr(*id, *attr);
             }
+            *hl_from = Some(revision);
         }
     }
 

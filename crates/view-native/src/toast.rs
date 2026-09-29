@@ -276,16 +276,35 @@ fn config_is_gone(key: &str) -> bool {
 /// apart from `keep`, the config being written for. A config is written for
 /// under a path every launch, and a record nothing prunes keeps one entry
 /// for each temporary config a script ever launched with.
+///
+/// Another view may have written the record since `record` was read, so
+/// the file is read again immediately before the rename and its keys merged
+/// in. Nothing locks the file between that read and the rename: two views
+/// writing inside that window keep only the later one's additions, which
+/// costs the other's notice once more on a later launch.
 fn write_record(path: &Path, record: &mut Record, keep: &str) -> Result<(), ToastError> {
-    record
-        .announced
-        .retain(|config, _| config == keep || !config_is_gone(config));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| ToastError::CreateDir {
             path: parent.display().to_string(),
             source,
         })?;
     }
+    let on_disk = read_record(path)?;
+    if on_disk.schema_version > SCHEMA_VERSION {
+        return Ok(());
+    }
+    for (config, keys) in on_disk.announced {
+        let merged = record.announced.entry(config).or_default();
+        for key in keys {
+            if !merged.contains(&key) {
+                merged.push(key);
+            }
+        }
+        merged.sort();
+    }
+    record
+        .announced
+        .retain(|config, _| config == keep || !config_is_gone(config));
     let rendered = toml::to_string(record)?;
     // written beside the record and renamed over it, so a process killed
     // mid-write leaves the previous record whole; the pid keeps two views
@@ -655,6 +674,31 @@ mod tests {
         assert_eq!(
             announced_keys(None, &record).expect("the record reads"),
             vec!["held:statusline".to_string()]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A key another view wrote after this one read the record survives
+    /// this one's write.
+    ///
+    /// Disconfirm: writing the record as read, with no read before the
+    /// rename, drops `held:tabline`.
+    #[test]
+    fn a_write_keeps_a_key_another_view_wrote_since_the_read() {
+        let dir = scratch("merge");
+        let record = dir.join("native-first-run.toml");
+        let mut read_earlier = read_record(&record).expect("an absent record reads");
+        record_key(None, "held:tabline", &record).expect("the other view records");
+        read_earlier.schema_version = SCHEMA_VERSION;
+        read_earlier
+            .announced
+            .entry(String::new())
+            .or_default()
+            .push("held:statusline".to_string());
+        write_record(&record, &mut read_earlier, "").expect("the write lands");
+        assert_eq!(
+            announced_keys(None, &record).expect("the record reads"),
+            vec!["held:statusline".to_string(), "held:tabline".to_string()]
         );
         std::fs::remove_dir_all(&dir).ok();
     }

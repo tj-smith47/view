@@ -1734,7 +1734,7 @@ impl Drop for RedrawLogOnReturn {
 /// once the terminal is restored, since fd 2 reaches the terminal again
 /// from then.
 fn finish_redraw_log() {
-    if let Err(e) = view_engine::redraw_log::finish(native::REDRAW_LOG_QUIT_WAIT) {
+    if let Err(e) = view_engine::redraw_log::finish(view_proc::writer::QUIT_WAIT) {
         eprintln!("view: {e}");
     }
 }

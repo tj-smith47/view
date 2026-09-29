@@ -1115,6 +1115,63 @@ fn a_theme_change_during_a_held_layout_repaints_from_the_current_table() {
     assert!(m.engine.holds_the_screen());
 }
 
+/// A flush during a held layout keeps the held table while the live one
+/// has not moved, and rebuilds it once a highlight lands.
+///
+/// Disconfirm: rebuilding the held table on every flush drops the marker
+/// at the first flush.
+#[test]
+fn a_held_layout_copies_the_highlight_table_only_when_it_moved() {
+    let mut m = vsplit_model();
+    let _ = restart(&mut m);
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    assert!(m.engine.holds_the_screen(), "the layout was not held");
+    let attr = |fg| crate::hl::HlAttr {
+        fg: Some(fg),
+        bg: None,
+        bold: false,
+        italic: false,
+        underline: false,
+        reverse: false,
+    };
+    m.engine
+        .held_hl_mut()
+        .expect("a held layout has a table")
+        .define_attr(99, attr(0x123456));
+    let marker = |m: &Model| m.engine.painted_hl().attr(99).and_then(|a| a.fg);
+
+    let _ = update(&mut m, Msg::Redraw(vec![UiEvent::Flush]));
+    assert!(m.engine.holds_the_screen());
+    assert_eq!(
+        marker(&m),
+        Some(0x123456),
+        "a flush that moved no highlight copied the table"
+    );
+
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::HlAttrDefine {
+                id: 8,
+                fg: Some(0x654321),
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert!(m.engine.holds_the_screen());
+    assert_eq!(
+        m.engine.painted_hl().attr(8).and_then(|a| a.fg),
+        Some(0x654321),
+        "the held layout missed a highlight defined during the hold"
+    );
+    assert_eq!(marker(&m), None, "the moved table was not rebuilt");
+}
+
 /// The bound hands the screen to a replacement that never reopens the
 /// dead engine's sidebar, and an expiry the dead engine armed does not.
 #[test]

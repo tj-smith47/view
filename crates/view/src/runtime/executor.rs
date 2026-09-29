@@ -171,6 +171,21 @@ impl<E: EngineOps> Executor<E> {
         self.loop_msgs.flush(self.toast_timer.as_ref());
     }
 
+    /// Sends `msg` to the loop's own channel after `after`, from a thread
+    /// that owns that one send. The loop has no clock of its own, so this
+    /// thread is what wakes an idle editor. Answers whether the timer was
+    /// armed: false when no channel is wired or the thread was refused.
+    fn one_shot(&self, name: &'static str, after: std::time::Duration, msg: Msg) -> bool {
+        let Some(tx) = &self.toast_timer else {
+            return false;
+        };
+        let tx = tx.clone();
+        spawn_or_log(name, move || {
+            std::thread::sleep(after);
+            let _ = tx.send(msg);
+        })
+    }
+
     /// Wires the clipboard worker's job channel; `ClipboardRead`/
     /// `ClipboardWrite` effects forward to it instead of self-answering.
     #[must_use]
@@ -590,13 +605,7 @@ impl<E: EngineOps> Executor<E> {
             // this thread -- not a paint-time check -- is what wakes it back
             // up on an otherwise-idle editor.
             Effect::ScheduleToastExpiry { id, after } => {
-                if let Some(tx) = &self.toast_timer {
-                    let tx = tx.clone();
-                    spawn_or_log("toast-expiry", move || {
-                        std::thread::sleep(after);
-                        let _ = tx.send(Msg::ToastExpired { id });
-                    });
-                }
+                self.one_shot("toast-expiry", after, Msg::ToastExpired { id });
                 Flow::Continue
             }
             // the same one-shot thread again, and one live at a time by
@@ -612,13 +621,8 @@ impl<E: EngineOps> Executor<E> {
             // paints it. The unwired half of the same degrade is `dispatch`'s
             // to fold, there being no channel here to carry it.
             Effect::ScheduleAnimTick { after } => {
-                if let Some(tx) = &self.toast_timer {
-                    let ticker = tx.clone();
-                    let armed = spawn_or_log("toast-motion", move || {
-                        std::thread::sleep(after);
-                        let _ = ticker.send(Msg::AnimTick);
-                    });
-                    if !armed {
+                if !self.one_shot("toast-motion", after, Msg::AnimTick) {
+                    if let Some(tx) = &self.toast_timer {
                         let _ = tx.send(Msg::AnimDropped);
                     }
                 }
@@ -629,55 +633,33 @@ impl<E: EngineOps> Executor<E> {
             // or the first keypress, both of which arrive on paths that do
             // not need a clock
             Effect::ScheduleStartupHold { after, generation } => {
-                if let Some(tx) = &self.toast_timer {
-                    let tx = tx.clone();
-                    spawn_or_log("startup-hold", move || {
-                        std::thread::sleep(after);
-                        let _ = tx.send(Msg::StartupHoldExpired { generation });
-                    });
-                }
+                self.one_shot(
+                    "startup-hold",
+                    after,
+                    Msg::StartupHoldExpired { generation },
+                );
                 Flow::Continue
             }
             // the same one-shot thread, and the degrade `msg.rs` states
             Effect::ScheduleLayoutHold { after, generation } => {
-                if let Some(tx) = &self.toast_timer {
-                    let tx = tx.clone();
-                    spawn_or_log("layout-hold", move || {
-                        std::thread::sleep(after);
-                        let _ = tx.send(Msg::LayoutHoldExpired { generation });
-                    });
-                }
+                self.one_shot("layout-hold", after, Msg::LayoutHoldExpired { generation });
                 Flow::Continue
             }
             // the same one-shot thread, and the degrade `msg.rs` states
             Effect::ScheduleChordHold { after, generation } => {
-                if let Some(tx) = &self.toast_timer {
-                    let tx = tx.clone();
-                    spawn_or_log("chord-hold", move || {
-                        std::thread::sleep(after);
-                        let _ = tx.send(Msg::ChordHoldExpired { generation });
-                    });
-                }
+                self.one_shot("chord-hold", after, Msg::ChordHoldExpired { generation });
                 Flow::Continue
             }
             Effect::ScheduleSubmitHold { after, generation } => {
-                if let Some(tx) = &self.toast_timer {
-                    let tx = tx.clone();
-                    spawn_or_log("submit-hold", move || {
-                        std::thread::sleep(after);
-                        let _ = tx.send(Msg::SubmitHoldExpired { generation });
-                    });
-                }
+                self.one_shot("submit-hold", after, Msg::SubmitHoldExpired { generation });
                 Flow::Continue
             }
             Effect::ScheduleSequenceExpiry { after, generation } => {
-                if let Some(tx) = &self.toast_timer {
-                    let tx = tx.clone();
-                    spawn_or_log("sequence-expiry", move || {
-                        std::thread::sleep(after);
-                        let _ = tx.send(Msg::SequenceExpired { generation });
-                    });
-                }
+                self.one_shot(
+                    "sequence-expiry",
+                    after,
+                    Msg::SequenceExpired { generation },
+                );
                 Flow::Continue
             }
             // `dispatch` hands this to the native session's record writer
@@ -689,13 +671,11 @@ impl<E: EngineOps> Executor<E> {
             // states: an unwired channel leaves the grace open, which is a
             // take-down bounded by the complaint signature alone
             Effect::ScheduleComplaintGrace { after, generation } => {
-                if let Some(tx) = &self.toast_timer {
-                    let tx = tx.clone();
-                    spawn_or_log("complaint-grace", move || {
-                        std::thread::sleep(after);
-                        let _ = tx.send(Msg::ComplaintGraceExpired { generation });
-                    });
-                }
+                self.one_shot(
+                    "complaint-grace",
+                    after,
+                    Msg::ComplaintGraceExpired { generation },
+                );
                 Flow::Continue
             }
             // the same one-shot thread `ScheduleToastExpiry` uses, and the
@@ -715,14 +695,14 @@ impl<E: EngineOps> Executor<E> {
             // unwired-`toast_timer` half of that degrade needs `update()`
             // itself and lives in `dispatch`, beside `Effect::AiTrustSet`'s.
             Effect::ReprobeExternalWrite { path } => {
-                if let Some(tx) = &self.toast_timer {
-                    let timer = tx.clone();
-                    let reason = reprobe_unscheduled(&path);
-                    let spawned = spawn_or_log("external-write-reprobe", move || {
-                        std::thread::sleep(view_ai::FILE_GONE_GRACE);
-                        let _ = timer.send(Msg::ConfirmExternalRemoval { path });
-                    });
-                    if !spawned {
+                let reason = reprobe_unscheduled(&path);
+                let armed = self.one_shot(
+                    "external-write-reprobe",
+                    view_ai::FILE_GONE_GRACE,
+                    Msg::ConfirmExternalRemoval { path },
+                );
+                if !armed {
+                    if let Some(tx) = &self.toast_timer {
                         let _ = tx.try_send(Msg::ExternalWatchDegraded { reason });
                     }
                 }
@@ -1006,5 +986,33 @@ mod tests {
         }));
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(*ops.calls.borrow(), vec!["release_option(laststatus)"]);
+    }
+
+    /// Every timer arm arms through `one_shot`, so a change to how a timer
+    /// thread degrades is made once.
+    ///
+    /// Disconfirm: restoring one arm's own `spawn_or_log` block with its
+    /// `sleep` makes the count two.
+    #[test]
+    fn every_timer_sleeps_in_the_one_shot_helper() {
+        let source = include_str!("executor.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(source);
+        assert_eq!(
+            production.matches("std::thread::sleep(").count(),
+            1,
+            "a timer arm sleeps on a thread of its own; route it through one_shot"
+        );
+    }
+
+    /// An unwired executor arms no timer and says so, which is what the
+    /// motion and re-probe arms read to pick their degrade.
+    #[test]
+    fn an_unwired_one_shot_reports_it_armed_nothing() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        assert!(!executor.one_shot("test", std::time::Duration::ZERO, Msg::AnimTick));
     }
 }

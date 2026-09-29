@@ -84,6 +84,8 @@ pub struct HlTable {
     accent: AccentInputs,
     /// Whether any of the above changed since the last [`HlTable::take_dirty`].
     dirty: bool,
+    /// See [`HlTable::revision`].
+    revision: u64,
 }
 
 /// The colours the accent role resolves through, in preference order.
@@ -110,6 +112,7 @@ impl HlTable {
             confirmed: None,
             accent: AccentInputs::default(),
             dirty: false,
+            revision: 0,
         }
     }
 
@@ -177,7 +180,7 @@ impl HlTable {
         // unconditional rather than value-compared: the generation moves on
         // every call, and that alone re-derives the theme whenever it
         // invalidates a previously matching confirmed reply
-        self.dirty = true;
+        self.touch();
         self.probe_generation
     }
 
@@ -196,7 +199,7 @@ impl HlTable {
             return;
         }
         self.attrs.insert(hl_id, attr);
-        self.dirty = true;
+        self.touch();
     }
 
     /// Associates a builtin UI element name with the `hl_id` it resolves
@@ -206,7 +209,7 @@ impl HlTable {
             return;
         }
         self.groups.insert(name, hl_id);
-        self.dirty = true;
+        self.touch();
     }
 
     /// Accepts one probe reply as the confirmed disambiguation of the
@@ -218,7 +221,7 @@ impl HlTable {
             return;
         }
         self.confirmed = Some(probe);
-        self.dirty = true;
+        self.touch();
     }
 
     /// What the accent role resolves through right now.
@@ -233,7 +236,7 @@ impl HlTable {
             return;
         }
         self.accent.token = token;
-        self.dirty = true;
+        self.touch();
     }
 
     /// Records the two probed syntax foregrounds the accent falls back to.
@@ -243,14 +246,27 @@ impl HlTable {
         }
         self.accent.function_fg = function_fg;
         self.accent.statement_fg = statement_fg;
-        self.dirty = true;
+        self.touch();
     }
 
     /// Records that the resolved styles moved for a reason no single
     /// mutator above saw: a whole-table replacement, where the incoming
     /// table's own flag describes its construction rather than the swap.
     pub(crate) fn mark_dirty(&mut self) {
+        self.touch();
+    }
+
+    fn touch(&mut self) {
         self.dirty = true;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// A number that moves on every change to what this table resolves,
+    /// and is never drained, so a copy built from this table can tell
+    /// whether it is stale however many frames have taken the dirty flag.
+    #[must_use]
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Drains whether anything here changed since the last call. Called once

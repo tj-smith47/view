@@ -606,7 +606,6 @@ crates/view-bench/src/remote_ui.rs 1 the headless control server, tied: it has n
 crates/view-bench/src/scenarios/echo_speculated_rtt.rs 3 an interpreter probe that runs to completion, and the relay fixture the row waits out and kills
 crates/view-bench/src/session.rs 1 a pty session leader, ended by the kernel when the master closes
 crates/view-engine/src/process.rs 4 the engine and the remote leg ssh client, both tied through spawn_engine_child, each started again by the ETXTBSY retry
-crates/view-engine/src/redraw_log.rs 1 the thread that writes the redraw log, which ends with the process
 crates/view-harness/src/bin/bench.rs 1 a sysctl read, waited on to completion
 crates/view-harness/src/bin/bench/replicates.rs 1 a git read, waited on to completion
 crates/view-harness/src/bin/oracle/compat.rs 3 a cargo build and a reference nvim, both waited on to completion, and a pty-hosted view ended by its master closing
@@ -617,10 +616,10 @@ crates/view-oracle/src/hang.rs 1 a taskkill, waited on to completion
 crates/view-oracle/src/pty.rs 2 the pty funnel: setsid and TIOCSCTTY make the child a session leader, so the master closing delivers SIGHUP
 crates/view-oracle/src/remote.rs 1 a stub ssh client, waited on to completion
 crates/view-proc/src/lib.rs 4 the anchor thread every tied spawn forks from, which lives as long as the process does, and the watcher off Linux, which is the tie itself and ends on the pipe this process closes by ending, plus the thread that builds it ahead of the first spawn
+crates/view-proc/src/writer.rs 1 the thread that owns every write to one file, for the redraw log and the first-run record, not a process, which ends when its queue closes or with the process
 crates/view-test-support/src/lib.rs 3 a sysctl read and the two process-table probes off Linux, each waited on to completion
 crates/view/src/ai_context_worker.rs 1 a worker thread, not a process
 crates/view/src/clipboard.rs 2 worker threads, not processes
-crates/view/src/native.rs 1 the first-run record writer thread, not a process
 crates/view/src/remote_guard.rs 2 an ssh probe, bounded by its own deadline and killed on it
 crates/view/src/runtime.rs 1 a worker thread, not a process
 '

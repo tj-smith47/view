@@ -4,29 +4,39 @@
 //! with nvim's.
 //!
 //! [`init`] reads the variable and opens the file once, at startup, handing
-//! it to a writer thread of its own; [`finish`] hands that thread the last
-//! lines and waits a bounded time for them to reach the file. Unset, every
-//! entry point is one `OnceLock` read that finds `None` and formats nothing.
+//! it to a [`BackgroundWriter`]; [`finish`] hands that thread the last lines
+//! and waits a bounded time for them to reach the file. Unset, every entry
+//! point is one `OnceLock` read that finds `None` and formats nothing.
+//!
+//! The RPC reader writes here, so a batch that finds the queue full is
+//! dropped and counted, and the next batch that fits is led by a
+//! `dropped <n>` line naming how many lines were lost.
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::TrySendError;
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use view_core::events::UiEvent;
+use view_proc::writer::{BackgroundWriter, Finished};
 
-/// The number the next line carries, and the channel to the thread that
-/// owns the file. Numbering and sending share one lock, so the channel
-/// carries lines in the order they are numbered; the send never blocks, so
-/// no caller waits on the disk.
+/// How many batches may wait for the disk. A batch is one decoded redraw
+/// message, so this is several seconds of a busy screen.
+const QUEUED_BATCHES: usize = 1024;
+
+/// The number the next line carries, and the writer thread that owns the
+/// file. Numbering and queueing share one lock, so the queue carries lines
+/// in the order they are numbered; queueing never waits, so no caller
+/// waits on the disk.
 struct Log {
     seq: u64,
-    /// Each text with the number of its first line.
-    lines: Option<Sender<(u64, String)>>,
-    /// Answers once the writer's loop ends, with the write that ended it.
-    done: Option<Receiver<Option<WriteError>>>,
+    /// Takes each text with the number of its first line.
+    writer: BackgroundWriter<(u64, String), WriteError>,
+    /// Lines numbered since the last text the queue took, and refused by
+    /// a full queue.
+    dropped: u64,
 }
 
 /// A write to the `VIEW_REDRAW_LOG` file that failed. The writer stops at
@@ -57,27 +67,25 @@ pub enum FinishError {
     },
 }
 
-/// Starts the thread that writes each text it receives to `file`, until
-/// every sender is gone or a write fails.
-fn spawn(mut file: Box<dyn std::io::Write + Send>) -> std::io::Result<Log> {
-    let (lines, texts) = mpsc::channel::<(u64, String)>();
-    let (ended, done) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("redraw-log".into())
-        .spawn(move || {
-            let mut failed = None;
-            for (line, text) in texts {
-                if let Err(source) = file.write_all(text.as_bytes()) {
-                    failed = Some(WriteError { line, source });
-                    break;
-                }
-            }
-            let _ = ended.send(failed);
-        })?;
+/// Starts the thread that writes each text it receives to `file`, until the
+/// log is closed or a write fails.
+fn spawn(file: Box<dyn std::io::Write + Send>) -> std::io::Result<Log> {
+    spawn_with(file, QUEUED_BATCHES)
+}
+
+fn spawn_with(mut file: Box<dyn std::io::Write + Send>, capacity: usize) -> std::io::Result<Log> {
+    let writer = BackgroundWriter::start(
+        "redraw-log",
+        capacity,
+        move |(line, text): (u64, String)| {
+            file.write_all(text.as_bytes())
+                .map_err(|source| WriteError { line, source })
+        },
+    )?;
     Ok(Log {
         seq: 0,
-        lines: Some(lines),
-        done: Some(done),
+        writer,
+        dropped: 0,
     })
 }
 
@@ -141,14 +149,15 @@ pub fn finish(wait: Duration) -> Result<(), FinishError> {
 }
 
 fn close(sink: &Mutex<Log>, wait: Duration) -> Result<(), FinishError> {
-    let done = {
-        let mut log = sink.lock().unwrap_or_else(PoisonError::into_inner);
-        log.lines = None;
-        log.done.take()
-    };
-    match done.map(|done| done.recv_timeout(wait)) {
-        Some(Ok(Some(failed))) => Err(failed.into()),
-        Some(Err(RecvTimeoutError::Timeout)) => Err(FinishError::Busy { wait }),
+    // the wait runs with the lock released, since the RPC reader takes it
+    let closed = sink
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .writer
+        .close();
+    match closed.wait(wait) {
+        Finished::Failed(failed) => Err(failed.into()),
+        Finished::Busy => Err(FinishError::Busy { wait }),
         _ => Ok(()),
     }
 }
@@ -167,7 +176,7 @@ pub fn enabled() -> bool {
 /// The payload is built only when a log is open.
 pub fn note(payload: impl FnOnce() -> String) {
     if let Some(sink) = sink() {
-        write(sink, [payload()]);
+        write(sink, || [payload()]);
     }
 }
 
@@ -175,8 +184,7 @@ pub fn note(payload: impl FnOnce() -> String) {
 /// writes a grid, and one per `flush`, written to the file at once.
 pub(crate) fn batch(events: &[UiEvent]) {
     if let Some(sink) = sink() {
-        let lines: Vec<String> = events.iter().filter_map(describe).collect();
-        write(sink, lines);
+        write(sink, || events.iter().filter_map(describe));
     }
 }
 
@@ -187,14 +195,38 @@ pub(crate) fn drained(events: &[UiEvent]) {
     }
 }
 
-/// Numbers `lines` under the log's lock and sends them to the writer
-/// thread as one text, which that thread writes to the file in one call.
-fn write(sink: &Mutex<Log>, lines: impl IntoIterator<Item = String>) {
+/// Numbers the lines `lines` builds under the log's lock and queues them for
+/// the writer thread as one text, which that thread writes to the file in
+/// one call. Nothing is built once the writer has stopped.
+///
+/// A full queue drops the text and counts its lines; the next text the
+/// queue takes opens with a `dropped <n>` line.
+fn write<I: IntoIterator<Item = String>>(sink: &Mutex<Log>, lines: impl FnOnce() -> I) {
     let mut log = sink.lock().unwrap_or_else(PoisonError::into_inner);
-    let first = log.seq;
-    let text = numbered(&mut log.seq, lines);
-    if let Some(lines) = log.lines.as_ref().filter(|_| !text.is_empty()) {
-        let _ = lines.send((first, text));
+    let Log {
+        seq,
+        writer,
+        dropped,
+    } = &mut *log;
+    if !writer.is_open() {
+        return;
+    }
+    let first = *seq;
+    let lost = (*dropped > 0).then(|| format!("dropped {dropped}"));
+    let text = numbered(seq, lost.into_iter().chain(lines()));
+    if text.is_empty() {
+        return;
+    }
+    let taken = *seq - first;
+    match writer.try_send((first, text)) {
+        Ok(()) => *dropped = 0,
+        // the refused lines give their numbers back, so the file's numbers
+        // stay consecutive and the `dropped` line alone states the loss
+        Err(TrySendError::Full(_)) => {
+            *dropped += taken - u64::from(*dropped > 0);
+            *seq = first;
+        }
+        Err(TrySendError::Disconnected(_)) => {}
     }
 }
 
@@ -264,8 +296,100 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use std::sync::mpsc;
     use view_core::events::GridCell;
     use view_test_support::ScratchDir;
+
+    /// [`super::write`] with lines already built.
+    fn write(sink: &Mutex<Log>, lines: impl IntoIterator<Item = String>) {
+        super::write(sink, || lines);
+    }
+
+    /// A file that says when a write reaches it, and holds that write
+    /// until the test lets it through.
+    struct Gate {
+        file: std::fs::File,
+        entered: mpsc::Sender<()>,
+        released: mpsc::Receiver<()>,
+    }
+
+    impl std::io::Write for Gate {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let _ = self.entered.send(());
+            let _ = self.released.recv();
+            self.file.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    /// Batches a full queue refuses are counted, and the next batch the
+    /// queue takes opens with one line naming how many lines were lost.
+    ///
+    /// Disconfirm: a blocking send in place of `try_send` never returns
+    /// from the third write while the file is held, and resetting the count
+    /// on a refusal leaves the `dropped` line out.
+    #[test]
+    fn a_full_queue_drops_batches_and_says_how_many_lines_it_lost() {
+        let dir = ScratchDir::new("redraw-log").unwrap();
+        let path = dir.path().join("redraw.log");
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let file = Gate {
+            file: std::fs::File::create(&path).unwrap(),
+            entered: entered_tx,
+            released,
+        };
+        let sink = Mutex::new(spawn_with(Box::new(file), 1).unwrap());
+        write(&sink, ["a".to_string()]);
+        entered.recv().unwrap();
+        write(&sink, ["b".to_string()]);
+        write(&sink, ["c".to_string()]);
+        write(&sink, ["d".to_string(), "e".to_string()]);
+        assert_eq!(sink.lock().unwrap().dropped, 3);
+        drop(release);
+        let deadline = std::time::Instant::now() + patient();
+        while std::fs::read_to_string(&path).unwrap() != "0 a\n1 b\n" {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the queued batch never reached the file"
+            );
+            std::thread::yield_now();
+        }
+        write(&sink, ["f".to_string()]);
+        close(&sink, patient()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "0 a\n1 b\n2 dropped 3\n3 f\n"
+        );
+    }
+
+    /// Once the writer has stopped, a line is never built.
+    ///
+    /// Disconfirm: building the lines before checking the writer calls the
+    /// closure.
+    #[test]
+    fn a_stopped_writer_builds_no_lines() {
+        let sink = Mutex::new(spawn(Box::new(Full { accepted: 0 })).unwrap());
+        let deadline = std::time::Instant::now() + patient();
+        while sink.lock().unwrap().writer.is_open() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the writer never stopped"
+            );
+            write(&sink, ["a".to_string()]);
+            std::thread::yield_now();
+        }
+        let mut built = false;
+        super::write(&sink, || {
+            built = true;
+            ["b".to_string()]
+        });
+        assert!(!built, "a line was built for a writer that had stopped");
+        assert!(close(&sink, patient()).is_err());
+    }
 
     #[test]
     fn a_line_is_summarised_by_its_span_and_unlogged_kinds_write_nothing() {
@@ -381,8 +505,8 @@ mod tests {
     /// `write` returns while the file has not accepted a byte, and what
     /// it sent reaches the file in number order once the file does.
     ///
-    /// Disconfirm: a `sync_channel(0)` in place of the unbounded channel
-    /// leaves the writes stuck on the held file past the deadline.
+    /// Disconfirm: a blocking send in place of `try_send` on a queue of no
+    /// capacity leaves the writes stuck on the held file past the deadline.
     #[test]
     fn a_write_returns_while_the_file_is_held() {
         let dir = ScratchDir::new("redraw-log").unwrap();
