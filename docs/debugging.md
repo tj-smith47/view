@@ -32,10 +32,25 @@ Attach this file to a bug report about startup, a crash or an engine restart.
 ## Recording the redraw sequence
 
 Set `VIEW_REDRAW_LOG` to a file path, and view appends one numbered line for
-each grid resize, window placement, grid clear, grid line and flush nvim sends,
-for each resize view asks nvim for, for each terminal resize (`resized`), for
-each time an engine restart holds or releases the screen (`held_screen`), and
-for each batch view draws (`drain`):
+each of these:
+
+| line | records |
+|---|---|
+| `grid_resize` | nvim sizes a grid |
+| `grid_line` | nvim writes a run of cells on one row of a grid |
+| `grid_scroll` | nvim scrolls a region of a grid |
+| `grid_clear` | nvim clears a grid |
+| `grid_destroy` | nvim frees a grid |
+| `win_pos` | nvim places a window's grid |
+| `win_float_pos` | nvim places a floating window's grid |
+| `win_hide` | nvim hides a window's grid |
+| `win_close` | nvim closes a window |
+| `flush` | nvim ends a batch of screen updates |
+| `try_resize` | view asks nvim to resize the whole screen |
+| `try_resize_grid` | view asks nvim to resize one grid |
+| `resized` | the terminal changes size |
+| `held_screen` | an engine restart holds or releases the screen |
+| `drain` | view takes a batch of updates to draw |
 
 ```text
 711 grid_resize grid=1 width=148 height=37
@@ -47,8 +62,9 @@ for each batch view draws (`drain`):
 VIEW_REDRAW_LOG=~/redraw.log view src/main.rs
 ```
 
-The numbers run in the order the lines were written, across every thread.
-Attach this file to a bug report about text drawn in the wrong place, or left
-behind after a window or the terminal changed size.
+The numbers run in the order the lines were written, across every thread. When
+a write to the file fails, the log stops at that line, and view names the line
+on exit. Attach this file to a bug report about text drawn in the wrong place,
+or left behind after a window or the terminal changed size.
 
 The two variables can be set together.

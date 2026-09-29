@@ -1095,7 +1095,7 @@ fn main() -> Result<()> {
     // a thread, a /bin/sh), and a refusal raised with nowhere to write it
     // is the one that says no child of this session is tied
     view_proc::record_refusals_with(log_untied_child);
-    // before any other thread exists, and as far from the engine spawn as
+    // before any thread that forks exists, and as far from the engine spawn as
     // the body allows: off Linux the tie is a watcher process, and this is
     // what keeps forking it out of the spawn the startup budget measures
     view_proc::prepare_to_tie_children();
@@ -1637,7 +1637,7 @@ fn main() -> Result<()> {
         term.restore_now();
         vlog::log("exit", "terminal restored");
         follow_ups.native.finish_record();
-        view_engine::redraw_log::finish();
+        finish_redraw_log();
         // after restore_now, not before: persist_theme's own diagnostic (on
         // a cache-write failure) is a plain stderr write, and the terminal
         // is raw-mode/alternate-screen owned until the line above -- see
@@ -1689,7 +1689,7 @@ fn main() -> Result<()> {
     // after the restore, so a stalled disk holds a restored terminal for
     // at most the writer's bound
     follow_ups.native.finish_record();
-    view_engine::redraw_log::finish();
+    finish_redraw_log();
     persist_theme(&model, &config_path);
     report_fatal_reason(&model);
     vlog::log_with("exit", || format!("leaving code={exit_code}"));
@@ -1718,14 +1718,23 @@ fn persist_theme(model: &Model, config_path: &Option<std::path::PathBuf>) {
     }
 }
 
-/// Hands the redraw log's last lines to its file when `main` returns an
-/// error. The quit paths leave through `std::process::exit`, which runs no
-/// destructor, so each of them calls `redraw_log::finish` itself.
+/// Hands the redraw log's last lines to its file when `main` returns. The
+/// quit paths leave through `std::process::exit`, which runs no destructor,
+/// so each of them calls [`finish_redraw_log`] itself.
 struct RedrawLogOnReturn;
 
 impl Drop for RedrawLogOnReturn {
     fn drop(&mut self) {
-        view_engine::redraw_log::finish();
+        finish_redraw_log();
+    }
+}
+
+/// Waits a bounded time for the redraw log's last lines, and prints the
+/// write that cut the log short, if one did. Called only once the terminal
+/// is restored, since fd 2 reaches the terminal again from then.
+fn finish_redraw_log() {
+    if let Err(e) = view_engine::redraw_log::finish(native::REDRAW_LOG_QUIT_WAIT) {
+        eprintln!("view: {e}");
     }
 }
 
