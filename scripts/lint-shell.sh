@@ -112,6 +112,13 @@ unparened=""
     a = substr(s, i + length(w), 1)
     return (a == "" || a ~ /[[:space:]]/)
   }
+  # whether a word after `before` starts a command: the line start, or after
+  # an operator, an opening paren or brace, or a keyword that takes a list
+  function command_position(before) {
+    sub(/[[:space:]]+$/, "", before)
+    return before == "" || before ~ /[;&|({]$/ ||
+      before ~ /(^|[^[:alnum:]_])(then|do|else|elif)$/
+  }
   # The position after the header `in`, 0 for a line with no `case`
   # keyword, -1 for a keyword whose `in` is not on the line. The word
   # between them may hold quotes, `$( )`, `$(( ))` and `${ }` with blanks
@@ -138,7 +145,7 @@ unparened=""
         if (kw && length(st) < lvl) { return -1 }
         continue
       }
-      if (!kw && word_at(s, i, "case") && (i == 1 || substr(s, i - 1, 1) ~ /[[:space:];&|(]/)) {
+      if (!kw && word_at(s, i, "case") && command_position(substr(s, 1, i - 1))) {
         kw = 1; lvl = length(st); i += 3; continue
       }
       if (kw && length(st) == lvl && word_at(s, i, "in") && substr(s, i - 1, 1) ~ /[[:space:]]/) {
@@ -160,44 +167,82 @@ unparened=""
     }
     return 0
   }
-  function arm(where, s,    e, body) {
-    bare_arm(where, s)
-    want[arms] = (s ~ /;;$/)
-    e = pattern_end(s)
-    if (e == 0) { return }
-    body = substr(s, e + 1)
-    sub(/^[[:space:]]+/, "", body)
-    if (body != "") { header(where, body) }
-  }
-  function header(where, s,    at, rest, n, k, t, seg) {
-    if (s !~ /(^|[^[:alnum:]_])case([^[:alnum:]_]|$)/) { return 0 }
-    at = case_header(s)
-    if (at == 0) { return 0 }
-    if (at < 0) {
-      print where ": a case keyword with no `in` after it on its line, so its patterns go unread: " s
-      return 1
-    }
-    rest = substr(s, at)
-    sub(/^[[:space:]]+/, "", rest)
-    if (rest ~ /(^|[[:space:];])esac([^[:alnum:]_]|$)/) {
-      n = split(rest, seg, ";;")
-      for (k = 1; k <= n; k++) {
-        t = seg[k]
-        sub(/^[[:space:]]+/, "", t)
-        sub(/[[:space:]]+$/, "", t)
-        if (t ~ /^esac([^[:alnum:]_]|$)/) { break }
-        bare_arm(where, t)
+  # where the first `;;` outside quotes and substitutions starts, 0 for none.
+  # A `)` with nothing open is the one closing the substitution the text
+  # was cut from, or a bare pattern, and closes nothing here.
+  function dsemi_at(s,    i, n, c, st, top) {
+    n = length(s); st = ""
+    for (i = 1; i < n; i++) {
+      c = substr(s, i, 1); top = top_of(st)
+      if (top == SQ) {
+        if (c == SQ) { st = substr(st, 1, length(st) - 1) }
+        continue
       }
-      return 1
+      if (c == "\\") { i++; continue }
+      if (c == "$" && (substr(s, i + 1, 1) == "(" || substr(s, i + 1, 1) == "{")) {
+        st = st substr(s, i + 1, 1); i++; continue
+      }
+      if (top == "\"") {
+        if (c == "\"") { st = substr(st, 1, length(st) - 1) }
+        continue
+      }
+      if (c == SQ || c == "\"" || c == "(") { st = st c; continue }
+      if ((c == ")" && top == "(") || (c == "}" && top == "{")) {
+        st = substr(st, 1, length(st) - 1); continue
+      }
+      if (st == "" && c == ";" && substr(s, i + 1, 1) == ";") { return i }
     }
-    arms++
-    want[arms] = 1
-    if (rest != "") { arm(where, rest) }
-    return 1
+    return 0
   }
-  function close_level(s) {
-    arms--
-    if (arms > 0 && s ~ /;;$/) { want[arms] = 1 }
+  function trim(s) {
+    sub(/^[[:space:]]+/, "", s)
+    sub(/[[:space:]]+$/, "", s)
+    return s
+  }
+  # One line of code, read left to right. `at_pattern` is whether the text
+  # at hand stands where a pattern does: after a header `in` or after a
+  # `;;`. A `;;` anywhere on the line opens such a position, an `esac`
+  # closes its level, and a header opens one, so a line holding several of
+  # them is read the same as the lines they would be split onto.
+  function read_line(where, s,    at_pattern, e, d, seg, at) {
+    at_pattern = (arms > 0 && want[arms])
+    while (1) {
+      s = trim(s)
+      if (s == "") { break }
+      if (arms > 0 && s ~ /^esac([^[:alnum:]_]|$)/) {
+        arms--
+        s = substr(s, 5); at_pattern = 0
+        continue
+      }
+      if (substr(s, 1, 2) == ";;") {
+        s = substr(s, 3); at_pattern = (arms > 0)
+        continue
+      }
+      if (at_pattern) {
+        bare_arm(where, s)
+        at_pattern = 0
+        e = pattern_end(s)
+        if (e == 0) { break }
+        s = substr(s, e + 1)
+        continue
+      }
+      d = dsemi_at(s)
+      seg = d ? substr(s, 1, d - 1) : s
+      if (seg ~ /(^|[^[:alnum:]_])case([^[:alnum:]_]|$)/) {
+        at = case_header(seg)
+        if (at > 0) {
+          arms++
+          s = substr(s, at); at_pattern = 1
+          continue
+        }
+        if (at < 0) {
+          print where ": a case keyword with no `in` after it on its line, so its patterns go unread: " seg
+        }
+      }
+      if (!d) { break }
+      s = substr(s, d)
+    }
+    if (arms > 0) { want[arms] = at_pattern }
   }
   FNR == 1 { arms = 0 }
   {
@@ -205,21 +250,9 @@ unparened=""
     text = (HD != "" || top == SQ || top == "\"")
     script_code_scan($0)
     if (text) { next }
-    s = CODE
-    sub(/^[[:space:]]+/, "", s)
-    sub(/[[:space:]]+$/, "", s)
+    s = trim(CODE)
     if (s == "") { next }
-    where = FILENAME ":" FNR
-    if (arms > 0 && want[arms]) {
-      if (s ~ /^esac([^[:alnum:]_]|$)/) { close_level(s); next }
-      arm(where, s)
-      next
-    }
-    if (header(where, s)) { next }
-    if (arms > 0) {
-      if (s ~ /^esac([^[:alnum:]_]|$)/) { close_level(s); next }
-      if (s ~ /;;$/) { want[arms] = 1 }
-    }
+    read_line(FILENAME ":" FNR, s)
   }
 ' "${own[@]}")
 if [ -n "$unparened" ]; then

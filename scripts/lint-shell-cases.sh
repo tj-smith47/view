@@ -385,6 +385,50 @@ commit_case
 expect 1 'scripts/p.sh:3: a case keyword with no `in` after it on its line' 1 \
   'a case keyword that yields no header is refused'
 
+new_case
+plant p.sh <<'EOF'
+set -eu
+case "${1:-}" in
+  (a) echo a ;; b) echo b ;;
+esac
+EOF
+commit_case
+expect 1 'scripts/p.sh:4: a case pattern with no leading paren: b) echo b ;;' 1 \
+  'a bare pattern after a mid-line ;; is refused'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+case "${1:-}" in
+  (a) echo a
+  ;; b) echo b ;;
+esac
+EOF
+commit_case
+expect 1 'scripts/p.sh:5: a case pattern with no leading paren: b) echo b ;;' 1 \
+  'a bare pattern after a ;; that opens its line is refused'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+case "${1:-}" in (a) echo a ;; esac; case "${2:-}" in
+  (x) echo x ;;
+  y) echo y ;;
+esac
+echo done
+EOF
+commit_case
+expect 1 'scripts/p.sh:5: a case pattern with no leading paren: y) echo y ;;' 1 \
+  'an esac mid-line closes its level and the header after it opens the next'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+echo case of x
+EOF
+commit_case
+expect 0 'scripts clean' 0 'a case word in argument position is no keyword'
+
 # the rule covers the scripts under scripts/, and a script outside it is
 # linted for everything else
 new_case

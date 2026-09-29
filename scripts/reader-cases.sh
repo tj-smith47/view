@@ -123,24 +123,54 @@ while read -r var name; do
         [ -n "$(rust_const "$rs" "$name" 2>/dev/null)" ]
 done <<<"$CONST_SITES"
 
-# The `char` constants the sweep greps out of a source by hand. The
-# truncation mark moved to another file once and the sweep stopped at that
-# read with no message on every host that could run it.
-CHAR_SITES=$(grep -oE 'grep -oE "const [A-Z_]+: char = .*" "\$[A-Z_]+_RS"' "$SWEEP" |
-    sed -E 's/.*const ([A-Z_]+): char.*"\$([A-Z_]+_RS)"/\2 \1/') || true
-# counted against every `: char` mention for the reason the `rust_const`
-# count above gives; the one subtracted is `border_glyph`'s alias read,
-# which the call sites below grade
-CHAR_SEEN=$(printf '%s\n' "$CHAR_SITES" | grep -c . || true)
-CHAR_ALL=$(grep -c ': char' "$SWEEP" || true)
-check_that "every char constant the sweep reads is a site this file grades" \
-    [ "$CHAR_SEEN" -eq "$((CHAR_ALL - 1))" ]
-while read -r var name; do
-    [ -n "$name" ] || continue
-    rs=${!var}
-    check_that "the sweep reads the char $name out of ${rs#"$ROOT"/}" \
-        grep -qE "const $name: char = '.+'" "$rs"
-done <<<"$CHAR_SITES"
+# Every other read the sweep takes out of a source: a `$( )` opened on a
+# line naming a `"$…_RS"` operand. The truncation mark moved to another file
+# once and the sweep stopped at that read with no message on every host that
+# could run it. Each read is graded by running the sweep own statement and
+# requiring a value, so a read respelled around any pattern this file could
+# hold, or pointed at the wrong file, fails by name. The `rust_const` sites
+# are graded above and are the only lines left out, counted.
+eval "$(grep -E '^[A-Z_]+_DIR=\$REPO_ROOT/' "$SWEEP")"
+READ_LINES=$(grep -nE '\$\(.*"\$[A-Z_]+_RS"' "$SWEEP" | cut -d: -f1)
+READ_ALL=$(printf '%s\n' "$READ_LINES" | grep -c . || true)
+READ_CONST=0
+READ_RUN=0
+for start in $READ_LINES; do
+    case $(sed -n "${start}p" "$SWEEP") in
+    (*'$(rust_const "$'[A-Z_]*'_RS" '[A-Z_]*')'*)
+        READ_CONST=$((READ_CONST + 1))
+        continue
+        ;;
+    esac
+    # a statement runs to the first line at which it parses whole
+    end=$start
+    until sed -n "${start},${end}p" "$SWEEP" | bash -n 2>/dev/null; do
+        end=$((end + 1))
+        [ "$end" -le "$((start + 60))" ] || break
+    done
+    stmt=$(sed -n "${start},${end}p" "$SWEEP")
+    READ_RUN=$((READ_RUN + 1))
+    if ! [[ $stmt =~ ^([A-Za-z_][A-Za-z_0-9]*)=\$\(([A-Za-z_][A-Za-z_0-9]*) ]]; then
+        check_that "the sweep read at line $start is an assignment this file can run" false
+        continue
+    fi
+    var=${BASH_REMATCH[1]}
+    cmd=${BASH_REMATCH[2]}
+    # a reader the sweep defines, or takes from the shared helper, is lifted
+    # the way the readers at the top of this file are
+    def=$(awk -v f="$cmd() {" 'index($0, f) == 1, /^\}/' "$SWEEP" "$SHARED")
+    value=$( (
+        [ -z "$def" ] || eval "$def"
+        eval "$stmt"
+        printf '%s' "${!var}"
+    ) 2>/dev/null)
+    check_that "the sweep reads $var (line $start) out of its source" [ -n "$value" ]
+done
+check_that "every source read in the sweep is run here or graded as a rust_const site" \
+    [ "$((READ_RUN + READ_CONST))" -eq "$READ_ALL" ]
+check_that "the rust_const sites left out are the ones graded above" \
+    [ "$READ_CONST" -le "$SITES_SEEN" ]
+check_that "the sweep reads a source through a substitution at least once" [ "$READ_RUN" -gt 0 ]
 
 # Each `border_glyph` call resolves a `BorderSet` field, through a `const`
 # alias where the field is written as one, so a charset or alias that moved

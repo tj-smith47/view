@@ -24,7 +24,7 @@ use view_harness::results::{
 };
 use view_harness::scenario::{self, Panes, ScenarioFile, ScenarioStateEntry};
 use view_oracle::compat::{
-    engine_error_reference, reset_hermetic_home, run_plugin_bootstrap, state_name, CompatSession,
+    engine_error_reference, reset_hermetic_home, run_plugin_bootstrap, CompatSession,
     ErrorBaseline, PluginClass, ScenarioState,
 };
 
@@ -497,7 +497,7 @@ fn scenario_result(
         plugin_version: resolve_plugin_version(&scenario.plugin, effective_fixture),
         class: class_str(scenario.class).to_string(),
         fixture: effective_fixture.map(str::to_string),
-        state: state_name(state.name).to_string(),
+        state: state.label(),
         panes: state.panes.as_str().to_string(),
         engine_pin: pin.to_string(),
         status: outcome.status,
@@ -974,7 +974,7 @@ fn run_scenario(
                 dir.join(format!(
                     "{}-{}{}.log",
                     scenario.plugin,
-                    state_name(state.name),
+                    state.label().replace('/', "-"),
                     match state.panes {
                         Panes::Nvim => "",
                         Panes::Tiles => "-tiles",
@@ -1480,6 +1480,7 @@ mod tests {
             fixture: None,
             accommodations: true,
             panes: Panes::Nvim,
+            variant: None,
             steps: Vec::new(),
         };
         assert_eq!(
@@ -1620,7 +1621,7 @@ mod tests {
                 loaded
                     .states
                     .iter()
-                    .any(|entry| state_name(entry.name) == state && entry.panes.as_str() == panes),
+                    .any(|entry| entry.label() == state && entry.panes.as_str() == panes),
                 "EXPECTED_RED names {scenario}/{state} under {panes} (clears with {task}), which \
                  the scenario file does not declare"
             );
@@ -1641,8 +1642,13 @@ mod tests {
     /// reason its subject does not survive the tiled layout: it reads the
     /// statusline row nvim's bar owns or a flag the tiled layout sets on its
     /// own.
-    const NVIM_ONLY: [(&str, &str, &str); 6] = [
+    const NVIM_ONLY: [(&str, &str, &str); 7] = [
         ("lualine", "deferred", "reads the statusline row's cells"),
+        (
+            "lualine",
+            "deferred/all-off",
+            "reads the statusline row's cells",
+        ),
         ("lualine", "superseded", "reads the statusline row's cells"),
         (
             "lualine",
@@ -1689,12 +1695,13 @@ mod tests {
             let loaded = scenario::load_file(path)
                 .unwrap_or_else(|err| panic!("loading {}: {err}", path.display()));
             for entry in &loaded.states {
-                let has_twin = loaded
-                    .states
-                    .iter()
-                    .any(|other| other.panes == Panes::Tiles && other.name == entry.name);
+                let has_twin = loaded.states.iter().any(|other| {
+                    other.panes == Panes::Tiles
+                        && other.name == entry.name
+                        && other.variant == entry.variant
+                });
                 if entry.panes == Panes::Nvim && !has_twin {
-                    untwinned.insert((stem.clone(), state_name(entry.name).to_string()));
+                    untwinned.insert((stem.clone(), entry.label()));
                 }
             }
         }
@@ -1849,6 +1856,7 @@ mod tests {
             fixture: None,
             accommodations: false,
             panes: Panes::Nvim,
+            variant: None,
             steps: Vec::new(),
         };
         assert_eq!(accommodations_env(&declining), Some("0"));
@@ -1863,6 +1871,7 @@ mod tests {
             fixture: None,
             accommodations: true,
             panes: Panes::Nvim,
+            variant: None,
             steps: Vec::new(),
         };
         assert_eq!(
@@ -1887,6 +1896,7 @@ mod tests {
             fixture: None,
             accommodations: true,
             panes: Panes::Nvim,
+            variant: None,
             steps: Vec::new(),
         };
         assert_eq!(
@@ -1900,6 +1910,7 @@ mod tests {
             fixture: None,
             accommodations: true,
             panes: Panes::Nvim,
+            variant: None,
             steps: Vec::new(),
         };
         assert_eq!(
@@ -2128,7 +2139,7 @@ mod tests {
                     Some("nvim"),
                     "{} state {} on fixture {fixture} runs under tiles:\n{materialized}",
                     path.display(),
-                    state_name(state.name),
+                    state.label(),
                 );
                 checked += 1;
             }

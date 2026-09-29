@@ -1169,17 +1169,22 @@ fn screen_cells(screen: &vt100::Screen) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// The text inside each framed box in `cells`, one text per box, its rows
-/// joined the way view-core's `wrap_line` broke them, so a
-/// needle the box wrapped reads whole.
+/// The text inside each framed box in `cells`, its rows joined the way
+/// view-core's `wrap_line` broke them, so a needle the box wrapped reads
+/// whole. A box gives one text per reading of its ambiguous row
+/// boundaries (see [`join_wrapped`]), and a box of blank rows gives none.
 ///
 /// A box is a top-left corner, a top-right corner on its row, and the rows
-/// under them whose cells in both of those columns are vertical edges. The
-/// two corners pair when the run between them is all horizontal edge, or
-/// when bottom corners close the rows under them at the same two columns,
-/// which is how a titled box and a tile with a notice over its top edge
-/// pair. Rows of two boxes are never joined, since a row belongs to a box
-/// only through that box's own edge columns.
+/// under them whose cells in both of those columns are vertical edges. A
+/// top-left pairs with the first top-right whose bottom corners close the
+/// rows under them at the same two columns, which is how a titled box and
+/// a tile with a notice over its top edge pair. The ASCII set draws every
+/// corner with one glyph, so a notice's top-left there is a top-right as
+/// well, and a tile's corner pairs past it only through that closing test.
+/// With no closing top-right, it pairs with the first one reached by an
+/// all-horizontal run, which covers a box the screen's edge clipped. Rows
+/// of two boxes are never joined, since a row belongs to a box only
+/// through that box's own edge columns.
 fn boxed_texts(cells: &[Vec<String>]) -> Vec<String> {
     use view_surface::overlay::BorderSet;
     const SETS: [BorderSet; 2] = [BorderSet::ROUNDED, BorderSet::ASCII];
@@ -1203,50 +1208,76 @@ fn boxed_texts(cells: &[Vec<String>]) -> Vec<String> {
     let mut texts = Vec::new();
     for (top, row) in cells.iter().enumerate() {
         for lo in (0..row.len()).filter(|col| is(|s| s.top_left, row.get(*col))) {
-            let paired = (lo + 1..row.len())
+            let candidates: Vec<usize> = (lo + 1..row.len())
                 .filter(|col| is(|s| s.top_right, row.get(*col)))
-                .find(|&hi| {
-                    let run = (lo + 1..hi).all(|col| is(|s| s.horizontal, row.get(col)));
-                    let bottom = cells.get(top + 1 + edges(top, lo, hi).len());
-                    run || bottom.is_some_and(|b| {
+                .collect();
+            let closes = |hi: usize| {
+                cells
+                    .get(top + 1 + edges(top, lo, hi).len())
+                    .is_some_and(|b| {
                         is(|s| s.bottom_left, b.get(lo)) && is(|s| s.bottom_right, b.get(hi))
                     })
-                });
+            };
+            let run = |hi: usize| (lo + 1..hi).all(|col| is(|s| s.horizontal, row.get(col)));
+            let paired = candidates
+                .iter()
+                .copied()
+                .find(|&hi| closes(hi))
+                .or_else(|| candidates.iter().copied().find(|&hi| run(hi)));
             let Some(hi) = paired else {
                 continue;
             };
             let rows = edges(top, lo, hi);
             if rows.len() > 1 {
-                texts.push(join_wrapped(&rows));
+                texts.extend(
+                    join_wrapped(&rows)
+                        .into_iter()
+                        .filter(|text| !text.trim().is_empty()),
+                );
             }
         }
     }
     texts
 }
 
-/// The rows of one box as the line they were wrapped from. `wrap_line`
-/// breaks inside a word only where the word fills the whole row, and
-/// everywhere else at a space it drops, so a boundary under a full row
-/// holding no space joins with nothing and every other boundary with a
-/// space. A single word that fills its row exactly reads joined to the
-/// next row as well, since the screen shows it the same as a hard break.
-fn join_wrapped(rows: &[&[String]]) -> String {
-    let mut text = String::new();
+/// The rows of one box as the lines they may have been wrapped from.
+/// `wrap_line` breaks inside a word only where the word fills the whole
+/// row, and everywhere else at a space it drops, so every boundary joins
+/// with a space except one under a single word that fills its row with a
+/// non-space opening the row below. The screen shows a hard break and a
+/// word that fit its row exactly the same way there, so that boundary is
+/// read both ways and the box gives one text per reading.
+fn join_wrapped(rows: &[&[String]]) -> Vec<String> {
+    // ponytail: readings double per ambiguous boundary, so past this many a
+    // boundary keeps the hard-break join; a notice holds a handful at most.
+    const MAX_AMBIGUOUS: usize = 8;
+    let mut texts = Vec::new();
+    let mut ambiguous = 0;
     for (index, row) in rows.iter().enumerate() {
         let line = row.concat();
-        let above = index.checked_sub(1).and_then(|at| rows.get(at));
-        let inside_a_word = above.is_some_and(|above| {
-            let above_line = above.concat();
-            above.last().is_some_and(|cell| cell != " ")
-                && !above_line.trim().contains(' ')
-                && row.first().is_some_and(|cell| cell != " ")
-        });
-        if above.is_some() && !inside_a_word {
-            text.push(' ');
+        let line = line.trim();
+        let Some(above) = index.checked_sub(1).and_then(|at| rows.get(at)) else {
+            texts = vec![line.to_string()];
+            continue;
+        };
+        let inside_a_word = above.last().is_some_and(|cell| cell != " ")
+            && !above.concat().trim().contains(' ')
+            && row.first().is_some_and(|cell| cell != " ");
+        if inside_a_word && ambiguous < MAX_AMBIGUOUS {
+            ambiguous += 1;
+            texts = texts
+                .into_iter()
+                .flat_map(|text| [format!("{text}{line}"), format!("{text} {line}")])
+                .collect();
+        } else {
+            let join = if inside_a_word { "" } else { " " };
+            for text in &mut texts {
+                text.push_str(join);
+                text.push_str(line);
+            }
         }
-        text.push_str(line.trim());
     }
-    text
+    texts
 }
 
 /// Scans `text` for an E-numbered Vim error (`E` followed by a digit,
@@ -1702,15 +1733,26 @@ mod tests {
     }
 
     /// Each row boundary joins the way the wrap broke it: nothing inside a
-    /// word too long for the box, a space at a word wrap, a space under a
-    /// row a word filled exactly.
+    /// word too long for the box, a space at a word wrap, and both under a
+    /// single word that fills its row, where a hard break and a word that
+    /// fit exactly look the same.
     #[test]
     fn a_row_boundary_joins_the_way_the_wrap_broke_it() {
         for set in &BOTH_SETS {
             let rows = wrapped_box("say HYPERCONNECTED now", 8);
             let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
             let texts = boxed_texts(&cells_of(set, &refs));
-            assert_eq!(texts, ["say HYPERCONNECTED now"], "{rows:#?}");
+            assert!(
+                texts.iter().any(|t| t == "say HYPERCONNECTED now"),
+                "{texts:?} from {rows:#?}"
+            );
+            let rows = wrapped_box("abcdefgh ijk", 8);
+            let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
+            let texts = boxed_texts(&cells_of(set, &refs));
+            assert!(
+                texts.iter().any(|t| t.contains("abcdefgh ijk")),
+                "{texts:?} from {rows:#?}"
+            );
             let rows = wrapped_box("has been overwritten by another", 14);
             let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
             let texts = boxed_texts(&cells_of(set, &refs));
@@ -1726,30 +1768,32 @@ mod tests {
 
     /// A tile and a notice whose top edge sits on the tile's top row are two
     /// boxes: the tile's corner pairs with its own top-right, past the
-    /// notice's. Rounded only, since the ASCII set draws every corner with
-    /// one glyph and a notice's top-left there is a top-right as well.
+    /// notice's, in the ASCII set as well, where the notice's top-left is
+    /// a top-right too.
     #[test]
     fn a_notice_on_a_tile_top_row_is_a_box_of_its_own() {
-        let cells = cells_of(
-            &view_surface::overlay::BorderSet::ROUNDED,
-            &[
-                "<======<======>===>",
-                "!buffer!note  !   !",
-                "!lines !text  !   !",
-                "!here  [======]   !",
-                "!more line here   !",
-                "[=================]",
-            ],
-        );
-        let texts = boxed_texts(&cells);
-        assert_eq!(texts.len(), 2, "{texts:?}");
-        assert!(texts.iter().any(|t| t == "note text"), "{texts:?}");
-        assert!(
-            texts
-                .iter()
-                .any(|t| t.starts_with("buffer") && t.ends_with("more line here")),
-            "{texts:?}"
-        );
+        for set in &BOTH_SETS {
+            let cells = cells_of(
+                set,
+                &[
+                    "<======<======>===>",
+                    "!buffer!note  !   !",
+                    "!lines !text  !   !",
+                    "!here  [======]   !",
+                    "!more line here   !",
+                    "[=================]",
+                ],
+            );
+            let texts = boxed_texts(&cells);
+            assert_eq!(texts.len(), 2, "{texts:?}");
+            assert!(texts.iter().any(|t| t == "note text"), "{texts:?}");
+            assert!(
+                texts
+                    .iter()
+                    .any(|t| t.starts_with("buffer") && t.ends_with("more line here")),
+                "{texts:?}"
+            );
+        }
     }
 
     /// One reference capture's worth of marked stdout, as the deferred Lua

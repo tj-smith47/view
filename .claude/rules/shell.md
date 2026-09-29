@@ -46,12 +46,15 @@ The middle row names two instances, and each has a gate of its own. The first, a
 stands after the header's `in` and after each `;;`, so a line scanner finds
 each pattern position and refuses one that does not open with `(`. It finds the
 header's `in` as the first `in` word outside quotes, `$( )`, `$(( ))` and
-`${ }`, so a word holding a blank is read. It reads a one-line `case … esac`, a
-nested `case`, and a header opened on the rest of an arm line. Here-doc bodies
-and quoted strings are text it skips. A `case` keyword whose line carries no
-such `in` is reported, since the patterns under it would go unread. That split
-header is the proxy the drift cases read as well: the spelling took the whole
-style case matrix out of the 3.2 leg.
+`${ }`, so a word holding a blank is read. It reads a line left to right, so a
+one-line `case … esac`, a nested `case`, a header opened on the rest of an arm
+line, and a `;;` or an `esac` in the middle of a line are each read where they
+stand. Here-doc bodies and quoted strings are text it skips. A `case` word is
+the keyword only in command position: at the start of a line, or after an
+operator, an opening paren or brace, `then`, `do`, `else` or `elif`. A keyword
+whose line carries no such `in` is reported, since the patterns under it would
+go unread. That split header is the proxy the drift cases read as well: the
+spelling took the whole style case matrix out of the 3.2 leg.
 
 The second instance, a comment inside a multi-line `$( )` or `<( )` whose own
 parens do not balance, or which carries an odd number of quotes, is read

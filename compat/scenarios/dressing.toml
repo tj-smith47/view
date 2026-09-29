@@ -15,8 +15,8 @@
 # `cmdheight` probe there is what stops a runner bug that silently ignores
 # the `native` table from passing both states by coincidence. lualine's
 # bar under the same three features off (row 28, above nvim's command
-# line) is asserted by lualine.toml's deferred state, which has no tiles
-# twin to hold a frame over that row.
+# line) is asserted by lualine.toml's all-off deferred state, which has
+# no tiles twin to hold a frame over that row.
 schema = 1
 plugin = "dressing"
 class = "ui-owning"

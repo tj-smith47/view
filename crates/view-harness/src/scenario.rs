@@ -128,6 +128,7 @@ struct RawState {
     #[serde(default = "accommodations_default")]
     accommodations: bool,
     panes: Option<String>,
+    variant: Option<String>,
     steps: Vec<RawStep>,
 }
 
@@ -255,7 +256,25 @@ pub struct ScenarioStateEntry {
     /// names `tiles`, which only a twin of an nvim state of the same name
     /// may do.
     pub panes: Panes,
+    /// A second configuration of the same state, named so its row is told
+    /// apart from the state's plain one: lualine's `deferred` runs with the
+    /// statusline alone off, and `deferred`/`all-off` with every feature
+    /// that detaches nvim's command line off as well.
+    pub variant: Option<String>,
     pub steps: Vec<Step>,
+}
+
+impl ScenarioStateEntry {
+    /// The state's name as a results row and a log file spell it: the
+    /// state's own name, followed by `/variant` when it carries one.
+    #[must_use]
+    pub fn label(&self) -> String {
+        let name = state_name(self.name);
+        match &self.variant {
+            Some(variant) => format!("{name}/{variant}"),
+            None => name.to_string(),
+        }
+    }
 }
 
 /// Errors loading or validating a scenario entry.
@@ -288,8 +307,9 @@ pub enum ScenarioError {
     /// the runner to drive.
     #[error("scenario declares no [[states]] entries")]
     NoStates,
-    /// Two `[[states]]` entries in the same file named the same state,
-    /// leaving the runner unable to tell which one a report line describes.
+    /// Two `[[states]]` entries in the same file named the same state and
+    /// variant under the same panes, leaving the runner unable to tell
+    /// which one a report line describes.
     #[error("state {name:?} is declared more than once under panes = {panes:?}")]
     DuplicateStateName { name: String, panes: &'static str },
     /// A `[[states]]` entry's `panes` named neither layout.
@@ -620,6 +640,7 @@ fn validate_state_entry(raw: RawState) -> Result<ScenarioStateEntry, ScenarioErr
         fixture: raw.fixture,
         accommodations: raw.accommodations,
         panes,
+        variant: raw.variant,
         steps,
     })
 }
@@ -638,15 +659,14 @@ fn without_timeout(step: &Step) -> Step {
     step
 }
 
-/// Fails a tiles state that has no nvim state of its name, or that differs
-/// from it in anything but a wait's timeout.
+/// Fails a tiles state that has no nvim state of its name and variant, or
+/// that differs from it in anything but a wait's timeout.
 fn check_tiles_twins(states: &[ScenarioStateEntry]) -> Result<(), ScenarioError> {
     for twin in states.iter().filter(|state| state.panes == Panes::Tiles) {
-        let name = state_name(twin.name).to_string();
-        let Some(nvim) = states
-            .iter()
-            .find(|state| state.panes == Panes::Nvim && state.name == twin.name)
-        else {
+        let name = twin.label();
+        let Some(nvim) = states.iter().find(|state| {
+            state.panes == Panes::Nvim && state.name == twin.name && state.variant == twin.variant
+        }) else {
             return Err(ScenarioError::TwinWithoutNvimState { state: name });
         };
         let diverges = |what: String| ScenarioError::TwinDiverges {
@@ -714,12 +734,12 @@ fn validate_state_completeness(
         return Err(ScenarioError::NoStates);
     }
     let mut seen: BTreeSet<&'static str> = BTreeSet::new();
-    let mut seen_under: BTreeSet<(&'static str, Panes)> = BTreeSet::new();
+    let mut seen_under: BTreeSet<(&'static str, Option<&str>, Panes)> = BTreeSet::new();
     for state in states {
         let name = state_name(state.name);
-        if !seen_under.insert((name, state.panes)) {
+        if !seen_under.insert((name, state.variant.as_deref(), state.panes)) {
             return Err(ScenarioError::DuplicateStateName {
-                name: name.to_string(),
+                name: state.label(),
                 panes: state.panes.as_str(),
             });
         }
@@ -1120,6 +1140,29 @@ states = []
         assert!(
             matches!(err, ScenarioError::DuplicateStateName { ref name, .. } if name == "present"),
             "expected DuplicateStateName{{\"present\"}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn two_deferred_states_with_different_variants_parse() {
+        let toml = format!(
+            "{}\n[[states]]\nname = \"deferred\"\nsteps = []\n\n[[states]]\nname = \"deferred\"\nvariant = \"all-off\"\nsteps = []\n",
+            VALID.trim_end()
+        );
+        let scenario = parse(&toml).expect("a variant makes a second deferred state its own row");
+        let labels: Vec<String> = scenario.states.iter().map(|s| s.label()).collect();
+        assert_eq!(labels, ["present", "deferred", "deferred/all-off"]);
+    }
+
+    #[test]
+    fn two_deferred_states_with_the_same_variant_are_rejected() {
+        let state = "[[states]]\nname = \"deferred\"\nvariant = \"all-off\"\nsteps = []\n";
+        let toml = format!("{}\n{state}\n{state}", VALID.trim_end());
+        let err = parse(&toml).expect_err("one variant twice is one row twice");
+        assert!(
+            matches!(err, ScenarioError::DuplicateStateName { ref name, panes: "nvim" }
+                if name == "deferred/all-off"),
+            "expected DuplicateStateName{{\"deferred/all-off\"}}, got {err:?}"
         );
     }
 
