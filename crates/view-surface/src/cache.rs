@@ -736,7 +736,15 @@ mod tests {
         ),
         (
             "view-core/src/native/submit_hold/refused.rs",
-            "pub(super)fnreports_error(model:&Model,events:&[UiEvent])->bool{",
+            "pub(super)fnmessage_top(model:&Model,line:Option<&str>)->u16{",
+            "engine.grids()",
+            "`message_top` reads where the live engine's command line stands \
+             as a `:View` line is submitted to it, and paints nothing",
+        ),
+        (
+            "view-core/src/native/submit_hold/refused.rs",
+            "pub(super)fnreports_error(model:&Model,events:&[UiEvent],message_top:u16)\
+             ->bool{",
             "engine.grids()",
             "`reports_error` reads a redraw batch for an error the live engine \
              drew into its own message grid, and the column 0 that grid \

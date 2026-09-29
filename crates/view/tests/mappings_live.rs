@@ -72,11 +72,11 @@ impl Session {
 
     /// The same fixture with `extra` appended to its `init.lua`.
     fn start_with(name: &str, extra: &str) -> Self {
-        Self::start_attached(name, extra, view_engine::UI_EXT_OPTIONS)
+        Self::start_attached(name, extra, view_engine::UI_EXT_OPTIONS, 80)
     }
 
-    /// The same fixture attached with `surfaces`.
-    fn start_attached(name: &str, extra: &str, surfaces: &[&str]) -> Self {
+    /// The same fixture attached with `surfaces` at `width` columns.
+    fn start_attached(name: &str, extra: &str, surfaces: &[&str], width: u16) -> Self {
         let dir = common::fixture(
             &format!("mappings-live-{name}"),
             &format!(
@@ -88,7 +88,7 @@ impl Session {
         );
         let cfg = common::isolated_reading(&dir.join("init.lua"));
         let (engine, damage, rx) = common::spawn_with_pump(cfg, 256);
-        engine.handle.ui_attach(80, 24, surfaces).unwrap();
+        engine.handle.ui_attach(width, 24, surfaces).unwrap();
         Self {
             engine,
             rx,
@@ -535,10 +535,16 @@ fn keys_behind_a_view_line_nvim_refuses_reach_nvim_on_its_error() {
             true,
         ),
     ] {
+        // where nvim draws the whole screen, every window row shows a sign
+        // in `ErrorMsg`'s id on a screen narrow enough to wrap a `:View`
+        // line
+        let signs = surfaces == [Ext::LineGrid];
+        let (extra, width) = if signs { (SIGNS, 30) } else { ("", 80) };
         let names: Vec<_> = surfaces.iter().map(|surface| surface.as_str()).collect();
-        let session = Session::start_attached(&format!("refused-{name}"), "", &names);
-        let mut model = Model::with_term_size(80, 24);
+        let session = Session::start_attached(&format!("refused-{name}"), extra, &names, width);
+        let mut model = Model::with_term_size(width, 24);
         model.attach_surfaces(surfaces);
+        model.ai_trusted = true;
         session.register(&NativeConfig::all_enabled());
         pump(&session, &mut model, ARRIVAL, |_, msg| {
             matches!(msg, Msg::MappingsClaimed { .. }).then_some(())
@@ -583,7 +589,95 @@ fn keys_behind_a_view_line_nvim_refuses_reach_nvim_on_its_error() {
         assert_eq!(session.eval("getline(1)"), "hello", "{name}");
         assert_eq!(session.eval("winnr('$')"), "1", "{name}: no window opened");
         assert_eq!(session.invoke(SILENCE), None, "{name}: nothing was invoked");
+        if signs {
+            keys_behind_a_wrapped_view_line_reach_what_it_opened(&session, &mut model);
+        }
     }
+}
+
+/// Forty empty lines, each with a sign nvim draws in `ErrorMsg`'s id.
+const SIGNS: &str = "\
+vim.api.nvim_buf_set_lines(0, 0, -1, false, vim.fn['repeat']({ '' }, 40))
+vim.o.signcolumn = 'yes'
+local ns = vim.api.nvim_create_namespace('signs')
+for i = 0, 39 do
+  vim.api.nvim_buf_set_extmark(0, ns, i, 0,
+    { sign_text = 'E', sign_hl_group = 'DiagnosticSignError' })
+end
+";
+
+/// A valid `:View` line wrapping onto two rows of a screen whose window
+/// rows show error signs, typed with the keys behind it inside one round
+/// trip. nvim redraws those rows as it leaves the command line after the
+/// invocation, and the keys wait for the invocation and reach the composer
+/// it opened.
+fn keys_behind_a_wrapped_view_line_reach_what_it_opened(session: &Session, model: &mut Model) {
+    // the silence watch before this read past redraw tokens without
+    // taking their damage, and no token follows until it is taken
+    send(
+        session,
+        &update(model, Msg::Redraw(session.damage.take_damage())),
+    );
+    assert_eq!(type_into(session, model, &["<Esc>"]), ["<Esc>"]);
+    pump(session, model, ARRIVAL, |model, _| {
+        (model.engine.mode.current == "normal").then_some(())
+    })
+    .expect("nvim must leave insert mode");
+    // `:View` splits its arguments on whitespace, so the run of spaces
+    // wraps the line and leaves the verb `open`
+    let line: Vec<String> = ":View ai                          open"
+        .chars()
+        .map(|c| match c {
+            ' ' => "<Space>".to_string(),
+            c => c.to_string(),
+        })
+        .collect();
+    let line: Vec<&str> = line.iter().map(String::as_str).collect();
+    assert_eq!(type_into(session, model, &line).len(), line.len());
+    assert_eq!(type_into(session, model, &["<CR>"]), ["<CR>"]);
+    assert!(model.submit_hold.is_holding(), "the line names View");
+    assert!(type_into(session, model, &["a", "b", "c"]).is_empty());
+
+    // the invocation is kept back until nvim has left the command line,
+    // so the redraw that leaves it is read with the hold still standing,
+    // as the runtime reads it when that redraw is drained first
+    let mut invocation = None;
+    loop {
+        let msg = session
+            .wait_for(ARRIVAL, |msg| {
+                matches!(msg, Msg::FeatureInvoke { .. } | Msg::RedrawReady).then(|| msg.clone())
+            })
+            .expect("nvim must invoke the feature and leave the command line");
+        let events = match msg {
+            Msg::FeatureInvoke { .. } => {
+                invocation = Some(msg);
+                continue;
+            }
+            Msg::RedrawReady => session.damage.take_damage(),
+            _ => continue,
+        };
+        let left_line = invocation.is_some()
+            && events
+                .iter()
+                .any(|event| matches!(event, UiEvent::ModeChange { mode, .. } if mode == "normal"));
+        send(session, &update(model, Msg::Redraw(events)));
+        assert!(
+            model.submit_hold.is_holding(),
+            "a redraw before the invocation released the keys"
+        );
+        if left_line {
+            break;
+        }
+    }
+    let invocation = invocation.expect("the line invoked the feature");
+    send(session, &update(model, invocation));
+    assert!(
+        !model.submit_hold.is_holding(),
+        "the invocation ends the hold"
+    );
+    assert_eq!(model.ai_panel().input(), "abc");
+    assert_eq!(session.eval("getline(1)"), "hello");
+    assert_eq!(session.eval("mode()"), "n");
 }
 
 /// The `:` reading the palette's speculation is gated on, taken off the same

@@ -4,10 +4,43 @@
 use std::collections::HashMap;
 
 use crate::events::UiEvent;
-use crate::grid::registry::GridId;
+use crate::grid::registry::{GridId, GLOBAL_GRID};
 use crate::hl::{HlAttr, HlTable};
 use crate::model::Model;
+use crate::native::ext::Ext;
 use crate::native::speculate::is_cmdline_mode;
+use crate::native::text::text_width;
+
+/// The global grid's top row of nvim's message area once the submitted
+/// `line` is drawn, which is the command line's own top row: the row the
+/// cursor stands on, or the grid's last row while the keys that open the
+/// command line are still on their way, less the rows `line` wraps onto
+/// after its `:`. nvim grows the command line upward from where it opened.
+/// An external command line takes no row, and the message area starts on
+/// the last one.
+///
+/// A line whose text view does not know is taken as wrapping onto no row,
+/// so an error drawn above that estimate waits for the backstop.
+pub(super) fn message_top(model: &Model, line: Option<&str>) -> u16 {
+    let grid = model.engine.grids().global();
+    let (width, height) = grid.size();
+    let bottom = height.saturating_sub(1);
+    if model.owns(Ext::Cmdline) {
+        return bottom;
+    }
+    let row = if is_cmdline_mode(&model.engine.mode.current) {
+        grid.cursor().0
+    } else {
+        bottom
+    };
+    let wrapped = line.map_or(0, |line| {
+        text_width(line)
+            .saturating_add(1)
+            .checked_div(width)
+            .unwrap_or(0)
+    });
+    row.saturating_sub(wrapped)
+}
 
 /// Whether `events` report an error for the submitted line and then leave
 /// the command line: a `msg_show` of kind `emsg`, or a line nvim draws
@@ -17,11 +50,19 @@ use crate::native::speculate::is_cmdline_mode;
 /// error says that error was the earlier line's. nvim reports modes in
 /// every attach.
 ///
+/// On the global grid only the rows at or below `message_top` are the
+/// message area, as [`message_top`] found it when the hold armed, and a
+/// scroll of the rows down to the grid's bottom moves its top up to the
+/// scroll's own. Every other row is a window's, where a sign can be drawn
+/// in `ErrorMsg`.
+///
 /// Costs one pass over the batch, one more for its highlight definitions
 /// at the first line drawn into the message area, and a look back for
 /// column 0 on an error line that starts past it.
-pub(super) fn reports_error(model: &Model, events: &[UiEvent]) -> bool {
+pub(super) fn reports_error(model: &Model, events: &[UiEvent], message_top: u16) -> bool {
     let grids = model.engine.grids();
+    let height = u64::from(grids.global().size().1);
+    let mut top = u64::from(message_top);
     let mut error = None;
     let mut reported = false;
     for (at, event) in events.iter().enumerate() {
@@ -29,12 +70,20 @@ pub(super) fn reports_error(model: &Model, events: &[UiEvent]) -> bool {
             UiEvent::ModeChange { mode, .. } if is_cmdline_mode(mode) => reported = false,
             UiEvent::ModeChange { .. } if reported => return true,
             UiEvent::MsgShow { kind, .. } if kind == "emsg" => reported = true,
+            UiEvent::GridScroll {
+                grid,
+                top: scrolled,
+                bot,
+                ..
+            } if GridId(*grid) == GLOBAL_GRID && *bot == height => top = top.min(*scrolled),
             UiEvent::GridLine {
                 grid,
                 row,
                 col_start,
                 cells,
-            } if grids.draws_messages(GridId(*grid)) => {
+            } if grids.draws_messages(GridId(*grid))
+                && (GridId(*grid) != GLOBAL_GRID || *row >= top) =>
+            {
                 let Some(first) = cells.first() else {
                     continue;
                 };
