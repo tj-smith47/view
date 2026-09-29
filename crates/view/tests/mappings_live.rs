@@ -661,7 +661,9 @@ fn literal_taking_key(command: &str) -> Option<String> {
 /// silently. The commands' fewest-characters counts are asked of the
 /// engine's own `fullcommand()`. The modifiers' counts are asked of the
 /// modifier parser, which keeps its own minimums, by running a user `View`
-/// behind each one at its count and at one character fewer.
+/// that records its `<q-mods>` behind each one at its count and at one
+/// character fewer. `:filter` is left out of `<q-mods>`, so its rows ask
+/// whether `View` ran at all.
 ///
 /// Skipped where the runtime ships no documentation, for the reason the
 /// literal-key test above gives.
@@ -672,9 +674,9 @@ fn the_command_tables_match_the_pinned_engines_help() {
     let session = Session::start_with(
         "command-tables",
         "vim.cmd([[\n\
-         command! -nargs=* View let g:ran = 1\n\
+         command! -nargs=* View let g:ran = <q-mods>\n\
          function! Ran(line)\n\
-           let g:ran = 0\n\
+           let g:ran = 'not run'\n\
            try\n\
              exe a:line\n\
            catch\n\
@@ -731,32 +733,46 @@ fn the_command_tables_match_the_pinned_engines_help() {
         );
     }
 
-    let runs_view = |line: &str| session.eval(&format!("Ran('{line}')")) == "1";
-    assert!(
-        !runs_view("sandbox View"),
+    const NOT_RUN: &str = "not run";
+    let ran = |line: &str| session.eval(&format!("Ran('{line}')"));
+    assert_eq!(
+        ran("sandbox View"),
+        NOT_RUN,
         "`:sandbox View` runs a user command, so MODIFIERS should list :sandbox"
     );
-    let rows = MODIFIERS
-        .iter()
-        .map(|&(full, shortest)| (full, shortest, ""))
-        .chain([(FILTER.0, FILTER.1, " /x/")]);
-    for (full, shortest, pattern) in rows {
+    for &(full, shortest) in &MODIFIERS {
+        let reported = match full {
+            "leftabove" => "aboveleft",
+            "rightbelow" => "belowright",
+            _ => full,
+        };
+        let line = |length: usize| format!("{} View", &full[..length]);
+        assert_eq!(
+            ran(&line(shortest)),
+            reported,
+            "`:{}` runs `:View` behind `:{full}`",
+            line(shortest)
+        );
+        assert_ne!(
+            ran(&line(shortest - 1)),
+            reported,
+            "`:{}` already runs `:View` behind `:{full}`, so {shortest} is not the fewest characters",
+            line(shortest - 1)
+        );
+    }
+    let (full, shortest) = FILTER;
+    for pattern in [" /x/", " /[/]/", " /x/g"] {
         let line = |length: usize| format!("{}{pattern} View", &full[..length]);
-        assert!(
-            runs_view(&line(shortest)),
+        assert_ne!(
+            ran(&line(shortest)),
+            NOT_RUN,
             "`:{}` does not run `:View`",
             line(shortest)
         );
-        // `:keep` stops short of `:keepalt` and still reads as `:keepmarks`
-        let shorter = &full[..shortest - 1];
-        let another_reads_it = MODIFIERS.iter().any(|&(other, least)| {
-            other != full && other.starts_with(shorter) && shorter.len() >= least
-        });
         assert_eq!(
-            runs_view(&line(shortest - 1)),
-            another_reads_it,
-            "`:{}` runs `:View` exactly when another modifier row reads it, \
-             so {shortest} is the fewest characters of `:{full}`",
+            ran(&line(shortest - 1)),
+            NOT_RUN,
+            "`:{}` already runs `:View`, so {shortest} is not the fewest characters of `:{full}`",
             line(shortest - 1)
         );
     }

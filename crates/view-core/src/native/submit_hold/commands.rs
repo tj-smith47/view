@@ -154,15 +154,18 @@ fn skip_modifiers(command: &str) -> &str {
 }
 
 /// `after` past the `!` and the pattern a `:filter` takes. A pattern opened
-/// by a character that cannot start a name ends at the next unescaped copy
-/// of that character, and any other pattern ends at whitespace.
+/// by a character that cannot start a name ends where [`pattern_end`] finds
+/// that character again, followed by any of the `g`, `j` and `f` flags
+/// `:vimgrep` takes, and any other pattern ends at whitespace.
 fn skip_filter_pattern(after: &str) -> &str {
     let after = after.trim_start();
     let pattern = after.strip_prefix('!').unwrap_or(after).trim_start();
     match pattern.chars().next() {
         Some(delimiter) if !(delimiter.is_alphanumeric() || delimiter == '_') => {
             let body = &pattern[delimiter.len_utf8()..];
-            unescaped(body, delimiter).map_or("", |end| &body[end + delimiter.len_utf8()..])
+            pattern_end(body, delimiter).map_or("", |end| {
+                body[end + delimiter.len_utf8()..].trim_start_matches(['g', 'j', 'f'])
+            })
         }
         _ => pattern.trim_start_matches(|c: char| !c.is_whitespace()),
     }
@@ -208,7 +211,7 @@ fn skip_range(command: &str) -> &str {
             }
             Some(delimiter @ ('/' | '?')) => {
                 let pattern = chars.as_str();
-                unescaped(pattern, delimiter).map_or("", |end| &pattern[end + 1..])
+                pattern_end(pattern, delimiter).map_or("", |end| &pattern[end + 1..])
             }
             Some('\\') if rest[1..].starts_with(['/', '?', '&']) => &rest[2..],
             _ => return rest,
@@ -225,6 +228,112 @@ fn unescaped(text: &str, target: char) -> Option<usize> {
         escaped = !escaped && c == '\\';
         found.then_some(at)
     })
+}
+
+/// Where `delimiter` closes the search pattern `body` opens, found the way
+/// nvim's `skip_regexp` finds it: a backslash takes the character after it,
+/// and a collection holds the delimiter as one of its characters. `\v` and
+/// `\V` switch the pattern to and from magic, where `[` opens a collection
+/// and `\[` does without it. `None` when nothing closes the pattern.
+fn pattern_end(body: &str, delimiter: char) -> Option<usize> {
+    let mut magic = true;
+    let mut at = 0;
+    while let Some(c) = body[at..].chars().next() {
+        if c == delimiter {
+            return Some(at);
+        }
+        let after = &body[at + c.len_utf8()..];
+        let step = match (c, after.chars().next()) {
+            ('[', _) if magic => {
+                at = collection_end(body, at + 1)?;
+                1
+            }
+            ('\\', Some('[')) if !magic => {
+                at = collection_end(body, at + 2)?;
+                1
+            }
+            ('\\', Some(next)) => {
+                // nvim's skip leaves `\m` and `\M` in magic, so `\M[` still
+                // opens a collection there
+                match next {
+                    'v' => magic = true,
+                    'V' => magic = false,
+                    _ => {}
+                }
+                at += 1;
+                next.len_utf8()
+            }
+            _ => c.len_utf8(),
+        };
+        at += step;
+    }
+    None
+}
+
+/// The character classes a collection names as `[:name:]`.
+const CHARACTER_CLASSES: [&str; 19] = [
+    "alnum",
+    "alpha",
+    "backspace",
+    "blank",
+    "cntrl",
+    "digit",
+    "escape",
+    "fname",
+    "graph",
+    "ident",
+    "keyword",
+    "lower",
+    "print",
+    "punct",
+    "return",
+    "space",
+    "tab",
+    "upper",
+    "xdigit",
+];
+
+/// Where the `]` closing the collection that opens before `start` stands in
+/// `body`, read the way nvim's `skip_anyof` reads one. `None` when the
+/// collection runs to the end of `body`.
+fn collection_end(body: &str, start: usize) -> Option<usize> {
+    let mut rest = &body[start..];
+    rest = rest.strip_prefix('^').unwrap_or(rest);
+    rest = rest.strip_prefix([']', '-']).unwrap_or(rest);
+    loop {
+        let mut chars = rest.chars();
+        match chars.next()? {
+            ']' => return Some(body.len() - rest.len()),
+            '-' if !chars.as_str().starts_with(']') => {
+                chars.next();
+            }
+            '\\' if chars
+                .as_str()
+                .starts_with(|c: char| "]^-n\\rtebdoxuU".contains(c)) =>
+            {
+                chars.next();
+            }
+            '[' => {
+                let item = chars.as_str();
+                let single = |mark: char| {
+                    let mut inner = item.strip_prefix(mark)?.chars();
+                    inner.next()?;
+                    inner.as_str().strip_prefix(mark)?.strip_prefix(']')
+                };
+                let class = || {
+                    let name = item.strip_prefix(':')?;
+                    CHARACTER_CLASSES
+                        .iter()
+                        .find_map(|class| name.strip_prefix(class)?.strip_prefix(":]"))
+                };
+                if let Some(past) = class().or_else(|| single('=')).or_else(|| single('.')) {
+                    chars = past.chars();
+                }
+            }
+            _ => {}
+        }
+        rest = chars.as_str();
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +388,7 @@ mod tests {
             "echo 'a\\|View'",
             "'<,'>normal x|View",
             "/a\\/b/normal x|View",
+            "/[/]/normal x|View",
         ] {
             assert!(!names_view(line), "{line:?}");
         }
@@ -307,6 +417,17 @@ mod tests {
             "filter /x/ View",
             "filt! x View",
             "filter /a\\/b/ View",
+            "filter /[/]/ View",
+            "filter /a[/]b/ View",
+            "filter /[[:alpha:]/]/ View",
+            "filter /[^]/]/ View",
+            "filter /[\\]/]/ View",
+            "filter /x/g View",
+            "filter /x/j View",
+            "filter /x/gjf View",
+            "filter /\\V[/ View",
+            "filter /\\V\\[/]/ View",
+            "filter /\\M[/]/ View",
             "bel View",
             "hor View",
         ] {
@@ -323,6 +444,9 @@ mod tests {
             "fil /x/ View",
             "filter View",
             "filter /x View",
+            "filter /[/ View",
+            "filter /\\M\\[/]/ View",
+            "filter /[[:nope:]/]/ View",
         ] {
             assert!(!names_view(line), "{line:?}");
         }

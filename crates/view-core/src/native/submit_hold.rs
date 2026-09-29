@@ -1795,11 +1795,15 @@ mod tests {
     /// tracks costs at most 8 times the last key of a 64-character line (the
     /// key expands its line once, about 4 times; an expansion per recorded
     /// text is about 16 times), and the `<CR>` of that line, shown as no
-    /// recorded text matches, costs at most 5 times the `<CR>` of the same
-    /// line with no rows (the `<CR>` compares text alone). Each side is a
-    /// median of the same run: the test runs in debug on three CI hosts
-    /// beside the binary's other tests, and an absolute taken on one host
-    /// is a flake on another.
+    /// recorded text matches, costs at most 15 times the `<CR>` of the same
+    /// line with no rows. The side with rows compares each recorded text
+    /// once, two string compares for each of up to `TRACKED_MAX` recorded
+    /// states, so its ratio grows with the states recorded. The regressions
+    /// the bound guards are an expansion per miss, about 40 times, and a
+    /// re-read of every edit at the `<CR>`, over a thousand times. Each side
+    /// is a median of the same run: the test runs in debug on three CI hosts
+    /// beside the binary's other tests, and an absolute taken on one host is
+    /// a flake on another.
     #[test]
     fn the_last_key_and_the_cr_of_a_mapped_line_scale_with_the_line() {
         const RUNS: usize = 21;
@@ -1844,7 +1848,7 @@ mod tests {
             keys.len()
         );
         assert!(
-            ratio(cr_rows, cr_bare) <= 5.0,
+            ratio(cr_rows, cr_bare) <= 15.0,
             "the <CR> of the longest line under ten rows took a median {cr_rows:?}, \
              against {cr_bare:?} with no rows"
         );
