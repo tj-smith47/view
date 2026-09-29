@@ -846,6 +846,20 @@ impl SubmitHold {
         self.typed.is_some()
     }
 
+    /// Tracks a `:` line view itself sends the engine, holding `text`, the
+    /// way its keys would be tracked if typed. The line opens whatever mode
+    /// view last read, since nvim reads it once the command that sent it
+    /// has finished.
+    pub(crate) fn open_line(&mut self, text: &str) {
+        self.set_typed(Some(Typed::Known(String::new())));
+        for c in text.chars() {
+            if let Some(typed) = self.typed.as_mut() {
+                typed.edit(&c.to_string());
+            }
+            self.note_edited();
+        }
+    }
+
     /// Drops the tracked line, so keys typed after it are read where
     /// focus stands.
     pub(crate) fn forget_line(&mut self) {
@@ -1637,7 +1651,16 @@ mod tests {
     /// holds the keys behind it.
     #[test]
     fn keys_behind_a_reopened_view_line_are_held() {
-        let mut model = normal_mode();
+        // nvim sends the invocation while it still runs the line that
+        // named it, so the mode view last read may be the command line's
+        for mode in ["normal", "cmdline_normal"] {
+            let mut model = normal_mode();
+            model.engine.mode.current = mode.to_string();
+            keys_behind_a_reopened_line(model);
+        }
+    }
+
+    fn keys_behind_a_reopened_line(mut model: Model) {
         let reopened = crate::update::update(
             &mut model,
             Msg::FeatureInvoke {
