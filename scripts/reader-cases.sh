@@ -90,16 +90,16 @@ grep -xE -- 'first row' <<<"$CAPTURE" >/dev/null
 check "grep -xE refuses a partial row" 1 $?
 
 # The `&str` constants the visual sweep reads out of Rust source. Checked
-# here as well as on the sweep own run, because that run needs tmux and a
+# here as well as on the sweep's own run, because that run needs tmux and a
 # live nvim: a source the sweep can no longer read is a red acceptance leg
 # on a machine that can take one and nothing at all on `task ci`, which is
 # how the message-history title went unread from the commit that stopped
 # writing it as a literal until CI reached the sweep. The population is
-# taken from the sweep own call sites, so a constant added there is graded
+# taken from the sweep's own call sites, so a constant added there is graded
 # without this file being touched.
 SWEEP="$ROOT/scripts/acceptance/visual-sweep.sh"
 eval "$(awk '/^rust_const\(\) \{/,/^\}/' "$SWEEP")"
-# the sources are named by the sweep own `*_RS` assignments, lifted rather
+# the sources are named by the sweep's own `*_RS` assignments, lifted rather
 # than copied for the reason the readers above are
 REPO_ROOT="$ROOT"
 eval "$(grep -E '^[A-Z_]+_RS=\$REPO_ROOT/' "$SWEEP")"
@@ -108,7 +108,7 @@ CONST_SITES=$(grep -oE 'rust_const "\$[A-Z_]+_RS" [A-Z_]+' "$SWEEP" |
     tr -d '"$' | sed -E 's/^rust_const +//')
 # a call-site spelling this file can no longer find grades nothing at all,
 # which is the silence the cases below exist to refuse. Counted against the
-# sweep own mentions rather than a floor: a floor passes a fourth read added
+# sweep's own mentions rather than a floor: a floor passes a fourth read added
 # in a spelling the pattern above cannot see, which is the same silence
 # arriving one call site later. The one subtracted is the definition
 SITES_SEEN=$(printf '%s\n' "$CONST_SITES" | grep -c .)
@@ -123,10 +123,10 @@ while read -r var name; do
         [ -n "$(rust_const "$rs" "$name" 2>/dev/null)" ]
 done <<<"$CONST_SITES"
 
-# Every other read the sweep takes out of a source: a `$( )` opened on a
-# line naming a `"$…_RS"` operand. The truncation mark moved to another file
-# once and the sweep stopped at that read with no message on every host that
-# could run it. Each read is graded by running the sweep own statement and
+# Every read the sweep takes through a `$( )` opened on a line naming a
+# `"$…_RS"` operand. The truncation mark moved to another file once and the
+# sweep stopped at that read with no message on every host that could run
+# it. Each read is graded by running the sweep's own statement and
 # requiring a value, so a read respelled around any pattern this file could
 # hold, or pointed at the wrong file, fails by name. The `rust_const` sites
 # are graded above and are the only lines left out, counted.

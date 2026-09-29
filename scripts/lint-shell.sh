@@ -113,11 +113,12 @@ unparened=""
     return (a == "" || a ~ /[[:space:]]/)
   }
   # whether a word after `before` starts a command: the line start, or after
-  # an operator, an opening paren or brace, or a keyword that takes a list
+  # an operator, an opening paren or brace, `!`, or a keyword that takes a
+  # command after it
   function command_position(before) {
     sub(/[[:space:]]+$/, "", before)
-    return before == "" || before ~ /[;&|({]$/ ||
-      before ~ /(^|[^[:alnum:]_])(then|do|else|elif)$/
+    return before == "" || before ~ /[;&|({!]$/ ||
+      before ~ /(^|[^[:alnum:]_])(then|do|else|elif|if|while|until|time)$/
   }
   # The position after the header `in`, 0 for a line with no `case`
   # keyword, -1 for a keyword whose `in` is not on the line. The word

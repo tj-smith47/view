@@ -61,8 +61,10 @@ const COLD_BOOTSTRAP_STEM: &str = "cold-bootstrap";
 /// file could relax any state's epilogue with nothing in the tree recording
 /// that it happened -- so the population that may take the differential form
 /// is enumerated here, keyed on a filename the way
-/// [`COLD_BOOTSTRAP_STEM`] is, and a state joining it is an edit to this
-/// array rather than to a line nobody re-reads.
+/// [`COLD_BOOTSTRAP_STEM`] is and on the state's
+/// [`label`](ScenarioStateEntry::label), so a pair authorizes one results
+/// row and no other variant of its state, and a state joins it only by an
+/// edit to this array.
 ///
 /// `noice`'s `deferred` state is the one member: it carries the remedy a
 /// conflict notice points a user at, and a remedy proven only on a config
@@ -769,11 +771,9 @@ fn check_accommodation_declines(
     states: &[ScenarioStateEntry],
 ) -> Result<(), ScenarioError> {
     for state in states.iter().filter(|state| !state.accommodations) {
-        let name = state_name(state.name);
+        let label = state.label();
         if fixture.is_none() && state.fixture.is_none() {
-            return Err(ScenarioError::AccommodationDeclineWithoutFixture {
-                state: name.to_string(),
-            });
+            return Err(ScenarioError::AccommodationDeclineWithoutFixture { state: label });
         }
         if state.name == ScenarioState::Unaccommodated {
             continue;
@@ -781,10 +781,10 @@ fn check_accommodation_declines(
         let stem = source_stem.unwrap_or_default();
         if !UNADJUSTED_STATES
             .iter()
-            .any(|(listed_stem, listed_state)| *listed_stem == stem && *listed_state == name)
+            .any(|(listed_stem, listed_state)| *listed_stem == stem && *listed_state == label)
         {
             return Err(ScenarioError::UnauthorizedAccommodationDecline {
-                state: name.to_string(),
+                state: label,
                 stem: stem.to_string(),
             });
         }
@@ -839,7 +839,7 @@ fn check_own_window_closed_polls(
                         && !proven.contains(expr.as_str()) =>
                 {
                     return Err(ScenarioError::VacuousOwnWindowWait {
-                        state: state_name(state.name).to_string(),
+                        state: state.label(),
                         plugin: plugin.to_string(),
                         index,
                     });
@@ -1327,6 +1327,28 @@ states = []
         )
     }
 
+    /// A listed pair authorizes the one row its label names: a variant of
+    /// the listed state is its own row, and declining accommodations there
+    /// needs a pair of its own.
+    #[test]
+    fn a_listed_state_authorizes_no_other_variant_of_it() {
+        let toml = format!(
+            "{}\n[[states]]\nname = \"deferred\"\nvariant = \"all-off\"\naccommodations = false\n\
+             native = {{ statusline = false }}\nsteps = []\n",
+            ui_owning_with_unadjusted_deferred().trim_end()
+        );
+        let err = parse_from(&toml, Some("noice"))
+            .expect_err("noice/deferred must not authorize noice/deferred/all-off");
+        assert!(
+            matches!(
+                err,
+                ScenarioError::UnauthorizedAccommodationDecline { ref state, ref stem }
+                    if state == "deferred/all-off" && stem == "noice"
+            ),
+            "expected UnauthorizedAccommodationDecline for noice/deferred/all-off, got {err:?}"
+        );
+    }
+
     #[test]
     fn a_state_beyond_unaccommodated_declines_accommodations_only_where_listed() {
         let scenario = parse(VALID_UI_OWNING).expect("VALID_UI_OWNING must parse");
@@ -1472,7 +1494,7 @@ states = []
         let dir = crate::fixture::workspace_root()
             .join("compat")
             .join("scenarios");
-        let mut declining: Vec<(String, &'static str)> = Vec::new();
+        let mut declining: Vec<(String, String)> = Vec::new();
         let mut states_seen = 0_usize;
         for entry in std::fs::read_dir(&dir).expect("compat/scenarios must be readable") {
             let path = entry.expect("a readable directory entry").path();
@@ -1496,13 +1518,13 @@ states = []
                     state.name == ScenarioState::Unaccommodated
                         || UNADJUSTED_STATES
                             .iter()
-                            .any(|(s, n)| *s == stem && *n == state_name(state.name)),
+                            .any(|(s, n)| *s == stem && *n == state.label()),
                     "{} runs its {:?} state without the fixture's accommodations; add the pair \
                      to UNADJUSTED_STATES with its grounds, or restore them",
                     path.display(),
-                    state_name(state.name)
+                    state.label()
                 );
-                declining.push((stem.clone(), state_name(state.name)));
+                declining.push((stem.clone(), state.label()));
             }
         }
         assert!(
@@ -1514,7 +1536,7 @@ states = []
             assert!(
                 declining
                     .iter()
-                    .any(|(seen_stem, seen_state)| seen_stem == stem && *seen_state == state),
+                    .any(|(seen_stem, seen_state)| seen_stem == stem && seen_state == state),
                 "UNADJUSTED_STATES names {stem}/{state}, which no scenario file declares as \
                  declining accommodations"
             );

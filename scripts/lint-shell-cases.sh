@@ -424,6 +424,28 @@ expect 1 'scripts/p.sh:5: a case pattern with no leading paren: y) echo y ;;' 1 
 new_case
 plant p.sh <<'EOF'
 set -eu
+if case "${1:-}" in
+  a) true ;;
+esac; then echo a; fi
+EOF
+commit_case
+expect 1 'scripts/p.sh:4: a case pattern with no leading paren: a) true ;;' 1 \
+  'a case keyword after if opens a header'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
+if ! case "${1:-}" in
+  a) true ;;
+esac; then echo a; fi
+EOF
+commit_case
+expect 1 'scripts/p.sh:4: a case pattern with no leading paren: a) true ;;' 1 \
+  'a case keyword after ! opens a header'
+
+new_case
+plant p.sh <<'EOF'
+set -eu
 echo case of x
 EOF
 commit_case

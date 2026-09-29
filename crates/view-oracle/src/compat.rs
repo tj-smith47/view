@@ -802,7 +802,7 @@ impl CompatSession {
                     screen.contents().contains(needle.as_str())
                         || boxed_texts(&screen_cells(screen))
                             .iter()
-                            .any(|text| text.contains(needle.as_str()))
+                            .any(|text| box_reads(text, needle))
                 });
                 if present {
                     Err(CompatError::ForbiddenTextPresent {
@@ -1171,8 +1171,9 @@ fn screen_cells(screen: &vt100::Screen) -> Vec<Vec<String>> {
 
 /// The text inside each framed box in `cells`, its rows joined the way
 /// view-core's `wrap_line` broke them, so a needle the box wrapped reads
-/// whole. A box gives one text per reading of its ambiguous row
-/// boundaries (see [`join_wrapped`]), and a box of blank rows gives none.
+/// whole through [`box_reads`]. A box gives one text with its ambiguous
+/// row boundaries marked (see [`join_wrapped`]), and a box of blank rows
+/// gives none.
 ///
 /// A box is a top-left corner, a top-right corner on its row, and the rows
 /// under them whose cells in both of those columns are vertical edges. A
@@ -1228,56 +1229,68 @@ fn boxed_texts(cells: &[Vec<String>]) -> Vec<String> {
                 continue;
             };
             let rows = edges(top, lo, hi);
-            if rows.len() > 1 {
-                texts.extend(
-                    join_wrapped(&rows)
-                        .into_iter()
-                        .filter(|text| !text.trim().is_empty()),
-                );
+            let text = join_wrapped(&rows);
+            if rows.len() > 1 && !text.trim().is_empty() {
+                texts.push(text);
             }
         }
     }
     texts
 }
 
-/// The rows of one box as the lines they may have been wrapped from.
+/// Marks a row boundary in a box text that reads as nothing or as one
+/// space (see [`join_wrapped`]); [`box_reads`] matches it either way.
+const EITHER_JOIN: char = '\u{1f}';
+
+/// The rows of one box as the line they may have been wrapped from.
 /// `wrap_line` breaks inside a word only where the word fills the whole
 /// row, and everywhere else at a space it drops, so every boundary joins
 /// with a space except one under a single word that fills its row with a
 /// non-space opening the row below. The screen shows a hard break and a
 /// word that fit its row exactly the same way there, so that boundary is
-/// read both ways and the box gives one text per reading.
-fn join_wrapped(rows: &[&[String]]) -> Vec<String> {
-    // ponytail: readings double per ambiguous boundary, so past this many a
-    // boundary keeps the hard-break join; a notice holds a handful at most.
-    const MAX_AMBIGUOUS: usize = 8;
-    let mut texts = Vec::new();
-    let mut ambiguous = 0;
+/// written as [`EITHER_JOIN`] and read both ways by [`box_reads`].
+fn join_wrapped(rows: &[&[String]]) -> String {
+    let mut text = String::new();
     for (index, row) in rows.iter().enumerate() {
         let line = row.concat();
-        let line = line.trim();
-        let Some(above) = index.checked_sub(1).and_then(|at| rows.get(at)) else {
-            texts = vec![line.to_string()];
-            continue;
-        };
-        let inside_a_word = above.last().is_some_and(|cell| cell != " ")
-            && !above.concat().trim().contains(' ')
-            && row.first().is_some_and(|cell| cell != " ");
-        if inside_a_word && ambiguous < MAX_AMBIGUOUS {
-            ambiguous += 1;
-            texts = texts
-                .into_iter()
-                .flat_map(|text| [format!("{text}{line}"), format!("{text} {line}")])
-                .collect();
-        } else {
-            let join = if inside_a_word { "" } else { " " };
-            for text in &mut texts {
-                text.push_str(join);
-                text.push_str(line);
+        if let Some(above) = index.checked_sub(1).and_then(|at| rows.get(at)) {
+            let inside_a_word = above.last().is_some_and(|cell| cell != " ")
+                && !above.concat().trim().contains(' ')
+                && row.first().is_some_and(|cell| cell != " ");
+            text.push(if inside_a_word { EITHER_JOIN } else { ' ' });
+        }
+        text.push_str(line.trim());
+    }
+    text
+}
+
+/// Whether `needle` stands in the box text `text`, each [`EITHER_JOIN`]
+/// matching nothing or one space. One pass over `text` carries the set
+/// of needle prefixes matched so far, so a box with any number of
+/// ambiguous boundaries is read once.
+fn box_reads(text: &str, needle: &str) -> bool {
+    let needle: Vec<char> = needle.chars().collect();
+    let mut matched = vec![false; needle.len() + 1];
+    for c in text.chars() {
+        matched[0] = true;
+        if matched[needle.len()] {
+            return true;
+        }
+        let mut next = vec![false; needle.len() + 1];
+        for (at, _) in matched.iter().enumerate().filter(|(_, on)| **on) {
+            let Some(&want) = needle.get(at) else {
+                continue;
+            };
+            if c == EITHER_JOIN {
+                next[at] = true;
+            }
+            if want == c || (c == EITHER_JOIN && want == ' ') {
+                next[at + 1] = true;
             }
         }
+        matched = next;
     }
-    texts
+    matched[needle.len()] || needle.is_empty()
 }
 
 /// Scans `text` for an E-numbered Vim error (`E` followed by a digit,
@@ -1743,14 +1756,14 @@ mod tests {
             let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
             let texts = boxed_texts(&cells_of(set, &refs));
             assert!(
-                texts.iter().any(|t| t == "say HYPERCONNECTED now"),
+                texts.iter().any(|t| box_reads(t, "say HYPERCONNECTED now")),
                 "{texts:?} from {rows:#?}"
             );
             let rows = wrapped_box("abcdefgh ijk", 8);
             let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
             let texts = boxed_texts(&cells_of(set, &refs));
             assert!(
-                texts.iter().any(|t| t.contains("abcdefgh ijk")),
+                texts.iter().any(|t| box_reads(t, "abcdefgh ijk")),
                 "{texts:?} from {rows:#?}"
             );
             let rows = wrapped_box("has been overwritten by another", 14);
@@ -1759,9 +1772,42 @@ mod tests {
             assert_eq!(texts, ["has been overwritten by another"], "{rows:#?}");
             for invented in ["beenoverwritten", "byanother"] {
                 assert!(
-                    !texts.iter().any(|t| t.contains(invented)),
+                    !texts.iter().any(|t| box_reads(t, invented)),
                     "{invented:?} read out of {texts:?}"
                 );
+            }
+        }
+    }
+
+    /// A box whose every boundary is ambiguous reads a needle across any
+    /// of them either way, however many there are, and invents no text
+    /// the rows do not hold.
+    #[test]
+    fn every_ambiguous_boundary_of_a_box_reads_both_ways() {
+        let word = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN";
+        let words = "abcd efgh ijkl mnop qrst uvwx yzAB CDEF GHIJ KLMN OPQR STUV";
+        for set in &BOTH_SETS {
+            for (text, needles) in [
+                (word, ["ABCDEFGHIJKLMN", "zABCD"]),
+                (words, ["OPQR STUV", "GHIJKLMN"]),
+            ] {
+                let rows = wrapped_box(text, 4);
+                assert!(rows.len() >= 12, "{rows:#?}");
+                let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
+                let texts = boxed_texts(&cells_of(set, &refs));
+                assert_eq!(texts.len(), 1, "{texts:?}");
+                for needle in needles {
+                    assert!(
+                        texts.iter().any(|t| box_reads(t, needle)),
+                        "{needle:?} unread in {texts:?}"
+                    );
+                }
+                for invented in ["abcdX", "N  O", "ab cd"] {
+                    assert!(
+                        !texts.iter().any(|t| box_reads(t, invented)),
+                        "{invented:?} read out of {texts:?}"
+                    );
+                }
             }
         }
     }
