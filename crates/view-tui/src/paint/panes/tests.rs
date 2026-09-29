@@ -3255,8 +3255,8 @@ fn every_text_taking_native_surface_puts_its_caret_inside_its_own_painted_rect()
 ///
 /// `slot` shifted by the same chrome offset the compositor paints that tile
 /// at: `WinPos`'s `startrow`/`startcol` are grid-local, the coordinate space
-/// [`GridRegistry::native_pane_rect`] answers in and `tiled_model`'s own
-/// `slots` are written in, but a caret is a terminal cell -- exactly the
+/// a pane's `filled` box and `tiled_model`'s own `slots` are written in,
+/// but a caret is a terminal cell -- exactly the
 /// distinction `pane_cursor` (`view-surface`'s own windowed caret arm) has
 /// to add `origin` back in for. Read off the rendered `EngineGrid` layer's
 /// own rect, since that layer is built at that offset by
@@ -4564,7 +4564,10 @@ fn surface_frames_on_the_tile_rows(
         let (row, col, width, height) = model
             .engine
             .grids()
-            .native_pane_rect(surface)
+            .panes_in_z_order()
+            .into_iter()
+            .find(|pane| pane.kind.native_surface() == Some(surface))
+            .map(|pane| pane.filled)
             .unwrap_or_else(|| panic!("{label}: no pane was placed"));
         let (origin_row, origin_col) = view_surface::grid_origin(&model);
         let (row, col) = (row + origin_row, col + origin_col);

@@ -14,7 +14,6 @@ use std::path::PathBuf;
 
 use view_core::model::{Look, Model};
 use view_core::msg::{Effect, EngineRequest, Msg, RpcCall, TakeoverStep};
-use view_core::native::channels::{self, Channel};
 use view_core::native::chords::{KeyProfile, ModifierChoice, DESKTOP_CHORD_COUNT};
 use view_core::native::registry;
 use view_native::config::profile;
@@ -951,11 +950,10 @@ impl NativeSession {
     /// statusline, so this push does not read `self.cfg` or `self.plan` at
     /// all.
     ///
-    /// A channel more than one surface claims follows the externalized
-    /// surfaces rather than `self.plan`, and the attach that externalizes
-    /// them closes the sequence. `cmdheight` is the message area's alone
-    /// and rides in its feature's plan entry: nvim zeroes the row for any
-    /// UI attached with `ext_messages`, command line or not.
+    /// The attach that externalizes the surfaces closes the sequence.
+    /// `cmdheight` is the message area's alone and rides in its feature's
+    /// plan entry: nvim zeroes the row for any UI attached with
+    /// `ext_messages`, command line or not.
     fn take_over(&mut self, model: &mut Model) -> Vec<Effect> {
         if self.handed_over {
             return Vec::new();
@@ -986,14 +984,6 @@ impl NativeSession {
         effects.push(RpcCall::RegisterClipboard {
             channel_id: self.channel_id,
         });
-        for channel in channels::session_holds_in(channels::CHANNELS, model) {
-            if let Channel::Hold { option, value, .. } = channel {
-                effects.push(RpcCall::HoldOption {
-                    name: option.to_string(),
-                    value: value.wire(self.look),
-                });
-            }
-        }
         crate::vlog::log_with("native", || {
             let (taken, look_held): (Vec<&Supersession>, Vec<&Supersession>) =
                 self.plan.iter().partition(|e| e.announced);
@@ -1438,16 +1428,6 @@ mod tests {
         .iter()
         .filter_map(|entry| entry.rpc.clone())
         .collect();
-        let session_held: Vec<RpcCall> = channels::session_held()
-            .into_iter()
-            .filter_map(|channel| match channel {
-                Channel::Hold { option, value, .. } => Some(RpcCall::HoldOption {
-                    name: option.to_string(),
-                    value: value.wire(Look::default()),
-                }),
-                _ => None,
-            })
-            .collect();
         let holds: Vec<RpcCall> = effects
             .iter()
             .filter_map(|e| match e {
@@ -1459,10 +1439,9 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let expected: Vec<RpcCall> = planned.iter().cloned().chain(session_held).collect();
         assert_eq!(
-            holds, expected,
-            "every planned surface, and every channel the session holds, must be held: {effects:?}"
+            holds, planned,
+            "every planned surface must be held: {effects:?}"
         );
         assert!(
             !holds.is_empty(),

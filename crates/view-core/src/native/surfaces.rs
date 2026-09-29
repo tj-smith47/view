@@ -50,11 +50,9 @@ pub enum Surface {
     ///
     /// No channel of its own, deliberately. `laststatus` is what leaves
     /// nvim a row under each window for the frame to paint over, and a
-    /// second claim on that option would make it
-    /// [`shared_by_surfaces`](crate::native::channels::shared_by_surfaces)
-    /// -- which skips it out of every feature's plan and leaves nothing
-    /// holding it. So the row here is the enumeration and
-    /// [`Surface::Statusline`] keeps the single claim.
+    /// second claim on that option would let either feature's switch hand
+    /// the row back while the other still paints on it. So the row here is
+    /// the enumeration and [`Surface::Statusline`] keeps the single claim.
     Frame,
     /// The buffer grid, which view never draws over: nvim owns it, and so
     /// does anything that wants to float above it.

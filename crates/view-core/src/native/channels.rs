@@ -167,9 +167,8 @@ pub struct SurfaceChannels {
 
 /// Every surface view can own, with the channels that draw it.
 ///
-/// A channel named by two surfaces is held only where both of them are
-/// view's ([`session_held`]), so a surface handed back keeps whatever row
-/// it draws on.
+/// Each channel is named by one surface, whose feature's switch hands it
+/// back.
 pub const CHANNELS: &[SurfaceChannels] = &[
     SurfaceChannels {
         surface: Surface::Cmdline,
@@ -370,19 +369,8 @@ pub fn channels(surface: Surface) -> &'static [Channel] {
 }
 
 /// Every surface whose channel list names `option`, in table order.
-///
-/// A hold is issued only where every one of them is view's, which is what
-/// keeps `cmdheight` with nvim for a session that kept nvim's messages.
 pub fn claimants_of(option: &str) -> impl Iterator<Item = Surface> + '_ {
-    claimants_in(CHANNELS, option)
-}
-
-/// [`claimants_of`] over `table`.
-pub fn claimants_in<'a>(
-    table: &'a [SurfaceChannels],
-    option: &'a str,
-) -> impl Iterator<Item = Surface> + 'a {
-    table
+    CHANNELS
         .iter()
         .filter(move |row| row.channels.iter().any(|channel| channel.name() == option))
         .map(|row| row.surface)
@@ -392,61 +380,6 @@ pub fn claimants_in<'a>(
 #[must_use]
 pub fn is_claimed(channel: &str) -> bool {
     claimants_of(channel).next().is_some()
-}
-
-/// Whether more than one surface claims `channel`, which makes it the
-/// session's to hold rather than any one feature's: the surfaces that
-/// claim it can be handed back one at a time, and the channel is still
-/// needed while either of them is view's.
-///
-/// One spelling for one question. The takeover derivation leaves such a
-/// channel out of a feature's plan and the session holds it against its
-/// whole attach set, so two readings of "shared" would either hold it
-/// twice or not at all.
-#[must_use]
-pub fn shared_by_surfaces(channel: &str) -> bool {
-    claimants_of(channel).count() > 1
-}
-
-/// Every channel more than one surface claims, in table order and with no
-/// repeats.
-///
-/// The session holds these against its whole attach set rather than any
-/// feature's switch, so the crate that performs them and the crate that
-/// enumerates the guards they install both read this one answer.
-#[must_use]
-pub fn session_held() -> Vec<Channel> {
-    session_held_in(CHANNELS)
-}
-
-/// [`session_held`] over `table`.
-#[must_use]
-pub fn session_held_in(table: &[SurfaceChannels]) -> Vec<Channel> {
-    table
-        .iter()
-        .flat_map(|entry| entry.channels.iter().copied())
-        .filter(|channel| claimants_in(table, channel.name()).count() > 1)
-        .fold(Vec::new(), |mut out, channel| {
-            if !out.contains(&channel) {
-                out.push(channel);
-            }
-            out
-        })
-}
-
-/// The holds of [`session_held_in`] `table` that `model` issues: those
-/// whose every claimant view draws, since a surface handed back keeps the
-/// row the channel would take from it.
-#[must_use]
-pub fn session_holds_in(table: &[SurfaceChannels], model: &crate::model::Model) -> Vec<Channel> {
-    session_held_in(table)
-        .into_iter()
-        .filter(|channel| matches!(channel, Channel::Hold { .. }))
-        .filter(|channel| {
-            claimants_in(table, channel.name())
-                .all(|surface| crate::native::surfaces::view_draws(surface, model))
-        })
-        .collect()
 }
 
 /// Every channel of every surface `option` belongs to that nvim evaluates
@@ -584,39 +517,21 @@ mod tests {
         assert_eq!(claimants, vec![Surface::Messages]);
     }
 
-    /// A channel two surfaces claim is held only where view draws both, so
-    /// handing either one back keeps the channel with nvim.
+    /// Each channel is held by the one feature whose surface claims it, so
+    /// a channel two surfaces claimed would be taken back by either
+    /// feature's switch while the other still needs it.
     #[test]
-    fn a_shared_hold_is_issued_only_where_every_claimant_is_drawn() {
-        const HOLD: Channel = Channel::Hold {
-            option: "shared-row",
-            scope: Scope::Global,
-            value: ChannelValue::Int(0),
-        };
-        const TABLE: &[SurfaceChannels] = &[
-            SurfaceChannels {
-                surface: Surface::Cmdline,
-                channels: &[HOLD],
-            },
-            SurfaceChannels {
-                surface: Surface::Messages,
-                channels: &[HOLD],
-            },
-        ];
-        assert_eq!(session_held_in(TABLE), vec![HOLD]);
-        for (attached, held) in [
-            (vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages], true),
-            (vec![Ext::LineGrid, Ext::Messages], false),
-            (vec![Ext::LineGrid, Ext::Cmdline], false),
-            (vec![Ext::LineGrid], false),
-        ] {
-            let mut model = crate::model::Model::with_term_size(80, 24);
-            model.attach_surfaces(attached.clone());
-            assert_eq!(
-                session_holds_in(TABLE, &model) == vec![HOLD],
-                held,
-                "attached {attached:?}"
-            );
+    fn no_channel_is_claimed_by_two_surfaces() {
+        for row in CHANNELS {
+            for channel in row.channels {
+                let claimants: Vec<Surface> = claimants_of(channel.name()).collect();
+                assert_eq!(
+                    claimants,
+                    vec![row.surface],
+                    "{} is claimed by {claimants:?}",
+                    channel.name()
+                );
+            }
         }
     }
 
@@ -660,26 +575,6 @@ mod tests {
         assert_eq!(
             by_look.wire(Look::new(Panes::Tiles, true)),
             OptionValue::Int(2)
-        );
-    }
-
-    /// `laststatus` is the one option whose held value moves with the
-    /// look, and it stays a single surface's claim whichever leg answers.
-    ///
-    /// A `Surface::Frame` row carrying a `Hold` of its own would make it
-    /// shared, which skips it out of every feature's plan and hands it to
-    /// `session_held()` -- so `[native] statusline = false` would stop
-    /// handing the row back at all.
-    #[test]
-    fn laststatus_is_claimed_by_one_surface_whatever_the_look() {
-        assert!(
-            !shared_by_surfaces("laststatus"),
-            "laststatus must stay one surface's to hold"
-        );
-        assert_eq!(claimants_of("laststatus").count(), 1);
-        assert!(
-            !session_held().iter().any(|c| c.name() == "laststatus"),
-            "a session-held laststatus is one no feature's off switch reverses"
         );
     }
 

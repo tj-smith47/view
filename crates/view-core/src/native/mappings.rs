@@ -568,7 +568,7 @@ fn render_history_table() -> String {
 }
 
 /// Display metadata for a feature in [`REGISTRY_EXEMPT_FEATURES`] -- the same
-/// three facts [`registry::FeatureDesc`] carries for a feature the registry
+/// facts [`registry::FeatureDesc`] carries for a feature the registry
 /// tracks. A claim on an exempt feature's key needs exactly these to report
 /// through the same mechanism a registry feature's claim does, rather than
 /// being dropped for lacking a `FeatureDesc` row (see
@@ -584,9 +584,6 @@ pub struct ExemptFeatureDesc {
     /// Stable id, spelled identically to the id [`MappingSpec::feature`]
     /// carries for this feature.
     pub id: &'static str,
-    /// The plugin surface this feature takes over, rendered as prose in a
-    /// claim's notice exactly as [`registry::FeatureDesc::supersedes`] is.
-    pub supersedes: Option<&'static str>,
     /// The exact config line that turns this feature off, verbatim in a
     /// claim's notice, the same contract [`registry::FeatureDesc::off_switch`]
     /// holds.
@@ -599,7 +596,6 @@ pub struct ExemptFeatureDesc {
 static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 3] = [
     ExemptFeatureDesc {
         id: "ai",
-        supersedes: Some("your own AI chat plugin"),
         off_switch: "ai.enabled = false",
     },
     // `ui` has no on/off switch of its own (see the `Msg::FeatureInvoke`
@@ -607,7 +603,6 @@ static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 3] = [
     // line a claim notice offers is the `[keys]` rebind.
     ExemptFeatureDesc {
         id: "ui",
-        supersedes: None,
         off_switch: "keys.toggle_gaps / keys.cycle_surfaces in view.toml",
     },
     // `window` carries the whole desktop chord table (`native::chords`)
@@ -615,7 +610,6 @@ static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 3] = [
     // `[native]`-gated surface -- the off switch is the profile.
     ExemptFeatureDesc {
         id: "window",
-        supersedes: Some("your desktop's own window-management chords"),
         off_switch: "keys.profile = \"editor\"",
     },
 ];

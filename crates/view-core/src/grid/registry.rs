@@ -1230,20 +1230,9 @@ impl GridRegistry {
         self.native_surface(self.cursor_grid()?)
     }
 
-    /// `surface`'s own tile, `(row, col, width, height)` in the global
-    /// grid's coordinate space -- the same space [`Self::pane_origin`]
-    /// answers in: the [`Pane::filled`] box its frame is drawn on. `None`
-    /// while no pane of that surface is placed.
-    #[must_use]
-    pub fn native_pane_rect(&self, surface: NativeSurface) -> Option<(u16, u16, u16, u16)> {
-        self.panes_in_z_order()
-            .into_iter()
-            .find(|pane| pane.kind.native_surface() == Some(surface))
-            .map(|pane| pane.filled)
-    }
-
-    /// The rect `surface`'s content is painted in, in the same space as
-    /// [`Self::native_pane_rect`]: [`Pane::text`] for its grid. `None`
+    /// The rect `surface`'s content is painted in, `(row, col, width,
+    /// height)` in the global grid's coordinate space -- the same space
+    /// [`Self::pane_origin`] answers in: [`Pane::text`] for its grid. `None`
     /// while no pane of that surface is placed, which is what a caret in a
     /// windowed surface with no window open yet has to fall back past.
     #[must_use]

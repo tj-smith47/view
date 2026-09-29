@@ -250,8 +250,8 @@ fn measure(
         }
     }
     dump.push_str(&format!(
-        "  native_pane_rect {:?}\n",
-        registry.native_pane_rect(surface)
+        "  native_pane_text {:?}\n",
+        registry.native_pane_text(surface)
     ));
     let overlay = model.overlays().iter().find(|overlay| {
         matches!(

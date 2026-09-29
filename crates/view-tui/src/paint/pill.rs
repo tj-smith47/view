@@ -7,7 +7,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use view_core::native::pill::{edge_cells, PillCaps, PillView};
+use view_core::native::pill::{edge_cells, PillCaps, PillView, AGENT_CRASHED, AGENT_WAITING};
 use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
 
 use super::text::{cluster_width, clusters, set_cluster};
@@ -49,8 +49,8 @@ pub(super) fn paint_pill(pill: &PillView, theme: &Theme, area: Rect, buf: &mut B
     let agent = edge_cells(pill.agent);
     if agent > 0 {
         let fg = match pill.agent {
-            "waiting" => theme.chrome(ChromeGroup::WarningMsg).fg,
-            "crashed" => theme.chrome(ChromeGroup::ErrorMsg).fg,
+            AGENT_WAITING => theme.chrome(ChromeGroup::WarningMsg).fg,
+            AGENT_CRASHED => theme.chrome(ChromeGroup::ErrorMsg).fg,
             _ => theme.accent().fg,
         };
         ends.draw(buf, area, (pill.agent_col(), agent), pill.agent, edge(fg));
@@ -401,6 +401,51 @@ mod tests {
             ("p", "t"),
             "the host and the current name are not where the slots put them"
         );
+    }
+
+    /// A word that needs the person reading the row stands in the group
+    /// nvim gives that urgency, and any other word in the accent.
+    #[test]
+    fn the_agent_word_is_coloured_by_what_it_asks_of_the_reader() {
+        let mut model = two_tabs(40);
+        for (id, group, fg) in [
+            (3_u64, ChromeGroup::WarningMsg, 0x33_33_33_u32),
+            (4, ChromeGroup::ErrorMsg, 0x55_55_55),
+        ] {
+            for event in [
+                view_core::events::UiEvent::HlAttrDefine {
+                    id,
+                    fg: Some(fg),
+                    bg: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    reverse: false,
+                },
+                view_core::events::UiEvent::HlGroupSet {
+                    name: group.hl_name().to_string(),
+                    hl_id: id,
+                },
+            ] {
+                let _ =
+                    view_core::update::update(&mut model, view_core::msg::Msg::Redraw(vec![event]));
+            }
+        }
+        let theme = Theme::from_hl(model.engine.hl());
+        for (word, fg) in [
+            (super::AGENT_WAITING, 0x33_33_33),
+            (super::AGENT_CRASHED, 0x55_55_55),
+            ("running", ACCENT),
+        ] {
+            let mut pill = PillView::from_model(&model);
+            pill.agent = word;
+            let buf = painted(&pill, &theme);
+            assert_eq!(
+                buf[(pill.agent_col() + 2, 0)].style().fg,
+                Some(rgb(fg)),
+                "the agent word {word:?}"
+            );
+        }
     }
 
     /// Paints `pill` into a buffer as wide as its own row.

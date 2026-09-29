@@ -41,14 +41,6 @@ pub struct Supersession {
     /// registry's `off_switch` so the reversal a notice prints and the
     /// reversal doctor prints can never disagree.
     pub reverses_with: &'static str,
-    /// The plugin surface being taken over, verbatim from the registry's
-    /// `supersedes`, or `None` for a feature that names no plugin.
-    ///
-    /// Carried on the entry rather than looked up again by consumers: the
-    /// notice and doctor both render it, and a second lookup keyed on
-    /// `feature` is a second place the plan and its description can
-    /// disagree about what was taken over.
-    pub supersedes: Option<&'static str>,
     /// Whether the first-run notice and doctor name this entry.
     ///
     /// `false` for a hold the look makes on a feature the user turned off
@@ -127,8 +119,7 @@ impl TakeoverKind {
 
 /// Every augroup the shipped holds create inside nvim, in table order: one
 /// per takeover row whose kind installs a hold, none for a kind that does
-/// not, and one per channel the session holds on its own account
-/// ([`channels::session_held`]).
+/// not.
 ///
 /// The kind decides, through a match with no wildcard arm, rather than the
 /// shape of the string it produced. A later kind that does install a guard
@@ -140,28 +131,7 @@ impl TakeoverKind {
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn takeover_augroups() -> Vec<String> {
-    let mut names: Vec<String> = takeovers().iter().map(|row| row.kind.claims()).collect();
-    // the session's own holds install the same guards under the same
-    // names, and a guard nothing enumerates is a guard the cross-crate pin
-    // never reads
-    for channel in channels::session_held() {
-        if let Channel::Hold {
-            option,
-            scope,
-            value,
-        } = channel
-        {
-            names.push(
-                TakeoverKind::Option {
-                    option,
-                    scope,
-                    value,
-                }
-                .claims(),
-            );
-        }
-    }
-    names
+    takeovers().iter().map(|row| row.kind.claims()).collect()
 }
 
 /// One row of the takeover table: the feature that owns it, and what its
@@ -237,11 +207,6 @@ fn takeover_call(row: &Takeover, look: Look) -> Option<RpcCall> {
 /// Derived rather than written here, so the set of channels a surface
 /// claims is stated once: the audit that reads them back and the takeover
 /// that holds them cannot disagree about what view owns.
-///
-/// A channel claimed by more than one surface is not a feature's to hold,
-/// since a session that gave either surface back still needs it, so those
-/// are held by the session against its attach set instead, on the same
-/// reading ([`channels::shared_by_surfaces`]).
 fn takeovers() -> Vec<Takeover> {
     let mut rows = Vec::new();
     for entry in channels::CHANNELS {
@@ -254,16 +219,11 @@ fn takeovers() -> Vec<Takeover> {
                     option,
                     scope,
                     value,
-                } => {
-                    if channels::shared_by_surfaces(option) {
-                        continue;
-                    }
-                    TakeoverKind::Option {
-                        option,
-                        scope,
-                        value,
-                    }
-                }
+                } => TakeoverKind::Option {
+                    option,
+                    scope,
+                    value,
+                },
                 Channel::Replaced(NOTIFY_GLOBAL) => TakeoverKind::Notify,
                 // an attach performs the takeover at `nvim_ui_attach` and
                 // leaves nothing to hold; a covered channel is held by its
@@ -334,7 +294,6 @@ fn plan_from(
                     feature: f.id,
                     rpc: takeover_call(t, look),
                     reverses_with: f.off_switch,
-                    supersedes: f.supersedes,
                     announced: enabled,
                 })
         })
@@ -894,23 +853,6 @@ mod tests {
     }
 
     #[test]
-    fn every_entry_carries_its_registry_supersedes_verbatim() {
-        let plan = plan(
-            &NativeConfig::all_enabled(),
-            registry::features(),
-            Look::default(),
-        );
-        assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
-        for entry in &plan {
-            let desc = registry::features()
-                .iter()
-                .find(|f| f.id == entry.feature)
-                .expect("every plan entry must name a registry feature");
-            assert_eq!(entry.supersedes, desc.supersedes);
-        }
-    }
-
-    #[test]
     fn every_entry_rides_an_api_call_never_the_keyboard() {
         let plan = plan(
             &NativeConfig::all_enabled(),
@@ -935,9 +877,8 @@ mod tests {
         }
     }
 
-    /// The tab line's channels split between the attach and one option:
-    /// the plan carries the option, and the sentence a user reads about the
-    /// surface is rendered from the entry that carries it.
+    /// The tab line's channels split between the attach and one option,
+    /// and the plan carries the option.
     #[test]
     fn the_tab_line_is_planned_for_the_row_the_attach_cannot_reach() {
         let entries: Vec<Supersession> = plan(
@@ -953,10 +894,6 @@ mod tests {
             1,
             "nvim stops drawing the tab row at the attach, so the row a plan carries is the \
              window-local one the attach leaves standing: {entries:?}"
-        );
-        assert!(
-            entries.iter().all(|entry| entry.supersedes.is_some()),
-            "the row exists so the plugin it supersedes is named to the user"
         );
         assert!(
             entries.iter().any(|entry| entry.rpc

@@ -417,6 +417,12 @@ fn entries(
     (entries, PillNames::Tabs)
 }
 
+/// The word a pending permission draws, which the row colours as a warning.
+pub const AGENT_WAITING: &str = "waiting";
+
+/// The word a crashed session draws, which the row colours as an error.
+pub const AGENT_CRASHED: &str = "crashed";
+
 /// What the agent is doing, in one word, or empty for a session with the
 /// agent turned off.
 ///
@@ -428,13 +434,13 @@ pub fn agent_word(panel: &AiPanelState, enabled: bool, trusted: bool) -> &'stati
         return "";
     }
     if panel.pending_permission.is_some() {
-        return "waiting";
+        return AGENT_WAITING;
     }
     // an open session between turns is waiting on nothing and doing
     // nothing, so only a turn in flight reads as running
     match SessionState::derive(panel, trusted) {
         SessionState::Active if panel.turn_in_flight => "running",
-        SessionState::Crashed => "crashed",
+        SessionState::Crashed => AGENT_CRASHED,
         _ => "idle",
     }
 }

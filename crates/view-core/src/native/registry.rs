@@ -16,9 +16,6 @@ pub struct FeatureDesc {
     /// table key, the doctor row name, and the off-switch name, and it may
     /// never drift between the three.
     pub id: &'static str,
-    /// What a config already has for this surface, named the way a user
-    /// would name it, or `None` for a feature that supersedes nothing.
-    pub supersedes: Option<&'static str>,
     /// The exact line a user writes to turn this feature off, rendered
     /// verbatim by doctor and by the first-run toast. A rendered string
     /// rather than a derived one: a user who is told `native.picker =
@@ -46,48 +43,39 @@ pub struct FeatureDesc {
     pub default_on: bool,
 }
 
-// `supersedes` names the thing a config already has for this surface, in a
-// user's own words: it is rendered as prose ("your own status line still
-// loads") and matched against nothing.
 static FEATURES: [FeatureDesc; 6] = [
     FeatureDesc {
         id: "picker",
-        supersedes: Some("your own fuzzy finder"),
         off_switch: "native.picker = false",
         entry_keys: true,
         default_on: true,
     },
     FeatureDesc {
         id: "tree",
-        supersedes: Some("your own file explorer"),
         off_switch: "native.tree = false",
         entry_keys: true,
         default_on: true,
     },
     FeatureDesc {
         id: "statusline",
-        supersedes: Some("your own status line"),
         off_switch: "native.statusline = false",
         entry_keys: false,
         default_on: true,
     },
     FeatureDesc {
         id: "notifications",
-        supersedes: Some("your own notifier"),
         off_switch: "native.notifications = false",
         entry_keys: true,
         default_on: true,
     },
     FeatureDesc {
         id: "palette",
-        supersedes: Some("your own command-line UI"),
         off_switch: "native.palette = false",
         entry_keys: true,
         default_on: true,
     },
     FeatureDesc {
         id: "tabline",
-        supersedes: Some("your own tab line"),
         off_switch: "native.tabline = false",
         entry_keys: false,
         default_on: false,
