@@ -1057,6 +1057,26 @@ impl GridRegistry {
     /// Records the slot nvim gave `grid`'s window and places the grid at
     /// the origin the current look puts inside it.
     fn place_window(&mut self, grid: GridId, win: WinHandle, slot: (u16, u16, u16, u16)) {
+        // a grid_line that beat the claim here left engine cells standing
+        // under a pane view paints itself
+        if self.clears_when_placed(grid, win) {
+            if let Some(entry) = self.slot_mut(grid) {
+                entry.grid.apply(GridOp::Clear);
+            }
+        }
+        self.seat_window(grid, win, slot);
+    }
+
+    /// Whether placing `win` in `grid` blanks the grid: `win` is claimed
+    /// for a surface and the grid is not yet placed as that surface's pane.
+    fn clears_when_placed(&self, grid: GridId, win: WinHandle) -> bool {
+        matches!(self.window_kind(win), PaneKind::Native { .. })
+            && self.native_surface(grid).is_none()
+    }
+
+    /// Records the slot and placement [`Self::place_window`] gives `grid`,
+    /// leaving its cells as they are.
+    fn seat_window(&mut self, grid: GridId, win: WinHandle, slot: (u16, u16, u16, u16)) {
         let look = self.look;
         let shown = closed(slot, &self.docks);
         if let Some(entry) = self.slot_mut(grid) {
@@ -1076,13 +1096,6 @@ impl GridRegistry {
         }
         let origin = inner_origin(look, shown, self.margin_top(grid));
         let kind = self.window_kind(win);
-        // a grid_line that beat the claim here left engine cells standing
-        // under a pane view paints itself
-        if matches!(kind, PaneKind::Native { .. }) && self.native_surface(grid).is_none() {
-            if let Some(entry) = self.slot_mut(grid) {
-                entry.grid.apply(GridOp::Clear);
-            }
-        }
         self.place(grid, origin, kind, 0);
     }
 

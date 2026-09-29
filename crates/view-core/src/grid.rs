@@ -262,6 +262,29 @@ impl Grid {
         true
     }
 
+    /// Makes this grid `size` wide and tall with its cursor at `cursor` and
+    /// every cell [`Cell::default`], in its own buffers, and answers whether
+    /// anything changed. A cell is blank only with a space in highlight 0,
+    /// so whitespace drawn in a colour counts as a change.
+    pub(crate) fn blank_to(&mut self, size: (u16, u16), cursor: (u16, u16)) -> bool {
+        let blank = self
+            .cells
+            .iter()
+            .all(|cell| cell.text == " " && cell.hl_id == 0);
+        if blank && self.size() == size && self.cursor() == cursor {
+            return false;
+        }
+        (self.width, self.height) = size;
+        self.cells.clear();
+        self.cells
+            .resize(usize::from(size.0) * usize::from(size.1), Cell::default());
+        self.dirty_rows.clear();
+        self.dirty_rows.resize(usize::from(size.1), false);
+        self.cursor_goto(cursor.0, cursor.1);
+        self.dirty_full = true;
+        true
+    }
+
     /// Where the cell buffer lives, so a test can tell a grid copied into
     /// in place from one replaced by a fresh copy.
     #[cfg(test)]

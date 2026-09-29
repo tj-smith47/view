@@ -1,7 +1,7 @@
 //! A registry laid out in the slots of a layout that is no longer nvim's.
 
 use super::{GridId, GridRegistry, Slot, WindowSlot};
-use crate::grid::{Grid, GridOp};
+use crate::grid::Grid;
 
 impl GridRegistry {
     /// Lays this registry out in `drawn` as drawn in `layout`: each window
@@ -15,6 +15,7 @@ impl GridRegistry {
     /// two differ. Answers how many grids were copied, or `None`, leaving
     /// `drawn` as it was, when a window here has no slot in `layout`, since
     /// the layout it would be drawn in is then no longer the one on screen.
+    #[must_use]
     pub fn relay_into(
         &self,
         layout: &[WindowSlot],
@@ -34,7 +35,8 @@ impl GridRegistry {
                 (false, Some(Some(cells))) => Some(cells),
                 _ => None,
             };
-            windows.push((entry.id, *win, *slot, cells));
+            let blank = self.clears_when_placed(entry.id, *win);
+            windows.push((entry.id, *win, *slot, cells, blank));
         }
         let mut copied = usize::from(drawn.global.follow(&self.global));
         drawn.cursor = self.cursor;
@@ -51,11 +53,12 @@ impl GridRegistry {
         };
         for slot in &self.slots {
             let mut grid = reuse(slot.id);
-            let held_cells = windows
-                .iter()
-                .find(|(id, ..)| *id == slot.id)
-                .and_then(|(.., cells)| *cells);
-            copied += usize::from(grid.follow(held_cells.unwrap_or(&slot.grid)));
+            let window = windows.iter().find(|(id, ..)| *id == slot.id);
+            copied += usize::from(match window {
+                Some((.., Some(cells), _)) => grid.follow(cells),
+                Some((.., None, true)) => grid.blank_to(slot.grid.size(), slot.grid.cursor()),
+                _ => grid.follow(&slot.grid),
+            });
             drawn.slots.push(Slot {
                 id: slot.id,
                 grid,
@@ -63,15 +66,12 @@ impl GridRegistry {
                 window: slot.window.clone(),
             });
         }
-        for (grid, win, slot, cells) in &windows {
-            drawn.place_window(*grid, *win, *slot);
-            // placing a native pane clears its grid, and the held cells
-            // are what the slot shows until the replacement draws text
-            if let Some(cells) = cells {
-                if let Some(entry) = drawn.slots.iter_mut().find(|s| s.id == *grid) {
-                    copied += usize::from(entry.grid.follow(cells));
-                }
-            }
+        // each grid, stand-ins included, already holds what placing its
+        // window leaves on screen, the blank a native pane is cleared to
+        // among them, so the clear is skipped and last flush's copy compares
+        // equal
+        for (grid, win, slot, ..) in &windows {
+            drawn.seat_window(*grid, *win, *slot);
         }
         // ids counted down from the top of the range, which nvim, counting
         // up from 2, never names in a session
@@ -82,23 +82,19 @@ impl GridRegistry {
             }
             let id = GridId(spare);
             let mut grid = reuse(id);
-            if let Some(Some(cells)) = held.get(index) {
-                copied += usize::from(grid.follow(cells));
-            } else if grid.size() != (slot.2, slot.3) || grid.has_text() {
-                grid = Grid::new();
-                grid.apply(GridOp::Resize {
-                    width: slot.2,
-                    height: slot.3,
-                });
-                copied += 1;
-            }
+            let blank = drawn.clears_when_placed(id, *win);
+            copied += usize::from(match held.get(index) {
+                Some(Some(cells)) if blank => grid.blank_to(cells.size(), cells.cursor()),
+                Some(Some(cells)) => grid.follow(cells),
+                _ => grid.blank_to((slot.2, slot.3), (0, 0)),
+            });
             drawn.slots.push(Slot {
                 id,
                 grid,
                 placed: None,
                 window: None,
             });
-            drawn.place_window(id, *win, *slot);
+            drawn.seat_window(id, *win, *slot);
             spare = spare.saturating_sub(1);
         }
         Some(copied)
@@ -110,6 +106,8 @@ mod tests {
     use super::*;
     use crate::events::WinHandle;
     use crate::grid::registry::GridEvent;
+    use crate::grid::GridOp;
+    use crate::native::geometry::NativeSurface;
 
     fn cells(grid: GridId, op: GridOp) -> GridEvent {
         GridEvent::Cells { grid, op }
@@ -183,6 +181,101 @@ mod tests {
         assert!(
             drawn.window_grid(WinHandle(1003)).is_some(),
             "a layout the live window has no slot in changed drawn"
+        );
+    }
+
+    /// A window or stand-in claimed for a surface but not yet placed as its
+    /// pane is drawn blank, and a relay that finds it blank already copies
+    /// nothing.
+    ///
+    /// Disconfirm: copying the live or held cells before the clear placing
+    /// them runs counts copies on the second relay.
+    #[test]
+    fn a_claimed_window_awaiting_its_pane_is_blanked_without_a_copy() {
+        let mut live = GridRegistry::new();
+        live.apply(cells(
+            GridId(3),
+            GridOp::Resize {
+                width: 30,
+                height: 10,
+            },
+        ));
+        live.apply(cells(GridId(3), text("engine")));
+        live.apply(GridEvent::Window {
+            grid: GridId(3),
+            win: WinHandle(1004),
+            startrow: 0,
+            startcol: 0,
+            width: 30,
+            height: 10,
+        });
+        live.claims.push((WinHandle(1004), NativeSurface::Tree));
+        live.claims.push((WinHandle(1005), NativeSurface::Agent));
+        let layout = [
+            (WinHandle(1004), (0, 0, 30, 10)),
+            (WinHandle(1005), (0, 31, 20, 10)),
+        ];
+        let mut before = Grid::new();
+        before.apply(GridOp::Resize {
+            width: 20,
+            height: 10,
+        });
+        before.apply(text("held"));
+        let held = [None, Some(before)];
+        let mut drawn = GridRegistry::new();
+
+        assert_eq!(live.relay_into(&layout, &held, &mut drawn), Some(2));
+        assert_eq!(live.relay_into(&layout, &held, &mut drawn), Some(0));
+        for win in [WinHandle(1004), WinHandle(1005)] {
+            assert!(
+                drawn.window_grid(win).is_some_and(|g| !g.has_text()),
+                "{win:?} shows cells under a pane"
+            );
+        }
+        assert_eq!(
+            drawn.window_grid(WinHandle(1004)).map(Grid::size),
+            Some((30, 10))
+        );
+    }
+
+    /// A stand-in that showed coloured blanks is redrawn blank once its slot
+    /// holds nothing.
+    ///
+    /// Disconfirm: judging the reused stand-in by its text alone keeps
+    /// highlight 7 in the cell.
+    #[test]
+    fn a_reused_stand_in_drops_the_highlight_it_showed() {
+        let mut live = GridRegistry::new();
+        live.apply(cells(
+            GridId(1),
+            GridOp::Resize {
+                width: 80,
+                height: 24,
+            },
+        ));
+        let layout = [(WinHandle(1002), (0, 0, 20, 5))];
+        let mut coloured = Grid::new();
+        coloured.apply(GridOp::Resize {
+            width: 20,
+            height: 5,
+        });
+        coloured.apply(GridOp::PutLine {
+            row: 0,
+            col_start: 0,
+            cells: vec![(" ".to_string(), 7, 20)],
+        });
+        let mut drawn = GridRegistry::new();
+
+        assert!(live
+            .relay_into(&layout, &[Some(coloured)], &mut drawn)
+            .is_some());
+        assert_eq!(live.relay_into(&layout, &[None], &mut drawn), Some(1));
+        assert_eq!(
+            drawn
+                .window_grid(WinHandle(1002))
+                .and_then(|g| g.cell(0, 0))
+                .map(|c| c.hl_id),
+            Some(0)
         );
     }
 }

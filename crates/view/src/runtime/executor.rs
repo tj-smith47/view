@@ -1000,16 +1000,14 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .unwrap_or(source);
-        // any spelling of the call: a path, `thread::sleep(` after a `use`
-        // of `std::thread`, or a bare `sleep(` after a `use` of the function
+        // every naming of a sleeping function counts, so a call through any
+        // path, an alias `use`d with `as`, the function passed as a value,
+        // and its `_ms` and `_until` siblings each add one
         let calls = production
-            .match_indices("sleep(")
-            .filter(|(at, _)| {
-                production[..*at]
-                    .chars()
-                    .next_back()
-                    .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
-            })
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(|line| line.split(|c: char| !(c.is_alphanumeric() || c == '_')))
+            .filter(|token| matches!(*token, "sleep" | "sleep_ms" | "sleep_until"))
             .count();
         assert_eq!(
             calls, 1,
