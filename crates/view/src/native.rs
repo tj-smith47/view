@@ -122,20 +122,11 @@ impl HoldStarts {
 /// `<...>` name lowercased, and the name of a printable key written as the
 /// character, which is how the terminal reader sends it unmodified.
 fn first_key(keys: &str) -> Option<String> {
-    let first = keys.chars().next()?;
-    if first == '<' {
-        if let Some(end) = keys.find('>') {
-            let name = keys[..=end].to_ascii_lowercase();
-            return Some(match name.as_str() {
-                "<space>" => " ".to_string(),
-                "<lt>" => "<".to_string(),
-                "<bslash>" => "\\".to_string(),
-                "<bar>" => "|".to_string(),
-                _ => name,
-            });
-        }
-    }
-    Some(first.to_string())
+    let key = view_core::native::keys::key_tokens(keys).next()?;
+    Some(
+        view_core::native::keys::notation_char(key)
+            .map_or_else(|| key.to_ascii_lowercase(), |c| c.to_string()),
+    )
 }
 
 /// One session's native configuration and the plan it applies.
@@ -1268,6 +1259,24 @@ mod tests {
 
     fn model() -> Model {
         Model::with_term_size(80, 24)
+    }
+
+    /// A mapping's first key reads the way the terminal reader sends it,
+    /// through the tokenizer and character table every surface shares.
+    #[test]
+    fn a_mappings_first_key_is_spelled_as_the_reader_sends_it() {
+        for (lhs, key) in [
+            ("<space>ff", Some(" ")),
+            ("<Space>", Some(" ")),
+            ("<LT>x", Some("<")),
+            ("<Bar>", Some("|")),
+            ("<C->>x", Some("<c->>")),
+            ("<C-W>v", Some("<c-w>")),
+            ("gx", Some("g")),
+            ("", None),
+        ] {
+            assert_eq!(first_key(lhs).as_deref(), key, "{lhs}");
+        }
     }
 
     /// Every spec a session registers at startup: the takeover's own

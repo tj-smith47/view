@@ -3965,6 +3965,22 @@ mod tests {
         );
     }
 
+    /// nvim's default `'timeoutlen'` is written once, in `view_core::msg`,
+    /// and the decoder reads it from there, so the two cannot part.
+    #[test]
+    fn the_decoder_spells_no_timeoutlen_of_its_own() {
+        let decoder = include_str!("handle/decode.rs");
+        let copies: Vec<&str> = decoder
+            .lines()
+            .filter(|line| {
+                line.contains("from_millis(1000)")
+                    || (line.contains("timeoutlen") && line.contains("1000"))
+                    || line.contains("from_secs(1)")
+            })
+            .collect();
+        assert!(copies.is_empty(), "{copies:#?}");
+    }
+
     /// The late re-read: a plugin that loaded after the registration and
     /// mapped `:` reports on the bridge, and that closes the gate.
     #[test]

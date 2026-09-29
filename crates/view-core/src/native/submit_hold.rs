@@ -184,6 +184,10 @@ fn line_key(notation: &str) -> LineKey {
 #[derive(Debug, Clone, Default)]
 pub struct SubmitHold {
     typed: Option<Typed>,
+    /// Every text the tracked line has held while view knew it, oldest
+    /// first. nvim showing one of them is showing keys still in flight,
+    /// whatever the edit that led away from it.
+    states: Vec<String>,
     /// Whether nvim has shown the tracked line open.
     opened: bool,
     /// Lines the tracker has seen end that nvim has not yet hidden.
@@ -503,7 +507,7 @@ impl SubmitHold {
         }
         let shown: String = line.content.iter().map(|(_, s)| s.as_str()).collect();
         self.opened |= match &self.typed {
-            Some(Typed::Known(text)) => text.starts_with(&shown),
+            Some(Typed::Known(_)) => self.states.contains(&shown),
             Some(_) => true,
             None => false,
         };
@@ -524,6 +528,22 @@ impl SubmitHold {
     fn set_typed(&mut self, typed: Option<Typed>) {
         self.typed = typed;
         self.opened = false;
+        self.states.clear();
+        self.note_edited();
+    }
+
+    /// Records the tracked line's text after an edit. A line edited more
+    /// times than the record holds is one view no longer knows, and nvim's
+    /// own line is read at its `<CR>`.
+    fn note_edited(&mut self) {
+        let Some(Typed::Known(text)) = &self.typed else {
+            return;
+        };
+        if self.states.len() < TRACKED_MAX {
+            self.states.push(text.clone());
+        } else {
+            self.typed = Some(Typed::unknown());
+        }
     }
 
     /// Ends the tracked line, which nvim answers with one hide, and tracks
@@ -823,12 +843,15 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
         hold.end_line(None);
     } else if key == LineKey::Submit {
         let opened = hold.line_opened();
+        let states = std::mem::take(&mut hold.states);
         let typed = hold.end_line(None);
-        if submits_view(model, opened, typed.as_ref()) {
+        if submits_view(model, opened, typed.as_ref(), &states) {
             return arm(model, Armed::Command);
         }
     } else if typed.edit(notation) {
         hold.end_line(None);
+    } else {
+        hold.note_edited();
     }
     Vec::new()
 }
@@ -892,11 +915,12 @@ pub(crate) fn may_open(model: &Model) -> bool {
 
 /// Whether the line a `<CR>` submits runs `:View`, read from the engine's
 /// last `cmdline_show` of it, and from the keys view sent where the engine
-/// has shown none or is still showing an earlier prefix of them.
+/// has shown none or is showing a text those keys gave the line on the way
+/// (`states`), since the keys after it are still in flight.
 ///
-/// A `cnoremap` or `cabbrev` can put `View` on a line whose keys never
-/// spelled it, and only the engine's line says so.
-fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>) -> bool {
+/// A `cnoremap` can put `View` on a line whose keys never spelled it, and
+/// only the engine's line says so.
+fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>, states: &[String]) -> bool {
     let shown = model
         .engine
         .cmdline
@@ -909,9 +933,7 @@ fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>) -> bool {
                 .collect::<String>()
         });
     match (typed, shown) {
-        (Some(Typed::Known(text)), Some(shown))
-            if opened && !(text.len() > shown.len() && text.starts_with(&shown)) =>
-        {
+        (Some(Typed::Known(_)), Some(shown)) if opened && !states.contains(&shown) => {
             names_view(&shown)
         }
         (Some(Typed::Known(text)), _) => names_view(text),
@@ -1005,8 +1027,8 @@ mod tests {
     }
 
     /// A `cnoremap` that turns the typed line into `View ai open` arms the
-    /// hold on what the engine shows, and an engine line still showing an
-    /// earlier prefix of the keys typed defers to them.
+    /// hold on what the engine shows, and an engine line still showing a
+    /// text the keys typed gave the line on the way defers to them.
     #[test]
     fn a_line_the_engine_shows_as_view_holds_whatever_keys_spelled_it() {
         let mut model = normal_mode();
@@ -1029,6 +1051,27 @@ mod tests {
         let _ = type_keys(&mut model, &["V", "i"]);
         show_line(&mut model, "Vi");
         let sent = type_keys(&mut model, &["m", "<CR>"]);
+        assert!(!arms(&sent), "{sent:?}");
+
+        // a typo corrected faster than nvim shows it: the shown `Vx` is a
+        // text the keys gave the line, so the typed `View` decides
+        let mut model = normal_mode();
+        let _ = type_keys(&mut model, &[":"]);
+        show_line(&mut model, "");
+        let _ = type_keys(&mut model, &["V", "x"]);
+        show_line(&mut model, "Vx");
+        let sent = type_keys(&mut model, &["<BS>", "i", "e", "w", "<CR>"]);
+        assert!(arms(&sent), "{sent:?}");
+
+        let mut model = normal_mode();
+        let _ = type_keys(&mut model, &[":"]);
+        show_line(&mut model, "");
+        let _ = type_keys(&mut model, &["V", "i"]);
+        show_line(&mut model, "Vi");
+        let sent = type_keys(
+            &mut model,
+            &["<BS>", "<BS>", "e", "<Space>", "f", "o", "o", "<CR>"],
+        );
         assert!(!arms(&sent), "{sent:?}");
     }
 

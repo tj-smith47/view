@@ -288,7 +288,7 @@ fn split_keys(spelling: &str) -> Option<Binding> {
 ///
 /// A `<...>` token is returned whole even where [`well_formed`] refuses
 /// it, so a caller that needs a real key checks each token itself.
-pub(crate) fn key_tokens(spelling: &str) -> impl Iterator<Item = &str> {
+pub fn key_tokens(spelling: &str) -> impl Iterator<Item = &str> {
     let mut rest = spelling;
     std::iter::from_fn(move || {
         let head = rest.chars().next()?;
@@ -315,21 +315,27 @@ pub(crate) fn key_tokens(spelling: &str) -> impl Iterator<Item = &str> {
 
 /// The character a single-key notation types into text: the key itself
 /// when it is one character, the character a named printable key spells
-/// (`<Space>`, `<lt>`, `<Bslash>`, `<Bar>`), and `None` for any other key.
+/// (`<Space>`, `<lt>`, `<Bslash>`, `<Bar>`, in any case, as nvim reads
+/// them), and `None` for any other key.
 #[must_use]
-pub(crate) fn notation_char(notation: &str) -> Option<char> {
+pub fn notation_char(notation: &str) -> Option<char> {
     let mut chars = notation.chars();
     match (chars.next(), chars.next()) {
         (Some(c), None) => Some(c),
-        _ => match notation {
-            "<Space>" => Some(' '),
-            "<lt>" => Some('<'),
-            "<Bslash>" => Some('\\'),
-            "<Bar>" => Some('|'),
-            _ => None,
-        },
+        _ => NAMED_PRINTABLES
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(notation))
+            .map(|&(_, c)| c),
     }
 }
+
+/// The keys nvim names in notation that type one printable character.
+const NAMED_PRINTABLES: [(&str, char); 4] = [
+    ("<Space>", ' '),
+    ("<lt>", '<'),
+    ("<Bslash>", '\\'),
+    ("<Bar>", '|'),
+];
 
 #[cfg(test)]
 mod tests {
@@ -645,6 +651,8 @@ mod tests {
             ("<lt>", Some('<')),
             ("<Bslash>", Some('\\')),
             ("<Bar>", Some('|')),
+            ("<space>", Some(' ')),
+            ("<LT>", Some('<')),
             ("<Esc>", None),
             ("<C-w>", None),
             ("<S-Tab>", None),
@@ -655,7 +663,9 @@ mod tests {
     }
 
     /// One tokenizer and one notation-to-character table serve every
-    /// surface; a private copy under one of the retired names fails here.
+    /// surface of every crate. A private copy fails here under one of the
+    /// retired names, or, written inline, by a named printable key spelled
+    /// as a literal in code that is not a test.
     #[test]
     fn no_module_keeps_its_own_key_tokenizer_or_character_table() {
         let retired = [
@@ -664,9 +674,20 @@ mod tests {
             "fn lone_char(",
             "fn single_char(",
         ];
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut stack = vec![src];
+        let named: Vec<String> = NAMED_PRINTABLES
+            .iter()
+            .map(|(name, _)| format!("\"{name}\""))
+            .collect();
+        // writing a typed `<` into nvim's input spells the key, and reads
+        // no notation
+        let encoders = ["view-core/src/update/paste.rs"];
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let mut stack = vec![crates.clone()];
         let mut found = Vec::new();
+        let mut walked = 0;
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).unwrap() {
                 let path = entry.unwrap().path();
@@ -674,20 +695,34 @@ mod tests {
                     stack.push(path);
                     continue;
                 }
+                let rel = path.strip_prefix(&crates).unwrap().to_string_lossy();
                 if path.extension().is_none_or(|ext| ext != "rs")
-                    || path.ends_with("native/keys.rs")
+                    || rel == "view-core/src/native/keys.rs"
                 {
                     continue;
                 }
+                walked += 1;
                 let text = std::fs::read_to_string(&path).unwrap();
                 found.extend(
                     retired
                         .iter()
                         .filter(|name| text.contains(*name))
-                        .map(|name| format!("{}: {name}", path.display())),
+                        .map(|name| format!("{rel}: {name}")),
+                );
+                let test_only = rel.contains("/tests/") || path.ends_with("tests.rs");
+                if test_only || encoders.contains(&rel.as_ref()) {
+                    continue;
+                }
+                let code = text.split("#[cfg(test)]").next().unwrap_or_default();
+                found.extend(
+                    named
+                        .iter()
+                        .filter(|name| code.contains(name.as_str()))
+                        .map(|name| format!("{rel}: {name}")),
                 );
             }
         }
+        assert!(walked > 100, "walked {walked} files under {crates:?}");
         assert!(found.is_empty(), "{found:#?}");
     }
 }
