@@ -1032,7 +1032,7 @@ pub fn fold_expiry(model: &mut Model, now: SpecStamp) {
 /// Folds one engine-bound keystroke into the display-only prediction it is
 /// expected to produce.
 fn fold_keystroke(model: &mut Model, notation: &str, now: SpecStamp) {
-    let Some(key) = lone_char(notation) else {
+    let Some(key) = crate::native::keys::notation_char(notation) else {
         // the caller obligation `predict` states: a notation key moves the
         // cursor or changes what typing means without ever reaching it as a
         // character, so nothing pending can survive one
@@ -1088,18 +1088,6 @@ fn fold_invalidation(model: &mut Model) {
 /// repaint.
 fn mark_retirement(model: &mut Model, before: usize) {
     model.dirty |= model.speculate.pending().len() != before;
-}
-
-/// The one character `notation` is, or `None` when it is a notation key.
-///
-/// nvim notation writes every key that is not a single printable character as
-/// a bracketed name -- `<Esc>`, `<C-w>`, `<S-Tab>`, and `<lt>` for a literal
-/// `<` -- so "exactly one char" separates the two with no table of key names
-/// to keep in step with the encoder that produced them.
-fn lone_char(notation: &str) -> Option<char> {
-    let mut chars = notation.chars();
-    let first = chars.next()?;
-    chars.next().is_none().then_some(first)
 }
 
 #[cfg(test)]
@@ -2623,16 +2611,18 @@ mod tests {
         assert_eq!(model.speculate.pending().len(), 1);
     }
 
-    /// `<lt>` is nvim's notation for a typed `<`, and it is three characters
-    /// on the wire: predicting one glyph per character would put a `<`, a
-    /// `l` and a `t` on the grid.
+    /// `<lt>` is nvim's notation for a typed `<`: it predicts the one glyph
+    /// it types, and a named key typing no character predicts nothing.
     #[test]
-    fn a_bracketed_notation_is_never_mistaken_for_the_characters_that_spell_it() {
-        for notation in ["<lt>", "<Esc>", "<C-w>", "<S-Tab>"] {
-            assert_eq!(lone_char(notation), None, "{notation}");
-        }
-        assert_eq!(lone_char("x"), Some('x'));
-        assert_eq!(lone_char(" "), Some(' '));
+    fn a_bracketed_notation_predicts_the_character_it_types() {
+        let mut model = typing_model();
+        fold_engine_call(&mut model, &input("<lt>"), stamp(0));
+        let glyphs: Vec<char> = model.speculate.pending().iter().map(|c| c.glyph).collect();
+        assert_eq!(glyphs, ['<']);
+
+        let mut model = typing_model();
+        fold_engine_call(&mut model, &input("<S-Tab>"), stamp(0));
+        assert!(model.speculate.pending().is_empty());
     }
 
     /// Speculation is mode-gated at the model, so a key typed outside insert

@@ -196,8 +196,8 @@ impl PickerState {
         self.generation
     }
 
-    /// Applies one key-notation edit to the query: a single non-`<`-prefixed
-    /// character inserts, `<BS>` deletes the last character, anything else
+    /// Applies one key-notation edit to the query: a key that types a
+    /// character inserts it, `<BS>` deletes the last character, anything else
     /// is a no-op edit. Bumps and returns the new generation regardless --
     /// the caller decides which keys reach this at all (see `update()`'s
     /// picker key routing), so by the time a call lands here the edit is
@@ -205,7 +205,7 @@ impl PickerState {
     pub fn edit_query(&mut self, notation: &str) -> u64 {
         if notation == "<BS>" {
             self.query.pop();
-        } else if let Some(c) = single_char(notation) {
+        } else if let Some(c) = crate::native::keys::notation_char(notation) {
             self.query.push(c);
         }
         self.requery()
@@ -367,18 +367,6 @@ fn join_display(root: &std::path::Path, rel: &str) -> String {
     root.join(rel).to_string_lossy().into_owned()
 }
 
-/// A single non-`<`-prefixed character, or `None` for an empty string, a
-/// multi-character notation (`<CR>`, `<Esc>`, ...), or a multi-byte grapheme
-/// this simple editor does not attempt to compose.
-fn single_char(notation: &str) -> Option<char> {
-    let mut chars = notation.chars();
-    let c = chars.next()?;
-    if c == '<' || chars.next().is_some() {
-        return None;
-    }
-    Some(c)
-}
-
 /// Splits `item.label` into spans around its matched byte ranges: the
 /// matched runs carry [`StyleRole::Match`], everything else is
 /// [`StyleRole::Plain`]. `item.indices` are byte offsets of individual
@@ -461,6 +449,14 @@ mod tests {
         assert!(g1 > g0);
         assert_eq!(state.generation(), g1);
         assert_eq!(state.query(), "m");
+    }
+
+    #[test]
+    fn edit_query_types_the_character_a_named_key_spells() {
+        let mut state = PickerState::open(Source::Buffers);
+        state.edit_query("<lt>");
+        state.edit_query("<Space>");
+        assert_eq!(state.query(), "< ");
     }
 
     #[test]

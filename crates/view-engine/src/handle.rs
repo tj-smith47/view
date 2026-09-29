@@ -3961,7 +3961,7 @@ mod tests {
         let report = super::decode::decode_mapping_report(&reply(None));
         assert_eq!(
             report.user_keys.timeoutlen,
-            Some(Duration::from_millis(1000))
+            Some(view_core::msg::DEFAULT_TIMEOUTLEN)
         );
     }
 

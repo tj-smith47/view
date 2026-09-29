@@ -426,8 +426,7 @@ pub(super) fn ai_panel_key(
         // forwarded, the same way an unmatched key on a
         // confirm-class `PromptState` leaves the prompt open
         // instead of falling through.
-        let mut chars = notation.chars();
-        let key = chars.next().filter(|_| chars.next().is_none());
+        let key = crate::native::keys::notation_char(notation);
         if let Some(option) = key.and_then(|c| prompt.option_for_key(c)).cloned() {
             model.ai_panel_mut().pending_permission = None;
             model.dirty = true;
@@ -572,20 +571,7 @@ pub(super) fn ai_panel_key(
         if model.ai_panel_mut().pop_input() {
             model.dirty = true;
         }
-    } else if notation == "<lt>" {
-        // nvim's own escape for a literal `<`, the one
-        // printable character that cannot arrive as itself
-        // (see `keys::encode_key`'s own doc).
-        model.ai_panel_mut().push_input("<");
-        model.dirty = true;
-    } else if let Some(ch) = {
-        // Every other single character, including a literal
-        // space, arrives as itself rather than a named `<...>`
-        // notation -- the same convention the permission
-        // options above already key off of.
-        let mut chars = notation.chars();
-        chars.next().filter(|_| chars.next().is_none())
-    } {
+    } else if let Some(ch) = crate::native::keys::notation_char(notation) {
         model
             .ai_panel_mut()
             .push_input(ch.encode_utf8(&mut [0_u8; 4]));

@@ -12,16 +12,13 @@ use std::time::Duration;
 use crate::events::UiEvent;
 use crate::model::{CmdlineState, Model};
 use crate::msg::{Effect, Msg};
+use crate::native::keys::{key_tokens, notation_char};
 use crate::native::speculate::SpecStamp;
 
 /// The longest a tracked command line grows before it is given up on: a
 /// `:` typed in insert mode is text, and the tracker would otherwise keep
 /// every character after it.
 const TRACKED_MAX: usize = 256;
-
-/// nvim's own default `'timeoutlen'`, which a held sequence waits for
-/// until the engine reports the one the user's config set.
-const DEFAULT_TIMEOUTLEN: Duration = Duration::from_millis(1000);
 
 /// Normal-mode keys that leave normal mode: into insert, replace, visual
 /// or a command line, or into an operator's pending motion. A key typed
@@ -105,7 +102,7 @@ impl Typed {
         if line_key(notation) == LineKey::Delete {
             return text.pop().is_none();
         }
-        match typed_char(notation) {
+        match notation_char(notation) {
             Some(c) if text.len() < TRACKED_MAX => text.push(c),
             _ => *self = Self::unknown(),
         }
@@ -263,7 +260,7 @@ impl SubmitHold {
         self.invoke_keys = claims
             .iter()
             .filter_map(|claim| {
-                let keys: Vec<_> = split_keys(claim.keys.as_deref()?).map(canonical).collect();
+                let keys: Vec<_> = key_tokens(claim.keys.as_deref()?).map(canonical).collect();
                 (!keys.is_empty()).then(|| Invocation {
                     feature: claim.feature.clone(),
                     keys,
@@ -280,7 +277,7 @@ impl SubmitHold {
     pub fn learn_user_keys(&mut self, keys: &[String], timeoutlen: Option<Duration>) {
         self.user_keys = keys
             .iter()
-            .map(|keys| split_keys(keys).map(canonical).collect::<Vec<_>>())
+            .map(|keys| key_tokens(keys).map(canonical).collect::<Vec<_>>())
             .filter(|keys| !keys.is_empty())
             .collect();
         self.timeout_off = timeoutlen.is_none();
@@ -411,7 +408,8 @@ impl SubmitHold {
             return Vec::new();
         }
         vec![Effect::ScheduleSequenceExpiry {
-            after: self.timeoutlen.unwrap_or(DEFAULT_TIMEOUTLEN),
+            // the engine has not yet reported the user's own value
+            after: self.timeoutlen.unwrap_or(crate::msg::DEFAULT_TIMEOUTLEN),
             generation: self.sequence_generation,
         }]
     }
@@ -620,26 +618,11 @@ fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     complete
 }
 
-/// The keys of `spelling`, one `<...>` token or one character each.
-fn split_keys(spelling: &str) -> impl Iterator<Item = &str> {
-    let mut rest = spelling;
-    std::iter::from_fn(move || {
-        let first = rest.chars().next()?;
-        let token = rest
-            .find('>')
-            .map(|end| &rest[..=end])
-            .filter(|token| first == '<' && crate::native::keys::well_formed(token))
-            .unwrap_or(&rest[..first.len_utf8()]);
-        rest = &rest[token.len()..];
-        Some(token)
-    })
-}
-
 /// One spelling for each key nvim reads as the same key: `keytrans()`
 /// writes `<M-S-Left>` and `<Space>` where view's input writes
 /// `<S-M-Left>` and a bare space, and a shifted letter is its capital.
 fn canonical(key: &str) -> String {
-    if let Some(c) = typed_char(key) {
+    if let Some(c) = notation_char(key) {
         return c.to_string();
     }
     let Some(Modified {
@@ -836,8 +819,9 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
     if key.leaves() {
         hold.end_line(None);
     } else if key == LineKey::Submit {
+        let opened = hold.line_opened();
         let typed = hold.end_line(None);
-        if submits_view(model, typed.as_ref()) {
+        if submits_view(model, opened, typed.as_ref()) {
             return arm(model, Armed::Command);
         }
     } else if typed.edit(notation) {
@@ -903,38 +887,33 @@ pub(crate) fn may_open(model: &Model) -> bool {
                 .contains(&model.engine.mode.current.as_str()))
 }
 
-/// The character a single-key notation types into a command line.
-fn typed_char(notation: &str) -> Option<char> {
-    let mut chars = notation.chars();
-    match (chars.next(), chars.next()) {
-        (Some(c), None) => Some(c),
-        _ => match notation {
-            "<Space>" => Some(' '),
-            "<lt>" => Some('<'),
-            "<Bslash>" => Some('\\'),
-            "<Bar>" => Some('|'),
-            _ => None,
-        },
+/// Whether the line a `<CR>` submits runs `:View`, read from the engine's
+/// last `cmdline_show` of it, and from the keys view sent where the engine
+/// has shown none or is still showing an earlier prefix of them.
+///
+/// A `cnoremap` or `cabbrev` can put `View` on a line whose keys never
+/// spelled it, and only the engine's line says so.
+fn submits_view(model: &Model, opened: bool, typed: Option<&Typed>) -> bool {
+    let shown = model
+        .engine
+        .cmdline
+        .as_ref()
+        .filter(|line| line.firstc == ":")
+        .map(|line| {
+            line.content
+                .iter()
+                .map(|(_, s)| s.as_str())
+                .collect::<String>()
+        });
+    match (typed, shown) {
+        (Some(Typed::Known(text)), Some(shown))
+            if opened && !(text.len() > shown.len() && text.starts_with(&shown)) =>
+        {
+            names_view(&shown)
+        }
+        (Some(Typed::Known(text)), _) => names_view(text),
+        (_, shown) => shown.is_some_and(|shown| names_view(&shown)),
     }
-}
-
-/// Whether the line a `<CR>` submits runs `:View`, read from the keys view
-/// sent, or from the engine's last `cmdline_show` where those keys edited
-/// the line in a way view does not model.
-fn submits_view(model: &Model, typed: Option<&Typed>) -> bool {
-    if let Some(Typed::Known(text)) = typed {
-        return names_view(text);
-    }
-    model.engine.cmdline.as_ref().is_some_and(|line| {
-        line.firstc == ":"
-            && names_view(
-                &line
-                    .content
-                    .iter()
-                    .map(|(_, s)| s.as_str())
-                    .collect::<String>(),
-            )
-    })
 }
 
 /// Whether `line`'s command word is `View` or an abbreviation nvim would
@@ -1000,6 +979,54 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn show_line(model: &mut Model, text: &str) {
+        let _ = crate::update::update(
+            model,
+            Msg::Redraw(vec![UiEvent::CmdlineShow {
+                content: vec![(0, text.to_string())],
+                pos: 0,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            }]),
+        );
+    }
+
+    fn arms(effects: &[Effect]) -> bool {
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::ScheduleSubmitHold { .. }))
+    }
+
+    /// A `cnoremap` that turns the typed line into `View ai open` arms the
+    /// hold on what the engine shows, and an engine line still showing an
+    /// earlier prefix of the keys typed defers to them.
+    #[test]
+    fn a_line_the_engine_shows_as_view_holds_whatever_keys_spelled_it() {
+        let mut model = normal_mode();
+        let _ = type_keys(&mut model, &[":"]);
+        show_line(&mut model, "");
+        let _ = type_keys(&mut model, &["v", "v"]);
+        show_line(&mut model, "View ai open");
+        let sent = type_keys(&mut model, &["<CR>"]);
+        assert!(arms(&sent), "{sent:?}");
+
+        let mut model = normal_mode();
+        let _ = type_keys(&mut model, &[":"]);
+        show_line(&mut model, "");
+        let sent = type_keys(&mut model, &["V", "i", "e", "w", "<CR>"]);
+        assert!(arms(&sent), "{sent:?}");
+
+        let mut model = normal_mode();
+        let _ = type_keys(&mut model, &[":"]);
+        show_line(&mut model, "");
+        let _ = type_keys(&mut model, &["V", "i"]);
+        show_line(&mut model, "Vi");
+        let sent = type_keys(&mut model, &["m", "<CR>"]);
+        assert!(!arms(&sent), "{sent:?}");
     }
 
     const OPEN_PICKER: [&str; 20] = [
@@ -1333,16 +1360,24 @@ mod tests {
         }
         assert_ne!(canonical("<M-q>"), canonical("<M-Q>"));
         assert_eq!(
-            split_keys("<Space>a<lt>\\<M-S-Left>").collect::<Vec<_>>(),
+            key_tokens("<Space>a<lt>\\<M-S-Left>").collect::<Vec<_>>(),
             ["<Space>", "a", "<lt>", "\\", "<M-S-Left>"]
         );
     }
 
+    /// `keytrans()` spells `Ctrl` with `>` as `<C->>` and a `|` as `<Bar>`,
+    /// each one key, so a claim written with either holds behind that key.
     #[test]
-    fn single_key_notations_type_their_character() {
-        assert_eq!(typed_char("a"), Some('a'));
-        assert_eq!(typed_char("<Space>"), Some(' '));
-        assert_eq!(typed_char("<Tab>"), None);
+    fn a_claim_spelling_a_closer_or_a_named_character_is_one_key() {
+        for (claim, typed) in [
+            ("<C->>", &["<C->>"][..]),
+            ("<M->>", &["<M->>"][..]),
+            ("<Bar>a", &["|", "a"][..]),
+        ] {
+            let mut model = claiming(&[Some(claim)]);
+            let _ = type_keys(&mut model, typed);
+            assert!(model.submit_hold.is_holding(), "{claim}");
+        }
     }
 
     /// A key read as the argument of the one before it ends no line, an

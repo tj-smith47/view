@@ -436,7 +436,7 @@ impl Default for UserKeys {
     fn default() -> Self {
         Self {
             keys: Vec::new(),
-            timeoutlen: Some(Duration::from_millis(1000)),
+            timeoutlen: Some(view_core::msg::DEFAULT_TIMEOUTLEN),
         }
     }
 }

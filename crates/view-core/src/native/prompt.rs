@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::model::{CmdlineState, MessageEntry};
 use crate::native::geometry::OverlayBox;
+use crate::native::keys::notation_char;
 
 /// The share of the terminal a prompt may take at its widest, and the share
 /// it always takes vertically. The width is a ceiling now rather than a
@@ -269,7 +270,7 @@ impl PromptState {
         if notation == "<CR>" {
             return choices.iter().any(|c| c.default);
         }
-        let Some(c) = notation.chars().next() else {
+        let Some(c) = notation_char(notation) else {
             return false;
         };
         choices
@@ -331,13 +332,9 @@ impl PromptState {
                 if notation == "<CR>" || notation == "<Esc>" {
                     return true;
                 }
-                let mut chars = notation.chars();
-                let Some(c) = chars.next() else {
+                let Some(c) = notation_char(notation) else {
                     return false;
                 };
-                if chars.next().is_some() {
-                    return false;
-                }
                 choices
                     .iter()
                     .any(|choice| choice.key == c.to_ascii_lowercase())
@@ -346,10 +343,7 @@ impl PromptState {
                 digits_only: true, ..
             } => {
                 matches!(notation, "<CR>" | "<Esc>" | "<BS>" | "q")
-                    || notation
-                        .chars()
-                        .next()
-                        .is_some_and(|c| notation.chars().count() == 1 && c.is_ascii_digit())
+                    || notation_char(notation).is_some_and(|c| c.is_ascii_digit())
             }
             // an ordinary `input()` prompt (see `Answer::FreeText`'s doc):
             // `q` is not nvim's documented cancel key here the way it is for
@@ -360,10 +354,7 @@ impl PromptState {
                 digits_only: false, ..
             } => {
                 matches!(notation, "<CR>" | "<Esc>" | "<BS>")
-                    || notation
-                        .chars()
-                        .next()
-                        .is_some_and(|c| notation.chars().count() == 1 && !c.is_control())
+                    || notation_char(notation).is_some_and(|c| !c.is_control())
             }
         }
     }
@@ -634,6 +625,16 @@ mod tests {
         assert!(state.accepts("<BS>"));
         assert!(state.accepts("q"));
         assert!(!state.accepts("z"));
+    }
+
+    /// A typed `<` arrives as `<lt>` and is text a file name can hold.
+    #[test]
+    fn a_free_text_prompt_accepts_a_named_key_that_types_a_character() {
+        let mut state = PromptState::from_entry(&entry("confirm", "New file:")).unwrap();
+        state.learn_cmdline(&cmdline_prompt("New file: "));
+        assert!(state.takes_typed_text());
+        assert!(state.accepts("<lt>"));
+        assert!(!state.accepts("<Up>"));
     }
 
     #[test]

@@ -269,47 +269,66 @@ pub fn escaped_key(notation: &str) -> Option<String> {
 /// spells Alt with for the same reason: nvim accepts both, and the one
 /// this build never receives would otherwise bind a key nothing sends.
 fn split_keys(spelling: &str) -> Option<Binding> {
-    let mut keys: Vec<String> = Vec::new();
-    let mut rest = spelling;
-    while let Some(head) = rest.chars().next() {
-        if keys.len() == 2 {
-            return None;
-        }
-        match (head == '<').then(|| rest.find('>')).flatten() {
-            Some(end) => {
-                // `>` is a key as much as it is a closer, and the first one
-                // in `<C->>` is the character the chord names. Reading it
-                // as the closer splits the chord into a modifier with no
-                // key and a stray `>`, which is how `Ctrl`+`>` -- a chord
-                // a keyboard-protocol terminal really does report -- came
-                // to be refused as malformed
-                let end = if !well_formed(&rest[..=end]) && rest[end + 1..].starts_with('>') {
-                    end + 1
-                } else {
-                    end
-                };
-                // inside a `<...>` key, `A-` can only ever be the modifier:
-                // what follows the prefixes is one character or a named key,
-                // and no name holds a `-`
-                keys.push(rest[..=end].replace("A-", "M-"));
-                rest = &rest[end + 1..];
-            }
-            None => {
-                keys.push(if head == '<' {
-                    "<lt>".to_string()
-                } else {
-                    head.to_string()
-                });
-                rest = &rest[head.len_utf8()..];
-            }
-        }
-    }
-    if !keys.iter().all(|key| well_formed(key)) {
-        return None;
-    }
-    let mut keys = keys.into_iter();
+    let mut keys = key_tokens(spelling).map(|key| match key {
+        "<" => "<lt>".to_string(),
+        // inside a `<...>` key, `A-` can only ever be the modifier: what
+        // follows the prefixes is one character or a named key, and no name
+        // holds a `-`
+        _ => key.replace("A-", "M-"),
+    });
     let first = keys.next()?;
-    Some((first, keys.next()))
+    let second = keys.next();
+    let formed = well_formed(&first) && second.as_deref().is_none_or(well_formed);
+    (formed && keys.next().is_none()).then_some((first, second))
+}
+
+/// The keys `spelling` writes, in order: each `<...>` notation as one
+/// token, and every other character, a `<` that opens no notation
+/// included, as a token of its own.
+///
+/// A `<...>` token is returned whole even where [`well_formed`] refuses
+/// it, so a caller that needs a real key checks each token itself.
+pub(crate) fn key_tokens(spelling: &str) -> impl Iterator<Item = &str> {
+    let mut rest = spelling;
+    std::iter::from_fn(move || {
+        let head = rest.chars().next()?;
+        let len = match (head == '<').then(|| rest.find('>')).flatten() {
+            // `>` is a key as much as it is a closer, and the first one in
+            // `<C->>` is the character the chord names. Read as the closer,
+            // it leaves a modifier with no key and a stray `>`, and `Ctrl`
+            // with `>` is a chord a keyboard-protocol terminal reports
+            Some(end)
+                if rest[..end].ends_with('-')
+                    && !well_formed(&rest[..=end])
+                    && rest[end + 1..].starts_with('>') =>
+            {
+                end + 2
+            }
+            Some(end) => end + 1,
+            None => head.len_utf8(),
+        };
+        let (token, tail) = rest.split_at(len);
+        rest = tail;
+        Some(token)
+    })
+}
+
+/// The character a single-key notation types into text: the key itself
+/// when it is one character, the character a named printable key spells
+/// (`<Space>`, `<lt>`, `<Bslash>`, `<Bar>`), and `None` for any other key.
+#[must_use]
+pub(crate) fn notation_char(notation: &str) -> Option<char> {
+    let mut chars = notation.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Some(c),
+        _ => match notation {
+            "<Space>" => Some(' '),
+            "<lt>" => Some('<'),
+            "<Bslash>" => Some('\\'),
+            "<Bar>" => Some('|'),
+            _ => None,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -594,5 +613,81 @@ mod tests {
         assert_eq!(split_keys("g"), Some(("g".to_string(), None)));
         assert_eq!(split_keys("ggg"), None);
         assert_eq!(split_keys(""), None);
+    }
+
+    /// The spellings a binding is configured in and the ones `keytrans()`
+    /// writes a claimed key in are read by the one tokenizer.
+    #[test]
+    fn a_closer_named_as_a_key_is_part_of_the_notation_it_closes() {
+        for (spelling, tokens) in [
+            ("<C->>", &["<C->>"][..]),
+            ("<M->>x", &["<M->>", "x"][..]),
+            ("<C-w>>", &["<C-w>", ">"][..]),
+            ("<Bar>>", &["<Bar>", ">"][..]),
+            ("<Space>a<lt>\\", &["<Space>", "a", "<lt>", "\\"][..]),
+            ("<C-w><", &["<C-w>", "<"][..]),
+        ] {
+            assert_eq!(
+                key_tokens(spelling).collect::<Vec<_>>(),
+                tokens,
+                "{spelling}"
+            );
+        }
+        assert_eq!(split_keys("<A->>"), Some(("<M->>".to_string(), None)));
+    }
+
+    #[test]
+    fn a_named_printable_key_types_its_character() {
+        for (notation, typed) in [
+            ("x", Some('x')),
+            (" ", Some(' ')),
+            ("<Space>", Some(' ')),
+            ("<lt>", Some('<')),
+            ("<Bslash>", Some('\\')),
+            ("<Bar>", Some('|')),
+            ("<Esc>", None),
+            ("<C-w>", None),
+            ("<S-Tab>", None),
+            ("", None),
+        ] {
+            assert_eq!(notation_char(notation), typed, "{notation}");
+        }
+    }
+
+    /// One tokenizer and one notation-to-character table serve every
+    /// surface; a private copy under one of the retired names fails here.
+    #[test]
+    fn no_module_keeps_its_own_key_tokenizer_or_character_table() {
+        let retired = [
+            "fn split_keys(",
+            "fn typed_char(",
+            "fn lone_char(",
+            "fn single_char(",
+        ];
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        let mut found = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs")
+                    || path.ends_with("native/keys.rs")
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                found.extend(
+                    retired
+                        .iter()
+                        .filter(|name| text.contains(*name))
+                        .map(|name| format!("{}: {name}", path.display())),
+                );
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
     }
 }

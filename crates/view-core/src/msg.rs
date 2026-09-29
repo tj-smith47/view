@@ -1195,6 +1195,10 @@ pub struct ExitInfo {
 /// The leader nvim uses when `g:mapleader` is unset or empty.
 pub const DEFAULT_MAPLEADER: &str = "\\";
 
+/// nvim's default `'timeoutlen'`, how long it waits for the rest of a
+/// mapped key sequence.
+pub const DEFAULT_TIMEOUTLEN: Duration = Duration::from_millis(1000);
+
 /// Engine-initiated requests, decoded to a closed vocabulary in
 /// `view-engine`; unknown methods never reach core (the reader auto-errors
 /// them, as built).
