@@ -1038,6 +1038,83 @@ fn report(m: &mut Model, win: u64, name: &str) {
     );
 }
 
+/// A theme change that lands between flushes while a restart holds the
+/// layout reaches the table the screen is painted with, and the dead
+/// engine's colours stay in it.
+#[test]
+fn a_theme_change_during_a_held_layout_repaints_from_the_current_table() {
+    let mut m = vsplit_model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::HlAttrDefine {
+            id: 7,
+            fg: Some(0x00aa00),
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            reverse: false,
+        }]),
+    );
+    let _ = restart(&mut m);
+    let _ = replacement_file_alone(&mut m, Vec::new());
+    assert!(m.engine.holds_the_screen(), "the layout was not held");
+    let dead = |m: &Model| m.engine.painted_hl().attr(7 + (1 << 32)).and_then(|a| a.fg);
+    assert_eq!(dead(&m), Some(0x00aa00));
+
+    let generation = m.engine.hl().probe_generation();
+    let _ = update(
+        &mut m,
+        Msg::HlProbeReply {
+            generation,
+            fg: Some(0xf8f8f2),
+            bg: Some(0x282a36),
+        },
+    );
+    assert_eq!(
+        m.engine.painted_hl().confirmed(),
+        Some(crate::hl::ProbedDefaults {
+            generation,
+            fg: Some(0xf8f8f2),
+            bg: Some(0x282a36),
+        }),
+        "the held layout painted the unconfirmed defaults"
+    );
+
+    m.engine.confirm_accent(Some(0x111111), Some(0x222222));
+    m.engine.set_accent_token(Some(0x333333));
+    assert_eq!(
+        m.engine.painted_hl().accent(),
+        crate::hl::AccentInputs {
+            token: Some(0x333333),
+            function_fg: Some(0x111111),
+            statement_fg: Some(0x222222),
+        },
+        "the held layout painted the old accent"
+    );
+
+    let mut seeded = crate::hl::HlTable::new();
+    seeded.define_attr(
+        3,
+        crate::hl::HlAttr {
+            fg: Some(0x444444),
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            reverse: false,
+        },
+    );
+    m.engine.replace_hl(seeded);
+    assert_eq!(
+        m.engine.painted_hl().attr(3).and_then(|a| a.fg),
+        Some(0x444444),
+        "the held layout painted the table it replaced"
+    );
+    assert_eq!(dead(&m), Some(0x00aa00), "the dead engine's colours left");
+    assert!(m.engine.holds_the_screen());
+}
+
 /// The bound hands the screen to a replacement that never reopens the
 /// dead engine's sidebar, and an expiry the dead engine armed does not.
 #[test]

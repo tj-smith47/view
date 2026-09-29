@@ -347,27 +347,35 @@ impl EngineModel {
         } = &self.held.hold
         {
             let next = match fit(slots, shown, &live, status) {
-                Fit::Slots(fitted) if !settled(&fitted) => {
-                    self.grids.laid_out_as(&fitted, cells).map(|drawn| {
-                        let mut hl = self.hl.clone();
-                        for (id, attr) in attrs {
-                            hl.define_attr(*id, *attr);
-                        }
-                        Hold::Layout {
-                            slots: slots.clone(),
-                            shown: shown.clone(),
-                            cells: cells.clone(),
-                            attrs: attrs.clone(),
-                            drawn,
-                            hl,
-                        }
-                    })
-                }
+                Fit::Slots(fitted) if !settled(&fitted) => self
+                    .grids
+                    .laid_out_as(&fitted, cells)
+                    .map(|drawn| Hold::Layout {
+                        slots: slots.clone(),
+                        shown: shown.clone(),
+                        cells: cells.clone(),
+                        attrs: attrs.clone(),
+                        drawn,
+                        hl: HlTable::new(),
+                    }),
                 Fit::Slots(_) | Fit::Unnamed | Fit::Outside => None,
             };
             self.held.hold = next.unwrap_or_default();
         }
+        self.refresh_held_hl();
         began && self.holds_the_screen()
+    }
+
+    /// Rebuilds the held layout's table from the live one with the dead
+    /// engine's attributes added. A theme change lands in the live table
+    /// between flushes, and the repaint it damages reads this one.
+    pub(super) fn refresh_held_hl(&mut self) {
+        if let Hold::Layout { attrs, hl, .. } = &mut self.held.hold {
+            *hl = self.hl.clone();
+            for (id, attr) in attrs.iter() {
+                hl.define_attr(*id, *attr);
+            }
+        }
     }
 
     /// Hands the screen to the replacement's own layout once it has put a

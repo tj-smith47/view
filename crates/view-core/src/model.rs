@@ -1610,16 +1610,19 @@ impl EngineModel {
     /// generation check the caller owes first.
     pub fn confirm_hl_defaults(&mut self, probe: ProbedDefaults) {
         self.hl.confirm_defaults(probe);
+        self.refresh_held_hl();
     }
 
     /// Records the two probed foregrounds the accent role falls back to.
     pub fn confirm_accent(&mut self, function_fg: Option<u32>, statement_fg: Option<u32>) {
         self.hl.confirm_accent(function_fg, statement_fg);
+        self.refresh_held_hl();
     }
 
     /// Records the colour the user named for the accent role.
     pub fn set_accent_token(&mut self, token: Option<u32>) {
         self.hl.set_accent_token(token);
+        self.refresh_held_hl();
     }
 
     /// Installs a whole highlight table, as startup does with one seeded
@@ -1634,6 +1637,7 @@ impl EngineModel {
     pub fn replace_hl(&mut self, hl: HlTable) {
         self.hl = hl;
         self.hl.mark_dirty();
+        self.refresh_held_hl();
     }
 
     /// Whether a command line is on screen: nvim's own, or the empty `:`

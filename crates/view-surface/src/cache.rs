@@ -593,7 +593,16 @@ mod tests {
                 };
                 flat.replace_range(body + hit..body + hit + read.len(), "");
             }
-            for read in ["engine.grids()", "engine.grid()", "engine.hl()"] {
+            for read in [
+                "engine.grids()",
+                "engine.grid()",
+                "engine.hl()",
+                "window_status.get(",
+                "window_status[",
+                "window_status.iter(",
+                "window_status.values(",
+                "window_status.contains_key(",
+            ] {
                 if flat.contains(read) {
                     live.push(format!("{} reads {read}", path.display()));
                 }
@@ -602,7 +611,8 @@ mod tests {
         assert!(files.len() > 10, "the walk reached {} sources", files.len());
         assert!(
             live.is_empty(),
-            "paint through `painted_grids()` / `painted_grid()` / `painted_hl()`:\n  {}",
+            "paint through `painted_grids()` / `painted_grid()` / `painted_hl()` / \
+             `painted_status()`:\n  {}",
             live.join("\n  ")
         );
     }
@@ -610,13 +620,32 @@ mod tests {
     /// Live registry reads a painter reaches that paint nothing: the file,
     /// the function's signature with its whitespace taken out, the read,
     /// and the grounds.
-    const LIVE_READS: &[(&str, &str, &str, &str)] = &[(
-        "view-core/src/model.rs",
-        "pubfnfocus(&self)->Focus{",
-        "engine.grids()",
-        "`Model::focus` routes input, so it reads the live registry: while a \
-         frame is held, keys go to the replacement, which has no pane yet",
-    )];
+    const LIVE_READS: &[(&str, &str, &str, &str)] = &[
+        (
+            "view-core/src/model.rs",
+            "pubfnfocus(&self)->Focus{",
+            "engine.grids()",
+            "`Model::focus` routes input, so it reads the live registry: while a \
+             frame is held, keys go to the replacement, which has no pane yet",
+        ),
+        (
+            "view-core/src/model/held.rs",
+            PAINTED_STATUS,
+            "window_status.get(",
+            "`Model::painted_status` is the painted read: with nothing held, the \
+             painted registry is the live one",
+        ),
+        (
+            "view-core/src/model/held.rs",
+            PAINTED_STATUS,
+            "window_status.get(",
+            "`Model::painted_status` is the painted read: a held layout's slot a \
+             live window fills takes that window's report once it arrives",
+        ),
+    ];
+
+    /// `Model::painted_status`'s signature with its whitespace taken out.
+    const PAINTED_STATUS: &str = "pubfnpainted_status(&self,win:WinHandle)->Option<&WindowStatus>{";
 
     /// Everything in `source` ahead of its test module.
     ///
