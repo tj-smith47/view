@@ -423,6 +423,9 @@ pub const AGENT_WAITING: &str = "waiting";
 /// The word a crashed session draws, which the row colours as an error.
 pub const AGENT_CRASHED: &str = "crashed";
 
+/// The word an agent doing nothing reports, which the row draws as nothing.
+pub const AGENT_IDLE: &str = "idle";
+
 /// What the agent is doing, in one word, or empty for a session with the
 /// agent turned off.
 ///
@@ -441,16 +444,16 @@ pub fn agent_word(panel: &AiPanelState, enabled: bool, trusted: bool) -> &'stati
     match SessionState::derive(panel, trusted) {
         SessionState::Active if panel.turn_in_flight => "running",
         SessionState::Crashed => AGENT_CRASHED,
-        _ => "idle",
+        _ => AGENT_IDLE,
     }
 }
 
-/// The agent word the row draws: [`agent_word`] with `idle` drawn as
-/// nothing, since an idle agent is nothing a person has to read.
+/// The agent word the row draws: [`agent_word`] with [`AGENT_IDLE`] drawn
+/// as nothing, since an idle agent is nothing a person has to read.
 #[must_use]
 pub fn shown_agent(model: &Model) -> &'static str {
     match agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted) {
-        "idle" => "",
+        AGENT_IDLE => "",
         word => word,
     }
 }

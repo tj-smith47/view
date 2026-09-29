@@ -132,4 +132,45 @@ mod tests {
         assert!(!is_feature("pickr"));
         assert!(!is_feature(""));
     }
+
+    /// The pane rect and the `supersedes` text had no reader outside tests,
+    /// so code that is not a test carries neither name in any crate.
+    #[test]
+    fn no_crate_carries_the_pane_rect_or_a_supersedes_field_outside_its_tests() {
+        let retired = ["native_pane_rect", "supersedes:", ".supersedes"];
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let mut stack = vec![crates.clone()];
+        let mut found = Vec::new();
+        let mut walked = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let rel = path.strip_prefix(&crates).unwrap().to_string_lossy();
+                if path.extension().is_none_or(|ext| ext != "rs")
+                    || rel.contains("/tests/")
+                    || path.ends_with("tests.rs")
+                {
+                    continue;
+                }
+                walked += 1;
+                let text = std::fs::read_to_string(&path).unwrap();
+                let code = text.split("#[cfg(test)]").next().unwrap_or_default();
+                found.extend(
+                    retired
+                        .iter()
+                        .filter(|name| code.contains(*name))
+                        .map(|name| format!("{rel}: {name}")),
+                );
+            }
+        }
+        assert!(walked > 100, "walked {walked} files under {crates:?}");
+        assert!(found.is_empty(), "{found:#?}");
+    }
 }

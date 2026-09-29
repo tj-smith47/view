@@ -404,10 +404,20 @@ mod tests {
     }
 
     /// A word that needs the person reading the row stands in the group
-    /// nvim gives that urgency, and any other word in the accent.
+    /// nvim gives that urgency, any other word in the accent, and an idle
+    /// agent draws no word at all.
     #[test]
     fn the_agent_word_is_coloured_by_what_it_asks_of_the_reader() {
         let mut model = two_tabs(40);
+        assert_eq!(
+            view_core::native::pill::agent_word(
+                model.ai_panel(),
+                model.ai_enabled,
+                model.ai_trusted
+            ),
+            view_core::native::pill::AGENT_IDLE
+        );
+        assert_eq!(PillView::from_model(&model).agent, "", "the idle agent");
         for (id, group, fg) in [
             (3_u64, ChromeGroup::WarningMsg, 0x33_33_33_u32),
             (4, ChromeGroup::ErrorMsg, 0x55_55_55),

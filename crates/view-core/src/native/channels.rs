@@ -265,9 +265,6 @@ pub const CHANNELS: &[SurfaceChannels] = &[
             },
         ],
     },
-    // the frame is view's own paint over cells nvim already owns, so it
-    // takes no channel: the row is here because the surface exists, and a
-    // second claim on `laststatus` would leave the option nobody's to hold
     SurfaceChannels {
         surface: Surface::Frame,
         channels: &[],

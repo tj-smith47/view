@@ -123,9 +123,8 @@ fn follow_the_look_with_the_tabline(model: &mut Model) -> Vec<Effect> {
 /// it does.
 ///
 /// Read off the channel table, so the option a look decides is named once,
-/// and gated on the same `view_draws` predicate the takeover's own
-/// session-held walk uses -- view sets no option for a surface the user
-/// handed back. The one exception is the hold the tiles look keeps whatever
+/// and gated on `view_draws`, since view sets no option for a surface the
+/// user handed back. The one exception is the hold the tiles look keeps whatever
 /// the switch says ([`ChannelValue::held_by_look`]). That one is released
 /// when the look leaves tiles, which puts the user's own value back.
 ///
