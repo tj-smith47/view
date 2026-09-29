@@ -172,8 +172,8 @@ pub fn clamp_panel_width(pct: i64) -> u16 {
         i64::from(MIN_PANEL_WIDTH_PCT),
         i64::from(MAX_PANEL_WIDTH_PCT),
     );
-    // the fallback is unreachable arithmetic insurance rather than live
-    // error handling: a value already inside 15..=70 always converts
+    // a value already inside 15..=70 always converts, so this fallback is
+    // unreachable arithmetic insurance
     u16::try_from(clamped).unwrap_or(DEFAULT_PANEL_WIDTH_PCT)
 }
 

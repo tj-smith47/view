@@ -483,15 +483,15 @@ impl Messages {
     /// overwriting a view notice would both drop something nvim never put
     /// there and leave the line nvim meant to replace standing as a
     /// duplicate. A one-shot notice reaches the tail as readily as a
-    /// condition does -- `clear` keeps it across an `msg_clear` that empties
+    /// condition does; `clear` keeps it across an `msg_clear` that empties
     /// everything around it.
     ///
     /// Crate-private on purpose: this is the raw primitive
-    /// [`EngineModel::record_message`] is built from, not an entry point of
-    /// its own. `EngineModel::record_message`/`record_native_notice` and
-    /// `Messages::push_native`/`set_native_condition` are the only callers,
-    /// all inside this crate -- nothing outside it can reach a `MessageEntry`
-    /// without also going through classification.
+    /// [`EngineModel::record_message`] is built from, and carries no entry
+    /// point of its own. `EngineModel::record_message`/`record_native_notice`
+    /// and `Messages::push_native`/`set_native_condition` are the only
+    /// callers, all inside this crate, so nothing outside it can reach a
+    /// `MessageEntry` without also going through classification.
     pub(crate) fn push(
         &mut self,
         kind: String,
@@ -1050,9 +1050,9 @@ impl Messages {
             raised.set_content(content);
             return true;
         }
-        // raised through `push_native` and marked afterwards, rather than
-        // built here: a condition is a native notice in every respect but
-        // its lifetime, and one construction site is what keeps it so
+        // raised through `push_native` and marked afterwards: a condition
+        // is a native notice in every respect but its lifetime, and one
+        // construction site is what keeps it so
         self.push_native(text.to_string(), false);
         if let Some(mut raised) = self.entries.pop() {
             raised.condition = true;

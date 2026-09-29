@@ -650,14 +650,14 @@ impl DiffReviewState {
         let hunk = self.hunks.get(index);
         let stale = hunk.is_some_and(|hunk| hunk.status == HunkStatus::Stale);
         let anchored = hunk.is_some_and(|hunk| hunk.anchor_intact);
-        // A stale hunk has no accept to offer -- `accept` refuses it -- so
-        // its header names the keys that do work on it instead of
-        // advertising one that answers with a refusal notice. A second
-        // edit inside its anchor narrows the offer again: `re_diff`
-        // refuses a hunk whose context the user has since changed, and the
-        // key it would be pressed with must stop being advertised in the
-        // same fold that takes the anchor (see
-        // [`Self::presentation_stamp`], which is what re-issues this).
+        // A stale hunk has no accept to offer (`accept` refuses it), so its
+        // header names only the keys that do work on it, dropping the one
+        // that would answer with a refusal notice. A second edit inside
+        // its anchor narrows the offer again: `re_diff` refuses a hunk
+        // whose context the user has since changed, and the key it would
+        // be pressed with must stop being advertised in the same fold that
+        // takes the anchor (see [`Self::presentation_stamp`], which is
+        // what re-issues this).
         let keys = match (stale, anchored) {
             (false, _) => KEY_HINT,
             (true, true) => STALE_KEY_HINT,

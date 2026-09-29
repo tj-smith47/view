@@ -220,9 +220,9 @@ fn decode_msg_set_pos(args: &[Value]) -> Option<UiEvent> {
 
 fn decode_win_viewport(args: &[Value]) -> Option<UiEvent> {
     // nvim grew `line_count` and `scroll_delta` onto the end of this tuple
-    // after the six fields below; the rest takes whatever a build sends
-    // rather than making arity part of the match, the same way `grid_line`
-    // does
+    // after the six fields below; the trailing slice absorbs whatever a
+    // build sends without making arity part of the match, the same way
+    // `grid_line` does
     let [grid, win, topline, botline, curline, curcol, rest @ ..] = args else {
         return None;
     };

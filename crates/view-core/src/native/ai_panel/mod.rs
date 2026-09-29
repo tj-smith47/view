@@ -468,9 +468,9 @@ impl AiPanelState {
             self.breaks.pop();
         }
         // A boundary at or below the shortened text is still a boundary of
-        // it -- the text below it is unchanged -- so a backspace drops only
-        // what the text no longer reaches. Dropping it here rather than
-        // where the list is read is what keeps a pop the next keystroke
+        // it, since the text below it is unchanged, so a backspace drops
+        // only what the text no longer reaches. Dropping it here, and not
+        // waiting for the list to be read, keeps a pop the next keystroke
         // types back over from leaving an offset the text no longer opens a
         // row at
         let len = self.input.len();
@@ -768,10 +768,10 @@ impl AiPanelState {
         let rows = if start == tail {
             self.transcript.rows_from(tail, visible_rows, width)
         } else {
-            // The marker spends a row of the window rather than sitting
-            // above it: it is the last row, where a reader looking for the
-            // newest line looks, and it lands in the same tail the overlay
-            // keeps when the panel is shorter than this budget.
+            // The marker spends a row of the window: it is the last row,
+            // where a reader looking for the newest line looks, and it
+            // lands in the same tail the overlay keeps when the panel is
+            // shorter than this budget.
             let mut rows =
                 self.transcript
                     .rows_from(start, visible_rows.saturating_sub(MARKER_ROWS), width);
@@ -800,9 +800,9 @@ impl AiPanelState {
             } else {
                 DISMISS_VERB_HINT
             };
-            // One row, not an error row plus a hint row: the overlay's
-            // tail-keep truncation would keep a trailing hint row and drop
-            // the error itself at the tightest budget.
+            // The overlay's tail-keep truncation would keep a trailing hint
+            // row and drop the error itself at the tightest budget, so this
+            // stays one row.
             view =
                 view.with_local_error(vec![vec![Span::plain(format!("Error: {message}. {hint}"))]]);
         }
@@ -1195,10 +1195,10 @@ enum Break {
 /// A line break ends a row wherever it falls, so a pasted multi-line prompt
 /// reads in the composer as the lines it was copied as, and reads the same
 /// again once sent. All three endings break: `\n`, `\r\n` as the one break
-/// it is, and a lone `\r` -- which is not a line ending in a file but is
-/// what a terminal hands a paste through tmux's own buffer. The break is the
-/// row's end and never a cell of it, so a text ending on one ends on an
-/// empty row, which is where the next character goes.
+/// it is, and a lone `\r` (no line ending in a file, but what a terminal
+/// hands a paste through tmux's own buffer). The break is always the row's
+/// end and never a cell of it, so a text ending on one ends on an empty
+/// row, which is where the next character goes.
 ///
 /// [`Break::Cell`] measures with the ASCII-doubling upper bound the caret
 /// is placed with: one per ASCII character, two for anything else.
@@ -1954,9 +1954,9 @@ mod tests {
     }
 
     /// A wide glyph is measured as two cells on the way in, so a row of
-    /// them breaks at half the count rather than painting past the frame's
-    /// right edge. Over-wide is the safe direction and the one this crate
-    /// takes everywhere it measures text without a width table.
+    /// them breaks at half the count and stays clear of the frame's right
+    /// edge. Over-wide is the safe direction and the one this crate takes
+    /// everywhere it measures text without a width table.
     #[test]
     fn a_wide_glyph_composer_row_never_measures_past_the_frame() {
         let width = composer_width(WIDE_PANEL);
@@ -2586,8 +2586,8 @@ mod tests {
     /// The reported defect's other half: a prompt longer than the panel is
     /// wide kept only the columns one row had and dropped the rest, so a
     /// user who wrote a paragraph could never read back what they sent. It
-    /// wraps to the panel instead -- every character on screen, no row past
-    /// the frame's interior, and none of it dragging the frame open.
+    /// now wraps to the panel: every character on screen, no row past the
+    /// frame's interior, and none of it dragging the frame open.
     #[test]
     fn a_long_echoed_prompt_wraps_inside_the_panel_rather_than_losing_its_tail() {
         let mut state = AiPanelState::new();

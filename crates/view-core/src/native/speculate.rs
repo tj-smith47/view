@@ -312,8 +312,8 @@ fn fold_cmdline_key(model: &mut Model, notation: &str, now: SpecStamp) {
         model.engine.cmdline_speculated = Some(CmdlineSpeculation {
             since: now,
             // the window the key was typed into, which is the one nvim
-            // moves the cursor in if the `:` turns out to have been a
-            // command's argument rather than a command line
+            // moves the cursor in if the `:` turns out to belong to a
+            // command's argument
             grid: model.engine.grids().cursor_local().0,
         });
         model.dirty = true;
@@ -635,9 +635,8 @@ impl SpeculateState {
                 UiEvent::WinViewport {
                     win, grid, topline, ..
                 } => {
-                    // recording the viewport is what reading it costs, so it
-                    // happens in the arm rather than in a guard that would
-                    // read as a pure test of the variant
+                    // recording the viewport costs the same as reading it,
+                    // so it happens here in the match arm itself
                     let moved = self.note_viewport(*win, *topline);
                     if moved {
                         shifted_grids.push(GridId(*grid));
@@ -665,13 +664,13 @@ impl SpeculateState {
         }
         // the epoch is deliberately left alone here, exactly as
         // `expire_stale` leaves it: a shift says the cells a shifted grid's
-        // predictions named are showing something else, not that the mode
-        // ended. Scoped to the grids that actually shifted -- `win_viewport`
-        // names its own grid, and every `PredictedCell` carries the grid it
-        // was made against, so a bystander window's predictions survive a
-        // mover's scroll under `ext_multigrid` exactly as they always did
-        // under single-grid, where every prediction shares the one grid
-        // that ever shifts.
+        // predictions named are showing something else, without the mode
+        // itself having ended. This is scoped to the grids that actually
+        // shifted: `win_viewport` names its own grid, and every
+        // `PredictedCell` carries the grid it was made against, so a
+        // bystander window's predictions survive a mover's scroll under
+        // `ext_multigrid` exactly as they always did under single-grid,
+        // where every prediction shares the one grid that ever shifts.
         let epoch = self.epoch;
         self.pending.retain(|cell| {
             cell.epoch == epoch && !shifted_grids.contains(&cell.grid) && !answered_by(redraw, cell)
@@ -849,11 +848,11 @@ fn covers_column(col_start: u64, cells: &[GridCell], col: u16) -> bool {
 pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
     match call {
         RpcCall::Input { notation } => {
-            // a key nvim answered with nothing at all -- an unmapped
-            // function key produces no redraw -- is not a key in flight, and
-            // every forwarded key re-stamps this flag anyway, so the real
-            // cost of leaving it standing is one `:` left unaccelerated: the
-            // key nvim never answers, not the rest of the session
+            // a key nvim answered with nothing at all (an unmapped function
+            // key produces no redraw) is not a key in flight; every
+            // forwarded key re-stamps this flag anyway, so the real cost of
+            // leaving it standing is one `:` left unaccelerated for the key
+            // nvim never answers
             if model
                 .engine
                 .key_unanswered
@@ -884,8 +883,8 @@ pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
         }
         // `RpcCall` is `#[non_exhaustive]`: a call added later is assumed to
         // touch neither the buffer nor the cursor until someone decides
-        // otherwise, which is the reading that costs an unaccelerated
-        // character rather than a wrong one
+        // otherwise, which costs an unaccelerated character over a wrong
+        // one
         _ => {}
     }
 }
@@ -1041,12 +1040,13 @@ fn fold_keystroke(model: &mut Model, notation: &str, now: SpecStamp) {
     };
     let registry = model.engine.grids();
     // `cursor_local` falls back to grid 1 when the pane holding the cursor
-    // is hidden or gone, which is the right answer for painting a caret and
-    // the wrong one for placing a glyph: under `ext_multigrid` grid 1's own
-    // cursor field is whatever it was last (never) set to, so a prediction
-    // made there lands at (0, 0) rather than under the character typed.
-    // `PredictedCell`'s contract is to drop rather than misplace, so this
-    // keystroke goes unpredicted and the engine's own redraw shows it.
+    // is hidden or gone, which suits painting a caret but not placing a
+    // glyph: under `ext_multigrid` grid 1's own cursor field is whatever it
+    // was last (never) set to, so a prediction made there lands at (0, 0),
+    // away from the character typed.
+    // `PredictedCell`'s contract is to drop a keystroke it cannot place
+    // safely, so this one goes unpredicted and the engine's own redraw
+    // shows it.
     if registry
         .cursor_grid()
         .is_some_and(|grid| grid != GLOBAL_GRID && registry.pane_origin(grid).is_none())
@@ -1058,10 +1058,10 @@ fn fold_keystroke(model: &mut Model, notation: &str, now: SpecStamp) {
     let (grid, row, col) = registry.cursor_local();
     let mode = model.engine.mode.current.as_str();
     let before = model.speculate.pending().len();
-    // the refusal path is why the answer is read off the pending list rather
-    // than off this `Option`: a character `predict` declines discards
-    // everything pending inside `predict` itself, and the caller sees only
-    // the `None` it shares with a mode that was never predicting at all
+    // a character `predict` declines discards everything pending inside
+    // `predict` itself, and the caller sees only the `None` it shares with
+    // a mode that was never predicting at all, so the answer has to be read
+    // off the pending list
     let _ = model.speculate.predict(mode, grid, key, (row, col), now);
     mark_retirement(model, before);
 }

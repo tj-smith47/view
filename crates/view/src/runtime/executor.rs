@@ -679,14 +679,14 @@ impl<E: EngineOps> Executor<E> {
                 Flow::Continue
             }
             // the same one-shot thread `ScheduleToastExpiry` uses, and the
-            // same reason for it: `update()` has no clock, and a reply that
-            // said a path could not be read has to be re-asked later rather
-            // than believed at once. What goes back names the confirming
-            // probe as one, since the fold announces on the reply to this
-            // look and on no other.
+            // same reason for it: `update()` has no clock, so a reply that
+            // said a path could not be read waits out this delay for a
+            // second look before it settles. What goes back names the
+            // confirming probe as one, since the fold announces on the
+            // reply to this look and on no other.
             //
             // The delay is `view_ai`'s, taken from the crate that owns the
-            // coalesce window it is keyed to rather than restated here.
+            // coalesce window it is keyed to, so it is not restated here.
             //
             // A spawn that fails says so through the same channel rather
             // than swallowing the confirmation: the removal behind it would

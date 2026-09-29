@@ -346,10 +346,11 @@ impl PromptState {
                     || notation_char(notation).is_some_and(|c| c.is_ascii_digit())
             }
             // an ordinary `input()` prompt (see `Answer::FreeText`'s doc):
-            // `q` is not nvim's documented cancel key here the way it is for
-            // `inputlist()` -- it is an ordinary character a filename can
-            // contain -- so it falls through to the single-printable-char
-            // check like any other letter rather than being special-cased
+            // `q` is not nvim's documented cancel key here the way it is
+            // for `inputlist()`, since it is an ordinary character a
+            // filename can contain, so it falls through to the
+            // single-printable-char check like any other letter, with no
+            // special case
             Answer::FreeText {
                 digits_only: false, ..
             } => {

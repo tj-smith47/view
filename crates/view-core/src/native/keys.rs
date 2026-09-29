@@ -178,8 +178,8 @@ impl KeyBindings {
         // typed alone, and these bindings are no exception to that: without
         // this, the four keys the whole set exists for would be the one
         // class a waiting prefix locks out, and a doubled first key (nvim
-        // muscle memory taps `<C-w>` twice) would drop the chord instead of
-        // re-arming it.
+        // muscle memory taps `<C-w>` twice) would drop the chord where it
+        // should re-arm it.
         if pending.is_some() {
             return self.resolve(None, notation);
         }

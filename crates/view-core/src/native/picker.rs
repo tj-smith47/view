@@ -580,25 +580,23 @@ mod tests {
 
     #[test]
     fn selected_path_for_live_grep_uses_the_stored_path_not_a_label_split() {
-        // a relative path containing its own ':' -- the old
-        // `item.label.split(':').next()` resolved this to "src/mod"
-        // instead of the real file, previewing (or opening) the wrong path
-        // entirely
+        // a relative path containing its own ':': the old
+        // `item.label.split(':').next()` resolved this to "src/mod",
+        // previewing (or opening) the wrong path entirely
         let mut state = PickerState::open(Source::LiveGrep {
             root: PathBuf::from("/repo"),
         });
         let gen = state.generation();
         let item = PickerItem::grep_match("src/mod:weird.rs", 3, "let x = 1;");
         state.apply_results(gen, vec![item]);
-        // joined rather than spelled out: the separator between root and
-        // match is the platform's, and a hardcoded '/' asserts a Unix
-        // rendering on a Windows host that never produced one -- while the
-        // ':' this test is about is a path character on Unix and the drive
-        // separator on Windows, where splitting a label at it resolves
-        // `C:\repo\src\main.rs` to `C`. Building `expected` with the same
-        // join production uses makes the separator half of this assertion
-        // unfalsifiable by construction; the ':' surviving intact is the
-        // half under test
+        // the separator between root and match is the platform's, and a
+        // hardcoded '/' asserts a Unix rendering on a Windows host that
+        // never produced one; the ':' this test is about is a path
+        // character on Unix and the drive separator on Windows, where
+        // splitting a label at it resolves `C:\repo\src\main.rs` to `C`.
+        // Building `expected` with the same join production uses makes the
+        // separator half of this assertion unfalsifiable by construction;
+        // the ':' surviving intact is the half under test
         let expected = PathBuf::from("/repo").join("src/mod:weird.rs");
         assert_eq!(
             state.selected_path().as_deref(),

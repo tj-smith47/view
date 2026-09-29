@@ -111,10 +111,9 @@ impl MappingClaim {
     }
 }
 
-// the ecosystem's own default keys deliberately, spelled the way a
-// switching user already has them in muscle memory; a claim over a user's
-// own `<leader>f` or `<leader>e` prefix is reported rather than avoided by
-// picking keys nobody uses.
+// spelled to match the ecosystem's own default keys, the way a switching
+// user already has them in muscle memory; a claim over a user's own
+// `<leader>f` or `<leader>e` prefix is reported so it stays visible.
 static DEFAULT_MAPS: [MappingSpec; 25] = [
     MappingSpec {
         feature: "picker",

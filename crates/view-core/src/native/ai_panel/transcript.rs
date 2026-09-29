@@ -398,10 +398,11 @@ impl Transcript {
             }
             let entry_rows = cache[i]
                 .get_or_insert_with(|| render_entry(&self.entries[i], self.frame_at(i), width));
-            // Bounded before the clone, not after: one wrapped entry can be
-            // taller than the whole panel, and cloning all of it to throw
-            // the excess away would put the tallest entry's row count into
-            // every frame's cost instead of the viewport's.
+            // Bounded before the clone: one wrapped entry can be taller
+            // than the whole panel, and cloning all of it to throw the
+            // excess away would put the tallest entry's row count into
+            // every frame's cost, where only the viewport's row count
+            // belongs.
             let room = budget - rows.len();
             rows.extend(entry_rows.iter().skip(skip).take(room).cloned());
             skip = 0;
@@ -736,11 +737,11 @@ impl Transcript {
     /// puts [`USER_MARK`] back the moment it is.
     pub fn echo_user_prompt(&mut self, text: &str) {
         // Only ever one prompt is unanswered: the composer refuses a second
-        // submit while a turn is in flight, so a prompt reaching here always
-        // follows a turn that ended -- but a marker that outlived its own
-        // turn would spin for the rest of the run, and standing the previous
-        // one down here is what makes that unrepresentable rather than
-        // conditional on a gate two crates away.
+        // submit while a turn is in flight, so a prompt reaching here
+        // always follows a turn that ended. A marker that outlived its own
+        // turn would spin for the rest of the run, so standing the
+        // previous one down here makes that state unrepresentable, without
+        // relying on a gate two crates away.
         self.agent_answered();
         self.local_seq += 1;
         let id = format!("{LOCAL_ID_PREFIX}{}", self.local_seq);
@@ -765,9 +766,9 @@ impl Transcript {
             return false;
         };
         self.animating.remove(&at);
-        // Dropped rather than rewritten in place: the marker is going back
-        // to a different glyph, not on to the next frame, and this happens
-        // once per turn where a tick happens eight times a second.
+        // Dropping the cached row here is cheap: this happens once per
+        // turn, where a tick happens eight times a second, and the slot
+        // picks up the marker's new glyph on the repaint that follows.
         if let Some(slot) = self.row_cache.get_mut().get_mut(at) {
             *slot = None;
         }
@@ -802,10 +803,10 @@ impl Transcript {
         let Some(echo) = self.echo else {
             return false;
         };
-        // `get` rather than an index and a slice: a replay that has matched
-        // part way into a multi-byte character leaves `matched` off a char
-        // boundary, and asking for the rest of the text is how that answers
-        // "not a match" instead of panicking on the paint path's own state.
+        // A replay that has matched part way into a multi-byte character
+        // leaves `matched` off a char boundary, so an index-and-slice would
+        // panic on the paint path's own state; `get` answers "not a match"
+        // there safely.
         let absorbed = self
             .entries
             .get(echo.entry)
@@ -1017,8 +1018,8 @@ impl EntryRows {
             left: ROW_PAINT_CEILING,
             breaks,
             // A panel too narrow for even one cell of text would otherwise
-            // open a row per character; the floor spends a column the frame
-            // clips anyway rather than the entry's whole row budget.
+            // open a row per character; the floor spends a column the
+            // frame clips anyway, sparing the entry's whole row budget.
             body: width.saturating_sub(MARK_COLS).max(1),
             cut: false,
         }
@@ -1051,8 +1052,8 @@ impl EntryRows {
         self.left -= capped.len();
         self.cut = capped.len() < text.len();
         // Nothing of this piece survived the cut, so it gets no marker row
-        // of its own -- an entry ends on its last readable row and then the
-        // notice, not on an empty marker.
+        // of its own; an entry ends on its last readable row and then the
+        // notice.
         if capped.is_empty() && !text.is_empty() {
             return;
         }

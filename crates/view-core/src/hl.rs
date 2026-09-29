@@ -177,9 +177,9 @@ impl HlTable {
         self.default_fg = fg;
         self.default_bg = bg;
         self.probe_generation = self.probe_generation.wrapping_add(1);
-        // unconditional rather than value-compared: the generation moves on
-        // every call, and that alone re-derives the theme whenever it
-        // invalidates a previously matching confirmed reply
+        // the generation moves on every call, and touching unconditionally
+        // is what re-derives the theme whenever that invalidates a
+        // previously matching confirmed reply
         self.touch();
         self.probe_generation
     }
@@ -188,14 +188,14 @@ impl HlTable {
     pub fn define_attr(&mut self, hl_id: u64, attr: HlAttr) {
         if self.attrs.get(&hl_id) == Some(&attr) {
             // a redefinition to the identical value resolves every cell to
-            // the same style, so it is not a repaint. Defensive rather than
-            // load-bearing: instrumenting the pinned engine across four
-            // plugin sessions saw 0 identical resends in 498 definitions
-            // (it allocates a fresh id per distinct attribute set, even
-            // across colorscheme reloads), but the table must not depend on
-            // that -- an engine that did resend would turn every resend
-            // into a whole-frame repaint, giving back the frames the damage
-            // clip exists to save
+            // the same style, so it is not a repaint. This is a defensive
+            // guard: instrumenting the pinned engine across four plugin
+            // sessions saw 0 identical resends in 498 definitions (it
+            // allocates a fresh id per distinct attribute set, even across
+            // colorscheme reloads), but the table must not depend on that,
+            // since an engine that did resend would turn every resend into
+            // a whole-frame repaint, giving back the frames the damage clip
+            // exists to save
             return;
         }
         self.attrs.insert(hl_id, attr);

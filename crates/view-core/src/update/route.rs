@@ -164,14 +164,12 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
         .engine
         .messages
         .resolve_startup_hold(HoldOutcome::Release);
-    // the fallback, not the rule: a prompt view itself answered retires on
-    // the `cmdline_hide` that key causes (see `UiEvent::CmdlineHide`), and
-    // this catches only the prompt nothing view sent resolved -- nvim's own
-    // Lua answering its own question, where view forwarded no key to set
-    // the flag that arm reads. The question's own entry goes with the
-    // overlay: a prompt routes `Route::Prompt` and so owns no idle timer,
-    // and nvim sends no msg_clear on resolution, so nothing else would ever
-    // take it down.
+    // a prompt view itself answered retires on the `cmdline_hide` that key
+    // causes (see `UiEvent::CmdlineHide`); this handles the case where
+    // nvim's own Lua resolved the question without view forwarding a key,
+    // so that flag never got set. The overlay owns the question's entry: a
+    // prompt routes `Route::Prompt` and holds no idle timer, and nvim sends
+    // no msg_clear on resolution, so nothing else would take it down.
     // excludes the AI trust prompt and the external-write conflict prompt:
     // neither has a paired cmdline_show to have gone quiet, so
     // `cmdline_open` reads `false` for either from the moment it opens, and

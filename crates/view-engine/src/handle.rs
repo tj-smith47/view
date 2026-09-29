@@ -1048,9 +1048,9 @@ impl EngineHandle {
                                     // the never-drop slot the takeover's own
                                     // reading uses: the probe sends this only
                                     // when the answer changed, so a refused
-                                    // one is not recomputed by anything -- it
-                                    // is the session's last word on where its
-                                    // notices belong
+                                    // one is the session's last word on
+                                    // where its notices belong, and nothing
+                                    // recomputes it
                                     Some(msg @ Msg::NotifySinkRead { .. }) => {
                                         pump.route_notify_sink(msg);
                                     }

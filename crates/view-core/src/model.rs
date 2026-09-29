@@ -509,9 +509,9 @@ impl Model {
     /// [`Self::owns`] about a surface nvim never gave it.
     pub fn attach_surfaces(&mut self, surfaces: Vec<crate::native::ext::Ext>) {
         self.ext_surfaces = surfaces;
-        // the same answer, read once: a session that leaves the messages
-        // with nvim speaks its own notices through the user's `vim.notify`
-        // rather than painting a toast over the notifier drawing them
+        // a session that leaves the messages with nvim speaks its own
+        // notices through the user's `vim.notify`; this caches that
+        // ownership answer once for the callers below to share
         let owns_messages = self.owns(crate::native::ext::Ext::Messages);
         self.engine.messages.hand_back(!owns_messages);
     }
@@ -1154,10 +1154,9 @@ impl Model {
             return false;
         };
         self.take_overlay_at(pos);
-        // the single authoritative closing point, so every caller that
-        // closes the panel clears it the same way `mouse_capture` above
-        // already is, rather than each having to remember to also clear
-        // `AiPanelState::focused` itself
+        // the single authoritative closing point: every caller that closes
+        // the panel clears `AiPanelState::focused` here, the same way
+        // `mouse_capture` above already does
         self.ai_panel.focused = false;
         true
     }
@@ -1235,9 +1234,9 @@ impl Model {
     /// doc on why callers never choose their own.
     fn next_id(&mut self) -> OverlayId {
         let id = OverlayId(self.next_overlay_id);
-        // saturating rather than wrapping: a wrapped counter would reissue
-        // an id a live overlay already holds, and no session can open
-        // u64::MAX overlays to reach the saturation point
+        // a wrapped counter would reissue an id a live overlay already
+        // holds, and no session can open u64::MAX overlays to reach the
+        // saturation point, so saturating is safe here
         self.next_overlay_id = self.next_overlay_id.saturating_add(1);
         id
     }
@@ -1811,9 +1810,9 @@ impl EngineModel {
         .then(|| content.iter().map(|(_, t)| t.as_str()).collect::<String>());
         let sticky = kind == "native_sticky";
         let id = self.messages.push(kind, content, replace_last);
-        // recorded by id, not `.entries.last()`: `push`'s replace path can
-        // overwrite an entry that sits before a still-open condition
-        // notice, which then occupies the last slot instead
+        // `push`'s replace path can overwrite an entry that sits before a
+        // still-open condition notice, which then occupies the last slot;
+        // looking up by id avoids picking that entry up instead
         if let Some(entry) = self.messages.entries.iter_mut().find(|e| e.id() == id) {
             entry.set_family(family);
             self.toast_history.push(entry);
@@ -1824,10 +1823,10 @@ impl EngineModel {
         if route == crate::native::toast::Route::HistoryOnly {
             self.messages.hold(id, replace_last);
         }
-        // the timer belongs to the top slot, not to the entry that just
-        // arrived (`Messages::arm_top_slot`): a message landing behind one
-        // already standing arms nothing, and a parked one that took its
-        // predecessor's place before being held hands the slot back here
+        // the timer belongs to the top slot (`Messages::arm_top_slot`): a
+        // message landing behind one already standing arms nothing, and a
+        // parked one that took its predecessor's place before being held
+        // hands the slot back here
         let mut effects: Vec<crate::msg::Effect> =
             self.messages.arm_top_slot().into_iter().collect();
         // a sticky notice never holds that slot and so is handed no timer
@@ -1981,13 +1980,13 @@ impl EngineModel {
         text: String,
     ) -> Vec<crate::msg::Effect> {
         let content = vec![(0, text)];
-        // every entry, not just the tail: anything at all landing between
-        // two detections -- one ordinary nvim message is enough -- takes
-        // the last slot, and a tail-only test would then stack the copy it
-        // exists to suppress. Scanning is exact rather than approximate,
-        // because `entries` holds only what is still standing: an expired
-        // transient is retain-removed from it, so a notice that has aged
-        // out is gone and the next detection speaks again
+        // anything at all landing between two detections (one ordinary
+        // nvim message is enough) takes the last slot, so a tail-only scan
+        // would stack the copy this exists to suppress; scanning every
+        // entry is exact because `entries` holds only what is still
+        // standing, an expired transient is retain-removed from it, so a
+        // notice that has aged out is gone and the next detection speaks
+        // again
         if self
             .messages
             .entries
@@ -2007,10 +2006,9 @@ impl EngineModel {
         let mut effects =
             self.record_message_in_family(kind.to_string(), content, false, Some(family), None);
         // a session that left the messages with a plugin notifier hears
-        // this family once: the line it already popped is this notice, and
-        // a re-wording is that notice changing its mind, not a second
-        // thing to be told about. On screen the two are the same slot --
-        // the replacement above is what makes it so -- and through a
+        // this family once: the line it already popped is this notice, so
+        // a re-wording reads as that same notice changing its mind. The
+        // replacement above keeps the two on screen as one slot; through a
         // foreign notifier they would be two pop-ups for one launch
         if replaces_a_standing_one {
             effects.retain(|e| {
@@ -2148,9 +2146,9 @@ impl CmdlineState {
     /// on the real event are the same view rather than two spellings of it.
     #[must_use]
     pub fn bare_colon() -> Self {
-        // one empty chunk, not an empty list: the pinned engine's own
-        // `cmdline_show` for a bare `:` carries `[[0, '', 0]]`, and the
-        // speculated state has to be the state the event replaces it with
+        // the pinned engine's own `cmdline_show` for a bare `:` carries
+        // `[[0, '', 0]]`, one empty chunk, and the speculated state has to
+        // be the state the event replaces it with
         Self {
             content: vec![(0, String::new())],
             pos: 0,
@@ -2669,7 +2667,7 @@ mod tests {
         // a real msg_show can carry the break inside one chunk's own text
         // (a wrapped `emsg` continuation) or split across chunk boundaries
         // (differing highlight per segment); both must land on the correct
-        // physical line, so joining happens before splitting, not after
+        // physical line, which requires joining chunks before splitting
         let e = entry(
             "echoerr",
             vec![(0, "one\ntwo".into()), (1, "-continued".into())],
