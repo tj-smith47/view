@@ -107,7 +107,8 @@ fn path_to_wire(path: &std::path::Path) -> String {
 }
 
 /// Closes, in the model, every surface view had open in a window of the
-/// engine being replaced, returning what each close owes the executor.
+/// engine being replaced, returning what each close owes the executor, and
+/// leaves the resize mode, whose window the replacement does not have.
 ///
 /// The replacement has none of those windows, so a surface left reading
 /// open would hold `Focus::Pane`, its ring position and its open flag for a
@@ -120,6 +121,9 @@ pub fn forget_native_windows(model: &mut Model) -> Vec<Effect> {
     // runs outside `update`, so its focus comparison never sees the
     // surfaces this closes
     model.submit_hold.take_sequence();
+    if model.resize_mode().is_some() {
+        model.set_resize_mode(None);
+    }
     surfaces::forget_native_windows(model)
 }
 
@@ -202,8 +206,14 @@ fn update_one(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // `:View` command, an agent's review or a window nvim closed can move
     // the keyboard with no key of the user's, and a sequence left standing
     // would be completed by the next key typed after focus comes back
-    if model.focus() != focus_before {
+    let focus_moved = model.focus() != focus_before;
+    if focus_moved {
         model.submit_hold.take_sequence();
+    }
+    // the resize mode belongs to what held the keyboard when it was entered,
+    // and the busy modal answers keys the mode would otherwise take
+    if model.resize_mode().is_some() && (focus_moved || model.engine_busy().is_some()) {
+        model.set_resize_mode(None);
     }
     // the top row follows facts a dozen arms move (a tabpage, the buffer
     // list, the agent's state, `showtabline`), so the one comparison lives

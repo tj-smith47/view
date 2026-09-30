@@ -2288,6 +2288,9 @@ fn a_count_multiplies_the_resize_modes_step() {
     assert_eq!(inputs(&update(&mut wide, key("l"))), ["12<C-w>>"]);
     assert_eq!(inputs(&update(&mut wide, key("h"))), ["4<C-w><lt>"]);
     assert_eq!(inputs(&update(&mut wide, key("<Down>"))), ["1<C-w>-"]);
+    // 5% of 24 rows is one row
+    assert_eq!(inputs(&update(&mut wide, key("k"))), ["1<C-w>+"]);
+    assert_eq!(inputs(&update(&mut wide, key("<Up>"))), ["1<C-w>+"]);
     assert_eq!(inputs(&update(&mut wide, key("=")))[..], ["<C-w>="]);
     assert!(wide.resize_mode().is_some(), "every step stays in the mode");
 }
@@ -2360,6 +2363,223 @@ fn a_rebound_resize_mode_key_enters_from_the_tree() {
     let _ = update(&mut m, key("<C-w>"));
     let _ = update(&mut m, key("R"));
     assert!(m.resize_mode().is_some());
+}
+
+#[test]
+fn each_leave_key_leaves_the_resize_mode_and_reaches_no_one() {
+    for leave in ["<Esc>", "<CR>", "q"] {
+        let mut m = vsplit_model();
+        let _ = update(&mut m, resize_mode());
+        let effects = update(&mut m, key(leave));
+        assert!(effects.is_empty(), "{leave} reached {effects:?}");
+        assert!(m.resize_mode().is_none(), "{leave} left the mode on");
+    }
+}
+
+/// Two windows stacked on an 80x24 screen, the status line between them on
+/// row 11.
+fn stacked_model() -> Model {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    let mut batch = vec![UiEvent::GridResize {
+        grid: 1,
+        width: 80,
+        height: 24,
+    }];
+    for (grid, win, row) in [(6, 1003, 0), (5, 1002, 12)] {
+        batch.push(UiEvent::GridResize {
+            grid,
+            width: 80,
+            height: 11,
+        });
+        batch.push(UiEvent::WinPos {
+            grid,
+            win: crate::events::WinHandle(win),
+            startrow: row,
+            startcol: 0,
+            width: 80,
+            height: 11,
+        });
+    }
+    batch.push(UiEvent::Flush);
+    let _ = update(&mut m, Msg::Redraw(batch));
+    m
+}
+
+#[test]
+fn a_status_line_drag_resizes_the_upper_window_once_per_row_moved() {
+    let mut m = stacked_model();
+    assert!(update(&mut m, click(11, 20)).is_empty());
+    assert!(
+        matches!(m.mouse_capture(), Some(MouseCapture::Border(_))),
+        "the press on the status line grips it: {:?}",
+        m.mouse_capture()
+    );
+    let lower = update(&mut m, mouse("drag", 13, 20));
+    assert_eq!(window_widths(&lower), [(1003, None, Some(13))]);
+    let same_row = update(&mut m, mouse("drag", 13, 30));
+    assert!(same_row.is_empty(), "no new row, no resize: {same_row:?}");
+    let higher = update(&mut m, mouse("drag", 9, 20));
+    assert_eq!(window_widths(&higher), [(1003, None, Some(9))]);
+    let _ = update(&mut m, mouse("release", 9, 20));
+    assert_eq!(m.mouse_capture(), None);
+}
+
+#[test]
+fn the_resize_mode_in_the_floating_agent_panel_steps_its_share() {
+    let mut m = entered_ai_panel_model();
+    let _ = update(&mut m, key("<C-w>"));
+    let _ = update(&mut m, key("m"));
+    assert_eq!(
+        m.resize_mode().map(|mode| mode.sidebar),
+        Some(Some(crate::native::geometry::NativeSurface::Agent))
+    );
+    let before = m.ai_panel_width_pct;
+    let _ = update(&mut m, key("l"));
+    assert_eq!(m.ai_panel_width_pct, before + 5);
+}
+
+#[test]
+fn the_resize_mode_in_the_windowed_agent_panel_steps_its_share() {
+    let mut m = focused_windowed_agent();
+    let _ = update(&mut m, key("<C-w>"));
+    let _ = update(&mut m, key("m"));
+    assert_eq!(
+        m.resize_mode().map(|mode| mode.sidebar),
+        Some(Some(crate::native::geometry::NativeSurface::Agent)),
+        "the <C-w> armed in the pane completes the mode's key"
+    );
+    let effects = update(&mut m, key("l"));
+    assert_eq!(m.ai_panel_width_pct, 35);
+    assert_eq!(window_widths(&effects).len(), 1, "{effects:?}");
+}
+
+#[test]
+fn the_resize_mode_in_a_bottom_stream_steps_its_height() {
+    use crate::native::geometry::{Anchor, NativeSurface, SurfaceLayout, SurfacePlacement};
+    let mut m = focused_windowed_notifications();
+    m.surfaces.set_layout(
+        NativeSurface::Notifications,
+        SurfaceLayout::new(SurfacePlacement::Windowed, Anchor::Bottom, 30),
+    );
+    let _ = update(&mut m, key("<C-w>"));
+    let _ = update(&mut m, key("m"));
+    assert_eq!(
+        m.resize_mode().map(|mode| mode.sidebar),
+        Some(Some(NativeSurface::Notifications))
+    );
+    assert!(
+        update(&mut m, key("l")).is_empty(),
+        "a stream at the bottom has no width to step"
+    );
+    let effects = update(&mut m, key("k"));
+    assert_eq!(m.surfaces.layout(NativeSurface::Notifications).size, 35);
+    assert!(
+        matches!(
+            window_widths(&effects)[..],
+            [(win, None, Some(_))] if win == NOTIFICATIONS_WIN.0
+        ),
+        "{effects:?}"
+    );
+}
+
+/// The status line's first word.
+fn mode_word(m: &Model) -> Option<String> {
+    m.engine
+        .statusline
+        .view(80)
+        .left
+        .first()
+        .map(|span| span.text.clone())
+}
+
+#[test]
+fn focus_leaving_the_resized_sidebar_takes_the_mode_and_its_word() {
+    let mut m = focused_windowed_tree();
+    let _ = update(&mut m, key("<C-w>"));
+    let _ = update(&mut m, key("m"));
+    assert!(m.resize_mode().is_some());
+    // what a click in the buffer's window comes back as
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridCursorGoto {
+                grid: 2,
+                row: 0,
+                col: 0,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert_eq!(m.focus(), Focus::Engine);
+    assert!(m.resize_mode().is_none(), "no key has arrived yet");
+    assert_ne!(
+        mode_word(&m).as_deref(),
+        Some(crate::native::statusline::RESIZE_WORD)
+    );
+}
+
+#[test]
+fn an_engine_restart_leaves_the_resize_mode() {
+    let mut m = vsplit_model();
+    let _ = update(&mut m, resize_mode());
+    let _ = restart(&mut m);
+    assert!(m.resize_mode().is_none());
+}
+
+#[test]
+fn the_busy_modal_takes_the_keys_from_the_resize_mode() {
+    let mut m = vsplit_model();
+    let _ = update(&mut m, resize_mode());
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: ENGINE_BUSY_MODAL_THRESHOLD,
+        },
+    );
+    assert!(m.engine_busy().is_some(), "the modal opens past the bound");
+    assert!(m.resize_mode().is_none(), "the modal ends the mode");
+    let _ = update(&mut m, key("<Esc>"));
+    assert!(m.engine_busy().is_none(), "<Esc> reached the modal");
+
+    let mut wedged = vsplit_model();
+    let _ = update(
+        &mut wedged,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: ENGINE_BUSY_MODAL_THRESHOLD,
+        },
+    );
+    let _ = update(&mut wedged, resize_mode());
+    assert!(
+        wedged.resize_mode().is_none(),
+        "the mode never arms under the modal"
+    );
+}
+
+#[test]
+fn keys_typed_behind_the_resize_mode_key_are_held_until_it_arms() {
+    let mut m = vsplit_model();
+    m.engine.mode.current = "normal".to_string();
+    m.submit_hold
+        .learn_invoke_keys(&[crate::native::mappings::MappingClaim::new(
+            "window", "<C-w>m", false,
+        )
+        .with_keys(Some("<C-W>m".to_string()))]);
+    let sent: Vec<_> = ["<C-w>", "m", "l"]
+        .into_iter()
+        .flat_map(|k| update(&mut m, key(k)))
+        .collect();
+    assert_eq!(inputs(&sent), ["<C-w>", "m"], "l is held: {sent:?}");
+    let replayed = update(&mut m, resize_mode());
+    assert_eq!(inputs(&replayed), ["4<C-w>>"], "l steps the window");
 }
 
 #[test]

@@ -18,13 +18,13 @@ enum Zone {
     Right,
 }
 
+/// The mode word while the resize mode holds the keyboard.
+pub const RESIZE_WORD: &str = "RESIZE";
+
 /// The statusline's current segment text, one field per source in
 /// [`SegmentUpdate`]. All fields start empty/absent -- an empty segment is
 /// simply not rendered, matching the wire's own "empty content hides the
 /// segment" convention (see `docs/statusline-wire-capture.md`).
-/// The mode word while the resize mode holds the keyboard.
-pub const RESIZE_WORD: &str = "RESIZE";
-
 #[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct StatuslineState {

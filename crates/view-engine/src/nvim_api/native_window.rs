@@ -469,6 +469,9 @@ end"
 ///
 /// The axis a surface does not own is left alone, because nvim re-flows
 /// the layout around every set, even one to the value it already holds.
+/// Each axis is tested with `type(...) == 'number'`: msgpack's nil crosses
+/// into Lua as `vim.NIL`, which is truthy, and a width of `vim.NIL` throws
+/// before the height is set.
 ///
 /// [`EngineHandle::set_window_size`]: super::EngineHandle::set_window_size
 pub(crate) const SET_WINDOW_SIZE_CHUNK: &str = "\
@@ -476,10 +479,10 @@ local win, width, height = ...
 if not vim.api.nvim_win_is_valid(win) then
   return
 end
-if width then
+if type(width) == 'number' then
   vim.api.nvim_win_set_width(win, width)
 end
-if height then
+if type(height) == 'number' then
   vim.api.nvim_win_set_height(win, height)
 end";
 

@@ -1867,6 +1867,11 @@ drive_action() {
         (resize)
             before=$(second_tile_col)
             "$@"
+            # the mode arms only once nvim's mapping has called back into
+            # view, and an `l` sent past the typed-ahead hold's bound moves
+            # nvim's cursor
+            wait_until "$WAIT_SECS" "the RESIZE word on $feature $verb" \
+                shows RESIZE >/dev/null || return 1
             send_key l
             send_key Escape
             took=$(wait_until "$REACTION_SECS" "the separator moving on $feature $verb then l" \

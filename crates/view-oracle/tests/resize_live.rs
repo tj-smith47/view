@@ -30,14 +30,35 @@ fn widths(engine: &mut EngineSession) -> Vec<u16> {
     text.split(',').map(|w| w.parse().unwrap()).collect()
 }
 
+/// Both windows' heights as `winheight()` reads them, top first.
+fn heights(engine: &mut EngineSession) -> Vec<u16> {
+    let text = engine
+        .eval_str("join(map(range(1, winnr('$')), 'winheight(v:val)'), ',')")
+        .unwrap();
+    text.split(',').map(|h| h.parse().unwrap()).collect()
+}
+
 /// Two side-by-side windows under nvim's own look, the cursor in the left.
 fn vsplit() -> EngineSession {
+    split(":vsplit<CR>")
+}
+
+/// Two windows `command` lays out under nvim's own look, after `setup`.
+fn split_after(setup: &str, command: &str) -> EngineSession {
     let mut engine = EngineSession::spawn_with_ext(COLS, ROWS, UI_EXT_OPTIONS_MULTIGRID)
         .expect("EngineSession against real nvim");
     settle(&mut engine, "attach");
-    engine.arm_and_input(":vsplit<CR>").unwrap();
-    settle(&mut engine, "vsplit");
+    if !setup.is_empty() {
+        engine.arm_and_input(setup).unwrap();
+        settle(&mut engine, setup);
+    }
+    engine.arm_and_input(command).unwrap();
+    settle(&mut engine, command);
     engine
+}
+
+fn split(command: &str) -> EngineSession {
+    split_after("", command)
 }
 
 fn mouse(engine: &mut EngineSession, action: &str, row: u16, col: u16) {
@@ -79,6 +100,42 @@ fn dragging_the_separator_resizes_both_windows() {
         [before[0] + 5, before[1] - 5],
         "the separator moved five columns right: {before:?} -> {after:?}"
     );
+}
+
+/// Drags the status line between two stacked windows two rows down.
+fn drag_the_status_line_down(engine: &mut EngineSession) {
+    let before = heights(engine);
+    assert_eq!(before.len(), 2, "{before:?}");
+    // the row above the lower window's first, the winbar's where it has one
+    let lower_top: u16 = engine
+        .eval_str("win_screenpos(2)[0]")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let row = engine.model().chrome_rows() + lower_top - 2;
+    let col = 10;
+    mouse(engine, "press", row, col);
+    mouse(engine, "drag", row + 1, col);
+    mouse(engine, "drag", row + 2, col);
+    mouse(engine, "release", row + 2, col);
+    let after = heights(engine);
+    assert_eq!(
+        after,
+        [before[0] + 2, before[1] - 2],
+        "the status line moved two rows down: {before:?} -> {after:?}"
+    );
+}
+
+#[test]
+fn dragging_the_status_line_resizes_both_stacked_windows() {
+    let mut engine = split(":split<CR>");
+    drag_the_status_line_down(&mut engine);
+}
+
+#[test]
+fn a_winbar_moves_the_status_line_by_the_rows_dragged() {
+    let mut engine = split_after(":set winbar=%f<CR>", ":split<CR>");
+    drag_the_status_line_down(&mut engine);
 }
 
 #[test]

@@ -532,6 +532,9 @@ left narrows, whichever edge the sidebar is pinned to. Two bindings per
 direction because macOS Terminal and Termius keep the shifted arrows for
 themselves and view never sees them; the chord reaches through both.
 
+`<C-w>m` enters resize mode on the focused sidebar, and dragging a sidebar's
+inner edge with the mouse sets its width; see [Resize mode](#resize-mode).
+
 These are view's own keys inside its own surfaces, so they take nothing
 from your config and appear in no `:map` listing. They are yours to change:
 `[keys]` takes one key notation per action, or a list of them, and a
@@ -607,10 +610,11 @@ line shows `RESIZE` where the mode word stands until you leave.
 | `=` | makes every window the same size (`<C-w>=`) |
 | `<Esc>` `<CR>` `q` | leaves the mode |
 
-A step is 5% of the screen, at least one cell. A count before the key
-multiplies it: `3l` is three steps wider. A sidebar steps its width by 5%
-and answers only the axis it has. Any other key leaves the mode and then
-does what it always does.
+A step is 5% of the editor area, at least one cell. A count before the key
+multiplies it: `3l` is three steps wider. A sidebar steps its share by 5%
+along the one direction it has: its width at the left or right, its height
+at the top or bottom. Any other key leaves the mode and then does what it
+always does.
 
 Rebind the entry key under `[keys]`:
 

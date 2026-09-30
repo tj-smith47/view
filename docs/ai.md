@@ -142,6 +142,9 @@ prompt at any other time. They work while a permission request is up.
 The file tree resizes with the same keys, and `[keys]` rebinds them for
 both; see [keymaps.md](keymaps.md).
 
+`<C-w>m` enters resize mode, and dragging the panel's inner edge with the
+mouse sets its width; see [Resize mode](keymaps.md#resize-mode).
+
 The width a session *starts* at is `view.toml`'s, and the file tree has the
 same key beside it:
 

@@ -475,11 +475,11 @@ pub(super) fn ai_panel_key(
                     return super::surfaces::resize_windowed_agent(model);
                 }
             }
+            Resolved::Act(Action::ResizeMode) => return super::resize::enter(model),
             // The line break `<CR>` cannot be: that key sends
             // the prompt, so a prompt of more than one line is
             // typed with this one and arrives at the agent as
             // the same `\n` a paste would have carried.
-            Resolved::Act(Action::ResizeMode) => return super::resize::enter(model),
             Resolved::Act(Action::ComposerNewline) => {
                 model.ai_panel_mut().push_input("\n");
                 model.dirty = true;
