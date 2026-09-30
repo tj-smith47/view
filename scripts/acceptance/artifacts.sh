@@ -552,12 +552,15 @@ agent_panel_title() {
         (?*.*) name=${name%.*} ;;
         esac
     else
-        name=$(grep -oE '"agentInfo": \{[^}]*"title": "[^"]+"' \
+        # `VIEW_AI_STUB_TITLE` in the stub's environment replaces the
+        # default, and the stub inherits this shell's, so the same variable
+        # decides here
+        name=${VIEW_AI_STUB_TITLE:-$(grep -oE 'var\("VIEW_AI_STUB_TITLE"\)\.unwrap_or_else\(\|_\| "[^"]+"' \
             "$REPO_ROOT/crates/view-ai/tests/fixtures/stub_agent.rs" |
-            sed -E 's/.*"title": "([^"]+)"/\1/') || true
+            sed -E 's/.*"([^"]+)"$/\1/')} || true
     fi
     if [ -z "$name" ]; then
-        printf 'FAIL: the stub agent names itself with no agentInfo title any more\n' >&2
+        printf 'FAIL: the stub agent has no VIEW_AI_STUB_TITLE default any more\n' >&2
         return 1
     fi
     if [ "$focused" = focused ]; then
