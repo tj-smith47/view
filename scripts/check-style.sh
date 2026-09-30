@@ -485,9 +485,11 @@ check_notice_joiners() {
     return 1
   fi
   status=0
-  report=$(LC_ALL=C awk -v exempt="$NOTICE_JOINER_EXEMPT" '
+  # the rows travel joined on the record separator byte: the awk macOS ships
+  # lexes a -v value as a string literal and refuses a newline inside one
+  report=$(LC_ALL=C awk -v exempt="$(printf '%s' "$NOTICE_JOINER_EXEMPT" | tr '\n' '\036')" '
     BEGIN {
-      rows = split(exempt, row, "\n")
+      rows = split(exempt, row, "\036")
       for (i = 1; i <= rows; i++) {
         split(row[i], field, "|")
         epath[i] = field[1]; etext[i] = field[2]; ewhy[i] = field[3]; used[i] = 0
@@ -2755,8 +2757,10 @@ comment_frames_added() {
   ') || true
   added=""
   if [ -n "$lines" ]; then
-    added=$(printf '%s\n' "$hits" | awk -v lines="$lines" '
-      BEGIN { n = split(lines, l, "\n"); for (i = 1; i <= n; i++) want[l[i]] = 1 }
+    # joined on the record separator byte for the same reason as the notice
+    # joiner table: BSD awk refuses a newline in a -v value
+    added=$(printf '%s\n' "$hits" | awk -v lines="$(printf '%s' "$lines" | tr '\n' '\036')" '
+      BEGIN { n = split(lines, l, "\036"); for (i = 1; i <= n; i++) want[l[i]] = 1 }
       { split($0, f, ":"); if ((f[1] ":" f[2]) in want) print }')
   fi
   if [ -n "$added" ]; then

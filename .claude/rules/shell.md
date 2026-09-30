@@ -98,6 +98,14 @@ form, hoisted into a variable because a walk calls it per line, and busybox,
 mawk and gawk agree on its count. The escape before a digit is on the pin's
 counted set, so the octal spelling reddens the moment it is written again.
 
+A list handed to awk through `-v` is joined on the record separator byte
+(`\036`) and split on it in `BEGIN`. The awk macOS ships lexes a `-v` value as
+a string literal and refuses a newline inside one, so a newline-joined list
+stops the walk with `awk: newline in string`; the notice joiner walk in
+`scripts/check-style.sh` failed that way on every macOS run. A case in
+`scripts/check-style-cases.sh` plays the whole run under a shim awk that
+refuses what BSD awk refuses, on a tree shaped to reach every such list.
+
 Both reading legs take their line from one reader in
 `scripts/lib/script-population.sh`, which carries quote, here-doc and nesting
 state across lines the way 3.2 carries them. A word in a comment or in a

@@ -4116,6 +4116,72 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# The awk macOS ships lexes a -v value as a string literal and refuses a
+# newline inside one, so a list handed to awk that way is joined on another
+# byte. The stock-awk case above grades one walk on a host that has that
+# awk; every other host has a GNU one, which takes the newline and grades
+# nothing. So the whole run is played once under a shim awk that refuses
+# what BSD awk refuses, on a tree shaped to reach both lists the run hands
+# over: the notice joiner table, and the added lines a crate over its
+# contrast-frame ceiling is graded on, which needs a commit to diff against.
+# ---------------------------------------------------------------------------
+NEWLINE_V='no -v value handed to awk carries a newline, under a shim that refuses one'
+n=$((n + 1))
+CASE="$WORK/case$n"
+mkdir -p "$CASE/crates/seed/src" "$CASE/crates/view/src" \
+  "$CASE/crates/view-core/src" "$CASE/crates/view-native/src" \
+  "$CASE/crates/view-ai/src" "$CASE/crates/view-tui/src" "$CASE/scripts" \
+  "$CASE/docs" "$CASE/.claude/rules" "$WORK/shim"
+real_awk=$(command -v awk)
+cat > "$WORK/shim/awk" <<SHIM
+#!/bin/sh
+nl='
+'
+pending=0
+for a in "\$@"; do
+  if [ "\$pending" = 1 ]; then
+    v=\$a
+    pending=0
+  else
+    case "\$a" in
+      (-v | -F) pending=1; continue ;;
+      (-v*) v=\${a#-v} ;;
+      (--) break ;;
+      (-*) continue ;;
+      (*) break ;;
+    esac
+  fi
+  case "\$v" in
+    (*"\$nl"*) echo "awk: newline in string \${v%%"\$nl"*}... at source line 1" >&2; exit 2 ;;
+  esac
+done
+exec "$real_awk" "\$@"
+SHIM
+chmod +x "$WORK/shim/awk"
+printf '# view\n\nA line that says what is true and stops.\n' > "$CASE/README.md"
+printf 'seed 0\n' > "$CASE/scripts/comment-frames.ceiling"
+printf 'pub fn a() {}\n' > "$CASE/crates/seed/src/lib.rs"
+printf 'pub fn b() {}\n' > "$CASE/crates/view-core/src/lib.rs"
+git -C "$CASE" init -q
+git -C "$CASE" add -A
+git -C "$CASE" -c user.name=case -c user.email=case@example.invalid \
+  commit -qm seed
+printf '// one rather than two\npub fn c() {}\n' >> "$CASE/crates/seed/src/lib.rs"
+shim_out=$(cd "$CASE" && PATH="$WORK/shim:$PATH" bash "$CHECKER" 2>&1)
+shim_refused=$(printf '%s\n' "$shim_out" | grep -c 'awk: newline in string' || true)
+shim_joiner=$(printf '%s\n' "$shim_out" |
+  grep -c '^STYLE FAIL: an exemption matches no line any more: ' || true)
+shim_added=$(printf '%s\n' "$shim_out" |
+  grep -c '^crates/seed/src/lib.rs:2:' || true)
+if [ "$shim_refused" = 0 ] && [ "$shim_joiner" -gt 0 ] && [ "$shim_added" -gt 0 ]; then
+  printf 'ok %s - %s\n' "$n" "$NEWLINE_V"
+else
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want no refusal, the joiner table read, the added line named\n  got  refusals=%s joiner=%s added=%s\n%s\n' \
+    "$n" "$NEWLINE_V" "$shim_refused" "$shim_joiner" "$shim_added" "$shim_out"
+fi
+
+# ---------------------------------------------------------------------------
 # the notice joiner ban: notice text a person reads joins its clauses with a
 # full stop, and the three lines the checker exempts are planted in every
 # case so an exemption that stops matching is itself a finding

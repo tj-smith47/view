@@ -67,18 +67,18 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           ENGINE_PIN=$(cat .engine-pin)
-          curl -fsSL -o nvim.appimage "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
-          chmod +x nvim.appimage
-          ./nvim.appimage --appimage-extract >/dev/null
-          echo "$PWD/squashfs-root/usr/bin" >> "$GITHUB_PATH"
+          curl -fsSL -o "$RUNNER_TEMP/nvim.appimage" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          chmod +x "$RUNNER_TEMP/nvim.appimage"
+          (cd "$RUNNER_TEMP" && ./nvim.appimage --appimage-extract >/dev/null)
+          echo "$RUNNER_TEMP/squashfs-root/usr/bin" >> "$GITHUB_PATH"
 
       - name: Install neovim (macos)
         if: runner.os == 'macOS'
         run: |
           ENGINE_PIN=$(cat .engine-pin)
-          curl -fsSL -o nvim-macos.tar.gz "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-macos-arm64.tar.gz"
-          tar xzf nvim-macos.tar.gz
-          echo "$PWD/nvim-macos-arm64/bin" >> "$GITHUB_PATH"
+          curl -fsSL -o "$RUNNER_TEMP/nvim-macos.tar.gz" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-macos-arm64.tar.gz"
+          tar xzf "$RUNNER_TEMP/nvim-macos.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/nvim-macos-arm64/bin" >> "$GITHUB_PATH"
 
       - name: Check neovim version
         run: |
