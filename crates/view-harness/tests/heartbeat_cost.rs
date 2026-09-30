@@ -221,7 +221,7 @@ fn measure(row: &Row, view_bin: &Path) -> f64 {
     );
     gated_value(&stdout, row.metric).unwrap_or_else(|| {
         panic!(
-            "{}/{} against {} printed no gated {} line:\n{stdout}",
+            "{}/{} against {} printed no trailer line for {}:\n{stdout}",
             row.scenario,
             row.fixture,
             view_bin.display(),
@@ -233,9 +233,12 @@ fn measure(row: &Row, view_bin: &Path) -> f64 {
 /// The value on the aggregation trailer for `metric`, the line
 /// `view_bench::report::aggregate_line` writes.
 fn gated_value(stdout: &str, metric: &str) -> Option<f64> {
-    let needle = format!("gated {metric} ");
+    // a shared class writes the trailer as `recorded`
+    let needles = [format!("gated {metric} "), format!("recorded {metric} ")];
     stdout.lines().rev().find_map(|line| {
-        let tail = line.split(&needle).nth(1)?;
+        let tail = needles
+            .iter()
+            .find_map(|needle| line.split(needle.as_str()).nth(1))?;
         tail.split_whitespace().next()?.parse().ok()
     })
 }

@@ -26,6 +26,7 @@ pub(super) fn run_remote_memory_row(
     bins: &Bins,
     scenario: &str,
     protocol: &Protocol,
+    controlled: bool,
 ) -> Result<CellMetrics> {
     let local_side = world.side(fixture, "view-local")?;
     let remote_side = world.side(fixture, "view-remote")?;
@@ -91,7 +92,15 @@ pub(super) fn run_remote_memory_row(
         (outcome.local_metric, outcome.gated_local_mb),
         (remote_memory::RATIO_METRIC, outcome.gated_ratio),
     ] {
-        println!("{}", report::aggregate_line(metric, value, trials));
+        println!(
+            "{}",
+            report::aggregate_line(
+                metric,
+                value,
+                trials,
+                baselines::gate_headroom(metric, controlled).is_some()
+            )
+        );
         metrics.insert(metric.to_string(), value);
     }
     Ok(metrics)

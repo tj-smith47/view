@@ -115,12 +115,15 @@ pub fn absolute_cell(scenario: &str, fixture: &str, metric: &str, stats: Absolut
     )
 }
 
-/// The per-invocation aggregation trailer naming the gated statistic, so a
-/// reader of the raw output can tell a single-trial number from the value
-/// the gate actually compares.
+/// The per-invocation aggregation trailer naming the statistic the run
+/// reduced its trials to, so a reader of the raw output can tell a
+/// single-trial number from the value the gate compares. `gated` says
+/// whether this class compares it at all: a shared class records its tail
+/// statistics and gates none of them, and the trailer says which it did.
 #[must_use]
-pub fn aggregate_line(statistic: &str, value: f64, trials: usize) -> String {
-    format!("      gated {statistic} {value:.3} (median of {trials} trials)")
+pub fn aggregate_line(statistic: &str, value: f64, trials: usize, gated: bool) -> String {
+    let verdict = if gated { "gated" } else { "recorded" };
+    format!("      {verdict} {statistic} {value:.3} (median of {trials} trials)")
 }
 
 #[cfg(test)]
@@ -216,8 +219,16 @@ mod tests {
     #[test]
     fn aggregate_line_names_the_statistic_and_trial_count() {
         assert_eq!(
-            aggregate_line("ratio_p99", 1.213, 3),
+            aggregate_line("ratio_p99", 1.213, 3, true),
             "      gated ratio_p99 1.213 (median of 3 trials)"
+        );
+    }
+
+    #[test]
+    fn aggregate_line_says_recorded_where_the_class_gates_nothing_on_it() {
+        assert_eq!(
+            aggregate_line("server_delta_ms", 3.237, 1, false),
+            "      recorded server_delta_ms 3.237 (median of 1 trials)"
         );
     }
 }

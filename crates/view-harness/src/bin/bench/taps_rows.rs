@@ -197,7 +197,12 @@ pub(crate) fn run_taps_row(
     }
     println!(
         "{}",
-        report::aggregate_line(metric_key, outcome.gated_p99, protocol.trials)
+        report::aggregate_line(
+            metric_key,
+            outcome.gated_p99,
+            protocol.trials,
+            baselines::gate_headroom(metric_key, controlled).is_some()
+        )
     );
     let mut metrics = CellMetrics::new();
     metrics.insert(metric_key.to_string(), outcome.gated_p99);
@@ -217,6 +222,7 @@ pub(crate) fn run_echo_speculated_row(
     world: &CellWorld,
     bins: &Bins,
     protocol: &Protocol,
+    controlled: bool,
 ) -> Result<RowOutcome> {
     let (pipe, view_spec, _cwd) = taps_side(fixture, world, bins.taps_bins()?, None)?;
     let nvim_spec = nvim_spec_from(world.side(fixture, "nvim")?, &bins.nvim);
@@ -261,7 +267,12 @@ pub(crate) fn run_echo_speculated_row(
     ] {
         println!(
             "{}",
-            report::aggregate_line(metric, value, outcome.echo.trials.len())
+            report::aggregate_line(
+                metric,
+                value,
+                outcome.echo.trials.len(),
+                baselines::gate_headroom(metric, controlled).is_some()
+            )
         );
         metrics.insert(metric.to_string(), value);
     }
@@ -442,6 +453,7 @@ pub(crate) fn run_echo_path_row(
     world: &CellWorld,
     bins: &Bins,
     protocol: &Protocol,
+    controlled: bool,
 ) -> Result<CellMetrics> {
     let (pipe, view_spec, cwd) = taps_side(fixture, world, bins.echo_path_bins()?, None)?;
     let nvim_spec = nvim_spec_from(world.side(fixture, "nvim")?, &bins.nvim);
@@ -462,7 +474,12 @@ pub(crate) fn run_echo_path_row(
     }
     println!(
         "{}",
-        report::aggregate_line("ratio_p50", outcome.gated_ratio_p50, outcome.trials.len())
+        report::aggregate_line(
+            "ratio_p50",
+            outcome.gated_ratio_p50,
+            outcome.trials.len(),
+            baselines::gate_headroom("ratio_p50", controlled).is_some()
+        )
     );
     for segment in outcome
         .segments

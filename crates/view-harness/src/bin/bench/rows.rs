@@ -21,10 +21,6 @@ pub(super) fn run_cell(
     controlled: bool,
 ) -> Result<RowOutcome> {
     let (scenario, fixture) = (&cell.scenario, &cell.fixture);
-    // the only consumer is the unix-only taps arm, so off unix the
-    // parameter has no reader and `-D warnings` fails the build there
-    #[cfg(not(unix))]
-    let _ = controlled;
     // the taps rows dispatch here rather than in measure_cell because they
     // are the only rows that can refuse their own number; every other row
     // either measures or fails, so measure_cell keeps the simpler contract
@@ -39,9 +35,9 @@ pub(super) fn run_cell(
         #[cfg(unix)]
         "echo_speculated" => {
             let world = CellWorld::create(fixture)?;
-            taps_rows::run_echo_speculated_row(fixture, &world, bins, protocol)?
+            taps_rows::run_echo_speculated_row(fixture, &world, bins, protocol, controlled)?
         }
-        _ => RowOutcome::trusted(measure_cell(cell, bins, protocol)?),
+        _ => RowOutcome::trusted(measure_cell(cell, bins, protocol, controlled)?),
     };
     let undeclared = baselines::undeclared_metrics(&outcome.metrics);
     ensure!(
@@ -53,7 +49,12 @@ pub(super) fn run_cell(
     Ok(outcome)
 }
 
-fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellMetrics> {
+fn measure_cell(
+    cell: &CellId,
+    bins: &Bins,
+    protocol: &Protocol,
+    controlled: bool,
+) -> Result<CellMetrics> {
     let (scenario, fixture) = (cell.scenario.as_str(), cell.fixture.as_str());
     // the only arm that reads this is unix-only, so on Windows the binding
     // has no reader at all and `-D warnings` fails the build there
@@ -62,7 +63,7 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
     let world = CellWorld::create(fixture)?;
     match scenario {
         #[cfg(unix)]
-        "echo_path" => taps_rows::run_echo_path_row(fixture, &world, bins, protocol),
+        "echo_path" => taps_rows::run_echo_path_row(fixture, &world, bins, protocol, controlled),
         #[cfg(unix)]
         "echo_control" => {
             let control_side = world.side(fixture, "control")?;
@@ -100,7 +101,12 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             ] {
                 println!(
                     "{}",
-                    report::aggregate_line(metric, value, outcome.trials.len())
+                    report::aggregate_line(
+                        metric,
+                        value,
+                        outcome.trials.len(),
+                        baselines::gate_headroom(metric, controlled).is_some()
+                    )
                 );
             }
             let mut metrics = CellMetrics::new();
@@ -131,18 +137,29 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             }
             println!(
                 "{}",
-                report::aggregate_line("ratio_p50", outcome.gated_ratio_p50, outcome.trials.len())
+                report::aggregate_line(
+                    "ratio_p50",
+                    outcome.gated_ratio_p50,
+                    outcome.trials.len(),
+                    baselines::gate_headroom("ratio_p50", controlled).is_some()
+                )
             );
             println!(
                 "{}",
-                report::aggregate_line("ratio_p99", outcome.gated_ratio_p99, outcome.trials.len())
+                report::aggregate_line(
+                    "ratio_p99",
+                    outcome.gated_ratio_p99,
+                    outcome.trials.len(),
+                    baselines::gate_headroom("ratio_p99", controlled).is_some()
+                )
             );
             println!(
                 "{}",
                 report::aggregate_line(
                     "paired_delta_p99_ms",
                     outcome.gated_paired_delta_p99_ms,
-                    outcome.trials.len()
+                    outcome.trials.len(),
+                    baselines::gate_headroom("paired_delta_p99_ms", controlled).is_some()
                 )
             );
             println!(
@@ -150,7 +167,8 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
                 report::aggregate_line(
                     "view_p99_ms",
                     outcome.gated_view_p99_ms,
-                    outcome.trials.len()
+                    outcome.trials.len(),
+                    baselines::gate_headroom("view_p99_ms", controlled).is_some()
                 )
             );
             let mut metrics = CellMetrics::new();
@@ -195,16 +213,27 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
                 report::aggregate_line(
                     "staleness_p99_ms",
                     outcome.gated_staleness_p99_ms,
-                    outcome.trials.len()
+                    outcome.trials.len(),
+                    baselines::gate_headroom("staleness_p99_ms", controlled).is_some()
                 )
             );
             println!(
                 "{}",
-                report::aggregate_line("ratio_p50", outcome.gated_ratio_p50, outcome.trials.len())
+                report::aggregate_line(
+                    "ratio_p50",
+                    outcome.gated_ratio_p50,
+                    outcome.trials.len(),
+                    baselines::gate_headroom("ratio_p50", controlled).is_some()
+                )
             );
             println!(
                 "{}",
-                report::aggregate_line("ratio_p99", outcome.gated_ratio_p99, outcome.trials.len())
+                report::aggregate_line(
+                    "ratio_p99",
+                    outcome.gated_ratio_p99,
+                    outcome.trials.len(),
+                    baselines::gate_headroom("ratio_p99", controlled).is_some()
+                )
             );
             let mut metrics = CellMetrics::new();
             metrics.insert(
@@ -251,20 +280,36 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
                 report::aggregate_line(
                     "shell_visible_cold_ms",
                     outcome.gated_shell_visible_cold_ms,
-                    1
+                    1,
+                    baselines::gate_headroom("shell_visible_cold_ms", controlled).is_some()
                 )
             );
             println!(
                 "{}",
-                report::aggregate_line("marker_cold_ms", outcome.gated_marker_cold_ms, 1)
+                report::aggregate_line(
+                    "marker_cold_ms",
+                    outcome.gated_marker_cold_ms,
+                    1,
+                    baselines::gate_headroom("marker_cold_ms", controlled).is_some()
+                )
             );
             println!(
                 "{}",
-                report::aggregate_line("marker_ratio_p50", outcome.gated_marker_ratio_p50, 1)
+                report::aggregate_line(
+                    "marker_ratio_p50",
+                    outcome.gated_marker_ratio_p50,
+                    1,
+                    baselines::gate_headroom("marker_ratio_p50", controlled).is_some()
+                )
             );
             println!(
                 "{}",
-                report::aggregate_line("marker_ratio_p99", outcome.gated_marker_ratio_p99, 1)
+                report::aggregate_line(
+                    "marker_ratio_p99",
+                    outcome.gated_marker_ratio_p99,
+                    1,
+                    baselines::gate_headroom("marker_ratio_p99", controlled).is_some()
+                )
             );
             verify_fixture_copies_untouched(&world, fixture)?;
             let mut metrics = CellMetrics::new();
@@ -321,7 +366,15 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
                 ("first_frame_ratio_p99", outcome.gated_first_frame_ratio_p99),
                 (startup::SERVER_DELTA_METRIC, server_delta),
             ] {
-                println!("{}", report::aggregate_line(metric, value, 1));
+                println!(
+                    "{}",
+                    report::aggregate_line(
+                        metric,
+                        value,
+                        1,
+                        baselines::gate_headroom(metric, controlled).is_some()
+                    )
+                );
                 metrics.insert(metric.to_string(), value);
             }
             // the planted marker is an added file, not an edit to one the
@@ -357,7 +410,12 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             );
             println!(
                 "{}",
-                report::aggregate_line(outcome.metric, outcome.gated_mb, 1)
+                report::aggregate_line(
+                    outcome.metric,
+                    outcome.gated_mb,
+                    1,
+                    baselines::gate_headroom(outcome.metric, controlled).is_some()
+                )
             );
             let mut metrics = CellMetrics::new();
             metrics.insert(outcome.metric.to_string(), outcome.gated_mb);
@@ -440,9 +498,9 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             Ok(metrics)
         }
         #[cfg(unix)]
-        "remote_memory" => {
-            super::remote_rows::run_remote_memory_row(&world, fixture, bins, scenario, protocol)
-        }
+        "remote_memory" => super::remote_rows::run_remote_memory_row(
+            &world, fixture, bins, scenario, protocol, controlled,
+        ),
         "flood" => {
             let pair = paired_specs(&world, fixture, bins)?;
             let outcome = flood::run(&flood::RunSpec {
@@ -462,18 +520,29 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             let trials = outcome.trials.len();
             println!(
                 "{}",
-                report::aggregate_line("pace_ratio", outcome.gated_pace_ratio, trials)
+                report::aggregate_line(
+                    "pace_ratio",
+                    outcome.gated_pace_ratio,
+                    trials,
+                    baselines::gate_headroom("pace_ratio", controlled).is_some()
+                )
             );
             println!(
                 "{}",
-                report::aggregate_line("cadence_p99_ms", outcome.gated_cadence_p99_ms, trials)
+                report::aggregate_line(
+                    "cadence_p99_ms",
+                    outcome.gated_cadence_p99_ms,
+                    trials,
+                    baselines::gate_headroom("cadence_p99_ms", controlled).is_some()
+                )
             );
             println!(
                 "{}",
                 report::aggregate_line(
                     "cadence_p99_ratio",
                     outcome.gated_cadence_p99_ratio,
-                    trials
+                    trials,
+                    baselines::gate_headroom("cadence_p99_ratio", controlled).is_some()
                 )
             );
             println!(
@@ -537,7 +606,15 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
                 ("first_page_p50_ms", outcome.gated_first_page_p50_ms),
                 ("first_page_p99_ms", outcome.gated_first_page_p99_ms),
             ] {
-                println!("{}", report::aggregate_line(metric, value, trials));
+                println!(
+                    "{}",
+                    report::aggregate_line(
+                        metric,
+                        value,
+                        trials,
+                        baselines::gate_headroom(metric, controlled).is_some()
+                    )
+                );
                 metrics.insert(metric.to_string(), value);
             }
             Ok(metrics)
@@ -585,7 +662,15 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
                     outcome.gated_restart_rehydrate_p99_ms,
                 ),
             ] {
-                println!("{}", report::aggregate_line(metric, value, trials));
+                println!(
+                    "{}",
+                    report::aggregate_line(
+                        metric,
+                        value,
+                        trials,
+                        baselines::gate_headroom(metric, controlled).is_some()
+                    )
+                );
                 metrics.insert(metric.to_string(), value);
             }
             Ok(metrics)
