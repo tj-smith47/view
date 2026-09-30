@@ -16,7 +16,7 @@
 mod common;
 
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use view_core::msg::{BufferHandle, Effect, Msg, RpcCall};
 use view_core::native::ai_panel::DiffReviewState;
@@ -113,6 +113,19 @@ fn undo(engine: &Engine) {
         .expect("issue undo");
 }
 
+/// Binds the review to `buf` and carries out the attach it answers with, so
+/// the edit events the tests fold have a subscription to arrive on.
+fn bind(engine: &Engine, review: &mut DiffReviewState, buf: u64) {
+    let effects = review.bind(7, Some(BufferHandle(buf)), changedtick(engine, buf));
+    let Some(Effect::Rpc(RpcCall::BufAttach { buf: attach, .. })) = effects.first() else {
+        panic!("binding answers the attach, got {effects:?}")
+    };
+    engine
+        .handle
+        .buf_attach(*attach, 7)
+        .expect("subscribe to the buffer under review");
+}
+
 /// Carries out one of the review's own effects against the live engine and
 /// folds nvim's answer back into the review, exactly as `Executor::run` and
 /// `update()` do between them.
@@ -146,13 +159,12 @@ fn fold_events(rx: &mpsc::Receiver<Msg>, review: &mut DiffReviewState) {
     let deadline = Instant::now() + common::rpc_deadline();
     let mut folded = 0;
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        assert!(
-            folded > 0 || remaining > Duration::ZERO,
-            "no Msg::BufTextChanged arrived within 5s"
-        );
         let received = if folded == 0 {
-            rx.recv_timeout(remaining).ok()
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            Some(
+                rx.recv_timeout(remaining)
+                    .expect("no Msg::BufTextChanged arrived within the rpc deadline"),
+            )
         } else {
             rx.try_recv().ok()
         };
@@ -208,14 +220,7 @@ fn a_whole_review_undoes_as_one_step_across_a_concurrent_edit_and_a_re_diff() {
         hunk::diff(Some(OLD), NEW),
     );
     assert_eq!(review.hunks.len(), 2, "the fixture proposes two hunks");
-    let effects = review.bind(7, Some(BufferHandle(buf)), changedtick(&engine, buf));
-    let Some(Effect::Rpc(RpcCall::BufAttach { buf: attach, .. })) = effects.first() else {
-        panic!("binding answers the attach, got {effects:?}")
-    };
-    engine
-        .handle
-        .buf_attach(*attach, 7)
-        .expect("subscribe to the buffer under review");
+    bind(&engine, &mut review, buf);
 
     // The user types under the second hunk while the review is open. Its
     // anchor no longer matches, so that hunk goes stale and refuses to
@@ -289,7 +294,7 @@ fn a_second_accept_issued_before_any_event_is_folded_still_applies() {
         7,
         hunk::diff(Some(OLD), NEW),
     );
-    let _ = review.bind(7, Some(BufferHandle(buf)), changedtick(&engine, buf));
+    bind(&engine, &mut review, buf);
 
     let first = review.accept(0).expect("the first hunk is fresh");
     carry_out(&engine, &mut review, &first[0]);
