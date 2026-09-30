@@ -699,7 +699,49 @@ fn a_nerd_tree_row_draws_its_git_states_as_glyphs_in_order() {
 
     let folder = TreeRow::dir(0, "src", false).with_git(GitIcons::from_xy("??"));
     assert!(tree_row_text(&folder, TreeIcons::Nerd).ends_with("\u{2605} src"));
-    assert_eq!(tree_row_text(&folder, TreeIcons::None), "+ src");
+    assert_eq!(tree_row_text(&folder, TreeIcons::None), "+ ? src");
+}
+
+#[test]
+fn a_plain_tree_folder_draws_a_letter_for_every_git_state_beneath_it() {
+    use view_core::native::views::{GitIcons, GitMark, TreeRow, TreeView};
+    let folded = GitIcons::from_xy("MM").union(GitIcons::from_xy("??"));
+    let kind = LayerKind::Tree(TreeView::new("Explorer").with_rows(vec![
+        TreeRow::dir(0, "src", true).with_git(folded),
+        TreeRow::leaf(1, "lib.rs")
+            .with_status(Some(GitMark::Modified))
+            .with_git(GitIcons::from_xy("MM")),
+        TreeRow::leaf(1, "new.rs")
+            .with_status(Some(GitMark::Untracked))
+            .with_git(GitIcons::from_xy("??")),
+    ]));
+    let framed = rows(30, 6, &kind, BorderSet::ASCII);
+    let text: Vec<_> = framed.lines[1..4]
+        .iter()
+        .map(|line| line_text(line))
+        .collect();
+    assert!(text[0].contains("  - A M ? src"), "{text:?}");
+    assert!(text[1].contains("    M lib.rs"), "{text:?}");
+    assert!(text[2].contains("    ? new.rs"), "{text:?}");
+
+    let spans = tree_row_spans(
+        &TreeRow::dir(0, "src", true).with_git(folded),
+        TreeIcons::None,
+    );
+    let roles: Vec<_> = spans
+        .iter()
+        .filter(|s| s.role != StyleRole::Plain)
+        .map(|s| s.role)
+        .collect();
+    assert_eq!(
+        roles,
+        [
+            StyleRole::GitAdded,
+            StyleRole::GitModified,
+            StyleRole::GitUntracked
+        ],
+        "{spans:?}"
+    );
 }
 
 #[test]

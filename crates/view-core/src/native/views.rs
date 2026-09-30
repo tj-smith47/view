@@ -504,6 +504,21 @@ impl GitIcon {
         }
     }
 
+    /// The [`GitMark`] whose letter and colour draw this state where the
+    /// row has no Nerd Font glyphs.
+    #[must_use]
+    pub const fn mark(self) -> GitMark {
+        match self {
+            Self::Staged => GitMark::Added,
+            Self::Unstaged => GitMark::Modified,
+            Self::Renamed => GitMark::Renamed,
+            Self::Deleted => GitMark::Deleted,
+            Self::Unmerged => GitMark::Conflicted,
+            Self::Untracked => GitMark::Untracked,
+            Self::Ignored => GitMark::Ignored,
+        }
+    }
+
     const fn bit(self) -> u8 {
         1 << self as u8
     }
@@ -596,7 +611,7 @@ pub struct TreeRow {
     /// Where a symbolic link points, as the row shows it, or `None` for an
     /// entry that is no link.
     pub link: Option<String>,
-    /// Whether a folder lists nothing inside it.
+    /// Whether the scan entered a folder and found nothing inside it.
     pub empty: bool,
 }
 

@@ -345,9 +345,11 @@ a folder glyph on a folder, both in your colorscheme's folder colour, with
 a glyph of its own for an empty folder and a linked one. A file gets a
 file-type icon in that type's own colour. Git states follow the icon as
 glyphs, and a folder shows every state found beneath it. `none` draws a `+`
-on a closed folder, a `-` on an open one and a blank on a file, and a
-file's git state as a letter. `auto` picks `nerd` on a terminal that draws
-box glyphs and `none` on one that does not.
+on a closed folder, a `-` on an open one and a blank on a file, and git
+states as letters, a folder showing one for every state found beneath it.
+Under `nerd` a folder inside `.git` draws the plain folder glyph. `auto`
+picks `nerd` on a terminal that draws box glyphs and `none` on one that
+does not.
 
 The notification stream's `anchor` is the toast stack's own corner: the
 near box sits flush against it and every later box sits farther away. A

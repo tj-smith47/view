@@ -53,6 +53,9 @@ pub struct TreeEntry {
     /// A file's icon, looked up once here so a frame never repeats the
     /// lookup.
     pub icon: Option<Devicon>,
+    /// Whether the scan listed a folder's contents, so a folder with
+    /// nothing beneath it is known to be empty.
+    pub entered: bool,
 }
 
 impl TreeEntry {
@@ -74,6 +77,7 @@ impl TreeEntry {
             depth,
             link: None,
             icon,
+            entered: is_dir,
         }
     }
 
@@ -82,6 +86,16 @@ impl TreeEntry {
     pub fn with_link(self, target: impl Into<String>) -> Self {
         Self {
             link: Some(target.into()),
+            entered: false,
+            ..self
+        }
+    }
+
+    /// The same entry as a folder whose contents the scan did not list.
+    #[must_use]
+    pub fn unentered(self) -> Self {
+        Self {
+            entered: false,
             ..self
         }
     }
@@ -366,10 +380,11 @@ impl TreeState {
                     // depth-first order puts a folder's first child right
                     // after it, so a folder is empty when the next entry
                     // does not sit deeper
-                    let empty = self
-                        .entries
-                        .get(i + 1)
-                        .is_none_or(|next| next.depth <= entry.depth);
+                    let empty = entry.entered
+                        && self
+                            .entries
+                            .get(i + 1)
+                            .is_none_or(|next| next.depth <= entry.depth);
                     TreeRow::dir(entry.depth, label, self.expanded.contains(&entry.path))
                         .with_empty(empty)
                 } else {
@@ -603,6 +618,39 @@ mod tests {
         );
         let empty: Vec<_> = tree.view().rows.iter().map(|row| row.empty).collect();
         assert_eq!(empty, [false, true, true]);
+    }
+
+    #[test]
+    fn a_tree_folder_the_scan_did_not_enter_is_not_empty() {
+        let mut tree = TreeState::open(PathBuf::from("/repo"));
+        let scan_gen = tree.generation();
+        tree.apply_scan(
+            scan_gen,
+            vec![
+                entry(".git", true, 0),
+                entry(".git/HEAD", false, 1),
+                entry(".git/objects", true, 1).unentered(),
+                entry(".git/refs", true, 1),
+                TreeEntry::new("docs".into(), true, 0).with_link("../shared/docs"),
+            ],
+        );
+        tree.toggle_expand(0);
+        let rows: Vec<_> = tree
+            .view()
+            .rows
+            .iter()
+            .map(|row| (row.label.clone(), row.empty))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (".git".to_string(), false),
+                ("HEAD".to_string(), false),
+                ("objects".to_string(), false),
+                ("refs".to_string(), true),
+                ("docs".to_string(), false),
+            ]
+        );
     }
 
     #[test]

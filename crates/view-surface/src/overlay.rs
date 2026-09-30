@@ -960,8 +960,10 @@ fn tree_body(view: &TreeView) -> Body {
 /// [`view_core::native::views::GitIcons`] follow as glyphs, each followed
 /// by a space. Under
 /// [`TreeIcons::None`] the row opens with a `-` on an open folder, a `+`
-/// on a closed one and a blank on a file, and a file's [`GitMark`] letter
-/// follows. The git state sits between the icon and the name, where
+/// on a closed one and a blank on a file. A file's [`GitMark`] letter
+/// follows, and a folder draws one letter per state it holds, in the order
+/// the glyphs take (see [`view_core::native::views::GitIcon::mark`]). The
+/// git state sits between the icon and the name, where
 /// nvim-tree's default renderer places it.
 fn tree_row_spans(row: &TreeRow, icons: TreeIcons) -> Vec<Span> {
     let mut spans = vec![Span::plain("  ".repeat(usize::from(row.depth)))];
@@ -1009,7 +1011,9 @@ fn tree_row_spans(row: &TreeRow, icons: TreeIcons) -> Vec<Span> {
                 None => " ",
             };
             spans.extend([Span::plain(marker), Span::plain(" ")]);
-            if let Some(mark) = row.status {
+            if row.expanded.is_some() {
+                spans.extend(row.git.iter().map(|icon| tree_git_glyph_span(icon.mark())));
+            } else if let Some(mark) = row.status {
                 spans.push(tree_git_glyph_span(mark));
             }
         }

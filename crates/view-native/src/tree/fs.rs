@@ -58,15 +58,10 @@ fn scan_paced(root: &Path, cancel: &AtomicBool, pace: impl Fn()) -> Vec<TreeEntr
     let walker = ignore::WalkBuilder::new(root)
         .hidden(false)
         .filter_entry(|entry| {
-            // the depth guard keeps a root that is itself a `.git` folder
-            // listing its whole tree
-            entry.depth() < 3
-                || entry
-                    .path()
-                    .parent()
-                    .and_then(Path::parent)
-                    .and_then(Path::file_name)
-                    != Some(OsStr::new(".git"))
+            entry
+                .path()
+                .parent()
+                .is_none_or(|parent| !stops_inside(parent, entry.depth().saturating_sub(1)))
         })
         .build();
     for entry in walker {
@@ -98,11 +93,21 @@ fn scan_paced(root: &Path, cancel: &AtomicBool, pace: impl Fn()) -> Vec<TreeEntr
         let mut listed = TreeEntry::new(rel.to_path_buf(), is_dir, depth);
         if link {
             listed = listed.with_link(link_target(entry.path(), &real_root));
+        } else if is_dir && stops_inside(entry.path(), entry.depth()) {
+            listed = listed.unentered();
         }
         out.push(listed);
     }
     out.sort_by(tree_order);
     out
+}
+
+/// Whether the walk lists nothing inside the folder at `path`, `depth`
+/// levels below the root: a folder that sits directly in a `.git` folder.
+/// The depth guard keeps a root that is itself a `.git` folder listing its
+/// whole tree.
+fn stops_inside(path: &Path, depth: usize) -> bool {
+    depth >= 2 && path.parent().and_then(Path::file_name) == Some(OsStr::new(".git"))
 }
 
 /// Where the link at `path` points: relative to `real_root` when it
@@ -324,6 +329,30 @@ mod tests {
         assert!(listed("sub/.git/HEAD"), "{entries:?}");
         assert!(listed("sub/.git/refs"), "{entries:?}");
         assert!(!listed("sub/.git/refs/heads"), "{entries:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_tree_scan_marks_the_folders_inside_git_as_not_entered() {
+        let root = scratch("entered");
+        std::fs::create_dir_all(root.join(".git/objects/ab")).expect("mkdir .git");
+        std::fs::create_dir_all(root.join("sub/.git/refs/heads")).expect("mkdir sub");
+        std::fs::create_dir_all(root.join("hollow")).expect("mkdir hollow");
+
+        let entries = scan(&root, &AtomicBool::new(false));
+        let entered = |name: &str| {
+            entries
+                .iter()
+                .find(|e| e.path == Path::new(name))
+                .map(|e| e.entered)
+        };
+        assert_eq!(entered(".git"), Some(true), "{entries:?}");
+        assert_eq!(entered(".git/objects"), Some(false), "{entries:?}");
+        assert_eq!(entered("sub"), Some(true), "{entries:?}");
+        assert_eq!(entered("sub/.git"), Some(true), "{entries:?}");
+        assert_eq!(entered("sub/.git/refs"), Some(false), "{entries:?}");
+        assert_eq!(entered("hollow"), Some(true), "{entries:?}");
 
         let _ = std::fs::remove_dir_all(&root);
     }
