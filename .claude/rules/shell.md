@@ -175,7 +175,10 @@ carries none. A script run by path fails with `Permission denied` when the bit
 is missing, and a sourced library has no reason to carry one.
 `check_script_modes` in `scripts/check-style.sh` grades every
 `scripts/**/*.sh` git lists against that rule, untracked ones included,
-because `task commit` runs the gate before it stages a new file.
+because `task commit` runs the gate before it stages a new file. A tracked
+file is graded on the mode git recorded for it, since the bash Windows ships
+answers `-x` for any file whose first line is a shebang; an untracked file has
+no recorded mode and is graded on the working tree's bit.
 
 ## A pipeline stage names the file it reads
 

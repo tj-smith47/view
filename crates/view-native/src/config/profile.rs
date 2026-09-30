@@ -170,9 +170,14 @@ mod tests {
     }
 
     #[test]
-    fn a_headless_session_derives_the_desktop_profile() {
+    fn a_headless_session_derives_the_profile_of_its_target() {
         let (profile, marker) = detect_profile(&env_of(&[]));
-        assert_eq!(profile, KeyProfile::Desktop);
+        let expected = if cfg!(any(target_os = "macos", target_os = "windows")) {
+            KeyProfile::Editor
+        } else {
+            KeyProfile::Desktop
+        };
+        assert_eq!(profile, expected);
         assert_eq!(marker, None);
     }
 

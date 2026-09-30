@@ -1527,7 +1527,8 @@ EOF
 # gate a new script is committed through runs before it is staged, and a
 # walk over tracked files alone first sees it at the next commit.
 check_script_modes() {
-  local fail=0 entries fresh line path first lib
+  local fail=0 entries fresh line path first lib executable tab
+  tab=$'\t'
   entries=$(git ls-files -s -- 'scripts/*.sh' 'scripts/**/*.sh' 2>&1) || {
     echo "STYLE FAIL: git ls-files could not list scripts/**/*.sh"
     printf '%s\n' "$entries"
@@ -1561,11 +1562,21 @@ check_script_modes() {
         esac
         ;;
     esac
-    if [ "$lib" -eq 0 ] && [ ! -x "$path" ]; then
+    # the bash Windows ships answers -x for any file whose first line is a
+    # shebang, so a tracked file is graded on the bit git recorded for it
+    case "$line" in
+      (*"$tab"*)
+        case "${line%% *}" in (100755) executable=1 ;; (*) executable=0 ;; esac
+        ;;
+      (*)
+        if [ -x "$path" ]; then executable=1; else executable=0; fi
+        ;;
+    esac
+    if [ "$lib" -eq 0 ] && [ "$executable" -eq 0 ]; then
       echo "$path: an entry point (its shebang names bash or sh) carries no executable bit"
       fail=1
     fi
-    if [ "$lib" -eq 1 ] && [ -x "$path" ]; then
+    if [ "$lib" -eq 1 ] && [ "$executable" -eq 1 ]; then
       echo "$path: a library (no shebang, or under scripts/lib/) carries the executable bit"
       fail=1
     fi

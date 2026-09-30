@@ -4587,5 +4587,22 @@ else
   printf 'FAIL %s - %s\n  want rc=1, fresh.sh named\n  got  rc=%s\n%s\n' "$n" "$desc" "$rc" "$out"
 fi
 
+# the bash Windows ships answers -x for any file with a shebang; a tracked
+# library is graded on the bit git recorded, whatever the working tree says
+new_case_modes
+printf '#!/usr/bin/env bash\nhelper() { :; }\n' > "$CASE/scripts/lib/helper.sh"
+git -C "$CASE" add -A
+git -C "$CASE" config core.fileMode false
+chmod +x "$CASE/scripts/lib/helper.sh"
+out=$(bash "$CHECKER" --script-modes "$CASE" 2>&1)
+rc=$?
+desc='a tracked library recorded without the bit, executable in the working tree alone'
+if [ "$rc" = 0 ]; then
+  printf 'ok %s - %s\n' "$n" "$desc"
+else
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=0\n  got  rc=%s\n%s\n' "$n" "$desc" "$rc" "$out"
+fi
+
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]
