@@ -350,7 +350,10 @@ recording_state_home() {
 # WHY: a capture or a tape records whichever binary it is handed, and a
 # release build left over from an earlier day is a recording of code without
 # the change under review. So the newer of the two builds is taken, never
-# the first one found. Prints nothing when neither exists.
+# the first one found, and a build older than a source file under `crates/`
+# is refused by name: the hero probe once listed the tree in the order of a
+# release binary built two hours before the sort it was meant to show.
+# Prints nothing when neither exists or the newer one is stale.
 # Usage: newest_build REPO_ROOT BINARY_NAME
 newest_build() {
   found=
@@ -359,6 +362,12 @@ newest_build() {
       found=$candidate
     fi
   done
+  [ -n "$found" ] || return 0
+  newer=$(find "$1/crates" -type f -newer "$found" 2>/dev/null | head -n 1)
+  if [ -n "$newer" ]; then
+    echo "newest_build: $found is older than $newer; rebuild $2 first" >&2
+    return 0
+  fi
   printf '%s' "$found"
 }
 
