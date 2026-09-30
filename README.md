@@ -47,7 +47,7 @@ live from your colorscheme. A single config key hands any one of them back
 to the plugin you already use: copy [`view.toml.example`](view.toml.example)
 to `~/.config/view/view.toml` and set `picker = false` under `[native]`.
 
-**Every window in a frame.** Each window gets a frame of its own, with a
+**Every window is a frame.** Each window gets a frame of its own, with a
 gap between them and your accent colour on the one you are working in. Turn
 it off with one config key, or let view read your desktop and decide. See
 [`docs/tiled-ui.md`](docs/tiled-ui.md).

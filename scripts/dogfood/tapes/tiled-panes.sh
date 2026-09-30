@@ -1,5 +1,5 @@
 #!/bin/sh
-# WHY: the moment README's "Every window in a frame" bullet promises, in
+# WHY: the moment README's "Every window is a frame" bullet promises, in
 # the shape of a working day: a Rust file beside the README, each in a
 # frame of its own, reflowing as the terminal shrinks and grows back, then
 # `:View window fit` sizing the Rust tile to its code. cap.sh writes a

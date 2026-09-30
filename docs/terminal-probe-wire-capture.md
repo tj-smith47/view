@@ -75,6 +75,7 @@ verbatim in the Windows section below.
 | F | mbp (Darwin 25.2.0, macOS 26.2) | kitty 0.45.0 over `ssh -tt` | `xterm-kitty` | *unset* |
 | G | mbp | tmux 3.6a inside F | `tmux-256color` | `truecolor` |
 | H | winserver (Windows Server 2025, 10.0.26100) | ConPTY / `conhost.exe` over OpenSSH | `xterm-256color` | *unset* |
+| I | dev-linux over ssh from the iPad | Termius | `xterm-256color` | `truecolor` |
 
 Recorded unavailable, on no assumption:
 
@@ -82,7 +83,6 @@ Recorded unavailable, on no assumption:
 |---|---|
 | xterm on dev-linux | not installed (`command -v xterm` empty); its modified-function-key encoding is covered by B/G, which emit the identical bytes |
 | Terminal.app on mbp | no interactive Aqua session to drive. `osascript -e 'tell application "Terminal" to count windows'` returns `31:44: execution error: Terminal got an error: AppleEvent timed out. (-1712)` |
-| Termius from the iPad | no interactive iPad session reachable from a headless run. F is the same shape: an `ssh` login whose client does not forward `COLORTERM` |
 | Windows Terminal (`wt.exe`) | no interactive desktop session on winserver; `WT_SESSION` unset. H captures the ConPTY underneath it, which is the layer that answers |
 
 ## A. kitty 0.45.0, dev-linux
@@ -253,6 +253,41 @@ field, so a terminal that *does* render 24-bit color is read as one that does
 not. Windows sets no `COLORTERM` either, so nothing else recovers it. Any
 consumer of this capture owes the empty-field spelling an accepted form.
 
+## I. Termius on the iPad, ssh to dev-linux
+
+Captured by hand from the Termius session, with the same batch as A.
+
+```
+== host
+  host:         apps
+  uname:        Linux 7.0.0-31-generic
+  TERM:         xterm-256color
+  COLORTERM:    truecolor
+  TERM_PROGRAM: <unset>
+  TMUX:         <unset>
+  LANG:         en_US.UTF-8
+== received
+  bytes:   12
+  hex:     1b 5b 33 32 3b 32 52 1b 5b 3f 36 63
+  escaped: \x1b[32;2R\x1b[?6c
+```
+
+Read as:
+
+| Reply | Bytes | Means |
+|---|---|---|
+| DECRPM | *absent* | `\x1b[?2026$p` is not understood, so `sync = false` |
+| kitty flags | *absent* | `\x1b[?u` is not understood |
+| DECRQSS | *absent* | the SGR query is not understood; `COLORTERM=truecolor` is forwarded, and that is what recovers 24-bit colour |
+| CPR | `\x1b[32;2R` | row 32, column 2. `╭` advanced one cell |
+| DA1 | `\x1b[?6c` | class 6 (VT102), last on the wire |
+
+Termius answers the two queries a VT102 answers and nothing else. The column
+of 2 is the measurement `boxes_one_cell` in `crates/view-tui/src/paint/emit.rs`
+takes at startup: on this terminal a run of box-drawing cells is addressed once,
+at the run's start. The two-cell drawing commit `5e42c17a` records is the
+nerd-font private-use icons, which this probe does not measure.
+
 ## What a terminal that does not support this answers
 
 Four distinct negatives are on the wire above, and they are not
@@ -322,12 +357,11 @@ these captures show it.
    and only the column differs. A column of 2 is the terminal's own advance
    after `╭`, and view writes a run of box-drawing cells on that advance with
    one cursor move at the run's start. A terminal that draws the glyph two
-   cells wide while it reports a column of 2 is unobserved. Termius is the one
-   terminal recorded drawing box glyphs two wide (commit `5e42c17a`), and its
-   reply to `\r╭\x1b[6n` is not recorded. That reply is to be captured from
-   the iPad, and it goes in a lettered section of its own after H, with a row in
-   the host matrix. A font that lacks the glyph is unobserved as well, so a
-   column of 2 says nothing about whether the border is legible.
+   cells wide while it reports a column of 2 is unobserved. Termius, the one
+   terminal recorded drawing private-use icons two wide (commit `5e42c17a`),
+   answers `\r╭\x1b[6n` with a column of 2 (I), so its borders take the
+   one-move-per-run path. A font that lacks the glyph is unobserved as well,
+   so a column of 2 says nothing about whether the border is legible.
 3. `Pm=0` on DECRPM is a real answer meaning unsupported, distinct from a
    missing one. Treating "no reply" and `;0$y` alike loses the distinction H
    provides.
