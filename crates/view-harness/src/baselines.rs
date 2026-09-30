@@ -252,7 +252,7 @@ pub fn is_controlled_class(class: &str) -> bool {
 /// value is set by cross-boot state a shared host cannot hold fixed
 /// rather than by run-to-run scheduler noise, and every
 /// [`is_host_regime_absolute`] metric, set by the host's ambient memory
-/// regime the same way. A size or a median is none of the three, and
+/// regime the same way. A size or a median ratio is none of the three, and
 /// gates everywhere. Ratios take [`RATIO_HEADROOM`] and everything else
 /// [`ABSOLUTE_HEADROOM`], except a paired delta, which is signed and so
 /// cannot take a proportional allowance at all.
@@ -486,8 +486,20 @@ fn derives_from_tail(metric: &str) -> bool {
 /// reason [`derives_from_tail`] is: `coldstart_ms` holds the letters of
 /// "cold" without naming the cross-boot state this predicate exempts, and
 /// a substring rule would exempt it on the strength of a coincidence.
+///
+/// `server_delta_ms` is in the family by name. It is the difference of two
+/// medians each taken over cold spawns, and the interleaving cancels the
+/// drift inside one run and nothing across boots: view's extra segment
+/// (the attach awaited inside `VimEnter`) runs at whatever speed the boot
+/// gives the host, so the difference scales with it the way each side's
+/// own absolute does, where a ratio would not. gh-linux, a fresh boot per
+/// run, moved `startup.user`'s reading past its allowance twice in three
+/// runs (35492734666, 36665386464, 36684414154) while the bare engine's
+/// own launch median moved with it; the last two runs differ by four
+/// highlight lookups in a Lua chunk. The readings are in the spec's
+/// engine-startup row.
 fn is_cold_start_absolute(metric: &str) -> bool {
-    metric.split('_').any(|component| component == "cold")
+    metric == "server_delta_ms" || metric.split('_').any(|component| component == "cold")
 }
 
 /// Whether `metric` names a settled-process memory footprint -- PSS or
@@ -2641,12 +2653,12 @@ mod tests {
             ("speculated_paint_p99_ms", None, absolute),
             ("paired_delta_p99_ms", None, signed),
             ("control_delta_p99_ms", None, signed),
-            // server_delta_ms: a difference between two cold spawns
-            // interleaved in one run, so the cross-boot state that exempts
-            // each side's own absolute is common to both and cancels; it
-            // gates on every class, in the signed shape a delta that reads
-            // below zero whenever view costs the engine nothing needs
-            ("server_delta_ms", signed, signed),
+            // server_delta_ms: a difference between two cold spawns, which
+            // scales with the boot's speed the way each side's absolute
+            // does; recorded on a shared class, gated on a controlled one,
+            // in the signed shape a delta that reads below zero whenever
+            // view costs the engine nothing needs
+            ("server_delta_ms", None, signed),
         ];
         // the table above classifies the declared vocabulary, so the two
         // cannot drift: a metric declared and left unclassified, or
@@ -2709,6 +2721,23 @@ mod tests {
         assert_eq!(gate_headroom("marker_cold_ms", true), absolute);
         assert_eq!(gate_headroom("coldstart_ms", false), absolute);
         assert_eq!(gate_headroom("coldstart_ms", true), absolute);
+    }
+
+    /// The engine-startup delta is a cold-start absolute by name: recorded
+    /// on a shared class, gated signed on a controlled one, and the name
+    /// rule reaches no sibling that merely carries `delta`.
+    ///
+    /// Disconfirm: drop the name from `is_cold_start_absolute`, and the
+    /// shared arm answers the signed policy.
+    #[test]
+    fn the_engine_startup_delta_is_recorded_and_not_gated_on_a_shared_class() {
+        let signed = Some(Headroom::Signed {
+            factor: RATIO_HEADROOM,
+            floor: SIGNED_DELTA_FLOOR_MS,
+        });
+        assert_eq!(gate_headroom("server_delta_ms", false), None);
+        assert_eq!(gate_headroom("server_delta_ms", true), signed);
+        assert_eq!(gate_headroom("other_delta_ms", false), signed);
     }
 
     /// A metric no policy row classifies would still get one from the

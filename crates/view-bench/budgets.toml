@@ -234,14 +234,17 @@ fixtures = ["minimal", "heavy"]
 # carries a `classes` list yet. dev-linux is the only class that has
 # recorded the row, and a class restriction would guess where the number
 # will next be recorded. `server_delta_ms`'s 5 ms is the controlled-leg
-# bar spec 3.1 states. The metric belongs to none of the three
-# shared-class exemption families in
-# `view_harness::baselines::gate_headroom`, so the recorded-value ratchet
-# reads it on every class that holds a seat, this one included. The rise
-# that seat once carried was leader-chord registration and the branch read
-# running inside the VimEnter autocommand, which the segment this metric
-# measures contains; both moved after the view_vim_enter reply at 44481fa,
-# and the dev-linux seats were re-recorded 2026-09-25.
+# bar spec 3.1 states. The metric is a cold-start absolute by name in
+# `view_harness::baselines::gate_headroom` (2026-09-30): a shared class
+# records it and a controlled class gates it, since the difference of two
+# cold spawns scales with the runner's boot the way each side's absolute
+# does (gh-linux moved past its allowance twice in three boots with no
+# startup code between the last two; the readings are in the spec's
+# engine-startup row). The rise the dev-linux seat once
+# carried was leader-chord registration and the branch read running inside
+# the VimEnter autocommand, which the segment this metric measures
+# contains; both moved after the view_vim_enter reply at 44481fa, and the
+# dev-linux seats were re-recorded 2026-09-25.
 [[budget]]
 spec_row = "Launch -> the settled screen, real config"
 scenario = "startup"
