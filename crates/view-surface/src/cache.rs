@@ -134,8 +134,8 @@ impl Frame {
 /// - a setting no layer's geometry follows on its own:
 ///   `ai_panel_width_pct`,
 ///   `ai_review_open_target`, `tree_width_pct`, `ext_surfaces`,
-///   `statusline_enabled` -- each one only reaches a layer through an open
-///   overlay, and an open overlay rebuilds
+///   `statusline_enabled`, `tree_icons` -- each one only reaches a layer
+///   through an open overlay, and an open overlay rebuilds
 /// - read through a field already here, second list: `ai_panel`,
 ///   `ai_trusted` and `ai_enabled` reach the pill's one word, which
 ///   `agent` carries, and `tabline_shows` decides only which of `tabline`

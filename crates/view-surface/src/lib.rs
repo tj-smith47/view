@@ -1135,7 +1135,9 @@ fn layer_kind(model: &Model, kind: &OverlayKind, height: u16, width: u16) -> Opt
     match kind {
         OverlayKind::Prompt(state) => Some(LayerKind::Prompt(state.view())),
         OverlayKind::Picker(state) => Some(LayerKind::Picker(state.view())),
-        OverlayKind::Tree(state) => Some(LayerKind::Tree(state.view())),
+        OverlayKind::Tree(state) => Some(LayerKind::Tree(
+            state.view().with_icons(model.tree_icons_shown()),
+        )),
         // a message-history browse is presented the same way the palette
         // itself is: rows in a centered box, no fields of its own the
         // palette's LayerKind doesn't already carry

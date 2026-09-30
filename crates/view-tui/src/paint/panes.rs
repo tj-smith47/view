@@ -199,7 +199,9 @@ fn native_pane_content(
             .overlays()
             .iter()
             .find_map(|overlay| match &overlay.kind {
-                OverlayKind::Tree(state) => Some(LayerKind::Tree(state.view())),
+                OverlayKind::Tree(state) => Some(LayerKind::Tree(
+                    state.view().with_icons(model.tree_icons_shown()),
+                )),
                 _ => None,
             }),
         NativeSurface::Agent => model.overlays().iter().find_map(|overlay| {

@@ -596,7 +596,10 @@ fn a_tree_row_shows_its_depth_and_whether_it_can_be_opened() {
 #[test]
 fn a_git_decorated_tree_row_carries_a_styled_glyph_span_before_its_label() {
     use view_core::native::views::{GitMark, TreeRow};
-    let spans = tree_row_spans(&TreeRow::leaf(0, "a.txt").with_status(Some(GitMark::Modified)));
+    let spans = tree_row_spans(
+        &TreeRow::leaf(0, "a.txt").with_status(Some(GitMark::Modified)),
+        TreeIcons::None,
+    );
     let glyph = spans
         .iter()
         .find(|s| s.role == StyleRole::GitModified)
@@ -613,11 +616,48 @@ fn a_git_decorated_tree_row_carries_a_styled_glyph_span_before_its_label() {
 #[test]
 fn an_undecorated_tree_row_carries_only_plain_spans() {
     use view_core::native::views::TreeRow;
-    let spans = tree_row_spans(&TreeRow::leaf(0, "a.txt"));
+    let spans = tree_row_spans(&TreeRow::leaf(0, "a.txt"), TreeIcons::None);
     assert!(
         spans.iter().all(|s| s.role == StyleRole::Plain),
         "a row with no git status must add no styled span: {spans:?}"
     );
+}
+
+#[test]
+fn a_nerd_tree_row_opens_with_its_folder_or_file_glyph() {
+    use view_core::native::devicons::{file_icon, FOLDER_CLOSED, FOLDER_OPEN};
+    use view_core::native::views::{GitMark, TreeRow};
+    let text = |row: &TreeRow, icons| {
+        tree_row_spans(row, icons)
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<String>()
+    };
+    let open = TreeRow::dir(0, "src", true);
+    let shut = TreeRow::dir(1, "target", false);
+    assert_eq!(text(&open, TreeIcons::Nerd), format!("{FOLDER_OPEN} src"));
+    assert_eq!(
+        text(&shut, TreeIcons::Nerd),
+        format!("  {FOLDER_CLOSED} target")
+    );
+    assert_eq!(text(&open, TreeIcons::None), "- src");
+    assert_eq!(text(&shut, TreeIcons::None), "  + target");
+
+    let spans = tree_row_spans(&open, TreeIcons::Nerd);
+    assert_eq!(spans[1].role, StyleRole::TreeFolder, "{spans:?}");
+
+    let rust = TreeRow::leaf(0, "main.rs").with_status(Some(GitMark::Added));
+    let spans = tree_row_spans(&rust, TreeIcons::Nerd);
+    let icon = file_icon("main.rs");
+    assert_eq!(spans[1].text, icon.glyph, "{spans:?}");
+    assert_eq!(spans[1].role, StyleRole::Devicon(0x00de_a584), "{spans:?}");
+    assert_eq!(
+        text(&rust, TreeIcons::Nerd),
+        format!("{} A main.rs", icon.glyph)
+    );
+
+    let unknown = tree_row_spans(&TreeRow::leaf(0, "notes.zzz"), TreeIcons::Nerd);
+    assert_eq!(unknown[1].text, devicons::DEFAULT_FILE.glyph, "{unknown:?}");
 }
 
 #[test]

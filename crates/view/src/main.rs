@@ -1284,6 +1284,7 @@ fn main() -> Result<()> {
         .with_remote(pill_host(cli.remote.as_deref()))
         .with_tabline_shows(resolved.tables.native.tabline_shows())
         .with_pill_caps(resolved.ui.pill_caps.value)
+        .with_tree_icons(resolved.ui.tree_icons.value)
         .with_tile_titles(resolved.ui.tile_titles.value.clone());
     // whether a `:View ui panes` flip derives `[native] tabline` again, or
     // leaves the value the user spelled where they put it

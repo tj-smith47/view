@@ -8,6 +8,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::style::Style;
+use view_core::native::views::StyleRole;
 
 pub(super) use view_core::native::text::{cluster_width, clusters, group_width};
 
@@ -30,4 +31,13 @@ pub(super) fn set_cluster(buf: &mut Buffer, x: u16, y: u16, cluster: &str, style
         cell.set_symbol(cluster);
     }
     cell.set_style(style);
+}
+
+/// `style` with a [`StyleRole::Devicon`] span's own colour as its
+/// foreground, and `style` unchanged for every other role.
+pub(super) fn tint(role: StyleRole, style: Style) -> Style {
+    match role {
+        StyleRole::Devicon(color) => style.fg(super::rgb(color)),
+        _ => style,
+    }
 }

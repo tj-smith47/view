@@ -249,6 +249,9 @@ pub struct Model {
     /// `[ui] pill_caps`: the pill ends the user forced, or `None` for
     /// `"auto"`, which follows the probed `caps.unicode_boxes`.
     pub pill_caps: Option<crate::native::pill::PillCaps>,
+    /// `[ui] tree_icons`: the tree glyphs the user forced, or `None` for
+    /// `"auto"`, which follows the probed `caps.unicode_boxes`.
+    pub tree_icons: Option<crate::native::devicons::TreeIcons>,
     /// nvim's own `showtabline`, as the bridge last relayed it: `0` never
     /// draws the top row under `panes = "nvim"`, `1` draws it once a
     /// second tabpage is open, `2` always.
@@ -476,6 +479,7 @@ impl Model {
             buffers: Vec::new(),
             tabline_shows: crate::native::pill::TablineShows::default(),
             pill_caps: None,
+            tree_icons: None,
             showtabline: crate::native::pill::DEFAULT_SHOWTABLINE,
             native_min_pane_size: (1, 1),
             tabline_follows_look: true,
@@ -825,6 +829,23 @@ impl Model {
     pub fn with_pill_caps(mut self, caps: Option<crate::native::pill::PillCaps>) -> Self {
         self.pill_caps = caps;
         self
+    }
+
+    /// The tree glyphs `[ui] tree_icons` forced, or `None` for `"auto"`.
+    #[must_use]
+    pub fn with_tree_icons(mut self, icons: Option<crate::native::devicons::TreeIcons>) -> Self {
+        self.tree_icons = icons;
+        self
+    }
+
+    /// The tree glyphs this session draws: the forced answer, or what
+    /// `"auto"` derives from the probed box-glyph bit.
+    #[must_use]
+    pub fn tree_icons_shown(&self) -> crate::native::devicons::TreeIcons {
+        self.tree_icons
+            .unwrap_or(crate::native::devicons::TreeIcons::derived(
+                self.caps.unicode_boxes,
+            ))
     }
 
     /// The titles `[ui] tile_titles` gives a tile by its filetype.

@@ -10,6 +10,7 @@ pub mod ai_panel;
 pub mod ai_registry;
 pub mod channels;
 pub mod chords;
+pub mod devicons;
 pub mod diff;
 pub mod ext;
 pub mod geometry;

@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 pub use surfaces::surfaces;
 use view_core::model::{Panes, TileTitles};
 use view_core::native::chords;
+use view_core::native::devicons::TreeIcons;
 use view_core::native::ext::{self, Ext};
 use view_core::native::geometry;
 use view_core::native::geometry::NativeSurface;
@@ -118,6 +119,8 @@ struct UiTable {
     fit_active: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pill_caps: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tree_icons: Option<String>,
     // a `toml::Value` for `[native] tree_width`'s reason: a map written in
     // the wrong shape is a notice, and the rest of the file still loads
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,6 +265,9 @@ struct UiFile {
     /// `Some(None)` is the word `auto`, the same double meaning `tier`
     /// carries.
     pill_caps: Option<Option<PillCaps>>,
+    /// `Some(None)` is the word `auto`, the same double meaning `tier`
+    /// carries.
+    tree_icons: Option<Option<TreeIcons>>,
     tile_titles: Option<TileTitles>,
     tokens: Option<UiTokens>,
     /// The `[ui.surfaces]` tables as the file wrote them. Unparsed here:
@@ -329,6 +335,17 @@ fn parse_pill_caps(value: &str) -> Option<Option<PillCaps>> {
         return Some(None);
     }
     PillCaps::parse(&word).map(Some)
+}
+
+/// A tree glyph set a user named, `Some(None)` for the word that names the
+/// absence of a choice, and `None` for text that names no set at all, which
+/// falls through to the layer below the way [`parse_tier`] does.
+fn parse_tree_icons(value: &str) -> Option<Option<TreeIcons>> {
+    let word = value.trim().to_ascii_lowercase();
+    if word == AUTO {
+        return Some(None);
+    }
+    TreeIcons::parse(&word).map(Some)
 }
 
 /// The colour a value names as `0x00RRGGBB`, `Some(None)` for the word that
@@ -417,6 +434,13 @@ fn resolve_ui(table: &UiTable) -> UiFile {
         parse_pill_caps,
         &mut notices,
     );
+    let tree_icons = read_key(
+        table.tree_icons.as_deref(),
+        ("ui", "tree_icons"),
+        view_core::config::TREE_ICONS_EXPECTED,
+        parse_tree_icons,
+        &mut notices,
+    );
     let tile_titles = table.tile_titles.as_ref().and_then(|value| {
         let titles = tile_titles_of(value);
         if titles.is_none() {
@@ -443,6 +467,7 @@ fn resolve_ui(table: &UiTable) -> UiFile {
         gaps: table.gaps,
         fit_active: table.fit_active,
         pill_caps,
+        tree_icons,
         tile_titles,
         // the outer `Some` is the file naming the key at all, which is what
         // keeps a value this build could not read from reading as the file
@@ -1389,6 +1414,9 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
     if file.ui.pill_caps.is_some() {
         spelled.push(("ui", "pill_caps"));
     }
+    if file.ui.tree_icons.is_some() {
+        spelled.push(("ui", "tree_icons"));
+    }
     if file.ui.tile_titles.is_some() {
         spelled.push(("ui", "tile_titles"));
     }
@@ -1918,6 +1946,7 @@ mod tests {
             ("ui", "gaps") => "false",
             ("ui", "fit_active") => "true",
             ("ui", "pill_caps") => "\"flat\"",
+            ("ui", "tree_icons") => "\"none\"",
             ("ui", "tile_titles") => "{ outline = \"symbols\" }",
             ("ui.tokens", "accent") => "\"#89b4fa\"",
             ("engine", "nvim_bin") => "\"/opt/nvim/bin/nvim\"",

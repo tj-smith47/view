@@ -240,6 +240,12 @@ single_grid = false        # default: false -- view composites nvim's windows
 # two cells wide. Both take the same width. "auto" draws round ends where
 # the terminal draws box glyphs one cell wide, and flat ends elsewhere.
 #
+# tree_icons is what each file tree row opens with. "nerd" draws a Nerd Font
+# folder glyph on a folder and a file-type icon in its own colour on a file;
+# "none" draws + on a closed folder, - on an open one and a blank on a file.
+# "auto" draws nerd glyphs where the terminal draws box glyphs one cell
+# wide, and none elsewhere.
+#
 # [ui.tokens] is where you name a colour yourself instead of letting view
 # derive it. accent is the colour on the active tile's frame; left out, view
 # takes it from your colorscheme.
@@ -267,6 +273,9 @@ fit_active = false         # default: false -- true fits every window you
 pill_caps = "auto"         # default: "auto" -- round ends where the
                            # terminal draws box glyphs one cell wide, flat
                            # elsewhere. round | flat force it
+tree_icons = "auto"        # default: "auto" -- nerd glyphs where the
+                           # terminal draws box glyphs one cell wide, none
+                           # elsewhere. nerd | none force it
 tile_titles = {}           # default: {} -- each tile keeps its filetype
                            # as its title
 

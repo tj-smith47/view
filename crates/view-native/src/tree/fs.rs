@@ -2,14 +2,19 @@
 //! sorted and flattened into `view_core::native::tree::TreeEntry`'s
 //! depth-first shape.
 //!
-//! Shares `ignore::WalkBuilder`'s defaults with the picker's `Files` source
-//! (`view_native::picker::sources`): hidden files and `.gitignore`/`.ignore`
-//! entries are skipped, and a symlinked subtree is listed as one entry,
-//! never descended into. Sorted by file name within each directory (the
-//! picker's walk is not, since it only ever feeds a fuzzy matcher that
-//! re-orders everything anyway) so the sidebar's listing is stable across
-//! repeated scans of an unchanged tree.
+//! Lists entries the way nvim-tree does: `.gitignore`/`.ignore` entries
+//! are skipped, dotfiles are listed, and `.git` is listed as a folder with
+//! nothing walked beneath it, since its object store is the largest tree
+//! in most repositories and nobody browses it. A symlinked subtree is
+//! listed as one entry with nothing walked beneath it. Within each directory,
+//! folders come first and then files, each group ordered by name without
+//! regard to case.
+//!
+//! The picker's `Files` source (`view_native::picker::sources`) walks with
+//! `ignore::WalkBuilder`'s defaults, which skip dotfiles, and leaves the
+//! order to its fuzzy matcher. The two differ in those two respects.
 
+use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -49,7 +54,11 @@ pub fn scan(root: &Path, cancel: &AtomicBool) -> Vec<TreeEntry> {
 fn scan_paced(root: &Path, cancel: &AtomicBool, pace: impl Fn()) -> Vec<TreeEntry> {
     let mut out = Vec::new();
     let walker = ignore::WalkBuilder::new(root)
-        .sort_by_file_name(std::ffi::OsStr::cmp)
+        .hidden(false)
+        .filter_entry(|entry| {
+            entry.depth() < 2
+                || entry.path().parent().and_then(Path::file_name) != Some(OsStr::new(".git"))
+        })
         .build();
     for entry in walker {
         pace();
@@ -72,7 +81,26 @@ fn scan_paced(root: &Path, cancel: &AtomicBool, pace: impl Fn()) -> Vec<TreeEntr
         let depth = (depth - 1) as u16;
         out.push(TreeEntry::new(rel.to_path_buf(), is_dir, depth));
     }
+    out.sort_by_cached_key(order_key);
     out
+}
+
+/// The key that sorts `entry` into its place in the depth-first listing:
+/// one `(is a file, lower-cased name, name)` triple per path component, so
+/// a directory sorts ahead of everything beneath it and every sibling
+/// group puts folders before files. Every component but the last is a
+/// folder.
+fn order_key(entry: &TreeEntry) -> Vec<(bool, String, String)> {
+    let count = entry.path.components().count();
+    entry
+        .path
+        .components()
+        .enumerate()
+        .map(|(i, part)| {
+            let name = part.as_os_str().to_string_lossy().into_owned();
+            (i + 1 == count && !entry.is_dir, name.to_lowercase(), name)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -161,10 +189,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn a_tree_scan_puts_folders_before_files_ignoring_case() {
+        let root = scratch("order");
+        for dir in ["b_dir", "A_dir", "b_dir/z_sub"] {
+            std::fs::create_dir_all(root.join(dir)).expect("mkdir");
+        }
+        for file in ["a.txt", "C.txt", "b_dir/y.rs", "B.txt"] {
+            std::fs::write(root.join(file), "").expect("write");
+        }
+
+        let paths: Vec<String> = scan(&root, &AtomicBool::new(false))
+            .into_iter()
+            .map(|e| {
+                let parts: Vec<_> = e.path.iter().map(|p| p.to_string_lossy()).collect();
+                parts.join("/")
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "A_dir",
+                "b_dir",
+                "b_dir/z_sub",
+                "b_dir/y.rs",
+                "a.txt",
+                "B.txt",
+                "C.txt"
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_tree_scan_lists_dotfiles_and_git_unopened_but_not_ignored_ones() {
+        let root = scratch("dotfiles");
+        std::fs::create_dir_all(root.join(".git/objects")).expect("mkdir .git");
+        std::fs::write(root.join(".git/HEAD"), "").expect("write HEAD");
+        std::fs::write(root.join(".gitignore"), ".secret\n").expect("write .gitignore");
+        std::fs::write(root.join(".secret"), "").expect("write .secret");
+        std::fs::write(root.join(".env.example"), "").expect("write .env.example");
+
+        let entries = scan(&root, &AtomicBool::new(false));
+        let listed = |name: &str| entries.iter().any(|e| e.path == Path::new(name));
+        assert!(listed(".env.example"), "{entries:?}");
+        assert!(listed(".gitignore"), "{entries:?}");
+        assert!(
+            !listed(".secret"),
+            "a gitignored dotfile stays out: {entries:?}"
+        );
+        assert!(listed(".git"), "{entries:?}");
+        let git = entries
+            .iter()
+            .find(|e| e.path == Path::new(".git"))
+            .expect(".git is listed");
+        assert!(git.is_dir);
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.path.starts_with(".git") && e.path != Path::new(".git")),
+            "nothing beneath .git is walked: {entries:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Which consult parks the walk on its [`view_test_support::ScanGate`].
     /// `ignore` yields the root itself first (`scan` skips it) and then the
-    /// files under it in name order, so parking on the fourth leaves two
-    /// entries already collected behind the gate and five ahead of it.
+    /// files under it, so parking on the fourth leaves two entries already
+    /// collected behind the gate and five ahead of it.
     const GATE_PARKS_AT: usize = 4;
 
     /// Files under the cancel fixture: comfortably more than

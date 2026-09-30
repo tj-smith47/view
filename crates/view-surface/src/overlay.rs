@@ -19,6 +19,7 @@
 
 use unicode_width::UnicodeWidthChar;
 use view_core::model::TermCaps;
+use view_core::native::devicons::{self, TreeIcons};
 use view_core::native::geometry::LIST_MARKER_COLS;
 use view_core::native::text::{
     cluster_width, clusters, cut_before_mark, text_width_by, TRUNCATION_MARK,
@@ -938,7 +939,7 @@ fn tree_body(view: &TreeView) -> Body {
         items: view
             .rows
             .iter()
-            .map(tree_row_spans)
+            .map(|row| tree_row_spans(row, view.icons))
             .map(Line::Text)
             .collect(),
         selected: view.selected,
@@ -949,23 +950,36 @@ fn tree_body(view: &TreeView) -> Body {
     }
 }
 
-/// One tree row's spans: indentation and an expand marker that
-/// distinguishes an open directory from a shut one and from a leaf (plain
-/// text), then the entry's git decoration glyph in its own
+/// One tree row's spans: indentation, then the row's opening glyph and a
+/// space, then the entry's git decoration glyph in its own
 /// [`GitMark::style_role`]-tagged span when it carries one, then the label
-/// itself (plain text). A row with no [`TreeRow::status`] -- the common
-/// case, and the only possible one with `git` absent from `PATH` -- carries
-/// no glyph span at all rather than a blank placeholder one, so an
-/// undecorated tree costs nothing over this row's single-span rendering
-/// before git decorations existed.
-fn tree_row_spans(row: &TreeRow) -> Vec<Span> {
-    let indent = "  ".repeat(usize::from(row.depth));
-    let marker = match row.expanded {
-        Some(true) => "- ",
-        Some(false) => "+ ",
-        None => "  ",
+/// itself (plain text).
+///
+/// Under [`TreeIcons::Nerd`] the glyph is a folder, open or closed, in
+/// [`StyleRole::TreeFolder`], or the file's [`devicons::file_icon`] in its
+/// own colour. Under [`TreeIcons::None`] it is a `-` on an open folder, a
+/// `+` on a closed one and a blank on a file. The git glyph sits between
+/// the icon and the name, where nvim-tree's default renderer places it.
+fn tree_row_spans(row: &TreeRow, icons: TreeIcons) -> Vec<Span> {
+    let indent = Span::plain("  ".repeat(usize::from(row.depth)));
+    let glyph = match (icons, row.expanded) {
+        (TreeIcons::Nerd, Some(open)) => Span::new(
+            if open {
+                devicons::FOLDER_OPEN
+            } else {
+                devicons::FOLDER_CLOSED
+            },
+            StyleRole::TreeFolder,
+        ),
+        (TreeIcons::Nerd, None) => {
+            let icon = devicons::file_icon(&row.label);
+            Span::new(icon.glyph, StyleRole::Devicon(icon.color))
+        }
+        (_, Some(true)) => Span::plain("-"),
+        (_, Some(false)) => Span::plain("+"),
+        (_, None) => Span::plain(" "),
     };
-    let mut spans = vec![Span::plain(format!("{indent}{marker}"))];
+    let mut spans = vec![indent, glyph, Span::plain(" ")];
     if let Some(mark) = row.status {
         spans.push(tree_git_glyph_span(mark));
     }

@@ -17,7 +17,8 @@ use super::geometry::LIST_MARKER_COLS;
 use crate::theme::ChromeGroup;
 
 /// What a [`Span`]'s text means, resolved to a concrete [`crate::theme::ResolvedStyle`]
-/// through the active colorscheme -- never a raw color chosen here.
+/// through the active colorscheme. [`StyleRole::Devicon`] is the one role
+/// that carries its colour itself.
 ///
 /// The single vocabulary both painters (`view-tui`'s terminal backend and
 /// `view-oracle`'s raster) resolve through [`StyleRole::chrome_group`]: a
@@ -142,6 +143,13 @@ pub enum StyleRole {
     /// A line of a toast raised as a hint or a debug message. Painted as
     /// plain text; the box's frame carries the level.
     NoticeHint,
+    /// A tree row's folder glyph, in the colorscheme's directory colour.
+    TreeFolder,
+    /// A tree row's file-type glyph, painted in the `0xRRGGBB` colour its
+    /// [`crate::native::devicons::Devicon`] carries. The one role that
+    /// names a colour itself: a file-type icon keeps its colour across
+    /// colorschemes, the way nvim-web-devicons paints it.
+    Devicon(u32),
 }
 
 /// How much a notice asks of the person reading it, which picks the colour
@@ -162,7 +170,8 @@ pub enum NoticeLevel {
 impl StyleRole {
     /// The [`ChromeGroup`] this role resolves through, or `None` for
     /// [`StyleRole::Plain`] and the three notice roles, which paint in
-    /// whatever base style their row already carries.
+    /// whatever base style their row already carries, and for
+    /// [`StyleRole::Devicon`], which names its own colour.
     #[must_use]
     pub const fn chrome_group(self) -> Option<ChromeGroup> {
         match self {
@@ -192,7 +201,8 @@ impl StyleRole {
             Self::AiToolDone => Some(ChromeGroup::OkMsg),
             Self::AiToolFailed => Some(ChromeGroup::ErrorMsg),
             Self::Warning => Some(ChromeGroup::WarningMsg),
-            Self::NoticeError | Self::NoticeWarn | Self::NoticeHint => None,
+            Self::TreeFolder => Some(ChromeGroup::Directory),
+            Self::NoticeError | Self::NoticeWarn | Self::NoticeHint | Self::Devicon(_) => None,
         }
     }
 
@@ -465,6 +475,8 @@ pub struct TreeView {
     pub rows: Vec<TreeRow>,
     /// Index into `rows` of the cursor line, or `None` for an empty tree.
     pub selected: Option<usize>,
+    /// The glyphs each row opens with.
+    pub icons: crate::native::devicons::TreeIcons,
 }
 
 impl TreeView {
@@ -490,6 +502,12 @@ impl TreeView {
             selected: Some(index),
             ..self
         }
+    }
+
+    /// The same view drawing its rows with `icons`.
+    #[must_use]
+    pub fn with_icons(self, icons: crate::native::devicons::TreeIcons) -> Self {
+        Self { icons, ..self }
     }
 }
 

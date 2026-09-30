@@ -14,12 +14,13 @@ pub use view_core::config::Source;
 use view_core::config::{
     discarded_file, BOOL_EXPECTED, COLOR_EXPECTED, KEYS_EXPECTED, PANES_EXPECTED,
     PILL_CAPS_EXPECTED, TABLINE_SHOWS_EXPECTED, TIER_EXPECTED, TILE_TITLES_EXPECTED,
-    WIDTH_EXPECTED,
+    TREE_ICONS_EXPECTED, WIDTH_EXPECTED,
 };
 use view_core::model::{Panes, Tier, TileTitles};
 use view_core::native::chords::{
     self, DesktopChord, KeyProfile, ModifierChoice, DESKTOP_CHORD_COUNT,
 };
+use view_core::native::devicons::TreeIcons;
 use view_core::native::geometry;
 use view_core::native::geometry::{Anchor, NativeSurface, SurfaceLayout, SurfacePlacement};
 use view_core::native::keys::{well_formed, Action, Direction, KeyBindings};
@@ -31,8 +32,8 @@ use super::keys::{env_name, keys, ConfigKey};
 use super::profile;
 use super::{
     parse_color, parse_nvim_bin, parse_panes, parse_pill_caps, parse_theme, parse_tier,
-    parse_tile_titles, read_key, render_tile_titles, KeysConfig, NativeConfig, SupervisionConfig,
-    UiTokens, ViewConfig, AUTO, BUNDLED,
+    parse_tile_titles, parse_tree_icons, read_key, render_tile_titles, KeysConfig, NativeConfig,
+    SupervisionConfig, UiTokens, ViewConfig, AUTO, BUNDLED,
 };
 
 /// One resolved answer and the reason it is that answer.
@@ -138,6 +139,9 @@ pub struct ResolvedUi {
     /// How the pill's ends are drawn, or `None` for `"auto"`, which the
     /// model answers from the probed `unicode_boxes`.
     pub pill_caps: Resolved<Option<PillCaps>>,
+    /// Which glyphs the tree's rows open with, or `None` for `"auto"`,
+    /// which the model answers from the probed `unicode_boxes`.
+    pub tree_icons: Resolved<Option<TreeIcons>>,
     /// The title each filetype named here gives a tile titled by its
     /// filetype, empty where the user named none.
     pub tile_titles: Resolved<TileTitles>,
@@ -406,6 +410,19 @@ pub fn resolve_with(
                 &mut notices,
             ),
             file.ui.pill_caps,
+            None,
+        ),
+        tree_icons: layer(
+            None,
+            env_read(
+                env,
+                "ui",
+                "tree_icons",
+                TREE_ICONS_EXPECTED,
+                parse_tree_icons,
+                &mut notices,
+            ),
+            file.ui.tree_icons,
             None,
         ),
         tile_titles: layer(
@@ -731,6 +748,14 @@ impl ResolvedConfig {
                     .map_or(AUTO, PillCaps::label)
                     .to_string(),
                 self.ui.pill_caps.source,
+            ),
+            ("ui", "tree_icons") => (
+                self.ui
+                    .tree_icons
+                    .value
+                    .map_or(AUTO, TreeIcons::label)
+                    .to_string(),
+                self.ui.tree_icons.source,
             ),
             ("ui", "tile_titles") => (
                 render_tile_titles(&self.ui.tile_titles.value),
@@ -1385,6 +1410,7 @@ mod tests {
             ("ui", "theme") => "gruvbox",
             ("ui", "panes") => "nvim",
             ("ui", "pill_caps") => "flat",
+            ("ui", "tree_icons") => "none",
             ("ui", "tile_titles") => "{ outline = \"symbols\" }",
             ("ui.tokens", "accent") => "#89b4fa",
             ("engine", "nvim_bin") => "/opt/nvim/bin/nvim",
@@ -1953,6 +1979,45 @@ mod tests {
             notices.contains("turbo") && notices.contains("[ui] tier"),
             "the file's own discarded value must reach the same notice list an \
              environment's does: {notices:?}"
+        );
+    }
+
+    /// `[ui] tree_icons` reads its three words, and a fourth falls through
+    /// to `auto` with a notice.
+    #[test]
+    fn tree_icons_reads_its_three_words_and_refuses_a_fourth() {
+        for (word, value) in [
+            ("auto", None),
+            ("nerd", Some(TreeIcons::Nerd)),
+            ("none", Some(TreeIcons::None)),
+        ] {
+            let file = ViewConfig::from_toml_str(&format!("[ui]\ntree_icons = \"{word}\"\n"))
+                .expect("the fixture must parse");
+            let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+            assert_eq!(
+                resolved.ui.tree_icons,
+                Resolved {
+                    value,
+                    source: Source::File
+                },
+                "{word}"
+            );
+            assert!(resolved.notices().is_empty(), "{word}");
+        }
+        let file = ViewConfig::from_toml_str("[ui]\ntree_icons = \"emoji\"\n")
+            .expect("the fixture must parse");
+        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+        assert_eq!(
+            resolved.ui.tree_icons,
+            Resolved {
+                value: None,
+                source: Source::Derived
+            }
+        );
+        let notices = resolved.notices().join("\n");
+        assert!(
+            notices.contains("emoji") && notices.contains("[ui] tree_icons"),
+            "{notices:?}"
         );
     }
 

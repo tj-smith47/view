@@ -328,6 +328,23 @@ size = 30                    # percent of the terminal width (left/right) or
 and `[ai] panel_width` is `[ui.surfaces.agent] size` under its. Write
 either one; the newer key wins when a config writes both.
 
+The file tree lists folders first and then files, each group ordered by
+name whatever its case. Dotfiles are listed, and anything your `.gitignore`
+or `.ignore` names is left out. `.git` is listed as a folder with nothing
+walked inside it.
+
+```toml
+[ui]
+tree_icons = "auto"       # "auto" | "nerd" | "none"
+```
+
+`tree_icons` picks what each tree row opens with. `nerd` draws a Nerd Font
+folder glyph on a folder, open or closed, and a file-type icon in that
+type's own colour on a file. `none` draws a `+` on a closed folder, a `-` on
+an open one and a blank on a file. `auto` picks `nerd` on a terminal that
+draws box glyphs and `none` on one that does not. A file's git mark stands
+between its icon and its name.
+
 The notification stream's `anchor` is the toast stack's own corner: the
 near box sits flush against it and every later box sits farther away. A
 dismissed box leaves by sliding toward that corner, or by shrinking where

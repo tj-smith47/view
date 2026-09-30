@@ -97,6 +97,12 @@ pub fn keys() -> &'static [ConfigKey] {
             },
             ConfigKey {
                 table: "ui",
+                key: "tree_icons",
+                flag: None,
+                derived: Some(super::AUTO),
+            },
+            ConfigKey {
+                table: "ui",
                 key: "tile_titles",
                 flag: None,
                 derived: Some("{}"),

@@ -19,7 +19,7 @@ mod pill;
 mod text;
 mod toast;
 
-use text::{cluster_width, clusters, set_cluster};
+use text::{cluster_width, clusters, set_cluster, tint};
 
 /// The terminal-space rows a frame's composite must repaint, so a redraw
 /// touches only the changed region instead of all ~4800 cells.
@@ -1418,7 +1418,7 @@ fn paint_native_overlay(
             // because the layout measured each span on its own, and a span
             // opening on a mark joins the cluster before it once the row is
             // one string
-            paint_span_row(line, |_| selected, area, row, buf);
+            paint_span_row(line, |role| tint(role, selected), area, row, buf);
         } else {
             // ordinary content rows resolve style per span -- this is what
             // lets the statusline's diagnostic glyphs, mode text, git
@@ -1453,7 +1453,7 @@ fn paint_native_overlay(
                         ..theme.accent()
                     });
                 }
-                role.chrome_group().map_or(interior, |group| {
+                role.chrome_group().map_or(tint(role, interior), |group| {
                     let style = theme.float_chrome(group, base.bg);
                     ratatui_style(ResolvedStyle {
                         reverse: style.reverse && role.keeps_group_reverse(),
@@ -7955,6 +7955,51 @@ mod tests {
                 "the chip must not paint as a block of that color at column {c}"
             );
         }
+    }
+
+    /// A file's icon on a tree row paints in its devicon colour, on the
+    /// selected row as well as on the others.
+    #[test]
+    fn a_tree_file_icon_paints_in_its_devicon_colour() {
+        use view_core::native::devicons::{file_icon, TreeIcons};
+        use view_core::native::views::{TreeRow, TreeView};
+
+        let model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
+        let kind = LayerKind::Tree(
+            TreeView::new("files")
+                .with_rows(vec![
+                    TreeRow::leaf(0, "main.rs"),
+                    TreeRow::leaf(0, "lib.rs"),
+                ])
+                .with_selected(1)
+                .with_icons(TreeIcons::Nerd),
+        );
+        let borders = view_surface::overlay::BorderSet::for_caps(model.caps);
+        let width = 30_u16;
+        let rect = Rect::new(1, 1, width, 5);
+        let laid = view_surface::overlay::rows(width, 5, &kind, borders);
+        let layer = Layer::new(rect, kind, model.caps);
+        let buf = paint_layer_alone(&model, layer, width + 4, 8);
+
+        let glyph = file_icon("main.rs").glyph;
+        let mut painted = 0;
+        for (index, line) in laid.lines.iter().enumerate() {
+            let mut col = rect.col;
+            for span in line {
+                if span.text == glyph {
+                    let cell = &buf[(col, rect.row + u16::try_from(index).unwrap())];
+                    assert_eq!(cell.symbol(), glyph);
+                    assert_eq!(
+                        cell.fg,
+                        ratatui::style::Color::Rgb(0xDE, 0xA5, 0x84),
+                        "row {index} paints the rust icon in its own colour"
+                    );
+                    painted += 1;
+                }
+                col += u16::try_from(UnicodeWidthStr::width(span.text.as_str())).unwrap();
+            }
+        }
+        assert_eq!(painted, 2, "both rows carry the icon: {:?}", laid.lines);
     }
 
     /// The title set into an overlay's top border reads as a label, not as
