@@ -4,29 +4,50 @@
 //! and every message stamp rendered UTC with nothing on screen or in the
 //! docs saying so.
 //!
-//! Read fresh on every fold: a session that straddles a DST change stamps
-//! the new offset from the fold after the flip. `localtime_r` and
-//! `GetTimeZoneInformation` already read the zone the OS keeps parsed, so
-//! this costs the one syscall `dispatch` already pays each fold for
-//! `SystemTime::now`.
+//! Read at most once per wall-clock second: a session that straddles a DST
+//! change stamps the new offset from the first fold of the second after
+//! the flip. glibc's `localtime_r` takes the process-wide zone lock on
+//! every call, and `dispatch` folds once per message, keystrokes included.
 
-#[cfg(test)]
 use std::cell::Cell;
+use std::time::SystemTime;
+
+thread_local! {
+    /// The last reading and the whole second since the epoch it was taken
+    /// in. Per thread because the loop thread is the one caller.
+    static CACHED: Cell<Option<(u64, i64)>> = const { Cell::new(None) };
+}
 
 #[cfg(test)]
 thread_local! {
     /// A pin's own offset, standing in for the host's whenever it is set.
     static TEST_OFFSET_SECS: Cell<Option<i64>> = const { Cell::new(None) };
+    /// Platform readings taken on this thread.
+    static PLATFORM_READS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Seconds east of UTC on this host, or a pin's injected stand-in for one.
+/// Seconds east of UTC on this host at `now`, or a pin's injected stand-in
+/// for one. Reads the platform once per second of `now` and answers from
+/// that reading for the rest of it.
 #[must_use]
-pub(crate) fn utc_offset_secs() -> i64 {
+pub(crate) fn utc_offset_secs(now: SystemTime) -> i64 {
     #[cfg(test)]
     if let Some(secs) = TEST_OFFSET_SECS.with(Cell::get) {
         return secs;
     }
-    platform_offset_secs()
+    let second = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    if let Some((at, secs)) = CACHED.with(Cell::get) {
+        if at == second {
+            return secs;
+        }
+    }
+    #[cfg(test)]
+    PLATFORM_READS.with(|reads| reads.set(reads.get() + 1));
+    let secs = platform_offset_secs();
+    CACHED.with(|cached| cached.set(Some((second, secs))));
+    secs
 }
 
 /// Stands the next [`utc_offset_secs`] call in for the host's own reading,
@@ -109,4 +130,30 @@ fn platform_offset_secs() -> i64 {
 #[cfg(not(any(unix, windows)))]
 fn platform_offset_secs() -> i64 {
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Two folds inside one second read the platform once, and the first
+    /// fold of the next second reads it again, which is how a DST flip is
+    /// picked up.
+    ///
+    /// Disconfirm: reading the platform on every call counts two in the
+    /// first second.
+    #[test]
+    fn two_folds_inside_one_second_read_the_platform_once() {
+        let reads = || PLATFORM_READS.with(Cell::get);
+        // a second no other test on this thread has read in
+        let second = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_003);
+        let before = reads();
+        let first = utc_offset_secs(second);
+        let again = utc_offset_secs(second + Duration::from_millis(999));
+        assert_eq!(reads() - before, 1, "one second, one reading");
+        assert_eq!(first, again);
+        let _ = utc_offset_secs(second + Duration::from_secs(1));
+        assert_eq!(reads() - before, 2, "the next second reads again");
+    }
 }

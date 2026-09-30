@@ -787,6 +787,80 @@ fn a_panes_redraw_damages_its_own_rows_alone() {
     );
 }
 
+/// One window spanning the screen above its status row and the command
+/// line, with stale text in grid 1 under the window's rows.
+fn one_window() -> Model {
+    let mut model = Model::new();
+    model.term_width = WIDTH;
+    model.term_height = HEIGHT;
+    drive(
+        &mut model,
+        vec![
+            UiEvent::GridResize {
+                grid: 1,
+                width: u64::from(WIDTH),
+                height: u64::from(HEIGHT),
+            },
+            UiEvent::GridResize {
+                grid: LEFT,
+                width: u64::from(WIDTH),
+                height: 4,
+            },
+            UiEvent::WinPos {
+                grid: LEFT,
+                win: WinHandle(1001),
+                startrow: 0,
+                startcol: 0,
+                width: u64::from(WIDTH),
+                height: 4,
+            },
+            line(1, 0, "stale under the window", 0),
+            line(1, 4, "status", 0),
+            line(1, 5, ":cmdline", 0),
+            line(LEFT, 0, "text", 0),
+            UiEvent::GridCursorGoto {
+                grid: LEFT,
+                row: 0,
+                col: 0,
+            },
+            UiEvent::Flush,
+        ],
+    );
+    model
+}
+
+/// The global grid paints only the rows a window's text does not span
+/// from edge to edge: under one full-width window that is its status row
+/// and the command line, and under a vsplit every row, since the
+/// separator column is grid 1's on each of them.
+///
+/// Disconfirm: returning `damage` unchanged names rows 0 to 3 as well; a
+/// covered test that ignores the right edge drops the vsplit's rows.
+#[test]
+fn the_global_grid_skips_the_rows_one_window_covers() {
+    let area = ratatui::layout::Rect::new(0, 0, WIDTH, HEIGHT);
+    let uncovered = |model: &Model| {
+        let registry = model.engine.painted_grids();
+        let panes = registry.panes_in_z_order();
+        let mut out = Damage::default();
+        super::uncovered_global_damage(registry, &panes, area, &Damage::full(), &mut out);
+        assert!(!out.full);
+        out.rows
+    };
+    let model = one_window();
+    assert_eq!(uncovered(&model), vec![4, 5]);
+    let buf = frame(&model);
+    assert!(
+        row_text(&buf, 0).starts_with("text "),
+        "{:?}",
+        row_text(&buf, 0)
+    );
+    assert!(!row_text(&buf, 0).contains("stale"));
+    assert!(row_text(&buf, 4).starts_with("status"));
+    assert!(row_text(&buf, 5).starts_with(":cmdline"));
+    assert_eq!(uncovered(&vsplit()), (0..HEIGHT).collect::<Vec<_>>());
+}
+
 /// A window that moves names no cell at all, and the box it vacated belongs
 /// to whatever was underneath it.
 #[test]
@@ -2858,7 +2932,7 @@ fn a_windowed_trees_own_change_damages_its_pane_rows() {
     assert!(shadow.resize(area));
     let surface = view_surface::render(&model);
     let _ = shadow.overlay_damage(&surface);
-    let _ = shadow.native_pane_damage(&model, &surface, area);
+    shadow.native_pane_damage(&model, &surface, area, &mut Vec::new());
     let _ = model.take_paint_damage();
     shadow.compose(&model, &surface, &Damage::full());
     shadow.commit();
@@ -2869,12 +2943,12 @@ fn a_windowed_trees_own_change_damages_its_pane_rows() {
         .move_selection(1);
     let surface = view_surface::render(&model);
     let mut rows = shadow.overlay_damage(&surface);
-    let pane = shadow.native_pane_damage(&model, &surface, area);
+    let before = rows.len();
+    shadow.native_pane_damage(&model, &surface, area, &mut rows);
     assert!(
-        !pane.is_empty(),
+        rows.len() > before,
         "the tree's selection moved and its pane named no row"
     );
-    rows.extend(pane);
     let offset = view_surface::grid_origin(&model).0;
     let damage = Damage::from_frame(&model.take_paint_damage(), offset, &rows, false);
     shadow.compose(&model, &surface, &damage);

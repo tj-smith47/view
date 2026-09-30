@@ -155,8 +155,9 @@ pub(crate) fn dispatch<E: EngineOps>(
     // have them all read as the same instant, and the loop thread is the
     // only place that instant is ever taken -- the paint path never calls
     // `SystemTime::now()`.
-    model.set_now(SystemTime::now());
-    model.set_utc_offset(crate::localtime::utc_offset_secs());
+    let now = SystemTime::now();
+    model.set_now(now);
+    model.set_utc_offset(crate::localtime::utc_offset_secs(now));
     // kept aside rather than logged here: a float's `layout` line carries
     // whether view is holding it off the screen, which is the fold below's
     // own answer. Empty, and so free, with no `VIEW_LOG` sink open
@@ -3721,11 +3722,12 @@ mod tests {
         );
     }
 
-    /// `dispatch` reads the host's UTC offset fresh on every fold, proven
+    /// `dispatch` hands every fold the offset standing at that fold, proven
     /// by swapping the injected reading between two folds and reading each
-    /// stamp's own offset back off the model.
+    /// stamp's own offset back off the model. How often the platform is
+    /// read is `localtime`'s own pin.
     #[test]
-    fn the_runtime_rereads_the_utc_offset_on_every_fold() {
+    fn the_runtime_stamps_each_fold_with_the_offset_standing_then() {
         let _guard = crate::localtime::TestOffsetGuard::new(3600);
         let ops = FakeOps::default();
         let executor = Executor::new(&ops);
@@ -3771,8 +3773,7 @@ mod tests {
         assert_eq!(
             model.utc_offset_secs(),
             7200,
-            "a fold after the flip must re-read the offset rather than \
-             answer the first fold's cached reading"
+            "a fold after the flip must stamp the new offset"
         );
     }
 

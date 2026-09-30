@@ -130,13 +130,17 @@ pub(super) fn on_window_cursor(
     let row = saturate_u32(curline.saturating_add(1));
     let col = saturate_u32(curcol.saturating_add(1));
     let lines = line_count.map_or(status.lines, saturate_u32);
-    if (status.row, status.col, status.lines) == (row, col, lines) {
-        return;
-    }
+    let shown = status.kind.segments();
+    // a column that moved under a tile showing only the line count, or a
+    // count that moved under one showing only the position, changes no cell
+    let visible = (shown.position && (status.row, status.col) != (row, col))
+        || (shown.count && (status.row, status.lines) != (row, lines));
     status.row = row;
     status.col = col;
     status.lines = lines;
-    damage_frame_edges(model, win);
+    if visible {
+        damage_segment_edge(model, win);
+    }
 }
 
 /// Marks the rows a tile's frame edges stand on changed and asks for a
@@ -153,6 +157,17 @@ pub(super) fn on_window_cursor(
 /// frame is painted with every edge row clipped out and the segments keep
 /// the reading they had.
 fn damage_frame_edges(model: &mut Model, win: WinHandle) {
+    damage_edges(model, win, 0..2);
+}
+
+/// [`damage_frame_edges`] for the one edge row the status segments are
+/// written on, which is all a cursor motion changes: a gapped tile's top
+/// edge carries its title, and the title reads no position.
+fn damage_segment_edge(model: &mut Model, win: WinHandle) {
+    damage_edges(model, win, 1..2);
+}
+
+fn damage_edges(model: &mut Model, win: WinHandle, which: std::ops::Range<usize>) {
     if model.look.panes != crate::model::Panes::Tiles {
         return;
     }
@@ -160,7 +175,8 @@ fn damage_frame_edges(model: &mut Model, win: WinHandle) {
     let Some(slot) = model.engine.grids().window_filled(win) else {
         return;
     };
-    for row in model.look.edge_rows(slot) {
-        model.engine.grids_mut().mark_global_row(row);
+    let rows = model.look.edge_rows(slot);
+    for row in rows.get(which).unwrap_or_default() {
+        model.engine.grids_mut().mark_global_row(*row);
     }
 }

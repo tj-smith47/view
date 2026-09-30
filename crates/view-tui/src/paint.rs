@@ -16,10 +16,12 @@ use view_surface::{overlay::BorderSet, Layer, LayerKind, Rect, Surface};
 mod emit;
 mod panes;
 mod pill;
+mod scratch;
 mod shade;
 mod text;
 mod toast;
 
+use scratch::{PaintScratch, StyleCache};
 use shade::{border_color, float_border_color, selection_style};
 use text::{cluster_width, clusters, role_fg, set_cluster, tint};
 
@@ -245,6 +247,7 @@ pub struct Shadow {
     /// Each windowed surface's pane rect and content as the terminal shows
     /// it, which answers which rows a surface's own state change repainted.
     native_panes: Vec<(ratatui::layout::Rect, LayerKind)>,
+    scratch: PaintScratch,
     /// Whether the terminal's probe measured a box-drawing glyph one cell
     /// wide, which lets a border ride on the terminal's own advance (see
     /// `emit::may_widen`). Set once it is known and never cleared: a frame
@@ -375,21 +378,26 @@ impl Shadow {
     ///
     /// Call it once per frame, beside [`Shadow::overlay_damage`]. A pane
     /// that moved is already whole-frame damage from the registry, so what
-    /// this adds is the surface's own rows changing in place.
+    /// this adds is the surface's own rows changing in place, appended to
+    /// `rows`.
+    ///
+    /// Builds the frame's pane list, which the [`Shadow::compose`] after it
+    /// paints from.
     pub fn native_pane_damage(
         &mut self,
         model: &Model,
         surface: &Surface,
         frame: ratatui::layout::Rect,
-    ) -> Vec<u16> {
+        rows: &mut Vec<u16>,
+    ) {
+        self.scratch.build_panes(model);
         let now = surface
             .layers
             .iter()
             .find(|layer| matches!(layer.kind, LayerKind::EngineGrid))
             .map_or_else(Vec::new, |grid| {
-                panes::native_panes(model, clip_to_frame(grid.rect, frame))
+                panes::native_panes(model, &self.scratch.panes, clip_to_frame(grid.rect, frame))
             });
-        let mut rows = Vec::new();
         for index in 0..now.len().max(self.native_panes.len()) {
             let (was, is) = (self.native_panes.get(index), now.get(index));
             if was == is {
@@ -400,7 +408,6 @@ impl Shadow {
             }
         }
         self.native_panes = now;
-        rows
     }
 
     /// Folds `surface`'s overlay stack in, returning the terminal-space rows
@@ -434,13 +441,18 @@ impl Shadow {
             self.overlay_advanced = false;
         }
         let repaint = damage.union(&self.carried);
+        if !self.scratch.panes_fresh {
+            self.scratch.build_panes(model);
+        }
         composite_layers(
             &mut self.back,
             model,
             surface,
             &repaint,
             Some(&self.overlays),
+            &mut self.scratch,
         );
+        self.scratch.panes_fresh = false;
         self.carried = damage.clone();
         self.painted = repaint;
         #[cfg(debug_assertions)]
@@ -808,7 +820,9 @@ pub fn agent_panel_rows(surface: &Surface) -> Vec<u16> {
 /// so the unconditional `EngineGrid` paint below is what restores the
 /// resting text underneath).
 pub fn composite_into(buf: &mut Buffer, model: &Model, surface: &Surface, damage: &Damage) {
-    composite_layers(buf, model, surface, damage, None);
+    let mut scratch = PaintScratch::default();
+    scratch.build_panes(model);
+    composite_layers(buf, model, surface, damage, None, &mut scratch);
 }
 
 /// [`composite_into`], optionally spending overlay layouts a caller already
@@ -823,6 +837,7 @@ fn composite_layers(
     surface: &Surface,
     damage: &Damage,
     layouts: Option<&OverlayShadow>,
+    scratch: &mut PaintScratch,
 ) {
     let frame_area = buf.area;
     // Clear the rows this frame repaints before any layer paints, so each
@@ -861,7 +876,7 @@ fn composite_layers(
         // sidebar's top edge until something else damages that row.
         match &layer.kind {
             LayerKind::EngineGrid => {
-                panes::paint_panes(model, &theme, borders, area, damage, buf);
+                panes::paint_panes(model, &theme, borders, area, damage, scratch, buf);
             }
             LayerKind::Cmdline(state) => paint_cmdline(state, &theme, area, buf),
             LayerKind::Toast {
@@ -1565,47 +1580,6 @@ fn clip_to_frame(rect: Rect, frame_area: ratatui::layout::Rect) -> ratatui::layo
     }
 }
 
-/// Highest `hl_id` the per-frame dense style cache will hold. nvim
-/// allocates highlight ids as small dense integers, so real frames sit
-/// far below this; an id past the cap (or a pathological huge id) simply
-/// resolves uncached rather than growing an unbounded table.
-const STYLE_CACHE_CAP: usize = 4096;
-
-/// A per-frame memo of `hl_id -> ratatui::Style`, indexed directly by id.
-/// `Theme::style_for` costs a `HashMap` probe per call, and a full-grid
-/// composite makes one call per cell (4800 on a 120x40 frame) out of only
-/// a handful of distinct ids; resolving each id once per frame removes
-/// the probe from the per-cell path entirely. Frame-scoped rather than
-/// persistent so there is no invalidation to get wrong when the
-/// highlight table or theme changes between frames.
-struct StyleCache {
-    dense: Vec<Option<Style>>,
-}
-
-impl StyleCache {
-    fn new() -> Self {
-        Self { dense: Vec::new() }
-    }
-
-    fn get(&mut self, theme: &Theme, hl: &HlTable, hl_id: u64) -> Style {
-        let Ok(index) = usize::try_from(hl_id) else {
-            return style_for(theme, hl_id, hl);
-        };
-        if index >= STYLE_CACHE_CAP {
-            return style_for(theme, hl_id, hl);
-        }
-        if self.dense.len() <= index {
-            self.dense.resize(index + 1, None);
-        }
-        if let Some(style) = self.dense[index] {
-            return style;
-        }
-        let style = style_for(theme, hl_id, hl);
-        self.dense[index] = Some(style);
-        style
-    }
-}
-
 /// Paints the `grid` cells within `area` that `damage` covers, styled per
 /// `hl` through `theme`. Rows `damage` does not cover keep whatever the
 /// persistent `buf` already holds for them (last frame's content), which is
@@ -1617,10 +1591,11 @@ fn paint_grid(
     hl: &HlTable,
     area: ratatui::layout::Rect,
     damage: &Damage,
+    styles: &mut StyleCache,
     buf: &mut Buffer,
 ) {
     let (w, h) = grid.size();
-    let mut styles = StyleCache::new();
+    styles.reset();
     let cols = w.min(area.width) as usize;
     for row in 0..h.min(area.height) {
         // skipping an unchanged row leaves its cells as the previous frame
@@ -2808,6 +2783,37 @@ mod tests {
         );
     }
 
+    /// A plain frame composes out of buffers the shadow kept from the frame
+    /// before: the pane list the damage pass built, read again by the
+    /// compositor, and the style table.
+    ///
+    /// Disconfirm: building the pane list into a fresh `Vec`, or a fresh
+    /// `StyleCache` per pane, moves a pointer; building it again in
+    /// `compose` leaves no fresh list for the compositor to read.
+    #[test]
+    fn a_plain_frame_reuses_the_pane_list_and_the_style_table() {
+        let model = model_over_a_highlighted_buffer(40, 10);
+        let area = ratatui::layout::Rect::new(0, 0, 40, 10);
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(area));
+        let surface = view_surface::render(&model);
+        let frame = |shadow: &mut Shadow| {
+            let mut rows = shadow.overlay_damage(&surface);
+            shadow.native_pane_damage(&model, &surface, area, &mut rows);
+            assert!(shadow.scratch.panes_fresh, "the damage pass built no list");
+            shadow.compose(&model, &surface, &Damage::full());
+            assert!(!shadow.scratch.panes_fresh, "the list outlived its frame");
+            shadow.commit();
+            (
+                shadow.scratch.panes.as_ptr(),
+                shadow.scratch.styles.dense.as_ptr(),
+            )
+        };
+        let first = frame(&mut shadow);
+        assert!(!shadow.scratch.styles.dense.is_empty());
+        assert_eq!(frame(&mut shadow), first);
+    }
+
     /// The agent panel is full height, so answering a composer keystroke by
     /// dirtying every row it covers costs a whole-screen recomposite -- the
     /// grid cells beside the panel included -- for one changed cell, and
@@ -3733,6 +3739,7 @@ mod tests {
                     model.engine.hl(),
                     fa,
                     &Damage::full(),
+                    &mut StyleCache::default(),
                     buf,
                 );
                 toast::paint_toast(

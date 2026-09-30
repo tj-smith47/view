@@ -649,26 +649,32 @@ impl GridRegistry {
     /// picture, so it is the layer every window pane paints over.
     #[must_use]
     pub fn panes_in_z_order(&self) -> Vec<Pane> {
+        let mut panes = Vec::new();
+        self.panes_in_z_order_into(&mut panes);
+        panes
+    }
+
+    /// [`Self::panes_in_z_order`] into `panes`, replacing what it held, so
+    /// a painter that keeps the list across frames builds it with no
+    /// allocation once its capacity has grown to the pane count.
+    pub fn panes_in_z_order_into(&self, panes: &mut Vec<Pane>) {
         let (global_width, global_height) = self.global.size();
         let global = (0, 0, global_width, global_height);
-        let mut panes = vec![Pane {
+        panes.clear();
+        panes.push(Pane {
             id: GLOBAL_GRID,
             origin: (0, 0),
             slot: global,
             filled: global,
             kind: PaneKind::Window,
             hidden: false,
-        }];
-        let mut placed: Vec<(&Slot, &Placement)> = self
+        });
+        let placed = self
             .slots
             .iter()
             .filter_map(|slot| slot.placed.as_ref().map(|p| (slot, p)))
-            .filter(|(_, p)| !p.hidden && !p.withheld)
-            .collect();
-        // the id is the last key so the order is total: nvim reuses no id
-        // after a destroy, so two panes never tie on all four
-        placed.sort_by_key(|(slot, p)| (p.layer(), p.zindex(), p.compindex, slot.id));
-        panes.extend(placed.into_iter().map(|(slot, p)| {
+            .filter(|(_, p)| !p.hidden && !p.withheld);
+        panes.extend(placed.map(|(slot, p)| {
             let size = slot.grid.size();
             let (pane_slot, filled) = slot.window.as_ref().map_or_else(
                 || {
@@ -686,7 +692,24 @@ impl GridRegistry {
                 hidden: p.hidden,
             }
         }));
-        panes
+        // the id is the last key so the order is total: nvim reuses no id
+        // after a destroy, so two panes never tie on all four, and an
+        // unstable sort is the one that never allocates
+        if let Some(placed) = panes.get_mut(1..) {
+            placed.sort_unstable_by_key(|pane| {
+                let placement = self
+                    .slots
+                    .iter()
+                    .find(|slot| slot.id == pane.id)
+                    .and_then(|slot| slot.placed.as_ref());
+                (
+                    placement.map(Placement::layer),
+                    placement.map(Placement::zindex),
+                    placement.map(|p| p.compindex),
+                    pane.id,
+                )
+            });
+        }
     }
 
     /// Whether nvim is prompting out of its own message area: the cursor is

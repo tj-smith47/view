@@ -16733,6 +16733,7 @@ fn a_viewport_with_a_new_line_count_updates_the_tile_and_asks_for_a_frame() {
                 row: 1,
                 col: 1,
                 lines: 3,
+                kind: crate::model::TileKind::Quickfix,
                 ..crate::model::WindowStatus::default()
             },
         },
@@ -16743,6 +16744,55 @@ fn a_viewport_with_a_new_line_count_updates_the_tile_and_asks_for_a_frame() {
     let _ = update(&mut m, viewport(0, 0, Some(5)));
     assert_eq!(m.window_status[&win].lines, 5);
     assert!(m.dirty, "a new count painted nothing");
+}
+
+/// A cursor motion repaints the one edge row whose segments read it, and
+/// only when a segment the tile shows moved: a gapped tile's title row
+/// reads no position, and a quickfix tile's `row/lines` count reads no
+/// column. Each key otherwise composites and diffs full-width rows that
+/// change no cell.
+///
+/// Disconfirm: damaging both edge rows reddens the first half; damaging on
+/// any moved field reddens the second.
+#[test]
+fn a_cursor_motion_repaints_only_the_edge_row_whose_segments_it_moved() {
+    let mut m = vsplit_model();
+    m.look = crate::model::Look::new(crate::model::Panes::Tiles, true);
+    let win = crate::events::WinHandle(1003);
+    let report = |kind| Msg::WindowStatus {
+        win,
+        status: crate::model::WindowStatus {
+            row: 1,
+            col: 1,
+            lines: 40,
+            kind,
+            ..crate::model::WindowStatus::default()
+        },
+    };
+    let _ = update(&mut m, report(crate::model::TileKind::File));
+    let slot = m.engine.grids().window_filled(win).expect("placed window");
+    let [top, bottom] = m.look.edge_rows(slot);
+    assert_ne!(top, bottom, "a gapped tile has two edge rows");
+    let _ = m.take_paint_damage();
+    m.dirty = false;
+    let _ = update(&mut m, viewport(0, 5, None));
+    assert!(m.dirty, "a moved column under a file tile painted nothing");
+    let rows = m.take_paint_damage().rows;
+    assert!(rows.contains(&bottom), "the ruler row was not repainted");
+    assert!(
+        !rows.contains(&top),
+        "the title row was repainted: {rows:?}"
+    );
+
+    let _ = update(&mut m, report(crate::model::TileKind::Quickfix));
+    let _ = m.take_paint_damage();
+    m.dirty = false;
+    let _ = update(&mut m, viewport(0, 9, None));
+    assert!(
+        !m.dirty,
+        "a column the quickfix count never shows asked for a frame"
+    );
+    assert!(m.take_paint_damage().rows.is_empty());
 }
 
 /// The report is the only way a user finds out why a session came up in a

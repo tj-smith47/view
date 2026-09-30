@@ -28,7 +28,7 @@ use view_core::theme::{ChromeGroup, Theme};
 use view_surface::overlay::BorderSet;
 use view_surface::{Layer, LayerKind, Rect};
 
-use super::{clip_to_frame, paint_grid, ratatui_style, set_border_cell, Damage};
+use super::{clip_to_frame, paint_grid, ratatui_style, set_border_cell, Damage, PaintScratch};
 
 /// Paints every visible pane and the chrome between them.
 ///
@@ -48,15 +48,24 @@ pub(super) fn paint_panes(
     borders: BorderSet,
     area: TermRect,
     damage: &Damage,
+    scratch: &mut PaintScratch,
     buf: &mut Buffer,
 ) {
     let registry = model.engine.painted_grids();
     let hl = model.engine.painted_hl();
     // the shipped single-grid frame, and every multigrid one before its
-    // first window lands: one grid covering the layer, no chrome between
-    // windows, and no pane list allocated on the paint path to say so
+    // first window lands: one grid covering the layer and no chrome
+    // between windows
     if !registry.has_panes() {
-        paint_grid(registry.global(), theme, hl, area, damage, buf);
+        paint_grid(
+            registry.global(),
+            theme,
+            hl,
+            area,
+            damage,
+            &mut scratch.styles,
+            buf,
+        );
         return;
     }
     // tiles restyle the separator column themselves: gapped paints it as
@@ -65,10 +74,17 @@ pub(super) fn paint_panes(
     let look = registry.look();
     let tiled = look.panes == Panes::Tiles;
     let cursor = registry.cursor_grid();
-    let panes = registry.panes_in_z_order();
+    let PaintScratch {
+        panes,
+        styles,
+        global,
+        ..
+    } = scratch;
+    let panes = &*panes;
+    uncovered_global_damage(registry, panes, area, damage, global);
     let mut windows: Vec<TermRect> = Vec::new();
     let mut separated = false;
-    for pane in &panes {
+    for pane in panes {
         // a separator is a cell of the global grid, so it belongs to the
         // window layer and nothing above it: the pane list puts every
         // window ahead of every float and message grid, and the boundary
@@ -79,7 +95,7 @@ pub(super) fn paint_panes(
         if !separated && !pane.kind.is_window() {
             if tiled {
                 frames::paint_frames(
-                    model, &panes, look, cursor, theme, borders, area, damage, buf,
+                    model, panes, look, cursor, theme, borders, area, damage, buf,
                 );
             } else {
                 paint_separators(&windows, theme, borders, damage, buf);
@@ -103,7 +119,12 @@ pub(super) fn paint_panes(
                 &pane_theme(theme, pane, cursor),
                 hl,
                 pane_area,
-                damage,
+                if pane.id == GLOBAL_GRID {
+                    global
+                } else {
+                    damage
+                },
+                styles,
                 buf,
             ),
         }
@@ -114,11 +135,59 @@ pub(super) fn paint_panes(
     if !separated {
         if tiled {
             frames::paint_frames(
-                model, &panes, look, cursor, theme, borders, area, damage, buf,
+                model, panes, look, cursor, theme, borders, area, damage, buf,
             );
         } else {
             paint_separators(&windows, theme, borders, damage, buf);
         }
+    }
+}
+
+/// Replaces `out` with the rows of `damage` the global grid still shows
+/// through: every one but those a single window's text spans from the
+/// layer's left edge to the global grid's right one.
+///
+/// Under multigrid a window's text is its own grid's, and whatever grid 1
+/// holds beneath it is painted over cell for cell by the window pane that
+/// follows. The status rows, the separator column, the command line and a
+/// row two side-by-side windows share all stay grid 1's.
+fn uncovered_global_damage(
+    registry: &view_core::grid::registry::GridRegistry,
+    panes: &[Pane],
+    area: TermRect,
+    damage: &Damage,
+    out: &mut Damage,
+) {
+    let right = area
+        .x
+        .saturating_add(registry.global().size().0.min(area.width));
+    let covered = |row: u16| {
+        panes.iter().any(|pane| {
+            pane.id != GLOBAL_GRID
+                && pane.kind.is_window()
+                && pane.kind.native_surface().is_none()
+                && registry.grid(pane.id).is_some_and(|grid| {
+                    let (top, left, width, height) = pane.text(grid.size());
+                    let rect = clip_to_frame(Rect::new(top, left, width, height), area);
+                    rect.x <= area.x
+                        && rect.x.saturating_add(rect.width) >= right
+                        && (rect.y..rect.y.saturating_add(rect.height)).contains(&row)
+                })
+        })
+    };
+    out.full = false;
+    out.rows.clear();
+    let rows = area.y..area.y.saturating_add(area.height);
+    if damage.full {
+        out.rows.extend(rows.filter(|&row| !covered(row)));
+    } else {
+        out.rows.extend(
+            damage
+                .rows
+                .iter()
+                .copied()
+                .filter(|&row| rows.contains(&row) && !covered(row)),
+        );
     }
 }
 
@@ -128,13 +197,16 @@ pub(super) fn paint_panes(
 /// A surface's rows come from view's own state, so nvim sends no cell
 /// change when they move: comparing this list across frames is the only
 /// record of which rows a tree scan or a selection step repainted.
-pub(super) fn native_panes(model: &Model, area: TermRect) -> Vec<(TermRect, LayerKind)> {
+pub(super) fn native_panes(
+    model: &Model,
+    panes: &[Pane],
+    area: TermRect,
+) -> Vec<(TermRect, LayerKind)> {
     let registry = model.engine.painted_grids();
     if !registry.has_panes() {
         return Vec::new();
     }
-    registry
-        .panes_in_z_order()
+    panes
         .iter()
         .filter_map(|pane| {
             let surface = pane.kind.native_surface()?;

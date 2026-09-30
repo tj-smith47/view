@@ -178,7 +178,9 @@ struct Inputs {
     // the whole stack, not its `entries` alone: the pause key changes no
     // entry, only whether the top box carries the mark that says the stack
     // is frozen, and a frame keyed on a projection of a painted struct hands
-    // back the frame from before whatever the projection dropped
+    // back the frame from before whatever the projection dropped. Compared
+    // without the clock the runtime sets before every fold, which moves on
+    // every key and would rebuild every frame
     messages: view_core::model::Messages,
     // the frame's only free-running input, and the reason it cannot be
     // inferred from `messages`: a motion frame moves the same entries to
@@ -249,7 +251,7 @@ impl Inputs {
             && self.cmdline == engine.cmdline
             && self.cmdline_speculated == engine.cmdline_speculated.is_some()
             && self.popupmenu == engine.popupmenu
-            && self.messages == engine.messages
+            && self.messages.same_stack(&engine.messages)
             && self.toast_motion == model.toast_motion
             && self.notice_column == crate::live_notice_column(model)
     }
@@ -285,14 +287,15 @@ impl SurfaceCache {
         self.frames = self.frames.wrapping_add(1);
         if self.frame.as_ref().is_some_and(|f| f.inputs.matches(model)) {
             if let Some(frame) = self.frame.as_mut() {
-                let cursor = cursor_spec(model, grid_origin(model), &frame.surface.layers);
+                let origin = grid_origin(model);
+                let cursor = cursor_spec(model, origin, &frame.surface.layers);
                 frame.surface.cursor = cursor;
                 if frame.inputs.statusline_rows > 0 {
                     // the width the frame's own layers were built at, which
                     // is not the engine's while the grid is withheld
                     refresh_statusline(&mut frame.surface, model, crate::statusline_width(model));
                 }
-                refresh_speculated(&mut frame.surface, model, grid_origin(model));
+                refresh_speculated(&mut frame.surface, model, origin);
             }
         } else {
             self.frame = None;
@@ -992,6 +995,95 @@ mod tests {
             (cache.frames, cache.rebuilds),
             (2, 1),
             "a grid-content edit must reuse the cached frame, not rebuild it"
+        );
+    }
+
+    /// A keystroke typed into one window under multigrid, as nvim answers
+    /// it with the ruler and showcmd externalized: the window's cell, its
+    /// cursor, its viewport and the two message-area readings. None of it
+    /// reaches a layer, so every key reuses the cached frame and only the
+    /// first frame renders.
+    ///
+    /// Disconfirm: comparing the message stack with its clock (the derived
+    /// `==`), the ruler or the showcmd reading, rebuilds per key.
+    #[test]
+    fn a_keystroke_in_one_window_reuses_the_cached_frame() {
+        let mut model = model_with_grid(20, 6);
+        let key = |model: &mut Model, col: u64| {
+            // what the runtime sets ahead of every fold
+            model.set_now(std::time::SystemTime::now());
+            model.set_utc_offset(3600);
+            let _ = update(
+                model,
+                Msg::Redraw(vec![
+                    UiEvent::GridLine {
+                        grid: 2,
+                        row: 0,
+                        col_start: col,
+                        cells: vec![view_core::events::GridCell {
+                            text: "a".into(),
+                            hl_id: 0,
+                            repeat: 1,
+                        }],
+                    },
+                    UiEvent::GridCursorGoto {
+                        grid: 2,
+                        row: 0,
+                        col: col + 1,
+                    },
+                    UiEvent::WinViewport {
+                        grid: 2,
+                        win: view_core::events::WinHandle(1000),
+                        topline: 0,
+                        botline: 4,
+                        curline: 0,
+                        curcol: col + 1,
+                        line_count: Some(1),
+                    },
+                    UiEvent::MsgShowcmd { content: vec![] },
+                    UiEvent::MsgRuler {
+                        content: vec![(0, format!("1,{}", col + 2))],
+                    },
+                    UiEvent::Flush,
+                ]),
+            );
+        };
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![
+                UiEvent::GridResize {
+                    grid: 2,
+                    width: 20,
+                    height: 4,
+                },
+                UiEvent::WinPos {
+                    grid: 2,
+                    win: view_core::events::WinHandle(1000),
+                    startrow: 0,
+                    startcol: 0,
+                    width: 20,
+                    height: 4,
+                },
+                UiEvent::ModeChange {
+                    mode: "insert".into(),
+                    mode_idx: 1,
+                },
+                UiEvent::MsgShowmode {
+                    content: vec![(0, "-- INSERT --".into())],
+                },
+                UiEvent::Flush,
+            ]),
+        );
+        let mut cache = SurfaceCache::new();
+        let _ = cache.render(&model);
+        for col in 0..3 {
+            key(&mut model, col);
+            let _ = cache.render(&model);
+        }
+        assert_eq!(
+            (cache.frames, cache.rebuilds),
+            (4, 1),
+            "a keystroke rebuilt the frame"
         );
     }
 

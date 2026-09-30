@@ -490,6 +490,40 @@ fn keep_within(items: &[(u8, usize)], budget: usize) -> Vec<bool> {
 }
 
 impl Messages {
+    /// Whether `other` holds the same stack, apart from the clock
+    /// ([`Self::set_now`]) and the offset ([`Self::set_utc_offset`]) the
+    /// runtime sets before every fold. Neither reaches a toast: the clock
+    /// stamps the next entry pushed, which then differs in `entries`, and
+    /// the offset is read only where a stamp is rendered, in the history
+    /// views.
+    #[must_use]
+    pub fn same_stack(&self, other: &Self) -> bool {
+        let Self {
+            entries,
+            held,
+            startup_hold,
+            next_message_id,
+            armed_slot,
+            armed_lines,
+            paused,
+            pane_held,
+            handed_back,
+            foreign_notifier,
+            now: _,
+            utc_offset_secs: _,
+        } = self;
+        *entries == other.entries
+            && *held == other.held
+            && *startup_hold == other.startup_hold
+            && *next_message_id == other.next_message_id
+            && *armed_slot == other.armed_slot
+            && *armed_lines == other.armed_lines
+            && *paused == other.paused
+            && *pane_held == other.pane_held
+            && *handed_back == other.handed_back
+            && *foreign_notifier == other.foreign_notifier
+    }
+
     /// Sets the clock every entry pushed from here on stamps itself with.
     /// Called only from [`crate::model::Model::set_now`], once per folded
     /// message, ahead of `update()`, so every entry a single fold produces
