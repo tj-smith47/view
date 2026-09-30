@@ -723,8 +723,16 @@ fn maybe_relay_stdin(cfg: EngineConfig, _passthrough: &[std::ffi::OsString]) -> 
 #[cfg(not(unix))]
 fn deny_unsupported_stdin_relay(passthrough: &[std::ffi::OsString]) -> Result<()> {
     use std::io::IsTerminal;
+    deny_piped_stdin_relay(passthrough, !std::io::stdin().is_terminal())
+}
+
+/// [`deny_unsupported_stdin_relay`] with the stdin reading handed in, so the
+/// refusal is graded on both readings whatever the test runner's own stdin
+/// is.
+#[cfg(not(unix))]
+fn deny_piped_stdin_relay(passthrough: &[std::ffi::OsString], piped: bool) -> Result<()> {
     let wants_stdin = !stdin_operands(passthrough).is_empty();
-    if wants_stdin && !std::io::stdin().is_terminal() {
+    if wants_stdin && piped {
         anyhow::bail!(
             "view: `-` (read piped stdin into the first buffer) is not \
              supported on this platform yet: nvim's own fd 0 here is \
@@ -2872,18 +2880,21 @@ mod tests {
 
     // Runs only where `deny_unsupported_stdin_relay`'s real (non-Unix) arm
     // exists: on Unix the function is an unconditional `Ok(())`, so this
-    // would assert nothing there. Exercised by the Windows CI mirror this
-    // project already runs (`winserver`); cargo test's own stdin is not a
-    // terminal, matching `ls | view -`'s shape.
+    // would assert nothing there.
     #[cfg(not(unix))]
     #[test]
     fn a_bare_dash_off_unix_refuses_to_start_against_a_piped_stdin() {
-        let err = deny_unsupported_stdin_relay(&[OsString::from("-")])
+        let dash = [OsString::from("-")];
+        let err = deny_piped_stdin_relay(&dash, true)
             .expect_err("no relay mechanism exists off Unix; starting anyway would have nvim read its own RPC channel as buffer text");
         assert!(
             err.to_string().contains('-'),
             "the error must name the flag it is refusing, got {err}"
         );
+        deny_piped_stdin_relay(&dash, false)
+            .expect("`-` typed at a terminal has no piped content to protect nvim from");
+        deny_piped_stdin_relay(&[OsString::from("notes.md")], true)
+            .expect("a piped stdin nobody asked to read is left alone");
     }
 
     // nvim's `-V[N][file]` and clap's generated short version flag both want

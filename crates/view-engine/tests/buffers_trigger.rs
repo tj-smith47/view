@@ -91,7 +91,7 @@ fn the_buffers_trigger_reports_the_listed_set_once_per_tick() {
         last.iter()
             .map(|entry| entry.path.as_str())
             .collect::<Vec<_>>(),
-        vec![format!("{cwd}/a.rs"), format!("{cwd}/b.rs")],
+        ["a.rs", "b.rs"].map(|file| std::path::Path::new(&cwd).join(file).display().to_string()),
     );
 
     // the set replaces what view held: a wiped buffer is gone from it

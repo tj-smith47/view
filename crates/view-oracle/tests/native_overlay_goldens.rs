@@ -653,6 +653,10 @@ fn basic_crashed_ai_panel() {
 /// one queued behind it outside the workspace under the home: the panel
 /// names both relative to where the reader already is, and carries the
 /// review's keys nowhere (they are on the hunk in the buffer).
+///
+/// The three goldens built on it hold Unix path spellings, so they are
+/// graded off Windows, where the home-relative name is joined with `\`.
+#[cfg(not(windows))]
 fn reviewing_ai_panel(width: u16, height: u16) -> LayerKind {
     use view_core::native::ai_panel::{AiPanelState, DiffReviewState};
     let mut state = AiPanelState::new();
@@ -674,6 +678,7 @@ fn reviewing_ai_panel(width: u16, height: u16) -> LayerKind {
     LayerKind::Ai(state.view(usize::from(height), usize::from(width), false))
 }
 
+#[cfg(not(windows))]
 #[test]
 fn full_agent_review_relative_path() {
     assert_golden(
@@ -688,6 +693,7 @@ fn full_agent_review_relative_path() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn basic_agent_review_relative_path() {
     assert_golden(
@@ -696,6 +702,7 @@ fn basic_agent_review_relative_path() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn standard_agent_review_relative_path() {
     assert_golden(

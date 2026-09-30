@@ -95,7 +95,13 @@ local function report(win)
   local name = vim.api.nvim_buf_get_name(buf)
   if buftype == 'terminal' then
     name = name:match('^term://.-//%d+:(.*)$') or name
-    name = name:match('^[^%s;]+') or name
+    -- Windows spells the job as the resolved exe path, spaces and all
+    if vim.fn.has('win32') == 1 then
+      name = name:match('^(.-%.[eE][xX][eE])') or name:match('^[^%s;]+') or name
+      name = (name:gsub('%.[eE][xX][eE]$', ''))
+    else
+      name = name:match('^[^%s;]+') or name
+    end
   end
   vim.rpcnotify(channel, 'view_bridge', 'window', win, buf,
     vim.fn.fnamemodify(name, ':t'),

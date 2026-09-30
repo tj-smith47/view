@@ -4,6 +4,11 @@
 //! in `ext_tabline_toggle.rs`, and neither says what a person sees. This
 //! drives the binary a user runs and reads the cells of row 0 on both
 //! sides of the switch.
+//!
+//! Unix only, like every other leg that spawns the binary in a pty: the
+//! hermetic search path the pty funnel gives the child leaves it no engine
+//! to find on Windows.
+#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
