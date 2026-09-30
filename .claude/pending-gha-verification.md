@@ -10,26 +10,13 @@ One line per item, keyed to the run that proves it. A drained item is
 deleted, with the run id going into the commit that deletes it; the history
 of how a red run was fixed lives in the commit subjects.
 
-## Proven by the next green run on master (89b1ad2c: CI 36718737089, Bench 36718737103)
+## Proven by Bench 36725517306 on master (1720dcaa)
 
-- [ ] `ci` green on all three legs through `task test`. Windows first reached
-      `task test` at 6fe477ad and was green at 905d865d (job 109876592994);
-      macos carries the `diff_review_undo_live` fix (89b1ad2c).
-- [ ] `Install shellcheck` (44bc8c9) runs on all three legs: asset sha
-      checked, on `GITHUB_PATH`, `lint:shell` reports every script clean.
-- [ ] `drift:sweep` step green after the `scripts/comment-frames.ceiling`
-      rows were lowered.
-- [ ] gh-windows compiles and passes with the `view-proc` job object and
-      drained wait (57d4834, 0acb3e6) and the `TIME_ZONE_ID_DAYLIGHT` import
-      (3b599b3); only winserver has proven them.
 - [ ] Bench: both gh legs `gate OK` on the seats hand-committed after run
       36665386464 (1ea7d5ee); `startup.user server_delta_ms` printed as
       recorded and not gated (a0ca3d4c); `picker.minimal` green on gh-macos
       with `echo_control` inside its bar (tripwire #28, a run whose control
       breaches is discarded); the WB-E relay cells at or under seat.
-- [ ] Bench 36712254349 (905d865d) gh-linux job 109876706912 finished
-      success before the 89b1ad2c push cancelled the run: fetch its log and
-      record the verdict.
 
 ## Needs a manual action
 
