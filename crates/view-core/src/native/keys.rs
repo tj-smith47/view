@@ -705,7 +705,13 @@ mod tests {
                     stack.push(path);
                     continue;
                 }
-                let rel = path.strip_prefix(&crates).unwrap().to_string_lossy();
+                // Windows walks `\`-joined paths and the lists here are
+                // spelled with `/`
+                let rel = path
+                    .strip_prefix(&crates)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 if path.extension().is_none_or(|ext| ext != "rs")
                     || rel == "view-core/src/native/keys.rs"
                 {
