@@ -11,10 +11,12 @@
 # through `--config` against a copy of the user's own view.toml with one
 # `[ai]` table appended. The user's file is left untouched.
 #
-# `propose` anchors its diff at the stub agent's cwd
-# (named_inside_cwd(DIFF_FILE) in stub_agent.rs), so the tape runs from a
-# scratch directory seeded with that file's expected old text, the seed
-# ai-conformance.sh uses, and the review buffer has a real file to diff.
+# The proposal is a real edit to a Rust file of this repo, two hunks in one
+# function, set up by stub_proposal (scripts/dogfood/stub-proposal.sh), so
+# the tape runs from the repo root with that file open. The review is
+# shown on each hunk in turn and the second is accepted, which changes the
+# buffer and leaves the file on disk as it was. The config's own file tree
+# is closed so the frame holds the buffer and the panel.
 #
 # cap.sh's headless capture-pane produces a text snapshot, and README's
 # tape table names a gif, so this drives its own tmux session and hands it
@@ -29,6 +31,7 @@ OUT="${1:-$ROOT/assets/tapes/agent-panel.gif}"
 
 SOCKET=view-cap-agent-$$
 . "$HERE/../lib.sh"
+. "$HERE/../stub-proposal.sh"
 
 BIN=$(absolute_path "${VIEW_BIN:-$(newest_build "$ROOT" view)}")
 [ -n "$BIN" ] || { echo "agent-panel.sh: no view binary; build one or set VIEW_BIN" >&2; exit 2; }
@@ -53,23 +56,16 @@ USER_CFG="${XDG_CONFIG_HOME:-$HOME/.config}/view/view.toml"
 [ -f "$USER_CFG" ] && cat -- "$USER_CFG" >"$CFG" || : >"$CFG"
 printf '\n[ai]\nagent = ["%s"]\n' "$STUB_BIN" >>"$CFG"
 
-WORKDIR="$cachedir/agent-panel-work-$$"
-mkdir -p -- "$WORKDIR"
-printf 'alpha\nbeta\ngamma\n' >"$WORKDIR/view-ai-stub-diff.txt"
+stub_proposal "$ROOT" "$cachedir"
 
-cleanup_agent_panel() {
-  rm -rf -- "$WORKDIR"
-  cleanup
-}
-trap cleanup_agent_panel EXIT INT TERM
-
-cd -- "$WORKDIR"
+cd -- "$ROOT"
 new_cap_session "$SOCKET" 220 50 -- \
-  "$BIN" --config "$CFG" view-ai-stub-diff.txt --cmd "$QUIET_LAZY"
+  "$BIN" --config "$CFG" "$STUB_DIFF_FILE" --cmd "$QUIET_LAZY"
 (
   wait_for_recorder "$SOCKET"
-  show_when_settled "$SOCKET" view-ai-stub-diff.txt
-  sleep 1.5
+  close_config_tree "$SOCKET"
+  show_when_settled "$SOCKET" look.rs
+  sleep 1
   tmux -L "$SOCKET" send-keys -t cap ':View ai open' Enter
   sleep 1
   # 'y' only where the trust prompt is up: a project trusted in an earlier
@@ -83,10 +79,16 @@ new_cap_session "$SOCKET" 220 50 -- \
       ;;
   esac
   tmux -L "$SOCKET" send-keys -t cap 'propose' Enter
+  # a second settled mark would flash on the gif's own frames, so the
+  # review, which opens as the stub answers, is given a fixed dwell
+  sleep 3
+  tmux -L "$SOCKET" send-keys -t cap ':View review next' Enter
+  sleep 3
+  tmux -L "$SOCKET" send-keys -t cap ':View review accept' Enter
 ) &
 
 BODY='Show
-Sleep 4700ms'
-record_gif "$SOCKET" "$OUT" 5 220 50 "$BODY"
+Sleep 9700ms'
+record_gif "$SOCKET" "$OUT" 10 220 50 "$BODY"
 
 echo "agent-panel.sh: recorded $OUT" >&2

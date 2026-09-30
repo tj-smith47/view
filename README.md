@@ -52,7 +52,7 @@ gap between them and your accent colour on the one you are working in. Turn
 it off with one config key, or let view read your desktop and decide. See
 [`docs/tiled-ui.md`](docs/tiled-ui.md).
 
-![a Rust file beside the README, each in its own frame, reflowing as the terminal shrinks and grows, then fitted to its code](assets/tapes/tiled-panes.gif)
+![a Rust file beside the README, each in its own frame, stepped narrower and wider in resize mode, then fitted to its code](assets/tapes/tiled-panes.gif)
 
 **Status in every frame.** Each window carries its own status along the
 bottom of its frame: the mode in the window you are working in, and the

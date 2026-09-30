@@ -13,6 +13,9 @@
 //! string-id leg below simply never finishes -- which is the regression
 //! being nailed down.
 //!
+//! `VIEW_AI_STUB_TITLE` sets the `agentInfo.title` the handshake reports
+//! (`Stub` when unset), which is the name the panel shows.
+//!
 //! Arguments, all optional and all positional: the file whose appearance
 //! releases a stalled reader, the protocol version to answer `initialize`
 //! with, the path of a file to hold an exclusive lock on for as long as
@@ -71,7 +74,11 @@
 //!   process's own working directory. Any suffix after the word (`propose2`)
 //!   picks a different edit and a different tool call id, so a second
 //!   proposal in the same session is a genuinely new one rather than a
-//!   duplicate the driver deduplicates away.
+//!   duplicate the driver deduplicates away. With `VIEW_AI_STUB_DIFF_PATH`
+//!   and `VIEW_AI_STUB_DIFF_NEW` both set, it offers to replace the
+//!   file the first names (relative to this process's working directory)
+//!   with the text of the file the second names, so a recording can review
+//!   a readable hunk in a real source file.
 //! - `read` -- send an `fs/read_text_file` request for a file inside this
 //!   process's own working directory (which is the session's, and so the
 //!   only directory the client answers for) and report what came back as a
@@ -130,6 +137,40 @@ fn diff_texts(suffix: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// One `propose` leg's diff: the absolute path it edits and the text on
+/// either side.
+struct Proposal {
+    path: String,
+    old: String,
+    new: String,
+}
+
+/// The diff a `propose<suffix>` prompt offers.
+///
+/// The environment pair names a real file and its proposed text, and wins
+/// when both are set and readable; `old` is read at propose time because the
+/// client anchors hunks against what the buffer holds. Otherwise the seeded
+/// file and [`diff_texts`] for `suffix`.
+fn proposal(suffix: &str) -> Proposal {
+    let named = || {
+        let path = std::env::var("VIEW_AI_STUB_DIFF_PATH").ok()?;
+        let new = std::env::var("VIEW_AI_STUB_DIFF_NEW").ok()?;
+        Some(Proposal {
+            old: std::fs::read_to_string(&path).ok()?,
+            new: std::fs::read_to_string(new).ok()?,
+            path: named_inside_cwd(&path),
+        })
+    };
+    named().unwrap_or_else(|| {
+        let (old, new) = diff_texts(suffix);
+        Proposal {
+            path: named_inside_cwd(DIFF_FILE),
+            old: old.to_string(),
+            new: new.to_string(),
+        }
+    })
+}
+
 /// What a `session/request_permission` answer actually said, in one word:
 /// the chosen `optionId` for the wire's `"selected"` variant, the bare
 /// outcome string for `"cancelled"`, and the error code for a reply that
@@ -155,6 +196,7 @@ fn main() {
     // Taken before a single frame is served, so a client that has seen this
     // agent answer anything has also seen it take the lock.
     let liveness = liveness_lock();
+    let title = std::env::var("VIEW_AI_STUB_TITLE").unwrap_or_else(|_| "Stub".to_string());
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut pending_prompt: Option<serde_json::Value> = None;
@@ -299,7 +341,7 @@ fn main() {
                 serde_json::json!({
                     "protocolVersion": protocol_version(),
                     "agentCapabilities": {},
-                    "agentInfo": { "name": "stub", "title": "Stub", "version": "1.0.0" },
+                    "agentInfo": { "name": "stub", "title": title, "version": "1.0.0" },
                     "authMethods": auth_methods()
                 }),
             ),
@@ -468,15 +510,16 @@ fn main() {
                     // close rather than one it hopes is wide enough.
                     "propose-when-released" => {
                         stall();
-                        propose_diff(&mut stdout, "");
+                        propose_diff(&mut stdout, "", &proposal(""));
                         reply(
                             &mut stdout,
                             id,
                             serde_json::json!({ "stopReason": "end_turn" }),
                         );
                     }
-                    proposal if proposal.starts_with("propose") => {
-                        propose_diff(&mut stdout, &proposal["propose".len()..]);
+                    propose if propose.starts_with("propose") => {
+                        let suffix = &propose["propose".len()..];
+                        propose_diff(&mut stdout, suffix, &proposal(suffix));
                         reply(
                             &mut stdout,
                             id,
@@ -874,8 +917,11 @@ fn ask_permission_refuse(stdout: &mut std::io::Stdout, request_id: &str, tool_ca
 /// separate frame so the non-terminal status is on screen before the
 /// terminal one replaces it, rather than the call appearing already
 /// finished.
-fn propose_diff(stdout: &mut std::io::Stdout, suffix: &str) {
+fn propose_diff(stdout: &mut std::io::Stdout, suffix: &str, proposal: &Proposal) {
     let tool_call_id = format!("edit_{}", if suffix.is_empty() { "1" } else { suffix });
+    let name = std::path::Path::new(&proposal.path)
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
     send(
         stdout,
         &serde_json::json!({
@@ -886,7 +932,7 @@ fn propose_diff(stdout: &mut std::io::Stdout, suffix: &str) {
                 "update": {
                     "sessionUpdate": "tool_call",
                     "toolCallId": tool_call_id,
-                    "title": "Edit view-ai-stub-diff.txt",
+                    "title": format!("Edit {name}"),
                     "status": "in_progress"
                 }
             }
@@ -905,9 +951,9 @@ fn propose_diff(stdout: &mut std::io::Stdout, suffix: &str) {
                     "status": "completed",
                     "content": [{
                         "type": "diff",
-                        "path": named_inside_cwd(DIFF_FILE),
-                        "oldText": diff_texts(suffix).0,
-                        "newText": diff_texts(suffix).1
+                        "path": proposal.path,
+                        "oldText": proposal.old,
+                        "newText": proposal.new
                     }]
                 }
             }

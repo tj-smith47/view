@@ -217,6 +217,24 @@ wait_for_recorder() {
   tmux -L "$1" wait-for "$RECORDER_ATTACHED"
 }
 
+# WHY: the user's config opens nvim-tree on every start, a moment after
+# its plugins load, and a tape shows the files it opened, or view's own
+# tree, and never a sidebar its subject did not ask for. The config is
+# left as it is; the tree is closed once it is on the pane, or after the
+# wait ends with no tree shown, and either way before the tape shows.
+# Usage: close_config_tree SOCKET
+close_config_tree() {
+  tenths=0
+  while [ "$tenths" -lt 50 ]; do
+    case "$(tmux -L "$1" capture-pane -p -t cap)" in
+      (*NvimTree*) break ;;
+    esac
+    sleep 0.1
+    tenths=$((tenths + 1))
+  done
+  tmux -L "$1" send-keys -t cap ':silent! NvimTreeClose' Enter
+}
+
 # WHY: the start of a tape takes as long as the editor, the config and an
 # ssh connection take that day, so the recording shows from a condition
 # and never from a clock. The pane is read at the recording's frame rate:

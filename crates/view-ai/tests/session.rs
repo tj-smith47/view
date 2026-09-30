@@ -648,3 +648,111 @@ fn a_dropped_session_signals_its_agent_before_the_editor_process_is_gone() {
         ),
     }
 }
+
+/// Every frame the stub writes for an `initialize` and a `propose` prompt,
+/// run in `cwd` with `env` as the only stub variables in its environment.
+///
+/// Spawned directly and spoken to in raw frames: the environment is the
+/// input under test, and a session launch passes on only the one it was
+/// started with.
+fn stub_propose_frames(cwd: &std::path::Path, env: &[(&str, &str)]) -> Vec<serde_json::Value> {
+    use std::io::{BufRead, Write};
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_view-ai-stub-agent"))
+        .current_dir(cwd)
+        .env_remove("VIEW_AI_STUB_TITLE")
+        .env_remove("VIEW_AI_STUB_DIFF_PATH")
+        .env_remove("VIEW_AI_STUB_DIFF_NEW")
+        .envs(env.iter().copied())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the stub agent starts");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":1}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{{"sessionId":"sess_stub","prompt":[{{"type":"text","text":"propose"}}]}}}}"#
+    )
+    .unwrap();
+    // End of input ends the stub, so reading to its end collects every frame.
+    drop(stdin);
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let frames: Vec<serde_json::Value> = std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|line| serde_json::from_str(&line).ok())
+            .collect();
+        let _ = tx.send(frames);
+    });
+    let frames = rx.recv_timeout(view_test_support::host_deadline(WAIT));
+    if frames.is_err() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    frames.expect("the stub answered and exited")
+}
+
+/// The `agentInfo.title` and the `diff` content item from `frames`.
+fn title_and_diff(frames: &[serde_json::Value]) -> (String, serde_json::Value) {
+    let title = frames
+        .iter()
+        .find_map(|frame| frame["result"]["agentInfo"]["title"].as_str())
+        .expect("the handshake reply names the agent")
+        .to_string();
+    let diff = frames
+        .iter()
+        .find(|frame| frame["params"]["update"]["sessionUpdate"] == "tool_call_update")
+        .map(|frame| frame["params"]["update"]["content"][0].clone())
+        .expect("the proposal completes its tool call");
+    (title, diff)
+}
+
+/// With the environment pair set, the stub offers the named file's on-disk
+/// text against the new text file's, under the title the environment names.
+#[test]
+fn the_stub_proposes_the_file_and_title_its_environment_names() {
+    let scratch = ScratchDir::new("ai-stub-env").unwrap();
+    std::fs::write(scratch.join("edited.rs"), "fn old() {}\n").unwrap();
+    std::fs::write(scratch.join("new.rs"), "fn new() {}\n").unwrap();
+    let frames = stub_propose_frames(
+        &scratch,
+        &[
+            ("VIEW_AI_STUB_TITLE", "Agent"),
+            ("VIEW_AI_STUB_DIFF_PATH", "edited.rs"),
+            ("VIEW_AI_STUB_DIFF_NEW", "new.rs"),
+        ],
+    );
+    let (title, diff) = title_and_diff(&frames);
+    assert_eq!(title, "Agent");
+    assert!(
+        diff["path"].as_str().unwrap().ends_with("edited.rs"),
+        "the diff names the file: {diff}"
+    );
+    assert_eq!(diff["oldText"], "fn old() {}\n");
+    assert_eq!(diff["newText"], "fn new() {}\n");
+}
+
+/// Without the environment, the stub keeps its seeded three-line proposal
+/// and its own name, which every other transport test depends on.
+#[test]
+fn the_stub_proposes_its_seeded_edit_when_the_environment_names_nothing() {
+    let scratch = ScratchDir::new("ai-stub-seed").unwrap();
+    let frames = stub_propose_frames(&scratch, &[]);
+    let (title, diff) = title_and_diff(&frames);
+    assert_eq!(title, "Stub");
+    assert!(
+        diff["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("view-ai-stub-diff.txt"),
+        "the diff names the seeded file: {diff}"
+    );
+    assert_eq!(diff["oldText"], "alpha\nbeta\ngamma\n");
+    assert_eq!(diff["newText"], "alpha\nBETA\ngamma\n");
+}
