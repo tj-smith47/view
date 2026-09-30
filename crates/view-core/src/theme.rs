@@ -5,8 +5,8 @@
 //! a read of state the engine already streams, so re-deriving it on every
 //! `ColorScheme` change costs nothing beyond a handful of `HashMap` lookups.
 
-use crate::hl::{AccentInputs, HlTable, LevelColors};
-use crate::native::views::NoticeLevel;
+use crate::hl::{AccentInputs, HlTable, LevelColors, SyntaxColors};
+use crate::native::views::{NoticeLevel, StyleRole};
 
 /// One fully-resolved cell or chrome style: colors plus text attributes,
 /// backend-free so any frontend (not just `ratatui`) can consume it.
@@ -308,6 +308,8 @@ pub struct Theme {
     accent: AccentInputs,
     /// What [`Theme::level_fg`] reads.
     levels: LevelColors,
+    /// What [`Theme::role_fg`] reads for the git glyph roles.
+    syntax: SyntaxColors,
 }
 
 impl Theme {
@@ -354,6 +356,7 @@ impl Theme {
             bg,
             accent: hl.accent(),
             levels: hl.levels(),
+            syntax: hl.syntax(),
             ..Self::default()
         };
         for group in ChromeGroup::ALL {
@@ -483,6 +486,23 @@ impl Theme {
             NoticeLevel::Warn => self.levels.warn,
             NoticeLevel::Info => self.levels.info,
             NoticeLevel::Hint => self.levels.hint,
+        }
+    }
+
+    /// The foreground a role that resolves through no chrome group paints
+    /// in: a devicon's own colour, or the syntax group's foreground a tree
+    /// row's git glyph takes. `None` for every other role, and where the
+    /// colorscheme sets no foreground for the group or its probe has not
+    /// answered yet, which leaves the span in its row's colours.
+    #[must_use]
+    pub fn role_fg(&self, role: StyleRole) -> Option<u32> {
+        match role {
+            StyleRole::Devicon(color) => Some(color),
+            StyleRole::GitDirty => self.accent.statement_fg,
+            StyleRole::GitStaged => self.syntax.constant,
+            StyleRole::GitNew => self.syntax.preproc,
+            StyleRole::GitIgnored => self.syntax.comment,
+            _ => None,
         }
     }
 
@@ -1002,6 +1022,25 @@ mod tests {
         assert_eq!(theme.level_fg(NoticeLevel::Warn), Some(0xffb86c));
         assert_eq!(theme.level_fg(NoticeLevel::Info), Some(0x8be9fd));
         assert_eq!(theme.level_fg(NoticeLevel::Hint), None);
+    }
+
+    /// Each tree git glyph role reads the syntax group nvim-tree links it
+    /// to, and a devicon names its own colour.
+    #[test]
+    fn tree_git_roles_read_their_syntax_groups() {
+        let mut hl = accent_table(None, Some(0x00ff_79c6));
+        hl.confirm_syntax(crate::hl::SyntaxColors {
+            constant: Some(0x00bd_93f9),
+            preproc: Some(0x00ff_b86c),
+            comment: None,
+        });
+        let theme = Theme::from_hl(&hl);
+        assert_eq!(theme.role_fg(StyleRole::GitDirty), Some(0x00ff_79c6));
+        assert_eq!(theme.role_fg(StyleRole::GitStaged), Some(0x00bd_93f9));
+        assert_eq!(theme.role_fg(StyleRole::GitNew), Some(0x00ff_b86c));
+        assert_eq!(theme.role_fg(StyleRole::GitIgnored), None);
+        assert_eq!(theme.role_fg(StyleRole::Devicon(0x12)), Some(0x12));
+        assert_eq!(theme.role_fg(StyleRole::Plain), None);
     }
 
     /// The load-bearing property this whole extension exists to prove: once

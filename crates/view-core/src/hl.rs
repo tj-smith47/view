@@ -86,6 +86,9 @@ pub struct HlTable {
     /// the builtin UI groups alone, and the `Diagnostic*` groups are none
     /// of them, so these arrive by probe too.
     levels: LevelColors,
+    /// The syntax groups a tree row's git glyphs take, which arrive by
+    /// probe for the reason `accent` does.
+    syntax: SyntaxColors,
     /// Whether any of the above changed since the last [`HlTable::take_dirty`].
     dirty: bool,
     /// See [`HlTable::revision`].
@@ -118,6 +121,18 @@ pub struct LevelColors {
     pub hint: Option<u32>,
 }
 
+/// The probed foregrounds of `Constant`, `PreProc` and `Comment`, `None`
+/// where the colorscheme sets none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SyntaxColors {
+    /// `Constant`'s foreground.
+    pub constant: Option<u32>,
+    /// `PreProc`'s foreground.
+    pub preproc: Option<u32>,
+    /// `Comment`'s foreground.
+    pub comment: Option<u32>,
+}
+
 impl HlTable {
     /// An empty table: no defaults, no groups, no probe reply yet.
     #[must_use]
@@ -131,6 +146,7 @@ impl HlTable {
             confirmed: None,
             accent: AccentInputs::default(),
             levels: LevelColors::default(),
+            syntax: SyntaxColors::default(),
             dirty: false,
             revision: 0,
         }
@@ -281,6 +297,21 @@ impl HlTable {
             return;
         }
         self.levels = levels;
+        self.touch();
+    }
+
+    /// The probed syntax foregrounds a tree row's git glyphs take.
+    #[must_use]
+    pub fn syntax(&self) -> SyntaxColors {
+        self.syntax
+    }
+
+    /// Records the probed syntax foregrounds.
+    pub fn confirm_syntax(&mut self, syntax: SyntaxColors) {
+        if self.syntax == syntax {
+            return;
+        }
+        self.syntax = syntax;
         self.touch();
     }
 

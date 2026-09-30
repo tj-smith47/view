@@ -560,7 +560,8 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             function_fg,
             statement_fg,
             levels,
-        } => look::accent_reply(model, generation, function_fg, statement_fg, levels),
+            syntax,
+        } => look::accent_reply(model, generation, function_fg, statement_fg, levels, syntax),
         Msg::HeartbeatReply { .. } => {
             // the acknowledgement itself is recorded by the runtime loop's
             // liveness watch on the way in, before this arm ever runs; the

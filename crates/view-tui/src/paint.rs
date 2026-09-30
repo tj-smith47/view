@@ -16,10 +16,12 @@ use view_surface::{overlay::BorderSet, Layer, LayerKind, Rect, Surface};
 mod emit;
 mod panes;
 mod pill;
+mod shade;
 mod text;
 mod toast;
 
-use text::{cluster_width, clusters, set_cluster, tint};
+use shade::{border_color, float_border_color, selection_style};
+use text::{cluster_width, clusters, role_fg, set_cluster, tint};
 
 /// The terminal-space rows a frame's composite must repaint, so a redraw
 /// touches only the changed region instead of all ~4800 cells.
@@ -1184,71 +1186,6 @@ fn set_border_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, ch: char, 
     cell.set_style(style);
 }
 
-/// A frame's foreground given the style of the surface it encloses: a
-/// dimmed variant of that surface's own foreground, or the neutral grey
-/// floor when it has none. See [`toast::toast_border_color`] for why the floor
-/// is a fixed color rather than a dimmed background.
-fn border_color(interior: ResolvedStyle) -> u32 {
-    interior.fg.map_or(0x0080_8080, dim)
-}
-
-/// The foreground every frame view draws around a native float takes: the
-/// colorscheme's own `FloatBorder` when it states one, and the derived
-/// dimmed shade of `interior` only when it states nothing. A derivation is
-/// a guess at what the theme's author would have chosen, so a stated answer
-/// outranks it -- and a colorscheme that paints its floats transparent
-/// states a border color precisely because nothing else is left to read the
-/// frame's edge from.
-///
-/// Not the whole resolved style: the frame keeps the interior's background
-/// so the box reads as one continuous surface, the same reason
-/// [`ChromeGroup::FloatTitle`]'s background is pinned to it.
-fn float_border_color(theme: &Theme, interior: ResolvedStyle) -> u32 {
-    theme
-        .chrome(ChromeGroup::FloatBorder)
-        .fg
-        .unwrap_or_else(|| border_color(interior))
-}
-
-/// The style a selected row takes over an interior styled `base`:
-/// `PmenuSel` -- the group a colorscheme already uses for "this row is the
-/// one you are on" -- with its background made concrete.
-///
-/// Reverse video is resolved into colors here rather than sent as an SGR
-/// attribute. A colorscheme that never defines `PmenuSel` leaves it on
-/// `Theme::emphasis`, which is the reverse flag over the theme's own
-/// colors; emitting that as `ESC[7m` gave the user a full-width inverted
-/// bar whose color no colorscheme chose, and inverting an *unset*
-/// foreground/background inverts whatever the terminal's ambient default
-/// happens to be. Swapping the two resolved colors instead paints the same
-/// intent in the theme's palette. With neither color known there is nothing
-/// to swap, and the flag stays as the one selection signal any terminal can
-/// still carry.
-fn selection_style(theme: &Theme, base: ResolvedStyle) -> ResolvedStyle {
-    let sel = theme.float_chrome(ChromeGroup::PmenuSel, base.bg);
-    let fg = sel.fg.or(base.fg);
-    if !sel.reverse {
-        return ResolvedStyle { fg, ..sel };
-    }
-    if fg.is_none() && sel.bg.is_none() {
-        return sel;
-    }
-    ResolvedStyle {
-        fg: sel.bg,
-        bg: fg,
-        reverse: false,
-        ..sel
-    }
-}
-
-/// Scales each RGB channel of `c` to 60% of its original value, the muted
-/// transform [`toast::toast_border_color`] applies when no themed group already
-/// carries one.
-fn dim(c: u32) -> u32 {
-    let channel = |shift: u32| -> u32 { ((c >> shift) & 0xFF) * 3 / 5 };
-    (channel(16) << 16) | (channel(8) << 8) | channel(0)
-}
-
 /// Renders the popup menu: one item per row via [`PmItem::display_text`],
 /// the `selected` index in the selection style. `render()` already anchored
 /// and sized `area` to the event's `(row, col)` and the widest item.
@@ -1350,7 +1287,16 @@ fn paint_native_overlay(
     };
     let base = theme.chrome(group);
     let interior = ratatui_style(base);
-    let selected = ratatui_style(selection_style(theme, base));
+    let selection = selection_style(theme, base);
+    let selected = ratatui_style(selection);
+    // a role that keeps its own colour on the selected row lays it on the
+    // selection's bg; the bare reverse fallback has no bg of its own, and a
+    // coloured fg under reverse would become the cell's bg
+    let keeps_fg_on = if selection.reverse {
+        interior
+    } else {
+        selected
+    };
     let frame = ratatui_style(ResolvedStyle {
         fg: Some(if is_float {
             float_border_color(theme, base)
@@ -1418,14 +1364,19 @@ fn paint_native_overlay(
             // because the layout measured each span on its own, and a span
             // opening on a mark joins the cluster before it once the row is
             // one string
-            paint_span_row(line, |role| tint(role, selected), area, row, buf);
+            let on_selection = |role: StyleRole| -> Style {
+                if !role.keeps_fg_on_selection() {
+                    return selected;
+                }
+                role_fg(theme, role).map_or(selected, |fg| keeps_fg_on.fg(rgb(fg)))
+            };
+            paint_span_row(line, on_selection, area, row, buf);
         } else {
             // ordinary content rows resolve style per span -- this is what
             // lets the statusline's diagnostic glyphs, mode text, git
             // branch, etc. read in distinct colors instead of collapsing to
-            // one flat style; every other overlay's rows carry only
-            // `StyleRole::Plain` spans, so `resolve` falling back to
-            // `interior` for those keeps their appearance unchanged. A
+            // one flat style; a `StyleRole::Plain` span, which most
+            // overlays' rows carry throughout, falls back to `interior`. A
             // role's own background is honoured, but a role that names none
             // (most of them: a colorscheme colors a diagnostic glyph, not
             // the box behind it) keeps the overlay's, so a styled span never
@@ -1453,13 +1404,14 @@ fn paint_native_overlay(
                         ..theme.accent()
                     });
                 }
-                role.chrome_group().map_or(tint(role, interior), |group| {
-                    let style = theme.float_chrome(group, base.bg);
-                    ratatui_style(ResolvedStyle {
-                        reverse: style.reverse && role.keeps_group_reverse(),
-                        ..style
+                role.chrome_group()
+                    .map_or(tint(theme, role, interior), |group| {
+                        let style = theme.float_chrome(group, base.bg);
+                        ratatui_style(ResolvedStyle {
+                            reverse: style.reverse && role.keeps_group_reverse(),
+                            ..style
+                        })
                     })
-                })
             };
             paint_span_row(line, resolve, area, row, buf);
         }
@@ -7968,8 +7920,8 @@ mod tests {
         let kind = LayerKind::Tree(
             TreeView::new("files")
                 .with_rows(vec![
-                    TreeRow::leaf(0, "main.rs"),
-                    TreeRow::leaf(0, "lib.rs"),
+                    TreeRow::leaf(0, "main.rs").with_icon(file_icon("main.rs")),
+                    TreeRow::leaf(0, "lib.rs").with_icon(file_icon("lib.rs")),
                 ])
                 .with_selected(1)
                 .with_icons(TreeIcons::Nerd),
@@ -8000,6 +7952,140 @@ mod tests {
             }
         }
         assert_eq!(painted, 2, "both rows carry the icon: {:?}", laid.lines);
+    }
+
+    /// Paints a nerd tree of `rows` with `selected` highlighted, and returns
+    /// the cell each span whose text equals one of `find` opens on.
+    fn tree_cells(
+        model: &Model,
+        rows: Vec<view_core::native::views::TreeRow>,
+        selected: usize,
+        find: &[&str],
+    ) -> Vec<ratatui::buffer::Cell> {
+        use view_core::native::devicons::TreeIcons;
+        use view_core::native::views::TreeView;
+
+        let kind = LayerKind::Tree(
+            TreeView::new("files")
+                .with_rows(rows)
+                .with_selected(selected)
+                .with_icons(TreeIcons::Nerd),
+        );
+        let borders = view_surface::overlay::BorderSet::for_caps(model.caps);
+        let width = 30_u16;
+        let rect = Rect::new(1, 1, width, 6);
+        let laid = view_surface::overlay::rows(width, 6, &kind, borders);
+        let layer = Layer::new(rect, kind, model.caps);
+        let buf = paint_layer_alone(model, layer, width + 4, 9);
+        find.iter()
+            .map(|text| {
+                let mut found = None;
+                for (index, line) in laid.lines.iter().enumerate() {
+                    let mut col = rect.col;
+                    for span in line {
+                        if span.text == *text && found.is_none() {
+                            found =
+                                Some(buf[(col, rect.row + u16::try_from(index).unwrap())].clone());
+                        }
+                        col += u16::try_from(UnicodeWidthStr::width(span.text.as_str())).unwrap();
+                    }
+                }
+                found.unwrap_or_else(|| panic!("no span {text:?} in {:?}", laid.lines))
+            })
+            .collect()
+    }
+
+    /// A folder row that is not selected paints its arrow and glyph in the
+    /// colorscheme's `Directory` colour.
+    #[test]
+    fn a_tree_folder_paints_in_the_directory_colour() {
+        use view_core::native::devicons::{ARROW_CLOSED, FOLDER_CLOSED};
+        use view_core::native::views::TreeRow;
+
+        let model = model_with_distinctly_colored_chrome();
+        let arrow = format!("{ARROW_CLOSED} ");
+        let cells = tree_cells(
+            &model,
+            vec![TreeRow::dir(0, "src", false), TreeRow::leaf(0, "a.txt")],
+            1,
+            &[&arrow, FOLDER_CLOSED],
+        );
+        for cell in cells {
+            assert_eq!(
+                cell.fg,
+                ratatui::style::Color::Rgb(0x00, 0x88, 0xFF),
+                "{cell:?}"
+            );
+        }
+    }
+
+    /// On the selected row a folder keeps its `Directory` colour on the
+    /// selection's bg, and the name takes the selection's own fg.
+    #[test]
+    fn a_selected_tree_folder_keeps_its_colour_on_the_selection_bg() {
+        use view_core::native::devicons::FOLDER_OPEN;
+        use view_core::native::views::TreeRow;
+
+        let mut model = model_with_distinctly_colored_chrome();
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlAttrDefine {
+                id: 9,
+                fg: Some(0x00EE_EEEE),
+                bg: Some(0x0033_3333),
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+        );
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlGroupSet {
+                name: ChromeGroup::PmenuSel.hl_name().to_string(),
+                hl_id: 9,
+            },
+        );
+        let cells = tree_cells(
+            &model,
+            vec![TreeRow::leaf(0, "a.txt"), TreeRow::dir(0, "src", true)],
+            1,
+            &[FOLDER_OPEN, "src"],
+        );
+        let select_bg = ratatui::style::Color::Rgb(0x33, 0x33, 0x33);
+        assert_eq!(cells[0].fg, ratatui::style::Color::Rgb(0x00, 0x88, 0xFF));
+        assert_eq!(cells[0].bg, select_bg, "{:?}", cells[0]);
+        assert_eq!(cells[1].fg, ratatui::style::Color::Rgb(0xEE, 0xEE, 0xEE));
+        assert_eq!(cells[1].bg, select_bg, "{:?}", cells[1]);
+    }
+
+    /// Under the bare reverse selection a colorscheme with no `PmenuSel`
+    /// falls back to, a folder's colour sits on the interior unreversed, and
+    /// the name still reads reversed.
+    #[test]
+    fn a_selected_tree_folder_under_bare_reverse_keeps_its_colour_unreversed() {
+        use ratatui::style::Modifier;
+        use view_core::native::devicons::FOLDER_OPEN;
+        use view_core::native::views::TreeRow;
+
+        let model = model_with_distinctly_colored_chrome();
+        let cells = tree_cells(
+            &model,
+            vec![TreeRow::leaf(0, "a.txt"), TreeRow::dir(0, "src", true)],
+            1,
+            &[FOLDER_OPEN, "src"],
+        );
+        assert_eq!(cells[0].fg, ratatui::style::Color::Rgb(0x00, 0x88, 0xFF));
+        assert!(
+            !cells[0].modifier.contains(Modifier::REVERSED),
+            "{:?}",
+            cells[0]
+        );
+        assert!(
+            cells[1].modifier.contains(Modifier::REVERSED),
+            "{:?}",
+            cells[1]
+        );
     }
 
     /// The title set into an overlay's top border reads as a label, not as

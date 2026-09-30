@@ -174,6 +174,7 @@ pub enum Msg {
         function_fg: Option<u32>,
         statement_fg: Option<u32>,
         levels: crate::hl::LevelColors,
+        syntax: crate::hl::SyntaxColors,
     },
     /// The async acknowledgement of one read-side liveness probe. Carries
     /// no value: that the engine answered at all is the whole signal, and

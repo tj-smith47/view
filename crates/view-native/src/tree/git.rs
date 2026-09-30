@@ -1,6 +1,8 @@
 //! The tree sidebar's git-status refresh: shells out to
 //! `git status --porcelain=v2` on `root`, off the loop, and collapses each
-//! reported entry down to the single [`GitMark`] a tree row can carry.
+//! reported entry down to the single [`GitMark`] a tree row can carry as a
+//! letter, beside the [`GitIcons`] set it draws as glyphs, which keeps the
+//! staged and unstaged halves of the `XY` code apart.
 //!
 //! Shelling out rather than depending on a git library: `git`'s own
 //! porcelain v2 output is a stable, documented wire format this module owns
@@ -32,7 +34,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use view_core::native::tree::GitEntry;
-use view_core::native::views::GitMark;
+use view_core::native::views::{GitIcons, GitMark};
 
 /// How long a `git status` child is given before this module gives up on it
 /// and reports a timeout rather than blocking forever. Matches
@@ -209,9 +211,7 @@ fn parse_line(line: &str) -> Option<GitEntry> {
         "2" => parse_rename_or_copy(line),
         "u" => parse_unmerged(line),
         "?" => parse_untracked(line),
-        // "!" (ignored) never appears without --ignored, which this module
-        // does not pass; any other line shape is not a decoration this
-        // tree renders
+        "!" => parse_ignored(line),
         _ => None,
     }
 }
@@ -227,7 +227,7 @@ fn parse_ordinary(line: &str) -> Option<GitEntry> {
         parts.next()?; // sub, mH, mI, mW, hH, hI
     }
     let path = parts.next()?;
-    Some(GitEntry::new(path.into(), mark_from_xy(xy)?))
+    Some(GitEntry::new(path.into(), mark_from_xy(xy)?).with_icons(GitIcons::from_xy(xy)))
 }
 
 /// `2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>\t<origPath>` --
@@ -242,7 +242,7 @@ fn parse_rename_or_copy(line: &str) -> Option<GitEntry> {
     }
     let rest = parts.next()?;
     let path = rest.split('\t').next()?;
-    Some(GitEntry::new(path.into(), mark_from_xy(xy)?))
+    Some(GitEntry::new(path.into(), mark_from_xy(xy)?).with_icons(GitIcons::from_xy(xy)))
 }
 
 /// `u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>` -- 11
@@ -251,12 +251,12 @@ fn parse_rename_or_copy(line: &str) -> Option<GitEntry> {
 fn parse_unmerged(line: &str) -> Option<GitEntry> {
     let mut parts = line.splitn(11, ' ');
     parts.next()?; // "u"
-    parts.next()?; // XY, unused: every unmerged line is a conflict
+    let xy = parts.next()?;
     for _ in 0..8 {
         parts.next()?; // sub, m1, m2, m3, mW, h1, h2, h3
     }
     let path = parts.next()?;
-    Some(GitEntry::new(path.into(), GitMark::Conflicted))
+    Some(GitEntry::new(path.into(), GitMark::Conflicted).with_icons(GitIcons::from_xy(xy)))
 }
 
 /// `? <path>` -- the path is everything after the first space.
@@ -264,7 +264,15 @@ fn parse_untracked(line: &str) -> Option<GitEntry> {
     let mut parts = line.splitn(2, ' ');
     parts.next()?; // "?"
     let path = parts.next()?;
-    Some(GitEntry::new(path.into(), GitMark::Untracked))
+    Some(GitEntry::new(path.into(), GitMark::Untracked).with_icons(GitIcons::from_xy("??")))
+}
+
+/// `! <path>`, the shape of `?` with the ignored mark.
+fn parse_ignored(line: &str) -> Option<GitEntry> {
+    let mut parts = line.splitn(2, ' ');
+    parts.next()?; // "!"
+    let path = parts.next()?;
+    Some(GitEntry::new(path.into(), GitMark::Ignored).with_icons(GitIcons::from_xy("!!")))
 }
 
 /// Collapses a two-character `XY` porcelain code to the single character
@@ -509,8 +517,30 @@ mod tests {
     }
 
     #[test]
-    fn an_ignored_line_and_a_header_line_are_not_decorations() {
-        assert!(parse_line("! ignored.txt").is_none());
+    fn an_ignored_line_is_marked_and_a_header_line_is_no_decoration() {
+        let ignored = parse_line("! ignored.txt").expect("an ignored line parses");
+        assert_eq!(ignored.mark, GitMark::Ignored);
+        assert_eq!(ignored.icons, GitIcons::from_xy("!!"));
         assert!(parse_line("# branch.oid deadbeef").is_none());
+    }
+
+    #[test]
+    fn a_status_line_carries_its_staged_and_unstaged_states_apart() {
+        use view_core::native::views::GitIcon;
+        let both = parse_line("1 MM N... 100644 100644 100644 aaaa bbbb both.rs")
+            .expect("an ordinary line parses");
+        assert_eq!(both.mark, GitMark::Modified);
+        assert_eq!(
+            both.icons.iter().collect::<Vec<_>>(),
+            [GitIcon::Staged, GitIcon::Unstaged]
+        );
+        let conflict = parse_line("u UU N... 100644 100644 100644 100644 aaaa bbbb cccc c.txt")
+            .expect("an unmerged line parses");
+        assert_eq!(
+            conflict.icons.iter().collect::<Vec<_>>(),
+            [GitIcon::Unmerged]
+        );
+        let new = parse_line("? new.txt").expect("an untracked line parses");
+        assert_eq!(new.icons.iter().collect::<Vec<_>>(), [GitIcon::Untracked]);
     }
 }

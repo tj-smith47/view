@@ -2,18 +2,19 @@
 //! sorted and flattened into `view_core::native::tree::TreeEntry`'s
 //! depth-first shape.
 //!
-//! Lists entries the way nvim-tree does: `.gitignore`/`.ignore` entries
-//! are skipped, dotfiles are listed, and `.git` is listed as a folder with
-//! nothing walked beneath it, since its object store is the largest tree
-//! in most repositories and nobody browses it. A symlinked subtree is
-//! listed as one entry with nothing walked beneath it. Within each directory,
-//! folders come first and then files, each group ordered by name without
-//! regard to case.
+//! Dotfiles are listed, and entries an `.ignore` file names are skipped,
+//! as are entries a `.gitignore` names inside a git repository. A `.git`
+//! folder lists what sits directly inside it and nothing deeper. A
+//! symbolic link is listed as one entry carrying its target, a link to a
+//! folder sorting with the folders, and nothing beneath it is listed.
+//! Within each directory, folders come first and then files, each group
+//! ordered by name without regard to case.
 //!
 //! The picker's `Files` source (`view_native::picker::sources`) walks with
 //! `ignore::WalkBuilder`'s defaults, which skip dotfiles, and leaves the
 //! order to its fuzzy matcher. The two differ in those two respects.
 
+use std::cmp::Ordering as Order;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,11 +54,19 @@ pub fn scan(root: &Path, cancel: &AtomicBool) -> Vec<TreeEntry> {
 /// loaded macOS host left it ample room to do.
 fn scan_paced(root: &Path, cancel: &AtomicBool, pace: impl Fn()) -> Vec<TreeEntry> {
     let mut out = Vec::new();
+    let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let walker = ignore::WalkBuilder::new(root)
         .hidden(false)
         .filter_entry(|entry| {
-            entry.depth() < 2
-                || entry.path().parent().and_then(Path::file_name) != Some(OsStr::new(".git"))
+            // the depth guard keeps a root that is itself a `.git` folder
+            // listing its whole tree
+            entry.depth() < 3
+                || entry
+                    .path()
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::file_name)
+                    != Some(OsStr::new(".git"))
         })
         .build();
     for entry in walker {
@@ -73,34 +82,78 @@ fn scan_paced(root: &Path, cancel: &AtomicBool, pace: impl Fn()) -> Vec<TreeEntr
         if depth == 0 {
             continue;
         }
-        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+        let link = entry.path_is_symlink();
+        // `ignore` does not follow links, so a link's own type is a link
+        // and its target's type is read here
+        let is_dir = if link {
+            entry.path().is_dir()
+        } else {
+            entry.file_type().is_some_and(|ft| ft.is_dir())
+        };
         let Ok(rel) = entry.path().strip_prefix(root) else {
             continue;
         };
         #[allow(clippy::cast_possible_truncation)]
         let depth = (depth - 1) as u16;
-        out.push(TreeEntry::new(rel.to_path_buf(), is_dir, depth));
+        let mut listed = TreeEntry::new(rel.to_path_buf(), is_dir, depth);
+        if link {
+            listed = listed.with_link(link_target(entry.path(), &real_root));
+        }
+        out.push(listed);
     }
-    out.sort_by_cached_key(order_key);
+    out.sort_by(tree_order);
     out
 }
 
-/// The key that sorts `entry` into its place in the depth-first listing:
-/// one `(is a file, lower-cased name, name)` triple per path component, so
-/// a directory sorts ahead of everything beneath it and every sibling
-/// group puts folders before files. Every component but the last is a
+/// Where the link at `path` points: relative to `real_root` when it
+/// resolves beneath it, the resolved path when it resolves elsewhere, and
+/// the link's own text when it resolves nowhere.
+fn link_target(path: &Path, real_root: &Path) -> String {
+    match std::fs::canonicalize(path) {
+        Ok(real) => real
+            .strip_prefix(real_root)
+            .unwrap_or(&real)
+            .to_string_lossy()
+            .into_owned(),
+        Err(_) => std::fs::read_link(path)
+            .map(|target| target.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    }
+}
+
+/// The order of the depth-first listing, compared one path component at a
+/// time: a directory sorts ahead of everything beneath it, and each
+/// sibling group puts folders before files, each ordered by name without
+/// regard to case and then by its bytes. Every component but the last is a
 /// folder.
-fn order_key(entry: &TreeEntry) -> Vec<(bool, String, String)> {
-    let count = entry.path.components().count();
-    entry
-        .path
-        .components()
-        .enumerate()
-        .map(|(i, part)| {
-            let name = part.as_os_str().to_string_lossy().into_owned();
-            (i + 1 == count && !entry.is_dir, name.to_lowercase(), name)
-        })
-        .collect()
+fn tree_order(a: &TreeEntry, b: &TreeEntry) -> Order {
+    let mut left = a.path.components();
+    let mut right = b.path.components();
+    loop {
+        let (x, y) = match (left.next(), right.next()) {
+            (None, None) => return Order::Equal,
+            (None, Some(_)) => return Order::Less,
+            (Some(_), None) => return Order::Greater,
+            (Some(x), Some(y)) => (x, y),
+        };
+        if x == y {
+            continue;
+        }
+        let x_file = left.as_path().as_os_str().is_empty() && !a.is_dir;
+        let y_file = right.as_path().as_os_str().is_empty() && !b.is_dir;
+        return x_file
+            .cmp(&y_file)
+            .then_with(|| {
+                let (x, y) = (
+                    x.as_os_str().to_string_lossy(),
+                    y.as_os_str().to_string_lossy(),
+                );
+                x.chars()
+                    .flat_map(char::to_lowercase)
+                    .cmp(y.chars().flat_map(char::to_lowercase))
+            })
+            .then_with(|| x.as_os_str().cmp(y.as_os_str()));
+    }
 }
 
 #[cfg(test)]
@@ -223,10 +276,11 @@ mod tests {
     }
 
     #[test]
-    fn a_tree_scan_lists_dotfiles_and_git_unopened_but_not_ignored_ones() {
+    fn a_tree_scan_lists_dotfiles_and_one_level_of_git_but_not_ignored_ones() {
         let root = scratch("dotfiles");
-        std::fs::create_dir_all(root.join(".git/objects")).expect("mkdir .git");
+        std::fs::create_dir_all(root.join(".git/objects/ab")).expect("mkdir .git");
         std::fs::write(root.join(".git/HEAD"), "").expect("write HEAD");
+        std::fs::write(root.join(".git/objects/ab/cd"), "").expect("write an object");
         std::fs::write(root.join(".gitignore"), ".secret\n").expect("write .gitignore");
         std::fs::write(root.join(".secret"), "").expect("write .secret");
         std::fs::write(root.join(".env.example"), "").expect("write .env.example");
@@ -245,12 +299,70 @@ mod tests {
             .find(|e| e.path == Path::new(".git"))
             .expect(".git is listed");
         assert!(git.is_dir);
+        assert!(listed(".git/HEAD"), "{entries:?}");
+        assert!(listed(".git/objects"), "{entries:?}");
         assert!(
             !entries
                 .iter()
-                .any(|e| e.path.starts_with(".git") && e.path != Path::new(".git")),
-            "nothing beneath .git is walked: {entries:?}"
+                .any(|e| e.path.starts_with(".git/objects/ab")),
+            "nothing below .git's own entries is listed: {entries:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_tree_scan_lists_one_level_of_a_nested_git_folder() {
+        let root = scratch("nested-git");
+        std::fs::create_dir_all(root.join("sub/.git/refs/heads")).expect("mkdir");
+        std::fs::write(root.join("sub/.git/HEAD"), "").expect("write HEAD");
+        std::fs::write(root.join("sub/.git/refs/heads/main"), "").expect("write ref");
+
+        let entries = scan(&root, &AtomicBool::new(false));
+        let listed = |name: &str| entries.iter().any(|e| e.path == Path::new(name));
+        assert!(listed("sub/.git"), "{entries:?}");
+        assert!(listed("sub/.git/HEAD"), "{entries:?}");
+        assert!(listed("sub/.git/refs"), "{entries:?}");
+        assert!(!listed("sub/.git/refs/heads"), "{entries:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_scan_sorts_a_linked_folder_with_the_folders_and_lists_nothing_inside() {
+        let root = scratch("symlink");
+        std::fs::create_dir_all(root.join("real/inner")).expect("mkdir");
+        std::fs::write(root.join("real/inner/x.rs"), "").expect("write");
+        std::fs::write(root.join("a.txt"), "").expect("write");
+        std::os::unix::fs::symlink(root.join("real"), root.join("linked")).expect("symlink dir");
+        std::os::unix::fs::symlink(root.join("a.txt"), root.join("b.txt")).expect("symlink file");
+
+        let entries = scan(&root, &AtomicBool::new(false));
+        let top: Vec<_> = entries
+            .iter()
+            .filter(|e| e.depth == 0)
+            .map(|e| e.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(top, ["linked", "real", "a.txt", "b.txt"], "{entries:?}");
+        let linked = entries
+            .iter()
+            .find(|e| e.path == Path::new("linked"))
+            .expect("the link is listed");
+        assert!(linked.is_dir);
+        assert_eq!(linked.link.as_deref(), Some("real"));
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.path.starts_with("linked") && e.path != Path::new("linked")),
+            "nothing beneath a linked folder is listed: {entries:?}"
+        );
+        let file = entries
+            .iter()
+            .find(|e| e.path == Path::new("b.txt"))
+            .expect("the file link is listed");
+        assert!(!file.is_dir);
+        assert_eq!(file.link.as_deref(), Some("a.txt"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

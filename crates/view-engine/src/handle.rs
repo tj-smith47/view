@@ -628,17 +628,18 @@ impl EngineHandle {
                                     // answer for; leaving the generation
                                     // unresolved would keep the frame
                                     // marked accent-less forever
-                                    let (function_fg, statement_fg, levels) = if error == Value::Nil
-                                    {
-                                        decode_accent_probe_reply(&result)
-                                    } else {
-                                        (None, None, view_core::hl::LevelColors::default())
-                                    };
+                                    let (function_fg, statement_fg, levels, syntax) =
+                                        if error == Value::Nil {
+                                            decode_accent_probe_reply(&result)
+                                        } else {
+                                            Default::default()
+                                        };
                                     pump.route_probe_reply(Msg::AccentProbeReply {
                                         generation,
                                         function_fg,
                                         statement_fg,
                                         levels,
+                                        syntax,
                                     });
                                 }
                             }
@@ -2793,6 +2794,8 @@ mod tests {
             (Value::from("error"), Value::from(0x00FF_5555)),
             (Value::from("warn"), Value::from(0x00F1_FA8C)),
             (Value::from("info"), Value::from(0x008B_E9FD)),
+            (Value::from("constant"), Value::from(0x00BD_93F9)),
+            (Value::from("preproc"), Value::from(0x00FF_B86C)),
         ]);
         assert_eq!(
             decode_accent_probe_reply(&result),
@@ -2804,6 +2807,11 @@ mod tests {
                     warn: Some(0x00F1_FA8C),
                     info: Some(0x008B_E9FD),
                     hint: None,
+                },
+                view_core::hl::SyntaxColors {
+                    constant: Some(0x00BD_93F9),
+                    preproc: Some(0x00FF_B86C),
+                    comment: None,
                 }
             )
         );

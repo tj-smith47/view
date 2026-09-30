@@ -9,6 +9,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::style::Style;
 use view_core::native::views::StyleRole;
+use view_core::theme::Theme;
 
 pub(super) use view_core::native::text::{cluster_width, clusters, group_width};
 
@@ -33,11 +34,17 @@ pub(super) fn set_cluster(buf: &mut Buffer, x: u16, y: u16, cluster: &str, style
     cell.set_style(style);
 }
 
-/// `style` with a [`StyleRole::Devicon`] span's own colour as its
-/// foreground, and `style` unchanged for every other role.
-pub(super) fn tint(role: StyleRole, style: Style) -> Style {
-    match role {
-        StyleRole::Devicon(color) => style.fg(super::rgb(color)),
-        _ => style,
-    }
+/// `style` with the foreground [`Theme::role_fg`] gives `role`, and `style`
+/// unchanged for a role it colours nothing.
+pub(super) fn tint(theme: &Theme, role: StyleRole, style: Style) -> Style {
+    theme
+        .role_fg(role)
+        .map_or(style, |color| style.fg(super::rgb(color)))
+}
+
+/// The foreground `role` resolves to on its own: its chrome group's, else
+/// the one [`Theme::role_fg`] gives it.
+pub(super) fn role_fg(theme: &Theme, role: StyleRole) -> Option<u32> {
+    role.chrome_group()
+        .map_or_else(|| theme.role_fg(role), |group| theme.chrome(group).fg)
 }

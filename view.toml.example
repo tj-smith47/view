@@ -240,8 +240,9 @@ single_grid = false        # default: false -- view composites nvim's windows
 # two cells wide. Both take the same width. "auto" draws round ends where
 # the terminal draws box glyphs one cell wide, and flat ends elsewhere.
 #
-# tree_icons is what each file tree row opens with. "nerd" draws a Nerd Font
-# folder glyph on a folder and a file-type icon in its own colour on a file;
+# tree_icons is what each file tree row opens with. "nerd" draws an arrow and
+# a folder glyph on a folder, a file-type icon in its own colour on a file,
+# and git states as glyphs a folder gathers from everything beneath it;
 # "none" draws + on a closed folder, - on an open one and a blank on a file.
 # "auto" draws nerd glyphs where the terminal draws box glyphs one cell
 # wide, and none elsewhere.

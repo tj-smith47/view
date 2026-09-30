@@ -1644,6 +1644,12 @@ impl EngineModel {
         self.refresh_held_hl();
     }
 
+    /// Records the probed syntax foregrounds a tree row's git glyphs take.
+    pub fn confirm_syntax(&mut self, syntax: crate::hl::SyntaxColors) {
+        self.hl.confirm_syntax(syntax);
+        self.refresh_held_hl();
+    }
+
     /// Records the colour the user named for the accent role.
     pub fn set_accent_token(&mut self, token: Option<u32>) {
         self.hl.set_accent_token(token);

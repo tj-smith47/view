@@ -950,40 +950,78 @@ fn tree_body(view: &TreeView) -> Body {
     }
 }
 
-/// One tree row's spans: indentation, then the row's opening glyph and a
-/// space, then the entry's git decoration glyph in its own
-/// [`GitMark::style_role`]-tagged span when it carries one, then the label
-/// itself (plain text).
+/// One tree row's spans: indentation, the row's opening glyphs, its git
+/// state, then the label (plain text) and, for a symbolic link, where it
+/// points.
 ///
-/// Under [`TreeIcons::Nerd`] the glyph is a folder, open or closed, in
-/// [`StyleRole::TreeFolder`], or the file's [`devicons::file_icon`] in its
-/// own colour. Under [`TreeIcons::None`] it is a `-` on an open folder, a
-/// `+` on a closed one and a blank on a file. The git glyph sits between
-/// the icon and the name, where nvim-tree's default renderer places it.
+/// Under [`TreeIcons::Nerd`] a folder opens with an arrow and its folder
+/// glyph, both in [`StyleRole::TreeFolder`], and a file with two blank
+/// columns and the icon its row carries, in that icon's colour. The row's
+/// [`view_core::native::views::GitIcons`] follow as glyphs, each followed
+/// by a space. Under
+/// [`TreeIcons::None`] the row opens with a `-` on an open folder, a `+`
+/// on a closed one and a blank on a file, and a file's [`GitMark`] letter
+/// follows. The git state sits between the icon and the name, where
+/// nvim-tree's default renderer places it.
 fn tree_row_spans(row: &TreeRow, icons: TreeIcons) -> Vec<Span> {
-    let indent = Span::plain("  ".repeat(usize::from(row.depth)));
-    let glyph = match (icons, row.expanded) {
-        (TreeIcons::Nerd, Some(open)) => Span::new(
-            if open {
-                devicons::FOLDER_OPEN
-            } else {
-                devicons::FOLDER_CLOSED
-            },
-            StyleRole::TreeFolder,
-        ),
-        (TreeIcons::Nerd, None) => {
-            let icon = devicons::file_icon(&row.label);
-            Span::new(icon.glyph, StyleRole::Devicon(icon.color))
+    let mut spans = vec![Span::plain("  ".repeat(usize::from(row.depth)))];
+    match icons {
+        TreeIcons::Nerd => {
+            let (arrow, glyph) = match row.expanded {
+                Some(open) => {
+                    let arrow = if open {
+                        devicons::ARROW_OPEN
+                    } else {
+                        devicons::ARROW_CLOSED
+                    };
+                    let glyph = match (row.link.is_some(), row.empty, open) {
+                        (true, _, _) => devicons::FOLDER_LINK,
+                        (false, true, true) => devicons::FOLDER_EMPTY_OPEN,
+                        (false, true, false) => devicons::FOLDER_EMPTY,
+                        (false, false, true) => devicons::FOLDER_OPEN,
+                        (false, false, false) => devicons::FOLDER_CLOSED,
+                    };
+                    (
+                        Span::new(format!("{arrow} "), StyleRole::TreeFolder),
+                        Span::new(glyph, StyleRole::TreeFolder),
+                    )
+                }
+                None if row.link.is_some() => (Span::plain("  "), Span::plain(devicons::FILE_LINK)),
+                None => {
+                    let icon = row.icon.unwrap_or(devicons::DEFAULT_FILE);
+                    (
+                        Span::plain("  "),
+                        Span::new(icon.glyph, StyleRole::Devicon(icon.color)),
+                    )
+                }
+            };
+            spans.extend([arrow, glyph, Span::plain(" ")]);
+            spans.extend(
+                row.git
+                    .iter()
+                    .map(|icon| Span::new(format!("{} ", icon.glyph()), icon.style_role())),
+            );
         }
-        (_, Some(true)) => Span::plain("-"),
-        (_, Some(false)) => Span::plain("+"),
-        (_, None) => Span::plain(" "),
-    };
-    let mut spans = vec![indent, glyph, Span::plain(" ")];
-    if let Some(mark) = row.status {
-        spans.push(tree_git_glyph_span(mark));
+        _ => {
+            let marker = match row.expanded {
+                Some(true) => "-",
+                Some(false) => "+",
+                None => " ",
+            };
+            spans.extend([Span::plain(marker), Span::plain(" ")]);
+            if let Some(mark) = row.status {
+                spans.push(tree_git_glyph_span(mark));
+            }
+        }
     }
     spans.push(Span::plain(row.label.clone()));
+    if let Some(target) = &row.link {
+        let arrow = match icons {
+            TreeIcons::Nerd => devicons::LINK_ARROW,
+            _ => " -> ",
+        };
+        spans.push(Span::plain(format!("{arrow}{target}")));
+    }
     spans
 }
 

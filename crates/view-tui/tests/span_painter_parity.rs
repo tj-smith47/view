@@ -14,12 +14,11 @@
 //! says, while each still believes it painted the row it was handed. That
 //! is the divergence class this test exists to catch.
 //!
-//! The statusline is the layer under test because it is the only overlay
-//! whose rows carry more than one `StyleRole` in real content (every other
-//! overlay -- picker, tree, prompt, palette, messages -- is `StyleRole::
-//! Plain` throughout, see each `LayerKind` variant's own doc comment), so
-//! it is the one row shape that actually exercises `paint_span_row`'s
-//! per-span walk end to end.
+//! The statusline is the layer under test because its rows carry many
+//! `StyleRole`s in real content, so it exercises `paint_span_row`'s
+//! per-span walk end to end. The tree's rows carry several roles as well;
+//! the picker, prompt, palette and messages are `StyleRole::Plain`
+//! throughout.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as TuiRect;

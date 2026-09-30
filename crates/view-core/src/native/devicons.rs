@@ -62,7 +62,9 @@ impl TreeIcons {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Devicon {
+    /// The Nerd Font glyph, one character.
     pub glyph: &'static str,
+    /// The colour the glyph is painted in, as `0xRRGGBB`.
     pub color: u32,
 }
 
@@ -72,6 +74,27 @@ pub const FOLDER_CLOSED: &str = "\u{e5ff}";
 /// An open folder's glyph.
 pub const FOLDER_OPEN: &str = "\u{e5fe}";
 
+/// A closed folder's glyph when nothing is listed inside it.
+pub const FOLDER_EMPTY: &str = "\u{f114}";
+
+/// An open folder's glyph when nothing is listed inside it.
+pub const FOLDER_EMPTY_OPEN: &str = "\u{f115}";
+
+/// The glyph of a folder that is a symbolic link, open or closed.
+pub const FOLDER_LINK: &str = "\u{f482}";
+
+/// The glyph of a file that is a symbolic link.
+pub const FILE_LINK: &str = "\u{f481}";
+
+/// The arrow in front of a closed folder.
+pub const ARROW_CLOSED: &str = "\u{f460}";
+
+/// The arrow in front of an open folder.
+pub const ARROW_OPEN: &str = "\u{f47c}";
+
+/// What stands between a symbolic link's name and its target.
+pub const LINK_ARROW: &str = " \u{279b} ";
+
 /// The glyph a file with no entry of its own opens with.
 pub const DEFAULT_FILE: Devicon = Devicon {
     glyph: "\u{f0f6}",
@@ -80,6 +103,8 @@ pub const DEFAULT_FILE: Devicon = Devicon {
 
 /// Exact file names, lower-cased, sorted for the binary search.
 const BY_NAME: &[(&str, &str, u32)] = &[
+    (".editorconfig", "\u{e652}", 0x00ff_f2f2),
+    (".env", "\u{f462}", 0x00fa_f743),
     (".git-blame-ignore-revs", "\u{e702}", 0x00f5_4d27),
     (".gitattributes", "\u{e702}", 0x00f5_4d27),
     (".gitconfig", "\u{e615}", 0x00f5_4d27),
@@ -88,9 +113,11 @@ const BY_NAME: &[(&str, &str, u32)] = &[
     ("commit_editmsg", "\u{e702}", 0x00f5_4d27),
     ("copying", "\u{e60a}", 0x00cb_cb41),
     ("dockerfile", "\u{f0868}", 0x0045_8ee6),
+    ("justfile", "\u{f0ad}", 0x006d_8086),
     ("license", "\u{e60a}", 0x00d0_bf41),
     ("license.md", "\u{e60a}", 0x00d0_bf41),
     ("makefile", "\u{e779}", 0x006d_8086),
+    ("readme", "\u{f00ba}", 0x00ed_eded),
     ("readme.md", "\u{f00ba}", 0x00ed_eded),
     ("taskfile.yaml", "\u{f01a6}", 0x0069_d3c9),
     ("taskfile.yml", "\u{f01a6}", 0x0069_d3c9),
@@ -196,6 +223,14 @@ mod tests {
         assert_eq!(file_icon(".gitignore").glyph, "\u{e702}");
         assert_eq!(file_icon("Cargo.lock").glyph, "\u{e672}");
         assert_eq!(file_icon("archive.tar.json").glyph, "\u{e60b}");
+    }
+
+    #[test]
+    fn tree_icon_covers_a_bare_readme_and_the_common_dotfiles() {
+        assert_eq!(file_icon("README").glyph, "\u{f00ba}");
+        assert_eq!(file_icon(".env").color, 0x00fa_f743);
+        assert_eq!(file_icon(".editorconfig").glyph, "\u{e652}");
+        assert_eq!(file_icon("justfile").glyph, "\u{f0ad}");
     }
 
     #[test]

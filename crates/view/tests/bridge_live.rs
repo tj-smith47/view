@@ -548,7 +548,7 @@ fn the_colors_a_painter_reads_change_when_the_scheme_does() {
 /// every notice level with the foreground that scheme gives its
 /// `Diagnostic*` group.
 #[test]
-fn the_accent_probe_reads_each_diagnostic_levels_foreground() {
+fn the_accent_probe_reads_each_diagnostic_level_and_syntax_foreground() {
     let session = Session::start("accent-levels", "");
     let mut m = model();
     let fg = |group: &str| {
@@ -563,16 +563,22 @@ fn the_accent_probe_reads_each_diagnostic_levels_foreground() {
         info: fg("DiagnosticInfo"),
         hint: fg("DiagnosticHint"),
     };
+    let expected_syntax = view_core::hl::SyntaxColors {
+        constant: fg("Constant"),
+        preproc: fg("PreProc"),
+        comment: fg("Comment"),
+    };
 
     session.engine.handle.probe_accent_hl(7).unwrap();
-    let levels = session.wait_for(&mut m, ARRIVAL, |msg| match msg {
+    let reply = session.wait_for(&mut m, ARRIVAL, |msg| match msg {
         Msg::AccentProbeReply {
             generation: 7,
             levels,
+            syntax,
             ..
-        } => Some(*levels),
+        } => Some((*levels, *syntax)),
         _ => None,
     });
 
-    assert_eq!(levels, Some(expected));
+    assert_eq!(reply, Some((expected, expected_syntax)));
 }

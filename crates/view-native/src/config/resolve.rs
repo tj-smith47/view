@@ -2016,7 +2016,9 @@ mod tests {
         );
         let notices = resolved.notices().join("\n");
         assert!(
-            notices.contains("emoji") && notices.contains("[ui] tree_icons"),
+            notices.contains("emoji")
+                && notices.contains("[ui] tree_icons")
+                && notices.contains(TREE_ICONS_EXPECTED),
             "{notices:?}"
         );
     }

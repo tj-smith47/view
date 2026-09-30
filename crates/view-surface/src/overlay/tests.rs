@@ -623,41 +623,113 @@ fn an_undecorated_tree_row_carries_only_plain_spans() {
     );
 }
 
+fn tree_row_text(row: &view_core::native::views::TreeRow, icons: TreeIcons) -> String {
+    tree_row_spans(row, icons)
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect()
+}
+
 #[test]
-fn a_nerd_tree_row_opens_with_its_folder_or_file_glyph() {
-    use view_core::native::devicons::{file_icon, FOLDER_CLOSED, FOLDER_OPEN};
-    use view_core::native::views::{GitMark, TreeRow};
-    let text = |row: &TreeRow, icons| {
-        tree_row_spans(row, icons)
-            .iter()
-            .map(|s| s.text.as_str())
-            .collect::<String>()
+fn a_nerd_tree_row_opens_with_its_arrow_and_its_folder_or_file_glyph() {
+    use view_core::native::devicons::{
+        file_icon, ARROW_CLOSED, ARROW_OPEN, FOLDER_CLOSED, FOLDER_OPEN,
     };
+    use view_core::native::views::{GitMark, TreeRow};
     let open = TreeRow::dir(0, "src", true);
     let shut = TreeRow::dir(1, "target", false);
-    assert_eq!(text(&open, TreeIcons::Nerd), format!("{FOLDER_OPEN} src"));
     assert_eq!(
-        text(&shut, TreeIcons::Nerd),
-        format!("  {FOLDER_CLOSED} target")
+        tree_row_text(&open, TreeIcons::Nerd),
+        format!("{ARROW_OPEN} {FOLDER_OPEN} src")
     );
-    assert_eq!(text(&open, TreeIcons::None), "- src");
-    assert_eq!(text(&shut, TreeIcons::None), "  + target");
+    assert_eq!(
+        tree_row_text(&shut, TreeIcons::Nerd),
+        format!("  {ARROW_CLOSED} {FOLDER_CLOSED} target")
+    );
+    assert_eq!(tree_row_text(&open, TreeIcons::None), "- src");
+    assert_eq!(tree_row_text(&shut, TreeIcons::None), "  + target");
 
     let spans = tree_row_spans(&open, TreeIcons::Nerd);
-    assert_eq!(spans[1].role, StyleRole::TreeFolder, "{spans:?}");
-
-    let rust = TreeRow::leaf(0, "main.rs").with_status(Some(GitMark::Added));
-    let spans = tree_row_spans(&rust, TreeIcons::Nerd);
-    let icon = file_icon("main.rs");
-    assert_eq!(spans[1].text, icon.glyph, "{spans:?}");
-    assert_eq!(spans[1].role, StyleRole::Devicon(0x00de_a584), "{spans:?}");
+    assert_eq!(spans[1].role, StyleRole::TreeFolder, "the arrow: {spans:?}");
     assert_eq!(
-        text(&rust, TreeIcons::Nerd),
-        format!("{} A main.rs", icon.glyph)
+        spans[2].role,
+        StyleRole::TreeFolder,
+        "the folder: {spans:?}"
     );
 
+    let icon = file_icon("main.rs");
+    let rust = TreeRow::leaf(1, "main.rs")
+        .with_icon(icon)
+        .with_status(Some(GitMark::Added));
+    let spans = tree_row_spans(&rust, TreeIcons::Nerd);
+    assert_eq!(spans[1].text, "  ", "a file's arrow column: {spans:?}");
+    assert_eq!(spans[2].text, icon.glyph, "{spans:?}");
+    assert_eq!(spans[2].role, StyleRole::Devicon(0x00de_a584), "{spans:?}");
+    assert_eq!(
+        tree_row_text(&rust, TreeIcons::Nerd),
+        format!("    {} main.rs", icon.glyph)
+    );
+    assert_eq!(tree_row_text(&rust, TreeIcons::None), "    A main.rs");
+
     let unknown = tree_row_spans(&TreeRow::leaf(0, "notes.zzz"), TreeIcons::Nerd);
-    assert_eq!(unknown[1].text, devicons::DEFAULT_FILE.glyph, "{unknown:?}");
+    assert_eq!(unknown[2].text, devicons::DEFAULT_FILE.glyph, "{unknown:?}");
+}
+
+#[test]
+fn a_nerd_tree_row_draws_its_git_states_as_glyphs_in_order() {
+    use view_core::native::views::{GitIcons, GitMark, TreeRow};
+    let both = TreeRow::leaf(0, "both.rs")
+        .with_status(Some(GitMark::Modified))
+        .with_git(GitIcons::from_xy("MM"));
+    let spans = tree_row_spans(&both, TreeIcons::Nerd);
+    let git: Vec<_> = spans
+        .iter()
+        .filter(|s| matches!(s.role, StyleRole::GitStaged | StyleRole::GitDirty))
+        .map(|s| (s.text.as_str(), s.role))
+        .collect();
+    assert_eq!(
+        git,
+        [
+            ("\u{2713} ", StyleRole::GitStaged),
+            ("\u{2717} ", StyleRole::GitDirty)
+        ],
+        "{spans:?}"
+    );
+    assert_eq!(tree_row_text(&both, TreeIcons::None), "  M both.rs");
+
+    let folder = TreeRow::dir(0, "src", false).with_git(GitIcons::from_xy("??"));
+    assert!(tree_row_text(&folder, TreeIcons::Nerd).ends_with("\u{2605} src"));
+    assert_eq!(tree_row_text(&folder, TreeIcons::None), "+ src");
+}
+
+#[test]
+fn a_nerd_tree_row_marks_an_empty_folder_and_a_link() {
+    use view_core::native::devicons::{
+        ARROW_CLOSED, ARROW_OPEN, FILE_LINK, FOLDER_EMPTY, FOLDER_EMPTY_OPEN, FOLDER_LINK,
+    };
+    use view_core::native::views::TreeRow;
+    let shut = TreeRow::dir(0, "hollow", false).with_empty(true);
+    let open = TreeRow::dir(0, "hollow", true).with_empty(true);
+    assert_eq!(
+        tree_row_text(&shut, TreeIcons::Nerd),
+        format!("{ARROW_CLOSED} {FOLDER_EMPTY} hollow")
+    );
+    assert_eq!(
+        tree_row_text(&open, TreeIcons::Nerd),
+        format!("{ARROW_OPEN} {FOLDER_EMPTY_OPEN} hollow")
+    );
+
+    let linked = TreeRow::dir(0, "docs", false).with_link("../shared/docs");
+    assert_eq!(
+        tree_row_text(&linked, TreeIcons::Nerd),
+        format!("{ARROW_CLOSED} {FOLDER_LINK} docs \u{279b} ../shared/docs")
+    );
+    let file = TreeRow::leaf(0, "b.txt").with_link("a.txt");
+    assert_eq!(
+        tree_row_text(&file, TreeIcons::Nerd),
+        format!("  {FILE_LINK} b.txt \u{279b} a.txt")
+    );
+    assert_eq!(tree_row_text(&file, TreeIcons::None), "  b.txt -> a.txt");
 }
 
 #[test]

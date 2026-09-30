@@ -17,8 +17,7 @@ use super::geometry::LIST_MARKER_COLS;
 use crate::theme::ChromeGroup;
 
 /// What a [`Span`]'s text means, resolved to a concrete [`crate::theme::ResolvedStyle`]
-/// through the active colorscheme. [`StyleRole::Devicon`] is the one role
-/// that carries its colour itself.
+/// through the active colorscheme.
 ///
 /// The single vocabulary both painters (`view-tui`'s terminal backend and
 /// `view-oracle`'s raster) resolve through [`StyleRole::chrome_group`]: a
@@ -32,10 +31,9 @@ pub enum StyleRole {
     /// Unstyled text: rendered in whatever base style the row it sits on
     /// already carries (a popup's `Pmenu` colors, the statusline's own
     /// `StatusLine` colors). Every overlay that has never needed more than
-    /// one style per row -- the picker, the palette, the prompt, the
-    /// message log -- paints entirely in this role; a tree row does too
-    /// unless it carries a [`GitMark`], which adds one glyph span in a
-    /// `Git*` role of its own.
+    /// one style per row -- the palette, the prompt, the message log --
+    /// paints entirely in this role. A tree row's name and indentation
+    /// are in it too.
     #[default]
     Plain,
     /// The statusline's mode text (`-- INSERT --`, `recording @q`, ...),
@@ -146,10 +144,21 @@ pub enum StyleRole {
     /// A tree row's folder glyph, in the colorscheme's directory colour.
     TreeFolder,
     /// A tree row's file-type glyph, painted in the `0xRRGGBB` colour its
-    /// [`crate::native::devicons::Devicon`] carries. The one role that
-    /// names a colour itself: a file-type icon keeps its colour across
-    /// colorschemes, the way nvim-web-devicons paints it.
+    /// [`crate::native::devicons::Devicon`] carries, the same under every
+    /// colorscheme, the way nvim-web-devicons paints it.
     Devicon(u32),
+    /// A tree row's git glyph for a change not yet staged or a deletion,
+    /// in the colorscheme's `Statement` colour.
+    GitDirty,
+    /// A tree row's git glyph for a staged change or a merge conflict, in
+    /// the colorscheme's `Constant` colour.
+    GitStaged,
+    /// A tree row's git glyph for an untracked or renamed entry, in the
+    /// colorscheme's `PreProc` colour.
+    GitNew,
+    /// A tree row's git glyph for an ignored entry, in the colorscheme's
+    /// `Comment` colour.
+    GitIgnored,
 }
 
 /// How much a notice asks of the person reading it, which picks the colour
@@ -170,8 +179,8 @@ pub enum NoticeLevel {
 impl StyleRole {
     /// The [`ChromeGroup`] this role resolves through, or `None` for
     /// [`StyleRole::Plain`] and the three notice roles, which paint in
-    /// whatever base style their row already carries, and for
-    /// [`StyleRole::Devicon`], which names its own colour.
+    /// whatever base style their row already carries, and for the roles
+    /// [`crate::theme::Theme::role_fg`] colours.
     #[must_use]
     pub const fn chrome_group(self) -> Option<ChromeGroup> {
         match self {
@@ -202,8 +211,36 @@ impl StyleRole {
             Self::AiToolFailed => Some(ChromeGroup::ErrorMsg),
             Self::Warning => Some(ChromeGroup::WarningMsg),
             Self::TreeFolder => Some(ChromeGroup::Directory),
-            Self::NoticeError | Self::NoticeWarn | Self::NoticeHint | Self::Devicon(_) => None,
+            Self::NoticeError
+            | Self::NoticeWarn
+            | Self::NoticeHint
+            | Self::Devicon(_)
+            | Self::GitDirty
+            | Self::GitStaged
+            | Self::GitNew
+            | Self::GitIgnored => None,
         }
+    }
+
+    /// Whether a span in this role keeps its own foreground on a selected
+    /// row. A tree row's glyphs do, so the folder, the file type and the
+    /// git state still read on the cursor line; its name takes the
+    /// selection's colours.
+    #[must_use]
+    pub const fn keeps_fg_on_selection(self) -> bool {
+        matches!(
+            self,
+            Self::TreeFolder
+                | Self::Devicon(_)
+                | Self::GitModified
+                | Self::GitAdded
+                | Self::GitDeleted
+                | Self::GitUntracked
+                | Self::GitDirty
+                | Self::GitStaged
+                | Self::GitNew
+                | Self::GitIgnored
+        )
     }
 
     /// The level of the notice a toast line in this role belongs to.
@@ -381,6 +418,7 @@ pub enum GitMark {
     Copied,
     Conflicted,
     Untracked,
+    Ignored,
 }
 
 impl GitMark {
@@ -395,6 +433,7 @@ impl GitMark {
             Self::Copied => 'C',
             Self::Conflicted => 'U',
             Self::Untracked => '?',
+            Self::Ignored => '!',
         }
     }
 
@@ -409,7 +448,123 @@ impl GitMark {
             Self::Modified | Self::Renamed => StyleRole::GitModified,
             Self::Deleted | Self::Conflicted => StyleRole::GitDeleted,
             Self::Untracked => StyleRole::GitUntracked,
+            Self::Ignored => StyleRole::GitIgnored,
         }
+    }
+}
+
+/// One of the git states a tree row draws a Nerd Font glyph for, in the
+/// order a row draws them.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GitIcon {
+    Staged,
+    Unstaged,
+    Renamed,
+    Deleted,
+    Unmerged,
+    Untracked,
+    Ignored,
+}
+
+impl GitIcon {
+    /// Every state, in the order a row draws them.
+    pub const ALL: [Self; 7] = [
+        Self::Staged,
+        Self::Unstaged,
+        Self::Renamed,
+        Self::Deleted,
+        Self::Unmerged,
+        Self::Untracked,
+        Self::Ignored,
+    ];
+
+    /// The glyph a row draws for this state.
+    #[must_use]
+    pub const fn glyph(self) -> &'static str {
+        match self {
+            Self::Staged => "\u{2713}",
+            Self::Unstaged => "\u{2717}",
+            Self::Renamed => "\u{279c}",
+            Self::Deleted => "\u{f458}",
+            Self::Unmerged => "\u{e727}",
+            Self::Untracked => "\u{2605}",
+            Self::Ignored => "\u{25cc}",
+        }
+    }
+
+    /// The [`StyleRole`] this state's glyph is painted in.
+    #[must_use]
+    pub const fn style_role(self) -> StyleRole {
+        match self {
+            Self::Staged | Self::Unmerged => StyleRole::GitStaged,
+            Self::Unstaged | Self::Deleted => StyleRole::GitDirty,
+            Self::Renamed | Self::Untracked => StyleRole::GitNew,
+            Self::Ignored => StyleRole::GitIgnored,
+        }
+    }
+
+    const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+/// The git states one tree row carries: a file's own, or on a folder
+/// every state found beneath it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct GitIcons(u8);
+
+impl GitIcons {
+    /// The set holding `icons`.
+    #[must_use]
+    pub fn of(icons: &[GitIcon]) -> Self {
+        Self(icons.iter().fold(0, |bits, icon| bits | icon.bit()))
+    }
+
+    /// The states `git status --porcelain=v2` reports as the two-character
+    /// code `xy`, where `.` or a space is an unchanged side, `?` untracked
+    /// and `!` ignored.
+    #[must_use]
+    pub fn from_xy(xy: &str) -> Self {
+        use GitIcon::{Deleted, Ignored, Renamed, Staged, Unmerged, Unstaged, Untracked};
+        let mut chars = xy.chars().map(|c| if c == '.' { ' ' } else { c });
+        let (Some(x), Some(y)) = (chars.next(), chars.next()) else {
+            return Self::default();
+        };
+        let icons: &[GitIcon] = match (x, y) {
+            ('M' | 'C' | 'T' | 'A', ' ') | ('M', 'D') | ('A', 'D') => &[Staged],
+            (' ', 'M' | 'C' | 'T') | ('C', 'M') | ('D', 'A') => &[Unstaged],
+            ('T' | 'M' | 'A', 'M') => &[Staged, Unstaged],
+            (' ', 'A') | ('?', '?') => &[Untracked],
+            ('A', 'A' | 'U') => &[Unmerged, Untracked],
+            ('R', ' ') | (' ', 'R') => &[Renamed],
+            ('R', 'M') => &[Unstaged, Renamed],
+            ('U', 'U' | 'D' | 'A') => &[Unmerged],
+            (' ', 'D') | ('D' | 'R', ' ' | 'D') => &[Deleted],
+            ('D', 'U') => &[Deleted, Unmerged],
+            ('!', '!') => &[Ignored],
+            _ => &[Unstaged],
+        };
+        Self::of(icons)
+    }
+
+    /// Every state in either set.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether the set holds no state.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The states in the set, in the order a row draws them.
+    pub fn iter(self) -> impl Iterator<Item = GitIcon> {
+        GitIcon::ALL
+            .into_iter()
+            .filter(move |icon| self.0 & icon.bit() != 0)
     }
 }
 
@@ -431,6 +586,18 @@ pub struct TreeRow {
     /// common case, and the only possible case with `git` absent from
     /// `PATH` -- see [`GitMark`]'s doc). Absence is not an error.
     pub status: Option<GitMark>,
+    /// The git states the row draws glyphs for: a file's own, or on a
+    /// folder every state beneath it.
+    pub git: GitIcons,
+    /// A file's icon, resolved when the tree took its entries. `None` on a
+    /// folder, and on a file row built without one, which draws
+    /// [`crate::native::devicons::DEFAULT_FILE`].
+    pub icon: Option<crate::native::devicons::Devicon>,
+    /// Where a symbolic link points, as the row shows it, or `None` for an
+    /// entry that is no link.
+    pub link: Option<String>,
+    /// Whether a folder lists nothing inside it.
+    pub empty: bool,
 }
 
 impl TreeRow {
@@ -441,7 +608,7 @@ impl TreeRow {
             depth,
             label: label.into(),
             expanded: None,
-            status: None,
+            ..Self::default()
         }
     }
 
@@ -452,7 +619,7 @@ impl TreeRow {
             depth,
             label: label.into(),
             expanded: Some(expanded),
-            status: None,
+            ..Self::default()
         }
     }
 
@@ -460,6 +627,37 @@ impl TreeRow {
     #[must_use]
     pub fn with_status(self, status: Option<GitMark>) -> Self {
         Self { status, ..self }
+    }
+
+    /// The same row drawing glyphs for the git states in `git`.
+    #[must_use]
+    pub fn with_git(self, git: GitIcons) -> Self {
+        Self { git, ..self }
+    }
+
+    /// The same row opening with `icon`.
+    #[must_use]
+    pub fn with_icon(self, icon: crate::native::devicons::Devicon) -> Self {
+        Self {
+            icon: Some(icon),
+            ..self
+        }
+    }
+
+    /// The same row as a symbolic link pointing at `target`.
+    #[must_use]
+    pub fn with_link(self, target: impl Into<String>) -> Self {
+        Self {
+            link: Some(target.into()),
+            ..self
+        }
+    }
+
+    /// The same row as a folder that lists nothing inside it, when
+    /// `empty`.
+    #[must_use]
+    pub fn with_empty(self, empty: bool) -> Self {
+        Self { empty, ..self }
     }
 }
 
@@ -1310,6 +1508,37 @@ mod tests {
 
         let decorated = TreeRow::leaf(0, "main.rs").with_status(Some(GitMark::Added));
         assert_eq!(decorated.status, Some(GitMark::Added));
+    }
+
+    #[test]
+    fn tree_git_icons_split_staged_from_unstaged_and_draw_in_order() {
+        let glyphs = |xy: &str| {
+            GitIcons::from_xy(xy)
+                .iter()
+                .map(GitIcon::glyph)
+                .collect::<String>()
+        };
+        assert_eq!(glyphs("MM"), "\u{2713}\u{2717}");
+        assert_eq!(glyphs("M."), "\u{2713}");
+        assert_eq!(glyphs(".M"), "\u{2717}");
+        assert_eq!(glyphs("RM"), "\u{2717}\u{279c}");
+        assert_eq!(glyphs("DU"), "\u{f458}\u{e727}");
+        assert_eq!(glyphs("??"), "\u{2605}");
+        assert_eq!(glyphs("!!"), "\u{25cc}");
+
+        let folded = GitIcons::of(&[GitIcon::Untracked])
+            .union(GitIcons::from_xy(".M"))
+            .union(GitIcons::from_xy("A."));
+        assert_eq!(
+            folded.iter().collect::<Vec<_>>(),
+            [GitIcon::Staged, GitIcon::Unstaged, GitIcon::Untracked]
+        );
+        assert_eq!(GitIcon::Staged.style_role(), StyleRole::GitStaged);
+        assert_eq!(GitIcon::Unmerged.style_role(), StyleRole::GitStaged);
+        assert_eq!(GitIcon::Unstaged.style_role(), StyleRole::GitDirty);
+        assert_eq!(GitIcon::Deleted.style_role(), StyleRole::GitDirty);
+        assert_eq!(GitIcon::Renamed.style_role(), StyleRole::GitNew);
+        assert_eq!(GitIcon::Untracked.style_role(), StyleRole::GitNew);
     }
 
     #[test]

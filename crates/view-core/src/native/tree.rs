@@ -23,7 +23,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::views::{GitMark, TreeRow, TreeView};
+use super::devicons::{self, Devicon};
+use super::views::{GitIcons, GitMark, TreeRow, TreeView};
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -47,6 +48,11 @@ pub struct TreeEntry {
     pub path: PathBuf,
     pub is_dir: bool,
     pub depth: u16,
+    /// Where a symbolic link points, as the row shows it.
+    pub link: Option<String>,
+    /// A file's icon, looked up once here so a frame never repeats the
+    /// lookup.
+    pub icon: Option<Devicon>,
 }
 
 impl TreeEntry {
@@ -57,10 +63,26 @@ impl TreeEntry {
     /// caller outside it that ever builds one.
     #[must_use]
     pub fn new(path: PathBuf, is_dir: bool, depth: u16) -> Self {
+        let icon = (!is_dir).then(|| {
+            path.file_name().map_or(devicons::DEFAULT_FILE, |name| {
+                devicons::file_icon(&name.to_string_lossy())
+            })
+        });
         Self {
             path,
             is_dir,
             depth,
+            link: None,
+            icon,
+        }
+    }
+
+    /// The same entry as a symbolic link pointing at `target`.
+    #[must_use]
+    pub fn with_link(self, target: impl Into<String>) -> Self {
+        Self {
+            link: Some(target.into()),
+            ..self
         }
     }
 }
@@ -74,6 +96,8 @@ impl TreeEntry {
 pub struct GitEntry {
     pub path: PathBuf,
     pub mark: GitMark,
+    /// Every git state the entry is in, which a row draws as glyphs.
+    pub icons: GitIcons,
 }
 
 impl GitEntry {
@@ -82,7 +106,17 @@ impl GitEntry {
     /// this constructor exists rather than a struct literal.
     #[must_use]
     pub fn new(path: PathBuf, mark: GitMark) -> Self {
-        Self { path, mark }
+        Self {
+            path,
+            mark,
+            icons: GitIcons::default(),
+        }
+    }
+
+    /// The same entry in the git states `icons`.
+    #[must_use]
+    pub fn with_icons(self, icons: GitIcons) -> Self {
+        Self { icons, ..self }
     }
 }
 
@@ -97,7 +131,10 @@ pub struct TreeState {
     selected: usize,
     generation: u64,
     git_generation: u64,
-    git_status: HashMap<PathBuf, GitMark>,
+    /// Each path's own mark, and the git states found at it or anywhere
+    /// beneath it, folded once per git reply so a frame reads one entry
+    /// per row.
+    git_status: HashMap<PathBuf, (Option<GitMark>, GitIcons)>,
     /// Whether a `git_generation` scan has been issued and not yet replied
     /// to. Every bridge write/focus callback while a tree is open asks for
     /// a refresh, so a slow `git status` on a large repo can still be
@@ -212,7 +249,20 @@ impl TreeState {
         if generation != self.git_generation {
             return false;
         }
-        self.git_status = status.into_iter().map(|e| (e.path, e.mark)).collect();
+        let mut folded: HashMap<PathBuf, (Option<GitMark>, GitIcons)> = HashMap::new();
+        for entry in status {
+            for ancestor in entry.path.ancestors().skip(1) {
+                if ancestor.as_os_str().is_empty() {
+                    break;
+                }
+                let slot = folded.entry(ancestor.to_path_buf()).or_default();
+                slot.1 = slot.1.union(entry.icons);
+            }
+            let slot = folded.entry(entry.path).or_default();
+            slot.0 = Some(entry.mark);
+            slot.1 = slot.1.union(entry.icons);
+        }
+        self.git_status = folded;
         self.git_refresh_in_flight = false;
         std::mem::take(&mut self.git_refresh_pending)
     }
@@ -302,18 +352,36 @@ impl TreeState {
             .iter()
             .map(|&i| {
                 let entry = &self.entries[i];
-                let mark = self.git_status.get(&entry.path).copied();
+                let (mark, git) = self
+                    .git_status
+                    .get(&entry.path)
+                    .copied()
+                    .unwrap_or_default();
                 let label = entry
                     .path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| entry.path.to_string_lossy().into_owned());
-                let row = if entry.is_dir {
+                let mut row = if entry.is_dir {
+                    // depth-first order puts a folder's first child right
+                    // after it, so a folder is empty when the next entry
+                    // does not sit deeper
+                    let empty = self
+                        .entries
+                        .get(i + 1)
+                        .is_none_or(|next| next.depth <= entry.depth);
                     TreeRow::dir(entry.depth, label, self.expanded.contains(&entry.path))
+                        .with_empty(empty)
                 } else {
                     TreeRow::leaf(entry.depth, label)
                 };
-                row.with_status(mark)
+                if let Some(icon) = entry.icon {
+                    row = row.with_icon(icon);
+                }
+                if let Some(link) = &entry.link {
+                    row = row.with_link(link.clone());
+                }
+                row.with_status(mark).with_git(git)
             })
             .collect();
         let mut view = TreeView::new(title(&self.root)).with_rows(rows);
@@ -339,11 +407,7 @@ mod tests {
     use super::*;
 
     fn entry(path: &str, is_dir: bool, depth: u16) -> TreeEntry {
-        TreeEntry {
-            path: PathBuf::from(path),
-            is_dir,
-            depth,
-        }
+        TreeEntry::new(PathBuf::from(path), is_dir, depth)
     }
 
     fn sample_entries() -> Vec<TreeEntry> {
@@ -431,10 +495,10 @@ mod tests {
             .expect("nothing else is in flight yet");
         let _ = tree.apply_git(
             git_gen,
-            vec![GitEntry {
-                path: PathBuf::from("Cargo.toml"),
-                mark: GitMark::Modified,
-            }],
+            vec![GitEntry::new(
+                PathBuf::from("Cargo.toml"),
+                GitMark::Modified,
+            )],
         );
         let decorated = tree.view();
         let cargo = decorated
@@ -469,12 +533,93 @@ mod tests {
             .expect("nothing else is in flight yet");
         let _ = tree.apply_git(
             current + 1,
-            vec![GitEntry {
-                path: PathBuf::from("Cargo.toml"),
-                mark: GitMark::Modified,
-            }],
+            vec![GitEntry::new(
+                PathBuf::from("Cargo.toml"),
+                GitMark::Modified,
+            )],
         );
         assert!(tree.view().rows.iter().all(|row| row.status.is_none()));
+    }
+
+    #[test]
+    fn a_tree_folder_carries_every_git_state_beneath_it() {
+        use crate::native::views::GitIcon;
+        let mut tree = TreeState::open(PathBuf::from("/repo"));
+        let scan_gen = tree.generation();
+        tree.apply_scan(
+            scan_gen,
+            vec![
+                entry("a", true, 0),
+                entry("a/b", true, 1),
+                entry("a/b/new.rs", false, 2),
+                entry("a/both.rs", false, 1),
+                entry("c", true, 0),
+                entry("c/clean.rs", false, 1),
+            ],
+        );
+        tree.toggle_expand(0);
+        tree.toggle_expand(1);
+        let git_gen = tree.request_git_refresh().expect("nothing in flight");
+        let _ = tree.apply_git(
+            git_gen,
+            vec![
+                GitEntry::new("a/b/new.rs".into(), GitMark::Untracked)
+                    .with_icons(GitIcons::from_xy("??")),
+                GitEntry::new("a/both.rs".into(), GitMark::Modified)
+                    .with_icons(GitIcons::from_xy("MM")),
+            ],
+        );
+        let view = tree.view();
+        let git = |label: &str| {
+            view.rows
+                .iter()
+                .find(|row| row.label == label)
+                .map(|row| row.git.iter().collect::<Vec<_>>())
+                .expect("the row is listed")
+        };
+        assert_eq!(
+            git("a"),
+            [GitIcon::Staged, GitIcon::Unstaged, GitIcon::Untracked]
+        );
+        assert_eq!(git("b"), [GitIcon::Untracked]);
+        assert_eq!(git("both.rs"), [GitIcon::Staged, GitIcon::Unstaged]);
+        assert_eq!(git("c"), []);
+        let a = view.rows.iter().find(|row| row.label == "a");
+        assert_eq!(a.and_then(|row| row.status), None, "a folder has no letter");
+    }
+
+    #[test]
+    fn a_tree_folder_with_nothing_listed_inside_is_empty() {
+        let mut tree = TreeState::open(PathBuf::from("/repo"));
+        let scan_gen = tree.generation();
+        tree.apply_scan(
+            scan_gen,
+            vec![
+                entry("full", true, 0),
+                entry("full/a.rs", false, 1),
+                entry("hollow", true, 0),
+                entry("last", true, 0),
+            ],
+        );
+        let empty: Vec<_> = tree.view().rows.iter().map(|row| row.empty).collect();
+        assert_eq!(empty, [false, true, true]);
+    }
+
+    #[test]
+    fn a_tree_file_row_carries_the_icon_its_entry_resolved() {
+        let mut tree = TreeState::open(PathBuf::from("/repo"));
+        let scan_gen = tree.generation();
+        tree.apply_scan(
+            scan_gen,
+            vec![
+                entry("main.rs", false, 0),
+                TreeEntry::new("docs".into(), true, 0).with_link("../shared/docs"),
+            ],
+        );
+        let view = tree.view();
+        assert_eq!(view.rows[0].icon, Some(devicons::file_icon("main.rs")));
+        assert_eq!(view.rows[1].icon, None);
+        assert_eq!(view.rows[1].link.as_deref(), Some("../shared/docs"));
     }
 
     #[test]

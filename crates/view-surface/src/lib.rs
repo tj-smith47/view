@@ -1811,6 +1811,32 @@ mod tests {
         assert!(!view.title.is_empty(), "a tree layer must carry a title");
     }
 
+    /// The tree layer carries the glyph set the session draws, so a forced
+    /// `[ui] tree_icons` reaches the floating tree's rows.
+    #[test]
+    fn an_open_tree_overlay_carries_the_glyph_set_the_session_draws() {
+        use view_core::native::devicons::TreeIcons;
+        use view_core::native::geometry::{Anchor, OverlayBox};
+        use view_core::native::tree::TreeState;
+
+        for forced in [TreeIcons::Nerd, TreeIcons::None] {
+            let mut model = model_with_grid(40, 12).with_tree_icons(Some(forced));
+            model.term_width = 40;
+            model.term_height = 12;
+            let tree = TreeState::open(std::path::PathBuf::from("/tmp/example"));
+            model.push_overlay(
+                OverlayBox::new(30, 100).with_anchor(Anchor::Left),
+                OverlayKind::Tree(tree),
+            );
+            let surface = render(&model);
+            let icons = surface.layers.iter().find_map(|l| match &l.kind {
+                LayerKind::Tree(view) => Some(view.icons),
+                _ => None,
+            });
+            assert_eq!(icons, Some(forced), "forced {forced:?}");
+        }
+    }
+
     /// The busy modal paints, and paints its choices -- the same silent-
     /// wildcard hazard the tree test above exists for, applied to the
     /// overlay a user only ever sees when something has already gone wrong.

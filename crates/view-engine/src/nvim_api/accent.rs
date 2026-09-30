@@ -1,8 +1,10 @@
-//! The accent role's probe, which also reads the notice levels' colours.
+//! The accent role's probe, which also reads the notice levels' colours
+//! and the syntax colours a tree row's git glyphs take.
 //!
 //! nvim's `hl_group_set` broadcast covers the builtin UI groups alone.
-//! `Function` and `Statement` are syntax groups and the `Diagnostic*`
-//! groups are none of the UI ones, so these colours are read by asking.
+//! `Function`, `Statement`, `Constant`, `PreProc` and `Comment` are syntax
+//! groups and the `Diagnostic*` groups are none of the UI ones, so these
+//! colours are read by asking.
 
 /// Reads every foreground in one round trip, following every link to the
 /// group that actually carries the colour.
@@ -23,4 +25,7 @@ return {\n\
   warn = fg('DiagnosticWarn'),\n\
   info = fg('DiagnosticInfo'),\n\
   hint = fg('DiagnosticHint'),\n\
+  constant = fg('Constant'),\n\
+  preproc = fg('PreProc'),\n\
+  comment = fg('Comment'),\n\
 }\n";

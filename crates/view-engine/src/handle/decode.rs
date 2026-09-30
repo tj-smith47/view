@@ -840,15 +840,14 @@ pub(super) fn decode_delete_confirm_reply(result: &Value) -> DeleteConfirmOutcom
 /// for that channel rather than erroring: a malformed reply is exactly as
 /// informative as an absent key for this probe's purposes.
 /// The accent probe's reply: `Function`'s and `Statement`'s foregrounds,
-/// and the four diagnostic levels'.
+/// the four diagnostic levels', and `Constant`'s, `PreProc`'s and
+/// `Comment`'s.
 ///
 /// A key the chunk left out is a colorscheme that sets no foreground for
 /// that group, which is what the theme's fallback order exists for.
-pub(super) fn decode_accent_probe_reply(
-    result: &Value,
-) -> (Option<u32>, Option<u32>, view_core::hl::LevelColors) {
+pub(super) fn decode_accent_probe_reply(result: &Value) -> AccentProbe {
     let Some(map) = result.as_map() else {
-        return (None, None, view_core::hl::LevelColors::default());
+        return AccentProbe::default();
     };
     let get = |key: &str| {
         crate::wire::map_find(map, key)
@@ -861,8 +860,23 @@ pub(super) fn decode_accent_probe_reply(
         info: get("info"),
         hint: get("hint"),
     };
-    (get("function"), get("statement"), levels)
+    let syntax = view_core::hl::SyntaxColors {
+        constant: get("constant"),
+        preproc: get("preproc"),
+        comment: get("comment"),
+    };
+    (get("function"), get("statement"), levels, syntax)
 }
+
+/// What [`decode_accent_probe_reply`] reads: `Function`'s and
+/// `Statement`'s foregrounds, the diagnostic levels' and the syntax
+/// colours.
+pub(super) type AccentProbe = (
+    Option<u32>,
+    Option<u32>,
+    view_core::hl::LevelColors,
+    view_core::hl::SyntaxColors,
+);
 
 pub(super) fn decode_hl_probe_reply(result: &Value) -> (Option<u32>, Option<u32>) {
     let Some(map) = result.as_map() else {
