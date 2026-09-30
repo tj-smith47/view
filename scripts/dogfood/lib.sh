@@ -48,8 +48,12 @@ new_cap_session() {
   # tmux entry.
   term=tmux-256color
   infocmp "$term" >/dev/null 2>&1 || term=xterm-256color
+  # a window smaller than its client is padded with dots by default, and a
+  # tape that shrinks the window records them as a pattern over the vacated
+  # region
   tmux -L "$socket" set-option -g status off \; \
     set-option -g default-terminal "$term" \; \
+    set-option -g fill-character " " \; \
     new-session -d -s cap -x "$cols" -y "$rows" "$@"
 }
 
@@ -67,12 +71,13 @@ new_cap_session() {
 # The tape sets a Nerd Font because vhs's bundled font has no icon
 # glyphs, and every tree icon, pill separator and statusline symbol under
 # a person's config recorded as a box. RECORD_GIF_FONT names another
-# family; the cell constants below hold for the default only. At
-# FontSize 14 in that font, vhs 0.11.0's grid measures out to
-# `cols = floor((Width - 145) / 9)` and `rows = floor((Height - 130) / 18)`:
-# `tput cols`/`tput lines` read off plain-shell tapes put the column
-# boundaries at Width 1198 and 2206 and the row boundaries at Height 1012,
-# 1030, 1048 and 1066. new_cap_session turns tmux's status line off, so
+# family; the cell constants below hold for the default only. The tape
+# sets Padding 0, so the gif is the terminal with no blank rim around it,
+# and at FontSize 14 in that font vhs 0.11.0's grid then measures out to
+# `cols = floor((Width - 25) / 9)` and `rows = floor((Height - 10) / 18)`:
+# `tput cols`/`tput lines` read off plain-shell tapes put a column
+# boundary at Width 2086 (228 columns at 2084) and row boundaries at
+# Height 910 and 928. new_cap_session turns tmux's status line off, so
 # the pane is the whole session, and margin_cols/margin_rows cover
 # hinting drift across hosts and vhs versions this recorder has not
 # measured. A caller passes the `-x`/`-y` its session was created at,
@@ -146,8 +151,8 @@ Sleep ${seconds}s"}
   fi
   cell_w=9
   cell_h=18
-  pad_w=145
-  pad_h=130
+  pad_w=25
+  pad_h=10
   margin_cols=2
   margin_rows=1
   width=$(( (cols + margin_cols) * cell_w + pad_w ))
@@ -165,6 +170,7 @@ Sleep ${seconds}s"}
     printf 'Require tmux\n'
     printf 'Set Width %s\n' "$width"
     printf 'Set Height %s\n' "$height"
+    printf 'Set Padding 0\n'
     printf 'Set FontSize 14\n'
     printf 'Set FontFamily "%s"\n' "$font"
     printf 'Set Framerate 10\n'
