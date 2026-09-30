@@ -116,5 +116,5 @@ pace_ratio = 1.0155298057189985
 [startup.user]
 first_frame_cold_ms = 88.510239
 first_frame_ratio_p99 = 0.9365673166231595
-server_delta_ms = 0.34900000000000375
+server_delta_ms = 2.142000000000003
 settled_ratio_p50 = 1.0172044477918496

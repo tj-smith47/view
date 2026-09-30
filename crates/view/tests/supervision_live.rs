@@ -422,10 +422,12 @@ fn every_key_typed_at_the_modal_still_lands_in_the_buffer() {
 
 /// How long a live engine is given to flush a swap, repaint, or report its
 /// buffer list, before the host's load widens it.
+#[cfg(unix)]
 const SETTLES: Duration = Duration::from_secs(10);
 
 /// A spawn that leaves swap files under `dir` for a replacement to recover:
 /// `EngineConfig::isolated` passes `-n`, which writes none.
+#[cfg(unix)]
 fn recoverable(dir: &std::path::Path) -> view_engine::process::EngineConfig {
     view_engine::process::EngineConfig::default()
         .with_arg("--clean")
@@ -446,6 +448,7 @@ fn recoverable(dir: &std::path::Path) -> view_engine::process::EngineConfig {
 }
 
 /// What the engine shows on its first screen row.
+#[cfg(unix)]
 fn first_row(engine: &view_engine::process::Engine) -> String {
     engine.handle.command("redraw").unwrap();
     engine
@@ -458,6 +461,7 @@ fn first_row(engine: &view_engine::process::Engine) -> String {
 
 /// Waits until `engine`'s first screen row reads `want`, and returns what it
 /// read last.
+#[cfg(unix)]
 fn first_row_reading(engine: &view_engine::process::Engine, want: &str) -> String {
     let deadline = Instant::now() + view_test_support::host_deadline(SETTLES);
     loop {
@@ -470,6 +474,7 @@ fn first_row_reading(engine: &view_engine::process::Engine, want: &str) -> Strin
 }
 
 /// Every swap file under `dir` together, as bytes.
+#[cfg(unix)]
 fn swapped(dir: &std::path::Path) -> Vec<u8> {
     std::fs::read_dir(dir.join("swap"))
         .map(|entries| {
@@ -481,6 +486,7 @@ fn swapped(dir: &std::path::Path) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+#[cfg(unix)]
 fn holds(haystack: &[u8], needle: &str) -> bool {
     haystack
         .windows(needle.len())
@@ -494,6 +500,7 @@ fn holds(haystack: &[u8], needle: &str) -> bool {
 /// `swapped` says whether the session writes swap files to wait on. The
 /// model has folded the replacement's `EngineAttached`, so the swap probe
 /// generation it answers is the one the model is waiting on.
+#[cfg(unix)]
 struct Restarted {
     dir: view_test_support::ScratchDir,
     model: Model,
@@ -503,6 +510,7 @@ struct Restarted {
     _pump: view_engine::DamagePump,
 }
 
+#[cfg(unix)]
 fn restart_with_unsaved_work(
     label: &str,
     configure: fn(view_engine::process::EngineConfig) -> view_engine::process::EngineConfig,
@@ -627,6 +635,7 @@ fn restart_with_unsaved_work(
 
 /// Asks the replacement what its start recovered, once its first screen row
 /// reads `settled`, and folds the answer into the model.
+#[cfg(unix)]
 fn fold_recovery_reading(restarted: &mut Restarted, settled: &str) {
     assert_eq!(first_row_reading(&restarted.replacement, settled), settled);
     restarted

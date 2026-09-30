@@ -4167,7 +4167,9 @@ git -C "$CASE" add -A
 git -C "$CASE" -c user.name=case -c user.email=case@example.invalid \
   commit -qm seed
 printf '// one rather than two\npub fn c() {}\n' >> "$CASE/crates/seed/src/lib.rs"
-shim_out=$(cd "$CASE" && PATH="$WORK/shim:$PATH" bash "$CHECKER" 2>&1)
+# the run inherits CI's COMMENT_FRAMES_BASE, a commit the seed repository
+# never had
+shim_out=$(cd "$CASE" && PATH="$WORK/shim:$PATH" env -u COMMENT_FRAMES_BASE bash "$CHECKER" 2>&1)
 shim_refused=$(printf '%s\n' "$shim_out" | grep -c 'awk: newline in string' || true)
 shim_joiner=$(printf '%s\n' "$shim_out" |
   grep -c '^STYLE FAIL: an exemption matches no line any more: ' || true)

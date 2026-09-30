@@ -4784,8 +4784,8 @@ fn notices_beside_the_tiled_agent() -> Tiles {
 }
 
 /// The cursor on the first row of the right tile, under the stack's top
-/// right corner: the stack draws from the tile's bottom instead.
-fn notices_flipped_off_the_cursor() -> Tiles {
+/// right corner: the stack starts on the row under the cursor.
+fn notices_stepped_past_the_cursor() -> Tiles {
     let mut tiles = tiled(true);
     drive(
         &mut tiles.model,
@@ -5213,8 +5213,8 @@ const TILED_SCENES: &[(&str, SceneDump)] = &[
     ("notices-beside-agent-tiled", |tier| {
         tiles_dump(tier, notices_beside_the_tiled_agent())
     }),
-    ("notices-flip-off-cursor", |tier| {
-        tiles_dump(tier, notices_flipped_off_the_cursor())
+    ("notices-step-past-cursor", |tier| {
+        tiles_dump(tier, notices_stepped_past_the_cursor())
     }),
     ("agent-overlay", |tier| {
         tiles_dump(tier, agent_overlay_beside_the_tiles(true))

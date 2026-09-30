@@ -101,7 +101,7 @@ view_p99_ms = 7.03
 
 [echo_speculated.user]
 speculated_paint_p99_ms = 1.189
-speculated_ratio_p50 = 0.2199367088607595
+speculated_ratio_p50 = 0.2810615199034982
 
 [scroll.user]
 ratio_p50 = 2.2438036831896326
@@ -116,5 +116,5 @@ pace_ratio = 1.0144214121940949
 [startup.user]
 first_frame_cold_ms = 134.774583
 first_frame_ratio_p99 = 0.9917987574009096
-server_delta_ms = 2.1440000000000055
+server_delta_ms = 3.414999999999992
 settled_ratio_p50 = 1.004860791045314
