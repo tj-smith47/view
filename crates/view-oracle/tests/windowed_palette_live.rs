@@ -555,9 +555,11 @@ fn no_win_or_bufenter_autocmd_fires_for_the_palettes_own_open_or_close() {
 /// silence window plus one round trip, close enough together that a
 /// direction-only compare against it is noise. The tile is bounded against
 /// the overlay it stands beside, with headroom for scheduling jitter, and
-/// both against the frame budget a person can feel where the host can
-/// hold it: a shared runner whose no-op baseline already spans two frames
-/// grades the paired bound alone and says so.
+/// both against the frame budget a person can feel. Both bounds are graded
+/// only where the host holds that budget on the no-op press: a shared
+/// runner whose idle press already spans two frames spreads three equal
+/// measurements wider than the headroom, so the test prints them and says
+/// what it did not grade.
 #[test]
 fn the_cost_of_pressing_colon_windowed_versus_off() {
     let work = common::ScratchPaths::new("windowed-palette-latency");
@@ -591,21 +593,21 @@ fn the_cost_of_pressing_colon_windowed_versus_off() {
     );
     let frame_budget = Duration::from_millis(16);
     let headroom = Duration::from_millis(2);
-    if baseline < frame_budget {
-        assert!(
-            windowed < frame_budget,
-            "windowed tile latency exceeds a frame's worth of budget: {windowed:?}"
-        );
-        assert!(
-            floating < frame_budget,
-            "floating overlay latency exceeds a frame's worth of budget: {floating:?}"
-        );
-    } else {
+    if baseline >= frame_budget {
         eprintln!(
-            "frame budget not graded: the no-op baseline itself took \
-             {baseline:?} on this host"
+            "latency not graded: the no-op baseline itself took {baseline:?} \
+             on this host, past the {frame_budget:?} frame budget"
         );
+        return;
     }
+    assert!(
+        windowed < frame_budget,
+        "windowed tile latency exceeds a frame's worth of budget: {windowed:?}"
+    );
+    assert!(
+        floating < frame_budget,
+        "floating overlay latency exceeds a frame's worth of budget: {floating:?}"
+    );
     assert!(
         windowed <= floating + headroom,
         "windowed tile costs more than the floating overlay plus headroom: \
