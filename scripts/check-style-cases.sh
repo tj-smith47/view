@@ -4527,8 +4527,8 @@ fi
 
 new_case_modes
 printf '#!/usr/bin/env bash\nhelper() { :; }\n' > "$CASE/scripts/lib/helper.sh"
-chmod +x "$CASE/scripts/lib/helper.sh"
 git -C "$CASE" add -A
+git -C "$CASE" update-index --chmod=+x scripts/lib/helper.sh
 out=$(bash "$CHECKER" --script-modes "$CASE" 2>&1)
 rc=$?
 desc='a planted library under scripts/lib carrying the executable bit'
@@ -4542,9 +4542,9 @@ fi
 
 new_case_modes
 printf '#!/usr/bin/env bash\necho hi\n' > "$CASE/scripts/entry.sh"
-chmod +x "$CASE/scripts/entry.sh"
 printf '#!/usr/bin/env bash\nhelper() { :; }\n' > "$CASE/scripts/lib/helper.sh"
 git -C "$CASE" add -A
+git -C "$CASE" update-index --chmod=+x scripts/entry.sh
 out=$(bash "$CHECKER" --script-modes "$CASE" 2>&1)
 rc=$?
 desc='a correctly moded entry point and library together'
@@ -4570,11 +4570,12 @@ else
 fi
 
 # `task commit` runs the gate before it stages the paths it commits, so a
-# new script is still untracked when the gate grades it
+# new script is still untracked when the gate grades it; the planted bits go
+# through update-index because a chmod on NTFS records nothing
 new_case_modes
 printf '#!/usr/bin/env bash\necho hi\n' > "$CASE/scripts/tracked.sh"
-chmod +x "$CASE/scripts/tracked.sh"
 git -C "$CASE" add -A
+git -C "$CASE" update-index --chmod=+x scripts/tracked.sh
 printf '#!/usr/bin/env bash\necho hi\n' > "$CASE/scripts/fresh.sh"
 out=$(bash "$CHECKER" --script-modes "$CASE" 2>&1)
 rc=$?
@@ -4602,6 +4603,23 @@ if [ "$rc" = 0 ]; then
 else
   failures=$((failures + 1))
   printf 'FAIL %s - %s\n  want rc=0\n  got  rc=%s\n%s\n' "$n" "$desc" "$rc" "$out"
+fi
+
+# where the checkout records no bit, an untracked entry point is graded as
+# the 644 its `git add` will record, whatever the working tree answers
+new_case_modes
+git -C "$CASE" config core.fileMode false
+printf '#!/usr/bin/env bash\necho hi\n' > "$CASE/scripts/fresh.sh"
+chmod +x "$CASE/scripts/fresh.sh"
+out=$(bash "$CHECKER" --script-modes "$CASE" 2>&1)
+rc=$?
+desc='an untracked entry point, executable in a working tree whose checkout records no bit'
+case "$out" in (*'scripts/fresh.sh: an entry point'*) named=1 ;; (*) named=0 ;; esac
+if [ "$rc" = 1 ] && [ "$named" = 1 ]; then
+  printf 'ok %s - %s\n' "$n" "$desc"
+else
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=1, fresh.sh named\n  got  rc=%s\n%s\n' "$n" "$desc" "$rc" "$out"
 fi
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"

@@ -178,7 +178,10 @@ is missing, and a sourced library has no reason to carry one.
 because `task commit` runs the gate before it stages a new file. A tracked
 file is graded on the mode git recorded for it, since the bash Windows ships
 answers `-x` for any file whose first line is a shebang; an untracked file has
-no recorded mode and is graded on the working tree's bit.
+no recorded mode and is graded on the working tree's bit, or as the 644 its
+`git add` will record where `core.fileMode` is false. The ceiling comparison
+in `comment_frames_raised` asks git for the prefix under the top, since git
+spells a Windows top `D:/a/view` and that bash spells it `/d/a/view`.
 
 ## A pipeline stage names the file it reads
 

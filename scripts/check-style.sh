@@ -1527,8 +1527,9 @@ EOF
 # gate a new script is committed through runs before it is staged, and a
 # walk over tracked files alone first sees it at the next commit.
 check_script_modes() {
-  local fail=0 entries fresh line path first lib executable tab
+  local fail=0 entries fresh line path first lib executable tab filemode
   tab=$'\t'
+  filemode=$(git config --type=bool core.fileMode 2>/dev/null) || filemode=true
   entries=$(git ls-files -s -- 'scripts/*.sh' 'scripts/**/*.sh' 2>&1) || {
     echo "STYLE FAIL: git ls-files could not list scripts/**/*.sh"
     printf '%s\n' "$entries"
@@ -1563,13 +1564,21 @@ check_script_modes() {
         ;;
     esac
     # the bash Windows ships answers -x for any file whose first line is a
-    # shebang, so a tracked file is graded on the bit git recorded for it
+    # shebang, so a tracked file is graded on the bit git recorded for it,
+    # and an untracked one on a checkout that records no bit is graded as
+    # the 644 its `git add` will record
     case "$line" in
       (*"$tab"*)
         case "${line%% *}" in (100755) executable=1 ;; (*) executable=0 ;; esac
         ;;
       (*)
-        if [ -x "$path" ]; then executable=1; else executable=0; fi
+        if [ "$filemode" = false ]; then
+          executable=0
+        elif [ -x "$path" ]; then
+          executable=1
+        else
+          executable=0
+        fi
         ;;
     esac
     if [ "$lib" -eq 0 ] && [ "$executable" -eq 0 ]; then
@@ -1589,7 +1598,8 @@ EOF
   echo "STYLE FAIL: a script under scripts/ carries the wrong mode bit"
   echo "  A script run by path fails with Permission denied when its bit is"
   echo "  missing; a sourced library has no reason to carry one. chmod +x"
-  echo "  an entry point, chmod -x a library."
+  echo "  an entry point, chmod -x a library; where core.fileMode is false,"
+  echo "  git update-index --chmod=+x or --chmod=-x the tracked file."
   return 1
 }
 
@@ -2677,9 +2687,11 @@ comment_frame_hits() {
 # where the root is a git work tree's top and the base carries the file,
 # since a scratch tree has no committed ceiling to compare against.
 comment_frames_raised() {
-  local ceiling="$1" top base ref
-  top=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
-  if [ "$top" != "$(pwd -P)" ]; then
+  local ceiling="$1" prefix base ref
+  # asked as a prefix, since git spells the top `D:/a/view` where the bash
+  # Windows ships spells the same directory `/d/a/view`
+  prefix=$(git rev-parse --show-prefix 2>/dev/null) || return 0
+  if [ -n "$prefix" ]; then
     return 0
   fi
   ref="${COMMENT_FRAMES_BASE:-HEAD}"
