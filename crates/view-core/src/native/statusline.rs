@@ -22,6 +22,9 @@ enum Zone {
 /// [`SegmentUpdate`]. All fields start empty/absent -- an empty segment is
 /// simply not rendered, matching the wire's own "empty content hides the
 /// segment" convention (see `docs/statusline-wire-capture.md`).
+/// The mode word while the resize mode holds the keyboard.
+pub const RESIZE_WORD: &str = "RESIZE";
+
 #[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct StatuslineState {
@@ -53,6 +56,9 @@ pub struct StatuslineState {
     /// The current buffer's `filetype`, from the `buffer` trigger. Empty
     /// for a buffer nvim detected none for, which hides the segment.
     filetype: String,
+    /// Whether the resize mode holds the keyboard, which the mode word
+    /// shows in place of nvim's own.
+    resizing: bool,
     /// Set by every update, drained by
     /// [`Model::take_paint_damage`](crate::model::Model::take_paint_damage).
     ///
@@ -116,6 +122,22 @@ impl StatuslineState {
         }
     }
 
+    /// Shows or takes down the resize mode's word.
+    pub(crate) fn set_resizing(&mut self, on: bool) {
+        self.dirty |= self.resizing != on;
+        self.resizing = on;
+    }
+
+    /// The mode word: `RESIZE` while the resize mode holds the keyboard,
+    /// nvim's own `msg_showmode` text otherwise.
+    fn mode_word(&self) -> &str {
+        if self.resizing {
+            RESIZE_WORD
+        } else {
+            &self.mode
+        }
+    }
+
     /// Whether a segment changed since the last call.
     pub(crate) fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
@@ -137,6 +159,9 @@ impl StatuslineState {
     /// kept: they come from view's own bridge with no redraw event behind
     /// them, they still describe the buffers a restart recovers, and the
     /// replacement's bridge install re-fires them.
+    ///
+    /// [`Self::resizing`] is kept as well: it follows view's own resize
+    /// mode, which a restart leaves standing.
     ///
     /// [`Self::dirty`] is set here, because this clears four segments the
     /// next frame has to repaint.
@@ -168,7 +193,7 @@ impl StatuslineState {
     /// landing in plain text.
     #[must_use]
     pub fn view(&self, width: u16) -> StatuslineView {
-        let mode = self.mode.clone();
+        let mode = self.mode_word().to_string();
 
         // most to least important, matching the ranking documented above;
         // popping from the end below therefore drops least-important first
@@ -296,8 +321,10 @@ impl StatuslineState {
     ) -> Vec<Vec<Span>> {
         let shown = status.kind.segments();
         let mut groups: Vec<Vec<Span>> = Vec::new();
-        if shown.mode && active && !self.mode.is_empty() {
-            groups.push(vec![Span::new(self.mode.clone(), StyleRole::Mode)]);
+        // the resize mode's word shows on every kind of tile, since a
+        // sidebar's own tile carries no mode and is the one being resized
+        if active && (self.resizing || (shown.mode && !self.mode.is_empty())) {
+            groups.push(vec![Span::new(self.mode_word(), StyleRole::Mode)]);
         }
         if shown.branch && !self.git_branch.is_empty() {
             groups.push(vec![Span::new(
@@ -638,6 +665,36 @@ mod tests {
         let state = StatuslineState::default();
         let view = state.view(80);
         assert_eq!(view, StatuslineView::new("", "", ""));
+    }
+
+    #[test]
+    fn the_resize_mode_shows_its_word_where_the_mode_stands() {
+        use crate::model::TileKind;
+        use crate::native::geometry::NativeSurface;
+        let mut state = StatuslineState::default();
+        state.apply(SegmentUpdate::Mode("-- INSERT --".to_string()));
+        let _ = state.take_dirty();
+        state.set_resizing(true);
+        assert!(state.take_dirty(), "the word has to repaint");
+        assert_eq!(text(&state.view(80).left), RESIZE_WORD);
+        let tree = crate::model::WindowStatus {
+            kind: TileKind::Native(NativeSurface::Tree),
+            ..Default::default()
+        };
+        let first = |active| {
+            state
+                .tile_segments(&tree, active)
+                .first()
+                .map(|group| text(group))
+        };
+        assert_eq!(
+            first(true).as_deref(),
+            Some(RESIZE_WORD),
+            "on a sidebar's tile"
+        );
+        assert_eq!(first(false), None, "the word stays on the active tile");
+        state.set_resizing(false);
+        assert_eq!(text(&state.view(80).left), "-- INSERT --");
     }
 
     /// One state, one window: the fixture both position tests read, with a

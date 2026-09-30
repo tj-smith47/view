@@ -211,6 +211,12 @@ pub fn keys() -> &'static [ConfigKey] {
             },
             ConfigKey {
                 table: "keys",
+                key: "resize_mode",
+                flag: None,
+                derived: Some("<C-w>m"),
+            },
+            ConfigKey {
+                table: "keys",
                 key: "toggle_gaps",
                 flag: None,
                 derived: Some("<leader>ug"),

@@ -240,10 +240,11 @@ const INHERITED_APPNAME_ENV: &str = "NVIM_APPNAME";
 
 /// The `[keys]` actions, each beside the key that names it, in the order
 /// the registry lists them.
-const KEY_ACTIONS: [(&str, Action); 3] = [
+const KEY_ACTIONS: [(&str, Action); 4] = [
     ("sidebar_wider", Action::Resize(Direction::Wider)),
     ("sidebar_narrower", Action::Resize(Direction::Narrower)),
     ("composer_newline", Action::ComposerNewline),
+    ("resize_mode", Action::ResizeMode),
 ];
 
 /// Resolves every key against the process environment.

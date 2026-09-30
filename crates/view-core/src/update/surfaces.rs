@@ -469,7 +469,12 @@ pub(super) fn agent_pane_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     // `notifications_pane_key`).
     let armed_before = model.pending_chord.as_deref() == Some("<C-w>");
     let binding = take_binding(model, notation);
-    if armed_before && !matches!(binding, Some(Resolved::Act(Action::Resize(_)))) {
+    if armed_before
+        && !matches!(
+            binding,
+            Some(Resolved::Act(Action::Resize(_) | Action::ResizeMode))
+        )
+    {
         // `take_binding` re-arms `pending_chord` for a follower that
         // completes nothing (nvim's own doubled `<C-w>` among them, see
         // `tree_key`'s matching arm), but the pair below is forwarded to
@@ -706,7 +711,7 @@ fn sync_stacked_siblings(model: &mut Model, resized: NativeSurface, anchor: Anch
 /// `tree_width_pct`'s own copy (which `resize_tree` has already re-widthed
 /// the open float from). Only the live `SetWindowSize` RPC is a windowed
 /// surface's own.
-fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
+pub(super) fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
     let layout = model.surfaces.layout(NativeSurface::Tree);
     let stepped = model.tree_width_pct;
     model.surfaces.set_layout(
@@ -773,11 +778,21 @@ pub(super) fn resize_windowed_agent(model: &mut Model) -> Vec<Effect> {
 /// top or bottom in rows, per [`crate::native::geometry::SurfaceLayout`]'s
 /// own doc for what `size` percent means at each edge.
 pub(super) fn resize_windowed_stream(model: &mut Model, widen: bool) -> Vec<Effect> {
+    let size = model.surfaces.layout(NativeSurface::Notifications).size;
+    resize_windowed_stream_to(
+        model,
+        crate::native::geometry::step_panel_width(size, widen),
+    )
+}
+
+/// [`resize_windowed_stream`], to a share already chosen: clamped to the
+/// sidebar range, and nothing sent when it leaves the share where it was.
+pub(super) fn resize_windowed_stream_to(model: &mut Model, pct: u16) -> Vec<Effect> {
     if !model.notifications_is_windowed() {
         return Vec::new();
     }
     let layout = model.surfaces.layout(NativeSurface::Notifications);
-    let stepped = crate::native::geometry::step_panel_width(layout.size, widen);
+    let stepped = crate::native::geometry::clamp_panel_width(i64::from(pct));
     if stepped == layout.size {
         return Vec::new();
     }
@@ -1118,6 +1133,7 @@ pub(super) fn notifications_pane_key(model: &mut Model, notation: &str) -> Optio
         Some(Resolved::Act(Action::Resize(direction))) => {
             return Some(resize_windowed_stream(model, direction.widens()));
         }
+        Some(Resolved::Act(Action::ResizeMode)) => return Some(super::resize::enter(model)),
         // See `tree_key`'s matching arm: a follower that re-arms an
         // already-armed prefix is nvim's own doubled `<C-w>`, unarmed
         // and forwarded as the pair.
@@ -1253,6 +1269,7 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Option<Vec<Effect>>
             model.dirty = true;
             return Some(resize_windowed_tree(model));
         }
+        Some(Resolved::Act(Action::ResizeMode)) => return Some(super::resize::enter(model)),
         // The composer's line break is the agent panel's alone,
         // and the tree answers it the way it answers any key no
         // binding of its own names.

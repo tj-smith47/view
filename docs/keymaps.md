@@ -26,6 +26,7 @@ The table below is generated from `default_maps()` in
 | `<leader>wf` | `window` | `:View window fit` |
 | `<leader>ws` | `window` | `:View window flip` |
 | `<leader>uf` | `window` | `:View window float` |
+| `<C-w>m` | `window` | `:View window resize_mode` |
 | `<leader>fd` | `notifications` | `:View notifications dismiss` |
 | `<leader>w1` | `window` | `:View window to_tabpage_1` |
 | `<leader>w2` | `window` | `:View window to_tabpage_2` |
@@ -591,6 +592,35 @@ column or row. Widening a stacked agent panel and the notification stream
 beside it keeps the same width, whichever one held focus when you pressed
 the key. A windowed palette stacked on that edge follows along too, though
 every keystroke while it is open reaches nvim's own command line.
+
+## Resize mode
+
+`<C-w>m` enters resize mode on the focused window or sidebar. The status
+line shows `RESIZE` where the mode word stands until you leave.
+
+| key | does |
+| --- | --- |
+| `h` `<Left>` | narrower |
+| `l` `<Right>` | wider |
+| `j` `<Down>` | shorter |
+| `k` `<Up>` | taller |
+| `=` | makes every window the same size (`<C-w>=`) |
+| `<Esc>` `<CR>` `q` | leaves the mode |
+
+A step is 5% of the screen, at least one cell. A count before the key
+multiplies it: `3l` is three steps wider. A sidebar steps its width by 5%
+and answers only the axis it has. Any other key leaves the mode and then
+does what it always does.
+
+Rebind the entry key under `[keys]`:
+
+```toml
+[keys]
+resize_mode = "<C-w>m"
+```
+
+Dragging the border between two windows, or a sidebar's edge, with the
+mouse resizes them too.
 
 ## Gaps and the placement ring
 

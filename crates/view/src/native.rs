@@ -900,6 +900,24 @@ impl NativeSession {
                     spec.lhs = std::borrow::Cow::Owned(cycle_lhs.clone());
                 }
             }
+            // `[keys] resize_mode` names every key the mode answers to,
+            // none included, so the one default spec becomes one per key
+            let resize_keys = model
+                .key_bindings
+                .spellings(view_core::native::keys::Action::ResizeMode);
+            let mut rebound = Vec::with_capacity(specs.len() + resize_keys.len());
+            for spec in specs.drain(..) {
+                if spec.feature == "window" && spec.verb == "resize_mode" {
+                    rebound.extend(resize_keys.iter().map(|lhs| {
+                        let mut spec = spec.clone();
+                        spec.lhs = std::borrow::Cow::Owned(lhs.clone());
+                        spec
+                    }));
+                } else {
+                    rebound.push(spec);
+                }
+            }
+            *specs = rebound;
         }
         let (modifier, _, super_notice) =
             profile::modifier_for(self.desktop_modifier_choice, model.caps.kitty_kbd);
@@ -1959,6 +1977,23 @@ cycle_surfaces = \"gz\"
         );
     }
 
+    #[test]
+    fn a_resize_mode_rebind_registers_every_key_it_names_and_the_default_none() {
+        let dir = view_test_support::ScratchDir::new("native-resize-keys").unwrap();
+        let path = dir.join("view.toml");
+        std::fs::write(&path, "[keys]\nresize_mode = [\"<C-w>R\", \"<F3>\"]\n")
+            .expect("a temp config must be writable");
+        let mut m = model();
+        let (mut session, _) = load_from(Some(path), 7, &mut m);
+        let specs = startup_specs(&mut session, &mut m);
+        let resize: Vec<&str> = specs
+            .iter()
+            .filter(|spec| spec.feature == "window" && spec.verb == "resize_mode")
+            .map(|spec| spec.lhs.as_ref())
+            .collect();
+        assert_eq!(resize, ["<C-w>R", "<F3>"], "{specs:?}");
+    }
+
     /// `main` puts the resolved `[ui.surfaces]` placements on the model
     /// before `load` runs, and `load` read `[native] tree_width` back over
     /// the tree's share, so a file naming only `[ui.surfaces.tree] size`
@@ -2483,9 +2518,10 @@ cycle_surfaces = \"gz\"
                 _ => None,
             })
             .expect("the leader chords follow up");
+        let defaults = view_core::native::mappings::default_maps();
         assert!(
-            specs.iter().all(|s| s.lhs.starts_with("<leader>")),
-            "no desktop chord is on, so only leader chords register: {specs:?}"
+            specs.iter().all(|s| defaults.contains(s)),
+            "no desktop chord is on, so only the default maps register: {specs:?}"
         );
     }
 

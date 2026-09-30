@@ -649,11 +649,14 @@ LEADER=${LEADER:-\\}
 # entry point nothing drives is the hole the legs that press keys exist to
 # close.
 tmux_key() {
-    local lhs="$1" typed="$1"
+    local lhs="$1" typed="$1" ctrl_w
+    # nvim's window-command prefix is the control byte a terminal sends for it
+    ctrl_w=$(printf '\027')
     # one at a time: `<leader><leader>` spells the leader twice
     while :; do
         case "$typed" in
         (*'<leader>'*) typed=${typed/<leader>/"$LEADER"} ;;
+        (*'<C-w>'*) typed=${typed/<C-w>/"$ctrl_w"} ;;
         (*) break ;;
         esac
     done

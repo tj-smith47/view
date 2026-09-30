@@ -13,7 +13,10 @@ use crate::grid::{Grid, GridDamage, GridOp};
 use crate::model::Look;
 use crate::native::geometry::NativeSurface;
 
+mod border;
 mod relay;
+
+pub use border::{Border, BorderAxis};
 
 /// A grid's identity as nvim assigns it. The global grid keeps the id the
 /// engine gives it rather than a sentinel, so single-grid and multigrid

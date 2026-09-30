@@ -346,6 +346,8 @@ pub struct Model {
     /// after it would silently re-point some later, unrelated press at a
     /// resize.
     pub(crate) pending_chord: Option<String>,
+    /// The resize mode, while it holds the keyboard.
+    resize_mode: Option<ResizeMode>,
     /// The `:` command line being typed to the engine, and the input held
     /// behind a submitted `:View` until view has run it; see
     /// [`crate::native::submit_hold`].
@@ -487,6 +489,7 @@ impl Model {
             surfaces: crate::native::placement::SurfaceState::default(),
             key_bindings: crate::native::keys::KeyBindings::default(),
             pending_chord: None,
+            resize_mode: None,
             submit_hold: crate::native::submit_hold::SubmitHold::default(),
             supervision: crate::native::supervision::SupervisionState::default(),
             speculate: crate::native::speculate::SpeculateState::default(),
@@ -1333,21 +1336,13 @@ impl Model {
     /// caller that updated one of them would leave a reopened panel
     /// disagreeing with the one on screen.
     pub(crate) fn resize_ai_panel(&mut self, widen: bool) -> bool {
-        let next = geometry::step_panel_width(self.ai_panel_width_pct, widen);
-        let moved = next != self.ai_panel_width_pct;
-        self.ai_panel_width_pct = next;
-        self.rewidth(|kind| matches!(kind, OverlayKind::Ai), next);
-        moved
+        self.set_ai_panel_width(geometry::step_panel_width(self.ai_panel_width_pct, widen))
     }
 
     /// Steps the tree sidebar one notch, on the same terms as
     /// [`Model::resize_ai_panel`].
     pub(crate) fn resize_tree(&mut self, widen: bool) -> bool {
-        let next = geometry::step_panel_width(self.tree_width_pct, widen);
-        let moved = next != self.tree_width_pct;
-        self.tree_width_pct = next;
-        self.rewidth(|kind| matches!(kind, OverlayKind::Tree(_)), next);
-        moved
+        self.set_tree_width(geometry::step_panel_width(self.tree_width_pct, widen))
     }
 
     /// Re-widths every open overlay `is_target` names. A no-op when the
@@ -2176,6 +2171,7 @@ pub(crate) mod held;
 mod look;
 mod messages;
 pub(crate) mod notice;
+mod resize;
 mod rows;
 mod window_status;
 
@@ -2184,6 +2180,7 @@ pub use caps::{TermCaps, Tier};
 pub use look::{Detected, Joined, Look, Panes, MIN_FRAMED_SLOT};
 pub use messages::{format_at, wrap_toast, MessageEntry, MessageId, Messages};
 pub use notice::{NoticeColumn, NOTICE_COLUMN_MAX};
+pub use resize::{BorderGrip, ResizeMode, Resized};
 pub use rows::{grid_room_for, grid_target_for, ENGINE_MIN_SIZE, SIZE_FLOOR};
 pub use window_status::{Segments, TileKind, TileTitles, WindowStatus};
 
@@ -2381,6 +2378,9 @@ pub enum MouseCapture {
     /// placement, never through the overlay stack), so its capture is its
     /// own variant, which needs no overlay id.
     Palette,
+    /// A border between two windows, or a sidebar's edge, received the
+    /// press, so the drags that follow move it.
+    Border(BorderGrip),
 }
 
 #[cfg(test)]

@@ -2159,6 +2159,209 @@ fn a_click_on_a_separator_reaches_no_engine_window() {
     );
 }
 
+/// The `SetWindowSize` widths `effects` carry, in order.
+fn window_widths(effects: &[Effect]) -> Vec<(u64, Option<u16>, Option<u16>)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Rpc(RpcCall::SetWindowSize { win, width, height }) => {
+                Some((*win, *width, *height))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_separator_drag_resizes_the_left_window_once_per_cell_moved() {
+    let mut m = vsplit_model();
+    assert!(
+        update(&mut m, click(3, 40)).is_empty(),
+        "a press moves nothing"
+    );
+    assert!(
+        matches!(m.mouse_capture(), Some(MouseCapture::Border(_))),
+        "the press on the separator grips it: {:?}",
+        m.mouse_capture()
+    );
+    let wider = update(&mut m, mouse("drag", 3, 42));
+    assert_eq!(window_widths(&wider), [(1003, Some(42), None)]);
+    let same_cell = update(&mut m, mouse("drag", 4, 42));
+    assert!(
+        same_cell.is_empty(),
+        "no new cell, no resize: {same_cell:?}"
+    );
+    let back = update(&mut m, mouse("drag", 3, 38));
+    assert_eq!(window_widths(&back), [(1003, Some(38), None)]);
+    let released = update(&mut m, mouse("release", 3, 38));
+    assert!(
+        released.is_empty(),
+        "the release resizes nothing: {released:?}"
+    );
+    assert_eq!(m.mouse_capture(), None, "the release ends the gesture");
+}
+
+#[test]
+fn a_drag_starting_inside_a_window_still_reaches_that_window() {
+    let mut m = vsplit_model();
+    let _ = update(&mut m, click(3, 10));
+    let dragged = update(&mut m, mouse("drag", 3, 40));
+    assert!(
+        matches!(
+            &dragged[..],
+            [Effect::Rpc(RpcCall::InputMouse {
+                grid: GridId(6),
+                ..
+            })]
+        ),
+        "a selection crossing the separator stays a selection: {dragged:?}"
+    );
+}
+
+#[test]
+fn a_tree_float_edge_drag_moves_its_share() {
+    let mut m = tree_sidebar_model();
+    let tree = m
+        .overlays()
+        .iter()
+        .find(|overlay| matches!(overlay.kind, OverlayKind::Tree(_)))
+        .cloned()
+        .expect("the tree is open");
+    let rect = m.overlay_rect(&tree);
+    let edge = rect.col + rect.width - 1;
+    let row = rect.row + 2;
+    assert!(update(&mut m, click(row, edge)).is_empty());
+    // 8 cells of an 80-cell terminal are 10 percent
+    let effects = update(&mut m, mouse("drag", row, edge + 8));
+    assert!(
+        effects.is_empty(),
+        "a float has no window to resize: {effects:?}"
+    );
+    assert_eq!(m.tree_width_pct, 40);
+    assert_eq!(tree_width_pct(&m), 40, "the float re-widths");
+    let _ = update(&mut m, mouse("release", row, edge + 8));
+    assert_eq!(m.tree_width_pct, 40);
+}
+
+/// `<C-w>m` as the nvim mapping sends it.
+fn resize_mode() -> Msg {
+    Msg::FeatureInvoke {
+        generation: None,
+        feature: "window".to_string(),
+        verb: "resize_mode".to_string(),
+    }
+}
+
+/// The notations `effects` send nvim, in order.
+fn inputs(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Rpc(RpcCall::Input { notation }) => Some(notation.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_count_multiplies_the_resize_modes_step() {
+    let mut narrow = model();
+    let _ = update(
+        &mut narrow,
+        Msg::Redraw(vec![UiEvent::GridResize {
+            grid: 1,
+            width: 30,
+            height: 10,
+        }]),
+    );
+    let _ = update(&mut narrow, resize_mode());
+    assert!(update(&mut narrow, key("3")).is_empty(), "a count waits");
+    assert_eq!(
+        inputs(&update(&mut narrow, key("l"))),
+        ["3<C-w>>"],
+        "5% of 30 columns is one cell"
+    );
+    // 5% of 80 columns is 4 cells
+    let mut wide = vsplit_model();
+    let _ = update(&mut wide, resize_mode());
+    let _ = update(&mut wide, key("3"));
+    assert_eq!(inputs(&update(&mut wide, key("l"))), ["12<C-w>>"]);
+    assert_eq!(inputs(&update(&mut wide, key("h"))), ["4<C-w><lt>"]);
+    assert_eq!(inputs(&update(&mut wide, key("<Down>"))), ["1<C-w>-"]);
+    assert_eq!(inputs(&update(&mut wide, key("=")))[..], ["<C-w>="]);
+    assert!(wide.resize_mode().is_some(), "every step stays in the mode");
+}
+
+#[test]
+fn escape_leaves_the_resize_mode_and_its_word() {
+    let mut m = vsplit_model();
+    let _ = update(&mut m, resize_mode());
+    assert!(m.resize_mode().is_some());
+    assert_eq!(
+        m.engine
+            .statusline
+            .view(80)
+            .left
+            .first()
+            .map(|span| span.text.as_str()),
+        Some(crate::native::statusline::RESIZE_WORD)
+    );
+    assert!(
+        update(&mut m, key("<Esc>")).is_empty(),
+        "<Esc> reaches no one"
+    );
+    assert!(m.resize_mode().is_none());
+    assert_ne!(
+        m.engine
+            .statusline
+            .view(80)
+            .left
+            .first()
+            .map(|span| span.text.as_str()),
+        Some(crate::native::statusline::RESIZE_WORD)
+    );
+}
+
+#[test]
+fn an_unrelated_key_leaves_the_resize_mode_and_is_forwarded() {
+    let mut m = vsplit_model();
+    let _ = update(&mut m, resize_mode());
+    let effects = update(&mut m, key("x"));
+    assert!(m.resize_mode().is_none());
+    assert_eq!(inputs(&effects), ["x"], "the key does what it always does");
+}
+
+#[test]
+fn the_resize_mode_in_the_tree_steps_its_share() {
+    let mut m = tree_sidebar_model();
+    let _ = update(&mut m, key("<C-w>"));
+    let _ = update(&mut m, key("m"));
+    assert_eq!(
+        m.resize_mode().map(|mode| mode.sidebar),
+        Some(Some(crate::native::geometry::NativeSurface::Tree))
+    );
+    let _ = update(&mut m, key("h"));
+    assert_eq!(m.tree_width_pct, 25, "narrower by 5%");
+    assert_eq!(tree_width_pct(&m), 25);
+    let _ = update(&mut m, key("j"));
+    assert_eq!(m.tree_width_pct, 25, "the tree has no height to step");
+    assert!(m.resize_mode().is_some());
+}
+
+#[test]
+fn a_rebound_resize_mode_key_enters_from_the_tree() {
+    let mut m = tree_sidebar_model();
+    assert!(m
+        .key_bindings
+        .rebind(Action::ResizeMode, &["<C-w>R".to_string()]));
+    let _ = update(&mut m, key("<C-w>"));
+    let _ = update(&mut m, key("m"));
+    assert!(m.resize_mode().is_none(), "the default key is gone");
+    let _ = update(&mut m, key("<C-w>"));
+    let _ = update(&mut m, key("R"));
+    assert!(m.resize_mode().is_some());
+}
+
 #[test]
 fn a_release_on_a_separator_still_ends_the_gesture() {
     let mut m = vsplit_model();
@@ -16953,6 +17156,35 @@ fn focused_windowed_tree() -> Model {
     );
     let _ = update(&mut m, tree_window_placed());
     m
+}
+
+#[test]
+fn a_windowed_tree_edge_drag_moves_its_share_and_its_window() {
+    let mut m = focused_windowed_tree();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 2,
+                width: 55,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: 2,
+                win: crate::events::WinHandle(1000),
+                startrow: 0,
+                startcol: 25,
+                width: 55,
+                height: 24,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert!(update(&mut m, click(3, 24)).is_empty());
+    let effects = update(&mut m, mouse("drag", 3, 32));
+    assert_eq!(m.tree_width_pct, 40, "8 of 80 columns are 10 percent");
+    let cells = crate::native::geometry::share(80, 40);
+    assert_eq!(window_widths(&effects), [(TREE_WIN.0, Some(cells), None)]);
 }
 
 /// A re-enter of an already-open windowed tree -- the open chunk's

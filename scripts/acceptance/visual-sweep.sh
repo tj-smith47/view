@@ -1526,6 +1526,7 @@ entry_shape() {
     (ui/gaps) printf 'gaps' ;;
     (ui/cycle_surfaces) printf 'cycle' ;;
     (window/new | window/zoom | window/fit | window/flip | window/float) printf '%s' "$2" ;;
+    (window/resize_mode) printf 'resize' ;;
     (window/to_tabpage_[1-9]) printf 'tabpage' ;;
     (*)
         printf 'FAIL: nothing here knows what the %s %s key changes on screen, so pressing it would prove nothing; give it a shape\n' \
@@ -1833,7 +1834,7 @@ drive_action() {
             reads tile_layout beside) || return 1
         SAW="adds a tile beside the first in ${took}s"
         ;;
-    (zoom | flip | fit)
+    (zoom | flip | fit | resize)
         command_line ':silent vsplit'
         wait_until "$WAIT_SECS" 'two tiles side by side' reads tile_layout beside >/dev/null ||
             return 1
@@ -1862,6 +1863,15 @@ drive_action() {
             took=$(wait_until "$REACTION_SECS" "the focused tile resized on $feature $verb" \
                 second_tile_moved_from "$before") || return 1
             SAW="sizes the focused tile to its text in ${took}s"
+            ;;
+        (resize)
+            before=$(second_tile_col)
+            "$@"
+            send_key l
+            send_key Escape
+            took=$(wait_until "$REACTION_SECS" "the separator moving on $feature $verb then l" \
+                second_tile_moved_from "$before") || return 1
+            SAW="moves the separator one step in ${took}s"
             ;;
         esac
         ;;
@@ -2019,7 +2029,9 @@ BARE
         shape=$(entry_shape "$feature" "$verb") || return 1
         [ "$shape" != pause ] || continue
         key=$(tmux_key "$lhs") || return 1
-        desc=$(mapping_desc "$key") || return 1
+        # asked in nvim's notation: a control byte typed into the command
+        # line that asks would erase the word before it
+        desc=$(mapping_desc "$(printf '%s' "$key" | sed "s/$(printf '\027')/<C-w>/g")") || return 1
         # built from the engine's own format string rather than spelled
         # again here: a description that gains a field would otherwise match
         # nothing, every entry point would read as the config's, and the leg

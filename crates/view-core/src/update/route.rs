@@ -51,7 +51,7 @@ pub(super) fn reaches_past_a_panel_owner(
     // exactly what a panel owner is standing in front of.
     if matches!(
         binding,
-        Some(Resolved::Pending | Resolved::Act(Action::Resize(_)))
+        Some(Resolved::Pending | Resolved::Act(Action::Resize(_) | Action::ResizeMode))
     ) {
         return true;
     }

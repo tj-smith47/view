@@ -67,6 +67,7 @@ mod bridge;
 pub(crate) mod look;
 mod mouse;
 mod paste;
+mod resize;
 pub(super) mod review;
 mod route;
 mod supervision;
@@ -317,6 +318,9 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
     }
     match msg {
         Msg::Key(Key { notation }) => {
+            if let Some(effects) = resize::key(model, &notation) {
+                return effects;
+            }
             // ahead of every other keypress rule: the busy modal is the
             // newest thing on screen, so a key naming one of its choices is
             // folded into the episode's bookkeeping here, and then routed
@@ -696,6 +700,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                     "fit" => return surfaces::window_fit(model),
                     "flip" => return surfaces::window_flip(model),
                     "float" => return surfaces::window_float(model),
+                    "resize_mode" => return resize::enter(model),
                     _ => {
                         if let Some(destination) = verb
                             .strip_prefix("to_tabpage_")

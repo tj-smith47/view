@@ -749,6 +749,8 @@ struct KeysTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     composer_newline: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    resize_mode: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     toggle_gaps: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cycle_surfaces: Option<toml::Value>,
@@ -789,6 +791,12 @@ const COMPOSER_NEWLINE_NOTICE: &str =
     "view: [keys] composer_newline must be key notations spelled as nvim spells them, case \
      included (\"<S-CR>\", \"<M-CR>\"), at most two keys each. The composer breaks a \
      line on its default keys this run";
+
+/// The resize mode's own, on the same terms as [`SIDEBAR_WIDER_NOTICE`].
+const RESIZE_MODE_NOTICE: &str =
+    "view: [keys] resize_mode must be key notations spelled as nvim spells them, case \
+     included (\"<C-w>m\"), at most two keys each. The resize mode opens on its \
+     default key this run";
 
 /// What `[keys] toggle_gaps` naming no key this build can register is
 /// answered with: unlike the raw intercept the other three actions still
@@ -834,6 +842,7 @@ fn resolve_key_bindings(table: &KeysTable) -> (KeyBindings, Vec<&'static str>) {
             Action::ComposerNewline,
             COMPOSER_NEWLINE_NOTICE,
         ),
+        (&table.resize_mode, Action::ResizeMode, RESIZE_MODE_NOTICE),
     ] {
         let Some(value) = value.as_ref() else {
             continue;
@@ -1328,6 +1337,7 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
         ("sidebar_wider", &file.keys.sidebar_wider),
         ("sidebar_narrower", &file.keys.sidebar_narrower),
         ("composer_newline", &file.keys.composer_newline),
+        ("resize_mode", &file.keys.resize_mode),
         ("toggle_gaps", &file.keys.toggle_gaps),
         ("cycle_surfaces", &file.keys.cycle_surfaces),
     ] {
@@ -2551,22 +2561,30 @@ mod tests {
     /// to. Walked by the tests below rather than named one at a time, so an
     /// action added to [`KeysTable`] without a row here fails the
     /// crosscheck instead of shipping untested.
-    const KEYS_ACTIONS: [(&str, &str); 5] = [
+    const KEYS_ACTIONS: [(&str, &str); 6] = [
         ("sidebar_wider", "<S-Right>"),
         ("sidebar_narrower", "<S-Left>"),
         ("composer_newline", "<M-CR>"),
         ("toggle_gaps", "<leader>ug"),
         ("cycle_surfaces", "<leader>uw"),
+        ("resize_mode", "<C-w>m"),
     ];
 
     /// Whether `field` answers `default_key` under `cfg`: the shared chord
-    /// table for the three rebindable actions, `[keys]`'s own dedicated
+    /// table for the chord actions, `[keys]`'s own dedicated
     /// `gaps_lhs`/`cycle_lhs` for the two single-notation ones -- they left
     /// [`KeyBindings`] entirely once a leader chord needed representing.
     fn resolves_to(cfg: &ViewConfig, field: &str, default_key: &str) -> bool {
         match field {
             "toggle_gaps" => cfg.keys.gaps_lhs() == default_key,
             "cycle_surfaces" => cfg.keys.cycle_lhs() == default_key,
+            // a chord, which `resolve` takes one key at a time
+            "resize_mode" => cfg
+                .keys
+                .bindings()
+                .spellings(Action::ResizeMode)
+                .iter()
+                .any(|key| key == default_key),
             _ => cfg.keys.bindings().resolve(None, default_key).is_some(),
         }
     }
@@ -2584,6 +2602,7 @@ mod tests {
             composer_newline: Some("<M-CR>".into()),
             toggle_gaps: Some("<leader>ug".into()),
             cycle_surfaces: Some("<leader>uw".into()),
+            resize_mode: Some("<C-w>m".into()),
             profile: None,
             desktop_modifier: None,
             desktop: BTreeMap::new(),

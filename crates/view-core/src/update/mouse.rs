@@ -10,7 +10,7 @@
 //! window, so a screen coordinate sent with the wrong grid lands in the
 //! wrong buffer rather than nowhere.
 
-use crate::grid::registry::GridId;
+use crate::grid::registry::{BorderAxis, GridId};
 use crate::model::{Model, MouseCapture};
 use crate::msg::{Effect, MouseInput, RpcCall};
 use crate::native::pill::{PillNames, PillView};
@@ -65,22 +65,30 @@ pub(super) fn route(model: &mut Model, input: MouseInput) -> Vec<Effect> {
         // owns and the engine has no window under
         None | Some(MouseCapture::Overlay(_) | MouseCapture::Palette) => Vec::new(),
         Some(MouseCapture::Engine(grid)) => effect(model, input, grid),
+        Some(MouseCapture::Border(grip)) => super::resize::drag(model, &input, grip),
     }
 }
 
 /// Which surface the pointer is over: the topmost overlay covering the
 /// cell, the palette's own rect while a cmdline is open, the grid whose
-/// pane covers it, or nothing at all.
+/// pane covers it, the border a press landed on, or nothing at all.
 ///
-/// Nothing is the answer for a row the pill reserved -- a press there is
-/// already answered by [`pill_press`] before this runs -- and for a cell
-/// between windows that view's own separator chrome owns. Neither has a
-/// handler and neither is a position the engine has a window at, so a
-/// press there starts no gesture -- but a `drag` or `release` crossing one
-/// never reaches this function, because the press it belongs to already
-/// named an owner.
+/// A press on a sidebar float's inner edge, or on a cell between two
+/// windows, grips that border ([`Model::sidebar_edge`],
+/// [`Model::border_grip`]); any other event there, and a corner where
+/// borders meet, answers nothing. So does a row the pill reserved, where a
+/// press is already answered by [`pill_press`] before this runs. A `drag`
+/// or `release` crossing either never reaches this function, because the
+/// press it belongs to already named an owner.
 fn position_owner(model: &Model, input: &MouseInput) -> Option<MouseCapture> {
+    let press = input.action == "press";
     if let Some(id) = model.overlay_at(input.row, input.col) {
+        if let Some(grip) = press
+            .then(|| model.sidebar_edge(input.row, input.col))
+            .flatten()
+        {
+            return Some(MouseCapture::Border(grip));
+        }
         return Some(MouseCapture::Overlay(id));
     }
     // the palette carries no `OverlayId` (see `MouseCapture::Palette`'s
@@ -100,8 +108,21 @@ fn position_owner(model: &Model, input: &MouseInput) -> Option<MouseCapture> {
         .checked_sub(model.chrome_rows())?
         .checked_sub(offset)?;
     let col = input.col.checked_sub(offset)?;
-    let (grid, _, _) = model.engine.painted_grids().hit_test(col, row)?;
-    Some(MouseCapture::Engine(grid))
+    let grids = model.engine.painted_grids();
+    if let Some((grid, _, _)) = grids.hit_test(col, row) {
+        return Some(MouseCapture::Engine(grid));
+    }
+    if !press {
+        return None;
+    }
+    let border = grids.border_between(col, row)?;
+    let pressed_at = match border.axis {
+        BorderAxis::Columns => input.col,
+        BorderAxis::Rows => input.row,
+    };
+    model
+        .border_grip(border, pressed_at)
+        .map(MouseCapture::Border)
 }
 
 /// The switch a press on one of the pill's names asks for, or `None` for

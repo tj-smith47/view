@@ -89,7 +89,8 @@ impl Frame {
 ///   `mouse_capture`, `mouse_on`, `colon_mapped` (it gates whether a `:` is
 ///   speculated at all, and `cmdline_speculated` is the state that reaches
 ///   a layer), `pending_chord` (it closes the same gate, and holds
-///   nothing any layer draws), `ai_fs` (an agent's file request reaches
+///   nothing any layer draws), `resize_mode` (its word reaches the frames
+///   through `statusline`), `ai_fs` (an agent's file request reaches
 ///   the screen only as a prompt in the panel, which is an overlay),
 ///   `key_unanswered`, `key_round_trips`, `key_round_trips_at` and
 ///   `literal_pending`

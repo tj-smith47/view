@@ -114,7 +114,7 @@ impl MappingClaim {
 // spelled to match the ecosystem's own default keys, the way a switching
 // user already has them in muscle memory; a claim over a user's own
 // `<leader>f` or `<leader>e` prefix is reported so it stays visible.
-static DEFAULT_MAPS: [MappingSpec; 25] = [
+static DEFAULT_MAPS: [MappingSpec; 26] = [
     MappingSpec {
         feature: "picker",
         lhs: Cow::Borrowed("<leader>ff"),
@@ -212,6 +212,12 @@ static DEFAULT_MAPS: [MappingSpec; 25] = [
         feature: "window",
         lhs: Cow::Borrowed("<leader>uf"),
         verb: "float",
+        rhs: Rhs::Invoke,
+    },
+    MappingSpec {
+        feature: "window",
+        lhs: Cow::Borrowed("<C-w>m"),
+        verb: "resize_mode",
         rhs: Rhs::Invoke,
     },
     MappingSpec {

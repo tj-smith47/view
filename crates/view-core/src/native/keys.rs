@@ -44,6 +44,9 @@ pub enum Action {
     /// Insert a line break into the agent panel's composer, where `<CR>`
     /// sends the prompt instead.
     ComposerNewline,
+    /// Enter the resize mode, where single keys step the focused window or
+    /// sidebar.
+    ResizeMode,
 }
 
 /// What a keystroke means to the surface that has the keyboard.
@@ -62,6 +65,7 @@ pub struct KeyBindings {
     wider: Vec<Binding>,
     narrower: Vec<Binding>,
     composer_newline: Vec<Binding>,
+    resize_mode: Vec<Binding>,
 }
 
 impl Default for KeyBindings {
@@ -92,6 +96,8 @@ impl Default for KeyBindings {
                 ("<C-w>".to_string(), Some("<lt>".to_string())),
             ],
             composer_newline: vec![("<S-CR>".to_string(), None), ("<M-CR>".to_string(), None)],
+            // `m` because nvim binds `<C-w>r` to rotating the windows
+            resize_mode: vec![("<C-w>".to_string(), Some("m".to_string()))],
         }
     }
 }
@@ -133,6 +139,7 @@ impl KeyBindings {
             Action::Resize(Direction::Wider) => &self.wider,
             Action::Resize(Direction::Narrower) => &self.narrower,
             Action::ComposerNewline => &self.composer_newline,
+            Action::ResizeMode => &self.resize_mode,
         };
         bindings
             .iter()
@@ -150,6 +157,7 @@ impl KeyBindings {
             Action::Resize(Direction::Wider) => &mut self.wider,
             Action::Resize(Direction::Narrower) => &mut self.narrower,
             Action::ComposerNewline => &mut self.composer_newline,
+            Action::ResizeMode => &mut self.resize_mode,
         }
     }
 
@@ -162,6 +170,7 @@ impl KeyBindings {
             (Action::Resize(Direction::Wider), &self.wider),
             (Action::Resize(Direction::Narrower), &self.narrower),
             (Action::ComposerNewline, &self.composer_newline),
+            (Action::ResizeMode, &self.resize_mode),
         ] {
             let hit = bindings
                 .iter()
@@ -190,6 +199,7 @@ impl KeyBindings {
             .iter()
             .chain(&self.narrower)
             .chain(&self.composer_newline)
+            .chain(&self.resize_mode)
             .any(|(first, second)| second.is_some() && first == notation)
             .then_some(Resolved::Pending)
     }

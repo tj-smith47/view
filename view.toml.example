@@ -79,6 +79,7 @@ sidebar_narrower = ["<S-Left>", "<C-w><"]
 composer_newline = ["<S-CR>", "<M-CR>"]   # <M-CR> is also new_tile's alt
                                            # spelling below; a press reaches
                                            # whichever of the two is focused
+resize_mode = "<C-w>m"   # h/l/j/k step the focused window or sidebar
 toggle_gaps = "<leader>ug"
 cycle_surfaces = "<leader>uw"
 
