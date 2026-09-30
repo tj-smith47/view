@@ -10854,7 +10854,7 @@ fn a_second_ai_panel_toggle_under_the_same_blocked_prompt_closes_the_panel_it_en
 }
 
 #[test]
-fn ai_panel_toggle_while_a_picker_is_topmost_opens_beneath_it_without_stealing_focus() {
+fn ai_panel_toggle_while_a_picker_is_topmost_goes_over_it_and_takes_the_keys() {
     let mut m = model();
     m.ai_trusted = true;
     let effects = update(
@@ -10866,10 +10866,6 @@ fn ai_panel_toggle_while_a_picker_is_topmost_opens_beneath_it_without_stealing_f
         },
     );
     assert!(matches!(effects.as_slice(), [Effect::PickerQuery { .. }]));
-    let picker_id = match m.focus() {
-        Focus::Native(id) => id,
-        other => unreachable!("opening a picker must take focus: {other:?}"),
-    };
     assert!(matches!(
         m.overlays().last().map(|o| &o.kind),
         Some(OverlayKind::Picker(_))
@@ -10885,39 +10881,36 @@ fn ai_panel_toggle_while_a_picker_is_topmost_opens_beneath_it_without_stealing_f
     );
     assert!(
         effects.is_empty(),
-        "opening beneath the picker issues no effect of its own: {effects:?}"
-    );
-    assert_eq!(
-        m.focus(),
-        Focus::Native(picker_id),
-        "an agent panel opening while a picker is topmost must not steal its focus"
+        "opening over the picker issues no effect of its own: {effects:?}"
     );
     assert_eq!(
         m.overlays().len(),
         2,
-        "the panel must open beneath the picker, not replace it"
+        "the panel must open over the picker, not replace it"
     );
     assert!(
-        matches!(m.overlays()[0].kind, OverlayKind::Ai),
-        "the panel must sit beneath the picker on the stack: {:?}",
+        matches!(m.overlays()[1].kind, OverlayKind::Ai),
+        "the panel the person asked for goes on top: {:?}",
         m.overlays()
     );
     assert!(
-        matches!(m.overlays()[1].kind, OverlayKind::Picker(_)),
-        "the picker must remain topmost: {:?}",
+        matches!(m.focused_overlay().map(|o| &o.kind), Some(OverlayKind::Ai)),
+        "the entered panel takes the keys the picker held: {:?}",
         m.overlays()
     );
 
     let closed = m.pop_focused_overlay();
-    assert_eq!(
-        closed.map(|o| o.id),
-        Some(picker_id),
-        "closing the focused overlay while the panel sits beneath it must \
-             close the picker, not the non-focus-taking panel underneath"
+    assert!(
+        matches!(closed.map(|o| o.kind), Some(OverlayKind::Ai)),
+        "closing the focused overlay closes the entered panel"
     );
     assert!(
-        m.ai_panel_overlay_open(),
-        "the panel must still be open after only the picker above it closed"
+        matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Picker(_))
+        ),
+        "the picker is still open beneath it: {:?}",
+        m.overlays()
     );
 }
 
@@ -10963,6 +10956,43 @@ fn ai_panel_toggle_while_engine_busy_is_topmost_opens_beneath_it_without_occludi
         matches!(m.overlays()[1].kind, OverlayKind::EngineBusy(_)),
         "the busy modal must remain topmost and visible, since it cannot \
              be reached any other way while the connection is down: {:?}",
+        m.overlays()
+    );
+}
+
+#[test]
+fn ai_open_while_the_tree_sidebar_is_topmost_goes_over_it_and_takes_the_keys() {
+    let mut m = model();
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            generation: None,
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    assert!(matches!(
+        m.overlays().last().map(|o| &o.kind),
+        Some(OverlayKind::Tree(_))
+    ));
+
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            generation: None,
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    assert!(
+        matches!(m.overlays().last().map(|o| &o.kind), Some(OverlayKind::Ai)),
+        "an explicit open goes on top of the tree, which stays open beneath it: {:?}",
+        m.overlays()
+    );
+    assert!(
+        matches!(m.focused_overlay().map(|o| &o.kind), Some(OverlayKind::Ai)),
+        "the entered panel takes the keys the tree held: {:?}",
         m.overlays()
     );
 }

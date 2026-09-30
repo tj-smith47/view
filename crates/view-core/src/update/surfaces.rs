@@ -1007,13 +1007,15 @@ pub(super) fn native_window_open_failed(
 /// flush left (see [`OverlayKind::Ai`]'s doc). A no-op when the panel is
 /// already open: unlike `toggle`, `open` never closes what it finds.
 ///
-/// Inserted beneath the topmost overlay when that overlay takes focus or is
-/// the busy annunciator, rather than pushed on top of it: `Ai` has no key
-/// path of its own (see [`Model::takes_focus`]'s doc on why), so it must
-/// never sit over something that can still act on a keystroke, and must
-/// never bury the one warning that has to stay visible while the engine is
-/// unresponsive. Every other topmost overlay is exactly as blind to input
-/// as `Ai` itself, so stacking on top of it costs nothing.
+/// Inserted beneath a blocked-engine `Prompt` or the busy annunciator when
+/// one is topmost, rather than pushed on top of it: the prompt keeps the
+/// keys nvim is waiting on, and the warning stays visible while the engine
+/// is unresponsive, the same rule [`open_picker`] applies. Every other
+/// topmost overlay (the tree, a picker, the message history) is a feature
+/// the person is leaving for the panel, so the panel goes on top of it and
+/// an entered panel is the one [`Model::focused_overlay`] names. Beneath
+/// the tree, the panel read "Esc returns" while every key still reached
+/// the tree.
 ///
 /// Opening never itself starts (or stops) an agent session: the session's
 /// own lifecycle is independent of the overlay's, driven instead by the
@@ -1028,9 +1030,10 @@ pub(super) fn open_ai_panel(model: &mut Model) -> Vec<Effect> {
     if model.ai_panel_overlay_open() {
         return Vec::new();
     }
-    let insert_beneath = model.overlays().last().is_some_and(|overlay| {
-        Model::takes_focus(&overlay.kind) || matches!(overlay.kind, OverlayKind::EngineBusy(_))
-    });
+    let insert_beneath = matches!(
+        model.overlays().last().map(|overlay| &overlay.kind),
+        Some(OverlayKind::Prompt(_) | OverlayKind::EngineBusy(_))
+    );
     // `Anchor::Right` was hard-coded here, so `[ui.surfaces.agent]
     // anchor` had no effect on the overlay placement the vast majority of
     // sessions actually run -- only a windowed open read it. The overlay
