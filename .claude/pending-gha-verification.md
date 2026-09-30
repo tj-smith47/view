@@ -10,7 +10,7 @@ One line per item, keyed to the run that proves it. A drained item is
 deleted, with the run id going into the commit that deletes it; the history
 of how a red run was fixed lives in the commit subjects.
 
-## Proven by Bench 36725517306 on master (1720dcaa)
+## Proven by Bench 36733287414 on master (1a222a46)
 
 - [ ] Bench: both gh legs `gate OK` on the seats hand-committed after run
       36665386464 (1ea7d5ee); `startup.user server_delta_ms` printed as
