@@ -263,6 +263,31 @@ against the finished surface.
 A task that has absorbed its hours leaves what it measured here rather than
 running another loop.
 
+**S3 speculated echo, the redraw-driven paint path** (2026-09-30, about
+2.5 h, one commit, 6dda376c).
+
+- *What remains.* `output_path/minimal` on `dev-linux` reads loop-wake ->
+  draw-start 12.1 us and draw-start -> flush-start 18.1 us p50 against the
+  31b1a4c0 tree's 5.9 us and 15.5 us on the same host and toolchain, inside
+  its 1.0 ms p99 bar (0.12 ms). The felt row it decomposes,
+  `echo_speculated.minimal`, is back at its seat (view arm 0.213 ms p50).
+- *What was measured.* The seat tree is single-grid; HEAD is multigrid, so
+  part of both segments is the registry fold, two composited panes and the
+  separator pass. A read of the whole wake-to-flush path in both trees found
+  no single item over about 1 us: some twenty sub-microsecond additions per
+  batch, each touching a Model sub-struct the seat never read (the
+  `update_one` tail with its chrome-row, focus and notice work on every
+  `Redraw`; the per-dispatch wall clock and the eager loop-top clocks;
+  `Inputs::matches` grown from 13 fields to 21 and four slot scans in
+  `cursor_spec`; `Theme::from_hl` per frame; a style-cache reset per pane;
+  the `windows` Vec and the separator loop under one window).
+- *Next lever.* Skip the `update_one` tail on a cell-only batch (a per-batch
+  "chrome, notice or overlay touched" flag set by the events that change
+  them), read the wall clock only for a batch that can record a message
+  entry, and memoise the Theme on the hl table's revision. Split the wake
+  segment with temporary taps after the `step` loop and after
+  `surface_cache.render` before touching anything else.
+
 **S1.12 cold start, the settled screen under a real config** (2026-09-14/15,
 about 12 h of session time across six commits, 823b76c through b880b9b).
 
