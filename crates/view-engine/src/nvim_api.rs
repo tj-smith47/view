@@ -3578,8 +3578,8 @@ impl EngineHandle {
         )
     }
 
-    /// Issues the accent role's two-group read as an async probe tagged
-    /// with `generation`, on the same terms as
+    /// Issues the accent role's and the notice levels' group read as an
+    /// async probe tagged with `generation`, on the same terms as
     /// [`probe_default_hl`](Self::probe_default_hl): the reply crosses back
     /// as `Msg::AccentProbeReply` through the connection's pump, and
     /// nothing blocks on it here.

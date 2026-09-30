@@ -213,9 +213,9 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // the (possibly still wire-ambiguous) raw values until a
             // matching reply lands
             let generation = model.engine.set_hl_default_colors(fg, bg);
-            // the accent's two groups are read on the same generation: a
-            // colorscheme moves `Function` and `Statement` exactly when it
-            // moves `Normal`, and nvim broadcasts neither of them
+            // the accent's two groups and the diagnostic levels are read on
+            // the same generation: a colorscheme moves them exactly when it
+            // moves `Normal`, and nvim broadcasts none of them
             vec![
                 Effect::Rpc(RpcCall::GetDefaultHl { generation }),
                 Effect::Rpc(RpcCall::GetAccentHl { generation }),

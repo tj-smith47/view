@@ -77,8 +77,9 @@ pub trait EngineOps {
     /// with `generation`; never blocks, and never itself returns the reply
     /// (see `Msg::HlProbeReply`).
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError>;
-    /// Reads the two syntax groups the accent role resolves from
-    /// (see `Msg::AccentProbeReply`).
+    /// Reads the two syntax groups the accent role resolves from and the
+    /// four `Diagnostic*` groups a toast's frame takes its level colour
+    /// from (see `Msg::AccentProbeReply`).
     fn probe_accent_hl(&self, generation: u64) -> Result<(), EngineError>;
     /// Issues an async read of what this engine recovered while starting,
     /// tagged `generation`; never blocks, and never itself returns the

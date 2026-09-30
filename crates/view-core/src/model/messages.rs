@@ -6,7 +6,7 @@
 
 use std::time::SystemTime;
 
-use crate::native::views::{Span, StyleRole};
+use crate::native::views::{NoticeLevel, Span, StyleRole};
 
 /// A locally-assigned identity for one [`MessageEntry`], stamped by
 /// [`Messages::push`] from a monotonic per-session counter. Exists to name
@@ -48,6 +48,10 @@ pub struct MessageEntry {
     /// the standing line of a family whose current wording is not the one
     /// the user selected.
     family: Option<String>,
+    /// The notice's level, read off `kind` at push and raised by
+    /// [`Self::read_level_from_attr`] for a message whose kind says info but
+    /// whose text nvim drew in a warning or error group.
+    level: NoticeLevel,
     /// Whether this sticky notice has already stood for the window a
     /// transient one gets, after which ordinary typing takes it down
     /// ([`Messages::dismiss_read_sticky`]). Set by the expiry timer
@@ -79,6 +83,20 @@ impl PartialEq for WrapCache {
 }
 
 impl Eq for WrapCache {}
+
+/// The level nvim's `msg_show` kind names, which decides both a toast's
+/// frame colour and whether it stands until dismissed (error and warn).
+///
+/// `native_sticky` is view's own notice that a plugin is drawing over a
+/// surface view owns, a warning, and `verbose` is nvim's debug channel.
+fn kind_level(kind: &str) -> NoticeLevel {
+    match kind {
+        "emsg" | "echoerr" | "lua_error" | "rpc_error" | "shell_err" => NoticeLevel::Error,
+        "wmsg" | "native_sticky" => NoticeLevel::Warn,
+        "verbose" => NoticeLevel::Hint,
+        _ => NoticeLevel::Info,
+    }
+}
 
 impl MessageEntry {
     /// The entry's text as decoded off the wire: `(highlight id, text)`
@@ -147,6 +165,30 @@ impl MessageEntry {
         self.family = family.map(str::to_owned);
     }
 
+    /// Raises an info-level entry to the level of the group its first chunk
+    /// is drawn in, given the attr ids nvim broadcast for `WarningMsg` and
+    /// `ErrorMsg`.
+    ///
+    /// `vim.notify` at WARN or ERROR reaches the UI as a plain echo whose
+    /// chunk carries that group, so its kind alone reads as info.
+    pub(crate) fn read_level_from_attr(&mut self, warning: Option<u64>, error: Option<u64>) {
+        if self.level != NoticeLevel::Info {
+            return;
+        }
+        let Some(&(attr, _)) = self.content.first() else {
+            return;
+        };
+        // attr 0 is the default style, which no broadcast group resolves to
+        if attr == 0 {
+            return;
+        }
+        if Some(attr) == error {
+            self.level = NoticeLevel::Error;
+        } else if Some(attr) == warning {
+            self.level = NoticeLevel::Warn;
+        }
+    }
+
     /// This entry's content chunks joined into one string, then split into
     /// one entry per physical line. A `msg_show` content chunk can carry an
     /// embedded `\n` for a genuinely multi-line message (a long `emsg`'s
@@ -199,12 +241,17 @@ impl MessageEntry {
         self.condition
     }
 
-    /// The role every row of this entry's toast is painted in.
+    /// The role every row of this entry's toast is painted in, which also
+    /// carries the notice's level to the toast's frame.
     fn toast_role(&self) -> StyleRole {
         if self.condition {
-            StyleRole::Warning
-        } else {
-            StyleRole::Plain
+            return StyleRole::Warning;
+        }
+        match self.level {
+            NoticeLevel::Error => StyleRole::NoticeError,
+            NoticeLevel::Warn => StyleRole::NoticeWarn,
+            NoticeLevel::Hint => StyleRole::NoticeHint,
+            _ => StyleRole::Plain,
         }
     }
 
@@ -225,10 +272,7 @@ impl MessageEntry {
     /// the argument for why that notice cannot be transient.
     #[must_use]
     pub fn is_persistent_kind(kind: &str) -> bool {
-        matches!(
-            kind,
-            "emsg" | "echoerr" | "wmsg" | "lua_error" | "rpc_error" | "shell_err" | "native_sticky"
-        )
+        matches!(kind_level(kind), NoticeLevel::Error | NoticeLevel::Warn)
     }
 
     /// Whether this entry is the question text of a cmdline prompt that is
@@ -505,6 +549,7 @@ impl Messages {
         // is asleep holding
         self.next_message_id = self.next_message_id.saturating_add(1);
         let entry = MessageEntry {
+            level: kind_level(&kind),
             kind,
             content,
             condition: false,
@@ -547,6 +592,7 @@ impl Messages {
         let id = MessageId(self.next_message_id);
         self.next_message_id = self.next_message_id.saturating_add(1);
         MessageEntry {
+            level: kind_level(&kind),
             kind,
             content,
             condition: false,
@@ -1182,9 +1228,9 @@ impl Messages {
     /// directly, so the flattening reuses that selection and its eviction
     /// rule.
     ///
-    /// Each returned line is one span, carrying [`StyleRole::Plain`], or
-    /// [`StyleRole::Warning`] for the raised condition's lines: a toast has
-    /// no per-segment structure to preserve, so one span is the whole row.
+    /// Each returned line is one span in its entry's toast role: a toast
+    /// has no per-segment structure to preserve, so one span is the whole
+    /// row.
     #[must_use]
     pub fn visible_lines(&self, max_rows: usize) -> Vec<Vec<Span>> {
         self.visible_toasts_in(max_rows, u16::MAX)
@@ -1406,5 +1452,40 @@ mod tests {
             "a word wider than the box breaks at the cell"
         );
         assert_eq!(wrap_toast(&[String::new()], 7), vec![""]);
+    }
+
+    /// Every toast's rows carry the level of the notice they belong to,
+    /// read off nvim's message kind, and the text of every level but the
+    /// raised condition's paints plain. The error and warn kinds are
+    /// exactly the ones that stand until dismissed.
+    #[test]
+    fn a_toast_carries_the_level_of_its_message_kind() {
+        let cases = [
+            ("emsg", NoticeLevel::Error),
+            ("echoerr", NoticeLevel::Error),
+            ("lua_error", NoticeLevel::Error),
+            ("rpc_error", NoticeLevel::Error),
+            ("shell_err", NoticeLevel::Error),
+            ("wmsg", NoticeLevel::Warn),
+            ("native_sticky", NoticeLevel::Warn),
+            ("echomsg", NoticeLevel::Info),
+            ("native", NoticeLevel::Info),
+            ("", NoticeLevel::Info),
+            ("verbose", NoticeLevel::Hint),
+        ];
+        for (kind, level) in cases {
+            let mut messages = Messages::default();
+            messages.push(kind.to_string(), vec![(0, "x".into())], false);
+            let boxes = messages.visible_toasts_in(8, 40);
+            let role = boxes[0][0][0].role;
+            assert_eq!(role.notice_level(), level, "{kind:?}");
+            assert_eq!(role.chrome_group(), None, "{kind:?} paints plain text");
+            assert_eq!(
+                MessageEntry::is_persistent_kind(kind),
+                matches!(level, NoticeLevel::Error | NoticeLevel::Warn),
+                "{kind:?} persistence"
+            );
+        }
+        assert_eq!(StyleRole::Warning.notice_level(), NoticeLevel::Warn);
     }
 }

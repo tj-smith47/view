@@ -67,9 +67,10 @@ const NOTICE_OPENING: &str = "view: no system";
 /// marker and the row's own words.
 fn selected_row_contains(screen: &vt100::Screen, text: &str) -> bool {
     screen.contents().lines().any(|line| {
-        // the framed overlay's own left border sits ahead of the `> `
-        // marker on every row (`│ > ...`), so this is a whole-line search
-        line.contains("> ") && line.contains(text)
+        // the marker is matched with the overlay's own left border ahead of
+        // it: a toast over the intro screen's `<Enter>  for` row would
+        // otherwise read as selected
+        line.contains("│ > ") && line.contains(text)
     })
 }
 
@@ -252,6 +253,16 @@ fn a_headless_session_notices_an_unreachable_clipboard_once() {
     session
         .send(b"yy")
         .expect("both copy keys must reach the session");
+    // the notice stands at the far end of a full stack, where the open
+    // history overlay can cover its first row
+    session
+        .send(b"\x1b")
+        .expect("the close key must reach the session");
+    assert!(
+        session.wait_for_screen(SETTLE, |screen| !screen.contents().contains("Messages")),
+        "<Esc> never closed the message history; screen:\n{}",
+        session.screen()
+    );
     assert!(
         session.wait_for(NOTICE_OPENING, Duration::from_secs(10)),
         "a copy with no reachable clipboard must say so; screen:\n{}",

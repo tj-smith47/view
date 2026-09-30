@@ -141,12 +141,10 @@ pub enum LayerKind {
     /// each line's own text to leave behind -- the same slide read as a
     /// shrinking window into text moving out from under it.
     ///
-    /// Each row is a single span, [`view_core::native::views::StyleRole::Plain`]
-    /// or, on the wedge banner's rows,
-    /// [`view_core::native::views::StyleRole::Warning`] (a toast has no
-    /// per-segment structure to preserve), kept as a
-    /// span-vec rather than a `String` so the layer honestly carries the
-    /// same overlay-row shape every other overlay layer does.
+    /// Each row is a single span in the notice's toast role, which carries
+    /// its level (a toast has no per-segment structure to preserve), kept
+    /// as a span-vec so the layer carries the same overlay-row shape every
+    /// other overlay layer does.
     /// `paused` is set on the box at the top of the settled stack, and only
     /// there, while `Messages::paused` holds: the mark it puts in the border
     /// run is the whole of what tells a user a frozen stack apart from a

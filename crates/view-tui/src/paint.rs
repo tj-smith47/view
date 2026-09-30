@@ -7319,6 +7319,141 @@ mod tests {
         }
     }
 
+    /// dracula's diagnostic foregrounds, the levels a toast frame takes.
+    const LEVELS: view_core::hl::LevelColors = view_core::hl::LevelColors {
+        error: Some(0x00FF_5555),
+        warn: Some(0x00FF_B86C),
+        info: Some(0x008B_E9FD),
+        hint: Some(0x0050_FA7B),
+    };
+
+    /// The user's dracula under `transparent = true`: `Normal` states no
+    /// background, `NormalFloat` is `#21222c` and `FloatBorder` is
+    /// `#6272a4`.
+    fn model_on_a_transparent_scheme(width: u16, height: u16) -> Model {
+        let mut model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
+        model.engine.apply_grid(GridOp::Resize { width, height });
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0x00F8_F8F2),
+                bg: None,
+                sp: None,
+            },
+        );
+        for (id, group, fg, bg) in [
+            (
+                21,
+                ChromeGroup::NormalFloat,
+                Some(0x00F8_F8F2),
+                Some(0x0021_222C),
+            ),
+            (22, ChromeGroup::FloatBorder, Some(0x0062_72A4), None),
+        ] {
+            apply(
+                &mut model,
+                view_core::events::UiEvent::HlAttrDefine {
+                    id,
+                    fg,
+                    bg,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    reverse: false,
+                },
+            );
+            apply(
+                &mut model,
+                view_core::events::UiEvent::HlGroupSet {
+                    name: group.hl_name().to_string(),
+                    hl_id: id,
+                },
+            );
+        }
+        model
+    }
+
+    /// One toast of `role` at `rect`, painted alone.
+    fn paint_toast_of(model: &Model, role: StyleRole, rect: Rect) -> ratatui::buffer::Buffer {
+        let lines = vec![vec![Span::new("saved", role)]];
+        paint_layer_alone(
+            model,
+            Layer::new(rect, toast_kind(lines), model.caps),
+            40,
+            12,
+        )
+    }
+
+    /// Under a transparent scheme the toast's body is the terminal's own
+    /// background on every cell, the frame included, and the frame takes
+    /// the notice level's diagnostic colour.
+    #[test]
+    fn a_toast_on_a_transparent_scheme_paints_no_body_and_a_level_colored_frame() {
+        let mut model = model_on_a_transparent_scheme(40, 12);
+        model.engine.confirm_probe(None, None, LEVELS);
+        let rect = Rect::new(0, 8, 13, 3);
+        let buf = paint_toast_of(&model, StyleRole::Plain, rect);
+        for row in rect.row..rect.row + rect.height {
+            for col in rect.col..rect.col + rect.width {
+                assert_eq!(
+                    buf[(col, row)].bg,
+                    Color::Reset,
+                    "({col},{row}) paints a body over the terminal's background"
+                );
+            }
+        }
+        assert_eq!(buf[(8, 0)].fg, rgb(0x008B_E9FD), "an info toast's frame");
+        assert_eq!(
+            buf[(9, 1)].fg,
+            rgb(0x00F8_F8F2),
+            "the text keeps the float's foreground"
+        );
+    }
+
+    /// An opaque scheme keeps the float body, and its frame takes the
+    /// level colour all the same.
+    #[test]
+    fn a_toast_on_an_opaque_scheme_keeps_its_body_and_takes_a_level_colored_frame() {
+        let mut model = model_with_a_float_body_only(40, 12);
+        model.engine.confirm_probe(None, None, LEVELS);
+        let rect = Rect::new(0, 8, 13, 3);
+        let buf = paint_toast_of(&model, StyleRole::NoticeError, rect);
+        assert_eq!(buf[(9, 1)].bg, rgb(HABAMAX_FLOAT_BG));
+        assert_eq!(buf[(8, 0)].fg, rgb(0x00FF_5555), "an error toast's frame");
+        assert_eq!(buf[(8, 0)].bg, rgb(HABAMAX_FLOAT_BG));
+    }
+
+    /// Every level colours the frame with its own group, and a level whose
+    /// group states no foreground falls back to `FloatBorder`.
+    #[test]
+    fn each_toast_level_frames_in_its_own_group_and_falls_back_to_float_border() {
+        let mut model = model_on_a_transparent_scheme(40, 12);
+        let rect = Rect::new(0, 8, 13, 3);
+        let roles = [
+            (StyleRole::NoticeError, 0x00FF_5555),
+            (StyleRole::NoticeWarn, 0x00FF_B86C),
+            (StyleRole::Warning, 0x00FF_B86C),
+            (StyleRole::Plain, 0x008B_E9FD),
+            (StyleRole::NoticeHint, 0x0050_FA7B),
+        ];
+        model.engine.confirm_probe(None, None, LEVELS);
+        for (role, color) in roles {
+            let buf = paint_toast_of(&model, role, rect);
+            assert_eq!(buf[(8, 0)].fg, rgb(color), "{role:?}");
+        }
+        model
+            .engine
+            .confirm_probe(None, None, view_core::hl::LevelColors::default());
+        for (role, _) in roles {
+            let buf = paint_toast_of(&model, role, rect);
+            assert_eq!(
+                buf[(8, 0)].fg,
+                rgb(0x0062_72A4),
+                "{role:?} with no level colour takes FloatBorder"
+            );
+        }
+    }
+
     /// The same contract for the completion menu, the other float this
     /// module paints from a group of its own rather than from the float
     /// body: a scheme that leaves `Pmenu` alone must not get a popup in the

@@ -3,9 +3,8 @@
 //! detector both read.
 //!
 //! The column keeps clear of every frame line and every windowed surface,
-//! and the stack moves off the cursor's row when the other end of the
-//! column has room, so a notice leaves the text a person is working on in
-//! view.
+//! and the stack steps past the cursor's row where it would cover it, so a
+//! notice leaves the text a person is working on in view.
 
 use super::{Model, Panes, TileKind};
 use crate::grid::registry::{GridId, PaneKind, GLOBAL_GRID};
@@ -60,26 +59,20 @@ impl Model {
     ///
     /// The stack keeps clear of the cursor's row in the focused window and,
     /// while a review is open in it, of the hunk under review from its
-    /// header to its last added line. It stays at the end it was drawn from
-    /// until that region enters it, then moves to the other end. When both
-    /// ends would cover the region, the column shrinks to the larger side
-    /// of it and the notices that no longer fit wait in the history.
-    ///
-    /// The end the stack holds is kept by `update`, and the rest is read
-    /// off the layout of the moment.
+    /// header to its last added line. The stack stays at the anchor's end
+    /// and steps past that region there while the rows beyond it hold the
+    /// stack. When they do not, the column shrinks to the larger side of
+    /// the region and the notices that no longer fit wait in the history.
+    /// It returns to the anchor's end the moment that end has room again.
+    /// Every placement is read off the layout of the moment.
     #[must_use]
     pub fn notice_column(&self) -> NoticeColumn {
-        let anchor = self.notice_anchor();
-        let held = self
-            .notice_held
-            .filter(|(corner, _)| *corner == anchor)
-            .map(|(_, column)| column.from_top);
-        self.place_column(held)
+        self.place_column()
     }
 
     /// Records the column the stack is drawn in this update, and wraps
     /// every notice to its width. A session with nothing on the stack
-    /// records nothing, so the next notice starts from the anchor.
+    /// records nothing.
     pub(crate) fn place_notices(&mut self) {
         if self.engine.messages.entries.is_empty() && self.toast_motion.is_none() {
             self.notice_held = None;
@@ -109,10 +102,15 @@ impl Model {
             .armed_visible_slot(usize::from(rect.3).max(3), rect.2)
     }
 
-    /// The column for the current layout, drawn from the top where `held`
-    /// is `Some(true)` and the bottom where it is `Some(false)`, until the
-    /// region it keeps clear enters that end.
-    fn place_column(&self, held: Option<bool>) -> NoticeColumn {
+    /// The column for the current layout, drawn from the anchor's end.
+    ///
+    /// Where the region it keeps clear sits under the stack there, the
+    /// column shrinks to the larger side of that region and the stack keeps
+    /// its anchor's orientation. Whenever the side past the region holds the
+    /// whole stack it is the larger side, so the stack steps past the
+    /// region: a top stack starts on the row under it, a bottom one ends on
+    /// the row above it.
+    fn place_column(&self) -> NoticeColumn {
         let anchor = self.notice_anchor();
         let rect = self.notice_rect();
         let column = |rect, from_top| NoticeColumn {
@@ -120,9 +118,9 @@ impl Model {
             from_top,
             left_edge: anchor.is_left_corner(),
         };
-        let preferred = held.unwrap_or(anchor.is_top_corner());
+        let home = anchor.is_top_corner();
         let Some((first, last)) = self.keep_clear(rect) else {
-            return column(rect, preferred);
+            return column(rect, home);
         };
         let stack = self.stack_height(rect);
         let covers = |from_top: bool| {
@@ -136,26 +134,26 @@ impl Model {
             };
             stack > 0 && first < bottom && last >= top
         };
-        if !covers(preferred) {
-            return column(rect, preferred);
-        }
-        if !covers(!preferred) {
-            return column(rect, !preferred);
+        if !covers(home) {
+            return column(rect, home);
         }
         let above = first.saturating_sub(rect.0);
         let below = rect
             .0
             .saturating_add(rect.3)
             .saturating_sub(last.saturating_add(1));
+        // the stack at the other end would cover the region too: that end
+        // is clear only where the region sits wholly on the anchor's side
+        // of it, and the anchor's end then holds the stack past the region
         if above.max(below) < 3 {
             // no side holds a framed box, and a box over the region is
             // still a notice read
-            return column(rect, preferred);
+            return column(rect, home);
         }
         if above >= below {
-            column((rect.0, rect.1, rect.2, above), true)
+            column((rect.0, rect.1, rect.2, above), home)
         } else {
-            column((last.saturating_add(1), rect.1, rect.2, below), false)
+            column((last.saturating_add(1), rect.1, rect.2, below), home)
         }
     }
 
@@ -1037,9 +1035,11 @@ pub(crate) mod tests {
     }
 
     /// Three notices in the column of the focused tile, and the cursor on
-    /// every row of it in turn, at both vertical anchors.
+    /// every row of it in turn, at both vertical anchors: the stack stays
+    /// at the anchor's end, stepping past the cursor's row wherever it
+    /// would cover it.
     #[test]
-    fn the_stack_flips_off_the_cursor_row() {
+    fn the_stack_steps_past_the_cursor_row() {
         let look = Look::new(Panes::Tiles, true);
         for anchor in [Anchor::TopRight, Anchor::BottomRight] {
             let mut scene = scene((80, 24), look, &[], 2).expect("an 80x24 vsplit");
@@ -1051,50 +1051,67 @@ pub(crate) mod tests {
                     false,
                 );
             }
+            let home = anchor.is_top_corner();
             let right = scene.tiles[1];
-            let (inner_w, inner_h) = scene
+            let (_, inner_h) = scene
                 .model
                 .engine
                 .grids()
                 .grid(GridId(right))
                 .unwrap()
                 .size();
-            assert!(inner_w > 0);
-            let mut flipped = 0;
+            let full = scene.model.notice_bounds();
+            let stack = scene.model.stack_height(full);
+            let (top, bottom) = (full.0, full.0 + full.3);
+            let mut stepped = 0;
             for row in 0..inner_h {
                 focus(&mut scene.model, right, row);
-                let (cursor_row, _) = scene.model.engine.grids().cursor_pos();
+                let (cursor, _) = scene.model.engine.grids().cursor_pos();
                 let column = scene.model.notice_column();
-                let (top, _, _, height) = column.rect;
-                let stack = scene.model.stack_height(column.rect);
-                let band = |from_top: bool| {
-                    if from_top {
-                        top..top + stack
-                    } else {
-                        top + height - stack..top + height
-                    }
+                let at_home = if home {
+                    top..top + stack
+                } else {
+                    bottom - stack..bottom
                 };
-                if band(true).contains(&cursor_row) && band(false).contains(&cursor_row) {
+                if !at_home.contains(&cursor) {
+                    assert_eq!(
+                        (column.rect, column.from_top),
+                        (full, home),
+                        "{anchor:?}: the cursor on row {cursor} is under no box, and the stack moved"
+                    );
                     continue;
                 }
+                stepped += 1;
+                assert_eq!(column.from_top, home, "{anchor:?}: row {cursor}");
+                if home {
+                    assert_eq!(
+                        (column.rect.0, column.rect.0 + column.rect.3),
+                        (cursor + 1, bottom),
+                        "{anchor:?}: the stack starts one row under the cursor"
+                    );
+                } else {
+                    assert_eq!(
+                        (column.rect.0, column.rect.0 + column.rect.3),
+                        (top, cursor),
+                        "{anchor:?}: the stack ends one row above the cursor"
+                    );
+                }
                 assert!(
-                    !band(column.from_top).contains(&cursor_row),
-                    "{anchor:?}: a box covers the cursor on row {cursor_row} with room at the other end"
+                    !band(&scene.model, column).contains(&cursor),
+                    "{anchor:?}: a box covers the cursor on row {cursor}"
                 );
-                flipped += usize::from(column.from_top != anchor.is_top_corner());
             }
             assert!(
-                flipped > 0,
-                "{anchor:?}: the stack never moved off the cursor"
+                stepped > 0,
+                "{anchor:?}: the cursor never sat under the stack"
             );
 
             // the cursor in the other tile is under no box, so nothing moves
-            let held = scene.model.notice_column().from_top;
             for row in 0..inner_h {
                 focus(&mut scene.model, scene.tiles[0], row);
                 assert_eq!(
-                    scene.model.notice_column().from_top,
-                    held,
+                    scene.model.notice_column().rect,
+                    full,
                     "{anchor:?}: row {row} of the unfocused-column tile moved the stack"
                 );
             }
@@ -1231,9 +1248,6 @@ pub(crate) mod tests {
             rect.3 > stack * 2 + 1,
             "the column holds a stack at each end with a row between"
         );
-        // the first row moved the stack; start over from the anchor's end
-        // with the cursor between the two ends
-        scene.model.notice_held = None;
         focus(&mut scene.model, grid, rect.0 + stack - origin);
         assert_eq!(scene.model.notice_column().from_top, anchor.is_top_corner());
         (scene, rect, stack, origin)
@@ -1278,8 +1292,9 @@ pub(crate) mod tests {
     }
 
     /// A line inserted at the top of the file, its header and the line
-    /// itself drawn above the first row, and the cursor below the rows a
-    /// top stack takes: the stack leaves the hunk for the bottom.
+    /// itself drawn above the first row, and the cursor on the row under
+    /// the rows a top stack takes: the stack steps past the hunk and starts
+    /// on the row under the cursor.
     #[test]
     fn the_stack_leaves_an_insertion_hunk_at_the_window_top() {
         let (mut scene, rect, stack, origin) = stacked(Anchor::TopRight);
@@ -1292,7 +1307,8 @@ pub(crate) mod tests {
         assert_eq!(scene.model.engine.grids().cursor_pos().0, cursor);
         let column = scene.model.notice_column();
         let rows = band(&scene.model, column);
-        assert!(!column.from_top, "the stack stayed over the hunk: {rows:?}");
+        assert!(column.from_top, "the stack left the anchor's end: {rows:?}");
+        assert_eq!(column.rect.0, cursor + 1, "the stack starts under the hunk");
         for row in origin..=cursor {
             assert!(
                 !rows.contains(&row),
@@ -1303,7 +1319,8 @@ pub(crate) mod tests {
 
     /// The last two lines of the file replaced by eight, the cursor on the
     /// first of them above the rows a bottom stack takes: the header and the
-    /// added lines run into those rows, and the stack moves to the top.
+    /// added lines run into those rows, and the stack ends on the row above
+    /// the cursor.
     #[test]
     fn the_stack_leaves_a_long_replacement_at_the_file_end() {
         let (mut scene, rect, stack, origin) = stacked(Anchor::BottomRight);
@@ -1317,7 +1334,15 @@ pub(crate) mod tests {
         review_at(&mut scene, &old, &new, 38, cursor - origin);
         let column = scene.model.notice_column();
         let rows = band(&scene.model, column);
-        assert!(column.from_top, "the stack stayed over the hunk: {rows:?}");
+        assert!(
+            !column.from_top,
+            "the stack left the anchor's end: {rows:?}"
+        );
+        assert_eq!(
+            column.rect.0 + column.rect.3,
+            cursor,
+            "the stack ends above the hunk"
+        );
         let last = (cursor + 2 + 10).min(rect.0 + rect.3 - 1);
         for row in cursor..=last {
             assert!(
@@ -1355,6 +1380,7 @@ pub(crate) mod tests {
             (last + 1, rect.0 + rect.3),
             "the column takes the larger side, under the hunk"
         );
+        assert!(column.from_top, "the top stack keeps drawing from the top");
     }
 
     /// Two replacements, the first under review, and the cursor on the line
@@ -1394,38 +1420,100 @@ pub(crate) mod tests {
         }
     }
 
-    /// The cursor moving down every row and back up: the stack moves only
-    /// on a step that brings the cursor into the rows it takes.
+    /// The step past the region at the anchor's end, at its boundary: a
+    /// region leaving exactly the stack's height beyond it takes the stack
+    /// there, and one leaving a row less shrinks the column to the larger
+    /// side, the upper one on a tie. Both anchors keep their orientation.
     #[test]
-    fn the_stack_holds_its_end_until_the_cursor_enters_it() {
+    fn the_step_past_the_region_needs_exactly_the_stacks_height() {
         for anchor in [Anchor::TopRight, Anchor::BottomRight] {
-            let (mut scene, _, _, _) = stacked(anchor);
-            let grid = scene.tiles[0];
-            let (_, inner_h) = scene
-                .model
-                .engine
-                .grids()
-                .grid(GridId(grid))
-                .unwrap()
-                .size();
-            let mut before = scene.model.notice_column();
-            let mut moves = 0;
-            for row in (0..inner_h).chain((0..inner_h).rev()) {
-                focus(&mut scene.model, grid, row);
-                let cursor = scene.model.engine.grids().cursor_pos().0;
-                let after = scene.model.notice_column();
-                if after.from_top != before.from_top {
-                    moves += 1;
-                    assert!(
-                        band(&scene.model, before).contains(&cursor),
-                        "{anchor:?}: the stack moved with the cursor on row {cursor}, \
-                         outside the rows it took"
+            let (mut scene, rect, stack, origin) = stacked(anchor);
+            let home = anchor.is_top_corner();
+            let bottom = rect.0 + rect.3;
+            let old = lines(40);
+            let mut seen = (false, false);
+            for row in rect.0..bottom {
+                for added in 0..24 {
+                    let new = format!(
+                        "{}{}{}",
+                        lines(10),
+                        (0..added).map(|n| format!("new {n}\n")).collect::<String>(),
+                        &lines(40)[lines(11).len()..]
                     );
+                    review_at(&mut scene, &old, &new, 10, row - origin);
+                    let Some((first, last)) = scene.model.keep_clear(rect) else {
+                        continue;
+                    };
+                    if last >= bottom {
+                        continue;
+                    }
+                    let (above, below) = (first - rect.0, bottom - last - 1);
+                    let (beyond, other) = if home { (below, above) } else { (above, below) };
+                    if other != stack - 1 || !(beyond == stack || beyond == stack - 1) {
+                        continue;
+                    }
+                    let column = scene.model.notice_column();
+                    let expected = match (home, beyond == stack) {
+                        (true, true) => (last + 1, stack),
+                        (false, true) => (rect.0, stack),
+                        (_, false) => (rect.0, stack - 1),
+                    };
+                    assert_eq!(
+                        ((column.rect.0, column.rect.3), column.from_top),
+                        (expected, home),
+                        "{anchor:?}: rows {first}..={last} leave {beyond} beyond them"
+                    );
+                    if beyond == stack {
+                        seen.0 = true;
+                    } else {
+                        seen.1 = true;
+                    }
                 }
-                before = after;
             }
-            assert!(moves >= 2, "{anchor:?}: the stack moved {moves} times");
+            assert_eq!(seen, (true, true), "{anchor:?}: a boundary went unreached");
         }
+    }
+
+    /// A hunk under both ends shrinks the column under it; the review
+    /// closing leaves only the cursor's row to keep clear, and the stack is
+    /// back at the anchor's end on that same update, stepped past the
+    /// cursor, then whole once the cursor leaves the rows it takes.
+    #[test]
+    fn the_stack_returns_to_its_anchor_the_moment_it_has_room() {
+        let (mut scene, rect, stack, origin) = stacked(Anchor::TopRight);
+        let old = lines(40);
+        let new = format!(
+            "{}{}{}",
+            lines(10),
+            (0..6).map(|n| format!("new {n}\n")).collect::<String>(),
+            &lines(40)[lines(11).len()..]
+        );
+        review_at(&mut scene, &old, &new, 10, rect.0 + 4 - origin);
+        let shrunk = scene.model.notice_column();
+        assert!(
+            shrunk.rect.0 > rect.0 + stack,
+            "the hunk left the top no room: {shrunk:?}"
+        );
+        assert_eq!(
+            scene.model.notice_held.map(|(_, column)| column),
+            Some(shrunk),
+            "update records the column the armed toast is found in"
+        );
+
+        scene.model.ai_panel_mut().pending_diff = None;
+        let grid = scene.tiles[0];
+        focus(&mut scene.model, grid, rect.0 + 1 - origin);
+        let back = scene.model.notice_column();
+        assert!(back.from_top);
+        assert_eq!(
+            (back.rect.0, back.rect.0 + back.rect.3),
+            (rect.0 + 2, rect.0 + rect.3),
+            "the stack starts one row under the cursor"
+        );
+
+        focus(&mut scene.model, grid, rect.0 + stack - origin);
+        let home = scene.model.notice_column();
+        assert_eq!((home.rect, home.from_top), (rect, true));
     }
 
     /// The column's width and its overlap test are written once: the float

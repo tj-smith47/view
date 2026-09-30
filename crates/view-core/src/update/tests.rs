@@ -414,6 +414,44 @@ fn key_in_engine_focus_becomes_rpc_input_effect() {
     ));
 }
 
+/// `vim.notify(msg, vim.log.levels.WARN)` reaches the UI as a plain echo
+/// whose one chunk is drawn in `WarningMsg`, so the toast takes the level
+/// of the group nvim broadcast for that attr id; ERROR alike, and a chunk
+/// in any other attr stays info.
+#[test]
+fn a_notify_drawn_in_a_warning_or_error_group_takes_that_level() {
+    use crate::native::views::NoticeLevel;
+    for (attr, level) in [
+        (7, NoticeLevel::Warn),
+        (9, NoticeLevel::Error),
+        (0, NoticeLevel::Info),
+        (4, NoticeLevel::Info),
+    ] {
+        let mut m = started_model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![
+                UiEvent::HlGroupSet {
+                    name: "WarningMsg".into(),
+                    hl_id: 7,
+                },
+                UiEvent::HlGroupSet {
+                    name: "ErrorMsg".into(),
+                    hl_id: 9,
+                },
+                UiEvent::MsgShow {
+                    kind: "echomsg".into(),
+                    content: vec![(attr, "careful".into())],
+                    replace_last: false,
+                },
+                UiEvent::Flush,
+            ]),
+        );
+        let boxes = m.engine.messages.visible_toasts_in(8, 40);
+        assert_eq!(boxes[0][0][0].role.notice_level(), level, "attr {attr}");
+    }
+}
+
 #[test]
 fn typing_never_takes_a_notice_off_the_stack() {
     // the toast stack's one lifetime is the slot timer (spec 7.1, motion
@@ -1081,7 +1119,11 @@ fn a_theme_change_during_a_held_layout_repaints_from_the_current_table() {
         "the held layout painted the unconfirmed defaults"
     );
 
-    m.engine.confirm_accent(Some(0x111111), Some(0x222222));
+    m.engine.confirm_probe(
+        Some(0x111111),
+        Some(0x222222),
+        crate::hl::LevelColors::default(),
+    );
     m.engine.set_accent_token(Some(0x333333));
     assert_eq!(
         m.engine.painted_hl().accent(),

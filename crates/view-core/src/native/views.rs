@@ -133,12 +133,36 @@ pub enum StyleRole {
     /// A notice about something wrong with the session that holds while it
     /// stands: the engine wedge banner.
     Warning,
+    /// A line of a toast raised as an error. Painted as plain text; the
+    /// box's frame carries the level.
+    NoticeError,
+    /// A line of a toast raised as a warning. Painted as plain text; the
+    /// box's frame carries the level.
+    NoticeWarn,
+    /// A line of a toast raised as a hint or a debug message. Painted as
+    /// plain text; the box's frame carries the level.
+    NoticeHint,
+}
+
+/// How much a notice asks of the person reading it, which picks the colour
+/// of its toast's frame.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NoticeLevel {
+    /// Something failed.
+    Error,
+    /// Something needs attention.
+    Warn,
+    /// Something happened.
+    Info,
+    /// A hint or a debug message.
+    Hint,
 }
 
 impl StyleRole {
     /// The [`ChromeGroup`] this role resolves through, or `None` for
-    /// [`StyleRole::Plain`], which paints in whatever base style its row
-    /// already carries rather than a group of its own.
+    /// [`StyleRole::Plain`] and the three notice roles, which paint in
+    /// whatever base style their row already carries.
     #[must_use]
     pub const fn chrome_group(self) -> Option<ChromeGroup> {
         match self {
@@ -168,6 +192,18 @@ impl StyleRole {
             Self::AiToolDone => Some(ChromeGroup::OkMsg),
             Self::AiToolFailed => Some(ChromeGroup::ErrorMsg),
             Self::Warning => Some(ChromeGroup::WarningMsg),
+            Self::NoticeError | Self::NoticeWarn | Self::NoticeHint => None,
+        }
+    }
+
+    /// The level of the notice a toast line in this role belongs to.
+    #[must_use]
+    pub const fn notice_level(self) -> NoticeLevel {
+        match self {
+            Self::NoticeError => NoticeLevel::Error,
+            Self::NoticeWarn | Self::Warning => NoticeLevel::Warn,
+            Self::NoticeHint => NoticeLevel::Hint,
+            _ => NoticeLevel::Info,
         }
     }
 

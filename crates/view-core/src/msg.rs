@@ -173,6 +173,7 @@ pub enum Msg {
         generation: u64,
         function_fg: Option<u32>,
         statement_fg: Option<u32>,
+        levels: crate::hl::LevelColors,
     },
     /// The async acknowledgement of one read-side liveness probe. Carries
     /// no value: that the engine answered at all is the whole signal, and
@@ -2198,10 +2199,11 @@ pub enum RpcCall {
         generation: u64,
     },
     /// `nvim_get_hl` for the two syntax groups the accent role resolves
-    /// from. A separate probe from [`GetDefaultHl`](Self::GetDefaultHl)
-    /// because nvim broadcasts neither group: `hl_group_set` covers the UI
-    /// elements only, so `Function` and `Statement` can be read no other
-    /// way.
+    /// from and the four diagnostic groups a toast's frame takes its level
+    /// colour from. A separate probe from
+    /// [`GetDefaultHl`](Self::GetDefaultHl) because nvim broadcasts none of
+    /// these groups: `hl_group_set` covers the UI elements only, so they
+    /// can be read no other way.
     ///
     /// Carries the same `generation` the `Normal` probe beside it does, so
     /// a reply that crossed a colorscheme change is dropped by the same

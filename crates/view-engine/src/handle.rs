@@ -628,15 +628,17 @@ impl EngineHandle {
                                     // answer for; leaving the generation
                                     // unresolved would keep the frame
                                     // marked accent-less forever
-                                    let (function_fg, statement_fg) = if error == Value::Nil {
+                                    let (function_fg, statement_fg, levels) = if error == Value::Nil
+                                    {
                                         decode_accent_probe_reply(&result)
                                     } else {
-                                        (None, None)
+                                        (None, None, view_core::hl::LevelColors::default())
                                     };
                                     pump.route_probe_reply(Msg::AccentProbeReply {
                                         generation,
                                         function_fg,
                                         statement_fg,
+                                        levels,
                                     });
                                 }
                             }
@@ -2782,6 +2784,29 @@ mod tests {
         // notice, so a reply this decoder cannot read can never be read as
         // an account of what that window was drawing
         assert_eq!(decode_float_rows_reply(&Value::Nil), Vec::<String>::new());
+    }
+
+    #[test]
+    fn decode_accent_probe_reply_reads_each_level_and_leaves_a_missing_one_unset() {
+        let result = Value::Map(vec![
+            (Value::from("function"), Value::from(0x0050_FA7B)),
+            (Value::from("error"), Value::from(0x00FF_5555)),
+            (Value::from("warn"), Value::from(0x00F1_FA8C)),
+            (Value::from("info"), Value::from(0x008B_E9FD)),
+        ]);
+        assert_eq!(
+            decode_accent_probe_reply(&result),
+            (
+                Some(0x0050_FA7B),
+                None,
+                view_core::hl::LevelColors {
+                    error: Some(0x00FF_5555),
+                    warn: Some(0x00F1_FA8C),
+                    info: Some(0x008B_E9FD),
+                    hint: None,
+                }
+            )
+        );
     }
 
     #[test]

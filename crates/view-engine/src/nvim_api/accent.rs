@@ -1,10 +1,10 @@
-//! The accent role's probe.
+//! The accent role's probe, which also reads the notice levels' colours.
 //!
-//! `Function` and `Statement` are syntax groups, and nvim's `hl_group_set`
-//! broadcast covers the UI elements only, so the two colours the accent
-//! resolves from can be read no other way than by asking.
+//! nvim's `hl_group_set` broadcast covers the builtin UI groups alone.
+//! `Function` and `Statement` are syntax groups and the `Diagnostic*`
+//! groups are none of the UI ones, so these colours are read by asking.
 
-/// Reads both foregrounds in one round trip, following every link to the
+/// Reads every foreground in one round trip, following every link to the
 /// group that actually carries the colour.
 ///
 /// A missing key is a colorscheme that sets no foreground for that group,
@@ -16,4 +16,11 @@ local function fg(name)\n\
   if not ok then return nil end\n\
   return hl and hl.fg or nil\n\
 end\n\
-return { ['function'] = fg('Function'), statement = fg('Statement') }\n";
+return {\n\
+  ['function'] = fg('Function'),\n\
+  statement = fg('Statement'),\n\
+  error = fg('DiagnosticError'),\n\
+  warn = fg('DiagnosticWarn'),\n\
+  info = fg('DiagnosticInfo'),\n\
+  hint = fg('DiagnosticHint'),\n\
+}\n";

@@ -5,7 +5,8 @@
 //! a read of state the engine already streams, so re-deriving it on every
 //! `ColorScheme` change costs nothing beyond a handful of `HashMap` lookups.
 
-use crate::hl::{AccentInputs, HlTable};
+use crate::hl::{AccentInputs, HlTable, LevelColors};
+use crate::native::views::NoticeLevel;
 
 /// One fully-resolved cell or chrome style: colors plus text attributes,
 /// backend-free so any frontend (not just `ratatui`) can consume it.
@@ -305,6 +306,8 @@ pub struct Theme {
     /// What [`Theme::accent`] resolves through. Private for the reason
     /// `chrome` is: the resolution order is the contract, never the slots.
     accent: AccentInputs,
+    /// What [`Theme::level_fg`] reads.
+    levels: LevelColors,
 }
 
 impl Theme {
@@ -350,6 +353,7 @@ impl Theme {
             fg,
             bg,
             accent: hl.accent(),
+            levels: hl.levels(),
             ..Self::default()
         };
         for group in ChromeGroup::ALL {
@@ -433,15 +437,18 @@ impl Theme {
     /// its own background, or `base_bg` when its own is the buffer's.
     ///
     /// [`Theme::style_for`] resolves a chrome group the way nvim resolves a
-    /// grid cell, filling an unset background in from the buffer's own --
-    /// correct on the grid, and a hole through every float. The buffer's
-    /// background is exactly the value a float must never paint, so a
-    /// colorscheme that named it deliberately is asking for the same hole
-    /// and is answered the same way. A colorscheme that themes floats and
-    /// says nothing about nvim's message area -- habamax, and it is far
-    /// from alone -- is what makes this the common case rather than the
-    /// exotic one: without it, such a scheme gets a toast whose interior is
-    /// the buffer's color, a box the user can only find by its border.
+    /// grid cell, filling an unset background in from the buffer's own.
+    /// That is correct on the grid, and on an opaque scheme it paints a
+    /// float in the buffer's colour, a box the user can only find by its
+    /// border. A colorscheme that themes floats and says nothing about
+    /// nvim's message area (habamax among many) is the common case. So a
+    /// group whose background is the buffer's wears `base_bg`, the body of
+    /// the float it is drawn in.
+    ///
+    /// A transparent buffer states no background: it is the terminal's
+    /// own. A float body drawn over it keeps `base_bg` here, and the toast
+    /// painter, whose box is a bordered message on that background, clears
+    /// its body back to the terminal's.
     #[must_use]
     pub fn float_chrome(&self, group: ChromeGroup, base_bg: Option<u32>) -> ResolvedStyle {
         let mut style = self.chrome(group);
@@ -462,6 +469,20 @@ impl Theme {
         ResolvedStyle {
             reverse: true,
             ..self.normal()
+        }
+    }
+
+    /// The foreground of the diagnostic group for `level`
+    /// (`DiagnosticError`, `DiagnosticWarn`, `DiagnosticInfo`,
+    /// `DiagnosticHint`), or `None` where the colorscheme sets none or its
+    /// probe has not answered yet.
+    #[must_use]
+    pub fn level_fg(&self, level: NoticeLevel) -> Option<u32> {
+        match level {
+            NoticeLevel::Error => self.levels.error,
+            NoticeLevel::Warn => self.levels.warn,
+            NoticeLevel::Info => self.levels.info,
+            NoticeLevel::Hint => self.levels.hint,
         }
     }
 
@@ -963,6 +984,24 @@ mod tests {
         let mut hl = accent_table(Some(0x89b4fa), Some(0xcba6f7));
         hl.set_accent_token(Some(0xf38ba8));
         assert_eq!(Theme::from_hl(&hl).accent().fg, Some(0xf38ba8));
+    }
+
+    /// Each notice level reads its own diagnostic group's probed
+    /// foreground, and a level whose group has none reads `None`.
+    #[test]
+    fn each_notice_level_reads_its_own_diagnostic_group() {
+        let mut hl = HlTable::new();
+        hl.confirm_levels(LevelColors {
+            error: Some(0xff5555),
+            warn: Some(0xffb86c),
+            info: Some(0x8be9fd),
+            hint: None,
+        });
+        let theme = Theme::from_hl(&hl);
+        assert_eq!(theme.level_fg(NoticeLevel::Error), Some(0xff5555));
+        assert_eq!(theme.level_fg(NoticeLevel::Warn), Some(0xffb86c));
+        assert_eq!(theme.level_fg(NoticeLevel::Info), Some(0x8be9fd));
+        assert_eq!(theme.level_fg(NoticeLevel::Hint), None);
     }
 
     /// The load-bearing property this whole extension exists to prove: once

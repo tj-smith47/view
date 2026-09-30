@@ -10,7 +10,7 @@ use ratatui::buffer::Buffer;
 use ratatui::style::Style;
 
 use view_core::native::text::{cluster_width, clusters};
-use view_core::native::views::Span;
+use view_core::native::views::{NoticeLevel, Span};
 use view_surface::overlay::BorderSet;
 
 use super::{
@@ -72,8 +72,12 @@ pub(super) fn paint_toast(
         paint_text_row(&blank, style, area, row, buf);
     }
 
+    let level = lines
+        .first()
+        .and_then(|spans| spans.first())
+        .map_or(NoticeLevel::Info, |span| span.role.notice_level());
     let border_style = ratatui_style(ResolvedStyle {
-        fg: Some(toast_border_color(theme)),
+        fg: Some(toast_level_color(theme, level)),
         bg: body.bg,
         ..ResolvedStyle::default()
     });
@@ -202,21 +206,36 @@ fn paint_toast_border(
 
 /// A toast's interior: a float body first (`NormalFloat`), with nvim's
 /// message-area group filling whichever half of it the colorscheme left
-/// unstated, and `Normal` underneath both as their declared fallback.
+/// unstated, and `Normal` underneath both as their declared fallback. On a
+/// transparent scheme, one whose buffer states no background, the body
+/// states none either.
 ///
-/// That order is what a toast is. It carries a message, so a scheme that
-/// themes `MsgArea` and nothing else still reaches it; it is a box drawn
-/// over the buffer, so a scheme that themes floats and says nothing about
-/// the message area -- habamax, and it is far from alone -- gets its float
-/// colors rather than a box the user can only find by its border.
+/// It carries a message, so a scheme that themes `MsgArea` and nothing
+/// else still reaches it. On an opaque scheme it is a box drawn over the
+/// buffer, so a scheme that themes floats and says nothing about the
+/// message area (habamax among many) gets its float colors, where the
+/// buffer's own would leave a box the user can only find by its border. A
+/// transparent buffer is the terminal's own background, and a message box
+/// over it is a bordered box on that background, which is what the scheme
+/// asks for: a `NormalFloat` fill there reads as an opaque block over the
+/// user's wallpaper.
 fn toast_body(theme: &Theme) -> ResolvedStyle {
     let float = theme.float_chrome(ChromeGroup::NormalFloat, theme.float_bg());
     let msg = theme.float_chrome(ChromeGroup::MsgArea, theme.float_bg());
     ResolvedStyle {
         fg: float.fg.or(msg.fg),
-        bg: float.bg.or(msg.bg),
+        bg: theme.bg.and(float.bg.or(msg.bg)),
         ..float
     }
+}
+
+/// The toast frame's foreground for a notice at `level`: the
+/// colorscheme's diagnostic colour for that level, the look a notification
+/// plugin gives, and [`toast_border_color`] where the scheme sets none.
+pub(super) fn toast_level_color(theme: &Theme, level: NoticeLevel) -> u32 {
+    theme
+        .level_fg(level)
+        .unwrap_or_else(|| toast_border_color(theme))
 }
 
 /// The toast border's foreground: the same `FloatBorder`-first answer every

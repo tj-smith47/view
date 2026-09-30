@@ -175,9 +175,9 @@ pub struct Model {
     /// day holds one record per window on screen and no more.
     pub window_status: std::collections::HashMap<crate::events::WinHandle, WindowStatus>,
     /// The corner the last `update` stacked notices from and the column it
-    /// placed them in, or `None` while nothing is on the stack. The next
-    /// placement from the same corner keeps that column's end until the
-    /// cursor or the hunk under review enters it. The column is current
+    /// placed them in, or `None` while nothing is on the stack. A message
+    /// reads it to find the armed toast's slot without placing the column
+    /// again. The column is current
     /// only while every layout input moves through `update`; readers check
     /// the corner against the anchor of the moment.
     pub(crate) notice_held: Option<(crate::native::geometry::Anchor, NoticeColumn)>,
@@ -1614,9 +1614,17 @@ impl EngineModel {
         self.refresh_held_hl();
     }
 
-    /// Records the two probed foregrounds the accent role falls back to.
-    pub fn confirm_accent(&mut self, function_fg: Option<u32>, statement_fg: Option<u32>) {
+    /// Records one accent probe reply: the two foregrounds the accent role
+    /// falls back to and the diagnostic-level foregrounds a toast's frame
+    /// takes.
+    pub fn confirm_probe(
+        &mut self,
+        function_fg: Option<u32>,
+        statement_fg: Option<u32>,
+        levels: crate::hl::LevelColors,
+    ) {
         self.hl.confirm_accent(function_fg, statement_fg);
+        self.hl.confirm_levels(levels);
         self.refresh_held_hl();
     }
 
@@ -1815,6 +1823,7 @@ impl EngineModel {
         // looking up by id avoids picking that entry up instead
         if let Some(entry) = self.messages.entries.iter_mut().find(|e| e.id() == id) {
             entry.set_family(family);
+            entry.read_level_from_attr(self.hl.group("WarningMsg"), self.hl.group("ErrorMsg"));
             self.toast_history.push(entry);
         }
         // strictly after the scrollback record above, which is what makes

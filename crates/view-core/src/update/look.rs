@@ -37,9 +37,12 @@ pub(crate) fn accent_reply(
     generation: u64,
     function_fg: Option<u32>,
     statement_fg: Option<u32>,
+    levels: crate::hl::LevelColors,
 ) -> Vec<Effect> {
     if generation == model.engine.hl().probe_generation() {
-        model.engine.confirm_accent(function_fg, statement_fg);
+        model
+            .engine
+            .confirm_probe(function_fg, statement_fg, levels);
         model.dirty = true;
     }
     Vec::new()

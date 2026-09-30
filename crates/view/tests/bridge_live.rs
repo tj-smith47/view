@@ -543,3 +543,36 @@ fn the_colors_a_painter_reads_change_when_the_scheme_does() {
         "no chrome group's colors moved across a real colorscheme change: before={before:?} after={after:?}"
     );
 }
+
+/// The accent probe run against a live nvim on the default scheme answers
+/// every notice level with the foreground that scheme gives its
+/// `Diagnostic*` group.
+#[test]
+fn the_accent_probe_reads_each_diagnostic_levels_foreground() {
+    let session = Session::start("accent-levels", "");
+    let mut m = model();
+    let fg = |group: &str| {
+        let fg = session.eval(&format!(
+            "string(nvim_get_hl(0, #{{name: '{group}', link: v:false}}).fg)"
+        ));
+        Some(fg.parse::<u32>().unwrap())
+    };
+    let expected = view_core::hl::LevelColors {
+        error: fg("DiagnosticError"),
+        warn: fg("DiagnosticWarn"),
+        info: fg("DiagnosticInfo"),
+        hint: fg("DiagnosticHint"),
+    };
+
+    session.engine.handle.probe_accent_hl(7).unwrap();
+    let levels = session.wait_for(&mut m, ARRIVAL, |msg| match msg {
+        Msg::AccentProbeReply {
+            generation: 7,
+            levels,
+            ..
+        } => Some(*levels),
+        _ => None,
+    });
+
+    assert_eq!(levels, Some(expected));
+}

@@ -1,50 +1,50 @@
                                                                                 
  ╭ left.rs ───────────────────────────╮ ╭ agent: Stub ────────────────────────╮ 
  │left                                │ │                                     │ 
- │                                    │ │                                     │ 
- │                                    │ │                                     │ 
- │                                    │ │                                     │ 
- │                                    │ │                                     │ 
- │                                    │ │                                     │ 
- │                                    │ │                                     │ 
- │                                    │ │                                     │ 
- │                                    │ │                                     │ 
- │                                    │ │                                     │ 
- │                                    │ │                                     │ 
- │                            ╭──────╮│ │                                     │ 
- │                            │linted││ │                                     │ 
- │                            ╰──────╯│ │                                     │ 
+ │                             ╭─────╮│ │                                     │ 
+ │                             │saved││ │                                     │ 
+ │                             ╰─────╯│ │                                     │ 
  │                         ╭─────────╮│ │                                     │ 
  │                         │2 matches││ │                                     │ 
  │                         ╰─────────╯│ │                                     │ 
- │                             ╭─────╮│ │  ⠋ what does the gaps toggle do?    │ 
- │                             │saved││ │─────────────────────────────────────│ 
- │                             ╰─────╯│ │>                                    │ 
+ │                            ╭──────╮│ │                                     │ 
+ │                            │linted││ │                                     │ 
+ │                            ╰──────╯│ │                                     │ 
+ │                                    │ │                                     │ 
+ │                                    │ │                                     │ 
+ │                                    │ │                                     │ 
+ │                                    │ │                                     │ 
+ │                                    │ │                                     │ 
+ │                                    │ │                                     │ 
+ │                                    │ │                                     │ 
+ │                                    │ │  ⠋ what does the gaps toggle do?    │ 
+ │                                    │ │─────────────────────────────────────│ 
+ │                                    │ │>                                    │ 
  ╰ -- INSERT -- 1:1 ──────────────────╯ ╰─────────────────────────────────────╯ 
                                                                                 
 --- fg ---
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAADBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAAADBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
-ABAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAADBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAAADBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAADBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAADDDDDDDDBACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
+ABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA
 ABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBACCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 A = Reset

@@ -82,6 +82,10 @@ pub struct HlTable {
     /// What the accent role resolves from. nvim broadcasts neither of the
     /// two syntax groups through `hl_group_set`, so both arrive by probe.
     accent: AccentInputs,
+    /// The four diagnostic levels' foregrounds. `hl_group_set` broadcasts
+    /// the builtin UI groups alone, and the `Diagnostic*` groups are none
+    /// of them, so these arrive by probe too.
+    levels: LevelColors,
     /// Whether any of the above changed since the last [`HlTable::take_dirty`].
     dirty: bool,
     /// See [`HlTable::revision`].
@@ -99,6 +103,21 @@ pub struct AccentInputs {
     pub statement_fg: Option<u32>,
 }
 
+/// The probed foregrounds of `DiagnosticError`, `DiagnosticWarn`,
+/// `DiagnosticInfo` and `DiagnosticHint`, `None` where the colorscheme
+/// sets none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LevelColors {
+    /// `DiagnosticError`'s foreground.
+    pub error: Option<u32>,
+    /// `DiagnosticWarn`'s foreground.
+    pub warn: Option<u32>,
+    /// `DiagnosticInfo`'s foreground.
+    pub info: Option<u32>,
+    /// `DiagnosticHint`'s foreground.
+    pub hint: Option<u32>,
+}
+
 impl HlTable {
     /// An empty table: no defaults, no groups, no probe reply yet.
     #[must_use]
@@ -111,6 +130,7 @@ impl HlTable {
             probe_generation: 0,
             confirmed: None,
             accent: AccentInputs::default(),
+            levels: LevelColors::default(),
             dirty: false,
             revision: 0,
         }
@@ -246,6 +266,21 @@ impl HlTable {
         }
         self.accent.function_fg = function_fg;
         self.accent.statement_fg = statement_fg;
+        self.touch();
+    }
+
+    /// The probed diagnostic-level foregrounds a toast's frame takes.
+    #[must_use]
+    pub fn levels(&self) -> LevelColors {
+        self.levels
+    }
+
+    /// Records the probed diagnostic-level foregrounds.
+    pub fn confirm_levels(&mut self, levels: LevelColors) {
+        if self.levels == levels {
+            return;
+        }
+        self.levels = levels;
         self.touch();
     }
 
