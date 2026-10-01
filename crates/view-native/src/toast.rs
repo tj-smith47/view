@@ -58,7 +58,6 @@ pub enum ToastError {
     #[error("could not serialize the first-run record: {source}")]
     Serialize {
         /// The underlying TOML serialization error.
-        #[from]
         source: toml::ser::Error,
     },
 }
@@ -305,7 +304,7 @@ fn write_record(path: &Path, record: &mut Record, keep: &str) -> Result<(), Toas
     record
         .announced
         .retain(|config, _| config == keep || !config_is_gone(config));
-    let rendered = toml::to_string(record)?;
+    let rendered = toml::to_string(record).map_err(|source| ToastError::Serialize { source })?;
     // written beside the record and renamed over it, so a process killed
     // mid-write leaves the previous record whole; the pid keeps two views
     // writing at once off each other's temp file
