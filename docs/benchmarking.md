@@ -255,14 +255,57 @@ part of the gap: the engine refreshes a terminal buffer on a fixed 10 ms
 timer (`REFRESH_DELAY`, Neovim v0.12.4 `terminal.c:132`), and each side's
 cadence is that timer plus one redraw.
 
-The three unmet cells are `[[shortfall]]` entries in
-`crates/view-bench/budgets.toml`, each accepted at its recorded value with
-its bar untouched. Which class holds the five:
+dev-macos records all five on the same `user` fixture, taken 2026-10-01 on
+mbp at `e844816d`, one cell to a run. The conditions those five runs were
+taken under, which no cell records:
+
+```text
+2026-10-01  echo.user             1-minute load 1.11 rising to 1.50
+                                  null-pair calibration 2.7% at the start, 0.3% at the end
+            echo_speculated.user  1-minute load 1.39 falling to 1.15
+                                  null-pair calibration 1.1% at the start, 1.4% at the end
+            scroll.user           1-minute load 1.05 rising to 2.11
+                                  null-pair calibration 0.1% at the start, 4.6% at the end
+            flood.user            1-minute load 1.94 rising to 3.61
+                                  null-pair calibration 0.7% at the start, 0.2% at the end
+            startup.user          1-minute load 2.87 falling to 1.62
+                                  null-pair calibration 0.2% at the start, 0.7% at the end
+```
+
+All five calibrations sit inside the 15% floor that refuses a run.
+
+On dev-macos `startup.settled_ratio_p50` reads 1.005 on the `user` fixture
+against the 1.0 bar, unmet.
+
+On dev-macos the diagnostic `startup.server_delta_ms` reads 3.050 ms on the
+`user` fixture, inside its 5 ms bound.
+
+On dev-macos `echo.ratio_p50` reads 1.168 on the `user` fixture against the
+1.10 bar, unmet.
+
+On dev-macos `echo.view_p99_ms` reads 10.126 ms p99 on the `user` fixture
+against its 8 ms bar, unmet, and `echo.paired_delta_p99_ms` reads 8.209 ms.
+
+On dev-macos `echo_speculated.speculated_ratio_p50` reads 0.266 on the `user`
+fixture against the 1.0 bar, met, and `echo_speculated.speculated_paint_p99_ms`
+reads 4.370 ms p99.
+
+On dev-macos `scroll.staleness_p99_ms` reads 10.101 ms p99 on the `user`
+fixture, inside the 16 ms bar, and `scroll.ratio_p50` 1.806 and
+`scroll.ratio_p99` 1.113 are recorded and not gated.
+
+On dev-macos `flood.cadence_p99_ms` reads 13.439 ms p99 on the `user` fixture,
+inside the 16 ms frame, with `flood.cadence_p99_ratio` 1.011 and
+`flood.pace_ratio` 1.009.
+
+Three unmet cells on each dev class are `[[shortfall]]` entries in the
+ledger, `crates/view-bench/budgets.toml`, each accepted at its recorded value
+with its bar untouched. Which class holds the five:
 
 | class | the five `user` cells | how each is seated |
 |---|---|---|
 | `dev-linux` | all five recorded | -- |
-| `dev-macos` | all five owed | a quiet-window session on mbp, `task user-fixture` first |
+| `dev-macos` | all five recorded | a quiet-window session on mbp, `task user-fixture` first |
 | `gh-linux` | all five recorded | seated from the `bench-measured-gh-linux.toml` artifact its gate leg uploaded |
 | `gh-macos` | all five recorded | the same seating from `bench-measured-gh-macos.toml` |
 | `controlled-linux` | all five unseated | the matrix runs all five there and nothing scopes them away; its baseline holds no cell for any of them today, and it is the one class that loads the budget table, so a quiet-window recording there is what would attest the felt bars |

@@ -3017,9 +3017,9 @@ mod tests {
     /// repo is developed and gated on, and the two shared runner legs,
     /// which gate every row they arm against a committed baseline of their
     /// own. The remaining classes record what their own host can witness --
-    /// `dev-macos` has no speculated-echo or remote leg recorded,
-    /// `controlled-linux` is armed a row at a time -- so completeness is a
-    /// claim about these three.
+    /// `dev-macos` records the speculated-echo row on `user` alone and no
+    /// remote leg, `controlled-linux` is armed a row at a time -- so
+    /// completeness is a claim about these three.
     const COMPLETE_CLASSES: &[&str] = &["dev-linux", "gh-linux", "gh-macos"];
 
     #[test]

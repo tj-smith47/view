@@ -231,9 +231,9 @@ fixtures = ["minimal", "heavy"]
 
 # The two startup cells, in the vocabulary spec 3.1 states them in: what a
 # person waits through, and the one diagnostic that decomposes it. Neither
-# carries a `classes` list yet. dev-linux is the only class that has
-# recorded the row, and a class restriction would guess where the number
-# will next be recorded. `server_delta_ms`'s 5 ms is the controlled-leg
+# carries a `classes` list yet. The two dev classes and the two gh legs
+# record the row and no controlled class has, so a class restriction would
+# guess where the number will next be recorded. `server_delta_ms`'s 5 ms is the controlled-leg
 # bar spec 3.1 states. The metric is a cold-start absolute by name in
 # `view_harness::baselines::gate_headroom` (2026-09-30): a shared class
 # records it and a controlled class gates it, since the difference of two
@@ -502,7 +502,7 @@ config = "real"
 # what the 2026-09-06 retake under the answering pty made visible, an entry
 # each with the bar unchanged.
 #
-# Listed below: 15 entries -- 7 dev-linux, 8 dev-macos.
+# Listed below: 18 entries -- 7 dev-linux, 11 dev-macos.
 #
 # A count stated in prose about the file's own contents is a fact the file
 # can check, so the line above is pinned against the parsed entries; the
@@ -665,6 +665,35 @@ class = "dev-macos"
 accepted = 1.114
 trials = [0.974, 1.2513]
 why = "ratio_p50 1.114, 1.3% over the 1.1 bar at the median of a statistic this class cannot pin tighter. Eight quiet-host replicates span 0.974-1.218, within-replicate trial spread 2-8% against about a quarter between replicates. Both processes' absolute p50 redraw in discrete tiers per spawned pair (core placement), independent of ambient load: the lowest and highest clean draws on record, which are this entry's trials, both landed at 1-min loads inside the campaign's own cap, the highest from a same-commit gate run. That gate draw and the 2026-08-02 recording it replaced are both ordinary draws from this spread, and the record that replaced them took the median. The accepted value and the recorded baseline are the replicate median ratio_p50 1.114, since a single low draw as the seat would false-fail every record above it; the two ways of taking that median, all eight against load-included, differ by less than the last digit the bar is stated at. Same own-path residual as echo.minimal on this class."
+
+# dev-macos login-shaped legs, recorded 2026-10-01 on mbp at e844816d, each
+# run's null-pair calibration inside the 15% floor at both ends. Of the five
+# cells only these three sit past a felt bar.
+[[shortfall]]
+scenario = "echo"
+fixture = "user"
+metric = "ratio_p50"
+class = "dev-macos"
+accepted = 1.1684446939921393
+trials = [1.168, 1.170, 1.141]
+why = "the felt typing row on the config it claims: ratio_p50 reads 1.1684, which is 6.2 percent over the 1.10 bar. The record run drew view's p50 at 2081, 2249 and 2008 us against bare nvim's 1781, 1922 and 1760 us, a gap of about 250 to 330 us a keystroke, and the seat is the median trial. The same own-path residual stands on the plugin-free fixture, which the echo.minimal entry above carries, where ratio_p50 records 1.1066. This class has not had the round-trip stage decomposition dev-linux ran, so the wider gap here is unattributed. Its root cause is owed to the pre-v0.1.0 performance session. The speculated path is measured on this same config: echo_speculated.speculated_ratio_p50 reads 0.266 of the paired bare-nvim run, and it removes the engine round trip from perceived echo. This entry measures the unspeculated round trip, and its bar is untouched."
+
+[[shortfall]]
+scenario = "echo"
+fixture = "user"
+metric = "view_p99_ms"
+class = "dev-macos"
+accepted = 10.126
+trials = [10.126, 10.714, 9.589]
+why = "view_p99_ms 10.126 ms, 26.6 percent over the 8 ms bar on the login-shaped fixture, the median of the record run's three trials. The paired ratio_p99 reads 1.0601, so most of the absolute tail is the fixture's own. Bare nvim's own p99 sat past the same bar in all three of those trials. The root cause of the tail on this class is owed to the pre-v0.1.0 performance session, and the bar is untouched."
+
+[[shortfall]]
+scenario = "startup"
+fixture = "user"
+metric = "settled_ratio_p50"
+class = "dev-macos"
+accepted = 1.0049626651232069
+why = "the felt launch on the config it claims: settled_ratio_p50 reads 1.0050, which is 0.5 percent over the 1.0 bar. The record run took 1000 samples interleaved spawn-for-spawn against bare nvim, and view's p50 sat under half a millisecond behind bare nvim's. The diagnostic that decomposes this cell, server_delta_ms, reads 3.050 ms, inside its own 5 ms bound. dev-linux attributes its own reading of this cell to the attach's full-screen redraw that view re-renders and the attach-and-takeover round trip the pump runs inside VimEnter. This class has not decomposed its reading, and its root cause is owed to the pre-v0.1.0 performance session. The bar is untouched, and this entry records the gap."
 
 # dev-macos first_paint, from the 2026-08-02 quiet-host re-record (the
 # class's first recording of this row was taken on a host with a busy login

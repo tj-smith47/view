@@ -2,32 +2,6 @@ schema = 1
 engine_pin = "v0.12.4"
 machine_class = "dev-macos"
 
-[withdrawn.echo.user]
-paired_delta_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-ratio_p99 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-view_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
-[withdrawn.echo_speculated.user]
-speculated_paint_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-speculated_ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
-[withdrawn.scroll.user]
-ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-ratio_p99 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-staleness_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
-[withdrawn.flood.user]
-cadence_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-cadence_p99_ratio = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-pace_ratio = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
-[withdrawn.startup.user]
-first_frame_cold_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-first_frame_ratio_p99 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-server_delta_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-settled_ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
 [ai_composer.heavy]
 p99_ms = 0.537
 
@@ -46,6 +20,12 @@ ratio_p50 = 1.1066140177690031
 ratio_p99 = 1.023219512195122
 view_p99_ms = 5.244
 
+[echo.user]
+paired_delta_p99_ms = 8.209
+ratio_p50 = 1.1684446939921393
+ratio_p99 = 1.06005738597012
+view_p99_ms = 10.126
+
 [echo_control.heavy]
 control_delta_p99_ms = 5.997000000000001
 control_p99_ms = 9.737
@@ -57,6 +37,10 @@ control_delta_p99_ms = 2.299
 control_p99_ms = 4.789
 control_ratio_p50 = 1.0
 control_ratio_p99 = 1.3325415676959622
+
+[echo_speculated.user]
+speculated_paint_p99_ms = 4.37
+speculated_ratio_p50 = 0.26586294416243655
 
 [first_paint.heavy]
 marker_cold_ms = 84.02604099999999
@@ -81,6 +65,11 @@ cadence_p99_ms = 13.352667
 cadence_p99_ratio = 1.0364998638846823
 pace_ratio = 1.0030877047265554
 
+[flood.user]
+cadence_p99_ms = 13.439417
+cadence_p99_ratio = 1.011420364462776
+pace_ratio = 1.0091190680658908
+
 [input_path.minimal]
 key_to_rpc_p99_us = 157.0
 
@@ -97,7 +86,7 @@ match_paint_p50_ms = 7.1591249999999995
 match_paint_p99_ms = 17.483459
 
 [scroll.heavy]
-ratio_p50 = 2.3192445972478118
+ratio_p50 = 2.319244597247812
 ratio_p99 = 1.7097704636773465
 staleness_p99_ms = 8.833459
 
@@ -106,16 +95,17 @@ ratio_p50 = 2.272541802721265
 ratio_p99 = 1.6683195297774573
 staleness_p99_ms = 6.354875000000001
 
+[scroll.user]
+ratio_p50 = 1.806432091178278
+ratio_p99 = 1.112916045766089
+staleness_p99_ms = 10.101041
+
+[startup.user]
+first_frame_cold_ms = 90.56295899999999
+first_frame_ratio_p99 = 1.006161940583879
+server_delta_ms = 3.049999999999997
+settled_ratio_p50 = 1.0049626651232069
+
 [supervision.minimal]
 restart_rehydrate_p99_ms = 57.50425
 wedge_detect_p99_ms = 11541.929584
-
-[echo.user]
-
-[echo_speculated.user]
-
-[scroll.user]
-
-[flood.user]
-
-[startup.user]
