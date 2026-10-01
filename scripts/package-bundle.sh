@@ -52,7 +52,7 @@ engine_prefix() {
   pin="$(tr -d '[:space:]' < .engine-pin)"
   url="https://github.com/neovim/neovim/releases/download/${pin}/${asset}"
   mkdir -p "$workdir"
-  curl -fsSL -o "$workdir/$asset" "$url"
+  curl -fsSL --retry 5 -o "$workdir/$asset" "$url"
   case "$asset" in
     (*.zip) unzip -q "$workdir/$asset" -d "$workdir" ;;
     (*) tar xzf "$workdir/$asset" -C "$workdir" ;;

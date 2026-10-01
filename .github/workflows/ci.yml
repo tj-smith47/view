@@ -51,7 +51,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           ENGINE_PIN=$(cat .engine-pin)
-          curl -fsSL -o "$RUNNER_TEMP/nvim.appimage" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/nvim.appimage" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
           chmod +x "$RUNNER_TEMP/nvim.appimage"
           (cd "$RUNNER_TEMP" && ./nvim.appimage --appimage-extract >/dev/null)
           echo "$RUNNER_TEMP/squashfs-root/usr/bin" >> "$GITHUB_PATH"
@@ -60,7 +60,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           ENGINE_PIN=$(cat .engine-pin)
-          curl -fsSL -o "$RUNNER_TEMP/nvim-macos.tar.gz" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-macos-arm64.tar.gz"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/nvim-macos.tar.gz" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-macos-arm64.tar.gz"
           tar xzf "$RUNNER_TEMP/nvim-macos.tar.gz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/nvim-macos-arm64/bin" >> "$GITHUB_PATH"
 
@@ -70,7 +70,7 @@ jobs:
         run: |
           ENGINE_PIN=$(cat .engine-pin)
           TEMP_DIR=$(cygpath -u "$RUNNER_TEMP")
-          curl -fsSL -o "$TEMP_DIR/nvim-win64.zip" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-win64.zip"
+          curl -fsSL --retry 5 -o "$TEMP_DIR/nvim-win64.zip" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-win64.zip"
           unzip -q "$TEMP_DIR/nvim-win64.zip" -d "$TEMP_DIR"
           # cygpath back to a Windows path: this step runs under Git Bash,
           # whose paths (/d/a/...) only other bash steps can resolve.
@@ -100,7 +100,7 @@ jobs:
               asset="shellcheck-${SHELLCHECK_PIN}.zip"
               sum=8a4e35ab0b331c85d73567b12f2a444df187f483e5079ceffa6bda1faa2e740e ;;
           esac
-          curl -fsSL -o "$asset" "$base/$asset"
+          curl -fsSL --retry 5 -o "$asset" "$base/$asset"
           sha256() {
             if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
           }
@@ -182,7 +182,7 @@ jobs:
       - name: Install neovim (linux)
         run: |
           ENGINE_PIN=$(cat .engine-pin)
-          curl -fsSL -o "$RUNNER_TEMP/nvim.appimage" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/nvim.appimage" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
           chmod +x "$RUNNER_TEMP/nvim.appimage"
           (cd "$RUNNER_TEMP" && ./nvim.appimage --appimage-extract >/dev/null)
           echo "$RUNNER_TEMP/squashfs-root/usr/bin" >> "$GITHUB_PATH"
@@ -270,7 +270,7 @@ jobs:
       - name: Install neovim (linux)
         run: |
           ENGINE_PIN=$(cat .engine-pin)
-          curl -fsSL -o "$RUNNER_TEMP/nvim.appimage" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/nvim.appimage" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
           chmod +x "$RUNNER_TEMP/nvim.appimage"
           (cd "$RUNNER_TEMP" && ./nvim.appimage --appimage-extract >/dev/null)
           echo "$RUNNER_TEMP/squashfs-root/usr/bin" >> "$GITHUB_PATH"
@@ -338,7 +338,7 @@ jobs:
       - name: Install neovim (linux)
         run: |
           ENGINE_PIN=$(cat .engine-pin)
-          curl -fsSL -o "$RUNNER_TEMP/nvim.appimage" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/nvim.appimage" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
           chmod +x "$RUNNER_TEMP/nvim.appimage"
           (cd "$RUNNER_TEMP" && ./nvim.appimage --appimage-extract >/dev/null)
           echo "$RUNNER_TEMP/squashfs-root/usr/bin" >> "$GITHUB_PATH"
@@ -393,7 +393,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           ENGINE_PIN=$(cat .engine-pin)
-          curl -fsSL -o "$RUNNER_TEMP/nvim.appimage" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/nvim.appimage" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
           chmod +x "$RUNNER_TEMP/nvim.appimage"
           (cd "$RUNNER_TEMP" && ./nvim.appimage --appimage-extract >/dev/null)
           echo "$RUNNER_TEMP/squashfs-root/usr/bin" >> "$GITHUB_PATH"
@@ -402,7 +402,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           ENGINE_PIN=$(cat .engine-pin)
-          curl -fsSL -o "$RUNNER_TEMP/nvim-macos.tar.gz" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-macos-arm64.tar.gz"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/nvim-macos.tar.gz" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-macos-arm64.tar.gz"
           tar xzf "$RUNNER_TEMP/nvim-macos.tar.gz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/nvim-macos-arm64/bin" >> "$GITHUB_PATH"
 
@@ -460,7 +460,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           ENGINE_PIN=$(cat .engine-pin)
-          curl -fsSL -o "$RUNNER_TEMP/nvim.appimage" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/nvim.appimage" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
           chmod +x "$RUNNER_TEMP/nvim.appimage"
           (cd "$RUNNER_TEMP" && ./nvim.appimage --appimage-extract >/dev/null)
           echo "$RUNNER_TEMP/squashfs-root/usr/bin" >> "$GITHUB_PATH"
@@ -469,7 +469,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           ENGINE_PIN=$(cat .engine-pin)
-          curl -fsSL -o "$RUNNER_TEMP/nvim-macos.tar.gz" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-macos-arm64.tar.gz"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/nvim-macos.tar.gz" "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-macos-arm64.tar.gz"
           tar xzf "$RUNNER_TEMP/nvim-macos.tar.gz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/nvim-macos-arm64/bin" >> "$GITHUB_PATH"
 
