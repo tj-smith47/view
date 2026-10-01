@@ -12,7 +12,7 @@
 use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::pairing::{paired_summary, NvimSamples, PairedSummary, ViewSamples};
@@ -162,10 +162,18 @@ pub fn shim_taps_spec(
     }
 }
 
+/// The records the reader thread has parsed, and the signal it raises
+/// each time it adds some.
+#[derive(Default)]
+struct Sink {
+    records: Mutex<Vec<TapRecord>>,
+    arrived: Condvar,
+}
+
 /// The harness end of the tap channel: a FIFO plus a reader thread
 /// accumulating parsed records.
 pub struct TapPipe {
-    records: Arc<Mutex<Vec<TapRecord>>>,
+    sink: Arc<Sink>,
     stop: Arc<AtomicBool>,
     path: std::path::PathBuf,
 }
@@ -191,9 +199,9 @@ impl TapPipe {
         .map_err(|e| BenchError::Desync {
             context: format!("opening tap fifo {}: {e}", path.display()),
         })?;
-        let records = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::new(Sink::default());
         let stop = Arc::new(AtomicBool::new(false));
-        let thread_records = Arc::clone(&records);
+        let thread_sink = Arc::clone(&sink);
         let thread_stop = Arc::clone(&stop);
         std::thread::spawn(move || {
             let mut file = std::fs::File::from(file);
@@ -207,11 +215,12 @@ impl TapPipe {
                         while let Some(newline) = pending.find('\n') {
                             let line: String = pending.drain(..=newline).collect();
                             if let Some(record) = parse_record(line.trim_end()) {
-                                if let Ok(mut sink) = thread_records.lock() {
-                                    sink.push(record);
+                                if let Ok(mut records) = thread_sink.records.lock() {
+                                    records.push(record);
                                 }
                             }
                         }
+                        thread_sink.arrived.notify_all();
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_micros(500));
@@ -221,7 +230,7 @@ impl TapPipe {
             }
         });
         Ok(Self {
-            records,
+            sink,
             stop,
             path: path.to_path_buf(),
         })
@@ -239,10 +248,12 @@ impl TapPipe {
     /// caller's ordinary drain cadence is left untouched.
     #[must_use]
     pub fn records_between(&self, from: i64, to: i64) -> Vec<TapRecord> {
-        self.records
+        self.sink
+            .records
             .lock()
-            .map(|sink| {
-                sink.iter()
+            .map(|records| {
+                records
+                    .iter()
                     .filter(|r| r.nanos >= from && r.nanos <= to)
                     .copied()
                     .collect()
@@ -253,14 +264,15 @@ impl TapPipe {
     /// Takes every record accumulated so far.
     #[must_use]
     pub fn drain(&self) -> Vec<TapRecord> {
-        self.records
+        self.sink
+            .records
             .lock()
-            .map(|mut sink| std::mem::take(&mut *sink))
+            .map(|mut records| std::mem::take(&mut *records))
             .unwrap_or_default()
     }
 
-    /// Tight-polls until a record matching `pred` arrives (draining
-    /// nothing; the caller drains between samples), or `timeout` passes.
+    /// Blocks until a record matching `pred` arrives (draining nothing; the
+    /// caller drains between samples), or `timeout` passes.
     #[must_use]
     pub fn wait_for(
         &self,
@@ -269,19 +281,17 @@ impl TapPipe {
     ) -> Option<TapRecord> {
         let deadline = Instant::now() + timeout;
         let mut seen = 0;
+        let mut records = self.sink.records.lock().ok()?;
         loop {
-            if let Ok(sink) = self.records.lock() {
-                for record in sink.iter().skip(seen) {
-                    if pred(record) {
-                        return Some(*record);
-                    }
-                }
-                seen = sink.len();
+            if let Some(record) = records.iter().skip(seen).find(|r| pred(r)) {
+                return Some(*record);
             }
-            if Instant::now() >= deadline {
+            seen = records.len();
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 return None;
             }
-            std::thread::yield_now();
+            records = self.sink.arrived.wait_timeout(records, remaining).ok()?.0;
         }
     }
 }
@@ -1351,22 +1361,34 @@ fn spin_for(pace: Duration) {
 /// Measures the tap operation's own cost with the identical code shape
 /// the in-process tap sites run (one monotonic clock read, one record
 /// format, one non-blocking FIFO write), left `pace` apart so every write
-/// is one the reader actually receives. Callers pass [`OVERHEAD_PACE`];
-/// the parameter exists so the delivery guard below can be exercised
-/// against a pace that provably violates it.
+/// is one the reader actually receives. Callers pass [`OVERHEAD_PACE`].
 ///
 /// # Errors
 ///
 /// Returns [`BenchError::Desync`] if the FIFO cannot be opened for
-/// writing, or if the reader received fewer records than were written --
-/// a dropped write is a write whose cost the samples understate, so a
-/// lossy characterization is reported rather than averaged in.
+/// writing, or if the reader received fewer records than were written.
 pub fn characterize_overhead(
     pipe: &TapPipe,
     iterations: usize,
     pace: Duration,
 ) -> Result<Distribution, BenchError> {
     let (dist, delivered) = characterize_once(pipe, iterations, pace)?;
+    require_full_delivery(dist, delivered, iterations)
+}
+
+/// Hands back `dist` only when the reader received every record written.
+///
+/// # Errors
+///
+/// Returns [`BenchError::Desync`] when `delivered` is short of
+/// `iterations`: a dropped write is a write whose cost the samples
+/// understate, so a lossy characterization is reported and never averaged
+/// in.
+fn require_full_delivery(
+    dist: Distribution,
+    delivered: usize,
+    iterations: usize,
+) -> Result<Distribution, BenchError> {
     if delivered < iterations {
         return Err(BenchError::Desync {
             context: format!(
@@ -2312,16 +2334,14 @@ mod tests {
 
     #[test]
     fn an_undelivered_characterization_is_refused_rather_than_reported() {
-        // unpaced, the FIFO fills faster than the reader drains it and the
-        // rest of the writes fail immediately with EAGAIN. A failed write
-        // costs nothing, so its samples describe an operation the tap
-        // sites never perform -- which is how the 5us bar came to be
-        // compared against a p99 of 0.53us that no tap ever paid
-        let path = scratch_root().join(format!("unpaced-{}.fifo", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let pipe = TapPipe::create(&path).expect("tap pipe");
-        let err = characterize_overhead(&pipe, 100_000, Duration::ZERO)
-            .expect_err("a saturated FIFO must not report a percentile");
+        // a write the FIFO refuses fails immediately with EAGAIN and costs
+        // nothing, so its sample describes an operation the tap sites never
+        // perform. The shortfall is handed in: whether an unpaced writer
+        // outruns the reader is the host's scheduling, and a test that
+        // waits for it to happen fails on a host where it does not
+        let dist = Distribution::from_samples(&[0.5, 0.5, 0.5], 0).expect("three samples");
+        let err = require_full_delivery(dist, 99_999, 100_000)
+            .expect_err("a lossy characterization must not report a percentile");
         assert!(
             matches!(err, BenchError::Desync { .. }),
             "a lossy characterization is a harness fault, not a latency reading: {err:?}"
@@ -2331,15 +2351,14 @@ mod tests {
             message.contains("the reader received"),
             "the refusal must name the delivery shortfall, got: {message}"
         );
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn a_pace_too_fast_for_the_host_is_escalated_until_every_write_lands() {
-        // the same zero pace the guard test above proves is lossy: the
-        // adaptive caller must reach full delivery rather than refuse, and
-        // must report a pace slower than the one it was handed, so a host
-        // needing an unusual pace shows up in the row's output
+        // a zero pace is the one most likely to lose writes: the adaptive
+        // caller must reach full delivery rather than refuse, and must
+        // report the pace it settled on, so a host needing an unusual pace
+        // shows up in the row's output
         let path = scratch_root().join(format!("adaptive-{}.fifo", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let pipe = TapPipe::create(&path).expect("tap pipe");

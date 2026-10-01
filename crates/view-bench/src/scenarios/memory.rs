@@ -13,7 +13,7 @@
 //! apples-to-apples comparison instead of pairing view's own-process
 //! number against nvim's whole-process one.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::sampling::Distribution;
 use crate::scenarios::Protocol;
@@ -446,10 +446,7 @@ pub(crate) fn sample_distribution(
     let pace = Duration::from_millis(2);
     for _ in 0..total {
         raw_mb.push(sample_reading(&mut session, pid, reader)?);
-        let next = Instant::now() + pace;
-        while Instant::now() < next {
-            std::thread::yield_now();
-        }
+        std::thread::sleep(pace);
     }
     session.shutdown();
     Distribution::from_samples(&raw_mb, protocol.warmup)

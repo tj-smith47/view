@@ -369,7 +369,12 @@ fn elapsed_ms(start: Instant) -> f64 {
 
 /// Occurrences of `token` in the parsed screen text.
 fn count_token(session: &mut BenchSession, token: &str) -> usize {
-    session.with_screen(|screen| screen_lines(screen).matches(token).count())
+    session.with_screen(|screen| token_count(screen, token))
+}
+
+/// Occurrences of `token` in `screen`'s text.
+fn token_count(screen: &vt100::Screen, token: &str) -> usize {
+    screen_lines(screen).matches(token).count()
 }
 
 /// A single OS-level write from the picker can arrive at the bench's pty
@@ -397,29 +402,23 @@ fn debounced(before: usize, after: usize) -> Option<usize> {
     (before == after).then_some(after)
 }
 
-/// Tight-polls (yielding) until `check` holds, or fails with `what` and
+/// Blocks until `check` holds against the screen, or fails with `what` and
 /// the screen attached.
 fn wait_for(
     session: &mut BenchSession,
     timeout: Duration,
     what: &str,
-    mut check: impl FnMut(&mut BenchSession) -> bool,
+    check: impl FnMut(&vt100::Screen) -> bool,
 ) -> Result<(), BenchError> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if check(session) {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(BenchError::Desync {
-                context: format!(
-                    "{what} never held within {timeout:?}; screen:\n{}",
-                    session.screen_text()
-                ),
-            });
-        }
-        std::thread::yield_now();
+    if session.wait_screen(timeout, check) {
+        return Ok(());
     }
+    Err(BenchError::Desync {
+        context: format!(
+            "{what} never held within {timeout:?}; screen:\n{}",
+            session.screen_text()
+        ),
+    })
 }
 
 /// Spawns and settles one session in the spec's cwd.
@@ -449,17 +448,23 @@ fn spawn_settled(spec: &SpawnSpec, settle_deadline: Duration) -> Result<BenchSes
 fn open_picker(session: &mut BenchSession) -> Result<(), BenchError> {
     session.send(OPEN_COMMAND)?;
     session.send(b"\r")?;
-    wait_for(session, FIRST_PAGE_TIMEOUT, "picker first results", |s| {
-        count_token(s, BULK_TOKEN) >= 1
-    })
+    wait_for(
+        session,
+        FIRST_PAGE_TIMEOUT,
+        "picker first results",
+        |screen| token_count(screen, BULK_TOKEN) >= 1,
+    )
 }
 
 /// Closes the picker and waits for its rows to leave the screen.
 fn close_picker(session: &mut BenchSession) -> Result<(), BenchError> {
     session.send(b"\x1b")?;
-    wait_for(session, FIRST_PAGE_TIMEOUT, "picker overlay closed", |s| {
-        count_token(s, BULK_TOKEN) == 0 && count_token(s, PROBE_TOKEN) == 0
-    })
+    wait_for(
+        session,
+        FIRST_PAGE_TIMEOUT,
+        "picker overlay closed",
+        |screen| token_count(screen, BULK_TOKEN) == 0 && token_count(screen, PROBE_TOKEN) == 0,
+    )
 }
 
 /// The match phase: one session over the 100k corpus, corpus residency
@@ -482,7 +487,7 @@ fn run_match_phase(
         &mut session,
         FULL_WALK_TIMEOUT,
         "all corpus probes resident",
-        |s| count_token(s, PROBE_TOKEN) >= PROBE_FILES,
+        |screen| token_count(screen, PROBE_TOKEN) >= PROBE_FILES,
     )?;
     for _ in 0..PROBE_QUERY.len() {
         session.send(b"\x7f")?;
@@ -491,7 +496,7 @@ fn run_match_phase(
         &mut session,
         FIRST_PAGE_TIMEOUT,
         "query cleared to full corpus",
-        |s| count_token(s, BULK_TOKEN) >= 1,
+        |screen| token_count(screen, BULK_TOKEN) >= 1,
     )?;
     if !session.settle(SettleBound {
         quiet: Duration::from_secs(2),
@@ -517,10 +522,8 @@ fn run_match_phase(
                     &mut session,
                     protocol.sample_timeout,
                     "match results for the typed query",
-                    |s| {
-                        s.with_screen(|screen| {
-                            screen_holds(screen, MATCH_TARGET) && !screen_holds(screen, BULK_TOKEN)
-                        })
+                    |screen| {
+                        screen_holds(screen, MATCH_TARGET) && !screen_holds(screen, BULK_TOKEN)
                     },
                 )?;
             } else {
@@ -531,7 +534,7 @@ fn run_match_phase(
                     &mut session,
                     protocol.sample_timeout,
                     "match results for the erased query",
-                    |s| s.with_screen(|screen| screen_holds(screen, BULK_TOKEN)),
+                    |screen| screen_holds(screen, BULK_TOKEN),
                 )?;
             }
             samples.push(elapsed_ms(start));
@@ -541,9 +544,12 @@ fn run_match_phase(
         // trial starts from the empty query
         if protocol.samples % 2 == 1 {
             session.send(b"\x7f")?;
-            wait_for(&mut session, protocol.sample_timeout, "query reset", |s| {
-                s.with_screen(|screen| screen_holds(screen, BULK_TOKEN))
-            })?;
+            wait_for(
+                &mut session,
+                protocol.sample_timeout,
+                "query reset",
+                |screen| screen_holds(screen, BULK_TOKEN),
+            )?;
         }
         trials.push(Distribution::from_samples(&samples, protocol.warmup)?);
     }
@@ -570,7 +576,7 @@ fn run_scan_phase(
         &mut session,
         FULL_WALK_TIMEOUT,
         "warm-cache full walk",
-        |s| count_token(s, PROBE_TOKEN) >= PROBE_FILES,
+        |screen| token_count(screen, PROBE_TOKEN) >= PROBE_FILES,
     )?;
     close_picker(&mut session)?;
     let mut trials = Vec::with_capacity(protocol.trials);
@@ -586,13 +592,16 @@ fn run_scan_phase(
                 &mut session,
                 FIRST_PAGE_TIMEOUT,
                 "open command echoed",
-                |s| s.with_screen(|screen| screen_holds(screen, "View picker files")),
+                |screen| screen_holds(screen, "View picker files"),
             )?;
             let start = Instant::now();
             session.send(b"\r")?;
-            wait_for(&mut session, FIRST_PAGE_TIMEOUT, "first result page", |s| {
-                count_token(s, BULK_TOKEN) >= FIRST_PAGE_ROWS
-            })?;
+            wait_for(
+                &mut session,
+                FIRST_PAGE_TIMEOUT,
+                "first result page",
+                |screen| token_count(screen, BULK_TOKEN) >= FIRST_PAGE_ROWS,
+            )?;
             samples.push(elapsed_ms(start));
             // one streaming observation per trial, on the last measured
             // open, where the walk this open started is freshest
@@ -630,7 +639,8 @@ fn observe_streaming(
     let deadline = Instant::now() + FULL_WALK_TIMEOUT;
     let mut first_seen: Option<usize> = None;
     loop {
-        if let Some(count) = settled_count_token(session, PROBE_TOKEN) {
+        let settled = settled_count_token(session, PROBE_TOKEN);
+        if let Some(count) = settled {
             match first_seen {
                 None if count > 0 => {
                     if count >= PROBE_FILES {
@@ -657,7 +667,14 @@ fn observe_streaming(
                 ),
             });
         }
-        std::thread::yield_now();
+        // a count still moving across the settle window is re-read at once;
+        // a settled one can only change on output that has not arrived yet
+        if let Some(count) = settled {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let _ = session.wait_screen(remaining, |screen| {
+                token_count(screen, PROBE_TOKEN) != count
+            });
+        }
     }
 }
 

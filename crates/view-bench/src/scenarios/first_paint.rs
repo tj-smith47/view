@@ -61,33 +61,29 @@ fn sample_once(
 ) -> Result<SampleTimes, BenchError> {
     let start = Instant::now();
     let mut session = BenchSession::spawn(spec)?;
-    let deadline = start + FIRST_FRAME_TIMEOUT;
     let mut shell_ms = None;
-    let mut polls = 0_u64;
-    loop {
-        polls += 1;
-        // the shell frame stays on screen for the whole attach window
-        // (nothing repaints until the engine's first flush), so a poll
-        // this tight cannot step over it into the content frame
-        if watch_shell
-            && shell_ms.is_none()
-            && session.with_screen(view_oracle::startup_shell_visible)
-        {
-            shell_ms = Some(elapsed_ms(start));
-        }
-        if session.with_screen(|screen| screen_holds(screen, marker)) {
-            break;
-        }
-        if Instant::now() >= deadline {
-            return Err(BenchError::Desync {
-                context: format!(
-                    "buffer content {marker:?} never painted within {FIRST_FRAME_TIMEOUT:?} of \
-                     spawn; screen:\n{}",
-                    session.screen_text()
-                ),
-            });
-        }
-        std::thread::yield_now();
+    let mut checks = 0_u64;
+    // the shell frame stays on screen for the whole attach window (nothing
+    // repaints until the engine's first flush), so a check on every chunk
+    // cannot step over it into the content frame
+    let painted = session.wait_screen(
+        FIRST_FRAME_TIMEOUT.saturating_sub(start.elapsed()),
+        |screen| {
+            checks += 1;
+            if watch_shell && shell_ms.is_none() && view_oracle::startup_shell_visible(screen) {
+                shell_ms = Some(elapsed_ms(start));
+            }
+            screen_holds(screen, marker)
+        },
+    );
+    if !painted {
+        return Err(BenchError::Desync {
+            context: format!(
+                "buffer content {marker:?} never painted within {FIRST_FRAME_TIMEOUT:?} of \
+                 spawn; screen:\n{}",
+                session.screen_text()
+            ),
+        });
     }
     let marker_ms = elapsed_ms(start);
     // content without a shell frame means view stopped painting its
@@ -97,7 +93,7 @@ fn sample_once(
         return Err(BenchError::Desync {
             context: format!(
                 "buffer content painted at {marker_ms:.3}ms without the startup shell ever \
-                 reaching the screen across {polls} polls; screen:\n{}",
+                 reaching the screen across {checks} screen checks; screen:\n{}",
                 session.screen_text()
             ),
         });

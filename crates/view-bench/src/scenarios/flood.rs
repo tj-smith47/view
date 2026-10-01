@@ -61,9 +61,9 @@ pub struct FloodSide {
     /// Gaps between successive observed frame changes during the span, in
     /// milliseconds.
     pub cadence_gaps_ms: Vec<f64>,
-    /// Mean wall time one probe iteration took during the span, in
-    /// milliseconds: the resolution floor on every gap above, since a frame
-    /// change is only ever observed on a probe.
+    /// Mean wall time one probe spent reading the screen once output woke
+    /// it, in milliseconds: the resolution floor on every gap above, since
+    /// a frame change arriving while a probe reads is only seen by the next.
     pub probe_period_ms: f64,
 }
 
@@ -131,7 +131,19 @@ struct SampleSpan {
 struct Sampled {
     gaps_ms: Vec<f64>,
     probes: u32,
+    reading: Duration,
     elapsed: Duration,
+}
+
+/// What one probe saw.
+#[derive(Debug, Clone, Copy)]
+struct Reading {
+    /// When the frame change was seen, or when the probe gave up.
+    at: Instant,
+    /// The screen hash once every chunk that had arrived was read.
+    hash: u64,
+    /// How long the probe spent reading after `at`.
+    cost: Duration,
 }
 
 /// The `cat -n` counter read as the span opened and as it closed.
@@ -152,7 +164,7 @@ impl Sampled {
             lines_drained: counters.last.saturating_sub(counters.first) as f64,
             elapsed_ms,
             cadence_gaps_ms: self.gaps_ms,
-            probe_period_ms: elapsed_ms / f64::from(self.probes.max(1)),
+            probe_period_ms: self.reading.as_secs_f64() * 1000.0 / f64::from(self.probes.max(1)),
         }
     }
 }
@@ -160,35 +172,79 @@ impl Sampled {
 /// Probes the screen from `start` until `span` is satisfied, recording the
 /// gap between each pair of successive frame changes.
 ///
-/// `probe` returns the instant of a reading and the screen hash read at it.
+/// `probe` is handed the last hash seen and the instant to give up at, and
+/// blocks until the screen hashes differently or that instant passes.
 /// Production hands in the session's screen and the wall clock; the tests
 /// hand in a synthetic clock so the stopping rule runs without an editor.
 fn sample_cadence<P>(span: SampleSpan, start: Instant, mut last_hash: u64, mut probe: P) -> Sampled
 where
-    P: FnMut() -> (Instant, u64),
+    P: FnMut(u64, Instant) -> Reading,
 {
     let window_end = start + span.window;
     let cap_end = start + span.window * SPAN_CAP_FACTOR;
     let mut last_change = start;
     let mut gaps_ms = Vec::new();
     let mut probes = 0_u32;
+    let mut reading = Duration::ZERO;
     loop {
-        let (now, hash) = probe();
+        let give_up = if gaps_ms.len() >= span.min_gaps {
+            window_end
+        } else {
+            cap_end
+        };
+        let seen = probe(last_hash, give_up);
         probes = probes.saturating_add(1);
-        if hash != last_hash {
-            gaps_ms.push(now.duration_since(last_change).as_secs_f64() * 1000.0);
-            last_change = now;
-            last_hash = hash;
+        reading += seen.cost;
+        if seen.hash != last_hash {
+            gaps_ms.push(seen.at.duration_since(last_change).as_secs_f64() * 1000.0);
+            last_change = seen.at;
+            last_hash = seen.hash;
         }
         let floor_met = gaps_ms.len() >= span.min_gaps;
-        if (now >= window_end && floor_met) || now >= cap_end {
+        if (seen.at >= window_end && floor_met) || seen.at >= cap_end {
             return Sampled {
                 gaps_ms,
                 probes,
-                elapsed: now.duration_since(start),
+                reading,
+                elapsed: seen.at.duration_since(start),
             };
         }
-        std::thread::yield_now();
+    }
+}
+
+/// Blocks until the screen hashes differently from `last_hash` or
+/// `give_up` passes. The change is timed as the chunk carrying it is
+/// read, and the hash returned is the screen's once every chunk already
+/// arrived has been read behind it.
+fn probe_frame(session: &mut BenchSession, last_hash: u64, give_up: Instant) -> Reading {
+    let mut at = None;
+    // the predicate records the instant it accepted, so `at` is set
+    // exactly when the wait succeeded
+    let _ = session.wait_screen(
+        give_up.saturating_duration_since(Instant::now()),
+        |screen| {
+            let read_at = Instant::now();
+            let differs = crate::boundaries::screen_hash(screen) != last_hash;
+            if differs {
+                at = Some(read_at);
+            }
+            differs
+        },
+    );
+    match at {
+        Some(at) => {
+            let hash = session.with_screen(crate::boundaries::screen_hash);
+            Reading {
+                at,
+                hash,
+                cost: at.elapsed(),
+            }
+        }
+        None => Reading {
+            at: Instant::now(),
+            hash: last_hash,
+            cost: Duration::ZERO,
+        },
     }
 }
 
@@ -241,24 +297,18 @@ fn flood_once(spec: &SpawnSpec, run_spec: &RunSpec<'_>) -> Result<FloodSide, Ben
 
     // wait for the producer to begin scrolling before starting the span, so
     // it measures steady flood rather than the terminal-open transient
-    let mut last_hash = session.with_screen(crate::boundaries::screen_hash);
-    let armed = Instant::now();
-    loop {
-        let hash = session.with_screen(crate::boundaries::screen_hash);
-        if hash != last_hash {
-            last_hash = hash;
-            break;
-        }
-        if armed.elapsed() >= PRODUCER_START_DEADLINE {
-            return Err(BenchError::Desync {
-                context: format!(
-                    "flood producer never scrolled the terminal; screen:\n{}",
-                    session.screen_text()
-                ),
-            });
-        }
-        std::thread::yield_now();
+    let idle = session.with_screen(crate::boundaries::screen_hash);
+    if !session.wait_screen(PRODUCER_START_DEADLINE, |screen| {
+        crate::boundaries::screen_hash(screen) != idle
+    }) {
+        return Err(BenchError::Desync {
+            context: format!(
+                "flood producer never scrolled the terminal; screen:\n{}",
+                session.screen_text()
+            ),
+        });
     }
+    let last_hash = session.with_screen(crate::boundaries::screen_hash);
 
     let span = SampleSpan {
         window: run_spec.window,
@@ -267,9 +317,8 @@ fn flood_once(spec: &SpawnSpec, run_spec: &RunSpec<'_>) -> Result<FloodSide, Ben
     // the lines the producer drained before the span opened would otherwise
     // inflate the rate of whichever side stopped sooner
     let first = drained_lines(&mut session).unwrap_or(0);
-    let sampled = sample_cadence(span, Instant::now(), last_hash, || {
-        let hash = session.with_screen(crate::boundaries::screen_hash);
-        (Instant::now(), hash)
+    let sampled = sample_cadence(span, Instant::now(), last_hash, |last_hash, give_up| {
+        probe_frame(&mut session, last_hash, give_up)
     });
     let last = drained_lines(&mut session).unwrap_or(0);
 
@@ -1204,11 +1253,36 @@ mod tests {
             },
             start,
             0,
-            || {
+            |_, _| {
                 probe += 1;
-                (start + Duration::from_millis(probe), probe)
+                Reading {
+                    at: start + Duration::from_millis(probe),
+                    hash: probe,
+                    cost: Duration::ZERO,
+                }
             },
         )
+    }
+
+    #[test]
+    fn a_probe_that_sees_no_change_gives_up_at_the_cap() {
+        let start = Instant::now();
+        let sampled = sample_cadence(
+            SampleSpan {
+                window: Duration::from_millis(100),
+                min_gaps: 10,
+            },
+            start,
+            0,
+            |last_hash, give_up| Reading {
+                at: give_up,
+                hash: last_hash,
+                cost: Duration::ZERO,
+            },
+        );
+        assert!(sampled.gaps_ms.is_empty());
+        assert_eq!(sampled.probes, 1);
+        assert_eq!(sampled.elapsed, Duration::from_millis(200));
     }
 
     #[test]

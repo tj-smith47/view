@@ -246,12 +246,13 @@ impl BenchSession {
         }
     }
 
-    /// Tight-polls (yielding, not sleeping or spinning) until the cell at
-    /// `(row, col)` holds exactly `expected`, returning whether it did
-    /// within `timeout`. The sampling wait: sub-millisecond latencies sit
-    /// far below the OS sleep granularity, so a sleeping poll would inject
-    /// its own interval into every sample; a spinning poll on a busy host
-    /// starves the measured child of scheduler time and biases ratios.
+    /// Blocks until the cell at `at` holds exactly `expected`, returning
+    /// whether it did within `timeout`. The sampling wait: it sleeps on the
+    /// pty's output and re-checks the cell as each chunk arrives.
+    ///
+    /// A driver never polls with `yield_now`: on macOS a yield while other
+    /// work is runnable costs the caller a whole scheduler quantum, which
+    /// lands in the sample.
     #[must_use]
     pub fn wait_cell(
         &mut self,
@@ -259,19 +260,21 @@ impl BenchSession {
         expected: &str,
         timeout: Duration,
     ) -> bool {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let hit = self
-                .pty
-                .with_screen(|screen| boundaries::cell_holds(screen, at, expected));
-            if hit {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::yield_now();
-        }
+        self.wait_screen(timeout, |screen| {
+            boundaries::cell_holds(screen, at, expected)
+        })
+    }
+
+    /// Blocks until `predicate` holds against the screen, returning whether
+    /// it did within `timeout`. The predicate is checked once against the
+    /// screen as it stands, then again as each chunk of pty output arrives.
+    #[must_use]
+    pub fn wait_screen(
+        &mut self,
+        timeout: Duration,
+        predicate: impl FnMut(&vt100::Screen) -> bool,
+    ) -> bool {
+        self.pty.wait_for_screen(timeout, predicate)
     }
 
     /// Number of cells currently holding `target`, draining pending output

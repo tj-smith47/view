@@ -463,3 +463,21 @@ line the first walk already reads.
 The rule is scoped to the drivers. `view-oracle`'s tests make messages their
 subject (`:echo`, `:echomsg`, `:echoerr`), and silencing there would delete what
 they assert.
+
+## A driver blocks on the output it waits for
+
+A driver that waits for a screen condition sleeps on the pty reader channel
+through `BenchSession::wait_screen`, and its predicate is checked as each chunk
+arrives. A wait on anything else blocks on that thing's own signal: the tap pipe
+on the condvar its reader thread notifies, a pace between memory reads on a
+sleep.
+
+A `yield_now` poll is refused. On macOS a yield while other work is runnable
+costs the caller a whole scheduler quantum, and the delay is written into the
+sample. The picker keeps every core of the hosted macOS runner busy, so
+`picker.first_page_p50_ms` read on either side of its bar at one commit while
+view painted the first page at the same speed each time.
+
+`view-bench/tests/driver_waits.rs` reads every source under
+`crates/view-bench/src/` above its `#[cfg(test)]` boundary and fails naming the
+file and line of a `yield_now` call.

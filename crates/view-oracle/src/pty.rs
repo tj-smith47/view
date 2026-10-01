@@ -944,6 +944,10 @@ impl PtySession {
     /// (whole-screen substring search) and [`wait_for_cell`] (single-cell
     /// match): both differ only in what they check, not in how they poll.
     ///
+    /// The thread sleeps on the reader channel and wakes when a chunk
+    /// arrives, so the predicate sees each chunk as it is absorbed, and a
+    /// timed-out wait returns at its deadline.
+    ///
     /// Checks the already-processed screen state before blocking: a prior
     /// call (or another already-arrived chunk) may already have processed
     /// the data that satisfies `predicate`, and blocking on the channel
@@ -962,19 +966,21 @@ impl PtySession {
             return true;
         }
         let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            match self.rx.recv_timeout(Duration::from_millis(200)) {
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            match self.rx.recv_timeout(remaining) {
                 Ok(chunk) => {
                     self.absorb(&chunk);
                     if predicate(self.parsed_screen()) {
                         return true;
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return false,
             }
         }
-        false
     }
 
     /// Blocks (up to `timeout`) until the screen contains `needle`,
@@ -1626,6 +1632,42 @@ mod tests {
         let mut session =
             testenv::spawning(|| PtySession::spawn("/bin/echo", &["hi"], 80, 24)).unwrap();
         assert!(!session.wait_for("this-never-appears", Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn wait_for_screen_wakes_on_the_chunk_that_satisfies_it() {
+        let mut session = testenv::spawning(|| PtySession::spawn("/bin/cat", &[], 80, 24)).unwrap();
+        session.send(b"typed-after-the-wait-began\r").unwrap();
+        assert!(session.wait_for_screen(
+            view_test_support::host_deadline(Duration::from_secs(5)),
+            |screen| screen.contents().contains("typed-after-the-wait-began")
+        ));
+    }
+
+    // Nothing arrives from an idle `cat`, so each wait runs to its own
+    // timeout. The upper bound is twice the timeouts' sum before the host's
+    // share: a wait that sleeps the reader channel in slices longer than
+    // its timeout overshoots that many times over.
+    #[test]
+    fn wait_for_screen_gives_up_at_its_own_deadline() {
+        const TIMEOUT: Duration = Duration::from_millis(10);
+        const WAITS: u32 = 5;
+        let mut session = testenv::spawning(|| PtySession::spawn("/bin/cat", &[], 80, 24)).unwrap();
+        let started = Instant::now();
+        for _ in 0..WAITS {
+            assert!(!session.wait_for_screen(TIMEOUT, |_| false));
+        }
+        let elapsed = started.elapsed();
+        let floor = TIMEOUT * WAITS;
+        let ceiling = view_test_support::host_deadline(floor * 2);
+        assert!(
+            elapsed >= floor,
+            "{WAITS} waits of {TIMEOUT:?} returned in {elapsed:?}, before their deadlines"
+        );
+        assert!(
+            elapsed < ceiling,
+            "{WAITS} waits of {TIMEOUT:?} took {elapsed:?}, past {ceiling:?}"
+        );
     }
 
     #[test]

@@ -49,8 +49,8 @@ fn readiness_deadline(started: Instant, settle_deadline: Duration, takedowns: Du
 
 /// Parses the line label at `at`, returning its number when the cells hold
 /// a well-formed `L%06d`.
-fn label_at(session: &mut BenchSession, at: crate::boundaries::CellPos) -> Option<u32> {
-    let text = row_text_at(session, at);
+fn label_at(screen: &vt100::Screen, at: crate::boundaries::CellPos) -> Option<u32> {
+    let text = row_text_at(screen, at);
     let digits = text.strip_prefix('L')?;
     if digits.len() != 6 {
         return None;
@@ -140,26 +140,25 @@ impl SideState {
         let expected = self.delta.map(|d| previous + d);
         let start = Instant::now();
         self.session.send(b"\x04")?;
-        let deadline = start + protocol.sample_timeout;
-        let new_top = loop {
-            if let Some(label) = label_at(&mut self.session, self.label_at) {
-                match expected {
-                    Some(target) if label == target => break label,
-                    None if label > previous => break label,
-                    _ => {}
-                }
-            }
-            if Instant::now() >= deadline {
-                return Err(BenchError::Desync {
-                    context: format!(
-                        "top label never advanced from L{previous:06} to {}; screen:\n{}",
-                        expected
-                            .map_or_else(|| "any higher label".to_string(), |t| format!("L{t:06}")),
-                        self.session.screen_text()
-                    ),
-                });
-            }
-            std::thread::yield_now();
+        let at = self.label_at;
+        let mut new_top = None;
+        // the predicate keeps the label it accepted, so `new_top` is set
+        // exactly when the wait succeeded
+        let _ = self.session.wait_screen(protocol.sample_timeout, |screen| {
+            new_top = label_at(screen, at).filter(|&label| match expected {
+                Some(target) => label == target,
+                None => label > previous,
+            });
+            new_top.is_some()
+        });
+        let Some(new_top) = new_top else {
+            return Err(BenchError::Desync {
+                context: format!(
+                    "top label never advanced from L{previous:06} to {}; screen:\n{}",
+                    expected.map_or_else(|| "any higher label".to_string(), |t| format!("L{t:06}")),
+                    self.session.screen_text()
+                ),
+            });
         };
         self.raw_ms.push(start.elapsed().as_secs_f64() * 1000.0);
         if self.delta.is_none() {
@@ -175,30 +174,30 @@ impl SideState {
 /// `L%06d` label, trying a handful of left offsets so a number/sign
 /// gutter cannot hide the label column.
 fn find_label_origin(session: &mut BenchSession) -> Option<(crate::boundaries::CellPos, u32)> {
-    let (rows, cols) = session.with_screen(vt100::Screen::size);
-    for row in 0..rows {
-        for col in 0..cols.saturating_sub(LABEL_WIDTH).min(16) {
-            let at = crate::boundaries::CellPos { row, col };
-            if looks_like_label(&row_text_at(session, at)) {
-                if let Some(line) = label_at(session, at) {
-                    return Some((at, line));
+    session.with_screen(|screen| {
+        let (rows, cols) = screen.size();
+        for row in 0..rows {
+            for col in 0..cols.saturating_sub(LABEL_WIDTH).min(16) {
+                let at = crate::boundaries::CellPos { row, col };
+                if looks_like_label(&row_text_at(screen, at)) {
+                    if let Some(line) = label_at(screen, at) {
+                        return Some((at, line));
+                    }
                 }
             }
         }
-    }
-    None
+        None
+    })
 }
 
-fn row_text_at(session: &mut BenchSession, at: crate::boundaries::CellPos) -> String {
-    session.with_screen(|screen| {
-        crate::boundaries::row_text_from(
-            screen,
-            crate::boundaries::RowSpan {
-                start: at,
-                len: LABEL_WIDTH,
-            },
-        )
-    })
+fn row_text_at(screen: &vt100::Screen, at: crate::boundaries::CellPos) -> String {
+    crate::boundaries::row_text_from(
+        screen,
+        crate::boundaries::RowSpan {
+            start: at,
+            len: LABEL_WIDTH,
+        },
+    )
 }
 
 fn looks_like_label(text: &str) -> bool {
