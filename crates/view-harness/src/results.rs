@@ -101,10 +101,9 @@ pub enum ScenarioStatus {
     /// green is a hard [`Self::Failed`], since a manifest nobody has to
     /// update is a list of failures nobody has to fix.
     ExpectedFailure,
-    /// A fixture-less scenario with `$VIEW_DAILY_CONFIG` unset (the
-    /// maintainer's standing daily-config scenario), reported
-    /// SKIPPED-with-notice rather than failing a CI run that has no daily
-    /// config to test against.
+    /// The fixture-less daily-config scenario that did not run, reported
+    /// SKIPPED with its notice: `$VIEW_DAILY_CONFIG=off`, no nvim config on
+    /// the host (a CI runner), or a host without symlinks.
     Skipped,
 }
 

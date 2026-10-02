@@ -236,7 +236,8 @@ mod tests {
         skipped.status = ScenarioStatus::Skipped;
         skipped.plugin_version = None;
         skipped.fixture = None;
-        skipped.detail = Some("VIEW_DAILY_CONFIG is unset".to_string());
+        skipped.detail =
+            Some("VIEW_DAILY_CONFIG=off; the daily-config leg is switched off".to_string());
         let mut expected = row("fidget", "fidget");
         expected.state = "unaccommodated".to_string();
         expected.status = ScenarioStatus::ExpectedFailure;
@@ -304,7 +305,8 @@ mod tests {
         ));
         assert!(page.markdown.contains(
             "| daily-config | - | v0.12.4 | daily-config | present | nvim | \
-             SKIPPED: VIEW_DAILY_CONFIG is unset | 2026-07-19 |"
+             SKIPPED: VIEW_DAILY_CONFIG=off; the daily-config leg is switched off \
+             | 2026-07-19 |"
         ));
         // A planned red and a subtraction are only evidence if the committed
         // page says so in its own words -- a row that renders as a plain

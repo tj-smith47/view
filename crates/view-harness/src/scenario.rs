@@ -225,9 +225,10 @@ pub struct ScenarioFile {
     pub plugin: String,
     pub class: PluginClass,
     /// Names a subdirectory of `compat/fixtures/`, or `None` for a
-    /// fixture-less scenario (the maintainer's `$VIEW_DAILY_CONFIG`, whose
-    /// `init.lua` the harness does not own and so cannot rely on carrying
-    /// its own `serverstart` call -- see `CompatSession::prime_probe_channel`).
+    /// fixture-less scenario (the nvim config on the machine running it, or
+    /// the one `$VIEW_DAILY_CONFIG` names, whose `init.lua` the harness does
+    /// not own and so cannot rely on carrying its own `serverstart` call --
+    /// see `CompatSession::prime_probe_channel`).
     /// A state's own [`ScenarioStateEntry::fixture`] overrides this default
     /// when set.
     pub fixture: Option<String>,
