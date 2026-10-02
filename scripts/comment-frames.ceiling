@@ -4,10 +4,10 @@
 # the row is lowered in the same change.
 view 630
 view-ai 303
-view-bench 291
+view-bench 289
 view-core 1065
 view-engine 887
-view-harness 460
+view-harness 457
 view-native 221
 view-oracle 709
 view-proc 23

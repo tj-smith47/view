@@ -107,19 +107,19 @@ host. `dev-linux` is the default class of this page.
 
 **You open a project.** You type `view ~/.config` and wait for the screen you
 can start working in. Under a login-shaped plugin config (lazy.nvim, noice
-and nvim-notify) that screen arrives in 53.4 ms under view against 52.5 ms
-under Neovim: view 0.9 ms behind. The bar for this moment is level with
+and nvim-notify) that screen arrives in 54.3 ms under view against 51.9 ms
+under Neovim: view 2.4 ms behind. The bar for this moment is level with
 Neovim, so it is a bar view has not met. view's own tree, tabline and
-status line are on screen in about 4 ms, drawn while your config is still
+status line are on screen in about 5 ms, drawn while your config is still
 loading.
 
 **You type.** You press a key and the character appears. Under that same
-login-shaped config, view's worst keystroke in a thousand takes 1.34 ms
-against Neovim's 1.20 ms, and at the median view is 11% behind against a bar
-of 10%, a second bar missed by 1%. view can also draw the character it
+login-shaped config, view's worst keystroke in a thousand takes 1.46 ms
+against Neovim's 1.20 ms, and at the median view is 20% behind against a bar
+of 10%, a second bar missed by 10%. view can also draw the character it
 expects before Neovim confirms it: under that same config the predicted
-glyph is on screen in 0.32 ms at that same worst case, beside Neovim's
-1.25 ms, and the glyph is corrected the moment Neovim answers. The
+glyph is on screen in 0.35 ms at that same worst case, beside Neovim's
+1.22 ms, and the glyph is corrected the moment Neovim answers. The
 prediction is for editing over a network, which a separate acceptance leg
 measures by adding network delay at four levels
 (`scripts/acceptance/remote-rtt.sh`).

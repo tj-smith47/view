@@ -27,8 +27,8 @@ control_ratio_p50 = 0.9857445467564057
 control_ratio_p99 = 0.976705714890261
 
 [echo_speculated.minimal]
-speculated_paint_p99_ms = 0.447563
-speculated_ratio_p50 = 0.3496171611575586
+speculated_paint_p99_ms = 0.505835
+speculated_ratio_p50 = 0.392977527407231
 
 [first_paint.heavy]
 marker_cold_ms = 87.80524100000001

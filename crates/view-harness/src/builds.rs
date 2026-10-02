@@ -21,8 +21,10 @@ pub const TAPS_VIEW_BIN: &str = "--taps-view-bin";
 /// prediction put there first.
 pub const NOSPEC_VIEW_BIN: &str = "--nospec-view-bin";
 
-/// The `bench-taps` + `bench-no-speculate` build, for the row that
-/// decomposes an echo round trip through the taps.
+/// The `bench-taps` + `bench-no-speculate` build, for the tap rows whose
+/// sample closes on the terminal write of the frame that renders the
+/// engine's redraw. A build that predicts has already painted the glyph, so
+/// that frame writes nothing and the next write belongs to a later frame.
 pub const TAPS_NOSPEC_VIEW_BIN: &str = "--taps-nospec-view-bin";
 
 /// Every `--*-view-bin` flag the bench binary accepts, so a check over
@@ -49,10 +51,10 @@ pub const MEASURED_BUILD: &[(&str, Option<&str>)] = &[
     ("echo_path", Some(TAPS_NOSPEC_VIEW_BIN)),
     ("echo_speculated", Some(TAPS_VIEW_BIN)),
     ("input_path", Some(TAPS_VIEW_BIN)),
-    ("output_path", Some(TAPS_VIEW_BIN)),
+    ("output_path", Some(TAPS_NOSPEC_VIEW_BIN)),
     // the same two boundaries, with an agent turn streaming underneath
     ("ai_session_active", Some(TAPS_VIEW_BIN)),
-    ("ai_streaming", Some(TAPS_VIEW_BIN)),
+    ("ai_streaming", Some(TAPS_NOSPEC_VIEW_BIN)),
     // the panel's own composer, with no turn under it
     ("ai_composer", Some(TAPS_VIEW_BIN)),
     ("first_paint", Some(VIEW_BIN)),
@@ -143,11 +145,13 @@ mod tests {
             vec![
                 "echo_speculated",
                 "input_path",
-                "output_path",
                 "ai_session_active",
-                "ai_streaming",
                 "ai_composer"
             ]
+        );
+        assert_eq!(
+            scenarios_reading(TAPS_NOSPEC_VIEW_BIN),
+            vec!["echo_path", "output_path", "ai_streaming"]
         );
         assert!(scenarios_reading(VIEW_BIN).contains(&"picker"));
     }

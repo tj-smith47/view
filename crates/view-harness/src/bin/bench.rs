@@ -323,19 +323,19 @@ struct Cli {
     #[arg(long)]
     gate: bool,
     /// Path to the release view binary. Scope: the rows that measure the
-    /// shipped build (first_paint, scroll, memory, flood, picker,
-    /// supervision). The rows that measure a bench arm take the flag naming
-    /// that arm, and a run that passes this flag while one of them is
-    /// selected without its own flag is refused rather than silently
-    /// leaving this one inert. Every one of these flags is refused when no
-    /// selected row reads it at all
+    /// shipped build (first_paint, startup, scroll, memory, remote_memory,
+    /// flood, picker, supervision). The rows that measure a bench arm take
+    /// the flag naming that arm, and a run that passes this flag while one
+    /// of them is selected without its own flag is refused, since this one
+    /// would go unread for that row. Every one of these flags is refused
+    /// when no selected row reads it at all
     #[arg(long)]
     view_bin: Option<PathBuf>,
     /// Path to the nvim binary (must match .engine-pin)
     #[arg(long)]
     nvim_bin: Option<PathBuf>,
-    /// Path to the bench-taps build of view. Scope: input_path,
-    /// output_path, echo_speculated
+    /// Path to the bench-taps build of view. Scope: echo_speculated,
+    /// input_path, ai_session_active, ai_composer
     #[cfg(unix)]
     #[arg(long)]
     taps_view_bin: Option<PathBuf>,
@@ -343,8 +343,8 @@ struct Cli {
     #[arg(long)]
     nospec_view_bin: Option<PathBuf>,
     /// Path to the bench-taps + bench-no-speculate build of view. Scope:
-    /// echo_path, which decomposes an echo row and so must run the arm
-    /// that row runs
+    /// echo_path, output_path, ai_streaming, the tap rows that close on the
+    /// frame rendering the engine's redraw
     #[cfg(unix)]
     #[arg(long)]
     taps_nospec_view_bin: Option<PathBuf>,
@@ -604,10 +604,10 @@ struct Bins {
     /// unix mechanism, while the echo rows and the feature that arms them
     /// run on every platform this matrix measures.
     nospec_view: PathBuf,
-    /// Both arms at once, for the one row that needs both: `echo_path`
-    /// decomposes the echo round trip through the taps, so it needs the tap
-    /// channel of `taps_view` and the silent glyph of `nospec_view`; see
-    /// [`Bins::echo_path_bins`].
+    /// Both arms at once, for the tap rows that close on the frame
+    /// rendering the engine's redraw: they need the tap channel of
+    /// `taps_view` and the silent glyph of `nospec_view`; see
+    /// [`Bins::taps_nospec_bins`].
     #[cfg(unix)]
     taps_nospec_view: PathBuf,
     nvim: PathBuf,
@@ -657,27 +657,25 @@ impl Bins {
         })
     }
 
-    /// The build the `echo_path` decomposition measures: the echo rows' arm
-    /// with the tap channel compiled in.
+    /// The echo rows' arm with the tap channel compiled in, for every row
+    /// [`builds::MEASURED_BUILD`] gives `--taps-nospec-view-bin`.
     ///
-    /// The decomposition splits the echo row's own interval into the stages
-    /// the tap chain resolves, so it has to open and close that interval on
-    /// the same events the row does. On a build that predicts, the glyph the
-    /// chain's last tag waits for is on screen before the engine answers, the
-    /// authoritative write falls outside the window, and every stage resolves
-    /// over nothing -- which is why the row refuses a run that resolved no
-    /// chain at all rather than printing zeros (see
-    /// `taps_rows::unresolved_chain_refusal`).
+    /// Each of them closes a sample on the terminal write of the frame that
+    /// renders the engine's redraw. On a build that predicts, the glyph is
+    /// on screen before the engine answers, so that frame writes nothing:
+    /// `echo_path` resolves no chain (see
+    /// `taps_rows::unresolved_chain_refusal`), and `output_path` and
+    /// `ai_streaming` would close on whatever later frame writes next.
     #[cfg(unix)]
-    fn echo_path_bins(&self) -> Result<EditorBins<'_>> {
+    fn taps_nospec_bins(&self) -> Result<EditorBins<'_>> {
         ensure!(
             self.taps_nospec_view.exists(),
-            "the echo_path decomposition's bench-taps + bench-no-speculate build {} does not \
-             exist; run via `task bench` (which builds it) or pass --taps-nospec-view-bin. \
-             Decomposing on a build that predicts leaves every stage resolving over zero \
-             samples, because the glyph the chain closes on is painted before the engine \
-             answers",
-            self.taps_nospec_view.display()
+            "the bench-taps + bench-no-speculate build {} that {} measure does not exist; run \
+             via `task bench` (which builds it) or pass --taps-nospec-view-bin. On a build that \
+             predicts, the frame rendering the engine's redraw writes nothing, because the \
+             glyph is already on screen",
+            self.taps_nospec_view.display(),
+            scenarios_reading(builds::TAPS_NOSPEC_VIEW_BIN).join(", ")
         );
         Ok(EditorBins {
             view: &self.taps_nospec_view,
@@ -698,16 +696,16 @@ impl Bins {
     /// one can. What the shipped build does here is a row of its own,
     /// `echo_speculated`, under metric names of its own.
     ///
-    /// One other row shares that boundary and therefore that arm:
-    /// `echo_path`, which decomposes this round trip stage by stage and
-    /// takes it with the tap channel added ([`Bins::echo_path_bins`]). The
-    /// rest keep the shipped binary, because their boundaries are startup,
-    /// resident size, scroll staleness, engine output cadence, view's own
-    /// picker and a restart the supervisor drives, none of which a
-    /// prediction can answer. The tap rows keep the instrumented build:
-    /// `input_path` and `output_path` close inside view before anything
-    /// reaches the terminal, and `echo_speculated` is the row the predicted
-    /// paint is the subject of.
+    /// The tap rows that close on the frame rendering the engine's redraw
+    /// take this arm with the tap channel added
+    /// ([`Bins::taps_nospec_bins`]). The rest keep the shipped binary,
+    /// because their boundaries are startup, resident size, scroll
+    /// staleness, engine output cadence, view's own picker and a restart
+    /// the supervisor drives, none of which a prediction can answer. The
+    /// other tap rows keep the predicting instrumented build: `input_path`
+    /// and `ai_session_active` close at the RPC write, `ai_composer` types
+    /// into view's own composer, and `echo_speculated` is the row the
+    /// predicted paint is the subject of.
     fn echo_bins(&self) -> Result<EditorBins<'_>> {
         ensure!(
             self.nospec_view.exists(),
@@ -2031,14 +2029,14 @@ mod tests {
             ..bins_for_test()
         };
         assert!(
-            bins.echo_path_bins().is_err(),
+            bins.taps_nospec_bins().is_err(),
             "a missing arm must be named, not silently swapped for a build that predicts"
         );
 
         std::fs::write(&bins.taps_nospec_view, b"").unwrap();
         let spec = view_spec_from(
             world.side("minimal", "view").unwrap(),
-            bins.echo_path_bins().unwrap(),
+            bins.taps_nospec_bins().unwrap(),
         );
         assert_eq!(
             spec.program,
@@ -2080,6 +2078,41 @@ mod tests {
                 flag.is_some_and(|flag| VIEW_BIN_FLAGS.contains(&flag)),
                 "{scenario} names {flag:?}, which is not a flag the bench binary accepts"
             );
+        }
+    }
+
+    /// The `--help` scope of each `--*-view-bin` flag is the operator's only
+    /// account of which rows read it, and a table move that left the prose
+    /// behind had it naming rows that now read a different build.
+    #[cfg(unix)]
+    #[test]
+    fn every_view_bin_flags_help_names_the_rows_that_read_it() {
+        use clap::CommandFactory;
+        let command = Cli::command();
+        for flag in VIEW_BIN_FLAGS {
+            let id = flag.trim_start_matches("--").replace('-', "_");
+            let arg = command
+                .get_arguments()
+                .find(|arg| arg.get_id().as_str() == id);
+            assert!(
+                arg.is_some(),
+                "{flag} is not an argument of the bench binary"
+            );
+            let arg = arg.unwrap();
+            let help = arg
+                .get_long_help()
+                .or_else(|| arg.get_help())
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let words: Vec<&str> = help
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .collect();
+            for scenario in scenarios_reading(flag) {
+                assert!(
+                    words.contains(&scenario),
+                    "{flag}'s help does not name {scenario}, a row that reads it: {help}"
+                );
+            }
         }
     }
 

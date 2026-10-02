@@ -15,16 +15,16 @@ ratio_p99 = 1.1480989098643977
 view_p99_ms = 10.311
 
 [echo.minimal]
-paired_delta_p99_ms = 3.2880000000000003
-ratio_p50 = 1.1066140177690031
-ratio_p99 = 1.023219512195122
-view_p99_ms = 5.244
+paired_delta_p99_ms = 2.774
+ratio_p50 = 1.2331797235023043
+ratio_p99 = 1.1414219474497682
+view_p99_ms = 3.815
 
 [echo.user]
-paired_delta_p99_ms = 8.209
-ratio_p50 = 1.1684446939921393
-ratio_p99 = 1.06005738597012
-view_p99_ms = 10.126
+paired_delta_p99_ms = 5.617
+ratio_p50 = 1.162128712871287
+ratio_p99 = 1.1472527472527472
+view_p99_ms = 7.038
 
 [echo_control.heavy]
 control_delta_p99_ms = 5.997000000000001
@@ -38,9 +38,13 @@ control_p99_ms = 4.789
 control_ratio_p50 = 1.0
 control_ratio_p99 = 1.3325415676959622
 
+[echo_speculated.minimal]
+speculated_paint_p99_ms = 1.253
+speculated_ratio_p50 = 0.3014842300556586
+
 [echo_speculated.user]
-speculated_paint_p99_ms = 4.37
-speculated_ratio_p50 = 0.26586294416243655
+speculated_paint_p99_ms = 1.132
+speculated_ratio_p50 = 0.26244343891402716
 
 [first_paint.heavy]
 marker_cold_ms = 84.02604099999999
@@ -66,9 +70,9 @@ cadence_p99_ratio = 1.0364998638846823
 pace_ratio = 1.0030877047265554
 
 [flood.user]
-cadence_p99_ms = 13.439417
-cadence_p99_ratio = 1.011420364462776
-pace_ratio = 1.0091190680658908
+cadence_p99_ms = 13.493542000000001
+cadence_p99_ratio = 1.0055643263686413
+pace_ratio = 1.0101276339641947
 
 [input_path.minimal]
 key_to_rpc_p99_us = 157.0
@@ -77,13 +81,18 @@ key_to_rpc_p99_us = 157.0
 phys_footprint_mb = 3.56329345703125
 
 [output_path.minimal]
-p99_ms = 0.208
+p99_ms = 0.267
 
 [picker.minimal]
 first_page_p50_ms = 1.296291
 first_page_p99_ms = 1.404917
 match_paint_p50_ms = 7.1591249999999995
 match_paint_p99_ms = 17.483459
+
+[remote_memory.minimal]
+local_phys_footprint_mb = 6.1729736328125
+phys_footprint_mb = 6.219818115234375
+remote_local_ratio = 1.0063937951417619
 
 [scroll.heavy]
 ratio_p50 = 2.319244597247812
@@ -96,15 +105,21 @@ ratio_p99 = 1.6683195297774573
 staleness_p99_ms = 6.354875000000001
 
 [scroll.user]
-ratio_p50 = 1.806432091178278
-ratio_p99 = 1.112916045766089
-staleness_p99_ms = 10.101041
+ratio_p50 = 1.9735323226646577
+ratio_p99 = 1.4601275337103088
+staleness_p99_ms = 8.392083
+
+[startup.minimal]
+first_frame_cold_ms = 39.051333
+first_frame_ratio_p99 = 0.9528443543690924
+server_delta_ms = 1.8359999999999985
+settled_ratio_p50 = 0.9632511157993829
 
 [startup.user]
-first_frame_cold_ms = 90.56295899999999
-first_frame_ratio_p99 = 1.006161940583879
-server_delta_ms = 3.049999999999997
-settled_ratio_p50 = 1.0049626651232069
+first_frame_cold_ms = 87.78625
+first_frame_ratio_p99 = 0.9930248309232023
+server_delta_ms = 2.729999999999997
+settled_ratio_p50 = 1.0013811492640867
 
 [supervision.minimal]
 restart_rehydrate_p99_ms = 57.50425

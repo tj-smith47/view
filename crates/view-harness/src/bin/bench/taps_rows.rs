@@ -75,7 +75,12 @@ pub(crate) fn run_taps_row(
 ) -> Result<RowOutcome> {
     let (scenario, fixture) = (cell.scenario.as_str(), cell.fixture.as_str());
     let agent = ai_row(scenario).then(stub_agent_bin).transpose()?;
-    let (pipe, spec, cwd) = taps_side(fixture, world, bins.taps_bins()?, agent.as_deref())?;
+    let editor = if view_bin_flag(scenario) == Some(builds::TAPS_NOSPEC_VIEW_BIN) {
+        bins.taps_nospec_bins()?
+    } else {
+        bins.taps_bins()?
+    };
+    let (pipe, spec, cwd) = taps_side(fixture, world, editor, agent.as_deref())?;
     let deadline = settle_deadline(fixture);
     let (outcome, metric_key, unit) = match scenario {
         "input_path" => (
@@ -136,15 +141,12 @@ pub(crate) fn run_taps_row(
         );
     }
     let keystrokes = protocol.trials * (protocol.warmup + protocol.samples);
-    if outcome.paints.speculated > 0 {
-        println!(
-            "      predicted paints before the answering redraw: {} across {keystrokes} \
-             keystrokes (speculation put the typed glyph on screen on view's own tick); a count \
-             and not a share, since one keystroke's prediction can reach the terminal in more \
-             than one write. Outside this row's boundary by the same construction, and explained \
-             -- no bar",
-            outcome.paints.speculated
-        );
+    if let Some(reason) = predicted_paint_refusal(
+        &outcome.paints,
+        &format!("{scenario}/{fixture}"),
+        keystrokes,
+    ) {
+        bail!("{reason}");
     }
     if outcome.paints.agent > 0 {
         println!(
@@ -279,14 +281,6 @@ pub(crate) fn run_echo_speculated_row(
     Ok(RowOutcome::trusted(metrics))
 }
 
-/// Prepares one instrumented-build side: the tap FIFO and the shimmed
-/// spawn spec.
-///
-/// `editor` rather than a build chosen here: the tap channel is compiled
-/// into more than one arm, and which of them a row measures is the row's
-/// own decision (see [`Bins::echo_path_bins`]). Each accessor checks its
-/// own binary and names its own flag, so a missing arm is reported as the
-/// arm it is.
 /// Whether `scenario` measures its boundary with a live agent session in
 /// the editor. The one place that question is answered, because three
 /// things downstream turn on it: which binary the session spawns as its
@@ -342,6 +336,14 @@ fn composer_seed(fixture: &str) -> String {
     }
 }
 
+/// Prepares one instrumented-build side: the tap FIFO and the shimmed
+/// spawn spec.
+///
+/// The caller passes `editor` because the tap channel is compiled into
+/// more than one arm, and which of them a row measures is the row's own
+/// decision (see [`Bins::taps_nospec_bins`]). Each accessor checks its own
+/// binary and names its own flag, so a missing arm is reported as the arm
+/// it is.
 fn taps_side(
     fixture: &str,
     world: &CellWorld,
@@ -422,7 +424,26 @@ fn unresolved_chain_refusal(unresolved: usize, samples: usize) -> Option<String>
              below is zero over zero samples and the decomposition explains none of its own \
              total. The suspected cause is a view build that predicts: echo_path decomposes the \
              echo round trip and must run the bench-taps + bench-no-speculate arm \
-             (target/taps-nospec, which `task bench` builds, or --taps-nospec-view-bin)"
+             (the taps-nospec build `task bench` makes, or --taps-nospec-view-bin)"
+        )
+    })
+}
+
+/// Why the predicted paints a row saw disqualify it, when they do.
+///
+/// A predicted paint leaves the redraw's own frame with nothing to write,
+/// so the sample closes on a later frame and times that frame's cause.
+fn predicted_paint_refusal(
+    paints: &taps::PaintSplit,
+    row: &str,
+    keystrokes: usize,
+) -> Option<String> {
+    (paints.speculated > 0).then(|| {
+        format!(
+            "{row} saw {} predicted paints across {keystrokes} keystrokes, so the build it ran \
+             predicts; the row measures the bench-taps + bench-no-speculate build (the \
+             taps-nospec build `task bench` makes, or --taps-nospec-view-bin)",
+            paints.speculated
         )
     })
 }
@@ -455,7 +476,7 @@ pub(crate) fn run_echo_path_row(
     protocol: &Protocol,
     controlled: bool,
 ) -> Result<CellMetrics> {
-    let (pipe, view_spec, cwd) = taps_side(fixture, world, bins.echo_path_bins()?, None)?;
+    let (pipe, view_spec, cwd) = taps_side(fixture, world, bins.taps_nospec_bins()?, None)?;
     let nvim_spec = nvim_spec_from(world.side(fixture, "nvim")?, &bins.nvim);
     let outcome = taps::run_echo_path(
         ViewSpec(&view_spec),
@@ -594,6 +615,31 @@ mod tests {
         // admits the single stray paint the rate produces
         assert_eq!(unexplained_paint_bound(30), 1);
         assert_eq!(unexplained_paint_refusal(1, 30), None);
+    }
+
+    /// A row on a build that predicts closes on a later frame, so one
+    /// predicted paint refuses it and the refusal names the flag that
+    /// selects the right build.
+    #[test]
+    fn taps_rows_predicted_paints_refuse_a_build_that_predicts() {
+        let clean = taps::PaintSplit::default();
+        assert_eq!(
+            predicted_paint_refusal(&clean, "output_path/minimal", 3300),
+            None
+        );
+
+        let predicted = taps::PaintSplit {
+            speculated: 2,
+            ..taps::PaintSplit::default()
+        };
+        let reason = predicted_paint_refusal(&predicted, "output_path/minimal", 3300)
+            .expect("a predicted paint must refuse the row");
+        assert!(
+            reason.contains("output_path/minimal saw 2 predicted paints across 3300")
+                && reason.contains("--taps-nospec-view-bin")
+                && !reason.contains("target/"),
+            "the reason must carry the row, the count and the flag, got: {reason}"
+        );
     }
 
     /// The decomposition's own floor: nothing resolved is refused and

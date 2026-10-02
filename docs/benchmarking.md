@@ -105,67 +105,64 @@ the one fixture that unit names.
 
 | What | view | bare Neovim | |
 |---|---|---|---|
-| UI shell painted, engine still loading, no plugins (p99) | `first_paint.shell_visible_cold_ms` **4.1 ms** | n/a | budget 50 ms |
-| UI shell painted, engine still loading, 15-plugin lazy.nvim stack (p99) | `first_paint.shell_visible_cold_ms` **3.8 ms** | n/a | budget 50 ms |
-| First paint, cold, no plugins, `minimal` (p99) | 27.4 ms | **25.4 ms** | `first_paint.marker_ratio_p99` reads ~1.08x slower, a diagnostic of the felt `startup.settled_ratio_p50` |
-| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 91.7 ms | **93.7 ms** | `first_paint.marker_ratio_p99` reads ~0.98x, a diagnostic of the felt `startup.settled_ratio_p50` |
-| First paint, cold, full login, `user` (p99) | `first_paint.marker_cold_ms` 80.5 ms | not recorded on its own | seated at `e9087db`; the ratio beside it was re-recorded 2026-09-24 at `a836efa` (`first_paint.marker_ratio_p50` 1.042, `first_paint.marker_ratio_p99` 1.006) |
-| Resident memory (PSS), view process only, no plugins | `memory.pss_mb` **4.96 MB** | n/a | budget was 150 MB |
-| Redraw parsed to terminal write (p99) | `output_path.p99_ms` **0.11 ms** | n/a | budget 1 ms |
-| Keystroke to cell change, steady typing, no plugins (p99) | `echo.view_p99_ms` 0.73 ms | 0.67 ms | `echo.ratio_p99` ~1.09x slower at the tail, where `echo.view_p99_ms` carries the bound; at the median `echo.ratio_p50` reads 1.130 |
-| Keystroke to predicted glyph, no plugins, engine local (p99) | `echo_speculated.speculated_paint_p99_ms` **0.30 ms** | n/a | `echo_speculated.speculated_ratio_p50` reads 0.394 against the bare Neovim beside it. The injected round trips are a separate leg (`scripts/acceptance/remote-rtt.sh`) |
-| Sustained scroll, 100k lines, no plugins (p99 staleness) | `scroll.staleness_p99_ms` 1.07 ms | n/a | budget 16 ms |
-| Sustained scroll, 100k lines, 15-plugin lazy.nvim stack (p99 staleness) | `scroll.staleness_p99_ms` 1.23 ms | n/a | budget 16 ms |
-| Sustained scroll, no plugins, versus Neovim | | | ~1.6x slower (`scroll.ratio_p50`, the paired ratio beside the felt `scroll.staleness_p99_ms`) |
-| Sustained scroll, 15-plugin lazy.nvim stack, versus Neovim | | | ~1.9x slower (`scroll.ratio_p50`, the paired ratio beside the felt `scroll.staleness_p99_ms`) |
+| UI shell painted, engine still loading, no plugins (p99) | `first_paint.shell_visible_cold_ms` **4.9 ms** | n/a | budget 50 ms |
+| UI shell painted, engine still loading, 15-plugin lazy.nvim stack (p99) | `first_paint.shell_visible_cold_ms` **5.2 ms** | n/a | budget 50 ms |
+| First paint, cold, no plugins, `minimal` (p99) | 24.3 ms | **22.7 ms** | `first_paint.marker_ratio_p99` reads ~1.07x slower, a diagnostic of the felt `startup.settled_ratio_p50` |
+| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | **67.9 ms** | 71.2 ms | `first_paint.marker_ratio_p99` reads ~0.95x, a diagnostic of the felt `startup.settled_ratio_p50` |
+| First paint, cold, full login, `user` (p99) | `first_paint.marker_cold_ms` 72.4 ms | not recorded on its own | seated 2026-10-02 at `7f1762e8` with the ratios beside it (`first_paint.marker_ratio_p50` 1.039, `first_paint.marker_ratio_p99` 1.006) |
+| Resident memory (PSS), view process only, no plugins | `memory.pss_mb` **8.51 MB** | n/a | budget was 150 MB |
+| Redraw parsed to terminal write (p99) | `output_path.p99_ms` **0.13 ms** | n/a | budget 1 ms |
+| Keystroke to cell change, steady typing, no plugins (p99) | `echo.view_p99_ms` 1.02 ms | 0.85 ms | `echo.ratio_p99` ~1.22x slower at the tail, where `echo.view_p99_ms` carries the bound; at the median `echo.ratio_p50` reads 1.251 |
+| Keystroke to predicted glyph, no plugins, engine local (p99) | `echo_speculated.speculated_paint_p99_ms` **0.36 ms** | n/a | `echo_speculated.speculated_ratio_p50` reads 0.458 against the bare Neovim beside it. The injected round trips are a separate leg (`scripts/acceptance/remote-rtt.sh`) |
+| Sustained scroll, 100k lines, no plugins (p99 staleness) | `scroll.staleness_p99_ms` 1.39 ms | n/a | budget 16 ms |
+| Sustained scroll, 100k lines, 15-plugin lazy.nvim stack (p99 staleness) | `scroll.staleness_p99_ms` 1.47 ms | n/a | budget 16 ms |
+| Sustained scroll, no plugins, versus Neovim | | | ~1.7x slower (`scroll.ratio_p50`, the paired ratio beside the felt `scroll.staleness_p99_ms`) |
+| Sustained scroll, 15-plugin lazy.nvim stack, versus Neovim | | | ~2.0x slower (`scroll.ratio_p50`, the paired ratio beside the felt `scroll.staleness_p99_ms`) |
 
-The two bare-Neovim first-paint figures are dev-linux pairs: the `minimal`
-one from the 2026-09-06 retake, the `heavy` one from the 2026-09-24 record at
-`a836efa`. The figures they replace were withdrawn: both sides are spawned on
-a pty the harness owns, and until that pty answered the DSR that Neovim's
-tty startup writes behind its background-colour query, the bare side waited
-out its own `vim.wait(100, ...)` on every cold sample, roughly 100 ms that
-view's side never paid, because view's engine owns no tty and never asks.
-The pty answers it now (`view_oracle::pty`, pinned by
+The two bare-Neovim first-paint figures are dev-linux pairs from the 2026-10-02
+record at `7f1762e8`. The pairs taken before 2026-09-06 were withdrawn: both
+sides are spawned on a pty the harness owns, and until that pty answered the DSR
+that Neovim's tty startup writes behind its background-colour query, the bare
+side waited out its own `vim.wait(100, ...)` on every cold sample, roughly 100
+ms that view's side never paid, because view's engine owns no tty and never
+asks. The pty answers it now (`view_oracle::pty`, pinned by
 `view-bench/tests/nvim_arm_startup.rs`).
 
-Both first-paint columns on a row are one run's interleaved pair; view's
-recorded gate bar ratchets separately and came from a quieter run. One
-paragraph per fixture below, since each of these numbers belongs to one of
-them.
+Both first-paint columns on a row are one run's interleaved pair. The record
+took two runs of the whole matrix and kept the lower reading of each cell, so
+one paragraph per fixture below names the run each number came from.
 
-On `minimal` that bar is `first_paint.marker_cold_ms` 25.2 ms. The retake
-pair reads 16.88 ms p50 against bare nvim's 15.43 ms, which is
-`first_paint.marker_ratio_p50` 1.094 and `first_paint.marker_ratio_p99`
-1.076.
+On `minimal` the bar is `first_paint.marker_cold_ms` 24.3 ms, from the second
+run. That run's pair reads 15.22 ms p50 against bare nvim's 14.17 ms, which
+is `first_paint.marker_ratio_p50` 1.074 and `first_paint.marker_ratio_p99`
+1.068.
 
-On `heavy` the bar is `first_paint.marker_cold_ms` 79.3 ms. The pair the
-2026-09-24 record at `a836efa` took reads 52.94 ms p50 against 50.64 ms,
-which is `first_paint.marker_ratio_p50` 1.045 and the p99 pair's
-`first_paint.marker_ratio_p99` 0.978.
+On `heavy` the bar is `first_paint.marker_cold_ms` 67.9 ms, from the second
+run, whose p99 pair is `first_paint.marker_ratio_p99` 0.954. The first run's
+pair reads 51.18 ms p50 against 47.65 ms, which is
+`first_paint.marker_ratio_p50` 1.074.
 
-On `user` the pair the same record took reads 54.55 ms p50 against 52.36 ms,
-which is `first_paint.marker_ratio_p50` 1.042 and the p99 pair's
+On `user` the first run's pair reads 52.38 ms p50 against 50.42 ms, which is
+`first_paint.marker_ratio_p50` 1.039 and the p99 pair's
 `first_paint.marker_ratio_p99` 1.006.
 
-view trails bare Neovim by 4-9% at the median on every paired cold cell, and
+view trails bare Neovim by 4-8% at the median on every paired cold cell, and
 on `minimal` what it trails by is the post-VimEnter attach-plus-takeover round
 trip the late-attach design pays serially, since Neovim's own TUI attaches
 before init runs. Attribution past that outline is open work.
 
-Both dev classes are re-seated: dev-linux from the retake above, with its
-`heavy` and `user` ratios taken again by the 2026-09-24 record, and dev-macos
-from its own retake on mbp on 2026-09-06. `gh-linux` and `gh-macos` are
-re-seated from the measured artifacts of bench run 35472867066, the first
+Both dev classes are re-seated: dev-linux from the 2026-10-02 record above, and
+dev-macos from its own retake on mbp on 2026-09-06. `gh-linux` and `gh-macos`
+are re-seated from the measured artifacts of bench run 35472867066, the first
 gate run under the answering pty.
 
 The `user` row is recorded, and each class states its own reading on its own
 line, since a number belongs to one class and one fixture.
 
-dev-linux holds `first_paint.marker_cold_ms` 80.512 ms and
-`first_paint.shell_visible_cold_ms` 4.543 ms on the `user` fixture, seated at
-`e9087db`, and its two ratios come from the 2026-09-24 record above
-(`first_paint.marker_ratio_p50` 1.042, `first_paint.marker_ratio_p99` 1.006).
+dev-linux holds `first_paint.marker_cold_ms` 72.374 ms and
+`first_paint.shell_visible_cold_ms` 5.111 ms on the `user` fixture, with its
+two ratios from the same 2026-10-02 record (`first_paint.marker_ratio_p50`
+1.039, `first_paint.marker_ratio_p99` 1.006).
 
 dev-macos holds `first_paint.marker_cold_ms` 87.563 ms and
 `first_paint.shell_visible_cold_ms` 12.504 ms on the same `user` fixture,
@@ -193,11 +190,11 @@ started the Neovim child, so bare Neovim has no comparable event. It shows
 nothing until your config finishes loading.
 
 The shell frame is nearly identical either way, because none of your config
-has run yet at that point: `first_paint.shell_visible_cold_ms` reads 4.1 ms
+has run yet at that point: `first_paint.shell_visible_cold_ms` reads 4.9 ms
 on the plugin-free fixture.
 
 On the 15-plugin stack the same `first_paint.shell_visible_cold_ms` reads
-3.8 ms.
+5.2 ms.
 
 The no-plugins memory row is view's own process only: the embedded Neovim
 engine is a separate process this budget excludes, so the bare-Neovim
@@ -207,98 +204,78 @@ column reads `n/a`.
 
 Every felt row is recorded on the `user` fixture, and the matrix seats five
 cells there: `echo.user`, `echo_speculated.user`, `scroll.user`,
-`flood.user` and `startup.user`. dev-linux records all five.
-Four were taken 2026-09-06 in two quiet windows; `startup.user` was
-re-recorded 2026-09-15 in a quiet window of its own; `echo.user`'s p99 pair
-and `flood.user`'s `pace_ratio` were retaken 2026-09-24 at `a836efa` in a
-quiet window of its own. The conditions those three runs were taken under,
-which no cell records and which a record run therefore leaves standing:
+`flood.user` and `startup.user`. dev-linux records all five, re-recorded
+2026-10-02 at `7f1762e8` on kernel 7.0.0-34 with a view built by rustc 1.99.0.
+The record took two runs of the whole matrix and kept the lower reading of
+each cell. The conditions those two runs were taken under, which no cell
+records:
 
 ```text
-2026-09-06  echo.user, echo_speculated.user, scroll.user, flood.user
-            null-pair calibration inside 1.1%
-2026-09-15  startup.user
-            1-minute load 1.82 falling to 1.42 over the run
-            null-pair calibration 3.4% at the start, 1.0% at the end
-2026-09-24  echo.user (view_p99_ms, nvim p99), flood.user (pace_ratio)
-            1-minute load 1.14 falling to 0.48 over the run
-            null-pair calibration 5.2% at the start, 13.3% at the end
+2026-10-02  first run    1-minute load 2.05 rising to 7.15
+                         null-pair calibration 2.8% at the start, 0.1% at the end
+            second run   1-minute load 0.02 rising to 0.10
+                         null-pair calibration 0.8% at the start, 4.5% at the end
 ```
 
-All three calibrations sit inside the 15% floor that refuses a run.
+Both runs' calibrations sit inside the floor that refuses a run.
 
 | cell, `user` fixture | view | bare Neovim | reading |
 |---|---|---|---|
-| `startup.settled_ratio_p50` (`user`) | 53.433 ms p50 | 52.542 ms p50 | 1.017 against the 1.0 bar, unmet, re-recorded 2026-09-25 after the leader chords and the branch read moved off the startup segment; the diagnostic `startup.server_delta_ms` reads 1.244 ms |
-| `echo.ratio_p50`, `echo.view_p99_ms` (`user`) | 0.920 ms p50 recorded 2026-09-06, `echo.view_p99_ms` 1.338 ms p99 re-recorded 2026-09-25 | 0.829 ms p50 recorded 2026-09-06, 1.197 ms p99 re-recorded 2026-09-25 | `echo.ratio_p50` 1.110 against the 1.10 bar, unmet; the tail is inside its 8 ms bar, `echo.paired_delta_p99_ms` 0.679 ms |
-| `echo_speculated.speculated_ratio_p50` (`user`) | 0.200 ms p50, `echo_speculated.speculated_paint_p99_ms` 0.318 ms p99 | 0.603 ms p50, 1.250 ms p99 | 0.332 against the 1.0 bar, met; a prediction answered 99.9% of the samples and the rest can only understate it |
-| `scroll.staleness_p99_ms` (`user`) | `scroll.staleness_p99_ms` 1.572 ms p99 | 0.951 ms p99 | inside the 16 ms bar; `scroll.ratio_p50` 1.717 and `scroll.ratio_p99` 1.664 are recorded on a shared class and not gated |
-| `flood.cadence_p99_ms` (`user`) | `flood.cadence_p99_ms` 16.914 ms p99, recorded 2026-09-06 | 17.480 ms p99, recorded 2026-09-06 | 0.9 ms past the 16 ms frame, unmet on both sides; `flood.cadence_p99_ratio` 0.981 recorded 2026-09-06, `flood.pace_ratio` 1.000 re-recorded 2026-09-24, worst no-paint gap 48.9 ms reported and not gated |
+| `startup.settled_ratio_p50` (`user`) | 54.320 ms p50 | 51.889 ms p50 | 1.047 against the 1.0 bar, unmet; the diagnostic `startup.server_delta_ms` reads 2.635 ms |
+| `echo.ratio_p50`, `echo.view_p99_ms` (`user`) | 0.745 ms p50 from the second run, `echo.view_p99_ms` 1.461 ms p99 from the first | 0.622 ms p50 from the second run, 1.200 ms p99 from the first | `echo.ratio_p50` 1.198 against the 1.10 bar, unmet; the tail is inside its 8 ms bar, `echo.paired_delta_p99_ms` 0.769 ms |
+| `echo_speculated.speculated_ratio_p50` (`user`) | 0.221 ms p50 from the second run, `echo_speculated.speculated_paint_p99_ms` 0.350 ms p99 from the first | 0.605 ms p50 from the second run, 1.221 ms p99 from the first | 0.366 against the 1.0 bar, met; a prediction answered 2999 of the 3000 samples and the rest can only understate it |
+| `scroll.staleness_p99_ms` (`user`) | `scroll.staleness_p99_ms` 1.608 ms p99 | 1.008 ms p99 | inside the 16 ms bar; `scroll.ratio_p50` 1.631 and `scroll.ratio_p99` 1.595 are recorded on a shared class and not gated |
+| `flood.cadence_p99_ms` (`user`) | `flood.cadence_p99_ms` 16.955 ms p99 | 17.35 ms p99 | 1.0 ms past the 16 ms frame, unmet on both sides; `flood.cadence_p99_ratio` 0.963, `flood.pace_ratio` 1.002, worst no-paint gap 44.3 ms reported and not gated |
 
-The flood cell's plugin-free leg was re-recorded 2026-09-15 in a quiet
-window of its own, under conditions no cell records either:
-
-```text
-2026-09-15  flood.minimal
-            1-minute load 1.19 rising to 2.25 over the run
-            null-pair calibration 3.7% at the start, 5.5% at the end
-```
-
-Both sit inside the 15% floor that refuses a run. The seat it held was drawn
-before 2026-08-26 and no trial since has come near it, and a ratchet only
-ever moves a seat down, so the median of the three new draws was seated by
-hand.
-
-On the plugin-free fixture `flood.cadence_p99_ms` now reads 16.091 ms p99,
-so both legs sit past the 16 ms frame and the login stack is the smaller
-part of the gap: the engine refreshes a terminal buffer on a fixed 10 ms
+On the plugin-free fixture `flood.cadence_p99_ms` reads 15.023 ms p99, inside
+the 16 ms frame. The engine refreshes a terminal buffer on a fixed 10 ms
 timer (`REFRESH_DELAY`, Neovim v0.12.4 `terminal.c:132`), and each side's
 cadence is that timer plus one redraw.
 
 dev-macos records all five on the same `user` fixture, taken 2026-10-01 on
-mbp at `e844816d`, one cell to a run. The conditions those five runs were
+mbp at `7f1762e8`, one cell to a run. The conditions those five runs were
 taken under, which no cell records:
 
 ```text
-2026-10-01  echo.user             1-minute load 1.11 rising to 1.50
-                                  null-pair calibration 2.7% at the start, 0.3% at the end
-            echo_speculated.user  1-minute load 1.39 falling to 1.15
-                                  null-pair calibration 1.1% at the start, 1.4% at the end
-            scroll.user           1-minute load 1.05 rising to 2.11
-                                  null-pair calibration 0.1% at the start, 4.6% at the end
-            flood.user            1-minute load 1.94 rising to 3.61
-                                  null-pair calibration 0.7% at the start, 0.2% at the end
-            startup.user          1-minute load 2.87 falling to 1.62
-                                  null-pair calibration 0.2% at the start, 0.7% at the end
+2026-10-01  echo.user             1-minute load 4.90 falling to 1.56
+                                  null-pair calibration 0.0% at the start, 1.1% at the end
+            echo_speculated.user  1-minute load 1.44 falling to 0.91
+                                  null-pair calibration 0.8% at the start, 1.5% at the end
+            scroll.user           1-minute load 1.14 rising to 2.25
+                                  null-pair calibration 0.1% at the start, 1.3% at the end
+            flood.user            1-minute load 2.08 falling to 1.87
+                                  null-pair calibration 0.9% at the start, 0.3% at the end
+            startup.user          1-minute load 1.68 falling to 1.36
+                                  null-pair calibration 0.1% at the start, 1.0% at the end
 ```
 
-All five calibrations sit inside the 15% floor that refuses a run.
+All five calibrations sit inside the floor that refuses a run.
 
-On dev-macos `startup.settled_ratio_p50` reads 1.005 on the `user` fixture
+On dev-macos `startup.settled_ratio_p50` reads 1.001 on the `user` fixture
 against the 1.0 bar, unmet.
 
-On dev-macos the diagnostic `startup.server_delta_ms` reads 3.050 ms on the
+On dev-macos the diagnostic `startup.server_delta_ms` reads 2.730 ms on the
 `user` fixture, inside its 5 ms bound.
 
-On dev-macos `echo.ratio_p50` reads 1.168 on the `user` fixture against the
+On dev-macos `echo.ratio_p50` reads 1.162 on the `user` fixture against the
 1.10 bar, unmet.
 
-On dev-macos `echo.view_p99_ms` reads 10.126 ms p99 on the `user` fixture
-against its 8 ms bar, unmet, and `echo.paired_delta_p99_ms` reads 8.209 ms.
+On dev-macos `echo.view_p99_ms` reads 7.038 ms p99 on the `user` fixture
+against its 8 ms bar, met, and `echo.paired_delta_p99_ms` reads 5.617 ms.
 
-On dev-macos `echo_speculated.speculated_ratio_p50` reads 0.266 on the `user`
+On dev-macos `echo_speculated.speculated_ratio_p50` reads 0.262 on the `user`
 fixture against the 1.0 bar, met, and `echo_speculated.speculated_paint_p99_ms`
-reads 4.370 ms p99.
+reads 1.132 ms p99.
 
-On dev-macos `scroll.staleness_p99_ms` reads 10.101 ms p99 on the `user`
-fixture, inside the 16 ms bar, and `scroll.ratio_p50` 1.806 and
-`scroll.ratio_p99` 1.113 are recorded and not gated.
+On dev-macos `scroll.staleness_p99_ms` reads 8.392 ms p99 on the `user`
+fixture, inside the 16 ms bar, and `scroll.ratio_p50` 1.974 and
+`scroll.ratio_p99` 1.460 are recorded and not gated.
 
-On dev-macos `flood.cadence_p99_ms` reads 13.439 ms p99 on the `user` fixture,
-inside the 16 ms frame, with `flood.cadence_p99_ratio` 1.011 and
-`flood.pace_ratio` 1.009.
+On dev-macos `flood.cadence_p99_ms` reads 13.494 ms p99 on the `user` fixture,
+inside the 16 ms frame, with `flood.cadence_p99_ratio` 1.006 and
+`flood.pace_ratio` 1.010.
 
-Three unmet cells on each dev class are `[[shortfall]]` entries in the
+The unmet cells on each dev class are `[[shortfall]]` entries in the
 ledger, `crates/view-bench/budgets.toml`, each accepted at its recorded value
 with its bar untouched. Which class holds the five:
 
@@ -362,13 +339,13 @@ engine's: 27.96 MB of resident memory for view and its engine together,
 where bare Neovim's whole process reads 4.39 MB. A footprint is a resource
 row and states no speed.
 
-Neither side changes much between this reading and the plugin-free one for
-view's own-process number. Plugin-free, `memory.pss_mb` reads 4.96 MB. Under
-this stack the same process reads 5.00 MB, because lazy.nvim
-defers most of the 15 plugins until their trigger event fires,
-and the standard workload (opening and paging through plain text buffers)
-never fires one. This reading is each side settled after that workload,
-and a plugin stack can cost more once its triggers do fire.
+lazy.nvim defers most of the 15 plugins until their trigger event fires, and
+the standard workload (opening and paging through plain text buffers) never
+fires one. This reading is each side settled after that workload, and a plugin
+stack can cost more once its triggers do fire.
+
+The table was taken on an earlier day than the plugin-free seat. That seat,
+`memory.pss_mb`, reads 8.51 MB, recorded 2026-10-02 at `7f1762e8`.
 
 ## The typing gap
 
@@ -377,18 +354,17 @@ trails it further. One line per leg, because each number is one fixture's:
 
 | leg | steady typing | sustained scroll |
 |---|---|---|
-| plugin-free (`minimal`) | `echo.ratio_p50` 1.130, about 13% | `scroll.ratio_p50` 1.605, the paired figure beside the felt `scroll.staleness_p99_ms` |
-| 15-plugin stack (`heavy`) | -- | `scroll.ratio_p50` 1.891, the same paired figure |
-| login-shaped (`user`) | `echo.ratio_p50` 1.110, about 11% | `scroll.ratio_p50` 1.717 |
+| plugin-free (`minimal`) | `echo.ratio_p50` 1.251, about 25% | `scroll.ratio_p50` 1.731, the paired figure beside the felt `scroll.staleness_p99_ms` |
+| 15-plugin stack (`heavy`) | `echo.ratio_p50` 1.250, about 25% | `scroll.ratio_p50` 1.960, the same paired figure |
+| login-shaped (`user`) | `echo.ratio_p50` 1.198, about 20% | `scroll.ratio_p50` 1.631 |
 
 Neovim ships its own out-of-process TUI, and the control leg measures it
-under the identical protocol, in the same interleaved run as the typing
-cell above:
+under the identical protocol:
 
 | leg | Neovim's own TUI driving a headless Neovim |
 |---|---|
-| plugin-free (`minimal`) | `echo_control.control_ratio_p50` 0.994 |
-| 15-plugin stack (`heavy`) | `echo_control.control_ratio_p50` 1.009 |
+| plugin-free (`minimal`) | `echo_control.control_ratio_p50` 0.996 |
+| 15-plugin stack (`heavy`) | `echo_control.control_ratio_p50` 1.014 |
 
 Speaking the protocol from another process costs nothing this class can
 measure, so the gap is view's own code. Three earlier theories, a

@@ -517,6 +517,10 @@ mod tests {
             "opens the agent panel on a session `taps::prepare` cleared before handing it \
              over",
         ),
+        (
+            "taps/frame.rs",
+            "pairs tap records a row already drained and drives no session",
+        ),
         ("taps/mod.rs", TAKES_THEM_DOWN),
     ];
 

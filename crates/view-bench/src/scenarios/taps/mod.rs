@@ -1,7 +1,10 @@
 //! The internal-boundary rows: key at pty to RPC bytes written
 //! (`input_path`) and redraw parsed to terminal write (`output_path`).
-//! Both drive the bench-taps build of view, which emits `<tag> <seq>
-//! <nanos>\n` records over a FIFO the harness owns; timestamps on both
+//! `input_path` drives the bench-taps build of view and `output_path` the
+//! bench-taps + bench-no-speculate build, since a frame closing on the
+//! engine's redraw writes nothing once a prediction has painted the glyph.
+//! Both builds emit `<tag> <seq> <nanos>\n` records over a FIFO the
+//! harness owns; timestamps on both
 //! sides come from the same `CLOCK_MONOTONIC`, so harness-to-child
 //! deltas are valid on one machine.
 //!
@@ -27,7 +30,10 @@ use crate::session::{
 use crate::BenchError;
 
 mod ai;
+mod frame;
 pub use ai::{heavy_composer_seed, run_ai_composer, run_ai_session_active, run_ai_streaming};
+pub use frame::{answered_by_prediction, classify_paints_before_redraw, PaintSplit};
+use frame::{closes_the_frame_after, measured_frame};
 
 /// One parsed tap record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -604,155 +610,9 @@ fn sample_input_path(
     })
 }
 
-/// The frame a keypress at `t0` produced: the earliest parsed redraw at or
-/// after the keypress, paired with the earliest terminal write at or after
-/// that redraw.
-///
-/// Anchored on the redraw rather than on the paint, because a paint is not
-/// evidence that the measured frame has begun. view repaints for reasons
-/// the engine knows nothing about -- its own chrome answers the keystroke
-/// before the engine's redraw arrives -- and such a paint lands after the
-/// keypress and before the redraw it does not carry. Selecting the first
-/// paint after the keypress and then trying to explain it backwards makes
-/// every one of those a special case; selecting the redraw first makes
-/// them structurally uninteresting, since a paint before the redraw can
-/// never be at or after it.
-///
-/// Returns `None` while either half is still missing, which is what the
-/// sample timeout is measured against: no redraw at all after a keypress
-/// is the desync this row aborts on.
-fn measured_frame(records: &[TapRecord], t0: i64) -> Option<(TapRecord, TapRecord)> {
-    // earliest by timestamp, not by arrival: `R` is stamped by the engine
-    // and `T` by the tui, so two records can reach the pipe in the
-    // opposite order from the one their clocks record
-    let parsed = records
-        .iter()
-        .filter(|r| r.tag == b'R' && r.nanos >= t0)
-        .min_by_key(|r| r.nanos)
-        .copied()?;
-    let paint = records
-        .iter()
-        .filter(|r| r.tag == b'T' && r.nanos >= parsed.nanos)
-        .min_by_key(|r| r.nanos)
-        .copied()?;
-    Some((parsed, paint))
-}
-
-/// The terminal writes that landed after a keypress but before the redraw
-/// answering it, split by whether anything explains them.
-///
-/// Neither count is a measurement fault and neither is gated: both count
-/// frames the row's boundary deliberately steps over. The split is what
-/// keeps the unexplained half meaning what it always meant -- see
-/// [`classify_paints_before_redraw`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PaintSplit {
-    /// Writes carrying a cell the reconciler had a live prediction for: the
-    /// predicted paint, which speculation produces between the keypress and
-    /// its authoritative redraw by design.
-    pub speculated: usize,
-    /// Writes the painter announced as a frame whose whole damage is the
-    /// agent panel: the streamed turn painting itself, which under
-    /// the AI rows happens on the agent's own cadence and lands inside a
-    /// sample window whenever the two coincide.
-    pub agent: usize,
-    /// Writes with neither a redraw nor a live prediction nor an agent
-    /// repaint behind them -- view answering the keystroke from its own
-    /// chrome, the regression the output-path row's floor-1 refusal exists
-    /// to catch.
-    pub unexplained: usize,
-}
-
-/// Splits the writes in `[t0, parsed)` into the ones a live prediction
-/// explains and the ones nothing does.
-///
-/// An announcement precedes the write it explains: the painter taps
-/// `D` at the head of a frame carrying a predicted cell and `A` inside a
-/// frame whose whole damage is the agent panel's rows, and each is
-/// consumed by the next write.
-///
-/// A speculated paint announces itself before it happens: the painter taps
-/// `D` at the head of a frame carrying a predicted cell, and that frame's
-/// own `T` follows it on the same thread, so the pairing is "the next write
-/// after each announcement" rather than a timestamp window that would have
-/// to guess how long a frame takes. Announcements are consumed one per
-/// write, so a second write behind one announcement is unexplained, which
-/// is what keeps a stuck or duplicated `D` from laundering real chrome
-/// paints.
-///
-/// Records are ordered by their own stamps rather than by arrival: `D` and
-/// `T` are stamped on the paint thread but reach the harness through a pipe
-/// the engine's threads write to as well.
-pub fn classify_paints_before_redraw(records: &[TapRecord], t0: i64, parsed: i64) -> PaintSplit {
-    // An announcement is stamped at the head of the frame whose write it
-    // explains, so a frame already in flight when the key was pressed
-    // announces before `t0` and writes after it. Announcements are
-    // therefore collected from the last write before the keypress -- the
-    // boundary of that in-flight frame, everything before it already
-    // consumed -- while the writes counted stay the ones inside the
-    // window. Cutting announcements at `t0` instead reports the frames
-    // that straddle it as explained by nothing, which under a streaming
-    // agent turn is most of them.
-    let frame_start = records
-        .iter()
-        .filter(|r| r.tag == b'T' && r.nanos < t0)
-        .map(|r| r.nanos)
-        .max()
-        .unwrap_or(t0);
-    let mut window: Vec<&TapRecord> = records
-        .iter()
-        .filter(|r| match r.tag {
-            b'T' => r.nanos >= t0 && r.nanos < parsed,
-            b'D' | b'A' => r.nanos >= frame_start && r.nanos < parsed,
-            _ => false,
-        })
-        .collect();
-    window.sort_by_key(|r| (r.nanos, r.seq));
-    let mut split = PaintSplit::default();
-    let mut announced = None;
-    for record in window {
-        match record.tag {
-            b'T' => match announced.take() {
-                Some(b'D') => split.speculated += 1,
-                Some(_) => split.agent += 1,
-                None => split.unexplained += 1,
-            },
-            // a frame announcing both is a predicted paint first: the
-            // prediction is the reason it is on screen ahead of the redraw
-            tag => announced = announced.filter(|held| *held == b'D').or(Some(tag)),
-        }
-    }
-    split
-}
-
-/// Whether the glyph a sample watched appear between `start` and `seen`
-/// was put there by a prediction rather than by the engine's own answer.
-///
-/// True when a write the painter announced as carrying a predicted cell
-/// landed inside the sample's window and ahead of the redraw answering the
-/// keystroke -- which is the whole claim a speculated-echo number makes,
-/// and the only evidence for it that exists: on screen the predicted glyph
-/// and the authoritative one are the same character in the same cell, so
-/// nothing the harness parses out of the pty can tell them apart.
-///
-/// Conservative in both directions it can be wrong. A redraw stamped after
-/// `start` that belongs to the previous keystroke closes the window early
-/// and reads as unattributed, and a window with no redraw in it at all is
-/// bounded by `seen` rather than assumed to be all prediction.
-#[must_use]
-pub fn answered_by_prediction(records: &[TapRecord], start: i64, seen: i64) -> bool {
-    let parsed = records
-        .iter()
-        .filter(|r| r.tag == b'R' && r.nanos >= start)
-        .map(|r| r.nanos)
-        .min()
-        .unwrap_or(seen);
-    classify_paints_before_redraw(records, start, parsed.min(seen)).speculated > 0
-}
-
 /// Measures the redraw-parsed-to-terminal-write path: per keypress, the
-/// earliest `R` tap after the key is paired with the first `T` tap that
-/// follows it (the paint that made the redraw visible).
+/// earliest `R` tap after the key is paired with the `T` tap of the first
+/// frame to start at or after it (the paint that made the redraw visible).
 ///
 /// # Errors
 ///
@@ -836,9 +696,10 @@ fn sample_output_path(
                 });
             };
             if pipe
-                .wait_for(protocol.sample_timeout, |r| {
-                    r.tag == b'T' && r.nanos >= seen_parsed.nanos
-                })
+                .wait_for(
+                    protocol.sample_timeout,
+                    closes_the_frame_after(seen_parsed.nanos),
+                )
                 .is_none()
             {
                 return Err(BenchError::Desync {
@@ -854,7 +715,7 @@ fn sample_output_path(
             // set: an `R` stamped earlier than `seen_parsed` may still have
             // been crossing the pipe while the wait above returned
             all_records.extend(pipe.drain());
-            let Some((parsed, paint)) = measured_frame(&all_records, handoff.nanos) else {
+            let Some((parsed, paint)) = measured_frame(&all_records, handoff.nanos)? else {
                 return Err(BenchError::Desync {
                     context: "the redraw and paint that ended the sample waits were not in \
                               the drained record set"
@@ -1547,9 +1408,13 @@ mod tests {
         // both halves of the module: the AI rows live in the child file,
         // and a structural claim about them must not go quiet because the
         // function moved between the two
-        let found = [include_str!("mod.rs"), include_str!("ai.rs")]
-            .into_iter()
-            .find_map(|source| source.split(&marker).nth(1));
+        let found = [
+            include_str!("mod.rs"),
+            include_str!("ai.rs"),
+            include_str!("frame.rs"),
+        ]
+        .into_iter()
+        .find_map(|source| source.split(&marker).nth(1));
         assert!(found.is_some(), "{name} is gone from this module");
         found
             .unwrap_or_default()
@@ -1732,10 +1597,69 @@ mod tests {
 
     #[test]
     fn measured_frame_takes_the_earliest_redraw_and_the_paint_that_carries_it() {
-        let records = [tap(b'R', 1, 110), tap(b'R', 2, 130), tap(b'T', 1, 150)];
+        let records = [
+            tap(b'R', 1, 110),
+            tap(b'R', 2, 130),
+            tap(b'B', 1, 140),
+            tap(b'T', 1, 150),
+        ];
         assert_eq!(
-            measured_frame(&records, 100),
+            measured_frame(&records, 100).unwrap(),
             Some((tap(b'R', 1, 110), tap(b'T', 1, 150)))
+        );
+    }
+
+    /// The shape a predicting build produces: the glyph is already on
+    /// screen, so the redraw's own frame writes nothing and the next write
+    /// is a later frame's.
+    #[test]
+    fn measured_frame_refuses_a_write_from_a_later_frame() {
+        let records = [
+            tap(b'R', 1, 110),
+            tap(b'U', 1, 111),
+            tap(b'B', 1, 112),
+            tap(b'P', 1, 113),
+            tap(b'G', 1, 114),
+            tap(b'C', 1, 115),
+            tap(b'U', 2, 130),
+            tap(b'B', 2, 131),
+            tap(b'F', 1, 132),
+            tap(b'T', 1, 133),
+        ];
+        let err = measured_frame(&records, 100).expect_err("two frames between R and T");
+        assert!(
+            matches!(&err, BenchError::Desync { context }
+                if context.contains("2 frames started") && context.contains("later frame")),
+            "{err}"
+        );
+
+        let one_frame = [
+            tap(b'R', 1, 110),
+            tap(b'U', 1, 111),
+            tap(b'B', 1, 112),
+            tap(b'F', 1, 113),
+            tap(b'T', 1, 114),
+        ];
+        assert_eq!(
+            measured_frame(&one_frame, 100).unwrap(),
+            Some((tap(b'R', 1, 110), tap(b'T', 1, 114)))
+        );
+    }
+
+    /// A frame already drawing when the redraw is parsed writes after it
+    /// without carrying it; the sample closes on the next frame's write.
+    #[test]
+    fn measured_frame_skips_the_write_of_a_frame_already_in_flight() {
+        let records = [
+            tap(b'B', 1, 105),
+            tap(b'R', 1, 110),
+            tap(b'T', 1, 115),
+            tap(b'B', 2, 120),
+            tap(b'T', 2, 130),
+        ];
+        assert_eq!(
+            measured_frame(&records, 100).unwrap(),
+            Some((tap(b'R', 1, 110), tap(b'T', 2, 130)))
         );
     }
 
@@ -1746,9 +1670,15 @@ mod tests {
         // parsed. The measured frame is the 180/200 pair; a boundary that
         // anchored on the first paint after the keypress would have to
         // explain 120 backwards and has nothing to explain it with
-        let records = [tap(b'T', 1, 120), tap(b'R', 2, 180), tap(b'T', 2, 200)];
+        let records = [
+            tap(b'B', 1, 115),
+            tap(b'T', 1, 120),
+            tap(b'R', 2, 180),
+            tap(b'B', 2, 190),
+            tap(b'T', 2, 200),
+        ];
         assert_eq!(
-            measured_frame(&records, 100),
+            measured_frame(&records, 100).unwrap(),
             Some((tap(b'R', 2, 180), tap(b'T', 2, 200)))
         );
         assert_eq!(
@@ -1767,24 +1697,126 @@ mod tests {
         // the paint at 120 that carries it is not this sample's frame
         let records = [
             tap(b'R', 1, 40),
+            tap(b'B', 1, 50),
             tap(b'T', 1, 120),
             tap(b'R', 2, 180),
+            tap(b'B', 2, 190),
             tap(b'T', 2, 200),
         ];
         assert_eq!(
-            measured_frame(&records, 100),
+            measured_frame(&records, 100).unwrap(),
             Some((tap(b'R', 2, 180), tap(b'T', 2, 200)))
         );
     }
 
     #[test]
     fn measured_frame_is_none_until_both_halves_have_arrived() {
-        assert_eq!(measured_frame(&[tap(b'T', 1, 120)], 100), None);
-        assert_eq!(measured_frame(&[tap(b'R', 1, 110)], 100), None);
+        assert_eq!(measured_frame(&[tap(b'T', 1, 120)], 100).unwrap(), None);
+        assert_eq!(measured_frame(&[tap(b'R', 1, 110)], 100).unwrap(), None);
+        // a frame that has started but not yet written closes nothing
+        assert_eq!(
+            measured_frame(&[tap(b'R', 1, 110), tap(b'B', 1, 115)], 100).unwrap(),
+            None
+        );
         // a paint that predates the redraw does not close the frame
         assert_eq!(
-            measured_frame(&[tap(b'T', 1, 105), tap(b'R', 1, 110)], 100),
+            measured_frame(&[tap(b'T', 1, 105), tap(b'R', 1, 110)], 100).unwrap(),
             None
+        );
+    }
+
+    /// The `T` the output row's waits close a sample on, given the records
+    /// in the order they crossed the pipe: the first redraw to arrive at or
+    /// after `t0`, then the closing write of the frame after it.
+    fn wait_closes_on(arrived: &[TapRecord], t0: i64) -> Option<TapRecord> {
+        let seen = arrived.iter().find(|r| r.tag == b'R' && r.nanos >= t0)?;
+        let mut closes = closes_the_frame_after(seen.nanos);
+        arrived.iter().find(|r| closes(r)).copied()
+    }
+
+    #[test]
+    fn the_wait_skips_the_write_of_a_frame_already_in_flight() {
+        let arrived = [
+            tap(b'B', 1, 105),
+            tap(b'R', 1, 110),
+            tap(b'T', 1, 115),
+            tap(b'B', 2, 120),
+            tap(b'F', 1, 125),
+            tap(b'T', 2, 130),
+        ];
+        assert_eq!(wait_closes_on(&arrived, 100), Some(tap(b'T', 2, 130)));
+        assert_eq!(
+            measured_frame(&arrived, 100).unwrap(),
+            Some((tap(b'R', 1, 110), tap(b'T', 2, 130)))
+        );
+    }
+
+    /// The redraw's own frame started and wrote nothing: the wait still
+    /// closes on the next write, and the pairing refuses it.
+    #[test]
+    fn the_wait_closes_where_measured_frame_refuses_a_frame_that_wrote_nothing() {
+        let arrived = [
+            tap(b'R', 1, 110),
+            tap(b'B', 1, 115),
+            tap(b'B', 2, 120),
+            tap(b'F', 1, 125),
+            tap(b'T', 1, 130),
+        ];
+        assert_eq!(wait_closes_on(&arrived, 100), Some(tap(b'T', 1, 130)));
+        let err = measured_frame(&arrived, 100).expect_err("two frames between R and T");
+        assert!(
+            matches!(&err, BenchError::Desync { context } if context.contains("2 frames started")),
+            "{err}"
+        );
+    }
+
+    /// An earlier-stamped redraw that crossed the pipe after a later one:
+    /// the wait arms on the later redraw and closes on its frame, and the
+    /// pairing takes the earlier redraw's own frame, which wrote first.
+    #[test]
+    fn the_wait_closes_on_a_later_frame_when_an_earlier_redraw_arrives_late() {
+        let arrived = [
+            tap(b'B', 1, 115),
+            tap(b'T', 1, 120),
+            tap(b'R', 2, 130),
+            tap(b'B', 2, 135),
+            tap(b'T', 2, 140),
+            tap(b'R', 1, 110),
+        ];
+        assert_eq!(wait_closes_on(&arrived, 100), Some(tap(b'T', 2, 140)));
+        assert_eq!(
+            measured_frame(&arrived, 100).unwrap(),
+            Some((tap(b'R', 1, 110), tap(b'T', 1, 120)))
+        );
+    }
+
+    /// A frame starting at the redraw's own stamp is "at or after" it, so
+    /// it carries the redraw.
+    #[test]
+    fn a_frame_starting_at_the_redraws_stamp_carries_it() {
+        let records = [tap(b'R', 1, 110), tap(b'B', 1, 110), tap(b'T', 1, 120)];
+        assert_eq!(wait_closes_on(&records, 100), Some(tap(b'T', 1, 120)));
+        assert_eq!(
+            measured_frame(&records, 100).unwrap(),
+            Some((tap(b'R', 1, 110), tap(b'T', 1, 120)))
+        );
+    }
+
+    /// The count of frames between the redraw and the write includes the
+    /// write's own stamp, so a second frame starting at that instant is a
+    /// second frame.
+    #[test]
+    fn a_frame_starting_at_the_writes_stamp_counts_as_a_second_frame() {
+        let records = [
+            tap(b'R', 1, 110),
+            tap(b'B', 1, 115),
+            tap(b'B', 2, 120),
+            tap(b'T', 1, 120),
+        ];
+        let err = measured_frame(&records, 100).expect_err("a second B at the T's stamp");
+        assert!(
+            matches!(&err, BenchError::Desync { context } if context.contains("2 frames started")),
+            "{err}"
         );
     }
 
