@@ -214,11 +214,16 @@ impl Grid {
 
     /// Apply a single grid mutation. Out-of-bounds ops are ignored, never panic.
     pub fn apply(&mut self, op: GridOp) {
-        self.revision = self.revision.wrapping_add(1);
-        match op {
-            GridOp::Resize { width, height } => self.resize(width, height),
-            GridOp::Clear => self.clear(),
-            GridOp::CursorGoto { row, col } => self.cursor_goto(row, col),
+        let wrote = match op {
+            GridOp::Resize { width, height } => self.resize_cells(width, height),
+            GridOp::Clear => {
+                self.clear_cells();
+                true
+            }
+            GridOp::CursorGoto { row, col } => {
+                self.cursor_goto(row, col);
+                false
+            }
             GridOp::PutLine {
                 row,
                 col_start,
@@ -230,7 +235,10 @@ impl Grid {
                 left,
                 right,
                 rows,
-            } => self.scroll(top, bot, left, right, rows),
+            } => self.scroll_region(top, bot, left, right, rows),
+        };
+        if wrote {
+            self.revision = self.revision.wrapping_add(1);
         }
     }
 
@@ -373,7 +381,10 @@ impl Grid {
         row_off.checked_add(usize::from(col))
     }
 
-    fn resize(&mut self, width: u16, height: u16) {
+    /// Resizes the grid, keeping the cells both sizes share, and answers
+    /// whether the size changed.
+    fn resize_cells(&mut self, width: u16, height: u16) -> bool {
+        let resized = self.size() != (width, height);
         let mut new_cells = vec![Cell::default(); usize::from(width) * usize::from(height)];
         let copy_rows = self.height.min(height);
         let copy_cols = self.width.min(width);
@@ -399,9 +410,10 @@ impl Grid {
         // range
         self.dirty_full = true;
         self.dirty_rows = vec![false; usize::from(height)];
+        resized
     }
 
-    fn clear(&mut self) {
+    fn clear_cells(&mut self) {
         for cell in &mut self.cells {
             *cell = Cell::default();
         }
@@ -413,16 +425,19 @@ impl Grid {
         self.cursor_col = col.min(self.width.saturating_sub(1));
     }
 
-    fn put_line(&mut self, row: u16, col_start: u16, cells: &[(String, u64, u64)]) {
+    /// Writes `cells` into `row` from `col_start`, and answers whether any
+    /// cell landed inside the grid.
+    fn put_line(&mut self, row: u16, col_start: u16, cells: &[(String, u64, u64)]) -> bool {
         if row >= self.height {
-            return;
+            return false;
         }
         self.mark_row(row);
+        let mut wrote = false;
         let mut col = col_start;
         for (text, hl_id, repeat) in cells {
             for _ in 0..*repeat {
                 if col >= self.width {
-                    return;
+                    return wrote;
                 }
                 if let Some(idx) = self.index(row, col) {
                     if let Some(slot) = self.cells.get_mut(idx) {
@@ -430,20 +445,24 @@ impl Grid {
                             text: text.clone(),
                             hl_id: *hl_id,
                         };
+                        wrote = true;
                     }
                 }
                 col = col.saturating_add(1);
             }
         }
+        wrote
     }
 
-    fn scroll(&mut self, top: u16, bot: u16, left: u16, right: u16, rows: i32) {
+    /// Scrolls the region by `rows`, and answers whether the region holds
+    /// any cell to move.
+    fn scroll_region(&mut self, top: u16, bot: u16, left: u16, right: u16, rows: i32) -> bool {
         let top = top.min(self.height);
         let bot = bot.min(self.height);
         let left = left.min(self.width);
         let right = right.min(self.width);
         if top >= bot || left >= right || rows == 0 {
-            return;
+            return false;
         }
         // the whole region repaints: scrolled-in rows carry moved content and
         // the vacated tail is filled, so every row in `top..bot` changed
@@ -471,7 +490,7 @@ impl Grid {
             // rows for oversized shifts, so full-clear explicitly
             if shift >= bot.saturating_sub(top) {
                 self.fill_row_range(top, bot, left, right);
-                return;
+                return true;
             }
             let mut dst = bot;
             let mut src = bot.saturating_sub(shift);
@@ -482,6 +501,7 @@ impl Grid {
             }
             self.fill_row_range(top, top.saturating_add(shift), left, right);
         }
+        true
     }
 
     fn copy_row_range(&mut self, src_row: u16, dst_row: u16, left: u16, right: u16) {
@@ -567,6 +587,53 @@ mod tests {
         assert_eq!(g.revision(), revision, "nothing changed");
     }
 
+    /// An op that changes no cell leaves the revision alone, so a copy of
+    /// the cells is kept across it.
+    #[test]
+    fn an_op_that_changes_no_cell_keeps_the_revision() {
+        let mut g = grid_10x3();
+        let line = |row, col_start| GridOp::PutLine {
+            row,
+            col_start,
+            cells: vec![("x".into(), 1, 1)],
+        };
+        let scroll = |top, bot, rows| GridOp::Scroll {
+            top,
+            bot,
+            left: 0,
+            right: 10,
+            rows,
+        };
+        let revision = g.revision();
+        for op in [
+            GridOp::Resize {
+                width: 10,
+                height: 3,
+            },
+            line(3, 0),
+            line(0, 10),
+            scroll(0, 3, 0),
+            scroll(2, 2, 1),
+            GridOp::CursorGoto { row: 1, col: 1 },
+        ] {
+            g.apply(op.clone());
+            assert_eq!(g.revision(), revision, "{op:?} moved the revision");
+        }
+        for op in [
+            line(0, 0),
+            scroll(0, 3, 1),
+            GridOp::Clear,
+            GridOp::Resize {
+                width: 9,
+                height: 3,
+            },
+        ] {
+            let revision = g.revision();
+            g.apply(op.clone());
+            assert_ne!(g.revision(), revision, "{op:?} kept the revision");
+        }
+    }
+
     /// Disconfirm: a derived `Clone` for `Cell` moves every text pointer.
     #[test]
     fn following_a_grid_of_the_same_size_keeps_each_cells_text_buffer() {
@@ -588,51 +655,104 @@ mod tests {
         assert_eq!(g.cell(1, 0).map(|c| c.hl_id), Some(2));
     }
 
-    /// Every method code outside this file writes cells through moves the
+    /// The source of every file under `grid/`, blanked, with its test
+    /// modules taken out, by path.
+    fn grid_module_sources() -> Vec<(String, String)> {
+        use view_test_support::rust_source::{blank_non_code, without_test_modules};
+        fn walk(dir: &std::path::Path, into: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).expect("a readable source directory") {
+                let path = entry.expect("a readable directory entry").path();
+                if path.is_dir() {
+                    walk(&path, into);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let source = std::fs::read_to_string(&path).expect("a readable source");
+                    let code = blank_non_code(&without_test_modules(&source));
+                    into.push((path.display().to_string(), code));
+                }
+            }
+        }
+        let mut sources = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/grid"),
+            &mut sources,
+        );
+        sources
+    }
+
+    /// Every `&mut self` method of `Grid` that writes cells moves the
     /// revision, so a copy of something drawn from the cells is never
     /// reused past a change. A method that writes no cell names its ground
-    /// here.
+    /// here. A private method is reached only through the methods walked
+    /// here, and no other file under `grid/` calls it, which the walk
+    /// checks.
     #[test]
     fn every_method_that_writes_cells_moves_the_revision() {
-        const WRITES_NO_CELL: &[(&str, &str)] = &[(
-            "take_dirty",
-            "drains the damage record and leaves every cell",
-        )];
-        let source = include_str!("grid.rs");
-        let production = source
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .unwrap_or(source);
-        let lines: Vec<&str> = production.lines().collect();
+        use view_test_support::rust_source::{blank_non_code, closing, without_test_modules};
+        const WRITES_NO_CELL: &[(&str, &str)] = &[
+            (
+                "take_dirty",
+                "drains the damage record and leaves every cell",
+            ),
+            ("mark_row", "marks a row for repaint and leaves every cell"),
+        ];
+        let code = blank_non_code(&without_test_modules(include_str!("grid.rs")));
+        let open = code
+            .find("impl Grid {")
+            .expect("Grid has its own impl block")
+            + "impl Grid ".len();
+        let close = closing(&code, open).expect("the impl block closes");
+        let block = &code[open..close];
+        let elsewhere = grid_module_sources();
         let mut walked = Vec::new();
         let mut missing = Vec::new();
-        for (i, line) in lines.iter().enumerate() {
-            let Some(rest) = line
-                .strip_prefix("    pub fn ")
-                .or_else(|| line.strip_prefix("    pub(crate) fn "))
-            else {
+        let mut at = 0;
+        while let Some(offset) = block[at..].find("fn ") {
+            let fn_at = at + offset;
+            at = fn_at + 3;
+            let head = block[..fn_at].trim_end_matches(|c: char| c != '\n');
+            let declaration = block[head.len()..fn_at].trim();
+            if !matches!(declaration, "" | "pub" | "pub(crate)" | "pub(super)") {
                 continue;
-            };
-            let body: Vec<&str> = lines[i..]
-                .iter()
-                .take_while(|line| **line != "    }")
-                .copied()
-                .collect();
-            let signature = body.iter().take_while(|line| !line.ends_with('{'));
-            if !signature
-                .chain(body.iter().find(|line| line.ends_with('{')))
-                .any(|line| line.contains("&mut self"))
+            }
+            let name = block[at..]
+                .split(['(', '<'])
+                .next()
+                .unwrap_or_default()
+                .trim();
+            let body_open = fn_at + block[fn_at..].find('{').expect("a method has a body");
+            if !block[fn_at..body_open].contains("&mut self") {
+                continue;
+            }
+            let body_close = closing(block, body_open).expect("the body closes");
+            walked.push(name);
+            if WRITES_NO_CELL.iter().any(|(exempt, _)| *exempt == name)
+                || block[body_open..body_close].contains("self.revision")
             {
                 continue;
             }
-            let name = rest.split(['(', '<']).next().unwrap_or_default();
-            walked.push(name);
-            let exempt = WRITES_NO_CELL.iter().any(|(exempt, _)| *exempt == name);
-            if !exempt && !body.iter().any(|line| line.contains("self.revision")) {
-                missing.push(name);
+            let callers: Vec<&str> = elsewhere
+                .iter()
+                .filter(|(_, code)| {
+                    code.contains(&format!(".{name}(")) || code.contains(&format!("::{name}("))
+                })
+                .map(|(path, _)| path.as_str())
+                .collect();
+            if !declaration.is_empty() {
+                missing.push(format!("{name}, which other modules call"));
+            } else if !callers.is_empty() {
+                missing.push(format!("{name}, private and called from {callers:?}"));
             }
         }
-        for expected in ["apply", "follow", "blank_to", "map_hl", "take_dirty"] {
+        for expected in [
+            "apply",
+            "follow",
+            "blank_to",
+            "map_hl",
+            "take_dirty",
+            "mark_row",
+            "put_line",
+            "scroll_region",
+        ] {
             assert!(
                 walked.contains(&expected),
                 "the walk missed {expected}: {walked:?}"

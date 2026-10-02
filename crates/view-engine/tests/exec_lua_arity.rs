@@ -15,7 +15,9 @@
 
 use std::path::{Path, PathBuf};
 
-use view_test_support::rust_source::{blank_non_code, closing, item_end, top_level_items};
+use view_test_support::rust_source::{
+    blank_non_code, closing, item_end, top_level_items, without_test_modules,
+};
 
 const METHOD: &str = "\"nvim_exec_lua\"";
 
@@ -28,43 +30,6 @@ fn rust_sources(dir: &Path, into: &mut Vec<PathBuf>) {
             into.push(path);
         }
     }
-}
-
-/// Blanked `code` with every inline `#[cfg(test)]` module blanked as well,
-/// so its fixtures are not read and the code after it still is.
-///
-/// Other attributes may stand between the `cfg` and the `mod`. An
-/// out-of-line `mod name;` opens no body here, so the walk reads on past
-/// it.
-fn without_test_modules(code: &str) -> String {
-    let mut out = code.to_owned();
-    let mut from = 0;
-    while let Some(offset) = code[from..].find("#[cfg(test)]") {
-        let at = from + offset;
-        from = at + 1;
-        let mut rest = code[at + "#[cfg(test)]".len()..].trim_start();
-        while rest.starts_with("#[") {
-            let Some(close) = closing(rest, 1) else {
-                break;
-            };
-            rest = rest[close + 1..].trim_start();
-        }
-        let declaration = rest.strip_prefix("pub ").unwrap_or(rest);
-        let Some(after_mod) = declaration.strip_prefix("mod ") else {
-            continue;
-        };
-        let name_end = after_mod
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .unwrap_or(after_mod.len());
-        if !after_mod[name_end..].trim_start().starts_with('{') {
-            continue;
-        }
-        let open = code.len() - after_mod.len() + name_end;
-        let open = open + code[open..].find('{').unwrap_or(0);
-        let end = closing(code, open).map_or(code.len(), |close| close + 1);
-        out.replace_range(at..end, &code[at..end].replace(|c: char| c != '\n', " "));
-    }
-    out
 }
 
 /// The number of parameters the call naming `"nvim_exec_lua"` at `at`

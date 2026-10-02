@@ -3358,8 +3358,9 @@ mod tests {
 
     #[test]
     fn every_field_the_engine_raises_is_classified_where_it_is_dropped() {
-        let model = include_str!("model.rs");
-        let statusline = include_str!("native/statusline.rs");
+        use view_test_support::rust_source::without_test_modules;
+        let model = &without_test_modules(include_str!("model.rs"));
+        let statusline = &without_test_modules(include_str!("native/statusline.rs"));
         let mut unclassified = Vec::new();
 
         let overlays = doc_above(model, "pub fn forget_overlays(&mut self)");
@@ -3376,7 +3377,7 @@ mod tests {
             }
         }
 
-        let surfaces = include_str!("native/surfaces.rs");
+        let surfaces = &without_test_modules(include_str!("native/surfaces.rs"));
         let conflicts = doc_above(surfaces, "pub fn forget_engine(&mut self)");
         for field in declared_fields(surfaces, "pub struct SurfaceConflicts {") {
             if !classified(&conflicts, &field) {
@@ -3384,7 +3385,7 @@ mod tests {
             }
         }
 
-        let palette = include_str!("native/palette.rs");
+        let palette = &without_test_modules(include_str!("native/palette.rs"));
         let floats = doc_above(palette, "pub fn forget_engine(&mut self)");
         for field in declared_fields(palette, "pub struct CmdlineFloats {") {
             if !classified(&floats, &field) {
@@ -3392,7 +3393,7 @@ mod tests {
             }
         }
 
-        let messages = include_str!("model/messages.rs");
+        let messages = &without_test_modules(include_str!("model/messages.rs"));
         let hold = doc_above(messages, "pub(crate) fn forget_engine(&mut self)");
         for field in declared_fields(messages, "pub struct Messages {") {
             if !classified(&hold, &field) {

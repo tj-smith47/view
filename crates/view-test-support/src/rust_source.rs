@@ -157,7 +157,8 @@ pub fn closing(code: &str, open: usize) -> Option<usize> {
 /// offset of the comma that separates it from the next item, or of the
 /// bracket that closes the list, or the end of the text.
 ///
-/// A comma inside a nested bracket, a turbofish (`::<A, B>`) or a
+/// A comma inside a nested bracket, a turbofish (`::<A, B>`), a type's
+/// generics after `as` or a closure's `->` (`as Map<A, B>`), or a
 /// closure's parameter list (`|a, b|`) belongs to the item.
 #[must_use]
 pub fn item_end(code: &str, from: usize) -> usize {
@@ -172,17 +173,63 @@ pub fn item_end(code: &str, from: usize) -> usize {
                 Some(d) => depth = d,
                 None => return at,
             },
-            b'<' if code.get(..at).is_some_and(|head| head.ends_with("::")) || angles > 0 => {
-                angles += 1;
-            }
+            b'<' if angles > 0 || opens_generics(code, from, at) => angles += 1,
             b'>' if angles > 0 && at > 0 && bytes[at - 1] != b'-' => angles -= 1,
             b'|' if depth == 0 && angles == 0 && opens_closure(code, from, at) => {
-                at = find_from(bytes, at + 1, b'|').unwrap_or(bytes.len());
+                at = closure_parameters_end(bytes, at);
             }
             b',' if depth == 0 && angles == 0 => return at,
             _ => {}
         }
         at += 1;
+    }
+    bytes.len()
+}
+
+/// Whether the `<` at `at` opens generics: it follows `::`, or it follows a
+/// type path written after `as` or `->`, where Rust reads `<` as nothing
+/// else.
+fn opens_generics(code: &str, from: usize, at: usize) -> bool {
+    let Some(head) = code.get(from..at) else {
+        return false;
+    };
+    if head.ends_with("::") {
+        return true;
+    }
+    let path = head.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == ':');
+    if path.len() == head.len() {
+        return false;
+    }
+    let mut before = path.trim_end();
+    // the references and qualifiers a type may open with
+    loop {
+        if let Some(rest) = before.strip_suffix(['&', '*']) {
+            before = rest.trim_end();
+            continue;
+        }
+        let word_at = before
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+            .map_or(0, |i| i + 1);
+        let word = before.get(word_at..).unwrap_or_default();
+        if word.starts_with('\'') || matches!(word, "mut" | "const" | "dyn" | "impl") {
+            before = before.get(..word_at).unwrap_or_default().trim_end();
+            continue;
+        }
+        return word == "as" || before.ends_with("->");
+    }
+}
+
+/// The offset of the `|` closing the closure parameters opened at `open`,
+/// past any `|` an or-pattern carries inside a bracket.
+fn closure_parameters_end(bytes: &[u8], open: usize) -> usize {
+    let mut depth = 0usize;
+    for (at, byte) in bytes.iter().enumerate().skip(open + 1) {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b'|' if depth == 0 => return at,
+            _ => {}
+        }
     }
     bytes.len()
 }
@@ -209,6 +256,79 @@ pub fn top_level_items(inner: &str) -> Vec<&str> {
         from = end + 1;
     }
     items
+}
+
+/// `source` with every inline `#[cfg(test)]` module turned into spaces byte
+/// for byte, keeping each newline, so its fixtures are not read and every
+/// offset after it names the same place. Comments and literals outside
+/// those modules are kept, so a blanked or an unblanked source can be read
+/// through it.
+///
+/// Other attributes may stand between the `cfg` and the `mod`, and the
+/// module may carry any visibility. An out-of-line `mod name;` opens no
+/// body, so the text after it is kept.
+#[must_use]
+pub fn without_test_modules(source: &str) -> String {
+    const MARK: &str = "#[cfg(test)]";
+    let code = blank_non_code(source);
+    let mut out = source.as_bytes().to_vec();
+    let mut from = 0;
+    while let Some(offset) = code.get(from..).and_then(|rest| rest.find(MARK)) {
+        let at = from + offset;
+        from = at + 1;
+        let Some(end) = test_module_end(&code, at + MARK.len()) else {
+            continue;
+        };
+        for byte in out.iter_mut().take(end).skip(at) {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// The offset just past the inline module body that the attributes ending
+/// at `after` in blanked `code` stand on, or `None` where they stand on
+/// anything else.
+fn test_module_end(code: &str, after: usize) -> Option<usize> {
+    let mut rest = code.get(after..)?.trim_start();
+    while rest.starts_with("#[") {
+        let close = closing(rest, 1)?;
+        rest = rest.get(close + 1..)?.trim_start();
+    }
+    let after_mod = without_visibility(rest).strip_prefix("mod")?;
+    if !after_mod.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let after_mod = after_mod.trim_start();
+    let name_end = after_mod
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(after_mod.len());
+    let body = after_mod.get(name_end..)?.trim_start();
+    if !body.starts_with('{') {
+        return None;
+    }
+    let open = code.len() - body.len();
+    Some(closing(code, open).map_or(code.len(), |close| close + 1))
+}
+
+/// `item` past a leading `pub`, `pub(crate)`, `pub(in path)` or the like.
+fn without_visibility(item: &str) -> &str {
+    let Some(after) = item.strip_prefix("pub") else {
+        return item;
+    };
+    let scoped = after.trim_start();
+    if scoped.starts_with('(') {
+        return closing(scoped, 0)
+            .and_then(|close| scoped.get(close + 1..))
+            .map_or(item, str::trim_start);
+    }
+    if after.starts_with(char::is_whitespace) {
+        after.trim_start()
+    } else {
+        item
+    }
 }
 
 #[cfg(test)]
@@ -244,6 +364,39 @@ mod tests {
         assert_eq!(items_of("[f(br\"a, ]\")]").len(), 1);
     }
 
+    /// A test module is blanked byte for byte, so a character of several
+    /// bytes inside it moves nothing after it, and a module of any
+    /// visibility or a non-ASCII name is found.
+    #[test]
+    fn a_test_module_is_blanked_in_place_whatever_its_name_or_visibility() {
+        for module in [
+            "#[cfg(test)]\nmod tests {\n    fn é() { f(\"x\") }\n}\n",
+            "#[cfg(test)]\npub(crate) mod tests {\n    fn g() {}\n}\n",
+            "#[cfg(test)]\npub(in crate::a) mod tests {\n    fn g() {}\n}\n",
+            "#[cfg(test)]\n#[allow(x)]\npub mod tésts {\n    fn g() {}\n}\n",
+        ] {
+            let source = format!("fn shipped() {{}}\n{module}fn after() {{}}\n");
+            let out = without_test_modules(&source);
+            assert_eq!(out.len(), source.len(), "{source:?}");
+            assert_eq!(out.lines().count(), source.lines().count(), "{source:?}");
+            assert!(out.starts_with("fn shipped() {}\n"), "{out:?}");
+            assert!(out.ends_with("\nfn after() {}\n"), "{out:?}");
+            assert!(
+                !out.contains("fn g") && !out.contains("fn é") && !out.contains("mod"),
+                "the module is still read: {out:?}"
+            );
+        }
+    }
+
+    /// Comments are kept outside a test module, so a walk that reads doc
+    /// comments can strip test modules too, and an out-of-line module
+    /// keeps the code after it.
+    #[test]
+    fn only_an_inline_test_modules_body_is_blanked() {
+        let source = "/// kept\nfn a() {}\n#[cfg(test)]\nmod outside;\nfn b() {}\n";
+        assert_eq!(without_test_modules(source), source);
+    }
+
     #[test]
     fn a_closure_turbofish_or_lifetime_carries_no_separator() {
         assert_eq!(items_of("[|a, b| a + b]").len(), 1);
@@ -253,5 +406,19 @@ mod tests {
         assert_eq!(items_of("[f::<'a>(x), g(',')]").len(), 2);
         assert_eq!(items_of("[x as &'static str, ']']").len(), 2);
         assert_eq!(items_of("[a < b, c > d]").len(), 2);
+    }
+
+    /// A type after `as` or a closure's `->` takes generics with no
+    /// turbofish, and a closure's parameters may carry an or-pattern
+    /// inside brackets.
+    #[test]
+    fn a_generic_type_or_a_closure_pattern_carries_no_separator() {
+        assert_eq!(items_of("[x as Map<A, B>, c]").len(), 2);
+        assert_eq!(items_of("[x as &'a dyn Fn<A, B>, c]").len(), 2);
+        assert_eq!(items_of("[x as &mut T<A, B>]").len(), 1);
+        assert_eq!(items_of("[|x| -> Map<A, B> { m }, c]").len(), 2);
+        assert_eq!(items_of("[|(Some(a) | None): T| a, c]").len(), 2);
+        assert_eq!(items_of("[|a: Map<A, B>, b| a, c]").len(), 2);
+        assert_eq!(items_of("[has < b, c > d]").len(), 2);
     }
 }
