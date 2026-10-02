@@ -95,13 +95,12 @@ steps = [
 
 # The same plugin under view's own defaults, where the completion menu
 # stops being only a semantic question: with `native = {}` view owns the
-# command line, and the pinned cmp draws its cmdline menu on the grid's
-# last rows -- over the palette view painted there. view answers that the
-# way it answers every float over a surface it draws: the window keeps
-# drawing, view names it by what the window calls itself, and the notice
-# carries the `view.toml` line that hands the command line back. The
-# `present` state above is that remedy applied, so the pair is what a user
-# reads and what the user does about it.
+# command line, and the pinned cmp opens its cmdline menu while the
+# palette is drawing it. A float that opens inside the palette's command
+# line is the command line's own, so the palette lists the menu's rows in
+# its own box: nothing is drawn at the grid's left edge and no notice is
+# raised. The `present` state above is the same menu with the palette
+# handed back.
 #
 # Insert mode is the negative half: nvim's own completion menu rides
 # `ext_popupmenu`, so it is already view's and there is no float to name.
@@ -175,12 +174,11 @@ steps = [
   # which is a different failure from one view left standing, so the two
   # are not collapsed into one needle.
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"cmp_menu\" then if vim.api.nvim_win_get_config(w).hide == true then return \"hidden\" end return \"showing\" end end return \"none\" end)()')", expect = "showing", timeout_ms = 15000 },
-  # Both boxes on screen at once, which is the whole reading of this state:
-  # view's own command line carrying the query, and cmp's window under it
-  # carrying the candidates it rendered itself. cmp writes every candidate
-  # with a kind column (`Text` for a word from the buffer source -- see the
-  # captured rows in docs/surface-float-wire-capture.md), and the two-space
-  # gutter is what parts that row from the buffer line reading
+  # One box on screen: view's palette carrying the query, and in its rows
+  # the candidates cmp rendered. cmp writes every candidate with a kind
+  # column (`Text` for a word from the buffer source -- see the captured
+  # rows in docs/surface-float-wire-capture.md), and the two-space gutter
+  # is what parts that row from the buffer line reading
   # `prefabricated preflight` on the same screen. The candidate labels this
   # scenario types into are deliberately not named: cmp-buffer re-indexes
   # the buffer as the keys land, so how far through one of them a run has
@@ -188,17 +186,16 @@ steps = [
   # one of those -- it is in the buffer before any of this state's keys are
   # typed, so it is a candidate for `pre` in every run.
   { wait_for = "> :e pre", timeout_ms = 15000 },
-  { wait_for = "prefabricated  Text", timeout_ms = 15000 },
-  # And the notice a user reads about it, named by what the window calls
-  # itself and carrying the line that ends the overlap. The `present` state
-  # above is that line applied. Both needles stop at "command" because the
-  # box wraps at a width the layout decides, and the tiled layout's box
-  # breaks the line right after that word.
-  { wait_for = "view: cmp_menu is drawing over the command", timeout_ms = 15000 },
-  { wait_for = "native.palette = false gives it back", timeout_ms = 5000 },
-  # Not the anonymous wording: a window that names itself is named, and
-  # nothing else on this row claims it.
-  { assert_absent = "a plugin is drawing over the command" },
+  # Inside the palette: its edge, its padding column and its two-column
+  # list gutter stand before the row cmp drew, four columns cmp's own
+  # window never puts in front of it (two under this layout, three under
+  # tiles).
+  { wait_for = "    prefabricated  Text", timeout_ms = 15000 },
+  # And not at the bottom left: cmp's own window starts its row two
+  # columns into the screen under this layout, and that row is not drawn.
+  { assert_absent = "\n  prefabricated  Text" },
+  # The menu is the command line's own, so no notice names it.
+  { assert_absent = "cmp_menu is drawing over" },
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { assert_absent = "> pre" },
@@ -250,7 +247,7 @@ steps = [
   { send = "e" },
   { wait_for_probe = "luaeval('require(\"cmp\").visible()')", expect = "true", timeout_ms = 30000 },
   { wait_for = "prefabricated  Text", timeout_ms = 30000 },
-  { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"cmp_menu\" then if vim.api.nvim_win_get_config(w).hide == true then return \"hidden\" end return \"showing\" end end return \"none\" end)()')", expect = "showing" },
+  { probe ="luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"cmp_menu\" then if vim.api.nvim_win_get_config(w).hide == true then return \"hidden\" end return \"showing\" end end return \"none\" end)()')", expect = "showing" },
   { assert_absent = "> :e pre" },
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
@@ -286,10 +283,9 @@ steps = [
   { send = "e" },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"cmp_menu\" then if vim.api.nvim_win_get_config(w).hide == true then return \"hidden\" end return \"showing\" end end return \"none\" end)()')", expect = "showing", timeout_ms = 30000 },
   { wait_for = "> :e pre", timeout_ms = 30000 },
-  { wait_for = "prefabricated  Text", timeout_ms = 30000 },
-  { wait_for = "view: cmp_menu is drawing over the command", timeout_ms = 30000 },
-  { wait_for = "native.palette = false gives it back", timeout_ms = 30000 },
-  { assert_absent = "a plugin is drawing over the command" },
+  { wait_for = "    prefabricated  Text", timeout_ms = 30000 },
+  { assert_absent = "\n  prefabricated  Text" },
+  { assert_absent = "cmp_menu is drawing over" },
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
   { assert_absent = "> pre" },

@@ -328,6 +328,11 @@ size = 30                    # percent of the terminal width (left/right) or
 and `[ai] panel_width` is `[ui.surfaces.agent] size` under its. Write
 either one; the newer key wins when a config writes both.
 
+A completion menu your config opens while `:` is open is drawn in the
+palette's rows. A second window the same config opens beside it, such as a
+documentation window, is not shown while the palette is open.
+`[native] palette = false` gives both back to your config.
+
 The file tree lists folders first and then files, each group ordered by
 name whatever its case. Dotfiles are listed. Anything `.ignore` names is
 left out, and inside a git repository anything `.gitignore` names is left

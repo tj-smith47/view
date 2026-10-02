@@ -510,6 +510,10 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
     let Some(surface) = surfaces::claims(float, model) else {
         return Vec::new();
     };
+    if model.cmdline_floats.holds_window(float.win) {
+        // the palette draws this window's rows, so it covers nothing
+        return Vec::new();
+    }
     if surface == Surface::Cmdline && model.engine.cmdline.is_none() {
         // the command line this float is over is view's own guess at one,
         // and a sticky line never rests on a guess: the notice waits for
@@ -582,6 +586,9 @@ pub(super) fn on_float_placed(
     let Some((width, height)) = model.engine.grids().grid(grid).map(crate::grid::Grid::size) else {
         return Vec::new();
     };
+    if take_into_palette(model, grid, win, row, col, (width, height)) {
+        return Vec::new();
+    }
     let Some(surface) = surfaces::claims_at(
         row,
         col,
@@ -616,6 +623,43 @@ pub(super) fn on_float_placed(
     }
     model.dirty |= model.engine.withhold_float(grid, true);
     vec![Effect::Rpc(crate::msg::RpcCall::ReadFloatRows { win })]
+}
+
+/// Takes a float into the palette's open command line, and answers whether
+/// the command line holds it.
+///
+/// Taken on its first placement while the command line is open, and kept
+/// off the screen at every placement after: the palette paints its rows
+/// ([`crate::native::palette::listed_grid`]). A float already standing when
+/// the command line opened is left alone, and so is one over the notice
+/// column, which is a notification wherever it opened.
+fn take_into_palette(
+    model: &mut Model,
+    grid: crate::grid::registry::GridId,
+    win: u64,
+    row: i64,
+    col: i64,
+    (width, height): (u16, u16),
+) -> bool {
+    if model.cmdline_floats.holds(grid) {
+        return true;
+    }
+    if !crate::native::palette::takes_cmdline_floats(model)
+        || model.cmdline_floats.existed(grid)
+        || surfaces::over_notice_column(
+            row,
+            col,
+            width,
+            height,
+            surfaces::FloatAnchor::NorthWest,
+            model,
+        )
+    {
+        return false;
+    }
+    model.cmdline_floats.take(grid, win);
+    model.dirty |= model.engine.withhold_float(grid, true);
+    true
 }
 
 /// Puts every float the unread channel held off the screen through the
@@ -3396,5 +3440,272 @@ mod tests {
             }
             assert!(notices(&next).is_empty(), "{:?}", notices(&next));
         }
+    }
+
+    /// The capture's session with the palette drawing the command line.
+    fn palette_session() -> Model {
+        let mut model = captured_session();
+        model.palette_enabled = true;
+        model
+    }
+
+    /// One float nvim sizes and places: `grid` for window `win`, `width`
+    /// by `height` at `(row, col)`.
+    fn open_float(model: &mut Model, grid: u64, win: u64, rect: (u64, u64, u64, u64)) {
+        let (row, col, width, height) = rect;
+        let _ = update(
+            model,
+            Msg::Redraw(vec![
+                UiEvent::GridResize {
+                    grid,
+                    width,
+                    height,
+                },
+                UiEvent::WinFloatPos {
+                    grid,
+                    win: crate::events::WinHandle(win),
+                    anchor_grid: 1,
+                    zindex: 1001,
+                    compindex: 1,
+                    screen_row: row,
+                    screen_col: col,
+                },
+            ]),
+        );
+    }
+
+    fn withheld(model: &Model, grid: u64) -> bool {
+        model
+            .engine
+            .grids()
+            .float_withheld(crate::grid::registry::GridId(grid))
+    }
+
+    fn listed(model: &Model) -> Option<u64> {
+        crate::native::palette::listed_grid(model).map(|grid| grid.0)
+    }
+
+    fn hide_cmdline(model: &mut Model) {
+        let _ = update(model, Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }]));
+    }
+
+    /// The live menu's shape on a 39-row grid, moved up to fit this one:
+    /// rows 15..25 of 29, clear of the command line's own rows.
+    const MENU: (u64, u64, u64, u64) = (15, 0, 60, 11);
+
+    #[test]
+    fn a_float_placed_while_the_palette_owns_the_cmdline_is_withheld_and_named_by_the_palette() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        open_float(&mut model, 11, 1008, MENU);
+        assert!(withheld(&model, 11), "the menu paints over the screen");
+        assert_eq!(listed(&model), Some(11));
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![UiEvent::GridLine {
+                grid: 11,
+                row: 0,
+                col_start: 0,
+                cells: vec![crate::events::GridCell {
+                    text: "e Cargo.toml".to_string(),
+                    hl_id: 7,
+                    repeat: 1,
+                }],
+            }]),
+        );
+        let rows = crate::native::palette::drawn_rows(&model);
+        assert_eq!(rows.len(), 11);
+        let first: String = rows[0].iter().map(|span| span.text.as_str()).collect();
+        assert!(first.starts_with("e Cargo.toml"), "{first:?}");
+        // the next placement of the same window keeps it off the screen
+        open_float(&mut model, 11, 1008, (14, 0, 60, 11));
+        assert!(withheld(&model, 11));
+    }
+
+    /// A bordered menu lists its candidates and leaves its border out: the
+    /// palette's own box frames the rows.
+    #[test]
+    fn the_border_nvim_reports_around_a_taken_float_is_left_out_of_its_rows() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        let line = |row: u64, text: &str| UiEvent::GridLine {
+            grid: 11,
+            row,
+            col_start: 0,
+            cells: text
+                .chars()
+                .map(|ch| crate::events::GridCell {
+                    text: ch.to_string(),
+                    hl_id: 0,
+                    repeat: 1,
+                })
+                .collect(),
+        };
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![
+                UiEvent::WinViewportMargins {
+                    grid: 11,
+                    win: crate::events::WinHandle(1008),
+                    top: 1,
+                    bottom: 1,
+                    left: 1,
+                    right: 1,
+                },
+                UiEvent::GridResize {
+                    grid: 11,
+                    width: 6,
+                    height: 3,
+                },
+                UiEvent::WinFloatPos {
+                    grid: 11,
+                    win: crate::events::WinHandle(1008),
+                    anchor_grid: 1,
+                    zindex: 1001,
+                    compindex: 1,
+                    screen_row: 15,
+                    screen_col: 0,
+                },
+                line(0, "╭────╮"),
+                line(1, "│ ab │"),
+                line(2, "╰────╯"),
+                UiEvent::Flush,
+            ]),
+        );
+        let rows: Vec<String> = crate::native::palette::drawn_rows(&model)
+            .iter()
+            .map(|row| row.iter().map(|span| span.text.as_str()).collect())
+            .collect();
+        assert_eq!(rows, vec![" ab ".to_string()]);
+    }
+
+    #[test]
+    fn a_float_that_existed_before_cmdline_show_is_not_taken() {
+        let mut model = palette_session();
+        open_float(&mut model, 11, 1008, MENU);
+        open_cmdline(&mut model);
+        open_float(&mut model, 11, 1008, MENU);
+        assert!(!withheld(&model, 11));
+        assert_eq!(listed(&model), None);
+    }
+
+    #[test]
+    fn a_notice_column_float_during_the_cmdline_is_not_taken() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        open_float(&mut model, 12, 1009, (0, 50, 50, 3));
+        assert!(
+            !model
+                .cmdline_floats
+                .holds(crate::grid::registry::GridId(12)),
+            "a toast stays the notice column's"
+        );
+        assert_eq!(listed(&model), None);
+    }
+
+    #[test]
+    fn the_tallest_float_of_a_cmdline_session_is_the_list() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        open_float(&mut model, 12, 1009, (15, 60, 1, 1));
+        open_float(&mut model, 11, 1008, MENU);
+        open_float(&mut model, 13, 1010, (10, 62, 30, 5));
+        assert_eq!(listed(&model), Some(11));
+        for grid in [11, 12, 13] {
+            assert!(withheld(&model, grid), "grid {grid} paints over the screen");
+        }
+    }
+
+    #[test]
+    fn cmdline_hide_releases_the_absorbed_grid() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        open_float(&mut model, 11, 1008, MENU);
+        hide_cmdline(&mut model);
+        assert!(!withheld(&model, 11));
+        assert_eq!(listed(&model), None);
+        // the next command line starts with nothing listed
+        open_cmdline(&mut model);
+        assert_eq!(listed(&model), None);
+        assert!(!model
+            .cmdline_floats
+            .holds(crate::grid::registry::GridId(11)));
+    }
+
+    #[test]
+    fn a_closed_grid_releases_the_absorbed_grid() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        open_float(&mut model, 11, 1008, MENU);
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![
+                UiEvent::WinClose { grid: 11 },
+                UiEvent::GridDestroy { grid: 11 },
+            ]),
+        );
+        assert_eq!(listed(&model), None);
+        assert!(!model
+            .cmdline_floats
+            .holds(crate::grid::registry::GridId(11)));
+        assert!(!model.cmdline_floats.holds_window(1008));
+    }
+
+    /// `[native] palette = false` turns the palette off and detaches both
+    /// surfaces it draws.
+    #[test]
+    fn native_palette_false_takes_nothing() {
+        let mut model = captured_session();
+        model.palette_enabled = false;
+        model.attach_surfaces(vec![Ext::Messages, Ext::Tabline]);
+        open_cmdline(&mut model);
+        open_float(&mut model, 11, 1008, MENU);
+        assert!(!withheld(&model, 11));
+        assert_eq!(listed(&model), None);
+    }
+
+    /// nvim's own cmdline completion is the list when both are up: it is
+    /// the completion nvim's keys act on. The float stays held.
+    #[test]
+    fn nvims_own_cmdline_completion_wins_over_a_float_the_cmdline_took() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        open_float(&mut model, 11, 1008, MENU);
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![UiEvent::PopupmenuShow {
+                items: vec![crate::events::PmItem {
+                    word: "edit".to_string(),
+                    kind: String::new(),
+                    menu: String::new(),
+                    info: String::new(),
+                }],
+                selected: -1,
+                row: 0,
+                col: 0,
+                grid: -1,
+            }]),
+        );
+        assert_eq!(listed(&model), None);
+        assert!(withheld(&model, 11));
+        let _ = update(&mut model, Msg::Redraw(vec![UiEvent::PopupmenuHide]));
+        assert_eq!(listed(&model), Some(11));
+    }
+
+    /// One float, one claim: a menu the palette lists, sighted in the
+    /// command line's rows, raises no notice about the command line.
+    #[test]
+    fn a_float_the_palette_lists_raises_no_cmdline_notice() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        open_float(&mut model, 11, 1003, (26, 0, 20, 2));
+        assert!(withheld(&model, 11));
+        let sighting = cmdline_float("cmp_menu");
+        assert_eq!(
+            crate::native::surfaces::claims(&sighting, &model),
+            Some(Surface::Popupmenu)
+        );
+        let _ = observe_float(&mut model, &sighting);
+        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
     }
 }

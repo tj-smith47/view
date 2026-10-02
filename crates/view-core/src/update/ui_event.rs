@@ -83,6 +83,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         UiEvent::GridClear { grid } => cells(model, grid, GridOp::Clear),
         UiEvent::GridDestroy { grid } => {
             let grid = GridId(grid);
+            model.cmdline_floats.closed(grid);
             forget_window_status(model, grid);
             let native = native_pane_at(model, grid);
             let mut effects = place(model, GridEvent::Destroy { grid });
@@ -159,9 +160,16 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         UiEvent::WinExternalPos { grid, .. } => {
             place(model, GridEvent::External { grid: GridId(grid) })
         }
-        UiEvent::WinHide { grid } => place(model, GridEvent::Hide { grid: GridId(grid) }),
+        UiEvent::WinHide { grid } => {
+            let grid = GridId(grid);
+            if model.cmdline_floats.forget(grid) {
+                model.dirty |= model.engine.withhold_float(grid, false);
+            }
+            place(model, GridEvent::Hide { grid })
+        }
         UiEvent::WinClose { grid } => {
             let grid = GridId(grid);
+            model.cmdline_floats.closed(grid);
             forget_window_status(model, grid);
             let native = native_pane_at(model, grid);
             let mut effects = place(model, GridEvent::Close { grid });
@@ -303,6 +311,10 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                 }
             }
             model.submit_hold.note_line_shown(&cmdline);
+            if model.engine.cmdline.is_none() {
+                let before = model.engine.grids().grid_ids();
+                model.cmdline_floats.open(before);
+            }
             model.engine.cmdline = Some(cmdline);
             // the guess the palette was already drawing, answered: the
             // speculated state and this one render the same layer in the
@@ -331,6 +343,9 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                 .submit_hold
                 .note_line_hidden(level, model.engine.cmdline.as_ref());
             model.engine.cmdline = None;
+            for grid in model.cmdline_floats.close() {
+                model.dirty |= model.engine.withhold_float(grid, false);
+            }
             crate::native::speculate::withdraw_cmdline_speculation(model);
             // the answer landing, so the box goes with it: nvim sends no
             // msg_clear when a confirm-class prompt resolves, and the only
@@ -462,8 +477,18 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         UiEvent::UiSend { content } => forward_ui_send(&content),
         // the margin is what nvim adds on top of any inner height view
         // asks for, so the registry keeps it and spends it in the request
-        UiEvent::WinViewportMargins { grid, top, .. } => {
+        UiEvent::WinViewportMargins {
+            grid,
+            top,
+            bottom,
+            left,
+            right,
+            ..
+        } => {
             let grid = GridId(grid);
+            model
+                .cmdline_floats
+                .set_margins(grid, [top, bottom, left, right].map(saturate_u16));
             place(
                 model,
                 GridEvent::Margins {

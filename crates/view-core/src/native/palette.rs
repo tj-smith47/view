@@ -12,9 +12,10 @@
 //! be a second interpretation of the same wire traffic, free to drift from
 //! the first the moment either one changes.
 
-use crate::model::{format_at, CmdlineState, MessageEntry, PopupmenuState};
+use crate::grid::registry::GridId;
+use crate::model::{format_at, CmdlineState, MessageEntry, Model, PopupmenuState};
 use crate::native::toast::ToastHistory;
-use crate::native::views::{PaletteRow, PaletteView};
+use crate::native::views::{PaletteRow, PaletteView, Span, StyleRole};
 
 /// The command palette's state while nvim's command line is open: the
 /// typed line, plus its completion candidates when the open popup menu is
@@ -27,6 +28,7 @@ use crate::native::views::{PaletteRow, PaletteView};
 pub struct PaletteState {
     cmdline: CmdlineState,
     completion: Option<PopupmenuState>,
+    drawn: Vec<Vec<Span>>,
 }
 
 impl PaletteState {
@@ -40,7 +42,15 @@ impl PaletteState {
         Self {
             cmdline,
             completion,
+            drawn: Vec::new(),
         }
+    }
+
+    /// The same state listing `drawn`, the rows of the window the command
+    /// line opened ([`drawn_rows`]).
+    #[must_use]
+    pub fn with_drawn(self, drawn: Vec<Vec<Span>>) -> Self {
+        Self { drawn, ..self }
     }
 
     /// The typed line, `firstc` (`:`, `/`, `?`, `=`) prepended: the same
@@ -69,7 +79,8 @@ impl PaletteState {
         };
         let view = PaletteView::new(title_for(&self.cmdline.firstc))
             .with_query(self.query())
-            .with_rows(rows);
+            .with_rows(rows)
+            .with_drawn(self.drawn.clone());
         // the engine's `selected` is a signed sentinel (-1 for "nothing
         // selected")
         let selected = self
@@ -101,6 +112,172 @@ fn title_for(firstc: &str) -> &'static str {
         "=" => "Expression",
         _ => "Command Line",
     }
+}
+
+/// The floats a command line the palette draws has opened, held off the
+/// screen so the palette can paint the list among them in its own rows.
+///
+/// A float first placed while that command line is open belongs to it: the
+/// command line is the only thing on screen taking input, so a window
+/// opened then is the command line's own UI. A float that was already
+/// standing when it opened is left where it is.
+#[derive(Debug, Clone, Default)]
+pub struct CmdlineFloats {
+    /// Every grid nvim had named when the command line opened.
+    before: Vec<GridId>,
+    /// The floats taken since, as `(grid, window)`, in arrival order.
+    taken: Vec<(GridId, u64)>,
+    /// The rows and columns around each window grid's text, as nvim last
+    /// reported them (`top, bottom, left, right`): a float's border. Kept
+    /// for every grid because nvim sends them before the placement that
+    /// decides whether a float is taken.
+    margins: Vec<(GridId, [u16; 4])>,
+}
+
+impl CmdlineFloats {
+    /// Starts a command line with `before` already on the wire, dropping
+    /// whatever an engine that never sent `cmdline_hide` left behind.
+    pub(crate) fn open(&mut self, before: Vec<GridId>) {
+        self.before = before;
+        self.taken.clear();
+    }
+
+    /// Ends the command line, answering the grids it was holding.
+    pub(crate) fn close(&mut self) -> Vec<GridId> {
+        self.before.clear();
+        self.taken.drain(..).map(|(grid, _)| grid).collect()
+    }
+
+    /// Whether `grid` was named before the command line opened.
+    #[must_use]
+    pub(crate) fn existed(&self, grid: GridId) -> bool {
+        self.before.contains(&grid)
+    }
+
+    /// Takes `grid`, the float of window `win`.
+    pub(crate) fn take(&mut self, grid: GridId, win: u64) {
+        if !self.holds(grid) {
+            self.taken.push((grid, win));
+        }
+    }
+
+    /// Lets `grid` go, answering whether it was held.
+    pub(crate) fn forget(&mut self, grid: GridId) -> bool {
+        let held = self.holds(grid);
+        self.taken.retain(|(taken, _)| *taken != grid);
+        held
+    }
+
+    /// Lets `grid` go for good: nvim reuses no grid id once it is closed.
+    pub(crate) fn closed(&mut self, grid: GridId) {
+        self.forget(grid);
+        self.margins.retain(|(known, _)| *known != grid);
+    }
+
+    /// Records the margins nvim reported around `grid`'s text.
+    pub(crate) fn set_margins(&mut self, grid: GridId, margins: [u16; 4]) {
+        match self.margins.iter_mut().find(|(known, _)| *known == grid) {
+            Some((_, known)) => *known = margins,
+            None => self.margins.push((grid, margins)),
+        }
+    }
+
+    /// The margins around `grid`'s text, `top, bottom, left, right`, or
+    /// none where nvim reported none.
+    #[must_use]
+    pub fn margins(&self, grid: GridId) -> [u16; 4] {
+        self.margins
+            .iter()
+            .find(|(known, _)| *known == grid)
+            .map_or([0; 4], |(_, margins)| *margins)
+    }
+
+    /// Whether the command line took `grid`.
+    #[must_use]
+    pub fn holds(&self, grid: GridId) -> bool {
+        self.taken.iter().any(|(taken, _)| *taken == grid)
+    }
+
+    /// Whether the command line took window `win`'s float.
+    #[must_use]
+    pub fn holds_window(&self, win: u64) -> bool {
+        self.taken.iter().any(|(_, taken)| *taken == win)
+    }
+}
+
+/// Whether the palette is drawing an open command line whose floats it
+/// takes: the palette is on, it owns the command line and the completion
+/// menu, nvim's command line is open, and no prompt box is drawing it.
+#[must_use]
+pub fn takes_cmdline_floats(model: &Model) -> bool {
+    model.palette_enabled
+        && model.owns(crate::native::ext::Ext::Cmdline)
+        && model.engine.cmdline.is_some()
+        && crate::native::surfaces::view_draws(crate::native::surfaces::Surface::Popupmenu, model)
+        && !matches!(
+            model.overlays().last().map(|open| &open.kind),
+            Some(crate::model::OverlayKind::Prompt(_))
+        )
+}
+
+/// The grid whose rows the palette lists, or `None` when it lists nvim's
+/// own completion or nothing.
+///
+/// The tallest float the command line took is the list; the rest (a 1x1
+/// scrollbar thumb, a documentation window) stay held and unpainted. The
+/// first taken wins a tie. nvim's own cmdline completion wins over all of
+/// them: it is the completion state nvim's keys act on, and its rows carry
+/// the selection by index.
+#[must_use]
+pub fn listed_grid(model: &Model) -> Option<GridId> {
+    if model
+        .engine
+        .popupmenu
+        .as_ref()
+        .is_some_and(PopupmenuState::is_cmdline_sourced)
+    {
+        return None;
+    }
+    let grids = model.engine.painted_grids();
+    let mut list: Option<(GridId, u16)> = None;
+    for (grid, _) in &model.cmdline_floats.taken {
+        let Some((_, height)) = grids.grid(*grid).map(crate::grid::Grid::size) else {
+            continue;
+        };
+        if list.is_none_or(|(_, tallest)| height > tallest) {
+            list = Some((*grid, height));
+        }
+    }
+    list.map(|(grid, _)| grid)
+}
+
+/// The rows of [`listed_grid`] inside its border, one span per run of
+/// cells sharing a highlight id, or nothing when no grid is listed.
+#[must_use]
+pub fn drawn_rows(model: &Model) -> Vec<Vec<Span>> {
+    let Some((id, grid)) =
+        listed_grid(model).and_then(|id| Some((id, model.engine.painted_grids().grid(id)?)))
+    else {
+        return Vec::new();
+    };
+    let (width, height) = grid.size();
+    let [top, bottom, left, right] = model.cmdline_floats.margins(id);
+    (top..height.saturating_sub(bottom))
+        .map(|row| {
+            let mut spans: Vec<Span> = Vec::new();
+            for col in left..width.saturating_sub(right) {
+                let Some(cell) = grid.cell(row, col) else {
+                    continue;
+                };
+                let role = StyleRole::Highlight(cell.hl_id);
+                match spans.last_mut() {
+                    Some(span) if span.role == role => span.text.push_str(&cell.text),
+                    _ => spans.push(Span::new(cell.text.clone(), role)),
+                }
+            }
+            spans
+        })
+        .collect()
 }
 
 /// The title the message-history overlay is drawn under, and the one thing

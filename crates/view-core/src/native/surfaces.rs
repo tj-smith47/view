@@ -399,8 +399,16 @@ const CMDLINE_ROWS: i64 = 2;
 ///   outer side the way the boxes do, and is at most half the grid tall.
 ///   A hover crossing the column stops short of its outer side, and a
 ///   picker centered in the grid is taller than half of it.
+/// - **the completion menu**, for a window the palette's open command line
+///   took when it was first placed
+///   ([`CmdlineFloats`](crate::native::palette::CmdlineFloats)), wherever
+///   it sits. That one rule reads no rect, and it answers before the other
+///   two so a float the palette lists is claimed once.
 #[must_use]
 pub fn claims(float: &FloatSighting, model: &Model) -> Option<Surface> {
+    if model.cmdline_floats.holds_window(float.win) {
+        return owned(Surface::Popupmenu, model);
+    }
     claims_at(
         float.row,
         float.col,
@@ -428,6 +436,44 @@ pub fn claims_at(
     anchor: FloatAnchor,
     model: &Model,
 ) -> Option<Surface> {
+    let (in_band, over_notices) = landing(row, col, width, height, anchor, model)?;
+    let hit = crate::native::channels::CHANNELS.iter().find(|entry| {
+        entry.channels.iter().any(|channel| match channel {
+            Channel::Float(Region::CmdlineBand) => model.engine.paints_cmdline() && in_band,
+            Channel::Float(Region::NoticeColumn) => over_notices,
+            // a placement names no window the command line could be asked
+            // about, so `update::surface_conflict::on_float_placed` takes
+            // such a float and [`claims`] answers for its window
+            _ => false,
+        })
+    })?;
+    owned(hit.surface, model)
+}
+
+/// Whether a float over this rect lands over the notice column, as
+/// [`claims_at`] judges it, whoever draws the message area.
+#[must_use]
+pub fn over_notice_column(
+    row: i64,
+    col: i64,
+    width: u16,
+    height: u16,
+    anchor: FloatAnchor,
+    model: &Model,
+) -> bool {
+    landing(row, col, width, height, anchor, model).is_some_and(|(_, over)| over)
+}
+
+/// Where a float over this rect lands, as `(in the command line's rows,
+/// over the notice column)`, or `None` for a rect covering no cell.
+fn landing(
+    row: i64,
+    col: i64,
+    width: u16,
+    height: u16,
+    anchor: FloatAnchor,
+    model: &Model,
+) -> Option<(bool, bool)> {
     let (grid_w, grid_h) = model.engine.grid().size();
     let (top, left, bottom, right) = span(row, col, width, height, anchor, grid_w, grid_h)?;
     let last_row = i64::from(grid_h) - 1;
@@ -472,18 +518,10 @@ pub fn claims_at(
         };
         overlaps(column, float) && near_the_anchor && on_the_outer_side && rows <= chrome_rows
     };
-    let hit = crate::native::channels::CHANNELS.iter().find(|entry| {
-        entry.channels.iter().any(|channel| match channel {
-            Channel::Float(Region::CmdlineBand) => {
-                model.engine.paints_cmdline() && bottom >= last_row - (CMDLINE_ROWS - 1)
-            }
-            Channel::Float(Region::NoticeColumn) => {
-                over_the_stack(model.notice_bounds()) || over_the_stack(grid_corner)
-            }
-            _ => false,
-        })
-    })?;
-    owned(hit.surface, model)
+    Some((
+        bottom >= last_row - (CMDLINE_ROWS - 1),
+        over_the_stack(model.notice_bounds()) || over_the_stack(grid_corner),
+    ))
 }
 
 /// `surface` if this session draws it, `None` otherwise -- the gate that
@@ -1187,6 +1225,36 @@ mod tests {
         }
     }
 
+    /// A completion menu opened inside `model`'s open command line, 60 by
+    /// 11 at row 14: clear of the command line's rows and of the notice
+    /// column, so only the command line it opened in can claim it.
+    fn opened_inside_the_cmdline(model: &mut Model) -> FloatSighting {
+        let _ = update(
+            model,
+            crate::msg::Msg::Redraw(vec![
+                UiEvent::GridResize {
+                    grid: 11,
+                    width: 60,
+                    height: 11,
+                },
+                UiEvent::WinFloatPos {
+                    grid: 11,
+                    win: crate::events::WinHandle(1008),
+                    anchor_grid: 1,
+                    zindex: 1001,
+                    compindex: 1,
+                    screen_row: 14,
+                    screen_col: 0,
+                },
+            ]),
+        );
+        FloatSighting {
+            win: 1008,
+            zindex: 1001,
+            ..float("cmp_menu", 14, 0, 60, 11)
+        }
+    }
+
     /// telescope's four picker windows, verbatim from the capture. The
     /// negative control: a detector that flags any of these flags every
     /// float.
@@ -1229,8 +1297,14 @@ mod tests {
     #[test]
     fn every_float_region_the_table_names_is_claimed_through_it() {
         let mut model = captured_session();
+        model.palette_enabled = true;
+        model.attach_surfaces(vec![
+            Ext::Cmdline,
+            Ext::Popupmenu,
+            Ext::Messages,
+            Ext::Tabline,
+        ]);
         open_cmdline(&mut model);
-        model.attach_surfaces(vec![Ext::Cmdline, Ext::Messages, Ext::Tabline]);
         for entry in crate::native::channels::CHANNELS {
             for channel in entry.channels {
                 let crate::native::channels::Channel::Float(region) = channel else {
@@ -1239,6 +1313,9 @@ mod tests {
                 let sighting = match region {
                     crate::native::channels::Region::CmdlineBand => cmp_cmdline_menu(),
                     crate::native::channels::Region::NoticeColumn => notify_toast(),
+                    crate::native::channels::Region::CmdlineSession => {
+                        opened_inside_the_cmdline(&mut model)
+                    }
                 };
                 assert_eq!(
                     claims(&sighting, &model),

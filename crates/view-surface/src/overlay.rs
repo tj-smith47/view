@@ -1135,7 +1135,11 @@ fn palette_body(view: &PaletteView) -> Body {
             "{PROMPT_MARK} {}",
             view.query
         )))],
-        items: view.rows.iter().map(palette_row_line).collect(),
+        items: if view.drawn.is_empty() {
+            view.rows.iter().map(palette_row_line).collect()
+        } else {
+            view.drawn.iter().cloned().map(Line::Text).collect()
+        },
         selected: view.selected,
         header_keep_tail: false,
         header_first: false,

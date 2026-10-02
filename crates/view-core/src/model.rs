@@ -228,6 +228,8 @@ pub struct Model {
     /// second one. Session-lifetime, like the conflict it records: the
     /// remedy is a config line that takes effect at the next start.
     pub(crate) surface_conflicts: crate::native::surfaces::SurfaceConflicts,
+    /// The floats the open command line took for the palette to list.
+    pub cmdline_floats: crate::native::palette::CmdlineFloats,
     /// The working directory a relative [`crate::native::picker::Source`]
     /// resolves against, learned once at startup
     /// ([`Model::with_cwd`]) since `update()` has no filesystem access to
@@ -474,6 +476,7 @@ impl Model {
             ext_surfaces: crate::native::ext::shipped_multigrid(),
             config_was_read: true,
             surface_conflicts: crate::native::surfaces::SurfaceConflicts::default(),
+            cmdline_floats: crate::native::palette::CmdlineFloats::default(),
             cwd: PathBuf::new(),
             remote: None,
             buffers: Vec::new(),

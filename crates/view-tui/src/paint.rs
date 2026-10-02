@@ -926,7 +926,8 @@ fn composite_layers(
             | LayerKind::Stream(_)
             | LayerKind::Ai(_) => {
                 let laid = layouts.and_then(|shadow| shadow.laid_for(index, layer));
-                paint_native_overlay(layer, laid, &theme, area, damage, buf);
+                let hl = Some(model.engine.painted_hl());
+                paint_overlay_cells(layer, laid, &theme, hl, area, damage, buf);
             }
             // LayerKind is #[non_exhaustive]: a future variant degrades to
             // painting nothing rather than failing to compile here
@@ -1280,6 +1281,21 @@ fn paint_native_overlay(
     damage: &Damage,
     buf: &mut Buffer,
 ) {
+    paint_overlay_cells(layer, laid, theme, None, area, damage, buf);
+}
+
+/// [`paint_native_overlay`] with the highlight table a
+/// [`StyleRole::Highlight`] span resolves through. Without one such a span
+/// paints in the overlay's own interior colours.
+fn paint_overlay_cells(
+    layer: &Layer,
+    laid: Option<&view_surface::overlay::Rows>,
+    theme: &Theme,
+    hl: Option<&HlTable>,
+    area: ratatui::layout::Rect,
+    damage: &Damage,
+    buf: &mut Buffer,
+) {
     if layer.borders.is_none() {
         return;
     }
@@ -1408,6 +1424,9 @@ fn paint_native_overlay(
             // what it did to a whole reviewed row before the review
             // derived groups of its own.
             let resolve = |role: StyleRole| -> Style {
+                if let (StyleRole::Highlight(id), Some(hl)) = (role, hl) {
+                    return style_for(theme, id, hl);
+                }
                 // the bar's mode is the one segment whose colorscheme group
                 // is usually the bar's own foreground, which leaves the
                 // word a user glances at to read their mode indistinct from
@@ -1944,6 +1963,92 @@ mod tests {
             buf[(5, 1)].style(),
             "the predicted glyph is wearing a style of its own instead of the \
              one the grid layer gave its row"
+        );
+    }
+
+    /// A completion menu opened inside the palette's command line paints in
+    /// the palette's rows with the colours nvim drew its cells in, and not
+    /// at the float's own place on the screen.
+    ///
+    /// Disconfirm: resolving a `StyleRole::Highlight` span as the interior
+    /// leaves the row on the overlay's background.
+    #[test]
+    fn a_completion_menu_opened_in_the_palette_paints_in_its_rows_with_its_colours() {
+        let mut model = Model::new();
+        model.palette_enabled = true;
+        model.term_width = 60;
+        model.term_height = 20;
+        model.engine.apply_grid(GridOp::Resize {
+            width: 60,
+            height: 20,
+        });
+        let cells = " Cargo.toml"
+            .chars()
+            .map(|ch| view_core::events::GridCell {
+                text: ch.to_string(),
+                hl_id: 7,
+                repeat: 1,
+            })
+            .collect();
+        let _ = view_core::update::update(
+            &mut model,
+            view_core::msg::Msg::Redraw(vec![
+                view_core::events::UiEvent::HlAttrDefine {
+                    id: 7,
+                    fg: Some(0x00FF_FFFF),
+                    bg: Some(0x00AA_0000),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    reverse: false,
+                },
+                view_core::events::UiEvent::CmdlineShow {
+                    content: vec![(0, "e ".to_string())],
+                    pos: 2,
+                    firstc: ":".to_string(),
+                    prompt: String::new(),
+                    indent: 0,
+                    level: 1,
+                },
+                view_core::events::UiEvent::GridResize {
+                    grid: 5,
+                    width: 20,
+                    height: 3,
+                },
+                view_core::events::UiEvent::WinFloatPos {
+                    grid: 5,
+                    win: view_core::events::WinHandle(1008),
+                    anchor_grid: 1,
+                    zindex: 1001,
+                    compindex: 1,
+                    screen_row: 17,
+                    screen_col: 0,
+                },
+                view_core::events::UiEvent::GridLine {
+                    grid: 5,
+                    row: 0,
+                    col_start: 0,
+                    cells,
+                },
+                view_core::events::UiEvent::Flush,
+            ]),
+        );
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let at = (0..20_u16)
+            .flat_map(|row| (0..59_u16).map(move |col| (col, row)))
+            .find(|&(col, row)| {
+                buf[(col, row)].symbol() == "C" && buf[(col + 1, row)].symbol() == "a"
+            })
+            .expect("the menu's row is painted");
+        assert!(at.1 < 17, "painted at the float's own place: {at:?}");
+        assert_eq!(
+            buf[at].style().bg,
+            Some(ratatui::style::Color::Rgb(0xAA, 0, 0)),
+            "the cell lost the colour nvim drew it in"
         );
     }
 

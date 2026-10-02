@@ -620,7 +620,8 @@ pub fn render(model: &Model) -> Surface {
                 .as_ref()
                 .filter(|pm| pm.is_cmdline_sourced())
                 .cloned();
-            let state = PaletteState::new(cmdline.clone(), completion);
+            let state = PaletteState::new(cmdline.clone(), completion)
+                .with_drawn(view_core::native::palette::drawn_rows(model));
             let rect = palette_rect(model);
             layers.push(Layer::new(
                 Rect::new(rect.row, rect.col, rect.width, rect.height),

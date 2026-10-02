@@ -92,10 +92,10 @@ engine pin different from `.engine-pin`, so a pin bump forces a fresh
 | noice | 7bfd942 | v0.12.4 | noice | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
 | noice | 7bfd942 | v0.12.4 | noice | superseded | tiles | OK | 2026-09-29 |
 | noice | - | v0.12.4 | noice | native-only | tiles | OK | 2026-09-29 |
-| nvim-cmp | 2ffe79f | v0.12.4 | nvim-cmp | present | nvim | OK | 2026-09-29 |
-| nvim-cmp | 2ffe79f | v0.12.4 | nvim-cmp | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| nvim-cmp | 2ffe79f | v0.12.4 | nvim-cmp | present | tiles | OK | 2026-09-29 |
-| nvim-cmp | 2ffe79f | v0.12.4 | nvim-cmp | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
+| nvim-cmp | 2ffe79f | v0.12.4 | nvim-cmp | present | nvim | OK | 2026-10-02 |
+| nvim-cmp | 2ffe79f | v0.12.4 | nvim-cmp | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| nvim-cmp | 2ffe79f | v0.12.4 | nvim-cmp | present | tiles | OK | 2026-10-02 |
+| nvim-cmp | 2ffe79f | v0.12.4 | nvim-cmp | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
 | nvim-notify | 8701bec | v0.12.4 | nvim-notify | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
 | nvim-notify | 8701bec | v0.12.4 | nvim-notify | superseded | nvim | OK | 2026-09-29 |
 | nvim-notify | 8701bec | v0.12.4 | nvim-notify | deferred | nvim | OK | 2026-09-29 |

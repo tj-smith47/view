@@ -147,6 +147,10 @@ pub struct Grid {
     /// Per-row changed flags accumulated since the last [`Grid::take_dirty`],
     /// one entry per grid row (kept `height`-long by [`Grid::resize`]).
     dirty_rows: Vec<bool>,
+    /// Bumped by every [`Grid::apply`]: a reader that keeps a copy of
+    /// something drawn from these cells compares it to tell whether the
+    /// copy is stale.
+    revision: u64,
 }
 
 impl Grid {
@@ -162,7 +166,14 @@ impl Grid {
             cursor_col: 0,
             dirty_full: false,
             dirty_rows: Vec::new(),
+            revision: 0,
         }
+    }
+
+    /// How many mutations this grid has taken, wrapping.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Drains the rows changed since the last call, resetting the tracker to
@@ -203,6 +214,7 @@ impl Grid {
 
     /// Apply a single grid mutation. Out-of-bounds ops are ignored, never panic.
     pub fn apply(&mut self, op: GridOp) {
+        self.revision = self.revision.wrapping_add(1);
         match op {
             GridOp::Resize { width, height } => self.resize(width, height),
             GridOp::Clear => self.clear(),

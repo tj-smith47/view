@@ -161,6 +161,10 @@ pub enum StyleRole {
     /// A tree row's git glyph for an ignored entry, in the colorscheme's
     /// `Comment` colour.
     GitIgnored,
+    /// A cell nvim drew, in the highlight id nvim sent with it: its
+    /// foreground, background and attributes, the way the cell paints in
+    /// the window it came from.
+    Highlight(u64),
 }
 
 /// How much a notice asks of the person reading it, which picks the colour
@@ -220,7 +224,8 @@ impl StyleRole {
             | Self::GitDirty
             | Self::GitStaged
             | Self::GitNew
-            | Self::GitIgnored => None,
+            | Self::GitIgnored
+            | Self::Highlight(_) => None,
         }
     }
 
@@ -1112,6 +1117,10 @@ pub struct PaletteView {
     /// Index into `rows` of the highlighted command, or `None` when the
     /// query matched nothing.
     pub selected: Option<usize>,
+    /// Rows a completion window opened inside the command line drew, as
+    /// nvim sent them, top first. Painted in place of `rows` when not
+    /// empty; the selection is whatever highlight the cells carry.
+    pub drawn: Vec<Vec<Span>>,
 }
 
 impl PaletteView {
@@ -1146,6 +1155,13 @@ impl PaletteView {
             selected: Some(index),
             ..self
         }
+    }
+
+    /// The same palette listing `drawn`, the rows a completion window
+    /// drew.
+    #[must_use]
+    pub fn with_drawn(self, drawn: Vec<Vec<Span>>) -> Self {
+        Self { drawn, ..self }
     }
 }
 

@@ -521,6 +521,59 @@ fn a_palette_binding_is_pushed_against_the_right_edge_of_its_row() {
     );
 }
 
+/// Rows a completion window drew inside the command line take the list's
+/// place: each cell keeps the highlight nvim sent with it, and a row wider
+/// than the box is cut at its inner edge.
+#[test]
+fn a_palette_paints_the_rows_a_completion_window_drew_clipped_at_its_inner_width() {
+    use view_core::native::views::{PaletteView, Span};
+    let wide = "x".repeat(60);
+    let kind = LayerKind::Palette(
+        PaletteView::new("Command")
+            .with_query(":e ")
+            .with_rows(vec![view_core::native::views::PaletteRow::new(
+                "a command the palette would list",
+            )])
+            .with_drawn(vec![
+                vec![
+                    Span::new(" Cargo.toml ", StyleRole::Highlight(7)),
+                    Span::new(wide.clone(), StyleRole::Highlight(3)),
+                ],
+                vec![Span::new(" README.md ", StyleRole::Highlight(3))],
+            ]),
+    );
+    let framed = rows(30, 7, &kind, BorderSet::ASCII);
+    assert_eq!(widths(&framed), vec![30; 7], "every row is the rect wide");
+    let first = &framed.lines[3];
+    assert!(
+        first
+            .iter()
+            .any(|span| span.text == " Cargo.toml " && span.role == StyleRole::Highlight(7)),
+        "the selected cell keeps its highlight: {first:?}"
+    );
+    let shown: usize = first
+        .iter()
+        .filter(|span| span.role == StyleRole::Highlight(3))
+        .map(|span| span.text.chars().count())
+        .sum();
+    assert!(
+        shown < wide.len(),
+        "the wide row is cut at the box: {first:?}"
+    );
+    assert!(
+        interior(&line_text(&framed.lines[4])).contains(" README.md "),
+        "{:?}",
+        framed.lines[4]
+    );
+    assert!(
+        !framed
+            .lines
+            .iter()
+            .any(|line| line_text(line).contains("a command the palette")),
+        "the drawn rows replace the palette's own"
+    );
+}
+
 /// How many of a framed palette's rows are never a list item: the two
 /// border edges, the query line and the rule under it.
 ///

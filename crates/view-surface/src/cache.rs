@@ -116,7 +116,8 @@ impl Frame {
 ///   off the `Model`), `notice_held` (via `notice_column`, which resolves
 ///   the held column against the anchor of the moment),
 ///   `surface_conflicts` (a conflict reaches the screen as a notice on
-///   `messages`),
+///   `messages`), `cmdline_floats` (via `listed`, the one of them the
+///   palette paints),
 ///   `hl` and `mode` (painters read them off the
 ///   `Model` on the reuse path), `window_status` (the tile segments are
 ///   painted off the `Model` the same way, and the row each one stands on
@@ -175,6 +176,11 @@ struct Inputs {
     // is whether one is up
     cmdline_speculated: bool,
     popupmenu: Option<view_core::model::PopupmenuState>,
+    // the grid the palette lists, its revision and its border: its cells
+    // inside the border are copied into the palette layer, and the
+    // revision moves on every write to them, so nothing here compares a
+    // cell
+    listed: Option<(view_core::grid::registry::GridId, u64, [u16; 4])>,
     // the whole stack, not its `entries` alone: the pause key changes no
     // entry, only whether the top box carries the mark that says the stack
     // is frozen, and a frame keyed on a projection of a painted struct hands
@@ -199,6 +205,15 @@ fn agent_of(model: &Model) -> &'static str {
     view_core::native::pill::agent_word(model.ai_panel(), model.ai_enabled, model.ai_trusted)
 }
 
+/// The grid the palette lists, that grid's revision and the border nvim
+/// reported around it, or `None` while it lists none. Read off
+/// `model.cmdline_floats`.
+fn listed_of(model: &Model) -> Option<(view_core::grid::registry::GridId, u64, [u16; 4])> {
+    let grid = view_core::native::palette::listed_grid(model)?;
+    let revision = model.engine.painted_grids().grid(grid)?.revision();
+    Some((grid, revision, model.cmdline_floats.margins(grid)))
+}
+
 impl Inputs {
     fn capture(model: &Model) -> Self {
         let engine = &model.engine;
@@ -220,6 +235,7 @@ impl Inputs {
             cmdline: engine.cmdline.clone(),
             cmdline_speculated: engine.cmdline_speculated.is_some(),
             popupmenu: engine.popupmenu.clone(),
+            listed: listed_of(model),
             messages: engine.messages.clone(),
             toast_motion: model.toast_motion.clone(),
             notice_column: crate::live_notice_column(model),
@@ -251,6 +267,7 @@ impl Inputs {
             && self.cmdline == engine.cmdline
             && self.cmdline_speculated == engine.cmdline_speculated.is_some()
             && self.popupmenu == engine.popupmenu
+            && self.listed == listed_of(model)
             && self.messages.same_stack(&engine.messages)
             && self.toast_motion == model.toast_motion
             && self.notice_column == crate::live_notice_column(model)
@@ -710,11 +727,11 @@ mod tests {
         ),
         (
             "view-core/src/native/surfaces.rs",
-            "pubfnclaims_at(row:i64,col:i64,width:u16,height:u16,anchor:FloatAnchor,\
-             model:&Model,)->Option<Surface>{",
+            "fnlanding(row:i64,col:i64,width:u16,height:u16,anchor:FloatAnchor,\
+             model:&Model,)->Option<(bool,bool)>{",
             "engine.grid()",
-            "`claims_at` classifies a float placement nvim just sent, against the \
-             grid that placement lands on, and paints nothing",
+            "`landing` places a float nvim just sent against the grid that \
+             placement lands on, for `claims_at`, and paints nothing",
         ),
         (
             "view-core/src/native/speculate.rs",
@@ -1084,6 +1101,68 @@ mod tests {
             (cache.frames, cache.rebuilds),
             (4, 1),
             "a keystroke rebuilt the frame"
+        );
+    }
+
+    /// The palette paints the rows of a float its command line took, so a
+    /// line nvim redraws in that float alone rebuilds the frame.
+    ///
+    /// Disconfirm: dropping `listed` from `matches` reuses the stale frame.
+    #[test]
+    fn a_cell_change_in_the_float_the_palette_lists_rebuilds_the_frame() {
+        let mut model = model_with_grid(60, 20);
+        model.palette_enabled = true;
+        let line = |text: &str| UiEvent::GridLine {
+            grid: 5,
+            row: 0,
+            col_start: 0,
+            cells: vec![view_core::events::GridCell {
+                text: text.into(),
+                hl_id: 0,
+                repeat: 1,
+            }],
+        };
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![
+                UiEvent::CmdlineShow {
+                    content: vec![(0, "e ".to_string())],
+                    pos: 2,
+                    firstc: ":".to_string(),
+                    prompt: String::new(),
+                    indent: 0,
+                    level: 1,
+                },
+                UiEvent::GridResize {
+                    grid: 5,
+                    width: 20,
+                    height: 3,
+                },
+                UiEvent::WinFloatPos {
+                    grid: 5,
+                    win: view_core::events::WinHandle(1008),
+                    anchor_grid: 1,
+                    zindex: 1001,
+                    compindex: 1,
+                    screen_row: 10,
+                    screen_col: 0,
+                },
+                line("first"),
+                UiEvent::Flush,
+            ]),
+        );
+        let mut cache = SurfaceCache::new();
+        let _ = cache.render(&model);
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![line("second"), UiEvent::Flush]),
+        );
+        let painted = format!("{:?}", cache.render(&model).layers);
+        assert!(painted.contains("second"), "{painted}");
+        assert_eq!(
+            (cache.frames, cache.rebuilds),
+            (2, 2),
+            "the listed float's new line reused the stale frame"
         );
     }
 

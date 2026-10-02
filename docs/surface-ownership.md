@@ -41,7 +41,7 @@ The table below is generated from `SURFACES` in
 | surface | `ext_*` option | policy | `[native]` switch that hands it back | channels that draw it | proving scenario / state |
 | --- | --- | --- | --- | --- | --- |
 | the command line | `ext_cmdline` | `Own` | `native.palette = false` | `ext_cmdline`, `a float over the command line` | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
-| the completion menu | `ext_popupmenu` | `Own` | `native.palette = false` | `ext_popupmenu`, `ext_wildmenu` | `noice`/`superseded`, `noice`/`deferred` |
+| the completion menu | `ext_popupmenu` | `Own` | `native.palette = false` | `ext_popupmenu`, `ext_wildmenu`, `a float opened inside the command line` | `noice`/`superseded`, `noice`/`deferred` |
 | the message area | `ext_messages` | `Own` | `native.notifications = false` | `ext_messages`, `vim.notify`, `cmdheight`, `showmode`, `showcmd`, `ruler`, `rulerformat`, `a float over the notice column` | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
 | the tab line | `ext_tabline` | `Own` | `native.tabline = false` | `ext_tabline`, `winbar`, `tabline`, `showtabline` | `noice`/`deferred`, `smoke-minimal`/`native-only` |
 | the status line | -- none -- | `Own` | `native.statusline = false` | `laststatus`, `statusline` | -- none -- |
@@ -112,6 +112,11 @@ Each rule is a conjunction: a rect that lands where a surface lives, and a
 state only that surface produces. The command-line rule fires only while a
 command line is actually open, so a picker whose lowest chrome window sits
 one row above the same band stays silent.
+
+A float that opens while the palette's command line is open belongs to that
+command line, wherever it lands, unless it lands in the notice column. It
+gets no notice. The palette lists the tallest such float in its own rows and
+keeps the others off the screen until the command line closes.
 
 ## The notice a conflict gets
 

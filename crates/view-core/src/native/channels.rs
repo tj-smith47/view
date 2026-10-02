@@ -105,6 +105,10 @@ pub enum Region {
     /// The notice column, where view stacks its toasts
     /// ([`Model::notice_bounds`](crate::model::Model::notice_bounds)).
     NoticeColumn,
+    /// Wherever a float lands that opens while the palette's command line
+    /// is open: the command line's own UI, listed in the palette's rows
+    /// ([`crate::native::palette::CmdlineFloats`]).
+    CmdlineSession,
 }
 
 /// One way a surface can be drawn.
@@ -150,6 +154,7 @@ impl Channel {
             Self::Replaced(global) => global,
             Self::Float(Region::CmdlineBand) => "a float over the command line",
             Self::Float(Region::NoticeColumn) => "a float over the notice column",
+            Self::Float(Region::CmdlineSession) => "a float opened inside the command line",
         }
     }
 }
@@ -185,6 +190,7 @@ pub const CHANNELS: &[SurfaceChannels] = &[
                 option: "ext_wildmenu",
                 by: "ext_popupmenu",
             },
+            Channel::Float(Region::CmdlineSession),
         ],
     },
     SurfaceChannels {
