@@ -165,7 +165,7 @@ CHUNK(paths={"<workdir>/real_target_dir/target.txt"}, force=false)
 
 `found = true` despite the buffer's own name being the *unresolved* symlinked
 spelling: `CHECKTIME_CHUNK`'s `canon()` is byte-identical to
-`PREVIEW_CHUNK`/`LOAD_HIDDEN_CHUNK`'s own
+`PREVIEW_WINDOW_CHUNK`/`LOAD_HIDDEN_CHUNK`'s own
 (`vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')`), so both the buffer's
 name and the watcher's realpath'd event path resolve to the same key before
 comparison.

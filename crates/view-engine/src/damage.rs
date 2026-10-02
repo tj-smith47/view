@@ -989,9 +989,9 @@ impl PumpShared {
     /// [`route_probe_reply`](Self::route_probe_reply).
     ///
     /// A dropped preview reply is silent for the rest of that picker
-    /// session: nothing re-issues `RpcCall::PreviewBuffer` on its own, so a
-    /// refused reply that was simply discarded would leave the preview pane
-    /// showing stale or empty content with no way for the user to tell
+    /// session: nothing re-issues `RpcCall::PreviewBufferWindow` on its own,
+    /// so a refused reply that was simply discarded would leave the preview
+    /// pane showing stale or empty content with no way for the user to tell
     /// "genuinely empty" apart from "lost".
     pub(crate) fn route_preview(&self, msg: Msg) {
         self.route_held(msg, Held::Preview);

@@ -66,7 +66,7 @@ for idempotency (`bufadd` itself is idempotent by name; the scan below no longer
 needs to lean on `nvim_buf_set_name` for it). Kept for the "scan before
 creating" ordering, which the shipped chunk still preserves.
 
-Reusing `PREVIEW_CHUNK`'s own canonicalized name-match scan over
+Reusing `PREVIEW_WINDOW_CHUNK`'s own canonicalized name-match scan over
 `nvim_list_bufs()` (symlink-safe, `loaded buffer wins over disk`):
 
 ```

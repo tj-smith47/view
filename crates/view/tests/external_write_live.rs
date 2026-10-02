@@ -198,7 +198,7 @@ impl Watched {
         let name = self.path.to_string_lossy().into_owned();
         self.engine
             .handle
-            .preview_buffer(&name, 1)
+            .preview_buffer_window(&name, 1, 1000, 1)
             .expect("issue the buffer read");
         common::drain_until(&self.engine_rx, ARRIVAL, |msg| match msg {
             Msg::PickerPreviewReply { loaded, lines, .. } => {

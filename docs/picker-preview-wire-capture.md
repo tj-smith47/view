@@ -22,15 +22,17 @@ A standalone Python msgpack-rpc client (`pynvim` absent from the environment)
 spawns `nvim --clean --headless --listen <socket>` with the same hermetic
 `XDG_*`/`HOME` isolation `EngineConfig::isolated()` uses, connects over the
 unix socket, and issues `nvim_exec_lua` as a **request** with the candidate
-path as a positional vararg, the same calling convention
-`REGISTER_MAPPINGS_CHUNK`/`BUFFER_LIST_CHUNK` already use (constant Lua source,
-no interpolated caller data). No UI attach is needed: buffer content is not
-redraw-derived state.
+path, the window's 1-based first line and its line count as positional varargs,
+the same calling convention `REGISTER_MAPPINGS_CHUNK`/`BUFFER_LIST_CHUNK`
+already use (constant Lua source, no interpolated caller data). No UI attach is
+needed: buffer content is not redraw-derived state. The chunk is read out of
+`crates/view-engine/src/nvim_api.rs` by the capture script, so the bytes sent
+are the bytes shipped.
 
-The Lua chunk under test, verbatim `PREVIEW_CHUNK`:
+The Lua chunk under test, verbatim `PREVIEW_WINDOW_CHUNK`:
 
 ```lua
-local path = ...
+local path, first, count = ...
 local function canon(p)
   if p == '' then
     return p
@@ -41,12 +43,16 @@ local wanted = canon(path)
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
   if vim.api.nvim_buf_is_loaded(buf)
     and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
-    return { loaded = true,
-      lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false) }
+    return { loaded = true, lines = vim.api.nvim_buf_get_lines(
+      buf, first - 1, first - 1 + count, false) }
   end
 end
 return { loaded = false }
 ```
+
+`nvim_buf_get_lines` takes a 0-based start and an exclusive end, so the reply
+holds lines `first` through `first + count - 1`, fewer where the buffer ends
+first. The picker asks for 1000 lines around the matched line.
 
 The comparison canonicalizes both sides (`vim.uv.fs_realpath`, falling back to
 `vim.fn.fnamemodify(p, ':p')` for a path that doesn't exist on disk yet, e.g.
@@ -62,7 +68,8 @@ that happens to canonicalize to nvim's cwd, which is what
 ## 1. Baseline: no buffer open for the path
 
 A file exists on disk at the candidate path (`disk line one`/`disk line two`)
-but no buffer has been opened for it in this session.
+but no buffer has been opened for it in this session. Window: line 1, 1000
+lines, as in every case unless one says otherwise.
 
 ```
 err: None
@@ -106,6 +113,22 @@ the shape the falsifiable preview test asserts against; a disk-read
 implementation would return `['disk line one', 'disk line two']` here instead,
 and must fail the test.
 
+The same modified buffer, window line 2, one line:
+
+```
+err: None
+res: {'loaded': True, 'lines': ['modified line two']}
+```
+
+The same modified buffer, window line 10, 1000 lines, past its last line:
+
+```
+err: None
+res: {'loaded': True, 'lines': []}
+```
+
+A window past the end answers `loaded: True` with an empty `lines` array.
+
 ## 4. Path with no buffer and no file on disk
 
 ```
@@ -114,15 +137,16 @@ res: {'loaded': False}
 ```
 
 Same `{'loaded': False}` shape as case 1: a path with nothing to preview either
-way degrades to "no buffer," and the disk-fallback read (a plain
-`std::fs::read` in `view-native`, outside RPC entirely) is left to report its
-own not-found outcome; the RPC layer invents nothing.
+way degrades to "no buffer," and the disk-fallback read (a plain `std::fs`
+read in `view-native`, outside RPC entirely) is left to report its own
+not-found outcome; the RPC layer invents nothing.
 
 ## Conclusions for the implementation
 
-- `EngineHandle::request_preview(&self, path: &str, generation: u64)` issues
-  `nvim_exec_lua` with the chunk above (path as the sole positional vararg),
-  tagged `Waiter::Preview { generation }`, mirroring `request_buffer_list`'s
+- `EngineHandle::preview_buffer_window(&self, path, first_line, line_count,
+  generation)` issues `nvim_exec_lua` with the chunk above (path, first line
+  and line count as positional varargs) through `request_preview`, tagged
+  `Waiter::Preview { generation, path }`, mirroring `request_buffer_list`'s
   `Waiter::BufferList` shape exactly: async, blocks nothing, decodes on the
   reader thread, routes to `pump` as
   `Msg::PickerPreviewReply { generation, path, loaded, lines }` (new
@@ -133,11 +157,12 @@ own not-found outcome; the RPC layer invents nothing.
   `decode_buffer_list_reply`'s "error degrades to a safe default" precedent) it
   returns `loaded: false` with no lines; placeholder content is never invented.
 - `loaded: false` carries no error for the picker: it is the caller's signal to
-  issue a plain disk read (`view-native::picker::preview::read_file`, legal
-  `std::fs` I/O in `view-native`, outside RPC) via
-  `Effect::PickerPreviewFallback`, off the paint loop, in the `view` bin
-  crate's `Executor` (the one place allowed to depend on both `view-engine` and
-  `view-native`). `view-native` itself never opens an RPC connection.
+  issue a plain disk read of the same window
+  (`view-native::picker::preview::read_window`, legal `std::fs` I/O in
+  `view-native`, outside RPC) via `Effect::PickerPreviewFallbackWindow`, off
+  the paint loop, in the `view` bin crate's `Executor` (the one place allowed
+  to depend on both `view-engine` and `view-native`). `view-native` itself
+  never opens an RPC connection.
 - An error reply on this call degrades to `loaded: false` (triggering the
   disk-fallback path), so the preview pane never sits stuck on stale content
   from a prior generation, the same "safe default over a stuck generation"

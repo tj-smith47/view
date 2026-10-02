@@ -703,8 +703,8 @@ an item originally `setqflist`'d with a `filename` field (nvim resolves it to a
 `QUICKFIX_ENTRIES_CHUNK` resolves each entry's path itself via
 `vim.api.nvim_buf_get_name(item.bufnr)`, falling back to an empty string for
 `bufnr == 0` (an entry with no buffer at all); the same "no name is an empty
-string, standing apart from an omitted field" convention `PREVIEW_CHUNK` and
-`CURRENT_BUFFER_TEXT_CHUNK` already use. `lnum`/`col` are `getqflist`'s own
+string, standing apart from an omitted field" convention `PREVIEW_WINDOW_CHUNK`
+and `CURRENT_BUFFER_TEXT_CHUNK` already use. `lnum`/`col` are `getqflist`'s own
 1-indexed values, unmodified by this chunk. (Fix round 1 correction: an earlier
 version of this note said each chunk keeps its own source's indexing all the way
 out to `EngineReadSnapshot`. That was wrong for `QuickfixEntry` and
@@ -724,7 +724,8 @@ below for the corrected, actual contract.)
 
 Confirms nvim's own in-memory (possibly unsaved) buffer content is what crosses
 back, and stops short of a re-read of the file on disk; the same contract the
-picker preview pane's `PREVIEW_CHUNK` already records for `PreviewBuffer`.
+picker preview pane's `PREVIEW_WINDOW_CHUNK` already records for
+`PreviewBufferWindow`.
 
 ## Fix round 1 (review-driven): one shared 1-indexed convention across all three reads
 

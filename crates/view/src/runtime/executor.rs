@@ -387,9 +387,6 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::SetFitActive { on, inset_cols } => {
                         self.ops.set_fit_active(on, inset_cols)
                     }
-                    RpcCall::PreviewBuffer { path, generation } => {
-                        self.ops.preview_buffer(&path, generation)
-                    }
                     RpcCall::PreviewBufferWindow {
                         path,
                         first_line,
@@ -755,19 +752,8 @@ impl<E: EngineOps> Executor<E> {
             // `view-native` never opens an RPC connection, and this is the
             // one place allowed to depend on both `view-engine` and
             // `view-native` (see `docs/picker-preview-wire-capture.md`).
-            Effect::PickerPreviewFallback { generation, path } => {
-                if let Some(tx) = &self.toast_timer {
-                    let tx = tx.clone();
-                    spawn_or_log("picker-preview-fallback", move || {
-                        let lines =
-                            view_native::picker::preview::read_file(std::path::Path::new(&path));
-                        let _ = tx.send(Msg::PickerPreviewFile { generation, lines });
-                    });
-                }
-                Flow::Continue
-            }
-            // The same read bounded to the window the picker asked the
-            // engine for, so a large unopened file costs one window.
+            // The read is bounded to the window the picker asked the engine
+            // for, so a large unopened file costs one window.
             Effect::PickerPreviewFallbackWindow {
                 generation,
                 path,
@@ -788,13 +774,14 @@ impl<E: EngineOps> Executor<E> {
                 Flow::Continue
             }
             // One-shot thread per request, exactly like
-            // `PickerPreviewFallback` above: `view_native::tree::fs::scan`
-            // is a plain synchronous blocking call, so this is the only
-            // place it ever runs off the paint loop, reusing the loop's own
-            // message channel to report back. A superseding scan cancels
-            // whatever scan preceded it (see `tree_scan_cancel`'s own doc)
-            // before installing its own fresh flag, so a burst of rescans
-            // never leaves more than one walk running at a time.
+            // `PickerPreviewFallbackWindow` above:
+            // `view_native::tree::fs::scan` is a plain synchronous blocking
+            // call, so this is the only place it ever runs off the paint
+            // loop, reusing the loop's own message channel to report back. A
+            // superseding scan cancels whatever scan preceded it (see
+            // `tree_scan_cancel`'s own doc) before installing its own fresh
+            // flag, so a burst of rescans never leaves more than one walk
+            // running at a time.
             Effect::TreeScan { generation, root } => {
                 let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 {

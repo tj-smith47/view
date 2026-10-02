@@ -1,7 +1,7 @@
 //! Live-nvim proof that a symlinked candidate path still resolves to a
-//! modified-but-unsaved buffer's in-memory content: `PREVIEW_CHUNK`
-//! canonicalizes both sides of its name comparison (see
-//! `view_engine::nvim_api`'s doc on the constant) specifically so a picker
+//! modified-but-unsaved buffer's in-memory content:
+//! `PREVIEW_WINDOW_CHUNK` canonicalizes both sides of its name comparison
+//! (see `view_engine::nvim_api`'s doc on the constant) specifically so a picker
 //! candidate reached through a symlink is not silently treated as "no
 //! buffer open", which would otherwise fall back to a stale on-disk read.
 //! `#[cfg(unix)]`-gated: creating a symlink on Windows needs developer mode
@@ -65,11 +65,11 @@ fn a_symlinked_candidate_path_still_finds_its_modified_buffer() {
 
     // requests the preview through the *real, resolved* path -- literally
     // unequal to the symlink path nvim's buffer is named after, so this
-    // only matches if `PREVIEW_CHUNK` canonicalizes both sides
+    // only matches if `PREVIEW_WINDOW_CHUNK` canonicalizes both sides
     let real_str = real_path.to_string_lossy().into_owned();
     engine
         .handle
-        .preview_buffer(&real_str, 1)
+        .preview_buffer_window(&real_str, 1, 1000, 1)
         .expect("issue preview request");
 
     let deadline = Instant::now() + common::rpc_deadline();

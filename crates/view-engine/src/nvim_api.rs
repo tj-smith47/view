@@ -1149,15 +1149,17 @@ const SCAN_FLOATS_CHUNK: &str = "\
 pcall(vim.api.nvim_exec_autocmds, 'User',
   { pattern = 'ViewScanFloats', modeline = false })";
 
-/// Resolves the picker preview pane's text for a candidate path, verified
-/// live against the pinned engine -- see
+/// Resolves the picker preview pane's text for a candidate path, `count`
+/// lines from the 1-based line `first` on, fewer where the buffer ends
+/// first and none past its end, so a large buffer is never copied whole.
+/// Verified live against the pinned engine -- see
 /// `docs/picker-preview-wire-capture.md` for the captured reply shapes
 /// (`loaded`/`lines`) this chunk's `nvim_buf_is_loaded`/name-match lookup
 /// produces, and the load-bearing case (a modified-but-unsaved buffer
 /// answers with its modified content, never the file on disk). Constant,
 /// like every other chunk here: no caller data is interpolated into it --
-/// the candidate path travels as `nvim_exec_lua`'s positional vararg
-/// instead, the same convention `REGISTER_MAPPINGS_CHUNK` uses.
+/// the candidate path and window travel as `nvim_exec_lua`'s positional
+/// varargs instead, the same convention `REGISTER_MAPPINGS_CHUNK` uses.
 ///
 /// Both sides of the name comparison are canonicalized before comparing: a
 /// candidate path reached through a symlink (the picker's own root, or an
@@ -1173,27 +1175,6 @@ pcall(vim.api.nvim_exec_autocmds, 'User',
 /// empty, which would otherwise turn nvim's `[No Name]` scratch buffers
 /// into false-positive matches against any candidate path equal to nvim's
 /// cwd.
-const PREVIEW_CHUNK: &str = "\
-local path = ...
-local function canon(p)
-  if p == '' then
-    return p
-  end
-  return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
-end
-local wanted = canon(path)
-for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-  if vim.api.nvim_buf_is_loaded(buf)
-    and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
-    return { loaded = true,
-      lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false) }
-  end
-end
-return { loaded = false }";
-
-/// [`PREVIEW_CHUNK`] for `count` lines from the 1-based line `first` on,
-/// fewer where the buffer ends first and none past its end. Same reply
-/// shape, same canonicalized name match.
 const PREVIEW_WINDOW_CHUNK: &str = "\
 local path, first, count = ...
 local function canon(p)
@@ -1390,15 +1371,16 @@ fn nvim_style_absolute(path: &std::path::Path) -> std::path::PathBuf {
 /// shape this chunk's own logic depends on.
 ///
 /// The existing-buffer lookup runs before any creation is considered,
-/// reusing `PREVIEW_CHUNK`'s own canonicalized name-match scan (symlink-safe,
-/// "loaded buffer wins over disk") rather than `bufnr`/`bufadd`'s exact-string
-/// name matching: a diff review opens against a file the agent proposed
-/// changes to, which may be one no window has ever shown, one a previous
+/// reusing `PREVIEW_WINDOW_CHUNK`'s own canonicalized name-match scan
+/// (symlink-safe, "loaded buffer wins over disk") rather than
+/// `bufnr`/`bufadd`'s exact-string name matching: a diff review opens
+/// against a file the agent proposed changes to, which may be one no window
+/// has ever shown, one a previous
 /// `load_hidden` call already created hidden for this same path, or one a
 /// real window already has open -- all three are the same buffer identity by
 /// path, and the scan finds whichever of them already exists, unmodified or
 /// not (capture #5), before ever creating a second one over the same file.
-/// Unlike `PREVIEW_CHUNK`, the scan matches on name alone rather than
+/// Unlike `PREVIEW_WINDOW_CHUNK`, the scan matches on name alone rather than
 /// requiring `nvim_buf_is_loaded`: a match that is not yet loaded (capture
 /// #13 -- a buffer an earlier session left behind, or one `:bwipeout`-ed but
 /// never deleted) is `bufload`-ed in place and still reported
@@ -2035,10 +2017,10 @@ pub const CHECKTIME_PROBE_CHUNK: &str = CHECKTIME_CHUNK;
 /// Reads the current buffer's path and nvim-authoritative text for
 /// [`EngineHandle::read_current_buffer_text`], verified live against the
 /// pinned engine (see `docs/ai-context-reads-wire-capture.md`): an unnamed
-/// scratch buffer answers with `path = ''`, matching `PREVIEW_CHUNK`'s own
-/// convention for the same case, and `text` is every line joined with `\n`
-/// -- nvim's own buffer content, never the file on disk, so an unsaved edit
-/// is what this reads.
+/// scratch buffer answers with `path = ''`, matching
+/// `PREVIEW_WINDOW_CHUNK`'s own convention for the same case, and `text` is
+/// every line joined with `\n` -- nvim's own buffer content, never the file
+/// on disk, so an unsaved edit is what this reads.
 const CURRENT_BUFFER_TEXT_CHUNK: &str = "\
 local buf = vim.api.nvim_get_current_buf()
 return {
@@ -2124,7 +2106,7 @@ return {
 ///
 /// The `selection_*` keys are simply absent from the reply when no
 /// selection is active, the same "absent key, not a null" convention
-/// `PREVIEW_CHUNK`'s `loaded: false` case uses.
+/// `PREVIEW_WINDOW_CHUNK`'s `loaded: false` case uses.
 const CURSOR_CONTEXT_CHUNK: &str = "\
 local function line_text(line_number)
   return vim.api.nvim_buf_get_lines(0, line_number - 1, line_number, false)[1]
@@ -2240,7 +2222,8 @@ return out";
 /// confirmed against the pinned engine -- so this chunk resolves each
 /// entry's path via `nvim_buf_get_name(bufnr)`, falling back to an empty
 /// string for `bufnr == 0` (an entry with no buffer at all, the same
-/// `PREVIEW_CHUNK`/`CURRENT_BUFFER_TEXT_CHUNK` convention for "no name").
+/// `PREVIEW_WINDOW_CHUNK`/`CURRENT_BUFFER_TEXT_CHUNK` convention for "no
+/// name").
 /// `lnum`/`col` are `getqflist`'s own 1-indexed values, verbatim.
 const QUICKFIX_ENTRIES_CHUNK: &str = "\
 local out = {}
@@ -3674,38 +3657,19 @@ impl EngineHandle {
         )
     }
 
-    /// Issues [`PREVIEW_CHUNK`] as an async request tagged with `generation`,
-    /// resolving the picker preview pane's text for `path`. Async by
-    /// construction, like [`list_buffers`](Self::list_buffers): this issues
-    /// the request through [`EngineHandle::request_preview`] and returns
-    /// immediately; the answer crosses back as `Msg::PickerPreviewReply`
-    /// through the connection's pump. `path` also travels with the waiter
-    /// (unlike `list_buffers`, whose reply needs no echo) so the eventual
-    /// reply can name which candidate it answers, since the picker's
-    /// selection may have moved on by the time it lands. See
-    /// `docs/picker-preview-wire-capture.md` for the reply shapes
-    /// `crate::handle`'s `decode_preview_reply` decodes.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::Closed` if the connection is already closed or
-    /// the writer thread has already exited.
-    pub fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
-        self.request_preview(
-            "nvim_exec_lua",
-            vec![
-                Value::from(PREVIEW_CHUNK),
-                Value::Array(vec![Value::from(path)]),
-            ],
-            generation,
-            path.to_owned(),
-        )
-    }
-
-    /// [`preview_buffer`](Self::preview_buffer) for `line_count` lines of
-    /// `path` from the 1-based `first_line` on: the reply holds those lines
-    /// only, fewer where the buffer ends first, so a large buffer is never
-    /// copied whole.
+    /// Issues [`PREVIEW_WINDOW_CHUNK`] as an async request tagged with
+    /// `generation`, resolving the picker preview pane's text for
+    /// `line_count` lines of `path` from the 1-based `first_line` on: the
+    /// reply holds those lines only, fewer where the buffer ends first, so a
+    /// large buffer is never copied whole. Async by construction, like
+    /// [`list_buffers`](Self::list_buffers): this issues the request through
+    /// [`EngineHandle::request_preview`] and returns immediately; the answer
+    /// crosses back as `Msg::PickerPreviewReply` through the connection's
+    /// pump. `path` also travels with the waiter (unlike `list_buffers`,
+    /// whose reply needs no echo) so the eventual reply can name which
+    /// candidate it answers, since the picker's selection may have moved on
+    /// by the time it lands. See `docs/picker-preview-wire-capture.md` for
+    /// the reply shapes `crate::handle`'s `decode_preview_reply` decodes.
     ///
     /// # Errors
     ///
@@ -3858,9 +3822,9 @@ impl EngineHandle {
     /// Issues [`AI_FS_READ_CHUNK`] as an async request correlated on
     /// `request_id`, reading `buf`'s text for an agent's
     /// `fs/read_text_file`. Async on the same terms as
-    /// [`preview_buffer`](Self::preview_buffer): the answer crosses back as
-    /// `Msg::AiFsReadReply` through the connection's pump, and nothing on
-    /// the loop thread waits for it.
+    /// [`preview_buffer_window`](Self::preview_buffer_window): the answer
+    /// crosses back as `Msg::AiFsReadReply` through the connection's pump,
+    /// and nothing on the loop thread waits for it.
     ///
     /// `line`/`limit` travel as the wire's own optional window (1-based
     /// start line, maximum line count), unchanged; the chunk is what maps
@@ -4002,8 +3966,9 @@ impl EngineHandle {
 
     /// Issues [`READ_FLOAT_ROWS_CHUNK`] as an async request correlated on
     /// `win`, reading the lines a withheld float was drawing. Async by
-    /// construction, like [`preview_buffer`](Self::preview_buffer): this
-    /// returns immediately and the answer crosses back as `Msg::FloatRows`
+    /// construction, like
+    /// [`preview_buffer_window`](Self::preview_buffer_window): this returns
+    /// immediately and the answer crosses back as `Msg::FloatRows`
     /// through the connection's pump, which is what keeps the read off the
     /// paint path.
     ///
@@ -4060,11 +4025,12 @@ impl EngineHandle {
     /// Issues [`RENAME_CHUNK`] as an async request tagged with `generation`,
     /// renaming `old_path` to `new_path` and retargeting any open buffer
     /// along with it. Async by construction, like
-    /// [`preview_buffer`](Self::preview_buffer): this issues the request
-    /// through [`EngineHandle::request_rename`] and returns immediately; the
-    /// answer crosses back as `Msg::TreeRenameReply` through the
-    /// connection's pump. See `docs/tree-rename-wire-capture.md` for the
-    /// reply shape `crate::handle`'s `decode_rename_reply` decodes.
+    /// [`preview_buffer_window`](Self::preview_buffer_window): this issues
+    /// the request through [`EngineHandle::request_rename`] and returns
+    /// immediately; the answer crosses back as `Msg::TreeRenameReply`
+    /// through the connection's pump. See
+    /// `docs/tree-rename-wire-capture.md` for the reply shape
+    /// `crate::handle`'s `decode_rename_reply` decodes.
     ///
     /// # Errors
     ///
@@ -4553,7 +4519,7 @@ mod tests {
             ("CHECKTIME_CHUNK", CHECKTIME_CHUNK),
             ("HOLD_NOTIFY_CHUNK", HOLD_NOTIFY_CHUNK),
             ("OPEN_FILE_CHUNK", OPEN_FILE_CHUNK),
-            ("PREVIEW_CHUNK", PREVIEW_CHUNK),
+            ("PREVIEW_WINDOW_CHUNK", PREVIEW_WINDOW_CHUNK),
             ("NOTIFY_SINK_CHUNK", NOTIFY_SINK_CHUNK),
             ("RENAME_CHUNK", RENAME_CHUNK),
             ("REVIEW_CLEAR_CHUNK", REVIEW_CLEAR_CHUNK),

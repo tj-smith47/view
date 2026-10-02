@@ -834,15 +834,16 @@ pub enum Msg {
         /// The surface whose window was taken.
         surface: crate::native::geometry::NativeSurface,
     },
-    /// The decoded answer to one `RpcCall::PreviewBuffer`, resolving the
+    /// The decoded answer to one `RpcCall::PreviewBufferWindow`, resolving the
     /// preview pane's text for the picker's selected candidate; see
     /// `docs/picker-preview-wire-capture.md`. `path` echoes back the path
     /// the request was issued for (the selection may have moved on by the
     /// time this lands, and the applier needs to know which candidate this
     /// answers, not only which generation). `loaded` is `false` exactly
     /// when nvim has no buffer open for `path` -- `lines` is empty in that
-    /// case, and the applier's next step is `Effect::PickerPreviewFallback`,
-    /// never this reply's own empty `lines` misread as "an empty file".
+    /// case, and the applier's next step is
+    /// `Effect::PickerPreviewFallbackWindow`, never this reply's own empty
+    /// `lines` misread as "an empty file".
     /// Generation-gated on the same terms as `PickerResults`.
     PickerPreviewReply {
         generation: u64,
@@ -850,12 +851,12 @@ pub enum Msg {
         loaded: bool,
         lines: Vec<String>,
     },
-    /// The disk-fallback read `Effect::PickerPreviewFallback` requested,
-    /// for a candidate `PickerPreviewReply` reported `loaded: false` for.
-    /// `lines` is `None` for a path that does not exist or could not be
-    /// read as UTF-8 -- the preview pane shows nothing rather than a
-    /// misleading placeholder for either. Generation-gated on the same
-    /// terms as `PickerResults`.
+    /// The disk-fallback read `Effect::PickerPreviewFallbackWindow`
+    /// requested, for a candidate `PickerPreviewReply` reported
+    /// `loaded: false` for. `lines` is `None` for a path that does not
+    /// exist or could not be read -- the preview pane shows nothing rather
+    /// than a misleading placeholder for either. Generation-gated on the
+    /// same terms as `PickerResults`.
     PickerPreviewFile {
         generation: u64,
         lines: Option<Vec<String>>,
@@ -1682,19 +1683,14 @@ pub enum Effect {
     /// `Msg::PickerPreviewReply` reported `loaded: false` for -- nvim has no
     /// buffer open for it, so there is no RPC content to read instead. The
     /// read itself is plain `std::fs` I/O in `view-native`
-    /// (`view_native::picker::preview::read_file`), never RPC: only
+    /// (`view_native::picker::preview::read_window`), never RPC: only
     /// `view-engine` speaks RPC, and this path exists precisely because RPC
     /// already answered "nothing to read here." `generation` is
     /// `PickerState::generation` at the moment `update()` emitted this, the
-    /// same contract every other picker generation carries.
-    PickerPreviewFallback {
-        generation: u64,
-        path: String,
-    },
-    /// [`Effect::PickerPreviewFallback`] for `line_count` lines of `path`
-    /// from the 1-based `first_line` on, the window the
-    /// `RpcCall::PreviewBufferWindow` it follows asked nvim for. The read
-    /// stops at the window's last line.
+    /// same contract every other picker generation carries. Only
+    /// `line_count` lines of `path` from the 1-based `first_line` on are
+    /// read, the window the `RpcCall::PreviewBufferWindow` it follows asked
+    /// nvim for.
     PickerPreviewFallbackWindow {
         generation: u64,
         path: String,
@@ -2384,14 +2380,11 @@ pub enum RpcCall {
     /// error-degrades-to-`loaded: false` contract -- nvim owns all buffer
     /// text, so a modified-but-unsaved buffer must answer with its
     /// modified content, never the still-unmodified file on disk.
-    PreviewBuffer {
-        path: String,
-        generation: u64,
-    },
-    /// [`RpcCall::PreviewBuffer`] for `line_count` lines of `path` from the
-    /// 1-based `first_line` on, so a large file is never read whole. The
-    /// reply carries exactly those lines, fewer where the file ends first,
-    /// and the requester already knows which line it starts on.
+    ///
+    /// Only `line_count` lines of `path` from the 1-based `first_line` on
+    /// are read, so a large file is never read whole. The reply carries
+    /// exactly those lines, fewer where the file ends first, and the
+    /// requester already knows which line it starts on.
     PreviewBufferWindow {
         path: String,
         first_line: u64,
@@ -2399,7 +2392,7 @@ pub enum RpcCall {
         generation: u64,
     },
     /// Reads `win`'s buffer lines, for a float view is withholding from
-    /// the screen. Async like `PreviewBuffer`: the reply decodes on the
+    /// the screen. Async like `PreviewBufferWindow`: the reply decodes on the
     /// reader thread and routes back as `Msg::FloatRows`.
     ///
     /// The lines are what decides whether the window is a complaint view

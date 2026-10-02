@@ -62,7 +62,7 @@ fn read_current_buffer_text_reads_the_unnamed_scratch_buffer() {
 /// A named, edited buffer's text reads back nvim's own in-memory content
 /// (the unsaved edit), never a stale on-disk read -- the same
 /// nvim-owns-buffer-text contract the picker preview pane's read already
-/// proves for `PreviewBuffer`.
+/// proves for `PreviewBufferWindow`.
 #[test]
 fn read_current_buffer_text_reads_modified_content_over_a_named_buffer() {
     let engine = spawn();

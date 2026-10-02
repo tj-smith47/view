@@ -1001,13 +1001,6 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
-        fn preview_buffer(
-            &self,
-            _path: &str,
-            _generation: u64,
-        ) -> Result<(), view_engine::handle::EngineError> {
-            Ok(())
-        }
         fn preview_buffer_window(
             &self,
             _path: &str,

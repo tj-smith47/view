@@ -49,10 +49,14 @@ impl Session {
         self.engine.handle.command(cmd).unwrap();
     }
 
-    /// Requests a preview for `path` at `generation`, the same call
-    /// `RpcCall::PreviewBuffer`'s executor arm makes in production.
-    fn preview(&self, path: &str, generation: u64) {
-        self.engine.handle.preview_buffer(path, generation).unwrap();
+    /// Requests `count` lines of `path` from line `first` at `generation`,
+    /// the same call `RpcCall::PreviewBufferWindow`'s executor arm makes in
+    /// production.
+    fn preview(&self, path: &str, first: u64, count: u64, generation: u64) {
+        self.engine
+            .handle
+            .preview_buffer_window(path, first, count, generation)
+            .unwrap();
     }
 
     /// The first `Msg::PickerPreviewReply` the pump delivers, within
@@ -81,10 +85,10 @@ fn a_modified_unsaved_buffer_previews_its_modified_content_not_the_disk_file() {
         "call setline(1, ['modified line one', 'modified line two', 'modified line three'])",
     );
 
-    session.preview(&path_str, 1);
+    session.preview(&path_str, 2, 1000, 1);
     let reply = session
         .wait_for_reply()
-        .expect("a PreviewBuffer request must answer with Msg::PickerPreviewReply");
+        .expect("a preview request must answer with Msg::PickerPreviewReply");
 
     match reply {
         Msg::PickerPreviewReply {
@@ -99,12 +103,11 @@ fn a_modified_unsaved_buffer_previews_its_modified_content_not_the_disk_file() {
             assert_eq!(
                 lines,
                 vec![
-                    "modified line one".to_string(),
                     "modified line two".to_string(),
                     "modified line three".to_string(),
                 ],
-                "the preview must reflect the modified in-memory buffer, not the \
-                 still-unmodified file on disk"
+                "the window from line 2 must reflect the modified in-memory \
+                 buffer, not the still-unmodified file on disk"
             );
         }
         other => panic!("expected Msg::PickerPreviewReply, got {other:?}"),
@@ -126,10 +129,10 @@ fn an_unmodified_buffer_previews_the_same_content_the_file_holds() {
 
     session.command(&format!("edit {}", path_str.replace(' ', "\\ ")));
 
-    session.preview(&path_str, 2);
+    session.preview(&path_str, 1, 1000, 2);
     let reply = session
         .wait_for_reply()
-        .expect("a PreviewBuffer request must answer with Msg::PickerPreviewReply");
+        .expect("a preview request must answer with Msg::PickerPreviewReply");
 
     match reply {
         Msg::PickerPreviewReply { loaded, lines, .. } => {
@@ -145,7 +148,8 @@ fn an_unmodified_buffer_previews_the_same_content_the_file_holds() {
 
 /// A path with no buffer open must reply `loaded: false` with no lines --
 /// the signal the caller uses to fall back to a disk read
-/// (`Effect::PickerPreviewFallback`), never invented placeholder content.
+/// (`Effect::PickerPreviewFallbackWindow`), never invented placeholder
+/// content.
 #[test]
 fn a_path_with_no_open_buffer_replies_not_loaded() {
     let session = Session::start("no-buffer");
@@ -153,10 +157,10 @@ fn a_path_with_no_open_buffer_replies_not_loaded() {
     std::fs::write(&path, "disk line one").unwrap();
     let path_str = path.to_string_lossy().into_owned();
 
-    session.preview(&path_str, 3);
+    session.preview(&path_str, 1, 1000, 3);
     let reply = session
         .wait_for_reply()
-        .expect("a PreviewBuffer request must answer with Msg::PickerPreviewReply");
+        .expect("a preview request must answer with Msg::PickerPreviewReply");
 
     match reply {
         Msg::PickerPreviewReply { loaded, lines, .. } => {

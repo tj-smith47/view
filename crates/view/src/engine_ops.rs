@@ -152,13 +152,11 @@ pub trait EngineOps {
     /// Turns the fit on window entry on or off. See
     /// `view_engine::nvim_api::EngineHandle::set_fit_active`.
     fn set_fit_active(&self, on: bool, inset_cols: u16) -> Result<(), EngineError>;
-    /// Resolves the picker preview pane's text for `path`, tagged
-    /// `generation`; never blocks, and never itself returns the answer (see
-    /// `Msg::PickerPreviewReply`).
-    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError>;
-    /// Resolves `line_count` lines of `path` from the 1-based `first_line`,
-    /// tagged `generation`; never blocks, and never itself returns the
-    /// answer. See `view_engine::nvim_api::EngineHandle::preview_buffer_window`.
+    /// Resolves the picker preview pane's text for `line_count` lines of
+    /// `path` from the 1-based `first_line`, tagged `generation`; never
+    /// blocks, and never itself returns the answer (see
+    /// `Msg::PickerPreviewReply`). See
+    /// `view_engine::nvim_api::EngineHandle::preview_buffer_window`.
     fn preview_buffer_window(
         &self,
         path: &str,
@@ -451,9 +449,6 @@ impl EngineOps for EngineHandle {
     fn set_fit_active(&self, on: bool, inset_cols: u16) -> Result<(), EngineError> {
         self.set_fit_active(on, inset_cols)
     }
-    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
-        self.preview_buffer(path, generation)
-    }
     fn preview_buffer_window(
         &self,
         path: &str,
@@ -704,9 +699,6 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn set_fit_active(&self, on: bool, inset_cols: u16) -> Result<(), EngineError> {
         (**self).set_fit_active(on, inset_cols)
-    }
-    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
-        (**self).preview_buffer(path, generation)
     }
     fn preview_buffer_window(
         &self,
@@ -961,9 +953,6 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn set_fit_active(&self, on: bool, inset_cols: u16) -> Result<(), EngineError> {
         (**self).set_fit_active(on, inset_cols)
-    }
-    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
-        (**self).preview_buffer(path, generation)
     }
     fn preview_buffer_window(
         &self,
@@ -1284,9 +1273,6 @@ impl EngineOps for FakeOps {
     fn set_fit_active(&self, on: bool, inset_cols: u16) -> Result<(), EngineError> {
         self.record(format!("set_fit_active({on},{inset_cols})"))
     }
-    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
-        self.record(format!("preview_buffer({path},{generation})"))
-    }
     fn preview_buffer_window(
         &self,
         path: &str,
@@ -1597,9 +1583,6 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn set_fit_active(&self, _on: bool, _inset_cols: u16) -> Result<(), EngineError> {
-        Ok(())
-    }
-    fn preview_buffer(&self, _path: &str, _generation: u64) -> Result<(), EngineError> {
         Ok(())
     }
     fn preview_buffer_window(
