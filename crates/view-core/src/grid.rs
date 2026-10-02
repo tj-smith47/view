@@ -147,9 +147,9 @@ pub struct Grid {
     /// Per-row changed flags accumulated since the last [`Grid::take_dirty`],
     /// one entry per grid row (kept `height`-long by [`Grid::resize`]).
     dirty_rows: Vec<bool>,
-    /// Bumped by every [`Grid::apply`]: a reader that keeps a copy of
-    /// something drawn from these cells compares it to tell whether the
-    /// copy is stale.
+    /// Bumped by every method that writes cells: a reader that keeps a
+    /// copy of something drawn from these cells compares it to tell
+    /// whether the copy is stale.
     revision: u64,
 }
 
@@ -280,6 +280,7 @@ impl Grid {
         {
             return false;
         }
+        self.revision = self.revision.wrapping_add(1);
         self.width = source.width;
         self.height = source.height;
         self.cursor_row = source.cursor_row;
@@ -299,6 +300,7 @@ impl Grid {
     /// character, keeps it empty, which paints as a space.
     pub(crate) fn blank_to(&mut self, size: (u16, u16), cursor: (u16, u16)) -> bool {
         if self.size() != size {
+            self.revision = self.revision.wrapping_add(1);
             (self.width, self.height) = size;
             self.cells.clear();
             self.cells
@@ -324,6 +326,7 @@ impl Grid {
             }
         }
         if changed {
+            self.revision = self.revision.wrapping_add(1);
             self.dirty_rows.fill(false);
             self.dirty_full = true;
         }
@@ -339,6 +342,7 @@ impl Grid {
 
     /// Renumbers every cell's highlight id through `to`.
     pub(crate) fn map_hl(&mut self, to: impl Fn(u64) -> u64) {
+        self.revision = self.revision.wrapping_add(1);
         for cell in &mut self.cells {
             cell.hl_id = to(cell.hl_id);
         }
@@ -542,8 +546,14 @@ mod tests {
         });
         let texts = |g: &Grid| g.cells.iter().map(|c| c.text.as_ptr()).collect::<Vec<_>>();
         let (buffer, before) = (g.buffer(), texts(&g));
+        let revision = g.revision();
 
         assert!(g.blank_to((10, 3), (1, 2)));
+        assert_ne!(
+            g.revision(),
+            revision,
+            "the blanked cells kept the revision"
+        );
         assert_eq!((g.buffer(), texts(&g)), (buffer, before));
         assert_eq!(
             g.cell(0, 9).map(|c| (c.text.capacity(), c.hl_id)),
@@ -552,7 +562,9 @@ mod tests {
         assert!(!g.has_text());
         assert_eq!(g.cell(0, 0).map(|c| c.hl_id), Some(0));
         assert_eq!(g.cursor(), (1, 2));
+        let revision = g.revision();
         assert!(!g.blank_to((10, 3), (1, 2)));
+        assert_eq!(g.revision(), revision, "nothing changed");
     }
 
     /// Disconfirm: a derived `Clone` for `Cell` moves every text pointer.
@@ -567,11 +579,69 @@ mod tests {
         });
         let texts = |g: &Grid| g.cells.iter().map(|c| c.text.as_ptr()).collect::<Vec<_>>();
         let (buffer, before) = (g.buffer(), texts(&g));
+        let revision = g.revision();
 
         assert!(g.follow(&source));
+        assert_ne!(g.revision(), revision, "the copied cells kept the revision");
         assert_eq!((g.buffer(), texts(&g)), (buffer, before));
         assert_eq!(g.row_text(1), "yyyyyyyyyy");
         assert_eq!(g.cell(1, 0).map(|c| c.hl_id), Some(2));
+    }
+
+    /// Every method code outside this file writes cells through moves the
+    /// revision, so a copy of something drawn from the cells is never
+    /// reused past a change. A method that writes no cell names its ground
+    /// here.
+    #[test]
+    fn every_method_that_writes_cells_moves_the_revision() {
+        const WRITES_NO_CELL: &[(&str, &str)] = &[(
+            "take_dirty",
+            "drains the damage record and leaves every cell",
+        )];
+        let source = include_str!("grid.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(source);
+        let lines: Vec<&str> = production.lines().collect();
+        let mut walked = Vec::new();
+        let mut missing = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(rest) = line
+                .strip_prefix("    pub fn ")
+                .or_else(|| line.strip_prefix("    pub(crate) fn "))
+            else {
+                continue;
+            };
+            let body: Vec<&str> = lines[i..]
+                .iter()
+                .take_while(|line| **line != "    }")
+                .copied()
+                .collect();
+            let signature = body.iter().take_while(|line| !line.ends_with('{'));
+            if !signature
+                .chain(body.iter().find(|line| line.ends_with('{')))
+                .any(|line| line.contains("&mut self"))
+            {
+                continue;
+            }
+            let name = rest.split(['(', '<']).next().unwrap_or_default();
+            walked.push(name);
+            let exempt = WRITES_NO_CELL.iter().any(|(exempt, _)| *exempt == name);
+            if !exempt && !body.iter().any(|line| line.contains("self.revision")) {
+                missing.push(name);
+            }
+        }
+        for expected in ["apply", "follow", "blank_to", "map_hl", "take_dirty"] {
+            assert!(
+                walked.contains(&expected),
+                "the walk missed {expected}: {walked:?}"
+            );
+        }
+        assert!(
+            missing.is_empty(),
+            "these write cells and leave the revision where it was: {missing:?}"
+        );
     }
 
     #[test]

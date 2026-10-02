@@ -672,9 +672,12 @@ impl Model {
     /// the counterpart to [`EngineModel::forget_overlays`] for the floats
     /// view has already acted on
     /// ([`SurfaceConflicts::forget_engine`](crate::native::surfaces::SurfaceConflicts::forget_engine)
-    /// carries the per-field reasoning).
+    /// carries the per-field reasoning), and for the floats the command
+    /// line took
+    /// ([`crate::native::palette::CmdlineFloats::forget_engine`]).
     pub fn forget_engine_conflicts(&mut self) {
         self.surface_conflicts.forget_engine();
+        self.cmdline_floats.forget_engine();
     }
 
     /// Releases the startup hold on the deadline its attach armed -- and
@@ -3378,6 +3381,14 @@ mod tests {
         for field in declared_fields(surfaces, "pub struct SurfaceConflicts {") {
             if !classified(&conflicts, &field) {
                 unclassified.push(format!("SurfaceConflicts::{field} (forget_engine)"));
+            }
+        }
+
+        let palette = include_str!("native/palette.rs");
+        let floats = doc_above(palette, "pub fn forget_engine(&mut self)");
+        for field in declared_fields(palette, "pub struct CmdlineFloats {") {
+            if !classified(&floats, &field) {
+                unclassified.push(format!("CmdlineFloats::{field} (forget_engine)"));
             }
         }
 

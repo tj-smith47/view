@@ -3708,4 +3708,163 @@ mod tests {
         let _ = observe_float(&mut model, &sighting);
         assert!(notices(&model).is_empty(), "{:?}", notices(&model));
     }
+
+    /// The forgets the restart runs before it spawns the replacement.
+    fn restart(model: &mut Model) {
+        model.engine.forget_overlays();
+        model.forget_engine_windows();
+        model.forget_engine_conflicts();
+    }
+
+    fn holds(model: &Model, grid: u64) -> bool {
+        model
+            .cmdline_floats
+            .holds(crate::grid::registry::GridId(grid))
+    }
+
+    fn show_level(model: &mut Model, level: u64) {
+        let _ = update(
+            model,
+            Msg::Redraw(vec![UiEvent::CmdlineShow {
+                content: vec![(0, String::new())],
+                pos: 0,
+                firstc: if level == 1 { ":" } else { "=" }.to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level,
+            }]),
+        );
+    }
+
+    fn hide_level(model: &mut Model, level: u64) {
+        let _ = update(model, Msg::Redraw(vec![UiEvent::CmdlineHide { level }]));
+    }
+
+    /// The replacement engine numbers its grids and windows the way the
+    /// dead one did, so a float it places on a grid id the dead command
+    /// line held is its own: drawn, claimed by nothing, and cut by no
+    /// border the dead window had.
+    #[test]
+    fn a_float_on_a_grid_id_the_dead_engine_held_is_drawn_after_a_restart() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![UiEvent::WinViewportMargins {
+                grid: 11,
+                win: crate::events::WinHandle(1003),
+                top: 1,
+                bottom: 1,
+                left: 1,
+                right: 1,
+            }]),
+        );
+        open_float(&mut model, 11, 1003, MENU);
+        let sighting = FloatSighting {
+            row: 15,
+            col: 0,
+            width: 60,
+            height: 11,
+            ..cmdline_float("cmp_menu")
+        };
+        assert_eq!(
+            crate::native::surfaces::claims(&sighting, &model),
+            Some(Surface::Popupmenu)
+        );
+        restart(&mut model);
+        open_float(&mut model, 11, 1003, MENU);
+        assert!(!withheld(&model, 11), "the replacement's float is hidden");
+        assert_eq!(crate::native::surfaces::claims(&sighting, &model), None);
+        assert_eq!(
+            model
+                .cmdline_floats
+                .margins(crate::grid::registry::GridId(11)),
+            [0; 4]
+        );
+    }
+
+    /// A command line that opens while floats are still held from one
+    /// that never closed gives them back to the screen.
+    #[test]
+    fn opening_a_command_line_releases_what_an_unclosed_one_held() {
+        let mut model = palette_session();
+        open_float(&mut model, 11, 1008, MENU);
+        model
+            .cmdline_floats
+            .take(crate::grid::registry::GridId(11), 1008);
+        assert!(model
+            .engine
+            .withhold_float(crate::grid::registry::GridId(11), true));
+        open_cmdline(&mut model);
+        assert!(!withheld(&model, 11));
+        assert!(!holds(&model, 11));
+    }
+
+    /// `<C-r>=` opens a second command line inside the first. Its close
+    /// leaves the outer line's floats held, a float placed before the
+    /// outer line shows again joins them, and the outer line's own close
+    /// gives them all back.
+    #[test]
+    fn a_nested_command_line_leaves_the_outer_lines_floats_held() {
+        let mut model = palette_session();
+        show_level(&mut model, 1);
+        open_float(&mut model, 11, 1008, MENU);
+        show_level(&mut model, 2);
+        hide_level(&mut model, 2);
+        assert!(withheld(&model, 11), "the outer line's menu came back");
+        open_float(&mut model, 11, 1008, MENU);
+        open_float(&mut model, 12, 1009, (10, 62, 30, 5));
+        assert!(withheld(&model, 11));
+        assert!(withheld(&model, 12), "a float placed between the two lines");
+        show_level(&mut model, 1);
+        assert_eq!(listed(&model), Some(11));
+        hide_level(&mut model, 1);
+        for grid in [11, 12] {
+            assert!(!withheld(&model, grid), "grid {grid} stays hidden");
+            assert!(!holds(&model, grid));
+        }
+    }
+
+    /// A hidden window is given back, and the command line takes it again
+    /// when nvim places it again.
+    #[test]
+    fn win_hide_releases_and_a_later_placement_takes_the_float_again() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        open_float(&mut model, 11, 1008, MENU);
+        let _ = update(&mut model, Msg::Redraw(vec![UiEvent::WinHide { grid: 11 }]));
+        assert!(!holds(&model, 11));
+        assert!(!withheld(&model, 11));
+        open_float(&mut model, 11, 1008, MENU);
+        assert!(holds(&model, 11));
+        assert!(withheld(&model, 11));
+        assert_eq!(listed(&model), Some(11));
+    }
+
+    #[test]
+    fn of_two_floats_of_one_height_the_first_taken_is_the_list() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        open_float(&mut model, 11, 1008, (15, 0, 30, 5));
+        open_float(&mut model, 12, 1009, (15, 40, 30, 5));
+        assert_eq!(listed(&model), Some(11));
+    }
+
+    /// `win_close` and `grid_destroy` each release the grid on their own.
+    #[test]
+    fn either_grid_close_event_alone_releases_the_absorbed_grid() {
+        for close in [
+            UiEvent::WinClose { grid: 11 },
+            UiEvent::GridDestroy { grid: 11 },
+        ] {
+            let mut model = palette_session();
+            open_cmdline(&mut model);
+            open_float(&mut model, 11, 1008, MENU);
+            let event = format!("{close:?}");
+            let _ = update(&mut model, Msg::Redraw(vec![close]));
+            assert_eq!(listed(&model), None, "{event}");
+            assert!(!holds(&model, 11), "{event}");
+            assert!(!model.cmdline_floats.holds_window(1008), "{event}");
+        }
+    }
 }

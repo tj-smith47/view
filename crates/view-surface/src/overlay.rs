@@ -420,6 +420,7 @@ fn picker_split_rows(
             })
             .collect(),
         selected: marked,
+        in_view: None,
         header_keep_tail: false,
         header_first: false,
         rule: false,
@@ -657,6 +658,9 @@ struct Body {
     /// [`lay_out`] knows which of them is selected.
     items: Vec<Line>,
     selected: Option<usize>,
+    /// An item the window keeps on screen, unmarked, while nothing is
+    /// `selected`.
+    in_view: Option<usize>,
     /// Whether this body is laid out as a chat ([`lay_out_chat`]): `false`
     /// (every kind but [`ai_body`]) keeps the first `height` header rows,
     /// the shape a prompt or picker's own message-then-input ordering
@@ -813,7 +817,7 @@ fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
     // an index past the end selects nothing rather than being clamped onto
     // a row the feature never chose
     let selected = body.selected.filter(|i| *i < body.items.len());
-    let first = match selected {
+    let first = match selected.or(body.in_view.filter(|i| *i < body.items.len())) {
         Some(i) if item_rows > 0 && i >= item_rows => i + 1 - item_rows,
         _ => 0,
     };
@@ -932,6 +936,7 @@ fn picker_body(view: &PickerView) -> Body {
         )))],
         items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: view.selected,
+        in_view: None,
         header_keep_tail: false,
         header_first: false,
         rule: true,
@@ -950,6 +955,7 @@ fn tree_body(view: &TreeView) -> Body {
             .map(Line::Text)
             .collect(),
         selected: view.selected,
+        in_view: None,
         header_keep_tail: false,
         header_first: false,
         rule: false,
@@ -1052,6 +1058,7 @@ fn statusline_body(view: &StatuslineView) -> Body {
         )],
         items: Vec::new(),
         selected: None,
+        in_view: None,
         header_keep_tail: false,
         header_first: false,
         rule: false,
@@ -1100,6 +1107,7 @@ fn prompt_body(view: &PromptView, width: u16, height: u16) -> Body {
             .map(Line::Text)
             .collect(),
         selected: view.selected,
+        in_view: None,
         header_keep_tail: false,
         header_first: false,
         rule: fit.rule && !inline,
@@ -1141,11 +1149,31 @@ fn palette_body(view: &PaletteView) -> Body {
             view.drawn.iter().cloned().map(Line::Text).collect()
         },
         selected: view.selected,
+        in_view: standout_row(&view.drawn),
         header_keep_tail: false,
         header_first: false,
         rule: true,
         footer: Vec::new(),
     }
+}
+
+/// The one row of `rows` whose first cell's highlight differs from the one
+/// every other row opens with: how a menu that carries no selection index
+/// shows its selected row. `None` when no single row stands out, or there
+/// are fewer than three rows to tell it by.
+fn standout_row(rows: &[Vec<Span>]) -> Option<usize> {
+    let first = |row: &Vec<Span>| row.first().map(|span| span.role);
+    let mut firsts = rows.iter().map(first);
+    let (a, b) = (firsts.next()?, firsts.next()?);
+    // two of the first three agree, and that role is what every row but
+    // the selected one opens with
+    let common = if a == b { a } else { firsts.next()? };
+    let mut odd = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| first(row) != common);
+    let (index, _) = odd.next()?;
+    odd.next().is_none().then_some(index)
 }
 
 /// A windowed stream or ticker's rows: the same items [`palette_body`]
@@ -1158,6 +1186,7 @@ fn stream_body(view: &PaletteView) -> Body {
         header: Vec::new(),
         items: view.rows.iter().map(palette_row_line).collect(),
         selected: view.selected,
+        in_view: None,
         header_keep_tail: false,
         header_first: false,
         rule: false,
@@ -1186,6 +1215,7 @@ fn ai_body(view: &AiPanelView) -> Body {
         header: ai_header(view),
         items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: None,
+        in_view: None,
         header_keep_tail: true,
         header_first: !view.pending_permission.is_empty(),
         rule: AI_RULE,

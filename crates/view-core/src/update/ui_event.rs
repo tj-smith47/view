@@ -311,9 +311,11 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                 }
             }
             model.submit_hold.note_line_shown(&cmdline);
-            if model.engine.cmdline.is_none() {
+            if !model.cmdline_floats.is_open() {
                 let before = model.engine.grids().grid_ids();
-                model.cmdline_floats.open(before);
+                for grid in model.cmdline_floats.open(level, before) {
+                    model.dirty |= model.engine.withhold_float(grid, false);
+                }
             }
             model.engine.cmdline = Some(cmdline);
             // the guess the palette was already drawing, answered: the
@@ -343,7 +345,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                 .submit_hold
                 .note_line_hidden(level, model.engine.cmdline.as_ref());
             model.engine.cmdline = None;
-            for grid in model.cmdline_floats.close() {
+            for grid in model.cmdline_floats.close(level) {
                 model.dirty |= model.engine.withhold_float(grid, false);
             }
             crate::native::speculate::withdraw_cmdline_speculation(model);

@@ -191,9 +191,13 @@ steps = [
   # window never puts in front of it (two under this layout, three under
   # tiles).
   { wait_for = "    prefabricated  Text", timeout_ms = 15000 },
-  # And not at the bottom left: cmp's own window starts its row two
-  # columns into the screen under this layout, and that row is not drawn.
+  # And not at the bottom left. cmp's own window starts this row at the
+  # screen's left edge, two columns in under this layout and three under
+  # tiles, and nothing else on screen starts a line with it: the
+  # palette's rows open with whatever stands left of its box. One needle
+  # per layout, since the twins share their steps.
   { assert_absent = "\n  prefabricated  Text" },
+  { assert_absent = "\n   prefabricated  Text" },
   # The menu is the command line's own, so no notice names it.
   { assert_absent = "cmp_menu is drawing over" },
   { send = "<Esc>" },
@@ -247,7 +251,7 @@ steps = [
   { send = "e" },
   { wait_for_probe = "luaeval('require(\"cmp\").visible()')", expect = "true", timeout_ms = 30000 },
   { wait_for = "prefabricated  Text", timeout_ms = 30000 },
-  { probe ="luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"cmp_menu\" then if vim.api.nvim_win_get_config(w).hide == true then return \"hidden\" end return \"showing\" end end return \"none\" end)()')", expect = "showing" },
+  { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"cmp_menu\" then if vim.api.nvim_win_get_config(w).hide == true then return \"hidden\" end return \"showing\" end end return \"none\" end)()')", expect = "showing" },
   { assert_absent = "> :e pre" },
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },
@@ -285,6 +289,7 @@ steps = [
   { wait_for = "> :e pre", timeout_ms = 30000 },
   { wait_for = "    prefabricated  Text", timeout_ms = 30000 },
   { assert_absent = "\n  prefabricated  Text" },
+  { assert_absent = "\n   prefabricated  Text" },
   { assert_absent = "cmp_menu is drawing over" },
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 30000 },

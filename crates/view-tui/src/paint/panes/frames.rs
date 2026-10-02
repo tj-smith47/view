@@ -870,6 +870,7 @@ fn screen(row: u16, col: u16, area: Rect, damage: &Damage) -> Option<(u16, u16)>
 pub(crate) fn paint_windowed_palette(
     layer: &view_surface::Layer,
     theme: &Theme,
+    hl: &view_core::hl::HlTable,
     borders: BorderSet,
     area: Rect,
     damage: &Damage,
@@ -916,5 +917,5 @@ pub(crate) fn paint_windowed_palette(
     }
     let laid =
         view_surface::overlay::unframed_rows(interior.width, interior.height, &layer.kind, borders);
-    super::super::paint_native_overlay(layer, Some(&laid), theme, interior, damage, buf);
+    super::super::paint_native_overlay(layer, Some(&laid), theme, hl, interior, damage, buf);
 }

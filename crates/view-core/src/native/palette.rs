@@ -120,9 +120,14 @@ fn title_for(firstc: &str) -> &'static str {
 /// A float first placed while that command line is open belongs to it: the
 /// command line is the only thing on screen taking input, so a window
 /// opened then is the command line's own UI. A float that was already
-/// standing when it opened is left where it is.
+/// standing when it opened is left where it is. A command line opened
+/// inside another (`<C-r>=`) belongs to the outer one, so its floats stay
+/// held until the outermost line closes.
 #[derive(Debug, Clone, Default)]
 pub struct CmdlineFloats {
+    /// The level of the outermost command line open, or `None` with none
+    /// open.
+    level: Option<u64>,
     /// Every grid nvim had named when the command line opened.
     before: Vec<GridId>,
     /// The floats taken since, as `(grid, window)`, in arrival order.
@@ -135,17 +140,45 @@ pub struct CmdlineFloats {
 }
 
 impl CmdlineFloats {
-    /// Starts a command line with `before` already on the wire, dropping
-    /// whatever an engine that never sent `cmdline_hide` left behind.
-    pub(crate) fn open(&mut self, before: Vec<GridId>) {
-        self.before = before;
-        self.taken.clear();
+    /// Whether a command line is open.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.level.is_some()
     }
 
-    /// Ends the command line, answering the grids it was holding.
-    pub(crate) fn close(&mut self) -> Vec<GridId> {
+    /// Starts a command line at `level` with `before` already on the wire,
+    /// answering the grids still held from one whose close never arrived,
+    /// which the caller gives back to the screen.
+    #[must_use]
+    pub(crate) fn open(&mut self, level: u64, before: Vec<GridId>) -> Vec<GridId> {
+        self.level = Some(level);
+        self.before = before;
+        self.taken.drain(..).map(|(grid, _)| grid).collect()
+    }
+
+    /// Closes the command line at `level`, answering the grids the session
+    /// held once the outermost line closes, and nothing for a nested one.
+    #[must_use]
+    pub(crate) fn close(&mut self, level: u64) -> Vec<GridId> {
+        if self.level.is_some_and(|outer| level > outer) {
+            return Vec::new();
+        }
+        self.level = None;
         self.before.clear();
         self.taken.drain(..).map(|(grid, _)| grid).collect()
+    }
+
+    /// Forgets everything a replacement engine invalidates, called beside
+    /// [`EngineModel::forget_overlays`](crate::model::EngineModel::forget_overlays)
+    /// from the restart.
+    ///
+    /// | field | why |
+    /// | --- | --- |
+    /// | `level` | the dead engine's command line closed with it and sends no `cmdline_hide` |
+    /// | `before`, `taken` | grid ids and window handles, which the replacement numbers again from the start: a held id would hide the replacement's own float and answer for its window |
+    /// | `margins` | the borders of the dead engine's windows, which a borderless float on a reused grid id would lose rows and columns to |
+    pub fn forget_engine(&mut self) {
+        *self = Self::default();
     }
 
     /// Whether `grid` was named before the command line opened.
@@ -208,11 +241,13 @@ impl CmdlineFloats {
 /// Whether the palette is drawing an open command line whose floats it
 /// takes: the palette is on, it owns the command line and the completion
 /// menu, nvim's command line is open, and no prompt box is drawing it.
+/// The line counts as open between a nested line's close and the outer
+/// line's next `cmdline_show`.
 #[must_use]
 pub fn takes_cmdline_floats(model: &Model) -> bool {
     model.palette_enabled
         && model.owns(crate::native::ext::Ext::Cmdline)
-        && model.engine.cmdline.is_some()
+        && model.cmdline_floats.is_open()
         && crate::native::surfaces::view_draws(crate::native::surfaces::Surface::Popupmenu, model)
         && !matches!(
             model.overlays().last().map(|open| &open.kind),

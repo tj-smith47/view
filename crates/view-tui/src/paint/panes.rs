@@ -251,7 +251,15 @@ fn paint_native_pane(
         &layer.kind,
         borders,
     );
-    super::paint_native_overlay(&layer, Some(&laid), theme, pane_area, damage, buf);
+    super::paint_native_overlay(
+        &layer,
+        Some(&laid),
+        theme,
+        model.engine.painted_hl(),
+        pane_area,
+        damage,
+        buf,
+    );
 }
 
 /// What a windowed surface draws, or `None` while its state is not open.

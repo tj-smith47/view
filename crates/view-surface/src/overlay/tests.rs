@@ -574,6 +574,59 @@ fn a_palette_paints_the_rows_a_completion_window_drew_clipped_at_its_inner_width
     );
 }
 
+/// The drawn rows a band of eight shows, by label, for eleven rows whose
+/// first cells carry `firsts`.
+fn band_of_eight(firsts: &[u64; 11]) -> Vec<String> {
+    use view_core::native::views::{PaletteView, Span};
+    let drawn = firsts
+        .iter()
+        .enumerate()
+        .map(|(i, hl)| {
+            vec![
+                Span::new(format!("row {}", i + 1), StyleRole::Highlight(*hl)),
+                Span::new(" Text", StyleRole::Highlight(3)),
+            ]
+        })
+        .collect();
+    let kind = LayerKind::Palette(
+        PaletteView::new("Command")
+            .with_query(":e ")
+            .with_drawn(drawn),
+    );
+    let framed = rows(30, 12, &kind, BorderSet::ASCII);
+    framed.lines[3..11]
+        .iter()
+        .map(|line| {
+            let text = interior(&line_text(line));
+            text.trim().trim_end_matches(" Text").to_string()
+        })
+        .collect()
+}
+
+fn labels(range: std::ops::RangeInclusive<usize>) -> Vec<String> {
+    range.map(|i| format!("row {i}")).collect()
+}
+
+/// A selection below the band scrolls it: the one row whose first cell
+/// stands out from every other row's is kept on screen.
+#[test]
+fn a_drawn_selection_below_the_band_scrolls_it_into_view() {
+    let mut firsts = [3; 11];
+    firsts[9] = 7;
+    assert_eq!(band_of_eight(&firsts), labels(3..=10));
+}
+
+/// With no row standing out, or more than one, nothing says which is
+/// selected and the band shows from the top.
+#[test]
+fn drawn_rows_with_no_single_standout_show_from_the_top() {
+    assert_eq!(band_of_eight(&[3; 11]), labels(1..=8));
+    let mut firsts = [3; 11];
+    firsts[9] = 7;
+    firsts[10] = 8;
+    assert_eq!(band_of_eight(&firsts), labels(1..=8));
+}
+
 /// How many of a framed palette's rows are never a list item: the two
 /// border edges, the query line and the rule under it.
 ///

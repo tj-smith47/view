@@ -135,10 +135,10 @@ pub enum UiEvent {
     /// viewport `win_viewport` reports -- what 'winbar' and a floating
     /// window's borders take out of it.
     ///
-    /// Nothing that paints reads this: the cells inside a margin arrive as
-    /// `grid_line` like any other. It is decoded rather than left as
-    /// [`UiEvent::Unknown`] so that a layout trace names the grid each line
-    /// belongs to, which is the question such a trace exists to answer.
+    /// The cells inside a margin arrive as `grid_line` like any other. The
+    /// palette reads a float's margins to leave its border out of the rows
+    /// it lists from that float, and a layout trace reads them to name the
+    /// grid each line belongs to.
     WinViewportMargins {
         grid: u64,
         win: WinHandle,
