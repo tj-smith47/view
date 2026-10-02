@@ -231,14 +231,28 @@ fn spawn_and_attach(
     // the capability probe fills, and everything above it is work that must
     // not be held up for a terminal's reply (see `attach_in_background`)
     let residue = residue();
+    let notations = view_tui::keys::encode_residue_bytes(&residue);
+    log_replay(notations.len(), "terminal probe");
     // best-effort, matching this project's original startup ordering: a
     // write failure here means the connection is already gone, which the
     // caller discovers through the engine's own EngineDown path moments
     // later rather than through this loop
-    for notation in view_tui::keys::encode_residue_bytes(&residue) {
+    for notation in notations {
         let _ = engine.handle.input(&notation);
     }
     Ok(engine)
+}
+
+/// Logs, under the `"startup"` `VIEW_LOG` topic, that `count` keys typed
+/// before the engine was ready are being handed to it, and which window
+/// held them. One line per replay and none when nothing was held, so the
+/// key path itself logs nothing per key.
+fn log_replay(count: usize, held_by: &str) {
+    if count > 0 {
+        crate::vlog::log_with("startup", || {
+            format!("replaying {count} keys held by the {held_by}")
+        });
+    }
 }
 
 /// Replaces a failed engine with a fresh one, spawned the same way
@@ -1011,6 +1025,7 @@ pub(crate) fn run_cutover<E: crate::engine_ops::EngineOps>(
     // runtime::run's own loop discovers the same failure cleanly once its
     // pump is attached
     if engine_alive {
+        log_replay(keys.len(), "attach window");
         for key in keys {
             if crate::runtime::dispatch(model, executor, follow_ups, Msg::Key(key))
                 != crate::runtime::Flow::Continue
