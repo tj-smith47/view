@@ -60,7 +60,7 @@ key_to_rpc_p99_us = 35.757
 pss_mb = 3.3857421875
 
 [output_path.minimal]
-p99_ms = 0.081561
+p99_ms = 0.124712
 
 [picker.minimal]
 first_page_p50_ms = 3.486187

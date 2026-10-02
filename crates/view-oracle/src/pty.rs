@@ -1645,28 +1645,30 @@ mod tests {
     }
 
     // Nothing arrives from an idle `cat`, so each wait runs to its own
-    // timeout. The upper bound is twice the timeouts' sum before the host's
-    // share: a wait that sleeps the reader channel in slices longer than
-    // its timeout overshoots that many times over.
+    // timeout. The upper bound is on the fastest wait: a wait that sleeps the
+    // reader channel in slices longer than its timeout is late on every
+    // call, while a loaded host wakes a sleeper late on some calls and by a
+    // different amount each time, which a bound on the sum cannot tell apart.
     #[test]
     fn wait_for_screen_gives_up_at_its_own_deadline() {
         const TIMEOUT: Duration = Duration::from_millis(10);
-        const WAITS: u32 = 5;
+        const WAITS: u32 = 8;
+        const LATEST_FASTEST: Duration = Duration::from_millis(150);
         let mut session = testenv::spawning(|| PtySession::spawn("/bin/cat", &[], 80, 24)).unwrap();
-        let started = Instant::now();
+        let mut fastest_elapsed = Duration::MAX;
         for _ in 0..WAITS {
+            let started = Instant::now();
             assert!(!session.wait_for_screen(TIMEOUT, |_| false));
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed >= TIMEOUT,
+                "a wait of {TIMEOUT:?} returned in {elapsed:?}, before its deadline"
+            );
+            fastest_elapsed = fastest_elapsed.min(elapsed);
         }
-        let elapsed = started.elapsed();
-        let floor = TIMEOUT * WAITS;
-        let ceiling = view_test_support::host_deadline(floor * 2);
         assert!(
-            elapsed >= floor,
-            "{WAITS} waits of {TIMEOUT:?} returned in {elapsed:?}, before their deadlines"
-        );
-        assert!(
-            elapsed < ceiling,
-            "{WAITS} waits of {TIMEOUT:?} took {elapsed:?}, past {ceiling:?}"
+            fastest_elapsed < LATEST_FASTEST,
+            "the fastest of {WAITS} waits of {TIMEOUT:?} took {fastest_elapsed:?}, past {LATEST_FASTEST:?}"
         );
     }
 

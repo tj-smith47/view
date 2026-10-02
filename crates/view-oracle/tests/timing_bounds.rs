@@ -74,6 +74,19 @@ const DECLARED_ABSOLUTES: &[DeclaredAbsolute] = &[
             "it sits below the wedged fixture's own 5s sleep, which a scaled bound would reach",
     },
     DeclaredAbsolute {
+        file: "view-oracle/src/pty.rs",
+        line: "fastest_elapsed < LATEST_FASTEST,",
+        grounds: "it sits below the 200 ms slice the wait used to sleep the \
+                  reader channel in, which a scaled bound would reach",
+    },
+    DeclaredAbsolute {
+        file: "view-oracle/src/pty.rs",
+        line: "elapsed >= TIMEOUT,",
+        grounds: "it restates the timeout the wait was handed, so a slow \
+                  host can only overshoot the floor and the only reading \
+                  that fails is a wait that returned early",
+    },
+    DeclaredAbsolute {
         file: "view-ai/tests/fixtures/stub_agent.rs",
         line: "while start.elapsed() < SUSTAINED_CEILING {",
         grounds: "it is the fixture's own runaway guard, and a scaled one is \
