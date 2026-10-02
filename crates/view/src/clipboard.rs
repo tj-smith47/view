@@ -1008,6 +1008,15 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn preview_buffer_window(
+            &self,
+            _path: &str,
+            _first_line: u64,
+            _line_count: u64,
+            _generation: u64,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn read_float_rows(&self, _win: u64) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }

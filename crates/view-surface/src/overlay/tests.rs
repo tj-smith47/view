@@ -1927,7 +1927,7 @@ fn a_pickers_preview_lines_reach_the_painted_frame() {
 /// before it and the text in the role a matched substring carries.
 #[test]
 fn a_pickers_preview_marks_the_line_it_opens_on() {
-    let lines = (1..=200).map(|n| format!("line {n}")).collect();
+    let lines: Vec<String> = (1..=200).map(|n| format!("line {n}")).collect();
     let kind = LayerKind::Picker(
         PickerView::new("Live Grep")
             .with_rows(vec!["a.rs:150: x".to_string()])

@@ -13,6 +13,8 @@
 //! no key lookup happens downstream of this. A row that should read
 //! `src/main.rs` arrives as that string.
 
+use std::sync::Arc;
+
 use super::geometry::LIST_MARKER_COLS;
 use crate::theme::ChromeGroup;
 
@@ -340,8 +342,10 @@ pub struct PickerView {
     pub selected: Option<usize>,
     /// The preview pane's lines for the currently selected candidate, empty
     /// until a preview reply (RPC or disk-fallback) has landed for it -- see
-    /// `docs/picker-preview-wire-capture.md`.
-    pub preview: Vec<String>,
+    /// `docs/picker-preview-wire-capture.md`. A window of the file around
+    /// the line the candidate opens on, shared with the picker's own state
+    /// so a frame copies a pointer.
+    pub preview: Arc<[String]>,
     /// The 0-based index into `preview` of the line the selected candidate
     /// points at (a grep match's line), or `None` to preview from the top.
     pub preview_line: Option<usize>,
@@ -399,9 +403,9 @@ impl PickerView {
 
     /// The same view with `lines` shown in the preview pane.
     #[must_use]
-    pub fn with_preview(self, lines: Vec<String>) -> Self {
+    pub fn with_preview(self, lines: impl Into<Arc<[String]>>) -> Self {
         Self {
-            preview: lines,
+            preview: lines.into(),
             ..self
         }
     }
@@ -419,12 +423,15 @@ impl PickerView {
     /// index among them of [`Self::preview_line`].
     ///
     /// The line sits a third of the way down the pane, so the code leading
-    /// up to it is in view, and the window clamps at the file's first and
-    /// last line. A line past the end of `preview` previews from the top,
-    /// as a candidate with no line does. That happens when the file has
-    /// fewer lines than when it was matched (an edit in its buffer, a
-    /// change on disk), and when the read found nothing to show (a path
-    /// gone or unreadable as UTF-8), which leaves `preview` empty.
+    /// up to it is in view, and the window clamps at the first and last
+    /// line `preview` holds. A line past the end of `preview` previews from
+    /// its top, as a candidate with no line does. That happens when the
+    /// file has fewer lines than when it was matched (an edit in its
+    /// buffer, a change on disk), when the read found nothing to show (a
+    /// path gone or unreadable as UTF-8), which leaves `preview` empty, and
+    /// when the selection moved to a line of the same file past the window
+    /// `preview` holds, while the read of that line's own window is in
+    /// flight.
     #[must_use]
     pub fn preview_window(&self, rows: usize) -> (&[String], Option<usize>) {
         let len = self.preview.len();

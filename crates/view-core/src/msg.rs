@@ -1691,6 +1691,16 @@ pub enum Effect {
         generation: u64,
         path: String,
     },
+    /// [`Effect::PickerPreviewFallback`] for `line_count` lines of `path`
+    /// from the 1-based `first_line` on, the window the
+    /// `RpcCall::PreviewBufferWindow` it follows asked nvim for. The read
+    /// stops at the window's last line.
+    PickerPreviewFallbackWindow {
+        generation: u64,
+        path: String,
+        first_line: u64,
+        line_count: u64,
+    },
     /// Hands an `ignore`-walked filesystem scan of `root` to a worker off
     /// the loop thread; the worker, not this arm, owns streaming back
     /// `Msg::TreeScanResult`. Issued once when a tree overlay opens and
@@ -2376,6 +2386,16 @@ pub enum RpcCall {
     /// modified content, never the still-unmodified file on disk.
     PreviewBuffer {
         path: String,
+        generation: u64,
+    },
+    /// [`RpcCall::PreviewBuffer`] for `line_count` lines of `path` from the
+    /// 1-based `first_line` on, so a large file is never read whole. The
+    /// reply carries exactly those lines, fewer where the file ends first,
+    /// and the requester already knows which line it starts on.
+    PreviewBufferWindow {
+        path: String,
+        first_line: u64,
+        line_count: u64,
         generation: u64,
     },
     /// Reads `win`'s buffer lines, for a float view is withholding from

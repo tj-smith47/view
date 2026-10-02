@@ -28,10 +28,44 @@ pub fn read_file(path: &Path) -> Option<Vec<String>> {
     )
 }
 
+/// Reads `count` lines of `path` from the 1-based line `first` on, fewer
+/// where the file ends first, or `None` on the terms [`read_file`] gives.
+/// The file is streamed: lines before `first` are skipped without being
+/// kept, reading stops after the last line wanted, and only the lines
+/// returned are checked for UTF-8.
+#[must_use]
+pub fn read_window(path: &Path, first: u64, count: u64) -> Option<Vec<String>> {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+    let mut skipped = Vec::new();
+    for _ in 1..first {
+        skipped.clear();
+        if reader.read_until(b'\n', &mut skipped).ok()? == 0 {
+            return Some(Vec::new());
+        }
+    }
+    let wanted = usize::try_from(count).unwrap_or(usize::MAX);
+    reader.lines().take(wanted).collect::<Result<_, _>>().ok()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_read_returns_only_the_lines_asked_for() {
+        let path = scratch_path("long.txt");
+        let text: String = (1..=10_000).map(|n| format!("line {n}\r\n")).collect();
+        std::fs::write(&path, text).expect("write fixture");
+        let window = read_window(&path, 4500, 1000).expect("a readable file");
+        assert_eq!(window.len(), 1000);
+        assert_eq!(window[0], "line 4500");
+        assert_eq!(window[500], "line 5000");
+        assert_eq!(read_window(&path, 9900, 1000).expect("tail").len(), 101);
+        assert_eq!(read_window(&path, 20_000, 1000), Some(Vec::new()));
+        let _ = std::fs::remove_file(&path);
+    }
 
     fn scratch_path(name: &str) -> std::path::PathBuf {
         let nonce = format!(

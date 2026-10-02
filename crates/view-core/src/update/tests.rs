@@ -9227,9 +9227,10 @@ fn picker_results_issues_a_preview_request_for_the_selected_candidate() {
     assert!(
         matches!(
             effects.as_slice(),
-            [Effect::Rpc(RpcCall::PreviewBuffer { path, .. })] if path.ends_with("a.rs")
+            [Effect::Rpc(RpcCall::PreviewBufferWindow { path, first_line: 1, .. })]
+                if path.ends_with("a.rs")
         ),
-        "a fresh result set must issue exactly one PreviewBuffer request for \
+        "a fresh result set must issue exactly one preview request for \
              the selected candidate: {effects:?}"
     );
 }
@@ -9239,7 +9240,7 @@ fn picker_results_issues_a_preview_request_for_the_selected_candidate() {
 /// changing the *selected* candidate must not re-issue a preview
 /// request for a path already current or in flight -- two successive
 /// `PickerResults` batches selecting the same first row must together
-/// issue exactly one `PreviewBuffer` request, not two. Reverting
+/// issue exactly one `PreviewBufferWindow` request, not two. Reverting
 /// `PickerState::refresh_preview`'s dedupe check makes this fail by
 /// name (it would then see two).
 #[test]
@@ -9268,7 +9269,7 @@ fn two_result_batches_with_the_same_selection_issue_one_preview_request() {
     assert!(
         matches!(
             first.as_slice(),
-            [Effect::Rpc(RpcCall::PreviewBuffer { path, .. })] if path.ends_with("a.rs")
+            [Effect::Rpc(RpcCall::PreviewBufferWindow { path, .. })] if path.ends_with("a.rs")
         ),
         "the first batch must issue the usual single preview request: {first:?}"
     );
@@ -9403,11 +9404,11 @@ fn a_loaded_preview_reply_applies_its_lines_and_issues_no_fallback() {
         "a loaded reply must not also issue a disk-fallback effect: {effects:?}"
     );
     assert_eq!(
-        m.picker_mut()
+        *m.picker_mut()
             .expect("picker must still be open")
             .view()
             .preview,
-        vec![
+        [
             "modified line one".to_string(),
             "modified line two".to_string()
         ]
@@ -9416,8 +9417,8 @@ fn a_loaded_preview_reply_applies_its_lines_and_issues_no_fallback() {
 
 /// `loaded: false` means nvim has no buffer open for the candidate; the
 /// only remaining source of truth is disk, handed off to
-/// `Effect::PickerPreviewFallback` rather than treated as "nothing to
-/// preview" (see `update`'s `Msg::PickerPreviewReply` arm doc).
+/// `Effect::PickerPreviewFallbackWindow` rather than treated as "nothing
+/// to preview" (see `update`'s `Msg::PickerPreviewReply` arm doc).
 #[test]
 fn an_unloaded_preview_reply_issues_a_disk_fallback_effect() {
     let mut m = model();
@@ -9455,11 +9456,16 @@ fn an_unloaded_preview_reply_issues_a_disk_fallback_effect() {
     assert!(
         matches!(
             effects.as_slice(),
-            [Effect::PickerPreviewFallback { generation, path }]
+            [Effect::PickerPreviewFallbackWindow {
+                generation,
+                path,
+                first_line: 1,
+                line_count: crate::native::picker::PREVIEW_WINDOW_LINES,
+            }]
                 if *generation == preview_generation && path == "/tmp/a.rs"
         ),
         "loaded: false must hand off to the disk-fallback effect, echoing the \
-             same generation and path: {effects:?}"
+             same generation, path and window: {effects:?}"
     );
 }
 
@@ -9501,11 +9507,11 @@ fn a_picker_preview_file_reply_applies_disk_fallback_lines() {
 
     assert!(effects.is_empty());
     assert_eq!(
-        m.picker_mut()
+        *m.picker_mut()
             .expect("picker must still be open")
             .view()
             .preview,
-        vec!["disk line one".to_string()]
+        ["disk line one".to_string()]
     );
 }
 

@@ -25,6 +25,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use super::views::{PickerView, Span, StyleRole};
 
@@ -148,17 +149,37 @@ pub struct PickerState {
     /// The candidate path the current `preview_lines` belongs to, or the
     /// path most recently requested while a reply is still in flight.
     preview_path: Option<String>,
+    /// The 1-based first line of the window most recently requested for
+    /// `preview_path`.
+    preview_first: u64,
     /// The preview pane's last-known-good content. Left in place across a
     /// selection change until the new selection's own reply lands, rather
     /// than cleared immediately: a picker with a fast typist and a slow
     /// preview round trip should never flash an empty pane between every
-    /// keystroke.
-    preview_lines: Vec<String>,
+    /// keystroke. Shared with every frame's view, which copies the pointer.
+    preview_lines: Arc<[String]>,
     /// The candidate path `preview_lines` was read from, `None` until a
     /// reply lands. A line is marked only while it names the selection's
     /// own file: until a new file's reply lands, the pane still holds the
     /// previous file.
     applied_path: Option<String>,
+    /// The 1-based line number of `preview_lines[0]`.
+    applied_first: u64,
+}
+
+/// How many lines one preview read returns. A pane is at most a few
+/// hundred rows tall, and the window holds half this many on each side of
+/// the line it opens on, so the pane fills wherever that line sits in it.
+/// A whole file is never read: a log of gigabytes costs the same as this
+/// window.
+pub const PREVIEW_WINDOW_LINES: u64 = 1000;
+
+/// The 1-based first line of the preview window for a candidate that opens
+/// on `line`, from the top for a candidate with none.
+fn window_first(line: Option<u64>) -> u64 {
+    line.map_or(1, |line| {
+        line.saturating_sub(PREVIEW_WINDOW_LINES / 2).max(1)
+    })
 }
 
 impl PickerState {
@@ -177,8 +198,10 @@ impl PickerState {
             selected: 0,
             preview_generation: 0,
             preview_path: None,
-            preview_lines: Vec::new(),
+            preview_first: 1,
+            preview_lines: Arc::from([]),
             applied_path: None,
+            applied_first: 1,
         }
     }
 
@@ -291,7 +314,8 @@ impl PickerState {
     /// candidate and records it as this session's outstanding preview
     /// request, or does nothing (returning `None`) when there is no
     /// selection to preview, *or* when `preview_path` already names this
-    /// same candidate. `preview_path` is set the instant a request is
+    /// same candidate and the window requested for it holds the line the
+    /// candidate opens on. `preview_path` is set the instant a request is
     /// issued (not only once its reply lands -- see the field's own doc),
     /// so this one comparison covers both "the preview already shown is
     /// this path" and "a request for this path is already in flight":
@@ -300,19 +324,33 @@ impl PickerState {
     /// resolves several rows to the same file, differing only by line) would
     /// re-issue a preview request for a path already current, storming the
     /// RPC channel with redundant reads of a buffer that has not changed.
-    /// The caller issues the actual `Effect::Rpc(RpcCall::PreviewBuffer)`
-    /// with the returned pair -- this method only allocates the generation,
-    /// mirroring `PickerState::open`'s own "allocate, do not itself emit an
-    /// effect" contract.
+    /// The caller issues the actual
+    /// `Effect::Rpc(RpcCall::PreviewBufferWindow)` with the returned pair
+    /// and [`Self::preview_first_line`] -- this method only allocates the
+    /// generation, mirroring `PickerState::open`'s own "allocate, do not
+    /// itself emit an effect" contract.
     pub fn refresh_preview(&mut self) -> Option<(u64, String)> {
         let path = self.selected_path()?;
-        if self.preview_path.as_deref() == Some(path.as_str()) {
+        let line = self.items.get(self.selected).and_then(|item| item.line);
+        let held = line
+            .unwrap_or(1)
+            .checked_sub(self.preview_first)
+            .is_some_and(|offset| offset < PREVIEW_WINDOW_LINES);
+        if held && self.preview_path.as_deref() == Some(path.as_str()) {
             return None;
         }
         let generation = next_generation();
         self.preview_generation = generation;
         self.preview_path = Some(path.clone());
+        self.preview_first = window_first(line);
         Some((generation, path))
+    }
+
+    /// The 1-based first line of the outstanding preview request's window,
+    /// [`PREVIEW_WINDOW_LINES`] long.
+    #[must_use]
+    pub fn preview_first_line(&self) -> u64 {
+        self.preview_first
     }
 
     /// This session's outstanding preview generation, for a caller (the
@@ -335,8 +373,9 @@ impl PickerState {
         if generation != self.preview_generation {
             return;
         }
-        self.preview_lines = lines;
+        self.preview_lines = lines.into();
         self.applied_path.clone_from(&self.preview_path);
+        self.applied_first = self.preview_first;
     }
 
     /// This session's paint-facing projection: the query line, the
@@ -356,13 +395,14 @@ impl PickerState {
         let mut view = PickerView::new(title)
             .with_query(self.query.clone())
             .with_span_rows(rows)
-            .with_preview(self.preview_lines.clone())
+            .with_preview(Arc::clone(&self.preview_lines))
             .with_preview_line(
                 self.items
                     .get(self.selected)
                     .and_then(|item| item.line)
                     .filter(|_| shows_selected_file)
-                    .and_then(|line| usize::try_from(line.saturating_sub(1)).ok()),
+                    .and_then(|line| line.checked_sub(self.applied_first))
+                    .and_then(|index| usize::try_from(index).ok()),
             );
         if !self.items.is_empty() {
             view = view.with_selected(self.selected);
@@ -623,16 +663,18 @@ mod tests {
         );
     }
 
-    /// A picker over `items` whose preview reply of `len` numbered lines
-    /// has landed for the first item.
-    fn previewed(items: Vec<PickerItem>, len: usize) -> PickerView {
+    /// A picker over `items` whose preview reply has landed for the first
+    /// item: the window it asked for of a file of `len` numbered lines.
+    fn previewed(items: Vec<PickerItem>, len: u64) -> PickerView {
         let mut state = PickerState::open(Source::LiveGrep {
             root: PathBuf::from("/repo"),
         });
         let gen = state.generation();
         state.apply_results(gen, items);
         let (preview_gen, _) = state.refresh_preview().expect("a selection");
-        let lines = (1..=len).map(|n| format!("line {n}")).collect();
+        let first = state.preview_first_line();
+        let last = (first + PREVIEW_WINDOW_LINES - 1).min(len);
+        let lines = (first..=last).map(|n| format!("line {n}")).collect();
         state.apply_preview(preview_gen, lines);
         state.view()
     }
@@ -737,5 +779,41 @@ mod tests {
         state.apply_results(gen, vec![PickerItem::grep_match("a.rs", 90, "x")]);
         assert_eq!(state.refresh_preview(), None, "no new request");
         assert_eq!(state.view().preview_line, Some(89));
+    }
+
+    #[test]
+    fn a_window_read_from_past_the_top_marks_the_matched_row() {
+        let mut state = PickerState::open(Source::LiveGrep {
+            root: PathBuf::from("/repo"),
+        });
+        let gen = state.generation();
+        state.apply_results(gen, vec![PickerItem::grep_match("a.rs", 5000, "x")]);
+        let (preview_gen, _) = state.refresh_preview().expect("a selection");
+        let first = state.preview_first_line();
+        assert_eq!(first, 5000 - PREVIEW_WINDOW_LINES / 2);
+        let lines = (first..first + PREVIEW_WINDOW_LINES)
+            .map(|n| format!("line {n}"))
+            .collect();
+        state.apply_preview(preview_gen, lines);
+        let view = state.view();
+        let (window, marked) = view.preview_window(PANE_ROWS);
+        assert_eq!(window[marked.expect("the match is marked")], "line 5000");
+    }
+
+    #[test]
+    fn a_same_file_match_past_the_window_reads_its_own_window() {
+        let mut state = PickerState::open(Source::LiveGrep {
+            root: PathBuf::from("/repo"),
+        });
+        let gen = state.generation();
+        state.apply_results(gen, vec![PickerItem::grep_match("a.rs", 40, "x")]);
+        let (first, _) = state.refresh_preview().expect("a selection");
+        state.apply_preview(first, numbered(100));
+        let gen = state.edit_query("x");
+        state.apply_results(gen, vec![PickerItem::grep_match("a.rs", 3000, "x")]);
+        assert!(state.refresh_preview().is_some(), "a new window is read");
+        assert_eq!(state.preview_first_line(), 3000 - PREVIEW_WINDOW_LINES / 2);
+        let view = state.view();
+        assert_eq!(view.preview_window(PANE_ROWS).1, None, "no mark meanwhile");
     }
 }

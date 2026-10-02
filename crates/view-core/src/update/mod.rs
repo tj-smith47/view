@@ -1036,8 +1036,9 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // true` reply is applied straight to the preview pane, but `loaded:
         // false` means there is no buffer to read from at all, and the only
         // remaining source of truth is disk -- handed off to
-        // `Effect::PickerPreviewFallback` rather than treated as "nothing to
-        // preview", so a path with no open buffer still gets a preview.
+        // `Effect::PickerPreviewFallbackWindow` rather than treated as
+        // "nothing to preview", so a path with no open buffer still gets a
+        // preview.
         Msg::PickerPreviewReply {
             generation,
             path,
@@ -1055,7 +1056,12 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 model.dirty = true;
                 Vec::new()
             } else {
-                vec![Effect::PickerPreviewFallback { generation, path }]
+                vec![Effect::PickerPreviewFallbackWindow {
+                    generation,
+                    path,
+                    first_line: p.preview_first_line(),
+                    line_count: crate::native::picker::PREVIEW_WINDOW_LINES,
+                }]
             }
         }
         Msg::PickerPreviewFile { generation, lines } => {

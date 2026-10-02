@@ -15,8 +15,8 @@ use crate::native::palette::MessageHistoryState;
 use super::path_to_wire;
 use super::route::take_binding;
 
-/// Issues an `Effect::Rpc(RpcCall::PreviewBuffer)` for `state`'s current
-/// selection, or no effect at all when there is nothing to preview (an
+/// Issues an `Effect::Rpc(RpcCall::PreviewBufferWindow)` for `state`'s
+/// current selection, or no effect at all when there is nothing to preview (an
 /// empty result set, or an unnamed `Buffers` scratch entry -- see
 /// `PickerState::selected_path`'s doc). Shared by every arm that can move
 /// the selection: today that is only `Msg::PickerResults` (no arrow-key/
@@ -26,7 +26,12 @@ pub(super) fn picker_preview_request(
     state: &mut crate::native::picker::PickerState,
 ) -> Vec<Effect> {
     match state.refresh_preview() {
-        Some((generation, path)) => vec![Effect::Rpc(RpcCall::PreviewBuffer { path, generation })],
+        Some((generation, path)) => vec![Effect::Rpc(RpcCall::PreviewBufferWindow {
+            path,
+            first_line: state.preview_first_line(),
+            line_count: crate::native::picker::PREVIEW_WINDOW_LINES,
+            generation,
+        })],
         None => Vec::new(),
     }
 }

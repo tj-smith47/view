@@ -390,6 +390,14 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::PreviewBuffer { path, generation } => {
                         self.ops.preview_buffer(&path, generation)
                     }
+                    RpcCall::PreviewBufferWindow {
+                        path,
+                        first_line,
+                        line_count,
+                        generation,
+                    } => self
+                        .ops
+                        .preview_buffer_window(&path, first_line, line_count, generation),
                     RpcCall::ReadFloatRows { win } => self.ops.read_float_rows(win),
                     RpcCall::CloseFloat { win } => self.ops.close_float(win),
                     RpcCall::ScanFloats => self.ops.scan_floats(),
@@ -753,6 +761,27 @@ impl<E: EngineOps> Executor<E> {
                     spawn_or_log("picker-preview-fallback", move || {
                         let lines =
                             view_native::picker::preview::read_file(std::path::Path::new(&path));
+                        let _ = tx.send(Msg::PickerPreviewFile { generation, lines });
+                    });
+                }
+                Flow::Continue
+            }
+            // The same read bounded to the window the picker asked the
+            // engine for, so a large unopened file costs one window.
+            Effect::PickerPreviewFallbackWindow {
+                generation,
+                path,
+                first_line,
+                line_count,
+            } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    spawn_or_log("picker-preview-fallback", move || {
+                        let lines = view_native::picker::preview::read_window(
+                            std::path::Path::new(&path),
+                            first_line,
+                            line_count,
+                        );
                         let _ = tx.send(Msg::PickerPreviewFile { generation, lines });
                     });
                 }

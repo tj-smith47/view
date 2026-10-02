@@ -156,6 +156,16 @@ pub trait EngineOps {
     /// `generation`; never blocks, and never itself returns the answer (see
     /// `Msg::PickerPreviewReply`).
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError>;
+    /// Resolves `line_count` lines of `path` from the 1-based `first_line`,
+    /// tagged `generation`; never blocks, and never itself returns the
+    /// answer. See `view_engine::nvim_api::EngineHandle::preview_buffer_window`.
+    fn preview_buffer_window(
+        &self,
+        path: &str,
+        first_line: u64,
+        line_count: u64,
+        generation: u64,
+    ) -> Result<(), EngineError>;
     /// Reads a withheld float's lines; never blocks, and never itself
     /// returns the answer (see `RpcCall::ReadFloatRows`, `Msg::FloatRows`).
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError>;
@@ -444,6 +454,15 @@ impl EngineOps for EngineHandle {
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.preview_buffer(path, generation)
     }
+    fn preview_buffer_window(
+        &self,
+        path: &str,
+        first_line: u64,
+        line_count: u64,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.preview_buffer_window(path, first_line, line_count, generation)
+    }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         self.read_float_rows(win)
     }
@@ -688,6 +707,15 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
+    }
+    fn preview_buffer_window(
+        &self,
+        path: &str,
+        first_line: u64,
+        line_count: u64,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        (**self).preview_buffer_window(path, first_line, line_count, generation)
     }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         (**self).read_float_rows(win)
@@ -936,6 +964,15 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
+    }
+    fn preview_buffer_window(
+        &self,
+        path: &str,
+        first_line: u64,
+        line_count: u64,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        (**self).preview_buffer_window(path, first_line, line_count, generation)
     }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         (**self).read_float_rows(win)
@@ -1250,6 +1287,17 @@ impl EngineOps for FakeOps {
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.record(format!("preview_buffer({path},{generation})"))
     }
+    fn preview_buffer_window(
+        &self,
+        path: &str,
+        first_line: u64,
+        line_count: u64,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.record(format!(
+            "preview_buffer_window({path},{first_line},{line_count},{generation})"
+        ))
+    }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         self.record(format!("read_float_rows({win})"))
     }
@@ -1552,6 +1600,15 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn preview_buffer(&self, _path: &str, _generation: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn preview_buffer_window(
+        &self,
+        _path: &str,
+        _first_line: u64,
+        _line_count: u64,
+        _generation: u64,
+    ) -> Result<(), EngineError> {
         Ok(())
     }
     fn read_float_rows(&self, _win: u64) -> Result<(), EngineError> {

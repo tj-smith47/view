@@ -1191,6 +1191,27 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 end
 return { loaded = false }";
 
+/// [`PREVIEW_CHUNK`] for `count` lines from the 1-based line `first` on,
+/// fewer where the buffer ends first and none past its end. Same reply
+/// shape, same canonicalized name match.
+const PREVIEW_WINDOW_CHUNK: &str = "\
+local path, first, count = ...
+local function canon(p)
+  if p == '' then
+    return p
+  end
+  return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
+end
+local wanted = canon(path)
+for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(buf)
+    and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
+    return { loaded = true, lines = vim.api.nvim_buf_get_lines(
+      buf, first - 1, first - 1 + count, false) }
+  end
+end
+return { loaded = false }";
+
 /// The `canon()` both [`LOAD_HIDDEN_CHUNK`] and
 /// [`HIDDEN_CANON_PROBE_CHUNK`] embed, as one literal rather than two
 /// copies: the probe exists to pin [`canonical_hidden_key`] against the
@@ -3675,6 +3696,37 @@ impl EngineHandle {
             vec![
                 Value::from(PREVIEW_CHUNK),
                 Value::Array(vec![Value::from(path)]),
+            ],
+            generation,
+            path.to_owned(),
+        )
+    }
+
+    /// [`preview_buffer`](Self::preview_buffer) for `line_count` lines of
+    /// `path` from the 1-based `first_line` on: the reply holds those lines
+    /// only, fewer where the buffer ends first, so a large buffer is never
+    /// copied whole.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn preview_buffer_window(
+        &self,
+        path: &str,
+        first_line: u64,
+        line_count: u64,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.request_preview(
+            "nvim_exec_lua",
+            vec![
+                Value::from(PREVIEW_WINDOW_CHUNK),
+                Value::Array(vec![
+                    Value::from(path),
+                    Value::from(first_line),
+                    Value::from(line_count),
+                ]),
             ],
             generation,
             path.to_owned(),
