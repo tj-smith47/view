@@ -331,7 +331,8 @@ either one; the newer key wins when a config writes both.
 A completion menu your config opens while `:` is open is drawn in the
 palette's rows. A second window the same config opens beside it, such as a
 documentation window, is not shown while the palette is open.
-`[native] palette = false` gives both back to your config.
+`[native] palette = false` gives both back to your config. A notification
+or a progress message that opens while `:` is open stays where it opened.
 
 The file tree lists folders first and then files, each group ordered by
 name whatever its case. Dotfiles are listed. Anything `.ignore` names is

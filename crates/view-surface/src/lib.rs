@@ -625,7 +625,7 @@ pub fn render(model: &Model) -> Surface {
             let rect = palette_rect(model);
             layers.push(Layer::new(
                 Rect::new(rect.row, rect.col, rect.width, rect.height),
-                LayerKind::Palette(state.view()),
+                LayerKind::Palette(state.into_view()),
                 model.caps,
             ));
         } else {

@@ -46,80 +46,80 @@ engine pin different from `.engine-pin`, so a pin bump forces a fresh
 
 | Plugin | Version | Engine pin | Scenario | State | Panes | Result | Date |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| clipboard-precedence | - | v0.12.4 | clipboard-precedence | present | nvim | OK | 2026-09-29 |
-| clipboard-precedence | - | v0.12.4 | clipboard-precedence | native-only | nvim | OK | 2026-09-29 |
-| clipboard-precedence | - | v0.12.4 | clipboard-precedence | present | tiles | OK | 2026-09-29 |
-| clipboard-precedence | - | v0.12.4 | clipboard-precedence | native-only | tiles | OK | 2026-09-29 |
-| lualine | 221ce6b | v0.12.4 | cold-bootstrap | present | nvim | OK | 2026-09-29 |
-| lualine | 221ce6b | v0.12.4 | cold-bootstrap | present | tiles | OK | 2026-09-29 |
+| clipboard-precedence | - | v0.12.4 | clipboard-precedence | present | nvim | OK | 2026-10-02 |
+| clipboard-precedence | - | v0.12.4 | clipboard-precedence | native-only | nvim | OK | 2026-10-02 |
+| clipboard-precedence | - | v0.12.4 | clipboard-precedence | present | tiles | OK | 2026-10-02 |
+| clipboard-precedence | - | v0.12.4 | clipboard-precedence | native-only | tiles | OK | 2026-10-02 |
+| lualine | 221ce6b | v0.12.4 | cold-bootstrap | present | nvim | OK | 2026-10-02 |
+| lualine | 221ce6b | v0.12.4 | cold-bootstrap | present | tiles | OK | 2026-10-02 |
 | daily-config | - | v0.12.4 | daily-config | present | nvim | OK | 2026-10-02 |
 | daily-config | - | v0.12.4 | daily-config | present | tiles | OK | 2026-10-02 |
-| dressing | 2d7c2db | v0.12.4 | dressing | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| dressing | 2d7c2db | v0.12.4 | dressing | superseded | nvim | OK | 2026-09-29 |
-| dressing | 2d7c2db | v0.12.4 | dressing | deferred | nvim | OK | 2026-09-29 |
-| dressing | - | v0.12.4 | dressing | native-only | nvim | OK | 2026-09-29 |
-| dressing | 2d7c2db | v0.12.4 | dressing | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| dressing | 2d7c2db | v0.12.4 | dressing | superseded | tiles | OK | 2026-09-29 |
-| dressing | 2d7c2db | v0.12.4 | dressing | deferred | tiles | OK | 2026-09-29 |
-| dressing | - | v0.12.4 | dressing | native-only | tiles | OK | 2026-09-29 |
-| fidget | 6f793b2 | v0.12.4 | fidget | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| fidget | 6f793b2 | v0.12.4 | fidget | superseded | nvim | OK | 2026-09-29 |
-| fidget | 6f793b2 | v0.12.4 | fidget | deferred | nvim | OK | 2026-09-29 |
-| fidget | - | v0.12.4 | fidget | native-only | nvim | OK | 2026-09-29 |
-| fidget | 6f793b2 | v0.12.4 | fidget | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| fidget | 6f793b2 | v0.12.4 | fidget | superseded | tiles | OK | 2026-09-29 |
-| fidget | 6f793b2 | v0.12.4 | fidget | deferred | tiles | OK | 2026-09-29 |
-| fidget | - | v0.12.4 | fidget | native-only | tiles | OK | 2026-09-29 |
-| lualine | 221ce6b | v0.12.4 | lualine | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| lualine | 221ce6b | v0.12.4 | lualine | superseded | nvim | OK | 2026-09-29 |
-| lualine | 221ce6b | v0.12.4 | lualine | deferred | nvim | OK | 2026-09-29 |
-| lualine | 221ce6b | v0.12.4 | lualine | deferred/all-off | nvim | OK | 2026-09-29 |
-| lualine | - | v0.12.4 | lualine | native-only | nvim | OK | 2026-09-29 |
-| mini.nvim | a35f08f | v0.12.4 | mini | present | nvim | OK | 2026-09-29 |
-| mini.nvim | a35f08f | v0.12.4 | mini | present | tiles | OK | 2026-09-29 |
-| neo-tree | b01ee17 | v0.12.4 | neo-tree | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| neo-tree | b01ee17 | v0.12.4 | neo-tree | superseded | nvim | OK | 2026-09-29 |
-| neo-tree | b01ee17 | v0.12.4 | neo-tree | deferred | nvim | OK | 2026-09-29 |
-| neo-tree | - | v0.12.4 | neo-tree | native-only | nvim | OK | 2026-09-29 |
-| neo-tree | b01ee17 | v0.12.4 | neo-tree | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| neo-tree | b01ee17 | v0.12.4 | neo-tree | superseded | tiles | OK | 2026-09-29 |
-| neo-tree | b01ee17 | v0.12.4 | neo-tree | deferred | tiles | OK | 2026-09-29 |
-| neo-tree | - | v0.12.4 | neo-tree | native-only | tiles | OK | 2026-09-29 |
-| noice | 7bfd942 | v0.12.4 | noice | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| noice | 7bfd942 | v0.12.4 | noice | superseded | nvim | OK | 2026-09-29 |
-| noice | 7bfd942 | v0.12.4 | noice | deferred | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| noice | - | v0.12.4 | noice | native-only | nvim | OK | 2026-09-29 |
-| noice | 7bfd942 | v0.12.4 | noice | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| noice | 7bfd942 | v0.12.4 | noice | superseded | tiles | OK | 2026-09-29 |
-| noice | - | v0.12.4 | noice | native-only | tiles | OK | 2026-09-29 |
+| dressing | 2d7c2db | v0.12.4 | dressing | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| dressing | 2d7c2db | v0.12.4 | dressing | superseded | nvim | OK | 2026-10-02 |
+| dressing | 2d7c2db | v0.12.4 | dressing | deferred | nvim | OK | 2026-10-02 |
+| dressing | - | v0.12.4 | dressing | native-only | nvim | OK | 2026-10-02 |
+| dressing | 2d7c2db | v0.12.4 | dressing | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| dressing | 2d7c2db | v0.12.4 | dressing | superseded | tiles | OK | 2026-10-02 |
+| dressing | 2d7c2db | v0.12.4 | dressing | deferred | tiles | OK | 2026-10-02 |
+| dressing | - | v0.12.4 | dressing | native-only | tiles | OK | 2026-10-02 |
+| fidget | 6f793b2 | v0.12.4 | fidget | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| fidget | 6f793b2 | v0.12.4 | fidget | superseded | nvim | OK | 2026-10-02 |
+| fidget | 6f793b2 | v0.12.4 | fidget | deferred | nvim | OK | 2026-10-02 |
+| fidget | - | v0.12.4 | fidget | native-only | nvim | OK | 2026-10-02 |
+| fidget | 6f793b2 | v0.12.4 | fidget | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| fidget | 6f793b2 | v0.12.4 | fidget | superseded | tiles | OK | 2026-10-02 |
+| fidget | 6f793b2 | v0.12.4 | fidget | deferred | tiles | OK | 2026-10-02 |
+| fidget | - | v0.12.4 | fidget | native-only | tiles | OK | 2026-10-02 |
+| lualine | 221ce6b | v0.12.4 | lualine | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| lualine | 221ce6b | v0.12.4 | lualine | superseded | nvim | OK | 2026-10-02 |
+| lualine | 221ce6b | v0.12.4 | lualine | deferred | nvim | OK | 2026-10-02 |
+| lualine | 221ce6b | v0.12.4 | lualine | deferred/all-off | nvim | OK | 2026-10-02 |
+| lualine | - | v0.12.4 | lualine | native-only | nvim | OK | 2026-10-02 |
+| mini.nvim | a35f08f | v0.12.4 | mini | present | nvim | OK | 2026-10-02 |
+| mini.nvim | a35f08f | v0.12.4 | mini | present | tiles | OK | 2026-10-02 |
+| neo-tree | b01ee17 | v0.12.4 | neo-tree | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| neo-tree | b01ee17 | v0.12.4 | neo-tree | superseded | nvim | OK | 2026-10-02 |
+| neo-tree | b01ee17 | v0.12.4 | neo-tree | deferred | nvim | OK | 2026-10-02 |
+| neo-tree | - | v0.12.4 | neo-tree | native-only | nvim | OK | 2026-10-02 |
+| neo-tree | b01ee17 | v0.12.4 | neo-tree | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| neo-tree | b01ee17 | v0.12.4 | neo-tree | superseded | tiles | OK | 2026-10-02 |
+| neo-tree | b01ee17 | v0.12.4 | neo-tree | deferred | tiles | OK | 2026-10-02 |
+| neo-tree | - | v0.12.4 | neo-tree | native-only | tiles | OK | 2026-10-02 |
+| noice | 7bfd942 | v0.12.4 | noice | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| noice | 7bfd942 | v0.12.4 | noice | superseded | nvim | OK | 2026-10-02 |
+| noice | 7bfd942 | v0.12.4 | noice | deferred | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| noice | - | v0.12.4 | noice | native-only | nvim | OK | 2026-10-02 |
+| noice | 7bfd942 | v0.12.4 | noice | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| noice | 7bfd942 | v0.12.4 | noice | superseded | tiles | OK | 2026-10-02 |
+| noice | - | v0.12.4 | noice | native-only | tiles | OK | 2026-10-02 |
 | nvim-cmp | 2ffe79f | v0.12.4 | nvim-cmp | present | nvim | OK | 2026-10-02 |
 | nvim-cmp | 2ffe79f | v0.12.4 | nvim-cmp | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
 | nvim-cmp | 2ffe79f | v0.12.4 | nvim-cmp | present | tiles | OK | 2026-10-02 |
 | nvim-cmp | 2ffe79f | v0.12.4 | nvim-cmp | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
-| nvim-notify | 8701bec | v0.12.4 | nvim-notify | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| nvim-notify | 8701bec | v0.12.4 | nvim-notify | superseded | nvim | OK | 2026-09-29 |
-| nvim-notify | 8701bec | v0.12.4 | nvim-notify | deferred | nvim | OK | 2026-09-29 |
-| nvim-notify | - | v0.12.4 | nvim-notify | native-only | nvim | OK | 2026-09-29 |
-| nvim-notify | 8701bec | v0.12.4 | nvim-notify | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| nvim-notify | 8701bec | v0.12.4 | nvim-notify | superseded | tiles | OK | 2026-09-29 |
-| nvim-notify | 8701bec | v0.12.4 | nvim-notify | deferred | tiles | OK | 2026-09-29 |
-| nvim-notify | - | v0.12.4 | nvim-notify | native-only | tiles | OK | 2026-09-29 |
-| nvim-tree | 4213bd6 | v0.12.4 | nvim-tree | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| nvim-tree | 4213bd6 | v0.12.4 | nvim-tree | superseded | nvim | OK | 2026-09-29 |
-| nvim-tree | 4213bd6 | v0.12.4 | nvim-tree | deferred | nvim | OK | 2026-09-29 |
-| nvim-tree | - | v0.12.4 | nvim-tree | native-only | nvim | OK | 2026-09-29 |
-| nvim-tree | 4213bd6 | v0.12.4 | nvim-tree | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| nvim-tree | 4213bd6 | v0.12.4 | nvim-tree | superseded | tiles | OK | 2026-09-29 |
-| nvim-tree | 4213bd6 | v0.12.4 | nvim-tree | deferred | tiles | OK | 2026-09-29 |
-| nvim-tree | - | v0.12.4 | nvim-tree | native-only | tiles | OK | 2026-09-29 |
-| nvim-treesitter | cf12346 | v0.12.4 | nvim-treesitter | present | nvim | OK | 2026-09-29 |
-| nvim-treesitter | cf12346 | v0.12.4 | nvim-treesitter | present | tiles | OK | 2026-09-29 |
-| smoke | - | v0.12.4 | smoke-minimal | present | nvim | OK | 2026-09-29 |
-| smoke | - | v0.12.4 | smoke-minimal | native-only | nvim | OK | 2026-09-29 |
-| smoke | - | v0.12.4 | smoke-minimal | present | tiles | OK | 2026-09-29 |
-| telescope | 427b576 | v0.12.4 | telescope | present | nvim | OK | 2026-09-29 |
-| telescope | 427b576 | v0.12.4 | telescope | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| telescope | 427b576 | v0.12.4 | telescope | present | tiles | OK | 2026-09-29 |
-| telescope | 427b576 | v0.12.4 | telescope | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
-| which-key | 3aab214 | v0.12.4 | which-key | present | nvim | OK | 2026-09-29 |
-| which-key | 3aab214 | v0.12.4 | which-key | present | tiles | OK | 2026-09-29 |
+| nvim-notify | 8701bec | v0.12.4 | nvim-notify | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| nvim-notify | 8701bec | v0.12.4 | nvim-notify | superseded | nvim | OK | 2026-10-02 |
+| nvim-notify | 8701bec | v0.12.4 | nvim-notify | deferred | nvim | OK | 2026-10-02 |
+| nvim-notify | - | v0.12.4 | nvim-notify | native-only | nvim | OK | 2026-10-02 |
+| nvim-notify | 8701bec | v0.12.4 | nvim-notify | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| nvim-notify | 8701bec | v0.12.4 | nvim-notify | superseded | tiles | OK | 2026-10-02 |
+| nvim-notify | 8701bec | v0.12.4 | nvim-notify | deferred | tiles | OK | 2026-10-02 |
+| nvim-notify | - | v0.12.4 | nvim-notify | native-only | tiles | OK | 2026-10-02 |
+| nvim-tree | 4213bd6 | v0.12.4 | nvim-tree | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| nvim-tree | 4213bd6 | v0.12.4 | nvim-tree | superseded | nvim | OK | 2026-10-02 |
+| nvim-tree | 4213bd6 | v0.12.4 | nvim-tree | deferred | nvim | OK | 2026-10-02 |
+| nvim-tree | - | v0.12.4 | nvim-tree | native-only | nvim | OK | 2026-10-02 |
+| nvim-tree | 4213bd6 | v0.12.4 | nvim-tree | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| nvim-tree | 4213bd6 | v0.12.4 | nvim-tree | superseded | tiles | OK | 2026-10-02 |
+| nvim-tree | 4213bd6 | v0.12.4 | nvim-tree | deferred | tiles | OK | 2026-10-02 |
+| nvim-tree | - | v0.12.4 | nvim-tree | native-only | tiles | OK | 2026-10-02 |
+| nvim-treesitter | cf12346 | v0.12.4 | nvim-treesitter | present | nvim | OK | 2026-10-02 |
+| nvim-treesitter | cf12346 | v0.12.4 | nvim-treesitter | present | tiles | OK | 2026-10-02 |
+| smoke | - | v0.12.4 | smoke-minimal | present | nvim | OK | 2026-10-02 |
+| smoke | - | v0.12.4 | smoke-minimal | native-only | nvim | OK | 2026-10-02 |
+| smoke | - | v0.12.4 | smoke-minimal | present | tiles | OK | 2026-10-02 |
+| telescope | 427b576 | v0.12.4 | telescope | present | nvim | OK | 2026-10-02 |
+| telescope | 427b576 | v0.12.4 | telescope | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| telescope | 427b576 | v0.12.4 | telescope | present | tiles | OK | 2026-10-02 |
+| telescope | 427b576 | v0.12.4 | telescope | unaccommodated | tiles | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-10-02 |
+| which-key | 3aab214 | v0.12.4 | which-key | present | nvim | OK | 2026-10-02 |
+| which-key | 3aab214 | v0.12.4 | which-key | present | tiles | OK | 2026-10-02 |

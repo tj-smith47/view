@@ -575,6 +575,7 @@ pub(super) fn on_float_placed(
     win: u64,
     row: i64,
     col: i64,
+    zindex: u32,
 ) -> Vec<Effect> {
     if model.surface_conflicts.is_complaint(win) {
         // a window being animated sends a placement per step, and it is the
@@ -586,7 +587,7 @@ pub(super) fn on_float_placed(
     let Some((width, height)) = model.engine.grids().grid(grid).map(crate::grid::Grid::size) else {
         return Vec::new();
     };
-    if take_into_palette(model, grid, win, row, col, (width, height)) {
+    if take_into_palette(model, grid, win, (row, col, zindex), (width, height)) {
         return Vec::new();
     }
     let Some(surface) = surfaces::claims_at(
@@ -628,23 +629,32 @@ pub(super) fn on_float_placed(
 /// Takes a float into the palette's open command line, and answers whether
 /// the command line holds it.
 ///
-/// Taken on its first placement while the command line is open, and kept
-/// off the screen at every placement after: the palette paints its rows
-/// ([`crate::native::palette::listed_grid`]). A float already standing when
-/// the command line opened is left alone, and so is one over the notice
-/// column, which is a notification wherever it opened.
+/// Taken at a placement while the command line is open, and kept off the
+/// screen at every placement after: the palette paints its rows
+/// ([`crate::native::palette::listed_grid`]). Only a float stacked as a
+/// completion menu is taken ([`crate::native::palette::stacks_as_menu`]),
+/// and a held float placed again below that is let go on the same frame.
+/// A float already standing when the command line opened is left alone,
+/// and so is one over the notice column, which is a notification wherever
+/// it opened.
 fn take_into_palette(
     model: &mut Model,
     grid: crate::grid::registry::GridId,
     win: u64,
-    row: i64,
-    col: i64,
+    (row, col, zindex): (i64, i64, u32),
     (width, height): (u16, u16),
 ) -> bool {
+    let menu = crate::native::palette::stacks_as_menu(zindex);
     if model.cmdline_floats.holds(grid) {
-        return true;
+        if menu {
+            return true;
+        }
+        model.cmdline_floats.forget(grid);
+        model.dirty |= model.engine.withhold_float(grid, false);
+        return false;
     }
-    if !crate::native::palette::takes_cmdline_floats(model)
+    if !menu
+        || !crate::native::palette::takes_cmdline_floats(model)
         || model.cmdline_floats.existed(grid)
         || surfaces::over_notice_column(
             row,
@@ -1123,6 +1133,30 @@ mod tests {
                     .to_string()
             ]
         );
+    }
+
+    /// fidget's progress float, verbatim from the capture: `SE` at row 29,
+    /// col 99, two rows in the grid's bottom-right corner. It stands there
+    /// whether or not a command line is open, so it draws over none.
+    #[test]
+    fn a_notifier_in_the_bottom_corner_during_the_cmdline_is_not_named() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
+        let progress = FloatSighting {
+            win: 1006,
+            buf: 9,
+            row: 29,
+            col: 99,
+            width: 35,
+            height: 2,
+            anchor: FloatAnchor::SouthEast,
+            zindex: 45,
+            filetype: "fidget".to_string(),
+            name: String::new(),
+            hidden: false,
+        };
+        let _ = observe_float(&mut model, &progress);
+        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
     }
 
     #[test]
@@ -3450,28 +3484,46 @@ mod tests {
     }
 
     /// One float nvim sizes and places: `grid` for window `win`, `width`
-    /// by `height` at `(row, col)`.
+    /// by `height` at `(row, col)`, stacked where the captured completion
+    /// menu stacks.
     fn open_float(model: &mut Model, grid: u64, win: u64, rect: (u64, u64, u64, u64)) {
-        let (row, col, width, height) = rect;
-        let _ = update(
-            model,
-            Msg::Redraw(vec![
-                UiEvent::GridResize {
-                    grid,
-                    width,
-                    height,
-                },
-                UiEvent::WinFloatPos {
-                    grid,
-                    win: crate::events::WinHandle(win),
-                    anchor_grid: 1,
-                    zindex: 1001,
-                    compindex: 1,
-                    screen_row: row,
-                    screen_col: col,
-                },
-            ]),
-        );
+        open_float_stacked(model, grid, win, rect, 1001);
+    }
+
+    /// [`open_float`] at stacking order `zindex`.
+    fn open_float_stacked(
+        model: &mut Model,
+        grid: u64,
+        win: u64,
+        rect: (u64, u64, u64, u64),
+        zindex: u64,
+    ) {
+        let _ = update(model, Msg::Redraw(float_events(grid, win, rect, zindex)));
+    }
+
+    /// The `grid_resize` and `win_float_pos` nvim sends for one float.
+    fn float_events(
+        grid: u64,
+        win: u64,
+        (row, col, width, height): (u64, u64, u64, u64),
+        zindex: u64,
+    ) -> Vec<UiEvent> {
+        vec![
+            UiEvent::GridResize {
+                grid,
+                width,
+                height,
+            },
+            UiEvent::WinFloatPos {
+                grid,
+                win: crate::events::WinHandle(win),
+                anchor_grid: 1,
+                zindex,
+                compindex: 1,
+                screen_row: row,
+                screen_col: col,
+            },
+        ]
     }
 
     fn withheld(model: &Model, grid: u64) -> bool {
@@ -3600,6 +3652,64 @@ mod tests {
                 .holds(crate::grid::registry::GridId(12)),
             "a toast stays the notice column's"
         );
+        assert_eq!(listed(&model), None);
+    }
+
+    /// A progress float opened bottom-right while `:w` is open, at the
+    /// stacking order the captured one carries
+    /// (`caps/after/i1-streams/fidgetcmp.log`).
+    #[test]
+    fn a_progress_float_during_the_cmdline_is_not_taken() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        open_float_stacked(&mut model, 12, 1009, (29 - 4, 100 - 32, 30, 3), 45);
+        assert!(!holds(&model, 12));
+        assert!(!withheld(&model, 12), "the progress float stays on screen");
+        assert_eq!(listed(&model), None);
+    }
+
+    #[test]
+    fn a_notifier_at_any_corner_during_the_cmdline_is_not_taken() {
+        for (corner, rect) in [
+            ("top-left", (0, 0, 40, 3)),
+            ("top-right", (0, 60, 40, 3)),
+            ("bottom-left", (26, 0, 40, 3)),
+            ("bottom-right", (26, 60, 40, 3)),
+        ] {
+            let mut model = palette_session();
+            open_cmdline(&mut model);
+            open_float_stacked(&mut model, 12, 1009, rect, 50);
+            assert!(!holds(&model, 12), "{corner}");
+            assert_eq!(listed(&model), None, "{corner}");
+        }
+    }
+
+    /// The captured menu and its scrollbar thumb, placed in one batch with a
+    /// progress float the same redraw carried.
+    #[test]
+    fn a_float_stacked_like_the_menu_is_taken_beside_a_progress_float() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        let mut batch = float_events(11, 1008, (18, 0, 100, 10), 1001);
+        batch.extend(float_events(12, 1009, (19, 97, 1, 1), 1003));
+        batch.extend(float_events(13, 1010, (27, 64, 35, 2), 45));
+        batch.push(UiEvent::Flush);
+        let _ = update(&mut model, Msg::Redraw(batch));
+        assert_eq!(listed(&model), Some(11));
+        assert!(withheld(&model, 11) && withheld(&model, 12));
+        assert!(!holds(&model, 13));
+        assert!(!withheld(&model, 13), "the progress float stays on screen");
+    }
+
+    #[test]
+    fn a_held_float_placed_again_below_the_menus_stacking_is_released() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        open_float(&mut model, 11, 1008, MENU);
+        assert!(holds(&model, 11));
+        open_float_stacked(&mut model, 11, 1008, MENU, 50);
+        assert!(!holds(&model, 11));
+        assert!(!withheld(&model, 11));
         assert_eq!(listed(&model), None);
     }
 

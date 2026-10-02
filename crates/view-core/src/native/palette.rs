@@ -67,8 +67,9 @@ impl PaletteState {
         )
     }
 
+    /// The view the palette paints, taking the drawn rows with it.
     #[must_use]
-    pub fn view(&self) -> PaletteView {
+    pub fn into_view(self) -> PaletteView {
         let rows = match &self.completion {
             Some(pm) => pm
                 .items
@@ -80,7 +81,7 @@ impl PaletteState {
         let view = PaletteView::new(title_for(&self.cmdline.firstc))
             .with_query(self.query())
             .with_rows(rows)
-            .with_drawn(self.drawn.clone());
+            .with_drawn(self.drawn);
         // the engine's `selected` is a signed sentinel (-1 for "nothing
         // selected")
         let selected = self
@@ -114,15 +115,34 @@ fn title_for(firstc: &str) -> &'static str {
     }
 }
 
+/// The stacking order nvim gives its own insert completion menu
+/// (`:help api-win_config`, `zindex`).
+///
+/// nvim asks floats to stay below it unless they mean to cover its own
+/// menus, so a float at or above it is a menu. The completion menus
+/// captured on the command line stack at 1001 and 1003, and the
+/// notification and progress floats at 50 and 45
+/// (`docs/surface-ownership.md`).
+pub const COMPLETION_MENU_ZINDEX: u32 = 100;
+
+/// Whether a float at stacking order `zindex` is stacked as a completion
+/// menu ([`COMPLETION_MENU_ZINDEX`]).
+#[must_use]
+pub fn stacks_as_menu(zindex: u32) -> bool {
+    zindex >= COMPLETION_MENU_ZINDEX
+}
+
 /// The floats a command line the palette draws has opened, held off the
 /// screen so the palette can paint the list among them in its own rows.
 ///
-/// A float first placed while that command line is open belongs to it: the
-/// command line is the only thing on screen taking input, so a window
-/// opened then is the command line's own UI. A float that was already
-/// standing when it opened is left where it is. A command line opened
-/// inside another (`<C-r>=`) belongs to the outer one, so its floats stay
-/// held until the outermost line closes.
+/// A float placed while that command line is open belongs to it when it is
+/// stacked as a completion menu ([`stacks_as_menu`]): the command line is
+/// the only thing on screen taking input, so a menu opened then is the
+/// command line's own. Any other float (a notification, a progress
+/// message) stays where it opened, and so does a float already standing
+/// when the line opened. A command line opened inside another (`<C-r>=`)
+/// belongs to the outer one, so its floats stay held until the outermost
+/// line closes.
 #[derive(Debug, Clone, Default)]
 pub struct CmdlineFloats {
     /// The level of the outermost command line open, or `None` with none
@@ -559,10 +579,22 @@ mod tests {
         messages.entries.into_iter().next().expect("just pushed")
     }
 
+    /// The rows read off the menu's grid reach the view by move: a rebuild
+    /// copies the grid once, when they are read.
+    #[test]
+    fn the_drawn_rows_move_into_the_view_uncopied() {
+        let drawn = vec![vec![Span::new("edit".to_string(), StyleRole::Highlight(7))]];
+        let text = drawn[0][0].text.as_ptr();
+        let view = PaletteState::new(cmdline(":", "e"), None)
+            .with_drawn(drawn)
+            .into_view();
+        assert_eq!(view.drawn[0][0].text.as_ptr(), text);
+    }
+
     #[test]
     fn a_bare_colon_renders_an_empty_command_query() {
         let state = PaletteState::new(cmdline(":", ""), None);
-        let view = state.view();
+        let view = state.into_view();
         assert_eq!(view.title, "Command");
         assert_eq!(view.query, ":");
         assert!(view.rows.is_empty());
@@ -572,7 +604,7 @@ mod tests {
     #[test]
     fn a_typed_command_keeps_its_firstc_prefix_in_the_query() {
         let state = PaletteState::new(cmdline(":", "set nu"), None);
-        assert_eq!(state.view().query, ":set nu");
+        assert_eq!(state.into_view().query, ":set nu");
     }
 
     /// A `:call input("New file: ")`-style prompt carries its label in
@@ -592,13 +624,13 @@ mod tests {
             },
             None,
         );
-        assert_eq!(state.view().query, "New file: foo");
+        assert_eq!(state.into_view().query, "New file: foo");
     }
 
     #[test]
     fn a_search_prompt_titles_itself_search() {
         let state = PaletteState::new(cmdline("/", "needle"), None);
-        assert_eq!(state.view().title, "Search");
+        assert_eq!(state.into_view().title, "Search");
     }
 
     #[test]
@@ -624,7 +656,7 @@ mod tests {
             -1,
         );
         let state = PaletteState::new(cmdline(":", "set nu"), Some(completion));
-        let view = state.view();
+        let view = state.into_view();
         assert_eq!(
             view.rows
                 .iter()
@@ -650,7 +682,7 @@ mod tests {
             -1,
         );
         let state = PaletteState::new(cmdline(":", "set nu"), Some(completion));
-        assert_eq!(state.view().selected, None);
+        assert_eq!(state.into_view().selected, None);
     }
 
     #[test]

@@ -46,6 +46,28 @@ steps = [
   # row 29 stays the statusline row and lualine's own separator glyph
   # (U+E0B2) never reaches column 85 (see lualine.toml).
   { assert_cell_not = { row = 29, col = 85, glyph = "" } },
+  # A progress burst while the palette's command line is open. nvim draws
+  # no new window during a command line until something redraws, so cmp's
+  # cmdline menu answering a keystroke is what carries fidget's first frame,
+  # in the same batch as the menu's. The menu is listed in the palette, and
+  # the progress float stays at its own corner with no notice about it.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"fidget\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 15000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"fidget\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 60000 },
+  { probe = "luaeval('(function() local cmp = require(\"cmp\") cmp.setup.cmdline(\":\", { mapping = cmp.mapping.preset.cmdline(), sources = { { name = \"buffer\" } } }) vim.api.nvim_buf_set_lines(0, 0, -1, false, { \"prefabricated preflight\" }) return \"armed\" end)()')", expect = "armed" },
+  { send = ":" },
+  { send = "e" },
+  { send = " " },
+  { send = "p" },
+  { wait_for_probe = "luaeval('require(\"cmp\").visible()')", expect = "true", timeout_ms = 15000 },
+  { probe = "luaeval('(function() _G.compat_burst = require(\"fidget.progress\").handle.create({ title = \"compat-burst\", message = \"fidget-cmdline-marker\", lsp_client = { name = \"compatlsp\" } }) return \"made\" end)()')", expect = "made" },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"fidget\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 15000 },
+  { send = "r" },
+  { wait_for = "    prefabricated  Text", timeout_ms = 15000 },
+  { wait_for = "fidget-cmdline-marker compat-burst", timeout_ms = 15000 },
+  { assert_absent = "│    fidget-cmdline-marker" },
+  { assert_absent = "is drawing over" },
+  { send = "<Esc>" },
+  { probe = "luaeval('(function() _G.compat_burst:finish() return \"done\" end)()')", expect = "done" },
 ]
 
 
@@ -117,6 +139,23 @@ steps = [
   { wait_for = "fidget-compat-marker", timeout_ms = 60000 },
   { send = ":lua _G.compat_fidget:finish()<CR>" },
   { assert_cell_not = { row = 29, col = 85, glyph = "" } },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"fidget\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 15000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"fidget\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 60000 },
+  { probe = "luaeval('(function() local cmp = require(\"cmp\") cmp.setup.cmdline(\":\", { mapping = cmp.mapping.preset.cmdline(), sources = { { name = \"buffer\" } } }) vim.api.nvim_buf_set_lines(0, 0, -1, false, { \"prefabricated preflight\" }) return \"armed\" end)()')", expect = "armed" },
+  { send = ":" },
+  { send = "e" },
+  { send = " " },
+  { send = "p" },
+  { wait_for_probe = "luaeval('require(\"cmp\").visible()')", expect = "true", timeout_ms = 15000 },
+  { probe = "luaeval('(function() _G.compat_burst = require(\"fidget.progress\").handle.create({ title = \"compat-burst\", message = \"fidget-cmdline-marker\", lsp_client = { name = \"compatlsp\" } }) return \"made\" end)()')", expect = "made" },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"fidget\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 15000 },
+  { send = "r" },
+  { wait_for = "    prefabricated  Text", timeout_ms = 15000 },
+  { wait_for = "fidget-cmdline-marker compat-burst", timeout_ms = 15000 },
+  { assert_absent = "│    fidget-cmdline-marker" },
+  { assert_absent = "is drawing over" },
+  { send = "<Esc>" },
+  { probe = "luaeval('(function() _G.compat_burst:finish() return \"done\" end)()')", expect = "done" },
 ]
 
 [[states]]

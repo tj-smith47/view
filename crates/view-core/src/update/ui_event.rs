@@ -154,6 +154,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                 win.0,
                 i64::from(screen_row),
                 i64::from(screen_col),
+                saturate_u32(zindex),
             ));
             effects
         }

@@ -518,8 +518,11 @@ fn landing(
         };
         overlaps(column, float) && near_the_anchor && on_the_outer_side && rows <= chrome_rows
     };
+    // nvim's command line starts at the grid's left edge, so a float held
+    // inside the right-hand corner column is a notifier stacked there
+    let right_corner = i64::from(grid_w.saturating_sub(corner_width));
     Some((
-        bottom >= last_row - (CMDLINE_ROWS - 1),
+        bottom >= last_row - (CMDLINE_ROWS - 1) && left < right_corner,
         over_the_stack(model.notice_bounds()) || over_the_stack(grid_corner),
     ))
 }

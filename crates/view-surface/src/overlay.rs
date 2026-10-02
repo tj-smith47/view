@@ -17,6 +17,8 @@
 //! which is the only layer that knows the terminal's probed color
 //! capability; this module only decides which text carries which role.
 
+use std::collections::HashSet;
+
 use unicode_width::UnicodeWidthChar;
 use view_core::model::TermCaps;
 use view_core::native::devicons::{self, TreeIcons};
@@ -1157,21 +1159,52 @@ fn palette_body(view: &PaletteView) -> Body {
     }
 }
 
-/// The one row of `rows` whose first cell's highlight differs from the one
-/// every other row opens with: how a menu that carries no selection index
-/// shows its selected row. `None` when no single row stands out, or there
-/// are fewer than three rows to tell it by.
+/// The one row of `rows` whose highlights set it apart from every other row:
+/// how a menu that carries no selection index shows its selected row. `None`
+/// when no single row stands out, or there are fewer than three rows to tell
+/// it by.
 fn standout_row(rows: &[Vec<Span>]) -> Option<usize> {
-    let first = |row: &Vec<Span>| row.first().map(|span| span.role);
-    let mut firsts = rows.iter().map(first);
-    let (a, b) = (firsts.next()?, firsts.next()?);
-    // two of the first three agree, and that role is what every row but
-    // the selected one opens with
-    let common = if a == b { a } else { firsts.next()? };
-    let mut odd = rows
+    if rows.len() < 3 {
+        return None;
+    }
+    let sets: Vec<HashSet<StyleRole>> = rows
         .iter()
-        .enumerate()
-        .filter(|(_, row)| first(row) != common);
+        .map(|row| row.iter().map(|span| span.role).collect())
+        .collect();
+    lacks_a_shared_highlight(&sets).or_else(|| alone_in_its_highlights(&sets))
+}
+
+/// The one row missing a highlight every other row carries, which is a
+/// selection painted across the whole row over rows coloured per row.
+fn lacks_a_shared_highlight(sets: &[HashSet<StyleRole>]) -> Option<usize> {
+    let roles: HashSet<&StyleRole> = sets.iter().flatten().collect();
+    let mut lacking = None;
+    for role in roles {
+        let mut without = sets
+            .iter()
+            .enumerate()
+            .filter(|(_, set)| !set.contains(role));
+        let (Some((index, _)), None) = (without.next(), without.next()) else {
+            continue;
+        };
+        if lacking.is_some_and(|seen| seen != index) {
+            return None;
+        }
+        lacking = Some(index);
+    }
+    lacking
+}
+
+/// The one row whose highlights differ from the set every other row has.
+fn alone_in_its_highlights(sets: &[HashSet<StyleRole>]) -> Option<usize> {
+    // two of the first three agree, and that set is every row's but the
+    // selected one's
+    let common = if sets.first()? == sets.get(1)? {
+        sets.first()?
+    } else {
+        sets.get(2)?
+    };
+    let mut odd = sets.iter().enumerate().filter(|(_, set)| *set != common);
     let (index, _) = odd.next()?;
     odd.next().is_none().then_some(index)
 }

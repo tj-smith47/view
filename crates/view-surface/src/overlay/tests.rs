@@ -577,7 +577,7 @@ fn a_palette_paints_the_rows_a_completion_window_drew_clipped_at_its_inner_width
 /// The drawn rows a band of eight shows, by label, for eleven rows whose
 /// first cells carry `firsts`.
 fn band_of_eight(firsts: &[u64; 11]) -> Vec<String> {
-    use view_core::native::views::{PaletteView, Span};
+    use view_core::native::views::Span;
     let drawn = firsts
         .iter()
         .enumerate()
@@ -588,6 +588,32 @@ fn band_of_eight(firsts: &[u64; 11]) -> Vec<String> {
             ]
         })
         .collect();
+    band_of_eight_drawn(drawn)
+}
+
+/// Eleven rows that open with a glyph coloured per row, as a kind column
+/// does, with `selected` painted in the selection's colours from end to end.
+fn kind_coloured_rows(selected: Option<usize>) -> Vec<Vec<view_core::native::views::Span>> {
+    use view_core::native::views::Span;
+    (0..11_u64)
+        .map(|i| {
+            let (glyph, text) = if selected == usize::try_from(i).ok() {
+                (40, 9)
+            } else {
+                (20 + i, 3)
+            };
+            vec![
+                Span::new("* ", StyleRole::Highlight(glyph)),
+                Span::new(format!("row {}", i + 1), StyleRole::Highlight(text)),
+                Span::new(" Text", StyleRole::Highlight(text)),
+            ]
+        })
+        .collect()
+}
+
+/// The drawn rows a band of eight shows, by label.
+fn band_of_eight_drawn(drawn: Vec<Vec<view_core::native::views::Span>>) -> Vec<String> {
+    use view_core::native::views::PaletteView;
     let kind = LayerKind::Palette(
         PaletteView::new("Command")
             .with_query(":e ")
@@ -598,9 +624,24 @@ fn band_of_eight(firsts: &[u64; 11]) -> Vec<String> {
         .iter()
         .map(|line| {
             let text = interior(&line_text(line));
-            text.trim().trim_end_matches(" Text").to_string()
+            text.trim()
+                .trim_start_matches("* ")
+                .trim_end_matches(" Text")
+                .to_string()
         })
         .collect()
+}
+
+/// A menu whose rows each open in their own colour still shows its
+/// selection: the selected row is the one that carries none of the
+/// colours every other row shares.
+#[test]
+fn a_selection_among_rows_coloured_per_row_scrolls_into_view() {
+    assert_eq!(
+        band_of_eight_drawn(kind_coloured_rows(Some(9))),
+        labels(3..=10)
+    );
+    assert_eq!(band_of_eight_drawn(kind_coloured_rows(None)), labels(1..=8));
 }
 
 fn labels(range: std::ops::RangeInclusive<usize>) -> Vec<String> {
