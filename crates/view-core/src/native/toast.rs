@@ -303,6 +303,10 @@ pub struct ToastHistory {
     /// count moves on an eviction as a length never does, and it is what
     /// keeps a refresh check off the message path to two integers.
     pushed: usize,
+    /// How many entries have been re-worded in place, which an open
+    /// overlay compares the same way: a re-wording adds no row and moves
+    /// no push count.
+    revised: usize,
 }
 
 impl ToastHistory {
@@ -321,6 +325,7 @@ impl ToastHistory {
             capacity: capacity.max(1),
             entries: VecDeque::new(),
             pushed: 0,
+            revised: 0,
         }
     }
 
@@ -333,10 +338,27 @@ impl ToastHistory {
         self.pushed = self.pushed.saturating_add(1);
     }
 
+    /// Puts `e` where the entry `id` stands, and answers whether that entry
+    /// was still in the ring.
+    pub fn reword(&mut self, id: crate::model::MessageId, e: &MessageEntry) -> bool {
+        let Some(slot) = self.entries.iter_mut().find(|entry| entry.id() == id) else {
+            return false;
+        };
+        *slot = e.clone();
+        self.revised = self.revised.saturating_add(1);
+        true
+    }
+
     /// How many entries this ring has taken over its life.
     #[must_use]
     pub fn pushed(&self) -> usize {
         self.pushed
+    }
+
+    /// How many entries have been re-worded in place over its life.
+    #[must_use]
+    pub fn revised(&self) -> usize {
+        self.revised
     }
 
     /// Newest-first; the palette's message-history view reads it.

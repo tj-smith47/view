@@ -12142,15 +12142,120 @@ fn an_unreachable_system_clipboard_notices_once() {
     );
 }
 
-/// A surface-conflict notice stands for the session because the conflict
-/// does, and `d` in the history is the gesture that retires exactly that
-/// one line. Keyed on the family rather than the selected wording, which is
-/// the case this fixture is built around: the user selects the *older*
-/// wording of a family whose standing line has since been re-worded, and
-/// still takes the standing line down.
+/// The text of every row the open history overlay shows, timestamps cut.
+fn history_texts(m: &Model) -> Vec<String> {
+    history_view(m)
+        .rows
+        .iter()
+        .map(|row| {
+            row.label
+                .splitn(3, ' ')
+                .nth(2)
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
+}
+
+/// A notice that re-words itself while it stands keeps one history entry,
+/// carrying its last wording at the position its first wording took, and
+/// `d` on that entry takes the notice down and leaves the entry.
 #[test]
-fn the_dismiss_key_takes_down_a_standing_sticky_notice() {
+fn a_notice_reworded_three_times_keeps_one_history_entry() {
     let family = "view: noice.nvim is using ";
+    let mut m = Model::with_term_size(80, 24);
+    let _ = m
+        .engine
+        .messages
+        .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+    let _ = m.engine.record_message(
+        "echomsg".to_string(),
+        vec![(0, "before".to_string())],
+        false,
+    );
+    let wordings = [
+        format!("{family}the cmdline, which view owns."),
+        format!("{family}the cmdline and messages, which view owns."),
+        format!("{family}the cmdline, messages and popupmenu, which view owns."),
+    ];
+    for (at, wording) in wordings.iter().enumerate() {
+        let _ = m
+            .engine
+            .record_native_notice_sticky_once(family, wording.clone());
+        if at == 0 {
+            let _ = m.engine.record_message(
+                "echomsg".to_string(),
+                vec![(0, "after".to_string())],
+                false,
+            );
+        }
+    }
+    assert!(m.engine.has_native_notice(family));
+    open_history(&mut m);
+    assert_eq!(
+        history_texts(&m),
+        ["after", wordings[2].as_str(), "before"],
+        "one entry, the last wording, where the first one stood"
+    );
+
+    let _ = press(&mut m, "j");
+    m.dirty = false;
+    let effects = press(&mut m, "d");
+    assert!(
+        effects.is_empty(),
+        "a dismissal issues nothing: {effects:?}"
+    );
+    assert!(!m.engine.has_native_notice(family));
+    assert!(
+        m.dirty,
+        "taking a line off the screen must ask for a repaint"
+    );
+    assert_eq!(
+        history_texts(&m),
+        ["after", wordings[2].as_str(), "before"],
+        "the entry stays after the notice is gone"
+    );
+}
+
+/// A re-wording that arrives while the history is open replaces the row
+/// in front of the user, and the selection stays on the entry it was on.
+#[test]
+fn a_rewording_reaches_the_open_history_in_place() {
+    let family = "view: noice.nvim is using ";
+    let mut m = model_with_history(&["first"]);
+    let _ = m
+        .engine
+        .record_native_notice_sticky_once(family, format!("{family}the cmdline."));
+    let _ = m.engine.record_message(
+        "echomsg".to_string(),
+        vec![(0, "second".to_string())],
+        false,
+    );
+    let _ = m.refresh_message_history();
+    // the selection followed "first" down to the bottom row
+    let _ = press(&mut m, "k");
+    assert_eq!(history_view(&m).selected, Some(1));
+    let _ = m
+        .engine
+        .record_native_notice_sticky_once(family, format!("{family}the cmdline and messages."));
+    let _ = m.refresh_message_history();
+    assert_eq!(
+        history_texts(&m),
+        [
+            "second",
+            format!("{family}the cmdline and messages.").as_str(),
+            "first"
+        ]
+    );
+    assert_eq!(history_view(&m).selected, Some(1));
+}
+
+/// Two notices of two families keep two entries, and a notice raised again
+/// after it was taken down is a new entry.
+#[test]
+fn two_notices_keep_two_history_entries() {
+    let one = "view: noice.nvim is using ";
+    let two = "view: a plugin is drawing over ";
     let mut m = Model::with_term_size(80, 24);
     let _ = m
         .engine
@@ -12158,40 +12263,22 @@ fn the_dismiss_key_takes_down_a_standing_sticky_notice() {
         .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
     let _ = m
         .engine
-        .record_native_notice_sticky_once(family, format!("{family}the cmdline, which view owns."));
-    let _ = m.engine.record_native_notice_sticky_once(
-        family,
-        format!("{family}the cmdline and messages, which view owns."),
-    );
-    assert!(m.engine.has_native_notice(family));
+        .record_native_notice_sticky_once(one, format!("{one}the cmdline."));
+    let _ = m
+        .engine
+        .record_native_notice_sticky_once(two, format!("{two}the cmdline."));
+    let _ = m.engine.withdraw_native_notice(one);
+    let _ = m
+        .engine
+        .record_native_notice_sticky_once(one, format!("{one}the messages."));
     open_history(&mut m);
     assert_eq!(
-        history_view(&m).rows.len(),
-        2,
-        "both wordings are in the history, which is the record of what was said"
-    );
-    // the history is newest-first, so the oldest row is the wording that is
-    // no longer the one standing -- the case this test is about
-    let _ = press(&mut m, "G");
-
-    m.dirty = false;
-    let effects = press(&mut m, "d");
-    assert!(
-        effects.is_empty(),
-        "a dismissal issues nothing: {effects:?}"
-    );
-    assert!(
-        !m.engine.has_native_notice(family),
-        "`d` on the family's older wording must still retract the standing line"
-    );
-    assert!(
-        m.dirty,
-        "taking a line off the screen must ask for a repaint"
-    );
-    assert_eq!(
-        history_view(&m).rows.len(),
-        2,
-        "and must not edit the history it was pressed in"
+        history_texts(&m),
+        [
+            format!("{one}the messages."),
+            format!("{two}the cmdline."),
+            format!("{one}the cmdline."),
+        ]
     );
 }
 

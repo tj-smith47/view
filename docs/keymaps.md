@@ -722,11 +722,14 @@ of the machine you are reading it on:
 If there is no system clipboard to reach, view says so once and the copy
 still goes to its own registers and out over OSC 52.
 
+A notice that re-words itself while it stands keeps one entry in the
+history. The entry carries the newest wording and stays where the first
+wording put it.
+
 `d` takes down the notice the selected entry belongs to, wherever the
-entry sits in the history, an older wording of a notice that has since
-re-worded itself included. The entry stays: the history is the record of
-what was said. On a message from nvim, which has no notice standing behind
-it, `d` does nothing.
+entry sits in the history. The entry stays after the notice is gone. On a
+message from nvim, which has no notice standing behind it, `d` does
+nothing.
 
 ## `:View`
 

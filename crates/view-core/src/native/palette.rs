@@ -130,6 +130,9 @@ pub struct MessageHistoryState {
     /// costs two integers on a message that added nothing.
     read: usize,
 
+    /// The ring's re-wording count at the last read.
+    revised: usize,
+
     /// Whether the last key was the first `g` of a `gg`.
     ///
     /// Held here rather than in the router's shared `pending_chord`, which
@@ -146,6 +149,7 @@ impl MessageHistoryState {
             entries: history.entries().cloned().collect(),
             selected: 0,
             read: history.pushed(),
+            revised: history.revised(),
             pending_g: false,
         }
     }
@@ -154,13 +158,15 @@ impl MessageHistoryState {
     /// anything changed (the caller's cue to repaint).
     ///
     /// Entries that arrived since the last read are prepended, so the
-    /// selection moves down by as many to stay on the entry it was on.
+    /// selection moves down by as many to stay on the entry it was on. An
+    /// entry re-worded in place keeps its row.
     pub fn refresh(&mut self, history: &ToastHistory) -> bool {
-        if history.pushed() == self.read {
+        if history.pushed() == self.read && history.revised() == self.revised {
             return false;
         }
         let arrived = history.pushed() - self.read;
         self.read = history.pushed();
+        self.revised = history.revised();
         let entries: Vec<MessageEntry> = history.entries().cloned().collect();
         self.entries = entries;
         let last = self.entries.len().saturating_sub(1);

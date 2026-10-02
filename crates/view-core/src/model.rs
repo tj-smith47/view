@@ -1758,7 +1758,7 @@ impl EngineModel {
         content: Vec<(u64, String)>,
         replace_last: bool,
     ) -> Vec<crate::msg::Effect> {
-        self.record_message_in_family(kind, content, replace_last, None, None)
+        self.record_message_in_family(kind, content, replace_last, None, None, None)
     }
 
     /// Records text in the notification history alone, whatever the startup
@@ -1795,6 +1795,7 @@ impl EngineModel {
             false,
             None,
             Some(crate::native::toast::Route::Transient),
+            None,
         )
     }
 
@@ -1806,6 +1807,9 @@ impl EngineModel {
     /// `route` overrides the kind-and-hold classification for
     /// [`Self::record_seen_notification`], whose routing is a property of
     /// what the text is.
+    ///
+    /// `rewords` names the history entry of the standing notice this one
+    /// re-words, which the new entry takes the place of.
     fn record_message_in_family(
         &mut self,
         kind: String,
@@ -1813,6 +1817,7 @@ impl EngineModel {
         replace_last: bool,
         family: Option<&str>,
         route: Option<crate::native::toast::Route>,
+        rewords: Option<MessageId>,
     ) -> Vec<crate::msg::Effect> {
         let route = route.unwrap_or_else(|| {
             crate::native::toast::route_under_hold(&kind, self.messages.startup_hold())
@@ -1846,7 +1851,9 @@ impl EngineModel {
         if let Some(entry) = self.messages.entries.iter_mut().find(|e| e.id() == id) {
             entry.set_family(family);
             entry.read_level_from_attr(self.hl.group("WarningMsg"), self.hl.group("ErrorMsg"));
-            self.toast_history.push(entry);
+            if !rewords.is_some_and(|old| self.toast_history.reword(old, entry)) {
+                self.toast_history.push(entry);
+            }
         }
         // strictly after the scrollback record above, which is what makes
         // "nothing is ever dropped" true on every path through the hold: the
@@ -1971,7 +1978,7 @@ impl EngineModel {
         family: &str,
         text: String,
     ) -> Vec<crate::msg::Effect> {
-        self.record_native_notice_once_as("native", family, text)
+        self.record_native_notice_once_as("native", family, &[family], text)
     }
 
     /// [`Self::record_native_notice_once`] for a notice that has to outlive
@@ -1997,17 +2004,23 @@ impl EngineModel {
         family: &str,
         text: String,
     ) -> Vec<crate::msg::Effect> {
-        self.record_native_notice_once_as("native_sticky", family, text)
+        self.record_native_notice_once_as("native_sticky", family, &[family], text)
     }
 
     /// The shared body of [`Self::record_native_notice_once`] and
     /// [`Self::record_native_notice_sticky_once`]: same de-duplication, same
     /// family withdrawal, differing only in the `kind` the entry carries and
     /// therefore in the lifetime `toast::route` gives it.
-    fn record_native_notice_once_as(
+    ///
+    /// A standing line opening with any of `families` is the notice this
+    /// one re-words, for a notice whose opening moves between families as
+    /// its wording changes. It is withdrawn, and its history entry takes the
+    /// new wording in place, so the history holds one entry per notice.
+    pub(crate) fn record_native_notice_once_as(
         &mut self,
         kind: &str,
         family: &str,
+        families: &[&str],
         text: String,
     ) -> Vec<crate::msg::Effect> {
         let content = vec![(0, text)];
@@ -2026,22 +2039,28 @@ impl EngineModel {
         {
             return Vec::new();
         }
-        let replaces_a_standing_one = self
+        let standing = |e: &MessageEntry| families.iter().any(|f| is_standing_native_notice(e, f));
+        let rewords = self
             .messages
             .entries
             .iter()
-            .any(|e| is_standing_native_notice(e, family));
-        self.messages
-            .entries
-            .retain(|e| !is_standing_native_notice(e, family));
-        let mut effects =
-            self.record_message_in_family(kind.to_string(), content, false, Some(family), None);
+            .find(|e| standing(e))
+            .map(MessageEntry::id);
+        self.messages.entries.retain(|e| !standing(e));
+        let mut effects = self.record_message_in_family(
+            kind.to_string(),
+            content,
+            false,
+            Some(family),
+            None,
+            rewords,
+        );
         // a session that left the messages with a plugin notifier hears
         // this family once: the line it already popped is this notice, so
         // a re-wording reads as that same notice changing its mind. The
         // replacement above keeps the two on screen as one slot; through a
         // foreign notifier they would be two pop-ups for one launch
-        if replaces_a_standing_one {
+        if rewords.is_some() {
             effects.retain(|e| {
                 !matches!(
                     e,
