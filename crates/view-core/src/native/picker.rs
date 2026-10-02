@@ -154,6 +154,11 @@ pub struct PickerState {
     /// preview round trip should never flash an empty pane between every
     /// keystroke.
     preview_lines: Vec<String>,
+    /// The candidate path `preview_lines` was read from, `None` until a
+    /// reply lands. A line is marked only while it names the selection's
+    /// own file: until a new file's reply lands, the pane still holds the
+    /// previous file.
+    applied_path: Option<String>,
 }
 
 impl PickerState {
@@ -173,6 +178,7 @@ impl PickerState {
             preview_generation: 0,
             preview_path: None,
             preview_lines: Vec::new(),
+            applied_path: None,
         }
     }
 
@@ -330,6 +336,7 @@ impl PickerState {
             return;
         }
         self.preview_lines = lines;
+        self.applied_path.clone_from(&self.preview_path);
     }
 
     /// This session's paint-facing projection: the query line, the
@@ -344,6 +351,8 @@ impl PickerState {
             Source::LiveGrep { .. } => "Live Grep",
         };
         let rows = self.items.iter().map(item_spans).collect();
+        let shows_selected_file =
+            self.applied_path.is_some() && self.applied_path == self.selected_path();
         let mut view = PickerView::new(title)
             .with_query(self.query.clone())
             .with_span_rows(rows)
@@ -352,6 +361,7 @@ impl PickerState {
                 self.items
                     .get(self.selected)
                     .and_then(|item| item.line)
+                    .filter(|_| shows_selected_file)
                     .and_then(|line| usize::try_from(line.saturating_sub(1)).ok()),
             );
         if !self.items.is_empty() {
@@ -668,5 +678,64 @@ mod tests {
         let (window, marked) = view.preview_window(PANE_ROWS);
         assert_eq!(window[0], "line 1");
         assert_eq!(marked, None);
+    }
+
+    fn numbered(len: usize) -> Vec<String> {
+        (1..=len).map(|n| format!("line {n}")).collect()
+    }
+
+    /// A picker whose first result, in `a.rs`, has its preview applied and
+    /// whose next result set selects a match in `b.rs`, its preview
+    /// requested and not yet answered.
+    fn moved_to_another_file() -> (PickerState, u64, u64) {
+        let mut state = PickerState::open(Source::LiveGrep {
+            root: PathBuf::from("/repo"),
+        });
+        let gen = state.generation();
+        state.apply_results(gen, vec![PickerItem::grep_match("a.rs", 40, "x")]);
+        let (first, _) = state.refresh_preview().expect("a selection");
+        state.apply_preview(first, numbered(100));
+        let gen = state.edit_query("x");
+        state.apply_results(gen, vec![PickerItem::grep_match("b.rs", 70, "x")]);
+        let (second, path) = state.refresh_preview().expect("a new file to preview");
+        assert!(path.ends_with("b.rs"), "{path}");
+        (state, first, second)
+    }
+
+    #[test]
+    fn a_preview_in_flight_for_another_file_marks_no_line() {
+        let (state, _, _) = moved_to_another_file();
+        let view = state.view();
+        assert_eq!(view.preview_line, None);
+        assert_eq!(view.preview_window(PANE_ROWS).0[0], "line 1");
+    }
+
+    #[test]
+    fn the_mark_returns_when_the_selected_files_preview_lands() {
+        let (mut state, _, second) = moved_to_another_file();
+        state.apply_preview(second, numbered(100));
+        assert_eq!(state.view().preview_line, Some(69));
+    }
+
+    #[test]
+    fn a_stale_reply_does_not_mark_a_line() {
+        let (mut state, first, _) = moved_to_another_file();
+        state.apply_preview(first, numbered(100));
+        assert_eq!(state.view().preview_line, None);
+    }
+
+    #[test]
+    fn moving_between_matches_in_one_file_keeps_the_mark() {
+        let mut state = PickerState::open(Source::LiveGrep {
+            root: PathBuf::from("/repo"),
+        });
+        let gen = state.generation();
+        state.apply_results(gen, vec![PickerItem::grep_match("a.rs", 40, "x")]);
+        let (first, _) = state.refresh_preview().expect("a selection");
+        state.apply_preview(first, numbered(100));
+        let gen = state.edit_query("x");
+        state.apply_results(gen, vec![PickerItem::grep_match("a.rs", 90, "x")]);
+        assert_eq!(state.refresh_preview(), None, "no new request");
+        assert_eq!(state.view().preview_line, Some(89));
     }
 }

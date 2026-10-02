@@ -420,9 +420,11 @@ impl PickerView {
     ///
     /// The line sits a third of the way down the pane, so the code leading
     /// up to it is in view, and the window clamps at the file's first and
-    /// last line. A line past the end of `preview` (the file shrank since
-    /// it was matched) previews from the top, as a candidate with no line
-    /// does.
+    /// last line. A line past the end of `preview` previews from the top,
+    /// as a candidate with no line does. That happens when the file has
+    /// fewer lines than when it was matched (an edit in its buffer, a
+    /// change on disk), and when the read found nothing to show (a path
+    /// gone or unreadable as UTF-8), which leaves `preview` empty.
     #[must_use]
     pub fn preview_window(&self, rows: usize) -> (&[String], Option<usize>) {
         let len = self.preview.len();
