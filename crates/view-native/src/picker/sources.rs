@@ -128,10 +128,8 @@ pub const LIVE_GREP_LINE_CHAR_LIMIT: usize = 300;
 /// the whole label: nucleo would otherwise happily attribute a match to a
 /// byte inside the `path:line: ` prefix, highlighting part of the file name
 /// or line number instead of the text a user actually searched for. The
-/// matcher worker's own nucleo pass re-derives the highlighted match span
-/// from that column against `needle` and shifts it back by
-/// `PickerItem::match_start` before storing it, the same pipeline
-/// `build_results` already runs for `Files`/`Buffers`, so this scan does not
+/// matcher worker's `build_results` highlights every occurrence of
+/// `needle` at or past `PickerItem::match_start`, so this scan does not
 /// compute or push its own indices.
 ///
 /// `cancel` is checked ahead of every file the walk visits (a coarser grain

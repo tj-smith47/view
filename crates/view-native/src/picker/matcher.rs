@@ -126,6 +126,10 @@ struct Session {
     /// been joined, so a `None` here means "no scan thread can still be
     /// pushing into this session's injector" whether or not one ever ran.
     scan_handle: Option<JoinHandle<()>>,
+    /// The literal text a `LiveGrep` session's current scan searches for,
+    /// empty for every other source. [`build_results`] highlights each
+    /// occurrence of it in a row's text.
+    grep_needle: String,
     /// When set, [`stream_until_preempted`] mirrors its tick-state
     /// transitions and exit reason into `sources::scan_probe` under this
     /// key, so a starved matcher test's panic carries the worker-side
@@ -168,6 +172,7 @@ impl Session {
             scan_started: AtomicBool::new(false),
             cancel: Arc::new(AtomicBool::new(false)),
             scan_handle: None,
+            grep_needle: String::new(),
             #[cfg(test)]
             probe_key: None,
             #[cfg(test)]
@@ -194,6 +199,7 @@ impl Session {
             scan_started: AtomicBool::new(false),
             cancel: Arc::new(AtomicBool::new(false)),
             scan_handle: None,
+            grep_needle: String::new(),
             probe_key: None,
             scan_race_window: None,
             scan_pace: None,
@@ -400,6 +406,7 @@ fn restart_live_grep(active: &mut Session, root: std::path::PathBuf, needle: &st
     active.cancel.store(true, Ordering::Release);
     active.cancel = Arc::new(AtomicBool::new(false));
     active.nucleo.restart(true);
+    needle.clone_into(&mut active.grep_needle);
     if needle.is_empty() {
         active.scan_handle = None;
         return;
@@ -583,6 +590,11 @@ fn send_results<S: MsgSink>(active: &mut Session, generation: u64, tx: &S) {
 /// `item.match_start` before landing in `indices` -- without the shift, a
 /// match inside a grep row's matched text would be reported (and later
 /// painted) as if it fell inside the `path:line: ` prefix ahead of it.
+///
+/// A `LiveGrep` row is highlighted at every occurrence of the literal
+/// needle its scan searched for. Nucleo's indices name one fuzzy
+/// alignment, which on a line holding the needle twice can be the later
+/// one, past the width a results column shows.
 fn build_results(active: &mut Session) -> Vec<PickerItem> {
     let snapshot = active.nucleo.snapshot();
     let take = snapshot.matched_item_count().min(STREAM_ROWS);
@@ -590,7 +602,14 @@ fn build_results(active: &mut Session) -> Vec<PickerItem> {
     let mut matcher = nucleo::Matcher::default();
     let mut char_indices = Vec::new();
     let mut items = Vec::with_capacity(take as usize);
+    let needle = active.grep_needle.as_str();
     for matched in snapshot.matched_items(0..take) {
+        if !needle.is_empty() {
+            let mut item = matched.data.clone();
+            item.indices = literal_offsets(&item.label, item.match_start, needle);
+            items.push(item);
+            continue;
+        }
         char_indices.clear();
         let _ = column_pattern.indices(
             matched.matcher_columns[0].slice(..),
@@ -607,6 +626,18 @@ fn build_results(active: &mut Session) -> Vec<PickerItem> {
         items.push(item);
     }
     items
+}
+
+/// The byte offsets into `label` of every occurrence of `needle` at or
+/// past byte `from`.
+fn literal_offsets(label: &str, from: usize, needle: &str) -> Vec<u32> {
+    label
+        .get(from..)
+        .unwrap_or_default()
+        .match_indices(needle)
+        .flat_map(|(at, _)| from + at..from + at + needle.len())
+        .filter_map(|byte| u32::try_from(byte).ok())
+        .collect()
 }
 
 /// Converts nucleo's char (Unicode codepoint) match indices into byte
@@ -1770,6 +1801,10 @@ mod tests {
             "expected at least one streamed result within 60s"
         );
         for item in &items {
+            assert!(
+                !item.indices.is_empty(),
+                "a streamed grep row carries the bytes the needle matched: {item:?}"
+            );
             for &idx in &item.indices {
                 assert!(
                     idx as usize >= item.match_start,
@@ -1783,6 +1818,74 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A grep row highlights every place its text holds the needle. A
+    /// fuzzy pick of one occurrence chose the later of two here, past the
+    /// width a results column shows, and the row painted with no match.
+    #[test]
+    fn a_live_grep_row_highlights_every_occurrence_of_the_needle() {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("picker-grep-typed-highlight-{nonce}"));
+        std::fs::create_dir_all(&root).expect("create test root");
+        std::fs::write(
+            root.join("f.rs"),
+            "    (\"BUFFER_LIST_CHUNK\", BUFFER_LIST_CHUNK),\n",
+        )
+        .expect("write test fixture");
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let (msg_tx, msg_rx) = mpsc::sync_channel(64);
+        let _worker = spawn_bounded(req_rx, msg_tx, 1);
+        let needle = "BUFFER_LIST_CHUNK";
+        let last = 1;
+        req_tx
+            .send(WorkerRequest::Query(MatchRequest {
+                generation: last,
+                needle: needle.to_string(),
+                source: Source::LiveGrep { root: root.clone() },
+                resolved: None,
+            }))
+            .expect("worker channel closed");
+
+        let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(60));
+        let mut items = Vec::new();
+        while Instant::now() < deadline {
+            let Ok(msg) =
+                msg_rx.recv_timeout(view_test_support::host_deadline(Duration::from_millis(200)))
+            else {
+                continue;
+            };
+            if let Msg::PickerResults {
+                generation,
+                items: batch,
+            } = msg
+            {
+                if generation == last && !batch.is_empty() {
+                    items = batch;
+                    break;
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let item = items.first().expect("a streamed row within 60s");
+        let expected: Vec<u32> = item
+            .label
+            .match_indices(needle)
+            .flat_map(|(at, _)| at..at + needle.len())
+            .map(|b| b as u32)
+            .collect();
+        assert_eq!(expected.len(), 2 * needle.len(), "{item:?}");
+        assert_eq!(item.indices, expected, "{item:?}");
     }
 
     #[test]
