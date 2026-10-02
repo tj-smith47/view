@@ -91,6 +91,11 @@ pub struct Executor<E: EngineOps> {
     /// (`toast_timer`) or, like this one, mutated from behind `&self` by
     /// more than one effect over the executor's lifetime.
     tree_scan_cancel: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    /// The generation of the latest preview request, stored by both the RPC
+    /// arm and the disk-fallback arm. A fallback read whose own generation
+    /// no longer matches stops, so a selection moving deep through a large
+    /// unopened file leaves one scan running.
+    preview_latest: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The project's agent session worker, or `None` when `[ai]` is
     /// disabled -- the one degrade in this type that is never reachable in
     /// practice rather than merely untested: `update()`'s own
@@ -143,6 +148,7 @@ impl<E: EngineOps> Executor<E> {
             toast_timer: None,
             picker: None,
             tree_scan_cancel: std::sync::Mutex::new(None),
+            preview_latest: std::sync::Arc::default(),
             loop_msgs: crate::loop_msgs::LoopMsgOutbox::default(),
             ai: None,
             ai_context: None,
@@ -392,9 +398,12 @@ impl<E: EngineOps> Executor<E> {
                         first_line,
                         line_count,
                         generation,
-                    } => self
-                        .ops
-                        .preview_buffer_window(&path, first_line, line_count, generation),
+                    } => {
+                        self.preview_latest
+                            .store(generation, std::sync::atomic::Ordering::Relaxed);
+                        self.ops
+                            .preview_buffer_window(&path, first_line, line_count, generation)
+                    }
                     RpcCall::ReadFloatRows { win } => self.ops.read_float_rows(win),
                     RpcCall::CloseFloat { win } => self.ops.close_float(win),
                     RpcCall::ScanFloats => self.ops.scan_floats(),
@@ -760,13 +769,17 @@ impl<E: EngineOps> Executor<E> {
                 first_line,
                 line_count,
             } => {
+                self.preview_latest
+                    .store(generation, std::sync::atomic::Ordering::Relaxed);
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();
+                    let latest = std::sync::Arc::clone(&self.preview_latest);
                     spawn_or_log("picker-preview-fallback", move || {
                         let lines = view_native::picker::preview::read_window(
                             std::path::Path::new(&path),
                             first_line,
                             line_count,
+                            || latest.load(std::sync::atomic::Ordering::Relaxed) != generation,
                         );
                         let _ = tx.send(Msg::PickerPreviewFile { generation, lines });
                     });

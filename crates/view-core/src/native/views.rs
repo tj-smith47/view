@@ -354,6 +354,10 @@ pub struct PickerView {
     /// The 0-based index into `preview` of the line the selected candidate
     /// points at (a grep match's line), or `None` to preview from the top.
     pub preview_line: Option<usize>,
+    /// The 0-based index into `preview` the pane opens on, unmarked, when
+    /// [`Self::preview_line`] is `None`: the line it showed last, kept while
+    /// a window around the new line of the same file is read.
+    pub preview_anchor: Option<usize>,
 }
 
 impl PickerView {
@@ -424,8 +428,19 @@ impl PickerView {
         }
     }
 
+    /// The same view with the preview opening on line `index` (0-based)
+    /// unmarked, where no line is marked.
+    #[must_use]
+    pub fn with_preview_anchor(self, index: Option<usize>) -> Self {
+        Self {
+            preview_anchor: index,
+            ..self
+        }
+    }
+
     /// The preview lines a pane `rows` tall shows from its top, and the
-    /// index among them of [`Self::preview_line`].
+    /// index among them of [`Self::preview_line`]. With no line marked, the
+    /// pane opens on [`Self::preview_anchor`] the same way, unmarked.
     ///
     /// The line sits a third of the way down the pane, so the code leading
     /// up to it is in view, and the window clamps at the first and last
@@ -437,11 +452,12 @@ impl PickerView {
     #[must_use]
     pub fn preview_window(&self, rows: usize) -> (&[String], Option<usize>) {
         let len = self.preview.len();
-        let Some(line) = self.preview_line.filter(|line| *line < len) else {
+        let marked = self.preview_line.filter(|line| *line < len);
+        let Some(line) = marked.or(self.preview_anchor.filter(|line| *line < len)) else {
             return (&self.preview, None);
         };
         let start = line.saturating_sub(rows / 3).min(len.saturating_sub(rows));
-        (&self.preview[start..], Some(line - start))
+        (&self.preview[start..], marked.map(|line| line - start))
     }
 }
 

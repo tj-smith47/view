@@ -1151,8 +1151,9 @@ pcall(vim.api.nvim_exec_autocmds, 'User',
 
 /// Resolves the picker preview pane's text for a candidate path, `count`
 /// lines from the 1-based line `first` on, fewer where the buffer ends
-/// first and none past its end, so a large buffer is never copied whole.
-/// Verified live against the pinned engine -- see
+/// first and none past its end, each cut at `cap` bytes on a character
+/// boundary, so neither a large buffer nor one very long line is copied
+/// whole. Verified live against the pinned engine -- see
 /// `docs/picker-preview-wire-capture.md` for the captured reply shapes
 /// (`loaded`/`lines`) this chunk's `nvim_buf_is_loaded`/name-match lookup
 /// produces, and the load-bearing case (a modified-but-unsaved buffer
@@ -1176,7 +1177,7 @@ pcall(vim.api.nvim_exec_autocmds, 'User',
 /// into false-positive matches against any candidate path equal to nvim's
 /// cwd.
 const PREVIEW_WINDOW_CHUNK: &str = "\
-local path, first, count = ...
+local path, first, count, cap = ...
 local function canon(p)
   if p == '' then
     return p
@@ -1187,8 +1188,14 @@ local wanted = canon(path)
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
   if vim.api.nvim_buf_is_loaded(buf)
     and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
-    return { loaded = true, lines = vim.api.nvim_buf_get_lines(
-      buf, first - 1, first - 1 + count, false) }
+    local lines = vim.api.nvim_buf_get_lines(
+      buf, first - 1, first - 1 + count, false)
+    for i, line in ipairs(lines) do
+      if #line > cap then
+        lines[i] = line:sub(1, cap + vim.str_utf_start(line, cap + 1))
+      end
+    end
+    return { loaded = true, lines = lines }
   end
 end
 return { loaded = false }";
@@ -1375,11 +1382,11 @@ fn nvim_style_absolute(path: &std::path::Path) -> std::path::PathBuf {
 /// (symlink-safe, "loaded buffer wins over disk") rather than
 /// `bufnr`/`bufadd`'s exact-string name matching: a diff review opens
 /// against a file the agent proposed changes to, which may be one no window
-/// has ever shown, one a previous
-/// `load_hidden` call already created hidden for this same path, or one a
-/// real window already has open -- all three are the same buffer identity by
-/// path, and the scan finds whichever of them already exists, unmodified or
-/// not (capture #5), before ever creating a second one over the same file.
+/// has ever shown, one a previous `load_hidden` call already created hidden
+/// for this same path, or one a real window already has open -- all three
+/// are the same buffer identity by path, and the scan finds whichever of
+/// them already exists, unmodified or not (capture #5), before ever creating
+/// a second one over the same file.
 /// Unlike `PREVIEW_WINDOW_CHUNK`, the scan matches on name alone rather than
 /// requiring `nvim_buf_is_loaded`: a match that is not yet loaded (capture
 /// #13 -- a buffer an earlier session left behind, or one `:bwipeout`-ed but
@@ -3660,8 +3667,9 @@ impl EngineHandle {
     /// Issues [`PREVIEW_WINDOW_CHUNK`] as an async request tagged with
     /// `generation`, resolving the picker preview pane's text for
     /// `line_count` lines of `path` from the 1-based `first_line` on: the
-    /// reply holds those lines only, fewer where the buffer ends first, so a
-    /// large buffer is never copied whole. Async by construction, like
+    /// reply holds those lines only, fewer where the buffer ends first, each
+    /// cut at `view_core::native::picker::PREVIEW_LINE_BYTES`, so neither a
+    /// large buffer nor one very long line is copied whole. Async by construction, like
     /// [`list_buffers`](Self::list_buffers): this issues the request through
     /// [`EngineHandle::request_preview`] and returns immediately; the answer
     /// crosses back as `Msg::PickerPreviewReply` through the connection's
@@ -3690,6 +3698,7 @@ impl EngineHandle {
                     Value::from(path),
                     Value::from(first_line),
                     Value::from(line_count),
+                    Value::from(view_core::native::picker::PREVIEW_LINE_BYTES),
                 ]),
             ],
             generation,

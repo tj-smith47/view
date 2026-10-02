@@ -22,7 +22,8 @@ A standalone Python msgpack-rpc client (`pynvim` absent from the environment)
 spawns `nvim --clean --headless --listen <socket>` with the same hermetic
 `XDG_*`/`HOME` isolation `EngineConfig::isolated()` uses, connects over the
 unix socket, and issues `nvim_exec_lua` as a **request** with the candidate
-path, the window's 1-based first line and its line count as positional varargs,
+path, the window's 1-based first line, its line count and the per-line byte cap
+(`PREVIEW_LINE_BYTES`, 4096, read out of `view-core`) as positional varargs,
 the same calling convention `REGISTER_MAPPINGS_CHUNK`/`BUFFER_LIST_CHUNK`
 already use (constant Lua source, no interpolated caller data). No UI attach is
 needed: buffer content is not redraw-derived state. The chunk is read out of
@@ -32,7 +33,7 @@ are the bytes shipped.
 The Lua chunk under test, verbatim `PREVIEW_WINDOW_CHUNK`:
 
 ```lua
-local path, first, count = ...
+local path, first, count, cap = ...
 local function canon(p)
   if p == '' then
     return p
@@ -43,8 +44,14 @@ local wanted = canon(path)
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
   if vim.api.nvim_buf_is_loaded(buf)
     and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
-    return { loaded = true, lines = vim.api.nvim_buf_get_lines(
-      buf, first - 1, first - 1 + count, false) }
+    local lines = vim.api.nvim_buf_get_lines(
+      buf, first - 1, first - 1 + count, false)
+    for i, line in ipairs(lines) do
+      if #line > cap then
+        lines[i] = line:sub(1, cap + vim.str_utf_start(line, cap + 1))
+      end
+    end
+    return { loaded = true, lines = lines }
   end
 end
 return { loaded = false }
@@ -53,6 +60,12 @@ return { loaded = false }
 `nvim_buf_get_lines` takes a 0-based start and an exclusive end, so the reply
 holds lines `first` through `first + count - 1`, fewer where the buffer ends
 first. The picker asks for 1000 lines around the matched line.
+
+Each line longer than `cap` bytes is cut to `cap` bytes, less the start of a
+character the cut would split: `vim.str_utf_start(line, cap + 1)` is `0` when
+byte `cap + 1` starts a character and the negative distance back to that
+character's first byte otherwise. `cap` is `PREVIEW_LINE_BYTES`, the same cut
+the disk read makes.
 
 The comparison canonicalizes both sides (`vim.uv.fs_realpath`, falling back to
 `vim.fn.fnamemodify(p, ':p')` for a path that doesn't exist on disk yet, e.g.
@@ -141,14 +154,29 @@ way degrades to "no buffer," and the disk-fallback read (a plain `std::fs`
 read in `view-native`, outside RPC entirely) is left to report its own
 not-found outcome; the RPC layer invents nothing.
 
+## 5. A line longer than the cap
+
+A file whose first line is 4095 `x` bytes, then `€` (three bytes) straddling the
+cap, then `tail`, and whose second line is `short`, opened with `:edit`. The
+reply's byte lengths, the first line's last three characters and the second
+line:
+
+```
+err: None
+lens: [4095, 5] tail: 'xxx' second: short
+```
+
+The first line ends before the character the cut would split, and the line
+under it arrives whole.
+
 ## Conclusions for the implementation
 
 - `EngineHandle::preview_buffer_window(&self, path, first_line, line_count,
-  generation)` issues `nvim_exec_lua` with the chunk above (path, first line
-  and line count as positional varargs) through `request_preview`, tagged
-  `Waiter::Preview { generation, path }`, mirroring `request_buffer_list`'s
-  `Waiter::BufferList` shape exactly: async, blocks nothing, decodes on the
-  reader thread, routes to `pump` as
+  generation)` issues `nvim_exec_lua` with the chunk above (path, first line,
+  line count and `PREVIEW_LINE_BYTES` as positional varargs) through
+  `request_preview`, tagged `Waiter::Preview { generation, path }`, mirroring
+  `request_buffer_list`'s `Waiter::BufferList` shape exactly: async, blocks
+  nothing, decodes on the reader thread, routes to `pump` as
   `Msg::PickerPreviewReply { generation, path, loaded, lines }` (new
   `Held::Preview` slot in `damage.rs`, alongside `Held::BufferList`).
 - `decode_preview_reply` reads `loaded` first; when `loaded` is `true` it

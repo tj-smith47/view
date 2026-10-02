@@ -165,6 +165,11 @@ pub struct PickerState {
     applied_path: Option<String>,
     /// The 1-based line number of `preview_lines[0]`.
     applied_first: u64,
+    /// The line the pane last opened on with its mark in the applied
+    /// window. While a window for another line of the same file is read,
+    /// the pane stays on this line unmarked, so the only change a person
+    /// sees is the new window arriving.
+    shown_line: Option<u64>,
 }
 
 /// How many lines one preview read returns. A pane is at most a few
@@ -173,6 +178,14 @@ pub struct PickerState {
 /// A whole file is never read: a log of gigabytes costs the same as this
 /// window.
 pub const PREVIEW_WINDOW_LINES: u64 = 1000;
+
+/// How many bytes of one line a preview read keeps, cut on a character
+/// boundary. The pane cuts a line at its own width, and the widest pane is
+/// a few hundred cells, which this holds in any script. The disk read and
+/// the engine's buffer read both cut here, so one window is at most
+/// [`PREVIEW_WINDOW_LINES`] lines of this many bytes, 4 MiB, whatever the
+/// file holds.
+pub const PREVIEW_LINE_BYTES: u64 = 4096;
 
 /// How many lines a window has to hold on each side of a line before the
 /// pane can open on that line from it. The picker does not know the pane's
@@ -194,15 +207,17 @@ fn window_first(line: Option<u64>) -> u64 {
 /// with the file's own lines above and below it: the margin on each side
 /// lies inside the window, or the window reaches the file's first line on
 /// that side. `end` is how many lines the window holds when it is known to
-/// end at the file's last line; a line past that end is one the file has
-/// gained since, and is not held.
+/// end at the file's last line. Below the line, a known end decides alone:
+/// a line past it is one the file has gained since, and is not held.
 fn window_holds(first: u64, end: Option<u64>, line: u64) -> bool {
     let Some(offset) = line.checked_sub(first) else {
         return false;
     };
     let top = first == 1 || offset >= PREVIEW_WINDOW_MARGIN;
-    let bottom = offset + PREVIEW_WINDOW_MARGIN < PREVIEW_WINDOW_LINES
-        || end.is_some_and(|len| offset < len);
+    let bottom = match end {
+        Some(len) => offset < len,
+        None => offset + PREVIEW_WINDOW_MARGIN < PREVIEW_WINDOW_LINES,
+    };
     top && bottom
 }
 
@@ -226,6 +241,7 @@ impl PickerState {
             preview_lines: Arc::from([]),
             applied_path: None,
             applied_first: 1,
+            shown_line: None,
         }
     }
 
@@ -363,6 +379,9 @@ impl PickerState {
         let requested_is_applied =
             self.applied_path == self.preview_path && self.applied_first == self.preview_first;
         let end = self.applied_end().filter(|_| requested_is_applied);
+        if let Some(marked) = self.marked_line() {
+            self.shown_line = Some(marked);
+        }
         if self.preview_path.as_deref() == Some(path.as_str())
             && window_holds(self.preview_first, end, line.unwrap_or(1))
         {
@@ -413,6 +432,27 @@ impl PickerState {
         self.preview_lines = lines.into();
         self.applied_path.clone_from(&self.preview_path);
         self.applied_first = self.preview_first;
+        self.shown_line = self.marked_line();
+    }
+
+    /// The selected candidate's line when the applied window marks it: the
+    /// window is from the selection's own file and holds that line with a
+    /// pane's worth of lines on each side.
+    fn marked_line(&self) -> Option<u64> {
+        let shows_selected_file =
+            self.applied_path.is_some() && self.applied_path == self.selected_path();
+        self.items
+            .get(self.selected)
+            .and_then(|item| item.line)
+            .filter(|line| {
+                shows_selected_file && window_holds(self.applied_first, self.applied_end(), *line)
+            })
+    }
+
+    /// The 0-based index into the applied window of 1-based `line`.
+    fn applied_index(&self, line: u64) -> Option<usize> {
+        line.checked_sub(self.applied_first)
+            .and_then(|index| usize::try_from(index).ok())
     }
 
     /// This session's paint-facing projection: the query line, the
@@ -427,22 +467,21 @@ impl PickerState {
             Source::LiveGrep { .. } => "Live Grep",
         };
         let rows = self.items.iter().map(item_spans).collect();
-        let shows_selected_file =
-            self.applied_path.is_some() && self.applied_path == self.selected_path();
+        let marked = self.marked_line();
+        let selected_line = self.items.get(self.selected).and_then(|item| item.line);
+        let same_file_in_flight = marked.is_none()
+            && selected_line.is_some()
+            && self.applied_path.is_some()
+            && self.applied_path == self.selected_path();
         let mut view = PickerView::new(title)
             .with_query(self.query.clone())
             .with_span_rows(rows)
             .with_preview(Arc::clone(&self.preview_lines))
-            .with_preview_line(
-                self.items
-                    .get(self.selected)
-                    .and_then(|item| item.line)
-                    .filter(|line| {
-                        shows_selected_file
-                            && window_holds(self.applied_first, self.applied_end(), *line)
-                    })
-                    .and_then(|line| line.checked_sub(self.applied_first))
-                    .and_then(|index| usize::try_from(index).ok()),
+            .with_preview_line(marked.and_then(|line| self.applied_index(line)))
+            .with_preview_anchor(
+                self.shown_line
+                    .filter(|_| same_file_in_flight)
+                    .and_then(|line| self.applied_index(line)),
             );
         if !self.items.is_empty() {
             view = view.with_selected(self.selected);
@@ -922,6 +961,48 @@ mod tests {
         let view = state.view();
         let (window, marked) = view.preview_window(PANE_ROWS);
         assert_eq!(window[marked.expect("marked at once")], "line 5100");
+    }
+
+    #[test]
+    fn a_line_past_a_short_files_known_end_reads_the_file_again() {
+        let mut state = PickerState::open(Source::LiveGrep {
+            root: PathBuf::from("/repo"),
+        });
+        let gen = state.generation();
+        state.apply_results(gen, vec![PickerItem::grep_match("a.rs", 40, "x")]);
+        let (first, _) = state.refresh_preview().expect("a selection");
+        state.apply_preview(first, numbered(50));
+        let gen = state.edit_query("x");
+        state.apply_results(gen, vec![PickerItem::grep_match("a.rs", 60, "x")]);
+        assert!(state.refresh_preview().is_some(), "the grown file is read");
+        state.apply_preview(state.preview_generation(), numbered(80));
+        assert_eq!(state.view().preview_line, Some(59));
+    }
+
+    #[test]
+    fn while_a_same_file_window_is_read_the_pane_keeps_its_rows() {
+        let (state, request) = held_window_then_moved(5000, 5495);
+        assert!(request.is_some(), "a new window is requested");
+        let view = state.view();
+        let (window, marked) = view.preview_window(PANE_ROWS);
+        assert_eq!(marked, None, "no mark meanwhile");
+        assert_eq!(window[PANE_ROWS / 3], "line 5000", "the rows shown before");
+    }
+
+    #[test]
+    fn the_rows_kept_are_the_last_ones_marked_in_the_held_window() {
+        let (mut state, request) = held_window_then_moved(5000, 5100);
+        assert_eq!(request, None, "held");
+        let gen = state.edit_query("x");
+        state.apply_results(gen, vec![PickerItem::grep_match("a.rs", 5495, "x")]);
+        assert!(
+            state.refresh_preview().is_some(),
+            "a new window is requested"
+        );
+        let view = state.view();
+        let (window, marked) = view.preview_window(PANE_ROWS);
+        assert_eq!(marked, None, "no mark meanwhile");
+        assert_eq!(window[PANE_ROWS / 3], "line 5100", "the rows shown before");
     }
 
     #[test]

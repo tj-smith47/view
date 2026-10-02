@@ -6,57 +6,127 @@
 //! and the crate's "nvim owns all buffer text" hard rule: this module never
 //! reads a path a buffer might also hold open).
 
+use std::io::BufRead;
 use std::path::Path;
 
-/// How many bytes one window read keeps. A thousand lines of a source file
-/// fit many times over; a file with no line breaks (a minified bundle, a
-/// binary) would otherwise be held whole as its one line, and the pane
-/// cuts a line at its own width anyway.
-const WINDOW_BYTES: u64 = 1 << 20;
+use view_core::native::picker::PREVIEW_LINE_BYTES;
 
 /// Reads `count` lines of `path` from the 1-based line `first` on, fewer
 /// where the file ends first, or `None` for a path that does not exist or
-/// cannot be read. The file is streamed: lines before `first` are skipped
-/// without being kept, and reading stops after the last line wanted or
-/// after [`WINDOW_BYTES`] kept, whichever comes first, the last line cut
-/// where the bound falls. Bytes that are not UTF-8 show as U+FFFD, and a
-/// line ending in `\r\n` loses both, as nvim splits a CRLF file (`:help
-/// 'fileformat'`), so the preview's lines agree with what opening the file
-/// in view shows. The pane shows nothing for `None`, and the caller
+/// cannot be read, or once `superseded` answers true. The file is
+/// streamed: lines before `first` are skipped without being kept, and each
+/// line kept is cut at [`PREVIEW_LINE_BYTES`] on a character boundary, the
+/// rest of it skipped the same way. A short answer therefore always means
+/// the file ended. `superseded` is asked once per buffer of the file
+/// skipped, so a read nobody waits for any more stops wherever it is in
+/// the file.
+/// Bytes that are not UTF-8 show as U+FFFD, and a line ending in `\r\n`
+/// loses both, as nvim splits a CRLF file (`:help 'fileformat'`), so the
+/// preview's lines agree with what opening the file in view shows. The
+/// pane shows nothing for `None`, and the caller
 /// (`Msg::PickerPreviewFile`'s applier) does not need to tell its causes
 /// apart.
 #[must_use]
-pub fn read_window(path: &Path, first: u64, count: u64) -> Option<Vec<String>> {
-    use std::io::{BufRead, Read};
+pub fn read_window(
+    path: &Path,
+    first: u64,
+    count: u64,
+    superseded: impl Fn() -> bool,
+) -> Option<Vec<String>> {
     let mut reader = std::io::BufReader::new(std::fs::File::open(path).ok()?);
     let mut to_skip = first.saturating_sub(1);
     while to_skip > 0 {
+        if superseded() {
+            return None;
+        }
         let buf = reader.fill_buf().ok()?;
         if buf.is_empty() {
             return Some(Vec::new());
         }
-        let used = match buf.iter().position(|b| *b == b'\n') {
-            Some(at) => {
-                to_skip -= 1;
-                at + 1
+        let mut used = buf.len();
+        for (at, _) in buf.iter().enumerate().filter(|(_, b)| **b == b'\n') {
+            to_skip -= 1;
+            if to_skip == 0 {
+                used = at + 1;
+                break;
             }
-            None => buf.len(),
-        };
+        }
         reader.consume(used);
     }
-    let mut kept = reader.take(WINDOW_BYTES);
+    let cap = usize::try_from(PREVIEW_LINE_BYTES).unwrap_or(usize::MAX);
     let mut lines = Vec::new();
     let mut line = Vec::new();
     while u64::try_from(lines.len()).is_ok_and(|n| n < count) {
-        line.clear();
-        if kept.read_until(b'\n', &mut line).ok()? == 0 {
+        if !read_capped_line(&mut reader, cap, &mut line, &superseded)? {
             break;
         }
-        let text = line.strip_suffix(b"\n").unwrap_or(&line);
-        let text = text.strip_suffix(b"\r").unwrap_or(text);
-        lines.push(String::from_utf8_lossy(text).into_owned());
+        lines.push(String::from_utf8_lossy(&line).into_owned());
     }
     Some(lines)
+}
+
+/// Reads one line of `reader` into `line`, its `\n` or `\r\n` dropped and
+/// its text cut at `cap` bytes on a character boundary, with the rest of
+/// the line consumed and never held. `Some(false)` at the end of the file,
+/// `None` on a read error or once `superseded` answers true.
+fn read_capped_line(
+    reader: &mut impl BufRead,
+    cap: usize,
+    line: &mut Vec<u8>,
+    superseded: &impl Fn() -> bool,
+) -> Option<bool> {
+    line.clear();
+    let mut read_any = false;
+    let mut cut = false;
+    loop {
+        let buf = reader.fill_buf().ok()?;
+        if buf.is_empty() {
+            break;
+        }
+        read_any = true;
+        let newline = buf.iter().position(|b| *b == b'\n');
+        let text = &buf[..newline.unwrap_or(buf.len())];
+        let room = cap.saturating_sub(line.len());
+        line.extend_from_slice(&text[..text.len().min(room)]);
+        cut |= text.len() > room;
+        let used = newline.map_or(buf.len(), |at| at + 1);
+        reader.consume(used);
+        if newline.is_some() {
+            break;
+        }
+        if superseded() {
+            return None;
+        }
+    }
+    if cut {
+        line.truncate(char_floor(line));
+    } else if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    Some(read_any)
+}
+
+/// The length of `bytes` without a trailing character the cut left
+/// incomplete.
+fn char_floor(bytes: &[u8]) -> usize {
+    let lead = bytes
+        .iter()
+        .rposition(|b| b & 0b1100_0000 != 0b1000_0000)
+        .filter(|at| bytes.len() - at <= 4);
+    let Some(at) = lead else {
+        return bytes.len();
+    };
+    let wants = match bytes[at] {
+        b if b >= 0b1111_0000 => 4,
+        b if b >= 0b1110_0000 => 3,
+        b if b >= 0b1100_0000 => 2,
+        _ => 1,
+    };
+    if bytes.len() - at < wants {
+        at
+    } else {
+        bytes.len()
+    }
 }
 
 #[cfg(test)]
@@ -69,23 +139,148 @@ mod tests {
         let path = scratch_path("long.txt");
         let text: String = (1..=10_000).map(|n| format!("line {n}\r\n")).collect();
         std::fs::write(&path, text).expect("write fixture");
-        let window = read_window(&path, 4500, 1000).expect("a readable file");
+        let window = read_window(&path, 4500, 1000, || false).expect("a readable file");
         assert_eq!(window.len(), 1000);
         assert_eq!(window[0], "line 4500");
         assert_eq!(window[500], "line 5000");
-        assert_eq!(read_window(&path, 9900, 1000).expect("tail").len(), 101);
-        assert_eq!(read_window(&path, 20_000, 1000), Some(Vec::new()));
+        assert_eq!(
+            read_window(&path, 9900, 1000, || false)
+                .expect("tail")
+                .len(),
+            101
+        );
+        assert_eq!(read_window(&path, 20_000, 1000, || false), Some(Vec::new()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn cap() -> usize {
+        usize::try_from(PREVIEW_LINE_BYTES).expect("fits")
+    }
+
+    /// Writes 2000 lines of 4 KiB each, `MATCH` starting line 1500, the
+    /// 500 lines above it more than a megabyte.
+    fn long_lines_fixture(name: &str) -> std::path::PathBuf {
+        let path = scratch_path(name);
+        let text: String = (1..=2000)
+            .map(|n| {
+                let head = if n == 1500 {
+                    "MATCH 1500 ".to_string()
+                } else {
+                    format!("line {n} ")
+                };
+                format!("{head:a<4096}\n")
+            })
+            .collect();
+        std::fs::write(&path, text).expect("write fixture");
+        path
+    }
+
+    #[test]
+    fn a_match_below_lines_holding_megabytes_is_in_its_window() {
+        let path = long_lines_fixture("long-lines.jsonl");
+        let window = read_window(&path, 1000, 1000, || false).expect("a readable file");
+        assert_eq!(window.len(), 1000, "a full window, not the file's end");
+        assert!(
+            window[500].starts_with("MATCH 1500 "),
+            "{:.20}",
+            window[500]
+        );
+        assert!(window.iter().all(|line| line.len() <= cap()));
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn a_file_with_no_newline_is_read_only_up_to_the_byte_bound() {
+    fn a_match_below_lines_holding_megabytes_is_marked() {
+        use view_core::native::picker::{PickerItem, PickerState, Source, PREVIEW_WINDOW_LINES};
+        let path = long_lines_fixture("long-lines-marked.jsonl");
+        let dir = path.parent().expect("a scratch dir").to_path_buf();
+        let mut state = PickerState::open(Source::LiveGrep { root: dir });
+        let gen = state.generation();
+        let name = "long-lines-marked.jsonl";
+        state.apply_results(gen, vec![PickerItem::grep_match(name, 1500, "MATCH")]);
+        let (preview_gen, wanted) = state.refresh_preview().expect("a selection");
+        let lines = read_window(
+            Path::new(&wanted),
+            state.preview_first_line(),
+            PREVIEW_WINDOW_LINES,
+            || false,
+        );
+        state.apply_preview(preview_gen, lines.expect("a readable file"));
+        let view = state.view();
+        let (rows, marked) = view.preview_window(30);
+        assert!(rows[marked.expect("the match is marked")].starts_with("MATCH 1500 "));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_line_longer_than_the_cap_is_cut_on_a_character_boundary() {
+        for wide in ['é', '€', '😀'] {
+            let path = scratch_path("wide.txt");
+            let head = "x".repeat(cap() - 1);
+            std::fs::write(&path, format!("{head}{wide}tail\r\nnext\r\n")).expect("write fixture");
+            assert_eq!(
+                read_window(&path, 1, 1000, || false),
+                Some(vec![head, "next".to_string()]),
+                "{wide} straddles the cut"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    #[test]
+    fn a_line_exactly_the_cap_long_is_kept_whole() {
+        let path = scratch_path("exact.txt");
+        let line = format!("{}é", "x".repeat(cap() - 2));
+        std::fs::write(&path, format!("{line}\r\nnext")).expect("write fixture");
+        assert_eq!(
+            read_window(&path, 1, 1000, || false),
+            Some(vec![line, "next".to_string()])
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_file_with_no_newline_yields_one_capped_line() {
         let path = scratch_path("one-line.min.js");
-        let len = usize::try_from(WINDOW_BYTES).expect("fits") * 3;
-        std::fs::write(&path, "x".repeat(len)).expect("write fixture");
-        let window = read_window(&path, 1, 1000).expect("a readable file");
-        assert_eq!(window.len(), 1);
-        assert_eq!(window[0].len() as u64, WINDOW_BYTES);
+        std::fs::write(&path, "x".repeat(3 << 20)).expect("write fixture");
+        let window = read_window(&path, 1, 1000, || false).expect("a readable file");
+        assert_eq!(window, vec!["x".repeat(cap())]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A `superseded` that answers true from its second call on.
+    fn superseded_after_one_look() -> impl Fn() -> bool {
+        let calls = std::cell::Cell::new(0_u32);
+        move || {
+            calls.set(calls.get() + 1);
+            calls.get() > 1
+        }
+    }
+
+    #[test]
+    fn a_superseded_read_stops_while_skipping_to_its_window() {
+        let path = scratch_path("skip.txt");
+        let text: String = (1..=100_000).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(&path, text).expect("write fixture");
+        assert_eq!(
+            read_window(&path, 200_000, 1000, || false),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            read_window(&path, 200_000, 1000, superseded_after_one_look()),
+            None
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_superseded_read_stops_while_skipping_the_rest_of_a_line() {
+        let path = scratch_path("one-line-superseded.min.js");
+        std::fs::write(&path, "x".repeat(3 << 20)).expect("write fixture");
+        assert_eq!(
+            read_window(&path, 1, 1000, superseded_after_one_look()),
+            None
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -94,7 +289,7 @@ mod tests {
         let path = scratch_path("binary.bin");
         std::fs::write(&path, b"\xff\xfeab\r\n\x00c\n").expect("write fixture");
         assert_eq!(
-            read_window(&path, 1, 1000),
+            read_window(&path, 1, 1000, || false),
             Some(vec!["\u{FFFD}\u{FFFD}ab".to_string(), "\0c".to_string()])
         );
         let _ = std::fs::remove_file(&path);
@@ -119,7 +314,7 @@ mod tests {
     #[test]
     fn a_missing_path_reads_as_none() {
         let path = scratch_path("does-not-exist.txt");
-        assert_eq!(read_window(&path, 1, 1000), None);
+        assert_eq!(read_window(&path, 1, 1000, || false), None);
     }
 
     #[test]
@@ -127,7 +322,7 @@ mod tests {
         let path = scratch_path("lines.txt");
         std::fs::write(&path, "one\ntwo\nthree").expect("write scratch file");
         assert_eq!(
-            read_window(&path, 1, 1000),
+            read_window(&path, 1, 1000, || false),
             Some(vec![
                 "one".to_string(),
                 "two".to_string(),
