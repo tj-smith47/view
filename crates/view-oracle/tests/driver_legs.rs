@@ -125,12 +125,11 @@ fn pump_until_flush_returns_false_at_the_deadline_when_no_flush_arrives() {
 }
 
 /// leg (a) (pty-level injection) at the integration tier: a real `view`
-/// process inside a real pty shows a typed character on screen, and a first
-/// launch introduces the surfaces it took over. Full stack, full fidelity,
-/// the slowest and least isolated of the three legs by design, and the only
-/// place in the tree where the binary's own startup wiring -- reading
-/// `view.toml`, holding the superseded options, registering the feature
-/// keys, and announcing all of it once -- is exercised as a user runs it.
+/// process inside a real pty shows a typed character on screen. Full stack,
+/// full fidelity, the slowest and least isolated of the three legs by
+/// design, and the only place in the tree where the binary's own startup
+/// wiring (reading `view.toml`, holding the superseded options, registering
+/// the feature keys) is exercised as a user runs it.
 #[cfg(unix)]
 #[test]
 fn pty_session_against_the_view_binary_shows_a_typed_character_on_screen() {
@@ -149,19 +148,6 @@ fn pty_session_against_the_view_binary_shows_a_typed_character_on_screen() {
         session.screen()
     );
 
-    // the isolated home has no first-run record, so this launch is a first
-    // launch and owes the user the handover notice. Waiting for it before
-    // typing is also what makes the rest of this test deterministic: the
-    // notice arrives with the asynchronous claim reply, so typing first
-    // would race a toast that is about to appear.
-    assert!(
-        session.wait_for("view: now drawing the", Duration::from_secs(5)),
-        "a first launch never introduced what it took over: the startup path \
-         that reads the config, holds the superseded options and registers \
-         the feature keys is not running in the real binary; screen:\n{}",
-        session.screen()
-    );
-
     // a toast stands in the notice column, which moves off the cursor row,
     // so the first cells of an empty buffer can sit under one while it is
     // up. The newlines put the typed character below whatever stack this
@@ -176,6 +162,59 @@ fn pty_session_against_the_view_binary_shows_a_typed_character_on_screen() {
 
     session.send(b"\x1b:q!\r").unwrap();
     let _ = session.wait_for_exit(Duration::from_secs(5));
+}
+
+/// A first launch under `--clean` takes nothing from any config, so it shows
+/// no launch box, leaves none in the history and records nothing that would
+/// silence the box a conflicting config is owed later.
+#[cfg(unix)]
+#[test]
+fn a_clean_first_launch_raises_no_launch_box() {
+    let paths = common::ScratchPaths::new("driver-legs-clean");
+    let view_log = paths.isolated_home.join("view.log");
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.arg("--clean");
+    cmd.arg(&paths.scratch);
+    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+    cmd.env("VIEW_LOG", &view_log);
+    let mut session = PtySession::spawn_configured(cmd, 100, 30)
+        .expect("PtySession::spawn_configured against target/debug/view");
+
+    // the box is raised in the same pass that logs this, so the history
+    // opened behind it holds the box if there is one
+    common::wait_for_log_line(&view_log, "takeover answered");
+    session.send(b":View notifications history\r").unwrap();
+    assert!(
+        session.wait_for(
+            view_core::native::palette::MESSAGE_HISTORY_TITLE,
+            Duration::from_secs(5)
+        ),
+        "the history never opened; screen:\n{}",
+        session.screen()
+    );
+    let screen = session.screen();
+    for needle in ["view: now drawing", "give them back", "gives it back"] {
+        assert!(!screen.contains(needle), "{needle}: screen:\n{screen}");
+    }
+
+    // the Esc travels alone: written with the `:` behind it, the key decoder
+    // reads `<M-:>`, which the overlay ignores
+    session.send(b"\x1b").unwrap();
+    assert!(
+        session.wait_for_screen(Duration::from_secs(5), |s| {
+            !s.contents()
+                .contains(view_core::native::palette::MESSAGE_HISTORY_TITLE)
+        }),
+        "the history never closed; screen:\n{}",
+        session.screen()
+    );
+    session.send(b":q!\r").unwrap();
+    let _ = session.wait_for_exit(Duration::from_secs(5));
+    let record = common::xdg_home(&paths.isolated_home, "XDG_STATE_HOME")
+        .join("view")
+        .join("native-first-run.toml");
+    let recorded = std::fs::read_to_string(&record).unwrap_or_default();
+    assert!(!recorded.contains("statusline"), "{recorded}");
 }
 
 /// A sanity check on `Session::feed`'s total-and-lossy contract for a

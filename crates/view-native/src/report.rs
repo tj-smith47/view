@@ -7,10 +7,15 @@
 //! reported as one [`Handover`] kind rather than as a takeover notice and a
 //! separate mapping notice with their own wording and their own record.
 //!
-//! Only surfaces that actually changed hands appear here. A default key that
-//! landed on nothing took nothing, so it is not news; what keys a session
+//! A key appears here only when it changed hands. A default key that landed
+//! on nothing took nothing, so it is not news; what keys a session
 //! registered at all is a different question, answered by the mapping table
-//! and the config rather than by this report.
+//! and the config.
+//!
+//! A held surface is reported for every feature the plan switched on, since
+//! only the engine knows whether the config was drawing it. The launch box
+//! names such a feature only beside a channel the engine reported held or a
+//! key reported here, so a launch that took nothing raises no box.
 
 use view_core::native::chords;
 use view_core::native::mappings;
@@ -200,9 +205,28 @@ mod tests {
         );
     }
 
+    /// What the launch box shows for `handovers`, empty when it raises none.
+    fn launch_box(handovers: &[Handover]) -> String {
+        let mut model = view_core::model::Model::with_term_size(100, 30);
+        let taken = handovers
+            .iter()
+            .map(|h| (h.record_key(), h.taken()))
+            .collect();
+        let _ = view_core::update::tell_taken_over(&mut model, taken);
+        model
+            .engine
+            .messages
+            .entries
+            .iter()
+            .flat_map(|e| e.content().iter().map(|(_, t)| t.clone()))
+            .collect()
+    }
+
+    /// A held option carries the switch that returns it, and a plan that
+    /// took nothing from the config names it in no box.
     #[test]
-    fn a_held_option_is_reported_with_the_switch_that_returns_it() {
-        let handover = report(
+    fn a_held_option_carries_its_switch_and_alone_raises_no_box() {
+        let handovers = report(
             &plan(
                 &NativeConfig::all_enabled(),
                 registry::features(),
@@ -210,10 +234,11 @@ mod tests {
             ),
             &[],
             registry::features(),
-        )
-        .into_iter()
-        .find(|h| h.feature == "statusline")
-        .expect("an all-enabled plan must supersede the statusline");
+        );
+        let handover = handovers
+            .iter()
+            .find(|h| h.feature == "statusline")
+            .expect("an all-enabled plan must supersede the statusline");
         assert_eq!(
             handover.taken(),
             Taken::Drawing {
@@ -221,6 +246,7 @@ mod tests {
                 off_switch: "native.statusline = false",
             }
         );
+        assert_eq!(launch_box(&handovers), "");
     }
 
     /// The hold tiles keeps on a switched-off statusline names no switch:
@@ -242,24 +268,23 @@ mod tests {
     }
 
     /// The notify takeover is listed on exactly the same terms as the held
-    /// option, through the same `Surface::SessionHold`: a user who lost
-    /// their notification floats is told what took them and what gives them
-    /// back, and does not have to notice that one of these two surfaces is
-    /// an option and the other a Lua function.
+    /// option, through the same `Surface::SessionHold`, and its switch
+    /// reaches the box's give-back line once a taken key raises the box.
     #[test]
-    fn the_notify_takeover_is_reported_with_the_switch_that_returns_it() {
-        let handover = report(
+    fn the_notify_takeover_is_named_with_its_switch_beside_a_taken_key() {
+        let handovers = report(
             &plan(
                 &NativeConfig::all_enabled(),
                 registry::features(),
                 Look::default(),
             ),
-            &[],
+            &[claim("picker", "<leader>ff", true)],
             registry::features(),
-        )
-        .into_iter()
-        .find(|h| h.feature == "notifications")
-        .expect("an all-enabled plan must supersede notifications");
+        );
+        let handover = handovers
+            .iter()
+            .find(|h| h.feature == "notifications")
+            .expect("an all-enabled plan must supersede notifications");
         assert_eq!(handover.surface, Surface::SessionHold);
         assert_eq!(
             handover.taken(),
@@ -268,6 +293,8 @@ mod tests {
                 off_switch: "native.notifications = false",
             }
         );
+        let shown = launch_box(&handovers);
+        assert!(shown.contains("native.notifications = false"), "{shown}");
     }
 
     /// A desktop chord's feature is `window`, a

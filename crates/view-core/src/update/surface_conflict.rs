@@ -154,6 +154,9 @@ pub(super) fn on_channel_held(model: &mut Model, channel: &str, holder: &str) ->
 /// Each item comes with its first-run record key, and one this config was
 /// told at an earlier launch is left out. The caller writes the record,
 /// which keys these by feature and key.
+///
+/// Features alone raise no box: they are named once a held channel or a
+/// taken key raises it.
 pub(super) fn on_taken_over(model: &mut Model, taken: Vec<(String, Taken)>) -> Vec<Effect> {
     let mut news = false;
     for (key, taken) in taken {
@@ -170,8 +173,9 @@ pub(super) fn on_taken_over(model: &mut Model, taken: Vec<(String, Taken)>) -> V
 /// Raises or re-words the launch's one box from everything it names so far.
 ///
 /// The box opens with whichever of its lines comes first, so its family
-/// changes as more is told; every other launch family is withdrawn first,
-/// which keeps one box standing however the reports interleave.
+/// changes as more is told. A box standing under any launch family is this
+/// box re-worded, which keeps one box standing and one history entry for it
+/// however the reports interleave.
 fn raise_launch_box(model: &mut Model) -> Vec<Effect> {
     let Some((family, text)) = launch_notice(
         model.surface_conflicts.told(),
@@ -181,24 +185,17 @@ fn raise_launch_box(model: &mut Model) -> Vec<Effect> {
     ) else {
         return Vec::new();
     };
-    let mut reworded = false;
-    for other in LAUNCH_FAMILIES.iter().filter(|other| **other != family) {
-        reworded |= model.engine.withdraw_native_notice(other);
-    }
     model.dirty = true;
     // a held channel is the config fighting view, which stands until the
     // user acts; a feature or a key view took is told and times out
-    let mut effects = if model.surface_conflicts.told().is_empty() {
-        model.engine.record_native_notice_once(family, text)
+    let kind = if model.surface_conflicts.told().is_empty() {
+        "native"
     } else {
-        model.engine.record_native_notice_sticky_once(family, text)
+        "native_sticky"
     };
-    // a plugin notifier already popped this box under its earlier opening,
-    // and the same family re-worded is not sent to it again either
-    if reworded {
-        effects.retain(|e| !matches!(e, Effect::Rpc(crate::msg::RpcCall::Notify { .. })));
-    }
-    effects
+    model
+        .engine
+        .record_native_notice_once_as(kind, family, &LAUNCH_FAMILIES, text)
 }
 
 /// The history's account of one report, which is the one place the value a
@@ -221,7 +218,8 @@ fn history_line(channel: &str, holder: &str, held: Holder) -> String {
 /// The launch box, and the family it opens with: what the config also
 /// draws, the features view draws now, the user keys view maps now, the
 /// lines that give all of it back, and where the launch's messages went.
-/// `None` when there is nothing to name.
+/// `None` when nothing changed hands: no channel the config held and no key
+/// it had mapped.
 ///
 /// A surface is named by its label with the channels that reported it, so
 /// the user reads both the surface they see and the option they wrote. The
@@ -284,6 +282,11 @@ fn launch_notice(
             Taken::Drawing { .. } => None,
         })
         .collect();
+    // a feature view switched on took nothing from the config, so it is
+    // named only beside something that did change hands
+    if rows.is_empty() && keys.is_empty() {
+        return None;
+    }
     if !keys.is_empty() {
         let keys_read: Vec<&str> = keys.iter().map(String::as_str).collect();
         let theirs = if keys.len() > 1 {
@@ -3092,7 +3095,11 @@ mod tests {
                     for startup in [true, false] {
                         let launch = super::launch_notice(told, taken, read, startup);
                         let Some((family, text)) = launch else {
-                            assert!(told.is_empty() && taken.is_empty());
+                            assert!(
+                                told.is_empty()
+                                    && !taken.iter().any(|t| matches!(t, Taken::Key { .. })),
+                                "{taken:?}"
+                            );
                             continue;
                         };
                         assert!(super::LAUNCH_FAMILIES.contains(&family), "{family:?}");
@@ -3164,6 +3171,89 @@ mod tests {
         assert_eq!(kinds(&model), ["native"]);
         let _ = held(&mut model, "vim.notify", "function <a.renderer>");
         assert_eq!(kinds(&model), ["native_sticky"]);
+    }
+
+    /// The launch box re-words itself as each report lands, and opens with
+    /// another family once a held channel leads it. The history keeps one
+    /// entry for it, carrying the wording that stands.
+    #[test]
+    fn the_launch_box_keeps_one_history_entry_as_it_rewords() {
+        let mut model = drawing_everything();
+        let key: Vec<(String, Taken)> = every_taken()
+            .into_iter()
+            .filter(|(_, taken)| matches!(taken, Taken::Key { .. }))
+            .take(1)
+            .collect();
+        let _ = crate::update::tell_taken_over(&mut model, key);
+        for channel in ["statusline", "tabline", "vim.notify"] {
+            let _ = held(&mut model, channel, "%!v:lua.a()");
+        }
+        let standing = notices(&model);
+        assert_eq!(standing.len(), 1, "{standing:?}");
+        assert!(standing[0].starts_with(super::HELD_FAMILY), "{standing:?}");
+        let boxes: Vec<String> = model
+            .engine
+            .toast_history
+            .entries()
+            .map(|entry| entry.content().iter().map(|(_, t)| t.as_str()).collect())
+            .filter(|text: &String| {
+                super::LAUNCH_FAMILIES
+                    .iter()
+                    .any(|family| text.starts_with(family))
+            })
+            .collect();
+        assert_eq!(boxes, standing);
+    }
+
+    /// Every feature view draws, as the launch reports it.
+    fn every_drawing() -> Vec<(String, Taken)> {
+        every_taken()
+            .into_iter()
+            .filter(|(_, taken)| matches!(taken, Taken::Drawing { .. }))
+            .collect()
+    }
+
+    /// A launch whose config wrote no channel view draws and mapped no key
+    /// view took has nothing to tell, whatever features view now draws.
+    #[test]
+    fn a_launch_that_took_nothing_raises_no_box() {
+        let mut model = drawing_everything();
+        let drawing = every_drawing();
+        assert!(drawing.len() > 2, "{drawing:?}");
+        let effects = crate::update::tell_taken_over(&mut model, drawing);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(
+            model.engine.messages.entries.is_empty(),
+            "{:?}",
+            notices(&model)
+        );
+    }
+
+    /// The features view draws stand beside a held channel, in the wording
+    /// the box had before a launch with nothing held went quiet.
+    #[test]
+    fn a_held_channel_names_the_features_view_draws_beside_it() {
+        let mut model = drawing_everything();
+        let drawing: Vec<(String, Taken)> = every_drawing()
+            .into_iter()
+            .filter(|(key, _)| key == "statusline" || key == "tabline")
+            .collect();
+        assert_eq!(drawing.len(), 2, "{drawing:?}");
+        let _ = crate::update::tell_taken_over(&mut model, drawing);
+        let _ = held(&mut model, "vim.notify", "function <a.renderer>");
+        let standing = notices(&model);
+        assert_eq!(standing.len(), 1, "{standing:?}");
+        let lines: Vec<&str> = standing[0].split('\n').collect();
+        assert_eq!(
+            lines,
+            [
+                "view: your config also draws the message area (vim.notify). view draws it now.",
+                "Now drawing the status line and the tab line.",
+                "native.notifications = false, native.statusline = false and \
+                 native.tabline = false give them back.",
+                "Startup messages: <leader>fm",
+            ]
+        );
     }
 
     /// The launch shows one box whatever a config trips and in whatever

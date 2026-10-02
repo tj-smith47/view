@@ -243,6 +243,14 @@ pub(crate) struct NativeSession {
     /// follow-up adds one to every desktop startup, so a session with no
     /// record to consult would otherwise repeat each notice.
     announced: Vec<String>,
+    /// Whether the launch box has spoken this session: a key was taken, or
+    /// a held channel was told ([`Self::record_announced`]). Until then the
+    /// features view draws are named nowhere.
+    box_spoke: bool,
+    /// The features handed to the model before the box spoke, recorded the
+    /// moment it does. A record of a feature nobody was told would silence
+    /// it at the later launch whose config does conflict.
+    untold: Vec<view_native::report::Handover>,
     /// The thread that writes the first-run record.
     writer: RecordWriter,
 }
@@ -500,6 +508,8 @@ impl NativeSession {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            box_spoke: false,
+            untold: Vec::new(),
             writer: RecordWriter::default(),
         };
         (session, effects)
@@ -1022,7 +1032,9 @@ impl NativeSession {
     }
 
     /// Records `key` as told under this session's config, for a notice the
-    /// model raised about the config ([`Effect::RecordAnnounced`]).
+    /// model raised about the config ([`Effect::RecordAnnounced`]). That
+    /// notice is the launch box, so the features it now names beside the
+    /// held channel ([`Self::untold`]) are recorded with it.
     ///
     /// A record that cannot be written is logged, which costs the same
     /// notice once more next launch.
@@ -1032,6 +1044,11 @@ impl NativeSession {
     /// session makes spawns that thread.
     pub(crate) fn record_announced(&mut self, key: &str) {
         self.write_record(RecordWrite::Key(key.to_string()));
+        self.box_spoke = true;
+        if !self.untold.is_empty() {
+            let told = std::mem::take(&mut self.untold);
+            self.write_record(RecordWrite::Handovers(told));
+        }
     }
 
     /// Hands `write` to the record's writer thread.
@@ -1055,6 +1072,9 @@ impl NativeSession {
     /// worst that costs is repeating it next launch, and a user who is
     /// never told what took their key is worse.
     ///
+    /// A feature is recorded only once the box names it ([`Self::untold`]),
+    /// which is beside a taken key or a held channel.
+    ///
     /// Latency consequence: the record write goes to the writer thread
     /// ([`Self::record_announced`]), so the dispatch thread builds the
     /// report and touches no file. A registration reply that claims nothing
@@ -1074,7 +1094,15 @@ impl NativeSession {
             .iter()
             .map(|h| (h.record_key(), h.taken()))
             .collect();
-        self.write_record(RecordWrite::Handovers(handovers));
+        self.box_spoke |= handovers
+            .iter()
+            .any(|h| matches!(h.surface, view_native::report::Surface::Key { .. }));
+        if self.box_spoke {
+            handovers.append(&mut self.untold);
+            self.write_record(RecordWrite::Handovers(handovers));
+        } else {
+            self.untold.extend(handovers);
+        }
         view_core::update::tell_taken_over(model, taken)
     }
 
@@ -1176,6 +1204,8 @@ impl NativeSession {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            box_spoke: false,
+            untold: Vec::new(),
             writer: RecordWriter::default(),
         }
     }
@@ -1211,6 +1241,8 @@ impl NativeSession {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            box_spoke: false,
+            untold: Vec::new(),
             writer: RecordWriter::default(),
         }
     }
@@ -1601,6 +1633,8 @@ mod tests {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            box_spoke: false,
+            untold: Vec::new(),
             writer: RecordWriter::default(),
         };
         let mut m = model();
@@ -1665,6 +1699,8 @@ mod tests {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            box_spoke: false,
+            untold: Vec::new(),
             writer: RecordWriter::default(),
         };
         let mut m = model();
@@ -1755,6 +1791,30 @@ mod tests {
             "",
             "a surface introduces itself once per config, not every launch"
         );
+    }
+
+    /// A launch that took nothing from the config tells nothing and records
+    /// nothing, so the launch that does conflict is still told. The features
+    /// are recorded once a held channel raises the box that names them.
+    #[test]
+    fn a_launch_that_told_nothing_records_nothing() {
+        let (_dir, record) = scratch("told-nothing");
+        let mut session = NativeSession::all_enabled(7, Some(record.clone()));
+        let mut m = model();
+        let _ = session.follow_up(&mut m, Stage::Claims);
+        session.finish_record();
+        assert_eq!(shown(&m), "");
+        assert_eq!(
+            toast::announced_keys(None, &record).unwrap(),
+            Vec::<String>::new()
+        );
+
+        session.record_announced("held:statusline");
+        session.finish_record();
+        let recorded = toast::announced_keys(None, &record).unwrap();
+        for key in ["held:statusline", "statusline", "notifications"] {
+            assert!(recorded.iter().any(|k| k == key), "{key}: {recorded:?}");
+        }
     }
 
     /// `ui_attach` already ran, at the raw terminal height, before `load`

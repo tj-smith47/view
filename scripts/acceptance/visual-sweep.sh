@@ -1657,24 +1657,6 @@ done
 end_session
 pass "the colorscheme reaches view's own theme cache (NormalFloat bg $FLOAT_BG)"
 
-# The tiled layout draws the tab line, and the first launch under it says so
-# in a box that later launches on the same state record to the history
-# alone. One launch here says it, so a leg run again under tiles starts from
-# the stack its nvim run started from.
-SESSION="view-visual-$$-warm-tiles"
-SESSIONS+=("$SESSION")
-tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" -c "$warm_root" \
-    "env XDG_CONFIG_HOME=$SWEEP_CONFIG \
-         XDG_DATA_HOME=$DATA_HOME \
-         XDG_STATE_HOME=$STATE_HOME \
-         XDG_CACHE_HOME=$warm_root/xdg_cache_home \
-         VIEW_LOG=$warm_root/view.log \
-         TERM=xterm-256color COLORTERM=truecolor \
-         $TILES_LAUNCHER $warm_root/scratch.txt"
-wait_for 'view: now drawing' "$WAIT_SECS" "the tiled launch's notice" >/dev/null
-end_session
-pass "the tiled layout's launch notice is told once, ahead of the tiled legs"
-
 # Waits until `check` and its arguments answer yes against a fresh capture,
 # printing the seconds it took.
 #

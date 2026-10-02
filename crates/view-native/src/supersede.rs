@@ -41,7 +41,8 @@ pub struct Supersession {
     /// registry's `off_switch` so the reversal a notice prints and the
     /// reversal doctor prints can never disagree.
     pub reverses_with: &'static str,
-    /// Whether the first-run notice and doctor name this entry.
+    /// Whether doctor names this entry, and the first-run notice beside a
+    /// held channel or a taken key.
     ///
     /// `false` for a hold the look makes on a feature the user turned off
     /// ([`ChannelValue::held_by_look`](channels::ChannelValue::held_by_look)):

@@ -118,17 +118,19 @@ one row above the same band stays silent.
 When your config writes a channel of a surface view draws, view sets the
 channel back. It tells you once per config, then the history: the first
 launch under a config file shows one box naming each surface and the
-channels that reported it, the features view draws, and the keys of yours
-it maps in one line, with the `view.toml` lines that hand them back.
-Every later launch under the same file records the same finding to the
-message history and shows no box. The history entry spells what the channel
-was set to, which the box leaves out. A float parked over one of those
-surfaces gets a notice of its own, named by what that window calls itself.
+channels that reported it, and the keys of yours it maps in one line, with
+the `view.toml` lines that hand them back. The features view draws are
+named in the same box. A launch where your config wrote no such channel and
+mapped no such key shows no box. Every later launch under the same file
+records the same finding to the message history and shows no box. The
+history entry spells what the channel was set to, which the box leaves out.
+A float parked over one of those surfaces gets a notice of its own, named
+by what that window calls itself.
 
 The notice stands until you take it down. Any key, click or paste,
 `<Esc>` included, clears it once the notice has been on screen for as long
 as an ordinary one, so the keystroke you were already typing when it appeared
 leaves it alone. Its text stays in the notification history (`<leader>fm`)
 either way, which is where the `view.toml` line that resolves the conflict
-can be read back. A launch box that names only features and keys clears on
-its own, as an ordinary notice does.
+can be read back. A launch box that names no channel clears on its own, as
+an ordinary notice does.
