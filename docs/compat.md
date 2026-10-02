@@ -6,7 +6,7 @@ by hand: every row, including its date, is machine-stamped by the
 compat runner.
 
 - Engine pin: `v0.12.4`
-- Run date: 2026-09-29
+- Run date: 2026-10-02
 - Rows: 77
 
 ## Coverage model
@@ -52,8 +52,8 @@ engine pin different from `.engine-pin`, so a pin bump forces a fresh
 | clipboard-precedence | - | v0.12.4 | clipboard-precedence | native-only | tiles | OK | 2026-09-29 |
 | lualine | 221ce6b | v0.12.4 | cold-bootstrap | present | nvim | OK | 2026-09-29 |
 | lualine | 221ce6b | v0.12.4 | cold-bootstrap | present | tiles | OK | 2026-09-29 |
-| daily-config | - | v0.12.4 | daily-config | present | nvim | SKIPPED: VIEW_DAILY_CONFIG is unset; fixture-less scenario skipped | 2026-09-29 |
-| daily-config | - | v0.12.4 | daily-config | present | tiles | SKIPPED: VIEW_DAILY_CONFIG is unset; fixture-less scenario skipped | 2026-09-29 |
+| daily-config | - | v0.12.4 | daily-config | present | nvim | OK | 2026-10-02 |
+| daily-config | - | v0.12.4 | daily-config | present | tiles | OK | 2026-10-02 |
 | dressing | 2d7c2db | v0.12.4 | dressing | unaccommodated | nvim | OK (engine-noise subtracted: E216: No such group or event: FileExplorer *) | 2026-09-29 |
 | dressing | 2d7c2db | v0.12.4 | dressing | superseded | nvim | OK | 2026-09-29 |
 | dressing | 2d7c2db | v0.12.4 | dressing | deferred | nvim | OK | 2026-09-29 |

@@ -338,16 +338,17 @@ fn resolve_fixture(
             })))
         }
         None => {
-            let Ok(daily) = std::env::var("VIEW_DAILY_CONFIG") else {
-                let _ = std::fs::remove_dir_all(&hermetic_dir);
-                return Ok(FixtureResolution::Skipped {
-                    notice: "VIEW_DAILY_CONFIG is unset; fixture-less scenario skipped".to_string(),
-                });
+            let daily_path = match daily_config_dir() {
+                Ok(Ok(path)) => path,
+                Ok(Err(notice)) => {
+                    let _ = std::fs::remove_dir_all(&hermetic_dir);
+                    return Ok(FixtureResolution::Skipped { notice });
+                }
+                Err(err) => {
+                    let _ = std::fs::remove_dir_all(&hermetic_dir);
+                    return Err(err);
+                }
             };
-            let daily_path = PathBuf::from(&daily);
-            if !daily_path.join("init.lua").exists() && !daily_path.join("init.vim").exists() {
-                bail!("VIEW_DAILY_CONFIG={daily} has no init.lua/init.vim");
-            }
             let xdg_config_home = hermetic_dir.join("xdg_config_home");
             std::fs::create_dir_all(&xdg_config_home)
                 .with_context(|| format!("creating {}", xdg_config_home.display()))?;
@@ -394,14 +395,73 @@ fn ambient_data_home() -> PathBuf {
     PathBuf::from(home).join(".local").join("share")
 }
 
+/// The config the fixture-less arm runs on, or the notice it skips with.
+///
+/// `$VIEW_DAILY_CONFIG` names the config; `off` or an empty value switches
+/// the leg off; unset falls back to [`ambient_config_dir`]. A host without
+/// symlinks skips whatever is set, since the config is linked into a
+/// hermetic config home.
+///
+/// # Errors
+///
+/// Returns an error if `$VIEW_DAILY_CONFIG` names a directory with no
+/// `init.lua`/`init.vim`.
+fn daily_config_dir() -> Result<std::result::Result<PathBuf, String>> {
+    if cfg!(not(unix)) {
+        return Ok(Err(
+            "the daily-config leg links the config and needs a Unix host".to_string(),
+        ));
+    }
+    let has_init = |dir: &Path| dir.join("init.lua").exists() || dir.join("init.vim").exists();
+    match std::env::var_os("VIEW_DAILY_CONFIG") {
+        Some(daily) if daily.is_empty() || daily == "off" => Ok(Err(
+            "VIEW_DAILY_CONFIG=off; the daily-config leg is switched off".to_string(),
+        )),
+        Some(daily) => {
+            let path = PathBuf::from(daily);
+            if !has_init(&path) {
+                bail!(
+                    "VIEW_DAILY_CONFIG={} has no init.lua/init.vim",
+                    path.display()
+                );
+            }
+            Ok(Ok(path))
+        }
+        None => {
+            let path = ambient_config_dir();
+            if has_init(&path) {
+                Ok(Ok(path))
+            } else {
+                Ok(Err(format!(
+                    "no nvim config at {}; set VIEW_DAILY_CONFIG to name one",
+                    path.display()
+                )))
+            }
+        }
+    }
+}
+
+/// The config directory nvim itself would load: `$XDG_CONFIG_HOME/<app>`,
+/// else `$HOME/.config/<app>`, where `<app>` is `$NVIM_APPNAME` when set
+/// and `nvim` otherwise.
+fn ambient_config_dir() -> PathBuf {
+    let app = std::env::var_os("NVIM_APPNAME")
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "nvim".into());
+    match std::env::var_os("XDG_CONFIG_HOME").filter(|dir| !dir.is_empty()) {
+        Some(dir) => PathBuf::from(dir).join(app),
+        None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+            .join(".config")
+            .join(app),
+    }
+}
+
 /// Links `link` (inside a per-run hermetic `XDG_CONFIG_HOME`) to `target`
-/// (`$VIEW_DAILY_CONFIG`'s real path), so the maintainer's actual nvim
-/// config is what `view` sources while every *other* XDG home
-/// (state/cache) stays per-run hermetic, and `XDG_DATA_HOME` is the
-/// maintainer's own live data home (see [`ambient_data_home`]) rather than
-/// hermetic like the rest. Unix-only (symlinks): the daily-config scenario
-/// is a maintainer-machine standing scenario, not a CI-gated one, so a
-/// non-Unix host simply cannot run it yet.
+/// (the config [`daily_config_dir`] chose), so the machine's own nvim
+/// config is what `view` sources while state and cache stay per-run
+/// hermetic and `XDG_DATA_HOME` is the live data home (see
+/// [`ambient_data_home`]). Unix-only: [`daily_config_dir`] skips the leg
+/// on any other host before this is reached.
 ///
 /// # Errors
 ///
@@ -1585,14 +1645,15 @@ mod tests {
         // outlive the scenario it names.
         let (scenario, state, _, _, _) = SYNTHETIC[0];
         let mut result = red_row(scenario, state, ScenarioStatus::Skipped);
-        result.detail = Some("VIEW_DAILY_CONFIG is unset".to_string());
+        let notice = "VIEW_DAILY_CONFIG=off; the daily-config leg is switched off";
+        result.detail = Some(notice.to_string());
         apply_red_expectation_over(&mut result, &SYNTHETIC);
         assert_eq!(result.status, ScenarioStatus::Failed);
         let detail = result
             .detail
             .expect("a skipped listed row must explain itself");
         assert!(
-            detail.contains("skipped") && detail.contains("VIEW_DAILY_CONFIG is unset"),
+            detail.contains("skipped") && detail.contains(notice),
             "the row must say it skipped and keep the skip's own reason: {detail}"
         );
     }
@@ -1992,11 +2053,7 @@ mod tests {
     /// config finds no already-installed plugins and re-bootstraps from
     /// the network, outrunning the driver's prime deadline.
     ///
-    /// Unix-only: the fixture-less arm's config symlink
-    /// ([`symlink_daily_config`]) is itself Unix-only and returns an error
-    /// on every other host, which is a real property of that arm today, not
-    /// something this test should paper over by skipping the symlinked-path
-    /// exercise on the hosts that can't take it.
+    /// Unix-only: every other host skips the fixture-less arm.
     #[cfg(unix)]
     #[test]
     fn resolve_fixture_fixture_less_arm_uses_ambient_xdg_data_home() {
@@ -2038,6 +2095,104 @@ mod tests {
         assert_eq!(
             ambient_data_home(),
             PathBuf::from("/home/daily-config-test/.local/share")
+        );
+    }
+
+    /// Resolves the fixture-less arm and returns its skip notice, or `None`
+    /// when it came back `Ready`.
+    fn fixture_less_notice(sock_path: &Path) -> Option<String> {
+        match resolve_fixture(None, false, sock_path).expect("resolve_fixture must not error") {
+            FixtureResolution::Ready(_) => None,
+            FixtureResolution::Skipped { notice } => Some(notice),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_ambient_config_is_the_default_when_view_daily_config_is_unset() {
+        let _guard = env_mutation_guard();
+        let root = ScratchDir::new("harness-oracle-ambient-config").expect("scratch dir");
+        std::fs::create_dir_all(root.join("nvim")).expect("config dir");
+        std::fs::write(root.join("nvim").join("init.lua"), "").expect("init.lua");
+        let _daily_env = EnvRestore::unset("VIEW_DAILY_CONFIG");
+        let _app_env = EnvRestore::unset("NVIM_APPNAME");
+        let _config_env = EnvRestore::set("XDG_CONFIG_HOME", root.path());
+
+        let resolution = resolve_fixture(None, false, &root.join("daily.sock"))
+            .expect("resolve_fixture must not error");
+        let FixtureResolution::Ready(ready) = resolution else {
+            panic!("an ambient config with an init.lua must resolve Ready");
+        };
+        assert_eq!(
+            std::fs::read_link(ready.xdg_config_home.join("nvim")).expect("a linked config"),
+            root.join("nvim"),
+            "the hermetic config home must link the ambient config"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_ambient_config_skips_naming_the_path_it_read() {
+        let _guard = env_mutation_guard();
+        let root = ScratchDir::new("harness-oracle-no-ambient-config").expect("scratch dir");
+        let _daily_env = EnvRestore::unset("VIEW_DAILY_CONFIG");
+        let _app_env = EnvRestore::unset("NVIM_APPNAME");
+        let _config_env = EnvRestore::set("XDG_CONFIG_HOME", root.path());
+
+        assert_eq!(
+            fixture_less_notice(&root.join("daily.sock")),
+            Some(format!(
+                "no nvim config at {}; set VIEW_DAILY_CONFIG to name one",
+                root.join("nvim").display()
+            ))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn view_daily_config_off_skips() {
+        let _guard = env_mutation_guard();
+        let root = ScratchDir::new("harness-oracle-daily-config-off").expect("scratch dir");
+        std::fs::create_dir_all(root.join("nvim")).expect("config dir");
+        std::fs::write(root.join("nvim").join("init.lua"), "").expect("init.lua");
+        let _app_env = EnvRestore::unset("NVIM_APPNAME");
+        let _config_env = EnvRestore::set("XDG_CONFIG_HOME", root.path());
+        for value in ["off", ""] {
+            let _daily_env = EnvRestore::set("VIEW_DAILY_CONFIG", value);
+            assert_eq!(
+                fixture_less_notice(&root.join("daily.sock")).as_deref(),
+                Some("VIEW_DAILY_CONFIG=off; the daily-config leg is switched off"),
+                "VIEW_DAILY_CONFIG={value:?} must switch the leg off over an ambient config"
+            );
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn a_host_without_symlinks_skips_the_daily_config_leg() {
+        let _guard = env_mutation_guard();
+        let _daily_env = EnvRestore::set("VIEW_DAILY_CONFIG", "no-such-config");
+        assert_eq!(
+            fixture_less_notice(Path::new("daily.sock")).as_deref(),
+            Some("the daily-config leg links the config and needs a Unix host")
+        );
+    }
+
+    #[test]
+    fn nvim_appname_names_the_ambient_config_dir() {
+        let _guard = env_mutation_guard();
+        let _config_env = EnvRestore::set("XDG_CONFIG_HOME", "/xdg-config");
+        let _home_env = EnvRestore::set("HOME", "/home/daily-config-test");
+        let _app_env = EnvRestore::unset("NVIM_APPNAME");
+        assert_eq!(ambient_config_dir(), PathBuf::from("/xdg-config/nvim"));
+
+        let _app_env = EnvRestore::set("NVIM_APPNAME", "work");
+        assert_eq!(ambient_config_dir(), PathBuf::from("/xdg-config/work"));
+
+        let _config_env = EnvRestore::unset("XDG_CONFIG_HOME");
+        assert_eq!(
+            ambient_config_dir(),
+            PathBuf::from("/home/daily-config-test/.config/work")
         );
     }
     /// Every scenario file this repo commits, `broken/`'s deliberately-red
