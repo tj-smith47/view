@@ -180,9 +180,9 @@ fn a_clean_first_launch_raises_no_launch_box() {
     let mut session = PtySession::spawn_configured(cmd, 100, 30)
         .expect("PtySession::spawn_configured against target/debug/view");
 
-    // the box is raised in the same pass that logs this, so the history
-    // opened behind it holds the box if there is one
-    common::wait_for_log_line(&view_log, "takeover answered");
+    // logged in the pass that answers the last registration, after the
+    // last announcement that could raise the box
+    common::wait_for_log_line(&view_log, "claims settled");
     session.send(b":View notifications history\r").unwrap();
     assert!(
         session.wait_for(
@@ -215,6 +215,44 @@ fn a_clean_first_launch_raises_no_launch_box() {
         .join("native-first-run.toml");
     let recorded = std::fs::read_to_string(&record).unwrap_or_default();
     assert!(!recorded.contains("statusline"), "{recorded}");
+}
+
+/// A first launch under a config that draws its own status line raises the
+/// launch box naming it beside the features view draws, and records both.
+#[cfg(unix)]
+#[test]
+fn a_first_launch_under_a_held_channel_raises_the_launch_box() {
+    let paths = common::ScratchPaths::new("driver-legs-held");
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.arg(&paths.scratch);
+    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+    common::plant_nvim_config(&paths.isolated_home, "held-statusline");
+    let mut session = PtySession::spawn_configured(cmd, 120, 30)
+        .expect("PtySession::spawn_configured against target/debug/view");
+
+    assert!(
+        session.wait_for(
+            "view: your config also draws the status line",
+            Duration::from_secs(5)
+        ),
+        "the launch box never named the held status line; screen:\n{}",
+        session.screen()
+    );
+    assert!(
+        session.wait_for("Now drawing", Duration::from_secs(5)),
+        "the box never named the features view draws; screen:\n{}",
+        session.screen()
+    );
+
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait_for_exit(Duration::from_secs(5));
+    let record = common::xdg_home(&paths.isolated_home, "XDG_STATE_HOME")
+        .join("view")
+        .join("native-first-run.toml");
+    let recorded = std::fs::read_to_string(&record).unwrap_or_default();
+    for key in ["\"held:statusline\"", "\"statusline\"", "\"notifications\""] {
+        assert!(recorded.contains(key), "{key}: {recorded}");
+    }
 }
 
 /// A sanity check on `Session::feed`'s total-and-lossy contract for a

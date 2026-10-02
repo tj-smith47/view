@@ -139,12 +139,12 @@ pub(super) fn on_channel_held(model: &mut Model, channel: &str, holder: &str) ->
     if model.surface_conflicts.is_announced(&key) {
         return effects;
     }
+    let spoke = box_speaks(model);
     if !model.surface_conflicts.tell_held(surface, channel) {
         return effects;
     }
     model.surface_conflicts.note_announced(key.clone());
-    effects.extend(raise_launch_box(model));
-    effects.push(Effect::RecordAnnounced { key });
+    effects.extend(raise_launch_box(model, spoke, vec![key]));
     effects
 }
 
@@ -152,31 +152,54 @@ pub(super) fn on_channel_held(model: &mut Model, channel: &str, holder: &str) ->
 /// it maps) to the launch's one box.
 ///
 /// Each item comes with its first-run record key, and one this config was
-/// told at an earlier launch is left out. The caller writes the record,
-/// which keys these by feature and key.
+/// told at an earlier launch is left out. What the box names is handed to
+/// the record as it is raised ([`raise_launch_box`]).
 ///
 /// Features alone raise no box: they are named once a held channel or a
 /// taken key raises it.
 pub(super) fn on_taken_over(model: &mut Model, taken: Vec<(String, Taken)>) -> Vec<Effect> {
-    let mut news = false;
+    let spoke = box_speaks(model);
+    let mut news = Vec::new();
     for (key, taken) in taken {
-        if model.surface_conflicts.note_announced(key) {
-            news |= model.surface_conflicts.tell_taken(taken);
+        if model.surface_conflicts.note_announced(key.clone())
+            && model.surface_conflicts.tell_taken(taken)
+        {
+            news.push(key);
         }
     }
-    if !news {
+    if news.is_empty() {
         return Vec::new();
     }
-    raise_launch_box(model)
+    raise_launch_box(model, spoke, news)
 }
 
-/// Raises or re-words the launch's one box from everything it names so far.
+/// Whether the launch box has something that changed hands to name, so
+/// that it stands.
+fn box_speaks(model: &Model) -> bool {
+    launch_notice(
+        model.surface_conflicts.told(),
+        model.surface_conflicts.taken(),
+        true,
+        false,
+    )
+    .is_some()
+}
+
+/// Raises or re-words the launch's one box from everything it names so far,
+/// and records what it names for the first time
+/// ([`Effect::RecordAnnounced`]).
+///
+/// `news` holds the record keys this report added to the box. `spoke` says
+/// whether the box already stood before them; when it did not, the features
+/// told while nothing had changed hands stand in this box for the first
+/// time and are recorded with it. A box that does not stand records
+/// nothing, so a later launch whose config does conflict is still told.
 ///
 /// The box opens with whichever of its lines comes first, so its family
 /// changes as more is told. A box standing under any launch family is this
 /// box re-worded, which keeps one box standing and one history entry for it
 /// however the reports interleave.
-fn raise_launch_box(model: &mut Model) -> Vec<Effect> {
+fn raise_launch_box(model: &mut Model, spoke: bool, mut news: Vec<String>) -> Vec<Effect> {
     let Some((family, text)) = launch_notice(
         model.surface_conflicts.told(),
         model.surface_conflicts.taken(),
@@ -185,6 +208,16 @@ fn raise_launch_box(model: &mut Model) -> Vec<Effect> {
     ) else {
         return Vec::new();
     };
+    if !spoke {
+        // a feature is keyed in the record by its registry id
+        for taken in model.surface_conflicts.taken() {
+            if let Taken::Drawing { feature, .. } = taken {
+                if !news.iter().any(|key| key == feature) {
+                    news.push((*feature).to_string());
+                }
+            }
+        }
+    }
     model.dirty = true;
     // a held channel is the config fighting view, which stands until the
     // user acts; a feature or a key view took is told and times out
@@ -193,9 +226,12 @@ fn raise_launch_box(model: &mut Model) -> Vec<Effect> {
     } else {
         "native_sticky"
     };
-    model
-        .engine
-        .record_native_notice_once_as(kind, family, &LAUNCH_FAMILIES, text)
+    let mut effects =
+        model
+            .engine
+            .record_native_notice_once_as(kind, family, &LAUNCH_FAMILIES, text);
+    effects.extend(news.into_iter().map(|key| Effect::RecordAnnounced { key }));
+    effects
 }
 
 /// The history's account of one report, which is the one place the value a
@@ -3229,8 +3265,49 @@ mod tests {
         );
     }
 
-    /// The features view draws stand beside a held channel, in the wording
-    /// the box had before a launch with nothing held went quiet.
+    /// The keys a report records, in the order it records them.
+    fn recorded(effects: &[Effect]) -> Vec<String> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::RecordAnnounced { key } => Some(key.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The box records what it names as it is raised: nothing while it
+    /// stays down, every feature it names for the first time beside the
+    /// held channel that raises it, and only the added names as it
+    /// re-words.
+    #[test]
+    fn the_launch_box_records_what_it_names_when_raised() {
+        let mut model = drawing_everything();
+        let key = every_taken()
+            .into_iter()
+            .find(|(_, taken)| matches!(taken, Taken::Key { .. }))
+            .unwrap();
+        model.seed_announced([key.0.clone()]);
+        let mut taken = every_drawing();
+        taken.push(key);
+        let effects = crate::update::tell_taken_over(&mut model, taken);
+        assert_eq!(recorded(&effects), Vec::<String>::new());
+        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
+
+        let effects = held(&mut model, "statusline", "%!v:lua.a()");
+        let mut first = recorded(&effects);
+        first.sort();
+        let mut named: Vec<String> = every_drawing().into_iter().map(|(k, _)| k).collect();
+        named.push(super::announced_key("statusline"));
+        named.sort();
+        assert_eq!(first, named);
+
+        let effects = held(&mut model, "tabline", "%!v:lua.a()");
+        assert_eq!(recorded(&effects), [super::announced_key("tabline")]);
+    }
+
+    /// The features view draws stand beside a held channel in the box's
+    /// wording.
     #[test]
     fn a_held_channel_names_the_features_view_draws_beside_it() {
         let mut model = drawing_everything();

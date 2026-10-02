@@ -243,22 +243,12 @@ pub(crate) struct NativeSession {
     /// follow-up adds one to every desktop startup, so a session with no
     /// record to consult would otherwise repeat each notice.
     announced: Vec<String>,
-    /// Whether the launch box has spoken this session: a key was taken, or
-    /// a held channel was told ([`Self::record_announced`]). Until then the
-    /// features view draws are named nowhere.
-    box_spoke: bool,
-    /// The features handed to the model before the box spoke, recorded the
-    /// moment it does. A record of a feature nobody was told would silence
-    /// it at the later launch whose config does conflict.
-    untold: Vec<view_native::report::Handover>,
     /// The thread that writes the first-run record.
     writer: RecordWriter,
 }
 
 /// One write to the first-run record.
 enum RecordWrite {
-    /// Everything a registration handed over, keyed per surface.
-    Handovers(Vec<view_native::report::Handover>),
     /// One notice the model raised about the config.
     Key(String),
 }
@@ -371,7 +361,6 @@ fn apply_record_write(
     write: RecordWrite,
 ) {
     let result = match write {
-        RecordWrite::Handovers(handovers) => toast::first_run(&handovers, config, record),
         RecordWrite::Key(key) => toast::record_key(config, &key, record),
     };
     if let Err(err) = result {
@@ -508,8 +497,6 @@ impl NativeSession {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
-            box_spoke: false,
-            untold: Vec::new(),
             writer: RecordWriter::default(),
         };
         (session, effects)
@@ -732,8 +719,14 @@ impl NativeSession {
                 self.claims_owed = self.claims_owed.saturating_sub(1);
                 crate::vlog::log("startup", "takeover answered");
                 crate::vlog::log_takeover("answered");
+                // the answer to the last registration this session owes, so
+                // no later claims answer adds to the launch box
+                let settled = !self.chords_pending && self.claims_owed == 0;
                 let mut effects = self.announce(model);
                 effects.extend(self.follow_up_chords(model));
+                if settled {
+                    crate::vlog::log("startup", "claims settled");
+                }
                 effects
             }
             Stage::CapsUpgraded | Stage::ProfileFlip => self.reissue_mappings(model, stage),
@@ -1031,10 +1024,8 @@ impl NativeSession {
         effects
     }
 
-    /// Records `key` as told under this session's config, for a notice the
-    /// model raised about the config ([`Effect::RecordAnnounced`]). That
-    /// notice is the launch box, so the features it now names beside the
-    /// held channel ([`Self::untold`]) are recorded with it.
+    /// Records `key` as told under this session's config, for something the
+    /// launch box named as it was raised ([`Effect::RecordAnnounced`]).
     ///
     /// A record that cannot be written is logged, which costs the same
     /// notice once more next launch.
@@ -1044,11 +1035,6 @@ impl NativeSession {
     /// session makes spawns that thread.
     pub(crate) fn record_announced(&mut self, key: &str) {
         self.write_record(RecordWrite::Key(key.to_string()));
-        self.box_spoke = true;
-        if !self.untold.is_empty() {
-            let told = std::mem::take(&mut self.untold);
-            self.write_record(RecordWrite::Handovers(told));
-        }
     }
 
     /// Hands `write` to the record's writer thread.
@@ -1072,8 +1058,10 @@ impl NativeSession {
     /// worst that costs is repeating it next launch, and a user who is
     /// never told what took their key is worse.
     ///
-    /// A feature is recorded only once the box names it ([`Self::untold`]),
-    /// which is beside a taken key or a held channel.
+    /// Records exactly what the model's box named as it was raised
+    /// ([`Effect::RecordAnnounced`]), which is beside a taken key or a held
+    /// channel. The effects this returns go to the executor, which has no
+    /// reach to the record, so those are recorded here.
     ///
     /// Latency consequence: the record write goes to the writer thread
     /// ([`Self::record_announced`]), so the dispatch thread builds the
@@ -1094,16 +1082,15 @@ impl NativeSession {
             .iter()
             .map(|h| (h.record_key(), h.taken()))
             .collect();
-        self.box_spoke |= handovers
-            .iter()
-            .any(|h| matches!(h.surface, view_native::report::Surface::Key { .. }));
-        if self.box_spoke {
-            handovers.append(&mut self.untold);
-            self.write_record(RecordWrite::Handovers(handovers));
-        } else {
-            self.untold.extend(handovers);
-        }
-        view_core::update::tell_taken_over(model, taken)
+        let mut effects = view_core::update::tell_taken_over(model, taken);
+        effects.retain(|effect| match effect {
+            Effect::RecordAnnounced { key } => {
+                self.record_announced(key);
+                false
+            }
+            _ => true,
+        });
+        effects
     }
 
     /// Waits up to [`view_proc::writer::QUIT_WAIT`] for every record write this session
@@ -1204,8 +1191,6 @@ impl NativeSession {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
-            box_spoke: false,
-            untold: Vec::new(),
             writer: RecordWriter::default(),
         }
     }
@@ -1241,8 +1226,6 @@ impl NativeSession {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
-            box_spoke: false,
-            untold: Vec::new(),
             writer: RecordWriter::default(),
         }
     }
@@ -1633,8 +1616,6 @@ mod tests {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
-            box_spoke: false,
-            untold: Vec::new(),
             writer: RecordWriter::default(),
         };
         let mut m = model();
@@ -1699,8 +1680,6 @@ mod tests {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
-            box_spoke: false,
-            untold: Vec::new(),
             writer: RecordWriter::default(),
         };
         let mut m = model();
@@ -1793,28 +1772,162 @@ mod tests {
         );
     }
 
-    /// A launch that took nothing from the config tells nothing and records
-    /// nothing, so the launch that does conflict is still told. The features
-    /// are recorded once a held channel raises the box that names them.
-    #[test]
-    fn a_launch_that_told_nothing_records_nothing() {
-        let (_dir, record) = scratch("told-nothing");
-        let mut session = NativeSession::all_enabled(7, Some(record.clone()));
+    /// One launch under `record`, seeded from it the way `load` seeds: the
+    /// claims answer names `claimed` as keys the config had mapped, then
+    /// each of `held` is reported held by the config, its record effects
+    /// handed to the session the way `runtime::dispatch` hands them.
+    /// Answers what the box says and what the record holds afterwards.
+    fn launch(
+        record: &std::path::Path,
+        claimed: &[MappingClaim],
+        held: &[&str],
+    ) -> (String, Vec<String>) {
+        let mut session = NativeSession::all_enabled(7, Some(record.to_path_buf()));
         let mut m = model();
+        m.attach_surfaces(view_core::native::ext::ALL.to_vec());
+        m.statusline_enabled = true;
+        m.seed_announced(toast::announced_keys(None, record).unwrap());
+        m.record_claimed_keys(claimed.to_vec());
         let _ = session.follow_up(&mut m, Stage::Claims);
-        session.finish_record();
-        assert_eq!(shown(&m), "");
-        assert_eq!(
-            toast::announced_keys(None, &record).unwrap(),
-            Vec::<String>::new()
-        );
-
-        session.record_announced("held:statusline");
-        session.finish_record();
-        let recorded = toast::announced_keys(None, &record).unwrap();
-        for key in ["held:statusline", "statusline", "notifications"] {
-            assert!(recorded.iter().any(|k| k == key), "{key}: {recorded:?}");
+        for channel in held {
+            let effects = view_core::update::update(
+                &mut m,
+                Msg::ChannelHeld {
+                    channel: (*channel).to_string(),
+                    holder: "%!v:lua.a()".to_string(),
+                },
+            );
+            for effect in effects {
+                if let Effect::RecordAnnounced { key } = effect {
+                    session.record_announced(&key);
+                }
+            }
         }
+        session.finish_record();
+        (shown(&m), toast::announced_keys(None, record).unwrap())
+    }
+
+    /// The record keys of every feature an all-enabled launch draws.
+    fn drawing_keys() -> Vec<String> {
+        let session = NativeSession::all_enabled(7, None);
+        report(&session.plan, &[], registry::features())
+            .iter()
+            .map(view_native::report::Handover::record_key)
+            .collect()
+    }
+
+    /// `keys` sorted the way the record stores them.
+    fn sorted(keys: impl IntoIterator<Item = String>) -> Vec<String> {
+        let mut keys: Vec<String> = keys.into_iter().collect();
+        keys.sort();
+        keys
+    }
+
+    fn picker_key() -> Vec<MappingClaim> {
+        vec![MappingClaim::new("picker", "<leader>ff", true)]
+    }
+
+    const PICKER_KEY: &str = "picker:key:<leader>ff";
+
+    /// A launch with nothing held and no key taken raises no box and leaves
+    /// the record as it was.
+    #[test]
+    fn a_launch_that_took_nothing_tells_and_records_nothing() {
+        let (_dir, record) = scratch("took-nothing");
+        let (shown, recorded) = launch(&record, &[], &[]);
+        assert_eq!(shown, "");
+        assert_eq!(recorded, Vec::<String>::new());
+    }
+
+    /// A held channel raises the box with the held line and the line naming
+    /// the features view draws, and the record holds both.
+    #[test]
+    fn a_held_channel_records_what_the_box_names() {
+        let (_dir, record) = scratch("held");
+        let (shown, recorded) = launch(&record, &[], &["statusline"]);
+        assert!(
+            shown.starts_with("view: your config also draws the status line (statusline)"),
+            "{shown:?}"
+        );
+        assert!(
+            shown.contains("Now drawing ") && shown.contains("the tab line"),
+            "{shown:?}"
+        );
+        assert_eq!(
+            recorded,
+            sorted(drawing_keys().into_iter().chain(["held:statusline".into()]))
+        );
+    }
+
+    /// A taken key raises the box with the drawing line and the key line,
+    /// and the record holds both. The same launch again raises none and
+    /// leaves the record as it was.
+    #[test]
+    fn a_taken_key_records_what_the_box_names_once() {
+        let (_dir, record) = scratch("key");
+        let (shown, recorded) = launch(&record, &picker_key(), &[]);
+        assert!(shown.starts_with("view: now drawing "), "{shown:?}");
+        assert!(shown.contains("Now mapping <leader>ff"), "{shown:?}");
+        let both = sorted(drawing_keys().into_iter().chain([PICKER_KEY.into()]));
+        assert_eq!(recorded, both);
+
+        let (shown, recorded) = launch(&record, &picker_key(), &[]);
+        assert_eq!(shown, "");
+        assert_eq!(recorded, both);
+    }
+
+    /// A launch that told nothing leaves the features unrecorded, so the
+    /// later launch whose config holds a channel names them beside it and
+    /// records them.
+    #[test]
+    fn a_launch_that_told_nothing_leaves_the_features_for_the_conflict() {
+        let (_dir, record) = scratch("told-nothing");
+        let (shown, recorded) = launch(&record, &[], &[]);
+        assert_eq!((shown.as_str(), recorded.len()), ("", 0));
+
+        let (shown, recorded) = launch(&record, &[], &["statusline"]);
+        assert!(
+            shown.starts_with("view: your config also draws "),
+            "{shown:?}"
+        );
+        assert!(
+            shown.contains("Now drawing ") && shown.contains("the tab line"),
+            "{shown:?}"
+        );
+        assert_eq!(
+            recorded,
+            sorted(drawing_keys().into_iter().chain(["held:statusline".into()]))
+        );
+    }
+
+    /// A key told at an earlier launch and mapped again tells nothing, so
+    /// the features it would once have carried stay unrecorded and a later
+    /// held channel names them.
+    #[test]
+    fn a_key_told_before_records_no_feature_the_box_did_not_name() {
+        let (_dir, record) = scratch("key-told-before");
+        toast::record_key(None, PICKER_KEY, &record).unwrap();
+        let (shown, recorded) = launch(&record, &picker_key(), &[]);
+        assert_eq!(shown, "");
+        assert_eq!(recorded, [PICKER_KEY]);
+
+        let (shown, recorded) = launch(&record, &picker_key(), &["statusline"]);
+        assert!(
+            shown.starts_with("view: your config also draws "),
+            "{shown:?}"
+        );
+        assert!(
+            shown.contains("Now drawing ") && shown.contains("the tab line"),
+            "{shown:?}"
+        );
+        assert_eq!(
+            recorded,
+            sorted(
+                drawing_keys()
+                    .into_iter()
+                    .chain(["held:statusline".into(), PICKER_KEY.into()])
+            )
+        );
     }
 
     /// `ui_attach` already ran, at the raw terminal height, before `load`
