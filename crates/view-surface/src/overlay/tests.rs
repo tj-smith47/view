@@ -1922,6 +1922,40 @@ fn a_pickers_preview_lines_reach_the_painted_frame() {
     );
 }
 
+/// A preview opening on a candidate's line paints a window around that line
+/// and marks it the way a list marks its selection: the selection marker
+/// before it and the text in the role a matched substring carries.
+#[test]
+fn a_pickers_preview_marks_the_line_it_opens_on() {
+    let lines = (1..=200).map(|n| format!("line {n}")).collect();
+    let kind = LayerKind::Picker(
+        PickerView::new("Live Grep")
+            .with_rows(vec!["a.rs:150: x".to_string()])
+            .with_selected(0)
+            .with_preview(lines)
+            .with_preview_line(Some(149)),
+    );
+    let framed = rows(60, 14, &kind, BorderSet::ROUNDED);
+
+    let row = framed
+        .lines
+        .iter()
+        .find(|l| l.iter().any(|s| s.text.contains("line 150")))
+        .expect("the match line is painted");
+    let at = row
+        .iter()
+        .position(|s| s.text.contains("line 150"))
+        .expect("the match span");
+    assert_eq!(row[at].role, StyleRole::Match, "{row:?}");
+    assert_eq!(row[at - 1].text, SELECTED_MARK, "{row:?}");
+    let joined: String = framed.lines.iter().map(|l| line_text(l)).collect();
+    assert!(
+        joined.contains("line 149") && !joined.contains("line 1 "),
+        "context above the match, and the window starts past the top: {:?}",
+        framed.lines
+    );
+}
+
 /// A picker with nothing to preview yet keeps the single-column layout it
 /// always had: no separator rule appears inside the frame, and the results
 /// list uses the full interior width, exactly as it did before a preview

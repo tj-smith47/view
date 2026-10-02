@@ -334,7 +334,8 @@ impl PickerState {
 
     /// This session's paint-facing projection: the query line, the
     /// candidate rows with their matched substrings carrying
-    /// [`StyleRole::Match`], and which row is highlighted.
+    /// [`StyleRole::Match`], which row is highlighted, and the line the
+    /// selected candidate's preview opens on.
     #[must_use]
     pub fn view(&self) -> PickerView {
         let title = match &self.source {
@@ -346,7 +347,13 @@ impl PickerState {
         let mut view = PickerView::new(title)
             .with_query(self.query.clone())
             .with_span_rows(rows)
-            .with_preview(self.preview_lines.clone());
+            .with_preview(self.preview_lines.clone())
+            .with_preview_line(
+                self.items
+                    .get(self.selected)
+                    .and_then(|item| item.line)
+                    .and_then(|line| usize::try_from(line.saturating_sub(1)).ok()),
+            );
         if !self.items.is_empty() {
             view = view.with_selected(self.selected);
         }
@@ -604,5 +611,62 @@ mod tests {
             "a live-grep path containing ':' must resolve to the real file, \
              not the text before the first ':' in the display label"
         );
+    }
+
+    /// A picker over `items` whose preview reply of `len` numbered lines
+    /// has landed for the first item.
+    fn previewed(items: Vec<PickerItem>, len: usize) -> PickerView {
+        let mut state = PickerState::open(Source::LiveGrep {
+            root: PathBuf::from("/repo"),
+        });
+        let gen = state.generation();
+        state.apply_results(gen, items);
+        let (preview_gen, _) = state.refresh_preview().expect("a selection");
+        let lines = (1..=len).map(|n| format!("line {n}")).collect();
+        state.apply_preview(preview_gen, lines);
+        state.view()
+    }
+
+    const PANE_ROWS: usize = 30;
+
+    #[test]
+    fn a_grep_match_previews_its_own_line_a_third_of_the_way_down() {
+        let view = previewed(
+            vec![PickerItem::grep_match("src/a.rs", 1089, "BUFFER")],
+            1200,
+        );
+        let (window, marked) = view.preview_window(PANE_ROWS);
+        let marked = marked.expect("the match line is marked");
+        assert_eq!(window[marked], "line 1089");
+        assert_eq!(marked, PANE_ROWS / 3, "context above the match");
+    }
+
+    #[test]
+    fn a_match_near_the_top_clamps_to_the_first_line() {
+        let view = previewed(vec![PickerItem::grep_match("src/a.rs", 2, "x")], 1200);
+        let (window, marked) = view.preview_window(PANE_ROWS);
+        assert_eq!(window[0], "line 1");
+        assert_eq!(marked, Some(1));
+    }
+
+    #[test]
+    fn a_match_on_the_last_line_clamps_to_the_bottom() {
+        let view = previewed(vec![PickerItem::grep_match("src/a.rs", 1200, "x")], 1200);
+        let (window, marked) = view.preview_window(PANE_ROWS);
+        assert_eq!(window.len(), PANE_ROWS, "the pane is filled to the end");
+        assert_eq!(marked, Some(PANE_ROWS - 1));
+        assert_eq!(window[PANE_ROWS - 1], "line 1200");
+    }
+
+    #[test]
+    fn an_item_with_no_line_previews_from_the_top() {
+        let item = PickerItem {
+            path: Some("src/a.rs".to_string()),
+            ..PickerItem::new("src/a.rs")
+        };
+        let view = previewed(vec![item], 1200);
+        let (window, marked) = view.preview_window(PANE_ROWS);
+        assert_eq!(window[0], "line 1");
+        assert_eq!(marked, None);
     }
 }

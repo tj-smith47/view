@@ -373,7 +373,8 @@ fn content_rows(
 
 /// Splits a picker's interior into two columns separated by one frame-glyph
 /// rule: the results list (left, `body`, unchanged from the no-preview
-/// layout) and the RPC-read buffer preview (right, `view.preview`), painted
+/// layout) and the RPC-read buffer preview (right, the window
+/// [`PickerView::preview_window`] cuts around the selected line), painted
 /// by reusing [`lay_out`] and [`Line`]'s existing per-row column machinery
 /// (called once per side) rather than inventing a second layout primitive.
 /// Both painters
@@ -402,17 +403,23 @@ fn picker_split_rows(
     let preview_width = width - list_width - 1;
 
     let list = lay_out(body, list_width, height, borders);
+    let (window, marked) = view.preview_window(usize::from(height));
     let preview_body = Body {
         title: String::new(),
         header: Vec::new(),
-        items: view
-            .preview
+        items: window
             .iter()
-            .cloned()
-            .map(plain_spans)
-            .map(Line::Text)
+            .take(usize::from(height))
+            .enumerate()
+            .map(|(i, text)| {
+                if marked == Some(i) {
+                    Line::Text(vec![Span::new(text.clone(), StyleRole::Match)])
+                } else {
+                    Line::Text(plain_spans(text.clone()))
+                }
+            })
             .collect(),
-        selected: None,
+        selected: marked,
         header_keep_tail: false,
         header_first: false,
         rule: false,
