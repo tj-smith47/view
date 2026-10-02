@@ -7,7 +7,9 @@
 //! background walker mid-walk so a cancellation test observes what the
 //! walker does next instead of racing it; and [`WideTerm`], the
 //! terminal model that draws a glyph class two columns wide so a painter's
-//! output can be replayed on the terminal a user actually has.
+//! output can be replayed on the terminal a user actually has. The
+//! [`rust_source`] module reads a crate's own source text for the tests
+//! that check the shape of the calls written in it.
 //!
 //! Before this crate existed, `view-native::config`, `view::native`, and
 //! the `cli_live`/`supersede_live` integration tests each hand-rolled the
@@ -28,6 +30,7 @@
 //! `[dev-dependencies]` entry adds no edge to the direction
 //! `scripts/audit-deps.sh` enforces.
 
+pub mod rust_source;
 pub mod wide_term;
 
 pub use wide_term::{widening_residue, WideTerm, Widening, WIDE_HALF};

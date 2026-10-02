@@ -30,6 +30,8 @@
 
 use std::path::{Path, PathBuf};
 
+use view_test_support::rust_source::{blank_non_code, closing};
+
 /// One typed command that does not carry `silent`.
 struct TypedCommand {
     /// Source file under `src/`, as the walk names it.
@@ -140,81 +142,20 @@ fn typed_commands(source: &str) -> Vec<String> {
     found
 }
 
-/// The hash count of the raw string opening at `at`, or `None` where no raw
-/// string opens there.
-fn raw_string_hashes(bytes: &[u8], at: usize) -> Option<usize> {
-    if bytes.get(at) != Some(&b'r') {
-        return None;
-    }
-    let mut hashes = 0usize;
-    while bytes.get(at + 1 + hashes) == Some(&b'#') {
-        hashes += 1;
-    }
-    (bytes.get(at + 1 + hashes) == Some(&b'"')).then_some(hashes)
-}
-
-/// Whether the raw string opened with `hashes` hashes closes at `at`.
-fn raw_string_closes(bytes: &[u8], at: usize, hashes: usize) -> bool {
-    bytes.get(at) == Some(&b'"') && (0..hashes).all(|k| bytes.get(at + 1 + k) == Some(&b'#'))
-}
-
-/// The argument text of a call whose opening paren is at `open`, to the
-/// paren that closes it however many lines that takes, counting no paren
-/// that stands inside a string, a raw string or a char literal.
+/// The argument text of a call whose opening paren is at `open` in `code`,
+/// blanked by `blank_non_code`, to the paren that closes it however many
+/// lines that takes.
 ///
 /// Reading to the end of the line instead would drop the argument of a
 /// send site rustfmt wrapped, which is a command reaching the session
 /// with nothing read off it. A literal paren is the same miss in both
 /// directions: a `)` inside a string closes the argument a paren early
 /// and drops every call written after it, and a `(` runs it to the end
-/// of the file and reads calls no send site made.
-fn argument(text: &str, open: usize) -> &str {
-    let rest = &text[open + 1..];
-    let bytes = rest.as_bytes();
-    let mut depth = 1usize;
-    let mut at = 0usize;
-    while at < rest.len() {
-        // a raw string reads its own backslashes and hashes: the escape step
-        // below swallows the closing quote of `r"a\"`, and the hash form
-        // carries quotes of its own that close nothing
-        if let Some(hashes) = raw_string_hashes(bytes, at) {
-            at += hashes + 2;
-            while at < rest.len() && !raw_string_closes(bytes, at, hashes) {
-                at += 1;
-            }
-            at += hashes + 1;
-            continue;
-        }
-        match bytes[at] {
-            b'"' => {
-                at += 1;
-                while at < rest.len() && bytes[at] != b'"' {
-                    at += if bytes[at] == b'\\' { 2 } else { 1 };
-                }
-            }
-            // a char literal closes within three bytes of its opener; a
-            // quote that closes no further along is a lifetime, which
-            // opens nothing to skip past
-            b'\'' => {
-                for width in [2usize, 3] {
-                    if bytes.get(at + width) == Some(&b'\'') {
-                        at += width;
-                        break;
-                    }
-                }
-            }
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &rest[..at];
-                }
-            }
-            _ => {}
-        }
-        at += 1;
-    }
-    rest
+/// of the file and reads calls no send site made. Blanking takes every
+/// literal's parens out before the count starts.
+fn argument(code: &str, open: usize) -> &str {
+    let close = closing(code, open).unwrap_or(code.len());
+    code.get(open + 1..close).unwrap_or_default()
 }
 
 /// The functions `text` calls, ignoring method calls and macros.
@@ -264,16 +205,17 @@ fn command_builders(source: &str) -> Vec<String> {
         body.push_str(line);
         body.push('\n');
     }
+    let code = blank_non_code(&body);
     let mut found = Vec::new();
     for call in ["send(", "submitted("] {
-        for (at, _) in body.match_indices(call) {
+        for (at, _) in code.match_indices(call) {
             if at > 0 {
-                let prev = body.as_bytes()[at - 1];
+                let prev = code.as_bytes()[at - 1];
                 if prev.is_ascii_alphanumeric() || prev == b'_' {
                     continue;
                 }
             }
-            for builder in call_names(argument(&body, at + call.len() - 1)) {
+            for builder in call_names(argument(&code, at + call.len() - 1)) {
                 if !found.contains(&builder) {
                     found.push(builder);
                 }

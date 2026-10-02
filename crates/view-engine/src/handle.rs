@@ -11,6 +11,7 @@ use std::time::Duration;
 use view_core::msg::{DeleteConfirmOutcome, EngineRequest, Msg, ReplyToken, ReplyValue};
 
 mod decode;
+mod failures;
 
 use decode::{
     decode_accent_probe_reply, decode_bridge_event, decode_buf_lines_event,
@@ -579,6 +580,7 @@ impl EngineHandle {
         std::thread::spawn(move || {
             let mut r = std::io::BufReader::new(reader);
             let mut fatal_reason: Option<String> = None;
+            let mut failures = failures::FailureLog::default();
             'read: while let Ok(value) = rmpv::decode::read_value(&mut r) {
                 match RpcMessage::from_value(value) {
                     Ok(RpcMessage::Response {
@@ -592,11 +594,7 @@ impl EngineHandle {
                                 .unwrap_or_else(PoisonError::into_inner);
                             p.waiters.remove(&msgid)
                         };
-                        // every async arm below turns an error reply into
-                        // its safe default, and this line is the only
-                        // record that the request failed; a synchronous
-                        // caller is handed the error itself
-                        if error != Value::Nil && !matches!(waiter, None | Some(Waiter::Reply(_))) {
+                        if failures.starts_a_run(waiter.as_ref(), &error) {
                             crate::diagnose(|| {
                                 format!("async request failed: {waiter:?}: {error}")
                             });

@@ -233,7 +233,9 @@ fn load(name: &str) -> CorpusEntry {
 /// `entry_name`'s `native-` prefix: `native-picker-buffers` and
 /// `native-picker-grep` both invoke the `picker` feature through a
 /// different verb, so the corpus file's own name no longer determines it.
-fn assert_no_interference(entry_name: &str, expect_feature: &str) {
+/// `lists_buffers` is whether opening the entry asks the engine for its
+/// buffer list, whose reply is then read and has to name a buffer.
+fn assert_no_interference(entry_name: &str, expect_feature: &str, lists_buffers: bool) {
     let entry = load(entry_name);
 
     let mut driver = Driver::start(entry.ext_options);
@@ -247,7 +249,12 @@ fn assert_no_interference(entry_name: &str, expect_feature: &str) {
         invoked_feature, expect_feature,
         "corpus/native/{entry_name}.toml's key must invoke the {expect_feature} feature"
     );
-    if driver.listed_buffers {
+    assert_eq!(
+        driver.listed_buffers, lists_buffers,
+        "opening {entry_name} asked for the buffer list: {}, expected: {lists_buffers}",
+        driver.listed_buffers
+    );
+    if lists_buffers {
         // the session's unnamed buffer is loaded and listed, so an empty
         // list is a request nvim refused
         let names = driver
@@ -273,25 +280,25 @@ fn assert_no_interference(entry_name: &str, expect_feature: &str) {
 
 #[test]
 fn opening_and_closing_the_picker_leaves_the_engine_untouched() {
-    assert_no_interference("native-picker", "picker");
+    assert_no_interference("native-picker", "picker", false);
 }
 
 #[test]
 fn opening_and_closing_the_tree_leaves_the_engine_untouched() {
-    assert_no_interference("native-tree", "tree");
+    assert_no_interference("native-tree", "tree", false);
 }
 
 #[test]
 fn opening_and_closing_message_history_leaves_the_engine_untouched() {
-    assert_no_interference("native-notifications", "notifications");
+    assert_no_interference("native-notifications", "notifications", false);
 }
 
 #[test]
 fn opening_and_closing_the_picker_buffers_source_leaves_the_engine_untouched() {
-    assert_no_interference("native-picker-buffers", "picker");
+    assert_no_interference("native-picker-buffers", "picker", true);
 }
 
 #[test]
 fn opening_and_closing_the_picker_grep_source_leaves_the_engine_untouched() {
-    assert_no_interference("native-picker-grep", "picker");
+    assert_no_interference("native-picker-grep", "picker", false);
 }
