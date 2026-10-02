@@ -427,11 +427,8 @@ impl PickerView {
     /// line `preview` holds. A line past the end of `preview` previews from
     /// its top, as a candidate with no line does. That happens when the
     /// file has fewer lines than when it was matched (an edit in its
-    /// buffer, a change on disk), when the read found nothing to show (a
-    /// path gone or unreadable as UTF-8), which leaves `preview` empty, and
-    /// when the selection moved to a line of the same file past the window
-    /// `preview` holds, while the read of that line's own window is in
-    /// flight.
+    /// buffer, a change on disk), and when the read found nothing to show
+    /// (a path gone or unreadable), which leaves `preview` empty.
     #[must_use]
     pub fn preview_window(&self, rows: usize) -> (&[String], Option<usize>) {
         let len = self.preview.len();

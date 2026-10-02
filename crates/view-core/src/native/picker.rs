@@ -174,12 +174,36 @@ pub struct PickerState {
 /// window.
 pub const PREVIEW_WINDOW_LINES: u64 = 1000;
 
+/// How many lines a window has to hold on each side of a line before the
+/// pane can open on that line from it. The picker does not know the pane's
+/// height, and the pane puts the line a third of the way down, so this
+/// fills a pane up to 450 rows tall. It is under half of
+/// [`PREVIEW_WINDOW_LINES`], so a window always holds the line it was
+/// requested for.
+const PREVIEW_WINDOW_MARGIN: u64 = 300;
+
 /// The 1-based first line of the preview window for a candidate that opens
 /// on `line`, from the top for a candidate with none.
 fn window_first(line: Option<u64>) -> u64 {
     line.map_or(1, |line| {
         line.saturating_sub(PREVIEW_WINDOW_LINES / 2).max(1)
     })
+}
+
+/// Whether the window starting at line `first` can open a pane on `line`
+/// with the file's own lines above and below it: the margin on each side
+/// lies inside the window, or the window reaches the file's first line on
+/// that side. `end` is how many lines the window holds when it is known to
+/// end at the file's last line; a line past that end is one the file has
+/// gained since, and is not held.
+fn window_holds(first: u64, end: Option<u64>, line: u64) -> bool {
+    let Some(offset) = line.checked_sub(first) else {
+        return false;
+    };
+    let top = first == 1 || offset >= PREVIEW_WINDOW_MARGIN;
+    let bottom = offset + PREVIEW_WINDOW_MARGIN < PREVIEW_WINDOW_LINES
+        || end.is_some_and(|len| offset < len);
+    top && bottom
 }
 
 impl PickerState {
@@ -315,7 +339,11 @@ impl PickerState {
     /// request, or does nothing (returning `None`) when there is no
     /// selection to preview, *or* when `preview_path` already names this
     /// same candidate and the window requested for it holds the line the
-    /// candidate opens on. `preview_path` is set the instant a request is
+    /// candidate opens on with a pane's worth of lines on each side
+    /// (`window_holds`). A line nearer a window edge than that is read
+    /// again with its own window, and its mark waits for that read, so the
+    /// pane never opens as if the file began or ended at the window's edge.
+    /// `preview_path` is set the instant a request is
     /// issued (not only once its reply lands -- see the field's own doc),
     /// so this one comparison covers both "the preview already shown is
     /// this path" and "a request for this path is already in flight":
@@ -332,11 +360,12 @@ impl PickerState {
     pub fn refresh_preview(&mut self) -> Option<(u64, String)> {
         let path = self.selected_path()?;
         let line = self.items.get(self.selected).and_then(|item| item.line);
-        let held = line
-            .unwrap_or(1)
-            .checked_sub(self.preview_first)
-            .is_some_and(|offset| offset < PREVIEW_WINDOW_LINES);
-        if held && self.preview_path.as_deref() == Some(path.as_str()) {
+        let requested_is_applied =
+            self.applied_path == self.preview_path && self.applied_first == self.preview_first;
+        let end = self.applied_end().filter(|_| requested_is_applied);
+        if self.preview_path.as_deref() == Some(path.as_str())
+            && window_holds(self.preview_first, end, line.unwrap_or(1))
+        {
             return None;
         }
         let generation = next_generation();
@@ -351,6 +380,14 @@ impl PickerState {
     #[must_use]
     pub fn preview_first_line(&self) -> u64 {
         self.preview_first
+    }
+
+    /// How many lines the applied window holds when it ends at the file's
+    /// last line: the read returned fewer lines than a window holds.
+    fn applied_end(&self) -> Option<u64> {
+        u64::try_from(self.preview_lines.len())
+            .ok()
+            .filter(|len| *len < PREVIEW_WINDOW_LINES)
     }
 
     /// This session's outstanding preview generation, for a caller (the
@@ -400,7 +437,10 @@ impl PickerState {
                 self.items
                     .get(self.selected)
                     .and_then(|item| item.line)
-                    .filter(|_| shows_selected_file)
+                    .filter(|line| {
+                        shows_selected_file
+                            && window_holds(self.applied_first, self.applied_end(), *line)
+                    })
                     .and_then(|line| line.checked_sub(self.applied_first))
                     .and_then(|index| usize::try_from(index).ok()),
             );
@@ -815,5 +855,79 @@ mod tests {
         assert_eq!(state.preview_first_line(), 3000 - PREVIEW_WINDOW_LINES / 2);
         let view = state.view();
         assert_eq!(view.preview_window(PANE_ROWS).1, None, "no mark meanwhile");
+    }
+
+    /// A picker whose match at `line` of a 10000-line `a.rs` has its whole
+    /// window applied, with the selection then moved to `to` in that file.
+    /// Returns the state and whatever request the move issued.
+    fn held_window_then_moved(line: u64, to: u64) -> (PickerState, Option<(u64, String)>) {
+        let mut state = PickerState::open(Source::LiveGrep {
+            root: PathBuf::from("/repo"),
+        });
+        let gen = state.generation();
+        state.apply_results(gen, vec![PickerItem::grep_match("a.rs", line, "x")]);
+        let (preview_gen, _) = state.refresh_preview().expect("a selection");
+        let first = state.preview_first_line();
+        let lines = (first..first + PREVIEW_WINDOW_LINES)
+            .map(|n| format!("line {n}"))
+            .collect();
+        state.apply_preview(preview_gen, lines);
+        let gen = state.edit_query("x");
+        state.apply_results(gen, vec![PickerItem::grep_match("a.rs", to, "x")]);
+        let request = state.refresh_preview();
+        (state, request)
+    }
+
+    /// Lands the window the outstanding request asked for, from a
+    /// 10000-line file.
+    fn land_requested_window(state: &mut PickerState) {
+        let first = state.preview_first_line();
+        let lines = (first..first + PREVIEW_WINDOW_LINES)
+            .map(|n| format!("line {n}"))
+            .collect();
+        state.apply_preview(state.preview_generation(), lines);
+    }
+
+    #[test]
+    fn a_move_near_the_top_of_the_held_window_reads_a_new_one() {
+        let (mut state, request) = held_window_then_moved(5000, 4503);
+        assert!(request.is_some(), "a new window is requested");
+        assert_eq!(state.view().preview_line, None, "no mark meanwhile");
+        land_requested_window(&mut state);
+        let view = state.view();
+        let (window, marked) = view.preview_window(PANE_ROWS);
+        let marked = marked.expect("the match is marked");
+        assert_eq!(window[marked], "line 4503");
+        assert_eq!(marked, PANE_ROWS / 3, "context above the match");
+    }
+
+    #[test]
+    fn a_move_near_the_bottom_of_the_held_window_reads_a_new_one() {
+        let (mut state, request) = held_window_then_moved(5000, 5495);
+        assert!(request.is_some(), "a new window is requested");
+        assert_eq!(state.view().preview_line, None, "no mark meanwhile");
+        land_requested_window(&mut state);
+        let view = state.view();
+        let (window, marked) = view.preview_window(PANE_ROWS);
+        let marked = marked.expect("the match is marked");
+        assert_eq!(window[marked], "line 5495");
+        assert_eq!(window.len().min(PANE_ROWS), PANE_ROWS, "context below");
+        assert_eq!(marked, PANE_ROWS / 3);
+    }
+
+    #[test]
+    fn a_move_well_inside_the_held_window_marks_at_once() {
+        let (state, request) = held_window_then_moved(5000, 5100);
+        assert_eq!(request, None, "no new request");
+        let view = state.view();
+        let (window, marked) = view.preview_window(PANE_ROWS);
+        assert_eq!(window[marked.expect("marked at once")], "line 5100");
+    }
+
+    #[test]
+    fn a_held_window_from_the_first_line_marks_line_two_at_once() {
+        let (state, request) = held_window_then_moved(3, 2);
+        assert_eq!(request, None, "no new request");
+        assert_eq!(state.view().preview_line, Some(1));
     }
 }

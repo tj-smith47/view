@@ -2462,6 +2462,23 @@ mod tests {
         assert_eq!(ops.calls.borrow()[0], "preview_buffer(src/main.rs,7)");
     }
 
+    #[test]
+    fn preview_buffer_window_effect_maps_to_engine_ops_preview_buffer_window() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::PreviewBufferWindow {
+            path: "src/main.rs".into(),
+            first_line: 4500,
+            line_count: 1000,
+            generation: 7,
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(
+            ops.calls.borrow()[0],
+            "preview_buffer_window(src/main.rs,4500,1000,7)"
+        );
+    }
+
     /// The calls a float view takes off the screen costs, in the order the
     /// outbox carries them: nvim runs them in that order, which is what
     /// makes the reply that brings the rows back one the close has not
@@ -3290,6 +3307,49 @@ mod tests {
                     lines,
                     Some(vec!["line one".to_string(), "line two".to_string()]),
                     "the fallback must report the file this test wrote"
+                );
+            }
+            other => panic!("expected PickerPreviewFile, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The windowed fallback reads the lines its effect names, from its
+    /// first line on, and no more.
+    #[test]
+    fn picker_preview_fallback_window_effect_replies_with_the_window_read() {
+        let root = tree_effect_scratch("preview-fallback-window");
+        let path = root.join("target.txt");
+        let text: String = (1..=50).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(&path, text).expect("write target.txt");
+
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(tx));
+        let flow = executor.run(Effect::PickerPreviewFallbackWindow {
+            generation: 4,
+            path: path.to_string_lossy().into_owned(),
+            first_line: 10,
+            line_count: 3,
+        });
+        assert!(matches!(flow, Flow::Continue));
+
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
+            .expect("PickerPreviewFile arrives from the worker thread");
+        match msg {
+            Msg::PickerPreviewFile { generation, lines } => {
+                assert_eq!(generation, 4);
+                assert_eq!(
+                    lines,
+                    Some(vec![
+                        "line 10".to_string(),
+                        "line 11".to_string(),
+                        "line 12".to_string()
+                    ])
                 );
             }
             other => panic!("expected PickerPreviewFile, got {other:?}"),
