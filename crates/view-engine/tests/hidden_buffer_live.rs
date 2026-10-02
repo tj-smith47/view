@@ -546,6 +546,12 @@ fn a_hidden_buffer_never_appears_in_the_picker_buffer_list() {
         .list_buffers(70)
         .expect("issue the buffer-list request");
     let names = next_picker_buffer_list(&rx);
+    // the session's own unnamed buffer is loaded and listed, so an empty
+    // reply means the request failed and the absence below proves nothing
+    assert!(
+        !names.is_empty(),
+        "the buffer list came back empty, so it read no buffer at all"
+    );
     assert!(
         !names
             .iter()
@@ -572,6 +578,50 @@ fn a_hidden_buffer_never_appears_in_the_picker_buffer_list() {
         .handle
         .release_hidden(&path.to_string_lossy())
         .expect("release the one hold this test took");
+}
+
+/// A file the user opened with `:edit` is offered by the picker's buffer
+/// source under its full path.
+#[test]
+fn an_edited_file_is_listed_in_the_picker_buffer_list() {
+    let root = scratch_root("edited");
+    let path = root.join("edited.rs");
+    std::fs::write(&path, "edited content\n").expect("write fixture");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    engine
+        .handle
+        .open_file(&path.to_string_lossy())
+        .expect("open the file the way the user would");
+    engine
+        .handle
+        .list_buffers(71)
+        .expect("issue the buffer-list request");
+    let names = next_picker_buffer_list(&rx);
+    let expected = engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from("return vim.api.nvim_buf_get_name(0)"),
+                rmpv::Value::Array(vec![]),
+            ],
+        )
+        .expect("read the edited buffer's name")
+        .as_str()
+        .expect("a buffer name is a string")
+        .to_owned();
+    assert!(
+        expected.ends_with("edited.rs"),
+        "the :edit did not make the fixture current: {expected}"
+    );
+    assert!(
+        names.contains(&expected),
+        "the edited file {expected} is missing from the picker's buffers: {names:?}"
+    );
 }
 
 /// Two `load_hidden` calls for the same never-opened path answer

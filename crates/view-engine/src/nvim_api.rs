@@ -3648,7 +3648,7 @@ impl EngineHandle {
     pub fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
         self.request_buffer_list(
             "nvim_exec_lua",
-            vec![Value::from(BUFFER_LIST_CHUNK)],
+            vec![Value::from(BUFFER_LIST_CHUNK), Value::Array(vec![])],
             generation,
         )
     }

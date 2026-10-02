@@ -83,6 +83,7 @@ pub struct EngineNotification {
 /// waiter *and* silently drop every in-flight probe in the same critical
 /// section, or a probe registered between the drain and the flag flip could
 /// survive as a leaked map entry no future `Response` will ever remove.
+#[derive(Debug)]
 enum Waiter {
     /// A synchronous [`EngineHandle::request`]/`request_timeout` caller
     /// blocked on `rx.recv()`.
@@ -284,6 +285,7 @@ type Pending = Arc<Mutex<PendingState>>;
 /// `error` reply carries no `results` array at all, and a forced reload
 /// that never ran must degrade to "the discard did not happen" rather than
 /// to a probe's silence.
+#[derive(Debug)]
 pub struct CheckTimeCall {
     pub request_id: u64,
     pub paths: Vec<std::path::PathBuf>,
@@ -590,6 +592,15 @@ impl EngineHandle {
                                 .unwrap_or_else(PoisonError::into_inner);
                             p.waiters.remove(&msgid)
                         };
+                        // every async arm below turns an error reply into
+                        // its safe default, and this line is the only
+                        // record that the request failed; a synchronous
+                        // caller is handed the error itself
+                        if error != Value::Nil && !matches!(waiter, None | Some(Waiter::Reply(_))) {
+                            crate::diagnose(|| {
+                                format!("async request failed: {waiter:?}: {error}")
+                            });
+                        }
                         match waiter {
                             Some(Waiter::Reply(tx)) => {
                                 let outcome = if error == Value::Nil {
@@ -2984,6 +2995,61 @@ mod tests {
         assert_eq!(generation, 1);
         assert_eq!(fg, None);
         assert_eq!(bg, None);
+    }
+
+    /// Every diagnostic line this test binary's engines wrote, once
+    /// [`a_failed_buffer_list_resolves_empty_and_is_logged`] has installed
+    /// the sink.
+    static DIAGNOSED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    /// A failed buffer-list request still resolves its generation, with an
+    /// empty list so the picker never waits on it, and leaves a log line
+    /// naming the request and nvim's error text.
+    #[test]
+    fn a_failed_buffer_list_resolves_empty_and_is_logged() {
+        crate::set_diagnostics(|line| {
+            DIAGNOSED
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(line.to_owned());
+        });
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+
+        h.request_buffer_list("nvim_exec_lua", vec![], 4711)
+            .unwrap();
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected a Request");
+        };
+        let reply = RpcMessage::Response {
+            msgid,
+            error: Value::from("Wrong number of arguments"),
+            result: Value::Nil,
+        };
+        rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
+        let Msg::PickerBufferList { generation, names } = msg else {
+            unreachable!("expected PickerBufferList, got {msg:?}");
+        };
+        assert_eq!(generation, 4711);
+        assert!(names.is_empty(), "a failed request listed {names:?}");
+        let logged = DIAGNOSED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        assert!(
+            logged.iter().any(|line| line.contains("4711")
+                && line.contains("BufferList")
+                && line.contains("Wrong number of arguments")),
+            "the failed buffer list left no log line naming it: {logged:?}"
+        );
     }
 
     /// End-to-end through the reader thread's own routing: a `load_hidden`

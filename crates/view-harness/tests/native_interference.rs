@@ -61,6 +61,9 @@ struct Driver {
     engine: Engine,
     rx: Receiver<Msg>,
     model: Model,
+    /// Whether a `ListBuffers` call went to the engine, whose reply the
+    /// proof then has to read.
+    listed_buffers: bool,
 }
 
 impl Driver {
@@ -73,6 +76,7 @@ impl Driver {
             engine,
             rx,
             model: Model::with_term_size(80, 24),
+            listed_buffers: false,
         }
     }
 
@@ -125,6 +129,7 @@ impl Driver {
             RpcCall::Input { notation } => self.engine.handle.input(&notation).unwrap(),
             RpcCall::ListBuffers { generation } => {
                 self.engine.handle.list_buffers(generation).unwrap();
+                self.listed_buffers = true;
             }
             other => panic!(
                 "native feature open/close path produced an RPC call outside \
@@ -242,6 +247,20 @@ fn assert_no_interference(entry_name: &str, expect_feature: &str) {
         invoked_feature, expect_feature,
         "corpus/native/{entry_name}.toml's key must invoke the {expect_feature} feature"
     );
+    if driver.listed_buffers {
+        // the session's unnamed buffer is loaded and listed, so an empty
+        // list is a request nvim refused
+        let names = driver
+            .wait_for(|msg| match msg {
+                Msg::PickerBufferList { names, .. } => Some(names.clone()),
+                _ => None,
+            })
+            .expect("the picker's buffer list was never answered");
+        assert!(
+            !names.is_empty(),
+            "the picker's buffer list came back empty for {entry_name}"
+        );
+    }
     driver.close_overlay();
 
     let after = snapshot(&mut driver).unwrap();
