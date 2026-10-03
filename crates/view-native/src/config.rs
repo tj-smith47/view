@@ -19,6 +19,7 @@
 //! list written out here, so a feature can never exist in the table and be
 //! unspellable in config.
 
+mod dvr;
 mod keys;
 pub mod profile;
 mod resolve;
@@ -28,6 +29,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub use dvr::{DvrConfig, DvrTable};
 pub use keys::{env_name, keys, ConfigKey};
 pub use resolve::{
     profile_report_value, resolve, resolve_with, Overrides, Resolved, ResolvedConfig,
@@ -86,6 +88,8 @@ struct ViewFile {
     native: NativeTable,
     #[serde(default)]
     supervision: SupervisionTable,
+    #[serde(default)]
+    dvr: DvrTable,
     #[serde(default)]
     keys: KeysTable,
     #[serde(default)]
@@ -1037,6 +1041,11 @@ pub struct ViewConfig {
     pub native: NativeConfig,
     /// The `[supervision]` table's resolved answers.
     pub supervision: SupervisionConfig,
+    /// The `[dvr]` table's resolved answers.
+    pub dvr: DvrConfig,
+    /// The `[dvr]` table as the document wrote it, which the resolver
+    /// layers the environment over and range-checks.
+    dvr_file: DvrTable,
     /// The `[keys]` table's resolved answers.
     pub keys: KeysConfig,
     /// The `[engine]` table's answers. Crate-private, unlike its
@@ -1064,6 +1073,8 @@ impl ViewConfig {
         Self {
             native: NativeConfig::defaults(),
             supervision: SupervisionConfig::default(),
+            dvr: DvrConfig::default(),
+            dvr_file: DvrTable::default(),
             keys: KeysConfig::default(),
             engine: EngineFile::default(),
             ui: UiFile::default(),
@@ -1119,6 +1130,8 @@ impl ViewConfig {
                     .auto_restart
                     .unwrap_or(AUTO_RESTART_DEFAULT),
             },
+            dvr: dvr::resolve(&file.dvr, &|_| None, &mut Vec::new()).0,
+            dvr_file: file.dvr.clone(),
             keys: KeysConfig {
                 bindings,
                 notices,
@@ -1408,6 +1421,12 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
     if file.supervision.auto_restart.is_some() {
         spelled.push(("supervision", "auto_restart"));
     }
+    if file.dvr.enabled.is_some() {
+        spelled.push(("dvr", "enabled"));
+    }
+    if file.dvr.max_mb.is_some() {
+        spelled.push(("dvr", "max_mb"));
+    }
     // the wire value's presence, not the resolved one's: `nvim_bin =
     // "bundled"` resolves to the same absent path a missing key does, and
     // only one of the two is the file's own answer
@@ -1678,11 +1697,12 @@ mod tests {
     /// Hand-written, and unavoidably so: it is a transcription of the spec,
     /// which no build artifact carries. What is *not* hand-written is which
     /// of them this build reads -- see [`loaded_tables`].
-    static SPECIFIED_TABLES: [&str; 14] = [
+    static SPECIFIED_TABLES: [&str; 15] = [
         "native",
         "keys",
         "keys.desktop",
         "supervision",
+        "dvr",
         "engine",
         "ui",
         "ui.tokens",
@@ -1964,6 +1984,8 @@ mod tests {
             ("keys", _) => "[\"<C-w>>\"]",
             ("keys.desktop", _) => "\"<M-x>\"",
             ("supervision", _) => "false",
+            ("dvr", "enabled") => "true",
+            ("dvr", "max_mb") => "32",
             ("ui", "tier") => "\"basic\"",
             ("ui", "theme") => "\"gruvbox\"",
             ("ui", "panes") => "\"nvim\"",

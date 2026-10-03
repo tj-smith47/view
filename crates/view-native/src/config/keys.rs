@@ -36,7 +36,7 @@ pub struct ConfigKey {
 
 /// Every key a user may set in `view.toml`, grouped by table:
 /// `[ui]`, `[ui.surfaces.<surface>]`, `[engine]`, `[native]`, `[keys]`,
-/// `[supervision]`, `[ai]`, `[ai.review]`.
+/// `[supervision]`, `[dvr]`, `[ai]`, `[ai.review]`.
 ///
 /// The scope is the shipped example's own: every key that file documents
 /// has a row here, and a row here is a key that file documents
@@ -274,6 +274,18 @@ pub fn keys() -> &'static [ConfigKey] {
                 derived: Some("true"),
             },
             ConfigKey {
+                table: "dvr",
+                key: "enabled",
+                flag: None,
+                derived: Some("false"),
+            },
+            ConfigKey {
+                table: "dvr",
+                key: "max_mb",
+                flag: None,
+                derived: Some("64"),
+            },
+            ConfigKey {
                 table: "ai",
                 key: "enabled",
                 flag: None,
@@ -416,6 +428,7 @@ mod tests {
                 "keys",
                 "keys.desktop",
                 "supervision",
+                "dvr",
                 "ai",
                 "ai.review"
             ],

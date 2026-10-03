@@ -227,6 +227,8 @@ pub struct ResolvedConfig {
     key_log_key: Source,
     /// Where `[supervision] auto_restart` came from.
     supervision: Source,
+    /// Where `[dvr] enabled` and `[dvr] max_mb` came from, in that order.
+    dvr: [Source; 2],
     /// The `NVIM_APPNAME` this process already carries, which is what an
     /// unset `[engine] appname` resolves to in the child. Captured here
     /// rather than read at render time so a report is a statement about the
@@ -545,6 +547,7 @@ pub fn resolve_with(
             .then_some(file.supervision.auto_restart),
         SupervisionConfig::default().auto_restart,
     );
+    let (dvr, dvr_enabled, dvr_max_mb) = super::dvr::resolve(&file.dvr_file, env, &mut notices);
     let (profile, profile_marker) = resolve_profile(file, env, &mut notices);
     let desktop_modifier = layer(
         None,
@@ -589,6 +592,8 @@ pub fn resolve_with(
             supervision: SupervisionConfig {
                 auto_restart: auto_restart.value,
             },
+            dvr,
+            dvr_file: file.dvr_file.clone(),
             keys: KeysConfig {
                 bindings,
                 notices: file.keys.notices().to_vec(),
@@ -612,6 +617,7 @@ pub fn resolve_with(
         ui_cycle_key,
         key_log_key,
         supervision: auto_restart.source,
+        dvr: [dvr_enabled, dvr_max_mb],
         inherited_appname: env(INHERITED_APPNAME_ENV).filter(|name| !name.is_empty()),
     }
 }
@@ -866,6 +872,7 @@ impl ResolvedConfig {
                 self.tables.supervision.auto_restart.to_string(),
                 self.supervision,
             ),
+            ("dvr", key) => return super::dvr::report(key, &self.tables.dvr, self.dvr),
             _ => return None,
         })
     }
@@ -1137,28 +1144,17 @@ fn resolve_profile(
 
 /// The chain itself, written once so no key can answer in a different
 /// order than its neighbour.
-fn layer<T>(flag: Option<T>, env: Option<T>, file: Option<T>, derived: T) -> Resolved<T> {
-    if let Some(value) = flag {
-        return Resolved {
-            value,
-            source: Source::Flag,
-        };
-    }
-    if let Some(value) = env {
-        return Resolved {
-            value,
-            source: Source::Env,
-        };
-    }
-    if let Some(value) = file {
-        return Resolved {
-            value,
-            source: Source::File,
-        };
-    }
-    Resolved {
-        value: derived,
-        source: Source::Derived,
+pub(super) fn layer<T>(
+    flag: Option<T>,
+    env: Option<T>,
+    file: Option<T>,
+    derived: T,
+) -> Resolved<T> {
+    match (flag, env, file) {
+        (Some(value), _, _) => Resolved::new(value, Source::Flag),
+        (None, Some(value), _) => Resolved::new(value, Source::Env),
+        (None, None, Some(value)) => Resolved::new(value, Source::File),
+        (None, None, None) => Resolved::new(derived, Source::Derived),
     }
 }
 
@@ -1250,7 +1246,7 @@ fn parse_anchor(allowed: &[Anchor], value: &str) -> Option<Anchor> {
 /// open a file -- but it never falls through in silence either: the layer
 /// below answering while a user watches their own `VIEW_*` do nothing is
 /// the shape a notice exists for.
-fn env_read<T>(
+pub(super) fn env_read<T>(
     env: &dyn Fn(&str) -> Option<String>,
     table: &str,
     key: &str,
@@ -1323,7 +1319,7 @@ fn env_value_desktop(env: &dyn Fn(&str) -> Option<String>, chord_id: &str) -> Op
 /// failing the session: an environment view cannot parse is the same kind
 /// of mistake as a mistyped `tree_width`, and neither is a reason to
 /// refuse to open a file.
-fn parse_bool(value: &str) -> Option<bool> {
+pub(super) fn parse_bool(value: &str) -> Option<bool> {
     match value.to_ascii_lowercase().as_str() {
         "true" => Some(true),
         "false" => Some(false),
@@ -1428,6 +1424,7 @@ mod tests {
             ("keys", "desktop_modifier") => "super",
             ("keys.desktop", _) => "<M-x>",
             ("keys", _) => "<C-w>>",
+            ("dvr", "max_mb") => "128",
             _ => "false",
         }
     }

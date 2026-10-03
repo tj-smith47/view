@@ -166,6 +166,13 @@ desktop_modifier = "auto"   # "auto" | "super" | "alt"
 [supervision]
 auto_restart = true        # false: surface a dead engine and wait for the modal's own Restart
 
+# [dvr] records the session for rewind. It is off until you turn it on, and
+# the recording lives in memory within the bound below.
+
+[dvr]
+enabled = false   # true: record this session's painted frames and input for rewind
+max_mb = 64       # memory the recording may hold; oldest whole frames are dropped past it
+
 # [engine] names the editor view runs and the profile it runs under, and
 # both are derived when the key is absent. A release ships a pinned nvim
 # beside the view binary and runs that one; a build with none beside it

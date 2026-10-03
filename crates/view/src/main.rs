@@ -1294,6 +1294,9 @@ fn main() -> Result<()> {
         .with_pill_caps(resolved.ui.pill_caps.value)
         .with_tree_icons(resolved.ui.tree_icons.value)
         .with_tile_titles(resolved.ui.tile_titles.value.clone());
+    if resolved.tables.dvr.enabled {
+        model.dvr.enable(resolved.tables.dvr.max_bytes());
+    }
     // whether a `:View ui panes` flip derives `[native] tabline` again, or
     // leaves the value the user spelled where they put it
     model.tabline_follows_look = resolved.tabline_follows_look();
