@@ -37,6 +37,7 @@ The table below is generated from `default_maps()` in
 | `<leader>w7` | `window` | `:View window to_tabpage_7` |
 | `<leader>w8` | `window` | `:View window to_tabpage_8` |
 | `<leader>w9` | `window` | `:View window to_tabpage_9` |
+| `<leader>fk` | `keys` | `:View keys log` |
 
 ## `<leader>ai` reads the panel before it acts
 
@@ -730,6 +731,43 @@ wording put it.
 entry sits in the history. The entry stays after the notice is gone. On a
 message from nvim, which has no notice standing behind it, `d` does
 nothing.
+
+## The key log
+
+`<leader>fk` opens the key log in the bottom-right corner. Each mapping
+you fire is added to the top as it runs: the key, whose mapping it is, and
+for one of view's defaults the mapping of yours it took the key from.
+
+```
+14:02:11  <Space>fk     view   keys log
+14:02:09  <Space>e      view   tree toggle   took it from: Explorer (lua/keys.lua)
+14:02:05  gd            yours  Goto definition (lua/lsp.lua)
+14:01:58  :View         view   picker grep
+```
+
+The log keeps your keys going to the buffer while it is open. `<leader>fk`
+again closes it. `:View keys focus` moves the cursor into it, where these
+keys work:
+
+| key | does |
+| --- | --- |
+| `j` | select the next older mapping |
+| `k` | select the next newer mapping |
+| `<C-d>` | select half a screen further down |
+| `<C-u>` | select half a screen further up |
+| `gg` | select the newest mapping |
+| `G` | select the oldest mapping |
+| `y` | copy the selected row, to the system clipboard and over OSC 52 |
+
+`<Esc>` closes it. The log keeps the newest 200 mappings.
+
+A mapping of yours is logged when you fire it in normal mode, in any
+window. To put the log on another key:
+
+```toml
+[keys]
+key_log = "<leader>fk"   # the default
+```
 
 ## `:View`
 

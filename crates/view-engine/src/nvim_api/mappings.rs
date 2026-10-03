@@ -126,6 +126,15 @@ use view_core::native::mappings::{
 /// file open raises three or four of the events, so the events of one tick
 /// share a single walk scheduled after them.
 ///
+/// Each of those keys is answered with whose it is, under `user_owners` in
+/// the same order and as the bridge event's fourth argument: the mapping's
+/// `desc`, else its rhs, else `<Lua callback>`, and the script that set it
+/// when nvim names one (a positive `sid`), relative to the config
+/// directory. A claim carries the same description of the mapping it was
+/// set over under `displaced`, read from the snapshot the restore keeps,
+/// and the verb its spec names. The key log reads both, so a fired mapping
+/// is described with no read of its own.
+///
 /// The same read answers with the user's command-line mappings and
 /// abbreviations (`maplist()` rows in mode `c` or `!`), each as its
 /// `keytrans()` lhs, its rhs and its `abbr`, `noremap`, `expr`, `nowait`
@@ -159,14 +168,45 @@ local function note(maps)
   end
 end
 note(vim.api.nvim_get_keymap('n'))
+local config = vim.fn.stdpath('config') .. '/'
+local scripts = {}
+local function short(name)
+  if vim.startswith(name, config) then return name:sub(#config + 1) end
+  return name ~= '' and vim.fn.fnamemodify(name, ':~') or ''
+end
+local function owner(m)
+  if type(m) ~= 'table' or next(m) == nil then return nil end
+  local label = m.desc
+  if label == nil or label == '' then
+    label = (m.rhs ~= nil and m.rhs ~= '') and m.rhs or '<Lua callback>'
+  end
+  if type(m.callback) == 'function' then
+    -- a Lua-set mapping records no script id unless nvim runs verbose, so
+    -- the callback's own definition names the file
+    local info = debug.getinfo(m.callback, 'S')
+    local src = info.source or ''
+    local file = vim.startswith(src, '@') and src:sub(2) or info.short_src
+    local script = (file or '') ~= ''
+      and short(file) .. ':' .. info.linedefined or nil
+    return { label = label, script = script }
+  end
+  local sid = m.sid or 0
+  if sid > 0 and scripts[sid] == nil then
+    local ok, info = pcall(vim.fn.getscriptinfo, { sid = sid })
+    scripts[sid] = short(ok and info[1] and info[1].name or '')
+  end
+  local script = scripts[sid]
+  return { label = label, script = script ~= '' and script or nil }
+end
 local function read_user_keys()
-  local keys = {}
+  local keys, owners = {}, {}
   for _, m in ipairs(vim.api.nvim_get_keymap('n')) do
     local typed = not vim.startswith(m.lhs, '<Plug>')
       and not vim.startswith(m.lhs, '<SNR>')
       and not vim.startswith(m.desc or '', 'view: ')
     if typed then
       keys[#keys + 1] = vim.fn.keytrans(m.lhsraw or m.lhs)
+      owners[#owners + 1] = owner(m)
     end
   end
   local cmdline, seen = {}, {}
@@ -190,9 +230,10 @@ local function read_user_keys()
     end
   end
   local wait = vim.o.timeout and vim.o.timeoutlen or -1
-  return keys, wait, cmdline, table.concat(seen, '\\n')
+  return keys, wait, cmdline, table.concat(seen, '\\n'), owners
 end
-local user_keys, timeoutlen, cmdline_maps, cmdline_read = read_user_keys()
+local user_keys, timeoutlen, cmdline_maps, cmdline_read, user_owners =
+  read_user_keys()
 local user_read = table.concat(user_keys, ' ') .. ' ' .. timeoutlen
   .. '\\n' .. cmdline_read
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
@@ -211,12 +252,12 @@ local group = vim.api.nvim_create_augroup('view_colon_map', { clear = true })
 local keys_pending = false
 local function reread_keys()
   keys_pending = false
-  local keys, wait, maps, maps_read = read_user_keys()
+  local keys, wait, maps, maps_read, owners = read_user_keys()
   local read = table.concat(keys, ' ') .. ' ' .. wait .. '\\n' .. maps_read
   if read ~= user_read then
     user_read = read
     pcall(vim.rpcnotify, channel, 'view_bridge', 'user_keys', keys, wait,
-      maps)
+      maps, owners)
   end
 end
 local function reread()
@@ -264,9 +305,11 @@ for _, spec in ipairs(specs) do
   })
   claimed[#claimed + 1] = {
     feature = spec.feature,
+    verb = spec.verb,
     lhs = spec.lhs,
     had_user_mapping = (taken[resolved] or taken[spec.lhs]) == true,
     keys = (not spec.keys) and vim.fn.keytrans(resolved) or nil,
+    displaced = owner(registered_now[spec.lhs]),
   }
 end
 vim.g.view_registered_keys = registered_now
@@ -275,6 +318,7 @@ return {
   claims = claimed,
   colon_mapped = colon,
   user_keys = user_keys,
+  user_owners = user_owners,
   timeoutlen = timeoutlen,
   cmdline_maps = cmdline_maps,
 }";

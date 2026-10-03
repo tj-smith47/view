@@ -169,15 +169,16 @@ pub(crate) struct NativeSession {
     /// engine restarted after a `:View ui` flip is held for the look on
     /// screen.
     look: Look,
-    /// `[keys] toggle_gaps`/`cycle_surfaces`: the left-hand side to
-    /// register `ui gaps`/`ui cycle_surfaces` under, applied to the built
+    /// `[keys] toggle_gaps`/`cycle_surfaces`/`key_log`: the left-hand side
+    /// to register `ui gaps`/`ui cycle_surfaces`/`keys log` under, applied to
+    /// the built
     /// `RegisterMappings` spec in [`Self::build_mapping_call`] the same way
     /// `ai_enabled` is -- `view-native` resolves the override
     /// (`ResolvedConfig::tables.keys`), but the spec it hands back always
     /// carries `default_maps()`'s own compile-time `lhs`, which
     /// [`MappingSpec::lhs`](view_core::native::mappings::MappingSpec)'s
     /// `Cow<'static, str>` lets this override without leaking a `Box`.
-    ui_keys_lhs: (String, String),
+    ui_keys_lhs: (String, String, String),
     /// `[keys] profile`, resolved once at startup: what `Stage::ProfileFlip`
     /// falls back to when `model.key_profile_override` is `None`, i.e. a
     /// flip back to `"auto"`.
@@ -469,6 +470,7 @@ impl NativeSession {
         let ui_keys_lhs = (
             resolved.keys.gaps_lhs().to_string(),
             resolved.keys.cycle_lhs().to_string(),
+            resolved.keys.key_log_lhs().to_string(),
         );
         // read once here, before the loop, so a channel report looks the
         // key up in memory and the record is touched only to add one
@@ -911,19 +913,20 @@ impl NativeSession {
         // fresh mapping where it should hold nothing, and a later reissue
         // read that snapshot back as a user mapping view had taken.
         if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
-            let (gaps_lhs, cycle_lhs) = &self.ui_keys_lhs;
+            let (gaps_lhs, cycle_lhs, log_lhs) = &self.ui_keys_lhs;
+            let overrides = [
+                ("ui", "gaps", gaps_lhs),
+                ("ui", "cycle_surfaces", cycle_lhs),
+                ("keys", "log", log_lhs),
+            ];
             for spec in specs.iter_mut() {
-                if spec.feature == "ui"
-                    && spec.verb == "gaps"
-                    && gaps_lhs.as_str() != spec.lhs.as_ref()
-                {
-                    spec.lhs = std::borrow::Cow::Owned(gaps_lhs.clone());
-                }
-                if spec.feature == "ui"
-                    && spec.verb == "cycle_surfaces"
-                    && cycle_lhs.as_str() != spec.lhs.as_ref()
-                {
-                    spec.lhs = std::borrow::Cow::Owned(cycle_lhs.clone());
+                for (feature, verb, lhs) in overrides {
+                    if spec.feature == feature
+                        && spec.verb == verb
+                        && lhs.as_str() != spec.lhs.as_ref()
+                    {
+                        spec.lhs = std::borrow::Cow::Owned(lhs.clone());
+                    }
                 }
             }
             // `[keys] resize_mode` names every key the mode answers to,
@@ -1182,14 +1185,18 @@ fn batched(calls: Vec<RpcCall>) -> Vec<Effect> {
 #[cfg(test)]
 /// [`NativeSession::ui_keys_lhs`]'s own default, for every test constructor
 /// below that has no override of its own to resolve.
-fn default_ui_keys_lhs() -> (String, String) {
-    let lhs_for = |verb: &str| {
+fn default_ui_keys_lhs() -> (String, String, String) {
+    let lhs_for = |feature: &str, verb: &str| {
         view_core::native::mappings::default_maps()
             .iter()
-            .find(|spec| spec.feature == "ui" && spec.verb == verb)
+            .find(|spec| spec.feature == feature && spec.verb == verb)
             .map_or_else(String::new, |spec| spec.lhs.to_string())
     };
-    (lhs_for("gaps"), lhs_for("cycle_surfaces"))
+    (
+        lhs_for("ui", "gaps"),
+        lhs_for("ui", "cycle_surfaces"),
+        lhs_for("keys", "log"),
+    )
 }
 
 #[cfg(test)]
@@ -2171,6 +2178,7 @@ composer_newline = \"<A-x>\"
             "[keys]
 toggle_gaps = \"<F2>\"
 cycle_surfaces = \"gz\"
+key_log = \"<F4>\"
 ",
         )
         .expect("a temp config must be writable");
@@ -2179,21 +2187,26 @@ cycle_surfaces = \"gz\"
         let (mut session, _) = load_from(Some(path), 7, &mut m);
         let specs = startup_specs(&mut session, &mut m);
 
-        let lhs_for = |verb: &str| {
+        let lhs_for = |feature: &str, verb: &str| {
             specs
                 .iter()
-                .find(|spec| spec.feature == "ui" && spec.verb == verb)
+                .find(|spec| spec.feature == feature && spec.verb == verb)
                 .map(|spec| spec.lhs.as_ref())
         };
         assert_eq!(
-            lhs_for("gaps"),
+            lhs_for("ui", "gaps"),
             Some("<F2>"),
             "the single-key rebind must reach the registered spec: {specs:?}"
         );
         assert_eq!(
-            lhs_for("cycle_surfaces"),
+            lhs_for("ui", "cycle_surfaces"),
             Some("gz"),
             "the two-key rebind must reach the registered spec too: {specs:?}"
+        );
+        assert_eq!(
+            lhs_for("keys", "log"),
+            Some("<F4>"),
+            "the key log's rebind must reach the registered spec: {specs:?}"
         );
     }
 

@@ -1150,6 +1150,9 @@ fn layer_kind(model: &Model, kind: &OverlayKind, height: u16, width: u16) -> Opt
         OverlayKind::MessageHistory(state) => {
             Some(LayerKind::Palette(state.view(model.utc_offset_secs())))
         }
+        OverlayKind::KeyLog(state) => Some(LayerKind::Palette(
+            state.view(model.key_log(), model.utc_offset_secs()),
+        )),
         // a titled box with a message line and a fixed answer list is what
         // the confirm prompt's own layer already draws; the busy modal
         // carries no field that shape does not

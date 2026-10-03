@@ -31,8 +31,14 @@ impl Model {
     /// queued and applied on catch-up, so an annunciator that consumed them
     /// would turn a slow operation into lost work. It answers its own choice
     /// keys, and every other key routes as though it were not there.
+    ///
+    /// [`OverlayKind::KeyLog`] opens to be watched while the keys it logs
+    /// reach the editor, and takes them only once entered.
     pub(crate) const fn takes_focus(kind: &OverlayKind) -> bool {
-        !matches!(kind, OverlayKind::EngineBusy(_) | OverlayKind::Ai)
+        !matches!(
+            kind,
+            OverlayKind::EngineBusy(_) | OverlayKind::Ai | OverlayKind::KeyLog(_)
+        )
     }
 
     /// Whether `kind` takes the keyboard right now, on this model -- what
@@ -66,6 +72,7 @@ impl Model {
             // the windowed notification stream, same reasoning: its keys
             // route through `Focus::Pane(Notifications)` instead
             OverlayKind::MessageHistory(_) if notifications_windowed => false,
+            OverlayKind::KeyLog(view) => view.entered(),
             other => Self::takes_focus(other),
         }
     }

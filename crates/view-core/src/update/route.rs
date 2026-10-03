@@ -367,6 +367,9 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             Some(OverlayKind::MessageHistory(_)) if notation != "<Esc>" => {
                 sequence_key(model, notation, modal_was_open, message_history_key)
             }
+            Some(OverlayKind::KeyLog(_)) if notation != "<Esc>" => {
+                sequence_key(model, notation, modal_was_open, super::key_log::key)
+            }
             // the key belongs to the overlay on top of the stack,
             // and no other overlay kind carries a key handler yet,
             // so consuming it is the whole of that routing. <Esc>
@@ -528,6 +531,7 @@ fn sequence_answer(model: &Model) -> Option<Answer> {
         Focus::Native(_) => match &model.focused_overlay()?.kind {
             OverlayKind::Tree(_) => Some(surfaces::tree_key),
             OverlayKind::MessageHistory(_) => Some(message_history_key),
+            OverlayKind::KeyLog(_) => Some(super::key_log::key),
             _ => None,
         },
         _ => None,
@@ -675,6 +679,7 @@ fn focused_feature(model: &Model) -> Option<&'static str> {
         OverlayKind::Ai => Some("ai"),
         OverlayKind::MessageHistory(_) => Some("notifications"),
         OverlayKind::Picker(_) => Some("picker"),
+        OverlayKind::KeyLog(_) => Some("keys"),
         _ => None,
     }
 }

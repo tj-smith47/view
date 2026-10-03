@@ -223,6 +223,8 @@ pub struct ResolvedConfig {
     ui_gaps_key: Source,
     /// [`Self::ui_gaps_key`]'s own for `[keys] cycle_surfaces`.
     ui_cycle_key: Source,
+    /// [`Self::ui_gaps_key`]'s own for `[keys] key_log`.
+    key_log_key: Source,
     /// Where `[supervision] auto_restart` came from.
     supervision: Source,
     /// The `NVIM_APPNAME` this process already carries, which is what an
@@ -527,6 +529,8 @@ pub fn resolve_with(
         file.keys.cycle_lhs(),
         &mut notices,
     );
+    let (log_lhs, key_log_key) =
+        resolve_ui_lhs_env(file, env, "key_log", file.keys.key_log_lhs(), &mut notices);
     let auto_restart = layer(
         None,
         env_read(
@@ -590,6 +594,7 @@ pub fn resolve_with(
                 notices: file.keys.notices().to_vec(),
                 gaps_lhs: gaps_lhs.clone(),
                 cycle_lhs: cycle_lhs.clone(),
+                key_log_lhs: log_lhs,
                 profile: file.keys.profile().map(str::to_string),
                 desktop_modifier: file.keys.desktop_modifier().map(str::to_string),
                 desktop: file.keys.desktop().clone(),
@@ -605,6 +610,7 @@ pub fn resolve_with(
         keys: key_sources,
         ui_gaps_key,
         ui_cycle_key,
+        key_log_key,
         supervision: auto_restart.source,
         inherited_appname: env(INHERITED_APPNAME_ENV).filter(|name| !name.is_empty()),
     }
@@ -819,6 +825,7 @@ impl ResolvedConfig {
                 self.tabline_shows,
             ),
             ("keys", "toggle_gaps") => (self.tables.keys.gaps_lhs().to_string(), self.ui_gaps_key),
+            ("keys", "key_log") => (self.tables.keys.key_log_lhs().to_string(), self.key_log_key),
             ("keys", "cycle_surfaces") => {
                 (self.tables.keys.cycle_lhs().to_string(), self.ui_cycle_key)
             }

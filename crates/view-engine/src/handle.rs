@@ -4012,6 +4012,62 @@ mod tests {
         assert!(report.colon_mapped);
     }
 
+    /// A claim's verb and the mapping it displaced, and whose each of the
+    /// user's own keys is, decode from the rows the chunk writes. A row
+    /// with no label is no owner, and keeps its place.
+    #[test]
+    fn a_mapping_reply_decodes_verbs_and_owners() {
+        let owner = |label: &str, script: &str| {
+            Value::Map(vec![
+                (Value::from("label"), Value::from(label)),
+                (Value::from("script"), Value::from(script)),
+            ])
+        };
+        let reply = Value::Map(vec![
+            (
+                Value::from(crate::nvim_api::MAPPINGS_CLAIMS_KEY),
+                Value::Array(vec![Value::Map(vec![
+                    (Value::from("feature"), Value::from("picker")),
+                    (Value::from("lhs"), Value::from("<leader>fg")),
+                    (Value::from("verb"), Value::from("grep")),
+                    (
+                        Value::from("displaced"),
+                        owner("Live grep", "lua/keys.lua:3"),
+                    ),
+                ])]),
+            ),
+            (
+                Value::from(crate::nvim_api::MAPPINGS_USER_KEYS_KEY),
+                Value::Array(vec![Value::from("gd"), Value::from("<Space>x")]),
+            ),
+            (
+                Value::from("user_owners"),
+                Value::Array(vec![
+                    owner("Goto definition", "lua/lsp.lua:9"),
+                    Value::Map(Vec::new()),
+                ]),
+            ),
+        ]);
+
+        let report = super::decode::decode_mapping_report(&reply);
+
+        let claim = &report.claimed[0];
+        assert_eq!(claim.verb, "grep");
+        let displaced = claim.displaced.as_ref().expect("a displaced owner");
+        assert_eq!(displaced.label, "Live grep");
+        assert_eq!(displaced.script.as_deref(), Some("lua/keys.lua:3"));
+        let owners = &report.user_keys.owners;
+        assert_eq!(owners.len(), 2, "{owners:?}");
+        assert_eq!(
+            owners[0]
+                .as_ref()
+                .map(view_core::native::mappings::MappingOwner::describe)
+                .as_deref(),
+            Some("Goto definition (lua/lsp.lua:9)")
+        );
+        assert_eq!(owners[1], None);
+    }
+
     /// A reply carrying no `:` reading at all answers `false`, which is the
     /// reading that leaves the palette speculating: never speculating is the
     /// whole feature withheld on every config, where speculating wrongly
@@ -4115,6 +4171,7 @@ mod tests {
             keys,
             timeoutlen,
             cmdline,
+            ..
         }) = &decoded
         else {
             unreachable!("got {decoded:?}");

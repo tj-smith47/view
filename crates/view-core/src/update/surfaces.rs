@@ -1611,7 +1611,7 @@ fn history_mut(model: &mut Model) -> Option<&mut MessageHistoryState> {
 /// [`Effect::ClipboardWrite`]), and `Charwise` because a copied line is a
 /// line, not a linewise register: `lines_to_text` appends no newline to it,
 /// which is what keeps a pasted path a path.
-fn copy_selection(text: Option<String>) -> Vec<Effect> {
+pub(super) fn copy_selection(text: Option<String>) -> Vec<Effect> {
     let Some(text) = text else {
         return Vec::new();
     };

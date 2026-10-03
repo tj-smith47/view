@@ -142,6 +142,8 @@ pub struct Model {
     /// and doctor answer "what did view claim?" from, and a second recording
     /// appending to the first would report every key twice.
     claimed_keys: Vec<MappingClaim>,
+    /// The mappings that fired this session. See [`Model::key_log`].
+    pub(crate) key_log: key_log::KeyLogState,
     /// Whether the user's config maps `:` in normal or visual mode, as the
     /// engine read it off its own keymaps ([`crate::msg::Msg::MappingsClaimed`],
     /// re-read whenever a plugin loads late).
@@ -465,6 +467,7 @@ impl Model {
             stdin_relay: false,
             fatal_reason: None,
             claimed_keys: Vec::new(),
+            key_log: key_log::KeyLogState::default(),
             colon_mapped: false,
             statusline_enabled: false,
             look: Look::default(),
@@ -535,6 +538,7 @@ impl Model {
     /// an entry for display.
     pub fn set_now(&mut self, now: std::time::SystemTime) {
         self.engine.messages.set_now(now);
+        self.key_log.log.set_now(now);
     }
 
     /// Sets the offset (seconds east of UTC) a message stamp renders
@@ -2220,6 +2224,7 @@ mod buffers;
 mod caps;
 mod focus;
 pub(crate) mod held;
+mod key_log;
 mod look;
 mod messages;
 pub(crate) mod notice;
@@ -2373,6 +2378,11 @@ pub enum OverlayKind {
     /// same way it closes any other. See
     /// [`crate::native::palette::MessageHistoryState`].
     MessageHistory(crate::native::palette::MessageHistoryState),
+    /// The key log, live: every mapping that fired, newest first. Opens
+    /// without the keyboard so the keys a person watches fire still reach
+    /// the editor; `:View keys focus` enters it. See
+    /// [`crate::native::key_log::KeyLogView`].
+    KeyLog(crate::native::key_log::KeyLogView),
     /// The interrupt/restart modal a wedged or lost engine escalates into,
     /// carrying which wedge opened it and how long that wedge has lasted.
     /// Pushed on top of whatever is already open, including a blocked-engine

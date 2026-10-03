@@ -66,6 +66,7 @@ MAPPINGS_RS=$REPO_ROOT/crates/view-core/src/native/mappings.rs
 PERMISSION_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/permission.rs
 PICKER_RS=$REPO_ROOT/crates/view-core/src/native/picker.rs
 PALETTE_RS=$REPO_ROOT/crates/view-core/src/native/palette.rs
+KEY_LOG_RS=$REPO_ROOT/crates/view-core/src/native/key_log.rs
 SURFACES_RS=$REPO_ROOT/crates/view-core/src/update/surfaces.rs
 CHORDS_RS=$REPO_ROOT/crates/view-core/src/native/chords.rs
 OVERLAY_RS=$REPO_ROOT/crates/view-surface/src/overlay.rs
@@ -1046,6 +1047,12 @@ dismiss() {
         settle
         command_line ':View ai close'
     fi
+    if [ "$feature" = keys ]; then
+        # the key log leaves every key to nvim until it is entered, so the
+        # Escape closes nothing and the toggle does
+        settle
+        command_line ':View keys log'
+    fi
     wait_no_box 15 "the overlay" >/dev/null || return 1
 }
 
@@ -1454,6 +1461,7 @@ PERMISSION_PROMPT=$(grep -oE 'format!\("Permission requested for' "$PERMISSION_R
 # would still be read here, and the leg below is what would catch that --
 # it waits for this title on the screen.
 HISTORY_TITLE=$(rust_const "$PALETTE_RS" MESSAGE_HISTORY_TITLE) || exit 1
+KEY_LOG_TITLE=$(rust_const "$KEY_LOG_RS" KEY_LOG_TITLE) || exit 1
 # Joined across the two tables that decide it: which `Source` a picker verb
 # resolves to, and what title that source paints.
 PICKER_MARKERS=$(awk -v surfaces="$SURFACES_RS" -v picker="$PICKER_RS" '
@@ -1495,6 +1503,7 @@ marker_for() {
     # thing on screen from the same panel on a wide one
     (ai/focus-narrow) marker=$NARROW_FOCUSED_TITLE ;;
     (palette/open) marker="$PROMPT_MARK :" ;;
+    (keys/log) marker=$KEY_LOG_TITLE ;;
     esac
     [ -n "$marker" ] || {
         printf 'FAIL: nothing here knows what the %s %s surface paints, so driving it would prove nothing; give it a marker\n' \
@@ -1519,7 +1528,7 @@ marker_for() {
 # every default key through this on `task ci`.
 entry_shape() {
     case "$1/$2" in
-    (picker/* | tree/toggle | notifications/history | ai/toggle | ai/focus-narrow | palette/open)
+    (picker/* | tree/toggle | notifications/history | ai/toggle | ai/focus-narrow | palette/open | keys/log)
         printf 'surface' ;;
     (notifications/pause) printf 'pause' ;;
     (notifications/dismiss) printf 'dismiss' ;;

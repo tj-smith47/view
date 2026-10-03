@@ -74,6 +74,10 @@ view answers a tiling desktop's window keys: move between windows, zoom one,
 open the tree or the palette. On a desktop that already owns those keys,
 view keeps to leader keys. See [`docs/keymaps.md`](docs/keymaps.md).
 
+**See what a key just did.** `<leader>fk` opens a log of each mapping as it
+fires: the key, whose mapping it is, and the mapping of yours it took the
+key from.
+
 **Agents in the editor.** An agent panel that speaks ACP, an agent that
 sees the file, selection and diagnostics you are looking at, and every
 proposed change reviewed as a diff in the file itself.
@@ -153,8 +157,6 @@ view brings together ideas from across the open-source community:
 
 - **Rewind the session.** Scrub back through everything you typed and
   saw, branch from any point, export a clip.
-- **Key introspector.** `:View keys`: which mapping fired, whose it was,
-  what it displaced.
 - **Image viewing.** Open an image in a pane, or preview one from the
   picker or the tree. Sharp on terminals that can show pictures, blocky
   elsewhere.

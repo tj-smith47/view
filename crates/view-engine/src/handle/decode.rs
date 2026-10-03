@@ -15,7 +15,7 @@ use std::time::Duration;
 use view_core::events::WinHandle;
 use view_core::model::{BufferEntry, TileKind, WindowStatus};
 use view_core::msg::{DeleteConfirmOutcome, EngineRequest, Msg, RegisterType, ReplyToken};
-use view_core::native::mappings::MappingClaim;
+use view_core::native::mappings::{MappingClaim, MappingOwner};
 use view_core::native::submit_hold::CmdlineMap;
 use view_core::native::surfaces::{FloatAnchor, FloatSighting};
 
@@ -201,7 +201,11 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
         // the user's keys and `'timeoutlen'` read again on the same events,
         // sent only when they moved: a config that maps on `VeryLazy` has
         // mapped nothing yet when the registration reads them
-        "user_keys" => Some(user_keys_from(Some(first), rest.first(), rest.get(1)).into_msg()),
+        "user_keys" => Some(
+            user_keys_from(Some(first), rest.first(), rest.get(1))
+                .with_owners(rest.get(2))
+                .into_msg(),
+        ),
         _ => None,
     }
 }
@@ -424,6 +428,8 @@ pub(super) struct MappingReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct UserKeys {
     pub(super) keys: Vec<String>,
+    /// Whose each of `keys` is, in the same order.
+    pub(super) owners: Vec<Option<MappingOwner>>,
     /// `None` where `'timeout'` is off.
     pub(super) timeoutlen: Option<Duration>,
     pub(super) cmdline: Vec<CmdlineMap>,
@@ -434,6 +440,7 @@ impl Default for UserKeys {
     fn default() -> Self {
         Self {
             keys: Vec::new(),
+            owners: Vec::new(),
             timeoutlen: Some(view_core::msg::DEFAULT_TIMEOUTLEN),
             cmdline: Vec::new(),
         }
@@ -444,10 +451,30 @@ impl UserKeys {
     pub(super) fn into_msg(self) -> Msg {
         Msg::UserMappingsRead {
             keys: self.keys,
+            owners: self.owners,
             timeoutlen: self.timeoutlen,
             cmdline: self.cmdline,
         }
     }
+
+    /// The same keys with whose each one is, decoded from `owners`.
+    fn with_owners(self, owners: Option<&Value>) -> Self {
+        let owners = owners
+            .and_then(Value::as_array)
+            .map(|rows| rows.iter().map(decode_owner).collect())
+            .unwrap_or_default();
+        Self { owners, ..self }
+    }
+}
+
+/// One `{label, script}` row, or `None` for a row with no `label`.
+fn decode_owner(row: &Value) -> Option<MappingOwner> {
+    let pairs = row.as_map()?;
+    let label = crate::wire::map_find(pairs, "label")?.as_str()?;
+    let script = crate::wire::map_find(pairs, "script")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Some(MappingOwner::new(label, script))
 }
 
 /// Decodes the user's keys under `user_keys`, `'timeoutlen'` under
@@ -460,6 +487,7 @@ fn decode_user_keys(pairs: &[(Value, Value)]) -> UserKeys {
         crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_TIMEOUT_KEY),
         crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_CMDLINE_KEY),
     )
+    .with_owners(crate::wire::map_find(pairs, "user_owners"))
 }
 
 /// Decodes the rows of `REGISTER_MAPPINGS_CHUNK`'s command-line reading.
@@ -513,6 +541,7 @@ fn user_keys_from(
     };
     UserKeys {
         keys,
+        owners: Vec::new(),
         timeoutlen,
         cmdline: decode_cmdline_maps(cmdline),
     }
@@ -541,9 +570,10 @@ pub(super) fn decode_mapping_report(result: &Value) -> MappingReport {
     }
 }
 
-/// Decodes the claim rows themselves: an array of `{feature, lhs,
-/// had_user_mapping, keys}`, one per key the chunk registered, in
-/// registration order. `keys` is present on a row that invokes view.
+/// Decodes the claim rows themselves: an array of `{feature, verb, lhs,
+/// had_user_mapping, keys, displaced}`, one per key the chunk registered,
+/// in registration order. `keys` is present on a row that invokes view,
+/// and `displaced` on one set over a mapping nvim could describe.
 ///
 /// A row missing `feature` or `lhs` is dropped rather than reported as a
 /// claim naming nothing, and a missing `had_user_mapping` reads as `false`:
@@ -568,7 +598,13 @@ fn decode_mapping_claims(result: &Value) -> Vec<MappingClaim> {
                     crate::wire::map_find(pairs, "keys")
                         .and_then(Value::as_str)
                         .map(str::to_owned),
-                ),
+                )
+                .with_verb(
+                    crate::wire::map_find(pairs, "verb")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+                .with_displaced(crate::wire::map_find(pairs, "displaced").and_then(decode_owner)),
             )
         })
         .collect()

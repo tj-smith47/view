@@ -87,6 +87,12 @@ pub struct MappingClaim {
     /// resolved (`\ai`, `<Space>ai`), as `keytrans()` spells them. `None`
     /// for a chord that sends nvim keys of its own, which invokes nothing.
     pub keys: Option<String>,
+    /// The verb the key invokes, as [`MappingSpec::verb`] spells it. Empty
+    /// on a claim built without [`MappingClaim::with_verb`].
+    pub verb: String,
+    /// The user's own mapping the key was set over, when nvim could still
+    /// answer for it at registration.
+    pub displaced: Option<MappingOwner>,
 }
 
 impl MappingClaim {
@@ -99,6 +105,8 @@ impl MappingClaim {
             lhs: lhs.into(),
             had_user_mapping,
             keys: None,
+            verb: String::new(),
+            displaced: None,
         }
     }
 
@@ -109,12 +117,59 @@ impl MappingClaim {
         self.keys = keys;
         self
     }
+
+    /// The claim naming the verb its key invokes.
+    #[must_use]
+    pub fn with_verb(mut self, verb: impl Into<String>) -> Self {
+        self.verb = verb.into();
+        self
+    }
+
+    /// The claim naming the user mapping its key was set over.
+    #[must_use]
+    pub fn with_displaced(mut self, displaced: Option<MappingOwner>) -> Self {
+        self.displaced = displaced;
+        self
+    }
+}
+
+/// Whose a normal-mode mapping is, as a person reads it: the mapping's
+/// `desc`, else its rhs, else `<Lua callback>`, and the script that
+/// defined it when nvim reports one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MappingOwner {
+    /// The mapping's description, its rhs, or `<Lua callback>`.
+    pub label: String,
+    /// The defining script, relative to the config directory when it sits
+    /// under it.
+    pub script: Option<String>,
+}
+
+impl MappingOwner {
+    /// An owner described by `label`, defined in `script`.
+    #[must_use]
+    pub fn new(label: impl Into<String>, script: Option<String>) -> Self {
+        Self {
+            label: label.into(),
+            script,
+        }
+    }
+
+    /// `label`, followed by the script in parentheses when there is one.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match &self.script {
+            Some(script) => format!("{} ({script})", self.label),
+            None => self.label.clone(),
+        }
+    }
 }
 
 // spelled to match the ecosystem's own default keys, the way a switching
 // user already has them in muscle memory; a claim over a user's own
 // `<leader>f` or `<leader>e` prefix is reported so it stays visible.
-static DEFAULT_MAPS: [MappingSpec; 26] = [
+static DEFAULT_MAPS: [MappingSpec; 27] = [
     MappingSpec {
         feature: "picker",
         lhs: Cow::Borrowed("<leader>ff"),
@@ -280,6 +335,12 @@ static DEFAULT_MAPS: [MappingSpec; 26] = [
         verb: "to_tabpage_9",
         rhs: Rhs::Invoke,
     },
+    MappingSpec {
+        feature: "keys",
+        lhs: Cow::Borrowed("<leader>fk"),
+        verb: "log",
+        rhs: Rhs::Invoke,
+    },
 ];
 
 /// Every default key this build ships, in registration order.
@@ -315,7 +376,7 @@ pub struct CommandForm {
 /// [`REGISTRY_EXEMPT_FEATURES`] entry: both exist to report a key claim and
 /// to carry the off switch that gives the key back, and a form that claims
 /// no key has neither to answer for.
-static COMMAND_ONLY_FORMS: [CommandForm; 10] = [
+static COMMAND_ONLY_FORMS: [CommandForm; 11] = [
     CommandForm {
         feature: "ui",
         verb: "panes",
@@ -323,6 +384,10 @@ static COMMAND_ONLY_FORMS: [CommandForm; 10] = [
     CommandForm {
         feature: "keys",
         verb: "profile",
+    },
+    CommandForm {
+        feature: "keys",
+        verb: "focus",
     },
     CommandForm {
         feature: "review",
@@ -565,8 +630,21 @@ fn render_review_table() -> String {
 /// the test below is the only thing that needs to render it again.
 #[cfg(test)]
 fn render_history_table() -> String {
+    render_overlay_table(crate::update::surfaces::HISTORY_KEYS)
+}
+
+/// The key log's own keys as a markdown table, pinned to the page for the
+/// reason [`render_history_table`] is.
+#[cfg(test)]
+fn render_key_log_table() -> String {
+    render_overlay_table(crate::update::key_log::KEY_LOG_KEYS)
+}
+
+/// A table of keys an overlay answers itself, one `(key, does)` row each.
+#[cfg(test)]
+fn render_overlay_table(keys: &[(&str, &str)]) -> String {
     let mut out = String::from("| key | does |\n| --- | --- |\n");
-    for (key, does) in crate::update::surfaces::HISTORY_KEYS {
+    for (key, does) in keys {
         out.push_str(&format!("| `{key}` | {does} |\n"));
     }
     out
@@ -598,10 +676,16 @@ pub struct ExemptFeatureDesc {
 /// Features that reach a key in [`DEFAULT_MAPS`] without a
 /// [`registry::FeatureDesc`] row -- see [`is_reachable_feature`]'s doc on why
 /// a feature lands here.
-static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 3] = [
+static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 4] = [
     ExemptFeatureDesc {
         id: "ai",
         off_switch: "ai.enabled = false",
+    },
+    // the key log has no on/off switch: it opens only when asked, so its
+    // key can only be rebound, as `ui`'s can
+    ExemptFeatureDesc {
+        id: "keys",
+        off_switch: "keys.key_log in view.toml",
     },
     // `ui` has no on/off switch of its own (see the `Msg::FeatureInvoke`
     // "ui" arm) -- its two `DEFAULT_MAPS` keys can only be rebound, so the
@@ -919,6 +1003,18 @@ mod tests {
     #[test]
     fn the_keys_page_renders_the_history_overlay_keys_this_build_answers() {
         let table = render_history_table();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/keymaps.md");
+        let text = std::fs::read_to_string(&path).expect("docs/keymaps.md must be readable");
+        assert!(
+            text.contains(&table),
+            "docs/keymaps.md is stale, it must carry:\n{table}"
+        );
+    }
+
+    /// The key log's table, pinned the same way as the history overlay's.
+    #[test]
+    fn the_keys_page_renders_the_key_log_keys_this_build_answers() {
+        let table = render_key_log_table();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/keymaps.md");
         let text = std::fs::read_to_string(&path).expect("docs/keymaps.md must be readable");
         assert!(

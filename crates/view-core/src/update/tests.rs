@@ -8223,6 +8223,7 @@ fn user_mappings(m: &mut Model, keys: &[&str], timeoutlen: Option<Duration>) {
         m,
         Msg::UserMappingsRead {
             keys: keys.iter().map(|keys| (*keys).to_string()).collect(),
+            owners: Vec::new(),
             timeoutlen,
             cmdline: Vec::new(),
         },
@@ -8489,6 +8490,7 @@ fn walked(kind: &OverlayKind) -> bool {
         OverlayKind::Picker(_)
         | OverlayKind::Tree(_)
         | OverlayKind::MessageHistory(_)
+        | OverlayKind::KeyLog(_)
         | OverlayKind::Ai => true,
         // nvim's own input loop reads every key
         // (`a_meta_key_at_a_relayed_prompt_reaches_nvim_whole`)
@@ -8543,6 +8545,7 @@ fn keyboard_surfaces() -> Vec<(&'static str, Model, bool)> {
         }
     }
     surfaces.push(("picker", invoked("picker", "files"), true));
+    surfaces.push(("entered key log", invoked("keys", "focus"), false));
     for (name, m, _) in &surfaces {
         assert_ne!(
             m.focus(),
@@ -21006,4 +21009,251 @@ fn a_restart_forgets_the_sizes_the_dead_engine_announced() {
         grids.grid(GridId(2)).map(crate::grid::Grid::size),
         Some((40, 22))
     );
+}
+
+fn feature_invoke(feature: &str, verb: &str) -> Msg {
+    Msg::FeatureInvoke {
+        generation: None,
+        feature: feature.to_string(),
+        verb: verb.to_string(),
+    }
+}
+
+/// The picker's three defaults as registration reports them, each carrying
+/// the verb it runs.
+fn claim_picker_verbs(m: &mut Model) {
+    let claimed = [
+        ("<Space>ff", "files"),
+        ("<Space>fb", "buffers"),
+        ("<Space>fg", "grep"),
+    ]
+    .into_iter()
+    .map(|(keys, verb)| {
+        crate::native::mappings::MappingClaim::new("picker", keys, false)
+            .with_keys(Some(keys.to_string()))
+            .with_verb(verb)
+    })
+    .collect();
+    let _ = update(
+        m,
+        Msg::MappingsClaimed {
+            claimed,
+            colon_mapped: false,
+            generation: 0,
+        },
+    );
+}
+
+fn newest_fired(m: &Model) -> crate::native::key_log::Fired {
+    m.key_log()
+        .get(0)
+        .map(|entry| entry.fired.clone())
+        .expect("a row was logged")
+}
+
+fn key_log_rows(m: &Model) -> Option<Vec<String>> {
+    m.overlays().iter().find_map(|overlay| match &overlay.kind {
+        OverlayKind::KeyLog(view) => Some(
+            view.view(m.key_log(), 0)
+                .rows
+                .into_iter()
+                .map(|row| row.label)
+                .collect(),
+        ),
+        _ => None,
+    })
+}
+
+/// A key that fires one of a feature's several defaults is logged as the
+/// row of the verb it ran, with the key that ran it.
+#[test]
+fn a_picker_default_logs_the_row_of_the_verb_that_fired() {
+    use crate::native::key_log::Fired;
+    let mut m = started_model();
+    m.engine.mode.current = "normal".to_string();
+    claim_picker_verbs(&mut m);
+    let _ = typed(&mut m, &[" ", "f", "g"]);
+    let _ = update(&mut m, feature_invoke("picker", "grep"));
+    let Fired::View {
+        feature, verb, lhs, ..
+    } = newest_fired(&m)
+    else {
+        panic!("a view row");
+    };
+    assert_eq!(
+        (feature.as_str(), verb.as_str(), lhs.as_deref()),
+        ("picker", "grep", Some("<Space>fg"))
+    );
+}
+
+/// A `:View` typed by hand runs no key, so its row names none.
+#[test]
+fn a_typed_view_command_logs_no_key() {
+    use crate::native::key_log::Fired;
+    let mut m = started_model();
+    m.engine.mode.current = "normal".to_string();
+    claim_picker_verbs(&mut m);
+    let line = [
+        ":", "V", "i", "e", "w", " ", "p", "i", "c", "k", "e", "r", " ", "g", "r", "e", "p", "<CR>",
+    ];
+    let _ = typed(&mut m, &line);
+    let _ = update(&mut m, feature_invoke("picker", "grep"));
+    let Fired::View { verb, lhs, .. } = newest_fired(&m) else {
+        panic!("a view row");
+    };
+    assert_eq!((verb.as_str(), lhs), ("grep", None));
+}
+
+/// A user's own mapping handed on to nvim from a surface of view's own is
+/// logged with its key and whose it is.
+#[test]
+fn a_users_mapping_from_a_surface_is_logged_with_its_owner() {
+    use crate::native::key_log::Fired;
+    use crate::native::mappings::MappingOwner;
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    let _ = update(
+        &mut m,
+        Msg::UserMappingsRead {
+            keys: vec!["<Space>fg".to_string()],
+            owners: vec![Some(MappingOwner::new(
+                "Live grep",
+                Some("keys.vim".to_string()),
+            ))],
+            timeoutlen: Some(Duration::from_millis(1000)),
+            cmdline: Vec::new(),
+        },
+    );
+    let _ = typed(&mut m, &[" ", "f", "g"]);
+    let Fired::User { lhs, owner } = newest_fired(&m) else {
+        panic!("a user row");
+    };
+    assert_eq!(lhs, "<Space>fg");
+    assert_eq!(
+        owner.map(|owner| owner.describe()).as_deref(),
+        Some("Live grep (keys.vim)")
+    );
+}
+
+fn user_rows(m: &Model) -> Vec<String> {
+    m.key_log()
+        .entries()
+        .filter_map(|entry| match &entry.fired {
+            crate::native::key_log::Fired::User { lhs, .. } => Some(lhs.clone()),
+            crate::native::key_log::Fired::View { .. } => None,
+        })
+        .collect()
+}
+
+/// A user's own mapping typed in a buffer in normal mode is logged once, on
+/// its last key, and every key reaches nvim as typed and in order. The
+/// prefix logs nothing.
+#[test]
+fn a_users_mapping_typed_in_a_buffer_is_logged_once_it_completes() {
+    let mut m = started_model();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    user_mappings(
+        &mut m,
+        &["<Space>fg", "gd"],
+        Some(Duration::from_millis(1000)),
+    );
+    let keys = ["x", " ", "f"];
+    let effects = typed(&mut m, &keys);
+    assert_eq!(meta_inputs(&effects), keys, "{effects:?}");
+    assert!(user_rows(&m).is_empty(), "{:?}", user_rows(&m));
+    let effects = typed(&mut m, &["g"]);
+    assert_eq!(meta_inputs(&effects), ["g"], "{effects:?}");
+    assert_eq!(user_rows(&m), ["<Space>fg"]);
+    let _ = typed(&mut m, &["g", "d"]);
+    assert_eq!(user_rows(&m), ["gd", "<Space>fg"]);
+}
+
+/// The same keys in insert mode are text, and log nothing.
+#[test]
+fn a_users_mapping_typed_in_insert_mode_logs_nothing() {
+    let mut m = started_model();
+    m.engine.mode.current = "insert".to_string();
+    user_mappings(&mut m, &["<Space>fg"], Some(Duration::from_millis(1000)));
+    let keys = [" ", "f", "g"];
+    let effects = typed(&mut m, &keys);
+    assert_eq!(meta_inputs(&effects), keys, "{effects:?}");
+    assert!(m.key_log().is_empty());
+}
+
+/// The open log shows a mapping that fires after it opened, and the same
+/// toggle closes it.
+#[test]
+fn the_open_key_log_shows_new_rows_and_its_toggle_closes_it() {
+    let mut m = started_model();
+    let _ = update(&mut m, feature_invoke("keys", "log"));
+    let before = key_log_rows(&m).expect("the toggle opens the log").len();
+    m.dirty = false;
+    let _ = update(&mut m, feature_invoke("tree", "toggle"));
+    let rows = key_log_rows(&m).expect("still open");
+    assert_eq!(rows.len(), before + 1, "{rows:?}");
+    assert!(rows[0].contains("view   tree toggle"), "{rows:?}");
+    assert!(m.dirty);
+
+    let _ = update(&mut m, feature_invoke("keys", "log"));
+    assert_eq!(key_log_rows(&m), None);
+}
+
+/// Opening and closing the log asks nvim nothing, and while it stands open
+/// and unentered every key still reaches nvim.
+#[test]
+fn the_unentered_key_log_leaves_every_key_to_nvim() {
+    let mut m = started_model();
+    m.engine.mode.current = "normal".to_string();
+    let opened = update(&mut m, feature_invoke("keys", "log"));
+    assert!(
+        !opened.iter().any(|effect| matches!(effect, Effect::Rpc(_))),
+        "{opened:?}"
+    );
+    assert_eq!(m.focus(), Focus::Engine);
+    for notation in ["i", "j", "k", "y", "G", "<Esc>"] {
+        let effects = press(&mut m, notation);
+        assert_eq!(meta_inputs(&effects), [notation], "{effects:?}");
+    }
+    assert!(key_log_rows(&m).is_some());
+    let closed = update(&mut m, feature_invoke("keys", "log"));
+    assert!(
+        !closed.iter().any(|effect| matches!(effect, Effect::Rpc(_))),
+        "{closed:?}"
+    );
+}
+
+/// The walk behind `KEY_LOG_KEYS`: every key it documents, pressed as the
+/// key events the input layer builds, changes something in the entered log.
+#[test]
+fn every_documented_key_log_key_answers_a_real_keystroke() {
+    for (key, what) in crate::update::key_log::KEY_LOG_KEYS {
+        let mut m = Model::with_term_size(80, 24);
+        for i in 0..40 {
+            m.key_log.log.push(crate::native::key_log::Fired::User {
+                lhs: format!("#{i}"),
+                owner: None,
+            });
+        }
+        let _ = update(&mut m, feature_invoke("keys", "focus"));
+        // from the middle, so a key moving either way has somewhere to go
+        let _ = press(&mut m, "<C-d>");
+        let selected = |m: &Model| {
+            m.overlays().iter().find_map(|overlay| match &overlay.kind {
+                OverlayKind::KeyLog(view) => view.view(m.key_log(), 0).selected,
+                _ => None,
+            })
+        };
+        let before = selected(&m);
+        m.dirty = false;
+        let mut effects = Vec::new();
+        for notation in real_key_events(key) {
+            effects = press(&mut m, notation);
+        }
+        assert!(
+            before != selected(&m) || !effects.is_empty() || m.dirty,
+            "`{key}` ({what}) is documented but does nothing when pressed"
+        );
+    }
 }

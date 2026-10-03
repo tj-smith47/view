@@ -64,6 +64,7 @@ const _: () = assert!(
 mod ai;
 mod ai_fs;
 mod bridge;
+pub(crate) mod key_log;
 pub(crate) mod look;
 mod mouse;
 mod paste;
@@ -272,6 +273,7 @@ fn update_one(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // while it is open is neither on screen nor in the list unless the list
     // follows the ring
     model.dirty |= model.refresh_message_history();
+    model.dirty |= model.refresh_key_log();
     // the end the stack holds moves only here, and each notice is wrapped
     // here once for the column's width so a frame reads the wrap
     model.place_notices();
@@ -597,6 +599,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             } else {
                 verb
             };
+            model.log_invocation(&feature, &verb);
             // `ai_enabled` gates ahead of `ai_trusted`: a feature that is
             // off has nothing to trust it for, so prompting first would ask
             // a question whose every answer is thrown away the moment the
@@ -803,9 +806,11 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::UserMappingsRead {
             keys,
+            owners,
             timeoutlen,
             cmdline,
         } => {
+            model.learn_user_owners(&keys, &owners);
             model.submit_hold.learn_user_keys(&keys, timeoutlen);
             model.submit_hold.learn_cmdline_maps(&cmdline);
             Vec::new()
@@ -1367,6 +1372,9 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
     }
 }
 
+/// `:View keys log` (or a bare `:View keys`) toggles the key log and
+/// `:View keys focus` enters it.
+///
 /// `:View keys profile [desktop|editor|auto]`: records the flip on the
 /// model, with no report and no RPC of its own -- `NativeSession::follow_up`
 /// (`view/src/native.rs`) watches this field through `Stage::ProfileFlip`
@@ -1378,8 +1386,11 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
 /// `look::invoke` gives an unrecognized `ui panes` argument.
 fn keys_invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
     let mut words = verb.split_whitespace();
-    if words.next() != Some("profile") {
-        return Vec::new();
+    match words.next() {
+        Some("log") | None => return key_log::toggle(model),
+        Some("focus") => return key_log::focus(model),
+        Some("profile") => {}
+        Some(_) => return Vec::new(),
     }
     let profile = match words.next() {
         Some("desktop") => Some(crate::native::chords::KeyProfile::Desktop),

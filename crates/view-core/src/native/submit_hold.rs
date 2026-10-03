@@ -9,6 +9,7 @@
 
 pub mod commands;
 mod refused;
+mod user_run;
 
 use std::time::Duration;
 
@@ -301,6 +302,8 @@ pub struct SubmitHold {
     /// Every key sequence the user's own config maps in normal mode, one
     /// [`canonical`] key per entry.
     user_keys: Vec<Vec<String>>,
+    /// Which of `user_keys` the latest normal-mode keys fired.
+    user_run: user_run::UserRun,
     /// The user's command-line mappings and abbreviations whose keys type
     /// text.
     cmdline_maps: Vec<Expansion>,
@@ -405,6 +408,7 @@ impl SubmitHold {
             .map(|keys| key_tokens(keys).map(canonical).collect::<Vec<_>>())
             .filter(|keys| !keys.is_empty())
             .collect();
+        self.user_run = user_run::UserRun::new(&mut self.user_keys);
         self.timeout_off = timeoutlen.is_none();
         self.timeoutlen = timeoutlen;
         self.sequence.clear();
@@ -851,6 +855,12 @@ impl SubmitHold {
         self.argument_of = None;
     }
 
+    /// Whether the standing hold was armed by a key nvim maps to a view
+    /// invocation.
+    pub(crate) fn fired_by_key(&self) -> bool {
+        matches!(self.held, Some((Armed::Sequence, _)))
+    }
+
     /// Whether input is being held.
     #[must_use]
     pub fn is_holding(&self) -> bool {
@@ -963,6 +973,9 @@ pub fn fold_engine_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         model.submit_hold.set_typed(None);
         return arm(model, Armed::Sequence);
     }
+    if let Some(keys) = model.submit_hold.user_run.take_fired() {
+        model.log_user_mapping(&keys);
+    }
     fold_line(model, notation)
 }
 
@@ -991,12 +1004,14 @@ fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         .iter()
         .map(|invocation| invocation.keys.len())
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .max(hold.user_run.longest());
     // keys typed on a tracked `:` line are its text, whatever mode nvim
     // last reported: a line view sends itself opens with no `:` folded
     // here to mark the mode unsure
     if !normal || longest == 0 || hold.typed.is_some() {
         hold.recent.clear();
+        hold.user_run.reset();
         return false;
     }
     let key = canonical(notation);
@@ -1035,8 +1050,22 @@ fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         hold.recent.clear();
         hold.argument_of = None;
         hold.mode_unsure = false;
+        hold.user_run.reset();
+    } else {
+        hold.user_run.step(&hold.recent, &hold.user_keys);
     }
     complete
+}
+
+/// The keys `spelled` names, one [`canonical`] key each.
+pub(crate) fn canonical_keys(spelled: &str) -> Vec<String> {
+    key_tokens(spelled).map(canonical).collect()
+}
+
+/// `keys`, one notation each as view's input spells them, made
+/// [`canonical`].
+pub(crate) fn canonical_typed(keys: &[String]) -> Vec<String> {
+    keys.iter().map(|key| canonical(key)).collect()
 }
 
 /// One spelling for each key nvim reads as the same key: `keytrans()`
@@ -1512,6 +1541,7 @@ mod tests {
             model,
             Msg::UserMappingsRead {
                 keys: Vec::new(),
+                owners: Vec::new(),
                 timeoutlen: None,
                 cmdline,
             },

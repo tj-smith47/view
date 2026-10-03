@@ -246,7 +246,7 @@ eval "$(awk '/^PICKER_MARKERS=\$\(awk/,/^'"'"' "\$SURFACES_RS" "\$PICKER_RS"\)$/
 DRIVES=$(awk '/^drive_action\(\) \{/,/^\}/' "$SWEEP" | grep -E '^    \([a-z][a-z |]*\)$' | tr -d ' ()' | tr '|' '\n')
 # read by the sweep functions evaluated above, which shellcheck cannot follow
 # shellcheck disable=SC2034
-ROOT=/sweep/root HISTORY_TITLE=history PANEL_TITLE=panel NARROW_FOCUSED_TITLE=narrow PROMPT_MARK='>'
+ROOT=/sweep/root HISTORY_TITLE=history PANEL_TITLE=panel NARROW_FOCUSED_TITLE=narrow PROMPT_MARK='>' KEY_LOG_TITLE=keys
 ROWS_SEEN=0
 while read -r feature lhs verb; do
     [ -n "$feature" ] || continue

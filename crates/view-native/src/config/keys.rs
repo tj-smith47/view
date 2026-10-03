@@ -235,6 +235,12 @@ pub fn keys() -> &'static [ConfigKey] {
             },
             ConfigKey {
                 table: "keys",
+                key: "key_log",
+                flag: None,
+                derived: Some("<leader>fk"),
+            },
+            ConfigKey {
+                table: "keys",
                 key: "profile",
                 flag: None,
                 // the pill's switch follows `[ui] panes`, for the same

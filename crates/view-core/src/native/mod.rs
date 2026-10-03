@@ -14,6 +14,7 @@ pub mod devicons;
 pub mod diff;
 pub mod ext;
 pub mod geometry;
+pub mod key_log;
 pub mod keys;
 pub mod mappings;
 pub mod palette;

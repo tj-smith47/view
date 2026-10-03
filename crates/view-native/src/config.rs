@@ -780,6 +780,8 @@ struct KeysTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cycle_surfaces: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_log: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     desktop_modifier: Option<String>,
@@ -840,6 +842,12 @@ const CYCLE_SURFACES_NOTICE: &str =
     "view: [keys] cycle_surfaces must be one key notation, spelled as nvim spells it \
      (\"<leader>uw\"), with no quote or newline in it. The placement cycle answers on \
      the default key this run";
+
+/// The key log's own, on the same terms as [`TOGGLE_GAPS_NOTICE`].
+const KEY_LOG_NOTICE: &str =
+    "view: [keys] key_log must be one key notation, spelled as nvim spells it \
+     (\"<leader>fk\"), with no quote or newline in it. The key log opens on the default \
+     key this run";
 
 /// The bindings every rebindable action answers to, and the notice each
 /// action whose value could not be read owes the user.
@@ -910,13 +918,13 @@ fn resolve_ui_lhs(
     }
 }
 
-/// The `[keys] toggle_gaps`/`cycle_surfaces` value the file named no
-/// override for: `default_maps()`'s own row for `ui gaps`/`ui
-/// cycle_surfaces`, read back so the two can never drift apart.
-fn default_ui_lhs(verb: &str) -> &'static str {
+/// The `[keys] toggle_gaps`/`cycle_surfaces`/`key_log` value the file named
+/// no override for: `default_maps()`'s own row for that feature and verb,
+/// read back so the two can never drift apart.
+fn default_lhs(feature: &str, verb: &str) -> &'static str {
     view_core::native::mappings::default_maps()
         .iter()
-        .find(|spec| spec.feature == "ui" && spec.verb == verb)
+        .find(|spec| spec.feature == feature && spec.verb == verb)
         .map_or("", |spec| spec.lhs.as_ref())
 }
 
@@ -928,6 +936,7 @@ pub struct KeysConfig {
     notices: Vec<&'static str>,
     gaps_lhs: String,
     cycle_lhs: String,
+    key_log_lhs: String,
     /// `[keys] profile`'s raw file answer, carried for
     /// [`resolve::resolve_with`] to layer an environment value and a
     /// derivation over -- the same role `gaps_lhs` fills already, except
@@ -949,8 +958,9 @@ impl Default for KeysConfig {
         Self {
             bindings: KeyBindings::default(),
             notices: Vec::new(),
-            gaps_lhs: default_ui_lhs("gaps").to_string(),
-            cycle_lhs: default_ui_lhs("cycle_surfaces").to_string(),
+            gaps_lhs: default_lhs("ui", "gaps").to_string(),
+            cycle_lhs: default_lhs("ui", "cycle_surfaces").to_string(),
+            key_log_lhs: default_lhs("keys", "log").to_string(),
             profile: None,
             desktop_modifier: None,
             desktop: BTreeMap::new(),
@@ -985,6 +995,12 @@ impl KeysConfig {
     #[must_use]
     pub fn cycle_lhs(&self) -> &str {
         &self.cycle_lhs
+    }
+
+    /// [`Self::gaps_lhs`]'s own for `keys log`.
+    #[must_use]
+    pub fn key_log_lhs(&self) -> &str {
+        &self.key_log_lhs
     }
 
     /// `[keys] profile` exactly as the file wrote it, or `None` for a
@@ -1079,16 +1095,22 @@ impl ViewConfig {
         let (bindings, mut notices) = resolve_key_bindings(&file.keys);
         let (gaps_lhs, gaps_notice) = resolve_ui_lhs(
             &file.keys.toggle_gaps,
-            default_ui_lhs("gaps"),
+            default_lhs("ui", "gaps"),
             TOGGLE_GAPS_NOTICE,
         );
         let (cycle_lhs, cycle_notice) = resolve_ui_lhs(
             &file.keys.cycle_surfaces,
-            default_ui_lhs("cycle_surfaces"),
+            default_lhs("ui", "cycle_surfaces"),
             CYCLE_SURFACES_NOTICE,
+        );
+        let (key_log_lhs, key_log_notice) = resolve_ui_lhs(
+            &file.keys.key_log,
+            default_lhs("keys", "log"),
+            KEY_LOG_NOTICE,
         );
         notices.extend(gaps_notice);
         notices.extend(cycle_notice);
+        notices.extend(key_log_notice);
         Ok(Self {
             native: NativeConfig::from_parsed(&file)?,
             supervision: SupervisionConfig {
@@ -1102,6 +1124,7 @@ impl ViewConfig {
                 notices,
                 gaps_lhs,
                 cycle_lhs,
+                key_log_lhs,
                 profile: file.keys.profile.clone(),
                 desktop_modifier: file.keys.desktop_modifier.clone(),
                 desktop: file.keys.desktop.clone(),
@@ -1365,6 +1388,7 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
         ("resize_mode", &file.keys.resize_mode),
         ("toggle_gaps", &file.keys.toggle_gaps),
         ("cycle_surfaces", &file.keys.cycle_surfaces),
+        ("key_log", &file.keys.key_log),
     ] {
         if value.is_some() {
             spelled.push(("keys", key));
@@ -2590,12 +2614,13 @@ mod tests {
     /// to. Walked by the tests below rather than named one at a time, so an
     /// action added to [`KeysTable`] without a row here fails the
     /// crosscheck instead of shipping untested.
-    const KEYS_ACTIONS: [(&str, &str); 6] = [
+    const KEYS_ACTIONS: [(&str, &str); 7] = [
         ("sidebar_wider", "<S-Right>"),
         ("sidebar_narrower", "<S-Left>"),
         ("composer_newline", "<M-CR>"),
         ("toggle_gaps", "<leader>ug"),
         ("cycle_surfaces", "<leader>uw"),
+        ("key_log", "<leader>fk"),
         ("resize_mode", "<C-w>m"),
     ];
 
@@ -2607,6 +2632,7 @@ mod tests {
         match field {
             "toggle_gaps" => cfg.keys.gaps_lhs() == default_key,
             "cycle_surfaces" => cfg.keys.cycle_lhs() == default_key,
+            "key_log" => cfg.keys.key_log_lhs() == default_key,
             // a chord, which `resolve` takes one key at a time
             "resize_mode" => cfg
                 .keys
@@ -2631,6 +2657,7 @@ mod tests {
             composer_newline: Some("<M-CR>".into()),
             toggle_gaps: Some("<leader>ug".into()),
             cycle_surfaces: Some("<leader>uw".into()),
+            key_log: Some("<leader>fk".into()),
             resize_mode: Some("<C-w>m".into()),
             profile: None,
             desktop_modifier: None,

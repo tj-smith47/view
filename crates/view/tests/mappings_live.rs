@@ -311,6 +311,85 @@ fn the_palette_key_is_rebindable_through_keys() {
     );
 }
 
+/// Each claim carries the verb its key runs, and a claim set over a mapping
+/// of the user's carries that mapping's description and the script that set
+/// it, which is what the key log names as the mapping the key was taken
+/// from. A Lua callback is named by the file and line that defined it, for
+/// a claimed key and for one of the user's own keys alike.
+#[test]
+fn a_claim_names_its_verb_and_the_users_mapping_it_displaced() {
+    // a Vimscript file, so the mapping records a script id `getscriptinfo()`
+    // can name; a Lua-set mapping records none unless nvim runs verbose
+    let session = Session::start_with(
+        "displaced",
+        "vim.keymap.set('n', '<leader>zz', function() end, { desc = 'Mine' })\n\
+         local dir = vim.fs.dirname(debug.getinfo(1, 'S').source:sub(2))\n\
+         local keys = dir .. '/keys.vim'\n\
+         vim.fn.writefile({\n\
+         \x20 \"call nvim_set_keymap('n', '<leader>fg', ':echo 1<CR>', #{desc: 'Live grep'})\",\n\
+         }, keys)\n\
+         vim.cmd.source(keys)\n",
+    );
+    let _ = session.register(&NativeConfig::all_enabled());
+    // the reply routes the user's keys ahead of the claims
+    let owners = session
+        .wait_for(ARRIVAL, |msg| match msg {
+            Msg::UserMappingsRead { keys, owners, .. } => Some((keys.clone(), owners.clone())),
+            _ => None,
+        })
+        .expect("the registration reads the user's own keys");
+    let claimed = session.claims();
+    let claim = |lhs: &str| {
+        claimed
+            .iter()
+            .find(|c| c.lhs == lhs)
+            .unwrap_or_else(|| panic!("{lhs} must be claimed: {claimed:?}"))
+    };
+    assert_eq!(claim("<leader>ff").verb, "files");
+    assert_eq!(claim("<leader>fb").verb, "buffers");
+    let grep = claim("<leader>fg");
+    assert_eq!(grep.verb, "grep");
+    let displaced = grep
+        .displaced
+        .as_ref()
+        .unwrap_or_else(|| panic!("the fixture mapped <leader>fg: {grep:?}"));
+    assert_eq!(displaced.label, "Live grep", "{displaced:?}");
+    assert!(
+        displaced
+            .script
+            .as_deref()
+            .is_some_and(|script| script.ends_with("keys.vim")),
+        "the script that set the mapping must be named: {displaced:?}"
+    );
+    assert!(
+        claim("<leader>fb").displaced.is_none(),
+        "a key that landed on nothing displaced nothing: {claimed:?}"
+    );
+    // the fixture's own `<leader>ff` is a Lua callback on line 3 of init.lua
+    let ff = claim("<leader>ff").displaced.as_ref();
+    assert!(
+        ff.and_then(|owner| owner.script.as_deref())
+            .is_some_and(|script| script.ends_with("init.lua:3")),
+        "a Lua callback names the file and line that defined it: {ff:?}"
+    );
+    let mine = owners
+        .0
+        .iter()
+        .position(|keys| keys == ",zz")
+        .and_then(|at| owners.1.get(at).cloned().flatten());
+    assert_eq!(
+        mine.as_ref().map(|owner| owner.label.as_str()),
+        Some("Mine"),
+        "{owners:?}"
+    );
+    assert!(
+        mine.as_ref()
+            .and_then(|owner| owner.script.as_deref())
+            .is_some_and(|script| script.ends_with("init.lua:4")),
+        "a user's own Lua mapping names this fixture's init.lua: {mine:?}"
+    );
+}
+
 #[test]
 fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
     let session = Session::start("disabled");
@@ -341,15 +420,17 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
             "<leader>w7".to_string(),
             "<leader>w8".to_string(),
             "<leader>w9".to_string(),
+            "<leader>fk".to_string(),
         ],
         "a disabled feature must contribute no key of its own; the survivors \
-             are ai's default key, the two ui actions and window's own tile \
-             keys, none of which [native] has a switch for, got {registered:?}"
+             are ai's default key, the two ui actions, window's own tile \
+             keys and the key log, none of which [native] has a switch for, \
+             got {registered:?}"
     );
     let claimed = session.claims();
     assert_eq!(
         claimed.len(),
-        18,
+        19,
         "only the keys no [native] entry here names may be claimed: {claimed:?}"
     );
     assert_eq!(
@@ -373,6 +454,7 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
             "<leader>w7",
             "<leader>w8",
             "<leader>w9",
+            "<leader>fk",
         ]
     );
 
@@ -405,10 +487,10 @@ fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
     session.register(&cfg);
     assert_eq!(
         session.claims().len(),
-        18,
-        "only ai's key, the two ui actions and window's own tile keys, \
-             none of which [native] can turn off, survive every other \
-             feature being disabled"
+        19,
+        "only ai's key, the two ui actions, window's own tile keys and the \
+             key log, none of which [native] can turn off, survive every \
+             other feature being disabled"
     );
 
     assert_eq!(
