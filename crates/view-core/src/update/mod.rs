@@ -133,7 +133,8 @@ pub fn forget_native_windows(model: &mut Model) -> Vec<Effect> {
 ///
 /// Each item carries its first-run record key, and one the record already
 /// holds for this config ([`Model::seed_announced`]) is left out. The
-/// caller writes the record.
+/// [`Effect::RecordAnnounced`] among the returned effects is the record the
+/// caller writes; the executor drops it.
 #[must_use]
 pub fn tell_taken_over(
     model: &mut Model,

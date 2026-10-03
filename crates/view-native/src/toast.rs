@@ -15,8 +15,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::report::Handover;
-
 /// The record format this build writes. Bumped only when an older build
 /// would misread a newer file; a newer file is left untouched rather than
 /// clobbered, so downgrading a build costs at most a repeated notice.
@@ -71,7 +69,7 @@ struct Record {
     schema_version: u32,
     /// Config path (encoded by [`config_key`]) to the record keys already
     /// announced under it (see
-    /// [`Handover::record_key`]). A `BTreeMap` of sorted `Vec`s rather than
+    /// [`crate::report::Handover::record_key`]). A `BTreeMap` of sorted `Vec`s rather than
     /// hash-ordered containers so the file is stable across writes: a record
     /// that reshuffles itself every launch is unreadable as a diff and
     /// unusable as evidence.
@@ -79,10 +77,10 @@ struct Record {
     announced: BTreeMap<String, Vec<String>>,
 }
 
-/// Records every surface in `report` as announced under `config_path`, so
-/// the launch box names each of them once.
+/// Records every key in `keys` as announced under `config_path`, in one
+/// write, so the launch box names each of them once.
 ///
-/// A run whose report the record already covers writes nothing.
+/// A list the record already covers writes nothing.
 ///
 /// `config_path` is `None` for a session running without a config file at
 /// all, which is recorded as its own key so it never merges into whichever
@@ -92,29 +90,25 @@ struct Record {
 /// re-announcing at most once. A record from a newer schema is left exactly
 /// as it is: a downgraded build cannot know what that file already promised
 /// the user.
-pub fn first_run(
-    report: &[Handover],
+pub fn record_keys(
     config_path: Option<&Path>,
+    keys: &[String],
     record: &Path,
 ) -> Result<(), ToastError> {
-    if report.is_empty() {
+    if keys.is_empty() {
         return Ok(());
     }
-
     let mut current = read_record(record)?;
     if current.schema_version > SCHEMA_VERSION {
         return Ok(());
     }
     current.schema_version = SCHEMA_VERSION;
-
-    let key = config_path.map_or_else(String::new, config_key);
-    let announced = current.announced.entry(key.clone()).or_default();
-
+    let config = config_path.map_or_else(String::new, config_key);
+    let announced = current.announced.entry(config.clone()).or_default();
     let mut news = false;
-    for entry in report {
-        let key = entry.record_key();
-        if !announced.contains(&key) {
-            announced.push(key);
+    for key in keys {
+        if !announced.contains(key) {
+            announced.push(key.clone());
             news = true;
         }
     }
@@ -122,13 +116,13 @@ pub fn first_run(
         return Ok(());
     }
     announced.sort();
-    write_record(record, &mut current, &key)
+    write_record(record, &mut current, &config)
 }
 
 /// The keys already announced under `config_path`, which a session seeds
 /// its once-per-config notices with.
 ///
-/// Read on the same terms [`first_run`] reads: an absent or unreadable
+/// Read on the same terms [`record_keys`] reads: an absent or unreadable
 /// record announces nothing, so everything is news once.
 pub fn announced_keys(
     config_path: Option<&Path>,
@@ -137,27 +131,6 @@ pub fn announced_keys(
     let current = read_record(record)?;
     let config = config_path.map_or_else(String::new, config_key);
     Ok(current.announced.get(&config).cloned().unwrap_or_default())
-}
-
-/// Records `key` as announced under `config_path`, for a notice a session
-/// raised itself.
-///
-/// A key already there writes nothing, and a record from a newer schema is
-/// left as it is, on the terms [`first_run`] gives both.
-pub fn record_key(config_path: Option<&Path>, key: &str, record: &Path) -> Result<(), ToastError> {
-    let mut current = read_record(record)?;
-    if current.schema_version > SCHEMA_VERSION {
-        return Ok(());
-    }
-    current.schema_version = SCHEMA_VERSION;
-    let config = config_path.map_or_else(String::new, config_key);
-    let announced = current.announced.entry(config.clone()).or_default();
-    if announced.iter().any(|known| known == key) {
-        return Ok(());
-    }
-    announced.push(key.to_string());
-    announced.sort();
-    write_record(record, &mut current, &config)
 }
 
 /// The record key for a config path: its own bytes, with `%` and every byte
@@ -328,7 +301,7 @@ mod tests {
     use super::*;
 
     use crate::config::NativeConfig;
-    use crate::report::report;
+    use crate::report::{report, Handover};
     use crate::supersede::plan;
     use view_core::model::Look;
     use view_core::native::mappings::MappingClaim;
@@ -359,11 +332,18 @@ mod tests {
         )
     }
 
-    /// Runs [`first_run`] and answers the record keys it added under
-    /// `config`, which are the surfaces the launch box names this time.
+    /// Records one key, the way a session records one notice.
+    fn record_key(config: Option<&Path>, key: &str, record: &Path) -> Result<(), ToastError> {
+        record_keys(config, &[key.to_string()], record)
+    }
+
+    /// Records every surface in `report` and answers the record keys it
+    /// added under `config`, which are the surfaces the launch box names
+    /// this time.
     fn announce(report: &[Handover], config: Option<&Path>, record: &Path) -> Vec<String> {
         let before = announced_keys(config, record).expect("the record must read");
-        first_run(report, config, record).expect("the run must record");
+        let keys: Vec<String> = report.iter().map(Handover::record_key).collect();
+        record_keys(config, &keys, record).expect("the run must record");
         announced_keys(config, record)
             .expect("the record must read")
             .into_iter()
@@ -721,7 +701,7 @@ mod tests {
         let dir = scratch("empty");
         let record = dir.join("native-first-run.toml");
 
-        first_run(&[], None, &record).expect("an empty report must not fail");
+        record_keys(None, &[], &record).expect("an empty list must not fail");
 
         assert!(
             !record.exists(),

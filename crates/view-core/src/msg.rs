@@ -1601,15 +1601,15 @@ pub enum Effect {
         after: Duration,
         generation: u64,
     },
-    /// Adds `key` to the first-run record under this session's config, so
-    /// the next launch finds it told and records the same finding to the
-    /// history alone. `update()` has no filesystem access; the `view` bin
-    /// owns the record and its path.
+    /// Adds every key in `keys` to the first-run record under this
+    /// session's config in one write, so the next launch finds them told and
+    /// records the same findings to the history alone. `update()` has no
+    /// filesystem access; the `view` bin owns the record and its path.
     ///
     /// The degrade when a runtime or harness drops this effect: the next
     /// launch tells the user again.
     RecordAnnounced {
-        key: String,
+        keys: Vec<String>,
     },
     /// Re-nominates `path` after a grace period, so an answer of
     /// [`CheckTimeOutcome::FileGone`] is confirmed before anything is said

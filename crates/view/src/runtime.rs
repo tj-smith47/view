@@ -219,8 +219,8 @@ pub(crate) fn dispatch<E: EngineOps>(
     for eff in effects {
         // the session holds the record's path and the config it is keyed
         // on, which the executor has no reach to
-        if let Effect::RecordAnnounced { key } = &eff {
-            follow_ups.native.record_announced(key);
+        if let Effect::RecordAnnounced { keys } = &eff {
+            follow_ups.native.record_announced(keys);
             continue;
         }
         if holding && follow_ups.native.holds(&eff) {

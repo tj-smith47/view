@@ -626,6 +626,9 @@ pub struct SurfaceConflicts {
     /// The features and keys the same box names as handed to view
     /// ([`Self::tell_taken`]), in the order they were told.
     taken: Vec<Taken>,
+    /// The first-run record key each entry of `taken` was told under, at
+    /// the same index, as the session that handed it over spelled it.
+    taken_keys: Vec<String>,
     /// The first-run record keys this config has already been told about
     /// (`held:<channel>`), seeded at startup from the record
     /// ([`crate::model::Model::seed_announced`]) and grown as this session
@@ -820,14 +823,25 @@ impl SurfaceConflicts {
         &self.told
     }
 
-    /// Adds `taken` to what the launch box names, and answers whether that
-    /// is news.
-    pub fn tell_taken(&mut self, taken: Taken) -> bool {
+    /// Adds `taken`, told under the first-run record key `key`, to what the
+    /// launch box names, and answers whether that is news.
+    pub fn tell_taken(&mut self, key: String, taken: Taken) -> bool {
         if self.taken.contains(&taken) {
             return false;
         }
         self.taken.push(taken);
+        self.taken_keys.push(key);
         true
+    }
+
+    /// The record key of every feature the launch box names as drawn, in
+    /// the order told.
+    pub fn drawing_keys(&self) -> impl Iterator<Item = &str> {
+        self.taken
+            .iter()
+            .zip(&self.taken_keys)
+            .filter(|(taken, _)| matches!(taken, Taken::Drawing { .. }))
+            .map(|(_, key)| key.as_str())
     }
 
     /// Every feature and key the launch box names, in the order told.
@@ -1073,7 +1087,7 @@ impl SurfaceConflicts {
     /// | `generation` | bumped: the dead engine's deadlines are still sleeping in their timer threads, and their expiries must find nobody to answer to |
     /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config draws the same windows -- forgetting it would raise a second notice per window for one conflict |
     /// | `held` | cleared: the replacement re-reports its own channels, and a surface left in here would swallow that report as a conflict already accounted for |
-    /// | `told`, `taken` | kept: the box they word is still standing, and a channel the replacement reports first is added to that box |
+    /// | `told`, `taken`, `taken_keys` | kept: the box they word is still standing, and a channel the replacement reports first is added to that box |
     /// | `announced` | kept: it records what this config has been told, which a restart does not undo |
     pub fn forget_engine(&mut self) {
         self.complaints.clear();

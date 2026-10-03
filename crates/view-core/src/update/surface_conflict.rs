@@ -162,7 +162,7 @@ pub(super) fn on_taken_over(model: &mut Model, taken: Vec<(String, Taken)>) -> V
     let mut news = Vec::new();
     for (key, taken) in taken {
         if model.surface_conflicts.note_announced(key.clone())
-            && model.surface_conflicts.tell_taken(taken)
+            && model.surface_conflicts.tell_taken(key.clone(), taken)
         {
             news.push(key);
         }
@@ -209,12 +209,9 @@ fn raise_launch_box(model: &mut Model, spoke: bool, mut news: Vec<String>) -> Ve
         return Vec::new();
     };
     if !spoke {
-        // a feature is keyed in the record by its registry id
-        for taken in model.surface_conflicts.taken() {
-            if let Taken::Drawing { feature, .. } = taken {
-                if !news.iter().any(|key| key == feature) {
-                    news.push((*feature).to_string());
-                }
+        for key in model.surface_conflicts.drawing_keys() {
+            if !news.iter().any(|known| known == key) {
+                news.push(key.to_string());
             }
         }
     }
@@ -230,7 +227,9 @@ fn raise_launch_box(model: &mut Model, spoke: bool, mut news: Vec<String>) -> Ve
         model
             .engine
             .record_native_notice_once_as(kind, family, &LAUNCH_FAMILIES, text);
-    effects.extend(news.into_iter().map(|key| Effect::RecordAnnounced { key }));
+    if !news.is_empty() {
+        effects.push(Effect::RecordAnnounced { keys: news });
+    }
     effects
 }
 
@@ -1686,7 +1685,7 @@ mod tests {
                 }
                 let effects = held(&mut model, channel, "x");
                 let recorded = effects.iter().any(
-                    |effect| matches!(effect, Effect::RecordAnnounced { key: k } if *k == key),
+                    |effect| matches!(effect, Effect::RecordAnnounced { keys } if keys.contains(&key)),
                 );
                 let boxes = notices(&model);
                 assert!(
@@ -3343,15 +3342,18 @@ mod tests {
         );
     }
 
-    /// The keys a report records, in the order it records them.
+    /// The keys a report records, in the order it records them. A report
+    /// carries them in one effect, so the record is written once.
     fn recorded(effects: &[Effect]) -> Vec<String> {
-        effects
+        let writes: Vec<&Vec<String>> = effects
             .iter()
             .filter_map(|effect| match effect {
-                Effect::RecordAnnounced { key } => Some(key.clone()),
+                Effect::RecordAnnounced { keys } => Some(keys),
                 _ => None,
             })
-            .collect()
+            .collect();
+        assert!(writes.len() <= 1, "one record write per report: {writes:?}");
+        writes.into_iter().flatten().cloned().collect()
     }
 
     /// The box records what it names as it is raised: nothing while it
@@ -3382,6 +3384,28 @@ mod tests {
 
         let effects = held(&mut model, "tabline", "%!v:lua.a()");
         assert_eq!(recorded(&effects), [super::announced_key("tabline")]);
+    }
+
+    /// A feature told quietly is recorded under the key it was told with
+    /// when a held channel later raises the box, whatever its feature id.
+    #[test]
+    fn a_feature_told_quietly_is_recorded_under_its_own_key() {
+        let mut model = drawing_everything();
+        let drawing: Vec<(String, Taken)> = every_drawing()
+            .into_iter()
+            .map(|(key, taken)| (format!("handover:{key}"), taken))
+            .collect();
+        let told: Vec<String> = drawing.iter().map(|(key, _)| key.clone()).collect();
+        let effects = crate::update::tell_taken_over(&mut model, drawing);
+        assert!(effects.is_empty(), "{effects:?}");
+
+        let effects = held(&mut model, "statusline", "%!v:lua.a()");
+        let mut first = recorded(&effects);
+        first.sort();
+        let mut named = told;
+        named.push(super::announced_key("statusline"));
+        named.sort();
+        assert_eq!(first, named);
     }
 
     /// The features view draws stand beside a held channel in the box's

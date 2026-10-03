@@ -221,6 +221,10 @@ pub(crate) struct NativeSession {
     /// for the reply instead, which nvim sends only once the registration
     /// has run.
     claims_owed: usize,
+    /// How many `MappingsClaimed` replies are still owed for every
+    /// registration this session sent, held or not: the claims have settled
+    /// when none is ([`Self::claims_settled`]).
+    claims_unanswered: usize,
     /// The engine-bound effects of input and resizes that arrived while
     /// [`Self::holds_input`], in arrival order. A chord typed during launch
     /// would otherwise reach nvim ahead of its own mapping and run as nvim's
@@ -249,8 +253,8 @@ pub(crate) struct NativeSession {
 
 /// One write to the first-run record.
 enum RecordWrite {
-    /// One notice the model raised about the config.
-    Key(String),
+    /// Every notice one launch box named about the config.
+    Keys(Vec<String>),
 }
 
 /// The first-run record's writer: one thread that owns every write, spawned
@@ -361,7 +365,7 @@ fn apply_record_write(
     write: RecordWrite,
 ) {
     let result = match write {
-        RecordWrite::Key(key) => toast::record_key(config, &key, record),
+        RecordWrite::Keys(keys) => toast::record_keys(config, &keys, record),
     };
     if let Err(err) = result {
         crate::vlog::log_with("native", || format!("first-run record failed: {err}"));
@@ -492,6 +496,7 @@ impl NativeSession {
             leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
             hold_starts: HoldStarts::default(),
             claims_owed: 0,
+            claims_unanswered: 0,
             held_input: Vec::new(),
             hold_lifted: false,
             hold_generation: 0,
@@ -519,6 +524,7 @@ impl NativeSession {
         // the replacement's own takeover decides afresh whether to hold
         self.chords_pending = false;
         self.claims_owed = 0;
+        self.claims_unanswered = 0;
         self.held_input.clear();
         self.hold_lifted = false;
         self.takeover_sent = None;
@@ -531,6 +537,15 @@ impl NativeSession {
     /// [`Self::holds`]'s answer.
     pub(crate) fn holds_input(&self) -> bool {
         !self.hold_lifted && (self.chords_pending || self.claims_owed > 0)
+    }
+
+    /// Whether every registration this session sent has answered and none
+    /// is still to be sent, so no later claims answer adds to the launch
+    /// box. A channel the takeover's own holds find taken is reported from
+    /// inside the takeover batch, ahead of that batch's answer on the same
+    /// connection.
+    fn claims_settled(&self) -> bool {
+        !self.chords_pending && self.claims_unanswered == 0
     }
 
     /// Whether `effect`, which input produced, waits for the registration:
@@ -662,8 +677,10 @@ impl NativeSession {
     ) -> Vec<Effect> {
         let holding = self.holds_input();
         let mut effects = self.follow_up_stage(model, stage);
+        let registrations = effects.iter().filter(|e| answers_with_claims(e)).count();
+        self.claims_unanswered += registrations;
         if holding || self.holds_input() {
-            self.claims_owed += effects.iter().filter(|e| answers_with_claims(e)).count();
+            self.claims_owed += registrations;
         }
         let takeover_answered = matches!(stage, Stage::Claims)
             .then(|| self.takeover_sent.take())
@@ -717,11 +734,10 @@ impl NativeSession {
             }
             Stage::Claims => {
                 self.claims_owed = self.claims_owed.saturating_sub(1);
+                self.claims_unanswered = self.claims_unanswered.saturating_sub(1);
                 crate::vlog::log("startup", "takeover answered");
                 crate::vlog::log_takeover("answered");
-                // the answer to the last registration this session owes, so
-                // no later claims answer adds to the launch box
-                let settled = !self.chords_pending && self.claims_owed == 0;
+                let settled = self.claims_settled();
                 let mut effects = self.announce(model);
                 effects.extend(self.follow_up_chords(model));
                 if settled {
@@ -1024,17 +1040,18 @@ impl NativeSession {
         effects
     }
 
-    /// Records `key` as told under this session's config, for something the
-    /// launch box named as it was raised ([`Effect::RecordAnnounced`]).
+    /// Records `keys` as told under this session's config, in one write, for
+    /// what the launch box named as it was raised
+    /// ([`Effect::RecordAnnounced`]).
     ///
     /// A record that cannot be written is logged, which costs the same
-    /// notice once more next launch.
+    /// notices once more next launch.
     ///
-    /// Latency consequence: the dispatch thread hands the key to the
+    /// Latency consequence: the dispatch thread hands the keys to the
     /// record's writer thread and touches no file. The first record write a
     /// session makes spawns that thread.
-    pub(crate) fn record_announced(&mut self, key: &str) {
-        self.write_record(RecordWrite::Key(key.to_string()));
+    pub(crate) fn record_announced(&mut self, keys: &[String]) {
+        self.write_record(RecordWrite::Keys(keys.to_vec()));
     }
 
     /// Hands `write` to the record's writer thread.
@@ -1084,8 +1101,8 @@ impl NativeSession {
             .collect();
         let mut effects = view_core::update::tell_taken_over(model, taken);
         effects.retain(|effect| match effect {
-            Effect::RecordAnnounced { key } => {
-                self.record_announced(key);
+            Effect::RecordAnnounced { keys } => {
+                self.record_announced(keys);
                 false
             }
             _ => true,
@@ -1186,6 +1203,7 @@ impl NativeSession {
             leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
             hold_starts: HoldStarts::default(),
             claims_owed: 0,
+            claims_unanswered: 0,
             held_input: Vec::new(),
             hold_lifted: false,
             hold_generation: 0,
@@ -1221,6 +1239,7 @@ impl NativeSession {
             leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
             hold_starts: HoldStarts::default(),
             claims_owed: 0,
+            claims_unanswered: 0,
             held_input: Vec::new(),
             hold_lifted: false,
             hold_generation: 0,
@@ -1611,6 +1630,7 @@ mod tests {
             leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
             hold_starts: HoldStarts::default(),
             claims_owed: 0,
+            claims_unanswered: 0,
             held_input: Vec::new(),
             hold_lifted: false,
             hold_generation: 0,
@@ -1675,6 +1695,7 @@ mod tests {
             leader: view_core::msg::DEFAULT_MAPLEADER.to_string(),
             hold_starts: HoldStarts::default(),
             claims_owed: 0,
+            claims_unanswered: 0,
             held_input: Vec::new(),
             hold_lifted: false,
             hold_generation: 0,
@@ -1798,8 +1819,8 @@ mod tests {
                 },
             );
             for effect in effects {
-                if let Effect::RecordAnnounced { key } = effect {
-                    session.record_announced(&key);
+                if let Effect::RecordAnnounced { keys } = effect {
+                    session.record_announced(&keys);
                 }
             }
         }
@@ -1906,7 +1927,7 @@ mod tests {
     #[test]
     fn a_key_told_before_records_no_feature_the_box_did_not_name() {
         let (_dir, record) = scratch("key-told-before");
-        toast::record_key(None, PICKER_KEY, &record).unwrap();
+        toast::record_keys(None, &[PICKER_KEY.to_string()], &record).unwrap();
         let (shown, recorded) = launch(&record, &picker_key(), &[]);
         assert_eq!(shown, "");
         assert_eq!(recorded, [PICKER_KEY]);
@@ -2625,6 +2646,33 @@ cycle_surfaces = \"gz\"
         );
     }
 
+    /// A reissue sent after the hold lifted and before the takeover answered
+    /// is still owed its answer, so the claims settle only once both have
+    /// answered.
+    #[test]
+    fn the_claims_settle_once_every_registration_has_answered() {
+        let mut session = NativeSession::desktop(7, None);
+        let mut m = model();
+        let sent = std::time::Instant::now();
+        let mut due = session.follow_up_at(&mut m, Stage::VimEnter, || sent);
+        while let Some(&Effect::ScheduleChordHold { generation, .. }) = due.last() {
+            due = session.follow_up_at(&mut m, Stage::HoldExpired { generation }, || {
+                sent + CHORD_HOLD_CEILING
+            });
+        }
+        assert!(!session.holds_input(), "the ceiling lifts the hold");
+        let reissue = session.follow_up(&mut m, Stage::CapsUpgraded);
+        assert!(reissue.iter().any(answers_with_claims), "{reissue:?}");
+
+        let _ = session.follow_up(&mut m, Stage::Claims);
+        assert!(
+            !session.claims_settled(),
+            "the reissue's answer is still owed"
+        );
+        let _ = session.follow_up(&mut m, Stage::Claims);
+        assert!(session.claims_settled());
+    }
+
     /// The bound sits at least twice above the slowest reply the chord
     /// registration was measured at after `VimEnter`, the worst launch under
     /// a login config on dev-linux, whose draws the commit that set the bound
@@ -2993,7 +3041,7 @@ cycle_surfaces = \"gz\"
                 let _ = stalled.recv();
             })
             .expect("the writer thread must spawn");
-        writer.push(RecordWrite::Key("held:vim.notify".to_string()));
+        writer.push(RecordWrite::Keys(vec!["held:vim.notify".to_string()]));
         let started = std::time::Instant::now();
         let finished = writer.finish_within(view_proc::writer::QUIT_WAIT);
         let waited = started.elapsed();
@@ -3017,7 +3065,7 @@ cycle_surfaces = \"gz\"
         writer
             .start_with(|_| {})
             .expect("the writer thread must spawn");
-        writer.push(RecordWrite::Key("held:vim.notify".to_string()));
+        writer.push(RecordWrite::Keys(vec!["held:vim.notify".to_string()]));
         assert!(writer.finish_within(view_proc::writer::QUIT_WAIT));
     }
 }
