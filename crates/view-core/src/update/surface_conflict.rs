@@ -574,7 +574,7 @@ pub(super) fn on_float_placed(
     win: u64,
     row: i64,
     col: i64,
-    zindex: u32,
+    (zindex, anchor): (u32, surfaces::FloatAnchor),
 ) -> Vec<Effect> {
     if model.surface_conflicts.is_complaint(win) {
         // a window being animated sends a placement per step, and it is the
@@ -587,7 +587,14 @@ pub(super) fn on_float_placed(
         return Vec::new();
     };
     model.cmdline_floats.placed(grid, win);
-    if take_into_palette(model, grid, win, (row, col, zindex), (width, height)) {
+    if take_into_palette(
+        model,
+        grid,
+        win,
+        (row, col),
+        (zindex, anchor),
+        (width, height),
+    ) {
         return Vec::new();
     }
     let Some(surface) = surfaces::claims_window_at(
@@ -630,9 +637,10 @@ pub(super) fn on_float_placed(
 ///
 /// Taken at a placement while the command line is open, and kept off the
 /// screen at every placement after: the palette paints its rows
-/// ([`crate::native::palette::listed_grid`]). Only a float stacked as a
-/// completion menu is taken ([`crate::native::palette::stacks_as_menu`]),
-/// and a held float placed again below that is let go on the same frame.
+/// ([`crate::native::palette::listed_grid`]). Only a float stacked and
+/// anchored as a completion menu is taken
+/// ([`crate::native::palette::stacks_as_menu`]), and a held float placed
+/// again in any other shape is let go on the same frame.
 /// A float already standing when the command line opened is left alone,
 /// and so is one over the notice column, which is a notification wherever
 /// it opened.
@@ -640,10 +648,11 @@ fn take_into_palette(
     model: &mut Model,
     grid: crate::grid::registry::GridId,
     win: u64,
-    (row, col, zindex): (i64, i64, u32),
+    (row, col): (i64, i64),
+    (zindex, anchor): (u32, surfaces::FloatAnchor),
     (width, height): (u16, u16),
 ) -> bool {
-    let menu = crate::native::palette::stacks_as_menu(zindex);
+    let menu = crate::native::palette::stacks_as_menu(zindex, anchor);
     if model.cmdline_floats.holds(grid) {
         if menu {
             return true;
@@ -2652,6 +2661,7 @@ mod tests {
             Msg::Redraw(vec![UiEvent::WinFloatPos {
                 grid,
                 win: crate::events::WinHandle(win),
+                anchor: crate::events::FloatAnchor::NorthWest,
                 anchor_grid: 1,
                 zindex: 50,
                 compindex: 1,
@@ -3606,6 +3616,7 @@ mod tests {
             UiEvent::WinFloatPos {
                 grid,
                 win: crate::events::WinHandle(win),
+                anchor: crate::events::FloatAnchor::NorthWest,
                 anchor_grid: 1,
                 zindex,
                 compindex: 1,
@@ -3701,6 +3712,7 @@ mod tests {
                 UiEvent::WinFloatPos {
                     grid: 11,
                     win: crate::events::WinHandle(1008),
+                    anchor: crate::events::FloatAnchor::NorthWest,
                     anchor_grid: 1,
                     zindex: 1001,
                     compindex: 1,
@@ -3770,6 +3782,64 @@ mod tests {
             open_float_stacked(&mut model, 12, 1009, rect, 50);
             assert!(!holds(&model, 12), "{corner}");
             assert_eq!(listed(&model), None, "{corner}");
+        }
+    }
+
+    /// [`float_events`] hanging from `anchor`.
+    fn anchored_float_events(
+        grid: u64,
+        win: u64,
+        rect: (u64, u64, u64, u64),
+        zindex: u64,
+        anchor: crate::events::FloatAnchor,
+    ) -> Vec<UiEvent> {
+        let mut events = float_events(grid, win, rect, zindex);
+        for event in &mut events {
+            if let UiEvent::WinFloatPos { anchor: at, .. } = event {
+                *at = anchor;
+            }
+        }
+        events
+    }
+
+    /// A notifier stacked at the menu's own floor, bottom-up in the bottom
+    /// right-hand corner, as snacks stacks its toasts with `top_down = false`.
+    #[test]
+    fn a_right_anchored_float_stacked_as_a_menu_during_the_cmdline_is_not_taken() {
+        use crate::events::FloatAnchor;
+        for anchor in [FloatAnchor::SouthEast, FloatAnchor::NorthEast] {
+            let mut model = palette_session();
+            open_cmdline(&mut model);
+            let _ = update(
+                &mut model,
+                Msg::Redraw(anchored_float_events(
+                    12,
+                    1009,
+                    (26, 60, 40, 3),
+                    100,
+                    anchor,
+                )),
+            );
+            assert!(!holds(&model, 12), "{anchor:?}");
+            assert!(
+                !withheld(&model, 12),
+                "{anchor:?}: the toast stays on screen"
+            );
+            assert_eq!(listed(&model), None, "{anchor:?}");
+        }
+    }
+
+    #[test]
+    fn a_left_anchored_float_stacked_as_a_menu_during_the_cmdline_is_taken() {
+        use crate::events::FloatAnchor;
+        for anchor in [FloatAnchor::NorthWest, FloatAnchor::SouthWest] {
+            let mut model = palette_session();
+            open_cmdline(&mut model);
+            let _ = update(
+                &mut model,
+                Msg::Redraw(anchored_float_events(11, 1008, MENU, 1001, anchor)),
+            );
+            assert_eq!(listed(&model), Some(11), "{anchor:?}");
         }
     }
 

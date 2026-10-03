@@ -121,10 +121,12 @@ is a notification stacked there and draws over no command line either.
 A completion menu that opens while the palette's command line is open
 belongs to that command line, wherever it lands, unless it lands in the
 notice column. A float is a completion menu when it stacks at or above
-nvim's own completion menu, which is `zindex` 100. It gets no notice. The
-palette lists the tallest such float in its own rows and keeps the others
-off the screen until the command line closes. A notification or a progress
-message that opens while the line is open stays where it opened.
+nvim's own completion menu, which is `zindex` 100, and hangs from its left
+edge (`anchor` `NW` or `SW`). A notifier stacked as high hangs from a
+right-hand corner. A completion menu gets no notice. The palette lists the
+tallest such float in its own rows and keeps the others off the screen
+until the command line closes. A notification or a progress message that
+opens while the line is open stays where it opened.
 
 Such a menu sends no selected index, so the palette reads the selection
 from its colours: the one row most of whose cells carry a highlight no

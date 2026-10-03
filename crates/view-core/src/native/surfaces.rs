@@ -1288,6 +1288,7 @@ mod tests {
                 UiEvent::WinFloatPos {
                     grid: 11,
                     win: crate::events::WinHandle(1008),
+                    anchor: FloatAnchor::NorthWest,
                     anchor_grid: 1,
                     zindex: 1001,
                     compindex: 1,

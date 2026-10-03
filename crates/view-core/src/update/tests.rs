@@ -2691,6 +2691,7 @@ fn a_click_on_a_float_names_the_float_grid_not_the_window_beneath() {
             UiEvent::WinFloatPos {
                 grid: 9,
                 win: crate::events::WinHandle(1005),
+                anchor: crate::events::FloatAnchor::NorthWest,
                 anchor_grid: 1,
                 zindex: 50,
                 compindex: 0,

@@ -125,11 +125,18 @@ fn title_for(firstc: &str) -> &'static str {
 /// (`docs/surface-ownership.md`).
 pub const COMPLETION_MENU_ZINDEX: u32 = 100;
 
-/// Whether a float at stacking order `zindex` is stacked as a completion
-/// menu ([`COMPLETION_MENU_ZINDEX`]).
+/// Whether a float at stacking order `zindex`, hanging from `anchor`, is
+/// stacked as a completion menu: at or above [`COMPLETION_MENU_ZINDEX`],
+/// and anchored on its left edge (`NW` or `SW`).
+///
+/// A completion menu hangs from the command line's text, so its left edge
+/// is the fixed one. A notifier stacked as high hugs a grid corner on the
+/// right (`NE` or `SE`), at the top or the bottom.
 #[must_use]
-pub fn stacks_as_menu(zindex: u32) -> bool {
+pub fn stacks_as_menu(zindex: u32, anchor: crate::native::surfaces::FloatAnchor) -> bool {
+    use crate::native::surfaces::FloatAnchor;
     zindex >= COMPLETION_MENU_ZINDEX
+        && matches!(anchor, FloatAnchor::NorthWest | FloatAnchor::SouthWest)
 }
 
 /// The floats a command line the palette draws has opened, held off the

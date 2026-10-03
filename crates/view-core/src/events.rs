@@ -2,6 +2,8 @@
 //! and consumed by [`crate::update::update`]. Pure data: no RPC, no wire
 //! decoding here.
 
+pub use crate::native::surfaces::FloatAnchor;
+
 /// One decoded `redraw` sub-event.
 ///
 /// nvim batches many of these per `redraw` notification; unrecognized event
@@ -61,14 +63,16 @@ pub enum UiEvent {
     /// `(screen_row, screen_col)`, above the window layer at `zindex` and,
     /// within one zindex, in `compindex` order. `ext_multigrid` only.
     ///
-    /// The wire tuple carries four more fields -- `anchor`, `anchor_row`,
-    /// `anchor_col` and `mouse_enabled` -- and the first three are the
-    /// unresolved form of the position: `screen_row`/`screen_col` are what
-    /// nvim already resolved them to, so a compositor that decoded the
-    /// anchor would only re-derive an answer it was handed.
+    /// `screen_row`/`screen_col` are the resolved top-left corner, so they
+    /// alone position the float. `anchor` is the corner the window hangs
+    /// from, [`FloatAnchor::NorthWest`] when nvim sends none, and it is
+    /// read for what the float is: a completion menu hangs from its left
+    /// edge. The wire's `anchor_row`, `anchor_col` and `mouse_enabled` are
+    /// not decoded.
     WinFloatPos {
         grid: u64,
         win: WinHandle,
+        anchor: FloatAnchor,
         anchor_grid: u64,
         zindex: u64,
         compindex: u64,

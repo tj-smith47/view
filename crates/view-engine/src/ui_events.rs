@@ -6,7 +6,9 @@
 
 use crate::wire::map_find;
 use rmpv::Value;
-pub use view_core::events::{GridCell, ModeInfo, PmItem, TabEntry, TabHandle, UiEvent, WinHandle};
+pub use view_core::events::{
+    FloatAnchor, GridCell, ModeInfo, PmItem, TabEntry, TabHandle, UiEvent, WinHandle,
+};
 
 /// Decodes a `redraw` notification's params into typed [`UiEvent`]s.
 ///
@@ -163,10 +165,10 @@ fn decode_win_pos(args: &[Value]) -> Option<UiEvent> {
 
 fn decode_win_float_pos(args: &[Value]) -> Option<UiEvent> {
     // the pinned engine sends eleven fields, four more than the seven older
-    // frontends assume; `anchor`, `anchor_row`, `anchor_col` and
-    // `mouse_enabled` are skipped by position rather than named, since only
-    // the resolved `screen_*` pair positions a pane
-    let [grid, win, _anchor, anchor_grid, _anchor_row, _anchor_col, _mouse_enabled, zindex, compindex, screen_row, screen_col, ..] =
+    // frontends assume; `anchor_row`, `anchor_col` and `mouse_enabled` are
+    // skipped by position, since only the resolved `screen_*` pair
+    // positions a pane
+    let [grid, win, anchor, anchor_grid, _anchor_row, _anchor_col, _mouse_enabled, zindex, compindex, screen_row, screen_col, ..] =
         args
     else {
         return None;
@@ -174,6 +176,9 @@ fn decode_win_float_pos(args: &[Value]) -> Option<UiEvent> {
     Some(UiEvent::WinFloatPos {
         grid: as_u64(grid)?,
         win: WinHandle(decode_ext_handle(win)?),
+        anchor: anchor
+            .as_str()
+            .map_or(FloatAnchor::NorthWest, FloatAnchor::from_wire),
         anchor_grid: as_u64(anchor_grid)?,
         zindex: as_u64(zindex)?,
         compindex: as_u64(compindex)?,
@@ -844,6 +849,7 @@ mod tests {
                 UiEvent::WinFloatPos {
                     grid: 7,
                     win: WinHandle(1004),
+                    anchor: FloatAnchor::NorthWest,
                     anchor_grid: 1,
                     zindex: 50,
                     compindex: 1,
@@ -858,6 +864,39 @@ mod tests {
                 UiEvent::WinClose { grid: 4 },
             ]
         );
+    }
+
+    /// Each of nvim's four anchor spellings decodes to its own corner, and a
+    /// placement whose anchor is no string reads as `NW`.
+    #[test]
+    fn decodes_each_float_anchor() {
+        let placed = |anchor: Value| {
+            let params = vec![arr(vec![
+                Value::from("win_float_pos"),
+                arr(vec![
+                    Value::from(7u64),
+                    Value::Ext(1, vec![0xcd, 0x03, 0xec]),
+                    anchor,
+                    Value::from(1u64),
+                    Value::from(2.0),
+                    Value::from(4.0),
+                    Value::from(true),
+                    Value::from(50u64),
+                    Value::from(1u64),
+                    Value::from(2u64),
+                    Value::from(4u64),
+                ]),
+            ])];
+            match decode_redraw(&params).as_slice() {
+                [UiEvent::WinFloatPos { anchor, .. }] => Some(*anchor),
+                _ => None,
+            }
+        };
+        assert_eq!(placed(Value::from("NW")), Some(FloatAnchor::NorthWest));
+        assert_eq!(placed(Value::from("NE")), Some(FloatAnchor::NorthEast));
+        assert_eq!(placed(Value::from("SW")), Some(FloatAnchor::SouthWest));
+        assert_eq!(placed(Value::from("SE")), Some(FloatAnchor::SouthEast));
+        assert_eq!(placed(Value::Nil), Some(FloatAnchor::NorthWest));
     }
 
     /// Quoted from `docs/multigrid-wire-capture.md`'s `msg_set_pos`

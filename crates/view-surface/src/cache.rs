@@ -1141,6 +1141,7 @@ mod tests {
                 UiEvent::WinFloatPos {
                     grid: 5,
                     win: view_core::events::WinHandle(1008),
+                    anchor: view_core::events::FloatAnchor::NorthWest,
                     anchor_grid: 1,
                     zindex: 1001,
                     compindex: 1,

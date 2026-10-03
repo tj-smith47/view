@@ -757,6 +757,7 @@ fn layout_payload(
         UiEvent::WinFloatPos {
             grid,
             win,
+            anchor: _,
             anchor_grid,
             zindex,
             compindex,
@@ -1647,6 +1648,7 @@ mod tests {
             UiEvent::WinFloatPos {
                 grid: 4,
                 win: WinHandle(1001),
+                anchor: view_core::events::FloatAnchor::NorthWest,
                 anchor_grid: 1,
                 zindex: 50,
                 compindex: 0,
@@ -1716,6 +1718,7 @@ mod tests {
         let float = UiEvent::WinFloatPos {
             grid: 4,
             win: WinHandle(1001),
+            anchor: view_core::events::FloatAnchor::NorthWest,
             anchor_grid: 1,
             zindex: 50,
             compindex: 0,

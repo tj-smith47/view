@@ -1144,6 +1144,7 @@ pub(crate) mod tests {
                 UiEvent::WinFloatPos {
                     grid: 30,
                     win: WinHandle(1030),
+                    anchor: crate::events::FloatAnchor::NorthWest,
                     anchor_grid: 1,
                     zindex: 50,
                     compindex: 1,

@@ -3,7 +3,7 @@
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::Terminal;
-use view_core::events::{GridCell, UiEvent, WinHandle};
+use view_core::events::{FloatAnchor, GridCell, UiEvent, WinHandle};
 use view_core::grid::registry::GridId;
 use view_core::hl::HlAttr;
 use view_core::model::{Model, WindowStatus};
@@ -532,6 +532,7 @@ fn a_float_paints_above_the_windows_it_overlaps() {
             UiEvent::WinFloatPos {
                 grid: 7,
                 win: WinHandle(1004),
+                anchor: FloatAnchor::NorthWest,
                 anchor_grid: 1,
                 zindex: 50,
                 compindex: 1,
@@ -570,6 +571,7 @@ fn a_withheld_float_paints_nothing() {
             UiEvent::WinFloatPos {
                 grid: 7,
                 win: WinHandle(1004),
+                anchor: FloatAnchor::NorthWest,
                 anchor_grid: 1,
                 zindex: 50,
                 compindex: 1,
@@ -619,6 +621,7 @@ fn a_float_paints_above_the_separator_column() {
             UiEvent::WinFloatPos {
                 grid: 7,
                 win: WinHandle(1004),
+                anchor: FloatAnchor::NorthWest,
                 anchor_grid: 1,
                 zindex: 50,
                 compindex: 1,
@@ -682,6 +685,7 @@ fn a_claimed_float_still_resolves_under_multigrid() {
             UiEvent::WinFloatPos {
                 grid: 9,
                 win: WinHandle(1009),
+                anchor: FloatAnchor::NorthWest,
                 anchor_grid: 1,
                 zindex: 200,
                 compindex: 1,
@@ -723,6 +727,7 @@ fn view_overlays_stay_above_every_pane() {
             UiEvent::WinFloatPos {
                 grid: 7,
                 win: WinHandle(1004),
+                anchor: FloatAnchor::NorthWest,
                 anchor_grid: 1,
                 zindex: 200,
                 compindex: 1,
@@ -1257,6 +1262,7 @@ fn tiled_float(gaps: bool) -> Tiles {
         UiEvent::WinFloatPos {
             grid: TILED_FLOAT,
             win: WinHandle(1009),
+            anchor: FloatAnchor::NorthWest,
             anchor_grid: 1,
             zindex: 50,
             compindex: 1,
