@@ -247,6 +247,9 @@ pub(crate) struct NativeSession {
     /// follow-up adds one to every desktop startup, so a session with no
     /// record to consult would otherwise repeat each notice.
     announced: Vec<String>,
+    /// The record keys the launch box named before the claims settled,
+    /// written together once they have, so a launch writes its record once.
+    record_pending: Vec<String>,
     /// The thread that writes the first-run record.
     writer: RecordWriter,
 }
@@ -502,6 +505,7 @@ impl NativeSession {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            record_pending: Vec::new(),
             writer: RecordWriter::default(),
         };
         (session, effects)
@@ -681,6 +685,9 @@ impl NativeSession {
         self.claims_unanswered += registrations;
         if holding || self.holds_input() {
             self.claims_owed += registrations;
+        }
+        if self.claims_settled() {
+            self.flush_record();
         }
         let takeover_answered = matches!(stage, Stage::Claims)
             .then(|| self.takeover_sent.take())
@@ -1040,18 +1047,32 @@ impl NativeSession {
         effects
     }
 
-    /// Records `keys` as told under this session's config, in one write, for
-    /// what the launch box named as it was raised
-    /// ([`Effect::RecordAnnounced`]).
+    /// Records `keys` as told under this session's config, for what the
+    /// launch box named as it was raised ([`Effect::RecordAnnounced`]).
     ///
-    /// A record that cannot be written is logged, which costs the same
-    /// notices once more next launch.
+    /// Keys named before the claims settle wait and are written together
+    /// once they have ([`Self::flush_record`]), so the reports a launch
+    /// takes in one after another cost one write. A record that cannot be
+    /// written is logged, which costs the same notices once more next
+    /// launch.
     ///
     /// Latency consequence: the dispatch thread hands the keys to the
     /// record's writer thread and touches no file. The first record write a
     /// session makes spawns that thread.
     pub(crate) fn record_announced(&mut self, keys: &[String]) {
-        self.write_record(RecordWrite::Keys(keys.to_vec()));
+        self.record_pending.extend_from_slice(keys);
+        if self.claims_settled() {
+            self.flush_record();
+        }
+    }
+
+    /// Writes every key waiting in [`Self::record_pending`] in one write.
+    fn flush_record(&mut self) {
+        if self.record_pending.is_empty() {
+            return;
+        }
+        let keys = std::mem::take(&mut self.record_pending);
+        self.write_record(RecordWrite::Keys(keys));
     }
 
     /// Hands `write` to the record's writer thread.
@@ -1114,6 +1135,7 @@ impl NativeSession {
     /// has handed over. Called on quit after the terminal is restored,
     /// since `std::process::exit` runs no destructor.
     pub(crate) fn finish_record(&mut self) {
+        self.flush_record();
         self.writer.finish_within(view_proc::writer::QUIT_WAIT);
     }
 }
@@ -1209,6 +1231,7 @@ impl NativeSession {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            record_pending: Vec::new(),
             writer: RecordWriter::default(),
         }
     }
@@ -1245,6 +1268,7 @@ impl NativeSession {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            record_pending: Vec::new(),
             writer: RecordWriter::default(),
         }
     }
@@ -1636,6 +1660,7 @@ mod tests {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            record_pending: Vec::new(),
             writer: RecordWriter::default(),
         };
         let mut m = model();
@@ -1701,6 +1726,7 @@ mod tests {
             hold_generation: 0,
             takeover_sent: None,
             announced: Vec::new(),
+            record_pending: Vec::new(),
             writer: RecordWriter::default(),
         };
         let mut m = model();
@@ -2671,6 +2697,50 @@ cycle_surfaces = \"gz\"
         );
         let _ = session.follow_up(&mut m, Stage::Claims);
         assert!(session.claims_settled());
+    }
+
+    /// The reports a launch takes in before its claims settle are written to
+    /// the record together, once, when they settle.
+    #[test]
+    fn a_launch_writes_its_record_once_when_the_claims_settle() {
+        let (_dir, record) = scratch("one-write");
+        let mut session = NativeSession::all_enabled(7, Some(record.clone()));
+        let (wrote, writes) = std::sync::mpsc::channel();
+        session
+            .writer
+            .start_with(move |write| {
+                let _ = wrote.send(write);
+            })
+            .expect("the writer thread must spawn");
+        let mut m = model();
+        m.attach_surfaces(view_core::native::ext::ALL.to_vec());
+        m.statusline_enabled = true;
+        let _ = session.follow_up(&mut m, Stage::VimEnter);
+        assert!(!session.claims_settled(), "the takeover is unanswered");
+        for channel in ["statusline", "tabline"] {
+            let effects = view_core::update::update(
+                &mut m,
+                Msg::ChannelHeld {
+                    channel: channel.to_string(),
+                    holder: "%!v:lua.a()".to_string(),
+                },
+            );
+            for effect in effects {
+                if let Effect::RecordAnnounced { keys } = effect {
+                    session.record_announced(&keys);
+                }
+            }
+        }
+        while !session.claims_settled() {
+            let _ = session.follow_up(&mut m, Stage::Claims);
+        }
+        session.finish_record();
+        let writes: Vec<RecordWrite> = writes.try_iter().collect();
+        assert_eq!(writes.len(), 1, "one write for the launch");
+        let RecordWrite::Keys(keys) = &writes[0];
+        for held in ["held:statusline", "held:tabline"] {
+            assert!(keys.iter().any(|key| key == held), "{held} in {keys:?}");
+        }
     }
 
     /// The bound sits at least twice above the slowest reply the chord
