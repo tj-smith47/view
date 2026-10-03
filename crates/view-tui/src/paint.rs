@@ -16,6 +16,7 @@ use view_surface::{overlay::BorderSet, Layer, LayerKind, Rect, Surface};
 mod emit;
 mod panes;
 mod pill;
+pub(crate) mod record;
 mod scratch;
 mod shade;
 mod text;
@@ -8593,7 +8594,11 @@ mod tests {
     /// cell, with the grounds that keep each off the cluster walk. Each one
     /// places a glyph the layout pass or the engine already decided, never
     /// a run of text view composed.
-    const CELL_WRITERS_THAT_ARE_NOT_TEXT: [(&str, &str); 3] = [
+    const CELL_WRITERS_THAT_ARE_NOT_TEXT: [(&str, &str); 4] = [
+        (
+            "restore",
+            "a recorded cell, one grapheme cluster when it was painted",
+        ),
         (
             "set_border_cell",
             "one fixed box-drawing character per call",

@@ -4,6 +4,7 @@
 //! `view -> crossterm` and `view -> ratatui`: only `view-tui` may touch the
 //! terminal).
 
+use crate::dvr::FrameRing;
 use crate::paint::{Damage, Shadow};
 use crate::tiers;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
@@ -1096,6 +1097,84 @@ impl Term {
         Ok(())
     }
 
+    /// Records the frame [`draw_surface`](Self::draw_surface) just wrote
+    /// into `ring`, dated `at` since recording began, and returns its seq.
+    ///
+    /// Called after every draw that wrote, so each delta is taken against
+    /// the frame recorded before it. The copy is of the changed cells alone
+    /// and happens after the frame reached the terminal.
+    pub fn record_frame(&self, ring: &mut FrameRing, at: std::time::Duration) -> u64 {
+        let at_us = u64::try_from(at.as_micros()).unwrap_or(u64::MAX);
+        let cursor = self.last_cursor.filter(|_| self.cursor_shown == Some(true));
+        crate::paint::record::capture(&self.shadow, ring, at_us, cursor)
+    }
+
+    /// Repaints recorded frame `seq` of `ring` with `bar` across its last
+    /// row and the caret hidden. Returns false, writing nothing, when the
+    /// ring no longer holds the frame. The next live frame repaints the
+    /// whole screen.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `std::io::Error` if the write fails.
+    pub fn draw_recorded(
+        &mut self,
+        model: &Model,
+        ring: &FrameRing,
+        seq: u64,
+        bar: &str,
+    ) -> std::io::Result<bool> {
+        if !self.queue_recorded(model, ring, seq, bar)? {
+            return Ok(false);
+        }
+        let mut frame = self.frame_buf.borrow_mut();
+        if !frame.is_empty() {
+            let mut out = std::io::stdout().lock();
+            out.write_all(&frame)?;
+            frame.clear();
+            out.flush()?;
+        }
+        Ok(true)
+    }
+
+    /// Queues [`draw_recorded`](Self::draw_recorded)'s bytes into
+    /// `frame_buf`, leaving the write to it.
+    fn queue_recorded(
+        &mut self,
+        model: &Model,
+        ring: &FrameRing,
+        seq: u64,
+        bar: &str,
+    ) -> std::io::Result<bool> {
+        if ring.locate(seq).is_none() {
+            return Ok(false);
+        }
+        let mut sink = FrameBuf(Rc::clone(&self.frame_buf));
+        if model.caps.sync {
+            sink.write_all(b"\x1b[?2026h")?;
+        }
+        if self.shadow.resize(frame_area(model)) {
+            crossterm::queue!(
+                sink,
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+            )?;
+        }
+        crate::paint::record::load(&mut self.shadow, ring, seq);
+        crate::paint::record::paint_bar(&mut self.shadow, model, bar);
+        if self.cursor_shown != Some(false) {
+            crossterm::queue!(sink, crossterm::cursor::Hide)?;
+            self.cursor_shown = Some(false);
+        }
+        self.shadow.emit_updates(&mut sink)?;
+        self.shadow.commit();
+        self.last_cursor = None;
+        self.last_offset = None;
+        if model.caps.sync {
+            sink.write_all(b"\x1b[?2026l")?;
+        }
+        Ok(true)
+    }
+
     /// Writes an OSC 52 clipboard-set escape directly to the real
     /// terminal, bypassing `frame_buf`. The clipboard worker thread must
     /// never write to stdout itself -- only `view-tui` touches the
@@ -1849,6 +1928,38 @@ pub(crate) mod tests {
     ) -> Vec<u8> {
         term.queue_frame(model, surface, damage).unwrap();
         std::mem::take(&mut *term.frame_buf.borrow_mut())
+    }
+
+    /// A recorded frame and its bar replace what the terminal shows, so the
+    /// live frame after it has to repaint every cell the scrub painted over.
+    #[test]
+    fn draw_recorded_forces_a_full_repaint_after() {
+        let model = probe_model(TermCaps::default());
+        let surface = view_surface::render(&model);
+        let mut term = Term::frame_probe(model.caps);
+        let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+        let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        let mut ring = FrameRing::new(64 << 20);
+        let seq = term.record_frame(&mut ring, std::time::Duration::ZERO);
+        assert!(term.last_offset.is_some());
+
+        assert!(term
+            .queue_recorded(&model, &ring, seq, "DVR scrub")
+            .unwrap());
+        let scrub = std::mem::take(&mut *term.frame_buf.borrow_mut());
+        let shown = String::from_utf8_lossy(&scrub);
+        assert!(
+            shown.contains("DVR") && shown.contains("scrub"),
+            "{shown:?}"
+        );
+        assert_eq!(term.last_offset, None);
+        let live = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        assert!(
+            !live.is_empty(),
+            "the live frame left the scrub bar on screen"
+        );
+        assert!(!term.queue_recorded(&model, &ring, seq + 1, "x").unwrap());
+        assert!(term.frame_buf.borrow().is_empty());
     }
 
     /// nvim flushes a redraw batch for input it did not act on -- a wheel
