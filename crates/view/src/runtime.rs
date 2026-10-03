@@ -3340,12 +3340,10 @@ mod tests {
             line_count: 3,
         });
         then(&executor);
-        // opening the write end waits for the reader thread to open its end,
-        // so the read starts only after `then` has run
-        let mut pipe = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&fifo)
-            .expect("open the FIFO's write end");
+        let mut pipe = open_fifo_writer(
+            &fifo,
+            view_test_support::host_deadline(std::time::Duration::from_secs(5)),
+        );
         let _ = pipe.write_all(&[b'x'; 16 * 1024]);
         drop(pipe);
 
@@ -3362,6 +3360,61 @@ mod tests {
             }
             other => panic!("expected PickerPreviewFile, got {other:?}"),
         }
+    }
+
+    /// Opens `fifo`'s write end once a reader holds its read end, failing
+    /// the test when no reader opens it within `wait`.
+    #[cfg(unix)]
+    fn open_fifo_writer(fifo: &std::path::Path, wait: std::time::Duration) -> std::fs::File {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let deadline = std::time::Instant::now() + wait;
+        // A blocking open would wait for a reader for ever; a non-blocking
+        // one answers ENXIO until the reader is there.
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(fifo)
+            {
+                Ok(_probe) => {
+                    return std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(fifo)
+                        .expect("open the FIFO's write end");
+                }
+                Err(err) if err.raw_os_error() == Some(libc::ENXIO) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "no reader opened {fifo:?}: the fallback read never started"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(err) => panic!("open the FIFO's write end: {err}"),
+            }
+        }
+    }
+
+    /// Without a reader, the FIFO writer fails the test.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_with_no_reader_fails_the_writer_open() {
+        let root = tree_effect_scratch("fifo-no-reader");
+        let fifo = root.join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo is on PATH for this test's own setup");
+        assert!(made.success(), "mkfifo {fifo:?} failed");
+        let opened = std::panic::catch_unwind(|| {
+            open_fifo_writer(&fifo, std::time::Duration::from_millis(50))
+        });
+        let _ = std::fs::remove_dir_all(&root);
+        let message = opened.expect_err("no reader, so the open fails");
+        let text = message
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(text.contains("no reader opened"), "{text}");
     }
 
     /// A buffer read requested after a fallback read started stops that
