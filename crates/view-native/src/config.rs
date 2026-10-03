@@ -1041,7 +1041,8 @@ pub struct ViewConfig {
     pub native: NativeConfig,
     /// The `[supervision]` table's resolved answers.
     pub supervision: SupervisionConfig,
-    /// The `[dvr]` table's resolved answers.
+    /// The `[dvr]` table's answers. Read from the document alone, this is
+    /// the file layer; the resolver's tables carry the environment over it.
     pub dvr: DvrConfig,
     /// The `[dvr]` table as the document wrote it, which the resolver
     /// layers the environment over and range-checks.

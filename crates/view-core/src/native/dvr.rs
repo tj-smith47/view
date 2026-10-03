@@ -6,7 +6,7 @@
 //! The painted frames themselves live with the terminal frontend. This
 //! module holds no pixels, performs no I/O and hashes nothing.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ops::RangeInclusive;
 
 use crate::msg::{Key, MouseInput, Msg};
@@ -18,6 +18,13 @@ const ARENA_SHARE: usize = 8;
 /// notation is a few bytes, so the entry list fills no sooner than the
 /// arena does.
 const BYTES_PER_ENTRY: usize = 16;
+
+/// The bytes the input log may hold, entry list and arena together, out of
+/// a recording bound of `max_bytes`. The painted frames hold the rest.
+#[must_use]
+pub fn input_log_bytes(max_bytes: usize) -> usize {
+    max_bytes / ARENA_SHARE
+}
 
 /// The kind of one recorded input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +81,7 @@ pub struct RecordedInput<'a> {
     pub body: &'a [u8],
 }
 
-/// Work the loop performs for the recording, outside the fold.
+/// Work the recording needs done outside the fold.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DvrRequest {
@@ -104,8 +111,8 @@ pub struct BranchPlan {
 struct Entry {
     kind: InputKind,
     after_frame: u64,
-    start: usize,
-    len: usize,
+    start: u32,
+    len: u32,
 }
 
 /// The session recording's core state. Off until [`Dvr::enable`].
@@ -118,7 +125,7 @@ pub struct Dvr {
     last_frame: u64,
     markers: Vec<(u64, Marker)>,
     dead: Vec<RangeInclusive<u64>>,
-    seen_paths: Vec<String>,
+    seen_paths: HashSet<String>,
     requests: VecDeque<DvrRequest>,
 }
 
@@ -126,9 +133,9 @@ impl Dvr {
     /// Starts recording, reserving the input log's whole share of
     /// `max_bytes` up front so no later input allocates.
     pub fn enable(&mut self, max_bytes: usize) {
-        let arena = max_bytes / ARENA_SHARE;
-        self.arena = Vec::with_capacity(arena);
-        self.entries = Vec::with_capacity(arena / BYTES_PER_ENTRY);
+        let entries = input_log_bytes(max_bytes) / (std::mem::size_of::<Entry>() + BYTES_PER_ENTRY);
+        self.entries = Vec::with_capacity(entries);
+        self.arena = Vec::with_capacity(entries * BYTES_PER_ENTRY);
         self.recording = true;
     }
 
@@ -138,7 +145,7 @@ impl Dvr {
         self.recording
     }
 
-    /// Notes that frame `seq` was painted and recorded, with `oldest` the
+    /// Notes that frame `seq` is the newest recorded frame, with `oldest` the
     /// oldest frame still retained. Marks on frames no longer retained are
     /// dropped.
     pub fn note_frame(&mut self, seq: u64, oldest: u64) {
@@ -161,10 +168,16 @@ impl Dvr {
 
     /// The recorded inputs, in the order they were folded.
     pub fn inputs(&self) -> impl Iterator<Item = RecordedInput<'_>> + '_ {
-        self.entries.iter().map(|e| RecordedInput {
-            after_frame: e.after_frame,
-            kind: e.kind,
-            body: self.arena.get(e.start..e.start + e.len).unwrap_or_default(),
+        self.entries.iter().map(|e| {
+            let start = e.start as usize;
+            RecordedInput {
+                after_frame: e.after_frame,
+                kind: e.kind,
+                body: self
+                    .arena
+                    .get(start..start + e.len as usize)
+                    .unwrap_or_default(),
+            }
         })
     }
 
@@ -203,13 +216,16 @@ impl Dvr {
             Msg::Resized { .. } => (InputKind::Resized, 4),
             _ => return,
         };
-        if self.arena.capacity() - self.arena.len() < len
-            || self.entries.len() == self.entries.capacity()
-        {
+        let span = u32::try_from(self.arena.len())
+            .ok()
+            .zip(u32::try_from(len).ok());
+        let Some((start, len)) = span.filter(|_| {
+            self.arena.capacity() - self.arena.len() >= len
+                && self.entries.len() < self.entries.capacity()
+        }) else {
             self.overflowed_at = Some(self.last_frame);
             return;
-        }
-        let start = self.arena.len();
+        };
         match msg {
             Msg::Key(key) => self.arena.extend_from_slice(key.notation.as_bytes()),
             Msg::Paste(text) => self.arena.extend_from_slice(text.as_bytes()),
@@ -240,10 +256,10 @@ impl Dvr {
     /// recording. A buffer holding no file has an empty path and is
     /// skipped.
     pub(crate) fn see_path(&mut self, path: &str) {
-        if !self.recording || path.is_empty() || self.seen_paths.iter().any(|p| p == path) {
+        if !self.recording || path.is_empty() || self.seen_paths.contains(path) {
             return;
         }
-        self.seen_paths.push(path.to_owned());
+        self.seen_paths.insert(path.to_owned());
         self.requests
             .push_back(DvrRequest::Baseline(path.to_owned()));
     }
@@ -394,5 +410,38 @@ mod tests {
         assert_eq!(dvr.inputs().count(), 0);
         assert!(dvr.markers().is_empty());
         assert!(dvr.take_request().is_none());
+        assert!(dvr.overflowed_at().is_none());
+    }
+
+    #[test]
+    fn the_input_log_stays_inside_its_share_of_the_bound() {
+        assert_eq!(std::mem::size_of::<Entry>(), 24);
+        for max_mb in [64, 4096] {
+            let max_bytes = max_mb << 20;
+            let mut dvr = Dvr::default();
+            dvr.enable(max_bytes);
+            let held = dvr.arena.capacity() + dvr.entries.capacity() * std::mem::size_of::<Entry>();
+            assert!(
+                held <= input_log_bytes(max_bytes),
+                "{max_mb} MiB: the log holds {held} bytes"
+            );
+            assert!(
+                held * 10 >= input_log_bytes(max_bytes) * 9,
+                "{max_mb} MiB: {held}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_paste_larger_than_the_remaining_arena_is_refused() {
+        let mut dvr = Dvr::default();
+        dvr.enable(8 * 400);
+        let arena = dvr.arena.capacity();
+        assert!(dvr.entries.capacity() > 1, "the entry list has room left");
+        dvr.note_frame(3, 0);
+        dvr.record(&Msg::Paste("x".repeat(arena + 1)));
+        assert_eq!(dvr.inputs().count(), 0);
+        assert_eq!(dvr.overflowed_at(), Some(3));
+        assert_eq!(dvr.arena.capacity(), arena);
     }
 }
