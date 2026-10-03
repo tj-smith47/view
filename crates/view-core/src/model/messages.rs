@@ -380,6 +380,9 @@ pub struct Messages {
     /// of the two, and only the edge each one takes on its own resets the
     /// armed timer (see [`Self::after_pause_change`]).
     pane_held: bool,
+    /// Whether an open picker holds the stack, the third reason beside
+    /// `paused` and `pane_held`. See [`Self::set_picker_held`].
+    picker_held: bool,
     /// Whether this session left the messages surface with nvim, which is
     /// what `[native] notifications = false` asks for. See
     /// [`Self::hand_back`].
@@ -408,6 +411,7 @@ impl Default for Messages {
             armed_lines: Vec::new(),
             paused: false,
             pane_held: false,
+            picker_held: false,
             handed_back: false,
             foreign_notifier: false,
             now: SystemTime::UNIX_EPOCH,
@@ -507,6 +511,7 @@ impl Messages {
             armed_lines,
             paused,
             pane_held,
+            picker_held,
             handed_back,
             foreign_notifier,
             now: _,
@@ -520,6 +525,7 @@ impl Messages {
             && *armed_lines == other.armed_lines
             && *paused == other.paused
             && *pane_held == other.pane_held
+            && *picker_held == other.picker_held
             && *handed_back == other.handed_back
             && *foreign_notifier == other.foreign_notifier
     }
@@ -798,14 +804,15 @@ impl Messages {
     }
 
     /// Whether the pause key, the windowed notification stream's own
-    /// focus, or both are holding the toast stack open.
+    /// focus, an open picker, or any of them together are holding the toast
+    /// stack open.
     ///
     /// Read by the painter as well as by the update loop: a freeze the user
     /// cannot see is indistinguishable from a stuck editor, so the top box
-    /// carries a mark for as long as either is set.
+    /// carries a mark for as long as any is set.
     #[must_use]
     pub fn paused(&self) -> bool {
-        self.paused || self.pane_held
+        self.paused || self.pane_held || self.picker_held
     }
 
     /// Flips the pause key.
@@ -845,10 +852,10 @@ impl Messages {
         self.after_pause_change(was_paused);
     }
 
-    /// The armed-slot reset [`Self::toggle_pause`] and [`Self::set_pane_held`]
-    /// both owe [`Self::paused`]'s own falling edge: forgotten only when the
-    /// OR of the two reasons actually drops. An edge of either one alone
-    /// that the other is still holding up forgets nothing.
+    /// The armed-slot reset [`Self::toggle_pause`], [`Self::set_pane_held`]
+    /// and [`Self::set_picker_held`] all owe [`Self::paused`]'s own falling
+    /// edge: forgotten only when the OR of the reasons actually drops. An
+    /// edge of one alone that another is still holding up forgets nothing.
     fn after_pause_change(&mut self, was_paused: bool) {
         if was_paused && !self.paused() {
             self.armed_slot = None;
@@ -1036,6 +1043,7 @@ impl Messages {
     /// | `held` | drained or discarded as the dead engine's deadline would have, never carried into a hold whose outcome a different engine's probe decides |
     /// | `entries`, `next_message_id`, `armed_slot`, `armed_lines`, `paused` | kept: the toast stack and the scrollback outlive the connection, and an id stamped once is never reissued |
     /// | `pane_held` | untouched here, but not stale: `update()`'s own focus comparison sets it fresh on the very next fold regardless of what a restart left standing |
+    /// | `picker_held` | untouched here, and set fresh by `update()` from the overlay stack on the very next fold |
     /// | `handed_back` | kept: it is the session's `[native]` answer, and the replacement attaches with the same `ext_*` set |
     /// | `foreign_notifier` | cleared: it named a `vim.notify` inside a process that is gone, and a notice raised in the restart window would be spoken to it |
     /// | `now` (`Self::set_now`) | kept: it is the loop thread's wall clock and no fact about the dead connection, and the very next fold stamps it again regardless |
@@ -1367,6 +1375,8 @@ pub fn wrap_toast(lines: &[String], width: u16) -> Vec<String> {
         .flat_map(|line| crate::native::text::wrap_line(line, inside))
         .collect()
 }
+
+mod picker_hold;
 
 #[cfg(test)]
 mod tests {

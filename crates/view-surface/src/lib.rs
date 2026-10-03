@@ -576,12 +576,17 @@ pub fn render(model: &Model) -> Surface {
     // The busy modal is the other: the command line that wedged nvim stays
     // on screen for as long as the wedge does, since the engine that would
     // hide it is the one not answering, so a modal under it is never seen.
+    //
+    // The picker is the third: a toast over its list hides the rows being
+    // chosen from, and the stack holds its notices until it closes.
     let overlays = model.overlays();
     let (under_toasts, over_toasts) = match overlays.last() {
         Some(open)
             if matches!(
                 open.kind,
-                OverlayKind::MessageHistory(_) | OverlayKind::EngineBusy(_)
+                OverlayKind::MessageHistory(_)
+                    | OverlayKind::EngineBusy(_)
+                    | OverlayKind::Picker(_)
             ) =>
         {
             overlays.split_at(overlays.len().saturating_sub(1))
@@ -3234,10 +3239,38 @@ mod tests {
         );
     }
 
-    /// The exception is the history's and the busy modal's, and only while
-    /// one of them holds the top of the stack: every other overlay stays
-    /// under the transient surfaces, which is what the panel case above
-    /// pins.
+    /// A toast over the picker hides the rows being chosen from, so the
+    /// picker's frame paints above a notice standing when it opened.
+    #[test]
+    fn the_picker_paints_above_a_standing_notice() {
+        use view_core::native::geometry::OverlayBox;
+        use view_core::native::picker::{PickerState, Source};
+
+        let mut model = model_with_grid(80, 24);
+        model.term_width = 80;
+        model.term_height = 24;
+        model
+            .engine
+            .record_native_notice("statusline was drawing the status line".to_string(), false);
+        model.push_overlay(
+            OverlayBox::new(60, 40),
+            OverlayKind::Picker(PickerState::open(Source::Buffers)),
+        );
+
+        let surface = render(&model);
+        let position =
+            |matches: fn(&LayerKind) -> bool| surface.layers.iter().position(|l| matches(&l.kind));
+        let picker =
+            position(|k| matches!(k, LayerKind::Picker(_))).expect("the picker overlay is open");
+        let toast =
+            position(|k| matches!(k, LayerKind::Toast { .. })).expect("a notice is standing");
+        assert!(toast < picker, "a notice paints over the picker's rows");
+    }
+
+    /// The exception is the history's, the busy modal's and the picker's,
+    /// and only while one of them holds the top of the stack: every other
+    /// overlay stays under the transient surfaces, which is what the panel
+    /// case above pins.
     #[test]
     fn another_overlay_over_the_history_leaves_the_notice_on_top() {
         use view_core::native::geometry::OverlayBox;

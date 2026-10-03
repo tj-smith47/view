@@ -18773,6 +18773,59 @@ fn leaving_the_stream_rearms_it() {
     );
 }
 
+/// The picker paints over the toast stack, so a notice raised while it is
+/// open gets no dismissal timer, and closing the picker gives it a whole
+/// one.
+#[test]
+fn a_notice_raised_under_the_picker_waits_for_it_to_close() {
+    let mut m = model();
+    let _ = m
+        .engine
+        .messages
+        .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            generation: None,
+            feature: "picker".to_string(),
+            verb: "files".to_string(),
+        },
+    );
+    assert!(
+        m.engine.messages.paused(),
+        "the open picker holds the stack"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::ColorSchemeMissing {
+            name: "nonesuch".to_string(),
+        },
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ScheduleToastExpiry { .. })),
+        "a notice raised under the picker got a dismissal timer: {effects:?}"
+    );
+    let notice = m.engine.messages.top_slot();
+    assert!(notice.is_some(), "the notice waits in the stack");
+
+    let effects = update(&mut m, key("<Esc>"));
+    assert!(m.overlays().is_empty(), "Esc closes the picker");
+    assert!(
+        !m.engine.messages.paused(),
+        "the closed picker holds nothing"
+    );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::ScheduleToastExpiry { id, .. } if Some(*id) == notice
+        )),
+        "the waiting notice gets its timer once the picker closes: {effects:?}"
+    );
+}
+
 /// The focus-driven hold must never stomp a manual pause the user set for a
 /// reason that has nothing to do with where the cursor sits -- the fold
 /// that recomputes the hold runs on every message, including the one right

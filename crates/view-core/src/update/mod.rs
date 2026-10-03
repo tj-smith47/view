@@ -251,6 +251,13 @@ fn update_one(model: &mut Model, msg: Msg) -> Vec<Effect> {
         model.focus(),
         Focus::Pane(NativeSurface::Notifications)
     ));
+    // the picker paints over the toast stack, so a notice raised under it
+    // waits for it to close (`Messages::set_picker_held`)
+    let picker_open = model
+        .overlays()
+        .iter()
+        .any(|open| matches!(open.kind, OverlayKind::Picker(_)));
+    model.engine.messages.set_picker_held(picker_open);
     // the toast stack's dismissal timer belongs to its top slot, and the
     // ways an entry leaves that slot are spread across a dozen arms below
     // -- an expiry, a keypress, a deliberate sticky dismissal, an
