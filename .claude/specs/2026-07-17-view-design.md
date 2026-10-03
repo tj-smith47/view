@@ -646,7 +646,7 @@ section is the concrete visual system P4 builds to, so candidate surfaces are
 judged against renderings rather than adjectives. Reference renderings (Dracula, `full` tier) live in
 `assets/mockups/`; Dracula is the reference *rendering*, not the theme —
 every token below derives from the user's live colorscheme via the §7
-bridge, and every derivation is overridable in `view.toml`. Golden
+bridge, and the derivations a user names are the `[ui.tokens]` keys in §11. Golden
 snapshots per tier (§13) become the enforcement once the surfaces exist.
 
 **Elevation.** Three background steps, derived, never hardcoded:
@@ -753,8 +753,7 @@ motion = "on"        # "off" for reduced motion; ignored below full tier
 backdrop = "dim"     # "none" keeps the grid at full brightness under modals
 
 [ui.tokens]          # explicit values override theme derivation per token
-accent = "#bd93f9"
-surface_raised = "#343746"
+accent = "auto"
 ```
 
 ---
@@ -891,9 +890,15 @@ exists to kill. view treats the agent as a peer subsystem with native UI.
 
 In: ACP client, agent panel, context providers, native diff review, workspace
 fs-watch + conflict UI, config (`[ai] agent = "claude-code"` or arbitrary
-command), per-project trust prompt before first agent launch. Out (recorded candidates): inline ghost-text
-completions (users' existing plugins keep working meanwhile), multi-agent
-orchestration, embedded model serving.
+command), per-project trust prompt before first agent launch, and up to
+eight agent sessions inside one view with an attention list ordered by which
+agent needs a decision first, where selecting an agent lands on the review,
+file or line it is asking about (amended 2026-10-03, C2 agent-fleet
+attention, folded into the initial release by the 2026-09-04 ruling). Out
+(recorded candidates): inline ghost-text completions (users' existing plugins
+keep working meanwhile), orchestration across processes (a socket API, a
+daemon, or agents hosted in a multiplexer's panes; herdr and tmux stay the
+tools for hosting processes), embedded model serving.
 
 Existing AI nvim plugins remain fully functional throughout — compat contract.
 
@@ -923,6 +928,8 @@ pill_caps = "auto"         # auto | round | flat -- how each top-row pill
                            # cell wide
 tile_titles = {}           # filetype -> title for a tile a plugin fills
 
+# theme switchers edit `[ui] theme` and the `[ui.tokens]` paths; they are
+# fixed, and live in this one file
 [ui.tokens]
 accent = "auto"            # the active tile's frame colour; auto = derive
                            # from the colorscheme, or a hex colour
@@ -1206,6 +1213,7 @@ copyable ones (polish).
 | Float title style (§7.1, ruled 2026-08-09 at the P4 exit drain) | `ChromeGroup::FloatTitle` (nvim's builtin `hl-FloatTitle`) fg over the surface's own bg, bold on every tier | §7.1's original `accent` fg: the accent role vocabulary is unimplemented tree-wide (no code resolves `Function`/`Statement` into a role), so it would have shipped as a hardcoded style nvim has no way to reach — the opposite of the migration audience's expectation that their colorscheme drives view's chrome. Coordinator ruling, reported to the user; §7.1 is itself still pending user ratification |
 | `ToastHistory` scope vs §9's letter (ruled 2026-08-09 at the P4 exit drain) | Keep recording confirm-class entries (`confirm`/`return_prompt`/inputlist-class) to scrollback history alongside the sticky and transient rows, and amend §9's routing table to say so | Narrow the recorder to only what §9's routing table listed: a history that silently omits the confirm prompt the user just answered is the surprising outcome for anyone coming from nvim's `:messages`, and painless migration is the tie-breaker. Coordinator ruling, reported to the user |
 | Browser pane engine (§15.1) | CDP-driven system Chromium via `chromiumoxide`: screencast frames through the native graphics substrate; view owns bindings, hints, theme; browser detected, never bundled | Carbonyl/Carboxyl child process: stalled-upstream Chromium fork, supply-chain risk, UX never view's. Servo embedding: watched as the long-term in-process fit — API unstable and open-web compat incomplete as of 2026-08. Handrolled engine: never |
+| C2 fleet source (2026-10-03) | ACP sessions in this process; the list is a mode of the agent window | A fifth NativeSurface: about 250 sites to touch. Cross-process sources: wait on C1 attach |
 
 ## 19. Risks
 
