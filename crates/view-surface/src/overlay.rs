@@ -17,8 +17,6 @@
 //! which is the only layer that knows the terminal's probed color
 //! capability; this module only decides which text carries which role.
 
-use std::collections::HashSet;
-
 use unicode_width::UnicodeWidthChar;
 use view_core::model::TermCaps;
 use view_core::native::devicons::{self, TreeIcons};
@@ -32,6 +30,9 @@ use view_core::native::views::{
 };
 
 use crate::{Layer, LayerKind, OpenSide};
+
+mod selection;
+use selection::standout_row;
 
 /// The horizontal edge glyph of the box-drawing border. Named beside
 /// [`LINE_V`] because the two are one decision: a frame whose edges came
@@ -1157,90 +1158,6 @@ fn palette_body(view: &PaletteView) -> Body {
         rule: true,
         footer: Vec::new(),
     }
-}
-
-/// The one row of `rows` whose highlights set it apart from every other row:
-/// how a menu that carries no selection index shows its selected row. `None`
-/// when no single row stands out, or there are fewer than three rows to tell
-/// it by.
-fn standout_row(rows: &[Vec<Span>]) -> Option<usize> {
-    if rows.len() < 3 {
-        return None;
-    }
-    let sets: Vec<HashSet<StyleRole>> = rows
-        .iter()
-        .map(|row| row.iter().map(|span| span.role).collect())
-        .collect();
-    let selection = |index: usize| stands_apart(rows, &sets, index).then_some(index);
-    painted_apart(rows, &sets)
-        .or_else(|| lacks_a_shared_highlight(&sets).and_then(selection))
-        .or_else(|| alone_in_its_highlights(&sets).and_then(selection))
-}
-
-/// Whether row `index` is painted apart enough to be a selection: the
-/// cells whose highlights no other row carries cover more than half the
-/// row, and they number at least three.
-///
-/// A row set apart in a cell or two, as a kind glyph sets one, or a row two
-/// cells wide painted in its kind's own colour, is no selection. The
-/// selected row keeps its kind glyph's highlight, which every row of that
-/// kind carries, so a bound that asked every cell to be the row's own would
-/// never find the selection.
-fn stands_apart(rows: &[Vec<Span>], sets: &[HashSet<StyleRole>], index: usize) -> bool {
-    let cells = |span: &Span| span.text.chars().count();
-    let alone = |span: &Span| {
-        sets.iter()
-            .enumerate()
-            .all(|(other, set)| other == index || !set.contains(&span.role))
-    };
-    rows.get(index).is_some_and(|row| {
-        let total: usize = row.iter().map(cells).sum();
-        let own: usize = row.iter().filter(|span| alone(span)).map(cells).sum();
-        own * 2 > total && own >= 3
-    })
-}
-
-/// The one row that [`stands_apart`], which is a selection painted across
-/// its row.
-fn painted_apart(rows: &[Vec<Span>], sets: &[HashSet<StyleRole>]) -> Option<usize> {
-    let mut apart = (0..rows.len()).filter(|&index| stands_apart(rows, sets, index));
-    let index = apart.next()?;
-    apart.next().is_none().then_some(index)
-}
-
-/// The one row missing a highlight every other row carries, which is a
-/// selection painted across the whole row over rows coloured per row.
-fn lacks_a_shared_highlight(sets: &[HashSet<StyleRole>]) -> Option<usize> {
-    let roles: HashSet<&StyleRole> = sets.iter().flatten().collect();
-    let mut lacking = None;
-    for role in roles {
-        let mut without = sets
-            .iter()
-            .enumerate()
-            .filter(|(_, set)| !set.contains(role));
-        let (Some((index, _)), None) = (without.next(), without.next()) else {
-            continue;
-        };
-        if lacking.is_some_and(|seen| seen != index) {
-            return None;
-        }
-        lacking = Some(index);
-    }
-    lacking
-}
-
-/// The one row whose highlights differ from the set every other row has.
-fn alone_in_its_highlights(sets: &[HashSet<StyleRole>]) -> Option<usize> {
-    // two of the first three agree, and that set is every row's but the
-    // selected one's
-    let common = if sets.first()? == sets.get(1)? {
-        sets.first()?
-    } else {
-        sets.get(2)?
-    };
-    let mut odd = sets.iter().enumerate().filter(|(_, set)| *set != common);
-    let (index, _) = odd.next()?;
-    odd.next().is_none().then_some(index)
 }
 
 /// A windowed stream or ticker's rows: the same items [`palette_body`]

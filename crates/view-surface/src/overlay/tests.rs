@@ -670,39 +670,16 @@ fn a_selection_beside_a_row_of_another_kind_scrolls_into_view() {
     assert_eq!(band_of_eight_drawn(rows(Some(9))), labels(3..=10));
 }
 
-/// Two rows of other kinds and no selection: one is three cells wide, two
-/// of them in its kind's own colour. Nothing says which row is selected,
-/// and the band shows from the top.
-#[test]
-fn a_two_cell_row_of_another_kind_is_no_selection() {
+/// Plain rows with a last row whose own-coloured cells are `own` of
+/// `own + rest`; the rest carry colours the other rows share.
+fn rows_with_a_last_row_of(own: &str, rest: &str) -> Vec<Vec<view_core::native::views::Span>> {
     use view_core::native::views::Span;
-    let drawn = (0..11_u64)
+    (0..11_u64)
         .map(|i| match i {
             10 => vec![
-                Span::new("ab", StyleRole::Highlight(22)),
-                Span::new("c", StyleRole::Highlight(3)),
-            ],
-            _ => vec![
-                Span::new("* ", StyleRole::Highlight(if i == 6 { 23 } else { 21 })),
-                Span::new(format!("row {}", i + 1), StyleRole::Highlight(3)),
-                Span::new(" Text", StyleRole::Highlight(3)),
-            ],
-        })
-        .collect();
-    assert_eq!(band_of_eight_drawn(drawn), labels(1..=8));
-}
-
-/// One row of another kind among plain rows and no selection: two of its
-/// three cells carry its kind's own colour. It is no selection, and the
-/// band shows from the top.
-#[test]
-fn a_lone_two_cell_row_of_another_kind_is_no_selection() {
-    use view_core::native::views::Span;
-    let drawn = (0..11_u64)
-        .map(|i| match i {
-            10 => vec![
-                Span::new("ab", StyleRole::Highlight(22)),
-                Span::new("c", StyleRole::Highlight(3)),
+                Span::new(own, StyleRole::Highlight(22)),
+                Span::new(&rest[..1], StyleRole::Highlight(21)),
+                Span::new(&rest[1..], StyleRole::Highlight(3)),
             ],
             _ => vec![
                 Span::new("* ", StyleRole::Highlight(21)),
@@ -710,8 +687,43 @@ fn a_lone_two_cell_row_of_another_kind_is_no_selection() {
                 Span::new(" Text", StyleRole::Highlight(3)),
             ],
         })
-        .collect();
+        .collect()
+}
+
+/// A row painted apart in exactly half its cells (3 of 6) is no selection,
+/// and the band shows from the top.
+#[test]
+fn a_row_painted_apart_in_half_its_cells_is_no_selection() {
+    let drawn = rows_with_a_last_row_of("abc", "def");
     assert_eq!(band_of_eight_drawn(drawn), labels(1..=8));
+}
+
+/// A row painted apart in three of its five cells is the selection.
+#[test]
+fn a_row_painted_apart_in_three_of_five_cells_is_the_selection() {
+    let drawn = rows_with_a_last_row_of("abc", "de");
+    let mut shown = labels(4..=10);
+    shown.push("abcde".into());
+    assert_eq!(band_of_eight_drawn(drawn), shown);
+}
+
+/// Every row carries one highlight on every cell except the selected row,
+/// which carries a different one throughout: the absence is what sets it
+/// apart, and it still scrolls into view.
+#[test]
+fn a_row_that_only_lacks_the_others_highlight_is_the_selection() {
+    use view_core::native::views::Span;
+    let drawn = (0..11_u64)
+        .map(|i| {
+            let role = StyleRole::Highlight(if i == 9 { 21 } else { 3 });
+            vec![
+                Span::new("* ", StyleRole::Highlight(21)),
+                Span::new(format!("row {}", i + 1), role),
+                Span::new(" Text", role),
+            ]
+        })
+        .collect();
+    assert_eq!(band_of_eight_drawn(drawn), labels(3..=10));
 }
 
 fn labels(range: std::ops::RangeInclusive<usize>) -> Vec<String> {
