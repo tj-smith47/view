@@ -897,6 +897,7 @@ mod tests {
         assert_eq!(placed(Value::from("SW")), Some(FloatAnchor::SouthWest));
         assert_eq!(placed(Value::from("SE")), Some(FloatAnchor::SouthEast));
         assert_eq!(placed(Value::Nil), Some(FloatAnchor::NorthWest));
+        assert_eq!(placed(Value::from("XX")), Some(FloatAnchor::NorthWest));
     }
 
     /// Quoted from `docs/multigrid-wire-capture.md`'s `msg_set_pos`

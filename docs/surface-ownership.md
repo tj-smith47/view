@@ -113,10 +113,13 @@ state only that surface produces. The command-line rule fires only while a
 command line is actually open, so a picker whose lowest chrome window sits
 one row above the same band stays silent. It names a float that was
 standing when the line opened. A float first placed while the line is open
-and not taken as its completion menu is a notification or a progress
-message, and it draws over no command line in any corner. The command line
-starts at the left edge, so a float standing in the bottom right-hand corner
-is a notification stacked there and draws over no command line either.
+and not taken as its completion menu is judged by the anchor the menu rule
+reads. One that hangs from a right-hand corner (`anchor` `NE` or `SE`) is a
+notification or a progress message, and it draws over no command line. One
+that hangs from its left edge (`NW` or `SW`) is a plugin drawing its own
+command line, and it is named. The command line starts at the left edge, so
+a float standing in the bottom right-hand corner is a notification stacked
+there and draws over no command line either.
 
 A completion menu that opens while the palette's command line is open
 belongs to that command line, wherever it lands, unless it lands in the

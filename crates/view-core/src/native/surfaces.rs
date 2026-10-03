@@ -410,7 +410,7 @@ pub fn claims(float: &FloatSighting, model: &Model) -> Option<Surface> {
         return owned(Surface::Popupmenu, model);
     }
     claims_window_at(
-        float.win,
+        (float.win, float.anchor),
         (float.row, float.col),
         (float.width, float.height),
         float.anchor,
@@ -438,22 +438,27 @@ pub fn claims_at(
     claims_rect(row, col, width, height, anchor, false, model)
 }
 
-/// [`claims_at`] for window `win`'s float.
+/// [`claims_at`] for window `win`'s float, which hangs from `hangs_from`;
+/// `anchor` is the corner `row` and `col` name.
 ///
-/// The command line's rows name only a float that was standing when the
-/// line opened. One first placed while the line is open and left out of
-/// the palette is a notifier or a progress message, whichever corner it
-/// stacks in ([`CmdlineFloats::arrived`](crate::native::palette::CmdlineFloats::arrived)).
+/// The command line's rows leave alone a float first placed while the
+/// line is open ([`CmdlineFloats::arrived`](crate::native::palette::CmdlineFloats::arrived))
+/// that hangs from a right-hand corner (`NE` or `SE`): a notifier or a
+/// progress message hugging that corner. A left-anchored one (`NW` or
+/// `SW`) that the palette did not take as its menu is named, as a float
+/// standing before the line opened is: a plugin drawing its own command
+/// line opens its window there.
 #[must_use]
 pub fn claims_window_at(
-    win: u64,
+    (win, hangs_from): (u64, FloatAnchor),
     (row, col): (i64, i64),
     (width, height): (u16, u16),
     anchor: FloatAnchor,
     model: &Model,
 ) -> Option<Surface> {
-    let arrived = model.cmdline_floats.arrived(win);
-    claims_rect(row, col, width, height, anchor, arrived, model)
+    let notifier = model.cmdline_floats.arrived(win)
+        && matches!(hangs_from, FloatAnchor::NorthEast | FloatAnchor::SouthEast);
+    claims_rect(row, col, width, height, anchor, notifier, model)
 }
 
 fn claims_rect(
@@ -462,14 +467,14 @@ fn claims_rect(
     width: u16,
     height: u16,
     anchor: FloatAnchor,
-    arrived_in_line: bool,
+    notifier_in_line: bool,
     model: &Model,
 ) -> Option<Surface> {
     let (in_band, over_notices) = landing(row, col, width, height, anchor, model)?;
     let hit = crate::native::channels::CHANNELS.iter().find(|entry| {
         entry.channels.iter().any(|channel| match channel {
             Channel::Float(Region::CmdlineBand) => {
-                model.engine.paints_cmdline() && in_band && !arrived_in_line
+                model.engine.paints_cmdline() && in_band && !notifier_in_line
             }
             Channel::Float(Region::NoticeColumn) => over_notices,
             // a placement names no window the command line could be asked

@@ -1180,7 +1180,9 @@ fn standout_row(rows: &[Vec<Span>]) -> Option<usize> {
 /// which is a selection painted across its row. A row set apart in a cell
 /// or two, as a kind glyph sets one, is no candidate.
 ///
-/// The bar is most of the row. The selected row keeps its kind
+/// The bar is two bounds: those cells cover more than half the row, and
+/// they number at least three. A row two cells wide painted in its kind's
+/// own colour passes the first alone. The selected row keeps its kind
 /// glyph's highlight, which every row of that kind carries, so a rule that
 /// asked every cell to be the row's own would never find the selection.
 fn painted_apart(rows: &[Vec<Span>], sets: &[HashSet<StyleRole>]) -> Option<usize> {
@@ -1193,7 +1195,7 @@ fn painted_apart(rows: &[Vec<Span>], sets: &[HashSet<StyleRole>]) -> Option<usiz
         };
         let total: usize = row.iter().map(cells).sum();
         let own: usize = row.iter().filter(|span| alone(span)).map(cells).sum();
-        own * 2 > total
+        own * 2 > total && own >= 3
     });
     let (index, _) = apart.next()?;
     apart.next().is_none().then_some(index)

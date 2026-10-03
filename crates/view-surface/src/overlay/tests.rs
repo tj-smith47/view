@@ -670,6 +670,28 @@ fn a_selection_beside_a_row_of_another_kind_scrolls_into_view() {
     assert_eq!(band_of_eight_drawn(rows(Some(9))), labels(3..=10));
 }
 
+/// Two rows of other kinds and no selection: one is three cells wide, two
+/// of them in its kind's own colour. Nothing says which row is selected,
+/// and the band shows from the top.
+#[test]
+fn a_two_cell_row_of_another_kind_is_no_selection() {
+    use view_core::native::views::Span;
+    let drawn = (0..11_u64)
+        .map(|i| match i {
+            10 => vec![
+                Span::new("ab", StyleRole::Highlight(22)),
+                Span::new("c", StyleRole::Highlight(3)),
+            ],
+            _ => vec![
+                Span::new("* ", StyleRole::Highlight(if i == 6 { 23 } else { 21 })),
+                Span::new(format!("row {}", i + 1), StyleRole::Highlight(3)),
+                Span::new(" Text", StyleRole::Highlight(3)),
+            ],
+        })
+        .collect();
+    assert_eq!(band_of_eight_drawn(drawn), labels(1..=8));
+}
+
 fn labels(range: std::ops::RangeInclusive<usize>) -> Vec<String> {
     range.map(|i| format!("row {i}")).collect()
 }

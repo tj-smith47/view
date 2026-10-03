@@ -598,7 +598,7 @@ pub(super) fn on_float_placed(
         return Vec::new();
     }
     let Some(surface) = surfaces::claims_window_at(
-        win,
+        (win, anchor),
         (row, col),
         (width, height),
         surfaces::FloatAnchor::NorthWest,
@@ -1189,29 +1189,78 @@ mod tests {
     /// Places a float stacked below the menus at `rect` and reports the
     /// scan's sighting of it, answering the notices standing after.
     fn placed_and_sighted(model: &mut Model, rect: (u64, u64, u64, u64)) -> Vec<String> {
-        open_float_stacked(model, 12, 1009, rect, 50);
-        let _ = observe_float(model, &plain_float(1009, rect));
+        placed_and_sighted_as(model, rect, (50, FloatAnchor::NorthWest))
+    }
+
+    /// [`placed_and_sighted`] stacked at `zindex` and hanging from
+    /// `anchor`, with the sighting naming the corner it hangs from.
+    fn placed_and_sighted_as(
+        model: &mut Model,
+        (top, left, width, height): (u64, u64, u64, u64),
+        (zindex, anchor): (u16, FloatAnchor),
+    ) -> Vec<String> {
+        let rect = (top, left, width, height);
+        let _ = update(
+            model,
+            Msg::Redraw(anchored_float_events(
+                12,
+                1009,
+                rect,
+                u64::from(zindex),
+                anchor,
+            )),
+        );
+        let (bottom, right) = (top + height - 1, left + width);
+        let (row, col) = match anchor {
+            FloatAnchor::NorthWest => (top, left),
+            FloatAnchor::NorthEast => (top, right),
+            FloatAnchor::SouthWest => (bottom, left),
+            FloatAnchor::SouthEast => (bottom, right),
+        };
+        let mut sighting = plain_float(1009, (row, col, width, height));
+        sighting.anchor = anchor;
+        sighting.zindex = zindex;
+        let _ = observe_float(model, &sighting);
         notices(model)
     }
 
-    /// A notifier stacking bottom-left, first placed while `:` is open.
-    #[test]
-    fn a_bottom_left_float_placed_during_the_cmdline_is_not_named() {
-        let mut model = palette_session();
-        open_cmdline(&mut model);
-        let standing = placed_and_sighted(&mut model, (25, 0, 40, 3));
-        assert!(standing.is_empty(), "{standing:?}");
-        assert!(!withheld(&model, 12), "the notifier stays on screen");
-    }
+    const BAND_NOTICE: &str = "view: a plugin is drawing over the command line, which view \
+                               owns.\nnative.palette = false gives it back.";
 
     /// A right-hand notifier wider than the corner column, first placed
     /// while `:` is open: its left edge reaches past the column.
     #[test]
-    fn a_wide_right_hand_float_placed_during_the_cmdline_is_not_named() {
+    fn a_right_anchored_float_placed_during_the_cmdline_is_not_named() {
+        for anchor in [FloatAnchor::SouthEast, FloatAnchor::NorthEast] {
+            let mut model = palette_session();
+            open_cmdline(&mut model);
+            let standing = placed_and_sighted_as(&mut model, (26, 29, 70, 2), (50, anchor));
+            assert!(standing.is_empty(), "{anchor:?}: {standing:?}");
+            assert!(!withheld(&model, 12), "{anchor:?}: it stays on screen");
+        }
+    }
+
+    /// A plugin drawing its own command line opens its window over the
+    /// band once `:` is open, hanging from its left edge below the menus.
+    #[test]
+    fn a_left_anchored_float_placed_during_the_cmdline_is_named() {
+        for anchor in [FloatAnchor::NorthWest, FloatAnchor::SouthWest] {
+            let mut model = palette_session();
+            open_cmdline(&mut model);
+            let standing = placed_and_sighted_as(&mut model, (25, 0, 40, 3), (50, anchor));
+            assert_eq!(standing, vec![BAND_NOTICE.to_string()], "{anchor:?}");
+        }
+    }
+
+    /// The completion menu's shape over the band is the palette's menu.
+    #[test]
+    fn a_menu_shaped_float_placed_over_the_band_is_taken_and_not_named() {
         let mut model = palette_session();
         open_cmdline(&mut model);
-        let standing = placed_and_sighted(&mut model, (26, 29, 70, 2));
+        let standing =
+            placed_and_sighted_as(&mut model, (25, 0, 40, 3), (1001, FloatAnchor::NorthWest));
         assert!(standing.is_empty(), "{standing:?}");
+        assert_eq!(listed(&model), Some(12));
     }
 
     /// A float standing over the command line's rows before `:` opened
@@ -3867,6 +3916,27 @@ mod tests {
         open_float(&mut model, 11, 1008, MENU);
         assert!(holds(&model, 11));
         open_float_stacked(&mut model, 11, 1008, MENU, 50);
+        assert!(!holds(&model, 11));
+        assert!(!withheld(&model, 11));
+        assert_eq!(listed(&model), None);
+    }
+
+    #[test]
+    fn a_held_float_placed_again_from_a_right_hand_corner_is_released() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        open_float(&mut model, 11, 1008, MENU);
+        assert!(holds(&model, 11));
+        let _ = update(
+            &mut model,
+            Msg::Redraw(anchored_float_events(
+                11,
+                1008,
+                MENU,
+                1001,
+                crate::events::FloatAnchor::SouthEast,
+            )),
+        );
         assert!(!holds(&model, 11));
         assert!(!withheld(&model, 11));
         assert_eq!(listed(&model), None);
