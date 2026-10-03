@@ -3669,11 +3669,11 @@ impl EngineHandle {
     /// `line_count` lines of `path` from the 1-based `first_line` on: the
     /// reply holds those lines only, fewer where the buffer ends first, each
     /// cut at `view_core::native::picker::PREVIEW_LINE_BYTES`, so neither a
-    /// large buffer nor one very long line is copied whole. Async by construction, like
-    /// [`list_buffers`](Self::list_buffers): this issues the request through
-    /// [`EngineHandle::request_preview`] and returns immediately; the answer
-    /// crosses back as `Msg::PickerPreviewReply` through the connection's
-    /// pump. `path` also travels with the waiter (unlike `list_buffers`,
+    /// large buffer nor one very long line is copied whole. Async by
+    /// construction, like [`list_buffers`](Self::list_buffers): this issues
+    /// the request through [`EngineHandle::request_preview`] and returns
+    /// immediately; the answer crosses back as `Msg::PickerPreviewReply`
+    /// through the connection's pump. `path` also travels with the waiter (unlike `list_buffers`,
     /// whose reply needs no echo) so the eventual reply can name which
     /// candidate it answers, since the picker's selection may have moved on
     /// by the time it lands. See `docs/picker-preview-wire-capture.md` for

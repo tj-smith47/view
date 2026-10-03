@@ -3313,6 +3313,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Starts a fallback read of a FIFO at generation 4, runs `then` while
+    /// the read is blocked on it, feeds it one 16 KiB line, and answers the
+    /// lines the read replied with.
+    #[cfg(unix)]
+    fn fallback_read_after(
+        nonce: &str,
+        then: impl FnOnce(&Executor<&FakeOps>),
+    ) -> Option<Vec<String>> {
+        use std::io::Write as _;
+        let root = tree_effect_scratch(nonce);
+        let fifo = root.join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo is on PATH for this test's own setup");
+        assert!(made.success(), "mkfifo {fifo:?} failed");
+
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(tx));
+        let _ = executor.run(Effect::PickerPreviewFallbackWindow {
+            generation: 4,
+            path: fifo.to_string_lossy().into_owned(),
+            first_line: 10,
+            line_count: 3,
+        });
+        then(&executor);
+        // opening the write end waits for the reader thread to open its end,
+        // so the read starts only after `then` has run
+        let mut pipe = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&fifo)
+            .expect("open the FIFO's write end");
+        let _ = pipe.write_all(&[b'x'; 16 * 1024]);
+        drop(pipe);
+
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
+            .expect("PickerPreviewFile arrives from the worker thread");
+        let _ = std::fs::remove_dir_all(&root);
+        match msg {
+            Msg::PickerPreviewFile { generation, lines } => {
+                assert_eq!(generation, 4);
+                lines
+            }
+            other => panic!("expected PickerPreviewFile, got {other:?}"),
+        }
+    }
+
+    /// A buffer read requested after a fallback read started stops that
+    /// read while it skips to its window.
+    #[cfg(unix)]
+    #[test]
+    fn a_buffer_preview_request_stops_an_earlier_fallback_read() {
+        let lines = fallback_read_after("preview-superseded", |executor| {
+            let _ = executor.run(Effect::Rpc(RpcCall::PreviewBufferWindow {
+                path: "/loaded.rs".to_string(),
+                first_line: 1,
+                line_count: 3,
+                generation: 5,
+            }));
+        });
+        assert_eq!(lines, None, "the superseded read replies with nothing");
+    }
+
+    /// Closing the picker stops a fallback read still skipping to its
+    /// window.
+    #[cfg(unix)]
+    #[test]
+    fn closing_the_picker_stops_a_fallback_read() {
+        let lines = fallback_read_after("preview-closed", |executor| {
+            let _ = executor.run(Effect::PickerClose);
+        });
+        assert_eq!(lines, None, "the read stops once the picker closes");
+    }
+
     /// Same proof as `tree_scan_effect_replies_with_a_real_filesystem_listing`,
     /// for the `git status --porcelain=v2` worker instead.
     #[test]

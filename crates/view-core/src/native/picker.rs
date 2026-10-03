@@ -152,6 +152,10 @@ pub struct PickerState {
     /// The 1-based first line of the window most recently requested for
     /// `preview_path`.
     preview_first: u64,
+    /// The query generation and the line the most recent preview request
+    /// was issued for. A line past a file's end is read once per query,
+    /// because every streamed result batch would otherwise read it again.
+    preview_for: (u64, Option<u64>),
     /// The preview pane's last-known-good content. Left in place across a
     /// selection change until the new selection's own reply lands, rather
     /// than cleared immediately: a picker with a fast typist and a slow
@@ -166,9 +170,9 @@ pub struct PickerState {
     /// The 1-based line number of `preview_lines[0]`.
     applied_first: u64,
     /// The line the pane last opened on with its mark in the applied
-    /// window. While a window for another line of the same file is read,
-    /// the pane stays on this line unmarked, so the only change a person
-    /// sees is the new window arriving.
+    /// window. While a window for another line is read, in this file or
+    /// another, the pane stays on this line unmarked, so the only change a
+    /// person sees is the new window arriving.
     shown_line: Option<u64>,
 }
 
@@ -238,6 +242,7 @@ impl PickerState {
             preview_generation: 0,
             preview_path: None,
             preview_first: 1,
+            preview_for: (0, None),
             preview_lines: Arc::from([]),
             applied_path: None,
             applied_first: 1,
@@ -383,7 +388,8 @@ impl PickerState {
             self.shown_line = Some(marked);
         }
         if self.preview_path.as_deref() == Some(path.as_str())
-            && window_holds(self.preview_first, end, line.unwrap_or(1))
+            && (window_holds(self.preview_first, end, line.unwrap_or(1))
+                || self.preview_for == (self.generation, line))
         {
             return None;
         }
@@ -391,6 +397,7 @@ impl PickerState {
         self.preview_generation = generation;
         self.preview_path = Some(path.clone());
         self.preview_first = window_first(line);
+        self.preview_for = (self.generation, line);
         Some((generation, path))
     }
 
@@ -469,10 +476,8 @@ impl PickerState {
         let rows = self.items.iter().map(item_spans).collect();
         let marked = self.marked_line();
         let selected_line = self.items.get(self.selected).and_then(|item| item.line);
-        let same_file_in_flight = marked.is_none()
-            && selected_line.is_some()
-            && self.applied_path.is_some()
-            && self.applied_path == self.selected_path();
+        let line_in_flight =
+            marked.is_none() && selected_line.is_some() && self.applied_path.is_some();
         let mut view = PickerView::new(title)
             .with_query(self.query.clone())
             .with_span_rows(rows)
@@ -480,7 +485,7 @@ impl PickerState {
             .with_preview_line(marked.and_then(|line| self.applied_index(line)))
             .with_preview_anchor(
                 self.shown_line
-                    .filter(|_| same_file_in_flight)
+                    .filter(|_| line_in_flight)
                     .and_then(|line| self.applied_index(line)),
             );
         if !self.items.is_empty() {
@@ -826,9 +831,36 @@ mod tests {
     #[test]
     fn a_preview_in_flight_for_another_file_marks_no_line() {
         let (state, _, _) = moved_to_another_file();
+        assert_eq!(state.view().preview_line, None);
+    }
+
+    #[test]
+    fn while_another_files_window_is_read_the_pane_keeps_its_rows() {
+        let (mut state, _) = held_window_then_moved(5000, 5000);
+        let gen = state.edit_query("y");
+        state.apply_results(gen, vec![PickerItem::grep_match("b.rs", 20, "x")]);
+        assert!(state.refresh_preview().is_some(), "b.rs is requested");
         let view = state.view();
-        assert_eq!(view.preview_line, None);
-        assert_eq!(view.preview_window(PANE_ROWS).0[0], "line 1");
+        let (window, marked) = view.preview_window(PANE_ROWS);
+        assert_eq!(marked, None, "no mark meanwhile");
+        assert_eq!(window[PANE_ROWS / 3], "line 5000", "the rows shown before");
+    }
+
+    #[test]
+    fn a_line_past_a_files_end_is_read_once_per_query() {
+        let mut state = PickerState::open(Source::LiveGrep {
+            root: PathBuf::from("/repo"),
+        });
+        let gen = state.generation();
+        let hit = || vec![PickerItem::grep_match("a.rs", 60, "x")];
+        state.apply_results(gen, hit());
+        let (first, _) = state.refresh_preview().expect("a selection");
+        state.apply_preview(first, numbered(50));
+        state.apply_results(gen, hit());
+        assert_eq!(state.refresh_preview(), None, "the same query holds it");
+        let gen = state.edit_query("x");
+        state.apply_results(gen, hit());
+        assert!(state.refresh_preview().is_some(), "a new query reads it");
     }
 
     #[test]

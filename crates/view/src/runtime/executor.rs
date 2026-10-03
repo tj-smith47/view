@@ -749,6 +749,10 @@ impl<E: EngineOps> Executor<E> {
             // otherwise, the same unwired-channel degrade every other
             // fire-and-forget effect here uses
             Effect::PickerClose => {
+                // no preview request carries generation 0, so a fallback
+                // read still skipping through a large file stops
+                self.preview_latest
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
                 if let Some(tx) = &self.picker {
                     let _ = tx.send(view_native::picker::matcher::WorkerRequest::Close);
                 }
