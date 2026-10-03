@@ -23,6 +23,10 @@ spec; on conflict the spec wins and the plan gets fixed.
 | S2 Engine lifecycle (roadmap streak) | `2026-09-19-s2-engine-lifecycle.md` | Complete (2026-09-19; every task through its SDD review loop; GHA evidence in `.claude/pending-gha-verification.md`) |
 | S3 Tiled UI (roadmap streak) | `2026-09-20-s3-tiled-ui.md` | Design doc SHIP after four Fable review rounds (2026-09-20; ledger `.superpowers/sdd/2026-09-20-s3-tiled-ui/`); key profiles section (S3.5b, user ruling 2026-09-20) folded after three Fable rounds; tasks in progress |
 | Post-v0.1 charters (reattach persistence, agent-fleet attention, theme-switcher interop) | `2026-08-14-post-v01-charters.md` (charter format per `2026-07-18-p3-p6-charters.md`; origin: tmux/herdr/omarchy gap analysis) | Chartered (2026-08-14; adversarially reviewed, 1 round, findings folded) |
+| S5 session DVR | `2026-10-03-s5-dvr.md` (supersedes `2026-08-09-p5_5-dvr.md`) | Written against afc3d5d1 |
+| S5 media handoff and image viewing | `2026-10-03-s5-media-image.md` (supersedes `2026-08-09-p5_5-media.md` and `2026-08-09-p5_5-image.md`) | Written against afc3d5d1 |
+| S5 agent-fleet attention and theme-switcher interop | `2026-10-03-s5-fleet-theme.md` (charters C2, C3) | Written against afc3d5d1; C2 ruled go 2026-10-03 |
+| S5 reattach persistence | `2026-10-03-s5-reattach.md` (charter C1) | Written against afc3d5d1 |
 
 Policy: each pending plan is written when its phase starts, against the real
 interfaces produced by the previous phase, using the same task format as P0/P1
