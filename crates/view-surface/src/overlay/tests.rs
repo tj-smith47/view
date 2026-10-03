@@ -707,23 +707,28 @@ fn a_row_painted_apart_in_three_of_five_cells_is_the_selection() {
     assert_eq!(band_of_eight_drawn(drawn), shown);
 }
 
-/// Every row carries one highlight on every cell except the selected row,
-/// which carries a different one throughout: the absence is what sets it
-/// apart, and it still scrolls into view.
+/// A lone row of another kind among plain rows lacks the kind glyph's
+/// colour on every cell and carries no colour of its own. It is no
+/// selection however many cells it has, and the band shows from the top.
 #[test]
-fn a_row_that_only_lacks_the_others_highlight_is_the_selection() {
+fn a_lone_row_of_another_kind_is_no_selection() {
     use view_core::native::views::Span;
-    let drawn = (0..11_u64)
-        .map(|i| {
-            let role = StyleRole::Highlight(if i == 9 { 21 } else { 3 });
-            vec![
-                Span::new("* ", StyleRole::Highlight(21)),
-                Span::new(format!("row {}", i + 1), role),
-                Span::new(" Text", role),
-            ]
-        })
-        .collect();
-    assert_eq!(band_of_eight_drawn(drawn), labels(3..=10));
+    for (first, second) in [("ab", "c"), ("ab", "cd")] {
+        let drawn = (0..11_u64)
+            .map(|i| match i {
+                10 => vec![
+                    Span::new(first, StyleRole::Highlight(3)),
+                    Span::new(second, StyleRole::Highlight(3)),
+                ],
+                _ => vec![
+                    Span::new("* ", StyleRole::Highlight(21)),
+                    Span::new(format!("row {}", i + 1), StyleRole::Highlight(3)),
+                    Span::new(" Text", StyleRole::Highlight(3)),
+                ],
+            })
+            .collect();
+        assert_eq!(band_of_eight_drawn(drawn), labels(1..=8), "{first}{second}");
+    }
 }
 
 fn labels(range: std::ops::RangeInclusive<usize>) -> Vec<String> {

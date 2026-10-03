@@ -18,9 +18,7 @@ pub(super) fn standout_row(rows: &[Vec<Span>]) -> Option<usize> {
         .map(|row| row.iter().map(|span| span.role).collect())
         .collect();
     let selection = |index: usize| stands_apart(rows, &sets, index).then_some(index);
-    painted_apart(rows, &sets)
-        .or_else(|| lacks_a_shared_highlight(rows, &sets))
-        .or_else(|| alone_in_its_highlights(&sets).and_then(selection))
+    painted_apart(rows, &sets).or_else(|| alone_in_its_highlights(&sets).and_then(selection))
 }
 
 /// Whether `count` of a row's `total` cells set it apart enough to be a
@@ -61,39 +59,6 @@ fn painted_apart(rows: &[Vec<Span>], sets: &[HashSet<StyleRole>]) -> Option<usiz
     let mut apart = (0..rows.len()).filter(|&index| stands_apart(rows, sets, index));
     let index = apart.next()?;
     apart.next().is_none().then_some(index)
-}
-
-/// The one row missing a highlight every other row carries, which is a
-/// selection painted across the whole row over rows coloured per row.
-///
-/// What sets the row apart is the absence, so the bound counts the row's
-/// cells that lack the shared highlight.
-fn lacks_a_shared_highlight(rows: &[Vec<Span>], sets: &[HashSet<StyleRole>]) -> Option<usize> {
-    let roles: HashSet<&StyleRole> = sets.iter().flatten().collect();
-    let mut lacking = None;
-    let mut lacking_cells = 0;
-    for role in roles {
-        let mut without = sets
-            .iter()
-            .enumerate()
-            .filter(|(_, set)| !set.contains(role));
-        let (Some((index, _)), None) = (without.next(), without.next()) else {
-            continue;
-        };
-        if lacking.is_some_and(|seen| seen != index) {
-            return None;
-        }
-        lacking = Some(index);
-        lacking_cells = rows
-            .get(index)?
-            .iter()
-            .filter(|span| span.role != *role)
-            .map(cells)
-            .sum();
-    }
-    let index = lacking?;
-    let total: usize = rows.get(index)?.iter().map(cells).sum();
-    more_than_half_and_at_least_three(lacking_cells, total).then_some(index)
 }
 
 /// The one row whose highlights differ from the set every other row has.
