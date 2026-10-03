@@ -586,14 +586,14 @@ pub(super) fn on_float_placed(
     let Some((width, height)) = model.engine.grids().grid(grid).map(crate::grid::Grid::size) else {
         return Vec::new();
     };
+    model.cmdline_floats.placed(grid, win);
     if take_into_palette(model, grid, win, (row, col, zindex), (width, height)) {
         return Vec::new();
     }
-    let Some(surface) = surfaces::claims_at(
-        row,
-        col,
-        width,
-        height,
+    let Some(surface) = surfaces::claims_window_at(
+        win,
+        (row, col),
+        (width, height),
         surfaces::FloatAnchor::NorthWest,
         model,
     ) else {
@@ -1156,6 +1156,71 @@ mod tests {
         };
         let _ = observe_float(&mut model, &progress);
         assert!(notices(&model).is_empty(), "{:?}", notices(&model));
+    }
+
+    /// A float of window `win` over `(row, col, width, height)`, anchored
+    /// at its top-left corner and stacked below the menus.
+    fn plain_float(win: u64, (row, col, width, height): (u64, u64, u64, u64)) -> FloatSighting {
+        let cell = |value: u64| u16::try_from(value).unwrap_or(u16::MAX);
+        FloatSighting {
+            win,
+            buf: 9,
+            row: i64::try_from(row).unwrap_or(i64::MAX),
+            col: i64::try_from(col).unwrap_or(i64::MAX),
+            width: cell(width),
+            height: cell(height),
+            anchor: FloatAnchor::NorthWest,
+            zindex: 50,
+            filetype: String::new(),
+            name: String::new(),
+            hidden: false,
+        }
+    }
+
+    /// Places a float stacked below the menus at `rect` and reports the
+    /// scan's sighting of it, answering the notices standing after.
+    fn placed_and_sighted(model: &mut Model, rect: (u64, u64, u64, u64)) -> Vec<String> {
+        open_float_stacked(model, 12, 1009, rect, 50);
+        let _ = observe_float(model, &plain_float(1009, rect));
+        notices(model)
+    }
+
+    /// A notifier stacking bottom-left, first placed while `:` is open.
+    #[test]
+    fn a_bottom_left_float_placed_during_the_cmdline_is_not_named() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        let standing = placed_and_sighted(&mut model, (25, 0, 40, 3));
+        assert!(standing.is_empty(), "{standing:?}");
+        assert!(!withheld(&model, 12), "the notifier stays on screen");
+    }
+
+    /// A right-hand notifier wider than the corner column, first placed
+    /// while `:` is open: its left edge reaches past the column.
+    #[test]
+    fn a_wide_right_hand_float_placed_during_the_cmdline_is_not_named() {
+        let mut model = palette_session();
+        open_cmdline(&mut model);
+        let standing = placed_and_sighted(&mut model, (26, 29, 70, 2));
+        assert!(standing.is_empty(), "{standing:?}");
+    }
+
+    /// A float standing over the command line's rows before `:` opened
+    /// draws over the line it opens.
+    #[test]
+    fn a_float_standing_over_the_band_before_the_cmdline_is_named() {
+        let mut model = palette_session();
+        open_float_stacked(&mut model, 12, 1009, (26, 0, 20, 2), 50);
+        open_cmdline(&mut model);
+        let standing = placed_and_sighted(&mut model, (26, 0, 20, 2));
+        assert_eq!(
+            standing,
+            vec![
+                "view: a plugin is drawing over the command line, which view owns.\n\
+                 native.palette = false gives it back."
+                    .to_string()
+            ]
+        );
     }
 
     #[test]

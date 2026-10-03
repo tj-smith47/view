@@ -644,6 +644,32 @@ fn a_selection_among_rows_coloured_per_row_scrolls_into_view() {
     assert_eq!(band_of_eight_drawn(kind_coloured_rows(None)), labels(1..=8));
 }
 
+/// Path completion: ten file rows and a folder whose glyph alone is
+/// coloured apart. The selected file keeps its kind glyph's colour and
+/// paints the rest of its row in the selection's. The selection scrolls
+/// into view, and the folder is just a row of another kind.
+#[test]
+fn a_selection_beside_a_row_of_another_kind_scrolls_into_view() {
+    use view_core::native::views::Span;
+    let rows = |selected: Option<usize>| -> Vec<Vec<Span>> {
+        (0..11_usize)
+            .map(|i| {
+                let (glyph, text) = match (Some(i) == selected, i) {
+                    (true, _) => (21, 9),
+                    (false, 4) => (22, 3),
+                    (false, _) => (21, 3),
+                };
+                vec![
+                    Span::new("* ", StyleRole::Highlight(glyph)),
+                    Span::new(format!("row {}", i + 1), StyleRole::Highlight(text)),
+                    Span::new(" Text", StyleRole::Highlight(text)),
+                ]
+            })
+            .collect()
+    };
+    assert_eq!(band_of_eight_drawn(rows(Some(9))), labels(3..=10));
+}
+
 fn labels(range: std::ops::RangeInclusive<usize>) -> Vec<String> {
     range.map(|i| format!("row {i}")).collect()
 }

@@ -152,6 +152,8 @@ pub struct CmdlineFloats {
     before: Vec<GridId>,
     /// The floats taken since, as `(grid, window)`, in arrival order.
     taken: Vec<(GridId, u64)>,
+    /// The windows whose floats were first placed while the line is open.
+    arrived: Vec<u64>,
     /// The rows and columns around each window grid's text, as nvim last
     /// reported them (`top, bottom, left, right`): a float's border. Kept
     /// for every grid because nvim sends them before the placement that
@@ -173,6 +175,7 @@ impl CmdlineFloats {
     pub(crate) fn open(&mut self, level: u64, before: Vec<GridId>) -> Vec<GridId> {
         self.level = Some(level);
         self.before = before;
+        self.arrived.clear();
         self.taken.drain(..).map(|(grid, _)| grid).collect()
     }
 
@@ -185,6 +188,7 @@ impl CmdlineFloats {
         }
         self.level = None;
         self.before.clear();
+        self.arrived.clear();
         self.taken.drain(..).map(|(grid, _)| grid).collect()
     }
 
@@ -195,7 +199,7 @@ impl CmdlineFloats {
     /// | field | why |
     /// | --- | --- |
     /// | `level` | the dead engine's command line closed with it and sends no `cmdline_hide` |
-    /// | `before`, `taken` | grid ids and window handles, which the replacement numbers again from the start: a held id would hide the replacement's own float and answer for its window |
+    /// | `before`, `taken`, `arrived` | grid ids and window handles, which the replacement numbers again from the start: a held id would hide the replacement's own float and answer for its window |
     /// | `margins` | the borders of the dead engine's windows, which a borderless float on a reused grid id would lose rows and columns to |
     pub fn forget_engine(&mut self) {
         *self = Self::default();
@@ -205,6 +209,21 @@ impl CmdlineFloats {
     #[must_use]
     pub(crate) fn existed(&self, grid: GridId) -> bool {
         self.before.contains(&grid)
+    }
+
+    /// Notes a placement of `grid`, the float of window `win`: one the line
+    /// did not find standing when it opened arrived while it is open.
+    pub(crate) fn placed(&mut self, grid: GridId, win: u64) {
+        if self.is_open() && !self.existed(grid) && !self.arrived.contains(&win) {
+            self.arrived.push(win);
+        }
+    }
+
+    /// Whether window `win`'s float was first placed while the command
+    /// line is open.
+    #[must_use]
+    pub fn arrived(&self, win: u64) -> bool {
+        self.arrived.contains(&win)
     }
 
     /// Takes `grid`, the float of window `win`.

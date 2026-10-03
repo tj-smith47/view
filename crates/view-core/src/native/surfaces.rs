@@ -409,11 +409,10 @@ pub fn claims(float: &FloatSighting, model: &Model) -> Option<Surface> {
     if model.cmdline_floats.holds_window(float.win) {
         return owned(Surface::Popupmenu, model);
     }
-    claims_at(
-        float.row,
-        float.col,
-        float.width,
-        float.height,
+    claims_window_at(
+        float.win,
+        (float.row, float.col),
+        (float.width, float.height),
         float.anchor,
         model,
     )
@@ -436,10 +435,42 @@ pub fn claims_at(
     anchor: FloatAnchor,
     model: &Model,
 ) -> Option<Surface> {
+    claims_rect(row, col, width, height, anchor, false, model)
+}
+
+/// [`claims_at`] for window `win`'s float.
+///
+/// The command line's rows name only a float that was standing when the
+/// line opened. One first placed while the line is open and left out of
+/// the palette is a notifier or a progress message, whichever corner it
+/// stacks in ([`CmdlineFloats::arrived`](crate::native::palette::CmdlineFloats::arrived)).
+#[must_use]
+pub fn claims_window_at(
+    win: u64,
+    (row, col): (i64, i64),
+    (width, height): (u16, u16),
+    anchor: FloatAnchor,
+    model: &Model,
+) -> Option<Surface> {
+    let arrived = model.cmdline_floats.arrived(win);
+    claims_rect(row, col, width, height, anchor, arrived, model)
+}
+
+fn claims_rect(
+    row: i64,
+    col: i64,
+    width: u16,
+    height: u16,
+    anchor: FloatAnchor,
+    arrived_in_line: bool,
+    model: &Model,
+) -> Option<Surface> {
     let (in_band, over_notices) = landing(row, col, width, height, anchor, model)?;
     let hit = crate::native::channels::CHANNELS.iter().find(|entry| {
         entry.channels.iter().any(|channel| match channel {
-            Channel::Float(Region::CmdlineBand) => model.engine.paints_cmdline() && in_band,
+            Channel::Float(Region::CmdlineBand) => {
+                model.engine.paints_cmdline() && in_band && !arrived_in_line
+            }
             Channel::Float(Region::NoticeColumn) => over_notices,
             // a placement names no window the command line could be asked
             // about, so `update::surface_conflict::on_float_placed` takes

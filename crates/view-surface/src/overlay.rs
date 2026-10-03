@@ -1171,7 +1171,28 @@ fn standout_row(rows: &[Vec<Span>]) -> Option<usize> {
         .iter()
         .map(|row| row.iter().map(|span| span.role).collect())
         .collect();
-    lacks_a_shared_highlight(&sets).or_else(|| alone_in_its_highlights(&sets))
+    painted_apart(rows, &sets)
+        .or_else(|| lacks_a_shared_highlight(&sets))
+        .or_else(|| alone_in_its_highlights(&sets))
+}
+
+/// The one row most of whose cells carry highlights no other row carries,
+/// which is a selection painted across its row. A row set apart in a cell
+/// or two, as a kind glyph sets one, is no candidate.
+fn painted_apart(rows: &[Vec<Span>], sets: &[HashSet<StyleRole>]) -> Option<usize> {
+    let cells = |span: &Span| span.text.chars().count();
+    let mut apart = rows.iter().enumerate().filter(|(index, row)| {
+        let alone = |span: &Span| {
+            sets.iter()
+                .enumerate()
+                .all(|(other, set)| other == *index || !set.contains(&span.role))
+        };
+        let total: usize = row.iter().map(cells).sum();
+        let own: usize = row.iter().filter(|span| alone(span)).map(cells).sum();
+        own * 2 > total
+    });
+    let (index, _) = apart.next()?;
+    apart.next().is_none().then_some(index)
 }
 
 /// The one row missing a highlight every other row carries, which is a

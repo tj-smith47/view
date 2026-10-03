@@ -111,9 +111,12 @@ The measurements behind that are in `docs/surface-float-wire-capture.md`.
 Each rule is a conjunction: a rect that lands where a surface lives, and a
 state only that surface produces. The command-line rule fires only while a
 command line is actually open, so a picker whose lowest chrome window sits
-one row above the same band stays silent. The command line starts at the
-left edge, so a float held in the bottom right-hand corner is a notification
-stacked there and draws over no command line.
+one row above the same band stays silent. It names a float that was
+standing when the line opened. A float first placed while the line is open
+and not taken as its completion menu is a notification or a progress
+message, and it draws over no command line in any corner. The command line
+starts at the left edge, so a float standing in the bottom right-hand corner
+is a notification stacked there and draws over no command line either.
 
 A completion menu that opens while the palette's command line is open
 belongs to that command line, wherever it lands, unless it lands in the
@@ -122,6 +125,11 @@ nvim's own completion menu, which is `zindex` 100. It gets no notice. The
 palette lists the tallest such float in its own rows and keeps the others
 off the screen until the command line closes. A notification or a progress
 message that opens while the line is open stays where it opened.
+
+Such a menu sends no selected index, so the palette reads the selection
+from its colours: the one row most of whose cells carry a highlight no
+other row carries. A row set apart in a cell or two, as a kind glyph sets
+a folder among files, is a row like the others.
 
 ## The notice a conflict gets
 
