@@ -795,8 +795,8 @@ fn prepare_home_dir(path: &Path) -> io::Result<()> {
 /// Restores [`hermetic_home`] to the state every spawn accepts by deleting
 /// it outright, for a caller that has just run code it does not vet and
 /// cannot enumerate what that code's subprocesses wrote under the home:
-/// the compat harness's daily-config scenario sources the maintainer's
-/// live editor config, whose startup tooling writes real state there (a
+/// the compat harness's daily-config scenario sources the config this
+/// machine's nvim loads, whose startup tooling writes real state there (a
 /// Go toolchain invoked by a plugin manager creates `$HOME/go`, for one
 /// observed case). Deletion rather than a selective sweep because the
 /// home's own contract is that it holds nothing durable (see
