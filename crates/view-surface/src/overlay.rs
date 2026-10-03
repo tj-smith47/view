@@ -1171,33 +1171,40 @@ fn standout_row(rows: &[Vec<Span>]) -> Option<usize> {
         .iter()
         .map(|row| row.iter().map(|span| span.role).collect())
         .collect();
+    let selection = |index: usize| stands_apart(rows, &sets, index).then_some(index);
     painted_apart(rows, &sets)
-        .or_else(|| lacks_a_shared_highlight(&sets))
-        .or_else(|| alone_in_its_highlights(&sets))
+        .or_else(|| lacks_a_shared_highlight(&sets).and_then(selection))
+        .or_else(|| alone_in_its_highlights(&sets).and_then(selection))
 }
 
-/// The one row most of whose cells carry highlights no other row carries,
-/// which is a selection painted across its row. A row set apart in a cell
-/// or two, as a kind glyph sets one, is no candidate.
+/// Whether row `index` is painted apart enough to be a selection: the
+/// cells whose highlights no other row carries cover more than half the
+/// row, and they number at least three.
 ///
-/// The bar is two bounds: those cells cover more than half the row, and
-/// they number at least three. A row two cells wide painted in its kind's
-/// own colour passes the first alone. The selected row keeps its kind
-/// glyph's highlight, which every row of that kind carries, so a rule that
-/// asked every cell to be the row's own would never find the selection.
-fn painted_apart(rows: &[Vec<Span>], sets: &[HashSet<StyleRole>]) -> Option<usize> {
+/// A row set apart in a cell or two, as a kind glyph sets one, or a row two
+/// cells wide painted in its kind's own colour, is no selection. The
+/// selected row keeps its kind glyph's highlight, which every row of that
+/// kind carries, so a bound that asked every cell to be the row's own would
+/// never find the selection.
+fn stands_apart(rows: &[Vec<Span>], sets: &[HashSet<StyleRole>], index: usize) -> bool {
     let cells = |span: &Span| span.text.chars().count();
-    let mut apart = rows.iter().enumerate().filter(|(index, row)| {
-        let alone = |span: &Span| {
-            sets.iter()
-                .enumerate()
-                .all(|(other, set)| other == *index || !set.contains(&span.role))
-        };
+    let alone = |span: &Span| {
+        sets.iter()
+            .enumerate()
+            .all(|(other, set)| other == index || !set.contains(&span.role))
+    };
+    rows.get(index).is_some_and(|row| {
         let total: usize = row.iter().map(cells).sum();
         let own: usize = row.iter().filter(|span| alone(span)).map(cells).sum();
         own * 2 > total && own >= 3
-    });
-    let (index, _) = apart.next()?;
+    })
+}
+
+/// The one row that [`stands_apart`], which is a selection painted across
+/// its row.
+fn painted_apart(rows: &[Vec<Span>], sets: &[HashSet<StyleRole>]) -> Option<usize> {
+    let mut apart = (0..rows.len()).filter(|&index| stands_apart(rows, sets, index));
+    let index = apart.next()?;
     apart.next().is_none().then_some(index)
 }
 

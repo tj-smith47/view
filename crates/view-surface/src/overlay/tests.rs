@@ -692,6 +692,28 @@ fn a_two_cell_row_of_another_kind_is_no_selection() {
     assert_eq!(band_of_eight_drawn(drawn), labels(1..=8));
 }
 
+/// One row of another kind among plain rows and no selection: two of its
+/// three cells carry its kind's own colour. It is no selection, and the
+/// band shows from the top.
+#[test]
+fn a_lone_two_cell_row_of_another_kind_is_no_selection() {
+    use view_core::native::views::Span;
+    let drawn = (0..11_u64)
+        .map(|i| match i {
+            10 => vec![
+                Span::new("ab", StyleRole::Highlight(22)),
+                Span::new("c", StyleRole::Highlight(3)),
+            ],
+            _ => vec![
+                Span::new("* ", StyleRole::Highlight(21)),
+                Span::new(format!("row {}", i + 1), StyleRole::Highlight(3)),
+                Span::new(" Text", StyleRole::Highlight(3)),
+            ],
+        })
+        .collect();
+    assert_eq!(band_of_eight_drawn(drawn), labels(1..=8));
+}
+
 fn labels(range: std::ops::RangeInclusive<usize>) -> Vec<String> {
     range.map(|i| format!("row {i}")).collect()
 }
