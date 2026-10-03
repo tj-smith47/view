@@ -201,11 +201,12 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
         // the user's keys and `'timeoutlen'` read again on the same events,
         // sent only when they moved: a config that maps on `VeryLazy` has
         // mapped nothing yet when the registration reads them
-        "user_keys" => Some(
-            user_keys_from(Some(first), rest.first(), rest.get(1))
-                .with_owners(rest.get(2))
-                .into_msg(),
-        ),
+        "user_keys" => Some(user_keys_from(Some(first), rest.first(), rest.get(1)).into_msg()),
+        // whose each of those keys is, on the same events, sent only when a
+        // row moved
+        "user_owners" => Some(Msg::UserMappingOwners {
+            owners: decode_owners(Some(first)),
+        }),
         _ => None,
     }
 }
@@ -428,8 +429,8 @@ pub(super) struct MappingReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct UserKeys {
     pub(super) keys: Vec<String>,
-    /// Whose each of `keys` is, in the same order.
-    pub(super) owners: Vec<Option<MappingOwner>>,
+    /// Whose each key is, by its `keytrans()` lhs.
+    pub(super) owners: Vec<(String, MappingOwner)>,
     /// `None` where `'timeout'` is off.
     pub(super) timeoutlen: Option<Duration>,
     pub(super) cmdline: Vec<CmdlineMap>,
@@ -448,46 +449,66 @@ impl Default for UserKeys {
 }
 
 impl UserKeys {
-    pub(super) fn into_msg(self) -> Msg {
+    fn into_msg(self) -> Msg {
         Msg::UserMappingsRead {
             keys: self.keys,
-            owners: self.owners,
             timeoutlen: self.timeoutlen,
             cmdline: self.cmdline,
         }
     }
 
-    /// The same keys with whose each one is, decoded from `owners`.
-    fn with_owners(self, owners: Option<&Value>) -> Self {
-        let owners = owners
-            .and_then(Value::as_array)
-            .map(|rows| rows.iter().map(decode_owner).collect())
-            .unwrap_or_default();
-        Self { owners, ..self }
+    /// The keys, and then whose each one is.
+    pub(super) fn into_msgs(mut self) -> [Msg; 2] {
+        let owners = Msg::UserMappingOwners {
+            owners: std::mem::take(&mut self.owners),
+        };
+        [self.into_msg(), owners]
     }
 }
 
-/// One `{label, script}` row, or `None` for a row with no `label`.
+/// One `{label, script, buffer}` row, or `None` for a row with no `label`.
 fn decode_owner(row: &Value) -> Option<MappingOwner> {
     let pairs = row.as_map()?;
     let label = crate::wire::map_find(pairs, "label")?.as_str()?;
     let script = crate::wire::map_find(pairs, "script")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    Some(MappingOwner::new(label, script))
+    let buffer = crate::wire::map_find(pairs, "buffer")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Some(MappingOwner::new(label, script).with_buffer(buffer))
+}
+
+/// The `{lhs, label, script, buffer}` rows of `rows`, each paired with its
+/// own lhs. A row missing its lhs or label is dropped, and so is every
+/// other row the reply holds once it is not a list.
+fn decode_owners(rows: Option<&Value>) -> Vec<(String, MappingOwner)> {
+    rows.and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let lhs = crate::wire::map_find(row.as_map()?, "lhs")?.as_str()?;
+                    Some((lhs.to_owned(), decode_owner(row)?))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Decodes the user's keys under `user_keys`, `'timeoutlen'` under
 /// `timeoutlen`, where a negative one says `'timeout'` is off, and the
-/// command-line mappings under `cmdline_maps`. A key that is not a string
-/// is dropped.
+/// command-line mappings under `cmdline_maps`, and whose each key is under
+/// `user_owners`. A key that is not a string is dropped.
 fn decode_user_keys(pairs: &[(Value, Value)]) -> UserKeys {
-    user_keys_from(
+    let keys = user_keys_from(
         crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_USER_KEYS_KEY),
         crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_TIMEOUT_KEY),
         crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_CMDLINE_KEY),
-    )
-    .with_owners(crate::wire::map_find(pairs, "user_owners"))
+    );
+    UserKeys {
+        owners: decode_owners(crate::wire::map_find(pairs, "user_owners")),
+        ..keys
+    }
 }
 
 /// Decodes the rows of `REGISTER_MAPPINGS_CHUNK`'s command-line reading.

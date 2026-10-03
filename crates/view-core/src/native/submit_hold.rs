@@ -13,6 +13,8 @@ mod user_run;
 
 use std::time::Duration;
 
+pub(crate) use user_run::{canonical_keys, canonical_typed};
+
 use commands::names_view;
 
 use crate::events::UiEvent;
@@ -357,6 +359,8 @@ struct Folded {
     /// Whether a key that leaves normal mode went out ahead of it, with no
     /// mode reported since.
     mode_unsure: bool,
+    /// Whether nvim reads it as part of an operator's motion.
+    operand: bool,
 }
 
 /// One key sequence nvim runs a view invocation on.
@@ -395,6 +399,8 @@ impl SubmitHold {
                 })
             })
             .collect();
+        self.user_run
+            .learn_view(claims.iter().filter_map(|claim| claim.keys.as_ref()));
         self.recent.clear();
         self.sequence.clear();
     }
@@ -408,7 +414,7 @@ impl SubmitHold {
             .map(|keys| key_tokens(keys).map(canonical).collect::<Vec<_>>())
             .filter(|keys| !keys.is_empty())
             .collect();
-        self.user_run = user_run::UserRun::new(&mut self.user_keys);
+        self.user_run.learn_user(&mut self.user_keys);
         self.timeout_off = timeoutlen.is_none();
         self.timeoutlen = timeoutlen;
         self.sequence.clear();
@@ -855,10 +861,9 @@ impl SubmitHold {
         self.argument_of = None;
     }
 
-    /// Whether the standing hold was armed by a key nvim maps to a view
-    /// invocation.
-    pub(crate) fn fired_by_key(&self) -> bool {
-        matches!(self.held, Some((Armed::Sequence, _)))
+    /// The keys of the view invocation a key last completed, once.
+    pub(crate) fn take_invoked(&mut self) -> Option<Vec<String>> {
+        self.user_run.take_invoked()
     }
 
     /// Whether input is being held.
@@ -973,8 +978,10 @@ pub fn fold_engine_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         model.submit_hold.set_typed(None);
         return arm(model, Armed::Sequence);
     }
-    if let Some(keys) = model.submit_hold.user_run.take_fired() {
-        model.log_user_mapping(&keys);
+    for (keys, at) in model.submit_hold.user_run.take_fired() {
+        // the mapping ran, so the key after it starts a command again
+        model.submit_hold.argument_of = None;
+        model.log_user_mapping(&keys, at);
     }
     fold_line(model, notation)
 }
@@ -997,6 +1004,7 @@ pub fn fold_engine_key(model: &mut Model, notation: &str) -> Vec<Effect> {
 /// nothing.
 fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     let normal = model.engine.mode.current == "normal";
+    let now = model.key_log().now();
     let hold = &mut model.submit_hold;
     let argument_of = hold.argument_of.take();
     let longest = hold
@@ -1026,13 +1034,15 @@ fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     if hold.recent.len() >= longest {
         hold.recent.pop_front();
     }
+    let operand = hold.user_run.operand(&key, argument_of.is_some());
     hold.recent.push_back(Folded {
         key,
         argument: argument_of.is_some(),
         mode_unsure,
+        operand,
     });
     let recent = &hold.recent;
-    let complete = hold.invoke_keys.iter().any(|invocation| {
+    let complete = hold.invoke_keys.iter().find(|invocation| {
         let keys = &invocation.keys;
         recent.len().checked_sub(keys.len()).is_some_and(|start| {
             recent
@@ -1044,28 +1054,17 @@ fn completes_invoke(model: &mut Model, notation: &str) -> bool {
                     .eq(keys.iter())
         })
     });
-    if complete {
-        // the keys inside the sequence were the mapping's, and left no
-        // mode behind them
-        hold.recent.clear();
-        hold.argument_of = None;
-        hold.mode_unsure = false;
-        hold.user_run.reset();
-    } else {
-        hold.user_run.step(&hold.recent, &hold.user_keys);
-    }
-    complete
-}
-
-/// The keys `spelled` names, one [`canonical`] key each.
-pub(crate) fn canonical_keys(spelled: &str) -> Vec<String> {
-    key_tokens(spelled).map(canonical).collect()
-}
-
-/// `keys`, one notation each as view's input spells them, made
-/// [`canonical`].
-pub(crate) fn canonical_typed(keys: &[String]) -> Vec<String> {
-    keys.iter().map(|key| canonical(key)).collect()
+    let Some(invocation) = complete.map(|invocation| invocation.keys.clone()) else {
+        hold.user_run.step(&hold.recent, &hold.user_keys, now);
+        return false;
+    };
+    // the keys inside the sequence were the mapping's, and left no mode
+    // behind them
+    hold.recent.clear();
+    hold.argument_of = None;
+    hold.mode_unsure = false;
+    hold.user_run.invoked(invocation);
+    true
 }
 
 /// One spelling for each key nvim reads as the same key: `keytrans()`
@@ -1405,6 +1404,11 @@ pub fn releases(model: &Model, msg: &Msg) -> bool {
 /// never reports back releases the keys to wherever focus stands.
 fn arm(model: &mut Model, armed: Armed) -> Vec<Effect> {
     let hold = &mut model.submit_hold;
+    if armed == Armed::Command {
+        // a line typed by hand runs the next invocation, whatever key last
+        // completed one nvim never ran
+        let _ = hold.user_run.take_invoked();
+    }
     hold.generation = hold.generation.wrapping_add(1);
     hold.held = Some((armed, Vec::new()));
     vec![Effect::ScheduleSubmitHold {
@@ -1541,7 +1545,6 @@ mod tests {
             model,
             Msg::UserMappingsRead {
                 keys: Vec::new(),
-                owners: Vec::new(),
                 timeoutlen: None,
                 cmdline,
             },

@@ -679,7 +679,9 @@ impl EngineHandle {
                                     } else {
                                         Default::default()
                                     };
-                                    pump.route_claims(report.user_keys.into_msg());
+                                    for msg in report.user_keys.into_msgs() {
+                                        pump.route_claims(msg);
+                                    }
                                     pump.route_claims(Msg::MappingsClaimed {
                                         claimed: report.claimed,
                                         colon_mapped: report.colon_mapped,
@@ -716,7 +718,9 @@ impl EngineHandle {
                                     pump.route_notify_sink(Msg::NotifySinkRead {
                                         foreign: reading.foreign_notifier,
                                     });
-                                    pump.route_claims(reading.user_keys.into_msg());
+                                    for msg in reading.user_keys.into_msgs() {
+                                        pump.route_claims(msg);
+                                    }
                                     pump.route_claims(Msg::MappingsClaimed {
                                         claimed: reading.claimed,
                                         colon_mapped: reading.colon_mapped,
@@ -1070,6 +1074,7 @@ impl EngineHandle {
                                     // same terms
                                     Some(
                                         msg @ (Msg::UserMappingsRead { .. }
+                                        | Msg::UserMappingOwners { .. }
                                         | Msg::ColonMappingRead { .. }),
                                     ) => pump.route_claims(msg),
                                     Some(msg) => {
@@ -4023,6 +4028,13 @@ mod tests {
                 (Value::from("script"), Value::from(script)),
             ])
         };
+        let row = |lhs: &str, label: &str, buffer: bool| {
+            Value::Map(vec![
+                (Value::from("lhs"), Value::from(lhs)),
+                (Value::from("label"), Value::from(label)),
+                (Value::from("buffer"), Value::from(buffer)),
+            ])
+        };
         let reply = Value::Map(vec![
             (
                 Value::from(crate::nvim_api::MAPPINGS_CLAIMS_KEY),
@@ -4043,8 +4055,10 @@ mod tests {
             (
                 Value::from("user_owners"),
                 Value::Array(vec![
-                    owner("Goto definition", "lua/lsp.lua:9"),
+                    row("<Space>x", "Explore", false),
+                    owner("no lhs", "lua/lsp.lua:9"),
                     Value::Map(Vec::new()),
+                    row("gd", "Goto definition", true),
                 ]),
             ),
         ]);
@@ -4056,16 +4070,34 @@ mod tests {
         let displaced = claim.displaced.as_ref().expect("a displaced owner");
         assert_eq!(displaced.label, "Live grep");
         assert_eq!(displaced.script.as_deref(), Some("lua/keys.lua:3"));
-        let owners = &report.user_keys.owners;
-        assert_eq!(owners.len(), 2, "{owners:?}");
+        let owners: Vec<_> = report
+            .user_keys
+            .owners
+            .iter()
+            .map(|(lhs, owner)| (lhs.as_str(), owner.label.as_str(), owner.buffer))
+            .collect();
         assert_eq!(
-            owners[0]
-                .as_ref()
-                .map(view_core::native::mappings::MappingOwner::describe)
-                .as_deref(),
-            Some("Goto definition (lua/lsp.lua:9)")
+            owners,
+            [
+                ("<Space>x", "Explore", false),
+                ("gd", "Goto definition", true)
+            ],
+            "each row pairs with its own lhs, in whatever order the reply \
+             holds them, and a row that names no key is dropped"
         );
-        assert_eq!(owners[1], None);
+        let short = Value::Map(vec![
+            (
+                Value::from(crate::nvim_api::MAPPINGS_USER_KEYS_KEY),
+                Value::Array(vec![Value::from("<Space>x"), Value::from("gd")]),
+            ),
+            (
+                Value::from("user_owners"),
+                Value::Array(vec![row("gd", "Goto definition", false)]),
+            ),
+        ]);
+        let keys = super::decode::decode_mapping_report(&short).user_keys;
+        assert_eq!(keys.owners.len(), 1, "a reply shorter than its keys");
+        assert_eq!(keys.owners[0].0, "gd");
     }
 
     /// A reply carrying no `:` reading at all answers `false`, which is the

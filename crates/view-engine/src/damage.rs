@@ -894,10 +894,10 @@ impl PumpShared {
         self.route_held(msg, Held::Heartbeat);
     }
 
-    /// Routes a `Msg::MappingsClaimed`, the `Msg::UserMappingsRead` the
-    /// same reply carries, or either mapping reading the bridge re-sends
-    /// when it moves, without ever dropping or reordering it on a full
-    /// sink, and without blocking, on the terms
+    /// Routes a `Msg::MappingsClaimed`, the `Msg::UserMappingsRead` and
+    /// `Msg::UserMappingOwners` the same reply carries, or any mapping
+    /// reading the bridge re-sends when it moves, without ever dropping or
+    /// reordering it on a full sink, and without blocking, on the terms
     /// [`route_buf_detached`](Self::route_buf_detached) states.
     ///
     /// A dropped claim report is silent and permanent: nothing re-issues

@@ -8223,7 +8223,6 @@ fn user_mappings(m: &mut Model, keys: &[&str], timeoutlen: Option<Duration>) {
         m,
         Msg::UserMappingsRead {
             keys: keys.iter().map(|keys| (*keys).to_string()).collect(),
-            owners: Vec::new(),
             timeoutlen,
             cmdline: Vec::new(),
         },
@@ -21053,13 +21052,9 @@ fn newest_fired(m: &Model) -> crate::native::key_log::Fired {
 
 fn key_log_rows(m: &Model) -> Option<Vec<String>> {
     m.overlays().iter().find_map(|overlay| match &overlay.kind {
-        OverlayKind::KeyLog(view) => Some(
-            view.view(m.key_log(), 0)
-                .rows
-                .into_iter()
-                .map(|row| row.label)
-                .collect(),
-        ),
+        OverlayKind::KeyLog(view) => {
+            Some(view.view().rows.into_iter().map(|row| row.label).collect())
+        }
         _ => None,
     })
 }
@@ -21117,12 +21112,17 @@ fn a_users_mapping_from_a_surface_is_logged_with_its_owner() {
         &mut m,
         Msg::UserMappingsRead {
             keys: vec!["<Space>fg".to_string()],
-            owners: vec![Some(MappingOwner::new(
-                "Live grep",
-                Some("keys.vim".to_string()),
-            ))],
             timeoutlen: Some(Duration::from_millis(1000)),
             cmdline: Vec::new(),
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::UserMappingOwners {
+            owners: vec![(
+                "<Space>fg".to_string(),
+                MappingOwner::new("Live grep", Some("keys.vim".to_string())),
+            )],
         },
     );
     let _ = typed(&mut m, &[" ", "f", "g"]);
@@ -21193,7 +21193,7 @@ fn the_open_key_log_shows_new_rows_and_its_toggle_closes_it() {
     let _ = update(&mut m, feature_invoke("tree", "toggle"));
     let rows = key_log_rows(&m).expect("still open");
     assert_eq!(rows.len(), before + 1, "{rows:?}");
-    assert!(rows[0].contains("view   tree toggle"), "{rows:?}");
+    assert!(rows[0].contains("view    tree toggle"), "{rows:?}");
     assert!(m.dirty);
 
     let _ = update(&mut m, feature_invoke("keys", "log"));
@@ -21241,7 +21241,7 @@ fn every_documented_key_log_key_answers_a_real_keystroke() {
         let _ = press(&mut m, "<C-d>");
         let selected = |m: &Model| {
             m.overlays().iter().find_map(|overlay| match &overlay.kind {
-                OverlayKind::KeyLog(view) => view.view(m.key_log(), 0).selected,
+                OverlayKind::KeyLog(view) => view.view().selected,
                 _ => None,
             })
         };
@@ -21255,6 +21255,119 @@ fn every_documented_key_log_key_answers_a_real_keystroke() {
             before != selected(&m) || !effects.is_empty() || m.dirty,
             "`{key}` ({what}) is documented but does nothing when pressed"
         );
+    }
+}
+
+/// A mapping of the user's that one of view's keys extends is one nvim
+/// waits on: the keys that complete view's run view's alone, and the user's
+/// mapping is logged only once a key parts from view's.
+#[test]
+fn a_users_mapping_a_view_key_extends_is_logged_only_when_it_ran() {
+    let mut m = started_model();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    user_mappings(&mut m, &["<Space>w"], Some(Duration::from_millis(1000)));
+    let _ = typed(&mut m, &[" ", "w", "z"]);
+    assert!(user_rows(&m).is_empty(), "{:?}", user_rows(&m));
+    let _ = update(&mut m, feature_invoke("window", "zoom"));
+    let _ = typed(&mut m, &[" ", "w", "x"]);
+    assert_eq!(user_rows(&m), ["<Space>w"]);
+}
+
+/// A desktop chord and the leader key it mirrors run the same verb, and
+/// the row names the chord that was pressed, with nothing displaced.
+#[test]
+fn a_desktop_chord_logs_its_own_key_and_never_its_leader_twins() {
+    use crate::native::key_log::Fired;
+    use crate::native::mappings::{MappingClaim, MappingOwner};
+    let mut m = started_model();
+    m.engine.mode.current = "normal".to_string();
+    let claimed = vec![
+        MappingClaim::new("window", "<leader>wz", true)
+            .with_keys(Some("<Space>wz".to_string()))
+            .with_verb("zoom")
+            .with_displaced(Some(MappingOwner::new("Mine", None))),
+        MappingClaim::new("window", "<D-z>", false)
+            .with_keys(Some("<D-z>".to_string()))
+            .with_verb("zoom"),
+    ];
+    let _ = update(
+        &mut m,
+        Msg::MappingsClaimed {
+            claimed,
+            colon_mapped: false,
+            generation: 0,
+        },
+    );
+    let _ = typed(&mut m, &["<D-z>"]);
+    let _ = update(&mut m, feature_invoke("window", "zoom"));
+    let Fired::View { lhs, displaced, .. } = newest_fired(&m) else {
+        panic!("a view row");
+    };
+    assert_eq!((lhs.as_deref(), displaced), (Some("<D-z>"), None));
+}
+
+/// The press that asked for trust is logged once; answering the prompt
+/// runs the invocation again and logs nothing more.
+#[test]
+fn an_invocation_run_again_after_trust_logs_one_row() {
+    let mut m = started_model();
+    m.ai_enabled = true;
+    m.ai_trusted = false;
+    let _ = update(&mut m, feature_invoke("ai", "toggle"));
+    assert_eq!(m.key_log().len(), 1);
+    let _ = update(
+        &mut m,
+        Msg::AiTrustResolved {
+            trusted: true,
+            verb: "toggle".to_string(),
+        },
+    );
+    assert_eq!(m.key_log().len(), 1, "one press, one row");
+    let _ = update(&mut m, feature_invoke("ai", "toggle"));
+    assert_eq!(m.key_log().len(), 2, "the next press logs again");
+}
+
+/// A click over the unentered log never panics, and the key after it still
+/// reaches nvim.
+#[test]
+fn a_click_over_the_unentered_key_log_keeps_the_next_key_for_nvim() {
+    let mut m = full_screen_model();
+    m.engine.mode.current = "normal".to_string();
+    let _ = update(&mut m, feature_invoke("keys", "log"));
+    let rect = m
+        .overlays()
+        .iter()
+        .find(|overlay| matches!(overlay.kind, OverlayKind::KeyLog(_)))
+        .map(|overlay| m.overlay_rect(overlay))
+        .expect("the log is open");
+    let _ = update(&mut m, click(rect.row + 1, rect.col + 1));
+    let _ = update(&mut m, mouse("release", rect.row + 1, rect.col + 1));
+    let effects = press(&mut m, "j");
+    assert_eq!(meta_inputs(&effects), ["j"], "{effects:?}");
+    assert!(key_log_rows(&m).is_some(), "the click left the log open");
+}
+
+/// The log sits inside the screen, clear of the top and bottom rows the
+/// frames draw their borders on, at most 120 columns wide, and as wide as
+/// an 80-column screen. It takes no width from the tiles under it.
+#[test]
+fn the_key_log_fits_inside_the_frames_and_uses_the_width_there_is() {
+    for (width, want) in [(160, 120), (80, 80)] {
+        let mut m = Model::with_term_size(width, 40)
+            .with_look(crate::model::Look::new(crate::model::Panes::Tiles, false));
+        let _ = update(&mut m, feature_invoke("keys", "log"));
+        let overlay = m
+            .overlays()
+            .iter()
+            .find(|overlay| matches!(overlay.kind, OverlayKind::KeyLog(_)))
+            .expect("the log is open");
+        assert_eq!(m.joined_anchor(overlay), None, "the log docks nowhere");
+        let rect = m.overlay_rect(overlay);
+        assert_eq!(rect.width, want, "{width} columns: {rect:?}");
+        assert!(rect.col + rect.width <= width, "{rect:?}");
+        assert!(rect.row > 1, "clear of the top border: {rect:?}");
+        assert!(rect.row + rect.height < 39, "clear of the bottom: {rect:?}");
     }
 }
 

@@ -308,13 +308,17 @@ pub enum Msg {
     UserMappingsRead {
         /// Each sequence as `keytrans()` spells it, the leader resolved.
         keys: Vec<String>,
-        /// Whose each of `keys` is, in the same order, for the key log.
-        owners: Vec<Option<crate::native::mappings::MappingOwner>>,
         /// `'timeoutlen'`, or `None` where `'timeout'` is off.
         timeoutlen: Option<Duration>,
         /// The command-line mappings and abbreviations, which the input
         /// hold reads a submitted line through.
         cmdline: Vec<crate::native::submit_hold::CmdlineMap>,
+    },
+    /// Whose each of the user's own normal-mode mappings is, for the key
+    /// log: each sequence as `keytrans()` spells it beside its owner, read
+    /// with [`Msg::UserMappingsRead`] and sent again when an owner moves.
+    UserMappingOwners {
+        owners: Vec<(String, crate::native::mappings::MappingOwner)>,
     },
     /// nvim's own `:messages` as it stood at `VimEnter`, read once by the
     /// takeover ([`RpcCall::Takeover`]).

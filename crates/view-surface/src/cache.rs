@@ -1378,6 +1378,40 @@ mod tests {
         );
     }
 
+    /// A mapping that fires while the key log stands open reaches the
+    /// screen on the next frame, as a row of the log's own layer.
+    #[test]
+    fn a_row_pushed_while_the_key_log_is_open_reaches_the_next_frame() {
+        let invoke = |feature: &str, verb: &str| Msg::FeatureInvoke {
+            generation: None,
+            feature: feature.to_string(),
+            verb: verb.to_string(),
+        };
+        let rows = |surface: &Surface| {
+            surface
+                .layers
+                .iter()
+                .find_map(|layer| match &layer.kind {
+                    LayerKind::Stream(view) => Some(
+                        view.rows
+                            .iter()
+                            .map(|row| row.label.clone())
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                })
+                .expect("the key log draws as a stream")
+        };
+        let mut model = model_with_grid(100, 30);
+        let mut cache = SurfaceCache::new();
+        let _ = update(&mut model, invoke("keys", "log"));
+        let before = rows(cache.render(&model));
+        let _ = update(&mut model, invoke("tree", "toggle"));
+        let after = rows(cache.render(&model));
+        assert_eq!(after.len(), before.len() + 1, "{after:?}");
+        assert!(after[0].contains("tree toggle"), "{after:?}");
+    }
+
     /// The equivalence guard must be seen to catch: a guard that has never
     /// fired proves nothing. Corrupts the cached frame directly (the only
     /// way to diverge without a real bug) and expects the debug assert,

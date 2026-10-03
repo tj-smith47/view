@@ -171,9 +171,8 @@ pub(crate) struct NativeSession {
     look: Look,
     /// `[keys] toggle_gaps`/`cycle_surfaces`/`key_log`: the left-hand side
     /// to register `ui gaps`/`ui cycle_surfaces`/`keys log` under, applied to
-    /// the built
-    /// `RegisterMappings` spec in [`Self::build_mapping_call`] the same way
-    /// `ai_enabled` is -- `view-native` resolves the override
+    /// the built `RegisterMappings` spec in [`Self::build_mapping_call`] the
+    /// same way `ai_enabled` is -- `view-native` resolves the override
     /// (`ResolvedConfig::tables.keys`), but the spec it hands back always
     /// carries `default_maps()`'s own compile-time `lhs`, which
     /// [`MappingSpec::lhs`](view_core::native::mappings::MappingSpec)'s

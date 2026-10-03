@@ -734,20 +734,23 @@ nothing.
 
 ## The key log
 
-`<leader>fk` opens the key log in the bottom-right corner. Each mapping
-you fire is added to the top as it runs: the key, whose mapping it is, and
-for one of view's defaults the mapping of yours it took the key from.
+`<leader>fk` opens the key log in the middle of the screen. Each
+mapping you fire is added to the top as it runs: the key, whose mapping it
+is, and for one of view's defaults the mapping of yours it took the key
+from.
 
 ```
-14:02:11  <Space>fk     view   keys log
-14:02:09  <Space>e      view   tree toggle   took it from: Explorer (lua/keys.lua)
-14:02:05  gd            yours  Goto definition (lua/lsp.lua)
-14:01:58  :View         view   picker grep
+14:02:11  <Space>fk  view    keys log
+14:02:09  <Space>ff  view    picker files   took it from: Find files (lua/keys.lua:12)
+14:02:05  gd         buffer  Goto definition (lua/lsp.lua:31)
+14:02:01  <Space>x   yours   Close buffer (lua/keys.lua:20)
+14:01:58  :View      view    picker grep
 ```
 
 The log keeps your keys going to the buffer while it is open. `<leader>fk`
-again closes it. `:View keys focus` moves the cursor into it, where these
-keys work:
+again closes it. `:View keys focus` hands your keys to the log, with the
+newest row selected and the cursor left where it was in your buffer.
+These keys then work on the log:
 
 | key | does |
 | --- | --- |
@@ -759,10 +762,15 @@ keys work:
 | `G` | select the oldest mapping |
 | `y` | copy the selected row, to the system clipboard and over OSC 52 |
 
-`<Esc>` closes it. The log keeps the newest 200 mappings.
+While the log has your keys, `<Esc>` closes it. The log keeps the newest
+200 mappings.
 
 A mapping of yours is logged when you fire it in normal mode, in any
-window. To put the log on another key:
+window. A mapping set on the current buffer alone, such as one a language
+server sets when it attaches, is marked `buffer`. A mapping whose keys
+also begin a longer one is not shown until your next key arrives, and its
+row carries the time you pressed its last key. To put the log on another
+key:
 
 ```toml
 [keys]

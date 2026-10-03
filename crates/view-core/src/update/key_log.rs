@@ -29,7 +29,7 @@ pub(crate) const KEY_LOG_KEYS: &[(&str, &str)] = &[
 /// out.
 const CHROME_ROWS: u16 = 4;
 
-/// Opens the key log in the bottom-right corner, or closes it when open.
+/// Opens the key log, or closes it when open.
 pub(super) fn toggle(model: &mut Model) -> Vec<Effect> {
     if !model.close_key_log() {
         open(model);
@@ -50,12 +50,20 @@ pub(super) fn focus(model: &mut Model) -> Vec<Effect> {
     Vec::new()
 }
 
+/// The widest the log draws, which leaves a displaced mapping's whole
+/// description readable on a wide screen.
+const MAX_WIDTH: u16 = 120;
+
+/// Opens the log in the middle of the screen, clear of the frames' top and
+/// bottom border rows, as wide as the screen allows up to [`MAX_WIDTH`].
 fn open(model: &mut Model) {
-    let view = KeyLogView::open(model.key_log());
+    let view = KeyLogView::open(model.key_log(), model.utc_offset_secs());
     model.push_overlay(
-        OverlayBox::new(60, 40)
-            .with_max_width(80)
-            .with_anchor(Anchor::BottomRight),
+        // a box against the left or right edge docks, and the tiles beside
+        // it give up their width to it
+        OverlayBox::new(100, 40)
+            .with_max_width(MAX_WIDTH)
+            .with_anchor(Anchor::Center),
         OverlayKind::KeyLog(view),
     );
 }
@@ -63,14 +71,10 @@ fn open(model: &mut Model) {
 /// The entered key log's own keys, `None` for a key it does not answer.
 pub(super) fn key(model: &mut Model, notation: &str) -> Option<Vec<Effect>> {
     let page = page(model);
-    let offset = model.utc_offset_secs();
     let (view, log) = model.key_log_view_mut()?;
     let armed = view.take_g();
     let moved = match notation {
-        "y" => {
-            let text = view.selected_text(log, offset);
-            return Some(super::surfaces::copy_selection(text));
-        }
+        "y" => return Some(super::surfaces::copy_selection(view.selected_text())),
         "j" => view.move_selection(log, 1),
         "k" => view.move_selection(log, -1),
         "<C-d>" => view.move_selection(log, page),

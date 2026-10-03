@@ -126,14 +126,23 @@ use view_core::native::mappings::{
 /// file open raises three or four of the events, so the events of one tick
 /// share a single walk scheduled after them.
 ///
-/// Each of those keys is answered with whose it is, under `user_owners` in
-/// the same order and as the bridge event's fourth argument: the mapping's
-/// `desc`, else its rhs, else `<Lua callback>`, and the script that set it
-/// when nvim names one (a positive `sid`), relative to the config
-/// directory. A claim carries the same description of the mapping it was
-/// set over under `displaced`, read from the snapshot the restore keeps,
-/// and the verb its spec names. The key log reads both, so a fired mapping
-/// is described with no read of its own.
+/// The current buffer's own normal-mode mappings are read first and join
+/// the keys, each shadowing a global mapping with the same lhs. `LspAttach`
+/// re-reads them beside the events above, since a language server's keys
+/// are set on the buffer after it is entered.
+///
+/// Each of those keys is answered with whose it is, under `user_owners`
+/// and on the `user_owners` bridge event, one row per key: its `keytrans()`
+/// lhs, the mapping's `desc`, else its rhs, else `<Lua callback>`, whether
+/// it is the buffer's own, and the file that set it relative to the config
+/// directory. That file is the script nvim names (a positive `sid`), or
+/// the file and line a Lua callback was defined at. A C function has none,
+/// and a callback defined in nvim's own runtime names the file of a
+/// function it wraps, else none. The event is sent when a row moved, a
+/// description alone included. A claim carries the same description of
+/// the mapping it was set over under `displaced`, read from the snapshot
+/// the restore keeps, and the verb its spec names. The key log reads both,
+/// so a fired mapping is described with no read of its own.
 ///
 /// The same read answers with the user's command-line mappings and
 /// abbreviations (`maplist()` rows in mode `c` or `!`), each as its
@@ -174,21 +183,44 @@ local function short(name)
   if vim.startswith(name, config) then return name:sub(#config + 1) end
   return name ~= '' and vim.fn.fnamemodify(name, ':~') or ''
 end
+local runtime = vim.fs.normalize(vim.env.VIMRUNTIME or '') .. '/'
+local function defined(fn)
+  local info = debug.getinfo(fn, 'S')
+  local src = info.source or ''
+  if info.what == 'C' or not vim.startswith(src, '@') then return nil end
+  return vim.fs.normalize(src:sub(2)), info.linedefined
+end
+local function callback_script(fn)
+  -- a Lua-set mapping records no script id unless nvim runs verbose, so
+  -- the callback's own definition names the file
+  local file, line = defined(fn)
+  if file and vim.startswith(file, runtime) then
+    -- nvim's keymap wrapper closes over the function the config passed
+    file = nil
+    local i = 1
+    while file == nil do
+      local name, value = debug.getupvalue(fn, i)
+      if name == nil then break end
+      if type(value) == 'function' then
+        local f, l = defined(value)
+        if f and not vim.startswith(f, runtime) then file, line = f, l end
+      end
+      i = i + 1
+    end
+  end
+  return file and short(file) .. ':' .. line or nil
+end
 local function owner(m)
   if type(m) ~= 'table' or next(m) == nil then return nil end
   local label = m.desc
   if label == nil or label == '' then
     label = (m.rhs ~= nil and m.rhs ~= '') and m.rhs or '<Lua callback>'
   end
+  local lhs = vim.fn.keytrans(m.lhsraw or m.lhs or '')
+  local buffer = (m.buffer or 0) ~= 0
   if type(m.callback) == 'function' then
-    -- a Lua-set mapping records no script id unless nvim runs verbose, so
-    -- the callback's own definition names the file
-    local info = debug.getinfo(m.callback, 'S')
-    local src = info.source or ''
-    local file = vim.startswith(src, '@') and src:sub(2) or info.short_src
-    local script = (file or '') ~= ''
-      and short(file) .. ':' .. info.linedefined or nil
-    return { label = label, script = script }
+    return { lhs = lhs, label = label, script = callback_script(m.callback),
+      buffer = buffer }
   end
   local sid = m.sid or 0
   if sid > 0 and scripts[sid] == nil then
@@ -196,17 +228,30 @@ local function owner(m)
     scripts[sid] = short(ok and info[1] and info[1].name or '')
   end
   local script = scripts[sid]
-  return { label = label, script = script ~= '' and script or nil }
+  return { lhs = lhs, label = label, buffer = buffer,
+    script = script ~= '' and script or nil }
 end
 local function read_user_keys()
-  local keys, owners = {}, {}
-  for _, m in ipairs(vim.api.nvim_get_keymap('n')) do
-    local typed = not vim.startswith(m.lhs, '<Plug>')
-      and not vim.startswith(m.lhs, '<SNR>')
-      and not vim.startswith(m.desc or '', 'view: ')
-    if typed then
-      keys[#keys + 1] = vim.fn.keytrans(m.lhsraw or m.lhs)
-      owners[#owners + 1] = owner(m)
+  local keys, owners, rows, mapped = {}, {}, {}, {}
+  local maps = { vim.api.nvim_buf_get_keymap(0, 'n'),
+    vim.api.nvim_get_keymap('n') }
+  for _, list in ipairs(maps) do
+    for _, m in ipairs(list) do
+      local lhs = vim.fn.keytrans(m.lhsraw or m.lhs)
+      local typed = not vim.startswith(m.lhs, '<Plug>')
+        and not vim.startswith(m.lhs, '<SNR>')
+        and not vim.startswith(m.desc or '', 'view: ')
+        and not mapped[lhs]
+      if typed then
+        mapped[lhs] = true
+        keys[#keys + 1] = lhs
+        local row = owner(m)
+        if row then
+          owners[#owners + 1] = row
+          rows[#rows + 1] = table.concat({ row.lhs, row.label,
+            row.script or '', tostring(row.buffer) }, '\\0')
+        end
+      end
     end
   end
   local cmdline, seen = {}, {}
@@ -230,10 +275,11 @@ local function read_user_keys()
     end
   end
   local wait = vim.o.timeout and vim.o.timeoutlen or -1
-  return keys, wait, cmdline, table.concat(seen, '\\n'), owners
+  return keys, wait, cmdline, table.concat(seen, '\\n'), owners,
+    table.concat(rows, '\\n')
 end
-local user_keys, timeoutlen, cmdline_maps, cmdline_read, user_owners =
-  read_user_keys()
+local user_keys, timeoutlen, cmdline_maps, cmdline_read, user_owners,
+  owners_read = read_user_keys()
 local user_read = table.concat(user_keys, ' ') .. ' ' .. timeoutlen
   .. '\\n' .. cmdline_read
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
@@ -252,12 +298,16 @@ local group = vim.api.nvim_create_augroup('view_colon_map', { clear = true })
 local keys_pending = false
 local function reread_keys()
   keys_pending = false
-  local keys, wait, maps, maps_read, owners = read_user_keys()
+  local keys, wait, maps, maps_read, owners, read_owners = read_user_keys()
   local read = table.concat(keys, ' ') .. ' ' .. wait .. '\\n' .. maps_read
   if read ~= user_read then
     user_read = read
     pcall(vim.rpcnotify, channel, 'view_bridge', 'user_keys', keys, wait,
-      maps, owners)
+      maps)
+  end
+  if read_owners ~= owners_read then
+    owners_read = read_owners
+    pcall(vim.rpcnotify, channel, 'view_bridge', 'user_owners', owners)
   end
 end
 local function reread()
@@ -276,7 +326,8 @@ vim.api.nvim_create_autocmd('User', {
   pattern = { 'LazyLoad', 'VeryLazy' },
   callback = reread,
 })
-vim.api.nvim_create_autocmd({ 'BufEnter', 'FileType', 'BufWinEnter' }, {
+vim.api.nvim_create_autocmd({ 'BufEnter', 'FileType', 'BufWinEnter',
+  'LspAttach' }, {
   group = group,
   callback = reread,
 })

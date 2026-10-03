@@ -144,6 +144,9 @@ pub struct MappingOwner {
     /// The defining script, relative to the config directory when it sits
     /// under it.
     pub script: Option<String>,
+    /// Whether the mapping is set on the current buffer alone, where it
+    /// shadows a global mapping of the same keys.
+    pub buffer: bool,
 }
 
 impl MappingOwner {
@@ -153,7 +156,15 @@ impl MappingOwner {
         Self {
             label: label.into(),
             script,
+            buffer: false,
         }
+    }
+
+    /// The owner of a mapping set on the current buffer alone, when
+    /// `buffer` is set.
+    #[must_use]
+    pub fn with_buffer(self, buffer: bool) -> Self {
+        Self { buffer, ..self }
     }
 
     /// `label`, followed by the script in parentheses when there is one.

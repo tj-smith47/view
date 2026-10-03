@@ -809,13 +809,16 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::UserMappingsRead {
             keys,
-            owners,
             timeoutlen,
             cmdline,
         } => {
-            model.learn_user_owners(&keys, &owners);
             model.submit_hold.learn_user_keys(&keys, timeoutlen);
+            model.learn_user_spellings(&keys);
             model.submit_hold.learn_cmdline_maps(&cmdline);
+            Vec::new()
+        }
+        Msg::UserMappingOwners { owners } => {
+            model.learn_user_owners(&owners);
             Vec::new()
         }
         Msg::SequenceExpired { generation } => route::expire_sequence(model, generation),
@@ -1356,6 +1359,8 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::AiTrustResolved { trusted, verb } => {
             model.ai_trusted = trusted;
             if trusted {
+                // the press that asked for trust is logged already
+                model.skip_next_invocation_log();
                 update(
                     model,
                     Msg::FeatureInvoke {

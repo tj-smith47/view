@@ -3,8 +3,9 @@
 //!
 //! A view entry point is logged when its invocation is folded, so a held
 //! invocation appears once it has run. A user's own normal-mode mapping is
-//! logged where a surface of view's own resolves the keys it holds to that
-//! mapping. Nothing is logged for a key that fires no mapping.
+//! logged as its last key goes to nvim, in any window; one that a longer
+//! mapping begins with is logged once the next key settles which ran.
+//! Nothing is logged for a key that fires no mapping.
 
 use std::collections::VecDeque;
 use std::time::SystemTime;
@@ -52,35 +53,68 @@ pub struct KeyLogEntry {
     pub fired: Fired,
 }
 
+/// The fewest columns the key column takes, so short keys line up with the
+/// `:View` a typed command shows.
+const KEY_COLUMN: usize = 8;
+
 impl KeyLogEntry {
-    /// The row the overlay draws: the time, the key, whose it is and what
-    /// it did, the widest column last so a narrow box cuts only that one.
+    /// The key column's text: the keys that fired, or `:View` for a
+    /// command typed by hand.
     #[must_use]
-    pub fn label(&self, utc_offset_secs: i64) -> String {
+    pub fn key(&self) -> std::borrow::Cow<'_, str> {
+        match &self.fired {
+            Fired::View { lhs: Some(lhs), .. } | Fired::User { lhs, .. } => lhs.into(),
+            Fired::View { lhs: None, .. } => format!(":{COMMAND}").into(),
+        }
+    }
+
+    /// The row the overlay draws: the time, the key padded to `key_width`
+    /// columns, whose it is and what it did, the widest column last so a
+    /// narrow box cuts only that one. A mapping set on the current buffer
+    /// alone is marked `buffer` where the user's global ones read `yours`.
+    #[must_use]
+    pub fn label(&self, utc_offset_secs: i64, key_width: usize) -> String {
         let stamp = format_at(self.at, utc_offset_secs);
         let stamp = stamp.get(11..).unwrap_or(&stamp);
+        let key = self.key();
         match &self.fired {
             Fired::View {
                 feature,
                 verb,
-                lhs,
                 displaced,
+                ..
             } => {
-                let key = lhs.clone().unwrap_or_else(|| format!(":{COMMAND}"));
                 let took = displaced
                     .as_ref()
                     .map(|owner| format!("   took it from: {}", owner.describe()))
                     .unwrap_or_default();
-                format!("{stamp}  {key:<12}  view   {feature} {verb}{took}")
+                format!("{stamp}  {key:<key_width$}  view    {feature} {verb}{took}")
             }
-            Fired::User { lhs, owner } => {
-                let whose = owner.as_ref().map(MappingOwner::describe);
-                format!("{stamp}  {lhs:<12}  yours  {}", whose.unwrap_or_default())
-                    .trim_end()
-                    .to_string()
+            Fired::User { owner, .. } => {
+                let whose = if owner.as_ref().is_some_and(|owner| owner.buffer) {
+                    "buffer"
+                } else {
+                    "yours"
+                };
+                let what = owner.as_ref().map(MappingOwner::describe);
+                format!(
+                    "{stamp}  {key:<key_width$}  {whose:<6}  {}",
+                    what.unwrap_or_default()
+                )
+                .trim_end()
+                .to_string()
             }
         }
     }
+}
+
+/// The key column's width over every entry `log` holds.
+fn key_width(log: &KeyLog) -> usize {
+    log.entries()
+        .map(|entry| entry.key().chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(KEY_COLUMN)
 }
 
 /// The ring of mappings that fired, bounded at [`CAPACITY`].
@@ -111,16 +145,25 @@ impl KeyLog {
         self.now = now;
     }
 
+    /// The clock the next push stamps itself with.
+    #[must_use]
+    pub fn now(&self) -> SystemTime {
+        self.now
+    }
+
     /// Logs `fired` at the current clock, dropping the oldest entry once
     /// the log holds [`CAPACITY`].
     pub fn push(&mut self, fired: Fired) {
+        self.push_at(fired, self.now);
+    }
+
+    /// Logs `fired` as having fired at `at`, for a mapping the log learns
+    /// of only after its last key.
+    pub fn push_at(&mut self, fired: Fired, at: SystemTime) {
         if self.entries.len() >= CAPACITY {
             self.entries.pop_front();
         }
-        self.entries.push_back(KeyLogEntry {
-            at: self.now,
-            fired,
-        });
+        self.entries.push_back(KeyLogEntry { at, fired });
         self.pushed = self.pushed.saturating_add(1);
     }
 
@@ -161,9 +204,9 @@ impl Default for KeyLog {
     }
 }
 
-/// The open key log overlay: which row its keys act on, and whether a
-/// person has entered it. The rows themselves are read off [`KeyLog`] each
-/// frame.
+/// The open key log overlay: which row its keys act on, whether a person
+/// has entered it, and its rows as last formatted. The rows are formatted
+/// when the log or the clock's offset changes, so a frame formats nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KeyLogView {
@@ -175,19 +218,35 @@ pub struct KeyLogView {
     /// Whether the overlay holds the keyboard. It opens without it, so the
     /// keys a person watches fire still reach the editor.
     entered: bool,
+    /// Every entry's row, newest first.
+    rows: Vec<String>,
+    /// The offset from UTC the rows were stamped in.
+    utc_offset_secs: i64,
 }
 
 impl KeyLogView {
-    /// The overlay as it opens over `log`: not entered, the newest entry
-    /// selected.
+    /// The overlay as it opens over `log`, stamped `utc_offset_secs` east
+    /// of UTC: not entered, the newest entry selected.
     #[must_use]
-    pub fn open(log: &KeyLog) -> Self {
-        Self {
+    pub fn open(log: &KeyLog, utc_offset_secs: i64) -> Self {
+        let mut view = Self {
             selected: 0,
             read: log.pushed(),
             pending_g: false,
             entered: false,
-        }
+            rows: Vec::new(),
+            utc_offset_secs,
+        };
+        view.format(log);
+        view
+    }
+
+    fn format(&mut self, log: &KeyLog) {
+        let width = key_width(log);
+        self.rows = log
+            .entries()
+            .map(|entry| entry.label(self.utc_offset_secs, width))
+            .collect();
     }
 
     /// Whether a person has entered the overlay.
@@ -201,19 +260,24 @@ impl KeyLogView {
         !std::mem::replace(&mut self.entered, true)
     }
 
-    /// Catches the overlay up with `log`, answering whether a row arrived.
-    /// The selection moves down with the rows that arrived above it, so it
-    /// stays on the entry it was on.
-    pub fn refresh(&mut self, log: &KeyLog) -> bool {
-        if log.pushed() == self.read {
+    /// Catches the overlay up with `log` and with `utc_offset_secs`,
+    /// answering whether its rows changed. The selection moves down with
+    /// the rows that arrived above it, so it stays on the entry it was on.
+    pub fn refresh(&mut self, log: &KeyLog, utc_offset_secs: i64) -> bool {
+        if log.pushed() == self.read && utc_offset_secs == self.utc_offset_secs {
             return false;
         }
         let arrived = log.pushed().saturating_sub(self.read);
         self.read = log.pushed();
+        self.utc_offset_secs = utc_offset_secs;
         if self.entered {
             let last = log.len().saturating_sub(1);
             self.selected = self.selected.saturating_add(arrived).min(last);
         }
+        // ponytail: every row is formatted again on each push, which a
+        // full log makes 200 formats per fired mapping while it is open;
+        // format the new rows alone if that ever shows on a key's cost
+        self.format(log);
         true
     }
 
@@ -253,21 +317,17 @@ impl KeyLogView {
 
     /// The selected row's text, as the overlay draws it.
     #[must_use]
-    pub fn selected_text(&self, log: &KeyLog, utc_offset_secs: i64) -> Option<String> {
-        log.get(self.selected)
-            .map(|entry| entry.label(utc_offset_secs))
+    pub fn selected_text(&self) -> Option<String> {
+        self.rows.get(self.selected).cloned()
     }
 
-    /// The rows the overlay paints. The selection is drawn only once a
-    /// person has entered it.
+    /// The rows the overlay paints, copied from the last format. The
+    /// selection is drawn only once a person has entered it.
     #[must_use]
-    pub fn view(&self, log: &KeyLog, utc_offset_secs: i64) -> PaletteView {
-        let rows = log
-            .entries()
-            .map(|entry| PaletteRow::new(entry.label(utc_offset_secs)))
-            .collect();
+    pub fn view(&self) -> PaletteView {
+        let rows = self.rows.iter().cloned().map(PaletteRow::new).collect();
         let view = PaletteView::new(KEY_LOG_TITLE).with_rows(rows);
-        if self.entered && !log.is_empty() {
+        if self.entered && !self.rows.is_empty() {
             return view.with_selected(self.selected);
         }
         view
@@ -324,16 +384,63 @@ mod tests {
         let mut log = KeyLog::new();
         log.push(user(1));
         log.push(user(2));
-        let mut view = KeyLogView::open(&log);
+        let mut view = KeyLogView::open(&log, 0);
         view.enter();
         assert!(view.select(&log, 1));
         log.push(user(3));
-        assert!(view.refresh(&log));
+        assert!(view.refresh(&log, 0));
         assert_eq!(
-            view.selected_text(&log, 0).as_deref(),
-            Some("00:00:00  #1            yours")
+            view.selected_text().as_deref(),
+            Some("00:00:00  #1        yours")
         );
-        assert!(!view.refresh(&log), "nothing arrived since the last read");
+        assert!(
+            !view.refresh(&log, 0),
+            "nothing arrived since the last read"
+        );
+    }
+
+    /// The rows are formatted when the log changes and when the offset
+    /// does, and a view read between changes copies them unchanged.
+    #[test]
+    fn the_rows_are_formatted_when_the_log_or_the_offset_changes() {
+        let mut log = KeyLog::new();
+        log.push(user(1));
+        let mut view = KeyLogView::open(&log, 0);
+        assert_eq!(view.view().rows.len(), 1);
+        log.push(user(2));
+        assert_eq!(view.view().rows.len(), 1, "not read since the push");
+        assert!(view.refresh(&log, 0));
+        assert_eq!(view.view().rows[0].label, "00:00:00  #2        yours");
+        assert!(view.refresh(&log, 3600));
+        assert_eq!(view.view().rows[0].label, "01:00:00  #2        yours");
+    }
+
+    /// Every row's key column is as wide as the longest key the log holds,
+    /// so the columns after it line up.
+    #[test]
+    fn the_columns_line_up_past_a_long_key() {
+        let mut log = KeyLog::new();
+        log.push(Fired::User {
+            lhs: "<Space><Space>x".into(),
+            owner: None,
+        });
+        log.push(Fired::User {
+            lhs: "gd".into(),
+            owner: Some(MappingOwner::new("Goto definition", None).with_buffer(true)),
+        });
+        let rows: Vec<String> = KeyLogView::open(&log, 0)
+            .view()
+            .rows
+            .into_iter()
+            .map(|row| row.label)
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "00:00:00  gd               buffer  Goto definition",
+                "00:00:00  <Space><Space>x  yours",
+            ]
+        );
     }
 
     #[test]
@@ -351,8 +458,8 @@ mod tests {
             },
         };
         assert_eq!(
-            entry.label(0),
-            "00:00:00  <leader>ff    view   picker files   took it from: \
+            entry.label(0, 10),
+            "00:00:00  <leader>ff  view    picker files   took it from: \
              Telescope find files (lua/plugins/telescope.lua)"
         );
         let typed = KeyLogEntry {
@@ -364,6 +471,9 @@ mod tests {
                 displaced: None,
             },
         };
-        assert_eq!(typed.label(0), "00:00:00  :View         view   tree toggle");
+        assert_eq!(
+            typed.label(0, KEY_COLUMN),
+            "00:00:00  :View     view    tree toggle"
+        );
     }
 }

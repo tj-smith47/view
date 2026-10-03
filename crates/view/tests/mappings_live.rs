@@ -18,7 +18,8 @@ use std::time::Duration;
 use view_core::events::UiEvent;
 use view_core::model::{Look, Model};
 use view_core::msg::{Effect, Key, Msg, RpcCall};
-use view_core::native::mappings::MappingClaim;
+use view_core::native::key_log::Fired;
+use view_core::native::mappings::{MappingClaim, MappingOwner};
 use view_core::native::registry;
 use view_core::native::speculate::{is_cmdline_mode, CMDLINE_LITERAL_KEYS};
 use view_core::native::surfaces::Taken;
@@ -331,13 +332,13 @@ fn a_claim_names_its_verb_and_the_users_mapping_it_displaced() {
          vim.cmd.source(keys)\n",
     );
     let _ = session.register(&NativeConfig::all_enabled());
-    // the reply routes the user's keys ahead of the claims
+    // the reply routes the user's keys and whose they are ahead of the claims
     let owners = session
         .wait_for(ARRIVAL, |msg| match msg {
-            Msg::UserMappingsRead { keys, owners, .. } => Some((keys.clone(), owners.clone())),
+            Msg::UserMappingOwners { owners } => Some(owners.clone()),
             _ => None,
         })
-        .expect("the registration reads the user's own keys");
+        .expect("the registration reads whose the user's own keys are");
     let claimed = session.claims();
     let claim = |lhs: &str| {
         claimed
@@ -365,7 +366,9 @@ fn a_claim_names_its_verb_and_the_users_mapping_it_displaced() {
         claim("<leader>fb").displaced.is_none(),
         "a key that landed on nothing displaced nothing: {claimed:?}"
     );
-    // the fixture's own `<leader>ff` is a Lua callback on line 3 of init.lua
+    // the fixture's own `<leader>ff` is a Lua callback on line 3 of init.lua,
+    // read back through `maparg(..., v:true)`, which hands the callback to
+    // Lua as a function `debug.getinfo` can read
     let ff = claim("<leader>ff").displaced.as_ref();
     assert!(
         ff.and_then(|owner| owner.script.as_deref())
@@ -373,10 +376,9 @@ fn a_claim_names_its_verb_and_the_users_mapping_it_displaced() {
         "a Lua callback names the file and line that defined it: {ff:?}"
     );
     let mine = owners
-        .0
         .iter()
-        .position(|keys| keys == ",zz")
-        .and_then(|at| owners.1.get(at).cloned().flatten());
+        .find(|(lhs, _)| lhs == ",zz")
+        .map(|(_, owner)| owner.clone());
     assert_eq!(
         mine.as_ref().map(|owner| owner.label.as_str()),
         Some("Mine"),
@@ -639,6 +641,214 @@ fn type_into(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String>
         }));
     }
     sent
+}
+
+/// The user's own mappings the key log holds, oldest first, each as its
+/// lhs and whose it is.
+fn user_rows(model: &Model) -> Vec<(String, Option<MappingOwner>)> {
+    let mut rows: Vec<_> = model
+        .key_log()
+        .entries()
+        .filter_map(|entry| match &entry.fired {
+            Fired::User { lhs, owner } => Some((lhs.clone(), owner.clone())),
+            _ => None,
+        })
+        .collect();
+    rows.reverse();
+    rows
+}
+
+/// A model that has applied the registration's claims, with nvim in normal
+/// mode.
+fn registered_model(session: &Session) -> Model {
+    let mut model = Model::with_term_size(80, 24);
+    model.ai_trusted = true;
+    session.register(&NativeConfig::all_enabled());
+    pump(session, &mut model, ARRIVAL, |_, msg| {
+        matches!(msg, Msg::MappingsClaimed { .. }).then_some(())
+    })
+    .expect("the registration must answer with its claim list");
+    assert_eq!(model.engine.mode.current, "normal");
+    model
+}
+
+/// Applies the pump until whose the user's keys are has been read again
+/// and `has_gd` answers for the read, then until nvim is in normal mode.
+fn reread_owners(session: &Session, model: &mut Model, has_gd: bool) {
+    pump(session, model, ARRIVAL, |_, msg| match msg {
+        Msg::UserMappingOwners { owners } => {
+            (owners.iter().any(|(lhs, _)| lhs == "gd") == has_gd).then_some(())
+        }
+        _ => None,
+    })
+    .expect("the reread must report whose the keys are");
+    if model.engine.mode.current != "normal" {
+        pump(session, model, ARRIVAL, |model, _| {
+            (model.engine.mode.current == "normal").then_some(())
+        })
+        .expect("nvim must report normal mode");
+    }
+}
+
+/// The labels and buffer marks of the rows the key log holds, oldest
+/// first.
+fn row_labels(model: &Model) -> Vec<(String, String, bool)> {
+    user_rows(model)
+        .into_iter()
+        .map(|(lhs, owner)| {
+            let owner = owner.unwrap_or_else(|| panic!("whose {lhs} is was read"));
+            (lhs, owner.label, owner.buffer)
+        })
+        .collect()
+}
+
+/// A mapping a language server's attach sets on the buffer is logged with
+/// its description and marked as the buffer's own, over a global mapping
+/// with the same keys. A new description alone is read again. In a buffer
+/// that does not map them, the same keys log nothing, or the global
+/// mapping they run.
+#[test]
+fn a_buffer_local_mapping_set_on_lsp_attach_is_logged_as_the_buffers_own() {
+    let session = Session::start_with(
+        "buffer-local",
+        "vim.g.view_gd = 0\n\
+         function _G.view_gd_fn() vim.g.view_gd = vim.g.view_gd + 1 end\n\
+         vim.keymap.set('n', 'gy', function() end, { desc = 'Global yank' })\n\
+         vim.api.nvim_create_autocmd('LspAttach', { callback = function(args)\n\
+         \x20 vim.keymap.set('n', 'gd', view_gd_fn, { buffer = args.buf, desc = 'Goto definition' })\n\
+         \x20 vim.keymap.set('n', 'gy', function() end, { buffer = args.buf, desc = 'Buffer yank' })\n\
+         end })\n\
+         function _G.view_attach()\n\
+         \x20 vim.api.nvim_exec_autocmds('LspAttach',\n\
+         \x20   { buffer = 0, data = { client_id = 1 } })\n\
+         end\n",
+    );
+    let mut model = registered_model(&session);
+    session.eval("execute('lua view_attach()')");
+    reread_owners(&session, &mut model, true);
+
+    // every rhs is a function: nvim answers no request between a `<Nop>`
+    // rhs and the next key
+    let keys = ["g", "d", "g", "y"];
+    assert_eq!(type_into(&session, &mut model, &keys), keys);
+    assert_eq!(session.eval("g:view_gd"), "1", "the buffer's gd ran");
+    let at = |label: &str, buffer: bool, lhs: &str| (lhs.to_string(), label.to_string(), buffer);
+    assert_eq!(
+        row_labels(&model),
+        [
+            at("Goto definition", true, "gd"),
+            at("Buffer yank", true, "gy")
+        ]
+    );
+    let script = user_rows(&model)[0]
+        .1
+        .clone()
+        .and_then(|owner| owner.script);
+    assert!(
+        script
+            .as_deref()
+            .is_some_and(|script| script.ends_with("init.lua:5")),
+        "{script:?}"
+    );
+
+    session.eval(
+        "execute('lua vim.keymap.set(\"n\", \"gd\", view_gd_fn, \
+         { buffer = 0, desc = \"Peek definition\" })')",
+    );
+    session.eval("execute('doautocmd BufEnter')");
+    pump(&session, &mut model, ARRIVAL, |_, msg| match msg {
+        Msg::UserMappingOwners { owners } => owners
+            .iter()
+            .any(|(lhs, owner)| lhs == "gd" && owner.label == "Peek definition")
+            .then_some(()),
+        _ => None,
+    })
+    .expect("a new description alone must be read again");
+
+    session.engine.handle.input(":enew<CR>").unwrap();
+    reread_owners(&session, &mut model, false);
+    let _ = type_into(&session, &mut model, &keys);
+    session.eval("1");
+    assert_eq!(
+        row_labels(&model)[2..],
+        [at("Global yank", false, "gy")],
+        "gd is nobody's here, and gy is the global one"
+    );
+}
+
+/// A callback names the file a person wrote: none for a C function, and
+/// for a callback defined in nvim's runtime, the file of the function it
+/// wraps. The fixture stands a directory of its own in for the runtime.
+#[test]
+fn a_callback_names_the_file_a_person_wrote_or_none() {
+    let session = Session::start_with(
+        "callback-scripts",
+        "local dir = vim.fs.dirname(debug.getinfo(1, 'S').source:sub(2))\n\
+         vim.fn.mkdir(dir .. '/rt', 'p')\n\
+         vim.fn.writefile({ 'return function(fn) return function() return fn() end end' },\n\
+         \x20 dir .. '/rt/wrap.lua')\n\
+         local wrap = dofile(dir .. '/rt/wrap.lua')\n\
+         vim.keymap.set('n', '<leader>o', print)\n\
+         vim.keymap.set('n', '<leader>m', wrap(function() end), { desc = 'Wrapped' })\n\
+         vim.env.VIMRUNTIME = dir .. '/rt'\n",
+    );
+    let _ = session.register(&NativeConfig::all_enabled());
+    let owners = session
+        .wait_for(ARRIVAL, |msg| match msg {
+            Msg::UserMappingOwners { owners } => Some(owners.clone()),
+            _ => None,
+        })
+        .expect("the registration reads whose the user's own keys are");
+    let owner = |lhs: &str| {
+        owners
+            .iter()
+            .find(|(key, _)| key == lhs)
+            .map(|(_, owner)| owner.clone())
+            .unwrap_or_else(|| panic!("{lhs} must be read: {owners:?}"))
+    };
+    let print = owner(",o");
+    assert_eq!(
+        (print.label.as_str(), print.script),
+        ("<Lua callback>", None),
+        "a C function has no file"
+    );
+    let wrapped = owner(",m");
+    assert!(
+        wrapped
+            .script
+            .as_deref()
+            .is_some_and(|script| script.ends_with("init.lua:10")),
+        "the wrapped function's own line: {wrapped:?}"
+    );
+}
+
+/// A stub that maps the real handler over itself and types its keys again
+/// logs one row for one press, naming the stub.
+#[test]
+fn a_lazy_stub_logs_one_row_naming_the_stub() {
+    let session = Session::start_with(
+        "lazy-stub",
+        "vim.g.view_stub = 0\n\
+         vim.keymap.set('n', '<leader>j', function()\n\
+         \x20 vim.keymap.set('n', '<leader>j', function() vim.g.view_stub = vim.g.view_stub + 1 end,\n\
+         \x20   { desc = 'Real' })\n\
+         \x20 vim.api.nvim_feedkeys(',j', 'm', false)\n\
+         end, { desc = 'Stub' })\n",
+    );
+    let mut model = registered_model(&session);
+    assert_eq!(type_into(&session, &mut model, &[",", "j"]), [",", "j"]);
+    assert_eq!(
+        session.eval("g:view_stub"),
+        "1",
+        "the real handler ran once"
+    );
+    let rows = user_rows(&model);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].0, ",j");
+    assert_eq!(
+        rows[0].1.as_ref().map(|owner| owner.label.as_str()),
+        Some("Stub")
+    );
 }
 
 /// A `:View` line nvim refuses runs nothing, so the error it reports for
