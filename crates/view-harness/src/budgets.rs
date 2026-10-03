@@ -119,13 +119,14 @@ pub const CONFIGS: &[&str] = &["real", "fixture"];
 ///
 /// A bound is checked against the cells its own `config` names and no
 /// others. The login-shaped fixture `task user-fixture` generates is the
-/// real config the matrix carries today; a class that seats the
-/// maintainer's own `$VIEW_DAILY_CONFIG` instead adds that fixture's name
-/// here, and a bench fixture never joins it -- a felt bound reaching a
-/// plugin-free leg is the substitution the whole vocabulary exists to
-/// refuse, and it is silent in the direction that matters: the fixture leg
-/// reads inside the bar and the gate attests to the moment under a config
-/// nobody runs.
+/// real config the matrix carries today; a class that seats the config
+/// the daily-config leg resolves (`$VIEW_DAILY_CONFIG` when set, else the
+/// host's `$XDG_CONFIG_HOME/nvim` or `$HOME/.config/nvim`) adds that
+/// fixture's name here, and a bench fixture never joins it -- a felt
+/// bound reaching a plugin-free leg is the substitution the whole
+/// vocabulary exists to refuse, and it is silent in the direction that
+/// matters: the fixture leg reads inside the bar and the gate attests to
+/// the moment under a config nobody runs.
 pub const REAL_CONFIG_SEATS: &[&str] = &[crate::fixture::USER_FIXTURE];
 
 /// Felt rows measured under a bench fixture rather than a real config, and

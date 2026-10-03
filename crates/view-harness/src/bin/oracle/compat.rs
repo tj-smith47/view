@@ -276,10 +276,9 @@ fn drop_incomplete_clones(cache_dir: &Path, plugins: &BTreeSet<String>) -> Resul
 /// leave the committed fixture modified on disk after every run.
 ///
 /// The fixture-less arm is the one exception to "every XDG home is
-/// hermetic": its `XDG_DATA_HOME` is the maintainer's ambient data home
-/// (see [`ambient_data_home`]), not a fresh scratch directory, because the
-/// scenario exists to exercise the maintainer's real lazy.nvim-managed
-/// config against its already-installed plugins.
+/// hermetic": on a Unix host its `XDG_DATA_HOME` is the host's own data
+/// home (`ambient_data_home`), so the config it runs finds the plugins
+/// already installed for it.
 ///
 /// # Errors
 ///
@@ -356,8 +355,17 @@ fn resolve_daily_config(
     xdg_cache_home: PathBuf,
     sock_path: &Path,
 ) -> Result<FixtureResolution> {
-    let daily_path = match daily_config_dir() {
-        Ok(Ok(path)) => path,
+    let resolved = daily_config_dir().map(|config| {
+        config.and_then(|path| {
+            ambient_data_home().map(|data| (path, data)).ok_or_else(|| {
+                "no nvim data home: neither XDG_DATA_HOME nor HOME is set; \
+                 the config's plugins cannot be found"
+                    .to_string()
+            })
+        })
+    });
+    let (daily_path, xdg_data_home) = match resolved {
+        Ok(Ok(found)) => found,
         Ok(Err(notice)) => {
             let _ = std::fs::remove_dir_all(&hermetic_dir);
             return Ok(FixtureResolution::Skipped { notice });
@@ -375,7 +383,7 @@ fn resolve_daily_config(
         .with_context(|| format!("symlinking {} -> {}", link.display(), daily_path.display()))?;
     Ok(FixtureResolution::Ready(Box::new(ReadyFixture {
         xdg_config_home,
-        xdg_data_home: ambient_data_home(),
+        xdg_data_home,
         xdg_state_home,
         xdg_cache_home,
         daily_config: Some(daily_path),
@@ -421,21 +429,30 @@ fn resolve_daily_config(
 /// time out doing it. Pointing this one home at the ambient data directory
 /// lets lazy.nvim find its already-installed plugins and boot the same way
 /// the maintainer's real `nvim` does.
+///
+/// `None` when neither variable is set, since a relative `.local/share`
+/// would land under whatever directory the run started in.
 #[cfg(unix)]
-fn ambient_data_home() -> PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_DATA_HOME").filter(|dir| !dir.is_empty()) {
-        return PathBuf::from(dir);
+fn ambient_data_home() -> Option<PathBuf> {
+    let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    match set("XDG_DATA_HOME") {
+        Some(dir) => Some(PathBuf::from(dir)),
+        None => set("HOME").map(|home| PathBuf::from(home).join(".local").join("share")),
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".local").join("share")
 }
 
 /// The config the fixture-less arm runs on, or the notice it skips with.
 ///
-/// `$VIEW_DAILY_CONFIG` names the config, made absolute against the
-/// current directory so the link to it resolves from inside the hermetic
-/// config home; `off` in any case, or an empty value, switches the leg
-/// off; unset falls back to [`ambient_config_dir`].
+/// | `$VIEW_DAILY_CONFIG` | the config the leg runs |
+/// |---|---|
+/// | a directory | that directory, made absolute |
+/// | `off` in any case, or empty | none: the leg skips |
+/// | unset | [`ambient_config_dir`] |
+///
+/// `$NVIM_APPNAME` is ignored. The engine is spawned without it, so a
+/// config picked by it would run against another app's data directory.
+/// The path is made absolute so the link to it resolves from inside the
+/// hermetic config home.
 ///
 /// # Errors
 ///
@@ -472,32 +489,60 @@ fn daily_config_dir() -> Result<std::result::Result<PathBuf, String>> {
     }
 }
 
-/// The config directory nvim itself would load: `$XDG_CONFIG_HOME/<app>`,
-/// else `$HOME/.config/<app>`, where `<app>` is `$NVIM_APPNAME` when set
-/// and `nvim` otherwise. `None` when neither home is set, since there is
+/// The config directory the engine loads: `$XDG_CONFIG_HOME/nvim`, else
+/// `$HOME/.config/nvim`. `$NVIM_APPNAME` is ignored because the engine is
+/// spawned without it. `None` when neither home is set, since there is
 /// then no config directory to name.
 #[cfg(unix)]
 fn ambient_config_dir() -> Option<PathBuf> {
-    let app = std::env::var_os("NVIM_APPNAME")
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "nvim".into());
     let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
     match set("XDG_CONFIG_HOME") {
-        Some(dir) => Some(PathBuf::from(dir).join(app)),
-        None => set("HOME").map(|home| PathBuf::from(home).join(".config").join(app)),
+        Some(dir) => Some(PathBuf::from(dir).join("nvim")),
+        None => set("HOME").map(|home| PathBuf::from(home).join(".config").join("nvim")),
     }
 }
 
 /// The detail of a fixture-less scenario that never opened its probe
-/// channel: the cause, then the config it ran and how to switch the leg
-/// off.
-fn priming_failure_detail(cause: &str, config: &Path) -> String {
-    format!(
-        "{cause}; the config at {} did not finish starting (a plugin manager \
-         installing on first run does this). Run nvim once under it, or set \
-         VIEW_DAILY_CONFIG=off",
-        config.display()
-    )
+/// channel: the cause, what happened to the config it ran, and how to
+/// switch the leg off.
+///
+/// `exit_code` is the engine's exit code when it had already exited, and
+/// `screen` is what it last drew, read for nvim's own startup error
+/// report.
+fn priming_failure_detail(
+    cause: &str,
+    exit_code: Option<u32>,
+    screen: &str,
+    config: &Path,
+) -> String {
+    let config = config.display();
+    let errored = screen.lines().map(str::trim).find(|line| {
+        line.starts_with("Error detected while processing")
+            || line.starts_with("Error in ")
+            || nvim_error_code(line)
+    });
+    match (exit_code, errored) {
+        (Some(code), _) => format!(
+            "{cause}; nvim exited with status {code} while starting the config \
+             at {config}. Set VIEW_DAILY_CONFIG=off to skip this leg"
+        ),
+        (None, Some(line)) => format!(
+            "{cause}; the config at {config} errored while starting: {line}. \
+             Fix it, or set VIEW_DAILY_CONFIG=off"
+        ),
+        (None, None) => format!(
+            "{cause}; the config at {config} did not finish starting (a plugin \
+             manager installing on first run does this). Run nvim once under \
+             it, or set VIEW_DAILY_CONFIG=off"
+        ),
+    }
+}
+
+/// Whether `line` opens with one of nvim's numbered error codes (`E5113:`).
+fn nvim_error_code(line: &str) -> bool {
+    line.strip_prefix('E')
+        .and_then(|rest| rest.split_once(':'))
+        .is_some_and(|(digits, _)| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn class_str(class: PluginClass) -> &'static str {
@@ -1112,7 +1157,14 @@ fn run_scenario(
         let _ = session.wait_for_screen_quiescence(SCREEN_QUIESCE_SILENCE, SCREEN_QUIESCE_DEADLINE);
         session
             .prime_probe_channel(PROBE_CHANNEL_TIMEOUT)
-            .map_err(|err| priming_failure_detail(&err.to_string(), config))
+            .map_err(|err| {
+                let screen = session.pty().screen();
+                let exit_code = session
+                    .pty()
+                    .wait_for_exit(Duration::ZERO)
+                    .map(|status| status.exit_code());
+                priming_failure_detail(&err.to_string(), exit_code, &screen, config)
+            })
             .and_then(|()| {
                 // Settle again, and behind a stricter bar, before any step
                 // types: see DAILY_STEPS_SILENCE for the startup-burst race
@@ -1368,6 +1420,18 @@ fn apply_red_expectation_over(result: &mut ScenarioResult, manifest: &[RedRow]) 
     }
 }
 
+/// The name of the step a failed row stopped at: its index, `epilogue` for
+/// the zero-error check after the last step, and for a row that failed
+/// before any step ran, the real-config priming or the fixture's startup.
+fn step_label(result: &ScenarioResult) -> String {
+    match result.failing_step {
+        Some(index) if index == result.steps_total => "epilogue".to_string(),
+        Some(index) => index.to_string(),
+        None if result.fixture.is_none() => "real-config priming".to_string(),
+        None => "startup".to_string(),
+    }
+}
+
 /// Prints one scenario's report line in a fixed shape:
 ///
 /// ```text
@@ -1395,9 +1459,7 @@ fn print_scenario_result(result: &ScenarioResult) {
                 .map_or_else(String::new, |detail| format!(" [{detail}]"))
         ),
         ScenarioStatus::Failed => {
-            let step_label = result
-                .failing_step
-                .map_or_else(|| "epilogue".to_string(), |i| i.to_string());
+            let step_label = step_label(result);
             println!(
                 "compat: {scenario} ({place}) ... FAILED at step {step_label} ({} steps total, {secs:.1}s): {}",
                 result.steps_total,
@@ -1405,9 +1467,7 @@ fn print_scenario_result(result: &ScenarioResult) {
             );
         }
         ScenarioStatus::ExpectedFailure => {
-            let step_label = result
-                .failing_step
-                .map_or_else(|| "epilogue".to_string(), |i| i.to_string());
+            let step_label = step_label(result);
             println!(
                 "compat: {scenario} ({place}) ... RED-AS-EXPECTED at step {step_label} ({} steps total, {secs:.1}s): {}",
                 result.steps_total,
@@ -2121,7 +2181,27 @@ mod tests {
 
         assert_eq!(
             ambient_data_home(),
-            PathBuf::from("/home/daily-config-test/.local/share")
+            Some(PathBuf::from("/home/daily-config-test/.local/share"))
+        );
+    }
+
+    /// With neither `XDG_DATA_HOME` nor `HOME` set there is no data home to
+    /// name, and the leg skips saying so.
+    #[cfg(unix)]
+    #[test]
+    fn no_data_home_skips_saying_neither_is_set() {
+        let _guard = env_mutation_guard();
+        let config = scratch_daily_config("no-data-home");
+        let _daily_env = EnvRestore::set("VIEW_DAILY_CONFIG", config.path());
+        let _data_home_env = EnvRestore::unset("XDG_DATA_HOME");
+        let _home_env = EnvRestore::unset("HOME");
+        assert_eq!(ambient_data_home(), None);
+        assert_eq!(
+            fixture_less_notice(&config.join("daily.sock")).as_deref(),
+            Some(
+                "no nvim data home: neither XDG_DATA_HOME nor HOME is set; \
+                 the config's plugins cannot be found"
+            )
         );
     }
 
@@ -2207,7 +2287,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn nvim_appname_names_the_ambient_config_dir() {
+    fn nvim_appname_leaves_the_ambient_config_dir_alone() {
         let _guard = env_mutation_guard();
         let _config_env = EnvRestore::set("XDG_CONFIG_HOME", "/xdg-config");
         let _home_env = EnvRestore::set("HOME", "/home/daily-config-test");
@@ -2217,16 +2297,17 @@ mod tests {
             Some(PathBuf::from("/xdg-config/nvim"))
         );
 
+        // the engine is spawned without NVIM_APPNAME, so the leg ignores it
         let _app_env = EnvRestore::set("NVIM_APPNAME", "work");
         assert_eq!(
             ambient_config_dir(),
-            Some(PathBuf::from("/xdg-config/work"))
+            Some(PathBuf::from("/xdg-config/nvim"))
         );
 
         let _config_env = EnvRestore::unset("XDG_CONFIG_HOME");
         assert_eq!(
             ambient_config_dir(),
-            Some(PathBuf::from("/home/daily-config-test/.config/work"))
+            Some(PathBuf::from("/home/daily-config-test/.config/nvim"))
         );
     }
 
@@ -2292,14 +2373,52 @@ mod tests {
         let cause =
             view_oracle::compat::CompatError::ProbeChannelNeverOpened(PROBE_CHANNEL_TIMEOUT)
                 .to_string();
-        let detail = priming_failure_detail(&cause, Path::new("/home/me/.config/nvim"));
+        let config = Path::new("/home/me/.config/nvim");
         assert_eq!(
-            detail,
+            priming_failure_detail(&cause, None, "~\n~\n", config),
             "probe channel never opened within 15s of priming; the config at \
              /home/me/.config/nvim did not finish starting (a plugin manager \
              installing on first run does this). Run nvim once under it, or set \
              VIEW_DAILY_CONFIG=off"
         );
+    }
+
+    /// A priming failure says what happened: the engine exited, or the
+    /// config reported an error on screen.
+    #[test]
+    fn a_priming_failure_says_what_happened() {
+        let config = Path::new("/c");
+        assert_eq!(
+            priming_failure_detail("x", Some(1), "", config),
+            "x; nvim exited with status 1 while starting the config at /c. \
+             Set VIEW_DAILY_CONFIG=off to skip this leg"
+        );
+        let screen = "~\nError detected while processing /c/init.lua:\nE5113: boom\n";
+        assert_eq!(
+            priming_failure_detail("x", None, screen, config),
+            "x; the config at /c errored while starting: Error detected while \
+             processing /c/init.lua:. Fix it, or set VIEW_DAILY_CONFIG=off"
+        );
+        assert_eq!(
+            priming_failure_detail("x", None, "E5113: Error while calling lua chunk", config),
+            "x; the config at /c errored while starting: E5113: Error while \
+             calling lua chunk. Fix it, or set VIEW_DAILY_CONFIG=off"
+        );
+    }
+
+    /// A row that failed before any step names where it stopped: the
+    /// real-config priming for the fixture-less leg, the startup for a
+    /// fixture, and `epilogue` for the check after the last step.
+    #[test]
+    fn a_failed_row_names_the_step_it_stopped_at() {
+        let mut row = red_row("lualine", "present", ScenarioStatus::Failed);
+        assert_eq!(step_label(&row), "2");
+        row.failing_step = Some(row.steps_total);
+        assert_eq!(step_label(&row), "epilogue");
+        row.failing_step = None;
+        assert_eq!(step_label(&row), "startup");
+        row.fixture = None;
+        assert_eq!(step_label(&row), "real-config priming");
     }
     /// Every scenario file this repo commits, `broken/`'s deliberately-red
     /// entry included (excluded from `collect_scenarios`'s own walk, but
