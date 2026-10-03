@@ -152,6 +152,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     let Some(msg) = model.submit_hold.hold(msg) else {
         return Vec::new();
     };
+    if model.dvr.is_recording() {
+        model.dvr.record(&msg);
+    }
     let releases = crate::native::submit_hold::releases(model, &msg);
     let mut effects = update_one(model, msg);
     // replayed after the command has run, so the focus it set routes them.

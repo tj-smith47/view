@@ -128,6 +128,8 @@ impl Frame {
 ///   `statusline` (via `statusline_rows`), `toast_history` (only the
 ///   palette's history view reads it, and that is an overlay),
 ///   `key_log` (only the key log overlay reads it),
+///   `dvr` (a recorded frame is drawn by the terminal frontend from its
+///   own ring, outside any layer),
 ///   `showtabline` (it decides whether the top row exists under
 ///   `panes = "nvim"`, which is `offset`), `surfaces` (it decides whether
 ///   the tree draws as a float or in a pane, and both are painted off the

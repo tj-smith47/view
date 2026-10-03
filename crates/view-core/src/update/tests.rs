@@ -21257,3 +21257,66 @@ fn every_documented_key_log_key_answers_a_real_keystroke() {
         );
     }
 }
+
+fn recorded_keys(m: &Model) -> Vec<String> {
+    m.dvr
+        .inputs()
+        .map(|input| String::from_utf8_lossy(input.body).into_owned())
+        .collect()
+}
+
+/// Keys held behind a submitted `:View` are recorded when they are
+/// released, so a replay folds them in the order the session did.
+#[test]
+fn held_keys_are_recorded_in_the_order_they_fold() {
+    let mut m = model();
+    m.engine.mode.current = "normal".to_string();
+    m.dvr.enable(64 * 1024);
+    let line = [":", "V", "i", "e", "w", "<CR>"];
+    let armed = typed(&mut m, &line);
+    let _ = typed(&mut m, &["j", "k"]);
+    assert!(m.submit_hold.is_holding());
+    assert_eq!(recorded_keys(&m), line, "a held key is not folded yet");
+    let generation = armed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ScheduleSubmitHold { generation, .. } => Some(*generation),
+            _ => None,
+        })
+        .expect("the submit armed no bound");
+    let released = update(&mut m, Msg::SubmitHoldExpired { generation });
+    assert_eq!(inputs(&released), ["j", "k"]);
+    assert_eq!(
+        recorded_keys(&m),
+        [":", "V", "i", "e", "w", "<CR>", "j", "k"]
+    );
+}
+
+/// A file is baselined the first time a buffer shows it, once.
+#[test]
+fn a_new_buffer_path_queues_one_baseline() {
+    let mut m = model();
+    m.dvr.enable(64 * 1024);
+    let listed = |buf: u64, modified: bool| {
+        let mut entry = crate::model::BufferEntry::new(buf, "a.rs".to_string(), modified, true);
+        entry.path = "/w/a.rs".to_string();
+        entry
+    };
+    let _ = update(
+        &mut m,
+        Msg::BufferList {
+            buffers: vec![listed(3, false)],
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::BufferList {
+            buffers: vec![listed(3, true)],
+        },
+    );
+    let mut requests = Vec::new();
+    while let Some(request) = m.dvr.take_request() {
+        requests.push(format!("{request:?}"));
+    }
+    assert_eq!(requests, [r#"Baseline("/w/a.rs")"#]);
+}

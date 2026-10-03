@@ -1376,6 +1376,19 @@ pub fn wrap_toast(lines: &[String], width: u16) -> Vec<String> {
         .collect()
 }
 
+/// Whether `entry` is a standing one-shot native notice whose first line
+/// starts with `prefix`. A raised condition never counts: its lifetime
+/// belongs to [`Messages::set_native_condition`] rather than to whatever
+/// raised the notice beside it.
+pub(super) fn is_standing_native_notice(entry: &MessageEntry, prefix: &str) -> bool {
+    entry.is_native()
+        && !entry.is_condition()
+        && entry
+            .content()
+            .first()
+            .is_some_and(|(_, line)| line.starts_with(prefix))
+}
+
 mod picker_hold;
 
 #[cfg(test)]

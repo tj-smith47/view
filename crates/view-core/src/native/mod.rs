@@ -12,6 +12,7 @@ pub mod channels;
 pub mod chords;
 pub mod devicons;
 pub mod diff;
+pub mod dvr;
 pub mod ext;
 pub mod geometry;
 pub mod key_log;

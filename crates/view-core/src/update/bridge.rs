@@ -61,6 +61,11 @@ pub(super) fn on_buffer_list(model: &mut Model, buffers: Vec<BufferEntry>) -> Ve
         return Vec::new();
     }
     model.buffers = buffers;
+    if model.dvr.is_recording() {
+        for buffer in &model.buffers {
+            model.dvr.see_path(&buffer.path);
+        }
+    }
     model.dirty = true;
     Vec::new()
 }

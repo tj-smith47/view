@@ -144,6 +144,8 @@ pub struct Model {
     claimed_keys: Vec<MappingClaim>,
     /// The mappings that fired this session. See [`Model::key_log`].
     pub(crate) key_log: key_log::KeyLogState,
+    /// The session recording rewind reads. See [`crate::native::dvr::Dvr`].
+    pub dvr: crate::native::dvr::Dvr,
     /// Whether the user's config maps `:` in normal or visual mode, as the
     /// engine read it off its own keymaps ([`crate::msg::Msg::MappingsClaimed`],
     /// re-read whenever a plugin loads late).
@@ -468,6 +470,7 @@ impl Model {
             fatal_reason: None,
             claimed_keys: Vec::new(),
             key_log: key_log::KeyLogState::default(),
+            dvr: crate::native::dvr::Dvr::default(),
             colon_mapped: false,
             statusline_enabled: false,
             look: Look::default(),
@@ -2139,19 +2142,6 @@ impl EngineModel {
     }
 }
 
-/// Whether `entry` is a standing one-shot native notice whose first line
-/// starts with `prefix`. A raised condition never counts: its lifetime
-/// belongs to [`Messages::set_native_condition`] rather than to whatever
-/// raised the notice beside it.
-fn is_standing_native_notice(entry: &MessageEntry, prefix: &str) -> bool {
-    entry.is_native()
-        && !entry.is_condition()
-        && entry
-            .content()
-            .first()
-            .is_some_and(|(_, line)| line.starts_with(prefix))
-}
-
 /// nvim mode state: the cursor/highlight property table from the last
 /// `mode_info_set`, plus the active mode from the last `mode_change`.
 #[non_exhaustive]
@@ -2235,6 +2225,7 @@ mod window_status;
 pub use buffers::{reopen_order, unsaved_files, BufferEntry};
 pub use caps::{TermCaps, Tier};
 pub use look::{Detected, Joined, Look, Panes, MIN_FRAMED_SLOT};
+use messages::is_standing_native_notice;
 pub use messages::{format_at, wrap_toast, MessageEntry, MessageId, Messages};
 pub use notice::{NoticeColumn, NOTICE_COLUMN_MAX};
 pub use resize::{BorderGrip, ResizeMode, Resized};
