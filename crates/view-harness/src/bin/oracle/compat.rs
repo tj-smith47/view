@@ -20,7 +20,7 @@ use view_harness::fixture::{
     scratch_root, target_root, verify_nvim_matches_pin, workspace_root,
 };
 use view_harness::results::{
-    today_date_string, write_results, ResultsFile, ScenarioResult, ScenarioStatus,
+    today_date_string, write_results, PreStepFailure, ResultsFile, ScenarioResult, ScenarioStatus,
 };
 use view_harness::scenario::{self, Panes, ScenarioFile, ScenarioStateEntry};
 use view_oracle::compat::{
@@ -416,19 +416,16 @@ fn resolve_daily_config(
 /// the variable is unset or empty.
 ///
 /// Unlike every other XDG home in [`resolve_fixture`]'s fixture-less arm,
-/// this one is deliberately the maintainer's *live* data home rather than a
-/// fresh hermetic directory. The scenario's whole point is to exercise the
-/// maintainer's actual daily-driver config, and that config is
-/// lazy.nvim-managed: `stdpath("data")/lazy/lazy.nvim` is where its plugins
-/// already live. A hermetic, empty data home makes lazy.nvim conclude
-/// nothing is installed, so it clones lazy.nvim and the full plugin set from
-/// the network at startup -- and that bootstrap holds the editor for far
-/// longer than the driver's 15s prime deadline, which is waiting to type
-/// `:call serverstart(...)`. The scenario would then be measuring a
-/// from-scratch plugin install instead of the maintainer's editor, and would
-/// time out doing it. Pointing this one home at the ambient data directory
-/// lets lazy.nvim find its already-installed plugins and boot the same way
-/// the maintainer's real `nvim` does.
+/// this one is the host's *live* data home. The scenario exercises the
+/// config this machine's nvim loads, and a plugin manager keeps that
+/// config's plugins under `stdpath("data")`. An empty data home makes the
+/// manager conclude nothing is installed, so it clones the full plugin set
+/// from the network at startup, and that bootstrap holds the editor for
+/// far longer than the driver's 15s prime deadline, which is waiting to
+/// type `:call serverstart(...)`. The scenario would then measure a
+/// from-scratch plugin install and time out doing it. Pointing this one
+/// home at the ambient data directory lets the manager find its installed
+/// plugins and boot the same way this machine's own `nvim` does.
 ///
 /// `None` when neither variable is set, since a relative `.local/share`
 /// would land under whatever directory the run started in.
@@ -516,19 +513,26 @@ fn priming_failure_detail(
     config: &Path,
 ) -> String {
     let config = config.display();
-    let errored = screen.lines().map(str::trim).find(|line| {
-        line.starts_with("Error detected while processing")
-            || line.starts_with("Error in ")
-            || nvim_error_code(line)
-    });
+    // The numbered line says what failed; the header above it only says
+    // where.
+    let errored = screen
+        .lines()
+        .map(str::trim)
+        .find(|line| nvim_error_code(line))
+        .or_else(|| {
+            screen.lines().map(str::trim).find(|line| {
+                line.starts_with("Error detected while processing") || line.starts_with("Error in ")
+            })
+        });
     match (exit_code, errored) {
         (Some(code), _) => format!(
             "{cause}; nvim exited with status {code} while starting the config \
              at {config}. Set VIEW_DAILY_CONFIG=off to skip this leg"
         ),
         (None, Some(line)) => format!(
-            "{cause}; the config at {config} errored while starting: {line}. \
-             Fix it, or set VIEW_DAILY_CONFIG=off"
+            "{cause}; the config at {config} errored while starting: {}. \
+             Fix it, or set VIEW_DAILY_CONFIG=off",
+            line.trim_end_matches(':')
         ),
         (None, None) => format!(
             "{cause}; the config at {config} did not finish starting (a plugin \
@@ -607,8 +611,22 @@ fn resolve_plugin_version(plugin: &str, fixture: Option<&str>) -> Option<String>
 struct ScenarioOutcome {
     status: ScenarioStatus,
     failing_step: Option<usize>,
+    failed_before: Option<PreStepFailure>,
     detail: Option<String>,
     elapsed_ms: u128,
+}
+
+impl ScenarioOutcome {
+    /// A failure at `stage`, before the scenario's first step ran.
+    fn failed_before(stage: PreStepFailure, detail: String, elapsed_ms: u128) -> Self {
+        Self {
+            status: ScenarioStatus::Failed,
+            failing_step: None,
+            failed_before: Some(stage),
+            detail: Some(detail),
+            elapsed_ms,
+        }
+    }
 }
 
 fn scenario_result(
@@ -630,6 +648,7 @@ fn scenario_result(
         engine_pin: pin.to_string(),
         status: outcome.status,
         failing_step: outcome.failing_step,
+        failed_before: outcome.failed_before,
         steps_total: state.steps.len(),
         detail: outcome.detail,
         elapsed_ms: outcome.elapsed_ms,
@@ -1013,6 +1032,7 @@ fn run_scenario(
                 ScenarioOutcome {
                     status: ScenarioStatus::Skipped,
                     failing_step: None,
+                    failed_before: None,
                     detail: Some(notice),
                     elapsed_ms: 0,
                 },
@@ -1032,17 +1052,14 @@ fn run_scenario(
             scenario,
             state,
             pin,
-            ScenarioOutcome {
-                status: ScenarioStatus::Failed,
-                failing_step: None,
-                detail: Some(
-                    "a fixture-less scenario cannot decline accommodations: there is no \
-                     reference leg to subtract, and self-baselining would answer the \
-                     question with the session under test"
-                        .to_string(),
-                ),
-                elapsed_ms: start.elapsed().as_millis(),
-            },
+            ScenarioOutcome::failed_before(
+                PreStepFailure::Accommodations,
+                "a fixture-less scenario cannot decline accommodations: there is no \
+                 reference leg to subtract, and self-baselining would answer the \
+                 question with the session under test"
+                    .to_string(),
+                start.elapsed().as_millis(),
+            ),
         ));
     }
     // Before the session under test starts, so an engine that cannot even
@@ -1056,12 +1073,11 @@ fn run_scenario(
                 scenario,
                 state,
                 pin,
-                ScenarioOutcome {
-                    status: ScenarioStatus::Failed,
-                    failing_step: None,
-                    detail: Some(err.to_string()),
-                    elapsed_ms: start.elapsed().as_millis(),
-                },
+                ScenarioOutcome::failed_before(
+                    PreStepFailure::ReferenceLeg,
+                    err.to_string(),
+                    start.elapsed().as_millis(),
+                ),
             ));
         }
     };
@@ -1138,12 +1154,11 @@ fn run_scenario(
                 scenario,
                 state,
                 pin,
-                ScenarioOutcome {
-                    status: ScenarioStatus::Failed,
-                    failing_step: None,
-                    detail: Some(err.to_string()),
-                    elapsed_ms: start.elapsed().as_millis(),
-                },
+                ScenarioOutcome::failed_before(
+                    PreStepFailure::Startup,
+                    err.to_string(),
+                    start.elapsed().as_millis(),
+                ),
             ));
         }
     };
@@ -1190,17 +1205,17 @@ fn run_scenario(
             // process table for the rest of this run
             session.pty().kill();
             let _ = session.pty().wait_for_exit(Duration::from_secs(2));
+            let stage = if ready.daily_config.is_some() {
+                PreStepFailure::Priming
+            } else {
+                PreStepFailure::Startup
+            };
             return Ok(scenario_result(
                 scenario_path,
                 scenario,
                 state,
                 pin,
-                ScenarioOutcome {
-                    status: ScenarioStatus::Failed,
-                    failing_step: None,
-                    detail: Some(detail),
-                    elapsed_ms: start.elapsed().as_millis(),
-                },
+                ScenarioOutcome::failed_before(stage, detail, start.elapsed().as_millis()),
             ));
         }
     };
@@ -1237,13 +1252,13 @@ fn run_scenario(
     let _ = session.pty().send(b"\x1b:qa!\r");
     let _ = session.pty().wait_for_exit(Duration::from_secs(5));
 
-    // The fixture-less arm just sourced the maintainer's live config, whose
-    // startup tooling may write entries under the shared hermetic home that
-    // the next spawn's preparation rightly refuses (a Go toolchain invoked
-    // by a plugin manager creates $HOME/go, for one observed case). The
-    // home holds nothing durable by contract, so restoring it by deletion
-    // keeps one maintainer-config scenario from vetoing every spawn after
-    // it, in this run and the next. A failed reset is loud twice: here, and
+    // The fixture-less arm just sourced the config this machine's nvim
+    // loads, whose startup tooling may write entries under the shared
+    // hermetic home that the next spawn's preparation rightly refuses (a Go
+    // toolchain invoked by a plugin manager creates $HOME/go, for one
+    // observed case). The home holds nothing durable by contract, so
+    // restoring it by deletion keeps one daily-config scenario from vetoing
+    // every spawn after it, in this run and the next. A failed reset is loud twice: here, and
     // in the refusal the next spawn raises against the leftover entry.
     if ready.daily_config.is_some() {
         if let Err(err) = reset_hermetic_home() {
@@ -1280,6 +1295,7 @@ fn run_scenario(
         ScenarioOutcome {
             status,
             failing_step,
+            failed_before: None,
             detail,
             elapsed_ms: start.elapsed().as_millis(),
         },
@@ -1420,18 +1436,6 @@ fn apply_red_expectation_over(result: &mut ScenarioResult, manifest: &[RedRow]) 
     }
 }
 
-/// The name of the step a failed row stopped at: its index, `epilogue` for
-/// the zero-error check after the last step, and for a row that failed
-/// before any step ran, the real-config priming or the fixture's startup.
-fn step_label(result: &ScenarioResult) -> String {
-    match result.failing_step {
-        Some(index) if index == result.steps_total => "epilogue".to_string(),
-        Some(index) => index.to_string(),
-        None if result.fixture.is_none() => "real-config priming".to_string(),
-        None => "startup".to_string(),
-    }
-}
-
 /// Prints one scenario's report line in a fixed shape:
 ///
 /// ```text
@@ -1459,7 +1463,7 @@ fn print_scenario_result(result: &ScenarioResult) {
                 .map_or_else(String::new, |detail| format!(" [{detail}]"))
         ),
         ScenarioStatus::Failed => {
-            let step_label = step_label(result);
+            let step_label = result.step_label();
             println!(
                 "compat: {scenario} ({place}) ... FAILED at step {step_label} ({} steps total, {secs:.1}s): {}",
                 result.steps_total,
@@ -1467,7 +1471,7 @@ fn print_scenario_result(result: &ScenarioResult) {
             );
         }
         ScenarioStatus::ExpectedFailure => {
-            let step_label = step_label(result);
+            let step_label = result.step_label();
             println!(
                 "compat: {scenario} ({place}) ... RED-AS-EXPECTED at step {step_label} ({} steps total, {secs:.1}s): {}",
                 result.steps_total,
@@ -1548,12 +1552,7 @@ pub(crate) fn command(path: &Path) -> Result<()> {
                     scenario,
                     state,
                     &pin,
-                    ScenarioOutcome {
-                        status: ScenarioStatus::Failed,
-                        failing_step: None,
-                        detail: Some(err.to_string()),
-                        elapsed_ms: 0,
-                    },
+                    ScenarioOutcome::failed_before(PreStepFailure::Setup, err.to_string(), 0),
                 ),
             };
             apply_red_expectation(&mut result);
@@ -1674,6 +1673,7 @@ mod tests {
             engine_pin: "v0.0.0".to_string(),
             status,
             failing_step: Some(2),
+            failed_before: None,
             steps_total: 8,
             detail: Some("some failure".to_string()),
             elapsed_ms: 1,
@@ -2393,11 +2393,22 @@ mod tests {
             "x; nvim exited with status 1 while starting the config at /c. \
              Set VIEW_DAILY_CONFIG=off to skip this leg"
         );
-        let screen = "~\nError detected while processing /c/init.lua:\nE5113: boom\n";
+        let screen = "~\n\
+                      Error detected while processing /c/init.lua:\n\
+                      E5113: Lua chunk: /c/init.lua:1: module 'nope' not found:\n\
+                      \tno field package.preload['nope']\n\
+                      Press ENTER or type command to continue\n";
         assert_eq!(
             priming_failure_detail("x", None, screen, config),
+            "x; the config at /c errored while starting: E5113: Lua chunk: \
+             /c/init.lua:1: module 'nope' not found. Fix it, or set \
+             VIEW_DAILY_CONFIG=off"
+        );
+        let header_only = "~\nError detected while processing /c/init.lua:\n";
+        assert_eq!(
+            priming_failure_detail("x", None, header_only, config),
             "x; the config at /c errored while starting: Error detected while \
-             processing /c/init.lua:. Fix it, or set VIEW_DAILY_CONFIG=off"
+             processing /c/init.lua. Fix it, or set VIEW_DAILY_CONFIG=off"
         );
         assert_eq!(
             priming_failure_detail("x", None, "E5113: Error while calling lua chunk", config),
@@ -2406,19 +2417,58 @@ mod tests {
         );
     }
 
-    /// A row that failed before any step names where it stopped: the
-    /// real-config priming for the fixture-less leg, the startup for a
-    /// fixture, and `epilogue` for the check after the last step.
+    /// A failed row names where it stopped: the step's index, `epilogue`
+    /// for the check after the last step, and before any step, the words of
+    /// the stage it failed at, whatever its fixture.
     #[test]
     fn a_failed_row_names_the_step_it_stopped_at() {
         let mut row = red_row("lualine", "present", ScenarioStatus::Failed);
-        assert_eq!(step_label(&row), "2");
+        assert_eq!(row.step_label(), "2");
         row.failing_step = Some(row.steps_total);
-        assert_eq!(step_label(&row), "epilogue");
+        assert_eq!(row.step_label(), "epilogue");
         row.failing_step = None;
-        assert_eq!(step_label(&row), "startup");
         row.fixture = None;
-        assert_eq!(step_label(&row), "real-config priming");
+        let expected = [
+            (PreStepFailure::Setup, "setup"),
+            (PreStepFailure::Accommodations, "accommodations pairing"),
+            (PreStepFailure::ReferenceLeg, "reference leg"),
+            (PreStepFailure::Startup, "startup"),
+            (PreStepFailure::Priming, "real-config priming"),
+        ];
+        for (stage, words) in expected {
+            row.failed_before = Some(stage);
+            assert_eq!(row.step_label(), words, "{stage:?}");
+        }
+    }
+
+    /// Each stage a scenario can fail at before its first step travels
+    /// from the outcome into the row, so the report line names it.
+    #[test]
+    fn a_pre_step_failure_carries_its_stage_into_the_row() {
+        let path = workspace_root()
+            .join("compat")
+            .join("scenarios")
+            .join("lualine.toml");
+        let scenario = scenario::load_file(&path).expect("lualine.toml parses");
+        let state = &scenario.states[0];
+        for stage in [
+            PreStepFailure::Setup,
+            PreStepFailure::Accommodations,
+            PreStepFailure::ReferenceLeg,
+            PreStepFailure::Startup,
+            PreStepFailure::Priming,
+        ] {
+            let row = scenario_result(
+                &path,
+                &scenario,
+                state,
+                "v0.0.0",
+                ScenarioOutcome::failed_before(stage, "x".to_string(), 0),
+            );
+            assert_eq!(row.status, ScenarioStatus::Failed);
+            assert_eq!(row.failing_step, None);
+            assert_eq!(row.step_label(), stage.label(), "{stage:?}");
+        }
     }
     /// Every scenario file this repo commits, `broken/`'s deliberately-red
     /// entry included (excluded from `collect_scenarios`'s own walk, but

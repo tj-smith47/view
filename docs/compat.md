@@ -15,9 +15,9 @@ Rows cover the top-N by plugin-manager download rank per compat
 class, currently the named floor in section 13.3 of the design
 spec: every UI-owning plugin asserted per scenario state, the
 semantic and UI-adjacent classes alongside, a cold lazy.nvim
-bootstrap scenario, and the maintainer's standing daily-config
-scenario. Version cells are the short commit hashes recorded in
-the scenario fixture's lazy.nvim lockfile
+bootstrap scenario, and a daily-config scenario that runs the
+config this machine's nvim loads. Version cells are the short
+commit hashes recorded in the scenario fixture's lazy.nvim lockfile
 (`compat/fixtures/<fixture>/nvim/lazy-lock.json`); `-` marks a row
 whose scenario has no fixture or whose fixture lockfile does not
 name the plugin. A state may also run under the tiled layout, where

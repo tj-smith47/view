@@ -3673,11 +3673,12 @@ impl EngineHandle {
     /// construction, like [`list_buffers`](Self::list_buffers): this issues
     /// the request through [`EngineHandle::request_preview`] and returns
     /// immediately; the answer crosses back as `Msg::PickerPreviewReply`
-    /// through the connection's pump. `path` also travels with the waiter (unlike `list_buffers`,
-    /// whose reply needs no echo) so the eventual reply can name which
-    /// candidate it answers, since the picker's selection may have moved on
-    /// by the time it lands. See `docs/picker-preview-wire-capture.md` for
-    /// the reply shapes `crate::handle`'s `decode_preview_reply` decodes.
+    /// through the connection's pump. `path` also travels with the waiter
+    /// (unlike `list_buffers`, whose reply needs no echo) so the eventual
+    /// reply can name which candidate it answers, since the picker's
+    /// selection may have moved on by the time it lands. See
+    /// `docs/picker-preview-wire-capture.md` for the reply shapes
+    /// `crate::handle`'s `decode_preview_reply` decodes.
     ///
     /// # Errors
     ///

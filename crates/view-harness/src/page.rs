@@ -101,9 +101,9 @@ pub fn render_page(results: &ResultsFile, current_pin: &str) -> Result<RenderedP
          class, currently the named floor in section 13.3 of the design\n\
          spec: every UI-owning plugin asserted per scenario state, the\n\
          semantic and UI-adjacent classes alongside, a cold lazy.nvim\n\
-         bootstrap scenario, and the maintainer's standing daily-config\n\
-         scenario. Version cells are the short commit hashes recorded in\n\
-         the scenario fixture's lazy.nvim lockfile\n\
+         bootstrap scenario, and a daily-config scenario that runs the\n\
+         config this machine's nvim loads. Version cells are the short\n\
+         commit hashes recorded in the scenario fixture's lazy.nvim lockfile\n\
          (`compat/fixtures/<fixture>/nvim/lazy-lock.json`); `-` marks a row\n\
          whose scenario has no fixture or whose fixture lockfile does not\n\
          name the plugin. A state may also run under the tiled layout, where\n\
@@ -173,15 +173,11 @@ fn result_cell(row: &ScenarioResult) -> String {
             .detail
             .as_deref()
             .map_or_else(|| "OK".to_string(), |detail| format!("OK ({detail})")),
-        ScenarioStatus::Failed => {
-            let step_label = row
-                .failing_step
-                .map_or_else(|| "epilogue".to_string(), |index| index.to_string());
-            format!(
-                "FAILED at step {step_label}: {}",
-                row.detail.as_deref().unwrap_or("unknown failure")
-            )
-        }
+        ScenarioStatus::Failed => format!(
+            "FAILED at step {}: {}",
+            row.step_label(),
+            row.detail.as_deref().unwrap_or("unknown failure")
+        ),
         ScenarioStatus::ExpectedFailure => format!(
             "EXPECTED FAILURE: {}",
             row.detail.as_deref().unwrap_or("no detail recorded")
@@ -218,6 +214,7 @@ mod tests {
             engine_pin: "v0.12.4".to_string(),
             status: ScenarioStatus::Ok,
             failing_step: None,
+            failed_before: None,
             steps_total: 4,
             detail: None,
             elapsed_ms: 100,
@@ -368,6 +365,26 @@ mod tests {
             page.markdown.contains(r"expected \|marker\| on screen"),
             "a raw pipe inside a cell would split the markdown column"
         );
+    }
+
+    /// A row that failed before its first step, or at the epilogue, names
+    /// the stage in the words the runner's report line prints.
+    #[test]
+    fn a_failed_row_names_its_stage_as_the_report_line_does() {
+        let mut priming = row("daily-config", "daily-config");
+        priming.status = ScenarioStatus::Failed;
+        priming.fixture = None;
+        priming.failed_before = Some(crate::results::PreStepFailure::Priming);
+        priming.detail = Some("timed out".to_string());
+        assert_eq!(
+            result_cell(&priming),
+            "FAILED at step real-config priming: timed out"
+        );
+        let mut epilogue = row("noice", "noice");
+        epilogue.status = ScenarioStatus::Failed;
+        epilogue.failing_step = Some(epilogue.steps_total);
+        epilogue.detail = Some("E5108".to_string());
+        assert_eq!(result_cell(&epilogue), "FAILED at step epilogue: E5108");
     }
 
     #[test]

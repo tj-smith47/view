@@ -36,6 +36,10 @@ pub struct ScenarioResult {
     /// ran), naming the failing step's index otherwise only when `status`
     /// is [`ScenarioStatus::Failed`].
     pub failing_step: Option<usize>,
+    /// What a failed row stopped at before any step ran. A results file
+    /// written before the column existed reads `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_before: Option<PreStepFailure>,
     pub steps_total: usize,
     /// The failure text, the skip notice, or -- on a row that passed only
     /// because the pinned engine's own reading of the same config excused
@@ -53,6 +57,56 @@ pub struct ScenarioResult {
 
 fn nvim_panes() -> String {
     "nvim".to_string()
+}
+
+impl ScenarioResult {
+    /// The name of the step a failed row stopped at: its index, `epilogue`
+    /// for the zero-error check after the last step, and for a row that
+    /// stopped before any step ran, the words of what it stopped at. The
+    /// runner's report line and the published page both print this, so the
+    /// two name one row the same way.
+    #[must_use]
+    pub fn step_label(&self) -> String {
+        match (self.failing_step, self.failed_before) {
+            (Some(index), _) if index == self.steps_total => "epilogue".to_string(),
+            (Some(index), _) => index.to_string(),
+            (None, Some(stage)) => stage.label().to_string(),
+            (None, None) => "before the first step".to_string(),
+        }
+    }
+}
+
+/// What a scenario failed at before its first step ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum PreStepFailure {
+    /// The runner could not prepare the scenario at all.
+    Setup,
+    /// A fixture-less state declined accommodations, which it cannot.
+    Accommodations,
+    /// The pinned engine alone failed on the state's config.
+    ReferenceLeg,
+    /// The session under test did not start or never opened its probe
+    /// channel.
+    Startup,
+    /// The config this machine's nvim loads did not finish starting under
+    /// the session.
+    Priming,
+}
+
+impl PreStepFailure {
+    /// The words a report line and the page print for this stage.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Setup => "setup",
+            Self::Accommodations => "accommodations pairing",
+            Self::ReferenceLeg => "reference leg",
+            Self::Startup => "startup",
+            Self::Priming => "real-config priming",
+        }
+    }
 }
 
 /// `YYYY-MM-DD` for the current instant, in UTC. Hand-rolled rather than a
@@ -176,6 +230,7 @@ mod tests {
                 engine_pin: "v0.12.4".to_string(),
                 status: ScenarioStatus::Ok,
                 failing_step: None,
+                failed_before: None,
                 steps_total: 4,
                 detail: None,
                 elapsed_ms: 2100,

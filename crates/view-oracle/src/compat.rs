@@ -900,12 +900,12 @@ impl CompatSession {
 
     /// [`zero_error_check`](Self::zero_error_check), but attributing only
     /// content that appeared *after* `baseline` to the scenario's steps.
-    /// Exists for the fixture-less (daily-config) scenario: a maintainer's
-    /// live config may set `v:errmsg` during its own startup (`nvim` under
-    /// the same config sets the identical value, so it is the config's own
-    /// property, not a compat divergence), and a committed fixture's
-    /// guarantee that startup is error-free does not extend to a config
-    /// this harness does not own.
+    /// Exists for the fixture-less (daily-config) scenario: the config this
+    /// machine's nvim loads may set `v:errmsg` during its own startup
+    /// (`nvim` under the same config sets the identical value, so it is the
+    /// config's own property, not a compat divergence), and a committed
+    /// fixture's guarantee that startup is error-free does not extend to a
+    /// config this harness does not own.
     ///
     /// # Errors
     ///

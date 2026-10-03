@@ -68,11 +68,10 @@ struct Record {
     /// understands the file at all.
     schema_version: u32,
     /// Config path (encoded by [`config_key`]) to the record keys already
-    /// announced under it (see
-    /// [`crate::report::Handover::record_key`]). A `BTreeMap` of sorted `Vec`s rather than
-    /// hash-ordered containers so the file is stable across writes: a record
-    /// that reshuffles itself every launch is unreadable as a diff and
-    /// unusable as evidence.
+    /// announced under it (see [`crate::report::Handover::record_key`]). A
+    /// `BTreeMap` of sorted `Vec`s rather than hash-ordered containers so
+    /// the file is stable across writes: a record that reshuffles itself
+    /// every launch is unreadable as a diff and unusable as evidence.
     #[serde(default)]
     announced: BTreeMap<String, Vec<String>>,
 }
