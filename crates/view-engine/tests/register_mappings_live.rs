@@ -141,8 +141,9 @@ fn an_export_path_reaches_view_as_typed_and_absolute() {
 
 /// `:View dvr export` reads its path the way `:w` reads a file name: an
 /// escaped blank, an escaped trailing blank, an escaped backslash before a
-/// blank, an escaped `$`, an environment variable, `~` and a relative name
-/// after `:cd` each name the file `:w` writes. `HOME` is pointed at a
+/// blank, an escaped `$`, an unclosed `${`, an environment variable, `~`
+/// and a relative name after `:cd` each name the file `:w` writes. `HOME`
+/// is pointed at a
 /// scratch directory, so nothing is written outside it.
 #[test]
 fn an_export_path_names_the_file_w_writes() {
@@ -167,6 +168,7 @@ fn an_export_path_names_the_file_w_writes() {
         r"t\ ",
         r"a\\ b",
         r"\$VIEW_UNSET_EXPORT.vdvr",
+        "a${VIEW_UNSET_EXPORT.vdvr",
         "$HOME/e.vdvr",
         "~/t.vdvr",
         "rel.vdvr",
@@ -190,7 +192,8 @@ fn an_export_path_names_the_file_w_writes() {
 }
 
 /// A path naming an environment variable that is not set is refused with a
-/// message naming it, and nothing reaches view, so no clip is written.
+/// message naming it, and nothing reaches view, so no clip is written. A
+/// name nvim never reads as a variable is no refusal: `$$x` expands `$$`.
 #[test]
 fn an_export_path_naming_an_unset_variable_is_refused() {
     let (engine, channel, rx, _pump, _cutover) = spawn_attached();
@@ -219,6 +222,24 @@ fn an_export_path_naming_an_unset_variable_is_refused() {
             next_invoke(&rx),
             ("ui".to_owned(), "panes tiles".to_owned()),
             "{typed}"
+        );
+    }
+    engine
+        .handle
+        .eval_str("execute('View dvr export $$x')")
+        .unwrap();
+    let (_, verb) = next_invoke(&rx);
+    let cwd = engine.handle.eval_str("getcwd()").unwrap();
+    let path = std::path::Path::new(verb.strip_prefix("export ").unwrap());
+    assert_eq!(path.parent(), Some(std::path::Path::new(&cwd)), "{verb}");
+    // a unix shell expands `$$` to its own pid, a new one on every
+    // expansion, so the name is compared by shape
+    if cfg!(unix) {
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let pid = name.strip_suffix('x').unwrap_or_default();
+        assert!(
+            !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()),
+            "{verb}"
         );
     }
     let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();

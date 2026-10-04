@@ -89,8 +89,11 @@ libc = "0.2"
 # src/localtime.rs's `GetTimeZoneInformation`: the same host offset, on the
 # platform `libc::tm` carries no `tm_gmtoff` for. Already a vetted
 # dependency in this workspace (view-engine's named-pipe transport).
-# `TIME_ZONE_ID_DAYLIGHT` lives under SystemServices.
+# `TIME_ZONE_ID_DAYLIGHT` lives under SystemServices. src/dvr/io.rs's
+# `MoveFileExW` renames a clip into place in one step that refuses an
+# existing name.
 windows-sys = { version = "0.61.2", features = [
+    "Win32_Storage_FileSystem",
     "Win32_System_SystemServices",
     "Win32_System_Time",
 ] }

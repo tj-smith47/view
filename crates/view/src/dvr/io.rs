@@ -206,12 +206,19 @@ fn publish(
 }
 
 /// Whether a failed hard link says the filesystem has none: Linux answers
-/// EPERM on vfat and exFAT, and EOPNOTSUPP elsewhere.
+/// EPERM on vfat and exFAT and EOPNOTSUPP elsewhere, and macOS answers
+/// ENOTSUP on FAT and exFAT.
 fn lacks_hard_links(e: &io::Error) -> bool {
     // Windows FAT answers ERROR_INVALID_FUNCTION and a share
     // ERROR_NOT_SUPPORTED, which std maps to no kind of its own
     let windows = cfg!(windows) && matches!(e.raw_os_error(), Some(1 | 50));
+    // std gives macOS's ENOTSUP no kind; only its EOPNOTSUPP is Unsupported
+    #[cfg(unix)]
+    let notsup = e.raw_os_error() == Some(libc::ENOTSUP);
+    #[cfg(not(unix))]
+    let notsup = false;
     windows
+        || notsup
         || matches!(
             e.kind(),
             io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
@@ -223,24 +230,69 @@ fn lacks_hard_links(e: &io::Error) -> bool {
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 fn rename_noreplace(part: &Path, path: &Path) -> io::Result<()> {
     use rustix::fs::{renameat_with, RenameFlags, CWD};
-    match renameat_with(CWD, part, CWD, path, RenameFlags::NOREPLACE) {
-        Err(rustix::io::Errno::INVAL) => rename_checked(part, path),
+    rename_or_check(part, path, |part, path| {
+        renameat_with(CWD, part, CWD, path, RenameFlags::NOREPLACE)
+    })
+}
+
+/// [`rename_noreplace`] through `rename`, falling to [`rename_checked`]
+/// where the filesystem refuses the flag.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn rename_or_check(
+    part: &Path,
+    path: &Path,
+    rename: impl FnOnce(&Path, &Path) -> rustix::io::Result<()>,
+) -> io::Result<()> {
+    use rustix::io::Errno;
+    match rename(part, path) {
+        // Linux answers EINVAL, macOS ENOTSUP and a kernel older than
+        // renameat2 ENOSYS
+        Err(Errno::INVAL | Errno::NOTSUP | Errno::NOSYS) => rename_checked(part, path),
         other => other.map_err(io::Error::from),
     }
 }
 
+/// Renames `part` to `path` in one step that fails on an existing name.
+#[cfg(windows)]
+fn rename_noreplace(part: &Path, path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    let wide = |p: &Path| -> Vec<u16> {
+        p.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+    let (from, to) = (wide(part), wide(path));
+    // SAFETY: both pointers are NUL-terminated buffers that outlive the
+    // call, which retains neither. Flags 0 leave out
+    // MOVEFILE_REPLACE_EXISTING, so an existing name is refused.
+    #[allow(unsafe_code)]
+    let moved = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) };
+    if moved == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Renames `part` to `path` unless the name is taken; this target has no
 /// rename that refuses an existing name.
-#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+#[cfg(not(any(target_os = "linux", target_vendor = "apple", windows)))]
 fn rename_noreplace(part: &Path, path: &Path) -> io::Result<()> {
     rename_checked(part, path)
 }
 
-/// Renames `part` to `path` unless the name is taken. A file created
-/// between the check and the rename is replaced.
+/// Renames `part` to `path` unless the name is taken, a symlink included.
+/// A file created between the check and the rename is replaced: on unix
+/// targets other than Linux and Apple's, and on a Linux or macOS
+/// filesystem that refuses a rename with no replace.
+#[cfg(not(windows))]
 fn rename_checked(part: &Path, path: &Path) -> io::Result<()> {
-    if path.try_exists()? {
-        return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => return Err(io::Error::from(io::ErrorKind::AlreadyExists)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
     std::fs::rename(part, path)
 }
@@ -570,6 +622,63 @@ mod tests {
         assert!(matches!(reply, DvrIoReply::Failed { .. }), "{reply:?}");
         assert!(!synced, "the encode ran past the cancel");
         assert!(left_in(&dir).is_empty(), "{:?}", left_in(&dir));
+    }
+
+    /// A link refused for want of hard links is told from every other
+    /// failure by the raw code each host answers with.
+    #[test]
+    fn a_filesystem_without_hard_links_is_told_by_its_raw_error() {
+        #[cfg(unix)]
+        assert!(lacks_hard_links(&io::Error::from_raw_os_error(
+            libc::ENOTSUP
+        )));
+        #[cfg(windows)]
+        for code in [1, 50] {
+            let e = io::Error::from_raw_os_error(code);
+            assert!(lacks_hard_links(&e), "{code}");
+        }
+        let full = io::Error::from(io::ErrorKind::StorageFull);
+        assert!(!lacks_hard_links(&full));
+    }
+
+    /// A filesystem refusing the no-replace flag, by any of the codes
+    /// Linux, macOS and an old kernel answer with, gets the checked rename.
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    #[test]
+    fn a_refused_no_replace_flag_falls_to_the_checked_rename() {
+        use rustix::io::Errno;
+        let dir = ScratchDir::new("dvr-export-flag-refused").unwrap();
+        for errno in [Errno::INVAL, Errno::NOTSUP, Errno::NOSYS] {
+            let (part, path) = (dir.join("p"), dir.join("a.vdvr"));
+            std::fs::write(&part, b"clip").unwrap();
+            let renamed = rename_or_check(&part, &path, |_, _| Err(errno));
+            assert!(renamed.is_ok(), "{errno:?}: {renamed:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), b"clip", "{errno:?}");
+            std::fs::remove_file(&path).unwrap();
+        }
+        let part = dir.join("p");
+        std::fs::write(&part, b"clip").unwrap();
+        let taken = rename_or_check(&part, &dir.join("b"), |_, _| Err(Errno::EXIST));
+        assert_eq!(taken.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert!(part.exists() && !dir.join("b").exists());
+    }
+
+    /// A dangling symlink holds its name: neither rename replaces it.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_at_the_name_is_left_as_it_is() {
+        let dir = ScratchDir::new("dvr-export-dangling").unwrap();
+        let (part, path) = (dir.join("p"), dir.join("b.vdvr"));
+        std::fs::write(&part, b"clip").unwrap();
+        std::os::unix::fs::symlink("nowhere", &path).unwrap();
+        let noreplace = rename_noreplace(&part, &path).map_err(|e| e.kind());
+        let checked = rename_checked(&part, &path).map_err(|e| e.kind());
+        for (how, got) in [("noreplace", noreplace), ("checked", checked)] {
+            assert_eq!(got, Err(io::ErrorKind::AlreadyExists), "{how}");
+        }
+        let link = std::fs::symlink_metadata(&path).unwrap();
+        assert!(link.file_type().is_symlink());
+        assert_eq!(std::fs::read(&part).unwrap(), b"clip");
     }
 
     #[test]

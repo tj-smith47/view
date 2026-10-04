@@ -429,23 +429,44 @@ return {
 /// they stay as typed, and nvim makes the result absolute, `~` and the
 /// current directory included. A path naming an environment variable that
 /// is not set is refused with a message naming it, since `:w` would drop
-/// the variable and write at the filesystem root.
+/// the variable from the path or keep its braced form as typed. nvim
+/// decides what is a variable: an unset name counts where `expandcmd()`
+/// puts its value once it is set, and where the expansion leaves nothing
+/// of it or its braced form. A path that also carries `$$` is accepted,
+/// since the shell expanding it answers with a new pid each time.
 pub(crate) const REGISTER_COMMAND_CHUNK: &str = "\
 local channel, entries, command = ...
 local takes_path = { ['dvr export'] = true }
+local function unset_variable(path, typed)
+  local plain = vim.fn.expandcmd(typed)
+  for name in path:gmatch('%${?([%w_]+)') do
+    if vim.env[name] == nil then
+      local was = vim.uv.os_getenv(name)
+      vim.env[name] = '\\30'
+      local read = vim.fn.expandcmd(typed):find('\\30', 1, true)
+      vim.env[name] = was
+      local other = typed:gsub('(%${?)' .. name .. '%f[^%w_]',
+        '%1VIEW_UNSET_PROBE')
+      if read and (vim.fn.expandcmd(other) == plain
+          or plain:find('${' .. name .. '}', 1, true)) then
+        return name
+      end
+    end
+  end
+end
 vim.api.nvim_create_user_command(command, function(opts)
   local feature = opts.fargs[1] or ''
   local verb = (opts.args:gsub('^%s*%S+%s*', '', 1))
   local word, path = verb:match('^(%S+)%s+(.+)$')
   if word and takes_path[feature .. ' ' .. word] then
-    for name in path:gsub('\\\\.', ''):gmatch('%${?([%w_]+)') do
-      if vim.env[name] == nil then
-        vim.api.nvim_echo({ { 'view: DVR cannot export: $' .. name ..
-          ' is not set', 'ErrorMsg' } }, true, {})
-        return
-      end
+    local typed = vim.fn.escape(path, '%#<')
+    local name = unset_variable(path, typed)
+    if name then
+      vim.api.nvim_echo({ { 'view: DVR cannot export: $' .. name ..
+        ' is not set', 'ErrorMsg' } }, true, {})
+      return
     end
-    path = vim.fn.expandcmd(vim.fn.escape(path, '%#<'))
+    path = vim.fn.expandcmd(typed)
     verb = word .. ' ' .. vim.fn.fnamemodify(path, ':p')
   end
   vim.rpcnotify(channel, 'view_invoke', feature, verb)
