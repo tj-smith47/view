@@ -233,7 +233,12 @@ mod tests {
                 changed: Vec::new(),
                 unverifiable: false,
             });
-            let _ = view_core::update::update(&mut self.model, scrub);
+            let _ = view_core::update::update(&mut self.model, scrub.clone());
+            if self.model.dvr.scrub_frame().is_none() {
+                // a scrub invoked with no keys behind it is one the last
+                // branch's replay owes, which swallows it once
+                let _ = view_core::update::update(&mut self.model, scrub);
+            }
             self.model.dvr.show(at);
             let _ = view_core::update::update(&mut self.model, key("b"));
             let _ = view_core::update::update(&mut self.model, checked);

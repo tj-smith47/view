@@ -230,17 +230,16 @@ pub struct Dvr {
     paused: bool,
     /// Replayed inputs still to fold, which are logged already.
     suppress: usize,
-    /// Replayed DVR verbs still to arrive, which run nothing.
-    absorb: usize,
-    /// The inputs a replay carries after its logged ones: the closing
-    /// resize and the input held while it was owed.
-    trailing: usize,
+    /// The words of the replayed DVR verbs still to arrive, in order,
+    /// which run nothing.
+    owed: VecDeque<String>,
     /// A person's input folded while a replay is owed.
     held: Vec<Msg>,
     /// Each DVR verb and engine restart, with the count of inputs logged
-    /// before it and the newest frame then. Kept whole while frames are
-    /// dropped, since a replay starts from the first input.
-    history: Vec<(usize, u64, Marker)>,
+    /// before it, the newest frame then and the verb's word. Kept whole
+    /// while frames are dropped, since a replay starts from the first
+    /// input.
+    history: Vec<(usize, u64, Marker, String)>,
     /// A branch's recorded input, held until the replacement has started.
     replay: Vec<Msg>,
 }
@@ -333,12 +332,16 @@ impl Dvr {
         self.scrub.take().is_some()
     }
 
-    /// Marks the newest frame as the one a DVR verb ran on.
-    pub(crate) fn mark_invoke(&mut self) {
+    /// Marks the newest frame as the one the DVR verb `word` ran on.
+    pub(crate) fn mark_invoke(&mut self, word: &str) {
         if self.recording {
             self.markers.push((self.last_frame, Marker::Invoke));
-            self.history
-                .push((self.entries.len(), self.last_frame, Marker::Invoke));
+            self.history.push((
+                self.entries.len(),
+                self.last_frame,
+                Marker::Invoke,
+                word.to_owned(),
+            ));
         }
     }
 
@@ -355,8 +358,12 @@ impl Dvr {
     pub fn note_restart(&mut self) {
         if self.recording {
             self.markers.push((self.last_frame, Marker::EngineRestart));
-            self.history
-                .push((self.entries.len(), self.last_frame, Marker::EngineRestart));
+            self.history.push((
+                self.entries.len(),
+                self.last_frame,
+                Marker::EngineRestart,
+                String::new(),
+            ));
         }
     }
 
@@ -385,7 +392,7 @@ impl Dvr {
     pub fn restarts_before(&self, at: u64) -> usize {
         self.history
             .iter()
-            .filter(|(_, frame, kind)| *kind == Marker::EngineRestart && *frame < at)
+            .filter(|(_, frame, kind, _)| *kind == Marker::EngineRestart && *frame < at)
             .count()
     }
 
@@ -423,7 +430,7 @@ impl Dvr {
         self.entries.truncate(kept);
         self.arena.truncate(end);
         self.overflowed_at = None;
-        self.history.retain(|(inputs, frame, kind)| match kind {
+        self.history.retain(|(inputs, frame, kind, _)| match kind {
             Marker::Invoke => *inputs <= kept,
             _ => *frame < at,
         });
@@ -441,9 +448,6 @@ impl Dvr {
         !self.replay.is_empty()
     }
 
-    /// The replay a branch staged, to fold in order now. The log holds
-    /// those inputs already, so folding them logs nothing, and the DVR
-    /// verbs they invoke run nothing.
     /// Keeps `msg`, a person's input folded while a replay is owed, to
     /// follow the replay into the engine.
     pub(crate) fn hold_live(&mut self, msg: Msg) {
@@ -468,26 +472,31 @@ impl Dvr {
             return replay;
         }
         self.suppress = replay.len();
-        self.absorb = self
+        self.owed = self
             .history
             .iter()
-            .filter(|(_, _, kind)| *kind == Marker::Invoke)
-            .count();
+            .filter(|(_, _, kind, _)| *kind == Marker::Invoke)
+            .map(|(_, _, _, word)| word.clone())
+            .collect();
         replay.push(Msg::Resized {
             width: size.0,
             height: size.1,
         });
-        self.trailing = 1 + self.held.len();
         replay.append(&mut self.held);
         replay
     }
 
-    /// Takes one replayed DVR verb, which runs nothing. False for a verb a
-    /// person asked for.
-    pub(crate) fn absorb_invoke(&mut self) -> bool {
-        let absorbed = self.absorb > 0;
-        self.absorb = self.absorb.saturating_sub(1);
-        absorbed
+    /// Takes the replayed DVR verb `word`, which runs nothing, when it is
+    /// the next one owed. False for a verb a person asked for. A verb of
+    /// another word drops every owed verb, since the engine will not run
+    /// the rest.
+    pub(crate) fn absorb_invoke(&mut self, word: &str) -> bool {
+        if self.owed.front().is_some_and(|owed| owed == word) {
+            self.owed.pop_front();
+            return true;
+        }
+        self.owed.clear();
+        false
     }
 
     /// The oldest request the loop has not taken yet.
@@ -548,13 +557,6 @@ impl Dvr {
         if self.suppress > 0 {
             self.suppress -= 1;
             return;
-        }
-        // a replayed verb still owed when a person acts after the replay
-        // is one the engine split apart, and it never arrives
-        if self.trailing > 0 {
-            self.trailing -= 1;
-        } else {
-            self.absorb = 0;
         }
         let span = u32::try_from(self.arena.len())
             .ok()

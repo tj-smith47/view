@@ -41,13 +41,12 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
     if !model.dvr.is_recording() {
         return model.engine.record_native_notice(OFF.to_string(), false);
     }
-    // the keys a replay folds invoke again whatever verb they invoked first
-    if model.dvr.absorb_invoke() {
-        return Vec::new();
-    }
-    model.dvr.mark_invoke();
     // the path is every byte after the first blank run, as typed
     let (word, path) = verb.split_once(char::is_whitespace).unwrap_or((verb, ""));
+    if model.dvr.absorb_invoke(word) {
+        return Vec::new();
+    }
+    model.dvr.mark_invoke(word);
     match word {
         "scrub" if !model.dvr.open_scrub() => {
             model.engine.record_native_notice(EMPTY.to_string(), false)
@@ -720,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn a_replayed_verb_that_never_fires_leaves_no_verb_swallowed() {
+    fn a_replayed_verb_that_never_fires_swallows_one_verb_of_its_word() {
         let mut m = recorded();
         let _ = update(&mut m, invoke_msg("scrub"));
         let _ = update(&mut m, key("q"));
@@ -729,9 +728,59 @@ mod tests {
         branched(&mut m, 10, 10);
         let _ = update(&mut m, key("j"));
         let _ = update(&mut m, invoke_msg("scrub"));
+        assert!(m.dvr.scrub_frame().is_none(), "the owed scrub is swallowed");
+        assert!(exports(&mut m).is_empty(), "nothing is written");
+        let _ = update(&mut m, invoke_msg("scrub"));
         assert!(
             m.dvr.scrub_frame().is_some(),
-            "a scrub asked for after the replay settled opens"
+            "the next scrub asked for opens"
+        );
+    }
+
+    #[test]
+    fn a_replayed_export_is_absorbed_however_late_it_arrives() {
+        let mut m = recorded();
+        let _ = update(&mut m, key("x"));
+        let _ = update(&mut m, invoke_msg("export a.vdvr"));
+        let _ = exports(&mut m);
+        m.dvr.note_frame(10, 2);
+        branched(&mut m, 10, 10);
+        let _ = update(
+            &mut m,
+            Msg::Resized {
+                width: 100,
+                height: 30,
+            },
+        );
+        let _ = update(&mut m, key("j"));
+        let _ = update(&mut m, invoke_msg("export a.vdvr"));
+        assert!(
+            exports(&mut m).is_empty(),
+            "the replayed export runs nothing"
+        );
+        let _ = update(&mut m, invoke_msg("export b.vdvr"));
+        assert_eq!(exports(&mut m), [Some("b.vdvr".to_owned())]);
+    }
+
+    #[test]
+    fn a_verb_of_another_word_runs_while_one_is_owed() {
+        let mut m = recorded();
+        let _ = update(&mut m, invoke_msg("export a.vdvr"));
+        let _ = exports(&mut m);
+        let _ = update(&mut m, key("x"));
+        m.dvr.note_frame(10, 2);
+        branched(&mut m, 10, 10);
+        let _ = update(&mut m, invoke_msg("scrub"));
+        assert!(
+            m.dvr.scrub_frame().is_some(),
+            "a scrub opens past an owed export"
+        );
+        let _ = update(&mut m, key("q"));
+        let _ = update(&mut m, invoke_msg("export c.vdvr"));
+        assert_eq!(
+            exports(&mut m),
+            [Some("c.vdvr".to_owned())],
+            "the mismatch dropped what was owed"
         );
     }
 }
