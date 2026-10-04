@@ -835,6 +835,63 @@ fn a_callback_names_the_file_a_person_wrote_or_none() {
     );
 }
 
+/// Under the engine's own runtime, a mapping set straight to one of its
+/// functions names no file, and one set to a function a person wrote in a
+/// file of their own names that file.
+#[test]
+fn a_callback_set_straight_to_a_runtime_function_names_no_file() {
+    let session = Session::start_with(
+        "runtime-callback",
+        "local dir = vim.fs.dirname(debug.getinfo(1, 'S').source:sub(2))\n\
+         vim.fn.writefile({ 'return function() end' }, dir .. '/mine.lua')\n\
+         vim.keymap.set('n', '<leader>d', vim.diagnostic.open_float, { desc = 'Float' })\n\
+         vim.keymap.set('n', '<leader>k', dofile(dir .. '/mine.lua'), { desc = 'Mine' })\n",
+    );
+    let _ = session.register(&NativeConfig::all_enabled());
+    let owners = session
+        .wait_for(ARRIVAL, |msg| match msg {
+            Msg::UserMappingOwners { owners } => Some(owners.clone()),
+            _ => None,
+        })
+        .expect("the registration reads whose the user's own keys are");
+    let script = |lhs: &str| {
+        owners
+            .iter()
+            .find(|(key, _)| key == lhs)
+            .map(|(_, owner)| owner.script.clone())
+            .unwrap_or_else(|| panic!("{lhs} must be read: {owners:?}"))
+    };
+    assert_eq!(script(",d"), None, "nvim's own function has no file");
+    let mine = script(",k");
+    assert!(
+        mine.as_deref()
+            .is_some_and(|script| script.ends_with("mine.lua:1")),
+        "{mine:?}"
+    );
+}
+
+/// A user's mapping that draws nothing, then view's key and a query typed
+/// at once: the query waits for view's invocation, and none of it reaches
+/// nvim as a command that edits the buffer.
+#[test]
+fn keys_typed_ahead_after_a_users_mapping_never_edit_the_buffer() {
+    let session = Session::start_with(
+        "typed-ahead",
+        "vim.keymap.set('n', '<leader>j', '<cmd>let g:view_quiet = 1<CR>')\n",
+    );
+    let mut model = registered_model(&session);
+    let keys = [",", "j", ",", "f", "b", "m", "a", "i", "n"];
+    let sent = type_into(&session, &mut model, &keys);
+    pump(&session, &mut model, ARRIVAL, |_, msg| {
+        matches!(msg, Msg::FeatureInvoke { .. }).then_some(())
+    })
+    .expect("nvim runs view's <leader>fb");
+    assert_eq!(session.eval("g:view_quiet"), "1", "the user's mapping ran");
+    assert_eq!(session.eval("join(getline(1, '$'), '|')"), "");
+    assert_eq!(session.eval("mode()"), "n");
+    assert_eq!(sent, keys[..5], "the query waits for view's invocation");
+}
+
 /// A stub that maps the real handler over itself and types its keys again
 /// logs one row for one press, naming the stub.
 #[test]

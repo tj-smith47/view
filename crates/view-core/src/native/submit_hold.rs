@@ -317,7 +317,7 @@ pub struct SubmitHold {
     recent: std::collections::VecDeque<Folded>,
     /// The key whose argument nvim reads the next normal-mode key as: the
     /// key before it takes one, and was not itself an argument.
-    argument_of: Option<String>,
+    argument_of: Option<&'static str>,
     /// Whether a key that leaves normal mode has gone out since nvim last
     /// reported a mode, so the mode view last read may be stale.
     mode_unsure: bool,
@@ -363,6 +363,9 @@ struct Folded {
     /// Whether a key that leaves normal mode went out ahead of it, with no
     /// mode reported since.
     mode_unsure: bool,
+    /// Whether one of the user's mappings fired ahead of it with no answer
+    /// from nvim since, so its rhs may have left normal mode.
+    mapped_unsure: bool,
     /// Whether nvim reads it as part of an operator's motion.
     operand: bool,
 }

@@ -161,6 +161,30 @@ fn a_registration_reads_the_users_own_keys_and_timeoutlen() {
     assert_eq!(timeoutlen, Some(Duration::from_millis(300)));
 }
 
+/// A mapping of the user's that one of view's keys replaced is no key of
+/// theirs any more, since nvim runs view's.
+#[test]
+fn a_registration_leaves_out_the_users_keys_it_claimed() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    for setup in [
+        "execute('let mapleader = \" \"')",
+        "execute('nnoremap <leader>ff :echo<CR>')",
+        "execute('nnoremap <leader>fg :echo<CR>')",
+    ] {
+        engine.handle.eval_str(setup).unwrap();
+    }
+    let specs = [MappingSpec {
+        feature: "picker",
+        lhs: Cow::Borrowed("<leader>ff"),
+        verb: "files",
+        rhs: Rhs::Invoke,
+    }];
+    engine.handle.register_mappings(&specs, channel).unwrap();
+    let (keys, _) = next_user_keys(&rx);
+    assert!(keys.iter().any(|k| k == "<Space>fg"), "{keys:?}");
+    assert!(!keys.iter().any(|k| k == "<Space>ff"), "{keys:?}");
+}
+
 /// The next `Msg::UserMappingsRead` on `rx`, every other message discarded.
 fn next_user_keys(rx: &mpsc::Receiver<Msg>) -> (Vec<String>, Option<Duration>) {
     loop {

@@ -89,12 +89,18 @@ impl UserRun {
     /// Sorts and dedups `keys` in place so a run can be searched for, and
     /// learns how long nvim waits for the rest of one, `None` where it
     /// waits for good. The run in progress is read on against the new
-    /// keys, since a read lands between any two keys.
+    /// keys, since a read lands between any two keys, and is forgotten
+    /// where the new keys leave nothing to read it against.
     pub(crate) fn learn_user(&mut self, keys: &mut Vec<Vec<String>>, wait: Option<Duration>) {
         keys.sort();
         keys.dedup();
         self.longest = keys.iter().map(Vec::len).max().unwrap_or(0);
         self.wait = wait;
+        // a run no read key can extend any more, or one longer than the
+        // window keeps, points past the keys it was read from
+        if self.longest == 0 || self.run > self.window() {
+            self.reset();
+        }
     }
 
     /// Learns view's invoking sequences, each spelled as `keytrans()`
@@ -146,20 +152,34 @@ impl UserRun {
     /// the run in it. A whole mapping pending inside it ran then, so it
     /// fires stamped with its own last key's time. The rest of the run went
     /// to nvim as typed keys and is matched no further.
-    pub(crate) fn time_out(&mut self, recent: &mut VecDeque<Folded>, now: SystemTime) -> bool {
+    ///
+    /// nvim reads the gap on its own clock, which may differ from view's by
+    /// up to `margin`. A gap that close to `'timeoutlen'` ends the run with
+    /// no row, and a whole mapping pending in it is one nvim ran unseen.
+    pub(crate) fn time_out(
+        &mut self,
+        recent: &mut VecDeque<Folded>,
+        now: SystemTime,
+        margin: Duration,
+    ) -> bool {
         let last = self.last.replace(now);
-        let expired = self.run > 0
-            && self
-                .wait
-                .zip(last)
-                .is_some_and(|(wait, last)| now.duration_since(last).is_ok_and(|gap| gap > wait));
-        if !expired {
+        let gap = last.and_then(|last| now.duration_since(last).ok());
+        let Some((wait, gap)) = self.wait.zip(gap).filter(|_| self.run > 0) else {
+            return false;
+        };
+        if gap.saturating_add(margin) <= wait {
             return false;
         }
         let start = recent.len().saturating_sub(self.run);
-        if let Some((pending, at)) = self.pending.take() {
-            self.fire(recent, start, pending, at);
-            self.refold(recent, start + pending);
+        match self.pending.take() {
+            Some((pending, at)) if gap > wait.saturating_add(margin) => {
+                self.fire(recent, start, pending, at);
+                self.refold(recent, start + pending);
+            }
+            // an end past every key raises the doubt of a mapping that ran
+            // and reads no key after it
+            Some(_) => self.fired_end = Some(recent.len()),
+            None => {}
         }
         self.run = 0;
         true
@@ -352,21 +372,26 @@ impl UserRun {
 /// The mode is read the same way. `o<Space>e` typed inside one round trip
 /// reaches nvim in insert mode, where it is text, while the mode view last
 /// read still says normal. A sequence whose first key went out behind a
-/// key that leaves normal mode, or behind a fired user mapping, with no
-/// answer from nvim since, arms nothing. Its keys are kept for the row the
-/// invocation logs should nvim run it.
+/// key that leaves normal mode, with no answer from nvim since, arms
+/// nothing. Its keys are kept for the row the invocation logs should nvim
+/// run it. A fired user mapping nvim has not answered yet still arms the
+/// hold: keys typed ahead are held a little longer when its rhs did leave
+/// normal mode, and edit the buffer when it did not.
 pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     let normal = model.engine.mode.current == "normal";
     let now = model.key_log().now();
     let round_trip = crate::native::speculate::cmdline_backstop(model);
+    let margin = round_trip_spread(&model.engine.key_round_trips);
     let hold = &mut model.submit_hold;
-    // a rhs that left normal mode is reported inside the round trip bound,
-    // and one that draws nothing sends no batch to clear the doubt
+    // a mode nvim entered is reported inside the round trip bound, and a
+    // key it swallowed, or a rhs that draws nothing, sends no batch to
+    // clear the doubt
     let gap = hold.user_run.since_last(now);
     let quiet =
         |ran_after: Duration| gap.is_some_and(|gap| gap.saturating_sub(ran_after) > round_trip);
     if quiet(Duration::ZERO) {
         hold.mapped_unsure = false;
+        hold.mode_unsure = false;
     }
     let argument_of = hold.argument_of.take();
     let window = hold.user_run.window();
@@ -378,21 +403,28 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         hold.user_run.reset();
         return false;
     }
-    if hold.user_run.time_out(&mut hold.recent, now) {
+    if hold.user_run.time_out(&mut hold.recent, now, margin) {
         hold.note_fired();
         // nvim ran the held mapping `'timeoutlen'` after its last key
         if quiet(hold.user_run.wait.unwrap_or_default()) {
             hold.mapped_unsure = false;
+            hold.mode_unsure = false;
         }
         // nvim has read every key before the gap as typed
         hold.recent.clear();
     }
     let key = canonical(notation);
-    hold.argument_of = (argument_of.is_none()
-        && crate::native::speculate::CMDLINE_LITERAL_KEYS.contains(&notation))
-    .then(|| key.clone());
-    let mode_unsure = hold.mode_unsure || hold.mapped_unsure;
-    hold.mode_unsure |= leaves_normal(argument_of.as_deref(), &key);
+    hold.argument_of = argument_of
+        .is_none()
+        .then(|| {
+            crate::native::speculate::CMDLINE_LITERAL_KEYS
+                .into_iter()
+                .find(|literal| *literal == notation)
+        })
+        .flatten();
+    let mode_unsure = hold.mode_unsure;
+    let mapped_unsure = hold.mapped_unsure;
+    hold.mode_unsure |= leaves_normal(argument_of, &key);
     while hold.recent.len() >= window {
         hold.recent.pop_front();
     }
@@ -401,6 +433,7 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         key,
         argument: argument_of.is_some(),
         mode_unsure,
+        mapped_unsure,
         operand,
     });
     let Some(start) = hold.user_run.completed(&hold.recent, &hold.user_keys) else {
@@ -459,9 +492,20 @@ impl super::SubmitHold {
 /// Whether nvim reads the key at `start` in normal mode: no argument of the
 /// key before it, no mode change in flight, and no operator waiting.
 fn starts_normal(recent: &VecDeque<Folded>, start: usize) -> bool {
-    recent
-        .get(start)
-        .is_some_and(|first| !first.argument && !first.mode_unsure && !first.operand)
+    recent.get(start).is_some_and(|first| {
+        !first.argument && !first.mode_unsure && !first.mapped_unsure && !first.operand
+    })
+}
+
+/// How far apart the recent key round trips lie, the jitter between when
+/// view stamped a key and when nvim read it.
+fn round_trip_spread(trips: &[Option<Duration>]) -> Duration {
+    let trips = trips.iter().flatten();
+    trips
+        .clone()
+        .max()
+        .zip(trips.min())
+        .map_or(Duration::ZERO, |(max, min)| max.saturating_sub(*min))
 }
 
 /// The keys of `recent` from `start`.
@@ -537,6 +581,7 @@ mod tests {
                     key: (*key).to_string(),
                     argument,
                     mode_unsure: false,
+                    mapped_unsure: false,
                     operand,
                 });
                 match run.completed(&recent, user) {
@@ -627,24 +672,96 @@ mod tests {
         wait: Option<Duration>,
         typed: &[(&str, u64)],
     ) -> Vec<(Vec<String>, SystemTime)> {
+        let typed: Vec<_> = typed
+            .iter()
+            .map(|(key, secs)| (*key, secs * 1000))
+            .collect();
+        timed_ms(user, wait, Duration::ZERO, &typed)
+    }
+
+    /// [`timed`] with `(key, ms)` stamps, nvim's clock up to `margin` away
+    /// from view's.
+    fn timed_ms(
+        user: &mut Vec<Vec<String>>,
+        wait: Option<Duration>,
+        margin: Duration,
+        typed: &[(&str, u64)],
+    ) -> Vec<(Vec<String>, SystemTime)> {
         let mut run = UserRun::default();
         run.learn_user(user, wait);
         let mut recent = VecDeque::new();
         let mut fired = Vec::new();
-        for (key, secs) in typed {
-            if run.time_out(&mut recent, at(*secs)) {
+        for (key, ms) in typed {
+            let now = AT + Duration::from_millis(*ms);
+            if run.time_out(&mut recent, now, margin) {
                 recent.clear();
             }
-            recent.push_back(Folded {
-                key: (*key).to_string(),
-                argument: false,
-                mode_unsure: false,
-                operand: false,
-            });
-            run.step(&mut recent, user, at(*secs));
+            recent.push_back(folded(key));
+            run.step(&mut recent, user, now);
             fired.extend(run.take_fired());
         }
         fired
+    }
+
+    fn folded(key: &str) -> Folded {
+        Folded {
+            key: key.to_string(),
+            argument: false,
+            mode_unsure: false,
+            mapped_unsure: false,
+            operand: false,
+        }
+    }
+
+    /// A gap within the round trips' jitter of `'timeoutlen'` may have
+    /// read on the other side of it on nvim's clock, so it completes no
+    /// mapping and fires none held at it: no row where nvim may have run
+    /// another.
+    #[test]
+    fn a_gap_this_close_to_timeoutlen_logs_nothing() {
+        let wait = Some(Duration::from_millis(1000));
+        let margin = Duration::from_millis(5);
+        for late in [997, 1003] {
+            let typed = [(" ", 0), ("f", 10), ("g", 10 + late)];
+            let mut user = mappings(&[&[" ", "f", "g"]]);
+            assert_eq!(timed_ms(&mut user, wait, margin, &typed), [], "{late}");
+            let mut user = mappings(&[&[" ", "f"], &[" ", "f", "g"]]);
+            assert_eq!(timed_ms(&mut user, wait, margin, &typed), [], "{late}");
+        }
+        let typed = [(" ", 0), ("f", 10), ("g", 1100)];
+        let mut user = mappings(&[&[" ", "f"], &[" ", "f", "g"]]);
+        assert_eq!(
+            timed_ms(&mut user, wait, margin, &typed),
+            [(keys(&[" ", "f"]).remove(0), AT + Duration::from_millis(10))],
+            "a gap past the jitter"
+        );
+    }
+
+    /// A read that takes every mapping away mid-run forgets the run, so a
+    /// gap after it reads no keys the window no longer holds.
+    #[test]
+    fn a_read_with_no_mappings_forgets_the_run() {
+        let mut run = UserRun::default();
+        run.learn_view([String::from("q")].iter());
+        let wait = Some(Duration::from_secs(1));
+        let mut user = mappings(&[&[" ", "f"], &[" ", "f", "g"]]);
+        run.learn_user(&mut user, wait);
+        let mut recent = VecDeque::new();
+        for key in [" ", "f"] {
+            assert!(!run.time_out(&mut recent, at(0), Duration::ZERO));
+            recent.push_back(folded(key));
+            run.step(&mut recent, &user, at(0));
+        }
+        run.learn_user(&mut Vec::new(), wait);
+        let user = Vec::new();
+        assert!(!run.time_out(&mut recent, at(0), Duration::ZERO));
+        while recent.len() >= run.window() {
+            recent.pop_front();
+        }
+        recent.push_back(folded("x"));
+        run.step(&mut recent, &user, at(0));
+        assert!(!run.time_out(&mut recent, at(9), Duration::ZERO));
+        assert!(run.take_fired().is_empty());
     }
 
     /// A gap past `'timeoutlen'` is where nvim gave up on the run: no

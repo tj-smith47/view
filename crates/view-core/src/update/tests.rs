@@ -21575,6 +21575,47 @@ fn a_key_long_after_a_timed_out_mapping_is_matched() {
     }
 }
 
+/// A user's mapping nvim has not answered yet leaves view's hold armed: the
+/// keys typed at once after view's sequence wait for its invocation, and
+/// none of them reaches nvim as a command or logs a row.
+#[test]
+fn a_users_mapping_never_lets_typed_ahead_keys_through() {
+    let mut m = started_model();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    user_mappings(
+        &mut m,
+        &["<Space>c", "m"],
+        Some(Duration::from_millis(1000)),
+    );
+    let _ = typed(&mut m, &[" ", "c", " ", "u", "f"]);
+    assert!(m.submit_hold.is_holding(), "view's key arms the hold");
+    let sent: Vec<_> = typed(&mut m, &["m", "a", "i", "n"])
+        .into_iter()
+        .filter(|effect| matches!(effect, Effect::Rpc(RpcCall::Input { .. })))
+        .collect();
+    assert!(sent.is_empty(), "{sent:?}");
+    assert_eq!(user_rows(&m), ["<Space>c"], "no row for m");
+}
+
+/// A key that leaves normal mode and that nvim swallowed changes no mode,
+/// so nvim reports none. A key pressed a round trip later with the mode
+/// still normal is read in normal mode: a mapping is logged, and view's
+/// key arms the hold.
+#[test]
+fn a_key_a_round_trip_after_a_swallowed_mode_key_is_matched() {
+    let mut m = started_model();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    typed_at(
+        &mut m,
+        &["s"],
+        Some(Duration::from_millis(1000)),
+        &[("o", 0), ("s", 500), (" ", 510), ("u", 520), ("f", 530)],
+    );
+    assert_eq!(user_rows(&m), ["s"]);
+    assert!(m.submit_hold.is_holding(), "view's key arms the hold");
+}
+
 /// A click or a paste ends the mapping nvim waits on, so the keys after it
 /// start a new run.
 #[test]

@@ -119,7 +119,8 @@ use view_core::native::mappings::{
 /// own passes those keys on to nvim, the way a buffer tile does, and waits
 /// on a sequence's prefix as long as nvim would. `<Plug>` and `<SNR>` keys
 /// are left out, since no one types them, and so are view's own, which
-/// the claims carry. Both are read again by the same listener as `:`, and
+/// the claims carry, and the user's mappings a claim replaced, which nvim
+/// no longer runs. Both are read again by the same listener as `:`, and
 /// sent on the `view_bridge` `user_keys` event when they moved, so a
 /// mapping a config sets on `VeryLazy` reaches the windowed tree the way
 /// it reaches a tile. That read walks every global normal-mode map, and one
@@ -140,9 +141,10 @@ use view_core::native::mappings::{
 /// lhs, the mapping's `desc`, else its rhs, else `<Lua callback>`, whether
 /// it is the buffer's own, and the file that set it relative to the config
 /// directory. That file is the script nvim names (a positive `sid`), or
-/// the file and line a Lua callback was defined at. A C function has none,
-/// and a callback defined in nvim's own runtime names the file of a
-/// function it wraps, else none. The event is sent when a row moved, a
+/// the file and line a Lua callback was defined at, an absolute path
+/// outside nvim's own runtime. A C function has none. A function of nvim's
+/// runtime or of the modules compiled into it has none either, unless it
+/// wraps a function defined in such a file. The event is sent when a row moved, a
 /// description alone included. A claim carries the same description of
 /// the mapping it was set over under `displaced`, read from the snapshot
 /// the restore keeps, and the verb its spec names. The key log reads both,
@@ -192,25 +194,23 @@ local function defined(fn)
   local info = debug.getinfo(fn, 'S')
   local src = info.source or ''
   if info.what == 'C' or not vim.startswith(src, '@') then return nil end
-  return vim.fs.normalize(src:sub(2)), info.linedefined
+  local file = vim.fs.normalize(src:sub(2))
+  -- nvim loads its built-in modules under relative chunk names (`vim/F`)
+  local absolute = vim.startswith(file, '/') or file:match('^%a:/') ~= nil
+  if not absolute or vim.startswith(file, runtime) then return nil end
+  return file, info.linedefined
 end
 local function callback_script(fn)
   -- a Lua-set mapping records no script id unless nvim runs verbose, so
   -- the callback's own definition names the file
   local file, line = defined(fn)
-  if file and vim.startswith(file, runtime) then
-    -- nvim's keymap wrapper closes over the function the config passed
-    file = nil
-    local i = 1
-    while file == nil do
-      local name, value = debug.getupvalue(fn, i)
-      if name == nil then break end
-      if type(value) == 'function' then
-        local f, l = defined(value)
-        if f and not vim.startswith(f, runtime) then file, line = f, l end
-      end
-      i = i + 1
-    end
+  -- nvim's keymap wrapper closes over the function the config passed
+  local i = 1
+  while file == nil do
+    local name, value = debug.getupvalue(fn, i)
+    if name == nil then break end
+    if type(value) == 'function' then file, line = defined(value) end
+    i = i + 1
   end
   return file and short(file) .. ':' .. line or nil
 end
@@ -297,9 +297,7 @@ local function read_user_keys()
     table.concat(rows, '\\n')
 end
 local user_keys, timeoutlen, cmdline_maps, cmdline_read, user_owners,
-  owners_read = read_user_keys()
-local user_read = table.concat(user_keys, ' ') .. ' ' .. timeoutlen
-  .. '\\n' .. cmdline_read
+  owners_read, user_read
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
   if vim.api.nvim_buf_is_loaded(buf) then
     note(vim.api.nvim_buf_get_keymap(buf, 'n'))
@@ -395,6 +393,12 @@ for _, spec in ipairs(specs) do
   }
 end
 vim.g.view_registered_keys = registered_now
+-- read once view's keys have replaced the user's mappings they claim,
+-- which nvim no longer runs
+user_keys, timeoutlen, cmdline_maps, cmdline_read, user_owners,
+  owners_read = read_user_keys()
+user_read = table.concat(user_keys, ' ') .. ' ' .. timeoutlen
+  .. '\\n' .. cmdline_read
 assert(load(command_chunk))(channel, entries, command)
 return {
   claims = claimed,
