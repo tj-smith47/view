@@ -20,6 +20,12 @@ pub const CAPACITY: usize = 200;
 /// The title the key log is drawn under.
 pub const KEY_LOG_TITLE: &str = "Keys";
 
+/// The rows the key log's frame takes, its title in the top one.
+pub(crate) const FRAME_ROWS: u16 = 2;
+
+/// The fewest rows the key log is drawn in: its frame and one row.
+pub(crate) const MIN_ROWS: u16 = 3;
+
 /// Which mapping fired.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -247,6 +253,12 @@ impl KeyLogView {
             .entries()
             .map(|entry| entry.label(self.utc_offset_secs, width))
             .collect();
+    }
+
+    /// How many rows the overlay holds.
+    #[must_use]
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
     }
 
     /// Whether a person has entered the overlay.

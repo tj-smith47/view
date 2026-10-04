@@ -21,7 +21,7 @@ use view_core::msg::{Effect, Key, Msg, RpcCall};
 use view_core::native::key_log::Fired;
 use view_core::native::mappings::{MappingClaim, MappingOwner};
 use view_core::native::registry;
-use view_core::native::speculate::{is_cmdline_mode, CMDLINE_LITERAL_KEYS};
+use view_core::native::speculate::{fold_redraw, is_cmdline_mode, SpecStamp, CMDLINE_LITERAL_KEYS};
 use view_core::native::surfaces::Taken;
 use view_core::update::update;
 use view_engine::process::Engine;
@@ -568,6 +568,12 @@ fn applied<T>(
 ) -> Option<T> {
     let mut found = None;
     for msg in msgs {
+        // the runtime reads every batch for the keys nvim answered before
+        // the update applies it
+        if let Msg::Redraw(events) = &msg {
+            let stamp = SpecStamp::new(Duration::ZERO);
+            send(&fold_redraw(model, events, stamp));
+        }
         let effects = update(model, msg.clone());
         send(&effects);
         found = found.or_else(|| done(model, &msg));
@@ -628,6 +634,7 @@ fn send(session: &Session, effects: &[Effect]) {
 fn type_into(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String> {
     let mut sent = Vec::new();
     for key in keys {
+        model.set_now(std::time::SystemTime::now());
         let effects = update(
             model,
             Msg::Key(Key {
@@ -730,7 +737,11 @@ fn a_buffer_local_mapping_set_on_lsp_attach_is_logged_as_the_buffers_own() {
     // every rhs is a function: nvim answers no request between a `<Nop>`
     // rhs and the next key
     let keys = ["g", "d", "g", "y"];
-    assert_eq!(type_into(&session, &mut model, &keys), keys);
+    assert_eq!(type_into(&session, &mut model, &keys[..2]), keys[..2]);
+    // a key typed before nvim answers a mapping may have been text its rhs
+    // waits on, and gd draws nothing, so gy waits out a round trip
+    session.eval("execute('lua vim.wait(300, function() return false end)')");
+    assert_eq!(type_into(&session, &mut model, &keys[2..]), keys[2..]);
     assert_eq!(session.eval("g:view_gd"), "1", "the buffer's gd ran");
     let at = |label: &str, buffer: bool, lhs: &str| (lhs.to_string(), label.to_string(), buffer);
     assert_eq!(
@@ -848,6 +859,71 @@ fn a_lazy_stub_logs_one_row_naming_the_stub() {
     assert_eq!(
         rows[0].1.as_ref().map(|owner| owner.label.as_str()),
         Some("Stub")
+    );
+
+    idle_until_read(&session, &mut model, ",j", "Real");
+    // the stub draws nothing, so only a key pressed a round trip later is
+    // read in normal mode
+    session.eval("execute('lua vim.wait(300, function() return false end)')");
+    let _ = type_into(&session, &mut model, &[",", "j"]);
+    assert_eq!(session.eval("g:view_stub"), "2");
+    let rows = row_labels(&model);
+    assert_eq!(
+        rows.last()
+            .map(|(lhs, label, _)| (lhs.as_str(), label.as_str())),
+        Some((",j", "Real")),
+        "the second press ran the real handler: {rows:?}"
+    );
+}
+
+/// Raises an idle moment in nvim and applies the pump until `lhs` is read
+/// as `label`'s, then until nvim is in normal mode.
+fn idle_until_read(session: &Session, model: &mut Model, lhs: &str, label: &str) {
+    session.eval("execute('doautocmd CursorHold')");
+    pump(session, model, ARRIVAL, |_, msg| match msg {
+        Msg::UserMappingOwners { owners } => owners
+            .iter()
+            .any(|(key, owner)| key == lhs && owner.label == label)
+            .then_some(()),
+        _ => None,
+    })
+    .unwrap_or_else(|| panic!("an idle moment must read {lhs} as {label}'s"));
+    if model.engine.mode.current != "normal" {
+        pump(session, model, ARRIVAL, |model, _| {
+            (model.engine.mode.current == "normal").then_some(())
+        })
+        .expect("nvim must report normal mode");
+    }
+}
+
+/// A buffer mapping a deferred callback sets after the buffer is entered
+/// is read at the next idle moment, and its keys log the buffer's own
+/// mapping over the shorter global one.
+#[test]
+fn a_buffer_mapping_set_after_the_buffer_is_entered_is_logged() {
+    let session = Session::start_with(
+        "deferred-buffer-map",
+        "vim.g.view_hs = 0\n\
+         vim.keymap.set('n', '<leader>h', function() end, { desc = 'Global h' })\n\
+         vim.api.nvim_create_autocmd('BufEnter', { callback = function(args)\n\
+         \x20 vim.defer_fn(function()\n\
+         \x20   vim.keymap.set('n', '<leader>hs', function() vim.g.view_hs = 1 end,\n\
+         \x20     { buffer = args.buf, desc = 'Deferred hs' })\n\
+         \x20 end, 20)\n\
+         end })\n",
+    );
+    let mut model = registered_model(&session);
+    session.eval("execute('enew')");
+    session.eval("execute('lua vim.wait(200, function() return false end)')");
+    idle_until_read(&session, &mut model, ",hs", "Deferred hs");
+    let keys = [",", "h", "s"];
+    assert_eq!(type_into(&session, &mut model, &keys), keys);
+    assert_eq!(session.eval("g:view_hs"), "1", "the buffer's ,hs ran");
+    let rows = row_labels(&model);
+    assert_eq!(
+        rows.last(),
+        Some(&(",hs".to_string(), "Deferred hs".to_string(), true)),
+        "{rows:?}"
     );
 }
 

@@ -1160,10 +1160,10 @@ fn palette_body(view: &PaletteView) -> Body {
     }
 }
 
-/// A windowed stream or ticker's rows: the same items [`palette_body`]
-/// lists, with no query header and no rule -- the tile's own frame already
-/// marks the surface's edge, and a query row with nothing typed into it
-/// would be chrome for an input the stream never takes.
+/// The rows of a titled list that takes no query: the same items
+/// [`palette_body`] lists, under the title, with no query header and no
+/// rule. A query row with nothing typed into it would stand for an input
+/// the list never takes.
 fn stream_body(view: &PaletteView) -> Body {
     Body {
         title: view.title.clone(),

@@ -734,10 +734,11 @@ nothing.
 
 ## The key log
 
-`<leader>fk` opens the key log in the middle of the screen. Each
-mapping you fire is added to the top as it runs: the key, whose mapping it
-is, and for one of view's defaults the mapping of yours it took the key
-from.
+`<leader>fk` opens the key log at the bottom of the screen. It moves to the
+top while your cursor is on a line under it, and grows with its rows up to
+two fifths of the screen. Each mapping you fire is added to the top as it
+runs: the key, whose mapping it is, and for one of view's defaults the
+mapping of yours it took the key from.
 
 ```
 14:02:11  <Space>fk  view    keys log

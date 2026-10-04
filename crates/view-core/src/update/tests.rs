@@ -7689,6 +7689,17 @@ fn answer_batch_at(m: &mut Model, batch: Vec<UiEvent>, stamp: SpecStamp) {
     let _ = update(m, Msg::Redraw(batch));
 }
 
+/// nvim answering the last key with a cursor move on its cursor grid.
+fn answered(m: &mut Model) {
+    let grid = m.engine.grids().cursor_local().0 .0;
+    let goto = UiEvent::GridCursorGoto {
+        grid,
+        row: 0,
+        col: 0,
+    };
+    answer_batch(m, vec![goto, UiEvent::Flush]);
+}
+
 /// A redraw that answers the `:` before nvim shows the line, a timer's
 /// cursor move, leaves the rest of the line nvim's.
 #[test]
@@ -21166,6 +21177,7 @@ fn a_users_mapping_typed_in_a_buffer_is_logged_once_it_completes() {
     let effects = typed(&mut m, &["g"]);
     assert_eq!(meta_inputs(&effects), ["g"], "{effects:?}");
     assert_eq!(user_rows(&m), ["<Space>fg"]);
+    answered(&mut m);
     let _ = typed(&mut m, &["g", "d"]);
     assert_eq!(user_rows(&m), ["gd", "<Space>fg"]);
 }
@@ -21348,27 +21360,285 @@ fn a_click_over_the_unentered_key_log_keeps_the_next_key_for_nvim() {
     assert!(key_log_rows(&m).is_some(), "the click left the log open");
 }
 
+/// Moves nvim's cursor to `row` of a global grid as large as `m`'s
+/// terminal.
+fn cursor_at(m: &mut Model, row: u64) {
+    let (width, height) = (u64::from(m.term_width), u64::from(m.term_height));
+    let _ = update(
+        m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 1,
+                width,
+                height,
+            },
+            UiEvent::GridCursorGoto {
+                grid: 1,
+                row,
+                col: 0,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+}
+
+fn key_log_rect(m: &Model) -> crate::native::geometry::OverlayRect {
+    let overlay = m
+        .overlays()
+        .iter()
+        .find(|overlay| matches!(overlay.kind, OverlayKind::KeyLog(_)))
+        .expect("the log is open");
+    assert_eq!(m.joined_anchor(overlay), None, "the log docks nowhere");
+    m.overlay_rect(overlay)
+}
+
 /// The log sits inside the screen, clear of the top and bottom rows the
 /// frames draw their borders on, at most 120 columns wide, and as wide as
-/// an 80-column screen. It takes no width from the tiles under it.
+/// an 80-column screen. It takes no width from the tiles under it. It sits
+/// at the bottom, and moves to the top while the cursor's row is under it,
+/// so the line being edited stays in sight.
 #[test]
-fn the_key_log_fits_inside_the_frames_and_uses_the_width_there_is() {
+fn the_key_log_fits_inside_the_frames_and_stays_clear_of_the_cursor() {
     for (width, want) in [(160, 120), (80, 80)] {
         let mut m = Model::with_term_size(width, 40)
             .with_look(crate::model::Look::new(crate::model::Panes::Tiles, false));
+        cursor_at(&mut m, 3);
         let _ = update(&mut m, feature_invoke("keys", "log"));
-        let overlay = m
-            .overlays()
-            .iter()
-            .find(|overlay| matches!(overlay.kind, OverlayKind::KeyLog(_)))
-            .expect("the log is open");
-        assert_eq!(m.joined_anchor(overlay), None, "the log docks nowhere");
-        let rect = m.overlay_rect(overlay);
+        let rect = key_log_rect(&m);
+        let (top, status) = (m.chrome_rows(), 40 - m.cmdline_rows() - 1);
         assert_eq!(rect.width, want, "{width} columns: {rect:?}");
         assert!(rect.col + rect.width <= width, "{rect:?}");
-        assert!(rect.row > 1, "clear of the top border: {rect:?}");
-        assert!(rect.row + rect.height < 39, "clear of the bottom: {rect:?}");
+        assert!(rect.row > top, "clear of the top border: {rect:?}");
+        assert!(
+            rect.row + rect.height <= status,
+            "clear of the status row: {rect:?}"
+        );
+        assert!(
+            rect.row > 20,
+            "a cursor near the top: at the bottom {rect:?}"
+        );
+        assert!(!(rect.row..rect.row + rect.height).contains(&3), "{rect:?}");
+
+        cursor_at(&mut m, 36);
+        let rect = key_log_rect(&m);
+        assert!(
+            rect.row < 20,
+            "a cursor near the bottom: at the top {rect:?}"
+        );
+        assert!(rect.row > top, "clear of the top border: {rect:?}");
+        assert!(
+            !(rect.row..rect.row + rect.height).contains(&36),
+            "{rect:?}"
+        );
     }
+}
+
+/// The log is as tall as its rows and its frame, three rows at the least
+/// and 40 percent of the screen at the most.
+#[test]
+fn the_key_log_grows_with_its_rows() {
+    let mut m = Model::with_term_size(160, 40)
+        .with_look(crate::model::Look::new(crate::model::Panes::Tiles, false));
+    let _ = update(&mut m, feature_invoke("keys", "log"));
+    assert_eq!(key_log_rect(&m).height, 3, "the row opening the log");
+    let log = |m: &mut Model, n: usize| {
+        for i in 0..n {
+            m.key_log.log.push(crate::native::key_log::Fired::User {
+                lhs: format!("#{i}"),
+                owner: None,
+            });
+        }
+        let _ = update(m, Msg::Redraw(vec![UiEvent::Flush]));
+    };
+    log(&mut m, 4);
+    let rect = key_log_rect(&m);
+    assert_eq!(rect.height, 7, "five rows and the frame: {rect:?}");
+    assert!(rect.row + rect.height < 40, "{rect:?}");
+    log(&mut m, 100);
+    let rect = key_log_rect(&m);
+    assert!(rect.height <= 16 && rect.height > 10, "{rect:?}");
+}
+
+/// Logs the user's mappings `keys` with `'timeoutlen'` at `wait`, and
+/// types `(key, ms)`, each at that many milliseconds into the session.
+fn typed_at(m: &mut Model, keys: &[&str], wait: Option<Duration>, typed: &[(&str, u64)]) {
+    m.engine.mode.current = "normal".to_string();
+    user_mappings(m, keys, wait);
+    for (key, ms) in typed {
+        m.set_now(std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(*ms));
+        let _ = update(m, self::key(key));
+    }
+}
+
+/// A pause past `'timeoutlen'` inside a run is where nvim gave up on the
+/// longer mapping: a key after it completes no mapping with the keys
+/// before the pause, and a whole mapping held there is the one nvim ran,
+/// stamped with its own last key. With `'timeout'` off nvim waits for good.
+#[test]
+fn a_pause_past_timeoutlen_ends_the_run_where_nvim_ended_it() {
+    let wait = Some(Duration::from_millis(300));
+    let typed = [(" ", 0), ("f", 100), ("g", 2000)];
+    let mut m = started_model();
+    typed_at(&mut m, &["<Space>fg"], wait, &typed);
+    assert!(user_rows(&m).is_empty(), "{:?}", user_rows(&m));
+
+    let mut m = started_model();
+    typed_at(&mut m, &["<Space>f", "<Space>fg"], wait, &typed);
+    assert_eq!(user_rows(&m), ["<Space>f"]);
+    let at = m.key_log().get(0).expect("a row").at;
+    assert_eq!(
+        at,
+        std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(100)
+    );
+
+    let mut m = started_model();
+    typed_at(&mut m, &["<Space>fg"], None, &typed);
+    assert_eq!(user_rows(&m), ["<Space>fg"], "'notimeout' waits for good");
+}
+
+/// A fired user mapping's own keys leave no mode behind them, so after
+/// nvim answers, the keys after it are matched, view's own included. Until
+/// then its rhs may have left normal mode, so nothing after it logs, and a
+/// view key nvim does run is logged with its key, never as a typed
+/// `:View`.
+#[test]
+fn keys_after_a_users_mapping_are_matched_once_nvim_answers_it() {
+    use crate::native::key_log::Fired;
+    let mut m = started_model();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    user_mappings(
+        &mut m,
+        &["<Space>c", "s"],
+        Some(Duration::from_millis(1000)),
+    );
+    let _ = typed(&mut m, &[" ", "c"]);
+    answered(&mut m);
+    let _ = typed(&mut m, &["s"]);
+    assert_eq!(user_rows(&m), ["s", "<Space>c"]);
+    answered(&mut m);
+    let _ = typed(&mut m, &[" ", "c"]);
+    answered(&mut m);
+    let _ = typed(&mut m, &[" ", "e"]);
+    assert!(m.submit_hold.is_holding(), "view's key arms the hold");
+
+    let mut m = started_model();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    user_mappings(
+        &mut m,
+        &["<Space>c", "s"],
+        Some(Duration::from_millis(1000)),
+    );
+    let _ = typed(&mut m, &[" ", "c", "s"]);
+    assert_eq!(user_rows(&m), ["<Space>c"], "s may have been typed text");
+    let _ = typed(&mut m, &[" ", "e"]);
+    assert!(!m.submit_hold.is_holding(), "no hold behind an unsure mode");
+    let _ = update(&mut m, feature_invoke("tree", "toggle"));
+    let Fired::View { lhs, .. } = newest_fired(&m) else {
+        panic!("a view row");
+    };
+    assert_eq!(lhs.as_deref(), Some("<Space>e"), "never a typed :View");
+}
+
+/// A mapping whose rhs draws nothing gets no answer, and a key pressed a
+/// round trip after it with no mode reported is read in normal mode.
+#[test]
+fn a_key_a_round_trip_after_a_quiet_mapping_is_matched() {
+    let wait = Some(Duration::from_millis(1000));
+    for (late, want) in [(100, vec!["<Space>c"]), (500, vec!["s", "<Space>c"])] {
+        let mut m = started_model();
+        typed_at(
+            &mut m,
+            &["<Space>c", "s"],
+            wait,
+            &[(" ", 0), ("c", 10), ("s", 10 + late)],
+        );
+        assert_eq!(user_rows(&m), want, "s {late} ms after the mapping");
+    }
+}
+
+/// A mapping nvim ran when `'timeoutlen'` ran out was answered a round
+/// trip after that, so a key pressed later than both is matched.
+#[test]
+fn a_key_long_after_a_timed_out_mapping_is_matched() {
+    let wait = Some(Duration::from_millis(300));
+    for (late, want) in [(400, vec!["<Space>c"]), (2000, vec!["s", "<Space>c"])] {
+        let mut m = started_model();
+        typed_at(
+            &mut m,
+            &["<Space>c", "<Space>cx", "s"],
+            wait,
+            &[(" ", 0), ("c", 10), ("s", 10 + late)],
+        );
+        assert_eq!(user_rows(&m), want, "s {late} ms after the mapping");
+    }
+}
+
+/// A click or a paste ends the mapping nvim waits on, so the keys after it
+/// start a new run.
+#[test]
+fn a_click_ends_the_run_it_lands_in() {
+    let mut m = started_model();
+    m.engine.mode.current = "normal".to_string();
+    user_mappings(&mut m, &["<Space>fg"], Some(Duration::from_millis(1000)));
+    let _ = typed(&mut m, &[" ", "f"]);
+    m.submit_hold.forget_argument();
+    let _ = typed(&mut m, &["g"]);
+    assert!(user_rows(&m).is_empty(), "{:?}", user_rows(&m));
+}
+
+/// The keys of a view invocation nvim never ran are dropped with the hold
+/// they armed, and keys no claim of the invoked feature names are logged
+/// as no key. A buffer's own mapping on view's keys is the user's.
+#[test]
+fn a_view_row_names_only_the_keys_that_ran_it() {
+    use crate::native::key_log::Fired;
+    let lhs = |m: &Model| match newest_fired(m) {
+        Fired::View { lhs, .. } => lhs,
+        Fired::User { lhs, .. } => panic!("a view row, not {lhs}"),
+    };
+    let mut m = started_model();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    let armed = typed(&mut m, &[" ", "e"]);
+    let generation = armed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ScheduleSubmitHold { generation, .. } => Some(*generation),
+            _ => None,
+        })
+        .expect("the keys armed a bound");
+    let _ = update(&mut m, Msg::SubmitHoldExpired { generation });
+    let _ = update(&mut m, feature_invoke("tree", "toggle"));
+    assert_eq!(lhs(&m), None, "the expired hold took its keys with it");
+
+    let _ = typed(&mut m, &[" ", "e"]);
+    let _ = update(&mut m, feature_invoke("window", "zoom"));
+    assert_eq!(lhs(&m), None, "<Space>e names no claim of window");
+
+    user_mappings(&mut m, &["<Space>e"], Some(Duration::from_millis(1000)));
+    let _ = typed(&mut m, &[" ", "e"]);
+    assert!(!m.submit_hold.is_holding(), "the buffer's own <Space>e ran");
+    assert_eq!(user_rows(&m), ["<Space>e"]);
+}
+
+/// A reading of the user's keys landing while the windowed tree holds
+/// the start of a sequence keeps it held, and the next keys complete it.
+#[test]
+fn a_reading_of_the_users_keys_keeps_the_keys_a_surface_holds() {
+    let mut m = focused_windowed_tree();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    user_mappings(&mut m, &["<Space>fg"], Some(Duration::from_millis(1000)));
+    let mut effects = typed(&mut m, &[" "]);
+    user_mappings(
+        &mut m,
+        &["<Space>fg", "gd"],
+        Some(Duration::from_millis(1000)),
+    );
+    effects.extend(typed(&mut m, &["f", "g"]));
+    assert_eq!(meta_inputs(&effects), [" ", "f", "g"], "{effects:?}");
 }
 
 fn recorded_keys(m: &Model) -> Vec<String> {

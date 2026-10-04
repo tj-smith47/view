@@ -376,6 +376,9 @@ pub(super) fn grown_rect(
     let view = match &overlay.kind {
         super::OverlayKind::Prompt(state) => state.view(),
         super::OverlayKind::EngineBusy(state) => state.view(),
+        super::OverlayKind::KeyLog(view) => {
+            return (key_log_rect(overlay, view, term_w, band_h), false)
+        }
         _ => return (overlay.geometry.rect(term_w, band_h), false),
     };
     let width = overlay.geometry.rect(term_w, band_h).width;
@@ -397,6 +400,38 @@ pub(super) fn grown_rect(
         ..rect
     };
     (short, whole)
+}
+
+/// The key log's box on a `term_w` by `band_h` band: as tall as its rows
+/// and frame, at least [`MIN_ROWS`](crate::native::key_log::MIN_ROWS) and
+/// at most the box's share of the band, against the band's top edge where
+/// its anchor is [`Anchor::Top`] and its bottom edge otherwise.
+fn key_log_rect(
+    overlay: &super::Overlay,
+    view: &crate::native::key_log::KeyLogView,
+    term_w: u16,
+    band_h: u16,
+) -> OverlayRect {
+    use crate::native::key_log::{FRAME_ROWS, MIN_ROWS};
+    let share = overlay.geometry.rect(term_w, band_h);
+    let rows = u16::try_from(view.row_count()).unwrap_or(u16::MAX);
+    // The band's first and last rows carry the frames' top edge and the
+    // bottom window's status line, which stay in sight.
+    let inside = band_h.saturating_sub(2);
+    let height = rows
+        .saturating_add(FRAME_ROWS)
+        .min(share.height)
+        .max(MIN_ROWS)
+        .min(inside);
+    let row = match overlay.geometry.anchor {
+        Anchor::Top => 1.min(band_h),
+        _ => 1 + inside.saturating_sub(height),
+    };
+    OverlayRect {
+        row,
+        height,
+        ..share
+    }
 }
 
 #[cfg(test)]

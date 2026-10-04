@@ -129,7 +129,11 @@ use view_core::native::mappings::{
 /// The current buffer's own normal-mode mappings are read first and join
 /// the keys, each shadowing a global mapping with the same lhs. `LspAttach`
 /// re-reads them beside the events above, since a language server's keys
-/// are set on the buffer after it is entered.
+/// are set on the buffer after it is entered. `CursorHold` compares the
+/// maps it sees, the current buffer's and the global ones, with the last
+/// read and reads again only where they moved, for a mapping set from a
+/// deferred callback or by a stub remapping itself. `OptionSet` on
+/// `'timeout'` or `'timeoutlen'` reads again too.
 ///
 /// Each of those keys is answered with whose it is, under `user_owners`
 /// and on the `user_owners` bridge event, one row per key: its `keytrans()`
@@ -231,10 +235,24 @@ local function owner(m)
   return { lhs = lhs, label = label, buffer = buffer,
     script = script ~= '' and script or nil }
 end
+local function signature(maps)
+  local parts = {}
+  for _, list in ipairs(maps) do
+    for _, m in ipairs(list) do
+      parts[#parts + 1] = m.lhs .. '\\0' .. (m.rhs or tostring(m.callback))
+        .. '\\0' .. (m.desc or '')
+    end
+  end
+  return table.concat(parts, '\\n')
+end
+local function keymaps()
+  return { vim.api.nvim_buf_get_keymap(0, 'n'), vim.api.nvim_get_keymap('n') }
+end
+local held_maps = ''
 local function read_user_keys()
   local keys, owners, rows, mapped = {}, {}, {}, {}
-  local maps = { vim.api.nvim_buf_get_keymap(0, 'n'),
-    vim.api.nvim_get_keymap('n') }
+  local maps = keymaps()
+  held_maps = signature(maps)
   for _, list in ipairs(maps) do
     for _, m in ipairs(list) do
       local lhs = vim.fn.keytrans(m.lhsraw or m.lhs)
@@ -330,6 +348,19 @@ vim.api.nvim_create_autocmd({ 'BufEnter', 'FileType', 'BufWinEnter',
   'LspAttach' }, {
   group = group,
   callback = reread,
+})
+vim.api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = { 'timeout', 'timeoutlen' },
+  callback = reread,
+})
+-- a mapping set from a deferred callback, or by a stub remapping itself,
+-- raises no event of its own, so an idle moment compares the maps it sees
+vim.api.nvim_create_autocmd('CursorHold', {
+  group = group,
+  callback = function()
+    if signature(keymaps()) ~= held_maps then reread() end
+  end,
 })
 vim.api.nvim_create_autocmd('SourcePost', { group = group, callback = reread })
 vim.api.nvim_create_autocmd('CmdlineLeave', {

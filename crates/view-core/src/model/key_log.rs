@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 
 use super::{Model, OverlayKind};
+use crate::native::geometry::Anchor;
 use crate::native::key_log::{Fired, KeyLog, KeyLogView};
 use crate::native::mappings::MappingOwner;
 use crate::native::submit_hold::{canonical_keys, canonical_typed};
@@ -60,7 +61,7 @@ impl Model {
     /// set it off and the mapping that key displaced, read from the claim
     /// whose keys those are, so a desktop chord and the leader key it
     /// mirrors are told apart. A `:View` typed by hand set off no key and
-    /// logs none.
+    /// logs none, and neither do keys no claim of the feature names.
     pub(crate) fn log_invocation(&mut self, feature: &str, verb: &str) {
         if std::mem::take(&mut self.key_log.skip_next) {
             return;
@@ -75,10 +76,8 @@ impl Model {
                         .is_some_and(|spelled| canonical_keys(spelled) == *keys)
             })
         });
-        let lhs = match claim {
-            Some(claim) => Some(claim.keys.clone().unwrap_or_else(|| claim.lhs.clone())),
-            None => keys.map(|keys| keys.concat()),
-        };
+        // keys that match no claim of this feature did not set it off
+        let lhs = claim.map(|claim| claim.keys.clone().unwrap_or_else(|| claim.lhs.clone()));
         let fired = Fired::View {
             feature: feature.to_string(),
             verb: verb.to_string(),
@@ -111,19 +110,36 @@ impl Model {
     }
 
     /// Catches an open key log up with the ring and the clock's offset,
-    /// answering whether its rows changed: two integers on a fold that
-    /// logged nothing.
+    /// and keeps it clear of the cursor: at the bottom of the screen, or at
+    /// the top while the cursor's row falls where the bottom box would sit.
+    /// Answers whether its rows or its place changed: two integers and a
+    /// rect on a fold that logged nothing.
     #[must_use]
     pub fn refresh_key_log(&mut self) -> bool {
         let offset = self.utc_offset_secs();
         let log = &self.key_log.log;
-        self.overlays
-            .iter_mut()
-            .find_map(|overlay| match &mut overlay.kind {
-                OverlayKind::KeyLog(view) => Some(view),
-                _ => None,
-            })
-            .is_some_and(|view| view.refresh(log, offset))
+        let Some(pos) = self
+            .overlays
+            .iter()
+            .position(|overlay| matches!(overlay.kind, OverlayKind::KeyLog(_)))
+        else {
+            return false;
+        };
+        let rows = match &mut self.overlays[pos].kind {
+            OverlayKind::KeyLog(view) => view.refresh(log, offset),
+            _ => false,
+        };
+        let was = self.overlays[pos].geometry.anchor;
+        self.overlays[pos].geometry.anchor = Anchor::Bottom;
+        let bottom = self.overlay_rect(&self.overlays[pos]);
+        let cursor_row = self
+            .chrome_rows()
+            .saturating_add(self.look.grid_offset())
+            .saturating_add(self.engine.painted_grids().cursor_pos().0);
+        let covered = (bottom.row..bottom.row.saturating_add(bottom.height)).contains(&cursor_row);
+        let anchor = if covered { Anchor::Top } else { Anchor::Bottom };
+        self.overlays[pos].geometry.anchor = anchor;
+        rows || anchor != was
     }
 
     /// The open key log overlay's state and the ring it shows, wherever

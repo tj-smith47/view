@@ -25,10 +25,6 @@ pub(crate) const KEY_LOG_KEYS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Rows the box spends on its frame and title, which a half page leaves
-/// out.
-const CHROME_ROWS: u16 = 4;
-
 /// Opens the key log, or closes it when open.
 pub(super) fn toggle(model: &mut Model) -> Vec<Effect> {
     if !model.close_key_log() {
@@ -54,8 +50,10 @@ pub(super) fn focus(model: &mut Model) -> Vec<Effect> {
 /// description readable on a wide screen.
 const MAX_WIDTH: u16 = 120;
 
-/// Opens the log in the middle of the screen, clear of the frames' top and
-/// bottom border rows, as wide as the screen allows up to [`MAX_WIDTH`].
+/// Opens the log at the bottom of the screen, clear of the frames' border
+/// rows, as wide as the screen allows up to [`MAX_WIDTH`] and at most 40
+/// percent of its height. [`Model::refresh_key_log`] sizes it to its rows
+/// and moves it to the top while the cursor is under it.
 fn open(model: &mut Model) {
     let view = KeyLogView::open(model.key_log(), model.utc_offset_secs());
     model.push_overlay(
@@ -63,9 +61,10 @@ fn open(model: &mut Model) {
         // it give up their width to it
         OverlayBox::new(100, 40)
             .with_max_width(MAX_WIDTH)
-            .with_anchor(Anchor::Center),
+            .with_anchor(Anchor::Bottom),
         OverlayKind::KeyLog(view),
     );
+    let _ = model.refresh_key_log();
 }
 
 /// The entered key log's own keys, `None` for a key it does not answer.
@@ -97,7 +96,7 @@ fn page(model: &Model) -> isize {
         model
             .overlay_rect(overlay)
             .height
-            .saturating_sub(CHROME_ROWS)
+            .saturating_sub(crate::native::key_log::FRAME_ROWS)
     });
     isize::try_from(rows.div_ceil(2))
         .unwrap_or(isize::MAX)

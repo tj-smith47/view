@@ -188,10 +188,9 @@ pub enum LayerKind {
     Prompt(PromptView),
     /// A command palette's prompt line, commands, and their bindings.
     Palette(PaletteView),
-    /// The windowed notification stream or ticker's entries: the same rows
-    /// a [`LayerKind::Palette`] message-history view carries, with no query
-    /// row and no rule -- a tile is not a floating command palette, and its
-    /// frame is already the tile's own border.
+    /// A titled list that takes no query: the windowed notification stream
+    /// or ticker's entries, or the key log. The same rows a
+    /// [`LayerKind::Palette`] carries, with no query row and no rule.
     Stream(PaletteView),
     /// The display-only glyphs
     /// [`view_core::native::speculate::SpeculateState::pending`] is holding

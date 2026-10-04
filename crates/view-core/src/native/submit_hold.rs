@@ -321,6 +321,10 @@ pub struct SubmitHold {
     /// Whether a key that leaves normal mode has gone out since nvim last
     /// reported a mode, so the mode view last read may be stale.
     mode_unsure: bool,
+    /// Whether one of the user's mappings has fired since nvim last
+    /// answered a key, so its rhs may have left normal mode where nvim
+    /// reports nothing for a mode it did not change.
+    mapped_unsure: bool,
     /// Keys a surface of view's own is holding while they spell the start
     /// of a mapped sequence.
     sequence: Vec<String>,
@@ -407,17 +411,17 @@ impl SubmitHold {
 
     /// Learns the key sequences the user's own config maps in normal mode,
     /// and how long nvim waits for the rest of one: `timeoutlen` is `None`
-    /// where `'timeout'` is off.
+    /// where `'timeout'` is off. Keys a surface holds stay held, and the
+    /// next key reads them against the new sequences.
     pub fn learn_user_keys(&mut self, keys: &[String], timeoutlen: Option<Duration>) {
         self.user_keys = keys
             .iter()
             .map(|keys| key_tokens(keys).map(canonical).collect::<Vec<_>>())
             .filter(|keys| !keys.is_empty())
             .collect();
-        self.user_run.learn_user(&mut self.user_keys);
+        self.user_run.learn_user(&mut self.user_keys, timeoutlen);
         self.timeout_off = timeoutlen.is_none();
         self.timeoutlen = timeoutlen;
-        self.sequence.clear();
     }
 
     /// Learns the user's command-line mappings and abbreviations, which
@@ -684,6 +688,11 @@ impl SubmitHold {
     /// normal mode before it.
     pub fn note_mode_reported(&mut self, mode: &str) {
         self.mode_unsure = false;
+        self.mapped_unsure = false;
+        // keys a fired mapping left unsure were typed in that mode
+        if mode != "normal" {
+            let _ = self.user_run.take_invoked();
+        }
         // a report sent before nvim read the newest end says nothing of it
         if self.ended_at.is_none() {
             self.settle_ends(mode);
@@ -851,14 +860,27 @@ impl SubmitHold {
     }
 
     /// Ends the hold, handing back what it kept in the order it arrived.
+    /// The keys of the invocation behind it are dropped, logged or not, so
+    /// a later invocation is never logged with them.
     pub fn take_held(&mut self) -> Vec<Msg> {
+        let _ = self.user_run.take_invoked();
         self.held.take().map(|(_, held)| held).unwrap_or_default()
     }
 
-    /// Forgets which key nvim reads the next key as the argument of, where
-    /// something other than a key (a click, a paste) went out after it.
+    /// Notes a redraw batch nvim sent because it read a key: a mapping that
+    /// fired before it has run, and a mode its rhs entered rides the same
+    /// batch.
+    pub(crate) fn note_input_answered(&mut self) {
+        self.mapped_unsure = false;
+    }
+
+    /// Forgets the keys nvim was reading a mapping or an argument from,
+    /// where something other than a key (a click, a paste) went out after
+    /// them and ended both.
     pub fn forget_argument(&mut self) {
         self.argument_of = None;
+        self.recent.clear();
+        self.mapped_unsure |= self.user_run.forget();
     }
 
     /// The keys of the view invocation a key last completed, once.
@@ -974,7 +996,7 @@ impl SubmitHold {
 /// Called before the key is sent, so the model still describes the editor
 /// the key arrives at.
 pub fn fold_engine_key(model: &mut Model, notation: &str) -> Vec<Effect> {
-    if completes_invoke(model, notation) {
+    if user_run::completes_invoke(model, notation) {
         model.submit_hold.set_typed(None);
         return arm(model, Armed::Sequence);
     }
@@ -984,87 +1006,6 @@ pub fn fold_engine_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         model.log_user_mapping(&keys, at);
     }
     fold_line(model, notation)
-}
-
-/// Whether `notation` completes one of the invoking keys, typed in normal
-/// mode, where those keys are mapped.
-///
-/// Inside a sequence nvim matches the mapping before it reads a key as an
-/// argument, so the `a` of `\ai` still completes it. The first key is the
-/// exception: typed as the argument of `f`, `r` or `"`, nvim reads it
-/// literally and starts no mapping, so `f<Space>e` is a jump and then a
-/// motion. The argument is read off the keys this fold has seen, because
-/// the engine's own `literal_pending` is written only once a key is sent,
-/// after every key one update folds.
-///
-/// The mode is read the same way. `o<Space>e` typed inside one round trip
-/// reaches nvim in insert mode, where it is text, while the mode view last
-/// read still says normal. A sequence whose first key went out behind a
-/// key that leaves normal mode, with no mode reported since, completes
-/// nothing.
-fn completes_invoke(model: &mut Model, notation: &str) -> bool {
-    let normal = model.engine.mode.current == "normal";
-    let now = model.key_log().now();
-    let hold = &mut model.submit_hold;
-    let argument_of = hold.argument_of.take();
-    let longest = hold
-        .invoke_keys
-        .iter()
-        .map(|invocation| invocation.keys.len())
-        .max()
-        .unwrap_or(0)
-        .max(hold.user_run.longest());
-    // keys typed on a tracked `:` line are its text, whatever mode nvim
-    // last reported: a line view sends itself opens with no `:` folded
-    // here to mark the mode unsure
-    if !normal || longest == 0 || hold.typed.is_some() {
-        hold.recent.clear();
-        hold.user_run.reset();
-        return false;
-    }
-    let key = canonical(notation);
-    hold.argument_of = (argument_of.is_none()
-        && crate::native::speculate::CMDLINE_LITERAL_KEYS.contains(&notation))
-    .then(|| key.clone());
-    let mode_unsure = hold.mode_unsure;
-    hold.mode_unsure |= match argument_of.as_deref() {
-        None => LEAVES_NORMAL.contains(&key.as_str()),
-        Some(before) => LEAVES_NORMAL_AFTER.contains(&(before, key.as_str())),
-    };
-    if hold.recent.len() >= longest {
-        hold.recent.pop_front();
-    }
-    let operand = hold.user_run.operand(&key, argument_of.is_some());
-    hold.recent.push_back(Folded {
-        key,
-        argument: argument_of.is_some(),
-        mode_unsure,
-        operand,
-    });
-    let recent = &hold.recent;
-    let complete = hold.invoke_keys.iter().find(|invocation| {
-        let keys = &invocation.keys;
-        recent.len().checked_sub(keys.len()).is_some_and(|start| {
-            recent
-                .get(start)
-                .is_some_and(|first| !first.argument && !first.mode_unsure)
-                && recent
-                    .range(start..)
-                    .map(|folded| &folded.key)
-                    .eq(keys.iter())
-        })
-    });
-    let Some(invocation) = complete.map(|invocation| invocation.keys.clone()) else {
-        hold.user_run.step(&hold.recent, &hold.user_keys, now);
-        return false;
-    };
-    // the keys inside the sequence were the mapping's, and left no mode
-    // behind them
-    hold.recent.clear();
-    hold.argument_of = None;
-    hold.mode_unsure = false;
-    hold.user_run.invoked(invocation);
-    true
 }
 
 /// One spelling for each key nvim reads as the same key: `keytrans()`

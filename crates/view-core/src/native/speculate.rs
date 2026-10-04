@@ -982,6 +982,7 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
         }
     }
     if answers_input {
+        model.submit_hold.note_input_answered();
         if let Some(sent) = model.engine.key_unanswered.take() {
             // the one write site, so the read in `cmdline_backstop` is the
             // only place the window's shape is known

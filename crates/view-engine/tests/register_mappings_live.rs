@@ -326,6 +326,74 @@ fn opening_a_file_walks_the_users_keys_once() {
     assert_eq!(engine.handle.eval_str("g:walks").unwrap(), "1");
 }
 
+/// A change to `'timeoutlen'` or `'timeout'` is read again and sent, with
+/// `None` while nvim waits for good.
+#[test]
+fn a_change_to_the_mapping_timeout_is_read_again() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_user_keys(&rx);
+    engine
+        .handle
+        .eval_str("execute('set timeoutlen=700')")
+        .unwrap();
+    let (_, timeoutlen) = next_user_keys(&rx);
+    assert_eq!(timeoutlen, Some(Duration::from_millis(700)));
+    engine.handle.eval_str("execute('set notimeout')").unwrap();
+    let (_, timeoutlen) = next_user_keys(&rx);
+    assert_eq!(timeoutlen, None);
+}
+
+/// An idle moment compares the maps nvim holds with the ones last read,
+/// walks nothing more where they are the same, and reads a buffer mapping
+/// a deferred callback set.
+#[test]
+fn an_idle_moment_reads_a_mapping_set_late() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    engine
+        .handle
+        .eval_str("execute('let mapleader = \" \"')")
+        .unwrap();
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_user_keys(&rx);
+    engine
+        .handle
+        .eval_str(
+            "execute('lua local get = vim.api.nvim_get_keymap; \
+             vim.g.walks = 0; \
+             vim.api.nvim_get_keymap = function(m) \
+             if m == \"n\" then vim.g.walks = vim.g.walks + 1 end \
+             return get(m) end')",
+        )
+        .unwrap();
+    let idle = || {
+        for step in [
+            "execute('doautocmd CursorHold')",
+            "execute('lua vim.wait(100, function() return false end)')",
+        ] {
+            engine.handle.eval_str(step).unwrap();
+        }
+    };
+    idle();
+    assert_eq!(engine.handle.eval_str("g:walks").unwrap(), "1");
+
+    engine
+        .handle
+        .eval_str(
+            "execute('lua vim.defer_fn(function() \
+             vim.keymap.set(\"n\", \"<leader>hs\", \":echo<CR>\", \
+             { buffer = 0 }) end, 10)')",
+        )
+        .unwrap();
+    engine
+        .handle
+        .eval_str("execute('lua vim.wait(100, function() return false end)')")
+        .unwrap();
+    idle();
+    let (keys, _) = next_user_keys(&rx);
+    assert!(keys.iter().any(|k| k == "<Space>hs"), "{keys:?}");
+}
+
 /// A plugin lazy.nvim loads on a tick after a file open's walk has run
 /// raises its own `User LazyLoad`, and the map it set is read by a walk of
 /// its own.
