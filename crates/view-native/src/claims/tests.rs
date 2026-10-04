@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::config::KeysConfig;
-use view_core::native::chords::desktop_chords;
-use view_core::native::keys::key_tokens;
+use view_core::native::chords::{desktop_chord, desktop_chords};
+use view_core::native::keys::{key_tokens, lhs_keys, Direction};
 
 /// The owned half of an [`Inputs`], for a test to move keys on.
 #[derive(Clone)]
@@ -16,6 +16,7 @@ struct Fixture {
     modifier: DesktopModifier,
     ai: bool,
     dvr: bool,
+    leader: Option<String>,
 }
 
 impl Fixture {
@@ -30,6 +31,7 @@ impl Fixture {
             modifier,
             ai: true,
             dvr: true,
+            leader: None,
         }
     }
 
@@ -43,6 +45,7 @@ impl Fixture {
             modifier: self.modifier,
             ai: self.ai,
             dvr: self.dvr,
+            leader: self.leader.as_deref(),
         }
     }
 
@@ -80,12 +83,12 @@ fn held(settled: &Settled) -> (Vec<Vec<String>>, Vec<Vec<String>>) {
     let mut specs: Vec<_> = settled
         .specs
         .iter()
-        .map(|s| canonical_keys(&s.lhs))
+        .map(|s| lhs_keys(&s.lhs, None))
         .collect();
     let mut own: Vec<_> = KEY_ACTIONS
         .iter()
         .flat_map(|(_, action)| settled.bindings.spellings(*action))
-        .map(|key| canonical_keys(&key))
+        .map(|key| lhs_keys(&key, None))
         .collect();
     specs.sort();
     own.sort();
@@ -114,6 +117,14 @@ fn lowercased(key: &str) -> String {
             out
         })
         .collect()
+}
+
+/// `key` with each `<CR>`, `<BS>` and `<Del>` in it written with nvim's
+/// other name for that key: `<M-Enter>` for `<M-CR>`.
+fn aliased(key: &str) -> String {
+    key.replace("CR>", "Enter>")
+        .replace("BS>", "BackSpace>")
+        .replace("Del>", "Delete>")
 }
 
 #[test]
@@ -145,7 +156,8 @@ fn no_two_defaults_share_a_key_in_one_scope() {
 }
 
 /// Every config row moved onto every default key of every other claimant,
-/// in its own spelling and with its letters lowercased: a key another
+/// in its own spelling, with its letters lowercased and with nvim's other
+/// name for each `<CR>`, `<BS>` and `<Del>`: a key another
 /// feature holds in the same scope puts the row back with one notice, and
 /// a key held only in another scope is the row's to take.
 #[test]
@@ -155,13 +167,13 @@ fn every_view_key_moved_onto_another_keeps_its_default_and_says_so() {
     assert!(baseline.notices.is_empty(), "{:?}", baseline.notices);
     let defaults = held(&baseline);
     let claimants = base.claimants();
-    let (mut pairs, mut variants, mut apart) = (0, 0, 0);
+    let (mut pairs, mut variants, mut aliases, mut apart) = (0, 0, 0, 0);
     for (m, moved) in claimants.iter().enumerate() {
         let Some(row) = moved.row else { continue };
-        let own: Vec<_> = moved.defaults.iter().map(|d| canonical_keys(d)).collect();
+        let own: Vec<_> = moved.defaults.iter().map(|d| lhs_keys(d, None)).collect();
         for (h, holder) in claimants.iter().enumerate().filter(|(h, _)| *h != m) {
             for key in &holder.defaults {
-                let canonical = canonical_keys(key);
+                let canonical = lhs_keys(key, None);
                 if own.contains(&canonical) {
                     continue;
                 }
@@ -173,7 +185,8 @@ fn every_view_key_moved_onto_another_keeps_its_default_and_says_so() {
                     })
                     .map(|(i, _)| i)
                     .collect();
-                let mut spellings = vec![key.clone(), lowercased(key)];
+                let mut spellings = vec![key.clone(), lowercased(key), aliased(key)];
+                spellings.sort();
                 spellings.dedup();
                 for spelled in spellings {
                     let mut case = base.clone();
@@ -215,6 +228,9 @@ fn every_view_key_moved_onto_another_keeps_its_default_and_says_so() {
                     if spelled != *key {
                         variants += 1;
                     }
+                    if spelled == aliased(key) && spelled != *key {
+                        aliases += 1;
+                    }
                 }
             }
         }
@@ -225,6 +241,7 @@ fn every_view_key_moved_onto_another_keeps_its_default_and_says_so() {
         "{variants} variants reached"
     );
     assert!(apart > 100, "{apart} cross-scope moves reached");
+    assert!(aliases > 0, "{aliases} other names reached");
 }
 
 /// Every two config rows in one scope moved onto one key: a key nobody
@@ -237,7 +254,7 @@ fn two_rows_moved_onto_one_key_leave_it_to_its_holder_or_the_first() {
     let free = "<M-F9>";
     assert!(claimants
         .iter()
-        .all(|c| !c.canonical.contains(&canonical_keys(free))));
+        .all(|c| !c.canonical.contains(&lhs_keys(free, None))));
     let (mut pairs, mut three_way) = (0, 0);
     for (a, first) in claimants.iter().enumerate() {
         let Some(first_row) = first.row else { continue };
@@ -377,7 +394,7 @@ fn every_row_a_run_puts_back_prints_its_default_with_the_notice_under_it() {
     let defaults = resolved(ON);
     let printed = |config: &ResolvedConfig, row: (&str, &str)| {
         config
-            .held_rows(DesktopModifier::Alt, true)
+            .held_rows(DesktopModifier::Alt, true, None)
             .0
             .into_iter()
             .find(|(key, _, _)| (key.table, key.key) == row)
@@ -393,11 +410,11 @@ fn every_row_a_run_puts_back_prints_its_default_with_the_notice_under_it() {
             .iter()
             .filter(|h| h.name != moved.name && shares_scope(h, moved))
             .filter_map(|h| h.keys.first())
-            .filter(|k| !moved.canonical.contains(&same(k)))
+            .filter(|k| !moved.canonical.contains(&lhs_keys(k, None)))
             .find_map(|key| {
                 let toml = format!("{ON}[{}]\n{} = {key:?}\n", row.0, row.1);
                 let config = resolved(&toml);
-                let put_back = config.held_keys(DesktopModifier::Alt, true).put_back;
+                let put_back = config.held_keys(DesktopModifier::Alt, true, None).put_back;
                 put_back
                     .iter()
                     .any(|back| (back.table, back.key) == row)
@@ -406,7 +423,7 @@ fn every_row_a_run_puts_back_prints_its_default_with_the_notice_under_it() {
         let Some((key, config)) = held else {
             panic!("[{}] {} takes no key another feature holds", row.0, row.1);
         };
-        let notices = config.held_rows(DesktopModifier::Alt, true).1;
+        let notices = config.held_rows(DesktopModifier::Alt, true, None).1;
         assert_eq!(
             printed(&config, row),
             Some((moved.defaults.join(", "), Source::Derived)),
@@ -414,14 +431,13 @@ fn every_row_a_run_puts_back_prints_its_default_with_the_notice_under_it() {
             row.0,
             row.1
         );
-        // a chord's unmoved row prints the `super` spelling, the one this
-        // resolver knows with no terminal probe
-        if row.0 == "keys" {
-            assert_eq!(
-                printed(&defaults, row).map(|(value, _)| value),
-                Some(moved.defaults.join(", "))
-            );
-        }
+        assert_eq!(
+            printed(&defaults, row).map(|(value, _)| value),
+            Some(moved.defaults.join(", ")),
+            "[{}] {} unmoved",
+            row.0,
+            row.1
+        );
         let entry = format!("[{}] {} = {key:?}", row.0, row.1);
         assert!(
             notices.iter().any(|n| n.contains(&entry)),
@@ -436,7 +452,7 @@ fn every_row_a_run_puts_back_prints_its_default_with_the_notice_under_it() {
 #[test]
 fn dvr_scrub_on_the_gaps_key_prints_its_own_default() {
     let config = resolved("[dvr]\nenabled = true\n[keys]\ndvr_scrub = \"<leader>ug\"\n");
-    let (rows, notices) = config.held_rows(DesktopModifier::Alt, true);
+    let (rows, notices) = config.held_rows(DesktopModifier::Alt, true, None);
     let row = rows
         .iter()
         .find(|(key, _, _)| (key.table, key.key) == ("keys", "dvr_scrub"))
@@ -455,11 +471,12 @@ fn two_defaults_on_one_key_leave_it_to_the_first_and_say_so() {
             keys: keys.clone(),
             canonical: Vec::new(),
             defaults: keys,
+            default_canonical: Vec::new(),
             scope,
             spec: None,
             action: None,
         }
-        .canonicalized()
+        .canonicalized(None)
     };
     let mut claimants = [
         surface("first", &["<C-x>"], SURFACES),
@@ -474,4 +491,133 @@ fn two_defaults_on_one_key_leave_it_to_the_first_and_say_so() {
     assert!(put_back.is_empty());
     assert_eq!(claimants[1].keys, ["<c-x>"], "another scope keeps its key");
     assert_eq!(claimants[2].keys, ["<C-y>"]);
+}
+
+/// A row that keeps one of its own defaults beside a free key holds that
+/// default against a row moved onto it, and keeps the key it added.
+#[test]
+fn a_row_on_one_of_its_own_defaults_keeps_it_against_a_row_moved_onto_it() {
+    let config = resolved(
+        "[keys]\nsidebar_wider = \"<C-w><lt>\"\nsidebar_narrower = [\"<C-w><lt>\", \"<M-.>\"]\n",
+    );
+    let settled = config.held_keys(DesktopModifier::Alt, true, None);
+    let rows: Vec<_> = settled.put_back.iter().map(|p| (p.table, p.key)).collect();
+    assert_eq!(rows, [("keys", "sidebar_wider")], "{:?}", settled.notices);
+    assert_eq!(settled.notices.len(), 1, "{:?}", settled.notices);
+    assert!(
+        settled.notices[0].contains("`sidebar narrower` already"),
+        "{}",
+        settled.notices[0]
+    );
+    assert_eq!(
+        settled
+            .bindings
+            .spellings(Action::Resize(Direction::Narrower)),
+        ["<C-w><lt>", "<M-.>"]
+    );
+}
+
+/// A row written with the key `<leader>` stands for collides with a
+/// default written with `<leader>`, once the leader is known.
+#[test]
+fn a_key_spelled_with_the_leader_s_own_key_is_the_leader_key() {
+    let mut case = desktop_alt();
+    assert!(case.move_row(("keys", "toggle_gaps"), "<Space>fv"));
+    let settled = case.settle();
+    assert!(settled.notices.is_empty(), "{:?}", settled.notices);
+    case.leader = Some(" ".into());
+    let settled = case.settle();
+    let rows: Vec<_> = settled.put_back.iter().map(|p| (p.table, p.key)).collect();
+    assert_eq!(rows, [("keys", "toggle_gaps")], "{:?}", settled.notices);
+    assert_eq!(settled.notices.len(), 1, "{:?}", settled.notices);
+    assert!(
+        settled.notices[0].contains("`dvr scrub` already"),
+        "{}",
+        settled.notices[0]
+    );
+}
+
+/// Two spellings nvim stores as one key collide, and two it stores as two
+/// keys do not.
+#[test]
+fn a_key_nvim_stores_once_collides_and_two_it_stores_apart_do_not() {
+    for (modifier, key, collides) in [
+        (DesktopModifier::Alt, "<M-Enter>", true),
+        (DesktopModifier::Super, "<D-Enter>", true),
+        (DesktopModifier::Super, "<C-D-a>", false),
+        (DesktopModifier::Alt, "<C-M-S-a>", false),
+    ] {
+        let mut case = Fixture::new(KeyProfile::Desktop, modifier);
+        assert!(case.move_row(("keys", "toggle_gaps"), key));
+        let settled = case.settle();
+        assert_eq!(
+            settled.notices.len(),
+            usize::from(collides),
+            "{modifier:?} {key}: {:?}",
+            settled.notices
+        );
+    }
+    let mut case = Fixture::new(KeyProfile::Desktop, DesktopModifier::Super);
+    assert!(case.move_row(("keys", "key_log"), "<S-D-BackSpace>"));
+    assert_eq!(case.settle().notices.len(), 1);
+}
+
+/// Every listing spells each chord no layer moved with the modifier the
+/// run holds it under, a row put back onto a chord's key beside it.
+#[test]
+fn a_listing_spells_every_unmoved_chord_with_the_modifier_the_run_holds() {
+    for modifier in [DesktopModifier::Alt, DesktopModifier::Super] {
+        let chord = desktop_chord("focus_right").unwrap().lhs(modifier);
+        let config = resolved(&format!(
+            "[keys]\nprofile = \"desktop\"\ntoggle_gaps = {chord:?}\n"
+        ));
+        let (rows, notices) = config.held_rows(modifier, true, None);
+        assert_eq!(notices.len(), 1, "{modifier:?}: {notices:?}");
+        let mut chords = 0;
+        for (key, value, source) in rows
+            .iter()
+            .filter(|(key, _, _)| key.table == "keys.desktop")
+        {
+            let want = desktop_chord(key.key).unwrap().lhs(modifier);
+            assert_eq!(
+                (value.as_str(), *source),
+                (want, Source::Derived),
+                "{modifier:?}: keys.desktop.{}",
+                key.key
+            );
+            chords += 1;
+        }
+        assert_eq!(chords, DESKTOP_CHORD_COUNT);
+    }
+}
+
+/// A `[keys]` value the resolver refused prints as the default the run
+/// holds in its place, for every `[keys]` key.
+#[test]
+fn a_keys_value_the_resolver_refused_prints_as_the_default_it_is() {
+    let defaults = resolved("");
+    let row = |config: &ResolvedConfig, key: &str| {
+        config
+            .held_rows(DesktopModifier::Alt, true, None)
+            .0
+            .into_iter()
+            .find(|(row, _, _)| (row.table, row.key) == ("keys", key))
+            .map(|(_, value, source)| (value, source))
+    };
+    let keys: Vec<&str> = KEY_ACTIONS
+        .iter()
+        .map(|(key, _)| *key)
+        .chain(UI_KEYS.iter().map(|ui| ui.key))
+        .collect();
+    for key in &keys {
+        let config = resolved(&format!("[keys]\n{key} = 42\n"));
+        let (value, _) = row(&defaults, key).unwrap();
+        assert_eq!(row(&config, key), Some((value, Source::Derived)), "{key}");
+    }
+    let config = resolved("[keys]\nresize_mode = \"<leader>ff\"\n");
+    assert_eq!(
+        row(&config, "resize_mode").map(|(_, source)| source),
+        Some(Source::Derived)
+    );
+    assert_eq!(keys.len(), KEY_ACTIONS.len() + UI_KEYS.len());
 }

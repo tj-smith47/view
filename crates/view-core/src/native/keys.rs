@@ -297,9 +297,142 @@ fn split_keys(spelling: &str) -> Option<Binding> {
 /// and `<` each come out as one.
 #[must_use]
 pub fn canonical_keys(spelled: &str) -> Vec<String> {
-    key_tokens(spelled)
-        .map(super::submit_hold::canonical)
-        .collect()
+    key_tokens(spelled).map(canonical).collect()
+}
+
+/// The keys a mapping on `spelled` is stored under, each written one way
+/// for every spelling nvim stores as one left-hand side, with `<leader>`
+/// read as `leader` where one is given and compared as written where none
+/// is.
+#[must_use]
+pub fn lhs_keys(spelled: &str, leader: Option<&str>) -> Vec<String> {
+    let mut keys = Vec::new();
+    for token in key_tokens(spelled) {
+        match leader.filter(|_| token.eq_ignore_ascii_case("<leader>")) {
+            Some(leader) => keys.extend(key_tokens(leader).map(|key| one_spelling(key, true))),
+            None => keys.push(one_spelling(token, true)),
+        }
+    }
+    keys
+}
+
+/// One spelling for each key nvim reads as the same key: `keytrans()`
+/// writes `<M-S-Left>` and `<Space>` where view's input writes
+/// `<S-M-Left>` and a bare space, and a shifted letter is its capital.
+pub(crate) fn canonical(key: &str) -> String {
+    one_spelling(key, false)
+}
+
+/// [`canonical`], or with `lhs` the spelling nvim stores a mapping's
+/// left-hand side under, which differs three ways: a Shift beside Ctrl is a
+/// key of its own, another name for a key is that key (`<Enter>` is
+/// `<CR>`, `<M-lt>` is `<M-<>`), and a shifted letter with no other
+/// modifier is its bare capital.
+fn one_spelling(key: &str, lhs: bool) -> String {
+    if let Some(c) = notation_char(key) {
+        return c.to_string();
+    }
+    let Some(Modified {
+        ctrl,
+        mut shift,
+        alt,
+        meta,
+        cmd,
+        base,
+    }) = modified(key)
+    else {
+        return key.to_string();
+    };
+    // `<a>` is three keys to nvim, and only a modifier makes it one
+    let any_modifier = ctrl || shift || alt || meta || cmd;
+    let mut chars = base.chars();
+    let name = match (chars.next(), chars.next()) {
+        // a Ctrl letter is one key in either case
+        (Some(c), None) if c.is_alphabetic() => {
+            let capital = (shift || c.is_uppercase()) && !ctrl;
+            shift = shift && lhs && ctrl;
+            if capital {
+                c.to_uppercase().collect()
+            } else {
+                c.to_lowercase().collect()
+            }
+        }
+        (Some(_), None) => base.to_string(),
+        _ if lhs => notation_char(&format!("<{base}>")).map_or_else(
+            || primary_name(&base.to_ascii_lowercase()).to_string(),
+            String::from,
+        ),
+        _ => base.to_ascii_lowercase(),
+    };
+    let modifiers: String = [
+        (ctrl, "C-"),
+        (shift, "S-"),
+        (alt, "M-"),
+        (cmd, "D-"),
+        (meta, "T-"),
+    ]
+    .into_iter()
+    .filter_map(|(on, spelled)| on.then_some(spelled))
+    .collect();
+    if lhs && any_modifier && modifiers.is_empty() && name.chars().count() == 1 {
+        return name;
+    }
+    format!("<{modifiers}{name}>")
+}
+
+/// The name nvim stores a key under, for a lowercased key name: each of its
+/// other names for that key, as `nvim_get_keymap` reads them back, maps to
+/// it.
+fn primary_name(name: &str) -> &str {
+    match name {
+        "enter" | "return" => "cr",
+        "backspace" => "bs",
+        "delete" => "del",
+        "insert" => "ins",
+        "newline" | "linefeed" | "lf" => "nl",
+        "escape" => "esc",
+        other => other,
+    }
+}
+
+/// The modifiers a `<>` key notation carries, and the key they modify.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Modified<'a> {
+    pub(crate) ctrl: bool,
+    pub(crate) shift: bool,
+    /// `M-` or `A-`.
+    pub(crate) alt: bool,
+    /// `T-`.
+    pub(crate) meta: bool,
+    /// `D-`.
+    pub(crate) cmd: bool,
+    pub(crate) base: &'a str,
+}
+
+/// Splits a `<>` key notation into its modifiers and its base key, or
+/// `None` for a key written as its character.
+pub(crate) fn modified(notation: &str) -> Option<Modified<'_>> {
+    let mut base = notation.strip_prefix('<')?.strip_suffix('>')?;
+    let [mut ctrl, mut shift, mut alt, mut meta, mut cmd] = [false; 5];
+    while base.len() > 2 && base.as_bytes()[1] == b'-' {
+        match base.as_bytes()[0].to_ascii_uppercase() {
+            b'C' => ctrl = true,
+            b'S' => shift = true,
+            b'M' | b'A' => alt = true,
+            b'T' => meta = true,
+            b'D' => cmd = true,
+            _ => break,
+        }
+        base = &base[2..];
+    }
+    Some(Modified {
+        ctrl,
+        shift,
+        alt,
+        meta,
+        cmd,
+        base,
+    })
 }
 
 /// The keys `spelling` writes, in order: each `<...>` notation as one
@@ -362,6 +495,47 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// The pairs nvim 0.12.4 stores as one mapping and as two, with `,` as
+    /// the leader. `view/tests/mappings_live.rs` checks every such pair
+    /// against a live engine.
+    #[test]
+    fn two_spellings_are_one_key_exactly_where_nvim_stores_one_mapping() {
+        for (a, b) in [
+            ("<M-Enter>", "<M-CR>"),
+            ("<Return>", "<CR>"),
+            ("<S-D-BackSpace>", "<S-D-BS>"),
+            ("<Delete>", "<Del>"),
+            ("<Insert>", "<Ins>"),
+            ("<LF>", "<NL>"),
+            ("<Escape>", "<Esc>"),
+            ("<S-a>", "A"),
+            ("<M-S-a>", "<M-A>"),
+            ("<C-x>", "<C-X>"),
+            ("<C-S-A>", "<C-S-a>"),
+            ("<leader>fv", ",fv"),
+            ("<Space>fv", " fv"),
+        ] {
+            assert_eq!(lhs_keys(a, Some(",")), lhs_keys(b, Some(",")), "{a} {b}");
+        }
+        for (a, b) in [
+            ("<C-S-x>", "<C-x>"),
+            ("<C-S-x>", "<C-X>"),
+            ("<C-S-D-a>", "<C-D-a>"),
+            ("<C-M-S-a>", "<C-M-a>"),
+            ("<S-D-1>", "<D-!>"),
+            ("<Tab>", "<C-I>"),
+            ("<kEnter>", "<CR>"),
+            ("<M-x>", "<M-X>"),
+        ] {
+            assert_ne!(lhs_keys(a, Some(",")), lhs_keys(b, Some(",")), "{a} {b}");
+        }
+        assert_eq!(
+            lhs_keys("<Leader>fv", Some(" ")),
+            lhs_keys("<Space>fv", None)
+        );
+        assert_ne!(lhs_keys("<leader>fv", None), lhs_keys("\\fv", None));
+    }
 
     #[test]
     fn a_meta_key_stands_for_the_key_its_escape_came_before() {

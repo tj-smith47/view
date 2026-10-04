@@ -35,7 +35,7 @@ use commands::names_view;
 use crate::events::UiEvent;
 use crate::model::{CmdlineState, Model};
 use crate::msg::{Effect, Msg};
-use crate::native::keys::{key_tokens, notation_char};
+use crate::native::keys::{canonical, key_tokens, modified, notation_char, Modified};
 use crate::native::speculate::SpecStamp;
 
 /// The longest a tracked command line grows before it is given up on: a
@@ -1087,92 +1087,6 @@ pub fn fold_engine_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         return arm(model, Armed::Sequence);
     }
     fold_line(model, notation)
-}
-
-/// One spelling for each key nvim reads as the same key: `keytrans()`
-/// writes `<M-S-Left>` and `<Space>` where view's input writes
-/// `<S-M-Left>` and a bare space, and a shifted letter is its capital.
-pub(crate) fn canonical(key: &str) -> String {
-    if let Some(c) = notation_char(key) {
-        return c.to_string();
-    }
-    let Some(Modified {
-        ctrl,
-        mut shift,
-        alt,
-        meta,
-        cmd,
-        base,
-    }) = modified(key)
-    else {
-        return key.to_string();
-    };
-    let mut chars = base.chars();
-    let name = match (chars.next(), chars.next()) {
-        // a Ctrl letter is one key in either case
-        (Some(c), None) if c.is_alphabetic() => {
-            let capital = (shift || c.is_uppercase()) && !ctrl;
-            shift = false;
-            if capital {
-                c.to_uppercase().collect()
-            } else {
-                c.to_lowercase().collect()
-            }
-        }
-        (Some(_), None) => base.to_string(),
-        _ => base.to_ascii_lowercase(),
-    };
-    let modifiers: String = [
-        (ctrl, "C-"),
-        (shift, "S-"),
-        (alt, "M-"),
-        (cmd, "D-"),
-        (meta, "T-"),
-    ]
-    .into_iter()
-    .filter_map(|(on, spelled)| on.then_some(spelled))
-    .collect();
-    format!("<{modifiers}{name}>")
-}
-
-/// The modifiers a `<>` key notation carries, and the key they modify.
-#[derive(Debug, Clone, Copy)]
-struct Modified<'a> {
-    ctrl: bool,
-    shift: bool,
-    /// `M-` or `A-`.
-    alt: bool,
-    /// `T-`.
-    meta: bool,
-    /// `D-`.
-    cmd: bool,
-    base: &'a str,
-}
-
-/// Splits a `<>` key notation into its modifiers and its base key, or
-/// `None` for a key written as its character.
-fn modified(notation: &str) -> Option<Modified<'_>> {
-    let mut base = notation.strip_prefix('<')?.strip_suffix('>')?;
-    let [mut ctrl, mut shift, mut alt, mut meta, mut cmd] = [false; 5];
-    while base.len() > 2 && base.as_bytes()[1] == b'-' {
-        match base.as_bytes()[0].to_ascii_uppercase() {
-            b'C' => ctrl = true,
-            b'S' => shift = true,
-            b'M' | b'A' => alt = true,
-            b'T' => meta = true,
-            b'D' => cmd = true,
-            _ => break,
-        }
-        base = &base[2..];
-    }
-    Some(Modified {
-        ctrl,
-        shift,
-        alt,
-        meta,
-        cmd,
-        base,
-    })
 }
 
 /// The command-line half of [`fold_engine_key`].

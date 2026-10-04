@@ -939,7 +939,7 @@ fn seed_ai_enabled(
 ///
 /// `--print-caps` owes more than the tier override does: every key this
 /// build resolves, from [`ResolvedConfig::held_rows`], plus the one row
-/// `rows` cannot answer on its own -- `keys.desktop_modifier`, whose real
+/// `held_rows` cannot answer on its own -- `keys.desktop_modifier`, whose real
 /// value needs the terminal's own kitty keyboard protocol probe this
 /// function is the first caller to hold. A key the run puts back on its
 /// default prints that default, and the notice saying why follows the
@@ -971,7 +971,9 @@ fn caps_notice(
             resolved.desktop_modifier.value,
             caps.kitty_kbd,
         );
-        let (held, notices) = resolved.held_rows(modifier, ai);
+        // `mapleader` is the nvim config's, which runs only in the engine,
+        // so a key written with `<leader>` is compared as written
+        let (held, notices) = resolved.held_rows(modifier, ai, None);
         let mut rows: Vec<(String, String, &'static str)> = held
             .into_iter()
             .map(|(key, value, row_source)| {
@@ -1804,6 +1806,14 @@ mod tests {
         view_native::config::resolve_with(&ViewConfig::defaults(), &Overrides::from(cli), &|_| None)
     }
 
+    /// Every row `resolved` prints, as `--print-caps` lists them.
+    fn held_rows(
+        resolved: &ResolvedConfig,
+    ) -> Vec<(&'static view_native::config::ConfigKey, String, Source)> {
+        let alt = view_core::native::chords::DesktopModifier::Alt;
+        resolved.held_rows(alt, true, None).0
+    }
+
     /// [`super::engine_config`] for a command line alone, resolved the
     /// hermetic way [`resolved_for`] describes. Shadows the production
     /// name inside this module so every spawn assertion below runs through
@@ -1945,7 +1955,7 @@ mod tests {
             "nvim",
         ]);
         let resolved = resolved_for(&cli);
-        for (key, _, source) in resolved.rows() {
+        for (key, _, source) in held_rows(&resolved) {
             let expected = if key.flag.is_some() {
                 Source::Flag
             } else {
@@ -1972,7 +1982,7 @@ mod tests {
         )
         .expect("the fixture must parse");
         let resolved = resolve_session_config(&Cli::parse_from(["view", "--clean"]), &file);
-        for (key, _, source) in resolved.rows() {
+        for (key, _, source) in held_rows(&resolved) {
             assert_eq!(
                 source,
                 Source::Derived,
@@ -2699,7 +2709,7 @@ mod tests {
     }
 
     /// `--print-caps` owes the whole registry beyond the one tier line: every
-    /// row [`ResolvedConfig::rows`] answers, plus the `keys.desktop_modifier`
+    /// row [`ResolvedConfig::held_rows`] answers, plus the `keys.desktop_modifier`
     /// row that needs this session's own kitty keyboard protocol probe to
     /// answer at all.
     #[test]
@@ -2710,7 +2720,7 @@ mod tests {
         caps.kitty_kbd = true;
         let notice = caps_notice(&cli, &resolved, caps, CapsSource::Probed, true)
             .expect("--print-caps asks for the capability line");
-        for (key, _, _) in resolved.rows() {
+        for (key, _, _) in held_rows(&resolved) {
             let needle = format!("{}.{}", key.table, key.key);
             assert!(
                 notice.contains(&needle),

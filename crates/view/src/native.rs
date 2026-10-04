@@ -893,8 +893,7 @@ impl NativeSession {
     /// [`Self::build_mapping_call`] sends them, settled from the config
     /// this session loaded by [`view_native::claims::settle`], and the
     /// notice an unreachable `super` owes. Reads `self` and `model` and
-    /// changes neither, so [`Self::take_over`] asks it what the follow-up
-    /// will map without raising its notices early.
+    /// changes neither, so it raises no notice.
     fn live_specs(&self, model: &Model) -> (Settled, Option<&'static str>) {
         let (modifier, _, super_notice) =
             profile::modifier_for(self.desktop_modifier_choice, model.caps.kitty_kbd);
@@ -907,6 +906,7 @@ impl NativeSession {
             modifier,
             ai: self.ai_enabled,
             dvr: model.dvr.is_recording(),
+            leader: Some(&self.leader),
         });
         // owed only while a chord is registered under the fallback: a
         // flip to `editor` carries none
@@ -3151,34 +3151,69 @@ dvr_scrub = \"<F5>\"
     }
 
     /// An action whose key a desktop chord held takes that key back once a
-    /// profile flip frees it.
+    /// profile or modifier flip frees it.
     #[test]
     fn a_freed_key_goes_back_to_the_action_that_asked_for_it() {
-        use view_core::native::keys::{Action, Direction, KeyBindings};
-        for action in [Action::Resize(Direction::Wider), Action::ResizeMode] {
+        use view_core::native::keys::{Action, KeyBindings};
+        type Flip = fn(&mut Model) -> Stage;
+        // both take the `alt` chord off the key: one leaves the desktop
+        // profile, the other moves the chords onto `super`
+        let flips: [(&str, Flip); 2] = [
+            ("profile", |model| {
+                model.key_profile_override = Some(KeyProfile::Editor);
+                Stage::ProfileFlip
+            }),
+            ("modifier", |model| {
+                model.caps.kitty_kbd = true;
+                Stage::CapsUpgraded
+            }),
+        ];
+        let action = Action::ResizeMode;
+        for (name, flip) in flips {
             let mut session = NativeSession {
                 handed_over: true,
                 ..NativeSession::desktop(0, None)
             };
             assert!(session.key_bindings.rebind(action, &["<M-Left>".into()]));
             let mut model = recording_model();
+            model.caps.kitty_kbd = false;
             model.key_bindings = session.key_bindings.clone();
             let _ = session.reissue_mappings(&mut model, Stage::CapsUpgraded);
-            if action == Action::ResizeMode {
-                assert_eq!(
-                    model.key_bindings.spellings(action),
-                    KeyBindings::default().spellings(action),
-                    "the chord holds the key under the desktop profile"
-                );
-            }
-            model.key_profile_override = Some(KeyProfile::Editor);
-            let _ = session.reissue_mappings(&mut model, Stage::ProfileFlip);
             assert_eq!(
                 model.key_bindings.spellings(action),
-                ["<M-Left>"],
-                "{action:?}"
+                KeyBindings::default().spellings(action),
+                "{name}: the `alt` chord holds the key"
             );
+            let stage = flip(&mut model);
+            let _ = session.reissue_mappings(&mut model, stage);
+            assert_eq!(model.key_bindings.spellings(action), ["<M-Left>"], "{name}");
         }
+    }
+
+    /// Keys are compared under the leader nvim reported, so a key written
+    /// with the leader's own key meets the default written with `<leader>`.
+    #[test]
+    fn a_key_spelled_with_the_reported_leader_meets_a_leader_key() {
+        let at = view_native::config::UI_KEYS
+            .iter()
+            .position(|ui| ui.key == "toggle_gaps")
+            .unwrap();
+        let mut session = NativeSession {
+            handed_over: true,
+            ..NativeSession::desktop(0, None)
+        };
+        session.note_vim_enter(&leader_vim_enter(" "));
+        session.ui_keys_lhs[at] = "<Space>fv".into();
+        let mut model = recording_model();
+        let _ = session.reissue_mappings(&mut model, Stage::CapsUpgraded);
+        let entries = &model.engine.messages.entries;
+        let told: Vec<_> = entries
+            .iter()
+            .map(|entry| format!("{entry:?}"))
+            .filter(|entry| entry.contains("toggle_gaps"))
+            .collect();
+        assert_eq!(told.len(), 1, "{entries:?}");
+        assert!(told[0].contains("`dvr scrub` already"), "{}", told[0]);
     }
 
     /// The same collision settled by every reissue is told once, and so is

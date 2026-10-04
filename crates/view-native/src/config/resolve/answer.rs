@@ -15,8 +15,12 @@ impl ResolvedConfig {
     /// answer needs the terminal's own probe, which this resolver is never
     /// handed, so whoever holds the probe prints that one row itself,
     /// beside this walk.
+    ///
+    /// Printers outside this crate read
+    /// [`ResolvedConfig::held_rows`](crate::config::ResolvedConfig::held_rows),
+    /// which shows each key row as the key the run holds.
     #[must_use]
-    pub fn rows(&self) -> Vec<(&'static ConfigKey, String, Source)> {
+    pub(crate) fn rows(&self) -> Vec<(&'static ConfigKey, String, Source)> {
         keys()
             .iter()
             .filter_map(|key| self.answer(key).map(|(value, source)| (key, value, source)))

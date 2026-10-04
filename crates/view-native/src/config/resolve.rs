@@ -588,6 +588,7 @@ pub fn resolve_with(
             keys: KeysConfig {
                 bindings,
                 notices: file.keys.notices().to_vec(),
+                refused: file.keys.refused.clone(),
                 ui_lhs,
                 profile: file.keys.profile().map(str::to_string),
                 desktop_modifier: file.keys.desktop_modifier().map(str::to_string),
@@ -624,7 +625,7 @@ fn resolve_keys(
     let mut bindings = file.keys.bindings().clone();
     let mut sources = [Source::Derived; KEY_ACTIONS.len()];
     for (index, (key, action)) in KEY_ACTIONS.into_iter().enumerate() {
-        if file.spells("keys", key) {
+        if file.spells("keys", key) && !file.keys.refused(key) {
             sources[index] = Source::File;
         }
         let Some(spellings) = env_read(env, "keys", key, KEYS_EXPECTED, parse_keys, notices) else {
@@ -653,7 +654,7 @@ fn resolve_ui_lhs_env(
     notices: &mut Vec<String>,
 ) -> (String, Source) {
     let mut lhs = file_lhs.to_string();
-    let mut source = if file.spells("keys", key) {
+    let mut source = if file.spells("keys", key) && !file.keys.refused(key) {
         Source::File
     } else {
         Source::Derived

@@ -931,16 +931,17 @@ pub const KEY_ACTIONS: [(&str, Action); 4] = [
 /// A key never fails the table, for the reason `[native] tree_width`'s own
 /// resolution states, and each action falls back on its own: a mistyped
 /// `sidebar_wider` leaves a good `sidebar_narrower` as the user wrote it.
-fn resolve_key_bindings(table: &KeysTable) -> (KeyBindings, Vec<&'static str>) {
+fn resolve_key_bindings(table: &KeysTable) -> (KeyBindings, Vec<&'static str>, Vec<&'static str>) {
     let mut keys = KeyBindings::default();
     let mut notices = Vec::new();
+    let mut refused = Vec::new();
     let entries: [_; KEY_ACTIONS.len()] = [
         (&table.sidebar_wider, SIDEBAR_WIDER_NOTICE),
         (&table.sidebar_narrower, SIDEBAR_NARROWER_NOTICE),
         (&table.composer_newline, COMPOSER_NEWLINE_NOTICE),
         (&table.resize_mode, RESIZE_MODE_NOTICE),
     ];
-    for ((value, notice), (_, action)) in entries.into_iter().zip(KEY_ACTIONS) {
+    for ((value, notice), (key, action)) in entries.into_iter().zip(KEY_ACTIONS) {
         let Some(value) = value.as_ref() else {
             continue;
         };
@@ -954,9 +955,10 @@ fn resolve_key_bindings(table: &KeysTable) -> (KeyBindings, Vec<&'static str>) {
         };
         if !spellings.is_some_and(|spellings| keys.rebind(action, &spellings)) {
             notices.push(notice);
+            refused.push(key);
         }
     }
-    (keys, notices)
+    (keys, notices, refused)
 }
 
 /// `[keys] toggle_gaps`/`cycle_surfaces`: the lhs replaces the default
@@ -993,6 +995,9 @@ fn default_lhs(feature: &str, verb: &str) -> &'static str {
 pub struct KeysConfig {
     bindings: KeyBindings,
     notices: Vec<&'static str>,
+    /// Each `[keys]` key whose value the file layer refused, which holds
+    /// its default.
+    refused: Vec<&'static str>,
     /// The left-hand side each of [`UI_KEYS`] registers under, in its
     /// order.
     ui_lhs: [String; UI_KEYS.len()],
@@ -1016,6 +1021,7 @@ impl Default for KeysConfig {
         Self {
             bindings: KeyBindings::default(),
             notices: Vec::new(),
+            refused: Vec::new(),
             ui_lhs: UI_KEYS.map(|ui| default_lhs(ui.feature, ui.verb).to_string()),
             profile: None,
             desktop_modifier: None,
@@ -1038,6 +1044,12 @@ impl KeysConfig {
     #[must_use]
     pub fn notices(&self) -> &[&'static str] {
         &self.notices
+    }
+
+    /// Whether the file layer refused `[keys] key`'s value, leaving it on
+    /// its default.
+    pub(crate) fn refused(&self, key: &str) -> bool {
+        self.refused.contains(&key)
     }
 
     /// The left-hand side `ui gaps` registers under: `[keys] toggle_gaps`'s
@@ -1180,11 +1192,12 @@ impl ViewConfig {
         // makes every `Result<_, NativeConfigError>` in this module a
         // large-error return there (`clippy::result_large_err`)
         let file: ViewFile = toml::from_str(s).map_err(|e| NativeConfigError::Toml(Box::new(e)))?;
-        let (bindings, mut notices) = resolve_key_bindings(&file.keys);
+        let (bindings, mut notices, mut refused) = resolve_key_bindings(&file.keys);
         let mut ui_lhs: [String; UI_KEYS.len()] = Default::default();
         for ((slot, ui), value) in ui_lhs.iter_mut().zip(UI_KEYS).zip(file.keys.ui_values()) {
             let (lhs, notice) = resolve_ui_lhs(value, default_lhs(ui.feature, ui.verb), ui.notice);
             *slot = lhs;
+            refused.extend(notice.map(|_| ui.key));
             notices.extend(notice);
         }
         Ok(Self {
@@ -1200,6 +1213,7 @@ impl ViewConfig {
             keys: KeysConfig {
                 bindings,
                 notices,
+                refused,
                 ui_lhs,
                 profile: file.keys.profile.clone(),
                 desktop_modifier: file.keys.desktop_modifier.clone(),

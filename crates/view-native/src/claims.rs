@@ -5,8 +5,8 @@
 use std::borrow::Cow;
 
 use view_core::msg::RpcCall;
-use view_core::native::chords::{DesktopModifier, KeyProfile, DESKTOP_CHORD_COUNT};
-use view_core::native::keys::{canonical_keys, Action, KeyBindings};
+use view_core::native::chords::{desktop_chord, DesktopModifier, KeyProfile, DESKTOP_CHORD_COUNT};
+use view_core::native::keys::{lhs_keys, Action, KeyBindings};
 use view_core::native::mappings::MappingSpec;
 
 use crate::config::{
@@ -38,6 +38,9 @@ pub struct Inputs<'a> {
     pub ai: bool,
     /// Whether the recording is on.
     pub dvr: bool,
+    /// The key `<leader>` stands for, or `None` before nvim has said, when
+    /// `<leader>` is compared as written.
+    pub leader: Option<&'a str>,
 }
 
 /// The keys view holds once every collision is settled.
@@ -95,9 +98,9 @@ pub fn settle(inputs: &Inputs<'_>) -> Settled {
 
 impl ResolvedConfig {
     /// The keys this configuration holds once every collision is settled,
-    /// under `modifier` and with the agent panel on when `ai` is.
+    /// under `modifier` and `leader`, with the agent panel on when `ai` is.
     #[must_use]
-    pub fn held_keys(&self, modifier: DesktopModifier, ai: bool) -> Settled {
+    pub fn held_keys(&self, modifier: DesktopModifier, ai: bool, leader: Option<&str>) -> Settled {
         settle(&Inputs {
             cfg: &self.tables.native,
             ui_lhs: self.tables.keys.ui_lhs(),
@@ -107,18 +110,22 @@ impl ResolvedConfig {
             modifier,
             ai,
             dvr: self.tables.dvr.enabled,
+            leader,
         })
     }
 
-    /// [`Self::rows`] with each key row the run puts back on its default
-    /// showing that default as derived, and the notice each collision owes.
+    /// Every row this configuration resolves, each key row showing the key
+    /// the run holds under `modifier`: a row put back on its default shows
+    /// that default as derived, and a desktop chord no layer moved shows
+    /// its spelling under `modifier`. Then the notice each collision owes.
     #[must_use]
     pub fn held_rows(
         &self,
         modifier: DesktopModifier,
         ai: bool,
+        leader: Option<&str>,
     ) -> (Vec<(&'static ConfigKey, String, Source)>, Vec<String>) {
-        let held = self.held_keys(modifier, ai);
+        let held = self.held_keys(modifier, ai, leader);
         let rows = self
             .rows()
             .into_iter()
@@ -129,6 +136,11 @@ impl ResolvedConfig {
                     .find(|back| (back.table, back.key) == (key.table, key.key))
                 {
                     Some(back) => (key, back.value.clone(), Source::Derived),
+                    None if key.table == "keys.desktop" && source == Source::Derived => {
+                        let lhs = desktop_chord(key.key)
+                            .map_or(value, |chord| chord.lhs(modifier).to_string());
+                        (key, lhs, source)
+                    }
                     None => (key, value, source),
                 }
             })
@@ -147,9 +159,11 @@ struct Claimant {
     /// The feature and verb a notice names, `ui gaps` or `sidebar wider`.
     name: String,
     keys: Vec<String>,
-    /// [`Self::keys`], each in its canonical spelling.
+    /// [`Self::keys`], each as nvim stores it.
     canonical: Vec<Vec<String>>,
     defaults: Vec<String>,
+    /// [`Self::defaults`], each as nvim stores it.
+    default_canonical: Vec<Vec<String>>,
     /// [`BUFFER`], [`SURFACES`], or both.
     scope: u8,
     /// The mapping each key registers, `None` for a key only view's own
@@ -172,28 +186,27 @@ impl Claimant {
             name: format!("{} {}", spec.feature, spec.verb),
             defaults: vec![spec.lhs.to_string()],
             canonical: Vec::new(),
+            default_canonical: Vec::new(),
             keys,
             scope: BUFFER,
             spec: Some(spec),
             action: None,
         }
-        .canonicalized()
     }
 
-    fn canonicalized(mut self) -> Self {
-        self.canonical = self.keys.iter().map(|key| same(key)).collect();
+    /// The claimant with its keys and defaults spelled as nvim stores them,
+    /// `<leader>` read as `leader`.
+    fn canonicalized(mut self, leader: Option<&str>) -> Self {
+        let stored = |keys: &[String]| keys.iter().map(|key| lhs_keys(key, leader)).collect();
+        self.canonical = stored(&self.keys);
+        self.default_canonical = stored(&self.defaults);
         self
     }
 
-    fn set_keys(&mut self, keys: Vec<String>) {
-        self.keys = keys;
-        self.canonical = self.keys.iter().map(|key| same(key)).collect();
-    }
-
-    /// Whether a config row moved it onto a key outside its defaults.
-    fn moved(&self) -> bool {
-        let defaults: Vec<Vec<String>> = self.defaults.iter().map(|key| same(key)).collect();
-        !self.canonical.iter().all(|key| defaults.contains(key))
+    /// Whether `key` is one of the keys it holds when no config row moves
+    /// it.
+    fn holds_as_default(&self, key: &[String]) -> bool {
+        self.default_canonical.iter().any(|d| d == key)
     }
 
     /// `[keys] dvr_scrub`, the way a notice names the row.
@@ -201,11 +214,6 @@ impl Claimant {
         self.row
             .map_or_else(String::new, |(table, key)| format!("[{table}] {key}"))
     }
-}
-
-/// The form two spellings of one key compare equal in.
-fn same(key: &str) -> Vec<String> {
-    canonical_keys(key)
 }
 
 /// Whether two claimants answer a key in one place.
@@ -248,7 +256,6 @@ fn claimants(inputs: &Inputs<'_>) -> Vec<Claimant> {
                     inputs.bindings.spellings(Action::ResizeMode),
                 )
             }
-            .canonicalized()
         } else {
             let keys = vec![spec.lhs.to_string()];
             Claimant::spec(None, spec, keys)
@@ -276,21 +283,22 @@ fn claimants(inputs: &Inputs<'_>) -> Vec<Claimant> {
         if !answered {
             continue;
         }
-        claimants.push(
-            Claimant {
-                row: Some(("keys", key)),
-                name: key.replacen('_', " ", 1),
-                keys: inputs.bindings.spellings(action),
-                canonical: Vec::new(),
-                defaults: KeyBindings::default().spellings(action),
-                scope: SURFACES,
-                spec: None,
-                action: Some(action),
-            }
-            .canonicalized(),
-        );
+        claimants.push(Claimant {
+            row: Some(("keys", key)),
+            name: key.replacen('_', " ", 1),
+            keys: inputs.bindings.spellings(action),
+            canonical: Vec::new(),
+            defaults: KeyBindings::default().spellings(action),
+            default_canonical: Vec::new(),
+            scope: SURFACES,
+            spec: None,
+            action: Some(action),
+        });
     }
     claimants
+        .into_iter()
+        .map(|claimant| claimant.canonicalized(inputs.leader))
+        .collect()
 }
 
 /// How [`settle_claimants`] settles one collision.
@@ -301,18 +309,20 @@ enum Collision {
         moved: usize,
         key: String,
     },
-    /// Two features on their defaults share `key`: `other` gives it up.
+    /// Two features on their defaults share `key`, stored as `shared`:
+    /// `other` gives it up.
     Drop {
         holder: usize,
         other: usize,
         key: String,
+        shared: Vec<String>,
     },
 }
 
 /// Settles every collision in `claimants` and returns the notices and the
 /// rows put back. Repeats until no key has two claimants in one scope,
 /// because a default put back can be the key another claimant was moved
-/// onto. Each round puts a moved claimant back for good or drops a key,
+/// onto. Each pass puts a moved claimant back for good or drops a key,
 /// so it ends.
 fn settle_claimants(claimants: &mut [Claimant]) -> (Vec<String>, Vec<PutBack>) {
     let mut notices = Vec::new();
@@ -339,10 +349,15 @@ fn settle_claimants(claimants: &mut [Claimant]) -> (Vec<String>, Vec<PutBack>) {
                         value: defaults,
                     });
                 }
-                let keys = moved.defaults.clone();
-                moved.set_keys(keys);
+                moved.keys.clone_from(&moved.defaults);
+                moved.canonical.clone_from(&moved.default_canonical);
             }
-            Collision::Drop { holder, other, key } => {
+            Collision::Drop {
+                holder,
+                other,
+                key,
+                shared,
+            } => {
                 let Some(name) = claimants.get(holder).map(|h| h.name.clone()) else {
                     break;
                 };
@@ -353,14 +368,15 @@ fn settle_claimants(claimants: &mut [Claimant]) -> (Vec<String>, Vec<PutBack>) {
                     "view: `{name}` and `{}` both hold {key} by default. `{name}` keeps it this run",
                     other.name,
                 ));
-                let dropped = same(&key);
-                let keys = other
+                let (keys, canonical) = other
                     .keys
                     .iter()
-                    .filter(|k| same(k) != dropped)
-                    .cloned()
-                    .collect();
-                other.set_keys(keys);
+                    .zip(&other.canonical)
+                    .filter(|(_, k)| **k != shared)
+                    .map(|(key, k)| (key.clone(), k.clone()))
+                    .unzip();
+                other.keys = keys;
+                other.canonical = canonical;
             }
         }
     }
@@ -371,7 +387,6 @@ fn settle_claimants(claimants: &mut [Claimant]) -> (Vec<String>, Vec<PutBack>) {
 /// its defaults holds, then the first two moved onto one key, then the
 /// first two defaults that share one.
 fn collision(claimants: &[Claimant]) -> Option<Collision> {
-    let moved: Vec<bool> = claimants.iter().map(Claimant::moved).collect();
     let mut both_moved = None;
     let mut both_held = None;
     for (i, first) in claimants.iter().enumerate() {
@@ -382,7 +397,12 @@ fn collision(claimants: &[Claimant]) -> Option<Collision> {
             let Some(shared) = other.canonical.iter().find(|k| first.canonical.contains(k)) else {
                 continue;
             };
-            match (moved[i], moved[j]) {
+            // a row moved onto one key keeps every one of its defaults it
+            // still names, so being moved is a question about this key
+            match (
+                !first.holds_as_default(shared),
+                !other.holds_as_default(shared),
+            ) {
                 (false, true) => {
                     return Some(Collision::PutBack {
                         holder: i,
@@ -409,6 +429,7 @@ fn collision(claimants: &[Claimant]) -> Option<Collision> {
                         holder: i,
                         other: j,
                         key: spelled(other, shared),
+                        shared: shared.clone(),
                     });
                 }
             }

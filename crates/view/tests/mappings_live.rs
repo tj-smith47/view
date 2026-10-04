@@ -19,6 +19,7 @@ use view_core::events::UiEvent;
 use view_core::model::{Look, Model};
 use view_core::msg::{Effect, Key, Msg, RpcCall};
 use view_core::native::key_log::Fired;
+use view_core::native::keys::lhs_keys;
 use view_core::native::mappings::{MappingClaim, MappingOwner};
 use view_core::native::registry;
 use view_core::native::speculate::{
@@ -2134,4 +2135,105 @@ fn command_modifiers(help: &str) -> Vec<&str> {
         .filter_map(|token| token.strip_prefix(':'))
         .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase()))
         .collect()
+}
+
+/// Pairs of spellings for one key or two: each modifier and named-key
+/// spelling view's defaults, chords and docs write, beside the other names
+/// and cases a config may write it in.
+const SPELLING_PAIRS: &[(&str, &str)] = &[
+    ("<CR>", "<Enter>"),
+    ("<CR>", "<Return>"),
+    ("<M-CR>", "<M-Enter>"),
+    ("<D-CR>", "<D-Enter>"),
+    ("<S-CR>", "<S-Return>"),
+    ("<BS>", "<BackSpace>"),
+    ("<S-D-BS>", "<S-D-BackSpace>"),
+    ("<Del>", "<Delete>"),
+    ("<Ins>", "<Insert>"),
+    ("<NL>", "<NewLine>"),
+    ("<NL>", "<LineFeed>"),
+    ("<NL>", "<LF>"),
+    ("<Esc>", "<Escape>"),
+    ("<S-Esc>", "<S-Escape>"),
+    ("<S-a>", "A"),
+    ("<M-S-a>", "<M-A>"),
+    ("<D-S-f>", "<D-F>"),
+    ("<C-S-a>", "<C-a>"),
+    ("<C-S-x>", "<C-X>"),
+    ("<C-x>", "<C-X>"),
+    ("<c-g>", "<C-g>"),
+    ("<C-S-D-a>", "<C-D-a>"),
+    ("<C-M-S-a>", "<C-M-a>"),
+    ("<C-S-A>", "<C-S-a>"),
+    ("<S-D-1>", "<D-!>"),
+    ("<M-!>", "<M-S-1>"),
+    ("<S-D-=>", "<D-+>"),
+    ("<M-x>", "<M-X>"),
+    ("<D-x>", "<D-X>"),
+    ("<T-x>", "<T-X>"),
+    ("<A-x>", "<M-x>"),
+    ("<C-A-x>", "<C-M-x>"),
+    ("<A->>", "<M->>"),
+    ("<m-cr>", "<M-CR>"),
+    ("<S-M-D-,>", "<M-S-D-,>"),
+    ("<S-M-Left>", "<M-S-Left>"),
+    ("<D-Left>", "<d-left>"),
+    ("<S-Tab>", "<s-tab>"),
+    ("<C-S-Left>", "<C-Left>"),
+    ("<Tab>", "<C-I>"),
+    ("<C-[>", "<Esc>"),
+    ("<C-M>", "<CR>"),
+    ("<kEnter>", "<CR>"),
+    ("<Nul>", "<C-@>"),
+    ("<C-Space>", "<C-@>"),
+    ("<C-Space>", "<C- >"),
+    ("<M-Space>", "<M- >"),
+    ("<M-lt>", "<M-<>"),
+    ("<M-Bar>", "<M-|>"),
+    ("<M-Bslash>", "<M-\\>"),
+    ("<S-Space>", " "),
+    ("<S-1>", "!"),
+    ("<a>", "a"),
+    ("<lt>", "<"),
+    ("<Bar>", "|"),
+    ("<Bslash>", "\\"),
+    ("<Space>", " "),
+    ("<C-w><lt>", "<C-w><"),
+    ("<leader>fv", ",fv"),
+    ("<Leader>fv", ",fv"),
+    ("<Space>fv", " fv"),
+    ("<leader>fv", "<Space>fv"),
+    ("<leader><leader>", ",,"),
+];
+
+/// Each pair set in a live nvim one after the other: view reads the two
+/// spellings as one key exactly where nvim keeps one mapping for both.
+///
+/// The count of stored mappings decides. `maparg` finds a `<Tab>` mapping
+/// under `<C-i>` and an `<Esc>` one under `<C-[>`, where nvim keeps two.
+#[test]
+fn view_reads_two_spellings_as_one_key_exactly_where_nvim_stores_one_mapping() {
+    let session = Session::start("spelling-pairs");
+    let mut one = 0;
+    for (a, b) in SPELLING_PAIRS {
+        let lua = format!(
+            "vim.cmd('mapclear') \
+             vim.api.nvim_set_keymap('n', [==[{a}]==], 'A', {{}}) \
+             vim.api.nvim_set_keymap('n', [==[{b}]==], 'B', {{}}) \
+             return tostring(#vim.api.nvim_get_keymap('n'))"
+        );
+        let stored = session.eval(&format!(
+            "luaeval('(function() {} end)()')",
+            lua.replace('\'', "''")
+        ));
+        let nvim = stored == "1";
+        let view = lhs_keys(a, Some(LEADER)) == lhs_keys(b, Some(LEADER));
+        assert_eq!(view, nvim, "{a:?} and {b:?}: nvim stores {stored}");
+        one += usize::from(nvim);
+    }
+    assert!(
+        one > 10 && one < SPELLING_PAIRS.len() - 10,
+        "{one} of {} pairs are one key",
+        SPELLING_PAIRS.len()
+    );
 }
