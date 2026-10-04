@@ -292,6 +292,16 @@ fn split_keys(spelling: &str) -> Option<Binding> {
     (formed && keys.next().is_none()).then_some((first, second))
 }
 
+/// The keys `spelled` names, each written one way for every spelling nvim
+/// reads as that key: `<c-g>` and `<C-g>`, `<A-x>` and `<M-x>`, `<lt>`
+/// and `<` each come out as one.
+#[must_use]
+pub fn canonical_keys(spelled: &str) -> Vec<String> {
+    key_tokens(spelled)
+        .map(super::submit_hold::canonical)
+        .collect()
+}
+
 /// The keys `spelling` writes, in order: each `<...>` notation as one
 /// token, and every other character, a `<` that opens no notation
 /// included, as a token of its own.

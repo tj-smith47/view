@@ -14,7 +14,7 @@ mod user_run;
 
 use std::time::Duration;
 
-pub(crate) use user_run::{canonical_keys, canonical_typed};
+pub(crate) use user_run::canonical_typed;
 
 use commands::names_view;
 
@@ -1036,7 +1036,7 @@ pub fn fold_engine_key(model: &mut Model, notation: &str) -> Vec<Effect> {
 /// One spelling for each key nvim reads as the same key: `keytrans()`
 /// writes `<M-S-Left>` and `<Space>` where view's input writes
 /// `<S-M-Left>` and a bare space, and a shifted letter is its capital.
-fn canonical(key: &str) -> String {
+pub(crate) fn canonical(key: &str) -> String {
     if let Some(c) = notation_char(key) {
         return c.to_string();
     }

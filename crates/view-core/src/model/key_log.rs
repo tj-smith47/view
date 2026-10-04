@@ -8,8 +8,9 @@ use std::time::SystemTime;
 use super::{Model, OverlayKind};
 use crate::native::geometry::Anchor;
 use crate::native::key_log::{Fired, KeyLog, KeyLogView};
+use crate::native::keys::canonical_keys;
 use crate::native::mappings::MappingOwner;
-use crate::native::submit_hold::{canonical_keys, canonical_typed};
+use crate::native::submit_hold::canonical_typed;
 
 /// The key log and what it needs to describe a row.
 #[derive(Debug, Clone, Default)]

@@ -193,12 +193,14 @@ impl FrameRing {
     /// recorded while the snapshot is held keep building on the open group.
     /// The copy counts toward the ring's budget until the snapshot drops,
     /// and the oldest groups are evicted to make room for it before it is
-    /// taken. `None` when no group the ring may evict makes that room: the
-    /// open group, or earlier snapshots, hold what the copy would need.
+    /// taken. `None`, evicting nothing, when no group the ring may evict
+    /// makes that room: the open group, or earlier snapshots, hold what the
+    /// copy would need.
     #[must_use]
     pub fn snapshot(&mut self) -> Option<RingSnapshot> {
         let bytes = self.groups.back().map_or(0, |g| g.bytes());
-        if !self.trim_to(bytes, 1) {
+        let needed = self.held().saturating_add(bytes);
+        if needed.saturating_sub(self.freeable(1)) > self.budget || !self.trim_to(bytes, 1) {
             return None;
         }
         let closed = self.groups.len().saturating_sub(1);
@@ -369,6 +371,21 @@ impl FrameRing {
             }
         }
         true
+    }
+
+    /// The bytes [`Self::trim_to`] can free while leaving `keep` groups:
+    /// the retired groups no snapshot holds and the oldest groups up to the
+    /// first one a snapshot holds.
+    fn freeable(&self, keep: usize) -> usize {
+        let unheld = |g: &&Arc<Group>| Arc::strong_count(g) == 1 && Arc::weak_count(g) == 0;
+        let evictable = self.groups.len().saturating_sub(keep);
+        let oldest = self.groups.iter().take(evictable).take_while(unheld);
+        self.retired
+            .iter()
+            .filter(unheld)
+            .chain(oldest)
+            .map(|g| g.counted)
+            .sum()
     }
 
     /// Moves the oldest group to the retired list. `None`, evicting
@@ -685,6 +702,26 @@ mod tests {
         alone.push_key(0, AREA, None, screen("a")).unwrap();
         assert!(alone.snapshot().is_none());
         assert_eq!(alone.held(), alone.budget);
+    }
+
+    #[test]
+    fn a_snapshot_with_no_room_for_its_copy_evicts_nothing() {
+        let mut ring = FrameRing::new(64 << 20);
+        ring.push_key(0, AREA, None, screen("a")).unwrap();
+        ring.push_key(1, AREA, None, screen("b")).unwrap();
+        let group = ring.open_delta(AREA).unwrap();
+        for (x, symbol) in ["世", "界", "漢", "字"].into_iter().enumerate() {
+            assert!(group.push_cell(u16::try_from(x).unwrap(), 0, &Cell::new(symbol)));
+        }
+        ring.close_delta(2, None, None).unwrap();
+        ring.budget = ring.held();
+        assert!(ring.snapshot().is_none());
+        assert_eq!(
+            ring.oldest(),
+            Some(1),
+            "the refused snapshot kept the history"
+        );
+        assert_eq!(ring.groups.len(), 2);
     }
 
     #[test]

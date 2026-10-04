@@ -2,13 +2,13 @@
 # check_comment_frames). A row only ever comes down: a row above the value
 # this file holds at HEAD is refused, and a crate under its row fails until
 # the row is lowered in the same change.
-view 629
+view 627
 view-ai 303
 view-bench 289
 view-core 1063
 view-engine 886
 view-harness 450
-view-native 219
+view-native 218
 view-oracle 709
 view-proc 23
 view-surface 128

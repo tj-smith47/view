@@ -420,8 +420,17 @@ dvr_scrub = "<leader>ug"
 view: [keys] dvr_scrub = "<leader>ug" is the key `ui gaps` already holds. `dvr scrub` stays on <leader>fv this run
 ```
 
-A feature that is off holds no key, so its keys are free to take. Two
-entries that swap keys both take effect.
+`view --print-caps` shows that entry at its default, with the same line
+under the rows.
+
+A feature that is off holds no key, so its keys are free to take. The
+sidebar width keys are held while the file tree, the AI panel or
+notifications are on. Two entries that swap keys both take effect.
+When two entries move onto one free key, one keeps it and the other stays
+on its default, and view names both.
+
+`<c-g>` and `<C-g>` are one key, as are `<M-x>` and `<A-x>`. A key typed in
+a buffer and a key typed on one of view's own panels can share a spelling.
 
 ## Answering an agent's permission request
 

@@ -18,8 +18,8 @@ use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime};
 
+use super::canonical;
 use super::typed_ahead::leaves_normal;
-use super::{canonical, key_tokens};
 use crate::model::Model;
 
 /// One key sent to nvim in normal mode, as the log reads it.
@@ -55,11 +55,6 @@ pub(crate) enum Gap {
 pub(crate) const OPERATORS: [&str; 16] = [
     "d", "y", "c", "<", ">", "!", "=", "g~", "gu", "gU", "g?", "gq", "gw", "g@", "zf", "gc",
 ];
-
-/// The keys `spelled` names, one [`canonical`] key each.
-pub(crate) fn canonical_keys(spelled: &str) -> Vec<String> {
-    key_tokens(spelled).map(canonical).collect()
-}
 
 /// `keys`, one notation each as view's input spells them, made
 /// [`canonical`].
@@ -140,7 +135,7 @@ impl UserRun {
     /// writes it.
     pub(crate) fn learn_view<'a>(&mut self, keys: impl Iterator<Item = &'a String>) {
         self.view = keys
-            .map(|spelled| canonical_keys(spelled))
+            .map(|spelled| crate::native::keys::canonical_keys(spelled))
             .filter(|keys| !keys.is_empty())
             .collect();
         self.view.sort();

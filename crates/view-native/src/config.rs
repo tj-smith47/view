@@ -930,12 +930,11 @@ pub const KEY_ACTIONS: [(&str, Action); 4] = [
 ///
 /// A key never fails the table, for the reason `[native] tree_width`'s own
 /// resolution states, and each action falls back on its own: a mistyped
-/// `sidebar_wider` leaves a perfectly good `sidebar_narrower` alone rather
-/// than reverting both to defaults the user asked to replace.
+/// `sidebar_wider` leaves a good `sidebar_narrower` as the user wrote it.
 fn resolve_key_bindings(table: &KeysTable) -> (KeyBindings, Vec<&'static str>) {
     let mut keys = KeyBindings::default();
     let mut notices = Vec::new();
-    let entries = [
+    let entries: [_; KEY_ACTIONS.len()] = [
         (&table.sidebar_wider, SIDEBAR_WIDER_NOTICE),
         (&table.sidebar_narrower, SIDEBAR_NARROWER_NOTICE),
         (&table.composer_newline, COMPOSER_NEWLINE_NOTICE),
@@ -960,17 +959,12 @@ fn resolve_key_bindings(table: &KeysTable) -> (KeyBindings, Vec<&'static str>) {
     (keys, notices)
 }
 
-/// `[keys] toggle_gaps`/`cycle_surfaces`: the left-hand side view registers
-/// for `ui gaps`/`ui cycle_surfaces` in place of the design's own default,
-/// applied by [`crate::mappings::register_plan`]'s caller
-/// (`crates/view/src/native.rs`'s `take_over`) mutating the built
-/// `RegisterMappings` spec in place.
+/// `[keys] toggle_gaps`/`cycle_surfaces`: the lhs replaces the default
+/// map's lhs for that feature and verb (`ui gaps`, `ui cycle_surfaces`).
 ///
-/// One notation: unlike the raw `KeyBindings` intercept the other three
-/// `[keys]` actions still resolve through, this key is a real nvim mapping,
-/// so there is no ceiling on how many raw keystrokes it may carry
-/// ([`view_core::native::mappings::lhs_is_spellable`] is the whole of what a
-/// value must pass).
+/// The key is an nvim mapping, so it may carry any number of keystrokes,
+/// and [`view_core::native::mappings::lhs_is_spellable`] is the whole of
+/// what a value must pass.
 fn resolve_ui_lhs(
     value: &Option<toml::Value>,
     default: &'static str,
@@ -1069,6 +1063,13 @@ impl KeysConfig {
     #[must_use]
     pub fn dvr_lhs(&self) -> &str {
         self.lhs("dvr_scrub")
+    }
+
+    /// The left-hand side each of [`UI_KEYS`] registers under, in its
+    /// order.
+    #[must_use]
+    pub fn ui_lhs(&self) -> &[String; UI_KEYS.len()] {
+        &self.ui_lhs
     }
 
     /// The left-hand side the [`UI_KEYS`] row spelled `key` registers
