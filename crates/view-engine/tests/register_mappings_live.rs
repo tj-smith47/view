@@ -174,16 +174,21 @@ fn an_export_path_names_the_file_w_writes() {
     ] {
         engine.handle.eval_str(&setup).unwrap();
     }
-    for typed in [
+    let mut typed_paths = vec![
         r"a\ b.vdvr",
         r"t\ ",
         r"a\\ b",
-        r"\$VIEW_UNSET_EXPORT.vdvr",
         "a${VIEW_UNSET_EXPORT.vdvr",
         "$HOME/e.vdvr",
         "~/t.vdvr",
         "rel.vdvr",
-    ] {
+    ];
+    // a leading backslash names the drive root on Windows, outside the
+    // scratch directory
+    if cfg!(unix) {
+        typed_paths.push(r"\$VIEW_UNSET_EXPORT.vdvr");
+    }
+    for typed in typed_paths {
         engine
             .handle
             .eval_str(&format!("execute('View dvr export {typed}')"))
@@ -256,26 +261,8 @@ fn an_export_path_naming_an_unset_variable_is_refused() {
         let got = Path::new(verb.strip_prefix("export ").unwrap());
         assert_eq!(got, want, "{verb}");
     }
-    // a unix shell expands `$$` to its own pid, a new one on every
-    // expansion, so the name is compared by shape; on Windows `$$` is two
-    // literal dollars and the second one starts the variable `x`
-    if cfg!(unix) {
-        engine
-            .handle
-            .eval_str("execute('View dvr export $$x')")
-            .unwrap();
-        let (_, verb) = next_invoke(&rx);
-        let path = Path::new(verb.strip_prefix("export ").unwrap());
-        assert_eq!(path.parent(), Some(Path::new(&cwd)), "{verb}");
-        let name = path.file_name().unwrap().to_str().unwrap();
-        let pid = name.strip_suffix('x').unwrap_or_default();
-        assert!(
-            !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()),
-            "{verb}"
-        );
-    } else {
-        refuses("$$x", "x");
-    }
+    // with `x` set, nvim reads `$$x` as a dollar and `$x` on every platform
+    refuses("$$x", "x");
     let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
     assert!(left.is_empty(), "{left:?}");
 }

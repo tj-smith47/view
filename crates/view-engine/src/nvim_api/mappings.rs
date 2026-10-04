@@ -430,17 +430,14 @@ return {
 /// current directory included. A path naming an environment variable that
 /// is not set is refused with a message naming it, since `:w` would drop
 /// the variable from the path or keep it as typed. nvim decides what is a
-/// variable: an unset name counts where `expandcmd()` puts its value once
-/// it is set, and the unset expansion is that same path with anything, or
-/// nothing, in the value's place. On unix a path carrying `$$` is
-/// accepted, since the shell expanding it answers with a new pid each
-/// time. On Windows `$$` is two literal dollars and the second one starts
-/// a variable like any other.
+/// variable: an unset name counts where `expandcmd()` puts its value in
+/// the path once it is set. `$$x` is refused as `$x is not set` on every
+/// platform, since nvim reads `$x` there once `x` is set. A refusal writes
+/// nothing.
 pub(crate) const REGISTER_COMMAND_CHUNK: &str = "\
 local channel, entries, command = ...
 local takes_path = { ['dvr export'] = true }
 local function unset_variable(path, typed)
-  local plain = vim.fn.expandcmd(typed)
   for name in path:gmatch('%${?([%w_]+)') do
     if vim.env[name] == nil then
       local was = vim.uv.os_getenv(name)
@@ -448,10 +445,7 @@ local function unset_variable(path, typed)
       local ok, set = pcall(vim.fn.expandcmd, typed)
       vim.env[name] = was
       if ok and set:find('\\30', 1, true) then
-        local shape = '^' .. vim.pesc(set):gsub('\\30', '.*') .. '$'
-        if plain:find(shape) then
-          return name
-        end
+        return name
       end
     end
   end
