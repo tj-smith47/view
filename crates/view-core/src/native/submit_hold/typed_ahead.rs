@@ -115,10 +115,27 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     complete
 }
 
-/// Ends the doubt an error raised once the newest key neither owes an
-/// argument nor was read as one. At such a key nvim and view agree nothing
-/// is owed, whichever way either read the keys before it, and every one of
-/// those keys spells a sequence.
+/// Whether the newest key neither owes an argument nor was read as one. At
+/// such a key nvim and view agree nothing is owed, whichever way either
+/// read the keys before it, and every one of those keys spells a sequence.
+///
+/// An error clears what the newest key owes, since a refused `i` owes
+/// nothing. A key that takes an argument and stays in normal mode, `"` or
+/// `f`, is never refused by itself, so an error after it answered an
+/// earlier key and it still owes.
+pub(super) fn nothing_owed(hold: &SubmitHold) -> bool {
+    let owes = |key: &str| {
+        crate::native::speculate::CMDLINE_LITERAL_KEYS.contains(&key)
+            && !LEAVES_NORMAL.contains(&key)
+    };
+    hold.argument_of.is_none()
+        && !hold
+            .recent
+            .back()
+            .is_some_and(|newest| newest.argument || owes(newest.key.as_str()))
+}
+
+/// Ends the doubt an error raised once nothing is owed.
 ///
 /// The answering batch, arriving at `now`, has to be one that can answer a
 /// key typed after the error. One sooner than `shortest`, the shortest
@@ -128,9 +145,7 @@ pub(super) fn settle_doubt(hold: &mut SubmitHold, now: SpecStamp, shortest: Dura
     let answers_sent = hold
         .doubt_sent
         .is_none_or(|sent| now.age_since(sent) >= shortest);
-    let newest = hold.recent.back();
-    let settled = hold.argument_of.is_none() && !newest.is_some_and(|key| key.argument);
-    if hold.doubt == Some(true) && answers_sent && settled {
+    if hold.doubt == Some(true) && answers_sent && nothing_owed(hold) {
         hold.doubt = None;
     }
 }

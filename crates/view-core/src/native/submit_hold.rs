@@ -911,10 +911,12 @@ impl SubmitHold {
         self.argument_of = None;
     }
 
-    /// Ends the doubt an error raised: nvim reported a mode in a flush
-    /// after the one that carried the error.
+    /// Ends the doubt an error raised where nvim reported a mode in a flush
+    /// after the one that carried the error and nothing is owed.
     pub(crate) fn note_mode_after_errors(&mut self) {
-        self.doubt = None;
+        if typed_ahead::nothing_owed(self) {
+            self.doubt = None;
+        }
     }
 
     /// Forgets which key nvim reads the next key as the argument of, where

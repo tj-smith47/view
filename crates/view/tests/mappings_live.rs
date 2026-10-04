@@ -537,27 +537,57 @@ fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
 /// Applies every `Msg` the pump delivers to `model`, sending nvim the keys
 /// the updates route to it, until `done` answers for the model an update
 /// left and the message it applied, the first answer returned once the
-/// whole wakeup is applied. `None` when nothing answers within `budget`.
+/// whole wakeup is applied. `None` when nothing answers within `budget`
+/// scaled for the host's load, after printing the kinds of the last
+/// messages the pump delivered.
 fn pump<T>(
     session: &Session,
     model: &mut Model,
     budget: Duration,
     done: impl Fn(&Model, &Msg) -> Option<T>,
 ) -> Option<T> {
-    let deadline = std::time::Instant::now() + budget;
+    let deadline = std::time::Instant::now() + view_test_support::host_deadline(budget);
+    let mut seen = std::collections::VecDeque::new();
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        let received = session.rx.recv_timeout(left).ok()?;
-        let found = applied(
-            model,
-            dispatched(session, received),
-            |effects| send(session, effects),
-            &done,
-        );
+        let Ok(received) = session.rx.recv_timeout(left) else {
+            eprintln!("nothing answered; the last messages seen: {seen:?}");
+            return None;
+        };
+        let msgs = dispatched(session, received);
+        for msg in &msgs {
+            if seen.len() == 8 {
+                seen.pop_front();
+            }
+            seen.push_back(kind(msg));
+        }
+        let found = applied(model, msgs, |effects| send(session, effects), &done);
         if found.is_some() {
             return found;
         }
     }
+}
+
+/// The variant `msg` is, with the kinds of the events a redraw carries and
+/// the kind of each message nvim showed.
+fn kind(msg: &Msg) -> String {
+    let name = |debug: String| {
+        debug
+            .split(|c: char| !c.is_alphanumeric())
+            .next()
+            .map(str::to_string)
+    };
+    let Msg::Redraw(events) = msg else {
+        return name(format!("{msg:?}")).unwrap_or_default();
+    };
+    let events: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            UiEvent::MsgShow { kind, .. } => Some(format!("MsgShow({kind})")),
+            event => name(format!("{event:?}")),
+        })
+        .collect();
+    format!("Redraw{events:?}")
 }
 
 /// Applies every one of `msgs` to `model`, handing `send` the effects of

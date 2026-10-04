@@ -21956,7 +21956,7 @@ fn the_hold_decides_as_recorded_where_nvim_sends_no_error() {
             hash = crate::hash::fnv1a_extend(hash, format!("{trace:?}").as_bytes());
         }
     }
-    assert_eq!(hash, 0x4bfe_0cb2_638b_c130, "{hash:#x}");
+    assert_eq!(hash, 0xf866_baee_a0d7_f6b0, "{hash:#x}");
 }
 
 /// An error answering a key sent before `f` leaves `f` waiting for its
@@ -22087,8 +22087,12 @@ const OPERATOR_MAPPINGS: [&str; 11] = [
 
 /// The keys before an error nvim answered, and the user's mappings read
 /// where the keys need them, each followed by view's key and a query.
-/// The last two type a jump after the error, every key of it answered.
-fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 10] {
+/// Two type a jump after the error, every key of it answered. Three close
+/// a text object or name a macro after the error, and nvim then reports a
+/// mode while the key closing it owes its argument. In the last, the error
+/// answers a key before `"`, which still owes its register when the mode
+/// report comes.
+fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 14] {
     let answered = |keys: &[&'static str]| {
         let mut steps: Vec<Step> = keys.iter().map(|key| k(key)).collect();
         steps.extend([Step::Answer, k("i"), Step::Error]);
@@ -22123,6 +22127,43 @@ fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 10] {
                 Step::Answer,
             ]),
             &OPERATOR_MAPPINGS,
+        ),
+        (
+            vec![
+                k("n"),
+                k("d"),
+                k("i"),
+                Step::Error,
+                k("\""),
+                Step::Mode("normal"),
+            ],
+            &[],
+        ),
+        (
+            vec![
+                k("y"),
+                k("2"),
+                k("i"),
+                Step::Error,
+                k("\""),
+                Step::Mode("normal"),
+            ],
+            &[],
+        ),
+        (
+            vec![
+                k("n"),
+                k("@"),
+                Step::Error,
+                k("a"),
+                Step::Mode("insert"),
+                Step::Mode("normal"),
+            ],
+            &[],
+        ),
+        (
+            vec![k("n"), k("\""), Step::Error, Step::Mode("normal"), k("d")],
+            &[],
         ),
     ]
 }
@@ -22187,6 +22228,35 @@ fn the_doubt_an_error_raises_ends_on_a_fact_from_nvim() {
     ];
     let trace = hold_trace(&mut hold_model(false, false), &steps, false, false);
     assert!(trace[6].0, "f's argument is still owed: {trace:?}");
+}
+
+/// A doubt a mode report left standing, `"` owing its register, still
+/// ends on a fact from nvim once nothing is owed: the answer to a later
+/// plain key or a mode report after it. Until then `j` is the register,
+/// and view's key typed as `f`'s argument arms the hold.
+#[test]
+fn a_doubt_left_owing_ends_once_a_later_key_owes_nothing() {
+    let owing = [
+        k("n"),
+        k("d"),
+        k("i"),
+        Step::Error,
+        k("\""),
+        Step::Mode("normal"),
+    ];
+    let probe = ["f", " ", "f", "f", "m"].map(k);
+    for (after, holds) in [
+        (&[k("j"), Step::Mode("normal")][..], true),
+        (&[k("j"), k("j"), Step::Answer], false),
+        (&[k("j"), k("j"), Step::Mode("normal")], false),
+    ] {
+        let mut steps = owing.to_vec();
+        steps.extend_from_slice(after);
+        steps.extend(probe);
+        let trace = hold_trace(&mut hold_model(false, false), &steps, false, false);
+        let held = trace.iter().any(|t| t.0);
+        assert_eq!(held, holds, "{after:?}: {trace:?}");
+    }
 }
 
 /// A mode report and an error in one batch, the report first, leave the
@@ -22301,22 +22371,16 @@ fn an_answer_to_a_key_sent_before_the_error_keeps_the_doubt() {
 
 /// The doubt covers every key until nothing is owed, so the keys after an
 /// error are never read from a guess at what the error left owed. After
-/// `o i` and after `d i`, `f` owes, `m` is its argument and view's key
-/// folds while the doubt stands, `t` owing in between for `d i`. Every key
-/// is answered.
+/// `d i`, `f` owes, `m` is its argument and `t` owes again, so view's key
+/// is `t`'s argument and arms the hold only because the doubt still
+/// stands. Every key is answered.
 #[test]
 fn keys_after_an_error_stay_in_doubt_until_nothing_is_owed() {
-    let query = [" ", "f", "f", "m", "a", "i", "n"].map(k);
-    for prefix in [
-        &[k("o"), k("i"), Step::Error, k("f"), k("m")][..],
-        &[k("d"), k("i"), Step::Error, k("f"), k("m"), k("t")],
-    ] {
-        let mut steps = prefix.to_vec();
-        steps.extend(query);
-        let armed = steps.len() - 5;
-        let trace = hold_trace(&mut hold_model(false, false), &steps, true, false);
-        assert!(trace[armed].0, "{prefix:?}: the hold arms: {trace:?}");
-    }
+    let mut steps = vec![k("d"), k("i"), Step::Error, k("f"), k("m"), k("t")];
+    steps.extend([" ", "f", "f", "m", "a", "i", "n"].map(k));
+    let armed = steps.len() - 5;
+    let trace = hold_trace(&mut hold_model(false, false), &steps, true, false);
+    assert!(trace[armed].0, "the hold arms: {trace:?}");
 }
 
 /// A hold armed only because an error put view's reading in doubt, where
@@ -22363,8 +22427,6 @@ fn the_hold_decides_what_it_was_recorded_deciding() {
         (held, sent.iter().map(|key| (*key).to_string()).collect())
     }
     let typed = |keys: &[&str]| -> Trace { keys.iter().map(|key| row(false, &[key])).collect() };
-    // the sequences traced against a live nvim: the keys before an error,
-    // the keys after it, view's key armed or not, then the query
     let query = ["m", "a", "i", "n"];
     let errored = |before: &[&'static str], after: &[&'static str]| -> (Vec<Step>, Trace) {
         let mut steps: Vec<Step> = before.iter().map(|key| k(key)).collect();
@@ -22664,12 +22726,12 @@ fn the_hold_decides_what_it_was_recorded_deciding() {
 /// before its later keys, and then `main` typed ahead, and every pair of
 /// units before view's key at speed. The units are view's keys and their
 /// prefixes, the user's mappings and a prefix of one, operators, keys that
-/// leave normal mode, answered or not, a key that takes an argument, a
-/// click, and nvim's answers and mode reports; the gaps fall below, at and
-/// past `'timeoutlen'`, a millisecond short of it and fifty past it among
-/// them.
+/// leave normal mode, answered or not, keys that take an argument, one of
+/// them reported on, a click, and nvim's answers and mode reports; the gaps
+/// fall below, at and past `'timeoutlen'`, a millisecond short of it and
+/// fifty past it among them.
 fn hold_population() -> Vec<Vec<Step>> {
-    const UNITS: [&[Step]; 26] = [
+    const UNITS: [&[Step]; 27] = [
         &[k(" "), k("f"), k("f")],
         &[k(" "), k("e")],
         &[k(" ")],
@@ -22701,6 +22763,7 @@ fn hold_population() -> Vec<Vec<Step>> {
         ],
         &[k("v"), Step::Mode("visual")],
         &[Step::Mode("normal")],
+        &[k("\""), Step::Mode("normal")],
     ];
     const VIEW: [&[&str]; 2] = [&[" ", "f", "f"], &[" ", "e"]];
     const GAPS: [u64; 7] = [10, 150, 299, 300, 301, 350, 1000];
