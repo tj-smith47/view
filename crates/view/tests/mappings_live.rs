@@ -915,6 +915,160 @@ fn keys_typed_ahead_after_a_users_mapping_never_edit_the_buffer() {
     assert_eq!(sent, [",", "f", "b"], "the query waits after a pause");
 }
 
+/// Whether `events` carries something nvim draws because it read a key.
+fn answers_a_key(events: &[UiEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            UiEvent::GridCursorGoto { .. }
+                | UiEvent::ModeChange { .. }
+                | UiEvent::CmdlineShow { .. }
+                | UiEvent::GridLine { .. }
+                | UiEvent::MsgShowcmd { .. }
+        )
+    })
+}
+
+/// Sends `key` and keeps what nvim sends back, in the order the runtime
+/// applies it, until nvim echoes the keys it waits on, each message
+/// waited for within `budget`.
+fn echoed(session: &Session, key: &str, budget: Duration) -> Vec<Msg> {
+    session.engine.handle.input(key).unwrap();
+    let mut kept = Vec::new();
+    loop {
+        let received = session
+            .rx
+            .recv_timeout(budget)
+            .expect("nvim echoes the key");
+        let msgs = dispatched(session, received);
+        let echo = msgs.iter().any(|msg| {
+            matches!(msg, Msg::Redraw(events) if events.iter().any(|event| {
+                matches!(event, UiEvent::MsgShowcmd { content } if !content.is_empty())
+            }))
+        });
+        kept.extend(msgs);
+        if echo {
+            return kept;
+        }
+    }
+}
+
+/// Reads `kept`, then sends `keys`, each its own input, and reads what
+/// nvim sends back in the order the runtime applies it, each message
+/// waited for within `budget`, until view's invocation: whether a batch
+/// answering a key came first.
+fn answered_before_invoke(
+    session: &Session,
+    kept: Vec<Msg>,
+    keys: &[&str],
+    budget: Duration,
+) -> bool {
+    for key in keys {
+        session.engine.handle.input(key).unwrap();
+    }
+    let mut answered = false;
+    let mut msgs = kept;
+    loop {
+        for msg in msgs {
+            match msg {
+                Msg::FeatureInvoke { .. } => return answered,
+                Msg::Redraw(events) => answered |= answers_a_key(&events),
+                _ => {}
+            }
+        }
+        let received = session.rx.recv_timeout(budget).expect("view's invocation");
+        msgs = dispatched(session, received);
+    }
+}
+
+/// Reads every message nvim sent before it answered a request, which it
+/// does only once it has drawn what the keys before it did.
+fn settle(session: &Session) {
+    session.eval("1");
+    while let Ok(received) = session.rx.try_recv() {
+        let _ = dispatched(session, received);
+    }
+    let _ = session.damage.take_damage_folded();
+}
+
+/// The order view's invocation and nvim's redraw arrive in for one of
+/// view's keys, over sixty presses each typed at once, typed with every
+/// echo read before the next key, and typed with the echoes read only once
+/// the last key is out, as a link with a longer round trip than the typing
+/// delivers them. On the last, nvim's echo of the keys it waited on
+/// arrives ahead of the invocation every time, so an answer seen after a
+/// view key never says that nvim ran some other mapping on it.
+#[test]
+fn an_answer_to_an_earlier_key_arrives_ahead_of_views_invocation() {
+    let session = Session::start("invoke-order");
+    let _ = session.register(&NativeConfig::all_enabled());
+    let _ = session.claims();
+    settle(&session);
+    let mut at_once = Vec::new();
+    let mut spaced = 0;
+    let mut far = 0;
+    for press in 0..60 {
+        if answered_before_invoke(&session, Vec::new(), &[",", "f", "f"], ARRIVAL) {
+            at_once.push(press);
+        }
+        settle(&session);
+        let _ = echoed(&session, ",", ARRIVAL);
+        let _ = echoed(&session, "f", ARRIVAL);
+        spaced += usize::from(answered_before_invoke(
+            &session,
+            Vec::new(),
+            &["f"],
+            ARRIVAL,
+        ));
+        settle(&session);
+        let mut kept = echoed(&session, ",", ARRIVAL);
+        kept.extend(echoed(&session, "f", ARRIVAL));
+        far += usize::from(answered_before_invoke(&session, kept, &["f"], ARRIVAL));
+        settle(&session);
+    }
+    eprintln!(
+        "answered before the invocation: at once {at_once:?} of 60, spaced {spaced}/60, \
+         far {far}/60"
+    );
+    assert_eq!(far, 60, "nvim echoes the keys it waits on");
+}
+
+/// A user's mapping whose last key would enter insert mode on its own,
+/// then view's key and a query typed at once: the query waits for view's
+/// invocation, and none of it edits the buffer.
+#[test]
+fn keys_typed_ahead_after_a_users_mapping_on_a_mode_key_never_edit_the_buffer() {
+    let session = Session::start_with(
+        "typed-ahead-mode-key",
+        "vim.keymap.set('n', '<leader>a', '<cmd>let g:view_a = 1<CR>')\n",
+    );
+    let mut model = Model::with_term_size(80, 24);
+    model.ai_trusted = true;
+    session.register(&NativeConfig::all_enabled());
+    let seen = std::cell::Cell::new((false, false));
+    pump(&session, &mut model, ARRIVAL, |_, msg| {
+        let (claimed, read) = seen.get();
+        seen.set(match msg {
+            Msg::MappingsClaimed { .. } => (true, read),
+            Msg::UserMappingsRead { keys, .. } => (claimed, keys.iter().any(|keys| keys == ",a")),
+            _ => (claimed, read),
+        });
+        (seen.get() == (true, true)).then_some(())
+    })
+    .expect("the registration answers and the user's keys are read");
+    assert_eq!(model.engine.mode.current, "normal");
+    let keys = [",", "a", ",", "f", "f", "m", "a", "i", "n"];
+    let sent = type_into(&session, &mut model, &keys);
+    pump(&session, &mut model, ARRIVAL, |_, msg| {
+        matches!(msg, Msg::FeatureInvoke { .. }).then_some(())
+    })
+    .expect("nvim runs view's <leader>ff");
+    assert_eq!(session.eval("g:view_a"), "1", "the user's mapping ran");
+    assert_eq!(session.eval("join(getline(1, '$'), '|')"), "");
+    assert_eq!(session.eval("mode()"), "n");
+    assert_eq!(sent, keys[..5], "the query waits for view's invocation");
+}
+
 /// A stub that maps the real handler over itself and types its keys again
 /// logs one row for one press, naming the stub.
 #[test]

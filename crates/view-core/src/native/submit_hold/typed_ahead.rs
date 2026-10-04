@@ -1,8 +1,11 @@
 //! Whether a key sent to nvim completes one of view's invoking sequences,
 //! which arms the hold on the keys typed ahead of the invocation.
 //!
-//! The decision reads the hold's own window of recent keys and nothing the
-//! key log keeps. No clock and none of the user's mappings enter it.
+//! The decision reads the hold's own window of recent keys, the user's
+//! mapped key sequences as the mapping read wrote them, and nothing the key
+//! log keeps. No clock enters it.
+
+use std::collections::VecDeque;
 
 use super::{canonical, Folded, LEAVES_NORMAL, LEAVES_NORMAL_AFTER};
 use crate::model::Model;
@@ -21,8 +24,16 @@ use crate::model::Model;
 /// The mode is read the same way. `o<Space>e` typed inside one round trip
 /// reaches nvim in insert mode, where it is text, while the mode view last
 /// read still says normal. A sequence whose first key went out behind a
-/// key that leaves normal mode, with no mode reported since, completes
-/// nothing.
+/// key that leaves normal mode, with no mode reported or key answered
+/// since, completes nothing. A key inside one of the user's own mapped
+/// sequences, the `a` of `<leader>a`, is that mapping's: it leaves no mode
+/// by itself, and the key after it may start a sequence. A rhs that does
+/// leave normal mode is reported, and the hold it lets arm ends on that
+/// report.
+///
+/// With no user mappings read, a key costs what it did before they were
+/// read. With some, a key that leaves normal mode or takes an argument
+/// also compares the window against each of them.
 pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     let normal = model.engine.mode.current == "normal";
     let hold = &mut model.submit_hold;
@@ -50,15 +61,19 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         })
         .flatten();
     let mode_unsure = hold.mode_unsure;
-    hold.mode_unsure |= leaves_normal(argument_of, &key);
-    if hold.recent.len() >= longest {
+    let leaves = leaves_normal(argument_of, &key);
+    // nvim matches a mapping before it reads a key as an argument, so the
+    // key after one of the user's may start a sequence
+    let argument = argument_of.is_some() && !in_user_keys(&hold.recent, &hold.user_keys);
+    while hold.recent.len() >= longest.max(hold.user_longest) {
         hold.recent.pop_front();
     }
     hold.recent.push_back(Folded {
         key,
-        argument: argument_of.is_some(),
+        argument,
         mode_unsure,
     });
+    hold.mode_unsure |= leaves && !in_user_keys(&hold.recent, &hold.user_keys);
     let recent = &hold.recent;
     let complete = hold.invoke_keys.iter().any(|invocation| {
         let keys = &invocation.keys;
@@ -80,6 +95,22 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         hold.mode_unsure = false;
     }
     complete
+}
+
+/// Whether the latest keys of `recent`, read from a key nvim starts a
+/// mapping on, spell one of `user_keys` or begin one.
+fn in_user_keys(recent: &VecDeque<Folded>, user_keys: &[Vec<String>]) -> bool {
+    (0..recent.len()).any(|start| {
+        let run = recent.len() - start;
+        recent.get(start).is_some_and(|first| !first.argument)
+            && user_keys.iter().any(|lhs| {
+                lhs.len() >= run
+                    && recent
+                        .range(start..)
+                        .map(|folded| &folded.key)
+                        .eq(lhs.iter().take(run))
+            })
+    })
 }
 
 /// Whether `key`, typed as the argument of `before` or of nothing, leaves

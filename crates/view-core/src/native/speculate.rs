@@ -951,6 +951,7 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
     let mut settled = false;
     let mut shows_cmdline = false;
     let mut answers_input = false;
+    let mut refused = false;
     for ev in redraw {
         match ev {
             UiEvent::GridCursorGoto { grid, .. } => {
@@ -978,8 +979,17 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
             // clear -- never `settled`, so a literal-taking key's argument
             // is still owed and the `f`/`r`/`"`/`q`/`@` rows stay gated
             UiEvent::MsgShowcmd { .. } => answers_input = true,
+            // a key nvim refused, `i` in a buffer that cannot be edited,
+            // is answered by the error alone
+            UiEvent::MsgShow { kind, .. } if kind == "emsg" => {
+                answers_input = true;
+                refused = true;
+            }
             _ => {}
         }
+    }
+    if refused {
+        model.submit_hold.note_refused();
     }
     if answers_input {
         model.submit_hold.note_input_answered();

@@ -21500,7 +21500,7 @@ fn a_pause_past_timeoutlen_ends_the_run_where_nvim_ended_it() {
 /// nvim answers, the keys after it are matched, view's own included. Until
 /// then its rhs may have left normal mode, so nothing after it logs, and a
 /// view key nvim does run is logged with its key, never as a typed
-/// `:View`.
+/// `:View`. The hold reads the user's keys as theirs and arms behind them.
 #[test]
 fn keys_after_a_users_mapping_are_matched_once_nvim_answers_it() {
     use crate::native::key_log::Fired;
@@ -21533,7 +21533,10 @@ fn keys_after_a_users_mapping_are_matched_once_nvim_answers_it() {
     let _ = typed(&mut m, &[" ", "c", "s"]);
     assert_eq!(user_rows(&m), ["<Space>c"], "s may have been typed text");
     let _ = typed(&mut m, &[" ", "e"]);
-    assert!(!m.submit_hold.is_holding(), "no hold behind an unsure mode");
+    assert!(
+        m.submit_hold.is_holding(),
+        "the user's s leaves no mode by itself"
+    );
     let _ = update(&mut m, feature_invoke("tree", "toggle"));
     let Fired::View { lhs, .. } = newest_fired(&m) else {
         panic!("a view row");
@@ -21575,27 +21578,30 @@ fn a_key_long_after_a_timed_out_mapping_is_matched() {
     }
 }
 
-/// A user's mapping nvim has not answered yet leaves view's hold armed: the
-/// keys typed at once after view's sequence wait for its invocation, and
-/// none of them reaches nvim as a command or logs a row.
+/// A user's mapping nvim has not answered yet leaves view's hold armed,
+/// the `c` of `<Space>c` counting as the mapping's and no change of mode:
+/// the keys typed at once after view's sequence wait for its invocation,
+/// and none of them reaches nvim as a command or logs a row.
 #[test]
 fn a_users_mapping_never_lets_typed_ahead_keys_through() {
-    let mut m = started_model();
-    m.engine.mode.current = "normal".to_string();
-    claim_invocations(&mut m, &LEADER_CLAIMS);
-    user_mappings(
-        &mut m,
-        &["<Space>j", "m"],
-        Some(Duration::from_millis(1000)),
-    );
-    let _ = typed(&mut m, &[" ", "j", " ", "u", "f"]);
-    assert!(m.submit_hold.is_holding(), "view's key arms the hold");
-    let sent: Vec<_> = typed(&mut m, &["m", "a", "i", "n"])
-        .into_iter()
-        .filter(|effect| matches!(effect, Effect::Rpc(RpcCall::Input { .. })))
-        .collect();
-    assert!(sent.is_empty(), "{sent:?}");
-    assert_eq!(user_rows(&m), ["<Space>j"], "no row for m");
+    // `a` also takes an argument where nvim reads it as a command
+    for (lhs, last) in [("<Space>c", "c"), ("<Space>a", "a")] {
+        let mut m = started_model();
+        m.engine.mode.current = "normal".to_string();
+        claim_invocations(&mut m, &LEADER_CLAIMS);
+        user_mappings(&mut m, &[lhs, "m"], Some(Duration::from_millis(1000)));
+        let _ = typed(&mut m, &[" ", last, " ", "u", "f"]);
+        assert!(
+            m.submit_hold.is_holding(),
+            "{lhs}: view's key arms the hold"
+        );
+        let sent: Vec<_> = typed(&mut m, &["m", "a", "i", "n"])
+            .into_iter()
+            .filter(|effect| matches!(effect, Effect::Rpc(RpcCall::Input { .. })))
+            .collect();
+        assert!(sent.is_empty(), "{lhs}: {sent:?}");
+        assert_eq!(user_rows(&m), [lhs], "no row for m");
+    }
 }
 
 /// Seeds the key round trips view has read with two readings.
@@ -21683,177 +21689,405 @@ fn a_key_a_round_trip_after_a_timed_out_mapping_is_matched() {
     assert_eq!(user_rows(&m), ["s", "<Space>c"]);
 }
 
-/// Whether input was held after each of `typed`'s keys and which keys
-/// reached nvim, then the same for the hold's bound running out. nvim
-/// answers each key with no mode change where `answer` is set.
-fn hold_trace(m: &mut Model, typed: &[(&str, u64)], answer: bool) -> Vec<(bool, Vec<String>)> {
-    let mut generation = None;
-    let mut trace: Vec<_> = typed
-        .iter()
-        .map(|(key, ms)| {
-            m.set_now(std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(*ms));
-            let effects = update(m, self::key(key));
-            if answer {
-                answered(m);
+/// One thing that happens in a sequence the hold is graded on.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    /// A key pressed this many milliseconds after the one before it.
+    Key(&'static str, u64),
+    /// nvim answers with a cursor move and no change of mode.
+    Answer,
+    /// nvim answers with an error message alone.
+    Error,
+    /// nvim reports this mode.
+    Mode(&'static str),
+    /// A click on the buffer.
+    Click,
+}
+
+/// A key pressed 10 ms after the one before it.
+const fn k(key: &'static str) -> Step {
+    Step::Key(key, 10)
+}
+
+/// `events` as a batch nvim sent in answer to the latest key, and the
+/// effects of applying it.
+fn engine_batch(m: &mut Model, events: Vec<UiEvent>) -> Vec<Effect> {
+    let stamp = SpecStamp::new(Duration::ZERO);
+    m.engine.key_unanswered = Some(stamp);
+    let _ = crate::native::speculate::fold_redraw(m, &events, stamp);
+    update(m, Msg::Redraw(events))
+}
+
+/// Applies `step` to `m` at `at` milliseconds into the session, and the
+/// effects it had.
+fn apply_step(m: &mut Model, step: Step, at: u64) -> Vec<Effect> {
+    let grid = m.engine.grids().cursor_local().0 .0;
+    match step {
+        Step::Key(key, _) => {
+            m.set_now(std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(at));
+            update(m, self::key(key))
+        }
+        Step::Answer => engine_batch(
+            m,
+            vec![
+                UiEvent::GridCursorGoto {
+                    grid,
+                    row: 0,
+                    col: 0,
+                },
+                UiEvent::Flush,
+            ],
+        ),
+        Step::Error => engine_batch(
+            m,
+            vec![
+                UiEvent::MsgShow {
+                    kind: "emsg".to_string(),
+                    content: vec![(0, "E21: Cannot make changes".to_string())],
+                    replace_last: false,
+                },
+                UiEvent::Flush,
+            ],
+        ),
+        Step::Mode(mode) => engine_batch(
+            m,
+            vec![
+                UiEvent::ModeChange {
+                    mode: mode.to_string(),
+                    mode_idx: 0,
+                },
+                UiEvent::Flush,
+            ],
+        ),
+        Step::Click => {
+            let effects = update(m, click(1, 1));
+            for effect in &effects {
+                if let Effect::Rpc(call) = effect {
+                    crate::native::speculate::fold_engine_call(
+                        m,
+                        call,
+                        SpecStamp::new(Duration::ZERO),
+                    );
+                }
             }
-            generation = effects
-                .iter()
-                .rev()
-                .find_map(|effect| match effect {
-                    Effect::ScheduleSubmitHold { generation, .. } => Some(*generation),
-                    _ => None,
-                })
-                .or(generation);
-            let sent = meta_inputs(&effects).into_iter().map(str::to_string);
-            (m.submit_hold.is_holding(), sent.collect())
+            effects
+        }
+    }
+}
+
+/// The bound a hold `effects` armed, or `armed` where they armed none.
+fn bound_armed(effects: &[Effect], armed: Option<u64>) -> Option<u64> {
+    effects
+        .iter()
+        .rev()
+        .find_map(|effect| match effect {
+            Effect::ScheduleSubmitHold { generation, .. } => Some(*generation),
+            _ => None,
         })
-        .collect();
-    if let Some(generation) = generation {
+        .or(armed)
+}
+
+/// Whether input was held after each step and which keys reached nvim.
+type Trace = Vec<(bool, Vec<String>)>;
+
+/// The [`Trace`] of `steps`, then the same for each bound running out
+/// while a hold stands. nvim answers each key with no mode change where
+/// `answer` is set, and the key log forgets everything it read after each
+/// step where `forget` is.
+fn hold_trace(m: &mut Model, steps: &[Step], answer: bool, forget: bool) -> Trace {
+    let mut armed = None;
+    let mut at = 0;
+    let mut trace = Vec::new();
+    for step in steps {
+        if let Step::Key(_, gap) = step {
+            at += gap;
+        }
+        let mut effects = apply_step(m, *step, at);
+        if answer && matches!(step, Step::Key(..)) {
+            effects.extend(apply_step(m, Step::Answer, at));
+        }
+        if forget {
+            m.submit_hold.forget_log();
+        }
+        armed = bound_armed(&effects, armed);
+        let sent = meta_inputs(&effects).into_iter().map(str::to_string);
+        trace.push((m.submit_hold.is_holding(), sent.collect()));
+    }
+    while let Some(generation) = armed.filter(|_| m.submit_hold.is_holding()) {
         let effects = update(m, Msg::SubmitHoldExpired { generation });
+        armed = bound_armed(&effects, None);
         let sent = meta_inputs(&effects).into_iter().map(str::to_string);
         trace.push((m.submit_hold.is_holding(), sent.collect()));
     }
     trace
 }
 
-/// A model with `<Space>ff` and `<Space>e` claimed, and, where `log` is
-/// set, the user's mappings read and the key log open.
-fn hold_model(log: bool) -> Model {
+/// A model with `<Space>ff` and `<Space>e` claimed, the user's mappings
+/// read where `user` is set and the key log open where `log` is.
+fn hold_model(user: bool, log: bool) -> Model {
     let mut m = started_model();
     m.engine.mode.current = "normal".to_string();
     claim_invocations(&mut m, &[("picker", "<Space>ff"), ("tree", "<Space>e")]);
     round_trips(&mut m, 4, 40);
-    if log {
+    if user {
         user_mappings(
             &mut m,
             &["<Space>c", "<Space>coy", "<Space>f", "<Space>fg", "gd", "s"],
             Some(Duration::from_millis(300)),
         );
+    }
+    if log {
         let _ = update(&mut m, feature_invoke("keys", "log"));
     }
     m
 }
 
-/// The hold decides alone. Every sequence of [`hold_population`] holds and
-/// forwards the same keys with the user's mappings read and the key log
-/// open as with neither.
+/// The hold decides alone. With the same mappings read, every sequence of
+/// [`hold_population`], answered or not, holds, releases and forwards the
+/// same keys with the key log open and reading as with the log closed and
+/// forgetting all it read after every step.
 #[test]
 fn the_hold_decides_the_same_with_or_without_the_key_log() {
-    for typed in &hold_population() {
-        let with = hold_trace(&mut hold_model(true), typed, false);
-        let without = hold_trace(&mut hold_model(false), typed, false);
-        assert_eq!(with, without, "{typed:?}");
+    let leave = |step: &Step| matches!(step, Step::Key("i" | "o" | "c" | "v" | ":", _));
+    let mut held_after_leave = 0;
+    for steps in &hold_population() {
+        for answer in [false, true] {
+            let with = hold_trace(&mut hold_model(true, true), steps, answer, false);
+            let without = hold_trace(&mut hold_model(true, false), steps, answer, true);
+            assert_eq!(with, without, "answer {answer}: {steps:?}");
+            let first_leave = steps.iter().position(leave);
+            held_after_leave += usize::from(
+                first_leave.is_some_and(|at| with.iter().skip(at).any(|(held, _)| *held)),
+            );
+        }
     }
+    assert!(held_after_leave > 0, "no sequence with a leave key holds");
+}
+
+/// The user's own mappings only ever add a hold. Across
+/// [`hold_population`], answered or not, every step held with no mappings
+/// read is held with them, and the same keys reach nvim in the same order.
+#[test]
+fn the_users_mappings_only_ever_add_a_hold() {
+    let mut added = 0;
+    for steps in &hold_population() {
+        for answer in [false, true] {
+            let with = hold_trace(&mut hold_model(true, false), steps, answer, false);
+            let without = hold_trace(&mut hold_model(false, false), steps, answer, false);
+            for (at, (mapped, bare)) in with.iter().zip(&without).take(steps.len()).enumerate() {
+                assert!(mapped.0 || !bare.0, "step {at}, answer {answer}: {steps:?}");
+                added += usize::from(mapped.0 && !bare.0);
+            }
+            let sent = |trace: &[(bool, Vec<String>)]| {
+                trace.iter().flat_map(|t| t.1.clone()).collect::<Vec<_>>()
+            };
+            assert_eq!(sent(&with), sent(&without), "answer {answer}: {steps:?}");
+        }
+    }
+    assert!(
+        added > 0,
+        "the population holds a leave key inside a mapping"
+    );
 }
 
 /// nvim answering a key with no mode change only ever adds a hold: across
 /// [`hold_population`], every key held with no answer is held with one.
 #[test]
 fn an_answer_from_nvim_only_ever_adds_a_hold() {
-    for typed in &hold_population() {
-        let with = hold_trace(&mut hold_model(false), typed, true);
-        let without = hold_trace(&mut hold_model(false), typed, false);
-        for (step, (answered, unanswered)) in with.iter().zip(&without).enumerate() {
-            assert!(answered.0 || !unanswered.0, "key {step} of {typed:?}");
+    for steps in &hold_population() {
+        let with = hold_trace(&mut hold_model(false, false), steps, true, false);
+        let without = hold_trace(&mut hold_model(false, false), steps, false, false);
+        for (at, (answered, unanswered)) in with.iter().zip(&without).enumerate() {
+            assert!(answered.0 || !unanswered.0, "step {at} of {steps:?}");
         }
     }
 }
 
-/// Every sequence of a unit, a gap, then one of view's keys with a gap
-/// before its last key, and then `main` typed ahead, and every pair of
+/// The hold's decisions for a few sequences, written out, with the user's
+/// mappings read and the key log open: each entry is whether input was
+/// held after the step and the keys that reached nvim, the last entry the
+/// bound running out where a hold still stands.
+#[test]
+fn the_hold_decides_what_it_was_recorded_deciding() {
+    fn row(held: bool, sent: &[&str]) -> (bool, Vec<String>) {
+        (held, sent.iter().map(|key| (*key).to_string()).collect())
+    }
+    let cases: [(&[Step], Trace); 7] = [
+        (
+            &[k(" "), k("f"), k("f"), k("m")],
+            vec![
+                row(false, &[" "]),
+                row(false, &["f"]),
+                row(true, &["f"]),
+                row(true, &[]),
+                row(false, &["m"]),
+            ],
+        ),
+        (
+            &[k("i"), k(" "), k("e"), k("m")],
+            vec![
+                row(false, &["i"]),
+                row(false, &[" "]),
+                row(false, &["e"]),
+                row(false, &["m"]),
+            ],
+        ),
+        (
+            &[k("o"), Step::Answer, k(" "), k("e"), k("m")],
+            vec![
+                row(false, &["o"]),
+                row(false, &[]),
+                row(false, &[" "]),
+                row(true, &["e"]),
+                row(true, &[]),
+                row(false, &["m"]),
+            ],
+        ),
+        (
+            &[k("i"), Step::Error, k(" "), k("e"), k("m")],
+            vec![
+                row(false, &["i"]),
+                row(false, &[]),
+                row(false, &[" "]),
+                row(true, &["e"]),
+                row(true, &[]),
+                row(false, &["m"]),
+            ],
+        ),
+        (
+            &[k(" "), k("c"), k(" "), k("e"), k("m")],
+            vec![
+                row(false, &[" "]),
+                row(false, &["c"]),
+                row(false, &[" "]),
+                row(true, &["e"]),
+                row(true, &[]),
+                row(false, &["m"]),
+            ],
+        ),
+        (
+            &[k(" "), k("c"), k(" "), k("e"), k("m"), Step::Mode("insert")],
+            vec![
+                row(false, &[" "]),
+                row(false, &["c"]),
+                row(false, &[" "]),
+                row(true, &["e"]),
+                row(true, &[]),
+                row(false, &["m"]),
+            ],
+        ),
+        (
+            &[k("f"), Step::Click, k(" "), k("e"), k("m")],
+            vec![
+                row(false, &["f"]),
+                row(false, &[]),
+                row(false, &[" "]),
+                row(true, &["e"]),
+                row(true, &[]),
+                row(false, &["m"]),
+            ],
+        ),
+    ];
+    for (steps, want) in cases {
+        let trace = hold_trace(&mut hold_model(true, true), steps, false, false);
+        assert_eq!(trace, want, "{steps:?}");
+    }
+}
+
+/// Every sequence of a unit, a gap, then one of view's keys with gaps
+/// before its later keys, and then `main` typed ahead, and every pair of
 /// units before view's key at speed. The units are view's keys and their
 /// prefixes, the user's mappings and a prefix of one, operators, keys that
-/// leave normal mode and a key that takes an argument; the gaps fall
-/// below, at and past `'timeoutlen'`, a millisecond short of it and fifty
-/// past it among them.
-fn hold_population() -> Vec<Vec<(&'static str, u64)>> {
-    const UNITS: [&[&str]; 19] = [
-        &[" ", "f", "f"],
-        &[" ", "e"],
-        &[" "],
-        &[" ", "f"],
-        &[" ", "c"],
-        &[" ", "f", "g"],
-        &["g", "d"],
-        &["s"],
-        &[" ", "c", "o"],
-        &["d"],
-        &["c"],
-        &["g", "c"],
-        &["y", "2"],
-        &["i"],
-        &["o"],
-        &[":"],
-        &["v"],
-        &["f"],
-        &["j"],
+/// leave normal mode, answered or not, a key that takes an argument, a
+/// click, and nvim's answers and mode reports; the gaps fall below, at and
+/// past `'timeoutlen'`, a millisecond short of it and fifty past it among
+/// them.
+fn hold_population() -> Vec<Vec<Step>> {
+    const UNITS: [&[Step]; 26] = [
+        &[k(" "), k("f"), k("f")],
+        &[k(" "), k("e")],
+        &[k(" ")],
+        &[k(" "), k("f")],
+        &[k(" "), k("c")],
+        &[k(" "), k("f"), k("g")],
+        &[k("g"), k("d")],
+        &[k("s")],
+        &[k(" "), k("c"), k("o")],
+        &[k("d")],
+        &[k("c")],
+        &[k("g"), k("c")],
+        &[k("y"), k("2")],
+        &[k("i")],
+        &[k("o")],
+        &[k(":")],
+        &[k("v")],
+        &[k("f")],
+        &[k("j")],
+        &[Step::Click],
+        &[k("o"), Step::Answer],
+        &[k("o"), Step::Error],
+        &[k(" "), k("c"), Step::Answer],
+        &[
+            k("i"),
+            Step::Mode("insert"),
+            k("<Esc>"),
+            Step::Mode("normal"),
+        ],
+        &[k("v"), Step::Mode("visual")],
+        &[Step::Mode("normal")],
     ];
     const VIEW: [&[&str]; 2] = [&[" ", "f", "f"], &[" ", "e"]];
     const GAPS: [u64; 7] = [10, 150, 299, 300, 301, 350, 1000];
-    // the units 10 ms apart key to key, `gap` before view's first key and
-    // `last_gap` before its last, then `main` at speed
-    fn sequence(
-        before: &[&[&'static str]],
-        gap: u64,
-        view: &[&'static str],
-        last_gap: u64,
-    ) -> Vec<(&'static str, u64)> {
-        let (last, first) = view.split_last().expect("view's keys");
-        let mut steps: Vec<_> = before
+    const MID_GAPS: [u64; 4] = [10, 290, 299, 350];
+    // the units 10 ms apart key to key, then view's keys `gaps` apart,
+    // then `main` at speed
+    fn sequence(before: &[&[Step]], view: &[&'static str], gaps: &[u64]) -> Vec<Step> {
+        let mut steps: Vec<Step> = before
             .iter()
-            .flat_map(|unit| unit.iter())
-            .map(|key| (*key, 10))
+            .flat_map(|unit| unit.iter().copied())
             .collect();
-        steps.extend(
-            first
-                .iter()
-                .enumerate()
-                .map(|(i, key)| (*key, if i == 0 { gap } else { 10 })),
-        );
-        steps.push((*last, last_gap));
-        steps.extend(["m", "a", "i", "n"].map(|key| (key, 10)));
-        let mut at = 0;
+        steps.extend(view.iter().zip(gaps).map(|(key, gap)| Step::Key(key, *gap)));
+        steps.extend(["m", "a", "i", "n"].map(k));
         steps
-            .into_iter()
-            .map(|(key, step)| {
-                at += step;
-                (key, at)
-            })
-            .collect()
     }
     let mut sequences = Vec::new();
     for unit in UNITS {
-        for view in VIEW {
-            for gap in GAPS {
-                for last_gap in GAPS {
-                    sequences.push(sequence(&[unit], gap, view, last_gap));
+        for gap in GAPS {
+            for last in GAPS {
+                sequences.push(sequence(&[unit], VIEW[1], &[gap, last]));
+                for mid in MID_GAPS {
+                    sequences.push(sequence(&[unit], VIEW[0], &[gap, mid, last]));
                 }
             }
+        }
+        for view in VIEW {
             for second in UNITS {
-                sequences.push(sequence(&[unit, second], 10, view, 10));
+                sequences.push(sequence(&[unit, second], view, &[10, 10, 10]));
             }
         }
     }
     sequences
 }
 
-/// A key that leaves normal mode and that nvim swallowed changes no mode,
-/// so nvim reports none. A key pressed a round trip later with the mode
-/// still normal is read in normal mode, and a mapping is logged. The pause
-/// changes nothing the hold decides, and nvim's answer to the swallowed key
-/// lets view's key arm it.
+/// A key that leaves normal mode and that nvim refused changes no mode,
+/// so nvim reports none and answers it with its error alone. A key pressed
+/// a round trip later is read in normal mode, and a mapping is logged. The
+/// error answers the refused key, so view's key after it arms the hold.
 #[test]
 fn a_key_a_round_trip_after_a_swallowed_mode_key_is_matched() {
     let mut m = started_model();
     claim_invocations(&mut m, &LEADER_CLAIMS);
+    let wait = Some(Duration::from_millis(1000));
+    typed_at(&mut m, &["s"], wait, &[("o", 0)]);
+    let _ = apply_step(&mut m, Step::Error, 0);
     typed_at(
         &mut m,
         &["s"],
-        Some(Duration::from_millis(1000)),
-        &[("o", 0), ("s", 500), (" ", 510), ("u", 520), ("f", 530)],
+        wait,
+        &[("s", 500), (" ", 510), ("u", 520), ("f", 530)],
     );
     assert_eq!(user_rows(&m), ["s"]);
-    assert!(!m.submit_hold.is_holding(), "a pause arms nothing");
+    assert!(m.submit_hold.is_holding(), "nvim's error answered the o");
 
     let mut m = started_model();
     m.engine.mode.current = "normal".to_string();

@@ -305,6 +305,8 @@ pub struct SubmitHold {
     /// Every key sequence the user's own config maps in normal mode, one
     /// [`canonical`] key per entry.
     user_keys: Vec<Vec<String>>,
+    /// The most keys any of `user_keys` spells, 0 where there is none.
+    user_longest: usize,
     /// The key log's own reading of the keys this hold folds, which no
     /// decision of the hold reads.
     log: user_run::Matcher,
@@ -321,8 +323,10 @@ pub struct SubmitHold {
     /// key before it takes one, and was not itself an argument.
     argument_of: Option<&'static str>,
     /// Whether a key that leaves normal mode has gone out since nvim last
-    /// reported a mode or answered a key, so the mode view last read may
-    /// be stale.
+    /// reported a mode or drew anything a key makes it draw, so the mode
+    /// view last read may be stale. Any answering batch clears it, one
+    /// answering an earlier key included. A hold armed in error because of
+    /// it ends on the mode report.
     mode_unsure: bool,
     /// Keys a surface of view's own is holding while they spell the start
     /// of a mapped sequence.
@@ -416,6 +420,7 @@ impl SubmitHold {
             .map(|keys| key_tokens(keys).map(canonical).collect::<Vec<_>>())
             .filter(|keys| !keys.is_empty())
             .collect();
+        self.user_longest = self.user_keys.iter().map(Vec::len).max().unwrap_or(0);
         self.log.learn_user(&self.user_keys, timeoutlen);
         self.timeout_off = timeoutlen.is_none();
         self.timeoutlen = timeoutlen;
@@ -860,11 +865,19 @@ impl SubmitHold {
         self.held.take().map(|(_, held)| held).unwrap_or_default()
     }
 
-    /// Notes a redraw batch nvim sent because it read a key, which carries
-    /// any mode that key entered.
+    /// Notes a redraw batch nvim sent because it read a key. It clears the
+    /// doubt over the mode whichever key it answered, an earlier one than
+    /// the key that left normal mode included. A hold armed in error
+    /// because of it ends on the mode report.
     pub(crate) fn note_input_answered(&mut self) {
         self.mode_unsure = false;
         self.log.note_answered();
+    }
+
+    /// Notes an error nvim answered a key with: the key it refused waits
+    /// for no argument, `i` in a buffer that cannot be edited among them.
+    pub(crate) fn note_refused(&mut self) {
+        self.argument_of = None;
     }
 
     /// Forgets which key nvim reads the next key as the argument of, where
@@ -872,6 +885,12 @@ impl SubmitHold {
     pub fn forget_argument(&mut self) {
         self.argument_of = None;
         self.log.forget();
+    }
+
+    /// Drops every reading the key log holds, its learned keys included.
+    #[cfg(test)]
+    pub(crate) fn forget_log(&mut self) {
+        self.log = user_run::Matcher::default();
     }
 
     /// The keys of the view invocation a key last completed, once.
@@ -987,7 +1006,8 @@ impl SubmitHold {
 /// Called before the key is sent, so the model still describes the editor
 /// the key arrives at.
 pub fn fold_engine_key(model: &mut Model, notation: &str) -> Vec<Effect> {
-    user_run::fold(model, notation);
+    let seen = user_run::Seen::of(model);
+    user_run::fold(&mut model.submit_hold.log, seen, notation);
     for (keys, at) in model.submit_hold.log.take_fired() {
         model.log_user_mapping(&keys, at);
     }

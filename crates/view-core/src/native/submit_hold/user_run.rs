@@ -3,13 +3,16 @@
 //! completed. It keeps every piece of its state to itself and is fed the
 //! keys and events the typed-ahead hold is fed, which reads none of it.
 //!
-//! Costs nothing per key while nvim is in another mode, or while neither
-//! the user nor view maps anything. Otherwise a key costs a few binary
-//! searches over the user's sorted mappings and view's sorted invoking
-//! sequences, each comparing at most the window's length of keys, once per
-//! suffix of the window, and a step that returns at once while the user
-//! maps nothing. A key allocates its canonical spelling, which the window
-//! keeps, and a firing mapping allocates its keys.
+//! Every key sent to nvim costs two scans of the eight recent key round
+//! trips, for how long nvim takes to report a mode and how far its clock
+//! may read a gap from view's. That is the whole cost while nvim is in
+//! another mode, or while neither the user nor view maps anything.
+//! Otherwise a key also costs a few binary searches over the user's sorted
+//! mappings and view's sorted invoking sequences, each comparing at most
+//! the window's length of keys, once per suffix of the window, and a step
+//! that returns at once while the user maps nothing. A key allocates its
+//! canonical spelling, which the window keeps, and a firing mapping
+//! allocates its keys.
 
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -587,20 +590,42 @@ impl Matcher {
     }
 }
 
+/// What the key log reads off the editor and the hold for one key, copied
+/// out before the key folds.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Seen {
+    normal: bool,
+    now: SystemTime,
+    round_trip: Duration,
+    margin: Duration,
+}
+
+impl Seen {
+    /// What `model` shows the key log for the key about to go to nvim.
+    pub(super) fn of(model: &Model) -> Self {
+        Self {
+            // keys typed on a tracked `:` line are its text, whatever mode
+            // nvim last reported: a line view sends itself opens with no
+            // `:` folded here to mark the mode unsure
+            normal: model.engine.mode.current == "normal" && model.submit_hold.typed.is_none(),
+            now: model.key_log().now(),
+            round_trip: crate::native::speculate::cmdline_backstop(model),
+            margin: round_trip_spread(&model.engine.key_round_trips),
+        }
+    }
+}
+
 /// Folds one key going to nvim into the key log's reading of the keys.
+/// The hold reaches it only as `seen`, so nothing here writes the hold.
 /// See [`super::fold_engine_key`].
-pub(super) fn fold(model: &mut Model, notation: &str) {
-    // keys typed on a tracked `:` line are its text, whatever mode nvim
-    // last reported: a line view sends itself opens with no `:` folded
-    // here to mark the mode unsure
-    let normal = model.engine.mode.current == "normal" && model.submit_hold.typed.is_none();
-    let now = model.key_log().now();
-    let round_trip = crate::native::speculate::cmdline_backstop(model);
-    let margin = round_trip_spread(&model.engine.key_round_trips);
-    model
-        .submit_hold
-        .log
-        .read(notation, normal, now, round_trip, margin);
+pub(super) fn fold(log: &mut Matcher, seen: Seen, notation: &str) {
+    log.read(
+        notation,
+        seen.normal,
+        seen.now,
+        seen.round_trip,
+        seen.margin,
+    );
 }
 
 /// Whether nvim reads the key at `start` in normal mode: no argument of the
