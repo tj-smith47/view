@@ -743,6 +743,33 @@ fn painted_screens(
     screens
 }
 
+/// Blocks until the `VimResized` handler that writes into the named pipe
+/// `held` has written `count - 1` there, which it does as it starts to wait
+/// on a key.
+fn wait_until_held(held: &std::path::Path, count: u32) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reading = held.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::fs::read_to_string(&reading).map_err(|e| e.kind()));
+    });
+    let read = rx.recv_timeout(host_deadline(BUDGET));
+    if read.is_err() {
+        // a writer of the test's own completes the reader thread's open, and
+        // dropping it hands that read an end of file, so no thread outlives
+        // the test
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+            .open(held);
+    }
+    assert_eq!(
+        read,
+        Ok(Ok(format!("{}\n", count - 1))),
+        "the handler never wrote that it waits on a key for resize {count}"
+    );
+}
+
 /// A vsplit whose windows wrap one long line of digits, shrunk and grown
 /// back under a slow `VimResized` handler, with the look `gaps` names: in
 /// every frame view paints, no digit stands off a tile's frame, the rows a
@@ -770,10 +797,16 @@ fn wrapped_text_stays_inside_its_frame(gaps: bool) {
     session.send(b"\x1b:set wrap | vsplit\r").unwrap();
     // the handler holds nvim short of the grid resize until the test has
     // seen view paint the gap, so that frame is one of its own however long
-    // the host keeps view off the CPU
-    session
-        .send(mark_resizes("wincmd = | call getchar() | ").as_bytes())
-        .unwrap();
+    // the host keeps view off the CPU; it says it holds through a pipe the
+    // test reads, because a key sent before nvim enters it is typeahead
+    // nvim reads as a normal-mode command ahead of the queued resize
+    let held = paths.isolated_home.join("held");
+    nix::unistd::mkfifo(&held, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    let handler = format!(
+        "wincmd = | call writefile([g:resizes], '{}') | call getchar() | ",
+        held.display()
+    );
+    session.send(mark_resizes(&handler).as_bytes()).unwrap();
     // a launch notice and the command line are frames of their own; the
     // split has landed once two frames stand side by side
     let settled = |screen: &vt100::Screen| {
@@ -803,6 +836,7 @@ fn wrapped_text_stays_inside_its_frame(gaps: bool) {
             size,
             |session, from| {
                 wait_for_a_frame_at_the_new_size(session, from);
+                wait_until_held(&held, count);
                 // nvim moves the slots ahead of the handler on a shrink and
                 // leaves a grow's for the redraw after it
                 let (cols, rows) = size;
