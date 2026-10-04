@@ -2019,7 +2019,7 @@ pub(crate) mod tests {
         put(&mut model, 1, "q");
         let third = live(&mut term, &mut ring, &mut model);
         let front = term.shadow.front().clone();
-        let snapshot = ring.snapshot();
+        let snapshot = ring.snapshot().unwrap();
         let keys: Vec<_> = snapshot.frames().map(|f| (f.seq, f.key)).collect();
         assert_eq!(keys, [(first, true), (second, false), (third, true)]);
         drop(snapshot);

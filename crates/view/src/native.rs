@@ -24,6 +24,22 @@ use view_native::report::report;
 use view_native::supersede::{plan, Supersession};
 use view_native::{mappings, toast};
 
+mod claims;
+use claims::Claimant;
+
+/// What [`NativeSession::live_specs`] settled: the specs to register, the
+/// bindings view's own surfaces answer, and the notices owed.
+#[derive(Debug, Default)]
+struct Live {
+    specs: Vec<view_core::native::mappings::MappingSpec>,
+    /// Owed when `[keys] desktop_modifier = "super"` is unreachable this
+    /// run.
+    super_notice: Option<&'static str>,
+    bindings: view_core::native::keys::KeyBindings,
+    /// One for each key put back on its default.
+    notices: Vec<String>,
+}
+
 /// Which native step, if any, a message owes beyond `update()`'s own answer
 /// to it.
 ///
@@ -862,110 +878,112 @@ impl NativeSession {
     /// [`Self::reissue_mappings`], so a chord respelled once the terminal's
     /// kitty keyboard protocol probe answers, or a profile flipped
     /// mid-session, both travel through the one place that turns `self`'s
-    /// resolved answers into a spec list. The second element is the notice
-    /// [`profile::modifier_for`] owes when `[keys] desktop_modifier =
-    /// "super"` is unreachable this run, empty otherwise.
+    /// resolved answers into a spec list. The second element carries the
+    /// notice [`profile::modifier_for`] owes when `[keys] desktop_modifier =
+    /// "super"` is unreachable this run, and one for each key put back on
+    /// its default because another view feature holds it. A key view's own
+    /// surfaces answer that was put back is put back on `model` as well.
     fn build_mapping_call(&self, model: &mut Model) -> (RpcCall, Vec<Effect>) {
-        let (specs, super_notice) = self.live_specs(model);
-        let notice_effects = match super_notice {
-            Some(text) => model.engine.record_native_notice(text.to_string(), false),
-            None => Vec::new(),
-        };
+        let live = self.live_specs(model);
+        model.key_bindings = live.bindings;
+        let mut notice_effects = Vec::new();
+        let notices = live.super_notice.map(str::to_string).into_iter();
+        for text in notices.chain(live.notices) {
+            notice_effects.extend(model.engine.record_native_notice(text, false));
+        }
         let mapping_call = RpcCall::RegisterMappings {
-            specs,
+            specs: live.specs,
             channel_id: self.channel_id,
         };
         (mapping_call, notice_effects)
     }
 
     /// Every key this session registers, in the order
-    /// [`Self::build_mapping_call`] sends them, and the notice
-    /// [`profile::modifier_for`] owes when a desktop chord among them falls
-    /// back from an unreachable `super`. Reads `self` and `model` and changes
-    /// neither, so [`Self::take_over`] asks it what the follow-up will map
-    /// without raising that notice early.
-    fn live_specs(
-        &self,
-        model: &Model,
-    ) -> (
-        Vec<view_core::native::mappings::MappingSpec>,
-        Option<&'static str>,
-    ) {
-        let mut mapping_call = mappings::register_plan(&self.cfg, self.channel_id);
-        // `[keys] toggle_gaps`/`cycle_surfaces`: `view-native` already
-        // validated the override (`resolve_ui_lhs`). `MappingSpec::lhs` is
-        // `Cow<'static, str>`, so the session-resolved value replaces the
-        // compile-time default in place, with no `Box::leak` of the kind
-        // `view-native`'s own `keys.rs` config registry still pays for a
-        // resolved value with nowhere `'static` to live.
-        //
-        // Applied to `register_plan`'s own specs before the desktop chords
-        // join the list: a chord's `(feature, verb)` names the same `ui`
-        // `gaps`/`cycle_surfaces` pair its default-map twin does, spelled
-        // under the OS chord it always keeps, so running this loop after
-        // the chords were appended rewrote the chord's own `lhs` to the
-        // default map's -- two specs claiming the one `lhs` in the same
-        // registration, which left `REGISTER_MAPPINGS_CHUNK`'s pre-set
-        // `maparg` snapshot for the second of them holding the first's own
-        // fresh mapping where it should hold nothing, and a later reissue
-        // read that snapshot back as a user mapping view had taken.
-        if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
-            for spec in specs.iter_mut() {
-                for (ui, lhs) in view_native::config::UI_KEYS.iter().zip(&self.ui_keys_lhs) {
-                    if spec.feature == ui.feature
-                        && spec.verb == ui.verb
-                        && lhs.as_str() != spec.lhs.as_ref()
-                    {
-                        spec.lhs = std::borrow::Cow::Owned(lhs.clone());
-                    }
+    /// [`Self::build_mapping_call`] sends them, with each key two view
+    /// features claim settled by [`claims::settle`]. Reads `self` and
+    /// `model` and changes neither, so [`Self::take_over`] asks it what the
+    /// follow-up will map without raising its notices early.
+    fn live_specs(&self, model: &Model) -> Live {
+        use view_core::native::keys::{Action, KeyBindings};
+        use view_native::config::{KEY_ACTIONS, UI_KEYS};
+        let RpcCall::RegisterMappings { specs, .. } =
+            mappings::register_plan(&self.cfg, self.channel_id)
+        else {
+            return Live::default();
+        };
+        let mut claimants =
+            Vec::with_capacity(specs.len() + DESKTOP_CHORD_COUNT + KEY_ACTIONS.len());
+        for spec in specs {
+            let ui = UI_KEYS
+                .iter()
+                .zip(&self.ui_keys_lhs)
+                .find(|(ui, _)| (ui.feature, ui.verb) == (spec.feature, spec.verb));
+            let claimant = if let Some((ui, lhs)) = ui {
+                Claimant::spec(format!("[keys] {}", ui.key), spec, vec![lhs.clone()])
+            } else if (spec.feature, spec.verb) == ("window", "resize_mode") {
+                // `[keys] resize_mode` names every key the mode answers to,
+                // none included, so the one default spec becomes one per key
+                Claimant {
+                    defaults: KeyBindings::default().spellings(Action::ResizeMode),
+                    action: Some(Action::ResizeMode),
+                    ..Claimant::spec(
+                        "[keys] resize_mode".into(),
+                        spec,
+                        model.key_bindings.spellings(Action::ResizeMode),
+                    )
                 }
-            }
-            // `[keys] resize_mode` names every key the mode answers to,
-            // none included, so the one default spec becomes one per key
-            let resize_keys = model
-                .key_bindings
-                .spellings(view_core::native::keys::Action::ResizeMode);
-            let mut rebound = Vec::with_capacity(specs.len() + resize_keys.len());
-            for spec in specs.drain(..) {
-                if spec.feature == "window" && spec.verb == "resize_mode" {
-                    rebound.extend(resize_keys.iter().map(|lhs| {
-                        let mut spec = spec.clone();
-                        spec.lhs = std::borrow::Cow::Owned(lhs.clone());
-                        spec
-                    }));
-                } else {
-                    rebound.push(spec);
-                }
-            }
-            *specs = rebound;
+            } else {
+                let keys = vec![spec.lhs.to_string()];
+                Claimant::spec(String::new(), spec, keys)
+            };
+            claimants.push(claimant);
         }
         let (modifier, _, super_notice) =
             profile::modifier_for(self.desktop_modifier_choice, model.caps.kitty_kbd);
-        let chords = profile::chord_plan(&self.desktop, self.profile, modifier, &self.cfg);
+        let chords = profile::chord_rows(&self.desktop, self.profile, modifier, &self.cfg);
         // Only owed when this call actually registers a desktop chord
         // under the fallback: a flip to `editor` (no chords at all) or a
         // reissue that keeps carrying the same fallback would otherwise
         // repeat the same notice on every one of them.
         let super_notice = super_notice.filter(|_| !chords.is_empty());
-        let RpcCall::RegisterMappings { mut specs, .. } = mapping_call else {
-            return (Vec::new(), None);
+        for (chord, spec) in chords {
+            let keys = vec![spec.lhs.to_string()];
+            claimants.push(Claimant {
+                defaults: vec![chord.lhs(modifier).to_string()],
+                ..Claimant::spec(format!("[keys.desktop] {}", chord.id), spec, keys)
+            });
+        }
+        // `NativeConfig::enabled("ai")` is unconditionally `true`: `[ai]`
+        // has no `[native]` switch, so the bit `model.ai_enabled` carries
+        // is applied here, to the chords as well. `[dvr]` carries the
+        // recording's switch, read off the model, which `main` enabled
+        // before the takeover. A feature that is off holds no key.
+        let off = |feature: &str| {
+            (feature == "ai" && !self.ai_enabled) || (feature == "dvr" && !model.dvr.is_recording())
         };
-        specs.extend(chords);
-        // `NativeConfig::enabled("ai")` is unconditionally `true` -- `[ai]`
-        // has no `[native]` switch by design, so `register_plan` alone would
-        // always register the key. `model.ai_enabled` is the bit `[native]`
-        // structurally cannot carry for this one feature, so it is applied
-        // here, once, after the desktop chords have joined the list too.
-        // `view-native` has no other reason to know the feature's name.
-        if !self.ai_enabled {
-            specs.retain(|spec| spec.feature != "ai");
+        claimants.retain(|c| c.spec.as_ref().is_none_or(|spec| !off(spec.feature)));
+        for (entry, action) in KEY_ACTIONS {
+            if action == Action::ResizeMode || (action == Action::ComposerNewline && off("ai")) {
+                continue;
+            }
+            claimants.push(Claimant {
+                entry: format!("[keys] {entry}"),
+                name: entry.replacen('_', " ", 1),
+                keys: model.key_bindings.spellings(action),
+                defaults: KeyBindings::default().spellings(action),
+                spec: None,
+                action: Some(action),
+            });
         }
-        // `[dvr]` carries the recording's switch, read off the model, which
-        // `main` enabled before the takeover
-        if !model.dvr.is_recording() {
-            specs.retain(|spec| spec.feature != "dvr");
+        let notices = claims::settle(&mut claimants);
+        let mut bindings = model.key_bindings.clone();
+        let specs = claims::apply(claimants, &mut bindings);
+        Live {
+            specs,
+            super_notice,
+            bindings,
+            notices,
         }
-        (specs, super_notice)
     }
 
     /// Every takeover this session performs, then the registration of the
@@ -1006,7 +1024,7 @@ impl NativeSession {
         // startup clock stops, and each key costs a `maparg` snapshot and a
         // `nvim_set_keymap` there. The empty registration still carries the
         // `:View` command and the reply that fires `Stage::Claims`.
-        let (specs, _) = self.live_specs(model);
+        let specs = self.live_specs(model).specs;
         self.chords_pending = !specs.is_empty();
         self.hold_starts = self.starts_of(&specs, model);
         effects.push(RpcCall::RegisterMappings {
@@ -3188,5 +3206,212 @@ dvr_scrub = \"<F5>\"
             .expect("the writer thread must spawn");
         writer.push(RecordWrite::Keys(vec!["held:vim.notify".to_string()]));
         assert!(writer.finish_within(view_proc::writer::QUIT_WAIT));
+    }
+
+    /// One rebindable view key, from each table that names one.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Member {
+        Ui(usize),
+        Action(view_core::native::keys::Action),
+        Chord(usize),
+    }
+
+    fn members() -> Vec<Member> {
+        let ui = (0..view_native::config::UI_KEYS.len()).map(Member::Ui);
+        let actions = view_native::config::KEY_ACTIONS.map(|(_, a)| Member::Action(a));
+        let chords = (0..DESKTOP_CHORD_COUNT).map(Member::Chord);
+        ui.chain(actions).chain(chords).collect()
+    }
+
+    impl Member {
+        /// The keys it holds when nothing moves it, and the feature and verb
+        /// a notice names it by.
+        fn defaults(self) -> (Vec<String>, String) {
+            use view_core::native::keys::{Action, KeyBindings};
+            let modifier = profile::modifier_for(ModifierChoice::Auto, false).0;
+            match self {
+                Self::Ui(at) => {
+                    let ui = &view_native::config::UI_KEYS[at];
+                    let name = format!("{} {}", ui.feature, ui.verb);
+                    (vec![default_ui_keys_lhs()[at].clone()], name)
+                }
+                Self::Action(action) => {
+                    let (entry, _) = view_native::config::KEY_ACTIONS
+                        .into_iter()
+                        .find(|(_, a)| *a == action)
+                        .unwrap();
+                    let name = if action == Action::ResizeMode {
+                        "window resize_mode".to_string()
+                    } else {
+                        entry.replacen('_', " ", 1)
+                    };
+                    (KeyBindings::default().spellings(action), name)
+                }
+                Self::Chord(at) => {
+                    let chord = &view_core::native::chords::desktop_chords()[at];
+                    let name = format!("{} {}", chord.feature, chord.verb);
+                    (vec![chord.lhs(modifier).to_string()], name)
+                }
+            }
+        }
+
+        /// Moves it onto `key`, or false when `key` is no key it can take.
+        fn move_to(self, session: &mut NativeSession, model: &mut Model, key: &str) -> bool {
+            match self {
+                Self::Ui(at) => session.ui_keys_lhs[at] = key.to_string(),
+                Self::Action(action) => return model.key_bindings.rebind(action, &[key.into()]),
+                Self::Chord(at) => session.desktop[at] = Resolved::new(key.into(), Source::File),
+            }
+            true
+        }
+
+        /// Whether `live` holds it on its defaults.
+        fn on_defaults(self, live: &Live) -> bool {
+            let (defaults, name) = self.defaults();
+            match self {
+                Self::Action(action) => live.bindings.spellings(action) == defaults,
+                Self::Ui(_) | Self::Chord(_) => live
+                    .specs
+                    .iter()
+                    .any(|s| format!("{} {}", s.feature, s.verb) == name && s.lhs == defaults[0]),
+            }
+        }
+    }
+
+    /// The keys `live` registers with nvim, and the keys view's own
+    /// surfaces answer, each sorted.
+    fn held(live: &Live) -> (Vec<String>, Vec<String>) {
+        let mut specs: Vec<String> = live.specs.iter().map(|s| s.lhs.to_string()).collect();
+        let mut own: Vec<String> = view_native::config::KEY_ACTIONS
+            .iter()
+            .flat_map(|(_, action)| live.bindings.spellings(*action))
+            .collect();
+        specs.sort();
+        own.sort();
+        (specs, own)
+    }
+
+    /// No key is registered twice, and no two of view's own bindings share
+    /// a key. A mapping and an own binding may share one, as the defaults
+    /// do: the binding answers on view's own surfaces and the mapping in a
+    /// buffer.
+    fn assert_held_once(live: &Live, case: &str) {
+        let (specs, own) = held(live);
+        for keys in [specs, own] {
+            let twice: Vec<_> = keys.windows(2).filter(|w| w[0] == w[1]).collect();
+            assert!(twice.is_empty(), "{case}: held twice: {twice:?}");
+        }
+    }
+
+    fn recording_model() -> Model {
+        let mut m = model();
+        m.dvr.enable(1 << 20);
+        m
+    }
+
+    #[test]
+    fn every_view_key_moved_onto_another_keeps_its_default_and_says_so() {
+        let live = NativeSession::desktop(0, None).live_specs(&recording_model());
+        assert!(live.notices.is_empty(), "{:?}", live.notices);
+        assert_held_once(&live, "the defaults");
+        let defaults = held(&live);
+        let holders = |key: &String| {
+            let (specs, own) = &defaults;
+            specs.iter().chain(own).filter(|k| *k == key).count()
+        };
+        let members = members();
+        let mut pairs = 0;
+        for &moved in &members {
+            let (own, name) = moved.defaults();
+            for &holder in members.iter().filter(|&&h| h != moved) {
+                let (theirs, holder_name) = holder.defaults();
+                let key = &theirs[0];
+                if own.contains(key) {
+                    continue;
+                }
+                let mut session = NativeSession::desktop(0, None);
+                let mut model = recording_model();
+                if !moved.move_to(&mut session, &mut model, key) {
+                    continue;
+                }
+                let case = format!("{moved:?} onto {holder:?}'s {key}");
+                let live = session.live_specs(&model);
+                assert_eq!(
+                    held(&live),
+                    defaults,
+                    "{case}: every key back on its default"
+                );
+                assert!(moved.on_defaults(&live), "{case}: not put back");
+                assert!(holder.on_defaults(&live), "{case}: the holder lost it");
+                assert_eq!(live.notices.len(), 1, "{case}: {:?}", live.notices);
+                let notice = &live.notices[0];
+                assert!(notice.contains(&format!("= \"{key}\"")), "{case}: {notice}");
+                assert!(
+                    notice.contains(&format!("`{name}` stays")),
+                    "{case}: {notice}"
+                );
+                // a key two features hold by default names either of them
+                if holders(key) == 1 {
+                    let named = format!("`{holder_name}` already");
+                    assert!(notice.contains(&named), "{case}: {notice}");
+                }
+                pairs += 1;
+            }
+        }
+        assert!(pairs > 40 * members.len(), "{pairs} pairs reached");
+    }
+
+    #[test]
+    fn swapped_view_keys_and_a_disabled_feature_s_key_are_free_to_take() {
+        use view_core::native::keys::Action;
+        let at = |key: &str| {
+            view_native::config::UI_KEYS
+                .iter()
+                .position(|ui| ui.key == key)
+                .unwrap()
+        };
+        let (gaps, scrub) = (at("toggle_gaps"), at("dvr_scrub"));
+        let defaults = default_ui_keys_lhs();
+        let lhs = |live: &Live, verb: &str| {
+            live.specs
+                .iter()
+                .filter(|s| s.verb == verb && s.feature != "window")
+                .map(|s| s.lhs.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        let mut session = NativeSession::desktop(0, None);
+        session.ui_keys_lhs[gaps] = defaults[scrub].clone();
+        session.ui_keys_lhs[scrub] = defaults[gaps].clone();
+        let live = session.live_specs(&recording_model());
+        assert!(live.notices.is_empty(), "{:?}", live.notices);
+        assert!(lhs(&live, "scrub").contains(&defaults[gaps]));
+
+        let mut session = NativeSession::desktop(0, None);
+        session.cfg = NativeConfig::from_toml_str("[native]\npicker = false\n").unwrap();
+        session.ui_keys_lhs[scrub] = "<leader>ff".into();
+        let live = session.live_specs(&recording_model());
+        assert!(live.notices.is_empty(), "{:?}", live.notices);
+        assert_eq!(lhs(&live, "scrub"), ["<leader>ff"]);
+
+        let mut session = NativeSession::desktop(0, None);
+        session.ui_keys_lhs[gaps] = defaults[scrub].clone();
+        session.ui_keys_lhs[scrub] = "<leader>ff".into();
+        let live = session.live_specs(&recording_model());
+        assert_eq!(live.notices.len(), 2, "{:?}", live.notices);
+        assert_eq!(lhs(&live, "scrub"), [defaults[scrub].clone()]);
+        assert!(lhs(&live, "gaps").contains(&defaults[gaps]));
+        assert_held_once(&live, "a default put back");
+
+        // two moved keys on one: the first keeps it and the second is told
+        let mut session = NativeSession::desktop(0, None);
+        let mut model = recording_model();
+        session.ui_keys_lhs[at("key_log")] = "<C-g>".into();
+        assert!(model
+            .key_bindings
+            .rebind(Action::ResizeMode, &["<C-g>".into()]));
+        let live = session.live_specs(&model);
+        assert_eq!(live.notices.len(), 1, "{:?}", live.notices);
+        assert_held_once(&live, "two moved onto one");
     }
 }

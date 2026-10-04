@@ -71,7 +71,8 @@ pub struct Capture {
     pub seq: Option<u64>,
     /// Whether the frame was stored whole.
     pub key: bool,
-    /// The painted cells that differ from the frame before.
+    /// The painted cells that differ from the frame before, 0 on a frame
+    /// stored whole with no recorded frame of its size before it.
     pub changed: usize,
     /// The columns scroll detection judged to have moved.
     pub span: Option<(u16, u16)>,
@@ -79,7 +80,7 @@ pub struct Capture {
     pub scroll: Option<Scroll>,
     /// The rows the shift's distance explains cell for cell.
     pub explained: usize,
-    /// The cells stored.
+    /// The cells stored, 0 when the ring kept no frame.
     pub pushed: usize,
 }
 
@@ -190,20 +191,26 @@ impl FrameRing {
     /// The retained groups, the closed ones shared with the caller at the
     /// cost of one `Arc` clone each and the open one copied, so frames
     /// recorded while the snapshot is held keep building on the open group.
-    /// The copy counts toward the ring's budget until the snapshot drops.
+    /// The copy counts toward the ring's budget until the snapshot drops,
+    /// and the oldest groups are evicted to make room for it before it is
+    /// taken. `None` when no group the ring may evict makes that room: the
+    /// open group, or earlier snapshots, hold what the copy would need.
     #[must_use]
-    pub fn snapshot(&self) -> RingSnapshot {
+    pub fn snapshot(&mut self) -> Option<RingSnapshot> {
+        let bytes = self.groups.back().map_or(0, |g| g.bytes());
+        if !self.trim_to(bytes, 1) {
+            return None;
+        }
         let closed = self.groups.len().saturating_sub(1);
         let open = self.groups.back().map(|g| Arc::new(Group::clone(g)));
-        let copy = open.as_ref().map(|g| {
-            let bytes = g.bytes();
+        let copy = open.as_ref().map(|_| {
             self.copied.fetch_add(bytes, Ordering::Relaxed);
             Arc::new(CopyHeld {
                 copied: Arc::clone(&self.copied),
                 bytes,
             })
         });
-        RingSnapshot {
+        Some(RingSnapshot {
             groups: self
                 .groups
                 .iter()
@@ -212,7 +219,7 @@ impl FrameRing {
                 .chain(open)
                 .collect(),
             _copy: copy,
-        }
+        })
     }
 
     /// The group holding frame `seq` and the frame's index inside it.
@@ -342,7 +349,14 @@ impl FrameRing {
     /// grown for a larger screen, the symbols a group entered, or a
     /// snapshot's copy of the open group can cause that.
     fn trim(&mut self) {
-        while self.held() > self.budget {
+        self.trim_to(0, 0);
+    }
+
+    /// Frees memory the way [`Self::trim`] does until `extra` more bytes
+    /// fit the budget, evicting no group while `keep` or fewer remain.
+    /// Returns whether they fit.
+    fn trim_to(&mut self, extra: usize, keep: usize) -> bool {
+        while self.held().saturating_add(extra) > self.budget {
             if let Some(at) = self
                 .retired
                 .iter_mut()
@@ -350,10 +364,11 @@ impl FrameRing {
             {
                 let dropped = self.retired.swap_remove(at);
                 self.held -= dropped.counted;
-            } else if self.evict_oldest().is_none() {
-                return;
+            } else if self.groups.len() <= keep || self.evict_oldest().is_none() {
+                return false;
             }
         }
+        true
     }
 
     /// Moves the oldest group to the retired list. `None`, evicting
@@ -625,7 +640,7 @@ mod tests {
             ring.push_key(frame, AREA, None, screen("k")).unwrap();
             seen.push(storage(&ring));
         }
-        let snapshot = ring.snapshot();
+        let snapshot = ring.snapshot().unwrap();
         let copy = ring.held() - ring.held;
         assert!(copy >= AREA.0 as usize * AREA.1 as usize, "{copy}");
         // the copy of the open group takes its room and the next group
@@ -653,11 +668,31 @@ mod tests {
     }
 
     #[test]
-    fn a_held_snapshot_leaves_the_open_group_taking_deltas() {
+    fn a_snapshot_taken_at_budget_makes_room_for_its_copy() {
         let mut ring = FrameRing::with_budget(Group::reserved_bytes(AREA) * 2);
         ring.push_key(0, AREA, None, screen("a")).unwrap();
         ring.push_key(1, AREA, None, screen("b")).unwrap();
-        let snapshot = ring.snapshot();
+        assert_eq!(ring.held(), ring.budget, "the ring is at its budget");
+        let snapshot = ring.snapshot().unwrap();
+        assert!(ring.held() <= ring.budget, "{} held", ring.held());
+        let held: Vec<_> = snapshot.frames().map(|f| f.seq).collect();
+        assert_eq!(held, [2], "the oldest group made room for the copy");
+        // the open group alone at budget leaves nothing to evict, and a
+        // second snapshot finds the first one holding what is left
+        assert!(ring.snapshot().is_none());
+        drop(snapshot);
+        let mut alone = FrameRing::with_budget(Group::reserved_bytes(AREA));
+        alone.push_key(0, AREA, None, screen("a")).unwrap();
+        assert!(alone.snapshot().is_none());
+        assert_eq!(alone.held(), alone.budget);
+    }
+
+    #[test]
+    fn a_held_snapshot_leaves_the_open_group_taking_deltas() {
+        let mut ring = FrameRing::with_budget(Group::reserved_bytes(AREA) * 3);
+        ring.push_key(0, AREA, None, screen("a")).unwrap();
+        ring.push_key(1, AREA, None, screen("b")).unwrap();
+        let snapshot = ring.snapshot().unwrap();
         assert_eq!(delta(&mut ring, 2, 1), 3);
         assert!(!is_key(&ring, 3), "the frame is a delta on the open group");
         // a new group has no room while the snapshot holds the oldest
@@ -785,12 +820,12 @@ mod tests {
         }
         let mut ring = FrameRing::new(64 << 20);
         ring.push_key(0, AREA, Some((1, 1)), cells.clone());
-        let snapshot = ring.snapshot();
+        let snapshot = ring.snapshot().unwrap();
         let frame = snapshot.frames().next().unwrap();
         let views: Vec<_> = frame.cells().collect();
         let mut builder = RingBuilder::new(64 << 20);
         builder.push_key(0, AREA, Some((1, 1)), views.iter().copied());
-        let rebuilt = builder.finish().snapshot();
+        let rebuilt = builder.finish().snapshot().unwrap();
         let again: Vec<_> = rebuilt.frames().next().unwrap().cells().collect();
         assert_eq!(views, again);
         for (view, color) in views.iter().zip(colors) {

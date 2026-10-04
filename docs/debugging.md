@@ -44,12 +44,12 @@ opens:
 |---|---|
 | `seq` | the frame's number, `-` when the recording had no room for it |
 | `key` | the frame was stored whole |
-| `changed` | cells that differ from the frame before |
+| `changed` | cells that differ from the frame before, `0` on a frame stored whole with no recorded frame of its size before it |
 | `span` | the columns found to have scrolled |
 | `by` | how many rows the text moved |
 | `run` | the rows the scroll covers |
 | `explained` | rows the scroll alone accounts for |
-| `pushed` | cells stored for the frame |
+| `pushed` | cells stored for the frame, `0` when the recording had no room for it |
 | `frames` | frames the recording holds |
 | `held` | bytes the recording holds |
 | `reach` | seconds from the oldest frame held to the newest |

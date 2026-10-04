@@ -406,6 +406,23 @@ with an empty value:
 close_alt = ""
 ```
 
+## Moving a view key onto another
+
+A `[keys]` or `[keys.desktop]` entry that moves a key onto one another view
+feature holds keeps its default for the run, and view names both features:
+
+```toml
+[keys]
+dvr_scrub = "<leader>ug"
+```
+
+```text
+view: [keys] dvr_scrub = "<leader>ug" is the key `ui gaps` already holds. `dvr scrub` stays on <leader>fv this run
+```
+
+A feature that is off holds no key, so its keys are free to take. Two
+entries that swap keys both take effect.
+
 ## Answering an agent's permission request
 
 While a permission request is up, the entered panel's keys are the digits

@@ -8,13 +8,13 @@ impl ResolvedConfig {
     /// came from, in registry order. The doctor's config section is this
     /// walk; nothing re-derives the list.
     ///
-    /// Every registry row whose table is not `[ai]`, minus `keys.desktop_modifier`,
-    /// and no others: `[ai]` is parsed and resolved by the crate that owns
-    /// it, and a caller that can name both crates appends its answers to
-    /// these; `keys.desktop_modifier`'s real answer needs the terminal's
-    /// own probe, which this resolver is never handed, so the caller that
-    /// holds it (`crates/view/src/main.rs`'s `caps_notice`) prints that one
-    /// row itself, beside this walk.
+    /// Every registry row whose table is not `[ai]`, minus
+    /// `keys.desktop_modifier`, and no others: `[ai]` is parsed and
+    /// resolved by the crate that owns it, and a caller that can name both
+    /// crates appends its answers to these; `keys.desktop_modifier`'s real
+    /// answer needs the terminal's own probe, which this resolver is never
+    /// handed, so whoever holds the probe prints that one row itself,
+    /// beside this walk.
     #[must_use]
     pub fn rows(&self) -> Vec<(&'static ConfigKey, String, Source)> {
         keys()

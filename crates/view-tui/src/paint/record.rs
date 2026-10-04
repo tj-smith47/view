@@ -50,8 +50,8 @@ pub(crate) fn capture(
         }
     }
     last.key = true;
-    last.pushed = shadow.front.content.len();
     last.seq = into.push_key(at_us, size, cursor, shadow.front.content.iter().cloned());
+    last.pushed = last.seq.map_or(0, |_| shadow.front.content.len());
     into.last = last;
     last.seq
 }
@@ -109,10 +109,11 @@ fn fill(shadow: &Shadow, group: &mut Group, scroll: Option<Scroll>) -> Option<us
 /// most changed rows differ are the span that moved, rows whose span
 /// equals another row of `back` vote for the distance between them, and
 /// the shift covers every row from the first the winning distance explains
-/// cell for cell to the last. Each edge of the span then grows outward
-/// over the columns where every explained row agrees with its source, to
-/// the furthest of them that changed, and a row past either end of the shift joins it while fewer
-/// of its cells differ from their source than from the cells they replace.
+/// cell for cell and that changed in place to the last. Each edge of the
+/// span then grows outward over the columns where every explained row
+/// agrees with its source, to the furthest of them that changed, and a row
+/// past either end of the shift joins it while fewer of its cells differ
+/// from their source than from the cells they replace.
 /// `None` when a row's worth of cells or fewer changed, or fewer than two
 /// rows are explained. `last` takes the counts.
 ///
@@ -195,15 +196,18 @@ fn scroll_of(shadow: &Shadow, scratch: &mut Vec<u64>, last: &mut Capture) -> Opt
                     && row(front, w, y, cols.clone()) == row(back, w, from, cols)
             })
     };
-    // the votes are spent, so their first `h` slots mark the explained rows
+    // the votes are spent, so their first `h` slots mark the explained rows.
+    // A row that stood still is explained whenever it equals its source, as
+    // `~` filler under a window does, so only a row that moved sets an end:
+    // a still row the shift leaves out costs nothing
     let mut hull = None::<Range<usize>>;
     for y in 0..h {
         let hit = explained(y);
         if let Some(mark) = votes.get_mut(y) {
             *mark = u64::from(hit);
         }
-        if hit {
-            last.explained += 1;
+        last.explained += usize::from(hit);
+        if hit && now.get(y) != was.get(y) {
             hull = Some(hull.map_or(y..y + 1, |r| r.start..y + 1));
         }
     }
@@ -474,6 +478,36 @@ mod fixture {
             buf.set_stringn(tree + 10, y, guide, 1, row.patch(dim));
         }
     }
+
+    /// The first row of the lower window [`split`] draws.
+    pub(super) fn lower_window(height: u16) -> u16 {
+        height / 2 + 1
+    }
+
+    /// Splits the editor of a screen [`draw`] drew into two windows: the
+    /// upper one keeps the scrolled text, a status line of its own closes
+    /// it, and the lower one holds a short file that stands still, nine
+    /// lines of text and `~` on every row past them.
+    pub(super) fn split(buf: &mut Buffer, area: (u16, u16), _: u64) {
+        let (w, h) = area;
+        let tree = tree_width(w);
+        let width = usize::from(w - tree - 1);
+        let text = Style::default().fg(Color::Rgb(248, 248, 242));
+        let dim = Style::default().fg(Color::Rgb(98, 114, 164));
+        let chrome = Style::default()
+            .fg(Color::Rgb(248, 248, 242))
+            .bg(Color::Rgb(33, 34, 44));
+        let lower = lower_window(h);
+        let status = format!("{:<width$}", " b.rs  [+]");
+        buf.set_stringn(tree + 1, lower - 1, status, width, chrome);
+        for (y, n) in (lower..h - 2).zip(0u64..) {
+            let (row, style) = match LINES.get(usize::try_from(n).unwrap_or(0)) {
+                Some(line) if n < 9 => (format!("{:>4} {line}", n + 1), text),
+                _ => ("~".to_string(), dim),
+            };
+            buf.set_stringn(tree + 1, y, format!("{row:<width$}"), width, style);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -574,7 +608,7 @@ mod tests {
         assert_eq!(capture(&shadow, &mut ring, 40, None, true), Some(6));
         let sixth = shadow.front.clone();
 
-        let deltas = ring.snapshot();
+        let deltas = ring.snapshot().unwrap();
         let keys: Vec<_> = deltas.frames().map(|f| (f.seq, f.key)).collect();
         assert_eq!(
             keys,
@@ -614,6 +648,18 @@ mod tests {
     }
 
     #[test]
+    fn a_keyframe_the_ring_refuses_counts_no_cell_stored() {
+        let mut shadow = Shadow::new();
+        shadow.resize(Rect::new(0, 0, W, H));
+        shadow.painted = Damage::full();
+        let mut ring = FrameRing::new(64);
+        assert_eq!(capture(&shadow, &mut ring, 0, None, false), None);
+        let last = ring.last_capture();
+        assert!(last.key && last.seq.is_none(), "{last:?}");
+        assert_eq!(last.pushed, 0);
+    }
+
+    #[test]
     fn a_placed_cell_never_runs_past_its_row() {
         let mut ring = FrameRing::new(64 << 20);
         let mut cells = vec![Cell::EMPTY; 8];
@@ -631,12 +677,14 @@ mod tests {
     /// A drawing laid over the fixture screen, and its name.
     type Decoration = (&'static str, Decorate);
 
-    /// The fixture screen as it is, under relative line numbers, and under
-    /// a working config's cursor line, wrapped lines and indent guide.
-    const DECORATIONS: [Decoration; 3] = [
+    /// The fixture screen as it is, under relative line numbers, under a
+    /// working config's cursor line, wrapped lines and indent guide, and
+    /// split over a lower window that stands still.
+    const DECORATIONS: [Decoration; 4] = [
         ("plain", |_, _, _| {}),
         ("relative", fixture::relative),
         ("real", fixture::real),
+        ("split", fixture::split),
     ];
 
     /// Feeds frames of the fixture screen of size `area`, one every
@@ -741,14 +789,18 @@ mod tests {
 
     /// Asserts every frame of `ring` loads back as the frame `painted`
     /// holds, and returns each frame's shift.
-    fn reloaded(ring: &FrameRing, painted: &[ratatui::buffer::Buffer]) -> Vec<Option<Scroll>> {
+    fn reloaded(ring: &mut FrameRing, painted: &[ratatui::buffer::Buffer]) -> Vec<Option<Scroll>> {
         let mut shadow = Shadow::new();
         for (seq, frame) in (1u64..).zip(painted) {
             shadow.resize(frame.area);
             assert!(load(&mut shadow, ring, seq));
             assert_eq!(&shadow.back, frame, "frame {seq}");
         }
-        ring.snapshot().frames().map(|f| f.scroll).collect()
+        ring.snapshot()
+            .unwrap()
+            .frames()
+            .map(|f| f.scroll)
+            .collect()
     }
 
     #[test]
@@ -756,8 +808,8 @@ mod tests {
         let area = (40, 12);
         let tops = [0, 1, 2, 3, 5, 4, 3, 1, 0, 0, 1];
         let screens: Vec<_> = tops.iter().map(|&t| (area, t)).collect();
-        let (ring, painted) = record(&screens, |_, _, _| {});
-        let scrolls = reloaded(&ring, &painted);
+        let (mut ring, painted) = record(&screens, |_, _, _| {});
+        let scrolls = reloaded(&mut ring, &painted);
         let tree = fixture::tree_width(area.0);
         for (i, pair) in tops.windows(2).enumerate() {
             let by = i16::try_from(pair[1]).unwrap() - i16::try_from(pair[0]).unwrap();
@@ -788,8 +840,8 @@ mod tests {
             }
         };
         let screens: Vec<_> = [0, 1, 2, 1, 4].iter().map(|&t| (area, t)).collect();
-        let (ring, painted) = record(&screens, wide);
-        let scrolls = reloaded(&ring, &painted);
+        let (mut ring, painted) = record(&screens, wide);
+        let scrolls = reloaded(&mut ring, &painted);
         assert!(scrolls[1..].iter().all(Option::is_some), "{scrolls:?}");
     }
 
@@ -797,9 +849,9 @@ mod tests {
     fn a_resize_between_scrolls_rebuilds_cell_for_cell() {
         let (big, small) = ((40, 12), (30, 9));
         let screens = [(big, 0), (big, 1), (small, 1), (small, 2), (small, 0)];
-        let (ring, painted) = record(&screens, |_, _, _| {});
-        let scrolls = reloaded(&ring, &painted);
-        let keys: Vec<_> = ring.snapshot().frames().map(|f| f.key).collect();
+        let (mut ring, painted) = record(&screens, |_, _, _| {});
+        let scrolls = reloaded(&mut ring, &painted);
+        let keys: Vec<_> = ring.snapshot().unwrap().frames().map(|f| f.key).collect();
         assert_eq!(keys, [true, false, true, false, false]);
         assert!(scrolls[1].is_some() && scrolls[3].is_some() && scrolls[4].is_some());
     }
@@ -844,9 +896,10 @@ mod tests {
     #[test]
     fn a_wide_glyph_straddling_the_left_of_a_shift_rebuilds_cell_for_cell() {
         let area = (40, 12);
-        let (plain, _) = record(&[(area, 0), (area, 1)], |_, _, _| {});
+        let (mut plain, _) = record(&[(area, 0), (area, 1)], |_, _, _| {});
         let left = plain
             .snapshot()
+            .unwrap()
             .frames()
             .nth(1)
             .unwrap()
@@ -890,7 +943,7 @@ mod tests {
             assert_eq!(capture(&shadow, &mut ring, n, None, n > 0), Some(n + 1));
             painted.push(shadow.front.clone());
         }
-        let scrolls = reloaded(&ring, &painted);
+        let scrolls = reloaded(&mut ring, &painted);
         assert!(scrolls[1].is_some(), "{scrolls:?}");
         assert_eq!(scrolls[2], None);
     }
@@ -900,9 +953,9 @@ mod tests {
         let area = (100, 30);
         let tops: Vec<_> = (0..40).collect();
         let screens: Vec<_> = tops.iter().map(|&t| (area, t)).collect();
-        let (ring, painted) = record(&screens, fixture::real);
-        let scrolls = reloaded(&ring, &painted);
-        let keys: Vec<_> = ring.snapshot().frames().map(|f| f.key).collect();
+        let (mut ring, painted) = record(&screens, fixture::real);
+        let scrolls = reloaded(&mut ring, &painted);
+        let keys: Vec<_> = ring.snapshot().unwrap().frames().map(|f| f.key).collect();
         let under = area.1 - 3 - 8 + 1;
         for (i, scroll) in scrolls.iter().enumerate().filter(|&(i, _)| !keys[i]) {
             let scroll = scroll.expect("every delta frame scrolled");
@@ -911,6 +964,31 @@ mod tests {
                 "frame {}: {scroll:?}",
                 i + 1
             );
+        }
+    }
+
+    #[test]
+    fn scrolling_one_window_of_a_split_stores_no_cell_of_the_other() {
+        let area = (100, 30);
+        let screens: Vec<_> = (0..40).map(|t| (area, t)).collect();
+        let (mut ring, painted) = record(&screens, fixture::split);
+        reloaded(&mut ring, &painted);
+        // the upper window's status line and every row of the lower window
+        let still = fixture::lower_window(area.1) - 1..area.1 - 2;
+        let snapshot = ring.snapshot().unwrap();
+        for frame in snapshot.frames().filter(|f| !f.key) {
+            let scroll = frame.scroll.expect("every delta frame scrolled");
+            assert!(
+                scroll.bottom <= still.start,
+                "frame {}: {scroll:?}",
+                frame.seq
+            );
+            let stored: Vec<_> = frame
+                .cells()
+                .filter(|c| still.contains(&c.y))
+                .map(|c| (c.x, c.y))
+                .collect();
+            assert!(stored.is_empty(), "frame {}: {stored:?}", frame.seq);
         }
     }
 
@@ -954,8 +1032,8 @@ mod tests {
         let area = (40, 12);
         let tops = [0, 1, 2, 3, 2, 5];
         let screens: Vec<_> = tops.iter().map(|&t| (area, t)).collect();
-        let (ring, painted) = record(&screens, fixture::relative);
-        let scrolls = reloaded(&ring, &painted);
+        let (mut ring, painted) = record(&screens, fixture::relative);
+        let scrolls = reloaded(&mut ring, &painted);
         let gutter = fixture::tree_width(area.0) + 6;
         for (i, scroll) in scrolls.iter().enumerate().skip(1) {
             let scroll = scroll.expect("every frame after the first scrolled");
@@ -979,8 +1057,8 @@ mod tests {
             buf.set_string(pane + 2, 2, format!("n{top:<3}"), Style::default());
         };
         let screens: Vec<_> = (0..6).map(|t| (area, t)).collect();
-        let (ring, painted) = record(&screens, beside);
-        let scrolls = reloaded(&ring, &painted);
+        let (mut ring, painted) = record(&screens, beside);
+        let scrolls = reloaded(&mut ring, &painted);
         for (i, scroll) in scrolls.iter().enumerate().skip(1) {
             let scroll = scroll.expect("every frame after the first scrolled");
             assert!(scroll.right <= pane, "frame {}: {scroll:?}", i + 1);

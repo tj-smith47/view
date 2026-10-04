@@ -12,7 +12,7 @@
 use std::borrow::Cow;
 
 use view_core::native::chords::{
-    desktop_chords, DesktopModifier, KeyProfile, ModifierChoice, DESKTOP_CHORD_COUNT,
+    desktop_chords, DesktopChord, DesktopModifier, KeyProfile, ModifierChoice, DESKTOP_CHORD_COUNT,
 };
 use view_core::native::mappings::MappingSpec;
 
@@ -129,6 +129,20 @@ pub fn chord_plan(
     modifier: DesktopModifier,
     cfg: &NativeConfig,
 ) -> Vec<MappingSpec> {
+    chord_rows(desktop, profile, modifier, cfg)
+        .into_iter()
+        .map(|(_, spec)| spec)
+        .collect()
+}
+
+/// [`chord_plan`]'s specs, each beside the chord row it was built from.
+#[must_use]
+pub fn chord_rows(
+    desktop: &[Resolved<String>; DESKTOP_CHORD_COUNT],
+    profile: KeyProfile,
+    modifier: DesktopModifier,
+    cfg: &NativeConfig,
+) -> Vec<(&'static DesktopChord, MappingSpec)> {
     if profile != KeyProfile::Desktop {
         return Vec::new();
     }
@@ -145,12 +159,13 @@ pub fn chord_plan(
             if lhs.is_empty() {
                 return None;
             }
-            Some(MappingSpec {
+            let spec = MappingSpec {
                 feature: chord.feature,
                 lhs: Cow::Owned(lhs),
                 verb: chord.verb,
                 rhs: chord.rhs,
-            })
+            };
+            Some((chord, spec))
         })
         .collect()
 }

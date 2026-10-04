@@ -916,6 +916,15 @@ impl KeysTable {
     }
 }
 
+/// Every `[keys]` entry that rebinds a [`KeyBindings`] action, and the
+/// action, in the order [`resolve_key_bindings`] reads them.
+pub const KEY_ACTIONS: [(&str, Action); 4] = [
+    ("sidebar_wider", Action::Resize(Direction::Wider)),
+    ("sidebar_narrower", Action::Resize(Direction::Narrower)),
+    ("composer_newline", Action::ComposerNewline),
+    ("resize_mode", Action::ResizeMode),
+];
+
 /// The bindings every rebindable action answers to, and the notice each
 /// action whose value could not be read owes the user.
 ///
@@ -926,24 +935,13 @@ impl KeysTable {
 fn resolve_key_bindings(table: &KeysTable) -> (KeyBindings, Vec<&'static str>) {
     let mut keys = KeyBindings::default();
     let mut notices = Vec::new();
-    for (value, action, notice) in [
-        (
-            &table.sidebar_wider,
-            Action::Resize(Direction::Wider),
-            SIDEBAR_WIDER_NOTICE,
-        ),
-        (
-            &table.sidebar_narrower,
-            Action::Resize(Direction::Narrower),
-            SIDEBAR_NARROWER_NOTICE,
-        ),
-        (
-            &table.composer_newline,
-            Action::ComposerNewline,
-            COMPOSER_NEWLINE_NOTICE,
-        ),
-        (&table.resize_mode, Action::ResizeMode, RESIZE_MODE_NOTICE),
-    ] {
+    let entries = [
+        (&table.sidebar_wider, SIDEBAR_WIDER_NOTICE),
+        (&table.sidebar_narrower, SIDEBAR_NARROWER_NOTICE),
+        (&table.composer_newline, COMPOSER_NEWLINE_NOTICE),
+        (&table.resize_mode, RESIZE_MODE_NOTICE),
+    ];
+    for ((value, notice), (_, action)) in entries.into_iter().zip(KEY_ACTIONS) {
         let Some(value) = value.as_ref() else {
             continue;
         };

@@ -33,9 +33,8 @@ use super::profile;
 use super::{
     parse_color, parse_nvim_bin, parse_panes, parse_pill_caps, parse_theme, parse_tier,
     parse_tile_titles, parse_tree_icons, read_key, render_tile_titles, KeysConfig, NativeConfig,
-    SupervisionConfig, UiKey, UiTokens, ViewConfig, AUTO, BUNDLED, UI_KEYS,
+    SupervisionConfig, UiTokens, ViewConfig, AUTO, BUNDLED, UI_KEYS,
 };
-use view_core::native::mappings::MappingSpec;
 
 /// One resolved answer and the reason it is that answer.
 #[non_exhaustive]
@@ -525,12 +524,6 @@ pub fn resolve_with(
         (*lhs, *source) =
             resolve_ui_lhs_env(file, env, ui.key, file.keys.lhs(ui.key), &mut notices);
     }
-    refuse_taken_keys(
-        &mut ui_lhs,
-        &mut ui_keys,
-        &file.native.disabled,
-        &mut notices,
-    );
     let auto_restart = layer(
         None,
         env_read(
@@ -674,66 +667,6 @@ fn resolve_ui_lhs_env(
         }
     }
     (lhs, source)
-}
-
-/// Puts back the default of every `[keys]` action moved onto a key another
-/// view feature holds, with one notice naming both features and the key.
-/// Repeats until nothing moves, because a default put back can be the key
-/// another action was moved onto.
-fn refuse_taken_keys(
-    lhs: &mut [String; UI_KEYS.len()],
-    sources: &mut [Source; UI_KEYS.len()],
-    disabled: &[&str],
-    notices: &mut Vec<String>,
-) {
-    let mut moved = true;
-    while moved {
-        moved = false;
-        for at in 0..UI_KEYS.len() {
-            let (Some(ui), Some(wanted)) = (UI_KEYS.get(at), lhs.get(at)) else {
-                continue;
-            };
-            let default = super::default_lhs(ui.feature, ui.verb);
-            if wanted == default {
-                continue;
-            }
-            let holder = taken_by(lhs, ui, wanted, disabled);
-            let (Some(holder), Some(slot), Some(source)) =
-                (holder, lhs.get_mut(at), sources.get_mut(at))
-            else {
-                continue;
-            };
-            notices.push(format!(
-                "view: [keys] {} = \"{slot}\" is the key `{} {}` already holds. \
-                 `{} {}` stays on {default} this run",
-                ui.key, holder.feature, holder.verb, ui.feature, ui.verb
-            ));
-            *slot = default.to_string();
-            *source = Source::Derived;
-            moved = true;
-        }
-    }
-}
-
-/// The default row of another enabled feature that answers to `wanted`,
-/// read through the key each `[keys]` action now resolves to.
-fn taken_by(
-    lhs: &[String; UI_KEYS.len()],
-    ui: &UiKey,
-    wanted: &str,
-    disabled: &[&str],
-) -> Option<&'static MappingSpec> {
-    mappings::default_maps().iter().find(|spec| {
-        let rebindable = UI_KEYS
-            .iter()
-            .position(|other| other.feature == spec.feature && other.verb == spec.verb);
-        let held = rebindable
-            .and_then(|other| lhs.get(other))
-            .map_or(spec.lhs.as_ref(), String::as_str);
-        (spec.feature, spec.verb) != (ui.feature, ui.verb)
-            && !disabled.contains(&spec.feature)
-            && held == wanted
-    })
 }
 
 mod answer;
@@ -2413,74 +2346,6 @@ mod tests {
             resolved.notices().is_empty(),
             "leaving a chord unbound owes no notice: {:?}",
             resolved.notices()
-        );
-    }
-
-    #[test]
-    fn a_key_moved_onto_another_view_key_keeps_its_default_and_says_so() {
-        let mut pairs = 0;
-        for ui in UI_KEYS {
-            let default = super::super::default_lhs(ui.feature, ui.verb);
-            for spec in mappings::default_maps() {
-                if (spec.feature, spec.verb) == (ui.feature, ui.verb) {
-                    continue;
-                }
-                let lhs = spec.lhs.as_ref();
-                let file = ViewConfig::from_toml_str(&format!("[keys]\n{} = \"{lhs}\"\n", ui.key))
-                    .expect("the fixture must parse");
-                let resolved = resolve_with(&file, &Overrides::default(), &no_env);
-                assert_eq!(
-                    resolved.tables.keys.lhs(ui.key),
-                    default,
-                    "{} moved onto {lhs} keeps its default",
-                    ui.key
-                );
-                let told: Vec<_> = resolved
-                    .notices()
-                    .iter()
-                    .filter(|notice| notice.contains(&format!("[keys] {} ", ui.key)))
-                    .collect();
-                assert_eq!(told.len(), 1, "one notice for {} on {lhs}", ui.key);
-                let both = [
-                    format!("`{} {}`", ui.feature, ui.verb),
-                    format!("`{} {}`", spec.feature, spec.verb),
-                    format!("\"{lhs}\""),
-                ];
-                assert!(
-                    told.iter()
-                        .all(|notice| both.iter().all(|part| notice.contains(part.as_str()))),
-                    "the notice names both features and the key: {told:?}"
-                );
-                pairs += 1;
-            }
-        }
-        assert!(pairs > UI_KEYS.len(), "the walk reached the default rows");
-    }
-
-    #[test]
-    fn swapped_view_keys_and_a_disabled_feature_s_key_are_free_to_take() {
-        let gaps = super::super::default_lhs("ui", "gaps");
-        let scrub = super::super::default_lhs("dvr", "scrub");
-        let swap = format!("[keys]\ntoggle_gaps = \"{scrub}\"\ndvr_scrub = \"{gaps}\"\n");
-        let file = ViewConfig::from_toml_str(&swap).expect("the fixture must parse");
-        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
-        assert_eq!(resolved.tables.keys.lhs("toggle_gaps"), scrub);
-        assert_eq!(resolved.tables.keys.lhs("dvr_scrub"), gaps);
-        assert!(resolved.notices().is_empty(), "{:?}", resolved.notices());
-
-        let freed = "[native]\npicker = false\n[keys]\ndvr_scrub = \"<leader>ff\"\n";
-        let file = ViewConfig::from_toml_str(freed).expect("the fixture must parse");
-        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
-        assert_eq!(resolved.tables.keys.lhs("dvr_scrub"), "<leader>ff");
-
-        let chain = format!("[keys]\ntoggle_gaps = \"{scrub}\"\ndvr_scrub = \"<leader>fk\"\n");
-        let file = ViewConfig::from_toml_str(&chain).expect("the fixture must parse");
-        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
-        assert_eq!(resolved.tables.keys.lhs("dvr_scrub"), scrub);
-        assert_eq!(
-            resolved.tables.keys.lhs("toggle_gaps"),
-            gaps,
-            "a default put back takes its key back from the action moved onto it"
         );
     }
 }
