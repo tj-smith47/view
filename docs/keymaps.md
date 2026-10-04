@@ -843,10 +843,12 @@ to the bar, ahead of the keys. These keys move through the frames:
 `e` writes `view-dvr-<seconds>.vdvr` in the directory view was started in.
 `:View dvr export PATH` writes to PATH, read as any file name you type: `~`
 is your home directory and a relative path starts from the current
-directory. A notice names the file once it is written. An existing file is
-left as it is, and the notice says so. A clip still being written when view
-quits gets up to two seconds to finish. One that does not is removed, and
-view says so as it exits.
+directory. It differs from `:w` in one case: a path naming an environment
+variable that is not set is refused, and nothing is written. A notice names
+the file once it is written. An existing file is left as it is, and the
+notice says so. A clip still being written when view quits gets up to two
+seconds to finish. One that does not is removed, and view says so as it
+exits.
 
 Every other key, paste and click is dropped while the scrub is open, so
 nothing reaches your buffer. Closing it redraws the live screen. How far

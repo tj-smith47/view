@@ -140,9 +140,10 @@ fn an_export_path_reaches_view_as_typed_and_absolute() {
 }
 
 /// `:View dvr export` reads its path the way `:w` reads a file name: an
-/// escaped blank, an environment variable, `~` and a relative name after
-/// `:cd` each name the file `:w` writes. `HOME` is pointed at a scratch
-/// directory, so nothing is written outside it.
+/// escaped blank, an escaped trailing blank, an escaped backslash before a
+/// blank, an escaped `$`, an environment variable, `~` and a relative name
+/// after `:cd` each name the file `:w` writes. `HOME` is pointed at a
+/// scratch directory, so nothing is written outside it.
 #[test]
 fn an_export_path_names_the_file_w_writes() {
     let (engine, channel, rx, _pump, _cutover) = spawn_attached();
@@ -152,14 +153,24 @@ fn an_export_path_names_the_file_w_writes() {
     let home = dir.join("home");
     let cwd = dir.join("cwd");
     std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(&cwd).unwrap();
+    // a backslash is a separator on Windows, where `a\\ b` names ` b` in `a`
+    std::fs::create_dir_all(cwd.join("a")).unwrap();
+    // a single-quoted Vimscript string keeps a Windows path's backslashes
     for setup in [
-        format!("execute('let $HOME = \"{}\"')", home.display()),
+        format!("execute('let $HOME = ''{}''')", home.display()),
         format!("execute('cd {}')", cwd.display()),
     ] {
         engine.handle.eval_str(&setup).unwrap();
     }
-    for typed in [r"a\ b.vdvr", "$HOME/e.vdvr", "~/t.vdvr", "rel.vdvr"] {
+    for typed in [
+        r"a\ b.vdvr",
+        r"t\ ",
+        r"a\\ b",
+        r"\$VIEW_UNSET_EXPORT.vdvr",
+        "$HOME/e.vdvr",
+        "~/t.vdvr",
+        "rel.vdvr",
+    ] {
         engine
             .handle
             .eval_str(&format!("execute('View dvr export {typed}')"))
@@ -176,6 +187,42 @@ fn an_export_path_names_the_file_w_writes() {
             "{typed}: :w wrote elsewhere than {exported}"
         );
     }
+}
+
+/// A path naming an environment variable that is not set is refused with a
+/// message naming it, and nothing reaches view, so no clip is written.
+#[test]
+fn an_export_path_naming_an_unset_variable_is_refused() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_claims(&rx);
+    let dir = view_test_support::ScratchDir::new("export-unset").unwrap();
+    engine
+        .handle
+        .eval_str(&format!("execute('cd {}')", dir.path().display()))
+        .unwrap();
+    for typed in ["$VIEW_UNSET_EXPORT/a.vdvr", "${VIEW_UNSET_EXPORT}/a.vdvr"] {
+        let said = engine
+            .handle
+            .eval_str(&format!("execute('View dvr export {typed}')"))
+            .unwrap();
+        assert!(
+            said.contains("view: DVR cannot export: $VIEW_UNSET_EXPORT is not set"),
+            "{typed}: {said:?}"
+        );
+        // an export sent ahead of this one would be the next invoke
+        engine
+            .handle
+            .eval_str("execute('View ui panes tiles')")
+            .unwrap();
+        assert_eq!(
+            next_invoke(&rx),
+            ("ui".to_owned(), "panes tiles".to_owned()),
+            "{typed}"
+        );
+    }
+    let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+    assert!(left.is_empty(), "{left:?}");
 }
 
 /// A key that invokes view answers with the keys nvim matches for it, the

@@ -739,6 +739,43 @@ mod tests {
         assert!(left.is_empty(), "{left:?}");
     }
 
+    /// A quit once the clip is written returns without waiting on the file
+    /// work queued behind it: a whole-queue wait blocks on the gate until
+    /// the watchdog fails the test.
+    #[test]
+    fn a_quit_after_the_clip_is_written_never_waits_on_work_behind_it() {
+        let _watchdog = view_test_support::watchdog();
+        let dir = view_test_support::ScratchDir::new("dvr-quit-behind").unwrap();
+        let mut model = Model::with_term_size(80, 24);
+        let mut dvr = recorded(&mut model);
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (gate, gate_rx) = std::sync::mpsc::channel::<()>();
+        let writer = BackgroundWriter::start("dvr-io-test", 4, move |job: IoJob| {
+            match job {
+                IoJob::Export(export) => {
+                    let _ = io::write(export);
+                }
+                _ => {
+                    let _ = entered_tx.send(());
+                    let _ = gate_rx.recv();
+                }
+            }
+            Ok::<(), Infallible>(())
+        })
+        .unwrap();
+        dvr.io = Some(writer);
+        let path = dir.join("a.vdvr");
+        export(&mut model, &mut dvr, &path.display().to_string());
+        dvr.unsent.push_back(IoJob::DiskCheck);
+        assert!(dvr.send_unsent().is_empty());
+        // the thread reaches the disk check only once the clip is written
+        entered.recv().unwrap();
+        // no end to the wait, so only a quit that skips the queue returns
+        assert_eq!(dvr.finish_within(Duration::MAX), None);
+        assert!(path.is_file());
+        drop(gate);
+    }
+
     /// A loop dropped on an error or a panic, with no `finish`, cancels
     /// the clip in flight and removes its part file.
     #[test]

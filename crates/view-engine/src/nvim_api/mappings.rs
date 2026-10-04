@@ -425,10 +425,11 @@ return {
 ///
 /// The verb is the argument text after the feature word, every blank in it
 /// kept. A verb that takes a path gets it read the way `:w` reads its file
-/// name: a backslash before a blank is dropped, environment variables are
-/// expanded by `expandcmd()` with `%`, `#` and `<` escaped so they stay as
-/// typed, and nvim makes the result absolute, `~` and the current
-/// directory included.
+/// name: it is expanded by `expandcmd()` with `%`, `#` and `<` escaped so
+/// they stay as typed, and nvim makes the result absolute, `~` and the
+/// current directory included. A path naming an environment variable that
+/// is not set is refused with a message naming it, since `:w` would drop
+/// the variable and write at the filesystem root.
 pub(crate) const REGISTER_COMMAND_CHUNK: &str = "\
 local channel, entries, command = ...
 local takes_path = { ['dvr export'] = true }
@@ -437,7 +438,13 @@ vim.api.nvim_create_user_command(command, function(opts)
   local verb = (opts.args:gsub('^%s*%S+%s*', '', 1))
   local word, path = verb:match('^(%S+)%s+(.+)$')
   if word and takes_path[feature .. ' ' .. word] then
-    path = path:gsub('\\\\(%s)', '%1')
+    for name in path:gsub('\\\\.', ''):gmatch('%${?([%w_]+)') do
+      if vim.env[name] == nil then
+        vim.api.nvim_echo({ { 'view: DVR cannot export: $' .. name ..
+          ' is not set', 'ErrorMsg' } }, true, {})
+        return
+      end
+    end
     path = vim.fn.expandcmd(vim.fn.escape(path, '%#<'))
     verb = word .. ' ' .. vim.fn.fnamemodify(path, ':p')
   end

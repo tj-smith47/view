@@ -34,12 +34,39 @@ mod tests {
 
     use super::*;
 
+    /// Whether `source` spells an FNV-1a offset or prime of its own, in hex
+    /// or decimal.
+    fn carries_fnv1a(source: &str) -> bool {
+        let digits = source.to_lowercase().replace('_', "");
+        let constants = [
+            "cbf29ce484222325",
+            "14695981039346656037",
+            "100000001b3",
+            "1099511628211",
+            // the 32-bit offset; its prime is too short to match without
+            // false hits
+            "811c9dc5",
+            "2166136261",
+        ];
+        constants.iter().any(|c| digits.contains(c))
+    }
+
     #[test]
     fn fnv1a_matches_the_published_vectors_whole_and_in_pieces() {
         assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(fnv1a(b"foobar"), 0x8594_4171_f739_67e8);
         assert_eq!(fnv1a_extend(fnv1a(b"foo"), b"bar"), fnv1a(b"foobar"));
+    }
+
+    /// A copy of either width is found however its digits are grouped or
+    /// cased, and the functions here carry no false hit.
+    #[test]
+    fn a_planted_fnv1a_copy_is_found() {
+        assert!(carries_fnv1a("const X: u32 = 0x811c_9dc5;"));
+        assert!(carries_fnv1a("let basis = 2166136261u32;"));
+        assert!(carries_fnv1a("const P: u64 = 0x0000_0100_0000_01B3;"));
+        assert!(!carries_fnv1a("fnv1a_extend(FNV_OFFSET, bytes)"));
     }
 
     /// No source file of the workspace outside this one spells the FNV-1a
@@ -58,18 +85,7 @@ mod tests {
                     && !path.ends_with("view-core/src/hash.rs")
                 {
                     let source = std::fs::read_to_string(&path).expect("a readable source");
-                    let digits = source.to_lowercase().replace('_', "");
-                    let constants = [
-                        "cbf29ce484222325",
-                        "14695981039346656037",
-                        "100000001b3",
-                        "1099511628211",
-                        // the 32-bit offset; its prime is too short to
-                        // match without false hits
-                        "811c9dc5",
-                        "2166136261",
-                    ];
-                    if constants.iter().any(|c| digits.contains(c)) {
+                    if carries_fnv1a(&source) {
                         found.push(path.display().to_string());
                     }
                 }

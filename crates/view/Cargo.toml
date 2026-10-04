@@ -73,6 +73,11 @@ rustix = { version = "1", default-features = false, features = [
     "std",
     "event",
     "pipe",
+    # src/dvr/io.rs's `renameat_with`, which renames a clip into place in
+    # one step that refuses an existing name, and src/wake.rs's apple
+    # fallback, which sets O_NONBLOCK through `fcntl_setfl` since macOS has
+    # no `pipe_with`
+    "fs",
 ] }
 # src/localtime.rs's `localtime_r`/`tm_gmtoff`: the host's UTC offset, with
 # no timezone crate's soundness caveats around env vars in a multithreaded
@@ -89,17 +94,6 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_SystemServices",
     "Win32_System_Time",
 ] }
-
-[target.'cfg(target_vendor = "apple")'.dependencies]
-# The apple fallback in src/wake.rs sets O_NONBLOCK via
-# rustix::fs::fcntl_setfl/OFlags -- macOS lacks the atomic pipe2-equivalent
-# `pipe_with` the non-apple path above uses, so it falls back to a plain
-# pipe() plus per-fd fcntl calls (see that module's docs). This is an
-# additional feature edge on the same rustix dependency declared under
-# cfg(unix): cargo unions the two tables' features for apple targets
-# (which satisfy both cfg predicates), so non-apple unix builds never pull
-# in the fs module this needs.
-rustix = { version = "1", default-features = false, features = ["fs"] }
 
 [dev-dependencies]
 # The same view-engine, with the constructor that builds a connection over

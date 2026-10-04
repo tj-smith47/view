@@ -151,7 +151,12 @@ pub(crate) fn part_path(path: &Path) -> PathBuf {
 /// Writes the clip `export` describes to a file that must not exist yet.
 /// The export's frames and hold are released before the reply is made.
 pub(super) fn write(export: Export) -> DvrIoReply {
-    write_paced(export, || {})
+    write_paced(
+        export,
+        || {},
+        || {},
+        |part, path| std::fs::hard_link(part, path),
+    )
 }
 
 /// The error a cancelled export stops with.
@@ -181,17 +186,17 @@ impl Write for Cancellable<'_> {
 
 /// Publishes the synced `part` under `path` unless a file holds that name.
 /// A hard link fails on an existing name in the same step that creates it.
-fn publish(part: &Path, path: &Path) -> io::Result<()> {
-    match std::fs::hard_link(part, path) {
+/// Where the filesystem has no hard links, the part is renamed by
+/// [`rename_noreplace`]. Any other link error is returned as it is.
+fn publish(
+    part: &Path,
+    path: &Path,
+    link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    match link(part, path) {
         Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
-        // vfat, exFAT and some network filesystems have no hard links
-        Err(_) => {
-            if path.try_exists()? {
-                return Err(io::Error::from(io::ErrorKind::AlreadyExists));
-            }
-            std::fs::rename(part, path)?;
-        }
+        Err(e) if lacks_hard_links(&e) => rename_noreplace(part, path)?,
+        Err(e) => return Err(e),
     }
     // a power loss can otherwise take the new name back
     if let Some(dir) = path.parent() {
@@ -200,9 +205,55 @@ fn publish(part: &Path, path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// [`write`], running `synced` once the whole clip sits synced under its
-/// part name, ahead of the link that publishes it.
-fn write_paced(export: Export, synced: impl FnOnce()) -> DvrIoReply {
+/// Whether a failed hard link says the filesystem has none: Linux answers
+/// EPERM on vfat and exFAT, and EOPNOTSUPP elsewhere.
+fn lacks_hard_links(e: &io::Error) -> bool {
+    // Windows FAT answers ERROR_INVALID_FUNCTION and a share
+    // ERROR_NOT_SUPPORTED, which std maps to no kind of its own
+    let windows = cfg!(windows) && matches!(e.raw_os_error(), Some(1 | 50));
+    windows
+        || matches!(
+            e.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+        )
+}
+
+/// Renames `part` to `path` in one step that fails on an existing name.
+/// A filesystem refusing the flag gets [`rename_checked`].
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn rename_noreplace(part: &Path, path: &Path) -> io::Result<()> {
+    use rustix::fs::{renameat_with, RenameFlags, CWD};
+    match renameat_with(CWD, part, CWD, path, RenameFlags::NOREPLACE) {
+        Err(rustix::io::Errno::INVAL) => rename_checked(part, path),
+        other => other.map_err(io::Error::from),
+    }
+}
+
+/// Renames `part` to `path` unless the name is taken; this target has no
+/// rename that refuses an existing name.
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+fn rename_noreplace(part: &Path, path: &Path) -> io::Result<()> {
+    rename_checked(part, path)
+}
+
+/// Renames `part` to `path` unless the name is taken. A file created
+/// between the check and the rename is replaced.
+fn rename_checked(part: &Path, path: &Path) -> io::Result<()> {
+    if path.try_exists()? {
+        return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+    }
+    std::fs::rename(part, path)
+}
+
+/// [`write`], running `created` once the part file exists and before the
+/// encode, and `synced` once the whole clip sits synced under its part
+/// name, ahead of `link`, which publishes it.
+fn write_paced(
+    export: Export,
+    created: impl FnOnce(),
+    synced: impl FnOnce(),
+    link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> DvrIoReply {
     let Export {
         path,
         frames,
@@ -241,6 +292,7 @@ fn write_paced(export: Export, synced: impl FnOnce()) -> DvrIoReply {
         .and_then(|file| {
             let written = (|| -> io::Result<usize> {
                 stop()?;
+                created();
                 let mut out = BufWriter::new(Cancellable {
                     file,
                     cancel: &cancel,
@@ -252,7 +304,7 @@ fn write_paced(export: Export, synced: impl FnOnce()) -> DvrIoReply {
                     .sync_all()?;
                 synced();
                 stop()?;
-                publish(&part, &path)?;
+                publish(&part, &path, link)?;
                 Ok(cut)
             })();
             // only a part this export created is removed, and once the
@@ -401,6 +453,24 @@ mod tests {
         names
     }
 
+    fn hard_link(part: &Path, path: &Path) -> io::Result<()> {
+        std::fs::hard_link(part, path)
+    }
+
+    /// [`write_paced`] with the production link and `synced` alone.
+    fn paced(export: Export, synced: impl FnOnce()) -> DvrIoReply {
+        write_paced(export, || {}, synced, hard_link)
+    }
+
+    fn refused(path: &Path) -> DvrIoReply {
+        DvrIoReply::Failed {
+            verb: "export",
+            reason: format!("{} already exists, left as it is", path.display()),
+        }
+    }
+
+    /// Two writers in one process share its pid, so the second is refused
+    /// by the part name the first holds.
     #[test]
     fn two_writers_to_one_name_leave_one_whole_clip_and_one_refusal() {
         let dir = ScratchDir::new("dvr-export-two").unwrap();
@@ -408,16 +478,98 @@ mod tests {
         let (mut first, mut second) = (frame_of("1"), frame_of("2"));
         let want = clip_bytes(&mut first);
         let mut inner = None;
-        let outer = write_paced(job(&mut first, &path), || {
+        let outer = paced(job(&mut first, &path), || {
             inner = Some(write(job(&mut second, &path)));
         });
         assert!(matches!(outer, DvrIoReply::Exported { .. }), "{outer:?}");
-        assert!(
-            matches!(inner, Some(DvrIoReply::Failed { .. })),
-            "{inner:?}"
-        );
+        let Some(DvrIoReply::Failed { reason, .. }) = &inner else {
+            panic!("{inner:?}")
+        };
+        let held = format!(".a.vdvr.{}.part already exists", std::process::id());
+        assert!(reason.ends_with(&held), "{reason}");
         assert_eq!(std::fs::read(&path).unwrap(), want, "the first clip, whole");
         assert_eq!(left_in(&dir), ["a.vdvr"]);
+    }
+
+    /// Two processes write two part names, and the one that links second
+    /// is refused at the link, the first clip left whole.
+    #[test]
+    fn a_clip_linked_first_by_another_process_is_left_whole() {
+        let dir = ScratchDir::new("dvr-export-two-parts").unwrap();
+        let path = dir.join("a.vdvr");
+        let (mut ours, mut theirs) = (frame_of("1"), frame_of("2"));
+        let want = clip_bytes(&mut theirs);
+        let other = dir.join(".a.vdvr.0.part");
+        std::fs::write(&other, &want).unwrap();
+        let reply = paced(job(&mut ours, &path), || {
+            publish(&other, &path, hard_link).unwrap();
+        });
+        assert_eq!(reply, refused(&path));
+        assert_eq!(std::fs::read(&path).unwrap(), want, "the other clip, whole");
+        assert_eq!(left_in(&dir), [".a.vdvr.0.part", "a.vdvr"]);
+    }
+
+    /// A filesystem with no hard links publishes by a rename that still
+    /// refuses a taken name.
+    #[test]
+    fn with_no_hard_links_a_clip_is_renamed_into_place_and_a_taken_name_kept() {
+        let dir = ScratchDir::new("dvr-export-no-links").unwrap();
+        let path = dir.join("a.vdvr");
+        let unsupported = |_: &Path, _: &Path| Err(io::Error::from(io::ErrorKind::Unsupported));
+        let mut ring = frame_of("1");
+        let want = clip_bytes(&mut ring);
+        let reply = write_paced(job(&mut ring, &path), || {}, || {}, unsupported);
+        assert!(matches!(reply, DvrIoReply::Exported { .. }), "{reply:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), want, "the clip, whole");
+        assert_eq!(left_in(&dir), ["a.vdvr"]);
+
+        let taken = dir.join("b.vdvr");
+        let plant = || std::fs::write(&taken, b"planted").unwrap();
+        let reply = write_paced(job(&mut ring, &taken), || {}, plant, unsupported);
+        assert_eq!(reply, refused(&taken));
+        assert_eq!(std::fs::read(&taken).unwrap(), b"planted");
+        assert_eq!(left_in(&dir), ["a.vdvr", "b.vdvr"]);
+    }
+
+    /// A link that fails for any reason but a missing hard-link operation
+    /// is the export's own error, and nothing is renamed into place.
+    #[test]
+    fn a_link_that_fails_on_a_full_disk_publishes_nothing() {
+        let dir = ScratchDir::new("dvr-export-full").unwrap();
+        let path = dir.join("a.vdvr");
+        let full = |_: &Path, _: &Path| Err(io::Error::from(io::ErrorKind::StorageFull));
+        let mut ring = one_frame();
+        let reply = write_paced(job(&mut ring, &path), || {}, || {}, full);
+        let want = io::Error::from(io::ErrorKind::StorageFull);
+        assert_eq!(
+            reply,
+            DvrIoReply::Failed {
+                verb: "export",
+                reason: format!("{}: {want}", path.display()),
+            }
+        );
+        assert!(left_in(&dir).is_empty(), "{:?}", left_in(&dir));
+    }
+
+    /// A cancel landing once the part exists stops the encode at its first
+    /// write, so the clip is never synced.
+    #[test]
+    fn a_cancel_during_the_encode_stops_it_before_the_clip_is_synced() {
+        let dir = ScratchDir::new("dvr-export-cancel-encode").unwrap();
+        let path = dir.join("a.vdvr");
+        let mut ring = one_frame();
+        let job = job(&mut ring, &path);
+        let cancel = Arc::clone(&job.cancel);
+        let mut synced = false;
+        let reply = write_paced(
+            job,
+            || cancel.store(true, Ordering::SeqCst),
+            || synced = true,
+            hard_link,
+        );
+        assert!(matches!(reply, DvrIoReply::Failed { .. }), "{reply:?}");
+        assert!(!synced, "the encode ran past the cancel");
+        assert!(left_in(&dir).is_empty(), "{:?}", left_in(&dir));
     }
 
     #[test]
@@ -425,7 +577,7 @@ mod tests {
         let dir = ScratchDir::new("dvr-export-planted").unwrap();
         let path = dir.join("a.vdvr");
         let mut ring = one_frame();
-        let reply = write_paced(job(&mut ring, &path), || {
+        let reply = paced(job(&mut ring, &path), || {
             std::fs::write(&path, b"planted").unwrap();
         });
         assert_eq!(
@@ -446,7 +598,7 @@ mod tests {
         let mut ring = one_frame();
         let job = job(&mut ring, &path);
         let cancel = Arc::clone(&job.cancel);
-        let reply = write_paced(job, || cancel.store(true, Ordering::SeqCst));
+        let reply = paced(job, || cancel.store(true, Ordering::SeqCst));
         assert!(matches!(reply, DvrIoReply::Failed { .. }), "{reply:?}");
         assert!(left_in(&dir).is_empty(), "{:?}", left_in(&dir));
 
@@ -509,7 +661,7 @@ mod tests {
             panic!("an export job")
         };
         let mut looked = false;
-        let reply = write_paced(job, || {
+        let reply = paced(job, || {
             looked = true;
             assert!(!path.exists(), "the clip is named before it is renamed");
             let whole = std::fs::read(&part).unwrap();
