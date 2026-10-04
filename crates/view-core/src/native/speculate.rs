@@ -952,18 +952,8 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
     let mut shows_cmdline = false;
     let mut answers_input = false;
     let mut refused = false;
-    let mut mode_last = false;
-    let (mut flush_error, mut flush_mode) = (false, false);
-    // nvim writes a flush's mode report after every error in it, whatever
-    // order the keys ran in, so only a later flush orders the two
-    for ev in redraw.iter().chain([&UiEvent::Flush]) {
+    for ev in redraw {
         match ev {
-            UiEvent::Flush => {
-                if flush_error || flush_mode {
-                    mode_last = !flush_error;
-                }
-                (flush_error, flush_mode) = (false, false);
-            }
             UiEvent::GridCursorGoto { grid, .. } => {
                 // a command waiting on its argument is finished by a cursor
                 // move wherever nvim addressed one
@@ -974,7 +964,6 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
             UiEvent::ModeChange { .. } => {
                 settled = true;
                 answers_input = true;
-                flush_mode = true;
             }
             UiEvent::CmdlineShow { .. } => {
                 shows_cmdline = true;
@@ -995,16 +984,12 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
             UiEvent::MsgShow { kind, .. } if kind == "emsg" => {
                 answers_input = true;
                 refused = true;
-                flush_error = true;
             }
             _ => {}
         }
     }
     if refused {
         model.submit_hold.note_refused();
-    }
-    if mode_last {
-        model.submit_hold.note_mode_after_errors();
     }
     if answers_input {
         let trips = model.engine.key_round_trips.iter().flatten();

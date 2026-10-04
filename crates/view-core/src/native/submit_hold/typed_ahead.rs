@@ -115,37 +115,26 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     complete
 }
 
-/// Whether the newest key neither owes an argument nor was read as one. At
-/// such a key nvim and view agree nothing is owed, whichever way either
-/// read the keys before it, and every one of those keys spells a sequence.
-///
-/// An error clears what the newest key owes, since a refused `i` owes
-/// nothing. A key that takes an argument and stays in normal mode, `"` or
-/// `f`, is never refused by itself, so an error after it answered an
-/// earlier key and it still owes.
-pub(super) fn nothing_owed(hold: &SubmitHold) -> bool {
-    let owes = |key: &str| {
-        crate::native::speculate::CMDLINE_LITERAL_KEYS.contains(&key)
-            && !LEAVES_NORMAL.contains(&key)
-    };
-    hold.argument_of.is_none()
-        && !hold
-            .recent
-            .back()
-            .is_some_and(|newest| newest.argument || owes(newest.key.as_str()))
-}
-
-/// Ends the doubt an error raised once nothing is owed.
+/// Ends the doubt an error raised on an answer to a key sent after the
+/// error, once nothing is owed. A mode report counts as an answer. One that
+/// answers a key sent before the error leaves the doubt standing, because
+/// the error erased what that key owes.
 ///
 /// The answering batch, arriving at `now`, has to be one that can answer a
 /// key typed after the error. One sooner than `shortest`, the shortest
 /// round trip read, after the first key sent since the error answers a key
-/// sent before it.
+/// sent before it. Nothing is owed once the newest key neither owes an
+/// argument nor was read as one: nvim and view then agree, whichever way
+/// either read the keys before it.
 pub(super) fn settle_doubt(hold: &mut SubmitHold, now: SpecStamp, shortest: Duration) {
     let answers_sent = hold
         .doubt_sent
         .is_none_or(|sent| now.age_since(sent) >= shortest);
-    if hold.doubt == Some(true) && answers_sent && nothing_owed(hold) {
+    if hold.doubt == Some(true)
+        && answers_sent
+        && hold.argument_of.is_none()
+        && !hold.recent.back().is_some_and(|newest| newest.argument)
+    {
         hold.doubt = None;
     }
 }

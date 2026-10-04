@@ -6,6 +6,14 @@
 //! Routed as they arrive, they reach nvim as normal-mode commands in the
 //! buffer the panel was opened from. Holding them until the invocation's
 //! notification comes back lets the focus it sets decide where they go.
+//!
+//! Over a slow link three cases still send a query typed ahead into the
+//! buffer as commands: keys that went out before an error from nvim came
+//! back, an answer to an earlier key arriving later than the quickest
+//! round trip seen, and a view key typed within one round trip of an
+//! operator's motion (`dw<Space>ff`). A hold armed where nvim needed none
+//! keeps the keys for one bound, then sends the same keys in the same
+//! order.
 
 pub mod commands;
 mod refused;
@@ -909,14 +917,6 @@ impl SubmitHold {
             folded.doubt = true;
         }
         self.argument_of = None;
-    }
-
-    /// Ends the doubt an error raised where nvim reported a mode in a flush
-    /// after the one that carried the error and nothing is owed.
-    pub(crate) fn note_mode_after_errors(&mut self) {
-        if typed_ahead::nothing_owed(self) {
-            self.doubt = None;
-        }
     }
 
     /// Forgets which key nvim reads the next key as the argument of, where

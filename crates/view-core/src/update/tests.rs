@@ -21956,7 +21956,7 @@ fn the_hold_decides_as_recorded_where_nvim_sends_no_error() {
             hash = crate::hash::fnv1a_extend(hash, format!("{trace:?}").as_bytes());
         }
     }
-    assert_eq!(hash, 0xf866_baee_a0d7_f6b0, "{hash:#x}");
+    assert_eq!(hash, 0x32b3_cdf7_6f8b_9da2, "{hash:#x}");
 }
 
 /// An error answering a key sent before `f` leaves `f` waiting for its
@@ -22089,10 +22089,11 @@ const OPERATOR_MAPPINGS: [&str; 11] = [
 /// where the keys need them, each followed by view's key and a query.
 /// Two type a jump after the error, every key of it answered. Three close
 /// a text object or name a macro after the error, and nvim then reports a
-/// mode while the key closing it owes its argument. In the last, the error
+/// mode while the key closing it owes its argument. In the next, the error
 /// answers a key before `"`, which still owes its register when the mode
-/// report comes.
-fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 14] {
+/// report comes. In the last, the reports answer keys sent before the
+/// error, and the `i` they leave behind still names a text object.
+fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 15] {
     let answered = |keys: &[&'static str]| {
         let mut steps: Vec<Step> = keys.iter().map(|key| k(key)).collect();
         steps.extend([Step::Answer, k("i"), Step::Error]);
@@ -22165,6 +22166,20 @@ fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 14] {
             vec![k("n"), k("\""), Step::Error, Step::Mode("normal"), k("d")],
             &[],
         ),
+        (
+            vec![
+                k("n"),
+                k("v"),
+                k("<Esc>"),
+                k("d"),
+                k("i"),
+                Step::Error,
+                Step::Mode("visual"),
+                Step::Mode("normal"),
+                k("\""),
+            ],
+            &[],
+        ),
     ]
 }
 
@@ -22203,13 +22218,13 @@ fn an_error_from_nvim_arms_the_hold_on_views_key_whatever_came_before() {
     assert!(missed.is_empty(), "{missed:#?}");
 }
 
-/// The doubt an error raises ends on a mode report, or on an answer to a
-/// key typed after the error once no argument is owed. After either, view's
-/// key typed as `f`'s argument arms nothing.
+/// The doubt an error raises ends on an answer to a key typed after the
+/// error, a mode report included, once no argument is owed. After it,
+/// view's key typed as `f`'s argument arms nothing.
 #[test]
 fn the_doubt_an_error_raises_ends_on_a_fact_from_nvim() {
     let jump = [" ", "f", "f", "m"].map(k);
-    for settled in [&[Step::Mode("normal")][..], &[k("j"), Step::Answer]] {
+    for settled in [&[k("j"), Step::Mode("normal")][..], &[k("j"), Step::Answer]] {
         let mut steps = vec![k("i"), Step::Error];
         steps.extend_from_slice(settled);
         steps.push(k("f"));
@@ -22298,12 +22313,12 @@ fn a_mode_report_ahead_of_an_error_in_one_batch_keeps_the_doubt() {
     assert_eq!(sent, ["y", "y", "i", " ", "f", "f"]);
 }
 
-/// nvim writes the mode report of a flush after every error in it, so an
-/// error and a mode report in one flush leave the doubt standing, and a
-/// report the next flush carries ends it. View's key typed as `f`'s
-/// argument arms the hold only while the doubt stands.
+/// A mode report with no key sent since the error leaves the doubt
+/// standing, in the error's own flush or a later one, and view's key typed
+/// as `f`'s argument arms the hold. A mode report after a key sent since
+/// the error ends it, and the same key arms nothing.
 #[test]
-fn a_mode_report_in_the_errors_own_flush_keeps_the_doubt() {
+fn a_mode_report_ends_the_doubt_only_after_a_key_sent_since_the_error() {
     let error = UiEvent::MsgShow {
         kind: "emsg".to_string(),
         content: vec![(0, "E21: Cannot make changes".to_string())],
@@ -22313,17 +22328,31 @@ fn a_mode_report_in_the_errors_own_flush_keeps_the_doubt() {
         mode: "normal".to_string(),
         mode_idx: 0,
     };
-    let one = vec![error.clone(), mode.clone(), UiEvent::Flush];
-    let two = vec![error, UiEvent::Flush, mode, UiEvent::Flush];
-    for (batch, holds) in [(one, true), (two, false)] {
+    let own = [vec![error.clone(), mode.clone(), UiEvent::Flush]];
+    let later = [
+        vec![error.clone(), UiEvent::Flush],
+        vec![mode.clone(), UiEvent::Flush],
+    ];
+    for batches in [&own[..], &later] {
         let mut m = hold_model(false, false);
         let _ = update(&mut m, self::key("i"));
-        let _ = engine_batch(&mut m, batch.clone());
+        for batch in batches {
+            let _ = engine_batch(&mut m, batch.clone());
+        }
         for key in ["f", " ", "f", "f"] {
             let _ = update(&mut m, self::key(key));
         }
-        assert_eq!(m.submit_hold.is_holding(), holds, "{batch:?}");
+        assert!(m.submit_hold.is_holding(), "{batches:?}");
     }
+    let mut m = hold_model(false, false);
+    let _ = update(&mut m, self::key("i"));
+    let _ = engine_batch(&mut m, vec![error, UiEvent::Flush]);
+    let _ = update(&mut m, self::key("j"));
+    let _ = engine_batch(&mut m, vec![mode, UiEvent::Flush]);
+    for key in ["f", " ", "f", "f", "m"] {
+        let _ = update(&mut m, self::key(key));
+    }
+    assert!(!m.submit_hold.is_holding(), "j answered by a mode report");
 }
 
 /// The doubt ends only on an answer that can be one to a key typed after
@@ -22727,11 +22756,12 @@ fn the_hold_decides_what_it_was_recorded_deciding() {
 /// units before view's key at speed. The units are view's keys and their
 /// prefixes, the user's mappings and a prefix of one, operators, keys that
 /// leave normal mode, answered or not, keys that take an argument, one of
-/// them reported on, a click, and nvim's answers and mode reports; the gaps
+/// them reported on, a text object named across a mode report, a click,
+/// and nvim's answers and mode reports; the gaps
 /// fall below, at and past `'timeoutlen'`, a millisecond short of it and
 /// fifty past it among them.
 fn hold_population() -> Vec<Vec<Step>> {
-    const UNITS: [&[Step]; 27] = [
+    const UNITS: [&[Step]; 28] = [
         &[k(" "), k("f"), k("f")],
         &[k(" "), k("e")],
         &[k(" ")],
@@ -22764,6 +22794,7 @@ fn hold_population() -> Vec<Vec<Step>> {
         &[k("v"), Step::Mode("visual")],
         &[Step::Mode("normal")],
         &[k("\""), Step::Mode("normal")],
+        &[k("d"), k("i"), Step::Mode("normal"), k("\"")],
     ];
     const VIEW: [&[&str]; 2] = [&[" ", "f", "f"], &[" ", "e"]];
     const GAPS: [u64; 7] = [10, 150, 299, 300, 301, 350, 1000];
