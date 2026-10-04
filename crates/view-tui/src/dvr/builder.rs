@@ -23,6 +23,13 @@ impl RingBuilder {
         }
     }
 
+    /// Whether a group of the ring can hold a frame of size `area`, so a
+    /// reader can refuse one before decoding its cells.
+    #[must_use]
+    pub fn holds(&self, area: (u16, u16)) -> bool {
+        Group::reserved_bytes(area) <= self.ring.budget
+    }
+
     /// Adds a keyframe of size `area`. A cell outside the area is dropped
     /// and a cell the frame does not name is blank. Returns its seq, or
     /// `None` when the ring could not hold it.
@@ -35,7 +42,7 @@ impl RingBuilder {
     ) -> Option<u64> {
         // a size no group of the ring can hold is refused before its
         // screen is allocated
-        if Group::reserved_bytes(area) > self.ring.budget {
+        if !self.holds(area) {
             self.dropped = true;
             return None;
         }

@@ -424,8 +424,11 @@ return {
 /// over the channel alone still gets the command.
 ///
 /// The verb is the argument text after the feature word, every blank in it
-/// kept. A verb that takes a path gets it made absolute by nvim, `~` and
-/// the current directory read as they are for any file name typed there.
+/// kept. A verb that takes a path gets it read the way `:w` reads its file
+/// name: a backslash before a blank is dropped, environment variables are
+/// expanded by `expandcmd()` with `%`, `#` and `<` escaped so they stay as
+/// typed, and nvim makes the result absolute, `~` and the current
+/// directory included.
 pub(crate) const REGISTER_COMMAND_CHUNK: &str = "\
 local channel, entries, command = ...
 local takes_path = { ['dvr export'] = true }
@@ -434,6 +437,8 @@ vim.api.nvim_create_user_command(command, function(opts)
   local verb = (opts.args:gsub('^%s*%S+%s*', '', 1))
   local word, path = verb:match('^(%S+)%s+(.+)$')
   if word and takes_path[feature .. ' ' .. word] then
+    path = path:gsub('\\\\(%s)', '%1')
+    path = vim.fn.expandcmd(vim.fn.escape(path, '%#<'))
     verb = word .. ' ' .. vim.fn.fnamemodify(path, ':p')
   end
   vim.rpcnotify(channel, 'view_invoke', feature, verb)

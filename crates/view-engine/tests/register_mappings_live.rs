@@ -139,6 +139,45 @@ fn an_export_path_reaches_view_as_typed_and_absolute() {
     }
 }
 
+/// `:View dvr export` reads its path the way `:w` reads a file name: an
+/// escaped blank, an environment variable, `~` and a relative name after
+/// `:cd` each name the file `:w` writes. `HOME` is pointed at a scratch
+/// directory, so nothing is written outside it.
+#[test]
+fn an_export_path_names_the_file_w_writes() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_claims(&rx);
+    let dir = view_test_support::ScratchDir::new("export-like-w").unwrap();
+    let home = dir.join("home");
+    let cwd = dir.join("cwd");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+    for setup in [
+        format!("execute('let $HOME = \"{}\"')", home.display()),
+        format!("execute('cd {}')", cwd.display()),
+    ] {
+        engine.handle.eval_str(&setup).unwrap();
+    }
+    for typed in [r"a\ b.vdvr", "$HOME/e.vdvr", "~/t.vdvr", "rel.vdvr"] {
+        engine
+            .handle
+            .eval_str(&format!("execute('View dvr export {typed}')"))
+            .unwrap();
+        let (_, verb) = next_invoke(&rx);
+        let exported = verb.strip_prefix("export ").unwrap().to_owned();
+        assert!(!std::path::Path::new(&exported).exists(), "{typed}");
+        engine
+            .handle
+            .eval_str(&format!("execute('silent write {typed}')"))
+            .unwrap();
+        assert!(
+            std::path::Path::new(&exported).is_file(),
+            "{typed}: :w wrote elsewhere than {exported}"
+        );
+    }
+}
+
 /// A key that invokes view answers with the keys nvim matches for it, the
 /// leader resolved, and a chord sending nvim keys of its own answers with
 /// none.

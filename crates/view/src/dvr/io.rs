@@ -4,9 +4,11 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs::File;
-use std::io::{self, BufWriter, Read};
+use std::io::{self, BufWriter, Read, Write};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 
 use view_core::hash::{fnv1a_extend, FNV_OFFSET};
@@ -45,6 +47,11 @@ pub(crate) struct Export {
     pub(crate) dead: Vec<RangeInclusive<u64>>,
     /// Held until the reply is sent, so the loop knows an export is open.
     pub(crate) held: Arc<()>,
+    /// Set when view quits: the writer stops, removes its part file and
+    /// publishes nothing.
+    pub(crate) cancel: Arc<AtomicBool>,
+    /// Signalled once the clip is published or has failed.
+    pub(crate) done: SyncSender<()>,
 }
 
 /// Starts the thread. `remote` sessions show files of another host, which
@@ -131,23 +138,70 @@ fn hash_file(path: &str) -> Option<u64> {
     }
 }
 
-/// The file a clip bound for `path` is written to before it is renamed
-/// there: `.NAME.part` beside it.
+/// The file a clip bound for `path` is written to before it is published
+/// there: `.NAME.<pid>.part` beside it, so two processes writing one name
+/// never share it.
 pub(crate) fn part_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .map_or_else(|| "clip".into(), |n| n.to_string_lossy().into_owned());
-    path.with_file_name(format!(".{name}.part"))
+    path.with_file_name(format!(".{name}.{}.part", std::process::id()))
 }
 
 /// Writes the clip `export` describes to a file that must not exist yet.
 /// The export's frames and hold are released before the reply is made.
-fn write(export: Export) -> DvrIoReply {
+pub(super) fn write(export: Export) -> DvrIoReply {
     write_paced(export, || {})
 }
 
+/// The error a cancelled export stops with.
+fn cancelled() -> io::Error {
+    io::Error::other("view quit before the clip was written")
+}
+
+/// The part file's writer, which fails once the export is cancelled, so a
+/// clip cancelled mid-encode stops at its next buffer flush.
+struct Cancellable<'a> {
+    file: File,
+    cancel: &'a AtomicBool,
+}
+
+impl Write for Cancellable<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.cancel.load(Ordering::SeqCst) {
+            return Err(cancelled());
+        }
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
+/// Publishes the synced `part` under `path` unless a file holds that name.
+/// A hard link fails on an existing name in the same step that creates it.
+fn publish(part: &Path, path: &Path) -> io::Result<()> {
+    match std::fs::hard_link(part, path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
+        // vfat, exFAT and some network filesystems have no hard links
+        Err(_) => {
+            if path.try_exists()? {
+                return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+            }
+            std::fs::rename(part, path)?;
+        }
+    }
+    // a power loss can otherwise take the new name back
+    if let Some(dir) = path.parent() {
+        let _ = File::open(dir).and_then(|d| d.sync_all());
+    }
+    Ok(())
+}
+
 /// [`write`], running `synced` once the whole clip sits synced under its
-/// part name, ahead of the rename that publishes it.
+/// part name, ahead of the link that publishes it.
 fn write_paced(export: Export, synced: impl FnOnce()) -> DvrIoReply {
     let Export {
         path,
@@ -156,25 +210,58 @@ fn write_paced(export: Export, synced: impl FnOnce()) -> DvrIoReply {
         markers,
         dead,
         held,
+        cancel,
+        done,
     } = export;
     let shown = path.display().to_string();
     let part = part_path(&path);
-    let written = (|| -> io::Result<usize> {
-        if path.try_exists()? {
-            return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+    let stop = || {
+        if cancel.load(Ordering::SeqCst) {
+            Err(cancelled())
+        } else {
+            Ok(())
         }
-        let mut out = BufWriter::new(File::create(&part)?);
-        let cut = clip::encode(&mut out, &frames, &inputs, &markers, &dead)?;
-        out.into_inner()
-            .map_err(io::IntoInnerError::into_error)?
-            .sync_all()?;
-        synced();
-        std::fs::rename(&part, &path)?;
-        Ok(cut)
-    })();
-    // nothing is left to remove once the rename has published the clip
-    let _ = std::fs::remove_file(&part);
+    };
+    let written = stop()
+        .and_then(|()| path.try_exists())
+        .and_then(|exists| {
+            if exists {
+                Err(io::Error::from(io::ErrorKind::AlreadyExists))
+            } else {
+                // a part under this pid is one a killed process left, and
+                // the person is told its name
+                File::create_new(&part).map_err(|e| match e.kind() {
+                    io::ErrorKind::AlreadyExists => {
+                        io::Error::other(format!("{} already exists", part.display()))
+                    }
+                    _ => e,
+                })
+            }
+        })
+        .and_then(|file| {
+            let written = (|| -> io::Result<usize> {
+                stop()?;
+                let mut out = BufWriter::new(Cancellable {
+                    file,
+                    cancel: &cancel,
+                });
+                let cut = clip::encode(&mut out, &frames, &inputs, &markers, &dead)?;
+                out.into_inner()
+                    .map_err(io::IntoInnerError::into_error)?
+                    .file
+                    .sync_all()?;
+                synced();
+                stop()?;
+                publish(&part, &path)?;
+                Ok(cut)
+            })();
+            // only a part this export created is removed, and once the
+            // clip is published the part is a second name for it
+            let _ = std::fs::remove_file(&part);
+            written
+        });
     drop((frames, held));
+    let _ = done.try_send(());
     match written {
         Ok(cut) => DvrIoReply::Exported { path: shown, cut },
         Err(e) => DvrIoReply::Failed {
@@ -277,7 +364,100 @@ mod tests {
             markers: Vec::new(),
             dead: Vec::new(),
             held: Arc::clone(held),
+            cancel: Arc::new(AtomicBool::new(false)),
+            done: mpsc::sync_channel(1).0,
         })
+    }
+
+    fn job(ring: &mut FrameRing, path: &Path) -> Export {
+        let IoJob::Export(job) = export(ring, path.to_path_buf(), &Arc::new(())) else {
+            panic!("an export job")
+        };
+        job
+    }
+
+    /// A ring of one frame whose cell holds `symbol`, so two clips of
+    /// different rings tell apart.
+    fn frame_of(symbol: &str) -> FrameRing {
+        let mut builder = RingBuilder::new(1 << 20);
+        let cell = view_tui::dvr::CellView::new(0, 0, symbol, [0; 3], 0);
+        builder.push_key(0, (3, 1), None, [cell]).unwrap();
+        builder.finish()
+    }
+
+    fn clip_bytes(ring: &mut FrameRing) -> Vec<u8> {
+        let mut out = Vec::new();
+        let frames = ring.snapshot().unwrap();
+        clip::encode(&mut out, &frames, &Inputs::default(), &[], &[]).unwrap();
+        out
+    }
+
+    fn left_in(dir: &ScratchDir) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn two_writers_to_one_name_leave_one_whole_clip_and_one_refusal() {
+        let dir = ScratchDir::new("dvr-export-two").unwrap();
+        let path = dir.join("a.vdvr");
+        let (mut first, mut second) = (frame_of("1"), frame_of("2"));
+        let want = clip_bytes(&mut first);
+        let mut inner = None;
+        let outer = write_paced(job(&mut first, &path), || {
+            inner = Some(write(job(&mut second, &path)));
+        });
+        assert!(matches!(outer, DvrIoReply::Exported { .. }), "{outer:?}");
+        assert!(
+            matches!(inner, Some(DvrIoReply::Failed { .. })),
+            "{inner:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), want, "the first clip, whole");
+        assert_eq!(left_in(&dir), ["a.vdvr"]);
+    }
+
+    #[test]
+    fn a_file_created_during_the_encode_is_left_as_it_is() {
+        let dir = ScratchDir::new("dvr-export-planted").unwrap();
+        let path = dir.join("a.vdvr");
+        let mut ring = one_frame();
+        let reply = write_paced(job(&mut ring, &path), || {
+            std::fs::write(&path, b"planted").unwrap();
+        });
+        assert_eq!(
+            reply,
+            DvrIoReply::Failed {
+                verb: "export",
+                reason: format!("{} already exists, left as it is", path.display()),
+            }
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"planted");
+        assert_eq!(left_in(&dir), ["a.vdvr"]);
+    }
+
+    #[test]
+    fn a_cancelled_export_publishes_nothing_and_leaves_no_part() {
+        let dir = ScratchDir::new("dvr-export-cancel").unwrap();
+        let path = dir.join("a.vdvr");
+        let mut ring = one_frame();
+        let job = job(&mut ring, &path);
+        let cancel = Arc::clone(&job.cancel);
+        let reply = write_paced(job, || cancel.store(true, Ordering::SeqCst));
+        assert!(matches!(reply, DvrIoReply::Failed { .. }), "{reply:?}");
+        assert!(left_in(&dir).is_empty(), "{:?}", left_in(&dir));
+
+        let cancel = AtomicBool::new(false);
+        let mut out = Cancellable {
+            file: File::create(dir.join("w")).unwrap(),
+            cancel: &cancel,
+        };
+        out.write_all(b"one").unwrap();
+        cancel.store(true, Ordering::SeqCst);
+        assert!(out.write_all(b"two").is_err(), "a cancelled encode stops");
     }
 
     #[test]
@@ -319,7 +499,10 @@ mod tests {
         let dir = ScratchDir::new("dvr-export-part").unwrap();
         let path = dir.join("a  b.vdvr");
         let part = part_path(&path);
-        assert_eq!(part, dir.join(".a  b.vdvr.part"));
+        assert_eq!(
+            part,
+            dir.join(format!(".a  b.vdvr.{}.part", std::process::id()))
+        );
         let mut ring = one_frame();
         let held = Arc::new(());
         let IoJob::Export(job) = export(&mut ring, path.clone(), &held) else {

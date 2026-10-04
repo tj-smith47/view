@@ -31,8 +31,8 @@ pub(crate) struct Clip {
 
 /// The marks, and apart from them the abandoned ranges, a clip is read with
 /// at most. A recording lays one per verb, restart or branch, so a clip
-/// past this many is damaged.
-const MARKS_MAX: usize = 1 << 16;
+/// past this many is damaged and refused.
+pub(super) const MARKS_MAX: usize = 1 << 16;
 
 /// The fewest bytes a recorded cell takes: an empty symbol, three colors
 /// and the modifier.
@@ -152,7 +152,9 @@ pub(crate) fn decode(r: &mut impl Read, max_bytes: usize) -> Result<Clip, ClipEr
                     None => clip.dropped_inputs += 1,
                 }
             }
-            MARKER if clip.markers.len() < MARKS_MAX => {
+            MARKER if clip.markers.len() >= MARKS_MAX => return Err(too_many_marks()),
+            DEAD if clip.dead.len() >= MARKS_MAX => return Err(too_many_marks()),
+            MARKER => {
                 let frame = body.u64()?;
                 let marker = match body.u8()? {
                     0 => Marker::EngineRestart,
@@ -162,7 +164,7 @@ pub(crate) fn decode(r: &mut impl Read, max_bytes: usize) -> Result<Clip, ClipEr
                 };
                 clip.markers.push((frame, marker));
             }
-            DEAD if clip.dead.len() < MARKS_MAX => clip.dead.push(body.u64()?..=body.u64()?),
+            DEAD => clip.dead.push(body.u64()?..=body.u64()?),
             END => {
                 if body.u64()? != frames || body.u64()? != inputs_read {
                     return Err(ClipError::Malformed("the end record miscounts the clip"));
@@ -176,6 +178,11 @@ pub(crate) fn decode(r: &mut impl Read, max_bytes: usize) -> Result<Clip, ClipEr
             _ => {}
         }
     }
+}
+
+/// The error for a clip carrying more marks or ranges than [`MARKS_MAX`].
+fn too_many_marks() -> ClipError {
+    ClipError::Malformed("more marks than a recording lays")
 }
 
 /// Adds the keyframe or delta in `body`, read past its seq, to `builder`.
@@ -200,6 +207,11 @@ fn read_frame(
             return Err(ClipError::Malformed(
                 "a keyframe holds fewer cells than its size",
             ));
+        }
+        if !builder.holds((w, h)) {
+            // the cells stay unread, and the refusal leaves the deltas
+            // after this frame nothing to build on
+            return Ok(builder.push_key(at_us, (w, h), cursor, std::iter::empty()));
         }
         for i in 0..cells_named {
             let at = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);

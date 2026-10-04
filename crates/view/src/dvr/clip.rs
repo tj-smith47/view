@@ -628,6 +628,61 @@ mod tests {
         ));
     }
 
+    /// A clip of `records`, each a tag and its payload, closed by an end
+    /// record counting `frames` frames and no input.
+    fn clip_from(records: &[(u8, Vec<u8>)], frames: u64) -> Vec<u8> {
+        let mut ring = ring();
+        let (bytes, _) = encoded(&mut ring, &Model::with_term_size(80, 24));
+        let mut out = bytes[..16].to_vec();
+        for (tag, payload) in records {
+            put_record(&mut out, *tag, payload).unwrap();
+        }
+        let end = [frames.to_le_bytes(), 0u64.to_le_bytes()].concat();
+        put_record(&mut out, END, &end).unwrap();
+        out
+    }
+
+    #[test]
+    fn a_clip_with_more_marks_than_a_recording_lays_is_refused() {
+        let marker = (MARKER, [&1u64.to_le_bytes()[..], &[1]].concat());
+        let dead = (DEAD, [1u64.to_le_bytes(), 2u64.to_le_bytes()].concat());
+        for (record, name) in [(marker, "markers"), (dead, "dead ranges")] {
+            let at_most = vec![record.clone(); read::MARKS_MAX];
+            assert!(
+                decode(&mut clip_from(&at_most, 0).as_slice(), MAX).is_ok(),
+                "{name} up to the bound"
+            );
+            let past = vec![record; read::MARKS_MAX + 1];
+            assert!(
+                matches!(
+                    decode(&mut clip_from(&past, 0).as_slice(), MAX),
+                    Err(ClipError::Malformed("more marks than a recording lays"))
+                ),
+                "{name} past the bound"
+            );
+        }
+    }
+
+    #[test]
+    fn a_keyframe_the_ring_cannot_hold_is_dropped_before_its_cells_are_read() {
+        let (w, h) = (256u16, 200u16);
+        assert!(!RingBuilder::new(MAX).holds((w, h)));
+        let mut payload = [1u64.to_le_bytes(), 0u64.to_le_bytes()].concat();
+        payload.extend_from_slice(&w.to_le_bytes());
+        payload.extend_from_slice(&h.to_le_bytes());
+        payload.extend_from_slice(&[0; 5]);
+        // every cell's symbol is invalid UTF-8, which reading it refuses
+        let bad_cell = [&[1, 0xFF][..], &[0; 14]].concat();
+        for _ in 0..usize::from(w) * usize::from(h) {
+            payload.extend_from_slice(&bad_cell);
+        }
+        let delta = [2u64.to_le_bytes(), 0u64.to_le_bytes()].concat();
+        let delta = [&delta[..], &[0; 5 + 1 + 8 + 2 + 4]].concat();
+        let bytes = clip_from(&[(KEYFRAME, payload), (DELTA, delta)], 2);
+        let clip = decode(&mut bytes.as_slice(), MAX).unwrap();
+        assert_eq!(clip.dropped, 2, "the keyframe and the delta built on it");
+    }
+
     #[test]
     fn inputs_past_the_input_share_and_of_an_unknown_kind_are_dropped() {
         let mut builder = RingBuilder::new(MAX);

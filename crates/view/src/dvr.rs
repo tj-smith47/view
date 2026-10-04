@@ -5,7 +5,8 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::path::PathBuf;
-use std::sync::mpsc::TrySendError;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, TrySendError};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -43,8 +44,26 @@ pub(crate) struct DvrLoop {
     /// ring. The ring records no new group past its budget until it is
     /// written, so a frame skipped meanwhile is told nothing.
     exporting: Arc<()>,
-    /// Where the last export queued is written.
-    export_path: Option<PathBuf>,
+    /// The last export queued.
+    pending: Option<Pending>,
+}
+
+/// An export handed to the file thread: where it is written, the flag that
+/// cancels it, and the signal it sends once published or failed.
+struct Pending {
+    path: PathBuf,
+    cancel: Arc<AtomicBool>,
+    done: Receiver<()>,
+}
+
+impl Pending {
+    /// Cancels the export and removes its part file. Either the writer
+    /// created the part before the flag was set, and it is removed here, or
+    /// the writer sees the flag after creating it and removes it itself.
+    fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        let _ = std::fs::remove_file(io::part_path(&self.path));
+    }
 }
 
 /// How long a quit waits for a clip still being written. A clip of a full
@@ -73,7 +92,7 @@ impl DvrLoop {
             io,
             unsent: VecDeque::new(),
             exporting: Arc::new(()),
-            export_path: None,
+            pending: None,
         }
     }
 
@@ -81,24 +100,26 @@ impl DvrLoop {
     /// is being written, and nothing otherwise. Returns the line to print
     /// once the terminal is restored when that clip is still unfinished,
     /// its part file removed.
-    pub(crate) fn finish(mut self) -> Option<String> {
-        let mut io = self.io.take()?;
-        if Arc::strong_count(&self.exporting) == 1 {
+    pub(crate) fn finish(self) -> Option<String> {
+        self.finish_within(EXPORT_QUIT_WAIT)
+    }
+
+    /// [`Self::finish`], waiting up to `wait` for the clip alone and never
+    /// for file work queued behind it.
+    fn finish_within(mut self, wait: Duration) -> Option<String> {
+        let _ = self.io.take()?.close();
+        let pending = self.pending.take()?;
+        if Arc::strong_count(&self.exporting) == 1 || pending.done.recv_timeout(wait).is_ok() {
             return None;
         }
-        let _ = io.finish_within(EXPORT_QUIT_WAIT);
-        let path = self.export_path.take()?;
-        if Arc::strong_count(&self.exporting) == 1 {
-            return None;
-        }
-        let _ = std::fs::remove_file(io::part_path(&path));
-        // the rename can land between the count and the removal
-        if path.exists() {
+        pending.cancel();
+        // the publish can land between the wait and the cancel
+        if pending.path.exists() {
             return None;
         }
         Some(format!(
             "view: DVR clip {} was not finished when view quit",
-            path.display()
+            pending.path.display()
         ))
     }
 
@@ -187,6 +208,8 @@ impl DvrLoop {
             PathBuf::from,
         );
         let path = model.cwd.join(name);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (done_tx, done) = std::sync::mpsc::sync_channel(1);
         let job = IoJob::Export(Export {
             path: path.clone(),
             frames,
@@ -194,10 +217,12 @@ impl DvrLoop {
             markers: model.dvr.markers().to_vec(),
             dead: model.dvr.dead().to_vec(),
             held: Arc::clone(&self.exporting),
+            cancel: Arc::clone(&cancel),
+            done: done_tx,
         });
         match io.try_send(job) {
             Ok(()) => {
-                self.export_path = Some(path);
+                self.pending = Some(Pending { path, cancel, done });
                 Ok(())
             }
             Err(TrySendError::Full(_)) => Err(ExportRefusal::Queued),
@@ -280,6 +305,17 @@ impl DvrLoop {
         // the flag goes ahead of the legend, since a narrow terminal cuts
         // the bar's end
         format!("DVR  -{age:.1}s of {reach:.1}s{flag}  {SCRUB_HINT}")
+    }
+}
+
+/// A loop dropped without [`DvrLoop::finish`], on an error or a panic,
+/// cancels the clip in flight and removes its part file without waiting.
+impl Drop for DvrLoop {
+    fn drop(&mut self) {
+        let in_flight = Arc::strong_count(&self.exporting) > 1;
+        if let Some(pending) = self.pending.as_ref().filter(|_| in_flight) {
+            pending.cancel();
+        }
     }
 }
 
@@ -660,6 +696,85 @@ mod tests {
         let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
         assert!(left.is_empty(), "{left:?}");
         drop(gate);
+    }
+
+    /// A quit whose wait ends while the clip is still queued behind other
+    /// file work leaves neither a part file nor a clip once the writer
+    /// reaches it.
+    #[test]
+    fn an_export_queued_behind_slow_work_and_cancelled_by_a_quit_leaves_nothing() {
+        let _watchdog = view_test_support::watchdog();
+        let dir = view_test_support::ScratchDir::new("dvr-quit-queued").unwrap();
+        let mut model = Model::with_term_size(80, 24);
+        let mut dvr = recorded(&mut model);
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (gate, gate_rx) = std::sync::mpsc::channel::<()>();
+        let (wrote_tx, wrote) = std::sync::mpsc::channel();
+        let writer = BackgroundWriter::start("dvr-io-test", 1, move |job: IoJob| {
+            match job {
+                IoJob::Export(export) => {
+                    let _ = wrote_tx.send(io::write(export));
+                }
+                _ => {
+                    let _ = entered_tx.send(());
+                    let _ = gate_rx.recv();
+                }
+            }
+            Ok::<(), Infallible>(())
+        })
+        .unwrap();
+        dvr.io = Some(writer);
+        dvr.unsent.push_back(IoJob::DiskCheck);
+        assert!(dvr.send_unsent().is_empty());
+        entered.recv().unwrap();
+        let path = dir.join("a.vdvr");
+        export(&mut model, &mut dvr, &path.display().to_string());
+        assert!(dvr.finish_within(Duration::ZERO).is_some());
+        drop(gate);
+        let reply = wrote
+            .recv_timeout(view_test_support::host_deadline(QUIT_WAIT))
+            .unwrap();
+        assert!(matches!(reply, DvrIoReply::Failed { .. }), "{reply:?}");
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    /// A loop dropped on an error or a panic, with no `finish`, cancels
+    /// the clip in flight and removes its part file.
+    #[test]
+    fn a_loop_dropped_without_finish_cancels_its_clip_and_removes_the_part() {
+        let _watchdog = view_test_support::watchdog();
+        let dir = view_test_support::ScratchDir::new("dvr-drop-export").unwrap();
+        let mut model = Model::with_term_size(80, 24);
+        let mut dvr = recorded(&mut model);
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (gate, gate_rx) = std::sync::mpsc::channel::<()>();
+        let (seen_tx, seen) = std::sync::mpsc::channel();
+        let writer = BackgroundWriter::start("dvr-io-test", 1, move |job: IoJob| {
+            if let IoJob::Export(export) = job {
+                let _ = std::fs::write(io::part_path(&export.path), b"VIEWDVR\0");
+                let _ = entered_tx.send(());
+                let _ = gate_rx.recv();
+                let _ = seen_tx.send(export.cancel.load(Ordering::SeqCst));
+            }
+            Ok::<(), Infallible>(())
+        })
+        .unwrap();
+        dvr.io = Some(writer);
+        export(
+            &mut model,
+            &mut dvr,
+            &dir.join("a.vdvr").display().to_string(),
+        );
+        entered.recv().unwrap();
+        drop(dvr);
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert!(left.is_empty(), "{left:?}");
+        drop(gate);
+        let cancelled = seen
+            .recv_timeout(view_test_support::host_deadline(QUIT_WAIT))
+            .unwrap();
+        assert!(cancelled, "the writer is told to stop");
     }
 
     #[test]

@@ -64,6 +64,10 @@ mod tests {
                         "14695981039346656037",
                         "100000001b3",
                         "1099511628211",
+                        // the 32-bit offset; its prime is too short to
+                        // match without false hits
+                        "811c9dc5",
+                        "2166136261",
                     ];
                     if constants.iter().any(|c| digits.contains(c)) {
                         found.push(path.display().to_string());
