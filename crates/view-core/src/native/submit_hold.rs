@@ -328,6 +328,11 @@ pub struct SubmitHold {
     /// answering an earlier key included. A hold armed in error because of
     /// it ends on the mode report.
     mode_unsure: bool,
+    /// Whether an error from nvim has put the reading of the keys around it
+    /// in doubt, and if so whether a key has gone out since the error.
+    /// Every key folded while it stands spells a sequence whatever the
+    /// keys before it.
+    doubt: Option<bool>,
     /// Whether nvim reads the next normal-mode key behind an operator or a
     /// visual-mode key, where an `i` or `a` names a text object.
     object_next: bool,
@@ -371,6 +376,9 @@ struct Folded {
     /// Whether a key that leaves normal mode went out ahead of it, with no
     /// mode reported or key answered since.
     mode_unsure: bool,
+    /// Whether it went out, or stood in the window, while an error put the
+    /// two readings above in doubt.
+    doubt: bool,
 }
 
 /// One key sequence nvim runs a view invocation on.
@@ -874,18 +882,35 @@ impl SubmitHold {
     /// doubt over the mode whichever key it answered, an earlier one than
     /// the key that left normal mode included. A hold armed in error
     /// because of it ends on the mode report.
+    ///
+    /// It ends the doubt an error raised once a key typed after the error
+    /// has gone out and no key's argument is owed: until then the batch may
+    /// answer the refused key, and the key owed an argument may be one nvim
+    /// never read as taking it.
     pub(crate) fn note_input_answered(&mut self) {
         self.mode_unsure = false;
+        if self.doubt == Some(true) && self.argument_of.is_none() {
+            self.doubt = None;
+        }
         self.log.note_answered();
     }
 
-    /// Notes an error nvim answered a key with. A refused key that leaves
-    /// normal mode, `i` in a buffer that cannot be edited, waits for no
-    /// argument. The error may answer a key sent before the newest one, so
-    /// the argument a literal key such as `f` waits for is still owed, and
-    /// so is the text object an `i` typed behind an operator names (the `"`
-    /// of `di"`), which nvim never refuses by itself.
+    /// Notes an error nvim answered a key with, and raises the doubt over
+    /// every key in the window and every key folded until it ends. The
+    /// error may answer any key still in flight, and whether a key before
+    /// it left normal mode or took the next as its argument is a guess the
+    /// error can falsify.
+    ///
+    /// A refused key that leaves normal mode, `i` in a buffer that cannot
+    /// be edited, waits for no argument. The argument a literal key such as
+    /// `f` waits for is still owed, and so is the text object an `i` typed
+    /// behind an operator names (the `"` of `di"`), which nvim never refuses
+    /// by itself.
     pub(crate) fn note_refused(&mut self) {
+        self.doubt = Some(false);
+        for folded in &mut self.recent {
+            folded.doubt = true;
+        }
         if !self.argument_object
             && self
                 .argument_of
@@ -893,6 +918,12 @@ impl SubmitHold {
         {
             self.argument_of = None;
         }
+    }
+
+    /// Ends the doubt an error raised: nvim reported a mode after every
+    /// error it sent.
+    pub(crate) fn note_mode_after_errors(&mut self) {
+        self.doubt = None;
     }
 
     /// Forgets which key nvim reads the next key as the argument of, where

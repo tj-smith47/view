@@ -21892,9 +21892,12 @@ fn the_users_mappings_only_ever_add_a_hold() {
 
 /// nvim answering a key with no mode change only ever adds a hold: across
 /// [`hold_population`], every key held with no answer is held with one.
+/// An answer ends the doubt an error raises, which takes away the holds the
+/// doubt alone armed, so a sequence carrying an error is left out.
 #[test]
 fn an_answer_from_nvim_only_ever_adds_a_hold() {
-    for steps in &hold_population() {
+    let erred = |steps: &&Vec<Step>| steps.iter().any(|step| matches!(step, Step::Error));
+    for steps in hold_population().iter().filter(|steps| !erred(steps)) {
         let with = hold_trace(&mut hold_model(false, false), steps, true, false);
         let without = hold_trace(&mut hold_model(false, false), steps, false, false);
         for (at, (answered, unanswered)) in with.iter().zip(&without).enumerate() {
@@ -21906,24 +21909,9 @@ fn an_answer_from_nvim_only_ever_adds_a_hold() {
 /// An error from nvim only ever adds a hold: across [`hold_population`],
 /// answered or not, with an error inserted at any position, every step held
 /// without it is held with it, no key reaches nvim sooner, and the same
-/// keys reach it in the same order. The one position left out is straight
-/// after a bare `i` or `a`, one behind no operator or visual-mode key, with
-/// every key answered by a cursor move.
+/// keys reach it in the same order.
 #[test]
 fn an_error_from_nvim_never_removes_a_hold() {
-    // the `c` of the user's `<Space>c` is that mapping's, and a count
-    // leaves the operator before it waiting
-    let bare = |before: &[Step]| {
-        let mut keys = before.iter().rev().filter_map(|step| match step {
-            Step::Key(key, _) => Some(*key),
-            _ => None,
-        });
-        match keys.find(|key| !key.bytes().all(|b| b.is_ascii_digit())) {
-            Some("d" | "y" | "v") => false,
-            Some("c") => keys.next() == Some(" "),
-            _ => true,
-        }
-    };
     let sent_by = |trace: &[(bool, Vec<String>)], at: usize| -> usize {
         trace.iter().take(at).map(|t| t.1.len()).sum()
     };
@@ -21933,16 +21921,6 @@ fn an_error_from_nvim_never_removes_a_hold() {
         for answer in [false, true] {
             let without = hold_trace(&mut hold_model(true, false), steps, answer, false);
             for error_at in 0..=steps.len() {
-                // nvim answers a bare `i` or `a` with the insert report or
-                // with its error, so the run without the error, where a
-                // cursor move alone answers it, is one nvim never sends
-                let refused = error_at.checked_sub(1).map(|at| steps[at]);
-                if answer
-                    && matches!(refused, Some(Step::Key("i" | "a", _)))
-                    && bare(&steps[..error_at - 1])
-                {
-                    continue;
-                }
                 let mut erred = steps.clone();
                 erred.insert(error_at, Step::Error);
                 let with = hold_trace(&mut hold_model(true, false), &erred, answer, false);
@@ -21959,6 +21937,28 @@ fn an_error_from_nvim_never_removes_a_hold() {
             }
         }
     }
+}
+
+/// Where no error from nvim stands in a sequence, the hold decides as it
+/// did before an error could put its reading in doubt: the traces of every
+/// such sequence of [`hold_population`], answered or not and with the
+/// user's mappings read or not, hash to the value recorded before an error
+/// could raise a doubt.
+#[test]
+fn the_hold_decides_as_recorded_where_nvim_sends_no_error() {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for steps in hold_population() {
+        if steps.iter().any(|step| matches!(step, Step::Error)) {
+            continue;
+        }
+        for (answer, user) in [(false, false), (false, true), (true, false), (true, true)] {
+            let trace = hold_trace(&mut hold_model(user, false), &steps, answer, false);
+            for byte in format!("{trace:?}").bytes() {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+    }
+    assert_eq!(hash, 0x4bfe_0cb2_638b_c130, "{hash:#x}");
 }
 
 /// An error answering a key sent before `f` leaves `f` waiting for its
@@ -22069,6 +22069,201 @@ fn an_error_after_an_answered_operator_keeps_the_text_object() {
             .collect();
         assert!(early.is_empty(), "{operator:?}: query sent: {trace:?}");
     }
+}
+
+/// The user's mappings in [`hold_model`] with operators of their own
+/// beside them, the way a surround or comment plugin maps them.
+const OPERATOR_MAPPINGS: [&str; 11] = [
+    "<Space>c",
+    "<Space>coy",
+    "<Space>f",
+    "<Space>fg",
+    "gd",
+    "s",
+    "ds",
+    "cs",
+    "ys",
+    "gc",
+    "gcc",
+];
+
+/// The keys before an error nvim answered, and the user's mappings read
+/// where the keys need them, each followed by view's key and a query.
+fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 8] {
+    let answered = |keys: &[&'static str]| {
+        let mut steps: Vec<Step> = keys.iter().map(|key| k(key)).collect();
+        steps.extend([Step::Answer, k("i"), Step::Error]);
+        steps
+    };
+    let quoted = |keys: &[&'static str]| {
+        let mut steps = answered(keys);
+        steps.push(k("\""));
+        steps
+    };
+    [
+        (answered(&["y", "y"]), &[]),
+        (answered(&["d", "d"]), &[]),
+        (answered(&[">", ">"]), &[]),
+        (answered(&["v", "v"]), &[]),
+        (vec![k("g"), k("n"), Step::Error, k("i"), Step::Error], &[]),
+        (answered(&["g", "h"]), &[]),
+        (quoted(&["d"]), &OPERATOR_MAPPINGS),
+        (quoted(&["z", "y"]), &[]),
+    ]
+}
+
+/// A model with `<Space>ff` and `<Space>e` claimed and `mappings` read as
+/// the user's, or [`hold_model`]'s own where `mappings` is empty.
+fn mapped_hold_model(mappings: &[&str], log: bool) -> Model {
+    let mut m = hold_model(true, log);
+    if !mappings.is_empty() {
+        user_mappings(&mut m, mappings, Some(Duration::from_millis(300)));
+    }
+    m
+}
+
+/// After an error from nvim, view's key typed behind any keys arms the
+/// hold, and no key of the query reaches nvim before it releases.
+#[test]
+fn an_error_from_nvim_arms_the_hold_on_views_key_whatever_came_before() {
+    let mut missed = Vec::new();
+    for (prefix, mappings) in errored_prefixes() {
+        let mut steps = prefix.clone();
+        steps.extend([" ", "f", "f", "m", "a", "i", "n"].map(k));
+        let armed = steps.len() - 5;
+        let trace = hold_trace(
+            &mut mapped_hold_model(mappings, false),
+            &steps,
+            false,
+            false,
+        );
+        let early = trace[armed + 1..steps.len()]
+            .iter()
+            .any(|t| !t.1.is_empty());
+        if !trace[armed].0 || early {
+            missed.push(format!("{prefix:?}: {trace:?}"));
+        }
+    }
+    assert!(missed.is_empty(), "{missed:#?}");
+}
+
+/// The doubt an error raises ends on a mode report, or on an answer to a
+/// key typed after the error once no argument is owed. After either, view's
+/// key typed as `f`'s argument arms nothing.
+#[test]
+fn the_doubt_an_error_raises_ends_on_a_fact_from_nvim() {
+    let jump = [" ", "f", "f", "m"].map(k);
+    for settled in [&[Step::Mode("normal")][..], &[k("j"), Step::Answer]] {
+        let mut steps = vec![k("i"), Step::Error];
+        steps.extend_from_slice(settled);
+        steps.push(k("f"));
+        steps.extend(jump);
+        let trace = hold_trace(&mut hold_model(false, false), &steps, false, false);
+        assert!(trace.iter().all(|t| !t.0), "{settled:?}: {trace:?}");
+    }
+    let steps = [
+        k("i"),
+        Step::Error,
+        k("f"),
+        Step::Answer,
+        jump[0],
+        jump[1],
+        jump[2],
+    ];
+    let trace = hold_trace(&mut hold_model(false, false), &steps, false, false);
+    assert!(trace[6].0, "f's argument is still owed: {trace:?}");
+}
+
+/// A mode report and an error in one batch, the report first, leave the
+/// doubt standing: the report answered a key before the refused one.
+#[test]
+fn a_mode_report_ahead_of_an_error_in_one_batch_keeps_the_doubt() {
+    let mut m = hold_model(false, false);
+    let mut sent = Vec::new();
+    for key in ["y", "y", "i"] {
+        sent.extend(
+            meta_inputs(&update(&mut m, self::key(key)))
+                .into_iter()
+                .map(str::to_string),
+        );
+    }
+    let _ = engine_batch(
+        &mut m,
+        vec![
+            UiEvent::ModeChange {
+                mode: "normal".to_string(),
+                mode_idx: 0,
+            },
+            UiEvent::MsgShow {
+                kind: "emsg".to_string(),
+                content: vec![(0, "E21: Cannot make changes".to_string())],
+                replace_last: false,
+            },
+            UiEvent::Flush,
+        ],
+    );
+    for key in [" ", "f", "f", "m", "a", "i", "n"] {
+        sent.extend(
+            meta_inputs(&update(&mut m, self::key(key)))
+                .into_iter()
+                .map(str::to_string),
+        );
+    }
+    assert!(m.submit_hold.is_holding(), "{sent:?}");
+    assert_eq!(sent, ["y", "y", "i", " ", "f", "f"]);
+}
+
+/// Keys typed after the doubt has ended are read from what the error left
+/// owed. An `i` refused behind `o` owes nothing, so `f` takes `m` and view's
+/// key is free. An `i` behind `d` names a text object, so it takes `f`, `m`
+/// takes `t` and view's key is free. Every key is answered.
+#[test]
+fn keys_after_an_errors_doubt_read_what_the_error_left_owed() {
+    let query = [" ", "f", "f", "m", "a", "i", "n"].map(k);
+    for prefix in [
+        &[k("o"), k("i"), Step::Error, k("f"), k("m")][..],
+        &[k("d"), k("i"), Step::Error, k("f"), k("m"), k("t")],
+    ] {
+        let mut steps = prefix.to_vec();
+        steps.extend(query);
+        let armed = steps.len() - 5;
+        let trace = hold_trace(&mut hold_model(false, false), &steps, true, false);
+        assert!(trace[armed].0, "{prefix:?}: the hold arms: {trace:?}");
+    }
+}
+
+/// A hold armed only because an error put view's reading in doubt, where
+/// no picker opens, releases within the bound and hands every held key to
+/// nvim in the order it was typed.
+#[test]
+fn a_hold_armed_in_doubt_releases_within_its_bound_in_order() {
+    let mut m = hold_model(false, false);
+    let mut armed = None;
+    let mut sent = Vec::new();
+    let steps = [k("y"), k("y"), Step::Answer, k("i"), Step::Error];
+    for (at, step) in steps
+        .into_iter()
+        .chain([" ", "f", "f", "m", "a", "i", "n"].map(k))
+        .enumerate()
+    {
+        let effects = apply_step(&mut m, step, at as u64 * 10);
+        sent.extend(meta_inputs(&effects).into_iter().map(str::to_string));
+        armed = armed.or_else(|| {
+            effects.iter().find_map(|effect| match effect {
+                Effect::ScheduleSubmitHold { after, generation } => Some((*after, *generation)),
+                _ => None,
+            })
+        });
+    }
+    let (after, generation) = armed.expect("the doubt armed the hold");
+    assert!(
+        (Duration::from_millis(250)..=Duration::from_secs(1)).contains(&after),
+        "{after:?}"
+    );
+    assert_eq!(sent, ["y", "y", "i", " ", "f", "f"]);
+    let effects = update(&mut m, Msg::SubmitHoldExpired { generation });
+    assert!(!m.submit_hold.is_holding());
+    assert_eq!(meta_inputs(&effects), ["m", "a", "i", "n"]);
 }
 
 /// The hold's decisions for a few sequences, written out, with the user's
@@ -22275,6 +22470,51 @@ fn the_hold_decides_what_it_was_recorded_deciding() {
     for (steps, want) in cases {
         let trace = hold_trace(&mut hold_model(true, true), steps, false, false);
         assert_eq!(trace, want, "{steps:?}");
+    }
+    // each errored prefix sends its own keys unheld, then view's key arms
+    // and the query waits for the bound
+    let tail = [
+        row(false, &[" "]),
+        row(false, &["f"]),
+        row(true, &["f"]),
+        row(true, &[]),
+        row(true, &[]),
+        row(true, &[]),
+        row(true, &[]),
+        row(false, &["m", "a", "i", "n"]),
+    ];
+    let answered = |keys: &[&str]| -> Trace {
+        let mut rows: Trace = keys.iter().map(|key| row(false, &[key])).collect();
+        rows.extend([row(false, &[]), row(false, &["i"]), row(false, &[])]);
+        rows
+    };
+    let quoted = |keys: &[&str]| -> Trace {
+        let mut rows = answered(keys);
+        rows.push(row(false, &["\""]));
+        rows
+    };
+    let prefixes: [Trace; 8] = [
+        answered(&["y", "y"]),
+        answered(&["d", "d"]),
+        answered(&[">", ">"]),
+        answered(&["v", "v"]),
+        vec![
+            row(false, &["g"]),
+            row(false, &["n"]),
+            row(false, &[]),
+            row(false, &["i"]),
+            row(false, &[]),
+        ],
+        answered(&["g", "h"]),
+        quoted(&["d"]),
+        quoted(&["z", "y"]),
+    ];
+    for ((prefix, mappings), mut want) in errored_prefixes().into_iter().zip(prefixes) {
+        let mut steps = prefix.clone();
+        steps.extend([" ", "f", "f", "m", "a", "i", "n"].map(k));
+        want.extend(tail.clone());
+        let trace = hold_trace(&mut mapped_hold_model(mappings, true), &steps, false, false);
+        assert_eq!(trace, want, "{prefix:?}");
     }
 }
 

@@ -952,6 +952,7 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
     let mut shows_cmdline = false;
     let mut answers_input = false;
     let mut refused = false;
+    let mut mode_last = false;
     for ev in redraw {
         match ev {
             UiEvent::GridCursorGoto { grid, .. } => {
@@ -964,6 +965,7 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
             UiEvent::ModeChange { .. } => {
                 settled = true;
                 answers_input = true;
+                mode_last = true;
             }
             UiEvent::CmdlineShow { .. } => {
                 shows_cmdline = true;
@@ -984,12 +986,17 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
             UiEvent::MsgShow { kind, .. } if kind == "emsg" => {
                 answers_input = true;
                 refused = true;
+                mode_last = false;
             }
             _ => {}
         }
     }
     if refused {
         model.submit_hold.note_refused();
+    }
+    // a report ahead of the error answered a key before the refused one
+    if mode_last {
+        model.submit_hold.note_mode_after_errors();
     }
     if answers_input {
         model.submit_hold.note_input_answered();

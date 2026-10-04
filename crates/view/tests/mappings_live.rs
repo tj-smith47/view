@@ -1074,6 +1074,39 @@ fn keys_typed_ahead_after_a_users_mapping_on_a_mode_key_never_edit_the_buffer() 
     assert_eq!(sent, keys[..5], "the query waits for view's invocation");
 }
 
+/// A read-only buffer, `yyi` refused, then view's key and a query typed at
+/// once: the query waits for view's invocation and reaches the picker, and
+/// the buffer is unchanged.
+#[test]
+fn keys_typed_ahead_after_a_refused_insert_reach_the_picker() {
+    let session = Session::start_with(
+        "typed-ahead-refused",
+        "vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'foo' })\n\
+         vim.bo.modifiable = false\n",
+    );
+    let mut model = registered_model(&session);
+    let _ = type_into(&session, &mut model, &["y", "y", "i"]);
+    let refused = |events: &[UiEvent]| {
+        events
+            .iter()
+            .any(|event| matches!(event, UiEvent::MsgShow { kind, .. } if kind == "emsg"))
+    };
+    pump(&session, &mut model, ARRIVAL, |_, msg| {
+        matches!(msg, Msg::Redraw(events) if refused(events)).then_some(())
+    })
+    .expect("nvim refuses the i");
+    let keys = [",", "f", "f", "m", "a", "i", "n"];
+    let sent = type_into(&session, &mut model, &keys);
+    pump(&session, &mut model, ARRIVAL, |_, msg| {
+        matches!(msg, Msg::FeatureInvoke { .. }).then_some(())
+    })
+    .expect("nvim runs view's <leader>ff");
+    assert_eq!(sent, keys[..3], "the query waits for view's invocation");
+    assert_eq!(session.eval("join(getline(1, '$'), '|')"), "foo");
+    let query = model.picker_mut().map(|picker| picker.query().to_string());
+    assert_eq!(query.as_deref(), Some("main"));
+}
+
 /// A stub that maps the real handler over itself and types its keys again
 /// logs one row for one press, naming the stub.
 #[test]

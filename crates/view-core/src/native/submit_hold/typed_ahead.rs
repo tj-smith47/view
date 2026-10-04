@@ -41,10 +41,18 @@ use crate::model::Model;
 /// by itself, and the key after it may start a sequence. A rhs that does
 /// leave normal mode is reported, and the hold it lets arm ends on that
 /// report.
+///
+/// Both readings are set aside for a first key folded under an error's
+/// doubt. A hold missed sends the query into the buffer as commands, and
+/// one armed in error ends on a mode report out of normal mode or on its
+/// bound.
 pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     let normal = model.engine.mode.current == "normal";
     let hold = &mut model.submit_hold;
     let argument_of = hold.argument_of.take();
+    if let Some(sent) = &mut hold.doubt {
+        *sent = true;
+    }
     let longest = hold
         .invoke_keys
         .iter()
@@ -85,6 +93,7 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         key,
         argument,
         mode_unsure,
+        doubt: hold.doubt.is_some(),
     });
     let left = leaves && !in_user_keys(&hold.recent, &hold.user_keys);
     hold.mode_unsure |= left;
@@ -99,7 +108,7 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         recent.len().checked_sub(keys.len()).is_some_and(|start| {
             recent
                 .get(start)
-                .is_some_and(|first| !first.argument && !first.mode_unsure)
+                .is_some_and(|first| first.doubt || (!first.argument && !first.mode_unsure))
                 && recent
                     .range(start..)
                     .map(|folded| &folded.key)
