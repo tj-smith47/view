@@ -26,6 +26,29 @@ pub(crate) struct KeyLogState {
     skip_next: bool,
 }
 
+impl KeyLogState {
+    /// Logs the user's own mapping `keys` spell, whose last key went to
+    /// nvim in normal mode at `at`, written as `keytrans()` writes it.
+    pub(crate) fn log_user_mapping(&mut self, keys: &[String], at: SystemTime) {
+        let typed = canonical_typed(keys);
+        let fired = match self.owners.get(&typed) {
+            Some((lhs, owner)) => Fired::User {
+                lhs: lhs.clone(),
+                owner: Some(owner.clone()),
+            },
+            None => Fired::User {
+                lhs: self
+                    .spellings
+                    .get(&typed)
+                    .cloned()
+                    .unwrap_or_else(|| typed.concat()),
+                owner: None,
+            },
+        };
+        self.log.push_at(fired, at);
+    }
+}
+
 impl Model {
     /// The mappings that fired this session, newest first.
     #[must_use]
@@ -85,28 +108,6 @@ impl Model {
             displaced: claim.and_then(|claim| claim.displaced.clone()),
         };
         self.key_log.log.push(fired);
-    }
-
-    /// Logs the user's own mapping `keys` spell, whose last key went to
-    /// nvim in normal mode at `at`, written as `keytrans()` writes it.
-    pub(crate) fn log_user_mapping(&mut self, keys: &[String], at: SystemTime) {
-        let typed = canonical_typed(keys);
-        let fired = match self.key_log.owners.get(&typed) {
-            Some((lhs, owner)) => Fired::User {
-                lhs: lhs.clone(),
-                owner: Some(owner.clone()),
-            },
-            None => Fired::User {
-                lhs: self
-                    .key_log
-                    .spellings
-                    .get(&typed)
-                    .cloned()
-                    .unwrap_or_else(|| typed.concat()),
-                owner: None,
-            },
-        };
-        self.key_log.log.push_at(fired, at);
     }
 
     /// Catches an open key log up with the ring and the clock's offset,

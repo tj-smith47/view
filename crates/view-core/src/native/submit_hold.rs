@@ -874,10 +874,21 @@ impl SubmitHold {
         self.log.note_answered();
     }
 
-    /// Notes an error nvim answered a key with: the key it refused waits
-    /// for no argument, `i` in a buffer that cannot be edited among them.
+    /// Notes an error nvim answered a key with. A refused key that leaves
+    /// normal mode, `i` in a buffer that cannot be edited, waits for no
+    /// argument. The error may answer a key sent before the newest one, so
+    /// the argument a literal key such as `f` waits for is still owed, and
+    /// so is the text object an `i` typed behind an unanswered operator
+    /// names (the `"` of `di"`).
     pub(crate) fn note_refused(&mut self) {
-        self.argument_of = None;
+        let bare = self.recent.back().is_some_and(|key| !key.mode_unsure);
+        if bare
+            && self
+                .argument_of
+                .is_some_and(|key| LEAVES_NORMAL.contains(&key))
+        {
+            self.argument_of = None;
+        }
     }
 
     /// Forgets which key nvim reads the next key as the argument of, where
@@ -1009,7 +1020,7 @@ pub fn fold_engine_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     let seen = user_run::Seen::of(model);
     user_run::fold(&mut model.submit_hold.log, seen, notation);
     for (keys, at) in model.submit_hold.log.take_fired() {
-        model.log_user_mapping(&keys, at);
+        model.key_log.log_user_mapping(&keys, at);
     }
     if typed_ahead::completes_invoke(model, notation) {
         model.submit_hold.set_typed(None);

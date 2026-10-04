@@ -995,9 +995,11 @@ fn settle(session: &Session) {
 /// view's keys, over sixty presses each typed at once, typed with every
 /// echo read before the next key, and typed with the echoes read only once
 /// the last key is out, as a link with a longer round trip than the typing
-/// delivers them. On the last, nvim's echo of the keys it waited on
-/// arrives ahead of the invocation every time, so an answer seen after a
-/// view key never says that nvim ran some other mapping on it.
+/// delivers them. With every echo read before the next key, the
+/// invocation arrives ahead of the completing key's own answer every time.
+/// The other two counts are printed: the earlier keys' echoes can arrive
+/// after the completing key, so an answer seen after a view key never says
+/// that nvim ran some other mapping on it.
 #[test]
 fn an_answer_to_an_earlier_key_arrives_ahead_of_views_invocation() {
     let session = Session::start("invoke-order");
@@ -1030,7 +1032,10 @@ fn an_answer_to_an_earlier_key_arrives_ahead_of_views_invocation() {
         "answered before the invocation: at once {at_once:?} of 60, spaced {spaced}/60, \
          far {far}/60"
     );
-    assert_eq!(far, 60, "nvim echoes the keys it waits on");
+    assert_eq!(
+        spaced, 0,
+        "view's invocation precedes the completing key's own answer"
+    );
 }
 
 /// A user's mapping whose last key would enter insert mode on its own,

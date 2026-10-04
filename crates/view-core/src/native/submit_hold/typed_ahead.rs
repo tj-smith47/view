@@ -4,6 +4,14 @@
 //! The decision reads the hold's own window of recent keys, the user's
 //! mapped key sequences as the mapping read wrote them, and nothing the key
 //! log keeps. No clock enters it.
+//!
+//! With no user mappings read, a key costs what it did before they were
+//! read. With some, a key that leaves normal mode, or that follows a key
+//! taking an argument, compares every suffix start of the window against
+//! every user lhs: window length times mapping count first-key compares,
+//! twice on a key that does both. The window holds the longest of view's
+//! sequences and the user's, so at 300 mappings and a five-key window a
+//! key costs at most 3,000 string compares.
 
 use std::collections::VecDeque;
 
@@ -30,10 +38,6 @@ use crate::model::Model;
 /// by itself, and the key after it may start a sequence. A rhs that does
 /// leave normal mode is reported, and the hold it lets arm ends on that
 /// report.
-///
-/// With no user mappings read, a key costs what it did before they were
-/// read. With some, a key that leaves normal mode or takes an argument
-/// also compares the window against each of them.
 pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     let normal = model.engine.mode.current == "normal";
     let hold = &mut model.submit_hold;
