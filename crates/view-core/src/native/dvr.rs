@@ -232,6 +232,11 @@ pub struct Dvr {
     suppress: usize,
     /// Replayed DVR verbs still to arrive, which run nothing.
     absorb: usize,
+    /// The inputs a replay carries after its logged ones: the closing
+    /// resize and the input held while it was owed.
+    trailing: usize,
+    /// A person's input folded while a replay is owed.
+    held: Vec<Msg>,
     /// Each DVR verb and engine restart, with the count of inputs logged
     /// before it and the newest frame then. Kept whole while frames are
     /// dropped, since a replay starts from the first input.
@@ -249,6 +254,16 @@ impl Dvr {
         self.arena = Vec::with_capacity(entries * BYTES_PER_ENTRY);
         self.max_bytes = max_bytes;
         self.recording = true;
+    }
+
+    /// Starts recording as [`Self::enable`] does, logging the terminal's
+    /// `size` first so every replay starts at the size the session did.
+    pub fn enable_at(&mut self, max_bytes: usize, size: (u16, u16)) {
+        self.enable(max_bytes);
+        self.record(&Msg::Resized {
+            width: size.0,
+            height: size.1,
+        });
     }
 
     /// Whether the session is being recorded.
@@ -375,17 +390,9 @@ impl Dvr {
     }
 
     /// Queues the branch from frame `at`, replaying the inputs folded
-    /// before it and, when those resize the editor, a last resize to
-    /// `size`, the terminal's size now. Logs no input until
-    /// [`Self::branched`].
-    pub(crate) fn confirm_branch(&mut self, at: u64, size: (u16, u16)) {
-        let mut replay = self.replay_until(at);
-        if replay.iter().any(|msg| matches!(msg, Msg::Resized { .. })) {
-            replay.push(Msg::Resized {
-                width: size.0,
-                height: size.1,
-            });
-        }
+    /// before it. Logs no input until [`Self::branched`].
+    pub(crate) fn confirm_branch(&mut self, at: u64) {
+        let replay = self.replay_until(at);
         self.paused = true;
         self.requests.push_back(DvrRequest::Branch(BranchPlan {
             at_frame: at,
@@ -400,9 +407,9 @@ impl Dvr {
     }
 
     /// Settles the log once the editor was replaced from frame `at`, with
-    /// `replay` to fold once the replacement has started, or nothing when
-    /// the replacement failed. The log keeps the inputs folded before `at`,
-    /// and the frames after `at` can no longer be branched from.
+    /// `replay` to fold once the replacement has started. The log keeps
+    /// the inputs folded before `at`, and the frames after `at` can no
+    /// longer be branched from.
     pub fn branched(&mut self, at: u64, replay: Vec<Msg>) {
         let kept = self
             .entries
@@ -437,17 +444,41 @@ impl Dvr {
     /// The replay a branch staged, to fold in order now. The log holds
     /// those inputs already, so folding them logs nothing, and the DVR
     /// verbs they invoke run nothing.
-    pub fn take_replay(&mut self) -> Vec<Msg> {
-        let replay = std::mem::take(&mut self.replay);
+    /// Keeps `msg`, a person's input folded while a replay is owed, to
+    /// follow the replay into the engine.
+    pub(crate) fn hold_live(&mut self, msg: Msg) {
+        self.held.push(msg);
+    }
+
+    /// Ends a branch whose replacement could not start. The recording is
+    /// left as it was, since the engine that follows is a restart of the
+    /// timeline it describes.
+    pub fn branch_failed(&mut self) {
+        self.paused = false;
+    }
+
+    /// The replay a branch staged, to fold in order now, followed by a
+    /// resize to `size`, the terminal's size now, and the input a person
+    /// typed while it was owed. The log holds the replayed inputs already,
+    /// so folding them logs nothing, and the DVR verbs they invoke run
+    /// nothing. Empty when no replay is owed.
+    pub fn take_replay(&mut self, size: (u16, u16)) -> Vec<Msg> {
+        let mut replay = std::mem::take(&mut self.replay);
+        if replay.is_empty() {
+            return replay;
+        }
         self.suppress = replay.len();
-        self.absorb = if replay.is_empty() {
-            0
-        } else {
-            self.history
-                .iter()
-                .filter(|(_, _, kind)| *kind == Marker::Invoke)
-                .count()
-        };
+        self.absorb = self
+            .history
+            .iter()
+            .filter(|(_, _, kind)| *kind == Marker::Invoke)
+            .count();
+        replay.push(Msg::Resized {
+            width: size.0,
+            height: size.1,
+        });
+        self.trailing = 1 + self.held.len();
+        replay.append(&mut self.held);
         replay
     }
 
@@ -517,6 +548,13 @@ impl Dvr {
         if self.suppress > 0 {
             self.suppress -= 1;
             return;
+        }
+        // a replayed verb still owed when a person acts after the replay
+        // is one the engine split apart, and it never arrives
+        if self.trailing > 0 {
+            self.trailing -= 1;
+        } else {
+            self.absorb = 0;
         }
         let span = u32::try_from(self.arena.len())
             .ok()
@@ -770,7 +808,7 @@ mod tests {
         assert!(dvr.take_request().is_none());
         assert_eq!(dvr.ask_branch(4), Ok(()));
         assert!(matches!(dvr.take_request(), Some(DvrRequest::DiskCheck)));
-        dvr.confirm_branch(4, (80, 24));
+        dvr.confirm_branch(4);
         dvr.branched(4, Vec::new());
         assert_eq!(dvr.overflowed_at(), None, "the log has room again");
         assert_eq!(dvr.inputs().count(), 0);
@@ -788,32 +826,115 @@ mod tests {
         });
         dvr.record(&key("i"));
         dvr.note_frame(2, 0);
-        dvr.confirm_branch(2, (120, 40));
+        dvr.confirm_branch(2);
         assert!(dvr.is_branching());
         dvr.record(&key("lost"));
-        let plan = match dvr.take_request() {
-            Some(DvrRequest::Branch(plan)) => Some(plan),
-            _ => None,
-        }
-        .expect("a branch is queued");
-        let shown: Vec<_> = plan.replay.iter().map(|m| format!("{m:?}")).collect();
-        assert_eq!(shown.len(), 3, "{shown:?}");
+        let plan = queued(&mut dvr);
+        dvr.branched(plan.at_frame, plan.replay);
+        dvr.hold_live(key("early"));
+        assert_eq!(dvr.inputs().count(), 2, "a key typed meanwhile waits");
+        let replay = dvr.take_replay((120, 40));
+        let shown: Vec<_> = replay.iter().map(|m| format!("{m:?}")).collect();
+        assert_eq!(shown.len(), 4, "{shown:?}");
         assert!(
             shown[2].contains("120") && shown[2].contains("40"),
             "{shown:?}"
         );
-        dvr.branched(plan.at_frame, plan.replay);
-        dvr.record(&key("lost"));
-        assert_eq!(
-            dvr.inputs().count(),
-            3,
-            "a key ahead of the replay is logged"
-        );
-        for msg in &dvr.take_replay() {
+        assert!(shown[3].contains("early"), "{shown:?}");
+        for msg in &replay {
             dvr.record(msg);
         }
-        assert_eq!(dvr.inputs().count(), 3, "nothing from the replay logged");
+        let logged: Vec<_> = dvr.inputs().map(|i| i.body.to_vec()).collect();
+        assert_eq!(logged.len(), 4, "the closing resize and the key are logged");
+        assert_eq!(logged[2], [120, 0, 40, 0]);
+        assert_eq!(logged[3], b"early", "in the order the engine got them");
         dvr.record(&key("j"));
-        assert_eq!(dvr.inputs().count(), 4, "a key after the replay is logged");
+        assert_eq!(dvr.inputs().count(), 5, "a key after the replay is logged");
+    }
+
+    fn queued(dvr: &mut Dvr) -> BranchPlan {
+        match dvr.take_request() {
+            Some(DvrRequest::Branch(plan)) => Some(plan),
+            _ => None,
+        }
+        .expect("a branch is queued")
+    }
+
+    fn resized(width: u16, height: u16) -> Msg {
+        Msg::Resized { width, height }
+    }
+
+    /// Branches at `at` the way the loop does once the new engine has
+    /// started at `size`, folding the replay into the log.
+    fn branch_and_fold(dvr: &mut Dvr, at: u64, size: (u16, u16)) {
+        dvr.confirm_branch(at);
+        let plan = queued(dvr);
+        dvr.branched(plan.at_frame, plan.replay);
+        for msg in &dvr.take_replay(size) {
+            dvr.record(msg);
+        }
+    }
+
+    #[test]
+    fn a_click_after_a_branch_replays_at_the_size_it_was_made_at() {
+        let mut dvr = recording();
+        dvr.note_frame(1, 0);
+        dvr.record(&resized(100, 30));
+        dvr.note_frame(2, 0);
+        dvr.record(&resized(120, 40));
+        dvr.note_frame(3, 0);
+        branch_and_fold(&mut dvr, 2, (120, 40));
+        dvr.record(&mouse());
+        dvr.note_frame(4, 0);
+        let replay: Vec<_> = dvr
+            .replay_until(5)
+            .iter()
+            .map(|m| format!("{m:?}"))
+            .collect();
+        let click = replay.iter().position(|m| m.contains("Mouse")).unwrap();
+        let size = replay[..click]
+            .iter()
+            .rfind(|m| m.contains("Resized"))
+            .unwrap();
+        assert!(size.contains("120") && size.contains("40"), "{replay:?}");
+    }
+
+    #[test]
+    fn a_replay_with_no_resize_runs_at_the_launch_size() {
+        let mut dvr = Dvr::default();
+        dvr.enable_at(64 * 1024, (80, 24));
+        dvr.note_frame(1, 0);
+        dvr.record(&key("i"));
+        dvr.note_frame(2, 0);
+        dvr.record(&resized(120, 40));
+        dvr.note_frame(3, 0);
+        dvr.confirm_branch(2);
+        let plan = queued(&mut dvr);
+        let shown: Vec<_> = plan.replay.iter().map(|m| format!("{m:?}")).collect();
+        assert_eq!(shown.len(), 2, "{shown:?}");
+        assert!(
+            shown[0].contains("80") && shown[0].contains("24"),
+            "{shown:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_branch_leaves_the_recording_as_it_was() {
+        let mut dvr = recording();
+        dvr.note_frame(1, 0);
+        dvr.record(&key("i"));
+        dvr.note_frame(2, 0);
+        dvr.record(&key("a"));
+        dvr.note_frame(3, 0);
+        dvr.confirm_branch(2);
+        assert!(dvr.is_branching());
+        dvr.branch_failed();
+        assert!(!dvr.is_branching());
+        assert!(!dvr.has_replay());
+        assert_eq!(dvr.inputs().count(), 2);
+        assert!(dvr.dead().is_empty());
+        assert!(dvr.markers().is_empty());
+        dvr.record(&key("x"));
+        assert_eq!(dvr.inputs().count(), 3, "recording carries on");
     }
 }

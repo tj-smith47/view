@@ -16,10 +16,6 @@ const EMPTY: &str = "view: DVR has recorded no frame yet";
 /// which a replacement cannot read again.
 const BRANCH_PIPED: &str = "view: DVR cannot branch while the editor reads piped input";
 
-/// What a branch answers with no recorded frame on screen.
-const BRANCH_NO_FRAME: &str =
-    "view: DVR branch starts from a frame the scrub shows: press b in :View dvr scrub";
-
 /// Every key the scrub answers, and what it does. `docs/keymaps.md`
 /// carries the rendered table. Test-only: the scrub matches on the keys
 /// themselves.
@@ -62,7 +58,6 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
             Vec::new()
         }
         "export" => export(model, path.trim_start()),
-        "branch" => branch(model),
         _ => model
             .engine
             .record_native_notice(super::feature_invoke_notice("dvr", verb, false), false),
@@ -81,27 +76,27 @@ fn export(model: &mut Model, path: &str) -> Vec<Effect> {
     on_io(model, &DvrIoReply::Refused(ExportRefusal::NoFrame))
 }
 
-/// Closes the scrub and asks to branch from the frame it showed, raising
-/// the confirm once the disk check answers, or says why that frame cannot
-/// be reproduced.
-fn branch(model: &mut Model) -> Vec<Effect> {
-    let shown = model.dvr.scrub_frame();
+/// Closes the scrub and asks to branch from frame `at`, the frame it
+/// showed, raising the confirm once the disk check answers, or says why
+/// that frame cannot be reproduced.
+fn branch(model: &mut Model, at: u64) -> Vec<Effect> {
     model.dvr.close_scrub();
     model.dirty = true;
-    let text = match shown {
-        _ if model.stdin_relay => BRANCH_PIPED.to_owned(),
-        None => BRANCH_NO_FRAME.to_owned(),
-        Some(at) => match model.dvr.ask_branch(at) {
-            Ok(()) => return Vec::new(),
-            Err(BranchRefusal::Dead) => format!(
-                "view: DVR cannot branch from frame {at}: a later branch left it \
-                 behind"
-            ),
-            Err(BranchRefusal::PastLog(full)) => format!(
-                "view: DVR cannot branch from frame {at}: the input log filled at \
-                 frame {full}; raise [dvr] max_mb"
-            ),
-        },
+    if model.stdin_relay {
+        return model
+            .engine
+            .record_native_notice(BRANCH_PIPED.to_owned(), false);
+    }
+    let text = match model.dvr.ask_branch(at) {
+        Ok(()) => return Vec::new(),
+        Err(BranchRefusal::Dead) => format!(
+            "view: DVR cannot branch from frame {at}: a later branch left it \
+             behind"
+        ),
+        Err(BranchRefusal::PastLog(full)) => format!(
+            "view: DVR cannot branch from frame {at}: the input log filled at \
+             frame {full}; raise [dvr] max_mb"
+        ),
     };
     model.engine.record_native_notice(text, false)
 }
@@ -160,17 +155,17 @@ pub(super) fn close_view_surfaces(model: &mut Model) -> Vec<Effect> {
 /// Takes every key, paste and click while the scrub is open, so none
 /// reaches the engine. `None` on the live screen and for any other message.
 pub(super) fn scrub_input(model: &mut Model, msg: &Msg) -> Option<Vec<Effect>> {
-    model.dvr.scrub_frame()?;
+    let shown = model.dvr.scrub_frame()?;
     match msg {
-        Msg::Key(key) => Some(scrub_key(model, &key.notation)),
+        Msg::Key(key) => Some(scrub_key(model, &key.notation, shown)),
         Msg::Paste(_) | Msg::Mouse(_) => Some(Vec::new()),
         _ => None,
     }
 }
 
-/// Moves the scrub cursor, closes the scrub or exports the recording. Any
-/// other key does nothing.
-fn scrub_key(model: &mut Model, notation: &str) -> Vec<Effect> {
+/// Moves the scrub cursor off frame `shown`, closes the scrub, exports the
+/// recording or branches from `shown`. Any other key does nothing.
+fn scrub_key(model: &mut Model, notation: &str, shown: u64) -> Vec<Effect> {
     let step = match notation {
         "h" => ScrubStep::Frames(-1),
         "l" => ScrubStep::Frames(1),
@@ -179,7 +174,7 @@ fn scrub_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         "g" => ScrubStep::Oldest,
         "G" => ScrubStep::Newest,
         "e" => return export(model, ""),
-        "b" => return branch(model),
+        "b" => return branch(model, shown),
         "q" | "<Esc>" => {
             model.dvr.close_scrub();
             model.dirty = true;
@@ -516,7 +511,8 @@ mod tests {
             .expect("y queues the branch");
         assert_eq!(plan.at_frame, at);
         m.dvr.branched(plan.at_frame, plan.replay);
-        for msg in m.dvr.take_replay() {
+        let _ = m.takes_attach();
+        for msg in crate::update::due_replay(m) {
             let _ = update(m, msg);
         }
         for seq in m.dvr.markers().last().map_or(0, |(f, _)| *f) + 1..=upto {
@@ -535,8 +531,9 @@ mod tests {
         assert_eq!(m.dvr.dead(), std::slice::from_ref(&(7..=9)));
         assert_eq!(
             m.dvr.inputs().map(|i| i.body.to_vec()).collect::<Vec<_>>(),
-            [b"i".to_vec(), b"a".to_vec()],
-            "the log keeps what was folded before frame 6, once"
+            [b"i".to_vec(), b"a".to_vec(), vec![80, 0, 24, 0]],
+            "the log keeps what was folded before frame 6, once, then the size \
+             the branch went on at"
         );
         assert!(m.dvr.markers().iter().any(|(_, k)| *k == Marker::Branch));
         let _ = update(&mut m, invoke_msg("scrub"));
@@ -633,7 +630,11 @@ mod tests {
         let _ = update(&mut m, key("x"));
         m.dvr.note_frame(11, 2);
         branched(&mut m, 11, 11);
-        assert_eq!(m.dvr.inputs().count(), 4, "the replay is not logged twice");
+        assert_eq!(
+            m.dvr.inputs().count(),
+            5,
+            "the replay is not logged twice, and the closing size is"
+        );
         let _ = update(&mut m, invoke_msg("scrub"));
         assert!(
             m.dvr.scrub_frame().is_none(),
@@ -643,6 +644,94 @@ mod tests {
         assert!(
             m.dvr.scrub_frame().is_some(),
             "a scrub asked for afresh opens"
+        );
+    }
+
+    /// Stages a branch from frame `at` that waits for the new engine's
+    /// attach, the state between the replacement and its `VimEnter`.
+    fn staged(m: &mut Model, at: u64) {
+        m.dvr.open_scrub();
+        m.dvr.show(at);
+        let _ = update(m, key("b"));
+        checked(m, &[], false);
+        m.note_frame_painted();
+        let _ = update(m, key("y"));
+        let plan = std::iter::from_fn(|| m.dvr.take_request())
+            .find_map(|r| match r {
+                DvrRequest::Branch(plan) => Some(plan),
+                _ => None,
+            })
+            .expect("y queues the branch");
+        m.dvr.branched(plan.at_frame, plan.replay);
+        m.rearm_attach();
+    }
+
+    #[test]
+    fn a_replay_waits_for_the_attach() {
+        let mut m = recorded();
+        let _ = update(&mut m, key("x"));
+        m.dvr.note_frame(10, 2);
+        staged(&mut m, 10);
+        assert!(crate::update::due_replay(&mut m).is_empty());
+        assert!(m.dvr.has_replay());
+        let _ = m.takes_attach();
+        let replay = crate::update::due_replay(&mut m);
+        assert!(format!("{:?}", replay[0]).contains("\"x\""), "{replay:?}");
+        assert!(!m.dvr.has_replay());
+        assert!(crate::update::due_replay(&mut m).is_empty(), "once");
+    }
+
+    #[test]
+    fn keys_typed_while_a_replay_is_owed_land_after_it() {
+        let mut m = recorded();
+        let _ = update(&mut m, key("x"));
+        m.dvr.note_frame(10, 2);
+        staged(&mut m, 10);
+        let mut early = update(&mut m, key("i"));
+        early.extend(update(&mut m, Msg::Paste("p".to_owned())));
+        assert!(early.is_empty(), "{early:?}");
+        assert_eq!(
+            m.dvr.inputs().count(),
+            1,
+            "nothing typed meanwhile is logged"
+        );
+        let _ = m.takes_attach();
+        let mut sent = Vec::new();
+        for msg in crate::update::due_replay(&mut m) {
+            for effect in update(&mut m, msg) {
+                if let Effect::Rpc(RpcCall::Input { notation }) = effect {
+                    sent.push(notation);
+                }
+            }
+        }
+        assert_eq!(sent, ["x", "i"], "the replay reaches the engine first");
+        let logged: Vec<_> = m.dvr.inputs().map(|i| i.kind).collect();
+        use crate::native::dvr::InputKind;
+        assert_eq!(
+            logged,
+            [
+                InputKind::Key,
+                InputKind::Resized,
+                InputKind::Key,
+                InputKind::Paste
+            ],
+            "the log reads in the order the engine got them"
+        );
+    }
+
+    #[test]
+    fn a_replayed_verb_that_never_fires_leaves_no_verb_swallowed() {
+        let mut m = recorded();
+        let _ = update(&mut m, invoke_msg("scrub"));
+        let _ = update(&mut m, key("q"));
+        let _ = update(&mut m, key("x"));
+        m.dvr.note_frame(10, 2);
+        branched(&mut m, 10, 10);
+        let _ = update(&mut m, key("j"));
+        let _ = update(&mut m, invoke_msg("scrub"));
+        assert!(
+            m.dvr.scrub_frame().is_some(),
+            "a scrub asked for after the replay settled opens"
         );
     }
 }

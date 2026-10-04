@@ -1312,7 +1312,9 @@ fn main() -> Result<()> {
         .with_tree_icons(resolved.ui.tree_icons.value)
         .with_tile_titles(resolved.ui.tile_titles.value.clone());
     if resolved.tables.dvr.enabled {
-        model.dvr.enable(resolved.tables.dvr.max_bytes());
+        model
+            .dvr
+            .enable_at(resolved.tables.dvr.max_bytes(), (width, height));
     }
     // whether a `:View ui panes` flip derives `[native] tabline` again, or
     // leaves the value the user spelled where they put it

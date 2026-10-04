@@ -886,6 +886,12 @@ mod tests {
         let mut model = Model::with_term_size(80, 24);
         model.cwd = dir.path().to_path_buf();
         let mut dvr = recorded(&mut model);
+        for notation in ["i", "a", "<Esc>"] {
+            let key = Msg::Key(Key {
+                notation: notation.to_owned(),
+            });
+            let _ = update(&mut model, key);
+        }
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
         dvr.io = Some(io::start(LoopSender::new(tx), false).unwrap());
         export(&mut model, &mut dvr, "a.vdvr");
@@ -910,8 +916,10 @@ mod tests {
             }),
         );
         let _ = dvr.poll(&mut model);
-        assert!(dvr.take_branch().is_some(), "the loop carries the branch");
+        let plan = dvr.take_branch().expect("the loop carries the branch");
         assert!(dvr.take_branch().is_none(), "once");
+        model.dvr.branched(plan.at_frame, plan.replay);
+        assert_eq!(model.dvr.inputs().count(), 0, "the branch cut the log");
         let reply = std::iter::from_fn(|| {
             rx.recv_timeout(view_test_support::host_deadline(QUIT_WAIT))
                 .ok()
@@ -924,5 +932,7 @@ mod tests {
         );
         let written = std::fs::read(dir.join("a.vdvr")).unwrap();
         assert_eq!(&written[..10], b"VIEWDVR\0\x01\x00");
+        let clip = clip::read::decode(&mut written.as_slice(), MAX).unwrap();
+        assert_eq!(clip.inputs.len(), 3, "the clip holds the log as queued");
     }
 }

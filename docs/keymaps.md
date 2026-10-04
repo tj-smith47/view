@@ -849,8 +849,8 @@ disk since recording began, which the fresh editor reads as they are now.
 Replay brings back what you typed. A timer, a language server reply or a
 key that waited on `timeoutlen` can land differently the second time. The
 frames after the branch point stay in the recording and cannot be branched
-from. `b` is refused while view reads piped input. `:View dvr branch` does
-the same from the frame the scrub shows.
+from. `b` is refused while view reads piped input. Keys you press while the
+fresh editor starts are typed after the replay.
 
 `e` writes `view-dvr-<seconds>.vdvr` in the directory view was started in.
 `:View dvr export PATH` writes to PATH, read as `:w` reads a file name: `~`

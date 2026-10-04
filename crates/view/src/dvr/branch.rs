@@ -8,9 +8,10 @@ use crate::recovery::{replace_engine, Bound, LoopChannels, Restarted};
 use crate::startup::AttachFailure;
 
 /// Stops `engine` and replaces it with one opening the launch's files,
-/// staging the recorded input `plan` replays. The model is settled either
-/// way: the input log ends at the branch point, and the frames after it
-/// can no longer be branched from.
+/// staging the recorded input `plan` replays. Once the replacement starts,
+/// the input log ends at the branch point and the frames after it can no
+/// longer be branched from. A replacement that fails leaves the recording
+/// as it was.
 ///
 /// # Latency
 ///
@@ -35,12 +36,11 @@ pub(crate) fn replace(
     // and the replacement would otherwise offer to recover each one
     let _ = engine.wait_exit();
     let fresh = replace_engine(engine, respawn, model, channels, bound, &[]);
-    let replay = if fresh.is_ok() {
-        plan.replay
+    if fresh.is_ok() {
+        model.dvr.branched(plan.at_frame, plan.replay);
     } else {
-        Vec::new()
-    };
-    model.dvr.branched(plan.at_frame, replay);
+        model.dvr.branch_failed();
+    }
     fresh
 }
 
@@ -89,7 +89,7 @@ mod tests {
             };
             let mut model = Model::with_term_size(80, 24);
             model.attach_surfaces(view_core::native::ext::shipped_multigrid());
-            model.dvr.enable(1 << 20);
+            model.dvr.enable_at(1 << 20, (80, 24));
             Self {
                 rx,
                 channels,
@@ -129,10 +129,8 @@ mod tests {
                     };
                     self.dispatch(executor, msg);
                 }
-                if self.model.dvr.has_replay() && !self.model.awaits_attach() {
-                    for msg in self.model.dvr.take_replay() {
-                        self.dispatch(executor, msg);
-                    }
+                for msg in view_core::update::due_replay(&mut self.model) {
+                    self.dispatch(executor, msg);
                 }
                 if done(self, engine) {
                     return;
@@ -199,6 +197,28 @@ mod tests {
             at: u64,
             done: impl FnMut(&mut Self, &Engine) -> bool,
         ) -> Restarted {
+            let fresh = self
+                .start_branch(engine, respawn, bound, at)
+                .expect("the replacement starts");
+            self.settle(
+                &fresh.engine,
+                &fresh.pump,
+                &fresh.executor,
+                "the branch replays",
+                done,
+            );
+            fresh
+        }
+
+        /// Confirms a branch from frame `at` and replaces the engine as
+        /// the loop does, returning before the replacement's `VimEnter`.
+        fn start_branch(
+            &mut self,
+            engine: &mut Engine,
+            respawn: &dyn Fn(&[String]) -> EngineConfig,
+            bound: Bound<'_>,
+            at: u64,
+        ) -> Result<Restarted, AttachFailure> {
             let scrub = Msg::FeatureInvoke {
                 generation: None,
                 feature: "dvr".to_owned(),
@@ -232,8 +252,13 @@ mod tests {
                 &self.channels,
                 bound,
                 plan,
-            )
-            .expect("the replacement starts");
+            )?;
+            Ok(self.cut_over(fresh))
+        }
+
+        /// Hands a replacement what its startup staged, as the loop does
+        /// once an engine has been replaced.
+        fn cut_over(&mut self, fresh: Restarted) -> Restarted {
             self.native.rebind(fresh.engine.api_info.channel_id);
             let mut follow_ups = FollowUps {
                 native: &mut self.native,
@@ -251,7 +276,7 @@ mod tests {
                 },
             );
             assert!(matches!(outcome, crate::startup::CutoverOutcome::Continue));
-            let fresh = Restarted {
+            Restarted {
                 staged: crate::startup::CutoverInput {
                     presink: Vec::new(),
                     pending_redraw: Vec::new(),
@@ -259,15 +284,7 @@ mod tests {
                     keys: Vec::new(),
                 },
                 ..fresh
-            };
-            self.settle(
-                &fresh.engine,
-                &fresh.pump,
-                &fresh.executor,
-                "the branch replays",
-                done,
-            );
-            fresh
+            }
         }
     }
 
@@ -345,7 +362,11 @@ mod tests {
             [Vec::<String>::new()],
             "the launch's files"
         );
-        assert_eq!(rig.model.dvr.inputs().count(), hello.len(), "logged once");
+        assert_eq!(
+            rig.model.dvr.inputs().count(),
+            hello.len() + 2,
+            "the launch size, the keys once and the closing size"
+        );
         assert_eq!(
             rig.model.dvr.dead(),
             std::slice::from_ref(&(at + 1..=rig.frames))
@@ -442,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_opens_the_surfaces_a_launch_opens() {
+    fn branch_closes_the_surfaces_opened_after_the_frame() {
         let scratch = view_test_support::ScratchDir::new("dvr-branch-tree").unwrap();
         let mut rig = Rig::new();
         rig.model.cwd = scratch.path().to_path_buf();
@@ -478,5 +499,117 @@ mod tests {
         assert!(!tree_open, "the tree opened after the frame stays closed");
         assert_eq!(rig.model.focus(), Focus::Engine);
         assert!(rig.model.surfaces.take_reopen().is_empty());
+    }
+
+    #[test]
+    fn a_key_typed_while_the_branch_starts_lands_after_the_replay() {
+        let mut rig = Rig::new();
+        let respawn = |_: &[String]| EngineConfig::isolated();
+        let (mut engine, pump, route, ai_route, executor) = rig.launch(EngineConfig::isolated());
+        let mut hello = keys(&["i"]);
+        hello.extend(chars("hello"));
+        hello.push("<Esc>".to_owned());
+        typed(&mut rig, &executor, &hello);
+        rig.settle(&engine, &pump, &executor, "the session types", |_, e| {
+            line(e, 1) == "hello" && eval(e, "mode()") == "n"
+        });
+
+        let mut fresh = rig
+            .start_branch(
+                &mut engine,
+                &respawn,
+                (&route, &ai_route, &executor),
+                rig.frames,
+            )
+            .expect("the replacement starts");
+        assert!(
+            rig.model.dvr.has_replay(),
+            "the key below is typed while the replay is owed"
+        );
+        typed(&mut rig, &fresh.executor, &keys(&["i"]));
+        rig.settle(
+            &fresh.engine,
+            &fresh.pump,
+            &fresh.executor,
+            "the replay runs, then the key",
+            |_, e| line(e, 1) == "hello" && eval(e, "mode()") == "i",
+        );
+        let mut more = chars("X");
+        more.push("<Esc>".to_owned());
+        typed(&mut rig, &fresh.executor, &more);
+        rig.settle(
+            &fresh.engine,
+            &fresh.pump,
+            &fresh.executor,
+            "the branch types",
+            |_, e| line(e, 1) == "hellXo" && eval(e, "mode()") == "n",
+        );
+
+        let at = rig.frames;
+        let _again = rig.branch(
+            &mut fresh.engine,
+            &respawn,
+            (&route, &ai_route, &fresh.executor),
+            at,
+            |_, e| line(e, 1) == "hellXo" && eval(e, "mode()") == "n",
+        );
+    }
+
+    #[test]
+    fn a_branch_that_cannot_start_leaves_the_recording_as_it_was() {
+        use view_core::native::dvr::Marker;
+        let tries = std::cell::Cell::new(0);
+        let respawn = |_: &[String]| {
+            tries.set(tries.get() + 1);
+            if tries.get() == 1 {
+                EngineConfig::isolated().with_nvim_bin("/nonexistent/nvim")
+            } else {
+                EngineConfig::isolated()
+            }
+        };
+        let mut rig = Rig::new();
+        let (mut engine, pump, route, ai_route, executor) = rig.launch(EngineConfig::isolated());
+        typed(&mut rig, &executor, &keys(&["i", "a", "<Esc>"]));
+        let at = rig.frames;
+        typed(&mut rig, &executor, &keys(&["x"]));
+        rig.settle(&engine, &pump, &executor, "the session types", |_, e| {
+            line(e, 1).is_empty()
+        });
+        let logged = rig.model.dvr.inputs().count();
+
+        let failed = rig.start_branch(&mut engine, &respawn, (&route, &ai_route, &executor), at);
+        assert!(matches!(failed, Err(AttachFailure::Spawn(_))));
+        let dvr = &rig.model.dvr;
+        assert_eq!(dvr.inputs().count(), logged, "the log is not cut");
+        assert!(
+            dvr.dead().is_empty(),
+            "every frame can still be branched from"
+        );
+        assert!(dvr.markers().iter().all(|(_, m)| *m != Marker::Branch));
+        assert!(!dvr.is_branching() && !dvr.has_replay());
+
+        // the restart the loop runs after a failed branch
+        let back = crate::recovery::restart_engine(
+            &mut engine,
+            &respawn,
+            &mut rig.model,
+            &rig.channels,
+            (&route, &ai_route, &executor),
+        )
+        .expect("an engine comes back");
+        let back = rig.cut_over(back);
+        rig.settle(
+            &back.engine,
+            &back.pump,
+            &back.executor,
+            "the restarted engine answers",
+            |_, e| answers(e),
+        );
+        assert!(rig
+            .model
+            .dvr
+            .markers()
+            .iter()
+            .any(|(_, m)| *m == Marker::EngineRestart));
     }
 }

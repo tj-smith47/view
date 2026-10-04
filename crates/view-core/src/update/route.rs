@@ -328,8 +328,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                     model.pop_focused_overlay();
                     model.dirty = true;
                     if go {
-                        let size = (model.term_width, model.term_height);
-                        model.dvr.confirm_branch(at, size);
+                        model.dvr.confirm_branch(at);
                     }
                     return Vec::new();
                 }

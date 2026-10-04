@@ -140,6 +140,18 @@ pub fn prepare_branch(model: &mut Model) -> Vec<Effect> {
     effects
 }
 
+/// The messages a branch's replay folds now: none until the replacement's
+/// `VimEnter` has attached it, since the takeover there holds each key it
+/// maps until the mapping is in place, then the replay, once.
+#[must_use]
+pub fn due_replay(model: &mut Model) -> Vec<Msg> {
+    if !model.dvr.has_replay() || model.awaits_attach() {
+        return Vec::new();
+    }
+    let size = (model.term_width, model.term_height);
+    model.dvr.take_replay(size)
+}
+
 /// Adds what a launch handed to view (the features it draws, the user keys
 /// it maps) to the launch's one notice, returning what raising it owes the
 /// executor.
@@ -165,6 +177,12 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // mapping
     if let Some(effects) = dvr::scrub_input(model, &msg) {
         return effects;
+    }
+    // the replacement runs its typeahead after `VimEnter`, so a key sent
+    // now would run ahead of the replay that comes after it
+    if model.dvr.has_replay() && matches!(msg, Msg::Key(_) | Msg::Paste(_) | Msg::Mouse(_)) {
+        model.dvr.hold_live(msg);
+        return Vec::new();
     }
     let Some(msg) = model.submit_hold.hold(msg) else {
         return Vec::new();
