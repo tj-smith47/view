@@ -953,8 +953,17 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
     let mut answers_input = false;
     let mut refused = false;
     let mut mode_last = false;
-    for ev in redraw {
+    let (mut flush_error, mut flush_mode) = (false, false);
+    // nvim writes a flush's mode report after every error in it, whatever
+    // order the keys ran in, so only a later flush orders the two
+    for ev in redraw.iter().chain([&UiEvent::Flush]) {
         match ev {
+            UiEvent::Flush => {
+                if flush_error || flush_mode {
+                    mode_last = !flush_error;
+                }
+                (flush_error, flush_mode) = (false, false);
+            }
             UiEvent::GridCursorGoto { grid, .. } => {
                 // a command waiting on its argument is finished by a cursor
                 // move wherever nvim addressed one
@@ -965,7 +974,7 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
             UiEvent::ModeChange { .. } => {
                 settled = true;
                 answers_input = true;
-                mode_last = true;
+                flush_mode = true;
             }
             UiEvent::CmdlineShow { .. } => {
                 shows_cmdline = true;
@@ -986,7 +995,7 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
             UiEvent::MsgShow { kind, .. } if kind == "emsg" => {
                 answers_input = true;
                 refused = true;
-                mode_last = false;
+                flush_error = true;
             }
             _ => {}
         }
@@ -994,12 +1003,13 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
     if refused {
         model.submit_hold.note_refused();
     }
-    // a report ahead of the error answered a key before the refused one
     if mode_last {
         model.submit_hold.note_mode_after_errors();
     }
     if answers_input {
-        model.submit_hold.note_input_answered();
+        let trips = model.engine.key_round_trips.iter().flatten();
+        let shortest = trips.min().copied().unwrap_or_default();
+        model.submit_hold.note_input_answered(now, shortest);
         if let Some(sent) = model.engine.key_unanswered.take() {
             // the one write site, so the read in `cmdline_backstop` is the
             // only place the window's shape is known

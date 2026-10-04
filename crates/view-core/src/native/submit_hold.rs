@@ -40,11 +40,12 @@ const LEAVES_NORMAL: [&str; 25] = [
 
 /// The keys that leave normal mode as the argument of the key before
 /// them: `gi`, `gv` and `gn` enter insert and visual, and the `g` and `z`
-/// operators (nvim's default `gc` among them) wait for a motion.
+/// operators (nvim's default `gc` and the `zy` yank among them) wait for a
+/// motion.
 /// A `gn` or `gN` with no search pattern stays in normal mode, so no mode
 /// report clears the doubt it raised, and a view key typed after it is
 /// not recognised until the next mode change.
-const LEAVES_NORMAL_AFTER: [(&str, &str); 19] = [
+const LEAVES_NORMAL_AFTER: [(&str, &str); 20] = [
     ("g", "n"),
     ("g", "N"),
     ("g", "c"),
@@ -64,6 +65,7 @@ const LEAVES_NORMAL_AFTER: [(&str, &str); 19] = [
     ("g", "w"),
     ("g", "@"),
     ("z", "f"),
+    ("z", "y"),
 ];
 
 /// What armed a standing hold.
@@ -333,11 +335,9 @@ pub struct SubmitHold {
     /// Every key folded while it stands spells a sequence whatever the
     /// keys before it.
     doubt: Option<bool>,
-    /// Whether nvim reads the next normal-mode key behind an operator or a
-    /// visual-mode key, where an `i` or `a` names a text object.
-    object_next: bool,
-    /// Whether the `i` or `a` in `argument_of` names a text object.
-    argument_object: bool,
+    /// When the first key sent after the error went to nvim, where the
+    /// host stamped it.
+    doubt_sent: Option<SpecStamp>,
     /// Keys a surface of view's own is holding while they spell the start
     /// of a mapped sequence.
     sequence: Vec<String>,
@@ -719,10 +719,14 @@ impl SubmitHold {
         }
     }
 
-    /// Stamps a line end folded from the key now going to nvim at `now`.
+    /// Stamps a line end folded from the key now going to nvim at `now`,
+    /// and the first key sent after an error that raised a doubt.
     pub(crate) fn note_key_sent(&mut self, now: SpecStamp) {
         if std::mem::take(&mut self.end_unsent) {
             self.ended_at = Some(now);
+        }
+        if self.doubt == Some(true) && self.doubt_sent.is_none() {
+            self.doubt_sent = Some(now);
         }
     }
 
@@ -883,15 +887,12 @@ impl SubmitHold {
     /// the key that left normal mode included. A hold armed in error
     /// because of it ends on the mode report.
     ///
-    /// It ends the doubt an error raised once a key typed after the error
-    /// has gone out and no key's argument is owed: until then the batch may
-    /// answer the refused key, and the key owed an argument may be one nvim
-    /// never read as taking it.
-    pub(crate) fn note_input_answered(&mut self) {
+    /// It may end the doubt an error raised, as `typed_ahead::settle_doubt`
+    /// states, the batch arriving at `now` with `shortest` the shortest
+    /// round trip read.
+    pub(crate) fn note_input_answered(&mut self, now: SpecStamp, shortest: Duration) {
         self.mode_unsure = false;
-        if self.doubt == Some(true) && self.argument_of.is_none() {
-            self.doubt = None;
-        }
+        typed_ahead::settle_doubt(self, now, shortest);
         self.log.note_answered();
     }
 
@@ -899,29 +900,19 @@ impl SubmitHold {
     /// every key in the window and every key folded until it ends. The
     /// error may answer any key still in flight, and whether a key before
     /// it left normal mode or took the next as its argument is a guess the
-    /// error can falsify.
-    ///
-    /// A refused key that leaves normal mode, `i` in a buffer that cannot
-    /// be edited, waits for no argument. The argument a literal key such as
-    /// `f` waits for is still owed, and so is the text object an `i` typed
-    /// behind an operator names (the `"` of `di"`), which nvim never refuses
-    /// by itself.
+    /// error can falsify. The doubt covers every key until nothing is owed,
+    /// so no argument is read as owed past the error.
     pub(crate) fn note_refused(&mut self) {
         self.doubt = Some(false);
+        self.doubt_sent = None;
         for folded in &mut self.recent {
             folded.doubt = true;
         }
-        if !self.argument_object
-            && self
-                .argument_of
-                .is_some_and(|key| LEAVES_NORMAL.contains(&key))
-        {
-            self.argument_of = None;
-        }
+        self.argument_of = None;
     }
 
-    /// Ends the doubt an error raised: nvim reported a mode after every
-    /// error it sent.
+    /// Ends the doubt an error raised: nvim reported a mode in a flush
+    /// after the one that carried the error.
     pub(crate) fn note_mode_after_errors(&mut self) {
         self.doubt = None;
     }

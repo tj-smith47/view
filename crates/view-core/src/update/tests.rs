@@ -22089,7 +22089,8 @@ const OPERATOR_MAPPINGS: [&str; 11] = [
 
 /// The keys before an error nvim answered, and the user's mappings read
 /// where the keys need them, each followed by view's key and a query.
-fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 8] {
+/// The last two type a jump after the error, every key of it answered.
+fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 10] {
     let answered = |keys: &[&'static str]| {
         let mut steps: Vec<Step> = keys.iter().map(|key| k(key)).collect();
         steps.extend([Step::Answer, k("i"), Step::Error]);
@@ -22098,6 +22099,10 @@ fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 8] {
     let quoted = |keys: &[&'static str]| {
         let mut steps = answered(keys);
         steps.push(k("\""));
+        steps
+    };
+    let jumped = |mut steps: Vec<Step>| {
+        steps.extend([k("f"), Step::Answer, k("m"), Step::Answer]);
         steps
     };
     [
@@ -22109,6 +22114,18 @@ fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 8] {
         (answered(&["g", "h"]), &[]),
         (quoted(&["d"]), &OPERATOR_MAPPINGS),
         (quoted(&["z", "y"]), &[]),
+        (jumped(answered(&["y", "y"])), &[]),
+        (
+            jumped(vec![
+                k("d"),
+                Step::Answer,
+                k("i"),
+                Step::Error,
+                k("\""),
+                Step::Answer,
+            ]),
+            &OPERATOR_MAPPINGS,
+        ),
     ]
 }
 
@@ -22213,12 +22230,84 @@ fn a_mode_report_ahead_of_an_error_in_one_batch_keeps_the_doubt() {
     assert_eq!(sent, ["y", "y", "i", " ", "f", "f"]);
 }
 
-/// Keys typed after the doubt has ended are read from what the error left
-/// owed. An `i` refused behind `o` owes nothing, so `f` takes `m` and view's
-/// key is free. An `i` behind `d` names a text object, so it takes `f`, `m`
-/// takes `t` and view's key is free. Every key is answered.
+/// nvim writes the mode report of a flush after every error in it, so an
+/// error and a mode report in one flush leave the doubt standing, and a
+/// report the next flush carries ends it. View's key typed as `f`'s
+/// argument arms the hold only while the doubt stands.
 #[test]
-fn keys_after_an_errors_doubt_read_what_the_error_left_owed() {
+fn a_mode_report_in_the_errors_own_flush_keeps_the_doubt() {
+    let error = UiEvent::MsgShow {
+        kind: "emsg".to_string(),
+        content: vec![(0, "E21: Cannot make changes".to_string())],
+        replace_last: false,
+    };
+    let mode = UiEvent::ModeChange {
+        mode: "normal".to_string(),
+        mode_idx: 0,
+    };
+    let one = vec![error.clone(), mode.clone(), UiEvent::Flush];
+    let two = vec![error, UiEvent::Flush, mode, UiEvent::Flush];
+    for (batch, holds) in [(one, true), (two, false)] {
+        let mut m = hold_model(false, false);
+        let _ = update(&mut m, self::key("i"));
+        let _ = engine_batch(&mut m, batch.clone());
+        for key in ["f", " ", "f", "f"] {
+            let _ = update(&mut m, self::key(key));
+        }
+        assert_eq!(m.submit_hold.is_holding(), holds, "{batch:?}");
+    }
+}
+
+/// The doubt ends only on an answer that can be one to a key typed after
+/// the error: a batch arriving sooner after that key than the shortest
+/// round trip view has read answers a key in flight before it, and leaves
+/// the doubt standing.
+#[test]
+fn an_answer_to_a_key_sent_before_the_error_keeps_the_doubt() {
+    fn send(m: &mut Model, key: &str, at: Duration) {
+        let _ = update(m, self::key(key));
+        let input = RpcCall::Input {
+            notation: key.to_string(),
+        };
+        crate::native::speculate::fold_engine_call(m, &input, SpecStamp::new(at));
+    }
+    fn batch(m: &mut Model, events: Vec<UiEvent>, at: Duration) {
+        let _ = crate::native::speculate::fold_redraw(m, &events, SpecStamp::new(at));
+        let _ = update(m, Msg::Redraw(events));
+    }
+    let trip = Duration::from_millis(40);
+    for (after, holds) in [(trip / 40, true), (trip * 2, false)] {
+        let mut m = hold_model(false, false);
+        round_trips(&mut m, 40, 40);
+        let error = UiEvent::MsgShow {
+            kind: "emsg".to_string(),
+            content: vec![(0, "E21: Cannot make changes".to_string())],
+            replace_last: false,
+        };
+        send(&mut m, "i", Duration::ZERO);
+        batch(&mut m, vec![error, UiEvent::Flush], trip);
+        send(&mut m, "j", trip * 2);
+        let grid = m.engine.grids().cursor_local().0 .0;
+        let answer = UiEvent::GridCursorGoto {
+            grid,
+            row: 0,
+            col: 0,
+        };
+        batch(&mut m, vec![answer, UiEvent::Flush], trip * 2 + after);
+        for key in ["f", " ", "f", "f"] {
+            let _ = update(&mut m, self::key(key));
+        }
+        assert_eq!(m.submit_hold.is_holding(), holds, "{after:?} after j");
+    }
+}
+
+/// The doubt covers every key until nothing is owed, so the keys after an
+/// error are never read from a guess at what the error left owed. After
+/// `o i` and after `d i`, `f` owes, `m` is its argument and view's key
+/// folds while the doubt stands, `t` owing in between for `d i`. Every key
+/// is answered.
+#[test]
+fn keys_after_an_error_stay_in_doubt_until_nothing_is_owed() {
     let query = [" ", "f", "f", "m", "a", "i", "n"].map(k);
     for prefix in [
         &[k("o"), k("i"), Step::Error, k("f"), k("m")][..],
@@ -22274,6 +22363,43 @@ fn a_hold_armed_in_doubt_releases_within_its_bound_in_order() {
 fn the_hold_decides_what_it_was_recorded_deciding() {
     fn row(held: bool, sent: &[&str]) -> (bool, Vec<String>) {
         (held, sent.iter().map(|key| (*key).to_string()).collect())
+    }
+    let typed = |keys: &[&str]| -> Trace { keys.iter().map(|key| row(false, &[key])).collect() };
+    // the sequences traced against a live nvim: the keys before an error,
+    // the keys after it, view's key armed or not, then the query
+    let query = ["m", "a", "i", "n"];
+    let errored = |before: &[&'static str], after: &[&'static str]| -> (Vec<Step>, Trace) {
+        let mut steps: Vec<Step> = before.iter().map(|key| k(key)).collect();
+        steps.push(Step::Error);
+        steps.extend(after.iter().chain(&["f"]).chain(&query).map(|key| k(key)));
+        let mut rows = typed(before);
+        rows.push(row(false, &[]));
+        rows.extend(typed(after));
+        rows.push(row(true, &["f"]));
+        rows.extend([
+            row(true, &[]),
+            row(true, &[]),
+            row(true, &[]),
+            row(true, &[]),
+        ]);
+        rows.push(row(false, &query));
+        (steps, rows)
+    };
+    let mut jump = vec![k("i"), Step::Error, k("j"), Step::Answer];
+    jump.extend(["f", " ", "f", "f", "m"].map(k));
+    let mut jumped = typed(&["i"]);
+    jumped.extend([row(false, &[]), row(false, &["j"]), row(false, &[])]);
+    jumped.extend(typed(&["f", " ", "f", "f", "m"]));
+    let yanked = ["z", "y", " ", "f", "f", "m", "a", "i", "n"];
+    let traced = [
+        errored(&["o", "i"], &["f", "m", " ", "f"]),
+        errored(&["d", "i"], &["f", "m", "t", " ", "f"]),
+        (jump, jumped),
+        (yanked.map(k).to_vec(), typed(&yanked)),
+    ];
+    for (steps, want) in traced {
+        let trace = hold_trace(&mut hold_model(true, true), &steps, false, false);
+        assert_eq!(trace, want, "{steps:?}");
     }
     let cases: [(&[Step], Trace); 11] = [
         (
@@ -22493,7 +22619,16 @@ fn the_hold_decides_what_it_was_recorded_deciding() {
         rows.push(row(false, &["\""]));
         rows
     };
-    let prefixes: [Trace; 8] = [
+    let jumped = |mut rows: Trace| -> Trace {
+        rows.extend([
+            row(false, &["f"]),
+            row(false, &[]),
+            row(false, &["m"]),
+            row(false, &[]),
+        ]);
+        rows
+    };
+    let prefixes: [Trace; 10] = [
         answered(&["y", "y"]),
         answered(&["d", "d"]),
         answered(&[">", ">"]),
@@ -22508,6 +22643,15 @@ fn the_hold_decides_what_it_was_recorded_deciding() {
         answered(&["g", "h"]),
         quoted(&["d"]),
         quoted(&["z", "y"]),
+        jumped(answered(&["y", "y"])),
+        jumped(vec![
+            row(false, &["d"]),
+            row(false, &[]),
+            row(false, &["i"]),
+            row(false, &[]),
+            row(false, &["\""]),
+            row(false, &[]),
+        ]),
     ];
     for ((prefix, mappings), mut want) in errored_prefixes().into_iter().zip(prefixes) {
         let mut steps = prefix.clone();

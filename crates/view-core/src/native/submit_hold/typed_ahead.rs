@@ -17,9 +17,11 @@
 //! each lhs.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
-use super::{canonical, Folded, LEAVES_NORMAL, LEAVES_NORMAL_AFTER};
+use super::{canonical, Folded, SubmitHold, LEAVES_NORMAL, LEAVES_NORMAL_AFTER};
 use crate::model::Model;
+use crate::native::speculate::SpecStamp;
 
 /// Whether `notation` completes one of the invoking keys, typed in normal
 /// mode, where those keys are mapped.
@@ -64,7 +66,6 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     // here to mark the mode unsure
     if !normal || longest == 0 || hold.typed.is_some() {
         hold.recent.clear();
-        hold.object_next = false;
         return false;
     }
     let key = canonical(notation);
@@ -76,16 +77,11 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
                 .find(|literal| *literal == notation)
         })
         .flatten();
-    hold.argument_object = hold.object_next && matches!(hold.argument_of, Some("i" | "a"));
     let mode_unsure = hold.mode_unsure;
     let leaves = leaves_normal(argument_of, &key);
     // nvim matches a mapping before it reads a key as an argument, so the
     // key after one of the user's may start a sequence
     let argument = argument_of.is_some() && !in_user_keys(&hold.recent, &hold.user_keys);
-    let follows = object_follows(argument_of, &key);
-    // a count typed behind an operator leaves it waiting for its motion
-    let digit = |key: &str| key.len() == 1 && key.bytes().all(|b| b.is_ascii_digit());
-    let count = digit(&key) && (key != "0" || hold.recent.back().is_some_and(|f| digit(&f.key)));
     while hold.recent.len() >= longest.max(hold.user_longest) {
         hold.recent.pop_front();
     }
@@ -95,13 +91,7 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         mode_unsure,
         doubt: hold.doubt.is_some(),
     });
-    let left = leaves && !in_user_keys(&hold.recent, &hold.user_keys);
-    hold.mode_unsure |= left;
-    hold.object_next = if left {
-        follows
-    } else {
-        count && hold.object_next
-    };
+    hold.mode_unsure |= leaves && !in_user_keys(&hold.recent, &hold.user_keys);
     let recent = &hold.recent;
     let complete = hold.invoke_keys.iter().any(|invocation| {
         let keys = &invocation.keys;
@@ -121,34 +111,27 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         hold.recent.clear();
         hold.argument_of = None;
         hold.mode_unsure = false;
-        hold.object_next = false;
     }
     complete
 }
 
-/// Whether an `i` or `a` typed after `key`, a key that leaves normal mode
-/// as the argument of `before` or of nothing, names a text object: `key`
-/// is an operator or a visual-mode key, and opens no insert, replace or
-/// command-line mode.
-fn object_follows(before: Option<&str>, key: &str) -> bool {
-    match before {
-        None => !matches!(
-            key,
-            ":" | "/"
-                | "?"
-                | "o"
-                | "O"
-                | "a"
-                | "A"
-                | "i"
-                | "I"
-                | "s"
-                | "S"
-                | "C"
-                | "R"
-                | "<Insert>"
-        ),
-        Some(before) => !matches!((before, key), ("g", "i" | "I" | "R" | "Q")),
+/// Ends the doubt an error raised once the newest key neither owes an
+/// argument nor was read as one. At such a key nvim and view agree nothing
+/// is owed, whichever way either read the keys before it, and every one of
+/// those keys spells a sequence.
+///
+/// The answering batch, arriving at `now`, has to be one that can answer a
+/// key typed after the error. One sooner than `shortest`, the shortest
+/// round trip read, after the first key sent since the error answers a key
+/// sent before it.
+pub(super) fn settle_doubt(hold: &mut SubmitHold, now: SpecStamp, shortest: Duration) {
+    let answers_sent = hold
+        .doubt_sent
+        .is_none_or(|sent| now.age_since(sent) >= shortest);
+    let newest = hold.recent.back();
+    let settled = hold.argument_of.is_none() && !newest.is_some_and(|key| key.argument);
+    if hold.doubt == Some(true) && answers_sent && settled {
+        hold.doubt = None;
     }
 }
 

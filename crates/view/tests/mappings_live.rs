@@ -1107,6 +1107,56 @@ fn keys_typed_ahead_after_a_refused_insert_reach_the_picker() {
     assert_eq!(query.as_deref(), Some("main"));
 }
 
+/// A read-only buffer, `yyi` refused, then a jump `fm` with each key
+/// answered before the next, and view's key and a query typed at once: the
+/// query waits for view's invocation and reaches the picker.
+#[test]
+fn a_jump_typed_after_a_refused_insert_keeps_the_query_for_the_picker() {
+    let session = Session::start_with(
+        "typed-ahead-refused-jump",
+        "vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'foo' })\n\
+         vim.bo.modifiable = false\n",
+    );
+    let mut model = registered_model(&session);
+    let _ = type_into(&session, &mut model, &["y", "y", "i"]);
+    let refused = |events: &[UiEvent]| {
+        events
+            .iter()
+            .any(|event| matches!(event, UiEvent::MsgShow { kind, .. } if kind == "emsg"))
+    };
+    pump(&session, &mut model, ARRIVAL, |_, msg| {
+        matches!(msg, Msg::Redraw(events) if refused(events)).then_some(())
+    })
+    .expect("nvim refuses the i");
+    let answers = |events: &[UiEvent]| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UiEvent::MsgShowcmd { .. }
+                    | UiEvent::GridCursorGoto { .. }
+                    | UiEvent::ModeChange { .. }
+            )
+        })
+    };
+    for key in ["f", "m"] {
+        let _ = type_into(&session, &mut model, &[key]);
+        pump(&session, &mut model, ARRIVAL, |_, msg| {
+            matches!(msg, Msg::Redraw(events) if answers(events)).then_some(())
+        })
+        .unwrap_or_else(|| panic!("nvim answers {key}"));
+    }
+    let keys = [",", "f", "f", "m", "a", "i", "n"];
+    let sent = type_into(&session, &mut model, &keys);
+    pump(&session, &mut model, ARRIVAL, |_, msg| {
+        matches!(msg, Msg::FeatureInvoke { .. }).then_some(())
+    })
+    .expect("nvim runs view's <leader>ff");
+    assert_eq!(sent, keys[..3], "the query waits for view's invocation");
+    assert_eq!(session.eval("join(getline(1, '$'), '|')"), "foo");
+    let query = model.picker_mut().map(|picker| picker.query().to_string());
+    assert_eq!(query.as_deref(), Some("main"));
+}
+
 /// A stub that maps the real handler over itself and types its keys again
 /// logs one row for one press, naming the stub.
 #[test]
