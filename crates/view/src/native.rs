@@ -177,7 +177,8 @@ pub(crate) struct NativeSession {
     /// carries `default_maps()`'s own compile-time `lhs`, which
     /// [`MappingSpec::lhs`](view_core::native::mappings::MappingSpec)'s
     /// `Cow<'static, str>` lets this override without leaking a `Box`.
-    ui_keys_lhs: (String, String, String),
+    /// The fourth is `[keys] dvr_scrub`, registered under `dvr scrub`.
+    ui_keys_lhs: (String, String, String, String),
     /// `[keys] profile`, resolved once at startup: what `Stage::ProfileFlip`
     /// falls back to when `model.key_profile_override` is `None`, i.e. a
     /// flip back to `"auto"`.
@@ -470,6 +471,7 @@ impl NativeSession {
             resolved.keys.gaps_lhs().to_string(),
             resolved.keys.cycle_lhs().to_string(),
             resolved.keys.key_log_lhs().to_string(),
+            resolved.keys.dvr_lhs().to_string(),
         );
         // read once here, before the loop, so a channel report looks the
         // key up in memory and the record is touched only to add one
@@ -912,11 +914,12 @@ impl NativeSession {
         // fresh mapping where it should hold nothing, and a later reissue
         // read that snapshot back as a user mapping view had taken.
         if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
-            let (gaps_lhs, cycle_lhs, log_lhs) = &self.ui_keys_lhs;
+            let (gaps_lhs, cycle_lhs, log_lhs, dvr_lhs) = &self.ui_keys_lhs;
             let overrides = [
                 ("ui", "gaps", gaps_lhs),
                 ("ui", "cycle_surfaces", cycle_lhs),
                 ("keys", "log", log_lhs),
+                ("dvr", "scrub", dvr_lhs),
             ];
             for spec in specs.iter_mut() {
                 for (feature, verb, lhs) in overrides {
@@ -967,6 +970,11 @@ impl NativeSession {
         // `view-native` has no other reason to know the feature's name.
         if !self.ai_enabled {
             specs.retain(|spec| spec.feature != "ai");
+        }
+        // `[dvr]` carries the recording's switch, read off the model, which
+        // `main` enabled before the takeover
+        if !model.dvr.is_recording() {
+            specs.retain(|spec| spec.feature != "dvr");
         }
         (specs, super_notice)
     }
@@ -1184,7 +1192,7 @@ fn batched(calls: Vec<RpcCall>) -> Vec<Effect> {
 #[cfg(test)]
 /// [`NativeSession::ui_keys_lhs`]'s own default, for every test constructor
 /// below that has no override of its own to resolve.
-fn default_ui_keys_lhs() -> (String, String, String) {
+fn default_ui_keys_lhs() -> (String, String, String, String) {
     let lhs_for = |feature: &str, verb: &str| {
         view_core::native::mappings::default_maps()
             .iter()
@@ -1195,6 +1203,7 @@ fn default_ui_keys_lhs() -> (String, String, String) {
         lhs_for("ui", "gaps"),
         lhs_for("ui", "cycle_surfaces"),
         lhs_for("keys", "log"),
+        lhs_for("dvr", "scrub"),
     )
 }
 
@@ -1693,6 +1702,42 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_dvr_registers_no_key_and_refuses_the_verb() {
+        let mut session = NativeSession::all_enabled(14, None);
+        let mut m = model();
+        let specs = startup_specs(&mut session, &mut m);
+        assert!(
+            specs.iter().all(|s| s.feature != "dvr"),
+            "an unrecorded session registers no DVR key: {specs:?}"
+        );
+        let _ = view_core::update::update(
+            &mut m,
+            Msg::FeatureInvoke {
+                generation: None,
+                feature: "dvr".to_string(),
+                verb: "scrub".to_string(),
+            },
+        );
+        let raised = format!("{:?}", m.engine.messages.entries);
+        assert!(
+            raised.contains("DVR is off: set [dvr] enabled = true"),
+            "{raised}"
+        );
+        assert!(m.dvr.scrub_frame().is_none());
+
+        let mut on = NativeSession::all_enabled(15, None);
+        let mut m = model();
+        m.dvr.enable(1 << 20);
+        let specs = startup_specs(&mut on, &mut m);
+        assert!(
+            specs
+                .iter()
+                .any(|s| s.feature == "dvr" && s.lhs == "<leader>fr"),
+            "a recorded session registers the DVR key: {specs:?}"
+        );
+    }
+
+    #[test]
     fn load_snapshots_ai_enabled_from_the_model_rather_than_a_hardcoded_default() {
         let mut m = model();
         m.ai_enabled = false;
@@ -2178,11 +2223,13 @@ composer_newline = \"<A-x>\"
 toggle_gaps = \"<F2>\"
 cycle_surfaces = \"gz\"
 key_log = \"<F4>\"
+dvr_scrub = \"<F5>\"
 ",
         )
         .expect("a temp config must be writable");
 
         let mut m = model();
+        m.dvr.enable(1 << 20);
         let (mut session, _) = load_from(Some(path), 7, &mut m);
         let specs = startup_specs(&mut session, &mut m);
 
@@ -2206,6 +2253,11 @@ key_log = \"<F4>\"
             lhs_for("keys", "log"),
             Some("<F4>"),
             "the key log's rebind must reach the registered spec: {specs:?}"
+        );
+        assert_eq!(
+            lhs_for("dvr", "scrub"),
+            Some("<F5>"),
+            "the DVR scrub's rebind must reach the registered spec: {specs:?}"
         );
     }
 
@@ -2264,6 +2316,8 @@ key_log = \"<F4>\"
                 NativeSession::all_enabled(7, None)
             };
             let mut m = model();
+            // the DVR key is registered only while the session is recorded
+            m.dvr.enable(1 << 20);
             let specs_of = |effects: &[Effect]| -> Vec<view_core::native::mappings::MappingSpec> {
                 effects
                     .iter()
@@ -2881,6 +2935,8 @@ key_log = \"<F4>\"
             ..NativeSession::all_enabled(7, None)
         };
         let mut m = model();
+        // the DVR key is registered only while the session is recorded
+        m.dvr.enable(1 << 20);
         m.key_profile_override = Some(KeyProfile::Desktop);
         let effects = unbatched(session.follow_up(&mut m, Stage::ProfileFlip));
         let specs = effects

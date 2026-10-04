@@ -7,6 +7,7 @@ mod ai_context_worker;
 mod ai_worker;
 mod bridge;
 mod clipboard;
+mod dvr;
 mod engine_ops;
 mod localtime;
 mod loop_msgs;

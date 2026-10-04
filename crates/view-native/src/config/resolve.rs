@@ -225,6 +225,8 @@ pub struct ResolvedConfig {
     ui_cycle_key: Source,
     /// [`Self::ui_gaps_key`]'s own for `[keys] key_log`.
     key_log_key: Source,
+    /// [`Self::ui_gaps_key`]'s own for `[keys] dvr_scrub`.
+    dvr_key: Source,
     /// Where `[supervision] auto_restart` came from.
     supervision: Source,
     /// Where `[dvr] enabled` and `[dvr] max_mb` came from, in that order.
@@ -533,6 +535,8 @@ pub fn resolve_with(
     );
     let (log_lhs, key_log_key) =
         resolve_ui_lhs_env(file, env, "key_log", file.keys.key_log_lhs(), &mut notices);
+    let (dvr_lhs, dvr_key) =
+        resolve_ui_lhs_env(file, env, "dvr_scrub", file.keys.dvr_lhs(), &mut notices);
     let auto_restart = layer(
         None,
         env_read(
@@ -600,6 +604,7 @@ pub fn resolve_with(
                 gaps_lhs: gaps_lhs.clone(),
                 cycle_lhs: cycle_lhs.clone(),
                 key_log_lhs: log_lhs,
+                dvr_lhs,
                 profile: file.keys.profile().map(str::to_string),
                 desktop_modifier: file.keys.desktop_modifier().map(str::to_string),
                 desktop: file.keys.desktop().clone(),
@@ -616,6 +621,7 @@ pub fn resolve_with(
         ui_gaps_key,
         ui_cycle_key,
         key_log_key,
+        dvr_key,
         supervision: auto_restart.source,
         dvr: [dvr_enabled, dvr_max_mb],
         inherited_appname: env(INHERITED_APPNAME_ENV).filter(|name| !name.is_empty()),
@@ -832,6 +838,7 @@ impl ResolvedConfig {
             ),
             ("keys", "toggle_gaps") => (self.tables.keys.gaps_lhs().to_string(), self.ui_gaps_key),
             ("keys", "key_log") => (self.tables.keys.key_log_lhs().to_string(), self.key_log_key),
+            ("keys", "dvr_scrub") => (self.tables.keys.dvr_lhs().to_string(), self.dvr_key),
             ("keys", "cycle_surfaces") => {
                 (self.tables.keys.cycle_lhs().to_string(), self.ui_cycle_key)
             }

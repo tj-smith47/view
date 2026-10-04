@@ -423,16 +423,17 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
             "<leader>w8".to_string(),
             "<leader>w9".to_string(),
             "<leader>fk".to_string(),
+            "<leader>fr".to_string(),
         ],
         "a disabled feature must contribute no key of its own; the survivors \
              are ai's default key, the two ui actions, window's own tile \
-             keys and the key log, none of which [native] has a switch for, \
-             got {registered:?}"
+             keys, the key log and the DVR scrub, none of which [native] has \
+             a switch for, got {registered:?}"
     );
     let claimed = session.claims();
     assert_eq!(
         claimed.len(),
-        19,
+        20,
         "only the keys no [native] entry here names may be claimed: {claimed:?}"
     );
     assert_eq!(
@@ -457,6 +458,7 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
             "<leader>w8",
             "<leader>w9",
             "<leader>fk",
+            "<leader>fr",
         ]
     );
 
@@ -489,10 +491,10 @@ fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
     session.register(&cfg);
     assert_eq!(
         session.claims().len(),
-        19,
-        "only ai's key, the two ui actions, window's own tile keys and the \
-             key log, none of which [native] can turn off, survive every \
-             other feature being disabled"
+        20,
+        "only ai's key, the two ui actions, window's own tile keys, the key \
+             log and the DVR scrub, none of which [native] can turn off, \
+             survive every other feature being disabled"
     );
 
     assert_eq!(

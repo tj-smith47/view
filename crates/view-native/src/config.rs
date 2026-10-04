@@ -786,6 +786,8 @@ struct KeysTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     key_log: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    dvr_scrub: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     desktop_modifier: Option<String>,
@@ -852,6 +854,12 @@ const KEY_LOG_NOTICE: &str =
     "view: [keys] key_log must be one key notation, spelled as nvim spells it \
      (\"<leader>fk\"), with no quote or newline in it. The key log opens on the default \
      key this run";
+
+/// The DVR scrub's own, on the same terms as [`TOGGLE_GAPS_NOTICE`].
+const DVR_SCRUB_NOTICE: &str =
+    "view: [keys] dvr_scrub must be one key notation, spelled as nvim spells it \
+     (\"<leader>fr\"), with no quote or newline in it. The DVR scrub opens on the \
+     default key this run";
 
 /// The bindings every rebindable action answers to, and the notice each
 /// action whose value could not be read owes the user.
@@ -941,6 +949,7 @@ pub struct KeysConfig {
     gaps_lhs: String,
     cycle_lhs: String,
     key_log_lhs: String,
+    dvr_lhs: String,
     /// `[keys] profile`'s raw file answer, carried for
     /// [`resolve::resolve_with`] to layer an environment value and a
     /// derivation over -- the same role `gaps_lhs` fills already, except
@@ -965,6 +974,7 @@ impl Default for KeysConfig {
             gaps_lhs: default_lhs("ui", "gaps").to_string(),
             cycle_lhs: default_lhs("ui", "cycle_surfaces").to_string(),
             key_log_lhs: default_lhs("keys", "log").to_string(),
+            dvr_lhs: default_lhs("dvr", "scrub").to_string(),
             profile: None,
             desktop_modifier: None,
             desktop: BTreeMap::new(),
@@ -1005,6 +1015,12 @@ impl KeysConfig {
     #[must_use]
     pub fn key_log_lhs(&self) -> &str {
         &self.key_log_lhs
+    }
+
+    /// [`Self::gaps_lhs`]'s own for `dvr scrub`.
+    #[must_use]
+    pub fn dvr_lhs(&self) -> &str {
+        &self.dvr_lhs
     }
 
     /// `[keys] profile` exactly as the file wrote it, or `None` for a
@@ -1120,9 +1136,15 @@ impl ViewConfig {
             default_lhs("keys", "log"),
             KEY_LOG_NOTICE,
         );
+        let (dvr_lhs, dvr_notice) = resolve_ui_lhs(
+            &file.keys.dvr_scrub,
+            default_lhs("dvr", "scrub"),
+            DVR_SCRUB_NOTICE,
+        );
         notices.extend(gaps_notice);
         notices.extend(cycle_notice);
         notices.extend(key_log_notice);
+        notices.extend(dvr_notice);
         Ok(Self {
             native: NativeConfig::from_parsed(&file)?,
             supervision: SupervisionConfig {
@@ -1139,6 +1161,7 @@ impl ViewConfig {
                 gaps_lhs,
                 cycle_lhs,
                 key_log_lhs,
+                dvr_lhs,
                 profile: file.keys.profile.clone(),
                 desktop_modifier: file.keys.desktop_modifier.clone(),
                 desktop: file.keys.desktop.clone(),
@@ -1403,6 +1426,7 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
         ("toggle_gaps", &file.keys.toggle_gaps),
         ("cycle_surfaces", &file.keys.cycle_surfaces),
         ("key_log", &file.keys.key_log),
+        ("dvr_scrub", &file.keys.dvr_scrub),
     ] {
         if value.is_some() {
             spelled.push(("keys", key));
@@ -2637,13 +2661,14 @@ mod tests {
     /// to. Walked by the tests below rather than named one at a time, so an
     /// action added to [`KeysTable`] without a row here fails the
     /// crosscheck instead of shipping untested.
-    const KEYS_ACTIONS: [(&str, &str); 7] = [
+    const KEYS_ACTIONS: [(&str, &str); 8] = [
         ("sidebar_wider", "<S-Right>"),
         ("sidebar_narrower", "<S-Left>"),
         ("composer_newline", "<M-CR>"),
         ("toggle_gaps", "<leader>ug"),
         ("cycle_surfaces", "<leader>uw"),
         ("key_log", "<leader>fk"),
+        ("dvr_scrub", "<leader>fr"),
         ("resize_mode", "<C-w>m"),
     ];
 
@@ -2656,6 +2681,7 @@ mod tests {
             "toggle_gaps" => cfg.keys.gaps_lhs() == default_key,
             "cycle_surfaces" => cfg.keys.cycle_lhs() == default_key,
             "key_log" => cfg.keys.key_log_lhs() == default_key,
+            "dvr_scrub" => cfg.keys.dvr_lhs() == default_key,
             // a chord, which `resolve` takes one key at a time
             "resize_mode" => cfg
                 .keys
@@ -2681,6 +2707,7 @@ mod tests {
             toggle_gaps: Some("<leader>ug".into()),
             cycle_surfaces: Some("<leader>uw".into()),
             key_log: Some("<leader>fk".into()),
+            dvr_scrub: Some("<leader>fr".into()),
             resize_mode: Some("<C-w>m".into()),
             profile: None,
             desktop_modifier: None,

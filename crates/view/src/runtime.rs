@@ -1221,6 +1221,7 @@ pub fn run(
     // construction (startup's pre-attach paints predate the loop and go
     // through their own full render)
     let mut surface_cache = view_surface::SurfaceCache::new();
+    let mut dvr = crate::dvr::DvrLoop::start(&model);
 
     loop {
         // ahead of everything else in the pass: every reading below, and
@@ -1411,7 +1412,18 @@ pub fn run(
         // core.
         let backlog = !pending.is_empty() && last_paint.elapsed() < FRAME;
         let mut flushed = false;
-        if model.dirty && !backlog {
+        if let Some(dvr) = dvr.as_mut() {
+            dvr.poll(&mut model);
+        }
+        let scrub = match dvr.as_mut().filter(|_| model.dirty && !backlog) {
+            Some(dvr) => dvr.paint_scrub(term, &mut model)?,
+            None => None,
+        };
+        if let Some(wrote) = scrub {
+            flushed = wrote;
+            frame_reached_terminal(&mut model);
+            last_paint = Instant::now();
+        } else if model.dirty && !backlog {
             // the three startup milestones a timeline needs and only this
             // point holds: the first pass with anything to draw at all, the
             // first frame the engine's flush produced, and the first one
@@ -1450,6 +1462,10 @@ pub fn run(
             flushed = term.draw_surface(&model, surface, &damage)?; // a frame's own terminal I/O error aborts; engine errors never do, and neither does the OSC52 drain above (fire-and-forget, see its own comment)
             frame_reached_terminal(&mut model);
             last_paint = Instant::now();
+            if let Some(dvr) = dvr.as_mut().filter(|_| flushed) {
+                let owed = dvr.after_paint(term, &mut model);
+                run_in_wire_order(&executor, owed, false);
+            }
         }
         // read once per pass rather than inside the branch: an input the
         // fold answered with no frame has to be closed by the pass that

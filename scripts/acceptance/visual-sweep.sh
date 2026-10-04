@@ -67,6 +67,7 @@ PERMISSION_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/permission.rs
 PICKER_RS=$REPO_ROOT/crates/view-core/src/native/picker.rs
 PALETTE_RS=$REPO_ROOT/crates/view-core/src/native/palette.rs
 KEY_LOG_RS=$REPO_ROOT/crates/view-core/src/native/key_log.rs
+DVR_RS=$REPO_ROOT/crates/view/src/dvr.rs
 SURFACES_RS=$REPO_ROOT/crates/view-core/src/update/surfaces.rs
 CHORDS_RS=$REPO_ROOT/crates/view-core/src/native/chords.rs
 OVERLAY_RS=$REPO_ROOT/crates/view-surface/src/overlay.rs
@@ -1181,7 +1182,10 @@ fi
 # each leg again with the tile frames blanked out of every capture.
 LAUNCHER=$RUN_SUPPORT/launch.sh
 {
-    printf '#!/usr/bin/env bash\nexec %q --config %q --panes nvim' "$VIEW_BIN" "$VIEW_TOML"
+    # the DVR is on through its variable, which a borrowed config carrying a
+    # `[dvr]` table of its own cannot collide with, so its key is registered
+    printf '#!/usr/bin/env bash\nexport VIEW_DVR_ENABLED=true\n'
+    printf 'exec %q --config %q --panes nvim' "$VIEW_BIN" "$VIEW_TOML"
     # guarded rather than left to the expansion: bash's `%q` with no
     # argument at all prints `''`, and an empty argument reaches view as a
     # path to open -- which resolves to the working directory and puts a
@@ -1462,6 +1466,14 @@ PERMISSION_PROMPT=$(grep -oE 'format!\("Permission requested for' "$PERMISSION_R
 # it waits for this title on the screen.
 HISTORY_TITLE=$(rust_const "$PALETTE_RS" MESSAGE_HISTORY_TITLE) || exit 1
 KEY_LOG_TITLE=$(rust_const "$KEY_LOG_RS" KEY_LOG_TITLE) || exit 1
+# The opening words of the bar the scrub paints over a recorded frame, read
+# out of the format that builds it.
+DVR_BAR=$(grep -oE '"DVR  -' "$DVR_RS" | head -1 | tr -d '"') || true
+[ -n "$DVR_BAR" ] || {
+    printf 'FAIL: the DVR scrub bar is not built from a literal in %s any more\n' \
+        "$DVR_RS" >&2
+    exit 1
+}
 # Joined across the two tables that decide it: which `Source` a picker verb
 # resolves to, and what title that source paints.
 PICKER_MARKERS=$(awk -v surfaces="$SURFACES_RS" -v picker="$PICKER_RS" '
@@ -1523,6 +1535,7 @@ marker_for() {
 #   cycle     the next surface opening in a tile of its own
 #   new zoom fit flip float tabpage
 #             the change to the tiles each one names (`drive_action`)
+#   scrub     the DVR bar over a recorded frame, gone again on `q`
 #
 # A pair with no shape fails the run, and `scripts/reader-cases.sh` walks
 # every default key through this on `task ci`.
@@ -1537,6 +1550,7 @@ entry_shape() {
     (window/new | window/zoom | window/fit | window/flip | window/float) printf '%s' "$2" ;;
     (window/resize_mode) printf 'resize' ;;
     (window/to_tabpage_[1-9]) printf 'tabpage' ;;
+    (dvr/scrub) printf 'scrub' ;;
     (*)
         printf 'FAIL: nothing here knows what the %s %s key changes on screen, so pressing it would prove nothing; give it a shape\n' \
             "$1" "$2" >&2
@@ -1944,6 +1958,15 @@ drive_action() {
         took=$(wait_until "$REACTION_SECS" "the window arriving on tabpage $n on $feature $verb" \
             shows "$BOX_TL tab$n.txt" "$BOX_TL scratch.txt") || return 1
         SAW="carries the window to tabpage $n in ${took}s"
+        ;;
+    (scrub)
+        "$@"
+        took=$(wait_until "$REACTION_SECS" "the DVR bar on $feature $verb" \
+            shows "$DVR_BAR") || return 1
+        send_text q
+        wait_until "$REACTION_SECS" "the live screen back on q after $feature $verb" \
+            lacks "$DVR_BAR" >/dev/null || return 1
+        SAW="shows a recorded frame under the DVR bar in ${took}s and q gives the live screen back"
         ;;
     (*)
         fail "drive_action has no drive for the $shape shape"

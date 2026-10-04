@@ -119,6 +119,9 @@ struct Entry {
 #[derive(Debug, Default)]
 pub struct Dvr {
     recording: bool,
+    max_bytes: usize,
+    scrub: Option<u64>,
+    pending_moves: VecDeque<ScrubStep>,
     arena: Vec<u8>,
     entries: Vec<Entry>,
     overflowed_at: Option<u64>,
@@ -136,6 +139,7 @@ impl Dvr {
         let entries = input_log_bytes(max_bytes) / (std::mem::size_of::<Entry>() + BYTES_PER_ENTRY);
         self.entries = Vec::with_capacity(entries);
         self.arena = Vec::with_capacity(entries * BYTES_PER_ENTRY);
+        self.max_bytes = max_bytes;
         self.recording = true;
     }
 
@@ -143,6 +147,74 @@ impl Dvr {
     #[must_use]
     pub fn is_recording(&self) -> bool {
         self.recording
+    }
+
+    /// The memory bound recording was enabled with, input log and painted
+    /// frames together. Zero while off.
+    #[must_use]
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
+    /// The recorded frame shown while scrubbing, or `None` on the live
+    /// screen.
+    #[must_use]
+    pub fn scrub_frame(&self) -> Option<u64> {
+        self.scrub
+    }
+
+    /// Shows frame `seq`, the frame a [`ScrubStep`] resolved to. Ignored on
+    /// the live screen.
+    pub fn show(&mut self, seq: u64) {
+        if self.scrub.is_some() {
+            self.scrub = Some(seq);
+        }
+    }
+
+    /// The oldest scrub move not taken yet.
+    pub fn take_step(&mut self) -> Option<ScrubStep> {
+        self.pending_moves.pop_front()
+    }
+
+    /// Freezes the screen on the newest recorded frame. Returns false, and
+    /// stays live, when no frame has been recorded.
+    pub(crate) fn open_scrub(&mut self) -> bool {
+        if self.last_frame == 0 {
+            return false;
+        }
+        self.scrub = Some(self.last_frame);
+        self.pending_moves.clear();
+        self.pending_moves.push_back(ScrubStep::Newest);
+        true
+    }
+
+    /// Queues one move of the scrub cursor. A move of the same unit as the
+    /// one queued last is added to it, so a burst of keys is one move.
+    pub(crate) fn step(&mut self, step: ScrubStep) {
+        let merged = match (self.pending_moves.back_mut(), step) {
+            (Some(ScrubStep::Frames(n)), ScrubStep::Frames(m))
+            | (Some(ScrubStep::Seconds(n)), ScrubStep::Seconds(m)) => {
+                *n = n.saturating_add(m);
+                true
+            }
+            _ => false,
+        };
+        if !merged {
+            self.pending_moves.push_back(step);
+        }
+    }
+
+    /// Returns to the live screen. Returns whether a scrub was open.
+    pub(crate) fn close_scrub(&mut self) -> bool {
+        self.pending_moves.clear();
+        self.scrub.take().is_some()
+    }
+
+    /// Marks the newest frame as the one a DVR verb ran on.
+    pub(crate) fn mark_invoke(&mut self) {
+        if self.recording {
+            self.markers.push((self.last_frame, Marker::Invoke));
+        }
     }
 
     /// Notes that frame `seq` is the newest recorded frame, with `oldest` the

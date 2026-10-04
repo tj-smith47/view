@@ -38,6 +38,7 @@ The table below is generated from `default_maps()` in
 | `<leader>w8` | `window` | `:View window to_tabpage_8` |
 | `<leader>w9` | `window` | `:View window to_tabpage_9` |
 | `<leader>fk` | `keys` | `:View keys log` |
+| `<leader>fr` | `dvr` | `:View dvr scrub` |
 
 ## `<leader>ai` reads the panel before it acts
 
@@ -371,8 +372,8 @@ and whatever your own config mapped `<leader>ff` to keeps working. The
 first time view takes a key you had mapped, it tells you so and names the
 line above verbatim.
 
-`ai` is the one exception: it has no `[native]` entry, since its own
-enabled state lives in `[ai]` instead:
+`ai` has no `[native]` entry, since its own enabled state lives in `[ai]`
+instead:
 
 ```toml
 [ai]
@@ -384,6 +385,10 @@ it off) and `:View ai …` answers with a notice. The same first-run notice
 the picker example above gets applies here too: if `<leader>ai` was already
 yours, taking it is reported, and the line above is what the notice names
 to give it back.
+
+`<leader>fr` is registered only while the session is recorded, which
+`[dvr]` turns on. With `[dvr] enabled = false`, the default, `:View dvr …`
+answers with a notice saying so.
 
 The desktop chords turn off together, with the profile:
 
@@ -776,6 +781,44 @@ key:
 ```toml
 [keys]
 key_log = "<leader>fk"   # the default
+```
+
+## Rewinding the screen
+
+With the session recorded, `<leader>fr` freezes the screen on the last
+frame view drew, and the bottom row becomes the scrub bar:
+
+```
+DVR  -1.4s  frame 812 (oldest 3)  h/l frame  H/L 1s  g/G ends  q close
+```
+
+```toml
+[dvr]
+enabled = true
+```
+
+The bar names how long before the newest frame the one on screen was
+drawn, and the oldest frame still kept. These keys move through the
+frames:
+
+| key | does |
+| --- | --- |
+| `h` | one frame back |
+| `l` | one frame forward |
+| `H` | one second back |
+| `L` | one second forward |
+| `g` | the oldest frame kept |
+| `G` | the newest frame |
+| `q` | back to the live screen, as `<Esc>` does |
+
+Every other key, paste and click is dropped while the scrub is open, so
+nothing reaches your buffer. Closing it redraws the live screen. How far
+back the frames reach depends on `[dvr] max_mb`: the oldest frames are
+dropped as new ones are kept. To put the scrub on another key:
+
+```toml
+[keys]
+dvr_scrub = "<leader>fr"   # the default
 ```
 
 ## `:View`

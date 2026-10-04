@@ -180,7 +180,7 @@ impl MappingOwner {
 // spelled to match the ecosystem's own default keys, the way a switching
 // user already has them in muscle memory; a claim over a user's own
 // `<leader>f` or `<leader>e` prefix is reported so it stays visible.
-static DEFAULT_MAPS: [MappingSpec; 27] = [
+static DEFAULT_MAPS: [MappingSpec; 28] = [
     MappingSpec {
         feature: "picker",
         lhs: Cow::Borrowed("<leader>ff"),
@@ -352,6 +352,12 @@ static DEFAULT_MAPS: [MappingSpec; 27] = [
         verb: "log",
         rhs: Rhs::Invoke,
     },
+    MappingSpec {
+        feature: "dvr",
+        lhs: Cow::Borrowed("<leader>fr"),
+        verb: "scrub",
+        rhs: Rhs::Invoke,
+    },
 ];
 
 /// Every default key this build ships, in registration order.
@@ -387,10 +393,14 @@ pub struct CommandForm {
 /// [`REGISTRY_EXEMPT_FEATURES`] entry: both exist to report a key claim and
 /// to carry the off switch that gives the key back, and a form that claims
 /// no key has neither to answer for.
-static COMMAND_ONLY_FORMS: [CommandForm; 11] = [
+static COMMAND_ONLY_FORMS: [CommandForm; 12] = [
     CommandForm {
         feature: "ui",
         verb: "panes",
+    },
+    CommandForm {
+        feature: "dvr",
+        verb: "close",
     },
     CommandForm {
         feature: "keys",
@@ -651,6 +661,13 @@ fn render_key_log_table() -> String {
     render_overlay_table(crate::update::key_log::KEY_LOG_KEYS)
 }
 
+/// The scrub's keys as a markdown table, pinned to the page for the reason
+/// [`render_history_table`] is.
+#[cfg(test)]
+fn render_dvr_keys() -> String {
+    render_overlay_table(&crate::update::dvr::DVR_KEYS)
+}
+
 /// A table of keys an overlay answers itself, one `(key, does)` row each.
 #[cfg(test)]
 fn render_overlay_table(keys: &[(&str, &str)]) -> String {
@@ -687,10 +704,16 @@ pub struct ExemptFeatureDesc {
 /// Features that reach a key in [`DEFAULT_MAPS`] without a
 /// [`registry::FeatureDesc`] row -- see [`is_reachable_feature`]'s doc on why
 /// a feature lands here.
-static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 4] = [
+static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 5] = [
     ExemptFeatureDesc {
         id: "ai",
         off_switch: "ai.enabled = false",
+    },
+    // the recording is switched by its own `[dvr]` table, so `[native]`
+    // carries no switch for it
+    ExemptFeatureDesc {
+        id: "dvr",
+        off_switch: "dvr.enabled = false",
     },
     // the key log has no on/off switch: it opens only when asked, so its
     // key can only be rebound, as `ui`'s can
@@ -1026,6 +1049,18 @@ mod tests {
     #[test]
     fn the_keys_page_renders_the_key_log_keys_this_build_answers() {
         let table = render_key_log_table();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/keymaps.md");
+        let text = std::fs::read_to_string(&path).expect("docs/keymaps.md must be readable");
+        assert!(
+            text.contains(&table),
+            "docs/keymaps.md is stale, it must carry:\n{table}"
+        );
+    }
+
+    /// The scrub's table, pinned the same way as the history overlay's.
+    #[test]
+    fn dvr_keys_table_matches_the_docs() {
+        let table = render_dvr_keys();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/keymaps.md");
         let text = std::fs::read_to_string(&path).expect("docs/keymaps.md must be readable");
         assert!(

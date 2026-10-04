@@ -236,9 +236,22 @@ fn load(name: &str) -> CorpusEntry {
 /// `lists_buffers` is whether opening the entry asks the engine for its
 /// buffer list, whose reply is then read and has to name a buffer.
 fn assert_no_interference(entry_name: &str, expect_feature: &str, lists_buffers: bool) {
+    assert_no_interference_with(entry_name, expect_feature, lists_buffers, |_| {}, &[]);
+}
+
+/// [`assert_no_interference`] on a model `prepare` has set up first, with
+/// `keys` typed between the open and the `<Esc>` that closes it.
+fn assert_no_interference_with(
+    entry_name: &str,
+    expect_feature: &str,
+    lists_buffers: bool,
+    prepare: fn(&mut Model),
+    keys: &[&str],
+) {
     let entry = load(entry_name);
 
     let mut driver = Driver::start(entry.ext_options);
+    prepare(&mut driver.model);
     driver.register_native_mappings();
     driver.seed_baseline();
 
@@ -268,7 +281,16 @@ fn assert_no_interference(entry_name: &str, expect_feature: &str, lists_buffers:
             "the picker's buffer list came back empty for {entry_name}"
         );
     }
+    for key in keys {
+        driver.apply(Msg::Key(Key {
+            notation: (*key).to_string(),
+        }));
+    }
     driver.close_overlay();
+    assert!(
+        driver.model.dvr.scrub_frame().is_none(),
+        "<Esc> left the DVR scrub open"
+    );
 
     let after = snapshot(&mut driver).unwrap();
 
@@ -301,4 +323,23 @@ fn opening_and_closing_the_picker_buffers_source_leaves_the_engine_untouched() {
 #[test]
 fn opening_and_closing_the_picker_grep_source_leaves_the_engine_untouched() {
     assert_no_interference("native-picker-grep", "picker", false);
+}
+
+/// The scrub's own keys and the editing keys it drops alike: any of them
+/// reaching nvim would show in the snapshot or panic in `forward_effect`.
+#[test]
+fn opening_scrubbing_and_closing_the_dvr_leaves_the_engine_untouched() {
+    fn recorded(model: &mut Model) {
+        model.dvr.enable(1 << 20);
+        model.dvr.note_frame(3, 1);
+    }
+    assert_no_interference_with(
+        "native-dvr",
+        "dvr",
+        false,
+        recorded,
+        &[
+            "h", "H", "g", "l", "G", "d", "d", "x", "p", "u", "m", "a", "\"", "a", "y",
+        ],
+    );
 }

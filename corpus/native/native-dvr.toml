@@ -1,0 +1,8 @@
+# Non-interference proof for the DVR scrub: see native-picker.toml's header
+# for the shared driver and assertion this file feeds. The scrub keys typed
+# between the open and the close are the test's own.
+schema = 1
+name = "native-dvr"
+input = "\\fr"
+engine_pin = "v0.12.4"
+ext_set = "default"

@@ -64,6 +64,7 @@ const _: () = assert!(
 mod ai;
 mod ai_fs;
 mod bridge;
+pub(crate) mod dvr;
 pub(crate) mod key_log;
 pub(crate) mod look;
 mod mouse;
@@ -149,6 +150,11 @@ pub fn tell_taken_over(
 /// the boundary as a returned [`Effect`] instead of being performed here.
 #[must_use]
 pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
+    // ahead of the hold, which would keep a scrub key as the start of a
+    // mapping
+    if let Some(effects) = dvr::scrub_input(model, &msg) {
+        return effects;
+    }
     let Some(msg) = model.submit_hold.hold(msg) else {
         return Vec::new();
     };
@@ -759,6 +765,9 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // (view/src/native.rs, outside this crate) can perform.
             if feature == "keys" {
                 return keys_invoke(model, &verb);
+            }
+            if feature == "dvr" {
+                return dvr::invoke(model, &verb);
             }
             // a bare `:View` asks for nothing, and nvim's completion for
             // `:View` lists every registered form, so the line reopened
