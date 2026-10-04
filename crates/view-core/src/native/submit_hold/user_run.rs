@@ -518,14 +518,7 @@ impl Matcher {
             self.recent.clear();
         }
         let key = canonical(notation);
-        self.argument_of = argument_of
-            .is_none()
-            .then(|| {
-                crate::native::speculate::CMDLINE_LITERAL_KEYS
-                    .into_iter()
-                    .find(|literal| *literal == notation)
-            })
-            .flatten();
+        self.argument_of = super::owed_after(argument_of, notation);
         let mode_unsure = self.mode_unsure;
         let mapped_unsure = self.mapped_unsure;
         self.mode_unsure |= leaves_normal(argument_of, &key);

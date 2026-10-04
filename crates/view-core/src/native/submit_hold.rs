@@ -7,19 +7,15 @@
 //! buffer the panel was opened from. Holding them until the invocation's
 //! notification comes back lets the focus it sets decide where they go.
 //!
-//! Over a slow link four cases still send a query typed ahead into the
+//! Over a slow link three cases still send a query typed ahead into the
 //! buffer as commands: keys that went out before an error from nvim came
 //! back, an answer to an earlier key arriving later than the quickest
-//! round trip seen, a view key typed within one round trip of an
-//! operator's motion (`dw<Space>ff`), and the replace mode an `r` or `gr`
-//! sent before the view key reports after it (`r"<Space>ff`), which ends
-//! the hold.
+//! round trip seen, and a view key typed within one round trip of an
+//! operator's motion (`dw<Space>ff`).
 //!
-//! One more needs no slow link: a builtin command of three keys (`g'`,
-//! `` g` ``, `<C-w>g`, and `gr` where the user maps nothing under it)
-//! whose third key takes an argument of its own elsewhere, as in `g'[`.
-//! That key is read as a command owing an argument, so the view key typed
-//! next is not recognised.
+//! A `gn` or `gN` with no search pattern needs no slow link: it stays in
+//! normal mode, and a view key typed after it is not recognised until
+//! nvim next reports a mode.
 //!
 //! A hold armed where nvim needed none keeps the keys for one bound, then
 //! sends the same keys in the same order.
@@ -31,6 +27,7 @@ mod user_run;
 
 use std::time::Duration;
 
+pub(crate) use typed_ahead::owed_after;
 pub(crate) use user_run::canonical_typed;
 
 use commands::names_view;
@@ -83,6 +80,21 @@ const LEAVES_NORMAL_AFTER: [(&str, &str); 20] = [
     ("g", "@"),
     ("z", "f"),
     ("z", "y"),
+];
+
+/// The builtin commands of three keys whose second key is read as the
+/// argument of the first and still owes the key after it, each with the
+/// name the third key is read as the argument of. `g'` and `` g` `` wait
+/// for a mark, `gr` for the character it replaces with, `zu` for the
+/// `zw` family's last key, and `<C-w>g` and `<C-w><C-g>` for the window
+/// command they begin.
+pub const OWES_AFTER: [(&str, &str, &str); 6] = [
+    ("g", "'", "g'"),
+    ("g", "`", "g`"),
+    ("g", "r", "gr"),
+    ("z", "u", "zu"),
+    ("<C-w>", "g", "<C-w>g"),
+    ("<C-w>", "<C-g>", "<C-w><C-g>"),
 ];
 
 /// What armed a standing hold.
@@ -347,6 +359,10 @@ pub struct SubmitHold {
     /// answering an earlier key included. A hold armed in error because of
     /// it ends on the mode report.
     mode_unsure: bool,
+    /// Whether an `r` or a `gr` has gone out since nvim last reported
+    /// normal mode. nvim reports replace mode for one once it reads it, and
+    /// that report may arrive after a sequence typed behind it armed.
+    replace_owed: bool,
     /// Whether an error from nvim has put the reading of the keys around it
     /// in doubt, and if so whether a key has gone out since the error.
     /// Every key folded while it stands spells a sequence whatever the
@@ -720,6 +736,7 @@ impl SubmitHold {
     /// normal mode before it.
     pub fn note_mode_reported(&mut self, mode: &str) {
         self.mode_unsure = false;
+        self.replace_owed &= mode != "normal";
         self.log.note_mode_reported(mode);
         // a report sent before nvim read the newest end says nothing of it
         if self.ended_at.is_none() {
@@ -863,18 +880,22 @@ impl SubmitHold {
     /// Whether `msg` ends a standing hold: the command's own notification,
     /// the bound this hold armed, or, for a hold a key sequence armed, a
     /// mode nvim reports leaving normal mode for, which says the sequence
-    /// ran no mapping.
+    /// ran no mapping. Replace mode is the one an `r` or a `gr` sent before
+    /// the sequence reports, and ends nothing while one is owed.
     fn ended_by(&self, msg: &Msg) -> bool {
         let Some((armed, _)) = &self.held else {
             return false;
         };
+        let leaves = |mode: &str| mode != "normal" && !(mode == "replace" && self.replace_owed);
         match msg {
             Msg::FeatureInvoke { .. } => true,
             Msg::SubmitHoldExpired { generation } => *generation == self.generation,
-            Msg::Redraw(events) => *armed == Armed::Sequence
-                && events.iter().any(
-                    |event| matches!(event, UiEvent::ModeChange { mode, .. } if mode != "normal"),
-                ),
+            Msg::Redraw(events) => {
+                *armed == Armed::Sequence
+                    && events.iter().any(
+                        |event| matches!(event, UiEvent::ModeChange { mode, .. } if leaves(mode)),
+                    )
+            }
             _ => false,
         }
     }
@@ -933,6 +954,7 @@ impl SubmitHold {
     /// waits for both.
     pub fn forget_argument(&mut self) {
         self.argument_of = None;
+        self.recent.clear();
         self.log.forget();
     }
 
@@ -1336,7 +1358,7 @@ fn special_key(notation: &str) -> bool {
 /// key still in flight may have put it there. The literal-taking keys
 /// read the `:` as their argument.
 pub(crate) fn may_open(model: &Model) -> bool {
-    !model.engine.literal_pending
+    model.engine.literal_pending.is_none()
         && (model.engine.key_unanswered.is_some()
             || crate::native::speculate::CMDLINE_GATE_MODES
                 .contains(&model.engine.mode.current.as_str()))

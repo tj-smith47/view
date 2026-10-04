@@ -1260,6 +1260,64 @@ fn keys_typed_ahead_after_a_replace_behind_a_default_mapping_reach_the_picker() 
     assert_eq!(query.as_deref(), Some("main"));
 }
 
+/// The same `gr"`, view's key and query, each key sent as its own input.
+/// nvim reports replace mode for `gr"` once it reads it, after view's key
+/// has armed the hold. The report ends no hold: the buffer is what `gr"`
+/// alone leaves, and the query reaches the picker.
+#[test]
+fn keys_typed_ahead_one_at_a_time_after_a_replace_reach_the_picker() {
+    let session = Session::start_with(
+        "typed-ahead-gr-each",
+        "vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'foo' })\n",
+    );
+    assert_ne!(session.eval("maparg('grn', 'n')"), "", "nvim maps grn");
+    let mut model = reading_model(&session, "grn");
+    let keys = ["g", "r", "\"", ",", "f", "f", "m", "a", "i", "n"];
+    let sent = type_into(&session, &mut model, &keys);
+    pump(&session, &mut model, ARRIVAL, |_, msg| {
+        matches!(msg, Msg::FeatureInvoke { .. }).then_some(())
+    })
+    .expect("nvim runs view's <leader>ff");
+    assert_eq!(sent, keys[..6], "the query waits for view's invocation");
+    assert_eq!(session.eval("join(getline(1, '$'), '|')"), "\"oo");
+    let query = model.picker_mut().map(|picker| picker.query().to_string());
+    assert_eq!(query.as_deref(), Some("main"));
+}
+
+/// With no mapping under `g`, `g'[` jumps to the mark `[`, so view's key
+/// and a query typed at once behind it: the query waits for view's
+/// invocation and reaches the picker, and the buffer is unchanged.
+#[test]
+fn keys_typed_ahead_after_a_mark_jump_of_three_keys_reach_the_picker() {
+    let session = Session::start_with(
+        "typed-ahead-g-mark",
+        "vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'foo' })\n\
+         vim.keymap.set('n', '<leader>x', '<Nop>')\n",
+    );
+    // nvim maps its own defaults under `g` and `[` after the config has run
+    session.eval(
+        "luaeval('vim.iter(vim.api.nvim_get_keymap(\"n\")):each(function(map) \
+         if map.lhs:find(\"^[g[]\") then vim.keymap.del(\"n\", map.lhs) end end)')",
+    );
+    assert_eq!(session.eval("maparg('grn', 'n')"), "", "nothing maps grn");
+    assert_eq!(
+        session.eval("maparg('[<Space>', 'n')"),
+        "",
+        "nothing maps ["
+    );
+    let mut model = reading_model(&session, ",x");
+    let keys = ["g", "'", "[", ",", "f", "f", "m", "a", "i", "n"];
+    let sent = type_at_once(&session, &mut model, &keys);
+    pump(&session, &mut model, ARRIVAL, |_, msg| {
+        matches!(msg, Msg::FeatureInvoke { .. }).then_some(())
+    })
+    .expect("nvim runs view's <leader>ff");
+    assert_eq!(sent, keys[..6], "the query waits for view's invocation");
+    assert_eq!(session.eval("join(getline(1, '$'), '|')"), "foo");
+    let query = model.picker_mut().map(|picker| picker.query().to_string());
+    assert_eq!(query.as_deref(), Some("main"));
+}
+
 /// `"`, a paste, then view's key and a query typed at once: nvim runs the
 /// paste once `"` has its register, which is the `,` typed after it, so
 /// view's key runs nothing. Nothing is held, every key reaches nvim as it
@@ -1734,6 +1792,139 @@ fn every_literal_taking_key_the_pinned_engine_documents_is_in_the_set() {
              CMDLINE_LITERAL_KEYS: a `:` typed after it opens no command line, and view would \
              speculate a palette for it"
         );
+    }
+}
+
+/// The builtins of three keys whose second key leaves the third owed,
+/// re-derived from the engine.
+///
+/// `OWES_AFTER` is transcribed by hand, and a `:` typed after one of its
+/// pairs is the third key, which opens no command line. Every pair a
+/// three-key command in `index.txt` begins with a literal-taking key, and
+/// every pair the file names as the start of a longer command (`CTRL-W
+/// CTRL-G`, "same as CTRL-W g .."), is typed into the live engine ahead of
+/// a `:` line. The pairs whose `:` runs no line are the table, exactly.
+///
+/// Skipped where the runtime ships no documentation, for the reason the
+/// literal-key test above gives.
+#[test]
+fn every_three_key_builtin_the_pinned_engine_runs_is_in_the_table() {
+    use std::collections::BTreeSet;
+    use view_core::native::submit_hold::OWES_AFTER;
+
+    let session = Session::start("three-key-builtins");
+    let index = Path::new(&session.eval("$VIMRUNTIME"))
+        .join("doc")
+        .join("index.txt");
+    let Ok(text) = std::fs::read_to_string(&index) else {
+        eprintln!(
+            "skipped: {} is unreadable, so the pinned engine's own index is not there to \
+             re-derive the table from",
+            index.display()
+        );
+        return;
+    };
+
+    let candidates = three_key_pairs(&text);
+    assert!(
+        candidates.len() > OWES_AFTER.len(),
+        "{} spells too few three-key commands where this reads them: {candidates:?}",
+        index.display()
+    );
+    let owing: BTreeSet<(String, String)> = candidates
+        .into_iter()
+        .filter(|(first, second)| {
+            let typed = [first, second].map(|key| vim_string_key(key)).concat();
+            session.eval("execute('let g:line_ran = 0')");
+            // a third key nvim refuses (`g':`, no such mark) raises its
+            // error out of the eval, which leaves the line unrun all the same
+            let _ = session.engine.handle.eval_str(&format!(
+                "feedkeys(\"{typed}:let g:line_ran = 1\\r\", 'xt')"
+            ));
+            session.eval("g:line_ran") == "0"
+        })
+        .collect();
+    let table: BTreeSet<(String, String)> = OWES_AFTER
+        .iter()
+        .map(|(first, second, _)| (first.to_string(), second.to_string()))
+        .collect();
+    assert_eq!(
+        owing, table,
+        "the pairs a `:` typed after runs no line, and OWES_AFTER"
+    );
+}
+
+/// Every pair of keys `index.txt`'s normal-mode and visual-mode sections
+/// spell ahead of a third key, the first of them a literal-taking key: the
+/// commands of three keys, and the two-key commands the file names as the
+/// same as a longer one (`same as "CTRL-W g .."`).
+fn three_key_pairs(index: &str) -> std::collections::BTreeSet<(String, String)> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut inside = false;
+    for line in index.lines() {
+        if line.contains("*normal-index*") {
+            inside = true;
+        } else if line.contains("*ex-edit-index*") {
+            break;
+        }
+        let tagged = line.starts_with('|');
+        let mut fields = line.split('\t').filter(|field| !field.is_empty());
+        if !inside || (tagged && fields.next().is_none()) {
+            continue;
+        }
+        let (Some(command), description) = (fields.next(), fields.next().unwrap_or("")) else {
+            continue;
+        };
+        let longer = description.trim().starts_with("same as \"") && description.contains(" ..\"");
+        let pair = match index_keys(command.trim()).as_slice() {
+            [first, second, _] if tagged && !second.starts_with('{') => {
+                Some((first.clone(), second.clone()))
+            }
+            [first, second] if longer => Some((first.clone(), second.clone())),
+            _ => None,
+        };
+        if let Some(pair) = pair.filter(|(first, _)| CMDLINE_LITERAL_KEYS.contains(&first.as_str()))
+        {
+            out.insert(pair);
+        }
+    }
+    out
+}
+
+/// The keys `command` spells, as `index.txt` writes it, in view's own
+/// notation: `CTRL-X` is one key, and so is a `<Name>` or a `{placeholder}`.
+fn index_keys(command: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut rest = command.trim_start();
+    while let Some(c) = rest.chars().next() {
+        let closing = match c {
+            '<' => rest.find('>'),
+            '{' => rest.find('}'),
+            _ => None,
+        };
+        let (key, len) = if let Some(name) = rest.strip_prefix("CTRL-") {
+            let Some(base) = name.chars().next() else {
+                break;
+            };
+            (format!("<C-{}>", base.to_lowercase()), 5 + base.len_utf8())
+        } else if let Some(end) = closing {
+            (rest[..=end].to_string(), end + 1)
+        } else {
+            (c.to_string(), c.len_utf8())
+        };
+        keys.push(key);
+        rest = rest[len..].trim_start();
+    }
+    keys
+}
+
+/// `key` in view's notation, spelled inside a Vim double-quoted string.
+fn vim_string_key(key: &str) -> String {
+    match key {
+        "\"" => "\\\"".to_string(),
+        "\\" => "\\\\".to_string(),
+        named if named.starts_with('<') && named.len() > 1 => format!("\\{named}"),
+        plain => plain.to_string(),
     }
 }
 

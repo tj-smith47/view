@@ -19,9 +19,9 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use super::{canonical, Folded, SubmitHold, LEAVES_NORMAL, LEAVES_NORMAL_AFTER};
+use super::{canonical, Folded, SubmitHold, LEAVES_NORMAL, LEAVES_NORMAL_AFTER, OWES_AFTER};
 use crate::model::Model;
-use crate::native::speculate::SpecStamp;
+use crate::native::speculate::{SpecStamp, CMDLINE_LITERAL_KEYS};
 
 /// Whether `notation` completes one of the invoking keys, typed in normal
 /// mode, where those keys are mapped.
@@ -69,26 +69,21 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         return false;
     }
     let key = canonical(notation);
-    hold.argument_of = argument_of
-        .is_none()
-        .then(|| {
-            crate::native::speculate::CMDLINE_LITERAL_KEYS
-                .into_iter()
-                .find(|literal| *literal == notation)
-        })
-        .flatten();
+    hold.argument_of = owed_after(argument_of, notation);
+    hold.replace_owed |= key == "r" && argument_of.is_none_or(|of| of == "g");
     let mode_unsure = hold.mode_unsure;
     let leaves = leaves_normal(argument_of, &key);
-    // nvim matches a mapping before it reads a key as an argument, so the
-    // key after one of the user's may start a sequence. Where the mapping
-    // then fails to match, nvim reads the keys as builtin commands, and
-    // this key was the argument after all
-    let continues = argument_of.is_some() && in_user_keys(&hold.recent, &hold.user_keys);
-    if continues && hold.doubt.is_none() {
+    // nvim matches a mapping before it reads a key as an argument, so where
+    // the keys up to the one owing an argument begin one of the user's
+    // mappings, this key may be that mapping's. Where the mapping then fails
+    // to match, nvim reads the keys as builtin commands, and this key was
+    // the argument after all, so the doubt covers both readings
+    let owing_begins_mapping = argument_of.is_some() && in_user_keys(&hold.recent, &hold.user_keys);
+    if owing_begins_mapping && hold.doubt.is_none() {
         hold.doubt = Some(true);
         hold.doubt_sent = None;
     }
-    let argument = argument_of.is_some() && !continues;
+    let argument = argument_of.is_some() && !owing_begins_mapping;
     while hold.recent.len() >= longest.max(hold.user_longest) {
         hold.recent.pop_front();
     }
@@ -139,10 +134,7 @@ pub(super) fn settle_doubt(hold: &mut SubmitHold, now: SpecStamp, shortest: Dura
     let answers_sent = hold
         .doubt_sent
         .is_none_or(|sent| now.age_since(sent) >= shortest);
-    let owes = |key: &str| {
-        crate::native::speculate::CMDLINE_LITERAL_KEYS.contains(&key)
-            && !LEAVES_NORMAL.contains(&key)
-    };
+    let owes = |key: &str| CMDLINE_LITERAL_KEYS.contains(&key) && !LEAVES_NORMAL.contains(&key);
     if hold.doubt == Some(true)
         && answers_sent
         && hold.argument_of.is_none()
@@ -169,6 +161,23 @@ fn in_user_keys(recent: &VecDeque<Folded>, user_keys: &[Vec<String>]) -> bool {
                         .eq(lhs.iter().take(run))
             })
     })
+}
+
+/// The key nvim reads the key after `notation` as the argument of, where
+/// `notation` is typed as the argument of `of` or of nothing. An argument
+/// owes nothing more unless it is the second key of a builtin command of
+/// three keys.
+pub(crate) fn owed_after(of: Option<&str>, notation: &str) -> Option<&'static str> {
+    let Some(of) = of else {
+        return CMDLINE_LITERAL_KEYS
+            .into_iter()
+            .find(|literal| *literal == notation);
+    };
+    let (of, key) = (canonical(of), canonical(notation));
+    OWES_AFTER
+        .into_iter()
+        .find(|(first, second, _)| *first == of && *second == key)
+        .map(|(_, _, owing)| owing)
 }
 
 /// Whether `key`, typed as the argument of `before` or of nothing, leaves

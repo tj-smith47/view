@@ -445,7 +445,7 @@ impl Model {
                 key_unanswered: None,
                 key_round_trips: [None; crate::native::speculate::KEY_ROUND_TRIPS],
                 key_round_trips_at: 0,
-                literal_pending: false,
+                literal_pending: None,
                 messages: Messages::default(),
                 toast_history: crate::native::toast::ToastHistory::new(),
                 tabline: None,
@@ -1517,13 +1517,13 @@ pub struct EngineModel {
     pub key_round_trips: [Option<std::time::Duration>; crate::native::speculate::KEY_ROUND_TRIPS],
     /// Where the next reading goes in `key_round_trips`.
     pub key_round_trips_at: usize,
-    /// Whether the last key view forwarded is one nvim takes the next
-    /// keystroke as an argument to rather than as a command
+    /// The key whose argument nvim takes the next keystroke as, where the
+    /// last key view forwarded leaves one owed
     /// ([`crate::native::speculate::CMDLINE_LITERAL_KEYS`]).
     ///
     /// nvim announces no mode for a command waiting on its argument, so
     /// nothing in `mode` can tell that state from plain normal mode.
-    pub literal_pending: bool,
+    pub literal_pending: Option<&'static str>,
     pub messages: Messages,
     /// Bounded scrollback of every message routed through
     /// [`crate::native::toast::route`], newest-first on read; the
@@ -1740,7 +1740,7 @@ impl EngineModel {
         self.cmdline = None;
         self.cmdline_speculated = None;
         self.key_unanswered = None;
-        self.literal_pending = false;
+        self.literal_pending = None;
         self.popupmenu = None;
         self.hold_frame();
         self.grids.forget_grids();

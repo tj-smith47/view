@@ -274,7 +274,7 @@ pub fn may_speculate_cmdline(model: &Model) -> bool {
         // the keys already in flight have moved on from: this `:` is the
         // argument of a command still waiting for one, or it follows a key
         // whose own `mode_change` has not come back yet
-        && !model.engine.literal_pending
+        && model.engine.literal_pending.is_none()
         && model.engine.key_unanswered.is_none()
         && CMDLINE_GATE_MODES.contains(&model.engine.mode.current.as_str())
 }
@@ -866,12 +866,14 @@ pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
             // is what the batch answering this key subtracts to read the
             // link
             model.engine.key_unanswered = Some(now);
-            // recomputed from this key alone, so a key that takes no
-            // argument clears whatever the key before it was owed: an `f`
-            // whose target is not on the line moves neither the mode nor
-            // the cursor, and reading the flag as sticky would leave the
-            // gate shut for the rest of the session
-            model.engine.literal_pending = CMDLINE_LITERAL_KEYS.contains(&notation.as_str());
+            // read from this key and the one it is the argument of, so a
+            // key that takes no argument, or is one, clears whatever the
+            // key before it was owed: an `f` whose target is not on the
+            // line moves neither the mode nor the cursor, and reading the
+            // flag as sticky would leave the gate shut for the rest of the
+            // session
+            model.engine.literal_pending =
+                crate::native::submit_hold::owed_after(model.engine.literal_pending, notation);
             fold_keystroke(model, notation, now);
             model.submit_hold.note_key_sent(now);
         }
@@ -1013,7 +1015,7 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
     // finished `f` produced is what says that `a` was an argument and not a
     // command waiting for one of its own
     if settled {
-        model.engine.literal_pending = false;
+        model.engine.literal_pending = None;
     }
     if moved_cursor_there && !shows_cmdline {
         withdraw_cmdline_speculation(model);
