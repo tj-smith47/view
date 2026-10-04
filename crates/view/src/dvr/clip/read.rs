@@ -6,7 +6,7 @@ use std::io::{self, Read};
 use std::ops::RangeInclusive;
 
 use view_core::msg::{Key, MouseInput, Msg};
-use view_core::native::dvr::Marker;
+use view_core::native::dvr::{input_log_bytes, Marker};
 use view_tui::dvr::{CellView, FrameRing, RingBuilder, Scroll};
 
 use super::{DEAD, DELTA, END, INPUT, KEYFRAME, MAGIC, MARKER, VERSION};
@@ -24,7 +24,19 @@ pub(crate) struct Clip {
     pub(crate) dead: Vec<RangeInclusive<u64>>,
     /// The frames the ring could not hold, with the deltas built on them.
     pub(crate) dropped: usize,
+    /// The inputs past the input log's share of the recording bound, and
+    /// those of a kind this build does not know.
+    pub(crate) dropped_inputs: usize,
 }
+
+/// The marks, and apart from them the abandoned ranges, a clip is read with
+/// at most. A recording lays one per verb, restart or branch, so a clip
+/// past this many is damaged.
+const MARKS_MAX: usize = 1 << 16;
+
+/// The fewest bytes a recorded cell takes: an empty symbol, three colors
+/// and the modifier.
+const CELL_BYTES_MIN: usize = 15;
 
 /// Why a clip could not be read.
 #[derive(Debug)]
@@ -65,7 +77,9 @@ impl From<io::Error> for ClipError {
 }
 
 /// Reads a clip from `r` into a ring holding a recording bound of
-/// `max_bytes`.
+/// `max_bytes`. A record longer than that bound is refused before it is
+/// read, and the inputs past the input log's share of it are dropped and
+/// counted.
 ///
 /// # Errors
 ///
@@ -91,34 +105,54 @@ pub(crate) fn decode(r: &mut impl Read, max_bytes: usize) -> Result<Clip, ClipEr
         markers: Vec::new(),
         dead: Vec::new(),
         dropped: 0,
+        dropped_inputs: 0,
     };
-    let mut frames = 0u64;
+    let (mut frames, mut inputs_read, mut input_bytes) = (0u64, 0u64, 0usize);
+    let mut last_seq = None;
     let mut payload = Vec::new();
     loop {
         let mut tag = [0u8; 5];
         r.read_exact(&mut tag)?;
         let [tag, len @ ..] = tag;
-        let len = u64::from(u32::from_le_bytes(len));
+        let len = u32::from_le_bytes(len);
+        if !usize::try_from(len).is_ok_and(|len| len <= max_bytes) {
+            return Err(ClipError::Malformed(
+                "a record is larger than the recording bound",
+            ));
+        }
         payload.clear();
-        let read = r.by_ref().take(len).read_to_end(&mut payload)?;
-        if u64::try_from(read).ok() != Some(len) {
+        let read = r.by_ref().take(u64::from(len)).read_to_end(&mut payload)?;
+        if u32::try_from(read).ok() != Some(len) {
             return Err(ClipError::Truncated);
         }
         let mut body = Bytes(&payload);
         match tag {
             KEYFRAME | DELTA => {
+                let seq = body.u64()?;
+                let follows = last_seq.map_or(seq > 0, |last: u64| {
+                    seq > last && (tag == KEYFRAME || last.checked_add(1) == Some(seq))
+                });
+                if !follows {
+                    return Err(ClipError::Malformed("frames out of order"));
+                }
+                last_seq = Some(seq);
                 frames += 1;
+                builder.seat(seq);
                 if read_frame(&mut builder, tag, &mut body)?.is_none() {
                     clip.dropped += 1;
                 }
             }
             INPUT => {
+                inputs_read += 1;
                 let after = body.u64()?;
-                if let Some(msg) = read_input(&mut body)? {
-                    clip.inputs.push((after, msg));
+                input_bytes = input_bytes.saturating_add(payload.len());
+                let kept = input_bytes <= input_log_bytes(max_bytes);
+                match read_input(&mut body)?.filter(|_| kept) {
+                    Some(msg) => clip.inputs.push((after, msg)),
+                    None => clip.dropped_inputs += 1,
                 }
             }
-            MARKER => {
+            MARKER if clip.markers.len() < MARKS_MAX => {
                 let frame = body.u64()?;
                 let marker = match body.u8()? {
                     0 => Marker::EngineRestart,
@@ -128,10 +162,9 @@ pub(crate) fn decode(r: &mut impl Read, max_bytes: usize) -> Result<Clip, ClipEr
                 };
                 clip.markers.push((frame, marker));
             }
-            DEAD => clip.dead.push(body.u64()?..=body.u64()?),
+            DEAD if clip.dead.len() < MARKS_MAX => clip.dead.push(body.u64()?..=body.u64()?),
             END => {
-                let inputs = u64::try_from(clip.inputs.len()).ok();
-                if body.u64()? != frames || Some(body.u64()?) != inputs {
+                if body.u64()? != frames || body.u64()? != inputs_read {
                     return Err(ClipError::Malformed("the end record miscounts the clip"));
                 }
                 if r.read(&mut [0u8; 1])? != 0 {
@@ -145,15 +178,13 @@ pub(crate) fn decode(r: &mut impl Read, max_bytes: usize) -> Result<Clip, ClipEr
     }
 }
 
-/// Adds the keyframe or delta in `body` to `builder`. Returns its seq, or
-/// `None` when the ring could not hold it.
+/// Adds the keyframe or delta in `body`, read past its seq, to `builder`.
+/// Returns its seq, or `None` when the ring could not hold it.
 fn read_frame(
     builder: &mut RingBuilder,
     tag: u8,
     body: &mut Bytes<'_>,
 ) -> Result<Option<u64>, ClipError> {
-    // the builder numbers the frames it keeps itself
-    let _seq = body.u64()?;
     let at_us = body.u64()?;
     let area = if tag == KEYFRAME {
         Some((body.u16()?, body.u16()?))
@@ -164,7 +195,13 @@ fn read_frame(
     let cursor = (on != 0).then_some((x, y));
     let mut cells = Vec::new();
     if let Some((w, h)) = area {
-        for i in 0..usize::from(w) * usize::from(h) {
+        let cells_named = usize::from(w) * usize::from(h);
+        if cells_named.saturating_mul(CELL_BYTES_MIN) > body.0.len() {
+            return Err(ClipError::Malformed(
+                "a keyframe holds fewer cells than its size",
+            ));
+        }
+        for i in 0..cells_named {
             let at = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
             let (x, y) = (at(i % usize::from(w)), at(i / usize::from(w)));
             cells.push(body.cell(x, y)?);

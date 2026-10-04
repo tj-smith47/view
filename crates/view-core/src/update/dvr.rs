@@ -33,7 +33,8 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
         return model.engine.record_native_notice(OFF.to_string(), false);
     }
     model.dvr.mark_invoke();
-    let (word, path) = verb.split_once(' ').unwrap_or((verb, ""));
+    // the path is every byte after the first blank run, as typed
+    let (word, path) = verb.split_once(char::is_whitespace).unwrap_or((verb, ""));
     match word {
         "scrub" if !model.dvr.open_scrub() => {
             model.engine.record_native_notice(EMPTY.to_string(), false)
@@ -43,7 +44,7 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
             model.dvr.close_scrub();
             Vec::new()
         }
-        "export" => export(model, path.trim()),
+        "export" => export(model, path.trim_start()),
         _ => model
             .engine
             .record_native_notice(super::feature_invoke_notice("dvr", verb, false), false),
@@ -290,10 +291,16 @@ mod tests {
         );
         assert!(m.dirty);
         let _ = update(&mut m, invoke_msg("export"));
-        let _ = update(&mut m, invoke_msg("export clips/a b.vdvr"));
+        let _ = update(&mut m, invoke_msg("export   /w/clips/a  b.vdvr "));
+        let _ = update(&mut m, invoke_msg("export\t/w/c.vdvr"));
         assert_eq!(
             exports(&mut m),
-            [None, None, Some("clips/a b.vdvr".to_owned())]
+            [
+                None,
+                None,
+                Some("/w/clips/a  b.vdvr ".to_owned()),
+                Some("/w/c.vdvr".to_owned())
+            ]
         );
     }
 
@@ -319,8 +326,9 @@ mod tests {
             DvrIoReply::Refused(ExportRefusal::NoWriter),
             DvrIoReply::Failed {
                 verb: "export",
-                reason: "/w/x.vdvr: File exists".to_owned(),
+                reason: "/w/x.vdvr already exists, left as it is".to_owned(),
             },
+            DvrIoReply::Refused(ExportRefusal::Queued),
         ];
         for reply in replies {
             let mut m = recorded();
@@ -339,7 +347,14 @@ mod tests {
         }
         assert!(told[1].contains("DVR clip written: /w/view-dvr-1.vdvr"));
         assert!(told[2].contains('3'), "{}", told[2]);
-        assert!(told[6].contains("/w/x.vdvr"), "{}", told[6]);
+        assert!(told[2].contains("3 symbols cut"), "{}", told[2]);
+        assert!(told[4].contains("raise [dvr] max_mb"), "{}", told[4]);
+        assert!(
+            told[6].contains("/w/x.vdvr already exists, left as it is"),
+            "{}",
+            told[6]
+        );
+        assert!(told[7].contains("file work is queued"), "{}", told[7]);
         let mut m = recorded();
         let quiet = DvrIoReply::DiskChecked {
             changed: Vec::new(),

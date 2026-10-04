@@ -92,6 +92,53 @@ fn a_view_command_hands_a_trailing_bar_command_to_nvim() {
     );
 }
 
+/// The next `Msg::FeatureInvoke` on `rx`, as its feature and verb.
+fn next_invoke(rx: &mpsc::Receiver<Msg>) -> (String, String) {
+    loop {
+        match rx.recv_timeout(view_test_support::host_deadline(TICK)) {
+            Ok(Msg::FeatureInvoke { feature, verb, .. }) => return (feature, verb),
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                panic!("no Msg::FeatureInvoke arrived within the deadline")
+            }
+        }
+    }
+}
+
+/// The path `:View dvr export` is given is the one a person typed: `~` is
+/// the home directory, a relative path starts at nvim's current directory,
+/// and a run of blanks stays in the name.
+#[test]
+fn an_export_path_reaches_view_as_typed_and_absolute() {
+    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_claims(&rx);
+    let dir = view_test_support::ScratchDir::new("export-path").unwrap();
+    engine
+        .handle
+        .eval_str(&format!("execute('cd {}')", dir.path().display()))
+        .unwrap();
+    let home = engine.handle.eval_str("expand('~')").unwrap();
+    let cwd = engine.handle.eval_str("getcwd()").unwrap();
+    let cases = [
+        ("View dvr export ~/x.vdvr", format!("export {home}/x.vdvr")),
+        (
+            "View dvr  export   a  b.vdvr",
+            format!("export {cwd}/a  b.vdvr"),
+        ),
+        ("View dvr export", "export".to_owned()),
+        ("View ui  panes tiles", "panes tiles".to_owned()),
+    ];
+    for (typed, want) in cases {
+        engine
+            .handle
+            .eval_str(&format!("execute('{typed}')"))
+            .unwrap();
+        let feature = typed.split_whitespace().nth(1).unwrap().to_owned();
+        assert_eq!(next_invoke(&rx), (feature, want), "{typed}");
+    }
+}
+
 /// A key that invokes view answers with the keys nvim matches for it, the
 /// leader resolved, and a chord sending nvim keys of its own answers with
 /// none.

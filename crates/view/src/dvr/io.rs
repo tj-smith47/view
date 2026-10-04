@@ -4,9 +4,9 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Read};
 use std::ops::RangeInclusive;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use view_core::hash::{fnv1a_extend, FNV_OFFSET};
@@ -131,9 +131,24 @@ fn hash_file(path: &str) -> Option<u64> {
     }
 }
 
+/// The file a clip bound for `path` is written to before it is renamed
+/// there: `.NAME.part` beside it.
+pub(crate) fn part_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map_or_else(|| "clip".into(), |n| n.to_string_lossy().into_owned());
+    path.with_file_name(format!(".{name}.part"))
+}
+
 /// Writes the clip `export` describes to a file that must not exist yet.
 /// The export's frames and hold are released before the reply is made.
 fn write(export: Export) -> DvrIoReply {
+    write_paced(export, || {})
+}
+
+/// [`write`], running `synced` once the whole clip sits synced under its
+/// part name, ahead of the rename that publishes it.
+fn write_paced(export: Export, synced: impl FnOnce()) -> DvrIoReply {
     let Export {
         path,
         frames,
@@ -143,25 +158,33 @@ fn write(export: Export) -> DvrIoReply {
         held,
     } = export;
     let shown = path.display().to_string();
-    let written = File::create_new(&path).and_then(|file| {
-        let mut out = BufWriter::new(file);
+    let part = part_path(&path);
+    let written = (|| -> io::Result<usize> {
+        if path.try_exists()? {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+        }
+        let mut out = BufWriter::new(File::create(&part)?);
         let cut = clip::encode(&mut out, &frames, &inputs, &markers, &dead)?;
-        out.flush()?;
+        out.into_inner()
+            .map_err(io::IntoInnerError::into_error)?
+            .sync_all()?;
+        synced();
+        std::fs::rename(&part, &path)?;
         Ok(cut)
-    });
+    })();
+    // nothing is left to remove once the rename has published the clip
+    let _ = std::fs::remove_file(&part);
     drop((frames, held));
     match written {
         Ok(cut) => DvrIoReply::Exported { path: shown, cut },
-        Err(e) => {
-            // a clip cut short holds no end record and no reader opens it
-            if e.kind() != io::ErrorKind::AlreadyExists {
-                let _ = std::fs::remove_file(&path);
-            }
-            DvrIoReply::Failed {
-                verb: "export",
-                reason: format!("{shown}: {e}"),
-            }
-        }
+        Err(e) => DvrIoReply::Failed {
+            verb: "export",
+            reason: if e.kind() == io::ErrorKind::AlreadyExists {
+                format!("{shown} already exists, left as it is")
+            } else {
+                format!("{shown}: {e}")
+            },
+        },
     }
 }
 
@@ -277,16 +300,43 @@ mod tests {
         let written = std::fs::read(&path).unwrap();
         assert_eq!(&written[..10], b"VIEWDVR\0\x01\x00");
         io.apply(export(&mut ring, path.clone(), &held));
-        match reply(&rx) {
-            DvrIoReply::Failed { verb, reason } => {
-                assert_eq!(verb, "export");
-                assert!(reason.starts_with(&shown), "{reason}");
+        assert_eq!(
+            reply(&rx),
+            DvrIoReply::Failed {
+                verb: "export",
+                reason: format!("{shown} already exists, left as it is"),
             }
-            other => panic!("{other:?}"),
-        }
+        );
         assert_eq!(std::fs::read(&path).unwrap(), written);
         let missing = dir.join("no-such-dir").join("b.vdvr");
         io.apply(export(&mut ring, missing, &held));
         assert!(matches!(reply(&rx), DvrIoReply::Failed { .. }));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_clip_appears_under_its_name_only_once_it_is_whole() {
+        let dir = ScratchDir::new("dvr-export-part").unwrap();
+        let path = dir.join("a  b.vdvr");
+        let part = part_path(&path);
+        assert_eq!(part, dir.join(".a  b.vdvr.part"));
+        let mut ring = one_frame();
+        let held = Arc::new(());
+        let IoJob::Export(job) = export(&mut ring, path.clone(), &held) else {
+            panic!("an export job")
+        };
+        let mut looked = false;
+        let reply = write_paced(job, || {
+            looked = true;
+            assert!(!path.exists(), "the clip is named before it is renamed");
+            let whole = std::fs::read(&part).unwrap();
+            assert!(
+                clip::read::decode(&mut whole.as_slice(), 1 << 20).is_ok(),
+                "the part file holds the whole clip, end record included"
+            );
+        });
+        assert!(looked);
+        assert!(matches!(reply, DvrIoReply::Exported { .. }), "{reply:?}");
+        assert!(path.exists() && !part.exists());
     }
 }

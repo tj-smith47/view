@@ -1685,7 +1685,7 @@ fn main() -> Result<()> {
     // built fresh per restart rather than stored once: `EngineConfig` is
     // consumed by the spawn it describes
     let respawn = |open: &[String]| respawn_config_for(&cli, &resolved.engine, open);
-    let (model, exit_code) = runtime::run(
+    let (model, exit_code, dvr) = runtime::run(
         model,
         recovery::EngineSession {
             engine,
@@ -1722,6 +1722,9 @@ fn main() -> Result<()> {
     // after the restore, so a stalled disk holds a restored terminal for
     // at most the writer's bound
     follow_ups.native.finish_record();
+    if let Some(unfinished) = dvr.and_then(crate::dvr::DvrLoop::finish) {
+        eprintln!("{unfinished}");
+    }
     finish_redraw_log();
     persist_theme(&model, &config_path);
     report_fatal_reason(&model);

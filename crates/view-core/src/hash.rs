@@ -30,6 +30,8 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
 
     #[test]
@@ -38,5 +40,40 @@ mod tests {
         assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(fnv1a(b"foobar"), 0x8594_4171_f739_67e8);
         assert_eq!(fnv1a_extend(fnv1a(b"foo"), b"bar"), fnv1a(b"foobar"));
+    }
+
+    /// No source file of the workspace outside this one spells the FNV-1a
+    /// offset or prime, in hex or decimal, so every hash goes through the
+    /// functions here.
+    #[test]
+    fn no_other_source_carries_its_own_fnv1a() {
+        fn walk(dir: &std::path::Path, found: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("a readable source directory") {
+                let path = entry.expect("a readable directory entry").path();
+                if path.is_dir() {
+                    if !path.ends_with("target") {
+                        walk(&path, found);
+                    }
+                } else if path.extension().is_some_and(|ext| ext == "rs")
+                    && !path.ends_with("view-core/src/hash.rs")
+                {
+                    let source = std::fs::read_to_string(&path).expect("a readable source");
+                    let digits = source.to_lowercase().replace('_', "");
+                    let constants = [
+                        "cbf29ce484222325",
+                        "14695981039346656037",
+                        "100000001b3",
+                        "1099511628211",
+                    ];
+                    if constants.iter().any(|c| digits.contains(c)) {
+                        found.push(path.display().to_string());
+                    }
+                }
+            }
+        }
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut found = Vec::new();
+        walk(&crates, &mut found);
+        assert!(found.is_empty(), "a private FNV-1a copy in {found:?}");
     }
 }

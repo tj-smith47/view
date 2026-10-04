@@ -1,7 +1,7 @@
 //! Builds a ring from frames decoded out of a clip.
 
 use super::cell::{restore, CellView};
-use super::group::Scroll;
+use super::group::{Group, Scroll};
 use super::{blank, place, FrameRing};
 
 /// Builds a ring from frames decoded out of a clip.
@@ -33,6 +33,12 @@ impl RingBuilder {
         cursor: Option<(u16, u16)>,
         cells: impl IntoIterator<Item = CellView<'c>>,
     ) -> Option<u64> {
+        // a size no group of the ring can hold is refused before its
+        // screen is allocated
+        if Group::reserved_bytes(area) > self.ring.budget {
+            self.dropped = true;
+            return None;
+        }
         let mut screen = blank(area);
         for view in cells {
             place(&mut screen, area, view.x, view.y, &restore(view));
@@ -96,6 +102,13 @@ impl RingBuilder {
             place(&mut screen, area, view.x, view.y, &restore(view));
         }
         self.ring.push_key(at_us, area, cursor, screen)
+    }
+
+    /// Numbers the next frame `seq` when that is past the number the ring
+    /// would give it, so a clip's frames keep the numbers they were
+    /// recorded under. A frame the ring could not hold leaves a gap.
+    pub fn seat(&mut self, seq: u64) {
+        self.ring.next_seq = self.ring.next_seq.max(seq);
     }
 
     /// The ring the frames built.

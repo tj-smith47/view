@@ -422,11 +422,21 @@ return {
 /// the session can open it takes the deferred-command path.
 /// [`REGISTER_MAPPINGS_CHUNK`] runs it again, so a caller that registers
 /// over the channel alone still gets the command.
+///
+/// The verb is the argument text after the feature word, every blank in it
+/// kept. A verb that takes a path gets it made absolute by nvim, `~` and
+/// the current directory read as they are for any file name typed there.
 pub(crate) const REGISTER_COMMAND_CHUNK: &str = "\
 local channel, entries, command = ...
+local takes_path = { ['dvr export'] = true }
 vim.api.nvim_create_user_command(command, function(opts)
-  local verb = table.concat(vim.list_slice(opts.fargs, 2), ' ')
-  vim.rpcnotify(channel, 'view_invoke', opts.fargs[1] or '', verb)
+  local feature = opts.fargs[1] or ''
+  local verb = (opts.args:gsub('^%s*%S+%s*', '', 1))
+  local word, path = verb:match('^(%S+)%s+(.+)$')
+  if word and takes_path[feature .. ' ' .. word] then
+    verb = word .. ' ' .. vim.fn.fnamemodify(path, ':p')
+  end
+  vim.rpcnotify(channel, 'view_invoke', feature, verb)
 end, {
   nargs = '*',
   bar = true,

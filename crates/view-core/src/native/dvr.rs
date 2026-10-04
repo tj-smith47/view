@@ -47,8 +47,7 @@ pub enum DvrIoReply {
     Exported {
         /// Where the clip was written.
         path: String,
-        /// How many symbols and mouse fields were cut to
-        /// [`CLIP_FIELD_MAX`] bytes.
+        /// How many symbols were cut to [`CLIP_FIELD_MAX`] bytes.
         cut: usize,
     },
     /// An export was not started.
@@ -70,6 +69,8 @@ pub enum ExportRefusal {
     NoFrame,
     /// An earlier export is still being written.
     Busy,
+    /// The file thread's queue is full of other work.
+    Queued,
     /// A copy of the newest frames would take the recording past its
     /// memory bound.
     OverBudget,
@@ -92,8 +93,11 @@ impl DvrIoReply {
                 ExportRefusal::Busy => {
                     "view: DVR export busy: the last clip is still being written"
                 }
+                ExportRefusal::Queued => {
+                    "view: DVR export busy: file work is queued, try again in a moment"
+                }
                 ExportRefusal::OverBudget => {
-                    "view: DVR cannot export: a copy of the newest frames would pass [dvr] max_mb"
+                    "view: DVR cannot export: no room to copy the newest frames: raise [dvr] max_mb"
                 }
                 ExportRefusal::NoWriter => {
                     "view: DVR cannot export: its file thread is not running"

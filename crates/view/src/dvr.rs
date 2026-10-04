@@ -7,12 +7,12 @@ use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::mpsc::TrySendError;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use view_core::model::{Model, OverlayKind};
 use view_core::msg::{Effect, Msg};
 use view_core::native::dvr::{DvrIoReply, DvrRequest, ExportRefusal, SCRUB_HINT};
-use view_proc::writer::{BackgroundWriter, QUIT_WAIT};
+use view_proc::writer::BackgroundWriter;
 use view_tui::dvr::FrameRing;
 use view_tui::terminal::Term;
 
@@ -43,7 +43,13 @@ pub(crate) struct DvrLoop {
     /// ring. The ring records no new group past its budget until it is
     /// written, so a frame skipped meanwhile is told nothing.
     exporting: Arc<()>,
+    /// Where the last export queued is written.
+    export_path: Option<PathBuf>,
 }
+
+/// How long a quit waits for a clip still being written. A clip of a full
+/// recording is tens of megabytes, which a local disk takes well inside it.
+const EXPORT_QUIT_WAIT: Duration = Duration::from_secs(2);
 
 impl DvrLoop {
     /// The loop's recorder, or `None` when the session is not recorded.
@@ -67,7 +73,33 @@ impl DvrLoop {
             io,
             unsent: VecDeque::new(),
             exporting: Arc::new(()),
+            export_path: None,
         }
+    }
+
+    /// Closes the file thread. Waits up to [`EXPORT_QUIT_WAIT`] while a clip
+    /// is being written, and nothing otherwise. Returns the line to print
+    /// once the terminal is restored when that clip is still unfinished,
+    /// its part file removed.
+    pub(crate) fn finish(mut self) -> Option<String> {
+        let mut io = self.io.take()?;
+        if Arc::strong_count(&self.exporting) == 1 {
+            return None;
+        }
+        let _ = io.finish_within(EXPORT_QUIT_WAIT);
+        let path = self.export_path.take()?;
+        if Arc::strong_count(&self.exporting) == 1 {
+            return None;
+        }
+        let _ = std::fs::remove_file(io::part_path(&path));
+        // the rename can land between the count and the removal
+        if path.exists() {
+            return None;
+        }
+        Some(format!(
+            "view: DVR clip {} was not finished when view quit",
+            path.display()
+        ))
     }
 
     /// Resolves the scrub moves the keys asked for against the ring, and
@@ -96,23 +128,43 @@ impl DvrLoop {
                 _ => {}
             }
         }
-        while let Some(job) = self.unsent.pop_front() {
-            let Some(io) = self.io.as_mut() else {
-                self.unsent.clear();
-                break;
-            };
-            if let Err(TrySendError::Full(job)) = io.try_send(job) {
-                self.unsent.push_front(job);
-                break;
-            }
+        for reply in self.send_unsent() {
+            effects.extend(view_core::update::update(model, Msg::DvrIo(reply)));
         }
         effects
     }
 
-    /// Queues the export of the recording to `path`, the working directory
-    /// holding a relative one and a derived one alike. The ring's groups
-    /// are shared with the job, its open group copied, and the input log
-    /// copied once.
+    /// Hands the queued jobs to the file thread until its queue is full.
+    /// Returns the replies owed on the spot for jobs no thread can take: a
+    /// disk check is answered unverifiable.
+    fn send_unsent(&mut self) -> Vec<DvrIoReply> {
+        let mut owed = Vec::new();
+        while let Some(job) = self.unsent.pop_front() {
+            let job = match self.io.as_mut() {
+                Some(io) => match io.try_send(job) {
+                    Ok(()) => continue,
+                    Err(TrySendError::Full(job)) => {
+                        self.unsent.push_front(job);
+                        break;
+                    }
+                    Err(TrySendError::Disconnected(job)) => job,
+                },
+                None => job,
+            };
+            if matches!(job, IoJob::DiskCheck) {
+                owed.push(DvrIoReply::DiskChecked {
+                    changed: Vec::new(),
+                    unverifiable: true,
+                });
+            }
+        }
+        owed
+    }
+
+    /// Queues the export of the recording to `path`, which nvim made
+    /// absolute, or to a derived name in the directory view was started in.
+    /// The ring's groups are shared with the job, its open group copied,
+    /// and the input log copied once.
     fn export(&mut self, model: &Model, path: Option<String>) -> Result<(), ExportRefusal> {
         if Arc::strong_count(&self.exporting) > 1 {
             return Err(ExportRefusal::Busy);
@@ -134,8 +186,9 @@ impl DvrLoop {
             },
             PathBuf::from,
         );
+        let path = model.cwd.join(name);
         let job = IoJob::Export(Export {
-            path: model.cwd.join(name),
+            path: path.clone(),
             frames,
             inputs: clip::Inputs::new(model.dvr.inputs()),
             markers: model.dvr.markers().to_vec(),
@@ -143,8 +196,11 @@ impl DvrLoop {
             held: Arc::clone(&self.exporting),
         });
         match io.try_send(job) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(ExportRefusal::Busy),
+            Ok(()) => {
+                self.export_path = Some(path);
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => Err(ExportRefusal::Queued),
             Err(TrySendError::Disconnected(_)) => Err(ExportRefusal::NoWriter),
         }
     }
@@ -227,15 +283,6 @@ impl DvrLoop {
     }
 }
 
-impl Drop for DvrLoop {
-    /// Gives a clip being written the time a quitting process allows.
-    fn drop(&mut self) {
-        if let Some(io) = self.io.as_mut() {
-            let _ = io.finish_within(QUIT_WAIT);
-        }
-    }
-}
-
 /// What a paint pass drew, and whether it wrote bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Painted {
@@ -301,6 +348,7 @@ mod tests {
     use view_core::grid::GridOp;
     use view_core::msg::{Key, Msg, RpcCall};
     use view_core::update::update;
+    use view_proc::writer::QUIT_WAIT;
     use view_tui::dvr::RingBuilder;
 
     use super::*;
@@ -542,6 +590,7 @@ mod tests {
 
     #[test]
     fn export_never_blocks_the_loop_when_the_writer_is_full() {
+        let _watchdog = view_test_support::watchdog();
         let mut model = Model::with_term_size(80, 24);
         let mut dvr = recorded(&mut model);
         let (entered_tx, entered) = std::sync::mpsc::channel();
@@ -559,18 +608,75 @@ mod tests {
         dvr.io = Some(io);
         // a send that waited on the blocked thread would never return here
         export(&mut model, &mut dvr, "a.vdvr");
-        assert_eq!(told(&model, "export busy"), 1);
+        assert_eq!(told(&model, "export busy: file work is queued"), 1);
         assert_eq!(
             Arc::strong_count(&dvr.exporting),
             1,
             "the refused job is dropped"
         );
-        // a clip still being written refuses the next export in the same words
+        // a clip still being written refuses the next export in its own words
         let writing = Arc::clone(&dvr.exporting);
         export(&mut model, &mut dvr, "b.vdvr");
+        assert_eq!(told(&model, "export busy: the last clip"), 1);
         assert_eq!(told(&model, "export busy"), 2);
         drop(writing);
         drop(gate);
+    }
+
+    #[test]
+    fn a_quit_during_a_slow_write_leaves_no_file_and_says_so() {
+        let _watchdog = view_test_support::watchdog();
+        let dir = view_test_support::ScratchDir::new("dvr-quit-export").unwrap();
+        let mut model = Model::with_term_size(80, 24);
+        let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+        let mut idle = recorded(&mut model);
+        idle.io = Some(io::start(LoopSender::new(tx), false).unwrap());
+        assert_eq!(idle.finish(), None, "no clip in flight, nothing to say");
+
+        let mut dvr = recorded(&mut model);
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (gate, gate_rx) = std::sync::mpsc::channel::<()>();
+        let writer = BackgroundWriter::start("dvr-io-test", 1, move |job: IoJob| {
+            if let IoJob::Export(export) = job {
+                // the clip half written when the process quits
+                let _ = std::fs::write(io::part_path(&export.path), b"VIEWDVR\0");
+                let _ = entered_tx.send(());
+                let _ = gate_rx.recv();
+            }
+            Ok::<(), Infallible>(())
+        })
+        .unwrap();
+        dvr.io = Some(writer);
+        let path = dir.join("a.vdvr");
+        export(&mut model, &mut dvr, &path.display().to_string());
+        entered.recv().unwrap();
+        assert_eq!(
+            dvr.finish(),
+            Some(format!(
+                "view: DVR clip {} was not finished when view quit",
+                path.display()
+            ))
+        );
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert!(left.is_empty(), "{left:?}");
+        drop(gate);
+    }
+
+    #[test]
+    fn a_disk_check_with_no_file_thread_is_answered_unverifiable() {
+        let mut model = Model::with_term_size(80, 24);
+        let mut dvr = recorded(&mut model);
+        dvr.unsent
+            .push_back(IoJob::Baseline(vec!["a.rs".to_owned()]));
+        dvr.unsent.push_back(IoJob::DiskCheck);
+        assert_eq!(
+            dvr.send_unsent(),
+            [DvrIoReply::DiskChecked {
+                changed: Vec::new(),
+                unverifiable: true,
+            }]
+        );
+        assert!(dvr.unsent.is_empty());
     }
 
     #[test]

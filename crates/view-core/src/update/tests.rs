@@ -21946,16 +21946,14 @@ fn an_error_from_nvim_never_removes_a_hold() {
 /// could raise a doubt.
 #[test]
 fn the_hold_decides_as_recorded_where_nvim_sends_no_error() {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut hash = crate::hash::FNV_OFFSET;
     for steps in hold_population() {
         if steps.iter().any(|step| matches!(step, Step::Error)) {
             continue;
         }
         for (answer, user) in [(false, false), (false, true), (true, false), (true, true)] {
             let trace = hold_trace(&mut hold_model(user, false), &steps, answer, false);
-            for byte in format!("{trace:?}").bytes() {
-                hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
-            }
+            hash = crate::hash::fnv1a_extend(hash, format!("{trace:?}").as_bytes());
         }
     }
     assert_eq!(hash, 0x4bfe_0cb2_638b_c130, "{hash:#x}");

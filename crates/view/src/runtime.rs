@@ -1115,6 +1115,9 @@ fn attach_wait_left(model: &Model, started: Instant, now: Instant) -> Option<std
 ///
 /// [`SPECULATION_MAX_AGE`]: view_core::native::speculate::SPECULATION_MAX_AGE
 ///
+/// Returns the model, the exit code and the session recorder, whose clip in
+/// flight is waited for once the terminal is restored.
+///
 /// # Errors
 ///
 /// Returns the underlying `std::io::Error` if a terminal paint fails (the
@@ -1129,7 +1132,7 @@ pub fn run(
     follow_ups: &mut FollowUps<'_>,
     term: &mut Term,
     ai_agent: view_ai::AgentSpec,
-) -> anyhow::Result<(Model, i32)> {
+) -> anyhow::Result<(Model, i32, Option<crate::dvr::DvrLoop>)> {
     let EngineSession {
         mut engine,
         mut pump,
@@ -1279,7 +1282,7 @@ pub fn run(
                         fresh.staged,
                         || engine.wait_exit(),
                     ) {
-                        return Ok((model, code));
+                        return Ok((model, code, dvr));
                     }
                 }
                 // a reconnect sequence absorbs its own failures: the next
@@ -1302,7 +1305,7 @@ pub fn run(
                             format!("the restarted engine could not be attached: {err}")
                         }
                     });
-                    return Ok((model, 1));
+                    return Ok((model, 1, dvr));
                 }
             }
         }
@@ -1338,7 +1341,7 @@ pub fn run(
                 || engine_stop(&mut engine),
                 Msg::AttachDeadline,
             ) {
-                return Ok((model, code));
+                return Ok((model, code, dvr));
             }
         }
         drain_pass_handoffs(&osc52_rx, term, &executor);
@@ -1356,7 +1359,7 @@ pub fn run(
                 || engine_stop(&mut engine),
                 Msg::Resized { width, height },
             ) {
-                return Ok((model, code));
+                return Ok((model, code, dvr));
             }
         }
         // both sides read here, immediately before the paint that would show
@@ -1379,7 +1382,7 @@ pub fn run(
                 || engine_stop(&mut engine),
                 msg,
             ) {
-                return Ok((model, code));
+                return Ok((model, code, dvr));
             }
             // straight back to the top rather than on through the wait
             // below, matching what the message path does after its own
@@ -1570,7 +1573,7 @@ pub fn run(
                 || engine_stop(&mut engine),
                 msg,
             ) {
-                return Ok((model, code));
+                return Ok((model, code, dvr));
             }
             felt.note_dispatched(dispatched, &model);
             // the rest of this batch was addressed to an engine that is

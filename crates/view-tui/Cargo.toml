@@ -18,6 +18,9 @@ workspace = true
 # rustix it widens is itself a cfg(unix) dependency -- so the module and
 # its call sites are fenced `cfg(all(unix, feature = "bench-taps"))`.
 bench-taps = ["rustix/time", "rustix/fs"]
+# A terminal that paints into a buffer, for tests in other crates that read
+# what a painted frame records.
+test-support = []
 
 [dependencies]
 crossterm = "0.29.0"

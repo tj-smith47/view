@@ -771,6 +771,10 @@ mod tests {
         assert_eq!(builder.push_key(0, small, None, [cell(0)]), Some(1));
         assert_eq!(builder.push_key(1, (40, 40), None, [cell(0)]), None);
         assert_eq!(builder.push_delta(2, None, None, [cell(1)]), None);
+        // a screen this size is refused before four billion cells are allocated
+        let huge = (u16::MAX, u16::MAX);
+        assert_eq!(builder.push_key(2, huge, None, [cell(0)]), None);
+        assert_eq!(builder.push_delta(2, None, None, [cell(1)]), None);
         assert_eq!(builder.push_key(3, small, None, [cell(1)]), Some(2));
         assert_eq!(builder.push_delta(4, None, None, [cell(0)]), Some(3));
         let mut ring = FrameRing::with_budget(1);

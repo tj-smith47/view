@@ -1256,8 +1256,9 @@ impl Term {
     /// unconditionally, and this value entered no terminal to restore: a
     /// drop here would write a teardown sequence to whatever the test
     /// harness's stdout is and disable raw mode process-wide.
-    #[cfg(test)]
-    fn frame_probe(caps: TermCaps) -> std::mem::ManuallyDrop<Self> {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn frame_probe(caps: TermCaps) -> std::mem::ManuallyDrop<Self> {
         let frame_buf = Rc::new(RefCell::new(Vec::new()));
         let inner = ratatui::backend::CrosstermBackend::new(FrameBuf(Rc::clone(&frame_buf)));
         std::mem::ManuallyDrop::new(Self {
@@ -1278,6 +1279,25 @@ impl Term {
             agent_repaint: false,
             probe: None,
         })
+    }
+
+    /// Paints one frame on a [`frame_probe`](Self::frame_probe) terminal
+    /// and discards its bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error composing the frame failed with.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn probe_paint(
+        &mut self,
+        model: &Model,
+        surface: &Surface,
+        grid_damage: &GridDamage,
+    ) -> std::io::Result<()> {
+        self.queue_frame(model, surface, grid_damage)?;
+        self.frame_buf.borrow_mut().clear();
+        Ok(())
     }
 }
 
