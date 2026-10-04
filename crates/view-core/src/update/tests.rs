@@ -21702,6 +21702,8 @@ enum Step {
     Mode(&'static str),
     /// A click on the buffer.
     Click,
+    /// A paste into the buffer.
+    Paste,
 }
 
 /// A key pressed 10 ms after the one before it.
@@ -21759,8 +21761,12 @@ fn apply_step(m: &mut Model, step: Step, at: u64) -> Vec<Effect> {
                 UiEvent::Flush,
             ],
         ),
-        Step::Click => {
-            let effects = update(m, click(1, 1));
+        Step::Click | Step::Paste => {
+            let msg = match step {
+                Step::Paste => Msg::Paste("xyz".to_string()),
+                _ => click(1, 1),
+            };
+            let effects = update(m, msg);
             for effect in &effects {
                 if let Effect::Rpc(call) = effect {
                     crate::native::speculate::fold_engine_call(
@@ -21832,7 +21838,15 @@ fn hold_model(user: bool, log: bool) -> Model {
     if user {
         user_mappings(
             &mut m,
-            &["<Space>c", "<Space>coy", "<Space>f", "<Space>fg", "gd", "s"],
+            &[
+                "<Space>c",
+                "<Space>coy",
+                "<Space>f",
+                "<Space>fg",
+                "gd",
+                "grn",
+                "s",
+            ],
             Some(Duration::from_millis(300)),
         );
     }
@@ -21939,11 +21953,12 @@ fn an_error_from_nvim_never_removes_a_hold() {
     }
 }
 
-/// Where no error from nvim stands in a sequence, the hold decides as it
-/// did before an error could put its reading in doubt: the traces of every
+/// Where no error from nvim stands in a sequence, the hold decides as
+/// recorded: the traces of every
 /// such sequence of [`hold_population`], answered or not and with the
-/// user's mappings read or not, hash to the value recorded before an error
-/// could raise a doubt.
+/// user's mappings read or not, hash to the value recorded once the
+/// decisions after a paste and inside a prefix of the user's mappings were
+/// checked against nvim.
 #[test]
 fn the_hold_decides_as_recorded_where_nvim_sends_no_error() {
     let mut hash = crate::hash::FNV_OFFSET;
@@ -21956,7 +21971,7 @@ fn the_hold_decides_as_recorded_where_nvim_sends_no_error() {
             hash = crate::hash::fnv1a_extend(hash, format!("{trace:?}").as_bytes());
         }
     }
-    assert_eq!(hash, 0x32b3_cdf7_6f8b_9da2, "{hash:#x}");
+    assert_eq!(hash, 0xbeaf_f600_9647_c095, "{hash:#x}");
 }
 
 /// An error answering a key sent before `f` leaves `f` waiting for its
@@ -22092,8 +22107,11 @@ const OPERATOR_MAPPINGS: [&str; 11] = [
 /// mode while the key closing it owes its argument. In the next, the error
 /// answers a key before `"`, which still owes its register when the mode
 /// report comes. In the last, the reports answer keys sent before the
-/// error, and the `i` they leave behind still names a text object.
-fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 15] {
+/// error, and the `i` they leave behind still names a text object. In the
+/// two after it, nvim answers while a key still owes its argument: `"`
+/// with a paste waiting behind it, and the `r` of `gr` that begins the
+/// user's `grn` and falls back to a replace.
+fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 17] {
     let answered = |keys: &[&'static str]| {
         let mut steps: Vec<Step> = keys.iter().map(|key| k(key)).collect();
         steps.extend([Step::Answer, k("i"), Step::Error]);
@@ -22180,6 +22198,21 @@ fn errored_prefixes() -> [(Vec<Step>, &'static [&'static str]); 15] {
             ],
             &[],
         ),
+        (
+            vec![
+                k("n"),
+                Step::Error,
+                k("\""),
+                Step::Paste,
+                Step::Answer,
+                k("f"),
+            ],
+            &[],
+        ),
+        (
+            vec![k("n"), Step::Error, k("g"), k("r"), Step::Answer, k("\"")],
+            &[],
+        ),
     ]
 }
 
@@ -22216,6 +22249,87 @@ fn an_error_from_nvim_arms_the_hold_on_views_key_whatever_came_before() {
         }
     }
     assert!(missed.is_empty(), "{missed:#?}");
+}
+
+/// With no error from nvim, a paste waits for the key before it that owes
+/// an argument, and the `r` of `gr` that begins the user's `grn` falls back
+/// to a replace still owed. View's key typed behind either arms the hold,
+/// and no key of the query reaches nvim before it releases.
+#[test]
+fn a_paste_or_a_mapping_prefix_before_views_key_arms_the_hold() {
+    let prefixes = [
+        vec![k("\""), Step::Paste, Step::Answer, k("f")],
+        vec![k("g"), k("r"), Step::Answer, k("\"")],
+    ];
+    for prefix in prefixes {
+        let mut steps = prefix.clone();
+        steps.extend([" ", "f", "f", "m", "a", "i", "n"].map(k));
+        let armed = steps.len() - 5;
+        let trace = hold_trace(&mut hold_model(true, false), &steps, false, false);
+        assert!(trace[armed].0, "{prefix:?}: the hold arms: {trace:?}");
+        let early: Vec<_> = trace[armed + 1..steps.len()]
+            .iter()
+            .flat_map(|t| &t.1)
+            .collect();
+        assert!(early.is_empty(), "{prefix:?}: query sent: {trace:?}");
+    }
+}
+
+/// A click reaches nvim as the argument of the key before it that owes
+/// one, so the `f` after it waits for view's first key as its target and
+/// nvim runs no mapping on it.
+#[test]
+fn a_click_after_a_key_owing_an_argument_is_that_argument() {
+    let mut steps = vec![k("\""), Step::Click, Step::Answer];
+    steps.extend(["f", " ", "f", "f", "m"].map(k));
+    let trace = hold_trace(&mut hold_model(true, false), &steps, false, false);
+    assert!(trace.iter().all(|t| !t.0), "{trace:?}");
+}
+
+/// nvim waits for the rest of a mapping through a paste, so `g r`, a paste
+/// and `n` run the user's `grn` and the key log shows it. A click ends the
+/// wait, and the same keys around it run nothing.
+#[test]
+fn a_paste_leaves_a_mapping_prefix_waiting_and_a_click_ends_it() {
+    for (between, rows) in [(Step::Paste, &["grn"][..]), (Step::Click, &[][..])] {
+        let mut m = hold_model(true, false);
+        for (at, step) in [k("g"), k("r"), between, k("n")].into_iter().enumerate() {
+            let _ = apply_step(&mut m, step, at as u64 * 10);
+        }
+        assert_eq!(user_rows(&m), rows, "{between:?}");
+    }
+}
+
+/// The doubt a key read inside one of the user's mappings raises lives as
+/// one an error raises. View's key after `g r`, an answer and `j` arms the
+/// hold, which releases when the picker opens and hands it the query with
+/// no bound run out. The answer to `j`, which owes nothing, ends the doubt,
+/// and view's key typed as `f`'s argument after it arms nothing.
+#[test]
+fn a_doubt_a_mapping_prefix_raises_ends_as_one_an_error_raises() {
+    let prefix = [k("g"), k("r"), Step::Answer, k("j")];
+    let mut m = hold_model(true, false);
+    let mut sent = Vec::new();
+    for (at, step) in prefix
+        .into_iter()
+        .chain([" ", "f", "f", "m", "a", "i", "n"].map(k))
+        .enumerate()
+    {
+        let effects = apply_step(&mut m, step, at as u64 * 10);
+        sent.extend(meta_inputs(&effects).into_iter().map(str::to_string));
+    }
+    assert!(m.submit_hold.is_holding(), "{sent:?}");
+    assert_eq!(sent, ["g", "r", "j", " ", "f", "f"]);
+    let released = update(&mut m, feature_invoke("picker", "files"));
+    assert!(!m.submit_hold.is_holding());
+    assert!(meta_inputs(&released).is_empty(), "{released:?}");
+    let query = m.picker_mut().map(|picker| picker.query().to_string());
+    assert_eq!(query.as_deref(), Some("main"));
+
+    let mut steps = prefix.to_vec();
+    steps.extend([Step::Answer, k("f"), k(" "), k("f"), k("f"), k("m")]);
+    let trace = hold_trace(&mut hold_model(true, false), &steps, false, false);
+    assert!(trace.iter().all(|t| !t.0), "{trace:?}");
 }
 
 /// The doubt an error raises ends on an answer to a key typed after the
@@ -22756,12 +22870,13 @@ fn the_hold_decides_what_it_was_recorded_deciding() {
 /// units before view's key at speed. The units are view's keys and their
 /// prefixes, the user's mappings and a prefix of one, operators, keys that
 /// leave normal mode, answered or not, keys that take an argument, one of
-/// them reported on, a text object named across a mode report, a click,
-/// and nvim's answers and mode reports; the gaps
+/// them reported on, a text object named across a mode report, a click, a
+/// paste behind a key owing its argument, the `gr` that begins the user's
+/// `grn`, and nvim's answers and mode reports; the gaps
 /// fall below, at and past `'timeoutlen'`, a millisecond short of it and
 /// fifty past it among them.
 fn hold_population() -> Vec<Vec<Step>> {
-    const UNITS: [&[Step]; 28] = [
+    const UNITS: [&[Step]; 30] = [
         &[k(" "), k("f"), k("f")],
         &[k(" "), k("e")],
         &[k(" ")],
@@ -22795,6 +22910,8 @@ fn hold_population() -> Vec<Vec<Step>> {
         &[Step::Mode("normal")],
         &[k("\""), Step::Mode("normal")],
         &[k("d"), k("i"), Step::Mode("normal"), k("\"")],
+        &[k("\""), Step::Paste],
+        &[k("g"), k("r")],
     ];
     const VIEW: [&[&str]; 2] = [&[" ", "f", "f"], &[" ", "e"]];
     const GAPS: [u64; 7] = [10, 150, 299, 300, 301, 350, 1000];

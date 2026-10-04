@@ -21,7 +21,9 @@ use view_core::msg::{Effect, Key, Msg, RpcCall};
 use view_core::native::key_log::Fired;
 use view_core::native::mappings::{MappingClaim, MappingOwner};
 use view_core::native::registry;
-use view_core::native::speculate::{fold_redraw, is_cmdline_mode, SpecStamp, CMDLINE_LITERAL_KEYS};
+use view_core::native::speculate::{
+    fold_engine_call, fold_redraw, is_cmdline_mode, SpecStamp, CMDLINE_LITERAL_KEYS,
+};
 use view_core::native::surfaces::Taken;
 use view_core::update::update;
 use view_engine::process::Engine;
@@ -666,20 +668,45 @@ fn send(session: &Session, effects: &[Effect]) {
 fn type_into(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String> {
     let mut sent = Vec::new();
     for key in keys {
-        model.set_now(std::time::SystemTime::now());
-        let effects = update(
-            model,
-            Msg::Key(Key {
-                notation: (*key).to_string(),
-            }),
-        );
+        let effects = press_into(model, key);
         send(session, &effects);
-        sent.extend(effects.iter().filter_map(|effect| match effect {
-            Effect::Rpc(RpcCall::Input { notation }) => Some(notation.clone()),
-            _ => None,
-        }));
+        sent.extend(inputs(&effects));
     }
     sent
+}
+
+/// Types `keys` into `model` and sends nvim the keys it forwards as one
+/// input. nvim reads all of them before it draws again, so no answer to
+/// an early key arrives after a later one went out.
+fn type_at_once(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String> {
+    let sent: Vec<String> = keys
+        .iter()
+        .flat_map(|key| inputs(&press_into(model, key)))
+        .collect();
+    session.engine.handle.input(&sent.concat()).unwrap();
+    sent
+}
+
+/// Presses `key` in `model`, stamped now, and its effects.
+fn press_into(model: &mut Model, key: &str) -> Vec<Effect> {
+    model.set_now(std::time::SystemTime::now());
+    update(
+        model,
+        Msg::Key(Key {
+            notation: key.to_string(),
+        }),
+    )
+}
+
+/// The keys `effects` send nvim.
+fn inputs(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Rpc(RpcCall::Input { notation }) => Some(notation.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The user's own mappings the key log holds, oldest first, each as its
@@ -1068,6 +1095,41 @@ fn an_answer_to_an_earlier_key_arrives_ahead_of_views_invocation() {
     );
 }
 
+/// A model that has applied the registration's claims and read the user's
+/// keys with `lhs` among them, with nvim in normal mode.
+fn reading_model(session: &Session, lhs: &str) -> Model {
+    let mut model = Model::with_term_size(80, 24);
+    model.ai_trusted = true;
+    session.register(&NativeConfig::all_enabled());
+    let seen = std::cell::Cell::new((false, false));
+    pump(session, &mut model, ARRIVAL, |_, msg| {
+        let (claimed, read) = seen.get();
+        seen.set(match msg {
+            Msg::MappingsClaimed { .. } => (true, read),
+            Msg::UserMappingsRead { keys, .. } => (claimed, keys.iter().any(|keys| keys == lhs)),
+            _ => (claimed, read),
+        });
+        (seen.get() == (true, true)).then_some(())
+    })
+    .expect("the registration answers and the user's keys are read");
+    assert_eq!(model.engine.mode.current, "normal");
+    model
+}
+
+/// Pastes `text` through `model`, sending nvim the paste it routes and
+/// folding the call as the runtime does.
+fn paste_into(session: &Session, model: &mut Model, text: &str) {
+    let effects = update(model, Msg::Paste(text.to_string()));
+    for effect in &effects {
+        if let Effect::Rpc(call) = effect {
+            fold_engine_call(model, call, SpecStamp::new(Duration::ZERO));
+            if let RpcCall::Paste { text } = call {
+                session.engine.handle.paste(text).unwrap();
+            }
+        }
+    }
+}
+
 /// A user's mapping whose last key would enter insert mode on its own,
 /// then view's key and a query typed at once: the query waits for view's
 /// invocation, and none of it edits the buffer.
@@ -1077,21 +1139,7 @@ fn keys_typed_ahead_after_a_users_mapping_on_a_mode_key_never_edit_the_buffer() 
         "typed-ahead-mode-key",
         "vim.keymap.set('n', '<leader>a', '<cmd>let g:view_a = 1<CR>')\n",
     );
-    let mut model = Model::with_term_size(80, 24);
-    model.ai_trusted = true;
-    session.register(&NativeConfig::all_enabled());
-    let seen = std::cell::Cell::new((false, false));
-    pump(&session, &mut model, ARRIVAL, |_, msg| {
-        let (claimed, read) = seen.get();
-        seen.set(match msg {
-            Msg::MappingsClaimed { .. } => (true, read),
-            Msg::UserMappingsRead { keys, .. } => (claimed, keys.iter().any(|keys| keys == ",a")),
-            _ => (claimed, read),
-        });
-        (seen.get() == (true, true)).then_some(())
-    })
-    .expect("the registration answers and the user's keys are read");
-    assert_eq!(model.engine.mode.current, "normal");
+    let mut model = reading_model(&session, ",a");
     let keys = [",", "a", ",", "f", "f", "m", "a", "i", "n"];
     let sent = type_into(&session, &mut model, &keys);
     pump(&session, &mut model, ARRIVAL, |_, msg| {
@@ -1185,6 +1233,53 @@ fn a_jump_typed_after_a_refused_insert_keeps_the_query_for_the_picker() {
     assert_eq!(session.eval("join(getline(1, '$'), '|')"), "foo");
     let query = model.picker_mut().map(|picker| picker.query().to_string());
     assert_eq!(query.as_deref(), Some("main"));
+}
+
+/// nvim's default `grn` begins with `gr`, and `gr"` matches no mapping, so
+/// nvim replaces a character with `"` and reads the next key as a command.
+/// `gr"`, view's key and a query typed at once: the buffer is what `gr"`
+/// alone leaves, and the query waits for view's invocation and reaches the
+/// picker.
+#[test]
+fn keys_typed_ahead_after_a_replace_behind_a_default_mapping_reach_the_picker() {
+    let session = Session::start_with(
+        "typed-ahead-gr",
+        "vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'foo' })\n",
+    );
+    assert_ne!(session.eval("maparg('grn', 'n')"), "", "nvim maps grn");
+    let mut model = reading_model(&session, "grn");
+    let keys = ["g", "r", "\"", ",", "f", "f", "m", "a", "i", "n"];
+    let sent = type_at_once(&session, &mut model, &keys);
+    pump(&session, &mut model, ARRIVAL, |_, msg| {
+        matches!(msg, Msg::FeatureInvoke { .. }).then_some(())
+    })
+    .expect("nvim runs view's <leader>ff");
+    assert_eq!(sent, keys[..6], "the query waits for view's invocation");
+    assert_eq!(session.eval("join(getline(1, '$'), '|')"), "\"oo");
+    let query = model.picker_mut().map(|picker| picker.query().to_string());
+    assert_eq!(query.as_deref(), Some("main"));
+}
+
+/// `"`, a paste, then view's key and a query typed at once: nvim runs the
+/// paste once `"` has its register, which is the `,` typed after it, so
+/// view's key runs nothing. Nothing is held, every key reaches nvim as it
+/// is typed, and the picker never opens.
+#[test]
+fn views_key_typed_after_a_paste_behind_a_register_key_is_that_register() {
+    let session = Session::start_with(
+        "typed-ahead-paste",
+        "vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'foo' })\n",
+    );
+    let mut model = registered_model(&session);
+    let mut sent = type_into(&session, &mut model, &["\""]);
+    paste_into(&session, &mut model, "xyz");
+    let keys = [",", "f", "f", "m", "a", "i", "n"];
+    sent.extend(type_into(&session, &mut model, &keys));
+    assert!(!model.submit_hold.is_holding());
+    assert_eq!(sent, ["\"", ",", "f", "f", "m", "a", "i", "n"]);
+    let _ = session.eval("1");
+    assert_eq!(session.invoke(SILENCE), None, "view's key ran nothing");
+    assert!(model.picker_mut().is_none());
 }
 
 /// A stub that maps the real handler over itself and types its keys again

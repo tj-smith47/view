@@ -7,13 +7,22 @@
 //! buffer the panel was opened from. Holding them until the invocation's
 //! notification comes back lets the focus it sets decide where they go.
 //!
-//! Over a slow link three cases still send a query typed ahead into the
+//! Over a slow link four cases still send a query typed ahead into the
 //! buffer as commands: keys that went out before an error from nvim came
 //! back, an answer to an earlier key arriving later than the quickest
-//! round trip seen, and a view key typed within one round trip of an
-//! operator's motion (`dw<Space>ff`). A hold armed where nvim needed none
-//! keeps the keys for one bound, then sends the same keys in the same
-//! order.
+//! round trip seen, a view key typed within one round trip of an
+//! operator's motion (`dw<Space>ff`), and the replace mode an `r` or `gr`
+//! sent before the view key reports after it (`r"<Space>ff`), which ends
+//! the hold.
+//!
+//! One more needs no slow link: a builtin command of three keys (`g'`,
+//! `` g` ``, `<C-w>g`, and `gr` where the user maps nothing under it)
+//! whose third key takes an argument of its own elsewhere, as in `g'[`.
+//! That key is read as a command owing an argument, so the view key typed
+//! next is not recognised.
+//!
+//! A hold armed where nvim needed none keeps the keys for one bound, then
+//! sends the same keys in the same order.
 
 pub mod commands;
 mod refused;
@@ -919,8 +928,9 @@ impl SubmitHold {
         self.argument_of = None;
     }
 
-    /// Forgets which key nvim reads the next key as the argument of, where
-    /// something other than a key (a click, a paste) went out after it.
+    /// Forgets which key nvim reads the next key as the argument of, and
+    /// the mapping it waits on, where a click went out after it. A paste
+    /// waits for both.
     pub fn forget_argument(&mut self) {
         self.argument_of = None;
         self.log.forget();

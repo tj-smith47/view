@@ -80,8 +80,15 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     let mode_unsure = hold.mode_unsure;
     let leaves = leaves_normal(argument_of, &key);
     // nvim matches a mapping before it reads a key as an argument, so the
-    // key after one of the user's may start a sequence
-    let argument = argument_of.is_some() && !in_user_keys(&hold.recent, &hold.user_keys);
+    // key after one of the user's may start a sequence. Where the mapping
+    // then fails to match, nvim reads the keys as builtin commands, and
+    // this key was the argument after all
+    let continues = argument_of.is_some() && in_user_keys(&hold.recent, &hold.user_keys);
+    if continues && hold.doubt.is_none() {
+        hold.doubt = Some(true);
+        hold.doubt_sent = None;
+    }
+    let argument = argument_of.is_some() && !continues;
     while hold.recent.len() >= longest.max(hold.user_longest) {
         hold.recent.pop_front();
     }
@@ -115,25 +122,34 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     complete
 }
 
-/// Ends the doubt an error raised on an answer to a key sent after the
-/// error, once nothing is owed. A mode report counts as an answer. One that
-/// answers a key sent before the error leaves the doubt standing, because
-/// the error erased what that key owes.
+/// Ends a doubt on an answer to a key sent after the error or the mapping
+/// key that raised it, once nothing is owed. A mode report counts as an
+/// answer. One that answers a key sent before the error leaves the doubt
+/// standing, because the error erased what that key owes.
 ///
 /// The answering batch, arriving at `now`, has to be one that can answer a
-/// key typed after the error. One sooner than `shortest`, the shortest
-/// round trip read, after the first key sent since the error answers a key
-/// sent before it. Nothing is owed once the newest key neither owes an
-/// argument nor was read as one: nvim and view then agree, whichever way
-/// either read the keys before it.
+/// key typed since the doubt was raised. One sooner than `shortest`, the
+/// shortest round trip read, after the first such key answers a key sent
+/// before it. Nothing is owed once the newest key neither was read as
+/// an argument nor takes one and stays in normal mode: nvim and view then
+/// agree, whichever way either read the keys before it. A `"` or an `f`
+/// read as no argument may still owe one, since nvim holds a key that
+/// takes an argument until it has it.
 pub(super) fn settle_doubt(hold: &mut SubmitHold, now: SpecStamp, shortest: Duration) {
     let answers_sent = hold
         .doubt_sent
         .is_none_or(|sent| now.age_since(sent) >= shortest);
+    let owes = |key: &str| {
+        crate::native::speculate::CMDLINE_LITERAL_KEYS.contains(&key)
+            && !LEAVES_NORMAL.contains(&key)
+    };
     if hold.doubt == Some(true)
         && answers_sent
         && hold.argument_of.is_none()
-        && !hold.recent.back().is_some_and(|newest| newest.argument)
+        && !hold
+            .recent
+            .back()
+            .is_some_and(|newest| newest.argument || owes(newest.key.as_str()))
     {
         hold.doubt = None;
     }

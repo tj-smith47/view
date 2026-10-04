@@ -160,9 +160,9 @@ impl UserRun {
         self.operator = Operator::Idle;
     }
 
-    /// Forgets the run for input that is no key, a click or a paste, which
-    /// nvim reads as the end of whatever mapping it waits on. Answers
-    /// whether a whole mapping was pending, which that input ran.
+    /// Forgets the run for a click, which nvim reads as the end of whatever
+    /// mapping it waits on. Answers whether a whole mapping was pending,
+    /// which the click ran.
     pub(crate) fn forget(&mut self) -> bool {
         let pending = self.pending.is_some();
         self.reset();
@@ -429,8 +429,8 @@ impl Matcher {
     }
 
     /// Forgets the keys nvim was reading a mapping or an argument from, for
-    /// input that is no key, a click or a paste, which ends both. A whole
-    /// mapping pending then is one that input ran.
+    /// a click, which ends both. A whole mapping pending then is one the
+    /// click ran.
     pub(crate) fn forget(&mut self) {
         self.argument_of = None;
         self.recent.clear();
