@@ -225,13 +225,21 @@ visuals recorded under the user's config.
 
 Exit: one capture per feature in the report, under the user's config.
 
-### S5 — Invented capabilities (plans drafted, not built)
+### S5 — Invented capabilities (split into five streaks, user ruling 2026-10-04)
 
-Order by dependency: key introspector → session DVR (both keystream-side),
-media handoff → image viewing (image is start-gated on media's open
-dispatch), then C2 agent-fleet attention, C1 reattach persistence, C3
-theme-switcher evidence, C4 agent change gallery (the user judges C4 against
-the dogfooded panel first — a ruling, not a build gate).
+One streak per session. S5 as one streak held eight features, and two of
+them filled a session, so each streak below is one feature or a pair that
+shares a mechanism. The harness task list carries one task per plan task of
+the active streak, and each streak closes with its own exit: captures under
+the user's config, a whole-streak review, install, README rows, one push.
+
+| Streak | Holds | Plan | Paired because |
+|---|---|---|---|
+| S5a | key introspector, session DVR | `2026-10-03-s5-dvr.md` | both read the key stream |
+| S5b | media handoff, image viewing | `2026-10-03-s5-media-image.md` | image is start-gated on media's open dispatch |
+| S5c | C2 agent-fleet attention, C3 theme-switcher evidence | `2026-10-03-s5-fleet-theme.md` | C3 is three small tasks with no production code |
+| S5d | C1 reattach persistence | `2026-10-03-s5-reattach.md` | 14 tasks, its own session |
+| S5e | C4 agent change gallery | chartered, not planned | waits on the user's ruling after dogfooding the agent panel and list |
 
 ### S6 — Workspace arc: more tile kinds
 
