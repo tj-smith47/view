@@ -38,6 +38,12 @@ thiserror = "2.0.18"
 toml = "0.8"
 view-core = { version = "0.0.1", path = "../view-core" }
 
+# The picker preview opens a candidate with O_NONBLOCK, so a path swapped
+# for a named pipe after it was listed cannot park the read in its open.
+# Already locked through view, view-tui and view-engine.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "fs"] }
+
 [dev-dependencies]
 # The shared temp-dir fixture guard (see its own crate doc): a leaf crate
 # with no dependency edge into core <- surface <- {native, ai}, reachable

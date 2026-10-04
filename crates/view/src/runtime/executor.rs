@@ -97,7 +97,9 @@ pub struct Executor<E: EngineOps> {
     /// unopened file leaves one scan running.
     preview_latest: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Run by a fallback read immediately before each check of
-    /// `preview_latest`; a no-op outside the tests that hold the read there.
+    /// `preview_latest`, so a test can hold the read there. Test builds
+    /// only: a release read passes `|| {}`, which compiles to nothing.
+    #[cfg(test)]
     preview_pace: std::sync::Arc<dyn Fn() + Send + Sync>,
     /// The project's agent session worker, or `None` when `[ai]` is
     /// disabled -- the one degrade in this type that is never reachable in
@@ -152,6 +154,7 @@ impl<E: EngineOps> Executor<E> {
             picker: None,
             tree_scan_cancel: std::sync::Mutex::new(None),
             preview_latest: std::sync::Arc::default(),
+            #[cfg(test)]
             preview_pace: std::sync::Arc::new(|| {}),
             loop_msgs: crate::loop_msgs::LoopMsgOutbox::default(),
             ai: None,
@@ -790,7 +793,10 @@ impl<E: EngineOps> Executor<E> {
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();
                     let latest = std::sync::Arc::clone(&self.preview_latest);
+                    #[cfg(test)]
                     let pace = std::sync::Arc::clone(&self.preview_pace);
+                    #[cfg(not(test))]
+                    let pace = || {};
                     spawn_or_log("picker-preview-fallback", move || {
                         let lines = view_native::picker::preview::read_window(
                             std::path::Path::new(&path),

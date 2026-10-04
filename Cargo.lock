@@ -2773,6 +2773,7 @@ dependencies = [
  "grep-searcher",
  "ignore",
  "nucleo",
+ "rustix",
  "serde",
  "thiserror 2.0.18",
  "toml",

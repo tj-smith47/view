@@ -34,12 +34,30 @@ pub fn read_window(
     count: u64,
     superseded: impl Fn() -> bool,
 ) -> Option<Vec<String>> {
-    // opening a named pipe or a device can block with no end, before
-    // `superseded` is ever asked
-    if !std::fs::metadata(path).ok()?.is_file() {
+    // a blocking open of a named pipe or a device can wait with no end,
+    // before `superseded` is ever asked, and a check made before the open
+    // misses a path swapped for one in between; O_NONBLOCK has no effect on
+    // reading a regular file
+    #[cfg(unix)]
+    let file = std::fs::File::from(
+        rustix::fs::open(
+            path,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .ok()?,
+    );
+    #[cfg(not(unix))]
+    let file = {
+        if !std::fs::metadata(path).ok()?.is_file() {
+            return None;
+        }
+        std::fs::File::open(path).ok()?
+    };
+    if !file.metadata().ok()?.is_file() {
         return None;
     }
-    let mut reader = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+    let mut reader = std::io::BufReader::new(file);
     let mut to_skip = first.saturating_sub(1);
     while to_skip > 0 {
         if superseded() {

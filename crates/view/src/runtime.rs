@@ -3364,7 +3364,11 @@ mod tests {
         let _watchdog = view_test_support::watchdog();
         let root = tree_effect_scratch(nonce);
         let path = root.join("target.txt");
-        let text: String = (1..=50).map(|n| format!("line {n}\n")).collect();
+        // each line outgrows one buffer fill, so a read that ignored its stop
+        // would consult the gate again while skipping to line 10
+        let text: String = (1..=50)
+            .map(|n| format!("line {n} {}\n", "x".repeat(16 * 1024)))
+            .collect();
         std::fs::write(&path, text).expect("write target.txt");
 
         let ops = FakeOps::default();
