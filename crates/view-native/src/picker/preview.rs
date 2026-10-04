@@ -1,6 +1,6 @@
 //! The picker preview pane's disk-read fallback: plain `std::fs` I/O, never
 //! RPC. Only reached for a candidate `EngineHandle::request_preview`
-//! answered `loaded: false` for -- nvim has no buffer open for that path, so
+//! answered `loaded: false` for. nvim has no buffer open for that path, so
 //! there is no in-memory content an RPC round trip could disagree with a
 //! disk read over (see `docs/picker-preview-wire-capture.md`'s conclusions
 //! and the crate's "nvim owns all buffer text" hard rule: this module never
@@ -34,26 +34,29 @@ pub fn read_window(
     count: u64,
     superseded: impl Fn() -> bool,
 ) -> Option<Vec<String>> {
-    // a blocking open of a named pipe or a device can wait with no end,
-    // before `superseded` is ever asked, and a check made before the open
-    // misses a path swapped for one in between; O_NONBLOCK has no effect on
-    // reading a regular file
+    // opening a named pipe completes the open of a writer waiting on it, and
+    // opening a device runs its driver, so neither is opened at all
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    // a path swapped for a pipe or a device after the check above would
+    // block a plain open with no end, before `superseded` is ever asked;
+    // O_NONBLOCK has no effect on reading a regular file, and O_NOCTTY
+    // keeps a swapped-in tty from becoming the controlling terminal
     #[cfg(unix)]
     let file = std::fs::File::from(
         rustix::fs::open(
             path,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::NOCTTY
+                | rustix::fs::OFlags::CLOEXEC,
             rustix::fs::Mode::empty(),
         )
         .ok()?,
     );
     #[cfg(not(unix))]
-    let file = {
-        if !std::fs::metadata(path).ok()?.is_file() {
-            return None;
-        }
-        std::fs::File::open(path).ok()?
-    };
+    let file = std::fs::File::open(path).ok()?;
     if !file.metadata().ok()?.is_file() {
         return None;
     }
@@ -366,6 +369,69 @@ mod tests {
             read.expect("the read returned without a writer on the pipe"),
             None
         );
+    }
+
+    /// Previewing a named pipe never opens it, so a writer blocked in its
+    /// own open stays blocked: opening the read end would complete that
+    /// open, and the preview closing it again breaks the writer's pipe.
+    #[cfg(unix)]
+    #[test]
+    fn a_writer_waiting_on_a_named_pipe_is_left_waiting() {
+        use std::io::Write;
+        let _watchdog = view_test_support::watchdog();
+        // nothing shows whether the writer has reached its open before the
+        // preview runs, so one round catches a preview that opens the pipe
+        // only about half the time; each round is independent
+        for round in 0..32 {
+            let fifo = scratch_path("pipe");
+            let made = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo is on PATH for this test's own setup");
+            assert!(made.success(), "mkfifo {fifo:?} failed");
+            let (entering, entered) = std::sync::mpsc::channel();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let writing = fifo.clone();
+            std::thread::spawn(move || {
+                let _ = entering.send(());
+                let written = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&writing)
+                    .and_then(|mut file| file.write_all(b"x"));
+                let _ = tx.send(written.map_err(|e| e.kind()));
+            });
+            entered.recv().expect("the writer thread started");
+            assert_eq!(read_window(&fifo, 1, 1000, || false), None);
+            let early = rx.try_recv().ok();
+            // a reader of the test's own completes a writer still parked in
+            // its open, and holding it open until the write lands keeps that
+            // write from failing for want of a reader
+            let release = rustix::fs::open(
+                &fifo,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::NONBLOCK
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .expect("open the test's own reader");
+            let written = early.is_none().then(|| {
+                rx.recv_timeout(view_test_support::host_deadline(
+                    std::time::Duration::from_secs(5),
+                ))
+                .expect("the released writer reports")
+            });
+            drop(release);
+            let _ = std::fs::remove_file(&fifo);
+            assert_eq!(
+                early, None,
+                "round {round}: the writer's open returned during the preview"
+            );
+            assert_eq!(
+                written,
+                Some(Ok(())),
+                "round {round}: the writer's open returned before the test's reader existed"
+            );
+        }
     }
 
     #[test]
