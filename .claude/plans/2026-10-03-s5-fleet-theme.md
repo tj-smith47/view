@@ -663,7 +663,7 @@ on the file and line it is asking about.
 | File | Other work | Resolution |
 |---|---|---|
 | `crates/view-core/src/model.rs` (999) | S5.1 (uncommitted), DVR T1 (moves `is_standing_native_notice`) | C2.T2 moves the ai accessor block (~50 lines) first; independent of DVR's move. Whoever lands second rebases the `mod` list (:2223-2233). |
-| `crates/view-core/src/native/mappings.rs` | S5.1 `<leader>fk` (27), DVR `<leader>fr` (28) | C2.T6 and T8 add one row each; the array length and registry tests take whatever count is current. |
+| `crates/view-core/src/native/mappings.rs` | S5.1 `<leader>fk` (27), DVR `<leader>fv` (28) | C2.T6 and T8 add one row each; the array length and registry tests take whatever count is current. |
 | `crates/view-core/src/update/mod.rs` (898) | S5.1, DVR (≤ 8 lines) | C2 adds ~6 lines; the fleet logic lives in `update/fleet.rs`. |
 | `crates/view-core/src/msg.rs` (787) | S5.1, DVR | Add-beside for every new variant. |
 | `crates/view/src/runtime/executor.rs` (582) | DVR mailbox | Separate arms. |
