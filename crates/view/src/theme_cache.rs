@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use view_core::hash::fnv1a;
 use view_core::hl::{HlAttr, HlTable, ProbedDefaults};
 use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
 
@@ -155,29 +156,6 @@ impl From<CachedTheme> for Theme {
         }
         theme
     }
-}
-
-/// FNV-1a's standard 64-bit offset basis, verbatim from the algorithm's
-/// public-domain specification.
-const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-/// FNV-1a's standard 64-bit prime.
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-/// FNV-1a over `bytes`, implemented locally rather than via a hash crate or
-/// `std::hash::DefaultHasher`: `DefaultHasher`'s algorithm and output are
-/// unspecified and have changed across toolchain versions, which would
-/// silently orphan every existing cache file on a compiler bump. FNV-1a is
-/// a fixed, documented algorithm with no such risk, and a cache-filename
-/// hash has no adversarial input to defend against, so its known
-/// non-cryptographic weaknesses do not apply here.
-#[must_use]
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash = FNV_OFFSET_BASIS;
-    for &b in bytes {
-        hash ^= u64::from(b);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
 }
 
 /// The cache file path for `config_path` under `state_dir`, at the

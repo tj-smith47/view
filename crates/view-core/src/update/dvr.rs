@@ -3,7 +3,7 @@
 
 use crate::model::Model;
 use crate::msg::{Effect, Msg};
-use crate::native::dvr::ScrubStep;
+use crate::native::dvr::{DvrIoReply, ExportRefusal, ScrubStep};
 
 /// What `:View dvr` answers while recording is off.
 const OFF: &str = "view: DVR is off: set [dvr] enabled = true";
@@ -15,7 +15,7 @@ const EMPTY: &str = "view: DVR has recorded no frame yet";
 /// carries the rendered table. Test-only: the scrub matches on the keys
 /// themselves.
 #[cfg(test)]
-pub(crate) const DVR_KEYS: [(&str, &str); 7] = [
+pub(crate) const DVR_KEYS: [(&str, &str); 8] = [
     ("h", "one frame back"),
     ("l", "one frame forward"),
     ("H", "one second back"),
@@ -23,6 +23,7 @@ pub(crate) const DVR_KEYS: [(&str, &str); 7] = [
     ("g", "the oldest frame kept"),
     ("G", "the newest frame"),
     ("q", "back to the live screen, as `<Esc>` does"),
+    ("e", "the recording written to a clip file, then live"),
 ];
 
 /// Answers `:View dvr <verb>`.
@@ -32,7 +33,8 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
         return model.engine.record_native_notice(OFF.to_string(), false);
     }
     model.dvr.mark_invoke();
-    match verb {
+    let (word, path) = verb.split_once(' ').unwrap_or((verb, ""));
+    match word {
         "scrub" if !model.dvr.open_scrub() => {
             model.engine.record_native_notice(EMPTY.to_string(), false)
         }
@@ -41,10 +43,32 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
             model.dvr.close_scrub();
             Vec::new()
         }
+        "export" => export(model, path.trim()),
         _ => model
             .engine
             .record_native_notice(super::feature_invoke_notice("dvr", verb, false), false),
     }
+}
+
+/// Closes the scrub and queues an export to `path`, or to a derived path
+/// when it is empty.
+fn export(model: &mut Model, path: &str) -> Vec<Effect> {
+    model.dvr.close_scrub();
+    model.dirty = true;
+    let path = (!path.is_empty()).then(|| path.to_owned());
+    if model.dvr.request_export(path) {
+        return Vec::new();
+    }
+    on_io(model, &DvrIoReply::Refused(ExportRefusal::NoFrame))
+}
+
+/// Raises the notice a reply from the DVR's file work carries.
+pub(super) fn on_io(model: &mut Model, reply: &DvrIoReply) -> Vec<Effect> {
+    let Some(text) = reply.notice() else {
+        return Vec::new();
+    };
+    model.dirty = true;
+    model.engine.record_native_notice(text, false)
 }
 
 /// Takes every key, paste and click while the scrub is open, so none
@@ -52,15 +76,15 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
 pub(super) fn scrub_input(model: &mut Model, msg: &Msg) -> Option<Vec<Effect>> {
     model.dvr.scrub_frame()?;
     match msg {
-        Msg::Key(key) => scrub_key(model, &key.notation),
-        Msg::Paste(_) | Msg::Mouse(_) => {}
-        _ => return None,
+        Msg::Key(key) => Some(scrub_key(model, &key.notation)),
+        Msg::Paste(_) | Msg::Mouse(_) => Some(Vec::new()),
+        _ => None,
     }
-    Some(Vec::new())
 }
 
-/// Moves the scrub cursor or closes the scrub. Any other key does nothing.
-fn scrub_key(model: &mut Model, notation: &str) {
+/// Moves the scrub cursor, closes the scrub or exports the recording. Any
+/// other key does nothing.
+fn scrub_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     let step = match notation {
         "h" => ScrubStep::Frames(-1),
         "l" => ScrubStep::Frames(1),
@@ -68,15 +92,17 @@ fn scrub_key(model: &mut Model, notation: &str) {
         "L" => ScrubStep::Seconds(1),
         "g" => ScrubStep::Oldest,
         "G" => ScrubStep::Newest,
+        "e" => return export(model, ""),
         "q" | "<Esc>" => {
             model.dvr.close_scrub();
             model.dirty = true;
-            return;
+            return Vec::new();
         }
-        _ => return,
+        _ => return Vec::new(),
     };
     model.dvr.step(step);
     model.dirty = true;
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -234,12 +260,91 @@ mod tests {
             .filter_map(|hint| hint.split(' ').next())
             .flat_map(|keys| keys.split('/'))
             .collect();
-        assert_eq!(named.len(), 7, "{named:?}");
+        assert_eq!(named.len(), 8, "{named:?}");
         for k in named {
             assert!(
                 DVR_KEYS.iter().any(|(notation, _)| *notation == k),
                 "the bar names {k}, which the scrub does not answer"
             );
         }
+    }
+
+    fn exports(m: &mut Model) -> Vec<Option<String>> {
+        std::iter::from_fn(|| m.dvr.take_request())
+            .filter_map(|r| match r {
+                crate::native::dvr::DvrRequest::Export(path) => Some(path),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn export_from_the_scrub_or_the_command_queues_a_clip() {
+        let mut m = recorded();
+        let _ = update(&mut m, invoke_msg("scrub"));
+        let effects = update(&mut m, key("e"));
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(
+            m.dvr.scrub_frame().is_none(),
+            "the export shows the live screen"
+        );
+        assert!(m.dirty);
+        let _ = update(&mut m, invoke_msg("export"));
+        let _ = update(&mut m, invoke_msg("export clips/a b.vdvr"));
+        assert_eq!(
+            exports(&mut m),
+            [None, None, Some("clips/a b.vdvr".to_owned())]
+        );
+    }
+
+    #[test]
+    fn every_export_reply_is_told_in_its_own_words() {
+        use crate::native::dvr::ExportRefusal;
+        let mut fresh = Model::with_term_size(80, 24);
+        fresh.dvr.enable(1 << 20);
+        let _ = update(&mut fresh, invoke_msg("export"));
+        assert!(exports(&mut fresh).is_empty());
+        let mut told = vec![format!("{:?}", fresh.engine.messages.entries)];
+        let replies = [
+            DvrIoReply::Exported {
+                path: "/w/view-dvr-1.vdvr".to_owned(),
+                cut: 0,
+            },
+            DvrIoReply::Exported {
+                path: "/w/view-dvr-2.vdvr".to_owned(),
+                cut: 3,
+            },
+            DvrIoReply::Refused(ExportRefusal::Busy),
+            DvrIoReply::Refused(ExportRefusal::OverBudget),
+            DvrIoReply::Refused(ExportRefusal::NoWriter),
+            DvrIoReply::Failed {
+                verb: "export",
+                reason: "/w/x.vdvr: File exists".to_owned(),
+            },
+        ];
+        for reply in replies {
+            let mut m = recorded();
+            m.dirty = false;
+            let _ = update(&mut m, Msg::DvrIo(reply.clone()));
+            assert!(m.dirty, "{reply:?}");
+            told.push(format!("{:?}", m.engine.messages.entries));
+        }
+        for (i, text) in told.iter().enumerate() {
+            assert!(text.contains("DVR"), "{text}");
+            assert!(!text.contains("no room for") && !text.contains("DVR is off"));
+            assert!(
+                told.iter().skip(i + 1).all(|other| other != text),
+                "{text} is told twice"
+            );
+        }
+        assert!(told[1].contains("DVR clip written: /w/view-dvr-1.vdvr"));
+        assert!(told[2].contains('3'), "{}", told[2]);
+        assert!(told[6].contains("/w/x.vdvr"), "{}", told[6]);
+        let mut m = recorded();
+        let quiet = DvrIoReply::DiskChecked {
+            changed: Vec::new(),
+            unverifiable: false,
+        };
+        assert!(update(&mut m, Msg::DvrIo(quiet)).is_empty());
     }
 }

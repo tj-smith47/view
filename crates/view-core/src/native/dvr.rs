@@ -27,7 +27,83 @@ pub fn input_log_bytes(max_bytes: usize) -> usize {
 }
 
 /// The keys the scrub bar names, each a key the scrub answers.
-pub const SCRUB_HINT: &str = "q close  h/l frame  H/L 1s  g/G ends";
+pub const SCRUB_HINT: &str = "q close  h/l frame  H/L 1s  g/G ends  e export";
+
+/// The longest symbol or mouse field a clip stores, in bytes.
+pub const CLIP_FIELD_MAX: usize = 255;
+
+/// What the thread doing the recording's file work answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DvrIoReply {
+    /// The baselined files were hashed again.
+    DiskChecked {
+        /// The files whose bytes changed since their baseline.
+        changed: Vec<String>,
+        /// Whether the files live on a host this process cannot read.
+        unverifiable: bool,
+    },
+    /// The recording was written as a clip.
+    Exported {
+        /// Where the clip was written.
+        path: String,
+        /// How many symbols and mouse fields were cut to
+        /// [`CLIP_FIELD_MAX`] bytes.
+        cut: usize,
+    },
+    /// An export was not started.
+    Refused(ExportRefusal),
+    /// A file operation failed.
+    Failed {
+        /// The verb that failed.
+        verb: &'static str,
+        /// What failed, naming the path.
+        reason: String,
+    },
+}
+
+/// Why an export was not started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExportRefusal {
+    /// No frame has been recorded yet.
+    NoFrame,
+    /// An earlier export is still being written.
+    Busy,
+    /// A copy of the newest frames would take the recording past its
+    /// memory bound.
+    OverBudget,
+    /// The thread that writes clips is not running.
+    NoWriter,
+}
+
+impl DvrIoReply {
+    /// The notice the reply raises, `None` for one that raises none.
+    #[must_use]
+    pub fn notice(&self) -> Option<String> {
+        Some(match self {
+            Self::DiskChecked { .. } => return None,
+            Self::Exported { path, cut: 0 } => format!("view: DVR clip written: {path}"),
+            Self::Exported { path, cut } => format!(
+                "view: DVR clip written: {path} ({cut} symbols cut to {CLIP_FIELD_MAX} bytes)"
+            ),
+            Self::Refused(why) => match why {
+                ExportRefusal::NoFrame => "view: DVR has no frame to export yet",
+                ExportRefusal::Busy => {
+                    "view: DVR export busy: the last clip is still being written"
+                }
+                ExportRefusal::OverBudget => {
+                    "view: DVR cannot export: a copy of the newest frames would pass [dvr] max_mb"
+                }
+                ExportRefusal::NoWriter => {
+                    "view: DVR cannot export: its file thread is not running"
+                }
+            }
+            .to_owned(),
+            Self::Failed { verb, reason } => format!("view: DVR {verb} failed: {reason}"),
+        })
+    }
+}
 
 /// The kind of one recorded input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,6 +401,16 @@ impl Dvr {
             start,
             len,
         });
+    }
+
+    /// Queues an export of the recording to `path`, or to a path the loop
+    /// derives. Returns false, queuing nothing, before the first frame.
+    pub(crate) fn request_export(&mut self, path: Option<String>) -> bool {
+        if self.last_frame == 0 {
+            return false;
+        }
+        self.requests.push_back(DvrRequest::Export(path));
+        true
     }
 
     /// Queues a baseline hash of `path` the first time it is seen while

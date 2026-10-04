@@ -1222,7 +1222,7 @@ pub fn run(
     // construction (startup's pre-attach paints predate the loop and go
     // through their own full render)
     let mut surface_cache = view_surface::SurfaceCache::new();
-    let mut dvr = crate::dvr::DvrLoop::start(&model);
+    let mut dvr = crate::dvr::DvrLoop::start(&model, channels.msg.clone());
 
     loop {
         // ahead of everything else in the pass: every reading below, and
@@ -1414,7 +1414,8 @@ pub fn run(
         let backlog = !pending.is_empty() && last_paint.elapsed() < FRAME;
         let mut flushed = false;
         if let Some(dvr) = dvr.as_mut() {
-            dvr.poll(&mut model);
+            let refused = dvr.poll(&mut model);
+            run_in_wire_order(&executor, refused, false);
         }
         if model.dirty && !backlog {
             let live = |term: &mut Term, model: &mut Model| {

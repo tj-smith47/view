@@ -6,6 +6,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use ratatui::buffer::Cell;
 use ratatui::style::{Color, Modifier};
+use view_core::hash::{fnv1a, fnv1a_extend, fnv1a_step, FNV_OFFSET};
 use view_core::native::text::clusters;
 
 /// The sixteen named colors in the order their packed payload numbers them.
@@ -249,28 +250,15 @@ pub(crate) fn restore(view: CellView<'_>) -> Cell {
     cell
 }
 
-const FNV_PRIME: u64 = 0x0100_0000_01b3;
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-
-/// The FNV-1a hash of `bytes`.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(FNV_OFFSET, |hash, &byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
-    })
-}
-
 /// A hash of `cells`, the same for two rows that show the same cells.
 pub(crate) fn row_hash(cells: &[Cell]) -> u64 {
-    let mut hash = FNV_OFFSET;
-    let mut eat = |word: u64| hash = (hash ^ word).wrapping_mul(FNV_PRIME);
-    for cell in cells {
-        for &byte in cell.symbol().as_bytes() {
-            eat(u64::from(byte));
-        }
-        eat((u64::from(pack(cell.fg)) << 32) | u64::from(pack(cell.bg)));
-        eat((u64::from(pack(cell.underline_color)) << 16) | u64::from(cell.modifier.bits()));
-    }
-    hash
+    cells.iter().fold(FNV_OFFSET, |hash, cell| {
+        let hash = fnv1a_extend(hash, cell.symbol().as_bytes());
+        let colors = (u64::from(pack(cell.fg)) << 32) | u64::from(pack(cell.bg));
+        let hash = fnv1a_step(hash, colors);
+        let rest = (u64::from(pack(cell.underline_color)) << 16) | u64::from(cell.modifier.bits());
+        fnv1a_step(hash, rest)
+    })
 }
 
 pub(crate) fn pack(color: Color) -> u32 {

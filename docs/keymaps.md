@@ -815,7 +815,7 @@ With the session recorded, `<leader>fv` freezes the screen on the last
 frame view drew, and the bottom row becomes the scrub bar:
 
 ```
-DVR  -1.4s of 42.3s  q close  h/l frame  H/L 1s  g/G ends
+DVR  -1.4s of 42.3s  q close  h/l frame  H/L 1s  g/G ends  e export
 ```
 
 ```toml
@@ -838,6 +838,11 @@ to the bar, ahead of the keys. These keys move through the frames:
 | `g` | the oldest frame kept |
 | `G` | the newest frame |
 | `q` | back to the live screen, as `<Esc>` does |
+| `e` | the recording written to a clip file, then live |
+
+`e` writes `view-dvr-<seconds>.vdvr` in the working directory, and
+`:View dvr export PATH` writes to PATH. A notice names the file once it is
+written.
 
 Every other key, paste and click is dropped while the scrub is open, so
 nothing reaches your buffer. Closing it redraws the live screen. How far

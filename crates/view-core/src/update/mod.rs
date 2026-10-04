@@ -593,6 +593,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             wedge,
             observed_for,
         } => note_engine_liveness(model, wedge, observed_for),
+        Msg::DvrIo(reply) => dvr::on_io(model, &reply),
         Msg::FeatureInvoke { feature, verb, .. } => {
             // A bare `:View <feature>` (no verb) means "just open it":
             // resolved to the feature's own first `default_maps()` entry

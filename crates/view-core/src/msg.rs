@@ -210,6 +210,8 @@ pub enum Msg {
         wedge: Option<crate::native::supervision::WedgeKind>,
         observed_for: Duration,
     },
+    /// The session DVR's file work answered.
+    DvrIo(crate::native::dvr::DvrIoReply),
     /// A user reached a native feature, either through one of view's
     /// registered default keys or through the `:View` command. `feature` is
     /// a [`registry`](crate::native::registry) id and `verb` the entry point

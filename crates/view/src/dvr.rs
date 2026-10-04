@@ -2,15 +2,28 @@
 //! sent, and paints the recorded frame the scrub shows in place of the live
 //! screen.
 
-use std::time::Instant;
+use std::collections::VecDeque;
+use std::convert::Infallible;
+use std::path::PathBuf;
+use std::sync::mpsc::TrySendError;
+use std::sync::Arc;
+use std::time::{Instant, SystemTime};
 
 use view_core::model::{Model, OverlayKind};
-use view_core::msg::Effect;
-use view_core::native::dvr::SCRUB_HINT;
+use view_core::msg::{Effect, Msg};
+use view_core::native::dvr::{DvrIoReply, DvrRequest, ExportRefusal, SCRUB_HINT};
+use view_proc::writer::{BackgroundWriter, QUIT_WAIT};
 use view_tui::dvr::FrameRing;
 use view_tui::terminal::Term;
 
-/// What view says, once, when the ring could not keep a frame.
+use crate::wake::LoopSender;
+use io::{Export, IoJob};
+
+mod clip;
+mod io;
+
+/// What view says when the ring could not keep a frame, once until it keeps
+/// one again.
 const REFUSED: &str = "view: DVR is skipping frames it has no room for: raise [dvr] max_mb";
 
 /// The painted frames and the clock they are dated by.
@@ -22,25 +35,117 @@ pub(crate) struct DvrLoop {
     /// its bar said something waits, so a pass that changed none of them
     /// writes nothing.
     painted: Option<(u64, (u16, u16), bool)>,
+    /// The thread doing the file work, `None` when the host refused it.
+    io: Option<BackgroundWriter<IoJob, Infallible>>,
+    /// Jobs a full queue handed back, sent again in order on the next poll.
+    unsent: VecDeque<IoJob>,
+    /// Shared with the export being written, which holds a snapshot of the
+    /// ring. The ring records no new group past its budget until it is
+    /// written, so a frame skipped meanwhile is told nothing.
+    exporting: Arc<()>,
 }
 
 impl DvrLoop {
     /// The loop's recorder, or `None` when the session is not recorded.
-    pub(crate) fn start(model: &Model) -> Option<Self> {
-        model.dvr.is_recording().then(|| Self {
-            ring: FrameRing::new(model.dvr.max_bytes()),
+    /// Replies from its file thread arrive on `msg`.
+    pub(crate) fn start(model: &Model, msg: LoopSender) -> Option<Self> {
+        if !model.dvr.is_recording() {
+            return None;
+        }
+        let io = io::start(msg, model.remote.is_some())
+            .inspect_err(|e| crate::vlog::log_with("dvr", || format!("no file thread: {e}")))
+            .ok();
+        Some(Self::with(FrameRing::new(model.dvr.max_bytes()), io))
+    }
+
+    fn with(ring: FrameRing, io: Option<BackgroundWriter<IoJob, Infallible>>) -> Self {
+        Self {
+            ring,
             started: Instant::now(),
             refused_told: false,
             painted: None,
-        })
+            io,
+            unsent: VecDeque::new(),
+            exporting: Arc::new(()),
+        }
     }
 
-    /// Resolves the scrub moves the keys asked for against the ring.
-    pub(crate) fn poll(&mut self, model: &mut Model) {
+    /// Resolves the scrub moves the keys asked for against the ring, and
+    /// hands the recording's requests to its file thread without waiting
+    /// on it. Returns what an export refused on the spot raised.
+    pub(crate) fn poll(&mut self, model: &mut Model) -> Vec<Effect> {
         while let Some(step) = model.dvr.take_step() {
             if let Some(from) = model.dvr.scrub_frame() {
                 model.dvr.show(self.ring.resolve(from, step));
             }
+        }
+        let mut effects = Vec::new();
+        while let Some(request) = model.dvr.take_request() {
+            match request {
+                DvrRequest::Baseline(path) => match self.unsent.back_mut() {
+                    Some(IoJob::Baseline(paths)) => paths.push(path),
+                    _ => self.unsent.push_back(IoJob::Baseline(vec![path])),
+                },
+                DvrRequest::DiskCheck => self.unsent.push_back(IoJob::DiskCheck),
+                DvrRequest::Export(path) => {
+                    if let Err(why) = self.export(model, path) {
+                        let reply = Msg::DvrIo(DvrIoReply::Refused(why));
+                        effects.extend(view_core::update::update(model, reply));
+                    }
+                }
+                _ => {}
+            }
+        }
+        while let Some(job) = self.unsent.pop_front() {
+            let Some(io) = self.io.as_mut() else {
+                self.unsent.clear();
+                break;
+            };
+            if let Err(TrySendError::Full(job)) = io.try_send(job) {
+                self.unsent.push_front(job);
+                break;
+            }
+        }
+        effects
+    }
+
+    /// Queues the export of the recording to `path`, the working directory
+    /// holding a relative one and a derived one alike. The ring's groups
+    /// are shared with the job, its open group copied, and the input log
+    /// copied once.
+    fn export(&mut self, model: &Model, path: Option<String>) -> Result<(), ExportRefusal> {
+        if Arc::strong_count(&self.exporting) > 1 {
+            return Err(ExportRefusal::Busy);
+        }
+        let Some(io) = self.io.as_mut().filter(|io| io.is_open()) else {
+            return Err(ExportRefusal::NoWriter);
+        };
+        if self.ring.newest().is_none() {
+            return Err(ExportRefusal::NoFrame);
+        }
+        let frames = self.ring.snapshot().ok_or(ExportRefusal::OverBudget)?;
+        let name = path.map_or_else(
+            || {
+                let secs = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                PathBuf::from(format!("view-dvr-{secs}.vdvr"))
+            },
+            PathBuf::from,
+        );
+        let job = IoJob::Export(Export {
+            path: model.cwd.join(name),
+            frames,
+            inputs: clip::Inputs::new(model.dvr.inputs()),
+            markers: model.dvr.markers().to_vec(),
+            dead: model.dvr.dead().to_vec(),
+            held: Arc::clone(&self.exporting),
+        });
+        match io.try_send(job) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(ExportRefusal::Busy),
+            Err(TrySendError::Disconnected(_)) => Err(ExportRefusal::NoWriter),
         }
     }
 
@@ -94,10 +199,11 @@ impl DvrLoop {
     fn recorded(&mut self, seq: Option<u64>, model: &mut Model) -> Vec<Effect> {
         match seq {
             Some(seq) => {
+                self.refused_told = false;
                 model.dvr.note_frame(seq, self.ring.oldest().unwrap_or(seq));
                 Vec::new()
             }
-            None if !self.refused_told => {
+            None if !self.refused_told && Arc::strong_count(&self.exporting) == 1 => {
                 self.refused_told = true;
                 model.dirty = true;
                 model
@@ -118,6 +224,15 @@ impl DvrLoop {
         // the flag goes ahead of the legend, since a narrow terminal cuts
         // the bar's end
         format!("DVR  -{age:.1}s of {reach:.1}s{flag}  {SCRUB_HINT}")
+    }
+}
+
+impl Drop for DvrLoop {
+    /// Gives a clip being written the time a quitting process allows.
+    fn drop(&mut self) {
+        if let Some(io) = self.io.as_mut() {
+            let _ = io.finish_within(QUIT_WAIT);
+        }
     }
 }
 
@@ -202,12 +317,7 @@ mod tests {
                 .unwrap();
         }
         model.dvr.note_frame(6, 1);
-        DvrLoop {
-            ring: builder.finish(),
-            started: Instant::now(),
-            refused_told: false,
-            painted: None,
-        }
+        DvrLoop::with(builder.finish(), None)
     }
 
     fn press(model: &mut Model, dvr: &mut DvrLoop, notation: &str) -> Option<u64> {
@@ -238,7 +348,7 @@ mod tests {
         assert_eq!(press(&mut model, &mut dvr, "h"), Some(5));
         assert_eq!(
             dvr.bar(5, false),
-            "DVR  -0.4s of 2.0s  q close  h/l frame  H/L 1s  g/G ends"
+            "DVR  -0.4s of 2.0s  q close  h/l frame  H/L 1s  g/G ends  e export"
         );
         assert_eq!(press(&mut model, &mut dvr, "H"), Some(2));
         assert_eq!(press(&mut model, &mut dvr, "g"), Some(1));
@@ -251,7 +361,9 @@ mod tests {
 
     #[test]
     fn a_session_with_the_dvr_off_runs_no_recorder() {
-        assert!(DvrLoop::start(&Model::with_term_size(80, 24)).is_none());
+        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+        let off = Model::with_term_size(80, 24);
+        assert!(DvrLoop::start(&off, LoopSender::new(tx)).is_none());
     }
 
     fn open_scrub(model: &mut Model, dvr: &mut DvrLoop) {
@@ -382,6 +494,16 @@ mod tests {
         let _ = dvr.recorded(None, &mut model);
         let raised = format!("{:?}", model.engine.messages.entries);
         assert_eq!(raised.matches("no room for").count(), 1, "{raised}");
+        // a kept frame ends the run, and the next refusal is a new one
+        let _ = dvr.recorded(Some(4), &mut model);
+        let _ = dvr.recorded(None, &mut model);
+        // a frame skipped while an export holds the ring is told nothing
+        let _ = dvr.recorded(Some(4), &mut model);
+        let export = Arc::clone(&dvr.exporting);
+        let _ = dvr.recorded(None, &mut model);
+        drop(export);
+        let raised = format!("{:?}", model.engine.messages.entries);
+        assert_eq!(raised.matches("no room for").count(), 2, "{raised}");
         // the frame noted is the one a scrub opens on, before any move
         let _ = update(
             &mut model,
@@ -398,5 +520,91 @@ mod tests {
         Msg::Key(Key {
             notation: notation.to_owned(),
         })
+    }
+
+    fn export(model: &mut Model, dvr: &mut DvrLoop, path: &str) {
+        let _ = update(
+            model,
+            Msg::FeatureInvoke {
+                generation: None,
+                feature: "dvr".to_owned(),
+                verb: format!("export {path}"),
+            },
+        );
+        let _ = dvr.poll(model);
+    }
+
+    fn told(model: &Model, words: &str) -> usize {
+        format!("{:?}", model.engine.messages.entries)
+            .matches(words)
+            .count()
+    }
+
+    #[test]
+    fn export_never_blocks_the_loop_when_the_writer_is_full() {
+        let mut model = Model::with_term_size(80, 24);
+        let mut dvr = recorded(&mut model);
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (gate, gate_rx) = std::sync::mpsc::channel::<()>();
+        let mut io = BackgroundWriter::start("dvr-io-test", 1, move |_: IoJob| {
+            let _ = entered_tx.send(());
+            let _ = gate_rx.recv();
+            Ok::<(), Infallible>(())
+        })
+        .unwrap();
+        // the thread holds one job and the queue the next
+        io.try_send(IoJob::DiskCheck).ok().unwrap();
+        entered.recv().unwrap();
+        io.try_send(IoJob::DiskCheck).ok().unwrap();
+        dvr.io = Some(io);
+        // a send that waited on the blocked thread would never return here
+        export(&mut model, &mut dvr, "a.vdvr");
+        assert_eq!(told(&model, "export busy"), 1);
+        assert_eq!(
+            Arc::strong_count(&dvr.exporting),
+            1,
+            "the refused job is dropped"
+        );
+        // a clip still being written refuses the next export in the same words
+        let writing = Arc::clone(&dvr.exporting);
+        export(&mut model, &mut dvr, "b.vdvr");
+        assert_eq!(told(&model, "export busy"), 2);
+        drop(writing);
+        drop(gate);
+    }
+
+    #[test]
+    fn an_export_with_no_file_thread_says_so() {
+        let mut model = Model::with_term_size(80, 24);
+        let mut dvr = recorded(&mut model);
+        export(&mut model, &mut dvr, "a.vdvr");
+        assert_eq!(told(&model, "file thread is not running"), 1);
+    }
+
+    #[test]
+    fn an_export_from_the_loop_writes_the_clip_and_names_it() {
+        let dir = view_test_support::ScratchDir::new("dvr-loop-export").unwrap();
+        let mut model = Model::with_term_size(80, 24);
+        model.cwd = dir.path().to_path_buf();
+        let mut dvr = recorded(&mut model);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        dvr.io = Some(io::start(LoopSender::new(tx), false).unwrap());
+        export(&mut model, &mut dvr, "a.vdvr");
+        let reply = rx
+            .recv_timeout(view_test_support::host_deadline(QUIT_WAIT))
+            .unwrap();
+        assert!(
+            matches!(reply, Msg::DvrIo(DvrIoReply::Exported { .. })),
+            "{reply:?}"
+        );
+        let _ = update(&mut model, reply);
+        assert_eq!(told(&model, "DVR clip written"), 1);
+        let written = std::fs::read(dir.join("a.vdvr")).unwrap();
+        assert_eq!(&written[..10], b"VIEWDVR\0\x01\x00");
+        assert_eq!(
+            Arc::strong_count(&dvr.exporting),
+            1,
+            "released once written"
+        );
     }
 }

@@ -3,6 +3,7 @@
 pub mod config;
 pub mod events;
 pub mod grid;
+pub mod hash;
 pub mod hl;
 pub mod model;
 pub mod msg;
