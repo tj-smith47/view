@@ -794,11 +794,14 @@ impl PtySession {
     /// `SIGWINCH` to the child) and resizes the local `vt100` screen so
     /// subsequent cursor-positioning escapes are interpreted against the
     /// new dimensions rather than the ones the session was opened with.
+    /// Output already delivered is parsed first, at the size it was painted
+    /// for.
     ///
     /// # Errors
     ///
     /// Returns [`OracleError::Pty`] if the kernel resize call fails.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), OracleError> {
+        self.drain_available();
         self.master
             .resize(PtySize {
                 rows,
