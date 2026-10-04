@@ -6,8 +6,8 @@
 //! redraws the window grids. A config whose handlers take time leaves view
 //! holding new slots and old grids for that long, which is what a person
 //! sees after dragging a terminal wider under a plugin-heavy config. The
-//! handler here is a sleep, so view paints the gap as frames of its own,
-//! and every frame view paints for the new size is replayed and judged.
+//! handler here is a sleep, or a wait on a key the test sends, and every
+//! frame view paints for the new size is replayed and judged.
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -15,7 +15,7 @@ mod common;
 
 use std::time::Duration;
 
-use view_oracle::PtySession;
+use view_oracle::{PtySession, QueryPolicy};
 use view_test_support::host_deadline;
 
 const COLS: u16 = 220;
@@ -23,12 +23,17 @@ const ROWS: u16 = 50;
 const SHRUNK: (u16, u16) = (150, 38);
 const BUDGET: Duration = Duration::from_secs(20);
 
-/// How long the `VimResized` handler sleeps: long enough that nvim flushes
-/// the new slots and the old grids as frames of their own before it.
+/// How long the slow `VimResized` handler a plugin-heavy config runs takes.
 const HANDLER: Duration = Duration::from_millis(1500);
 
-/// The caret's show, which ends every frame view paints.
-const SHOW: &[u8] = b"\x1b[?25h";
+/// The close of the synchronized-output bracket. view writes it at the end
+/// of every frame that writes anything once the terminal admits the
+/// bracket, and a terminal applies each bracketed frame whole, so the
+/// sessions here answer the probe for it.
+const FRAME_END: &[u8] = b"\x1b[?2026l";
+
+/// The terminal answers every view session here spawns with.
+const POLICY: QueryPolicy = QueryPolicy::AnswerFullTier;
 
 /// The cursor position the status row shows once each `VimResized` handler
 /// has moved the cursor a column right on the first line as its last act,
@@ -36,8 +41,13 @@ const SHOW: &[u8] = b"\x1b[?25h";
 /// first line's first columns stay on screen at every size, so the move
 /// scrolls nothing.
 fn resized_mark(count: u32) -> impl Fn(&vt100::Screen) -> bool {
-    let mark = format!(" 1:{} ", count + 1);
+    let mark = mark_text(count);
     move |screen| screen.contents().contains(&mark)
+}
+
+/// The status row's text [`resized_mark`] looks for.
+fn mark_text(count: u32) -> String {
+    format!(" 1:{} ", count + 1)
 }
 
 /// The command that counts resizes into [`resized_mark`], after `first`.
@@ -168,14 +178,26 @@ fn dump(screen: &vt100::Screen, cols: u16, rows: u16) -> String {
 /// it is not.
 type Check = fn(&vt100::Screen, u16, u16) -> Option<String>;
 
-/// One screen a painted frame left: the byte it ended at, the screen, and
-/// what the check found wrong on it.
-type Painted = (usize, String, Option<String>);
+/// Whether a screen shows the layout nvim moved its windows to for the
+/// size, which no frame painted for the old layout does.
+type Layout = fn(&vt100::Screen, u16, u16) -> bool;
+
+/// One screen a painted frame left.
+#[derive(Debug, Clone)]
+struct Painted {
+    /// The byte the frame ended at.
+    at: usize,
+    screen: String,
+    /// What the check found wrong on the screen.
+    why: Option<String>,
+    /// What the [`Layout`] read off the screen.
+    new_layout: bool,
+}
 
 /// Blocks until the recording ends where a painted frame ends, so a replay
 /// cut there holds no half of one.
 fn settle_on_a_frame_boundary(session: &mut PtySession) {
-    while !session.raw_output().ends_with(SHOW) {
+    while !session.raw_output().ends_with(FRAME_END) {
         let mut absorbed = false;
         assert!(
             session.wait_for_screen(BUDGET, |_| std::mem::replace(&mut absorbed, true)),
@@ -186,48 +208,78 @@ fn settle_on_a_frame_boundary(session: &mut PtySession) {
 }
 
 /// What is wrong with the frames a resize painted, or `None` where the last
-/// one agrees and no more than one before it disagrees: the frame view
-/// paints from the new size before nvim has moved its windows.
+/// one agrees and every one before it that disagrees was painted for the
+/// old layout, before nvim moved its windows. A frame that shows the new
+/// slots shows them over the grids sized for them, however many frames
+/// view paints before nvim answers.
 fn judge(screens: &[Painted]) -> Option<String> {
-    let Some((at, screen, last)) = screens.last() else {
+    let Some(last) = screens.last() else {
         return Some("no frame was painted".to_string());
     };
-    if let Some(why) = last {
+    if let Some(why) = &last.why {
         return Some(format!(
-            "the last of {} frames (ending at byte {at}): {why}; the screen \
-             it left:\n{screen}",
-            screens.len()
+            "the last of {} frames (ending at byte {}): {why}; the screen \
+             it left:\n{}",
+            screens.len(),
+            last.at,
+            last.screen
         ));
     }
     let wrong: Vec<(usize, &Painted)> = screens
         .iter()
         .enumerate()
-        .filter(|(_, (_, _, why))| why.is_some())
+        .filter(|(_, painted)| painted.why.is_some() && painted.new_layout)
         .collect();
-    if wrong.len() < 2 {
+    if wrong.is_empty() {
         return None;
     }
     let shown: Vec<String> = wrong
         .iter()
-        .map(|(index, (at, screen, why))| {
+        .map(|(index, painted)| {
             format!(
-                "frame {index} (ending at byte {at}): {}; the screen it left:\n{screen}",
-                why.as_deref().unwrap_or_default()
+                "frame {index} (ending at byte {}): {}; the screen it left:\n{}",
+                painted.at,
+                painted.why.as_deref().unwrap_or_default(),
+                painted.screen
             )
         })
         .collect();
     Some(format!(
-        "{} of {} frames disagree\n{}",
+        "{} of {} frames show the new layout and disagree\n{}",
         wrong.len(),
         screens.len(),
         shown.join("\n")
     ))
 }
 
-/// Resizes to `cols`x`rows` and answers every frame view painted for the
-/// new size until the screen passes both `done` and `check`, each replayed
-/// through `term` at the size it was painted for. `replayed` is how far
-/// into the recording `term` has been brought, and moves to its end.
+/// The erase view writes at the head of the first frame it paints for a new
+/// size.
+const CLEAR: &[u8] = b"\x1b[2J";
+
+/// Blocks until the recording past byte `from` holds a whole frame painted
+/// for a new size.
+fn wait_for_a_frame_at_the_new_size(session: &mut PtySession, from: usize) {
+    let painted = |raw: &[u8]| {
+        raw.windows(CLEAR.len())
+            .position(|w| w == CLEAR)
+            .is_some_and(|at| raw[at..].windows(FRAME_END.len()).any(|w| w == FRAME_END))
+    };
+    while !painted(&session.raw_output()[from..]) {
+        let mut absorbed = false;
+        assert!(
+            session.wait_for_screen(BUDGET, |_| std::mem::replace(&mut absorbed, true)),
+            "view painted no frame for the new size; screen:\n{}",
+            session.screen()
+        );
+    }
+}
+
+/// Resizes to `cols`x`rows`, runs `between` with the recording's length at
+/// the resize, and answers every frame view painted for the new size until
+/// the screen passes both `done` and `check`, each replayed through `term`
+/// at the size it was painted for and read by `check` and `layout`.
+/// `replayed` is how far into the recording `term` has been brought, and
+/// moves to its end.
 ///
 /// The first frame view paints for a new size clears the screen. A frame
 /// already on its way when the resize lands was painted for the old size,
@@ -238,14 +290,15 @@ fn resize_and_replay(
     term: &mut vt100::Parser,
     replayed: &mut usize,
     (cols, rows): (u16, u16),
+    between: impl FnOnce(&mut PtySession, usize),
     done: impl Fn(&vt100::Screen) -> bool,
-    check: Check,
+    (check, layout): (Check, Layout),
 ) -> Vec<Painted> {
-    const CLEAR: &[u8] = b"\x1b[2J";
     settle_on_a_frame_boundary(session);
     let from = session.raw_output().len();
     term.process(&session.raw_output()[*replayed..from]);
     session.resize(cols, rows).unwrap();
+    between(session, from);
     assert!(
         session.wait_for_screen(BUDGET, |screen| {
             done(screen) && check(screen, cols, rows).is_none()
@@ -263,7 +316,7 @@ fn resize_and_replay(
         .unwrap_or_else(|| panic!("view never cleared the screen for {cols}x{rows}"));
     term.process(&raw[..cleared]);
     term.screen_mut().set_size(rows, cols);
-    painted_screens(term, &raw[cleared..], check)
+    painted_screens(term, &raw[cleared..], check, layout)
 }
 
 /// A vsplit under a slow `VimResized` handler, shrunk and grown back, with
@@ -281,7 +334,7 @@ fn resize_under(gaps: bool) {
     common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
     let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
     std::fs::write(config, format!("[ui]\ngaps = {gaps}\n")).unwrap();
-    let mut session = PtySession::spawn_configured(cmd, COLS, ROWS).unwrap();
+    let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, POLICY).unwrap();
     session.record_raw_output_up_to(64 << 20);
     assert!(
         session.wait_for("####", BUDGET),
@@ -317,8 +370,9 @@ fn resize_under(gaps: bool) {
             &mut term,
             &mut replayed,
             size,
+            |_, _| {},
             resized_mark(count),
-            mismatch,
+            (mismatch, spans),
         );
         if let Some(why) = judge(&screens) {
             panic!("{look}: after the resize to {size:?} the tiles' text and frames: {why}");
@@ -361,6 +415,20 @@ fn apart(screen: &vt100::Screen, cols: u16, rows: u16) -> Option<String> {
 /// second screen row starts.
 fn wrapped_digit(index: u16) -> String {
     ((index % 10 + index / 10) % 10).to_string()
+}
+
+/// Whether a whole tile closes its frame one gap short of the panel's, the
+/// rightmost frame. The panel is view's own and stands at the new size from
+/// the first frame view paints for it, so it tells nothing about where nvim
+/// has put the tiles.
+fn beside_the_panel(screen: &vt100::Screen, cols: u16, rows: u16) -> bool {
+    let frames = frames(screen, cols, rows);
+    let Some(panel) = frames.iter().max_by_key(|frame| frame.left) else {
+        return false;
+    };
+    frames
+        .iter()
+        .any(|tile| tile.right < panel.left && tile.right + 2 >= panel.left)
 }
 
 /// Where a tile left of the panel shows the first line anywhere but from
@@ -419,7 +487,7 @@ fn panel_beside_the_tiles(gaps: bool) {
         ),
     )
     .unwrap();
-    let mut session = PtySession::spawn_configured(cmd, COLS, ROWS).unwrap();
+    let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, POLICY).unwrap();
     session.record_raw_output_up_to(64 << 20);
     assert!(
         session.wait_for("####", BUDGET),
@@ -458,32 +526,41 @@ fn panel_beside_the_tiles(gaps: bool) {
     session
         .send(format!("\x1b:call setline(1, '{digits}') | windo set wrap\r").as_bytes())
         .unwrap();
+    // `windo` leaves the cursor in the right tile, which the panel covers
+    // whole at the shrunk size, status row and mark with it
+    session.send(b"\x1b:1wincmd w\r").unwrap();
+    session.send(mark_resizes("").as_bytes()).unwrap();
     let mut term = vt100::Parser::new(ROWS, COLS, 0);
     let mut replayed = 0;
-    for (index, (cols, rows)) in [(COLS, ROWS), SHRUNK, (COLS, ROWS)].into_iter().enumerate() {
+    for (count, (cols, rows)) in (0..).zip([(COLS, ROWS), SHRUNK, (COLS, ROWS)]) {
+        let marked = resized_mark(count);
         let wrapped = |screen: &vt100::Screen| {
-            spans(screen, cols, rows) && wraps_beside_the_panel(screen, cols, rows).is_none()
+            spans(screen, cols, rows)
+                && wraps_beside_the_panel(screen, cols, rows).is_none()
+                && marked(screen)
         };
         // the first size is the one the session opened at
-        if index > 0 && gaps {
+        if count > 0 && gaps {
             let screens = resize_and_replay(
                 &mut session,
                 &mut term,
                 &mut replayed,
                 (cols, rows),
+                |_, _| {},
                 wrapped,
-                apart,
+                (apart, beside_the_panel),
             );
             if let Some(why) = judge(&screens) {
                 panic!("panel: at {cols}x{rows} two frames touched: {why}");
             }
-        } else if index > 0 {
+        } else if count > 0 {
             session.resize(cols, rows).unwrap();
         }
         assert!(
             session.wait_for_screen(BUDGET, wrapped),
             "{look} panel: at {cols}x{rows} the tile beside the panel never \
-             wrapped its first line at its frame; {:?}; screen:\n{}",
+             wrapped its first line at its frame under the handler's mark; \
+             {:?}; screen:\n{}",
             session.with_screen(|screen| wraps_beside_the_panel(screen, cols, rows)),
             session.screen()
         );
@@ -531,7 +608,7 @@ fn tree_beside_the_tiles() {
     common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
     let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
     std::fs::write(config, "[ui]\ngaps = true\n").unwrap();
-    let mut session = PtySession::spawn_configured(cmd, COLS, ROWS).unwrap();
+    let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, POLICY).unwrap();
     session.record_raw_output_up_to(64 << 20);
     assert!(
         session.wait_for("@###", BUDGET),
@@ -569,8 +646,9 @@ fn tree_beside_the_tiles() {
             &mut term,
             &mut replayed,
             (cols, rows),
+            |_, _| {},
             |screen| spans(screen, cols, rows),
-            text_beside_the_tree,
+            (text_beside_the_tree, spans),
         );
         if let Some(why) = judge(&screens) {
             panic!("tree: at {cols}x{rows} a tile beside the tree: {why}");
@@ -635,18 +713,30 @@ fn strays(screen: &vt100::Screen, cols: u16, rows: u16) -> Option<String> {
 }
 
 /// Every screen a painted frame in `raw` leaves `term` showing, with what
-/// `check` finds wrong on it, once `term` has taken the size the frames
-/// were painted for. A terminal without synchronized output is handed each
-/// frame's cells between a hide and the show of the caret the frame places.
-fn painted_screens(term: &mut vt100::Parser, raw: &[u8], check: Check) -> Vec<Painted> {
+/// `check` finds wrong on it and whether `layout` reads the new layout
+/// there, once `term` has taken the size the frames were painted for.
+fn painted_screens(
+    term: &mut vt100::Parser,
+    raw: &[u8],
+    check: Check,
+    layout: Layout,
+) -> Vec<Painted> {
     let (rows, cols) = term.screen().size();
     let mut screens = Vec::new();
     let mut from = 0;
-    while let Some(at) = raw[from..].windows(SHOW.len()).position(|w| w == SHOW) {
-        let end = from + at + SHOW.len();
+    while let Some(at) = raw[from..]
+        .windows(FRAME_END.len())
+        .position(|w| w == FRAME_END)
+    {
+        let end = from + at + FRAME_END.len();
         term.process(&raw[from..end]);
         let screen = term.screen();
-        screens.push((end, dump(screen, cols, rows), check(screen, cols, rows)));
+        screens.push(Painted {
+            at: end,
+            screen: dump(screen, cols, rows),
+            why: check(screen, cols, rows),
+            new_layout: layout(screen, cols, rows),
+        });
         from = end;
     }
     term.process(&raw[from..]);
@@ -670,7 +760,7 @@ fn wrapped_text_stays_inside_its_frame(gaps: bool) {
     common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
     let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
     std::fs::write(config, format!("[ui]\ngaps = {gaps}\n")).unwrap();
-    let mut session = PtySession::spawn_configured(cmd, COLS, ROWS).unwrap();
+    let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, POLICY).unwrap();
     session.record_raw_output_up_to(64 << 20);
     assert!(
         session.wait_for("01234567", BUDGET),
@@ -678,8 +768,12 @@ fn wrapped_text_stays_inside_its_frame(gaps: bool) {
         session.screen()
     );
     session.send(b"\x1b:set wrap | vsplit\r").unwrap();
-    let handler = format!("wincmd = | sleep {}m | ", HANDLER.as_millis());
-    session.send(mark_resizes(&handler).as_bytes()).unwrap();
+    // the handler holds nvim short of the grid resize until the test has
+    // seen view paint the gap, so that frame is one of its own however long
+    // the host keeps view off the CPU
+    session
+        .send(mark_resizes("wincmd = | call getchar() | ").as_bytes())
+        .unwrap();
     // a launch notice and the command line are frames of their own; the
     // split has landed once two frames stand side by side
     let settled = |screen: &vt100::Screen| {
@@ -707,62 +801,102 @@ fn wrapped_text_stays_inside_its_frame(gaps: bool) {
             &mut term,
             &mut replayed,
             size,
+            |session, from| {
+                wait_for_a_frame_at_the_new_size(session, from);
+                // nvim moves the slots ahead of the handler on a shrink and
+                // leaves a grow's for the redraw after it
+                let (cols, rows) = size;
+                assert!(
+                    cols == COLS
+                        || session.wait_for_screen(BUDGET, |screen| spans(screen, cols, rows)),
+                    "{look} wrap: at {size:?} view never painted the slots \
+                     moved; screen:\n{}",
+                    session.screen()
+                );
+                // the key the handler's getchar() waits for
+                session.send(b"x").unwrap();
+            },
             resized_mark(count),
-            strays,
+            (strays, spans),
         );
+        let mark = mark_text(count);
         assert!(
-            screens.len() >= 2,
-            "{look} wrap: at {size:?} view painted {} frames after the \
-             resize; screen:\n{}",
-            screens.len(),
+            screens
+                .iter()
+                .position(|painted| painted.screen.contains(&mark))
+                .is_some_and(|marked| marked > 0),
+            "{look} wrap: at {size:?} view painted no frame before the \
+             handler's mark; screen:\n{}",
             session.screen()
         );
-        for (index, (at, screen, stray)) in screens.iter().enumerate() {
+        for (index, painted) in screens.iter().enumerate() {
             assert!(
-                stray.is_none(),
+                painted.why.is_none(),
                 "{look} wrap: at {size:?}, frame {index} of {} (ending at \
-                 byte {at}): {}; the screen it left:\n{screen}",
+                 byte {}): {}; the screen it left:\n{}",
                 screens.len(),
-                stray.as_deref().unwrap_or_default()
+                painted.at,
+                painted.why.as_deref().unwrap_or_default(),
+                painted.screen
             );
         }
     }
 }
 
-/// A frame cut at the screen's edge stays on screen for as long as the
-/// child withholds the agreeing frame behind it, and the frame count
-/// passes it: one disagreeing frame, then one that agrees.
-#[test]
-fn a_cut_frame_held_on_screen_counts_once() {
-    let script = "stty -echo; \
-        printf '\\033[?25l\\033[H\\033[2J╭───╮╭───\\033[2;1H│###││###\\033[3;1H╰───╯╰───\\033[?25h'; \
-        read _; \
-        printf '\\033[?25l\\033[H\\033[2J╭───╮╭──╮\\033[2;1H│###││##│\\033[3;1H╰───╯╰──╯\\033[?25h'; \
-        read _";
-    let mut session = PtySession::spawn("/bin/sh", &["-c", script], 10, 3).unwrap();
+/// Every frame a child paints on a 10x3 screen from `rows`, three rows a
+/// frame, each in the bracket view writes, read back and checked by
+/// [`mismatch`].
+fn replayed_frames(rows: &[[&str; 3]]) -> Vec<Painted> {
+    let printed: String = rows
+        .iter()
+        .map(|[a, b, c]| {
+            format!("\\033[?2026h\\033[H\\033[2J{a}\\033[2;1H{b}\\033[3;1H{c}\\033[?2026l")
+        })
+        .collect();
+    let script = format!("stty -echo; printf '{printed}'; read _");
+    let mut session = PtySession::spawn("/bin/sh", &["-c", &script], 10, 3).unwrap();
     session.record_raw_output();
+    let last = rows.last().unwrap();
     assert!(
-        session.wait_for("╭───╮╭───", BUDGET),
-        "the cut frame never showed; screen:\n{}",
-        session.screen()
-    );
-    settle_on_a_frame_boundary(&mut session);
-    // the child paints the agreeing frame only once the cut one is taken
-    session.send(b"\n").unwrap();
-    assert!(
-        session.wait_for("╭───╮╭──╮", BUDGET),
-        "the agreeing frame never showed; screen:\n{}",
+        session.wait_for_screen(BUDGET, |screen| screen.contents().contains(last[1])),
+        "the last frame never showed; screen:\n{}",
         session.screen()
     );
     settle_on_a_frame_boundary(&mut session);
     let mut term = vt100::Parser::new(3, 10, 0);
     let raw = session.raw_output().to_vec();
-    let screens = painted_screens(&mut term, &raw, mismatch);
-    assert_eq!(screens.len(), 2, "{screens:?}");
-    assert!(screens[0].2.is_some(), "the cut frame read as agreeing");
+    let screens = painted_screens(&mut term, &raw, mismatch, spans);
+    assert_eq!(screens.len(), rows.len(), "{screens:?}");
+    screens
+}
+
+const CUT: [&str; 3] = ["╭───╮╭───", "│###││###", "╰───╯╰───"];
+const AGREEING: [&str; 3] = ["╭───╮╭──╮", "│###││##│", "╰───╯╰──╯"];
+
+/// Frames painted for the old layout, cut at the shrunk screen's edge, pass
+/// however many come before the frame that agrees.
+#[test]
+fn frames_painted_for_the_old_layout_pass() {
+    let screens = replayed_frames(&[CUT, CUT, AGREEING]);
+    assert!(screens[0].why.is_some(), "the cut frame read as agreeing");
+    assert!(
+        !screens[0].new_layout,
+        "the cut frame read as the new layout"
+    );
     assert_eq!(judge(&screens), None);
-    let twice = [screens[0].clone(), screens[0].clone(), screens[1].clone()];
-    assert!(judge(&twice).is_some(), "two cut frames passed");
+}
+
+/// A frame that shows the new slots over grids nvim has not sized for them
+/// fails, even as the only one that disagrees.
+#[test]
+fn a_frame_of_new_slots_over_old_grids_fails() {
+    let held = ["╭───╮╭──╮", "│###││# │", "╰───╯╰──╯"];
+    let screens = replayed_frames(&[held, AGREEING]);
+    assert!(
+        screens[0].new_layout,
+        "the held frame read as the old layout"
+    );
+    assert!(judge(&screens).is_some(), "new slots over old grids passed");
 }
 
 /// Both looks in one session after another, then the panel and the tree
