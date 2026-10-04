@@ -862,6 +862,12 @@ existing file is left as it is, and the notice says so. A clip still being
 written when view quits gets up to two seconds to finish. One that does
 not is removed, and view says so as it exits.
 
+`:View dvr play PATH` opens a clip in the scrub, with PATH read as the
+export path is. The bar starts with `CLIP` and the clip's file name. The
+frame keys move through the clip, and `q` returns to the live screen. `b`
+and `e` are not available in a clip. The session goes on recording while a
+clip is open, and the clip holds up to `[dvr] max_mb` of memory of its own.
+
 Every other key, paste and click is dropped while the scrub is open, so
 nothing reaches your buffer. Closing it redraws the live screen. How far
 back the frames reach depends on `[dvr] max_mb`: the oldest frames are

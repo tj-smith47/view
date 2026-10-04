@@ -33,13 +33,6 @@ use std::ops::RangeInclusive;
 use view_core::native::dvr::{InputKind, Marker, RecordedInput, CLIP_FIELD_MAX};
 use view_tui::dvr::{CellView, FrameView, RingSnapshot, Scroll};
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no session verb opens a clip, so only the tests read one"
-    )
-)]
 pub(super) mod read;
 
 const MAGIC: &[u8; 8] = b"VIEWDVR\0";

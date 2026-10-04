@@ -1,5 +1,5 @@
 //! The DVR's file work, on a thread of its own: hashing the files the
-//! session showed, and writing clips.
+//! session showed, writing clips and reading them back.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -8,14 +8,14 @@ use std::io::{self, BufWriter, Read, Write};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{Sender, SyncSender};
 use std::sync::Arc;
 
 use view_core::hash::{fnv1a_extend, FNV_OFFSET};
 use view_core::msg::Msg;
 use view_core::native::dvr::{DvrIoReply, Marker};
 use view_proc::writer::BackgroundWriter;
-use view_tui::dvr::RingSnapshot;
+use view_tui::dvr::{FrameRing, RingSnapshot};
 
 use super::clip::{self, Inputs};
 use crate::wake::LoopSender;
@@ -31,6 +31,14 @@ pub(crate) enum IoJob {
     DiskCheck,
     /// Write a clip.
     Export(Export),
+    /// Read the clip at `path` into a ring holding a recording bound of
+    /// `max_bytes`, and hand the ring to the loop.
+    Play {
+        /// The clip's file.
+        path: PathBuf,
+        /// The recording bound the ring is read with.
+        max_bytes: usize,
+    },
 }
 
 /// What an export writes, and where.
@@ -55,7 +63,8 @@ pub(crate) struct Export {
 }
 
 /// Starts the thread. `remote` sessions show files of another host, which
-/// the thread never reads.
+/// the thread never hashes. A clip read is sent on `clips` ahead of its
+/// reply.
 ///
 /// # Errors
 ///
@@ -63,11 +72,13 @@ pub(crate) struct Export {
 pub(crate) fn start(
     msg: LoopSender,
     remote: bool,
+    clips: Sender<FrameRing>,
 ) -> io::Result<BackgroundWriter<IoJob, Infallible>> {
     let mut io = Io {
         baselines: HashMap::new(),
         remote,
         msg,
+        clips,
     };
     BackgroundWriter::start("dvr-io", QUEUE, move |job| {
         io.apply(job);
@@ -81,6 +92,7 @@ struct Io {
     baselines: HashMap<String, Option<u64>>,
     remote: bool,
     msg: LoopSender,
+    clips: Sender<FrameRing>,
 }
 
 impl Io {
@@ -97,6 +109,21 @@ impl Io {
             }
             IoJob::DiskCheck => self.disk_check(),
             IoJob::Export(export) => write(export),
+            IoJob::Play { path, max_bytes } => match read_clip(&path, max_bytes) {
+                Ok(ring) => {
+                    // a loop that has quit takes no frames and no reply
+                    if self.clips.send(ring).is_err() {
+                        return;
+                    }
+                    DvrIoReply::ClipLoaded {
+                        path: path.display().to_string(),
+                    }
+                }
+                Err(reason) => DvrIoReply::Failed {
+                    verb: "play",
+                    reason,
+                },
+            },
         };
         let _ = self.msg.send(Msg::DvrIo(reply));
     }
@@ -120,6 +147,29 @@ impl Io {
             unverifiable: false,
         }
     }
+}
+
+/// The frames of the clip at `path`, read into a ring holding a recording
+/// bound of `max_bytes`, or why they could not be, naming the path.
+fn read_clip(path: &Path, max_bytes: usize) -> Result<FrameRing, String> {
+    let shown = path.display();
+    let file = File::open(path).map_err(|e| format!("{shown}: {e}"))?;
+    let clip = clip::read::decode(&mut io::BufReader::new(file), max_bytes)
+        .map_err(|e| format!("{shown}: {e}"))?;
+    crate::vlog::log_with("dvr", || {
+        format!(
+            "play {shown} dropped={} inputs={} dropped_inputs={} marks={} dead={}",
+            clip.dropped,
+            clip.inputs.len(),
+            clip.dropped_inputs,
+            clip.markers.len(),
+            clip.dead.len()
+        )
+    });
+    if clip.ring.newest().is_none() {
+        return Err(format!("{shown}: the clip holds no frame"));
+    }
+    Ok(clip.ring)
 }
 
 /// The FNV-1a hash of the file at `path`, read in pieces. `None` when it
@@ -396,6 +446,7 @@ mod tests {
             baselines: HashMap::new(),
             remote,
             msg: LoopSender::new(tx),
+            clips: mpsc::channel().0,
         };
         (io, rx)
     }

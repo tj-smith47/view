@@ -16,6 +16,9 @@ const EMPTY: &str = "view: DVR has recorded no frame yet";
 /// which a replacement cannot read again.
 const BRANCH_PIPED: &str = "view: DVR cannot branch while the editor reads piped input";
 
+/// What `:View dvr play` answers with no path.
+const PLAY_NO_PATH: &str = "view: DVR play needs a clip: :View dvr play PATH";
+
 /// Every key the scrub answers, and what it does. `docs/keymaps.md`
 /// carries the rendered table. Test-only: the scrub matches on the keys
 /// themselves.
@@ -57,15 +60,40 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
             Vec::new()
         }
         "export" => export(model, path.trim_start()),
+        "play" => play(model, path.trim_start()),
         _ => model
             .engine
             .record_native_notice(super::feature_invoke_notice("dvr", verb, false), false),
     }
 }
 
+/// Queues a read of the clip at `path`, which opens in the scrub once read.
+fn play(model: &mut Model, path: &str) -> Vec<Effect> {
+    if path.is_empty() {
+        return model
+            .engine
+            .record_native_notice(PLAY_NO_PATH.to_owned(), false);
+    }
+    model.dvr.request_play(path.to_owned());
+    Vec::new()
+}
+
+/// Closes a clip with the notice that `verb` does not run in one. `None`
+/// when no clip is shown.
+fn refuse_in_clip(model: &mut Model, verb: &str) -> Option<Vec<Effect>> {
+    model.dvr.clip()?;
+    model.dvr.close_scrub();
+    model.dirty = true;
+    let text = format!("view: DVR {verb} is not available in a clip");
+    Some(model.engine.record_native_notice(text, false))
+}
+
 /// Closes the scrub and queues an export to `path`, or to a derived path
 /// when it is empty.
 fn export(model: &mut Model, path: &str) -> Vec<Effect> {
+    if let Some(refused) = refuse_in_clip(model, "export") {
+        return refused;
+    }
     model.dvr.close_scrub();
     model.dirty = true;
     let path = (!path.is_empty()).then(|| path.to_owned());
@@ -79,6 +107,9 @@ fn export(model: &mut Model, path: &str) -> Vec<Effect> {
 /// showed, raising the confirm once the disk check answers, or says why
 /// that frame cannot be reproduced.
 fn branch(model: &mut Model, at: u64) -> Vec<Effect> {
+    if let Some(refused) = refuse_in_clip(model, "branch") {
+        return refused;
+    }
     model.dvr.close_scrub();
     model.dirty = true;
     if model.stdin_relay {
@@ -103,6 +134,11 @@ fn branch(model: &mut Model, at: u64) -> Vec<Effect> {
 /// Raises the confirm a pending branch waits on, or the notice a reply
 /// from the DVR's file work carries.
 pub(super) fn on_io(model: &mut Model, reply: &DvrIoReply) -> Vec<Effect> {
+    if let DvrIoReply::ClipLoaded { path } = reply {
+        model.dvr.open_clip(path.clone());
+        model.dirty = true;
+        return Vec::new();
+    }
     if let DvrIoReply::DiskChecked {
         changed,
         unverifiable,
@@ -348,6 +384,15 @@ mod tests {
                 "the bar names {k}, which the scrub does not answer"
             );
         }
+    }
+
+    #[test]
+    fn a_clip_bar_names_the_scrub_keys_but_branch_and_export() {
+        let hint = crate::native::dvr::CLIP_HINT;
+        assert_eq!(
+            Some(hint),
+            crate::native::dvr::SCRUB_HINT.strip_suffix("  b branch  e export")
+        );
     }
 
     fn exports(m: &mut Model) -> Vec<Option<String>> {
@@ -716,6 +761,62 @@ mod tests {
             ],
             "the log reads in the order the engine got them"
         );
+    }
+
+    fn loaded(path: &str) -> Msg {
+        Msg::DvrIo(DvrIoReply::ClipLoaded {
+            path: path.to_owned(),
+        })
+    }
+
+    #[test]
+    fn play_queues_a_clip_and_a_loaded_clip_opens_in_the_scrub() {
+        let mut m = recorded();
+        let _ = update(&mut m, invoke_msg("play"));
+        assert!(
+            told_once(&m, "DVR play needs a clip"),
+            "{:?}",
+            m.engine.messages.entries
+        );
+        let _ = update(&mut m, invoke_msg("play /w/a b.vdvr"));
+        let plays: Vec<_> = std::iter::from_fn(|| m.dvr.take_request())
+            .filter_map(|r| match r {
+                DvrRequest::Play(path) => Some(path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(plays, ["/w/a b.vdvr"]);
+        assert!(
+            m.dvr.clip().is_none(),
+            "nothing opens before the clip is read"
+        );
+        m.dirty = false;
+        let _ = update(&mut m, loaded("/w/a b.vdvr"));
+        assert!(m.dirty);
+        assert_eq!(m.dvr.clip(), Some("/w/a b.vdvr"));
+        assert!(m.dvr.scrub_frame().is_some());
+        assert_eq!(m.dvr.take_step(), Some(ScrubStep::Newest));
+        assert!(m.dvr.take_opened_clip());
+        assert!(!m.dvr.take_opened_clip(), "once");
+        let _ = update(&mut m, key("q"));
+        assert!(m.dvr.clip().is_none() && m.dvr.scrub_frame().is_none());
+    }
+
+    #[test]
+    fn a_clip_refuses_branch_and_export() {
+        for refused in [key("b"), key("e"), invoke_msg("export /w/b.vdvr")] {
+            let mut m = recorded();
+            let _ = update(&mut m, loaded("/w/a.vdvr"));
+            let _ = update(&mut m, refused.clone());
+            let queued: Vec<_> = std::iter::from_fn(|| m.dvr.take_request()).collect();
+            assert!(queued.is_empty(), "{refused:?}: {queued:?}");
+            assert!(
+                told_once(&m, "not available in a clip"),
+                "{refused:?}: {:?}",
+                m.engine.messages.entries
+            );
+            assert!(m.dvr.clip().is_none(), "the refusal shows the live screen");
+        }
     }
 
     #[test]

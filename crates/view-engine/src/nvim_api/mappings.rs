@@ -436,7 +436,7 @@ return {
 /// nothing.
 pub(crate) const REGISTER_COMMAND_CHUNK: &str = "\
 local channel, entries, command = ...
-local takes_path = { ['dvr export'] = true }
+local takes_path = { ['dvr export'] = true, ['dvr play'] = true }
 local function unset_variable(path, typed)
   for name in path:gmatch('%${?([%w_]+)') do
     if vim.env[name] == nil then
@@ -458,7 +458,7 @@ vim.api.nvim_create_user_command(command, function(opts)
     local typed = vim.fn.escape(path, '%#<')
     local name = unset_variable(path, typed)
     if name then
-      vim.api.nvim_echo({ { 'view: DVR cannot export: $' .. name ..
+      vim.api.nvim_echo({ { 'view: DVR cannot ' .. word .. ': $' .. name ..
         ' is not set', 'ErrorMsg' } }, true, {})
       return
     end

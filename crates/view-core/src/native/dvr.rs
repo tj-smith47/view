@@ -29,6 +29,10 @@ pub fn input_log_bytes(max_bytes: usize) -> usize {
 /// The keys the scrub bar names, each a key the scrub answers.
 pub const SCRUB_HINT: &str = "q close  h/l frame  H/L 1s  g/G ends  b branch  e export";
 
+/// The keys the bar names while a clip is shown, each a key the scrub
+/// answers there.
+pub const CLIP_HINT: &str = "q close  h/l frame  H/L 1s  g/G ends";
+
 /// The longest symbol or mouse field a clip stores, in bytes.
 pub const CLIP_FIELD_MAX: usize = 255;
 
@@ -52,6 +56,11 @@ pub enum DvrIoReply {
     },
     /// An export was not started.
     Refused(ExportRefusal),
+    /// A clip was read, and its frames wait for the loop to show them.
+    ClipLoaded {
+        /// The clip's file.
+        path: String,
+    },
     /// A file operation failed.
     Failed {
         /// The verb that failed.
@@ -83,7 +92,7 @@ impl DvrIoReply {
     #[must_use]
     pub fn notice(&self) -> Option<String> {
         Some(match self {
-            Self::DiskChecked { .. } => return None,
+            Self::DiskChecked { .. } | Self::ClipLoaded { .. } => return None,
             Self::Exported { path, cut: 0 } => format!("view: DVR clip written: {path}"),
             Self::Exported { path, cut } => format!(
                 "view: DVR clip written: {path} ({cut} symbols cut to {CLIP_FIELD_MAX} bytes)"
@@ -242,6 +251,10 @@ pub struct Dvr {
     history: Vec<(usize, u64, Marker, String)>,
     /// A branch's recorded input, held until the replacement has started.
     replay: Vec<Msg>,
+    /// The clip the scrub shows in place of the recording.
+    clip: Option<String>,
+    /// A clip opened that the loop has not shown yet.
+    clip_opened: bool,
 }
 
 impl Dvr {
@@ -326,10 +339,39 @@ impl Dvr {
         }
     }
 
-    /// Returns to the live screen. Returns whether a scrub was open.
+    /// Returns to the live screen, closing any clip. Returns whether a
+    /// scrub was open.
     pub(crate) fn close_scrub(&mut self) -> bool {
         self.pending_moves.clear();
+        self.clip = None;
         self.scrub.take().is_some()
+    }
+
+    /// Shows the clip at `path`, read already, in the scrub on its newest
+    /// frame.
+    pub(crate) fn open_clip(&mut self, path: String) {
+        self.scrub = Some(self.scrub.unwrap_or(self.last_frame));
+        self.pending_moves.clear();
+        self.pending_moves.push_back(ScrubStep::Newest);
+        self.clip = Some(path);
+        self.clip_opened = true;
+    }
+
+    /// The file of the clip the scrub shows, `None` while it shows the
+    /// recording or the live screen.
+    #[must_use]
+    pub fn clip(&self) -> Option<&str> {
+        self.clip.as_deref()
+    }
+
+    /// Whether a clip was opened since the last call, once.
+    pub fn take_opened_clip(&mut self) -> bool {
+        std::mem::take(&mut self.clip_opened)
+    }
+
+    /// Queues a read of the clip at `path`.
+    pub(crate) fn request_play(&mut self, path: String) {
+        self.requests.push_back(DvrRequest::Play(path));
     }
 
     /// Marks the newest frame as the one the DVR verb `word` ran on.

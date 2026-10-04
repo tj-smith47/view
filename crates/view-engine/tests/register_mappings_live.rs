@@ -127,6 +127,7 @@ fn an_export_path_reaches_view_as_typed_and_absolute() {
             "View dvr  export   a  b.vdvr",
             Path::new(&cwd).join("a  b.vdvr"),
         ),
+        ("View dvr play c.vdvr", Path::new(&cwd).join("c.vdvr")),
     ];
     for (typed, want) in paths {
         engine
@@ -135,7 +136,8 @@ fn an_export_path_reaches_view_as_typed_and_absolute() {
             .unwrap();
         let (feature, verb) = next_invoke(&rx);
         assert_eq!(feature, "dvr", "{typed}");
-        let got = verb.strip_prefix("export ").unwrap_or_default();
+        let word = typed.split_whitespace().nth(2).unwrap();
+        let got = verb.strip_prefix(&format!("{word} ")).unwrap_or_default();
         assert_eq!(Path::new(got), want, "{typed}: {verb}");
     }
     for (typed, want) in [
@@ -223,13 +225,13 @@ fn an_export_path_naming_an_unset_variable_is_refused() {
         .eval_str(&format!("execute('cd {}')", dir.path().display()))
         .unwrap();
     let cwd = engine.handle.eval_str("getcwd()").unwrap();
-    let refuses = |typed: &str, name: &str| {
+    let refuses_as = |verb: &str, typed: &str, name: &str| {
         let said = engine
             .handle
-            .eval_str(&format!("execute('View dvr export {typed}')"))
+            .eval_str(&format!("execute('View dvr {verb} {typed}')"))
             .unwrap();
         assert!(
-            said.contains(&format!("view: DVR cannot export: ${name} is not set")),
+            said.contains(&format!("view: DVR cannot {verb}: ${name} is not set")),
             "{typed}: {said:?}"
         );
         // an export sent ahead of this one would be the next invoke
@@ -243,6 +245,8 @@ fn an_export_path_naming_an_unset_variable_is_refused() {
             "{typed}"
         );
     };
+    let refuses = |typed: &str, name: &str| refuses_as("export", typed, name);
+    refuses_as("play", "$VIEW_UNSET_EXPORT/a.vdvr", "VIEW_UNSET_EXPORT");
     refuses("$VIEW_UNSET_EXPORT/a.vdvr", "VIEW_UNSET_EXPORT");
     // a unix shell that finds no file for the expansion leaves the name as
     // typed, which is what Windows does with every unset name

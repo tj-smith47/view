@@ -393,7 +393,7 @@ pub struct CommandForm {
 /// [`REGISTRY_EXEMPT_FEATURES`] entry: both exist to report a key claim and
 /// to carry the off switch that gives the key back, and a form that claims
 /// no key has neither to answer for.
-static COMMAND_ONLY_FORMS: [CommandForm; 13] = [
+static COMMAND_ONLY_FORMS: [CommandForm; 14] = [
     CommandForm {
         feature: "ui",
         verb: "panes",
@@ -405,6 +405,10 @@ static COMMAND_ONLY_FORMS: [CommandForm; 13] = [
     CommandForm {
         feature: "dvr",
         verb: "export",
+    },
+    CommandForm {
+        feature: "dvr",
+        verb: "play",
     },
     CommandForm {
         feature: "keys",
