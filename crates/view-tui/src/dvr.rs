@@ -131,12 +131,21 @@ impl FrameRing {
         }
     }
 
-    /// The retained groups, shared with the caller at the cost of one `Arc`
-    /// clone each. A frame recorded after this opens a new group.
+    /// The retained groups, the closed ones shared with the caller at the
+    /// cost of one `Arc` clone each and the open one copied, so frames
+    /// recorded while the snapshot is held keep building on the open group.
     #[must_use]
     pub fn snapshot(&self) -> RingSnapshot {
+        let closed = self.groups.len().saturating_sub(1);
+        let open = self.groups.back().map(|g| Arc::new(Group::clone(g)));
         RingSnapshot {
-            groups: self.groups.iter().cloned().collect(),
+            groups: self
+                .groups
+                .iter()
+                .take(closed)
+                .cloned()
+                .chain(open)
+                .collect(),
         }
     }
 
@@ -501,6 +510,28 @@ mod tests {
     }
 
     #[test]
+    fn a_group_reused_after_a_screen_of_distinct_glyphs_gives_its_table_back() {
+        let mut group = Group::default();
+        group.reset((40, 20));
+        for (i, glyph) in ('\u{4e00}'..).take(600).enumerate() {
+            let (x, y) = (
+                u16::try_from(i % 40).unwrap(),
+                u16::try_from(i / 40).unwrap(),
+            );
+            let mut cell = Cell::EMPTY;
+            cell.set_symbol(glyph.encode_utf8(&mut [0; 4]));
+            assert!(group.push_cell(x, y, &cell));
+        }
+        assert!(group.bytes() > Group::reserved_bytes((40, 20)) + 600 * 3);
+        group.reset((40, 20));
+        assert!(
+            group.bytes() <= Group::reserved_bytes((40, 20)) + 50 * 40,
+            "{}",
+            group.bytes()
+        );
+    }
+
+    #[test]
     fn a_held_snapshot_keeps_the_ring_inside_its_budget() {
         let mut ring = FrameRing::with_budget(Group::reserved_bytes(AREA) * 4);
         let mut seen = Vec::new();
@@ -529,15 +560,16 @@ mod tests {
     }
 
     #[test]
-    fn a_ring_every_snapshot_holds_keeps_its_frames_and_records_nothing() {
+    fn a_held_snapshot_leaves_the_open_group_taking_deltas() {
         let mut ring = FrameRing::with_budget(Group::reserved_bytes(AREA) * 2);
         ring.push_key(0, AREA, None, screen("a")).unwrap();
         ring.push_key(1, AREA, None, screen("b")).unwrap();
         let snapshot = ring.snapshot();
-        assert_eq!(ring.push_key(2, AREA, None, screen("c")), None);
-        assert_eq!((ring.oldest(), ring.newest()), (Some(1), Some(2)));
-        drop(snapshot);
-        assert_eq!(ring.push_key(3, AREA, None, screen("d")), Some(3));
+        assert_eq!(delta(&mut ring, 2, 1), 3);
+        assert!(!is_key(&ring, 3), "the frame is a delta on the open group");
+        assert_eq!(ring.push_key(3, AREA, None, screen("c")), Some(4));
+        let held: Vec<_> = snapshot.frames().map(|f| f.seq).collect();
+        assert_eq!(held, [1, 2], "the snapshot kept the frames it took");
     }
 
     #[test]
@@ -576,6 +608,45 @@ mod tests {
         let mut ring = FrameRing::with_budget(1);
         assert_eq!(ring.push_key(0, AREA, None, screen("k")), None);
         assert_eq!(ring.newest(), None);
+    }
+
+    /// Frame `seq` of `ring` as one string of symbols, row-major.
+    fn shown(ring: &FrameRing, seq: u64) -> String {
+        let (group, index) = ring.locate(seq).unwrap();
+        let mut screen = Vec::new();
+        group.replay(index, &mut screen);
+        screen.iter().map(Cell::symbol).collect()
+    }
+
+    #[test]
+    fn a_built_shift_fits_falls_back_to_a_keyframe_or_is_refused() {
+        let area = (2, 3);
+        let mut builder = RingBuilder::new(64 << 20);
+        let at = |x, y, symbol| CellView::new(x, y, symbol, [0; 3], 0);
+        let rows = [at(0, 0, "a"), at(0, 1, "b"), at(0, 2, "c")];
+        assert_eq!(builder.push_key(0, area, None, rows), Some(1));
+        let up = Scroll::new(0..2, 0..2, 1);
+        assert_eq!(
+            builder.push_delta(1, None, Some(up), [at(0, 2, "d")]),
+            Some(2)
+        );
+        // the delta list holds a screen of cells, so this frame fills it
+        let all: Vec<_> = (1..6).map(|i| at(i % 2, i / 2, "e")).collect();
+        assert_eq!(builder.push_delta(2, None, None, all), Some(3));
+        let down = Scroll::new(1..3, 0..2, -1);
+        assert_eq!(
+            builder.push_delta(3, None, Some(down), [at(1, 0, "f")]),
+            Some(4)
+        );
+        let reaching = Scroll::new(0..3, 0..2, 1);
+        assert_eq!(builder.push_delta(4, None, Some(reaching), []), None);
+        assert_eq!(builder.push_delta(5, None, None, [at(0, 0, "g")]), None);
+        let ring = builder.finish();
+        assert_eq!(shown(&ring, 2), "b c d ");
+        assert!(!is_key(&ring, 2) && !is_key(&ring, 3));
+        assert!(is_key(&ring, 4), "a full group closes into a keyframe");
+        assert_eq!(shown(&ring, 3), "beeeee");
+        assert_eq!(shown(&ring, 4), "bfbeee");
     }
 
     #[test]

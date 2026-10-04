@@ -44,20 +44,6 @@ impl DvrLoop {
         }
     }
 
-    /// Paints the frame the scrub shows, with the scrub bar over it. `None`
-    /// on the live screen; otherwise whether bytes were written.
-    pub(crate) fn paint_scrub(
-        &mut self,
-        term: &mut Term,
-        model: &mut Model,
-    ) -> std::io::Result<Option<bool>> {
-        Ok(match self.scrub_pass(model) {
-            None => None,
-            Some(None) => Some(false),
-            Some(Some((seq, bar))) => Some(term.draw_recorded(model, &self.ring, seq, &bar)?),
-        })
-    }
-
     /// Settles the model for one scrub pass and names the recorded frame
     /// and bar to paint. `None` on the live screen, `Some(None)` when the
     /// frame on screen is still the one to show.
@@ -116,8 +102,68 @@ impl DvrLoop {
         let age = secs(seq);
         let reach = secs(self.ring.oldest().unwrap_or(seq));
         let flag = if waiting { WAITING } else { "" };
-        format!("DVR  -{age:.1}s of {reach:.1}s  {SCRUB_HINT}{flag}")
+        // the flag goes ahead of the legend, since a narrow terminal cuts
+        // the bar's end
+        format!("DVR  -{age:.1}s of {reach:.1}s{flag}  {SCRUB_HINT}")
     }
+}
+
+/// What one paint pass puts on the terminal.
+pub(crate) enum Draw<'a> {
+    /// A recorded frame of `ring` with the scrub bar over it.
+    Recorded {
+        ring: &'a FrameRing,
+        seq: u64,
+        bar: &'a str,
+    },
+    /// The live screen.
+    Live,
+}
+
+/// What a paint pass drew, and whether it wrote bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Painted {
+    Recorded(bool),
+    Live(bool),
+}
+
+impl Painted {
+    /// Whether the pass wrote bytes to the terminal.
+    pub(crate) fn wrote(self) -> bool {
+        matches!(self, Self::Recorded(true) | Self::Live(true))
+    }
+}
+
+/// Runs one paint pass through `draw`: the frame the scrub shows while it
+/// is open, the live screen otherwise.
+///
+/// Only a live frame settles the model through
+/// [`crate::runtime::frame_reached_terminal`]. A recorded frame does not
+/// carry the live screen, so a question that opened under the scrub reads
+/// keys once a live frame showing it is painted.
+pub(crate) fn paint_pass(
+    model: &mut Model,
+    dvr: Option<&mut DvrLoop>,
+    draw: impl FnOnce(&mut Model, Draw<'_>) -> std::io::Result<bool>,
+) -> std::io::Result<Painted> {
+    if let Some(dvr) = dvr {
+        match dvr.scrub_pass(model) {
+            Some(None) => return Ok(Painted::Recorded(false)),
+            Some(Some((seq, bar))) => {
+                let ring = &dvr.ring;
+                let shown = Draw::Recorded {
+                    ring,
+                    seq,
+                    bar: &bar,
+                };
+                return draw(model, shown).map(Painted::Recorded);
+            }
+            None => {}
+        }
+    }
+    let wrote = draw(model, Draw::Live)?;
+    crate::runtime::frame_reached_terminal(model);
+    Ok(Painted::Live(wrote))
 }
 
 /// What the bar adds while something on the live screen waits for an answer.
@@ -138,6 +184,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use view_core::events::UiEvent;
+    use view_core::grid::GridOp;
     use view_core::msg::{Key, Msg, RpcCall};
     use view_core::update::update;
     use view_tui::dvr::RingBuilder;
@@ -231,7 +278,21 @@ mod tests {
         let mut model = Model::with_term_size(80, 24);
         let mut dvr = recorded(&mut model);
         open_scrub(&mut model, &mut dvr);
-        assert!(dvr.scrub_pass(&mut model).is_some());
+        let mut bar = String::new();
+        let pass = |model: &mut Model, dvr: &mut DvrLoop, bar: &mut String| {
+            paint_pass(model, Some(dvr), |_, draw| {
+                if let Draw::Recorded { bar: shown, .. } = draw {
+                    shown.clone_into(bar);
+                }
+                Ok(true)
+            })
+            .unwrap()
+        };
+        model.dirty = true;
+        assert_eq!(
+            pass(&mut model, &mut dvr, &mut bar),
+            Painted::Recorded(true)
+        );
         let _ = update(
             &mut model,
             Msg::Redraw(vec![
@@ -257,10 +318,13 @@ mod tests {
                 UiEvent::Flush,
             ]),
         );
-        let repainted = dvr.scrub_pass(&mut model);
+        assert_eq!(
+            pass(&mut model, &mut dvr, &mut bar),
+            Painted::Recorded(true)
+        );
         assert!(
-            matches!(&repainted, Some(Some((_, bar))) if bar.ends_with(WAITING)),
-            "the bar is repainted to say a prompt waits: {repainted:?}"
+            bar.find(WAITING).is_some_and(|at| at + WAITING.len() <= 80),
+            "the bar is repainted to say a prompt waits, inside 80 columns: {bar}"
         );
         assert!(!model.dirty);
 
@@ -269,7 +333,8 @@ mod tests {
         effects.extend(update(&mut model, key("l")));
         assert!(!answers_l(&effects), "{effects:?}");
 
-        model.note_frame_painted();
+        model.dirty = true;
+        assert_eq!(pass(&mut model, &mut dvr, &mut bar), Painted::Live(true));
         let answer = update(&mut model, key("l"));
         assert!(answers_l(&answer), "{answer:?}");
     }
@@ -282,7 +347,19 @@ mod tests {
         assert_eq!(dvr.scrub_pass(&mut model), None, "the live screen");
         assert!(model.dirty, "a live pass settles nothing here");
         open_scrub(&mut model, &mut dvr);
+        model.engine.apply_grid(GridOp::Resize {
+            width: 80,
+            height: 22,
+        });
+        assert!(model.take_paint_damage().full);
+        model.engine.apply_grid(GridOp::PutLine {
+            row: 2,
+            col_start: 0,
+            cells: vec![("x".into(), 0, 1)],
+        });
         assert!(matches!(dvr.scrub_pass(&mut model), Some(Some((6, _)))));
+        let spent = model.take_paint_damage();
+        assert!(!spent.full && spent.rows.is_empty(), "{spent:?}");
         assert_eq!(dvr.scrub_pass(&mut model), Some(None), "cached");
         model.term_width = 100;
         assert!(matches!(dvr.scrub_pass(&mut model), Some(Some((6, _)))));

@@ -169,16 +169,16 @@ pub(crate) struct NativeSession {
     /// engine restarted after a `:View ui` flip is held for the look on
     /// screen.
     look: Look,
-    /// `[keys] toggle_gaps`/`cycle_surfaces`/`key_log`: the left-hand side
-    /// to register `ui gaps`/`ui cycle_surfaces`/`keys log` under, applied to
-    /// the built `RegisterMappings` spec in [`Self::build_mapping_call`] the
-    /// same way `ai_enabled` is -- `view-native` resolves the override
-    /// (`ResolvedConfig::tables.keys`), but the spec it hands back always
-    /// carries `default_maps()`'s own compile-time `lhs`, which
+    /// The left-hand side each single-notation `[keys]` action
+    /// ([`view_native::config::UI_KEYS`], in its order) registers its
+    /// feature and verb under, applied to the built `RegisterMappings` spec
+    /// in [`Self::build_mapping_call`] the same way `ai_enabled` is --
+    /// `view-native` resolves the override (`ResolvedConfig::tables.keys`),
+    /// but the spec it hands back always carries `default_maps()`'s own
+    /// compile-time `lhs`, which
     /// [`MappingSpec::lhs`](view_core::native::mappings::MappingSpec)'s
     /// `Cow<'static, str>` lets this override without leaking a `Box`.
-    /// The fourth is `[keys] dvr_scrub`, registered under `dvr scrub`.
-    ui_keys_lhs: (String, String, String, String),
+    ui_keys_lhs: [String; view_native::config::UI_KEYS.len()],
     /// `[keys] profile`, resolved once at startup: what `Stage::ProfileFlip`
     /// falls back to when `model.key_profile_override` is `None`, i.e. a
     /// flip back to `"auto"`.
@@ -467,12 +467,8 @@ impl NativeSession {
         // drawing
         let look = model.look;
         let plan = plan(&cfg, registry::features(), look);
-        let ui_keys_lhs = (
-            resolved.keys.gaps_lhs().to_string(),
-            resolved.keys.cycle_lhs().to_string(),
-            resolved.keys.key_log_lhs().to_string(),
-            resolved.keys.dvr_lhs().to_string(),
-        );
+        let ui_keys_lhs =
+            view_native::config::UI_KEYS.map(|ui| resolved.keys.lhs(ui.key).to_string());
         // read once here, before the loop, so a channel report looks the
         // key up in memory and the record is touched only to add one
         if let Some(record) = &record {
@@ -914,17 +910,10 @@ impl NativeSession {
         // fresh mapping where it should hold nothing, and a later reissue
         // read that snapshot back as a user mapping view had taken.
         if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
-            let (gaps_lhs, cycle_lhs, log_lhs, dvr_lhs) = &self.ui_keys_lhs;
-            let overrides = [
-                ("ui", "gaps", gaps_lhs),
-                ("ui", "cycle_surfaces", cycle_lhs),
-                ("keys", "log", log_lhs),
-                ("dvr", "scrub", dvr_lhs),
-            ];
             for spec in specs.iter_mut() {
-                for (feature, verb, lhs) in overrides {
-                    if spec.feature == feature
-                        && spec.verb == verb
+                for (ui, lhs) in view_native::config::UI_KEYS.iter().zip(&self.ui_keys_lhs) {
+                    if spec.feature == ui.feature
+                        && spec.verb == ui.verb
                         && lhs.as_str() != spec.lhs.as_ref()
                     {
                         spec.lhs = std::borrow::Cow::Owned(lhs.clone());
@@ -1192,19 +1181,13 @@ fn batched(calls: Vec<RpcCall>) -> Vec<Effect> {
 #[cfg(test)]
 /// [`NativeSession::ui_keys_lhs`]'s own default, for every test constructor
 /// below that has no override of its own to resolve.
-fn default_ui_keys_lhs() -> (String, String, String, String) {
-    let lhs_for = |feature: &str, verb: &str| {
+fn default_ui_keys_lhs() -> [String; view_native::config::UI_KEYS.len()] {
+    view_native::config::UI_KEYS.map(|ui| {
         view_core::native::mappings::default_maps()
             .iter()
-            .find(|spec| spec.feature == feature && spec.verb == verb)
+            .find(|spec| spec.feature == ui.feature && spec.verb == ui.verb)
             .map_or_else(String::new, |spec| spec.lhs.to_string())
-    };
-    (
-        lhs_for("ui", "gaps"),
-        lhs_for("ui", "cycle_surfaces"),
-        lhs_for("keys", "log"),
-        lhs_for("dvr", "scrub"),
-    )
+    })
 }
 
 #[cfg(test)]
@@ -1732,7 +1715,7 @@ mod tests {
         assert!(
             specs
                 .iter()
-                .any(|s| s.feature == "dvr" && s.lhs == "<leader>fr"),
+                .any(|s| s.feature == "dvr" && s.lhs == "<leader>fv"),
             "a recorded session registers the DVR key: {specs:?}"
         );
     }

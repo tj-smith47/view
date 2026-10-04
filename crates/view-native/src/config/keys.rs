@@ -243,7 +243,7 @@ pub fn keys() -> &'static [ConfigKey] {
                 table: "keys",
                 key: "dvr_scrub",
                 flag: None,
-                derived: Some("<leader>fr"),
+                derived: Some("<leader>fv"),
             },
             ConfigKey {
                 table: "keys",

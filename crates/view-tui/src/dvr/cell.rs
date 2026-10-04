@@ -1,9 +1,8 @@
 //! A recorded cell packed into twenty bytes, the group's table of the
 //! symbols its cells show, and the view of a cell that leaves the crate.
 
-use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
-use std::hash::BuildHasher;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use ratatui::buffer::Cell;
 use ratatui::style::{Color, Modifier};
@@ -57,30 +56,65 @@ pub(crate) struct Packed {
 
 /// The symbols a group's cells show, each stored once. A one-byte ASCII
 /// symbol needs no entry.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Symbols {
     text: String,
     /// Where each entry's text starts in `text` and how long it is.
     spans: Vec<(u32, u32)>,
-    /// An entry's id by the hash of its text. A colliding symbol gets an
-    /// entry of its own and no index row.
-    index: HashMap<u64, u32>,
-    state: RandomState,
+    /// An entry's id by the FNV-1a hash of its text. A colliding symbol
+    /// gets an entry of its own and no index row.
+    index: HashMap<u64, u32, BuildHasherDefault<Prehashed>>,
+}
+
+/// A hasher for keys that already are a hash.
+#[derive(Debug, Default)]
+struct Prehashed(u64);
+
+impl Hasher for Prehashed {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(byte);
+        }
+    }
+
+    fn write_u64(&mut self, hash: u64) {
+        self.0 = hash;
+    }
 }
 
 impl Symbols {
-    /// Empties the table, keeping its storage.
-    pub(crate) fn clear(&mut self) {
+    /// Empties the table. Storage past what `keep` entries take is given
+    /// back, so a table grown on a screen of distinct glyphs does not stay
+    /// that size for every later group.
+    pub(crate) fn clear(&mut self, keep: usize) {
         self.text.clear();
         self.spans.clear();
         self.index.clear();
+        if self.spans.capacity() > 2 * keep {
+            self.spans.shrink_to(keep);
+            self.index.shrink_to(keep);
+        }
+        if self.text.capacity() > 8 * keep {
+            self.text.shrink_to(4 * keep);
+        }
     }
 
-    /// The bytes the table holds.
+    /// The bytes the table holds. The index is counted by its buckets,
+    /// each an entry and a control byte, of which its capacity is 7/8.
     pub(crate) fn bytes(&self) -> usize {
+        let capacity = self.index.capacity();
+        let buckets = if capacity == 0 {
+            0
+        } else {
+            (capacity * 8 / 7).next_power_of_two()
+        };
         self.text.capacity()
             + self.spans.capacity() * std::mem::size_of::<(u32, u32)>()
-            + self.index.capacity() * std::mem::size_of::<(u64, u32)>()
+            + buckets * (std::mem::size_of::<(u64, u32)>() + 1)
     }
 
     fn id(&mut self, symbol: &str) -> u32 {
@@ -89,7 +123,7 @@ impl Symbols {
                 return u32::from(*byte);
             }
         }
-        let hash = self.state.hash_one(symbol);
+        let hash = fnv1a(symbol.as_bytes());
         if let Some(&id) = self.index.get(&hash) {
             if self.get(id) == symbol {
                 return id;
@@ -215,11 +249,20 @@ pub(crate) fn restore(view: CellView<'_>) -> Cell {
     cell
 }
 
+const FNV_PRIME: u64 = 0x0100_0000_01b3;
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// The FNV-1a hash of `bytes`.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(FNV_OFFSET, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
+    })
+}
+
 /// A hash of `cells`, the same for two rows that show the same cells.
 pub(crate) fn row_hash(cells: &[Cell]) -> u64 {
-    const PRIME: u64 = 0x0100_0000_01b3;
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    let mut eat = |word: u64| hash = (hash ^ word).wrapping_mul(PRIME);
+    let mut hash = FNV_OFFSET;
+    let mut eat = |word: u64| hash = (hash ^ word).wrapping_mul(FNV_PRIME);
     for cell in cells {
         for &byte in cell.symbol().as_bytes() {
             eat(u64::from(byte));

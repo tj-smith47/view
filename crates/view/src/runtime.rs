@@ -24,6 +24,7 @@
 //! again once it has been handed to `run`.
 
 use crate::bridge::ThemeBridge;
+use crate::dvr::{Draw, Painted};
 use crate::engine_ops::EngineOps;
 use crate::native::NativeSession;
 use crate::osc52::{drain_osc52, Osc52Job, Osc52Sink};
@@ -1030,7 +1031,7 @@ const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// Settles the model once the frame rendered from it reached the terminal:
 /// nothing is owed until it changes again, and an open question may now
 /// read keys.
-fn frame_reached_terminal(model: &mut Model) {
+pub(crate) fn frame_reached_terminal(model: &mut Model) {
     model.dirty = false;
     model.note_frame_painted();
 }
@@ -1415,53 +1416,59 @@ pub fn run(
         if let Some(dvr) = dvr.as_mut() {
             dvr.poll(&mut model);
         }
-        let scrub = match dvr.as_mut().filter(|_| model.dirty && !backlog) {
-            Some(dvr) => dvr.paint_scrub(term, &mut model)?,
-            None => None,
-        };
-        if let Some(wrote) = scrub {
-            flushed = wrote;
+        if model.dirty && !backlog {
+            let pass =
+                crate::dvr::paint_pass(&mut model, dvr.as_mut(), |model, draw| match draw {
+                    Draw::Recorded { ring, seq, bar } => term.draw_recorded(model, ring, seq, bar),
+                    Draw::Live => {
+                        // the three startup milestones a timeline needs and only
+                        // this point holds: the first pass with anything to draw
+                        // at all, the first frame the engine's flush produced,
+                        // and the first one carrying a window's buffer text --
+                        // the frame the user calls the start. Under a late
+                        // attach the first is whatever marked the shell dirty
+                        // before nvim had a UI to draw on (a cached colorscheme
+                        // lands ~14 ms in on the configs measured), so the gap
+                        // to the second is the child's own `init.lua`, and the
+                        // gap from the second to the third is nvim's own first
+                        // screen update: the window grid standing at the chrome
+                        // frame is one nvim has sized and not yet drawn into.
+                        if !milestones.painted {
+                            milestones.painted = true;
+                            crate::vlog::log("startup", "first dirty pass painted");
+                        }
+                        if !milestones.chrome && model.chrome_painted {
+                            milestones.chrome = true;
+                            crate::vlog::log("startup", "chrome frame written");
+                        }
+                        if !milestones.content && model.engine.grids().window_text_painted() {
+                            milestones.content = true;
+                            // the census's own totals rather than a count kept
+                            // here: the first batch of a launch is drained by
+                            // the cutover before this loop exists, so a counter
+                            // living in the loop reports one batch and 109
+                            // events where the engine sent two and 676 -- what
+                            // separates a gap the engine spent silent from one
+                            // view spent reading is every batch drained up to
+                            // and including the one this frame came from
+                            crate::vlog::log_with("startup", || {
+                                let (redraws, events) = crate::vlog::redraws_drained();
+                                format!(
+                                    "first content frame written redraws={redraws} events={events}"
+                                )
+                            });
+                        }
+                        let surface = surface_cache.render(model);
+                        let damage = model.take_paint_damage();
+                        // a frame's own terminal I/O error aborts; engine errors
+                        // never do, and neither does the OSC52 drain above
+                        // (fire-and-forget, see its own comment)
+                        term.draw_surface(model, surface, &damage)
+                    }
+                })?;
+            flushed = pass.wrote();
             last_paint = Instant::now();
-        } else if model.dirty && !backlog {
-            // the three startup milestones a timeline needs and only this
-            // point holds: the first pass with anything to draw at all, the
-            // first frame the engine's flush produced, and the first one
-            // carrying a window's buffer text -- the frame the user calls
-            // the start. Under a late attach the first is whatever marked
-            // the shell dirty before nvim had a UI to draw on (a cached
-            // colorscheme lands ~14 ms in on the configs measured), so the
-            // gap to the second is the child's own `init.lua`, and the gap
-            // from the second to the third is nvim's own first screen
-            // update: the window grid standing at the chrome frame is one
-            // nvim has sized and not yet drawn into.
-            if !milestones.painted {
-                milestones.painted = true;
-                crate::vlog::log("startup", "first dirty pass painted");
-            }
-            if !milestones.chrome && model.chrome_painted {
-                milestones.chrome = true;
-                crate::vlog::log("startup", "chrome frame written");
-            }
-            if !milestones.content && model.engine.grids().window_text_painted() {
-                milestones.content = true;
-                // the census's own totals rather than a count kept here:
-                // the first batch of a launch is drained by the cutover
-                // before this loop exists, so a counter living in the loop
-                // reports one batch and 109 events where the engine sent
-                // two and 676 -- what separates a gap the engine spent
-                // silent from one view spent reading is every batch
-                // drained up to and including the one this frame came from
-                crate::vlog::log_with("startup", || {
-                    let (redraws, events) = crate::vlog::redraws_drained();
-                    format!("first content frame written redraws={redraws} events={events}")
-                });
-            }
-            let surface = surface_cache.render(&model);
-            let damage = model.take_paint_damage();
-            flushed = term.draw_surface(&model, surface, &damage)?; // a frame's own terminal I/O error aborts; engine errors never do, and neither does the OSC52 drain above (fire-and-forget, see its own comment)
-            frame_reached_terminal(&mut model);
-            last_paint = Instant::now();
-            if let Some(dvr) = dvr.as_mut().filter(|_| flushed) {
+            if let Some(dvr) = dvr.as_mut().filter(|_| pass == Painted::Live(true)) {
                 let owed = dvr.after_paint(term, &mut model);
                 run_in_wire_order(&executor, owed, false);
             }

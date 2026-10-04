@@ -858,8 +858,63 @@ const KEY_LOG_NOTICE: &str =
 /// The DVR scrub's own, on the same terms as [`TOGGLE_GAPS_NOTICE`].
 const DVR_SCRUB_NOTICE: &str =
     "view: [keys] dvr_scrub must be one key notation, spelled as nvim spells it \
-     (\"<leader>fr\"), with no quote or newline in it. The DVR scrub opens on the \
+     (\"<leader>fv\"), with no quote or newline in it. The DVR scrub opens on the \
      default key this run";
+
+/// A `[keys]` action that names one nvim left-hand side: the key the file
+/// spells it under, the feature and verb its mapping invokes, and what a
+/// value that is no key is answered with.
+#[derive(Debug, Clone, Copy)]
+pub struct UiKey {
+    /// The key under `[keys]`.
+    pub key: &'static str,
+    /// The feature the mapping invokes.
+    pub feature: &'static str,
+    /// The verb the mapping invokes.
+    pub verb: &'static str,
+    notice: &'static str,
+}
+
+/// Every single-notation `[keys]` action, in the order
+/// [`KeysTable::ui_values`] and [`KeysConfig::lhs`] hold them.
+pub const UI_KEYS: [UiKey; 4] = [
+    UiKey {
+        key: "toggle_gaps",
+        feature: "ui",
+        verb: "gaps",
+        notice: TOGGLE_GAPS_NOTICE,
+    },
+    UiKey {
+        key: "cycle_surfaces",
+        feature: "ui",
+        verb: "cycle_surfaces",
+        notice: CYCLE_SURFACES_NOTICE,
+    },
+    UiKey {
+        key: "key_log",
+        feature: "keys",
+        verb: "log",
+        notice: KEY_LOG_NOTICE,
+    },
+    UiKey {
+        key: "dvr_scrub",
+        feature: "dvr",
+        verb: "scrub",
+        notice: DVR_SCRUB_NOTICE,
+    },
+];
+
+impl KeysTable {
+    /// The file's value for each of [`UI_KEYS`], in its order.
+    fn ui_values(&self) -> [&Option<toml::Value>; UI_KEYS.len()] {
+        [
+            &self.toggle_gaps,
+            &self.cycle_surfaces,
+            &self.key_log,
+            &self.dvr_scrub,
+        ]
+    }
+}
 
 /// The bindings every rebindable action answers to, and the notice each
 /// action whose value could not be read owes the user.
@@ -946,13 +1001,12 @@ fn default_lhs(feature: &str, verb: &str) -> &'static str {
 pub struct KeysConfig {
     bindings: KeyBindings,
     notices: Vec<&'static str>,
-    gaps_lhs: String,
-    cycle_lhs: String,
-    key_log_lhs: String,
-    dvr_lhs: String,
+    /// The left-hand side each of [`UI_KEYS`] registers under, in its
+    /// order.
+    ui_lhs: [String; UI_KEYS.len()],
     /// `[keys] profile`'s raw file answer, carried for
     /// [`resolve::resolve_with`] to layer an environment value and a
-    /// derivation over -- the same role `gaps_lhs` fills already, except
+    /// derivation over -- the same role `ui_lhs` fills already, except
     /// this key's vocabulary (`auto`/`desktop`/`editor`) is resolved at
     /// that layer, since the "auto" answer needs the environment this struct
     /// is not handed.
@@ -971,10 +1025,7 @@ impl Default for KeysConfig {
         Self {
             bindings: KeyBindings::default(),
             notices: Vec::new(),
-            gaps_lhs: default_lhs("ui", "gaps").to_string(),
-            cycle_lhs: default_lhs("ui", "cycle_surfaces").to_string(),
-            key_log_lhs: default_lhs("keys", "log").to_string(),
-            dvr_lhs: default_lhs("dvr", "scrub").to_string(),
+            ui_lhs: UI_KEYS.map(|ui| default_lhs(ui.feature, ui.verb).to_string()),
             profile: None,
             desktop_modifier: None,
             desktop: BTreeMap::new(),
@@ -1002,25 +1053,36 @@ impl KeysConfig {
     /// override, or `default_maps()`'s own row.
     #[must_use]
     pub fn gaps_lhs(&self) -> &str {
-        &self.gaps_lhs
+        self.lhs("toggle_gaps")
     }
 
     /// [`Self::gaps_lhs`]'s own for `ui cycle_surfaces`.
     #[must_use]
     pub fn cycle_lhs(&self) -> &str {
-        &self.cycle_lhs
+        self.lhs("cycle_surfaces")
     }
 
     /// [`Self::gaps_lhs`]'s own for `keys log`.
     #[must_use]
     pub fn key_log_lhs(&self) -> &str {
-        &self.key_log_lhs
+        self.lhs("key_log")
     }
 
     /// [`Self::gaps_lhs`]'s own for `dvr scrub`.
     #[must_use]
     pub fn dvr_lhs(&self) -> &str {
-        &self.dvr_lhs
+        self.lhs("dvr_scrub")
+    }
+
+    /// The left-hand side the [`UI_KEYS`] row spelled `key` registers
+    /// under, or an empty string for a key no row names.
+    #[must_use]
+    pub fn lhs(&self, key: &str) -> &str {
+        UI_KEYS
+            .iter()
+            .position(|ui| ui.key == key)
+            .and_then(|at| self.ui_lhs.get(at))
+            .map_or("", String::as_str)
     }
 
     /// `[keys] profile` exactly as the file wrote it, or `None` for a
@@ -1121,30 +1183,12 @@ impl ViewConfig {
         // large-error return there (`clippy::result_large_err`)
         let file: ViewFile = toml::from_str(s).map_err(|e| NativeConfigError::Toml(Box::new(e)))?;
         let (bindings, mut notices) = resolve_key_bindings(&file.keys);
-        let (gaps_lhs, gaps_notice) = resolve_ui_lhs(
-            &file.keys.toggle_gaps,
-            default_lhs("ui", "gaps"),
-            TOGGLE_GAPS_NOTICE,
-        );
-        let (cycle_lhs, cycle_notice) = resolve_ui_lhs(
-            &file.keys.cycle_surfaces,
-            default_lhs("ui", "cycle_surfaces"),
-            CYCLE_SURFACES_NOTICE,
-        );
-        let (key_log_lhs, key_log_notice) = resolve_ui_lhs(
-            &file.keys.key_log,
-            default_lhs("keys", "log"),
-            KEY_LOG_NOTICE,
-        );
-        let (dvr_lhs, dvr_notice) = resolve_ui_lhs(
-            &file.keys.dvr_scrub,
-            default_lhs("dvr", "scrub"),
-            DVR_SCRUB_NOTICE,
-        );
-        notices.extend(gaps_notice);
-        notices.extend(cycle_notice);
-        notices.extend(key_log_notice);
-        notices.extend(dvr_notice);
+        let mut ui_lhs: [String; UI_KEYS.len()] = Default::default();
+        for ((slot, ui), value) in ui_lhs.iter_mut().zip(UI_KEYS).zip(file.keys.ui_values()) {
+            let (lhs, notice) = resolve_ui_lhs(value, default_lhs(ui.feature, ui.verb), ui.notice);
+            *slot = lhs;
+            notices.extend(notice);
+        }
         Ok(Self {
             native: NativeConfig::from_parsed(&file)?,
             supervision: SupervisionConfig {
@@ -1158,10 +1202,7 @@ impl ViewConfig {
             keys: KeysConfig {
                 bindings,
                 notices,
-                gaps_lhs,
-                cycle_lhs,
-                key_log_lhs,
-                dvr_lhs,
+                ui_lhs,
                 profile: file.keys.profile.clone(),
                 desktop_modifier: file.keys.desktop_modifier.clone(),
                 desktop: file.keys.desktop.clone(),
@@ -1423,11 +1464,10 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
         ("sidebar_narrower", &file.keys.sidebar_narrower),
         ("composer_newline", &file.keys.composer_newline),
         ("resize_mode", &file.keys.resize_mode),
-        ("toggle_gaps", &file.keys.toggle_gaps),
-        ("cycle_surfaces", &file.keys.cycle_surfaces),
-        ("key_log", &file.keys.key_log),
-        ("dvr_scrub", &file.keys.dvr_scrub),
-    ] {
+    ]
+    .into_iter()
+    .chain(UI_KEYS.iter().map(|ui| ui.key).zip(file.keys.ui_values()))
+    {
         if value.is_some() {
             spelled.push(("keys", key));
         }
@@ -2668,7 +2708,7 @@ mod tests {
         ("toggle_gaps", "<leader>ug"),
         ("cycle_surfaces", "<leader>uw"),
         ("key_log", "<leader>fk"),
-        ("dvr_scrub", "<leader>fr"),
+        ("dvr_scrub", "<leader>fv"),
         ("resize_mode", "<C-w>m"),
     ];
 
@@ -2693,6 +2733,37 @@ mod tests {
         }
     }
 
+    /// Every single-notation `[keys]` action reaches the three places a
+    /// person reads it: the example config, the default-key table of
+    /// `docs/keymaps.md`, and the rows `--print-caps` prints, each with the
+    /// default `default_maps()` registers.
+    #[test]
+    fn every_ui_key_reaches_the_example_the_docs_and_print_caps() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let read = |page: &str| std::fs::read_to_string(root.join(page)).expect(page);
+        let (example, docs) = (read("view.toml.example"), read("docs/keymaps.md"));
+        let rows = resolve_with(&ViewConfig::defaults(), &Overrides::default(), &|_| None).rows();
+        for ui in UI_KEYS {
+            let lhs = default_lhs(ui.feature, ui.verb);
+            assert!(!lhs.is_empty(), "{} has no default_maps row", ui.key);
+            let spelled = format!("{} = \"{lhs}\"", ui.key);
+            assert!(
+                example.lines().any(|line| line.starts_with(&spelled)),
+                "view.toml.example must carry `{spelled}`"
+            );
+            let (feature, verb) = (ui.feature, ui.verb);
+            let row = format!("| `{lhs}` | `{feature}` | `:View {feature} {verb}` |");
+            assert!(docs.contains(&row), "docs/keymaps.md must carry {row}");
+            assert!(
+                rows.iter()
+                    .any(|(key, value, _)| (key.table, key.key, value.as_str())
+                        == ("keys", ui.key, lhs)),
+                "--print-caps must print keys.{} as {lhs}",
+                ui.key
+            );
+        }
+    }
+
     /// The population the walk above has to cover: every field of the
     /// `[keys]` table, read off the serialized shape rather than restated.
     #[test]
@@ -2707,7 +2778,7 @@ mod tests {
             toggle_gaps: Some("<leader>ug".into()),
             cycle_surfaces: Some("<leader>uw".into()),
             key_log: Some("<leader>fk".into()),
-            dvr_scrub: Some("<leader>fr".into()),
+            dvr_scrub: Some("<leader>fv".into()),
             resize_mode: Some("<C-w>m".into()),
             profile: None,
             desktop_modifier: None,

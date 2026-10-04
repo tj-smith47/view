@@ -80,11 +80,18 @@ fn fill(shadow: &Shadow, group: &mut Group, scroll: Option<Scroll>) -> bool {
     true
 }
 
-/// The shift of `back` that the frame in `front` shows: rows whose span of
-/// changed columns equals another row of `back` vote for the distance
-/// between them, and the longest run of rows the winning distance explains
-/// cell for cell is the shift. `None` when a row's worth of cells or fewer
-/// changed, or no run of two rows is explained.
+/// The shift of `back` that the frame in `front` shows: the columns where
+/// most changed rows differ are the span that moved, rows whose span
+/// equals another row of `back` vote for the distance between them, and
+/// the longest run of rows the winning distance explains cell for cell is
+/// the shift. `None` when a row's worth of cells or fewer changed, or no
+/// run of two rows is explained.
+///
+/// A gutter of relative line numbers keeps its digits while the text
+/// beside it moves, and a sign changes on a row or two, so the majority
+/// leaves both outside the span and [`fill`] stores them as plain cells.
+/// The pass that counts the changed cells is one more read of the painted
+/// rows than [`fill`] makes on its own.
 // ponytail: one column span for the whole frame, so a pane that changes
 // beside the scrolling one widens the span past the shift. Per-pane spans
 // are the upgrade when that shows in a retention measurement.
@@ -92,7 +99,9 @@ fn scroll_of(shadow: &Shadow, scratch: &mut Vec<u64>) -> Option<Scroll> {
     let (front, back) = (&shadow.front.content, &shadow.back.content);
     let w = usize::from(shadow.front.area.width);
     let h = usize::from(shadow.front.area.height);
-    let (mut changed, mut left, mut right) = (0, w, 0);
+    let (mut changed, mut rows) = (0, 0u64);
+    scratch.clear();
+    scratch.resize(w, 0);
     for y in 0..h {
         if !u16::try_from(y).is_ok_and(|y| shadow.painted.covers(y)) {
             continue;
@@ -100,15 +109,21 @@ fn scroll_of(shadow: &Shadow, scratch: &mut Vec<u64>) -> Option<Scroll> {
         let (Some(now), Some(was)) = (row(front, w, y, 0..w), row(back, w, y, 0..w)) else {
             continue;
         };
+        let before = changed;
         for (x, _) in now.iter().zip(was).enumerate().filter(|(_, (a, b))| a != b) {
             changed += 1;
-            left = left.min(x);
-            right = right.max(x + 1);
+            if let Some(count) = scratch.get_mut(x) {
+                *count += 1;
+            }
         }
+        rows += u64::from(changed > before);
     }
     if changed <= w {
         return None;
     }
+    let moved = |count: &u64| 2 * *count > rows;
+    let left = scratch.iter().position(moved)?;
+    let right = scratch.iter().rposition(|&count| count > 0)? + 1;
     scratch.clear();
     for content in [front, back] {
         for y in 0..h {
@@ -290,6 +305,32 @@ mod fixture {
         buf.set_stringn(0, h - 2, status, width, chrome);
         buf.set_stringn(0, h - 1, " ".repeat(width), width, Style::default());
     }
+
+    /// Redraws the gutter of a screen [`draw`] drew at file line `top` the
+    /// way `relativenumber` does: the cursor stays on the cursor line's
+    /// row, which shows its file line, every other row shows its distance
+    /// from it, and a git sign marks file line 20 wherever it is on screen.
+    pub(super) fn relative(buf: &mut Buffer, area: (u16, u16), top: u64) {
+        let (w, h) = area;
+        let tree = tree_width(w);
+        let dim = Style::default().fg(Color::Rgb(98, 114, 164));
+        let cursor = h - 3;
+        for y in 1..h.saturating_sub(2) {
+            let line = top + u64::from(y);
+            let number = if y == cursor {
+                line
+            } else {
+                u64::from(y.abs_diff(cursor))
+            };
+            let sign = if line == 20 { "▎" } else { " " };
+            let style = if y == cursor {
+                dim.bg(Color::Rgb(68, 71, 90))
+            } else {
+                dim
+            };
+            buf.set_stringn(tree + 1, y, format!("{sign}{number:>3} "), 5, style);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -444,29 +485,36 @@ mod tests {
     /// Feeds frames of the fixture screen of size `area`, one every
     /// `period_us`, until the ring first drops its oldest group or holds
     /// `until` frames. Returns the frames and the seconds the ring held at
-    /// that moment.
+    /// that moment. `relative` draws the gutter the way `relativenumber`
+    /// does.
     fn retention(
         area: (u16, u16),
         period_us: u64,
-        scroll: bool,
+        (scroll, relative): (bool, bool),
         max_bytes: usize,
         until: u64,
     ) -> (u64, f64) {
         let mut shadow = Shadow::new();
         shadow.resize(Rect::new(0, 0, area.0, area.1));
         let mut ring = FrameRing::new(max_bytes);
-        fixture::draw(&mut shadow.front, area, 0, 0);
+        let draw = |buf: &mut Buffer, top: u64, typed: u16| {
+            fixture::draw(buf, area, top, typed);
+            if relative {
+                fixture::relative(buf, area, top);
+            }
+        };
+        draw(&mut shadow.front, 0, 0);
         shadow.painted = Damage::full();
         capture(&shadow, &mut ring, 0, None, false).unwrap();
         for n in 1..until {
             let held = (ring.newest().unwrap(), ring.age(1).unwrap().as_secs_f64());
             std::mem::swap(&mut shadow.front, &mut shadow.back);
             if scroll {
-                fixture::draw(&mut shadow.front, area, n, 0);
+                draw(&mut shadow.front, n, 0);
                 shadow.painted = Damage::full();
             } else {
                 let typed = u16::try_from(n % 1000).unwrap();
-                fixture::draw(&mut shadow.front, area, 0, typed);
+                draw(&mut shadow.front, 0, typed);
                 shadow.painted = rows(&[6, area.1 - 2]);
             }
             capture(&shadow, &mut ring, n * period_us, None, true);
@@ -480,13 +528,16 @@ mod tests {
     #[test]
     #[ignore = "a measurement, run by hand with --ignored --nocapture"]
     fn zz_measure_retention() {
-        for (name, area, period_us, scroll) in [
-            ("typing at 10 keys/s, 100x30", (100, 30), 100_000, false),
-            ("held j at 30 Hz, 100x30", (100, 30), 33_333, true),
-            ("held j at 30 Hz, 200x60", (200, 60), 33_333, true),
-        ] {
-            let (frames, secs) = retention(area, period_us, scroll, 64 << 20, u64::MAX);
-            println!("{name}: {frames} frames, {secs:.1} s");
+        for relative in [false, true] {
+            for (name, area, period_us, scroll) in [
+                ("typing at 10 keys/s, 100x30", (100, 30), 100_000, false),
+                ("held j at 30 Hz, 100x30", (100, 30), 33_333, true),
+                ("held j at 30 Hz, 200x60", (200, 60), 33_333, true),
+            ] {
+                let shape = (scroll, relative);
+                let (frames, secs) = retention(area, period_us, shape, 64 << 20, u64::MAX);
+                println!("relative={relative} {name}: {frames} frames, {secs:.1} s");
+            }
         }
         for (area, scroll) in [((100, 30), true), ((200, 60), true), ((200, 60), false)] {
             let mut shadow = Shadow::new();
@@ -626,8 +677,76 @@ mod tests {
         let old = u64::try_from(budget / whole * per_group).unwrap();
         // the first frame still held at six times the old figure is enough,
         // and costs a fifth of running on to the eviction
-        let (frames, _) = retention(area, 33_333, true, max, 6 * old);
-        assert_eq!(frames, 6 * old, "the first frame was dropped first");
+        for relative in [false, true] {
+            let (frames, _) = retention(area, 33_333, (true, relative), max, 6 * old);
+            assert_eq!(
+                frames,
+                6 * old,
+                "relative={relative}: the first frame was dropped first"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wide_glyph_straddling_the_left_of_a_shift_rebuilds_cell_for_cell() {
+        let area = (40, 12);
+        let (plain, _) = record(&[(area, 0), (area, 1)], |_, _, _| {});
+        let left = plain
+            .snapshot()
+            .frames()
+            .nth(1)
+            .unwrap()
+            .scroll
+            .unwrap()
+            .left;
+        // the glyph's lead cell sits left of the shift and its second half
+        // inside it, on a row that changes from frame to frame
+        let wide = move |buf: &mut Buffer, _: (u16, u16), top: u64| {
+            let y = if top.is_multiple_of(2) { 3 } else { 4 };
+            buf.set_string(left - 1, y, "世", Style::default());
+        };
+        let screens: Vec<_> = [0, 1, 2, 3].iter().map(|&t| (area, t)).collect();
+        let (ring, painted) = record(&screens, wide);
+        let scrolls = reloaded(&ring, &painted);
+        assert!(
+            scrolls[1..]
+                .iter()
+                .all(|s| s.is_some_and(|s| s.left == left)),
+            "{scrolls:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_typed_after_a_scroll_stores_its_cells_and_no_shift() {
+        let area = (40, 12);
+        let mut shadow = Shadow::new();
+        shadow.resize(Rect::new(0, 0, area.0, area.1));
+        let mut ring = FrameRing::new(64 << 20);
+        let mut painted = Vec::new();
+        for (n, (top, typed)) in (0u64..).zip([(0, 0), (1, 0), (1, 3)]) {
+            std::mem::swap(&mut shadow.front, &mut shadow.back);
+            fixture::draw(&mut shadow.front, area, top, typed);
+            shadow.painted = Damage::full();
+            assert_eq!(capture(&shadow, &mut ring, n, None, n > 0), Some(n + 1));
+            painted.push(shadow.front.clone());
+        }
+        let scrolls = reloaded(&ring, &painted);
+        assert!(scrolls[1].is_some(), "{scrolls:?}");
+        assert_eq!(scrolls[2], None);
+    }
+
+    #[test]
+    fn a_scroll_beside_relative_line_numbers_stores_its_shift() {
+        let area = (40, 12);
+        let tops = [0, 1, 2, 3, 2, 5];
+        let screens: Vec<_> = tops.iter().map(|&t| (area, t)).collect();
+        let (ring, painted) = record(&screens, fixture::relative);
+        let scrolls = reloaded(&ring, &painted);
+        let gutter = fixture::tree_width(area.0) + 6;
+        for (i, scroll) in scrolls.iter().enumerate().skip(1) {
+            let scroll = scroll.expect("every frame after the first scrolled");
+            assert!(scroll.left >= gutter, "frame {}: {scroll:?}", i + 1);
+        }
     }
 
     #[test]

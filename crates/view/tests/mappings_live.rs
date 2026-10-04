@@ -423,7 +423,7 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
             "<leader>w8".to_string(),
             "<leader>w9".to_string(),
             "<leader>fk".to_string(),
-            "<leader>fr".to_string(),
+            "<leader>fv".to_string(),
         ],
         "a disabled feature must contribute no key of its own; the survivors \
              are ai's default key, the two ui actions, window's own tile \
@@ -458,7 +458,7 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
             "<leader>w8",
             "<leader>w9",
             "<leader>fk",
-            "<leader>fr",
+            "<leader>fv",
         ]
     );
 

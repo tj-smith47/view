@@ -354,7 +354,7 @@ static DEFAULT_MAPS: [MappingSpec; 28] = [
     },
     MappingSpec {
         feature: "dvr",
-        lhs: Cow::Borrowed("<leader>fr"),
+        lhs: Cow::Borrowed("<leader>fv"),
         verb: "scrub",
         rhs: Rhs::Invoke,
     },
@@ -989,6 +989,22 @@ mod tests {
             for other in review_keys().iter().skip(i + 1) {
                 assert_ne!(key.lhs, other.lhs, "{} is set twice", key.lhs);
                 assert_ne!(key.verb, other.verb, "{} is reached twice", key.verb);
+            }
+        }
+    }
+
+    /// Two default rows on one key leave whichever registers last as the
+    /// only one that answers, and the other feature unreachable by key.
+    #[test]
+    fn no_two_default_keys_share_a_left_hand_side() {
+        let maps = default_maps();
+        for (i, spec) in maps.iter().enumerate() {
+            for other in maps.iter().skip(i + 1) {
+                assert_ne!(
+                    spec.lhs, other.lhs,
+                    "{} is the default key of both {} {} and {} {}",
+                    spec.lhs, spec.feature, spec.verb, other.feature, other.verb
+                );
             }
         }
     }

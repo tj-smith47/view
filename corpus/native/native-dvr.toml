@@ -3,6 +3,6 @@
 # between the open and the close are the test's own.
 schema = 1
 name = "native-dvr"
-input = "\\fr"
+input = "\\fv"
 engine_pin = "v0.12.4"
 ext_set = "default"

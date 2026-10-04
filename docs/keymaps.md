@@ -38,7 +38,7 @@ The table below is generated from `default_maps()` in
 | `<leader>w8` | `window` | `:View window to_tabpage_8` |
 | `<leader>w9` | `window` | `:View window to_tabpage_9` |
 | `<leader>fk` | `keys` | `:View keys log` |
-| `<leader>fr` | `dvr` | `:View dvr scrub` |
+| `<leader>fv` | `dvr` | `:View dvr scrub` |
 
 ## `<leader>ai` reads the panel before it acts
 
@@ -386,7 +386,7 @@ the picker example above gets applies here too: if `<leader>ai` was already
 yours, taking it is reported, and the line above is what the notice names
 to give it back.
 
-`<leader>fr` is registered only while the session is recorded, which
+`<leader>fv` is registered only while the session is recorded, which
 `[dvr]` turns on. With `[dvr] enabled = false`, the default, `:View dvr …`
 answers with a notice saying so.
 
@@ -785,7 +785,7 @@ key_log = "<leader>fk"   # the default
 
 ## Rewinding the screen
 
-With the session recorded, `<leader>fr` freezes the screen on the last
+With the session recorded, `<leader>fv` freezes the screen on the last
 frame view drew, and the bottom row becomes the scrub bar:
 
 ```
@@ -801,7 +801,7 @@ The bar names how long before the newest frame the one on screen was
 drawn, and how far back the recording reaches. When that frame's bottom
 row holds a message, the bar moves to the top row. While the scrub is
 open, a question the live screen is asking adds `! waiting: q to answer`
-to the bar. These keys move through the frames:
+to the bar, ahead of the keys. These keys move through the frames:
 
 | key | does |
 | --- | --- |
@@ -820,7 +820,7 @@ dropped as new ones are kept. To put the scrub on another key:
 
 ```toml
 [keys]
-dvr_scrub = "<leader>fr"   # the default
+dvr_scrub = "<leader>fv"   # the default
 ```
 
 ## `:View`

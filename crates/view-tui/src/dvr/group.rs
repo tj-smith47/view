@@ -100,7 +100,7 @@ pub(crate) struct Frame {
 }
 
 /// A keyframe and the delta frames painted on top of it, evicted whole.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Group {
     pub(crate) area: (u16, u16),
     pub(crate) key: Vec<Packed>,
@@ -126,7 +126,8 @@ impl Group {
         self.key.clear();
         self.deltas.clear();
         self.frames.clear();
-        self.symbols.clear();
+        // a screen where one cell in sixteen shows a glyph of its own
+        self.symbols.clear(cells / 16);
         // a group grown for a larger screen would otherwise hold that
         // screen's memory for the rest of the session
         if self.key.capacity() > 2 * cells {

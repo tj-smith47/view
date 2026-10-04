@@ -83,7 +83,7 @@ resize_mode = "<C-w>m"   # h/l/j/k step the focused window or sidebar
 toggle_gaps = "<leader>ug"
 cycle_surfaces = "<leader>uw"
 key_log = "<leader>fk"   # opens and closes the key log
-dvr_scrub = "<leader>fr" # rewinds the screen while [dvr] is on
+dvr_scrub = "<leader>fv" # rewinds the screen while [dvr] is on
 
 # view's keys are omarchy's keys on a machine with no desktop of its own,
 # and nvim's leader keys on a machine that has one. "auto" derives desktop

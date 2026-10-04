@@ -33,7 +33,7 @@ use super::profile;
 use super::{
     parse_color, parse_nvim_bin, parse_panes, parse_pill_caps, parse_theme, parse_tier,
     parse_tile_titles, parse_tree_icons, read_key, render_tile_titles, KeysConfig, NativeConfig,
-    SupervisionConfig, UiTokens, ViewConfig, AUTO, BUNDLED,
+    SupervisionConfig, UiTokens, ViewConfig, AUTO, BUNDLED, UI_KEYS,
 };
 
 /// One resolved answer and the reason it is that answer.
@@ -216,17 +216,11 @@ pub struct ResolvedConfig {
     /// Where each `[keys]` action's bindings came from, in [`KEY_ACTIONS`]
     /// order.
     keys: [Source; KEY_ACTIONS.len()],
-    /// Where `[keys] toggle_gaps` came from. Not a [`KEY_ACTIONS`] row: that
-    /// table drives `KeyBindings::rebind`, and this key registers a real
-    /// nvim mapping instead (see [`super::resolve_ui_lhs`]), file-layer
-    /// only -- no `VIEW_KEYS_TOGGLE_GAPS` exists to read a second layer from.
-    ui_gaps_key: Source,
-    /// [`Self::ui_gaps_key`]'s own for `[keys] cycle_surfaces`.
-    ui_cycle_key: Source,
-    /// [`Self::ui_gaps_key`]'s own for `[keys] key_log`.
-    key_log_key: Source,
-    /// [`Self::ui_gaps_key`]'s own for `[keys] dvr_scrub`.
-    dvr_key: Source,
+    /// Where each of [`UI_KEYS`] came from, in its order. Not
+    /// [`KEY_ACTIONS`] rows: that table drives `KeyBindings::rebind`, and
+    /// these keys register a real nvim mapping (see
+    /// [`super::resolve_ui_lhs`]).
+    ui_keys: [Source; UI_KEYS.len()],
     /// Where `[supervision] auto_restart` came from.
     supervision: Source,
     /// Where `[dvr] enabled` and `[dvr] max_mb` came from, in that order.
@@ -524,19 +518,12 @@ pub fn resolve_with(
     let (surfaces, surfaces_source) =
         resolve_surfaces(file, file_surfaces, &tree_width, env, &mut notices);
     let (bindings, key_sources) = resolve_keys(file, env, &mut notices);
-    let (gaps_lhs, ui_gaps_key) =
-        resolve_ui_lhs_env(file, env, "toggle_gaps", file.keys.gaps_lhs(), &mut notices);
-    let (cycle_lhs, ui_cycle_key) = resolve_ui_lhs_env(
-        file,
-        env,
-        "cycle_surfaces",
-        file.keys.cycle_lhs(),
-        &mut notices,
-    );
-    let (log_lhs, key_log_key) =
-        resolve_ui_lhs_env(file, env, "key_log", file.keys.key_log_lhs(), &mut notices);
-    let (dvr_lhs, dvr_key) =
-        resolve_ui_lhs_env(file, env, "dvr_scrub", file.keys.dvr_lhs(), &mut notices);
+    let mut ui_lhs: [String; UI_KEYS.len()] = Default::default();
+    let mut ui_keys = [Source::Derived; UI_KEYS.len()];
+    for ((lhs, source), ui) in ui_lhs.iter_mut().zip(&mut ui_keys).zip(UI_KEYS) {
+        (*lhs, *source) =
+            resolve_ui_lhs_env(file, env, ui.key, file.keys.lhs(ui.key), &mut notices);
+    }
     let auto_restart = layer(
         None,
         env_read(
@@ -601,10 +588,7 @@ pub fn resolve_with(
             keys: KeysConfig {
                 bindings,
                 notices: file.keys.notices().to_vec(),
-                gaps_lhs: gaps_lhs.clone(),
-                cycle_lhs: cycle_lhs.clone(),
-                key_log_lhs: log_lhs,
-                dvr_lhs,
+                ui_lhs,
                 profile: file.keys.profile().map(str::to_string),
                 desktop_modifier: file.keys.desktop_modifier().map(str::to_string),
                 desktop: file.keys.desktop().clone(),
@@ -618,10 +602,7 @@ pub fn resolve_with(
         tree_width: tree_width.source,
         tabline_shows: tabline_shows.source,
         keys: key_sources,
-        ui_gaps_key,
-        ui_cycle_key,
-        key_log_key,
-        dvr_key,
+        ui_keys,
         supervision: auto_restart.source,
         dvr: [dvr_enabled, dvr_max_mb],
         inherited_appname: env(INHERITED_APPNAME_ENV).filter(|name| !name.is_empty()),
@@ -731,6 +712,12 @@ impl ResolvedConfig {
     /// One key's rendered value and layer, or `None` for a key another
     /// crate answers.
     fn answer(&self, key: &ConfigKey) -> Option<(String, Source)> {
+        let ui = UI_KEYS.iter().position(|ui| ui.key == key.key);
+        if let Some(&source) = ui.and_then(|at| self.ui_keys.get(at)) {
+            if key.table == "keys" {
+                return Some((self.tables.keys.lhs(key.key).to_string(), source));
+            }
+        }
         Some(match (key.table, key.key) {
             ("ui", "tier") => (
                 self.ui
@@ -836,12 +823,6 @@ impl ResolvedConfig {
                 self.tables.native.tabline_shows().label().to_string(),
                 self.tabline_shows,
             ),
-            ("keys", "toggle_gaps") => (self.tables.keys.gaps_lhs().to_string(), self.ui_gaps_key),
-            ("keys", "key_log") => (self.tables.keys.key_log_lhs().to_string(), self.key_log_key),
-            ("keys", "dvr_scrub") => (self.tables.keys.dvr_lhs().to_string(), self.dvr_key),
-            ("keys", "cycle_surfaces") => {
-                (self.tables.keys.cycle_lhs().to_string(), self.ui_cycle_key)
-            }
             ("keys", "profile") => (
                 match self.profile_marker {
                     Some(marker) => format!("{} ({marker})", profile_label(self.profile.value)),
