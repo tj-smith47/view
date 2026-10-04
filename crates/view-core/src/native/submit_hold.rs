@@ -328,6 +328,11 @@ pub struct SubmitHold {
     /// answering an earlier key included. A hold armed in error because of
     /// it ends on the mode report.
     mode_unsure: bool,
+    /// Whether nvim reads the next normal-mode key behind an operator or a
+    /// visual-mode key, where an `i` or `a` names a text object.
+    object_next: bool,
+    /// Whether the `i` or `a` in `argument_of` names a text object.
+    argument_object: bool,
     /// Keys a surface of view's own is holding while they spell the start
     /// of a mapped sequence.
     sequence: Vec<String>,
@@ -878,11 +883,10 @@ impl SubmitHold {
     /// normal mode, `i` in a buffer that cannot be edited, waits for no
     /// argument. The error may answer a key sent before the newest one, so
     /// the argument a literal key such as `f` waits for is still owed, and
-    /// so is the text object an `i` typed behind an unanswered operator
-    /// names (the `"` of `di"`).
+    /// so is the text object an `i` typed behind an operator names (the `"`
+    /// of `di"`), which nvim never refuses by itself.
     pub(crate) fn note_refused(&mut self) {
-        let bare = self.recent.back().is_some_and(|key| !key.mode_unsure);
-        if bare
+        if !self.argument_object
             && self
                 .argument_of
                 .is_some_and(|key| LEAVES_NORMAL.contains(&key))

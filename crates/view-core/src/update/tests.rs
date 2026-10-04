@@ -21907,9 +21907,23 @@ fn an_answer_from_nvim_only_ever_adds_a_hold() {
 /// answered or not, with an error inserted at any position, every step held
 /// without it is held with it, no key reaches nvim sooner, and the same
 /// keys reach it in the same order. The one position left out is straight
-/// after an `i` with every key answered by a cursor move.
+/// after a bare `i` or `a`, one behind no operator or visual-mode key, with
+/// every key answered by a cursor move.
 #[test]
 fn an_error_from_nvim_never_removes_a_hold() {
+    // the `c` of the user's `<Space>c` is that mapping's, and a count
+    // leaves the operator before it waiting
+    let bare = |before: &[Step]| {
+        let mut keys = before.iter().rev().filter_map(|step| match step {
+            Step::Key(key, _) => Some(*key),
+            _ => None,
+        });
+        match keys.find(|key| !key.bytes().all(|b| b.is_ascii_digit())) {
+            Some("d" | "y" | "v") => false,
+            Some("c") => keys.next() == Some(" "),
+            _ => true,
+        }
+    };
     let sent_by = |trace: &[(bool, Vec<String>)], at: usize| -> usize {
         trace.iter().take(at).map(|t| t.1.len()).sum()
     };
@@ -21923,7 +21937,10 @@ fn an_error_from_nvim_never_removes_a_hold() {
                 // with its error, so the run without the error, where a
                 // cursor move alone answers it, is one nvim never sends
                 let refused = error_at.checked_sub(1).map(|at| steps[at]);
-                if answer && matches!(refused, Some(Step::Key("i" | "a", _))) {
+                if answer
+                    && matches!(refused, Some(Step::Key("i" | "a", _)))
+                    && bare(&steps[..error_at - 1])
+                {
                     continue;
                 }
                 let mut erred = steps.clone();
@@ -21998,6 +22015,62 @@ fn an_error_for_an_earlier_key_keeps_a_text_objects_argument() {
     );
 }
 
+/// An `i` or `a` typed behind a key that enters insert mode is a command
+/// of its own. The error refusing both waits for no argument, so view's
+/// key after it arms the hold on the query typed ahead.
+#[test]
+fn an_error_after_a_refused_insert_key_leaves_no_argument_owed() {
+    for (insert, then) in [("o", "i"), ("A", "i"), ("o", "a")] {
+        let steps = [
+            k(insert),
+            k(then),
+            Step::Error,
+            k(" "),
+            k("f"),
+            k("f"),
+            k("m"),
+            k("a"),
+            k("i"),
+            k("n"),
+        ];
+        let trace = hold_trace(&mut hold_model(false, false), &steps, false, false);
+        assert!(trace[5].0, "{insert}{then}: the hold arms: {trace:?}");
+        let early: Vec<_> = trace[6..steps.len()].iter().flat_map(|t| &t.1).collect();
+        assert!(early.is_empty(), "{insert}{then}: query sent: {trace:?}");
+    }
+}
+
+/// An `i` typed behind an operator nvim has answered, a count after it
+/// included, still names a text object, so an error answering no key
+/// leaves the `"` its argument and view's key after it arms the hold.
+#[test]
+fn an_error_after_an_answered_operator_keeps_the_text_object() {
+    for operator in [&[k("d")][..], &[k("y"), k("2")]] {
+        let mut steps = operator.to_vec();
+        steps.extend([
+            Step::Answer,
+            k("i"),
+            Step::Error,
+            k("\""),
+            k(" "),
+            k("f"),
+            k("f"),
+            k("m"),
+            k("a"),
+            k("i"),
+            k("n"),
+        ]);
+        let armed = steps.len() - 5;
+        let trace = hold_trace(&mut hold_model(false, false), &steps, false, false);
+        assert!(trace[armed].0, "{operator:?}: the hold arms: {trace:?}");
+        let early: Vec<_> = trace[armed + 1..steps.len()]
+            .iter()
+            .flat_map(|t| &t.1)
+            .collect();
+        assert!(early.is_empty(), "{operator:?}: query sent: {trace:?}");
+    }
+}
+
 /// The hold's decisions for a few sequences, written out, with the user's
 /// mappings read and the key log open: each entry is whether input was
 /// held after the step and the keys that reached nvim, the last entry the
@@ -22007,7 +22080,7 @@ fn the_hold_decides_what_it_was_recorded_deciding() {
     fn row(held: bool, sent: &[&str]) -> (bool, Vec<String>) {
         (held, sent.iter().map(|key| (*key).to_string()).collect())
     }
-    let cases: [(&[Step], Trace); 8] = [
+    let cases: [(&[Step], Trace); 11] = [
         (
             &[k(" "), k("f"), k("f"), k("m")],
             vec![
@@ -22101,6 +22174,93 @@ fn the_hold_decides_what_it_was_recorded_deciding() {
                 row(false, &["f"]),
                 row(false, &[]),
                 row(false, &["i"]),
+                row(false, &[" "]),
+                row(false, &["f"]),
+                row(true, &["f"]),
+                row(true, &[]),
+                row(true, &[]),
+                row(true, &[]),
+                row(true, &[]),
+                row(false, &["m", "a", "i", "n"]),
+            ],
+        ),
+        (
+            &[
+                k("o"),
+                k("i"),
+                Step::Error,
+                k(" "),
+                k("f"),
+                k("f"),
+                k("m"),
+                k("a"),
+                k("i"),
+                k("n"),
+            ],
+            vec![
+                row(false, &["o"]),
+                row(false, &["i"]),
+                row(false, &[]),
+                row(false, &[" "]),
+                row(false, &["f"]),
+                row(true, &["f"]),
+                row(true, &[]),
+                row(true, &[]),
+                row(true, &[]),
+                row(true, &[]),
+                row(false, &["m", "a", "i", "n"]),
+            ],
+        ),
+        (
+            &[
+                k("d"),
+                Step::Answer,
+                k("i"),
+                Step::Error,
+                k("\""),
+                k(" "),
+                k("f"),
+                k("f"),
+                k("m"),
+                k("a"),
+                k("i"),
+                k("n"),
+            ],
+            vec![
+                row(false, &["d"]),
+                row(false, &[]),
+                row(false, &["i"]),
+                row(false, &[]),
+                row(false, &["\""]),
+                row(false, &[" "]),
+                row(false, &["f"]),
+                row(true, &["f"]),
+                row(true, &[]),
+                row(true, &[]),
+                row(true, &[]),
+                row(true, &[]),
+                row(false, &["m", "a", "i", "n"]),
+            ],
+        ),
+        (
+            &[
+                k("d"),
+                k("i"),
+                Step::Error,
+                k("\""),
+                k(" "),
+                k("f"),
+                k("f"),
+                k("m"),
+                k("a"),
+                k("i"),
+                k("n"),
+            ],
+            vec![
+                row(false, &["d"]),
+                row(false, &["i"]),
+                row(false, &[]),
+                row(false, &["\""]),
                 row(false, &[" "]),
                 row(false, &["f"]),
                 row(true, &["f"]),

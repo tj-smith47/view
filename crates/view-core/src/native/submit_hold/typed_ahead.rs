@@ -8,10 +8,13 @@
 //! With no user mappings read, a key costs what it did before they were
 //! read. With some, a key that leaves normal mode, or that follows a key
 //! taking an argument, compares every suffix start of the window against
-//! every user lhs: window length times mapping count first-key compares,
-//! twice on a key that does both. The window holds the longest of view's
-//! sequences and the user's, so at 300 mappings and a five-key window a
-//! key costs at most 3,000 string compares.
+//! every user lhs, twice on a key that does both. The window holds W keys,
+//! the longest of view's sequences and the user's. One scan costs W first
+//! key compares per lhs, and up to W(W+1)/2 key compares for an lhs whose
+//! prefix matches the window from every start. At 300 mappings and a
+//! five-key window a key costs at most 3,000 first-key compares and 9,000
+//! key compares. A longer window costs at most W(W+1) key compares for
+//! each lhs.
 
 use std::collections::VecDeque;
 
@@ -53,6 +56,7 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     // here to mark the mode unsure
     if !normal || longest == 0 || hold.typed.is_some() {
         hold.recent.clear();
+        hold.object_next = false;
         return false;
     }
     let key = canonical(notation);
@@ -64,11 +68,16 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
                 .find(|literal| *literal == notation)
         })
         .flatten();
+    hold.argument_object = hold.object_next && matches!(hold.argument_of, Some("i" | "a"));
     let mode_unsure = hold.mode_unsure;
     let leaves = leaves_normal(argument_of, &key);
     // nvim matches a mapping before it reads a key as an argument, so the
     // key after one of the user's may start a sequence
     let argument = argument_of.is_some() && !in_user_keys(&hold.recent, &hold.user_keys);
+    let follows = object_follows(argument_of, &key);
+    // a count typed behind an operator leaves it waiting for its motion
+    let digit = |key: &str| key.len() == 1 && key.bytes().all(|b| b.is_ascii_digit());
+    let count = digit(&key) && (key != "0" || hold.recent.back().is_some_and(|f| digit(&f.key)));
     while hold.recent.len() >= longest.max(hold.user_longest) {
         hold.recent.pop_front();
     }
@@ -77,7 +86,13 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         argument,
         mode_unsure,
     });
-    hold.mode_unsure |= leaves && !in_user_keys(&hold.recent, &hold.user_keys);
+    let left = leaves && !in_user_keys(&hold.recent, &hold.user_keys);
+    hold.mode_unsure |= left;
+    hold.object_next = if left {
+        follows
+    } else {
+        count && hold.object_next
+    };
     let recent = &hold.recent;
     let complete = hold.invoke_keys.iter().any(|invocation| {
         let keys = &invocation.keys;
@@ -97,8 +112,35 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         hold.recent.clear();
         hold.argument_of = None;
         hold.mode_unsure = false;
+        hold.object_next = false;
     }
     complete
+}
+
+/// Whether an `i` or `a` typed after `key`, a key that leaves normal mode
+/// as the argument of `before` or of nothing, names a text object: `key`
+/// is an operator or a visual-mode key, and opens no insert, replace or
+/// command-line mode.
+fn object_follows(before: Option<&str>, key: &str) -> bool {
+    match before {
+        None => !matches!(
+            key,
+            ":" | "/"
+                | "?"
+                | "o"
+                | "O"
+                | "a"
+                | "A"
+                | "i"
+                | "I"
+                | "s"
+                | "S"
+                | "C"
+                | "R"
+                | "<Insert>"
+        ),
+        Some(before) => !matches!((before, key), ("g", "i" | "I" | "R" | "Q")),
+    }
 }
 
 /// Whether the latest keys of `recent`, read from a key nvim starts a
