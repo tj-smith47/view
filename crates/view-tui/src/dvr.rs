@@ -92,6 +92,12 @@ impl Group {
         self.key.clear();
         self.deltas.clear();
         self.frames.clear();
+        // a group grown for a larger screen would otherwise hold that
+        // screen's memory for the rest of the session
+        if self.key.capacity() > 2 * cells {
+            self.key.shrink_to(cells);
+            self.deltas.shrink_to(cells);
+        }
         self.key.reserve_exact(cells);
         self.deltas.reserve_exact(cells);
         self.frames.reserve_exact(GROUP_FRAMES);
@@ -745,6 +751,14 @@ mod tests {
             ring.push_key(frame, AREA, None, screen("k")).unwrap();
             assert!(seen.contains(&storage(&ring)), "frame {frame} allocated");
         }
+    }
+
+    #[test]
+    fn a_group_reused_for_a_smaller_screen_gives_its_memory_back() {
+        let mut group = Group::default();
+        group.reset((40, 20));
+        group.reset(AREA);
+        assert_eq!(group.bytes(), Group::reserved_bytes(AREA));
     }
 
     #[test]

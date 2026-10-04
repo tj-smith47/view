@@ -77,13 +77,21 @@ pub(crate) fn load(shadow: &mut Shadow, ring: &FrameRing, seq: u64) -> bool {
     true
 }
 
-/// Paints `text` across the last row of the shadow's `back` in the status
-/// line's colors.
+/// Paints `text` across one row of the shadow's `back` in the status line's
+/// colors: the last row when the recorded frame left it blank, the top row
+/// when it holds text, since that is where a message was printed.
 pub(crate) fn paint_bar(shadow: &mut Shadow, model: &Model, text: &str) {
     let area = shadow.back.area;
-    let Some(y) = area.bottom().checked_sub(1).filter(|_| area.width > 0) else {
+    let Some(last) = area.bottom().checked_sub(1).filter(|_| area.width > 0) else {
         return;
     };
+    let blank = (area.x..area.right()).all(|x| {
+        shadow
+            .back
+            .cell((x, last))
+            .is_none_or(|c| c.symbol().trim().is_empty())
+    });
+    let y = if blank { last } else { area.y };
     let style =
         ratatui_style(Theme::from_hl(model.engine.painted_hl()).chrome(ChromeGroup::StatusLine));
     let row = Rect::new(area.x, y, area.width, 1);
@@ -254,5 +262,18 @@ mod tests {
         let last = usize::from(H - 1) * usize::from(W);
         assert_eq!(shadow.back.content[last].symbol(), "D");
         assert_eq!(shadow.back.content[..last], before.content[..last]);
+    }
+
+    #[test]
+    fn the_bar_leaves_a_message_on_the_last_row_readable() {
+        let model = model();
+        let mut shadow = Shadow::new();
+        paint(&mut shadow, &model, &Damage::full());
+        shadow.back.cell_mut((3, H - 1)).unwrap().set_symbol("E");
+        let before = shadow.back.clone();
+        paint_bar(&mut shadow, &model, "DVR");
+        let last = usize::from(H - 1) * usize::from(W);
+        assert_eq!(shadow.back.content[0].symbol(), "D");
+        assert_eq!(shadow.back.content[last..], before.content[last..]);
     }
 }

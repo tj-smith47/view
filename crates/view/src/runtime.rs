@@ -1421,7 +1421,6 @@ pub fn run(
         };
         if let Some(wrote) = scrub {
             flushed = wrote;
-            frame_reached_terminal(&mut model);
             last_paint = Instant::now();
         } else if model.dirty && !backlog {
             // the three startup milestones a timeline needs and only this

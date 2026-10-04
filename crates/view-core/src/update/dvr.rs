@@ -193,12 +193,53 @@ mod tests {
 
     #[test]
     fn a_disabled_dvr_refuses_every_verb_in_one_notice() {
-        let mut m = Model::with_term_size(80, 24);
+        for verb in ["scrub", "close", "rewind"] {
+            let mut m = Model::with_term_size(80, 24);
+            let _ = update(&mut m, invoke_msg(verb));
+            let raised = format!("{:?}", m.engine.messages.entries);
+            assert_eq!(raised.matches("DVR is off").count(), 1, "{verb}: {raised}");
+            assert!(
+                raised.contains("set [dvr] enabled = true"),
+                "{verb}: {raised}"
+            );
+            assert!(m.dvr.scrub_frame().is_none());
+            assert!(scrub_input(&mut m, &key("h")).is_none());
+        }
+    }
+
+    #[test]
+    fn every_scrub_key_moves_or_closes_and_no_other_key_does() {
+        for (notation, _) in DVR_KEYS.iter().chain(&[("<Esc>", "")]) {
+            let mut m = recorded();
+            let _ = update(&mut m, invoke_msg("scrub"));
+            assert_eq!(m.dvr.take_step(), Some(ScrubStep::Newest));
+            let _ = update(&mut m, key(notation));
+            let closed = m.dvr.scrub_frame().is_none();
+            assert!(
+                closed != m.dvr.take_step().is_some(),
+                "{notation} neither moved nor closed the scrub"
+            );
+        }
+        let mut m = recorded();
         let _ = update(&mut m, invoke_msg("scrub"));
-        let raised = format!("{:?}", m.engine.messages.entries);
-        assert_eq!(raised.matches("DVR is off").count(), 1, "{raised}");
-        assert!(raised.contains("set [dvr] enabled = true"), "{raised}");
-        assert!(m.dvr.scrub_frame().is_none());
-        assert!(scrub_input(&mut m, &key("h")).is_none());
+        let _ = m.dvr.take_step();
+        let _ = update(&mut m, key("j"));
+        assert!(m.dvr.scrub_frame().is_some() && m.dvr.take_step().is_none());
+    }
+
+    #[test]
+    fn the_bar_names_only_keys_the_scrub_answers() {
+        let named: Vec<&str> = crate::native::dvr::SCRUB_HINT
+            .split("  ")
+            .filter_map(|hint| hint.split(' ').next())
+            .flat_map(|keys| keys.split('/'))
+            .collect();
+        assert_eq!(named.len(), 7, "{named:?}");
+        for k in named {
+            assert!(
+                DVR_KEYS.iter().any(|(notation, _)| *notation == k),
+                "the bar names {k}, which the scrub does not answer"
+            );
+        }
     }
 }

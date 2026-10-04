@@ -4,8 +4,9 @@
 
 use std::time::Instant;
 
-use view_core::model::Model;
+use view_core::model::{Model, OverlayKind};
 use view_core::msg::Effect;
+use view_core::native::dvr::SCRUB_HINT;
 use view_tui::dvr::FrameRing;
 use view_tui::terminal::Term;
 
@@ -17,9 +18,10 @@ pub(crate) struct DvrLoop {
     ring: FrameRing,
     started: Instant,
     refused_told: bool,
-    /// The recorded frame on screen and the size it was painted at, so a
-    /// pass that changed neither writes nothing.
-    painted: Option<(u64, (u16, u16))>,
+    /// The recorded frame on screen, the size it was painted at and whether
+    /// its bar said something waits, so a pass that changed none of them
+    /// writes nothing.
+    painted: Option<(u64, (u16, u16), bool)>,
 }
 
 impl DvrLoop {
@@ -42,33 +44,56 @@ impl DvrLoop {
         }
     }
 
-    /// Paints the frame the scrub shows, with the scrub bar on its last
-    /// row. `None` on the live screen; otherwise whether bytes were written.
+    /// Paints the frame the scrub shows, with the scrub bar over it. `None`
+    /// on the live screen; otherwise whether bytes were written.
     pub(crate) fn paint_scrub(
         &mut self,
         term: &mut Term,
         model: &mut Model,
     ) -> std::io::Result<Option<bool>> {
+        Ok(match self.scrub_pass(model) {
+            None => None,
+            Some(None) => Some(false),
+            Some(Some((seq, bar))) => Some(term.draw_recorded(model, &self.ring, seq, &bar)?),
+        })
+    }
+
+    /// Settles the model for one scrub pass and names the recorded frame
+    /// and bar to paint. `None` on the live screen, `Some(None)` when the
+    /// frame on screen is still the one to show.
+    ///
+    /// The pass clears `dirty` and marks no question seen: the terminal
+    /// shows a recorded frame, so a prompt that opened meanwhile reads keys
+    /// only once a live frame carrying it is painted.
+    fn scrub_pass(&mut self, model: &mut Model) -> Option<Option<(u64, String)>> {
         let Some(seq) = model.dvr.scrub_frame() else {
             self.painted = None;
-            return Ok(None);
+            return None;
         };
+        model.dirty = false;
         // the live screen's damage is spent here, since the frame that
         // closes the scrub repaints everything
         let _ = model.take_paint_damage();
-        let shown = (seq, (model.term_width, model.term_height));
+        let waits = waiting(model);
+        let shown = (seq, (model.term_width, model.term_height), waits);
         if self.painted == Some(shown) {
-            return Ok(Some(false));
+            return Some(None);
         }
-        let wrote = term.draw_recorded(model, &self.ring, seq, &self.bar(seq))?;
         self.painted = Some(shown);
-        Ok(Some(wrote))
+        Some(Some((seq, self.bar(seq, waits))))
     }
 
     /// Records the frame the live paint just wrote. Returns the notice owed
     /// the first time the ring could not keep one.
     pub(crate) fn after_paint(&mut self, term: &Term, model: &mut Model) -> Vec<Effect> {
-        match term.record_frame(&mut self.ring, self.started.elapsed()) {
+        let seq = term.record_frame(&mut self.ring, self.started.elapsed());
+        self.recorded(seq, model)
+    }
+
+    /// Notes a frame the ring kept, or raises the one-time notice when it
+    /// kept none.
+    fn recorded(&mut self, seq: Option<u64>, model: &mut Model) -> Vec<Effect> {
+        match seq {
             Some(seq) => {
                 model.dvr.note_frame(seq, self.ring.oldest().unwrap_or(seq));
                 Vec::new()
@@ -84,21 +109,36 @@ impl DvrLoop {
         }
     }
 
-    /// The scrub bar for frame `seq`.
-    fn bar(&self, seq: u64) -> String {
-        let age = self.ring.age(seq).unwrap_or_default().as_secs_f64();
-        let oldest = self.ring.oldest().unwrap_or(seq);
-        format!(
-            "DVR  -{age:.1}s  frame {seq} (oldest {oldest})  h/l frame  H/L 1s  g/G ends  q close"
-        )
+    /// The scrub bar for frame `seq`: how far back it is and how far back
+    /// the recording reaches, then the way out and the keys.
+    fn bar(&self, seq: u64, waiting: bool) -> String {
+        let secs = |s| self.ring.age(s).unwrap_or_default().as_secs_f64();
+        let age = secs(seq);
+        let reach = secs(self.ring.oldest().unwrap_or(seq));
+        let flag = if waiting { WAITING } else { "" };
+        format!("DVR  -{age:.1}s of {reach:.1}s  {SCRUB_HINT}{flag}")
     }
+}
+
+/// What the bar adds while something on the live screen waits for an answer.
+const WAITING: &str = "  ! waiting: q to answer";
+
+/// Whether the live screen holds a question or a recovery offer the person
+/// has not seen while the scrub covers it.
+fn waiting(model: &Model) -> bool {
+    model.ai_panel().pending_permission.is_some()
+        || model
+            .overlays()
+            .iter()
+            .any(|o| matches!(o.kind, OverlayKind::Prompt(_) | OverlayKind::EngineBusy(_)))
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use view_core::msg::{Key, Msg};
+    use view_core::events::UiEvent;
+    use view_core::msg::{Key, Msg, RpcCall};
     use view_core::update::update;
     use view_tui::dvr::RingBuilder;
 
@@ -151,8 +191,8 @@ mod tests {
         assert_eq!(model.dvr.scrub_frame(), Some(6));
         assert_eq!(press(&mut model, &mut dvr, "h"), Some(5));
         assert_eq!(
-            dvr.bar(5),
-            "DVR  -0.4s  frame 5 (oldest 1)  h/l frame  H/L 1s  g/G ends  q close"
+            dvr.bar(5, false),
+            "DVR  -0.4s of 2.0s  q close  h/l frame  H/L 1s  g/G ends"
         );
         assert_eq!(press(&mut model, &mut dvr, "H"), Some(2));
         assert_eq!(press(&mut model, &mut dvr, "g"), Some(1));
@@ -166,5 +206,117 @@ mod tests {
     #[test]
     fn a_session_with_the_dvr_off_runs_no_recorder() {
         assert!(DvrLoop::start(&Model::with_term_size(80, 24)).is_none());
+    }
+
+    fn open_scrub(model: &mut Model, dvr: &mut DvrLoop) {
+        let _ = update(
+            model,
+            Msg::FeatureInvoke {
+                generation: None,
+                feature: "dvr".to_owned(),
+                verb: "scrub".to_owned(),
+            },
+        );
+        dvr.poll(model);
+    }
+
+    fn answers_l(effects: &[Effect]) -> bool {
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::Input { notation }) if notation == "l"))
+    }
+
+    #[test]
+    fn a_prompt_that_opens_while_scrubbing_waits_for_a_live_frame() {
+        let mut model = Model::with_term_size(80, 24);
+        let mut dvr = recorded(&mut model);
+        open_scrub(&mut model, &mut dvr);
+        assert!(dvr.scrub_pass(&mut model).is_some());
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![
+                UiEvent::MsgShow {
+                    kind: "confirm".into(),
+                    content: vec![(0, "W12: Warning: File \"a.rs\" has changed".into())],
+                    replace_last: false,
+                },
+                UiEvent::Flush,
+            ]),
+        );
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![
+                UiEvent::CmdlineShow {
+                    content: vec![],
+                    pos: 0,
+                    firstc: String::new(),
+                    prompt: "[O]K, (L)oad File: ".into(),
+                    indent: 0,
+                    level: 1,
+                },
+                UiEvent::Flush,
+            ]),
+        );
+        let repainted = dvr.scrub_pass(&mut model);
+        assert!(
+            matches!(&repainted, Some(Some((_, bar))) if bar.ends_with(WAITING)),
+            "the bar is repainted to say a prompt waits: {repainted:?}"
+        );
+        assert!(!model.dirty);
+
+        // `q` then `l` in one drained batch, before any live frame
+        let mut effects = update(&mut model, key("q"));
+        effects.extend(update(&mut model, key("l")));
+        assert!(!answers_l(&effects), "{effects:?}");
+
+        model.note_frame_painted();
+        let answer = update(&mut model, key("l"));
+        assert!(answers_l(&answer), "{answer:?}");
+    }
+
+    #[test]
+    fn a_scrub_pass_paints_only_what_changed() {
+        let mut model = Model::with_term_size(80, 24);
+        let mut dvr = recorded(&mut model);
+        model.dirty = true;
+        assert_eq!(dvr.scrub_pass(&mut model), None, "the live screen");
+        assert!(model.dirty, "a live pass settles nothing here");
+        open_scrub(&mut model, &mut dvr);
+        assert!(matches!(dvr.scrub_pass(&mut model), Some(Some((6, _)))));
+        assert_eq!(dvr.scrub_pass(&mut model), Some(None), "cached");
+        model.term_width = 100;
+        assert!(matches!(dvr.scrub_pass(&mut model), Some(Some((6, _)))));
+        let _ = press(&mut model, &mut dvr, "h");
+        assert!(matches!(dvr.scrub_pass(&mut model), Some(Some((5, _)))));
+        let _ = press(&mut model, &mut dvr, "q");
+        assert_eq!(dvr.scrub_pass(&mut model), None);
+        assert_eq!(dvr.painted, None);
+    }
+
+    #[test]
+    fn a_refused_frame_is_told_once_and_a_kept_one_is_noted() {
+        let mut model = Model::with_term_size(80, 24);
+        let mut dvr = recorded(&mut model);
+        assert!(dvr.recorded(Some(4), &mut model).is_empty());
+        let _ = dvr.recorded(None, &mut model);
+        let _ = dvr.recorded(None, &mut model);
+        let raised = format!("{:?}", model.engine.messages.entries);
+        assert_eq!(raised.matches("no room for").count(), 1, "{raised}");
+        // the frame noted is the one a scrub opens on, before any move
+        let _ = update(
+            &mut model,
+            Msg::FeatureInvoke {
+                generation: None,
+                feature: "dvr".to_owned(),
+                verb: "scrub".to_owned(),
+            },
+        );
+        assert_eq!(model.dvr.scrub_frame(), Some(4));
+    }
+
+    fn key(notation: &str) -> Msg {
+        Msg::Key(Key {
+            notation: notation.to_owned(),
+        })
     }
 }

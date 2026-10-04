@@ -1001,9 +1001,12 @@ start_session() {
     tmux kill-session -t "$SESSION" 2>/dev/null || true
     SESSIONS+=("$SESSION")
     # started in $ROOT, which is both the project root view offers to trust
-    # and a directory no trust store here has ever heard of
+    # and a directory no trust store here has ever heard of. The DVR is on
+    # through its variable only where a leg sets `SWEEP_DVR`, since every
+    # other leg reads the session a person gets by default, and a borrowed
+    # config carrying a `[dvr]` table of its own cannot collide with it
     tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" -c "$ROOT" \
-        "env XDG_CONFIG_HOME=$SWEEP_CONFIG \
+        "env ${SWEEP_DVR:+VIEW_DVR_ENABLED=true} XDG_CONFIG_HOME=$SWEEP_CONFIG \
              XDG_DATA_HOME=$DATA_HOME \
              XDG_STATE_HOME=$STATE_HOME \
              XDG_CACHE_HOME=$ROOT/xdg_cache_home \
@@ -1182,9 +1185,7 @@ fi
 # each leg again with the tile frames blanked out of every capture.
 LAUNCHER=$RUN_SUPPORT/launch.sh
 {
-    # the DVR is on through its variable, which a borrowed config carrying a
-    # `[dvr]` table of its own cannot collide with, so its key is registered
-    printf '#!/usr/bin/env bash\nexport VIEW_DVR_ENABLED=true\n'
+    printf '#!/usr/bin/env bash\n'
     printf 'exec %q --config %q --panes nvim' "$VIEW_BIN" "$VIEW_TOML"
     # guarded rather than left to the expansion: bash's `%q` with no
     # argument at all prints `''`, and an empty argument reaches view as a
@@ -1796,6 +1797,8 @@ chord_twin() {
 # the leg's own shell, so the session it starts is one `cleanup` knows.
 drive_action() {
     local feature="$1" verb="$2" shape took before n source chord
+    # read by `start_session`: the scrub drive needs a recorded session
+    local SWEEP_DVR=1
     shift 2
     SAW=""
     shape=$(entry_shape "$feature" "$verb") || return 1
@@ -1963,10 +1966,17 @@ drive_action() {
         "$@"
         took=$(wait_until "$REACTION_SECS" "the DVR bar on $feature $verb" \
             shows "$DVR_BAR") || return 1
+        # the scrub opens on the newest frame, at no age at all, and `H`
+        # steps back to one painted before it
+        send_text H
+        wait_until "$REACTION_SECS" "an older frame on H after $feature $verb" \
+            lacks "${DVR_BAR}0.0s" >/dev/null || return 1
+        wait_until "$REACTION_SECS" "the DVR bar still up after H" \
+            shows "$DVR_BAR" >/dev/null || return 1
         send_text q
         wait_until "$REACTION_SECS" "the live screen back on q after $feature $verb" \
             lacks "$DVR_BAR" >/dev/null || return 1
-        SAW="shows a recorded frame under the DVR bar in ${took}s and q gives the live screen back"
+        SAW="shows a recorded frame under the DVR bar in ${took}s, H steps to an older one, and q gives the live screen back"
         ;;
     (*)
         fail "drive_action has no drive for the $shape shape"
@@ -1978,6 +1988,9 @@ drive_action() {
 
 leg_entry_points() {
     CURRENT_LEG="entry-points$LEG_TAG"
+    # read by `start_session`: the DVR's key is registered only while the
+    # session is recorded
+    local SWEEP_DVR=1
     start_session entry 'visual sweep seed line'
 
     # The bare form first, and against a project no trust store has heard
@@ -2987,10 +3000,51 @@ leg_transcript_reflow() {
     end_session
 }
 
+# The entry points of one `drive_action` shape alone, each through its bare
+# `:View` form and its default key, so a shape can be run without the whole
+# entry-points leg around it.
+leg_shape() {
+    CURRENT_LEG="shape-$ONLY_SHAPE$LEG_TAG"
+    local feature verb lhs key driven=0
+    while read -r feature verb; do
+        [ -n "$feature" ] || continue
+        [ "$(entry_shape "$feature" "$verb")" = "$ONLY_SHAPE" ] || continue
+        drive_action "$feature" "$verb" command_line ":View $feature" || return 1
+        pass ":View $feature ($feature $verb) $SAW"
+        driven=$((driven + 1))
+    done <<BARE
+$DEFAULT_VERBS
+BARE
+    while read -r feature lhs verb; do
+        [ -n "$feature" ] || continue
+        [ "$(entry_shape "$feature" "$verb")" = "$ONLY_SHAPE" ] || continue
+        key=$(tmux_key "$lhs") || return 1
+        drive_action "$feature" "$verb" send_text "$key" || return 1
+        pass "$lhs ($feature $verb) $SAW"
+        driven=$((driven + 1))
+    done <<ENTRIES
+$ENTRY_POINTS
+ENTRIES
+    [ "$driven" -gt 0 ] || {
+        fail "no entry point has the $ONLY_SHAPE shape"
+        return 1
+    }
+}
+
 LEGS=(leg_entry_points leg_toast_and_history leg_toast_beside_panel leg_panel_typing
     leg_panel_paste leg_narrow_title leg_inline_review leg_resize_chord
     leg_permission_caret leg_transcript_reflow leg_review_stale)
-if [ "$#" -eq 0 ]; then
+# `--only SHAPE` runs one shape's drives in place of the legs:
+# `task acceptance:visual -- --only scrub`
+ONLY_SHAPE=""
+if [ "${1:-}" = --only ]; then
+    ONLY_SHAPE=${2:-}
+    [ -n "$ONLY_SHAPE" ] && [ "$#" -eq 2 ] || {
+        printf 'FAIL: --only takes one shape (scrub, gaps, zoom, ...) and no leg numbers\n' >&2
+        exit 1
+    }
+    selected=(leg_shape)
+elif [ "$#" -eq 0 ]; then
     selected=("${LEGS[@]}")
 else
     selected=()
@@ -3019,5 +3073,10 @@ for leg in "${selected[@]}"; do
     "$leg"
 done
 
-printf 'visual sweep: %s of %s legs green, under the nvim and the tiled layout\n' \
-    "${#selected[@]}" "${#LEGS[@]}"
+if [ -n "$ONLY_SHAPE" ]; then
+    printf 'visual sweep: the %s shape green, under the nvim and the tiled layout\n' \
+        "$ONLY_SHAPE"
+else
+    printf 'visual sweep: %s of %s legs green, under the nvim and the tiled layout\n' \
+        "${#selected[@]}" "${#LEGS[@]}"
+fi

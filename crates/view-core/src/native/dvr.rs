@@ -14,9 +14,9 @@ use crate::msg::{Key, MouseInput, Msg};
 /// The share of the recording's memory bound the input log reserves.
 const ARENA_SHARE: usize = 8;
 
-/// The arena bytes one log entry is reserved for. A key's notation is one
-/// to five bytes, so typing fills the entry list first and leaves the rest
-/// of the arena to pastes.
+/// The arena bytes one log entry is reserved for. A key's notation is a
+/// few bytes, so typing fills the entry list first and leaves the rest of
+/// the arena to pastes.
 const BYTES_PER_ENTRY: usize = 16;
 
 /// The bytes the input log may hold, entry list and arena together, out of
@@ -25,6 +25,9 @@ const BYTES_PER_ENTRY: usize = 16;
 pub fn input_log_bytes(max_bytes: usize) -> usize {
     max_bytes / ARENA_SHARE
 }
+
+/// The keys the scrub bar names, each a key the scrub answers.
+pub const SCRUB_HINT: &str = "q close  h/l frame  H/L 1s  g/G ends";
 
 /// The kind of one recorded input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

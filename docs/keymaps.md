@@ -789,7 +789,7 @@ With the session recorded, `<leader>fr` freezes the screen on the last
 frame view drew, and the bottom row becomes the scrub bar:
 
 ```
-DVR  -1.4s  frame 812 (oldest 3)  h/l frame  H/L 1s  g/G ends  q close
+DVR  -1.4s of 42.3s  q close  h/l frame  H/L 1s  g/G ends
 ```
 
 ```toml
@@ -798,8 +798,10 @@ enabled = true
 ```
 
 The bar names how long before the newest frame the one on screen was
-drawn, and the oldest frame still kept. These keys move through the
-frames:
+drawn, and how far back the recording reaches. When that frame's bottom
+row holds a message, the bar moves to the top row. While the scrub is
+open, a question the live screen is asking adds `! waiting: q to answer`
+to the bar. These keys move through the frames:
 
 | key | does |
 | --- | --- |
