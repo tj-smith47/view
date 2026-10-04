@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use view_core::model::{Model, OverlayKind};
 use view_core::msg::{Effect, Msg};
-use view_core::native::dvr::{DvrIoReply, DvrRequest, ExportRefusal, SCRUB_HINT};
+use view_core::native::dvr::{BranchPlan, DvrIoReply, DvrRequest, ExportRefusal, SCRUB_HINT};
 use view_proc::writer::BackgroundWriter;
 use view_tui::dvr::FrameRing;
 use view_tui::terminal::Term;
@@ -20,6 +20,7 @@ use view_tui::terminal::Term;
 use crate::wake::LoopSender;
 use io::{Export, IoJob};
 
+pub(crate) mod branch;
 mod clip;
 mod io;
 
@@ -46,6 +47,8 @@ pub(crate) struct DvrLoop {
     exporting: Arc<()>,
     /// The last export queued.
     pending: Option<Pending>,
+    /// A confirmed branch the loop has yet to carry out.
+    branch: Option<BranchPlan>,
 }
 
 /// An export handed to the file thread: where it is written, the flag that
@@ -93,7 +96,15 @@ impl DvrLoop {
             unsent: VecDeque::new(),
             exporting: Arc::new(()),
             pending: None,
+            branch: None,
         }
+    }
+
+    /// The branch the person confirmed, once. The export in flight is left
+    /// to finish: it writes its own snapshot of the frames on the file
+    /// thread and publishes whole or not at all.
+    pub(crate) fn take_branch(&mut self) -> Option<BranchPlan> {
+        self.branch.take()
     }
 
     /// Closes the file thread. Waits up to [`EXPORT_QUIT_WAIT`] while a clip
@@ -146,6 +157,7 @@ impl DvrLoop {
                         effects.extend(view_core::update::update(model, reply));
                     }
                 }
+                DvrRequest::Branch(plan) => self.branch = Some(plan),
                 _ => {}
             }
         }
@@ -432,7 +444,7 @@ mod tests {
         assert_eq!(press(&mut model, &mut dvr, "h"), Some(5));
         assert_eq!(
             dvr.bar(5, false),
-            "DVR  -0.4s of 2.0s  q close  h/l frame  H/L 1s  g/G ends  e export"
+            "DVR  -0.4s of 2.0s  q close  h/l frame  H/L 1s  g/G ends  b branch  e export"
         );
         assert_eq!(press(&mut model, &mut dvr, "H"), Some(2));
         assert_eq!(press(&mut model, &mut dvr, "g"), Some(1));
@@ -864,5 +876,53 @@ mod tests {
             1,
             "released once written"
         );
+    }
+
+    /// A branch confirmed while a clip is being written leaves the clip to
+    /// the file thread, which writes the frames it was handed whole.
+    #[test]
+    fn a_branch_leaves_an_export_in_flight_to_finish() {
+        let dir = view_test_support::ScratchDir::new("dvr-loop-branch-export").unwrap();
+        let mut model = Model::with_term_size(80, 24);
+        model.cwd = dir.path().to_path_buf();
+        let mut dvr = recorded(&mut model);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        dvr.io = Some(io::start(LoopSender::new(tx), false).unwrap());
+        export(&mut model, &mut dvr, "a.vdvr");
+        let scrub = Msg::FeatureInvoke {
+            generation: None,
+            feature: "dvr".to_owned(),
+            verb: "scrub".to_owned(),
+        };
+        let _ = update(&mut model, scrub);
+        let _ = press(&mut model, &mut dvr, "h");
+        let _ = press(&mut model, &mut dvr, "b");
+        let checked = Msg::DvrIo(DvrIoReply::DiskChecked {
+            changed: Vec::new(),
+            unverifiable: false,
+        });
+        let _ = update(&mut model, checked);
+        model.note_frame_painted();
+        let _ = update(
+            &mut model,
+            Msg::Key(Key {
+                notation: "y".to_owned(),
+            }),
+        );
+        let _ = dvr.poll(&mut model);
+        assert!(dvr.take_branch().is_some(), "the loop carries the branch");
+        assert!(dvr.take_branch().is_none(), "once");
+        let reply = std::iter::from_fn(|| {
+            rx.recv_timeout(view_test_support::host_deadline(QUIT_WAIT))
+                .ok()
+        })
+        .find(|reply| !matches!(reply, Msg::DvrIo(DvrIoReply::DiskChecked { .. })))
+        .unwrap();
+        assert!(
+            matches!(reply, Msg::DvrIo(DvrIoReply::Exported { .. })),
+            "{reply:?}"
+        );
+        let written = std::fs::read(dir.join("a.vdvr")).unwrap();
+        assert_eq!(&written[..10], b"VIEWDVR\0\x01\x00");
     }
 }

@@ -1245,16 +1245,22 @@ pub fn run(
         }
         // the clock behind `armed`, never in front of it: a session with
         // nothing scheduled -- every pass of a healthy one -- costs the bool
-        if reconnect.armed() && reconnect.take_due(std::time::Instant::now()) {
-            match restart_engine(
-                &mut engine,
-                respawn,
-                &mut model,
-                &channels,
-                &clipboard_route,
-                &ai_context_route,
-                &executor,
-            ) {
+        let branch = dvr.as_mut().and_then(crate::dvr::DvrLoop::take_branch);
+        let branching = branch.is_some();
+        if branching || (reconnect.armed() && reconnect.take_due(std::time::Instant::now())) {
+            let bound = (&clipboard_route, &ai_context_route, &executor);
+            let outcome = match branch {
+                Some(plan) => crate::dvr::branch::replace(
+                    &mut engine,
+                    respawn,
+                    &mut model,
+                    &channels,
+                    bound,
+                    plan,
+                ),
+                None => restart_engine(&mut engine, respawn, &mut model, &channels, bound),
+            };
+            match outcome {
                 Ok(fresh) => {
                     reconnect.clear();
                     engine = fresh.engine;
@@ -1290,6 +1296,9 @@ pub fn run(
                 // choice goes back to the user through the dead-engine
                 // modal, and either way the session keeps running against
                 // the connection it still holds
+                // the branch stopped the engine it replaced, so a failed
+                // one is followed by the restart a dead engine gets
+                Err(_) if branching => state.restart_requested = true,
                 Err(_) if reconnect.note_failure(std::time::Instant::now()) => {}
                 // no second engine and no way to ask for one: the modal
                 // that offered the restart is gone with the engine it
@@ -1360,6 +1369,16 @@ pub fn run(
                 Msg::Resized { width, height },
             ) {
                 return Ok((model, code, dvr));
+            }
+        }
+        // a branch's replay waits for the replacement's `VimEnter`, whose
+        // takeover holds each key it maps until the mapping is in place
+        if model.dvr.has_replay() && !waiting {
+            for msg in model.dvr.take_replay() {
+                let stop = || engine_stop(&mut engine);
+                if let Some(code) = step(&mut model, &executor, follow_ups, &mut state, stop, msg) {
+                    return Ok((model, code, dvr));
+                }
             }
         }
         // both sides read here, immediately before the paint that would show

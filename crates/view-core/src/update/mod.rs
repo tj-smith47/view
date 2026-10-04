@@ -129,6 +129,17 @@ pub fn forget_native_windows(model: &mut Model) -> Vec<Effect> {
     surfaces::forget_native_windows(model)
 }
 
+/// Readies the model for a DVR branch, returning what it owes the
+/// executor: every surface view had open closes, and none reopens at the
+/// replacement's `VimEnter`, since the replayed input opens what it opened.
+#[must_use]
+pub fn prepare_branch(model: &mut Model) -> Vec<Effect> {
+    let mut effects = forget_native_windows(model);
+    let _ = model.surfaces.take_reopen();
+    effects.extend(dvr::close_view_surfaces(model));
+    effects
+}
+
 /// Adds what a launch handed to view (the features it draws, the user keys
 /// it maps) to the launch's one notice, returning what raising it owes the
 /// executor.
@@ -158,7 +169,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     let Some(msg) = model.submit_hold.hold(msg) else {
         return Vec::new();
     };
-    if model.dvr.is_recording() {
+    // a prompt view raised itself answers in view, and a replay would type
+    // its answer into the engine
+    if model.dvr.is_recording() && !route::answers_a_view_prompt(model, &msg) {
         model.dvr.record(&msg);
     }
     let releases = crate::native::submit_hold::releases(model, &msg);

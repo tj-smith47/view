@@ -815,7 +815,7 @@ With the session recorded, `<leader>fv` freezes the screen on the last
 frame view drew, and the bottom row becomes the scrub bar:
 
 ```
-DVR  -1.4s of 42.3s  q close  h/l frame  H/L 1s  g/G ends  e export
+DVR  -1.4s of 42.3s  q close  h/l frame  H/L 1s  g/G ends  b branch  e export
 ```
 
 ```toml
@@ -838,7 +838,19 @@ to the bar, ahead of the keys. These keys move through the frames:
 | `g` | the oldest frame kept |
 | `G` | the newest frame |
 | `q` | back to the live screen, as `<Esc>` does |
+| `b` | the editor replaced by one brought to this frame, after a confirm |
 | `e` | the recording written to a clip file, then live |
+
+`b` starts the editor again from the frame on screen. A fresh editor opens
+the files view was started with, and every key, paste, click and resize
+recorded before that frame is played into it. The confirm names the
+buffers with unsaved changes, which are lost, and the files changed on
+disk since recording began, which the fresh editor reads as they are now.
+Replay brings back what you typed. A timer, a language server reply or a
+key that waited on `timeoutlen` can land differently the second time. The
+frames after the branch point stay in the recording and cannot be branched
+from. `b` is refused while view reads piped input. `:View dvr branch` does
+the same from the frame the scrub shows.
 
 `e` writes `view-dvr-<seconds>.vdvr` in the directory view was started in.
 `:View dvr export PATH` writes to PATH, read as `:w` reads a file name: `~`

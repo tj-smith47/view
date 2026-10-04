@@ -8019,7 +8019,7 @@ struct Question {
     name: &'static str,
     open: fn(&mut Model),
     key: &'static str,
-    answered: fn(&[Effect]) -> bool,
+    answered: fn(&Model, &[Effect]) -> bool,
     still_open: fn(&Model) -> bool,
 }
 
@@ -8030,7 +8030,7 @@ fn a_prompt_is_on_top(m: &Model) -> bool {
     )
 }
 
-const QUESTIONS: [Question; 4] = [
+const QUESTIONS: [Question; 5] = [
     Question {
         name: "nvim-relayed confirm",
         open: |m| {
@@ -8038,7 +8038,7 @@ const QUESTIONS: [Question; 4] = [
             let _ = update(m, Msg::Redraw(vec![confirm_choices(), UiEvent::Flush]));
         },
         key: "y",
-        answered: |effects| {
+        answered: |_, effects| {
             effects
                 .iter()
                 .any(|e| matches!(e, Effect::Rpc(RpcCall::Input { notation }) if notation == "y"))
@@ -8058,7 +8058,7 @@ const QUESTIONS: [Question; 4] = [
             );
         },
         key: "y",
-        answered: |effects| {
+        answered: |_, effects| {
             effects
                 .iter()
                 .any(|e| matches!(e, Effect::AiTrustSet { trusted: true, .. }))
@@ -8080,7 +8080,7 @@ const QUESTIONS: [Question; 4] = [
             );
         },
         key: "<CR>",
-        answered: |effects| {
+        answered: |_, effects| {
             effects
                 .iter()
                 .any(|e| matches!(e, Effect::Rpc(RpcCall::Checktime { force: true, .. })))
@@ -8094,7 +8094,7 @@ const QUESTIONS: [Question; 4] = [
             let _ = update(m, permission_requested_msg(7, everyday_options()));
         },
         key: "1",
-        answered: |effects| {
+        answered: |_, effects| {
             effects.iter().any(|e| {
                 matches!(
                     e,
@@ -8106,6 +8106,25 @@ const QUESTIONS: [Question; 4] = [
             })
         },
         still_open: |m| m.ai_panel().pending_permission.is_some(),
+    },
+    Question {
+        name: "dvr branch",
+        open: |m| {
+            m.dvr.enable(1 << 20);
+            m.dvr.note_frame(5, 1);
+            m.dvr.open_scrub();
+            let _ = update(m, key("b"));
+            let _ = update(
+                m,
+                Msg::DvrIo(crate::native::dvr::DvrIoReply::DiskChecked {
+                    changed: Vec::new(),
+                    unverifiable: false,
+                }),
+            );
+        },
+        key: "y",
+        answered: |m, _| m.dvr.is_branching(),
+        still_open: a_prompt_is_on_top,
     },
 ];
 
@@ -8121,14 +8140,14 @@ fn every_question_reads_keys_only_after_it_was_painted() {
 
         let early = update(&mut m, key(question.key));
         assert!(
-            !(question.answered)(&early),
+            !(question.answered)(&m, &early),
             "{name}: a key typed before the question was painted answered it: {early:?}"
         );
         assert!((question.still_open)(&m), "{name}: {early:?}");
 
         m.note_frame_painted();
         let answer = update(&mut m, key(question.key));
-        assert!((question.answered)(&answer), "{name}: {answer:?}");
+        assert!((question.answered)(&m, &answer), "{name}: {answer:?}");
     }
 }
 
@@ -8144,17 +8163,17 @@ fn a_question_under_another_reads_keys_only_once_it_is_on_top() {
     m.note_frame_painted();
 
     let first = update(&mut m, key("y"));
-    assert!((QUESTIONS[0].answered)(&first), "{first:?}");
+    assert!((QUESTIONS[0].answered)(&m, &first), "{first:?}");
     let _ = update(
         &mut m,
         Msg::Redraw(vec![UiEvent::CmdlineHide { level: 1 }, UiEvent::Flush]),
     );
     let second = update(&mut m, key("y"));
-    assert!(!(QUESTIONS[1].answered)(&second), "{second:?}");
+    assert!(!(QUESTIONS[1].answered)(&m, &second), "{second:?}");
 
     m.note_frame_painted();
     let third = update(&mut m, key("y"));
-    assert!((QUESTIONS[1].answered)(&third), "{third:?}");
+    assert!((QUESTIONS[1].answered)(&m, &third), "{third:?}");
 }
 
 /// A frame painted with the picker over the agent panel may not show its
@@ -8184,12 +8203,12 @@ fn a_permission_question_under_the_picker_reads_keys_only_once_uncovered() {
     m.note_frame_painted();
 
     let early = typed(&mut m, &["<Esc>", "1"]);
-    assert!(!(permission.answered)(&early), "{early:?}");
+    assert!(!(permission.answered)(&m, &early), "{early:?}");
     assert!((permission.still_open)(&m), "{early:?}");
 
     m.note_frame_painted();
     let answer = update(&mut m, key("1"));
-    assert!((permission.answered)(&answer), "{answer:?}");
+    assert!((permission.answered)(&m, &answer), "{answer:?}");
 }
 
 /// A paste landing on a free-text prompt before it was painted types

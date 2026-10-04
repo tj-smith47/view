@@ -1,9 +1,10 @@
 //! The session DVR's `:View dvr` verbs and the keys the scrub answers while
 //! the screen shows a recorded frame.
 
-use crate::model::Model;
+use crate::model::{unsaved_files, Model, OverlayKind};
 use crate::msg::{Effect, Msg};
-use crate::native::dvr::{DvrIoReply, ExportRefusal, ScrubStep};
+use crate::native::dvr::{BranchRefusal, DvrIoReply, ExportRefusal, ScrubStep};
+use crate::native::prompt::PromptState;
 
 /// What `:View dvr` answers while recording is off.
 const OFF: &str = "view: DVR is off: set [dvr] enabled = true";
@@ -11,11 +12,19 @@ const OFF: &str = "view: DVR is off: set [dvr] enabled = true";
 /// What `:View dvr scrub` answers before the first frame is recorded.
 const EMPTY: &str = "view: DVR has recorded no frame yet";
 
+/// What a branch answers when the editor reads its input from a pipe,
+/// which a replacement cannot read again.
+const BRANCH_PIPED: &str = "view: DVR cannot branch while the editor reads piped input";
+
+/// What a branch answers with no recorded frame on screen.
+const BRANCH_NO_FRAME: &str =
+    "view: DVR branch starts from a frame the scrub shows: press b in :View dvr scrub";
+
 /// Every key the scrub answers, and what it does. `docs/keymaps.md`
 /// carries the rendered table. Test-only: the scrub matches on the keys
 /// themselves.
 #[cfg(test)]
-pub(crate) const DVR_KEYS: [(&str, &str); 8] = [
+pub(crate) const DVR_KEYS: [(&str, &str); 9] = [
     ("h", "one frame back"),
     ("l", "one frame forward"),
     ("H", "one second back"),
@@ -23,6 +32,10 @@ pub(crate) const DVR_KEYS: [(&str, &str); 8] = [
     ("g", "the oldest frame kept"),
     ("G", "the newest frame"),
     ("q", "back to the live screen, as `<Esc>` does"),
+    (
+        "b",
+        "the editor replaced by one brought to this frame, after a confirm",
+    ),
     ("e", "the recording written to a clip file, then live"),
 ];
 
@@ -31,6 +44,10 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
     model.dirty = true;
     if !model.dvr.is_recording() {
         return model.engine.record_native_notice(OFF.to_string(), false);
+    }
+    // the keys a replay folds invoke again whatever verb they invoked first
+    if model.dvr.absorb_invoke() {
+        return Vec::new();
     }
     model.dvr.mark_invoke();
     // the path is every byte after the first blank run, as typed
@@ -45,6 +62,7 @@ pub(super) fn invoke(model: &mut Model, verb: &str) -> Vec<Effect> {
             Vec::new()
         }
         "export" => export(model, path.trim_start()),
+        "branch" => branch(model),
         _ => model
             .engine
             .record_native_notice(super::feature_invoke_notice("dvr", verb, false), false),
@@ -63,13 +81,80 @@ fn export(model: &mut Model, path: &str) -> Vec<Effect> {
     on_io(model, &DvrIoReply::Refused(ExportRefusal::NoFrame))
 }
 
-/// Raises the notice a reply from the DVR's file work carries.
+/// Closes the scrub and asks to branch from the frame it showed, raising
+/// the confirm once the disk check answers, or says why that frame cannot
+/// be reproduced.
+fn branch(model: &mut Model) -> Vec<Effect> {
+    let shown = model.dvr.scrub_frame();
+    model.dvr.close_scrub();
+    model.dirty = true;
+    let text = match shown {
+        _ if model.stdin_relay => BRANCH_PIPED.to_owned(),
+        None => BRANCH_NO_FRAME.to_owned(),
+        Some(at) => match model.dvr.ask_branch(at) {
+            Ok(()) => return Vec::new(),
+            Err(BranchRefusal::Dead) => format!(
+                "view: DVR cannot branch from frame {at}: a later branch left it \
+                 behind"
+            ),
+            Err(BranchRefusal::PastLog(full)) => format!(
+                "view: DVR cannot branch from frame {at}: the input log filled at \
+                 frame {full}; raise [dvr] max_mb"
+            ),
+        },
+    };
+    model.engine.record_native_notice(text, false)
+}
+
+/// Raises the confirm a pending branch waits on, or the notice a reply
+/// from the DVR's file work carries.
 pub(super) fn on_io(model: &mut Model, reply: &DvrIoReply) -> Vec<Effect> {
+    if let DvrIoReply::DiskChecked {
+        changed,
+        unverifiable,
+    } = reply
+    {
+        if let Some(at) = model.dvr.take_asked() {
+            let state = PromptState::dvr_branch_prompt(
+                at,
+                &unsaved_files(&model.buffers),
+                changed,
+                model.dvr.restarts_before(at),
+                *unverifiable,
+            );
+            // beneath a prompt the engine waits on, which keeps its answer
+            if let Some(OverlayKind::Prompt(_)) = model.focused_overlay().map(|ov| &ov.kind) {
+                model.insert_overlay_beneath_top(state.overlay_box(), OverlayKind::Prompt(state));
+            } else {
+                model.push_overlay(state.overlay_box(), OverlayKind::Prompt(state));
+            }
+            model.dirty = true;
+            return Vec::new();
+        }
+    }
     let Some(text) = reply.notice() else {
         return Vec::new();
     };
     model.dirty = true;
     model.engine.record_native_notice(text, false)
+}
+
+/// Closes every view overlay and drops any held keys, returning what each
+/// close owes the executor. A replayed launch reaches the frame from a
+/// screen with none of them open.
+pub(super) fn close_view_surfaces(model: &mut Model) -> Vec<Effect> {
+    let _ = model.submit_hold.take_held();
+    let mut effects = Vec::new();
+    if model.close_tree() {
+        effects.push(Effect::TreeClose);
+    }
+    while let Some(overlay) = model.pop_focused_overlay() {
+        if matches!(overlay.kind, OverlayKind::Picker(_)) {
+            effects.push(Effect::PickerClose);
+        }
+    }
+    model.dirty = true;
+    effects
 }
 
 /// Takes every key, paste and click while the scrub is open, so none
@@ -94,6 +179,7 @@ fn scrub_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         "g" => ScrubStep::Oldest,
         "G" => ScrubStep::Newest,
         "e" => return export(model, ""),
+        "b" => return branch(model),
         "q" | "<Esc>" => {
             model.dvr.close_scrub();
             model.dirty = true;
@@ -112,7 +198,7 @@ mod tests {
 
     use super::*;
     use crate::msg::{Key, MouseInput, RpcCall};
-    use crate::native::dvr::Marker;
+    use crate::native::dvr::{DvrRequest, Marker};
     use crate::update::update;
 
     fn key(notation: &str) -> Msg {
@@ -261,7 +347,7 @@ mod tests {
             .filter_map(|hint| hint.split(' ').next())
             .flat_map(|keys| keys.split('/'))
             .collect();
-        assert_eq!(named.len(), 8, "{named:?}");
+        assert_eq!(named.len(), 9, "{named:?}");
         for k in named {
             assert!(
                 DVR_KEYS.iter().any(|(notation, _)| *notation == k),
@@ -361,5 +447,202 @@ mod tests {
             unverifiable: false,
         };
         assert!(update(&mut m, Msg::DvrIo(quiet)).is_empty());
+    }
+
+    fn disk_checks(m: &mut Model) -> usize {
+        std::iter::from_fn(|| m.dvr.take_request())
+            .filter(|r| matches!(r, DvrRequest::DiskCheck))
+            .count()
+    }
+
+    fn checked(m: &mut Model, changed: &[&str], unverifiable: bool) {
+        let reply = DvrIoReply::DiskChecked {
+            changed: changed.iter().map(|p| (*p).to_owned()).collect(),
+            unverifiable,
+        };
+        let _ = update(m, Msg::DvrIo(reply));
+    }
+
+    /// Opens the scrub, steps back `back` frames and presses `b`.
+    fn branch_back(m: &mut Model, back: u64) {
+        let _ = update(m, invoke_msg("scrub"));
+        let shown = m.dvr.scrub_frame().unwrap() - back;
+        m.dvr.show(shown);
+        let _ = update(m, key("b"));
+    }
+
+    fn prompt_text(m: &Model) -> Option<String> {
+        m.overlays().iter().rev().find_map(|ov| match &ov.kind {
+            crate::model::OverlayKind::Prompt(p) => p.dvr_branch_at().map(|_| format!("{p:?}")),
+            _ => None,
+        })
+    }
+
+    fn told_once(m: &Model, words: &str) -> bool {
+        format!("{:?}", m.engine.messages.entries)
+            .matches(words)
+            .count()
+            == 1
+    }
+
+    #[test]
+    fn branch_refuses_under_stdin_relay() {
+        let mut m = recorded();
+        m.stdin_relay = true;
+        branch_back(&mut m, 2);
+        assert!(m.dvr.scrub_frame().is_none(), "b leaves the scrub");
+        assert_eq!(disk_checks(&mut m), 0);
+        assert!(told_once(&m, "piped"), "{:?}", m.engine.messages.entries);
+        checked(&mut m, &[], false);
+        assert!(prompt_text(&m).is_none());
+    }
+
+    /// Confirms a branch from frame `at` and settles it the way the loop
+    /// does once the fresh engine is up, then paints frames up to `upto`.
+    fn branched(m: &mut Model, at: u64, upto: u64) {
+        // opened directly: a scrub invoked with no keys behind it would
+        // count as one the replay invokes again
+        m.dvr.open_scrub();
+        m.dvr.show(at);
+        let _ = update(m, key("b"));
+        checked(m, &[], false);
+        m.note_frame_painted();
+        let _ = update(m, key("y"));
+        let plan = std::iter::from_fn(|| m.dvr.take_request())
+            .find_map(|r| match r {
+                DvrRequest::Branch(plan) => Some(plan),
+                _ => None,
+            })
+            .expect("y queues the branch");
+        assert_eq!(plan.at_frame, at);
+        m.dvr.branched(plan.at_frame, plan.replay);
+        for msg in m.dvr.take_replay() {
+            let _ = update(m, msg);
+        }
+        for seq in m.dvr.markers().last().map_or(0, |(f, _)| *f) + 1..=upto {
+            m.dvr.note_frame(seq, 2);
+        }
+    }
+
+    #[test]
+    fn branch_refuses_a_dead_frame() {
+        let mut m = recorded();
+        for (frame, k) in [(3, "i"), (5, "a"), (7, "b"), (9, "c")] {
+            m.dvr.note_frame(frame, 2);
+            let _ = update(&mut m, key(k));
+        }
+        branched(&mut m, 6, 12);
+        assert_eq!(m.dvr.dead(), std::slice::from_ref(&(7..=9)));
+        assert_eq!(
+            m.dvr.inputs().map(|i| i.body.to_vec()).collect::<Vec<_>>(),
+            [b"i".to_vec(), b"a".to_vec()],
+            "the log keeps what was folded before frame 6, once"
+        );
+        assert!(m.dvr.markers().iter().any(|(_, k)| *k == Marker::Branch));
+        let _ = update(&mut m, invoke_msg("scrub"));
+        m.dvr.show(8);
+        let _ = update(&mut m, key("b"));
+        assert_eq!(disk_checks(&mut m), 0);
+        assert!(told_once(&m, "frame 8"), "{:?}", m.engine.messages.entries);
+        let _ = update(&mut m, invoke_msg("scrub"));
+        m.dvr.show(11);
+        let _ = update(&mut m, key("b"));
+        assert_eq!(disk_checks(&mut m), 1, "a frame after the dead run is live");
+    }
+
+    #[test]
+    fn branch_prompt_names_unsaved_and_changed_files() {
+        use crate::model::BufferEntry;
+        let mut m = recorded();
+        let _ = update(
+            &mut m,
+            Msg::BufferList {
+                buffers: vec![
+                    BufferEntry::new(1, "a.rs".into(), true, true).with_path("/w/a.rs".into()),
+                    BufferEntry::new(2, "b.rs".into(), false, false).with_path("/w/b.rs".into()),
+                    BufferEntry::new(3, "c.rs".into(), true, false).with_path("/w/c.rs".into()),
+                ],
+            },
+        );
+        branch_back(&mut m, 2);
+        assert_eq!(disk_checks(&mut m), 1);
+        assert!(
+            prompt_text(&m).is_none(),
+            "the prompt waits for the disk check"
+        );
+        checked(&mut m, &["/w/c.toml"], false);
+        let text = prompt_text(&m).unwrap();
+        assert!(text.contains("frame 7"), "{text}");
+        assert!(text.contains("Unsaved: /w/a.rs, /w/c.rs."), "{text}");
+        assert!(!text.contains("b.rs"), "{text}");
+        assert!(text.contains("Changed on disk: /w/c.toml."), "{text}");
+        assert!(!text.contains("not checked"), "{text}");
+        let _ = update(&mut m, key("<Esc>"));
+
+        let mut remote = recorded();
+        branch_back(&mut remote, 1);
+        checked(&mut remote, &[], true);
+        let text = prompt_text(&remote).unwrap();
+        assert!(text.contains("Disk not checked"), "{text}");
+        assert!(
+            !text.contains("Unsaved") && !text.contains("Changed"),
+            "{text}"
+        );
+        remote.note_frame_painted();
+        let logged = remote.dvr.inputs().count();
+        let _ = update(&mut remote, key("n"));
+        assert!(prompt_text(&remote).is_none());
+        assert!(!remote.dvr.is_branching(), "n cancels");
+        assert_eq!(
+            remote.dvr.inputs().count(),
+            logged,
+            "a later replay would type the answer into the engine"
+        );
+    }
+
+    #[test]
+    fn branch_across_an_engine_restart_asks_first() {
+        let mut m = recorded();
+        m.dvr.note_frame(4, 2);
+        m.dvr.note_restart();
+        m.dvr.note_frame(9, 2);
+        branch_back(&mut m, 3);
+        checked(&mut m, &[], false);
+        let text = prompt_text(&m).unwrap();
+        assert!(text.contains("restarted once"), "{text}");
+
+        let mut before = recorded();
+        before.dvr.note_frame(4, 2);
+        before.dvr.note_restart();
+        before.dvr.note_frame(9, 2);
+        branch_back(&mut before, 6);
+        checked(&mut before, &[], false);
+        let text = prompt_text(&before).unwrap();
+        assert!(!text.contains("restarted"), "{text}");
+    }
+
+    #[test]
+    fn replayed_dvr_keys_are_absorbed() {
+        let mut m = recorded();
+        for k in [" ", "f", "v"] {
+            let _ = update(&mut m, key(k));
+        }
+        let _ = update(&mut m, invoke_msg("scrub"));
+        let _ = update(&mut m, key("q"));
+        m.dvr.note_frame(10, 2);
+        let _ = update(&mut m, key("x"));
+        m.dvr.note_frame(11, 2);
+        branched(&mut m, 11, 11);
+        assert_eq!(m.dvr.inputs().count(), 4, "the replay is not logged twice");
+        let _ = update(&mut m, invoke_msg("scrub"));
+        assert!(
+            m.dvr.scrub_frame().is_none(),
+            "the scrub the replayed keys open again is absorbed"
+        );
+        let _ = update(&mut m, invoke_msg("scrub"));
+        assert!(
+            m.dvr.scrub_frame().is_some(),
+            "a scrub asked for afresh opens"
+        );
     }
 }

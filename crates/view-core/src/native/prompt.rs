@@ -113,6 +113,7 @@ enum Origin {
     Engine,
     AiTrust { project_root: PathBuf, verb: String },
     ExternalWriteConflict { path: PathBuf },
+    DvrBranch { at: u64 },
 }
 
 /// One open confirm-class prompt: the question text plus whatever choices
@@ -225,8 +226,8 @@ impl PromptState {
     #[must_use]
     pub(crate) fn ai_trust_project_root(&self) -> Option<&Path> {
         match &self.origin {
-            Origin::Engine | Origin::ExternalWriteConflict { .. } => None,
             Origin::AiTrust { project_root, .. } => Some(project_root),
+            _ => None,
         }
     }
 
@@ -237,8 +238,8 @@ impl PromptState {
     #[must_use]
     pub(crate) fn ai_trust_verb(&self) -> Option<&str> {
         match &self.origin {
-            Origin::Engine | Origin::ExternalWriteConflict { .. } => None,
             Origin::AiTrust { verb, .. } => Some(verb.as_str()),
+            _ => None,
         }
     }
 
@@ -248,8 +249,74 @@ impl PromptState {
     #[must_use]
     pub(crate) fn external_write_conflict_path(&self) -> Option<&Path> {
         match &self.origin {
-            Origin::Engine | Origin::AiTrust { .. } => None,
             Origin::ExternalWriteConflict { path } => Some(path),
+            _ => None,
+        }
+    }
+
+    /// The DVR branch confirm, raised by view for frame `at` once the disk
+    /// check answers. It names what replacing the editor loses or cannot
+    /// reproduce: `unsaved` buffers, files `changed` on disk since
+    /// recording began, a disk the remote host could not check, and the
+    /// engine restarts `crossed` before that frame.
+    #[must_use]
+    pub fn dvr_branch_prompt(
+        at: u64,
+        unsaved: &[String],
+        changed: &[String],
+        crossed: usize,
+        unverifiable: bool,
+    ) -> Self {
+        let mut message = format!(
+            "Branch from frame {at}? This replaces the editor with one the \
+             recorded input is replayed into."
+        );
+        if !unsaved.is_empty() {
+            message.push_str(&format!(" Unsaved: {}.", unsaved.join(", ")));
+        }
+        if !changed.is_empty() {
+            message.push_str(&format!(" Changed on disk: {}.", changed.join(", ")));
+        }
+        if unverifiable {
+            message.push_str(" Disk not checked for changed files.");
+        }
+        match crossed {
+            0 => {}
+            1 => message.push_str(
+                " The engine restarted once before that frame, and the \
+                 replay runs in one engine.",
+            ),
+            n => message.push_str(&format!(
+                " The engine restarted {n} times before that frame, and the \
+                 replay runs in one engine."
+            )),
+        }
+        Self {
+            message,
+            answer: Answer::Choices(vec![
+                Choice {
+                    key: 'y',
+                    label: "Branch".to_string(),
+                    default: true,
+                },
+                Choice {
+                    key: 'n',
+                    label: "Cancel".to_string(),
+                    default: false,
+                },
+            ]),
+            origin: Origin::DvrBranch { at },
+            answered: false,
+            shown: false,
+        }
+    }
+
+    /// The frame an open [`PromptState::dvr_branch_prompt`] branches from.
+    #[must_use]
+    pub fn dvr_branch_at(&self) -> Option<u64> {
+        match self.origin {
+            Origin::DvrBranch { at } => Some(at),
+            _ => None,
         }
     }
 

@@ -343,11 +343,8 @@ pub(crate) fn restart_engine(
     respawn: &dyn Fn(&[String]) -> view_engine::EngineConfig,
     model: &mut Model,
     channels: &LoopChannels,
-    route: &crate::clipboard::ReplyRoute<EngineHandle>,
-    ai_context_route: &crate::ai_context_worker::OpsRoute<EngineHandle>,
-    executor: &Executor<EngineHandle>,
+    bound: Bound<'_>,
 ) -> Result<Restarted, crate::startup::AttachFailure> {
-    let (width, height) = model.grid_target();
     // read before anything below is forgotten: the list is the dead
     // engine's last report of what the session had open
     let reopen = view_core::model::reopen_order(&model.buffers);
@@ -356,6 +353,30 @@ pub(crate) fn restart_engine(
     model
         .supervision
         .note_restart_unsaved(view_core::model::unsaved_files(&model.buffers));
+    let fresh = replace_engine(engine, respawn, model, channels, bound, &reopen)?;
+    model.dvr.note_restart();
+    Ok(fresh)
+}
+
+/// The routes bound to the engine being replaced, which the replacement
+/// is rebound to, and the executor that started the work a close owes.
+pub(crate) type Bound<'a> = (
+    &'a crate::clipboard::ReplyRoute<EngineHandle>,
+    &'a crate::ai_context_worker::OpsRoute<EngineHandle>,
+    &'a Executor<EngineHandle>,
+);
+
+/// Replaces `engine` with one opening `open`, or the launch's files when
+/// `open` is empty. See [`restart_engine`] for the order and its latency.
+pub(crate) fn replace_engine(
+    engine: &mut Engine,
+    respawn: &dyn Fn(&[String]) -> view_engine::EngineConfig,
+    model: &mut Model,
+    channels: &LoopChannels,
+    (route, ai_context_route, executor): Bound<'_>,
+    open: &[String],
+) -> Result<Restarted, crate::startup::AttachFailure> {
+    let (width, height) = model.grid_target();
     // ahead of the forget below, which drops the claims that record which
     // surfaces the dead engine held windows for. The closes run on
     // `executor`, the one that started their work, before the spawn can
@@ -388,7 +409,7 @@ pub(crate) fn restart_engine(
     model.dirty = true;
     let mut engine = crate::startup::respawn_engine(
         engine,
-        respawn(&reopen).with_late_attach(width, height),
+        respawn(open).with_late_attach(width, height),
         || model.takes_attach(),
     )?;
     let (pump, cutover) = engine.start_pump(channels.msg.clone());
@@ -927,9 +948,7 @@ mod tests {
             &respawn,
             &mut model,
             &channels,
-            &route,
-            &ai_context_route,
-            &executor,
+            (&route, &ai_context_route, &executor),
         )
         .expect("a crashed engine must be replaceable");
         assert_eq!(
@@ -1136,9 +1155,7 @@ mod tests {
             &respawn,
             &mut model,
             &channels,
-            &route,
-            &ai_context_route,
-            &executor,
+            (&route, &ai_context_route, &executor),
         );
         assert!(
             matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),
@@ -1183,9 +1200,7 @@ mod tests {
             &respawn,
             &mut model,
             &channels,
-            &route,
-            &ai_context_route,
-            &executor,
+            (&route, &ai_context_route, &executor),
         );
         assert!(
             matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),
@@ -1196,6 +1211,50 @@ mod tests {
             "the forgets ahead of the failed spawn changed what is painted, \
              and the loop this returns to repaints only what is marked"
         );
+    }
+
+    /// A restart asks the replacement for the files the session had open,
+    /// where a branch asks for the launch's.
+    #[test]
+    fn restart_still_reopens_the_buffers_it_had() {
+        let (msg_tx, _msg_rx) = std::sync::mpsc::sync_channel(64);
+        let (clipboard, _clipboard_jobs) = mpsc::channel();
+        let (osc52, _osc52_jobs) = mpsc::channel();
+        let (picker, _picker_requests) = mpsc::channel();
+        let (ai_context, _ai_context_jobs) = mpsc::channel();
+        let msg = crate::wake::LoopSender::new(msg_tx);
+        let channels = LoopChannels {
+            clipboard,
+            osc52,
+            picker,
+            ai: inert_ai_worker(&msg),
+            ai_context,
+            msg,
+        };
+        let mut engine = Engine::spawn(view_engine::process::EngineConfig::isolated()).unwrap();
+        let route = crate::clipboard::ReplyRoute::new(engine.handle.clone());
+        let ai_context_route = crate::ai_context_worker::OpsRoute::new(engine.handle.clone());
+        let asked = std::cell::RefCell::new(Vec::new());
+        let respawn = |open: &[String]| {
+            asked.borrow_mut().push(open.to_vec());
+            view_engine::process::EngineConfig::isolated().with_nvim_bin("/nonexistent/nvim")
+        };
+        let mut model = Model::with_term_size(80, 24);
+        let entry = |buf: u64, path: &str, current: bool| {
+            view_core::model::BufferEntry::new(buf, String::new(), false, current)
+                .with_path(path.to_string())
+        };
+        model.buffers = vec![entry(1, "/w/a.rs", true), entry(2, "/w/b.rs", false)];
+
+        let executor = channels.executor(engine.handle.clone(), route.epoch());
+        let _ = restart_engine(
+            &mut engine,
+            &respawn,
+            &mut model,
+            &channels,
+            (&route, &ai_context_route, &executor),
+        );
+        assert_eq!(*asked.borrow(), [vec!["/w/b.rs", "/w/a.rs"]]);
     }
 
     /// A base a test can afford to wait out, with the shipped doubling and
@@ -1457,9 +1516,7 @@ mod tests {
                 &respawn,
                 &mut model,
                 &channels,
-                &route,
-                &ai_context_route,
-                &executor,
+                (&route, &ai_context_route, &executor),
             );
             assert!(
                 matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),
@@ -1531,9 +1588,7 @@ mod tests {
             &respawn,
             &mut model,
             &channels,
-            &route,
-            &ai_context_route,
-            &executor,
+            (&route, &ai_context_route, &executor),
         );
         assert!(
             matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),

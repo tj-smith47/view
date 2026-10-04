@@ -3,7 +3,7 @@
 //! permission gate and the Meta reading every one of them shares.
 
 use crate::model::{Focus, Model, OverlayKind};
-use crate::msg::{Effect, RpcCall};
+use crate::msg::{Effect, Msg, RpcCall};
 use crate::native::ai_panel::TranscriptScroll;
 use crate::native::geometry::NativeSurface;
 use crate::native::keys::{Action, Resolved};
@@ -323,6 +323,16 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                         force: true,
                     })];
                 }
+                if let Some(at) = p.dvr_branch_at() {
+                    let go = p.accepted_is_default(&notation);
+                    model.pop_focused_overlay();
+                    model.dirty = true;
+                    if go {
+                        let size = (model.term_width, model.term_height);
+                        model.dvr.confirm_branch(at, size);
+                    }
+                    return Vec::new();
+                }
                 // recorded before the key leaves, so the `cmdline_hide` it
                 // causes can tell a resolution from the wire-identical
                 // re-arm an unmatched key produces
@@ -493,6 +503,16 @@ pub(super) fn route_unescaped(
     }
 }
 
+/// Whether `msg` is a key for a prompt view raised itself.
+pub(super) fn answers_a_view_prompt(model: &Model, msg: &Msg) -> bool {
+    matches!(msg, Msg::Key(_))
+        && matches!(
+            model.focused_overlay().map(|ov| &ov.kind),
+            Some(OverlayKind::Prompt(_))
+        )
+        && !relays_a_prompt(model)
+}
+
 /// Whether the focused overlay is a prompt nvim relays from its own input
 /// loop, which reads every key itself.
 fn relays_a_prompt(model: &Model) -> bool {
@@ -501,6 +521,7 @@ fn relays_a_prompt(model: &Model) -> bool {
         Some(OverlayKind::Prompt(p))
             if p.ai_trust_project_root().is_none()
                 && p.external_write_conflict_path().is_none()
+                && p.dvr_branch_at().is_none()
     )
 }
 
