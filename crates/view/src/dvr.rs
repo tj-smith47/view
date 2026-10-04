@@ -65,6 +65,18 @@ impl DvrLoop {
         if self.painted == Some(shown) {
             return Some(None);
         }
+        if self.painted.is_none() {
+            crate::vlog::log_with("dvr", || {
+                let (oldest, newest) = (self.ring.oldest(), self.ring.newest());
+                let frames = newest.zip(oldest).map_or(0, |(n, o)| n - o + 1);
+                let reach = oldest.and_then(|o| self.ring.age(o)).unwrap_or_default();
+                format!(
+                    "scrub frames={frames} held={} reach={:.1}s",
+                    self.ring.held(),
+                    reach.as_secs_f64()
+                )
+            });
+        }
         self.painted = Some(shown);
         Some(Some((seq, self.bar(seq, waits))))
     }
@@ -73,6 +85,7 @@ impl DvrLoop {
     /// the first time the ring could not keep one.
     pub(crate) fn after_paint(&mut self, term: &Term, model: &mut Model) -> Vec<Effect> {
         let seq = term.record_frame(&mut self.ring, self.started.elapsed());
+        crate::vlog::log_with("dvr", || format!("frame {}", self.ring.last_capture()));
         self.recorded(seq, model)
     }
 
@@ -108,18 +121,6 @@ impl DvrLoop {
     }
 }
 
-/// What one paint pass puts on the terminal.
-pub(crate) enum Draw<'a> {
-    /// A recorded frame of `ring` with the scrub bar over it.
-    Recorded {
-        ring: &'a FrameRing,
-        seq: u64,
-        bar: &'a str,
-    },
-    /// The live screen.
-    Live,
-}
-
 /// What a paint pass drew, and whether it wrote bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Painted {
@@ -134,34 +135,32 @@ impl Painted {
     }
 }
 
-/// Runs one paint pass through `draw`: the frame the scrub shows while it
-/// is open, the live screen otherwise.
+/// Runs one paint pass on `target`: `recorded` paints the frame the scrub
+/// shows, with its bar, while the scrub is open, and `live` paints the live
+/// screen otherwise.
 ///
 /// Only a live frame settles the model through
 /// [`crate::runtime::frame_reached_terminal`]. A recorded frame does not
 /// carry the live screen, so a question that opened under the scrub reads
-/// keys once a live frame showing it is painted.
-pub(crate) fn paint_pass(
+/// keys once a live frame showing it is painted, and `recorded` sees the
+/// model read-only.
+pub(crate) fn paint_pass<T>(
     model: &mut Model,
     dvr: Option<&mut DvrLoop>,
-    draw: impl FnOnce(&mut Model, Draw<'_>) -> std::io::Result<bool>,
+    target: &mut T,
+    live: impl FnOnce(&mut T, &mut Model) -> std::io::Result<bool>,
+    recorded: impl FnOnce(&mut T, &Model, &FrameRing, u64, &str) -> std::io::Result<bool>,
 ) -> std::io::Result<Painted> {
     if let Some(dvr) = dvr {
         match dvr.scrub_pass(model) {
             Some(None) => return Ok(Painted::Recorded(false)),
             Some(Some((seq, bar))) => {
-                let ring = &dvr.ring;
-                let shown = Draw::Recorded {
-                    ring,
-                    seq,
-                    bar: &bar,
-                };
-                return draw(model, shown).map(Painted::Recorded);
+                return recorded(target, model, &dvr.ring, seq, &bar).map(Painted::Recorded);
             }
             None => {}
         }
     }
-    let wrote = draw(model, Draw::Live)?;
+    let wrote = live(target, model)?;
     crate::runtime::frame_reached_terminal(model);
     Ok(Painted::Live(wrote))
 }
@@ -280,12 +279,16 @@ mod tests {
         open_scrub(&mut model, &mut dvr);
         let mut bar = String::new();
         let pass = |model: &mut Model, dvr: &mut DvrLoop, bar: &mut String| {
-            paint_pass(model, Some(dvr), |_, draw| {
-                if let Draw::Recorded { bar: shown, .. } = draw {
+            paint_pass(
+                model,
+                Some(dvr),
+                bar,
+                |_, _| Ok(true),
+                |bar, _, _, _, shown| {
                     shown.clone_into(bar);
-                }
-                Ok(true)
-            })
+                    Ok(true)
+                },
+            )
             .unwrap()
         };
         model.dirty = true;

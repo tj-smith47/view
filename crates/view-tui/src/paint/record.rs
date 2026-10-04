@@ -10,7 +10,7 @@ use view_core::model::Model;
 use view_core::theme::{ChromeGroup, Theme};
 
 use super::{paint_text_row, ratatui_style, Damage, Shadow};
-use crate::dvr::{place, row_hash, FrameRing, Group, Scroll};
+use crate::dvr::{place, row_hash, Capture, FrameRing, Group, Scroll};
 
 /// Records the frame [`Shadow::commit`] just promoted into `into` and
 /// returns its seq, or `None` when the ring could not hold it.
@@ -24,7 +24,7 @@ use crate::dvr::{place, row_hash, FrameRing, Group, Scroll};
 /// changed cells than the open group has room for is a keyframe.
 ///
 /// Scroll detection runs only when more than one row's worth of cells
-/// changed. It reads the screen's cells about five times and compares at
+/// changed. It reads the screen's cells about six times and compares at
 /// most height squared row hashes.
 pub(crate) fn capture(
     shadow: &Shadow,
@@ -35,16 +35,25 @@ pub(crate) fn capture(
 ) -> Option<u64> {
     let area = shadow.front.area;
     let size = (area.width, area.height);
+    let mut last = Capture::default();
     if delta && into.open_delta(size).is_some() {
-        let scroll = scroll_of(shadow, &mut into.scratch);
+        let scroll = scroll_of(shadow, &mut into.scratch, &mut last);
         if let Some(group) = into.open_delta(size) {
-            if fill(shadow, group, scroll) {
-                return into.close_delta(at_us, cursor, scroll);
+            if let Some(pushed) = fill(shadow, group, scroll) {
+                last.pushed = pushed;
+                last.scroll = scroll;
+                last.seq = into.close_delta(at_us, cursor, scroll);
+                into.last = last;
+                return last.seq;
             }
             group.abort();
         }
     }
-    into.push_key(at_us, size, cursor, shadow.front.content.iter().cloned())
+    last.key = true;
+    last.pushed = shadow.front.content.len();
+    last.seq = into.push_key(at_us, size, cursor, shadow.front.content.iter().cloned());
+    into.last = last;
+    last.seq
 }
 
 /// Row `y`'s columns `cols` of a row-major `content` `width` cells wide.
@@ -52,50 +61,73 @@ fn row(content: &[Cell], width: usize, y: usize, cols: Range<usize>) -> Option<&
     content.get(y * width + cols.start..y * width + cols.end)
 }
 
-/// Pushes the painted cells that differ from what `scroll` leaves of
-/// `back` into `group`. A cell the shift fills matches by the shift's own
-/// check. Returns false when the group has no room for them.
-fn fill(shadow: &Shadow, group: &mut Group, scroll: Option<Scroll>) -> bool {
+/// Pushes the cells of `front` that differ from what `scroll` leaves of
+/// `back` into `group`: a cell the shift fills is compared with the cell it
+/// is filled from, every other cell with the cell it replaces. Returns the
+/// cells pushed, or `None` when the group has no room for them.
+///
+/// A row the shift fills is read whether or not it was painted, since the
+/// shift moves its cells either way.
+fn fill(shadow: &Shadow, group: &mut Group, scroll: Option<Scroll>) -> Option<usize> {
     let width = usize::from(shadow.front.area.width);
+    let (front, back) = (&shadow.front.content, &shadow.back.content);
+    let mut pushed = 0;
     for y in 0..shadow.front.area.height {
-        if !shadow.painted.covers(y) {
+        let shifted = scroll.filter(|s| (s.top..s.bottom).contains(&y));
+        if !shadow.painted.covers(y) && shifted.is_none() {
             continue;
         }
         let at = usize::from(y);
         let (Some(now), Some(was)) = (
-            row(&shadow.front.content, width, at, 0..width),
-            row(&shadow.back.content, width, at, 0..width),
+            row(front, width, at, 0..width),
+            row(back, width, at, 0..width),
         ) else {
             continue;
         };
+        let source = shifted
+            .and_then(|s| s.source(y))
+            .and_then(|from| row(back, width, usize::from(from), 0..width));
         for (x, (now, was)) in (0..).zip(now.iter().zip(was)) {
-            if scroll.is_some_and(|s| s.covers(x, y)) {
-                continue;
-            }
-            if now != was && !group.push_cell(x, y, now) {
-                return false;
+            let base = match (shifted, source) {
+                (Some(s), Some(source)) if s.covers(x, y) => {
+                    source.get(usize::from(x)).unwrap_or(was)
+                }
+                _ => was,
+            };
+            if now != base {
+                if !group.push_cell(x, y, now) {
+                    return None;
+                }
+                pushed += 1;
             }
         }
     }
-    true
+    Some(pushed)
 }
 
 /// The shift of `back` that the frame in `front` shows: the columns where
 /// most changed rows differ are the span that moved, rows whose span
 /// equals another row of `back` vote for the distance between them, and
-/// the longest run of rows the winning distance explains cell for cell is
-/// the shift. `None` when a row's worth of cells or fewer changed, or no
-/// run of two rows is explained.
+/// the shift covers every row from the first the winning distance explains
+/// cell for cell to the last. Each edge of the span then grows outward
+/// over the columns where every explained row agrees with its source, to
+/// the furthest of them that changed, and a row past either end of the shift joins it while fewer
+/// of its cells differ from their source than from the cells they replace.
+/// `None` when a row's worth of cells or fewer changed, or fewer than two
+/// rows are explained. `last` takes the counts.
 ///
-/// A gutter of relative line numbers keeps its digits while the text
-/// beside it moves, and a sign changes on a row or two, so the majority
-/// leaves both outside the span and [`fill`] stores them as plain cells.
-/// The pass that counts the changed cells is one more read of the painted
-/// rows than [`fill`] makes on its own.
-// ponytail: one column span for the whole frame, so a pane that changes
-// beside the scrolling one widens the span past the shift. Per-pane spans
-// are the upgrade when that shows in a retention measurement.
-fn scroll_of(shadow: &Shadow, scratch: &mut Vec<u64>) -> Option<Scroll> {
+/// A row inside the shift that the distance does not explain, the cursor
+/// line or a guide that changed beside a block of rows, keeps the shift
+/// and [`fill`] stores the cells of it that differ from their source. A
+/// gutter of relative line numbers keeps its digits while the text beside
+/// it moves, so the majority leaves it outside the span and [`fill`] stores
+/// it as plain cells. The pass that counts the changed cells is one more
+/// read of the painted rows than [`fill`] makes on its own.
+// ponytail: one column span for the whole frame, so a pane that scrolls
+// beside another one that scrolls by a different distance stores the second
+// as cells. Per-pane spans are the upgrade when that shows in a retention
+// measurement.
+fn scroll_of(shadow: &Shadow, scratch: &mut Vec<u64>, last: &mut Capture) -> Option<Scroll> {
     let (front, back) = (&shadow.front.content, &shadow.back.content);
     let w = usize::from(shadow.front.area.width);
     let h = usize::from(shadow.front.area.height);
@@ -118,20 +150,21 @@ fn scroll_of(shadow: &Shadow, scratch: &mut Vec<u64>) -> Option<Scroll> {
         }
         rows += u64::from(changed > before);
     }
+    last.changed = changed;
     if changed <= w {
         return None;
     }
     let moved = |count: &u64| 2 * *count > rows;
-    let left = scratch.iter().position(moved)?;
-    let right = scratch.iter().rposition(|&count| count > 0)? + 1;
-    scratch.clear();
+    let mut left = scratch.iter().position(moved)?;
+    let mut right = scratch.iter().rposition(moved)? + 1;
     for content in [front, back] {
         for y in 0..h {
             scratch.push(row(content, w, y, left..right).map_or(0, row_hash));
         }
     }
-    scratch.resize(4 * h, 0);
-    let (now, rest) = scratch.split_at_mut(h);
+    scratch.resize(w + 4 * h, 0);
+    let (counts, rest) = scratch.split_at_mut(w);
+    let (now, rest) = rest.split_at_mut(h);
     let (was, votes) = rest.split_at_mut(h);
     for (y, hash) in now.iter().enumerate() {
         if was.get(y) == Some(hash) {
@@ -152,33 +185,94 @@ fn scroll_of(shadow: &Shadow, scratch: &mut Vec<u64>) -> Option<Scroll> {
         return None;
     }
     let by = isize::try_from(at).ok()? - isize::try_from(h).ok()?;
+    let (moved_left, moved_right) = (left, right);
     let explained = |y: usize| {
         y.checked_add_signed(by)
             .filter(|&f| f < h)
             .is_some_and(|from| {
+                let cols = moved_left..moved_right;
                 now.get(y) == was.get(from)
-                    && row(front, w, y, left..right) == row(back, w, from, left..right)
+                    && row(front, w, y, cols.clone()) == row(back, w, from, cols)
             })
     };
-    let (mut best, mut start) = (0..0, None);
-    for y in 0..=h {
-        match (y < h && explained(y), start) {
-            (true, None) => start = Some(y),
-            (false, Some(top)) => {
-                if y - top > best.len() {
-                    best = top..y;
-                }
-                start = None;
-            }
-            _ => {}
+    // the votes are spent, so their first `h` slots mark the explained rows
+    let mut hull = None::<Range<usize>>;
+    for y in 0..h {
+        let hit = explained(y);
+        if let Some(mark) = votes.get_mut(y) {
+            *mark = u64::from(hit);
+        }
+        if hit {
+            last.explained += 1;
+            hull = Some(hull.map_or(y..y + 1, |r| r.start..y + 1));
         }
     }
-    if best.len() < 2 {
-        return None;
+    let mut hull = hull.filter(|_| last.explained >= 2)?;
+    let source = |y: usize, x: usize| {
+        let from = y.checked_add_signed(by).filter(|&f| f < h)?;
+        Some((
+            front.get(y * w + x)?,
+            back.get(from * w + x)?,
+            back.get(y * w + x)?,
+        ))
+    };
+    // an edge reaches over the columns where every explained row shows its
+    // source's cell, as far as the last of them that changed, so it stops
+    // where the shift stops being true and leaves out columns that stood still
+    let agrees = |x: usize| {
+        (0..h)
+            .filter(|&y| votes.get(y) == Some(&1))
+            .all(|y| source(y, x).is_some_and(|(now, from, _)| now == from))
+    };
+    let touched = |x: usize| counts.get(x).is_some_and(|&c| c > 0);
+    let mut x = left;
+    while x > 0 && agrees(x - 1) {
+        x -= 1;
+        if touched(x) {
+            left = x;
+        }
     }
+    let mut x = right;
+    while x < w && agrees(x) {
+        x += 1;
+        if touched(x - 1) {
+            right = x;
+        }
+    }
+    // the cells a row saves when the shift covers it: those differing from
+    // the cells they replace less those differing from their source. The
+    // shift reaches as far past either end as the rows' savings add up to
+    // the most, so a cursor line or a guide that changed beside rows that
+    // still moved costs its own cells and no more
+    let saves = |y: usize| {
+        let mut saved = 0isize;
+        for x in left..right {
+            let (now, from, was) = source(y, x)?;
+            saved += isize::from(now != was) - isize::from(now != from);
+        }
+        Some(saved)
+    };
+    let reach = |rows: &mut dyn Iterator<Item = usize>| {
+        let (mut sum, mut best, mut at) = (0, 0, None);
+        for y in rows {
+            let Some(saved) = saves(y) else { break };
+            sum += saved;
+            if sum > best {
+                (best, at) = (sum, Some(y));
+            }
+        }
+        at
+    };
+    if let Some(top) = reach(&mut (0..hull.start).rev()) {
+        hull.start = top;
+    }
+    if let Some(bottom) = reach(&mut (hull.end..h)) {
+        hull.end = bottom + 1;
+    }
+    last.span = Some((u16::try_from(left).ok()?, u16::try_from(right).ok()?));
     let range = |r: Range<usize>| Some(u16::try_from(r.start).ok()?..u16::try_from(r.end).ok()?);
     Some(Scroll::new(
-        range(best)?,
+        range(hull)?,
         range(left..right)?,
         i16::try_from(by).ok()?,
     ))
@@ -329,6 +423,55 @@ mod fixture {
                 dim
             };
             buf.set_stringn(tree + 1, y, format!("{sign}{number:>3} "), 5, style);
+        }
+    }
+
+    /// The text a wrapped file line shows on its first row and its second.
+    const WRAPPED: [&str; 2] = [
+        "    let reach = self.ring.oldest().and_then(|s| self.ring.age(s)).unwrap_or_default();",
+        "        .as_secs_f64();",
+    ];
+
+    /// Redraws the editor of a screen [`draw`] drew at file line `top` the
+    /// way a working config shows it: every seventh file line wraps onto a
+    /// second row, the cursor line sits eight rows above the last text row,
+    /// and an indent guide turns solid beside the six-line block holding
+    /// the cursor line.
+    pub(super) fn real(buf: &mut Buffer, area: (u16, u16), top: u64) {
+        let (w, h) = area;
+        let tree = tree_width(w);
+        let text = Style::default()
+            .fg(Color::Rgb(248, 248, 242))
+            .bg(Color::Reset);
+        let dim = Style::default().fg(Color::Rgb(98, 114, 164));
+        let cursor = usize::from(h - 3 - 8);
+        let width = usize::from(w - tree - 1);
+        // each text row's file line, and whether it is a wrapped line's
+        // second row
+        let mut rows = Vec::new();
+        let mut line = top + 1;
+        while rows.len() < usize::from(h - 3) {
+            rows.push((line, false));
+            if line.is_multiple_of(7) {
+                rows.push((line, true));
+            }
+            line += 1;
+        }
+        let block = rows.get(cursor - 1).map_or(0, |&(line, _)| line / 6);
+        for (y, &(line, second)) in (1u16..h - 2).zip(&rows) {
+            let row = if usize::from(y) == cursor {
+                text.bg(Color::Rgb(68, 71, 90))
+            } else {
+                text
+            };
+            let code = match (line.is_multiple_of(7), second) {
+                (true, false) => format!("{line:>4} {}", WRAPPED[0]),
+                (true, true) => format!("     {}", WRAPPED[1]),
+                _ => format!("{line:>4} {}", source_line(line)),
+            };
+            buf.set_stringn(tree + 1, y, format!("{code:<width$}"), width, row);
+            let guide = if line / 6 == block { "│" } else { "┊" };
+            buf.set_stringn(tree + 10, y, guide, 1, row.patch(dim));
         }
     }
 }
@@ -482,15 +625,28 @@ mod tests {
         assert_eq!(shadow.back.content[5].symbol(), " ");
     }
 
+    /// A drawing laid over the fixture screen.
+    type Decorate = fn(&mut Buffer, (u16, u16), u64);
+
+    /// A drawing laid over the fixture screen, and its name.
+    type Decoration = (&'static str, Decorate);
+
+    /// The fixture screen as it is, under relative line numbers, and under
+    /// a working config's cursor line, wrapped lines and indent guide.
+    const DECORATIONS: [Decoration; 3] = [
+        ("plain", |_, _, _| {}),
+        ("relative", fixture::relative),
+        ("real", fixture::real),
+    ];
+
     /// Feeds frames of the fixture screen of size `area`, one every
     /// `period_us`, until the ring first drops its oldest group or holds
     /// `until` frames. Returns the frames and the seconds the ring held at
-    /// that moment. `relative` draws the gutter the way `relativenumber`
-    /// does.
+    /// that moment. `decorate` is drawn over every frame.
     fn retention(
         area: (u16, u16),
         period_us: u64,
-        (scroll, relative): (bool, bool),
+        (scroll, decorate): (bool, Decorate),
         max_bytes: usize,
         until: u64,
     ) -> (u64, f64) {
@@ -499,9 +655,7 @@ mod tests {
         let mut ring = FrameRing::new(max_bytes);
         let draw = |buf: &mut Buffer, top: u64, typed: u16| {
             fixture::draw(buf, area, top, typed);
-            if relative {
-                fixture::relative(buf, area, top);
-            }
+            decorate(buf, area, top);
         };
         draw(&mut shadow.front, 0, 0);
         shadow.painted = Damage::full();
@@ -528,15 +682,15 @@ mod tests {
     #[test]
     #[ignore = "a measurement, run by hand with --ignored --nocapture"]
     fn zz_measure_retention() {
-        for relative in [false, true] {
+        for (fixture, decorate) in DECORATIONS {
             for (name, area, period_us, scroll) in [
                 ("typing at 10 keys/s, 100x30", (100, 30), 100_000, false),
                 ("held j at 30 Hz, 100x30", (100, 30), 33_333, true),
                 ("held j at 30 Hz, 200x60", (200, 60), 33_333, true),
             ] {
-                let shape = (scroll, relative);
+                let shape = (scroll, decorate);
                 let (frames, secs) = retention(area, period_us, shape, 64 << 20, u64::MAX);
-                println!("relative={relative} {name}: {frames} frames, {secs:.1} s");
+                println!("{fixture} {name}: {frames} frames, {secs:.1} s");
             }
         }
         for (area, scroll) in [((100, 30), true), ((200, 60), true), ((200, 60), false)] {
@@ -677,12 +831,12 @@ mod tests {
         let old = u64::try_from(budget / whole * per_group).unwrap();
         // the first frame still held at six times the old figure is enough,
         // and costs a fifth of running on to the eviction
-        for relative in [false, true] {
-            let (frames, _) = retention(area, 33_333, (true, relative), max, 6 * old);
+        for (fixture, decorate) in DECORATIONS {
+            let (frames, _) = retention(area, 33_333, (true, decorate), max, 6 * old);
             assert_eq!(
                 frames,
                 6 * old,
-                "relative={relative}: the first frame was dropped first"
+                "{fixture}: the first frame was dropped first"
             );
         }
     }
@@ -700,20 +854,26 @@ mod tests {
             .unwrap()
             .left;
         // the glyph's lead cell sits left of the shift and its second half
-        // inside it, on a row that changes from frame to frame
-        let wide = move |buf: &mut Buffer, _: (u16, u16), top: u64| {
-            let y = if top.is_multiple_of(2) { 3 } else { 4 };
-            buf.set_string(left - 1, y, "世", Style::default());
-        };
-        let screens: Vec<_> = [0, 1, 2, 3].iter().map(|&t| (area, t)).collect();
-        let (ring, painted) = record(&screens, wide);
-        let scrolls = reloaded(&ring, &painted);
-        assert!(
-            scrolls[1..]
-                .iter()
-                .all(|s| s.is_some_and(|s| s.left == left)),
-            "{scrolls:?}"
-        );
+        // inside it, on a row that changes from frame to frame; detection
+        // grows the edge away from such a glyph, so the shift is given
+        let mut shadow = Shadow::new();
+        shadow.resize(Rect::new(0, 0, area.0, area.1));
+        let mut ring = FrameRing::new(64 << 20);
+        fixture::draw(&mut shadow.front, area, 0, 0);
+        shadow.front.set_string(left - 1, 4, "世", Style::default());
+        shadow.painted = Damage::full();
+        assert_eq!(capture(&shadow, &mut ring, 0, None, false), Some(1));
+        shadow.back = shadow.front.clone();
+        fixture::draw(&mut shadow.front, area, 1, 0);
+        shadow.front.set_string(left - 1, 6, "世", Style::default());
+        let scroll = Scroll::new(1..area.1 - 3, left..area.0, 1);
+        let group = ring.open_delta(area).unwrap();
+        assert!(fill(&shadow, group, Some(scroll)).is_some());
+        assert_eq!(ring.close_delta(1, None, Some(scroll)), Some(2));
+        let mut loaded = Shadow::new();
+        loaded.resize(Rect::new(0, 0, area.0, area.1));
+        assert!(load(&mut loaded, &ring, 2));
+        assert_eq!(loaded.back, shadow.front);
     }
 
     #[test]
@@ -736,6 +896,60 @@ mod tests {
     }
 
     #[test]
+    fn a_scroll_past_the_cursor_line_shifts_the_rows_under_it() {
+        let area = (100, 30);
+        let tops: Vec<_> = (0..40).collect();
+        let screens: Vec<_> = tops.iter().map(|&t| (area, t)).collect();
+        let (ring, painted) = record(&screens, fixture::real);
+        let scrolls = reloaded(&ring, &painted);
+        let keys: Vec<_> = ring.snapshot().frames().map(|f| f.key).collect();
+        let under = area.1 - 3 - 8 + 1;
+        for (i, scroll) in scrolls.iter().enumerate().filter(|&(i, _)| !keys[i]) {
+            let scroll = scroll.expect("every delta frame scrolled");
+            assert!(
+                scroll.top < under && scroll.bottom > under + 4,
+                "frame {}: {scroll:?}",
+                i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_left_unpainted_inside_a_shift_rebuilds_cell_for_cell() {
+        let (w, h) = (20u16, 8u16);
+        let fill_row = |buf: &mut Buffer, y: u16, c: char| {
+            buf.set_string(0, y, c.to_string().repeat(usize::from(w)), Style::default());
+        };
+        let mut shadow = Shadow::new();
+        shadow.resize(Rect::new(0, 0, w, h));
+        let mut ring = FrameRing::new(64 << 20);
+        for (y, c) in (0..h).zip('a'..) {
+            fill_row(&mut shadow.front, y, c);
+        }
+        shadow.painted = Damage::full();
+        assert_eq!(capture(&shadow, &mut ring, 0, None, false), Some(1));
+        // every row moves up one but the fourth, which keeps what it showed
+        // and so is neither painted nor explained by the shift
+        shadow.back = shadow.front.clone();
+        for (y, c) in (0..h).zip('b'..) {
+            if y != 3 {
+                fill_row(&mut shadow.front, y, c);
+            }
+        }
+        shadow.painted = rows(&[0, 1, 2, 4, 5, 6, 7]);
+        assert_eq!(capture(&shadow, &mut ring, 1, None, true), Some(2));
+        let scroll = ring
+            .last_capture()
+            .scroll
+            .expect("the frame stores a shift");
+        assert!(scroll.top < 3 && scroll.bottom > 4, "{scroll:?}");
+        let mut loaded = Shadow::new();
+        loaded.resize(Rect::new(0, 0, w, h));
+        assert!(load(&mut loaded, &ring, 2));
+        assert_eq!(loaded.back, shadow.front);
+    }
+
+    #[test]
     fn a_scroll_beside_relative_line_numbers_stores_its_shift() {
         let area = (40, 12);
         let tops = [0, 1, 2, 3, 2, 5];
@@ -746,6 +960,30 @@ mod tests {
         for (i, scroll) in scrolls.iter().enumerate().skip(1) {
             let scroll = scroll.expect("every frame after the first scrolled");
             assert!(scroll.left >= gutter, "frame {}: {scroll:?}", i + 1);
+        }
+        // the edge grows out of the text to the first column it holds
+        let lefts: Vec<_> = scrolls.iter().flatten().map(|s| s.left).collect();
+        assert!(lefts.contains(&gutter), "{lefts:?}");
+    }
+
+    #[test]
+    fn a_pane_changing_right_of_the_scroll_stays_out_of_its_span() {
+        let area = (40, 12);
+        let pane = area.0 - 6;
+        // a pane on the right whose rows differ from each other and whose
+        // second row counts the frames
+        let beside = move |buf: &mut Buffer, _: (u16, u16), top: u64| {
+            for y in 1..area.1 - 2 {
+                buf.set_string(pane, y, format!("│ p{y:<3}"), Style::default());
+            }
+            buf.set_string(pane + 2, 2, format!("n{top:<3}"), Style::default());
+        };
+        let screens: Vec<_> = (0..6).map(|t| (area, t)).collect();
+        let (ring, painted) = record(&screens, beside);
+        let scrolls = reloaded(&ring, &painted);
+        for (i, scroll) in scrolls.iter().enumerate().skip(1) {
+            let scroll = scroll.expect("every frame after the first scrolled");
+            assert!(scroll.right <= pane, "frame {}: {scroll:?}", i + 1);
         }
     }
 

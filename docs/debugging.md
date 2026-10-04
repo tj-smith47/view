@@ -29,6 +29,33 @@ VIEW_LOG=~/view.log view src/main.rs
 
 Attach this file to a bug report about startup, a crash or an engine restart.
 
+### What the DVR stores
+
+With `[dvr] enabled = true`, the same file carries one `dvr frame` line for
+each frame the recording kept, and one `dvr scrub` line each time the scrub
+opens:
+
+```text
+215004 dvr frame seq=5000 key=false changed=778 span=36..98 by=1 run=2..27 explained=23 pushed=147
+531032 dvr scrub frames=6086 held=58641408 reach=313.4s
+```
+
+| field | meaning |
+|---|---|
+| `seq` | the frame's number, `-` when the recording had no room for it |
+| `key` | the frame was stored whole |
+| `changed` | cells that differ from the frame before |
+| `span` | the columns found to have scrolled |
+| `by` | how many rows the text moved |
+| `run` | the rows the scroll covers |
+| `explained` | rows the scroll alone accounts for |
+| `pushed` | cells stored for the frame |
+| `frames` | frames the recording holds |
+| `held` | bytes the recording holds |
+| `reach` | seconds from the oldest frame held to the newest |
+
+A frame with no `by` stored no scroll.
+
 ## Recording the redraw sequence
 
 Set `VIEW_REDRAW_LOG` to a file path, and view appends one numbered line for

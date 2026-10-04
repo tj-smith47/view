@@ -1006,10 +1006,9 @@ pub struct KeysConfig {
     ui_lhs: [String; UI_KEYS.len()],
     /// `[keys] profile`'s raw file answer, carried for
     /// [`resolve::resolve_with`] to layer an environment value and a
-    /// derivation over -- the same role `ui_lhs` fills already, except
-    /// this key's vocabulary (`auto`/`desktop`/`editor`) is resolved at
-    /// that layer, since the "auto" answer needs the environment this struct
-    /// is not handed.
+    /// derivation over. Its vocabulary (`auto`/`desktop`/`editor`) is
+    /// resolved at that layer, since the "auto" answer needs the
+    /// environment this struct is not handed.
     profile: Option<String>,
     /// [`Self::profile`]'s own for `[keys] desktop_modifier`.
     desktop_modifier: Option<String>,
