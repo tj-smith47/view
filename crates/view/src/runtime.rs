@@ -3334,39 +3334,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Starts a fallback read of a FIFO at generation 4, runs `then` while
-    /// the read is blocked on it, feeds it one 16 KiB line, and answers the
-    /// lines the read replied with.
-    #[cfg(unix)]
+    /// Starts a fallback read at generation 4, holds it at its first check
+    /// for a newer request, runs `then`, lets it go on, and answers the
+    /// lines it replied with. Fails when the read checked again after it
+    /// was let go.
     fn fallback_read_after(
         nonce: &str,
         then: impl FnOnce(&Executor<&FakeOps>),
     ) -> Option<Vec<String>> {
-        use std::io::Write as _;
+        let _watchdog = view_test_support::watchdog();
         let root = tree_effect_scratch(nonce);
-        let fifo = root.join("pipe");
-        let made = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .expect("mkfifo is on PATH for this test's own setup");
-        assert!(made.success(), "mkfifo {fifo:?} failed");
+        let path = root.join("target.txt");
+        let text: String = (1..=50).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(&path, text).expect("write target.txt");
 
         let ops = FakeOps::default();
         let (tx, rx) = mpsc::sync_channel(4);
-        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(tx));
+        let (gate, pace) = view_test_support::ScanGate::new(1);
+        let executor = Executor::new(&ops)
+            .with_toast_timer(crate::wake::LoopSender::new(tx))
+            .with_preview_pace(pace);
         let _ = executor.run(Effect::PickerPreviewFallbackWindow {
             generation: 4,
-            path: fifo.to_string_lossy().into_owned(),
+            path: path.to_string_lossy().into_owned(),
             first_line: 10,
             line_count: 3,
         });
+        gate.wait_until_parked();
         then(&executor);
-        let mut pipe = open_fifo_writer(
-            &fifo,
-            view_test_support::host_deadline(std::time::Duration::from_secs(5)),
-        );
-        let _ = pipe.write_all(&[b'x'; 16 * 1024]);
-        drop(pipe);
+        gate.release();
 
         let msg = rx
             .recv_timeout(view_test_support::host_deadline(
@@ -3374,6 +3370,7 @@ mod tests {
             ))
             .expect("PickerPreviewFile arrives from the worker thread");
         let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(gate.steps_after_release(), 0, "the read checked again");
         match msg {
             Msg::PickerPreviewFile { generation, lines } => {
                 assert_eq!(generation, 4);
@@ -3383,64 +3380,8 @@ mod tests {
         }
     }
 
-    /// Opens `fifo`'s write end once a reader holds its read end, failing
-    /// the test when no reader opens it within `wait`.
-    #[cfg(unix)]
-    fn open_fifo_writer(fifo: &std::path::Path, wait: std::time::Duration) -> std::fs::File {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let deadline = std::time::Instant::now() + wait;
-        // A blocking open would wait for a reader for ever; a non-blocking
-        // one answers ENXIO until the reader is there.
-        loop {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(fifo)
-            {
-                Ok(_probe) => {
-                    return std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(fifo)
-                        .expect("open the FIFO's write end");
-                }
-                Err(err) if err.raw_os_error() == Some(libc::ENXIO) => {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "no reader opened {fifo:?}: the fallback read never started"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                Err(err) => panic!("open the FIFO's write end: {err}"),
-            }
-        }
-    }
-
-    /// Without a reader, the FIFO writer fails the test.
-    #[cfg(unix)]
-    #[test]
-    fn a_fifo_with_no_reader_fails_the_writer_open() {
-        let root = tree_effect_scratch("fifo-no-reader");
-        let fifo = root.join("pipe");
-        let made = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .expect("mkfifo is on PATH for this test's own setup");
-        assert!(made.success(), "mkfifo {fifo:?} failed");
-        let opened = std::panic::catch_unwind(|| {
-            open_fifo_writer(&fifo, std::time::Duration::from_millis(50))
-        });
-        let _ = std::fs::remove_dir_all(&root);
-        let message = opened.expect_err("no reader, so the open fails");
-        let text = message
-            .downcast_ref::<String>()
-            .cloned()
-            .unwrap_or_default();
-        assert!(text.contains("no reader opened"), "{text}");
-    }
-
     /// A buffer read requested after a fallback read started stops that
     /// read while it skips to its window.
-    #[cfg(unix)]
     #[test]
     fn a_buffer_preview_request_stops_an_earlier_fallback_read() {
         let lines = fallback_read_after("preview-superseded", |executor| {
@@ -3456,7 +3397,6 @@ mod tests {
 
     /// Closing the picker stops a fallback read still skipping to its
     /// window.
-    #[cfg(unix)]
     #[test]
     fn closing_the_picker_stops_a_fallback_read() {
         let lines = fallback_read_after("preview-closed", |executor| {

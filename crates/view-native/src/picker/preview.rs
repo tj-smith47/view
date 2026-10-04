@@ -13,7 +13,8 @@ use view_core::native::picker::PREVIEW_LINE_BYTES;
 
 /// Reads `count` lines of `path` from the 1-based line `first` on, fewer
 /// where the file ends first, or `None` for a path that does not exist or
-/// cannot be read, or once `superseded` answers true. The file is
+/// cannot be read, for a path that is no regular file (a named pipe, a
+/// device, a directory), or once `superseded` answers true. The file is
 /// streamed: lines before `first` are skipped without being kept, and each
 /// line kept is cut at [`PREVIEW_LINE_BYTES`] on a character boundary, the
 /// rest of it skipped the same way. A short answer therefore always means
@@ -33,6 +34,11 @@ pub fn read_window(
     count: u64,
     superseded: impl Fn() -> bool,
 ) -> Option<Vec<String>> {
+    // opening a named pipe or a device can block with no end, before
+    // `superseded` is ever asked
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
     let mut reader = std::io::BufReader::new(std::fs::File::open(path).ok()?);
     let mut to_skip = first.saturating_sub(1);
     while to_skip > 0 {
@@ -309,6 +315,39 @@ mod tests {
             .join(format!("picker-preview-{nonce}"));
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir.join(name)
+    }
+
+    /// A named pipe no process writes to reads as `None` at once, leaving
+    /// no thread parked in its open.
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_with_no_writer_reads_as_none() {
+        let _watchdog = view_test_support::watchdog();
+        let fifo = scratch_path("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo is on PATH for this test's own setup");
+        assert!(made.success(), "mkfifo {fifo:?} failed");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reading = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_window(&reading, 1, 1000, || false));
+        });
+        let read = rx.recv_timeout(view_test_support::host_deadline(
+            std::time::Duration::from_secs(5),
+        ));
+        // a writer arriving lets a read still parked in its open return, so
+        // no thread outlives the test
+        let release = read
+            .is_err()
+            .then(|| std::fs::OpenOptions::new().write(true).open(&fifo));
+        drop(release);
+        let _ = std::fs::remove_file(&fifo);
+        assert_eq!(
+            read.expect("the read returned without a writer on the pipe"),
+            None
+        );
     }
 
     #[test]

@@ -96,6 +96,9 @@ pub struct Executor<E: EngineOps> {
     /// no longer matches stops, so a selection moving deep through a large
     /// unopened file leaves one scan running.
     preview_latest: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Run by a fallback read immediately before each check of
+    /// `preview_latest`; a no-op outside the tests that hold the read there.
+    preview_pace: std::sync::Arc<dyn Fn() + Send + Sync>,
     /// The project's agent session worker, or `None` when `[ai]` is
     /// disabled -- the one degrade in this type that is never reachable in
     /// practice rather than merely untested: `update()`'s own
@@ -149,6 +152,7 @@ impl<E: EngineOps> Executor<E> {
             picker: None,
             tree_scan_cancel: std::sync::Mutex::new(None),
             preview_latest: std::sync::Arc::default(),
+            preview_pace: std::sync::Arc::new(|| {}),
             loop_msgs: crate::loop_msgs::LoopMsgOutbox::default(),
             ai: None,
             ai_context: None,
@@ -222,6 +226,14 @@ impl<E: EngineOps> Executor<E> {
     #[must_use]
     pub fn with_toast_timer(mut self, tx: crate::wake::LoopSender) -> Self {
         self.toast_timer = Some(tx);
+        self
+    }
+
+    /// Holds every fallback read on `pace` ahead of its cancel checks.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_preview_pace(mut self, pace: std::sync::Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.preview_pace = pace;
         self
     }
 
@@ -778,12 +790,16 @@ impl<E: EngineOps> Executor<E> {
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();
                     let latest = std::sync::Arc::clone(&self.preview_latest);
+                    let pace = std::sync::Arc::clone(&self.preview_pace);
                     spawn_or_log("picker-preview-fallback", move || {
                         let lines = view_native::picker::preview::read_window(
                             std::path::Path::new(&path),
                             first_line,
                             line_count,
-                            || latest.load(std::sync::atomic::Ordering::Relaxed) != generation,
+                            || {
+                                pace();
+                                latest.load(std::sync::atomic::Ordering::Relaxed) != generation
+                            },
                         );
                         let _ = tx.send(Msg::PickerPreviewFile { generation, lines });
                     });
