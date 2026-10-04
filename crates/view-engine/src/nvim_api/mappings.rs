@@ -144,11 +144,12 @@ use view_core::native::mappings::{
 /// the file and line a Lua callback was defined at, an absolute path
 /// outside nvim's own runtime. A C function has none. A function of nvim's
 /// runtime or of the modules compiled into it has none either, unless it
-/// wraps a function defined in such a file. The event is sent when a row moved, a
-/// description alone included. A claim carries the same description of
-/// the mapping it was set over under `displaced`, read from the snapshot
-/// the restore keeps, and the verb its spec names. The key log reads both,
-/// so a fired mapping is described with no read of its own.
+/// wraps a function a person wrote in a file of their own. The event is
+/// sent when a row moved, a description alone included. A claim carries
+/// the same description of the mapping it was set over under `displaced`,
+/// read from the snapshot the restore keeps, and the verb its spec names.
+/// The key log reads both, so a fired mapping is described with no read of
+/// its own.
 ///
 /// The same read answers with the user's command-line mappings and
 /// abbreviations (`maplist()` rows in mode `c` or `!`), each as its

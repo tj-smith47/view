@@ -9,6 +9,7 @@
 
 pub mod commands;
 mod refused;
+mod typed_ahead;
 mod user_run;
 
 use std::time::Duration;
@@ -304,8 +305,9 @@ pub struct SubmitHold {
     /// Every key sequence the user's own config maps in normal mode, one
     /// [`canonical`] key per entry.
     user_keys: Vec<Vec<String>>,
-    /// Which of `user_keys` the latest normal-mode keys fired.
-    user_run: user_run::UserRun,
+    /// The key log's own reading of the keys this hold folds, which no
+    /// decision of the hold reads.
+    log: user_run::Matcher,
     /// The user's command-line mappings and abbreviations whose keys type
     /// text.
     cmdline_maps: Vec<Expansion>,
@@ -319,12 +321,9 @@ pub struct SubmitHold {
     /// key before it takes one, and was not itself an argument.
     argument_of: Option<&'static str>,
     /// Whether a key that leaves normal mode has gone out since nvim last
-    /// reported a mode, so the mode view last read may be stale.
+    /// reported a mode or answered a key, so the mode view last read may
+    /// be stale.
     mode_unsure: bool,
-    /// Whether one of the user's mappings has fired since nvim last
-    /// answered a key, so its rhs may have left normal mode where nvim
-    /// reports nothing for a mode it did not change.
-    mapped_unsure: bool,
     /// Keys a surface of view's own is holding while they spell the start
     /// of a mapped sequence.
     sequence: Vec<String>,
@@ -361,13 +360,8 @@ struct Folded {
     /// Whether nvim read it as the argument of the key before it.
     argument: bool,
     /// Whether a key that leaves normal mode went out ahead of it, with no
-    /// mode reported since.
+    /// mode reported or key answered since.
     mode_unsure: bool,
-    /// Whether one of the user's mappings fired ahead of it with no answer
-    /// from nvim since, so its rhs may have left normal mode.
-    mapped_unsure: bool,
-    /// Whether nvim reads it as part of an operator's motion.
-    operand: bool,
 }
 
 /// One key sequence nvim runs a view invocation on.
@@ -406,7 +400,7 @@ impl SubmitHold {
                 })
             })
             .collect();
-        self.user_run
+        self.log
             .learn_view(claims.iter().filter_map(|claim| claim.keys.as_ref()));
         self.recent.clear();
         self.sequence.clear();
@@ -422,7 +416,7 @@ impl SubmitHold {
             .map(|keys| key_tokens(keys).map(canonical).collect::<Vec<_>>())
             .filter(|keys| !keys.is_empty())
             .collect();
-        self.user_run.learn_user(&mut self.user_keys, timeoutlen);
+        self.log.learn_user(&self.user_keys, timeoutlen);
         self.timeout_off = timeoutlen.is_none();
         self.timeoutlen = timeoutlen;
     }
@@ -691,11 +685,7 @@ impl SubmitHold {
     /// normal mode before it.
     pub fn note_mode_reported(&mut self, mode: &str) {
         self.mode_unsure = false;
-        self.mapped_unsure = false;
-        // keys a fired mapping left unsure were typed in that mode
-        if mode != "normal" {
-            let _ = self.user_run.take_invoked();
-        }
+        self.log.note_mode_reported(mode);
         // a report sent before nvim read the newest end says nothing of it
         if self.ended_at.is_none() {
             self.settle_ends(mode);
@@ -866,29 +856,27 @@ impl SubmitHold {
     /// The keys of the invocation behind it are dropped, logged or not, so
     /// a later invocation is never logged with them.
     pub fn take_held(&mut self) -> Vec<Msg> {
-        let _ = self.user_run.take_invoked();
+        let _ = self.log.take_invoked();
         self.held.take().map(|(_, held)| held).unwrap_or_default()
     }
 
-    /// Notes a redraw batch nvim sent because it read a key: a mapping that
-    /// fired before it has run, and a mode its rhs entered rides the same
-    /// batch.
+    /// Notes a redraw batch nvim sent because it read a key, which carries
+    /// any mode that key entered.
     pub(crate) fn note_input_answered(&mut self) {
-        self.mapped_unsure = false;
+        self.mode_unsure = false;
+        self.log.note_answered();
     }
 
-    /// Forgets the keys nvim was reading a mapping or an argument from,
-    /// where something other than a key (a click, a paste) went out after
-    /// them and ended both.
+    /// Forgets which key nvim reads the next key as the argument of, where
+    /// something other than a key (a click, a paste) went out after it.
     pub fn forget_argument(&mut self) {
         self.argument_of = None;
-        self.recent.clear();
-        self.mapped_unsure |= self.user_run.forget();
+        self.log.forget();
     }
 
     /// The keys of the view invocation a key last completed, once.
     pub(crate) fn take_invoked(&mut self) -> Option<Vec<String>> {
-        self.user_run.take_invoked()
+        self.log.take_invoked()
     }
 
     /// Whether input is being held.
@@ -999,14 +987,13 @@ impl SubmitHold {
 /// Called before the key is sent, so the model still describes the editor
 /// the key arrives at.
 pub fn fold_engine_key(model: &mut Model, notation: &str) -> Vec<Effect> {
-    if user_run::completes_invoke(model, notation) {
+    user_run::fold(model, notation);
+    for (keys, at) in model.submit_hold.log.take_fired() {
+        model.log_user_mapping(&keys, at);
+    }
+    if typed_ahead::completes_invoke(model, notation) {
         model.submit_hold.set_typed(None);
         return arm(model, Armed::Sequence);
-    }
-    for (keys, at) in model.submit_hold.user_run.take_fired() {
-        // the mapping ran, so the key after it starts a command again
-        model.submit_hold.argument_of = None;
-        model.log_user_mapping(&keys, at);
     }
     fold_line(model, notation)
 }
@@ -1351,7 +1338,7 @@ fn arm(model: &mut Model, armed: Armed) -> Vec<Effect> {
     if armed == Armed::Command {
         // a line typed by hand runs the next invocation, whatever key last
         // completed one nvim never ran
-        let _ = hold.user_run.take_invoked();
+        let _ = hold.log.take_invoked();
     }
     hold.generation = hold.generation.wrapping_add(1);
     hold.held = Some((armed, Vec::new()));

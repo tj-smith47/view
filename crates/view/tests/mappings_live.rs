@@ -872,7 +872,9 @@ fn a_callback_set_straight_to_a_runtime_function_names_no_file() {
 
 /// A user's mapping that draws nothing, then view's key and a query typed
 /// at once: the query waits for view's invocation, and none of it reaches
-/// nvim as a command that edits the buffer.
+/// nvim as a command that edits the buffer. The same holds where a pause
+/// inside view's key falls close to `'timeoutlen'` on view's clock and
+/// inside it on nvim's.
 #[test]
 fn keys_typed_ahead_after_a_users_mapping_never_edit_the_buffer() {
     let session = Session::start_with(
@@ -890,6 +892,27 @@ fn keys_typed_ahead_after_a_users_mapping_never_edit_the_buffer() {
     assert_eq!(session.eval("join(getline(1, '$'), '|')"), "");
     assert_eq!(session.eval("mode()"), "n");
     assert_eq!(sent, keys[..5], "the query waits for view's invocation");
+
+    let session = Session::start_with(
+        "typed-ahead-pause",
+        "vim.o.timeoutlen = 1000\n\
+         vim.keymap.set('n', '<leader>j', '<cmd>let g:view_quiet = 1<CR>')\n",
+    );
+    let mut model = registered_model(&session);
+    // round trips 296 ms apart put an 800 ms pause within reach of the
+    // 1000 ms 'timeoutlen', with 200 ms to spare on nvim's clock
+    model.engine.key_round_trips[0] = Some(Duration::from_millis(4));
+    model.engine.key_round_trips[1] = Some(Duration::from_millis(300));
+    let mut sent = type_into(&session, &mut model, &[",", "f"]);
+    std::thread::sleep(Duration::from_millis(800));
+    sent.extend(type_into(&session, &mut model, &["b", "m", "a", "i", "n"]));
+    pump(&session, &mut model, ARRIVAL, |_, msg| {
+        matches!(msg, Msg::FeatureInvoke { .. }).then_some(())
+    })
+    .expect("nvim runs view's <leader>fb after the pause");
+    assert_eq!(session.eval("join(getline(1, '$'), '|')"), "");
+    assert_eq!(session.eval("mode()"), "n");
+    assert_eq!(sent, [",", "f", "b"], "the query waits after a pause");
 }
 
 /// A stub that maps the real handler over itself and types its keys again

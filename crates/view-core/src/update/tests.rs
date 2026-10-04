@@ -21585,23 +21585,263 @@ fn a_users_mapping_never_lets_typed_ahead_keys_through() {
     claim_invocations(&mut m, &LEADER_CLAIMS);
     user_mappings(
         &mut m,
-        &["<Space>c", "m"],
+        &["<Space>j", "m"],
         Some(Duration::from_millis(1000)),
     );
-    let _ = typed(&mut m, &[" ", "c", " ", "u", "f"]);
+    let _ = typed(&mut m, &[" ", "j", " ", "u", "f"]);
     assert!(m.submit_hold.is_holding(), "view's key arms the hold");
     let sent: Vec<_> = typed(&mut m, &["m", "a", "i", "n"])
         .into_iter()
         .filter(|effect| matches!(effect, Effect::Rpc(RpcCall::Input { .. })))
         .collect();
     assert!(sent.is_empty(), "{sent:?}");
-    assert_eq!(user_rows(&m), ["<Space>c"], "no row for m");
+    assert_eq!(user_rows(&m), ["<Space>j"], "no row for m");
+}
+
+/// Seeds the key round trips view has read with two readings.
+fn round_trips(m: &mut Model, low_ms: u64, high_ms: u64) {
+    m.engine.key_round_trips[0] = Some(Duration::from_millis(low_ms));
+    m.engine.key_round_trips[1] = Some(Duration::from_millis(high_ms));
+}
+
+/// `<Space>f`, a pause at `'timeoutlen'` 300 with the round trips 36 ms
+/// apart, then `fmain` at speed: the hold arms on the second `f` and no
+/// key of `main` reaches nvim, whether nvim waited the pause out or gave
+/// up on it.
+#[test]
+fn a_pause_inside_view_keys_never_lets_the_rest_through() {
+    for pause in [280, 299, 350] {
+        let mut m = started_model();
+        claim_invocations(&mut m, &[("picker", "<Space>ff")]);
+        round_trips(&mut m, 4, 40);
+        typed_at(
+            &mut m,
+            &["<Space>c"],
+            Some(Duration::from_millis(300)),
+            &[(" ", 0), ("f", 10), ("f", 10 + pause)],
+        );
+        assert!(m.submit_hold.is_holding(), "{pause} ms: the hold arms");
+        let mut sent = Vec::new();
+        for (key, after) in [("m", 10), ("a", 20), ("i", 30), ("n", 40)] {
+            let at = Duration::from_millis(10 + pause + after);
+            m.set_now(std::time::SystemTime::UNIX_EPOCH + at);
+            let effects = update(&mut m, self::key(key));
+            sent.extend(meta_inputs(&effects).into_iter().map(str::to_string));
+        }
+        assert!(sent.is_empty(), "{pause} ms: {sent:?}");
+    }
+}
+
+/// A gap inside the spread of the recent round trips may have read past
+/// `'timeoutlen'` on nvim's clock, so the mapping it ends logs no row.
+#[test]
+fn a_gap_inside_the_round_trip_spread_logs_no_row() {
+    for (high, want) in [(4, vec!["<Space>fg"]), (40, vec![])] {
+        let mut m = started_model();
+        round_trips(&mut m, 4, high);
+        typed_at(
+            &mut m,
+            &["<Space>fg"],
+            Some(Duration::from_millis(300)),
+            &[(" ", 0), ("f", 10), ("g", 290)],
+        );
+        assert_eq!(user_rows(&m), want, "round trips 4 and {high} ms");
+    }
+}
+
+/// A whole mapping held at a gap close to `'timeoutlen'` ran on either
+/// clock before the key behind it, so an `i` there entered insert mode and
+/// the keys after it are typed text even once nvim answers.
+#[test]
+fn a_mode_key_behind_a_mapping_held_at_a_close_gap_starts_no_row() {
+    let mut m = started_model();
+    round_trips(&mut m, 4, 40);
+    typed_at(
+        &mut m,
+        &["<Space>f", "<Space>fio", "x"],
+        Some(Duration::from_millis(300)),
+        &[(" ", 0), ("f", 10), ("i", 20), ("x", 300)],
+    );
+    answered(&mut m);
+    m.set_now(std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(310));
+    let _ = update(&mut m, self::key("x"));
+    assert!(user_rows(&m).is_empty(), "{:?}", user_rows(&m));
+}
+
+/// A mapping nvim ran when `'timeoutlen'` ran out, behind it a key that
+/// leaves normal mode and that nvim swallowed: a key pressed a round trip
+/// after nvim ran the mapping is read in normal mode.
+#[test]
+fn a_key_a_round_trip_after_a_timed_out_mapping_is_matched() {
+    let mut m = started_model();
+    typed_at(
+        &mut m,
+        &["<Space>c", "<Space>coy", "s"],
+        Some(Duration::from_millis(300)),
+        &[(" ", 0), ("c", 10), ("o", 20), ("s", 620)],
+    );
+    assert_eq!(user_rows(&m), ["s", "<Space>c"]);
+}
+
+/// Whether input was held after each of `typed`'s keys and which keys
+/// reached nvim, then the same for the hold's bound running out. nvim
+/// answers each key with no mode change where `answer` is set.
+fn hold_trace(m: &mut Model, typed: &[(&str, u64)], answer: bool) -> Vec<(bool, Vec<String>)> {
+    let mut generation = None;
+    let mut trace: Vec<_> = typed
+        .iter()
+        .map(|(key, ms)| {
+            m.set_now(std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(*ms));
+            let effects = update(m, self::key(key));
+            if answer {
+                answered(m);
+            }
+            generation = effects
+                .iter()
+                .rev()
+                .find_map(|effect| match effect {
+                    Effect::ScheduleSubmitHold { generation, .. } => Some(*generation),
+                    _ => None,
+                })
+                .or(generation);
+            let sent = meta_inputs(&effects).into_iter().map(str::to_string);
+            (m.submit_hold.is_holding(), sent.collect())
+        })
+        .collect();
+    if let Some(generation) = generation {
+        let effects = update(m, Msg::SubmitHoldExpired { generation });
+        let sent = meta_inputs(&effects).into_iter().map(str::to_string);
+        trace.push((m.submit_hold.is_holding(), sent.collect()));
+    }
+    trace
+}
+
+/// A model with `<Space>ff` and `<Space>e` claimed, and, where `log` is
+/// set, the user's mappings read and the key log open.
+fn hold_model(log: bool) -> Model {
+    let mut m = started_model();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &[("picker", "<Space>ff"), ("tree", "<Space>e")]);
+    round_trips(&mut m, 4, 40);
+    if log {
+        user_mappings(
+            &mut m,
+            &["<Space>c", "<Space>coy", "<Space>f", "<Space>fg", "gd", "s"],
+            Some(Duration::from_millis(300)),
+        );
+        let _ = update(&mut m, feature_invoke("keys", "log"));
+    }
+    m
+}
+
+/// The hold decides alone. Every sequence of [`hold_population`] holds and
+/// forwards the same keys with the user's mappings read and the key log
+/// open as with neither.
+#[test]
+fn the_hold_decides_the_same_with_or_without_the_key_log() {
+    for typed in &hold_population() {
+        let with = hold_trace(&mut hold_model(true), typed, false);
+        let without = hold_trace(&mut hold_model(false), typed, false);
+        assert_eq!(with, without, "{typed:?}");
+    }
+}
+
+/// nvim answering a key with no mode change only ever adds a hold: across
+/// [`hold_population`], every key held with no answer is held with one.
+#[test]
+fn an_answer_from_nvim_only_ever_adds_a_hold() {
+    for typed in &hold_population() {
+        let with = hold_trace(&mut hold_model(false), typed, true);
+        let without = hold_trace(&mut hold_model(false), typed, false);
+        for (step, (answered, unanswered)) in with.iter().zip(&without).enumerate() {
+            assert!(answered.0 || !unanswered.0, "key {step} of {typed:?}");
+        }
+    }
+}
+
+/// Every sequence of a unit, a gap, then one of view's keys with a gap
+/// before its last key, and then `main` typed ahead, and every pair of
+/// units before view's key at speed. The units are view's keys and their
+/// prefixes, the user's mappings and a prefix of one, operators, keys that
+/// leave normal mode and a key that takes an argument; the gaps fall
+/// below, at and past `'timeoutlen'`, a millisecond short of it and fifty
+/// past it among them.
+fn hold_population() -> Vec<Vec<(&'static str, u64)>> {
+    const UNITS: [&[&str]; 19] = [
+        &[" ", "f", "f"],
+        &[" ", "e"],
+        &[" "],
+        &[" ", "f"],
+        &[" ", "c"],
+        &[" ", "f", "g"],
+        &["g", "d"],
+        &["s"],
+        &[" ", "c", "o"],
+        &["d"],
+        &["c"],
+        &["g", "c"],
+        &["y", "2"],
+        &["i"],
+        &["o"],
+        &[":"],
+        &["v"],
+        &["f"],
+        &["j"],
+    ];
+    const VIEW: [&[&str]; 2] = [&[" ", "f", "f"], &[" ", "e"]];
+    const GAPS: [u64; 7] = [10, 150, 299, 300, 301, 350, 1000];
+    // the units 10 ms apart key to key, `gap` before view's first key and
+    // `last_gap` before its last, then `main` at speed
+    fn sequence(
+        before: &[&[&'static str]],
+        gap: u64,
+        view: &[&'static str],
+        last_gap: u64,
+    ) -> Vec<(&'static str, u64)> {
+        let (last, first) = view.split_last().expect("view's keys");
+        let mut steps: Vec<_> = before
+            .iter()
+            .flat_map(|unit| unit.iter())
+            .map(|key| (*key, 10))
+            .collect();
+        steps.extend(
+            first
+                .iter()
+                .enumerate()
+                .map(|(i, key)| (*key, if i == 0 { gap } else { 10 })),
+        );
+        steps.push((*last, last_gap));
+        steps.extend(["m", "a", "i", "n"].map(|key| (key, 10)));
+        let mut at = 0;
+        steps
+            .into_iter()
+            .map(|(key, step)| {
+                at += step;
+                (key, at)
+            })
+            .collect()
+    }
+    let mut sequences = Vec::new();
+    for unit in UNITS {
+        for view in VIEW {
+            for gap in GAPS {
+                for last_gap in GAPS {
+                    sequences.push(sequence(&[unit], gap, view, last_gap));
+                }
+            }
+            for second in UNITS {
+                sequences.push(sequence(&[unit, second], 10, view, 10));
+            }
+        }
+    }
+    sequences
 }
 
 /// A key that leaves normal mode and that nvim swallowed changes no mode,
 /// so nvim reports none. A key pressed a round trip later with the mode
-/// still normal is read in normal mode: a mapping is logged, and view's
-/// key arms the hold.
+/// still normal is read in normal mode, and a mapping is logged. The pause
+/// changes nothing the hold decides, and nvim's answer to the swallowed key
+/// lets view's key arm it.
 #[test]
 fn a_key_a_round_trip_after_a_swallowed_mode_key_is_matched() {
     let mut m = started_model();
@@ -21613,6 +21853,14 @@ fn a_key_a_round_trip_after_a_swallowed_mode_key_is_matched() {
         &[("o", 0), ("s", 500), (" ", 510), ("u", 520), ("f", 530)],
     );
     assert_eq!(user_rows(&m), ["s"]);
+    assert!(!m.submit_hold.is_holding(), "a pause arms nothing");
+
+    let mut m = started_model();
+    m.engine.mode.current = "normal".to_string();
+    claim_invocations(&mut m, &LEADER_CLAIMS);
+    let _ = typed(&mut m, &["o"]);
+    answered(&mut m);
+    let _ = typed(&mut m, &[" ", "u", "f"]);
     assert!(m.submit_hold.is_holding(), "view's key arms the hold");
 }
 
@@ -21660,8 +21908,7 @@ fn a_view_row_names_only_the_keys_that_ran_it() {
 
     user_mappings(&mut m, &["<Space>e"], Some(Duration::from_millis(1000)));
     let _ = typed(&mut m, &[" ", "e"]);
-    assert!(!m.submit_hold.is_holding(), "the buffer's own <Space>e ran");
-    assert_eq!(user_rows(&m), ["<Space>e"]);
+    assert_eq!(user_rows(&m), ["<Space>e"], "the buffer's own <Space>e ran");
 }
 
 /// A reading of the user's keys landing while the windowed tree holds
