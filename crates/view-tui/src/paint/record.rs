@@ -11,22 +11,25 @@ use super::{paint_text_row, ratatui_style, Damage, Shadow};
 use crate::dvr::{place, FrameRing};
 
 /// Records the frame [`Shadow::commit`] just promoted into `into` and
-/// returns its seq.
+/// returns its seq, or `None` when the ring could not hold it.
 ///
-/// The rows the frame repainted are the only rows where `front` and `back`
-/// can differ, so a delta compares those rows alone and clones a cell only
-/// where it changed. A frame that repainted every row, changed size, or
-/// changed more cells than the open group has room for is a keyframe.
+/// `delta` says `back` holds the newest recorded frame, so the frame can be
+/// stored as the cells that differ from it. The rows the frame repainted
+/// are the only rows where `front` and `back` can differ, so a delta
+/// compares those rows alone and clones a cell only where it changed. A
+/// frame with no recorded base, a new size, or more changed cells than the
+/// open group has room for is a keyframe.
 pub(crate) fn capture(
     shadow: &Shadow,
     into: &mut FrameRing,
     at_us: u64,
     cursor: Option<(u16, u16)>,
-) -> u64 {
+    delta: bool,
+) -> Option<u64> {
     let area = shadow.front.area;
     let size = (area.width, area.height);
     let width = usize::from(area.width);
-    if !shadow.painted.full {
+    if delta {
         if let Some(group) = into.open_delta(size) {
             let mut fits = true;
             'rows: for (y, row) in (area.y..area.bottom()).enumerate() {
@@ -97,6 +100,7 @@ pub(crate) fn paint_bar(shadow: &mut Shadow, model: &Model, text: &str) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use ratatui::style::{Color, Modifier};
     use view_core::grid::GridOp;
 
     use super::*;
@@ -147,29 +151,97 @@ mod tests {
         let mut ring = FrameRing::new(64 << 20);
         put(&mut model, 0, "a");
         paint(&mut shadow, &model, &Damage::full());
+        assert_eq!(capture(&shadow, &mut ring, 0, None, false), Some(1));
         // a frame repaints the rows the frame before it did as well, so the
-        // first frame after a full one is still a whole-screen repaint
-        paint(&mut shadow, &model, &rows(&[]));
-        assert_eq!(capture(&shadow, &mut ring, 0, None), 1);
+        // frame after a full one is a whole-screen repaint stored as a delta
+        put(&mut model, 2, "z");
+        paint(&mut shadow, &model, &rows(&[2]));
+        assert!(shadow.painted.full);
+        assert_eq!(capture(&shadow, &mut ring, 5, None, true), Some(2));
         put(&mut model, 1, "b");
         paint(&mut shadow, &model, &rows(&[1]));
-        let second = shadow.front.clone();
-        assert_eq!(capture(&shadow, &mut ring, 10, Some((0, 1))), 2);
+        let third = shadow.front.clone();
+        assert_eq!(capture(&shadow, &mut ring, 10, Some((0, 1)), true), Some(3));
         put(&mut model, 0, "c");
         paint(&mut shadow, &model, &rows(&[0]));
-        let third = shadow.front.clone();
-        assert_eq!(capture(&shadow, &mut ring, 20, None), 3);
-        assert_ne!(second, third);
+        let fourth = shadow.front.clone();
+        assert_eq!(capture(&shadow, &mut ring, 20, None, true), Some(4));
+        assert_ne!(third, fourth);
+
+        // a wide glyph, a combining cluster and a styled cell, then the wide
+        // glyph replaced by narrow text
+        let mut styled = Cell::new("s");
+        styled.fg = Color::Rgb(1, 2, 3);
+        styled.bg = Color::Indexed(17);
+        styled.underline_color = Color::LightRed;
+        styled.modifier = Modifier::BOLD | Modifier::UNDERLINED;
+        hand_paint(
+            &mut shadow,
+            &[
+                (0, 3, Cell::new("世")),
+                (1, 3, Cell::EMPTY),
+                (0, 4, Cell::new("e\u{301}")),
+                (2, 4, styled.clone()),
+            ],
+        );
+        assert_eq!(capture(&shadow, &mut ring, 30, None, true), Some(5));
+        let fifth = shadow.front.clone();
+        hand_paint(
+            &mut shadow,
+            &[(0, 3, Cell::new("a")), (1, 3, Cell::new("b"))],
+        );
+        assert_eq!(capture(&shadow, &mut ring, 40, None, true), Some(6));
+        let sixth = shadow.front.clone();
+
         let deltas = ring.snapshot();
         let keys: Vec<_> = deltas.frames().map(|f| (f.seq, f.key)).collect();
-        assert_eq!(keys, [(1, true), (2, false), (3, false)]);
+        assert_eq!(
+            keys,
+            [
+                (1, true),
+                (2, false),
+                (3, false),
+                (4, false),
+                (5, false),
+                (6, false)
+            ]
+        );
 
-        assert!(load(&mut shadow, &ring, 2));
-        assert_eq!(shadow.back, second);
-        assert!(shadow.painted.full);
         assert!(load(&mut shadow, &ring, 3));
         assert_eq!(shadow.back, third);
-        assert!(!load(&mut shadow, &ring, 4));
+        assert!(shadow.painted.full);
+        assert!(load(&mut shadow, &ring, 4));
+        assert_eq!(shadow.back, fourth);
+        assert!(load(&mut shadow, &ring, 5));
+        assert_eq!(shadow.back, fifth);
+        assert_eq!(shadow.back.content[usize::from(W) * 4 + 2], styled);
+        assert!(load(&mut shadow, &ring, 6));
+        assert_eq!(shadow.back, sixth);
+        assert!(!load(&mut shadow, &ring, 7));
+    }
+
+    /// Commits a frame that changes `cells` by hand, the way
+    /// [`Shadow::commit`] leaves the frame before it in `back`.
+    fn hand_paint(shadow: &mut Shadow, cells: &[(u16, u16, Cell)]) {
+        shadow.back = shadow.front.clone();
+        let mut painted = Vec::new();
+        for (x, y, cell) in cells {
+            *shadow.front.cell_mut((*x, *y)).unwrap() = cell.clone();
+            painted.push(*y);
+        }
+        shadow.painted = rows(&painted);
+    }
+
+    #[test]
+    fn a_placed_cell_never_runs_past_its_row() {
+        let mut ring = FrameRing::new(64 << 20);
+        let mut cells = vec![Cell::EMPTY; 8];
+        cells[5] = Cell::new("世");
+        ring.push_key(0, (8, 1), None, cells).unwrap();
+        let mut shadow = Shadow::new();
+        shadow.resize(Rect::new(0, 0, 6, 1));
+        assert!(load(&mut shadow, &ring, 1));
+        assert_eq!(shadow.back.content[5].symbol(), " ");
     }
 
     #[test]

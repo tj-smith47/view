@@ -640,6 +640,11 @@ pub struct Term {
     /// appearing or vanishing) shifts every grid row, so the next paint
     /// must be full rather than damage-clipped.
     last_offset: Option<u16>,
+    /// Whether the shadow's `front` is the newest frame the DVR recorded.
+    recorded_front: std::cell::Cell<bool>,
+    /// Whether the frame before the one just queued is the newest recorded
+    /// frame, so the DVR can store the queued one as a delta on it.
+    delta_base: bool,
     /// The capabilities resolved during [`Term::init`], either probed or
     /// from a `--tier` override. Stored so [`Term::caps`] can hand a copy
     /// to the caller without re-running the (stdin-consuming, one-shot)
@@ -718,6 +723,8 @@ impl Term {
             cursor_shown: None,
             shadow: Shadow::new(),
             last_offset: None,
+            recorded_front: std::cell::Cell::new(false),
+            delta_base: false,
             caps,
             caps_source,
             #[cfg(all(unix, feature = "bench-taps"))]
@@ -1050,6 +1057,12 @@ impl Term {
         }
         self.shadow.commit();
         self.last_offset = Some(offset);
+        // a frame that changed no cell leaves `front` equal to the frame
+        // before it, so a recorded `front` stays the recording's base
+        self.delta_base = self.recorded_front.get() && !resized;
+        if painted_cells || resized {
+            self.recorded_front.set(false);
+        }
         match surface.cursor {
             Some(spec) => {
                 let at = (spec.col, spec.row);
@@ -1098,15 +1111,18 @@ impl Term {
     }
 
     /// Records the frame [`draw_surface`](Self::draw_surface) just wrote
-    /// into `ring`, dated `at` since recording began, and returns its seq.
+    /// into `ring`, dated `at` since recording began, and returns its seq,
+    /// or `None` when the ring could not hold it.
     ///
-    /// Called after every draw that wrote, so each delta is taken against
-    /// the frame recorded before it. The copy is of the changed cells alone
-    /// and happens after the frame reached the terminal.
-    pub fn record_frame(&self, ring: &mut FrameRing, at: std::time::Duration) -> u64 {
+    /// Call after every draw that wrote, so each delta is taken against the
+    /// frame recorded before it. A delta copies the changed cells; a
+    /// keyframe copies the screen.
+    pub fn record_frame(&self, ring: &mut FrameRing, at: std::time::Duration) -> Option<u64> {
         let at_us = u64::try_from(at.as_micros()).unwrap_or(u64::MAX);
         let cursor = self.last_cursor.filter(|_| self.cursor_shown == Some(true));
-        crate::paint::record::capture(&self.shadow, ring, at_us, cursor)
+        let seq = crate::paint::record::capture(&self.shadow, ring, at_us, cursor, self.delta_base);
+        self.recorded_front.set(seq.is_some());
+        seq
     }
 
     /// Repaints recorded frame `seq` of `ring` with `bar` across its last
@@ -1169,6 +1185,8 @@ impl Term {
         self.shadow.commit();
         self.last_cursor = None;
         self.last_offset = None;
+        self.recorded_front.set(false);
+        self.delta_base = false;
         if model.caps.sync {
             sink.write_all(b"\x1b[?2026l")?;
         }
@@ -1252,6 +1270,8 @@ impl Term {
             cursor_shown: None,
             shadow: Shadow::new(),
             last_offset: None,
+            recorded_front: std::cell::Cell::new(false),
+            delta_base: false,
             caps,
             caps_source: tiers::CapsSource::Assumed,
             #[cfg(all(unix, feature = "bench-taps"))]
@@ -1940,7 +1960,9 @@ pub(crate) mod tests {
         let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
         let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
         let mut ring = FrameRing::new(64 << 20);
-        let seq = term.record_frame(&mut ring, std::time::Duration::ZERO);
+        let seq = term
+            .record_frame(&mut ring, std::time::Duration::ZERO)
+            .unwrap();
         assert!(term.last_offset.is_some());
 
         assert!(term
@@ -1952,14 +1974,58 @@ pub(crate) mod tests {
             shown.contains("DVR") && shown.contains("scrub"),
             "{shown:?}"
         );
-        assert_eq!(term.last_offset, None);
-        let live = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        // a second scrub frame leaves no live frame in either buffer
+        assert!(term.queue_recorded(&model, &ring, seq, "DVR h").unwrap());
+        term.frame_buf.borrow_mut().clear();
+        let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        let mut fresh = Term::frame_probe(model.caps);
+        let _ = frame_bytes(&mut fresh, &model, &surface, &GridDamage::full());
         assert!(
-            !live.is_empty(),
+            term.shadow.front() == fresh.shadow.front(),
             "the live frame left the scrub bar on screen"
         );
         assert!(!term.queue_recorded(&model, &ring, seq + 1, "x").unwrap());
         assert!(term.frame_buf.borrow().is_empty());
+    }
+
+    /// The frame after a full repaint is stored as a delta on it, and the
+    /// live frame after a recorded repaint is a keyframe, since what the
+    /// terminal showed before it is the scrub frame and its bar.
+    #[test]
+    fn the_frame_after_a_recorded_repaint_is_a_keyframe() {
+        fn live(term: &mut Term, ring: &mut FrameRing, model: &mut Model) -> u64 {
+            let damage = model.take_paint_damage();
+            let _ = frame_bytes(term, model, &view_surface::render(model), &damage);
+            term.record_frame(ring, std::time::Duration::ZERO).unwrap()
+        }
+        fn put(model: &mut Model, row: u16, text: &str) {
+            model.engine.apply_grid(view_core::grid::GridOp::PutLine {
+                row,
+                col_start: 0,
+                cells: vec![(text.into(), 0, 1)],
+            });
+        }
+        let mut model = probe_model(TermCaps::default());
+        let mut term = Term::frame_probe(model.caps);
+        let mut ring = FrameRing::new(64 << 20);
+        let first = live(&mut term, &mut ring, &mut model);
+        put(&mut model, 2, "z");
+        let second = live(&mut term, &mut ring, &mut model);
+        let _ = term.queue_recorded(&model, &ring, first, "DVR").unwrap();
+        term.frame_buf.borrow_mut().clear();
+        // the live frame takes back what the second frame added, so a delta
+        // taken against the scrubbed first frame would not record it
+        put(&mut model, 2, " ");
+        put(&mut model, 1, "q");
+        let third = live(&mut term, &mut ring, &mut model);
+        let front = term.shadow.front().clone();
+        let snapshot = ring.snapshot();
+        let keys: Vec<_> = snapshot.frames().map(|f| (f.seq, f.key)).collect();
+        assert_eq!(keys, [(first, true), (second, false), (third, true)]);
+        drop(snapshot);
+        assert!(term.queue_recorded(&model, &ring, third, "").unwrap());
+        let above_bar = front.content.len() - usize::from(front.area.width);
+        assert!(term.shadow.front().content[..above_bar] == front.content[..above_bar]);
     }
 
     /// nvim flushes a redraw batch for input it did not act on -- a wheel

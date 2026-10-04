@@ -14,9 +14,9 @@ use crate::msg::{Key, MouseInput, Msg};
 /// The share of the recording's memory bound the input log reserves.
 const ARENA_SHARE: usize = 8;
 
-/// The arena bytes one log entry is reserved for: an average input's
-/// notation is a few bytes, so the entry list fills no sooner than the
-/// arena does.
+/// The arena bytes one log entry is reserved for. A key's notation is one
+/// to five bytes, so typing fills the entry list first and leaves the rest
+/// of the arena to pastes.
 const BYTES_PER_ENTRY: usize = 16;
 
 /// The bytes the input log may hold, entry list and arena together, out of

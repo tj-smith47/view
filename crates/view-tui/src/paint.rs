@@ -983,7 +983,7 @@ fn columns_left(buf: &Buffer, col: u16) -> u16 {
 /// column. That bound is what keeps this a length compare on nearly every
 /// cell of a text frame -- including the wide-glyph cells a width computation
 /// would otherwise charge for -- rather than a width computation per cell.
-fn fitted_symbol(symbol: &str, columns_left: u16) -> &str {
+pub(crate) fn fitted_symbol(symbol: &str, columns_left: u16) -> &str {
     if symbol.len() > usize::from(columns_left) && symbol.cell_width() > columns_left {
         " "
     } else {
@@ -8594,10 +8594,14 @@ mod tests {
     /// cell, with the grounds that keep each off the cluster walk. Each one
     /// places a glyph the layout pass or the engine already decided, never
     /// a run of text view composed.
-    const CELL_WRITERS_THAT_ARE_NOT_TEXT: [(&str, &str); 4] = [
+    const CELL_WRITERS_THAT_ARE_NOT_TEXT: [(&str, &str); 5] = [
         (
             "restore",
             "a recorded cell, one grapheme cluster when it was painted",
+        ),
+        (
+            "place",
+            "a recorded cell blanked when it no longer fits its row",
         ),
         (
             "set_border_cell",

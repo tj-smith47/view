@@ -12,6 +12,9 @@ use std::time::Duration;
 use ratatui::buffer::Cell;
 use ratatui::style::{Color, Modifier};
 use view_core::native::dvr::{input_log_bytes, ScrubStep};
+use view_core::native::text::clusters;
+
+use crate::paint::fitted_symbol;
 
 /// The frames one group holds before the next frame opens a new keyframe.
 const GROUP_FRAMES: usize = 256;
@@ -56,6 +59,23 @@ pub(crate) struct Group {
     key: Vec<Cell>,
     deltas: Vec<(u16, u16, Cell)>,
     frames: Vec<Frame>,
+    /// The bytes the group's symbols hold on the heap.
+    heap: usize,
+    /// `heap` as the last closed frame left it.
+    heap_closed: usize,
+}
+
+/// The bytes a symbol stores inline in its cell.
+const INLINE_SYMBOL: usize = 24;
+
+/// The bytes `cell`'s symbol holds on the heap.
+fn heap_of(cell: &Cell) -> usize {
+    let len = cell.symbol().len();
+    if len > INLINE_SYMBOL {
+        len
+    } else {
+        0
+    }
 }
 
 impl Group {
@@ -63,6 +83,21 @@ impl Group {
         self.key.capacity() * std::mem::size_of::<Cell>()
             + self.deltas.capacity() * std::mem::size_of::<(u16, u16, Cell)>()
             + self.frames.capacity() * std::mem::size_of::<Frame>()
+            + self.heap
+    }
+
+    /// Empties the group and reserves it for `area`.
+    fn reset(&mut self, area: (u16, u16)) {
+        let cells = usize::from(area.0) * usize::from(area.1);
+        self.key.clear();
+        self.deltas.clear();
+        self.frames.clear();
+        self.key.reserve_exact(cells);
+        self.deltas.reserve_exact(cells);
+        self.frames.reserve_exact(GROUP_FRAMES);
+        self.area = area;
+        self.heap = 0;
+        self.heap_closed = 0;
     }
 
     /// The bytes a group reserved for `area` holds.
@@ -79,6 +114,7 @@ impl Group {
         if self.deltas.len() == self.deltas.capacity() {
             return false;
         }
+        self.heap += heap_of(cell);
         self.deltas.push((x, y, cell.clone()));
         true
     }
@@ -87,6 +123,7 @@ impl Group {
     pub(crate) fn abort(&mut self) {
         let end = self.frames.last().map_or(0, |f| f.deltas_end);
         self.deltas.truncate(end);
+        self.heap = self.heap_closed;
     }
 
     /// Calls `put` with every cell that builds frame `index`: the keyframe
@@ -114,8 +151,9 @@ impl Group {
 /// recording's memory bound is reached.
 ///
 /// Every group reserves its keyframe, its delta list and its frame list when
-/// it opens, and an evicted group's storage opens the next one, so a capture
-/// in steady state allocates nothing.
+/// it opens, and an evicted group, its `Arc` included, opens the next one
+/// once no snapshot holds it. A capture in steady state allocates only for
+/// a symbol longer than 24 bytes.
 // ponytail: a keyframe stores every cell, so a full-screen scroll costs a
 // whole screen per frame. Row dedup or compression of closed groups is the
 // upgrade when a longer rewind under scrolling matters.
@@ -124,9 +162,11 @@ pub struct FrameRing {
     /// The retained groups, oldest first. The newest is the open one,
     /// written through `Arc::get_mut` while no snapshot shares it.
     groups: VecDeque<Arc<Group>>,
-    pool: Vec<Group>,
+    /// Evicted groups, some still held by a snapshot, kept counted until one
+    /// opens a new group or is dropped.
+    retired: Vec<Arc<Group>>,
     budget: usize,
-    /// The bytes the retained and pooled groups reserve.
+    /// The bytes the retained and retired groups hold.
     held: usize,
     next_seq: u64,
 }
@@ -142,7 +182,7 @@ impl FrameRing {
     fn with_budget(budget: usize) -> Self {
         Self {
             groups: VecDeque::new(),
-            pool: Vec::new(),
+            retired: Vec::new(),
             budget,
             held: 0,
             next_seq: 1,
@@ -234,104 +274,120 @@ impl FrameRing {
         (group.area == area && group.frames.len() < GROUP_FRAMES).then_some(group)
     }
 
-    /// Closes the delta frame built on the open group and returns its seq.
-    pub(crate) fn close_delta(&mut self, at_us: u64, cursor: Option<(u16, u16)>) -> u64 {
+    /// Closes the delta frame built on the open group and returns its seq,
+    /// or `None` when the frame left the ring to keep it inside its budget.
+    pub(crate) fn close_delta(&mut self, at_us: u64, cursor: Option<(u16, u16)>) -> Option<u64> {
         let seq = self.next_seq;
-        if let Some(group) = self.groups.back_mut().and_then(Arc::get_mut) {
-            group.frames.push(Frame {
-                seq,
-                at_us,
-                cursor,
-                deltas_end: group.deltas.len(),
-            });
-            self.next_seq += 1;
-        }
-        seq
+        let group = self.groups.back_mut().and_then(Arc::get_mut)?;
+        group.frames.push(Frame {
+            seq,
+            at_us,
+            cursor,
+            deltas_end: group.deltas.len(),
+        });
+        self.held += group.heap - group.heap_closed;
+        group.heap_closed = group.heap;
+        self.next_seq += 1;
+        self.trim();
+        self.newest().filter(|&newest| newest == seq)
     }
 
     /// Records a keyframe of size `area` from `cells`, row by row, opening a
-    /// new group. Returns its seq, or the newest seq when one group of this
-    /// size cannot fit the bound at all and the frame goes unrecorded.
+    /// new group. Returns its seq, or `None` when the frame goes unrecorded:
+    /// one group of this size cannot fit the budget, or snapshots hold the
+    /// memory it would take.
     pub(crate) fn push_key(
         &mut self,
         at_us: u64,
         area: (u16, u16),
         cursor: Option<(u16, u16)>,
         cells: impl IntoIterator<Item = Cell>,
-    ) -> u64 {
-        let Some(mut group) = self.take_group(area) else {
-            return self.newest().unwrap_or(0);
+    ) -> Option<u64> {
+        let mut shared = self.take_group(area)?;
+        let seq = self.next_seq;
+        let Some(group) = Arc::get_mut(&mut shared) else {
+            self.retired.push(shared);
+            return None;
         };
         group.key.extend(cells);
-        let seq = self.next_seq;
-        self.next_seq += 1;
+        group.heap = group.key.iter().map(heap_of).sum();
+        group.heap_closed = group.heap;
         group.frames.push(Frame {
             seq,
             at_us,
             cursor,
             deltas_end: 0,
         });
-        self.groups.push_back(Arc::new(group));
-        seq
+        self.held += group.heap;
+        self.next_seq += 1;
+        self.groups.push_back(shared);
+        self.trim();
+        self.newest().filter(|&newest| newest == seq)
     }
 
-    /// Storage for a new group of size `area`: a pooled group first, then
-    /// a fresh one once evicting the oldest groups makes room for it.
-    fn take_group(&mut self, area: (u16, u16)) -> Option<Group> {
+    /// Storage for a new group of size `area`, counted in `held`: a retired
+    /// group no snapshot holds first, then a fresh one once evicting the
+    /// oldest groups makes room for it.
+    fn take_group(&mut self, area: (u16, u16)) -> Option<Arc<Group>> {
         let fresh = Group::reserved_bytes(area);
         if fresh > self.budget {
             return None;
         }
-        let cells = usize::from(area.0) * usize::from(area.1);
         loop {
-            if let Some(mut group) = self.pool.pop() {
-                let before = group.bytes();
-                group.key.clear();
-                group.deltas.clear();
-                group.frames.clear();
-                group.key.reserve(cells);
-                group.deltas.reserve(cells);
-                group.frames.reserve(GROUP_FRAMES);
-                group.area = area;
-                self.held -= before;
-                if group.bytes() > self.budget {
-                    continue;
-                }
+            if let Some(at) = self
+                .retired
+                .iter_mut()
+                .position(|g| Arc::get_mut(g).is_some())
+            {
+                let mut shared = self.retired.swap_remove(at);
+                let Some(group) = Arc::get_mut(&mut shared) else {
+                    self.retired.push(shared);
+                    return None;
+                };
+                self.held -= group.bytes();
+                group.reset(area);
                 self.held += group.bytes();
                 self.trim();
-                return Some(group);
+                if self.held > self.budget {
+                    self.held -= shared.bytes();
+                    return None;
+                }
+                return Some(shared);
             }
             if self.held + fresh <= self.budget {
-                let group = Group {
-                    area,
-                    key: Vec::with_capacity(cells),
-                    deltas: Vec::with_capacity(cells),
-                    frames: Vec::with_capacity(GROUP_FRAMES),
-                };
+                let mut group = Group::default();
+                group.reset(area);
                 self.held += group.bytes();
-                return Some(group);
+                return Some(Arc::new(group));
+            }
+            // evicting a group a snapshot holds frees nothing, so while
+            // snapshots hold every group the ring keeps its frames
+            if self.groups.iter().all(|g| Arc::strong_count(g) > 1) {
+                return None;
             }
             let oldest = self.groups.pop_front()?;
-            match Arc::try_unwrap(oldest) {
-                Ok(group) => self.pool.push(group),
-                Err(shared) => self.held -= shared.bytes(),
-            }
+            self.retired.push(oldest);
         }
     }
 
-    /// Drops pooled and then the oldest groups while the ring holds more
-    /// than its budget, which a pooled group grown for a larger screen can
-    /// cause.
+    /// Drops retired groups no snapshot holds, then evicts the oldest
+    /// groups, while the ring holds more than its budget. A retired group
+    /// grown for a larger screen, or symbols stored on the heap, can cause
+    /// that.
     fn trim(&mut self) {
         while self.held > self.budget {
-            let dropped = match self.pool.pop() {
-                Some(group) => group.bytes(),
-                None => match self.groups.pop_front() {
-                    Some(group) => group.bytes(),
-                    None => return,
-                },
-            };
-            self.held -= dropped;
+            if let Some(at) = self
+                .retired
+                .iter_mut()
+                .position(|g| Arc::get_mut(g).is_some())
+            {
+                let dropped = self.retired.swap_remove(at);
+                self.held -= dropped.bytes();
+            } else if let Some(oldest) = self.groups.pop_front() {
+                self.retired.push(oldest);
+            } else {
+                return;
+            }
         }
     }
 }
@@ -445,12 +501,15 @@ impl<'a> CellView<'a> {
     }
 }
 
-/// The cell `view` was recorded from. A symbol carrying a control character,
-/// which only a damaged clip holds, comes back blank.
+/// The cell `view` was recorded from, holding the symbol's first grapheme
+/// cluster. A symbol carrying a control character, which only a damaged
+/// clip holds, comes back blank.
 fn restore(view: CellView<'_>) -> Cell {
     let mut cell = Cell::EMPTY;
     if !view.symbol.chars().any(char::is_control) {
-        cell.set_symbol(view.symbol);
+        if let Some(cluster) = clusters(view.symbol).next() {
+            cell.set_symbol(cluster);
+        }
     }
     cell.fg = unpack(view.fg);
     cell.bg = unpack(view.bg);
@@ -486,11 +545,17 @@ fn blank(area: (u16, u16)) -> Vec<Cell> {
 }
 
 /// Copies `cell` to column `x` of row `y` of a row-major `screen` of size
-/// `area`, dropping it when it falls outside.
+/// `area`, dropping it when it falls outside. A symbol wider than the
+/// columns left in its row is placed as a blank, since the shadow's diff
+/// relies on no cell running past its row.
 pub(crate) fn place(screen: &mut [Cell], area: (u16, u16), x: u16, y: u16, cell: &Cell) {
     if x < area.0 && y < area.1 {
         if let Some(slot) = screen.get_mut(usize::from(y) * usize::from(area.0) + usize::from(x)) {
             slot.clone_from(cell);
+            let fitted = fitted_symbol(cell.symbol(), area.0 - x);
+            if fitted != cell.symbol() {
+                slot.set_symbol(fitted);
+            }
         }
     }
 }
@@ -499,6 +564,9 @@ pub(crate) fn place(screen: &mut [Cell], area: (u16, u16), x: u16, y: u16, cell:
 #[derive(Debug)]
 pub struct RingBuilder {
     ring: FrameRing,
+    /// Whether the last frame went unrecorded, which leaves the deltas
+    /// after it nothing to build on until the next keyframe.
+    dropped: bool,
 }
 
 impl RingBuilder {
@@ -507,34 +575,53 @@ impl RingBuilder {
     pub fn new(max_bytes: usize) -> Self {
         Self {
             ring: FrameRing::new(max_bytes),
+            dropped: false,
         }
     }
 
     /// Adds a keyframe of size `area`. A cell outside the area is dropped
-    /// and a cell the frame does not name is blank. Returns its seq.
+    /// and a cell the frame does not name is blank. Returns its seq, or
+    /// `None` when the ring could not hold it.
     pub fn push_key<'c>(
         &mut self,
         at_us: u64,
         area: (u16, u16),
         cursor: Option<(u16, u16)>,
         cells: impl IntoIterator<Item = CellView<'c>>,
-    ) -> u64 {
+    ) -> Option<u64> {
         let mut screen = blank(area);
         for view in cells {
             place(&mut screen, area, view.x, view.y, &restore(view));
         }
-        self.ring.push_key(at_us, area, cursor, screen)
+        let seq = self.ring.push_key(at_us, area, cursor, screen);
+        self.dropped = seq.is_none();
+        seq
     }
 
     /// Adds a delta frame on the newest frame. A delta past what the open
     /// group holds becomes a keyframe of the frame it builds. Returns its
-    /// seq, or `None` before any keyframe.
+    /// seq, or `None` before any keyframe, after a frame the ring could not
+    /// hold until the next keyframe, or when the ring cannot hold this one.
     pub fn push_delta<'c>(
         &mut self,
         at_us: u64,
         cursor: Option<(u16, u16)>,
         cells: impl IntoIterator<Item = CellView<'c>> + Clone,
     ) -> Option<u64> {
+        let seq = self.delta(at_us, cursor, cells);
+        self.dropped = seq.is_none();
+        seq
+    }
+
+    fn delta<'c>(
+        &mut self,
+        at_us: u64,
+        cursor: Option<(u16, u16)>,
+        cells: impl IntoIterator<Item = CellView<'c>> + Clone,
+    ) -> Option<u64> {
+        if self.dropped {
+            return None;
+        }
         let newest = self.ring.newest()?;
         let area = self.ring.locate(newest)?.0.area;
         if let Some(group) = self.ring.open_delta(area) {
@@ -544,7 +631,7 @@ impl RingBuilder {
                 .filter(|v| v.x < area.0 && v.y < area.1)
                 .all(|v| group.push_cell(v.x, v.y, &restore(v)));
             if fits {
-                return Some(self.ring.close_delta(at_us, cursor));
+                return self.ring.close_delta(at_us, cursor);
             }
             group.abort();
         }
@@ -554,7 +641,7 @@ impl RingBuilder {
         for view in cells {
             place(&mut screen, area, view.x, view.y, &restore(view));
         }
-        Some(self.ring.push_key(at_us, area, cursor, screen))
+        self.ring.push_key(at_us, area, cursor, screen)
     }
 
     /// The ring the frames built.
@@ -578,18 +665,34 @@ mod tests {
 
     fn delta(ring: &mut FrameRing, at_us: u64, cells: usize) -> u64 {
         let Some(group) = ring.open_delta(AREA) else {
-            return ring.push_key(at_us, AREA, None, screen("k"));
+            return ring.push_key(at_us, AREA, None, screen("k")).unwrap();
         };
         let changed = Cell::new("d");
         if (0..cells).all(|i| group.push_cell(u16::try_from(i % 4).unwrap(), 0, &changed)) {
-            return ring.close_delta(at_us, None);
+            return ring.close_delta(at_us, None).unwrap();
         }
         group.abort();
-        ring.push_key(at_us, AREA, None, screen("k"))
+        ring.push_key(at_us, AREA, None, screen("k")).unwrap()
     }
 
     fn is_key(ring: &FrameRing, seq: u64) -> bool {
         ring.locate(seq).is_some_and(|(_, index)| index == 0)
+    }
+
+    /// The bytes every group the ring keeps alive holds, counted from the
+    /// groups themselves.
+    fn counted(ring: &FrameRing) -> usize {
+        ring.groups
+            .iter()
+            .chain(&ring.retired)
+            .map(|g| g.bytes())
+            .sum()
+    }
+
+    /// Where the open group's header and storage live.
+    fn storage(ring: &FrameRing) -> (*const Group, *const Cell, *const (u16, u16, Cell)) {
+        let open = ring.groups.back().unwrap();
+        (Arc::as_ptr(open), open.key.as_ptr(), open.deltas.as_ptr())
     }
 
     #[test]
@@ -607,7 +710,9 @@ mod tests {
             delta(&mut ring, frame, usize::try_from(frame % 5).unwrap());
             let oldest = ring.oldest().unwrap();
             assert!(is_key(&ring, oldest), "frame {frame}: oldest {oldest}");
-            assert!(ring.held <= ring.budget, "frame {frame}: {}", ring.held);
+            let live = counted(&ring);
+            assert_eq!(live, ring.held, "frame {frame}");
+            assert!(live <= ring.budget, "frame {frame}: {live}");
         }
         assert!(ring.groups.len() > 1);
         assert!(ring.oldest().unwrap() > 1, "the oldest groups were dropped");
@@ -616,11 +721,13 @@ mod tests {
     #[test]
     fn a_resize_opens_a_new_keyframe() {
         let mut ring = FrameRing::new(64 << 20);
-        let first = ring.push_key(0, AREA, None, screen("a"));
+        let first = ring.push_key(0, AREA, None, screen("a")).unwrap();
         let second = delta(&mut ring, 1, 1);
         assert!(!is_key(&ring, second));
         assert!(ring.open_delta((5, 2)).is_none());
-        let resized = ring.push_key(2, (5, 2), None, vec![Cell::new("b"); 10]);
+        let resized = ring
+            .push_key(2, (5, 2), None, vec![Cell::new("b"); 10])
+            .unwrap();
         assert!(is_key(&ring, resized));
         assert_eq!((first, second, resized), (1, 2, 3));
         assert_eq!(ring.locate(resized).unwrap().0.area, (5, 2));
@@ -631,16 +738,107 @@ mod tests {
         let mut ring = FrameRing::with_budget(Group::reserved_bytes(AREA) * 3);
         let mut seen = Vec::new();
         for frame in 0..3 {
-            ring.push_key(frame, AREA, None, screen("k"));
-            let open = ring.groups.back().unwrap();
-            seen.push((open.key.as_ptr(), open.deltas.as_ptr()));
+            ring.push_key(frame, AREA, None, screen("k")).unwrap();
+            seen.push(storage(&ring));
         }
         for frame in 3..20 {
-            ring.push_key(frame, AREA, None, screen("k"));
-            let open = ring.groups.back().unwrap();
-            let storage = (open.key.as_ptr(), open.deltas.as_ptr());
-            assert!(seen.contains(&storage), "frame {frame} allocated");
+            ring.push_key(frame, AREA, None, screen("k")).unwrap();
+            assert!(seen.contains(&storage(&ring)), "frame {frame} allocated");
         }
+    }
+
+    #[test]
+    fn a_held_snapshot_keeps_the_ring_inside_its_budget() {
+        let mut ring = FrameRing::with_budget(Group::reserved_bytes(AREA) * 4);
+        let mut seen = Vec::new();
+        for frame in 0..2 {
+            ring.push_key(frame, AREA, None, screen("k")).unwrap();
+            seen.push(storage(&ring));
+        }
+        let snapshot = ring.snapshot();
+        for frame in 2..40 {
+            assert!(ring.push_key(frame, AREA, None, screen("k")).is_some());
+            if frame < 4 {
+                seen.push(storage(&ring));
+            }
+            assert!(seen.contains(&storage(&ring)), "frame {frame} allocated");
+            let live = counted(&ring);
+            assert_eq!(live, ring.held, "frame {frame}");
+            assert!(live <= ring.budget, "frame {frame}: {live}");
+        }
+        assert_eq!(snapshot.frames().count(), 2, "the snapshot kept its frames");
+        drop(snapshot);
+        for frame in 40..60 {
+            ring.push_key(frame, AREA, None, screen("k")).unwrap();
+            assert!(seen.contains(&storage(&ring)), "frame {frame} allocated");
+            assert!(counted(&ring) <= ring.budget);
+        }
+    }
+
+    #[test]
+    fn a_ring_every_snapshot_holds_keeps_its_frames_and_records_nothing() {
+        let mut ring = FrameRing::with_budget(Group::reserved_bytes(AREA) * 2);
+        ring.push_key(0, AREA, None, screen("a")).unwrap();
+        ring.push_key(1, AREA, None, screen("b")).unwrap();
+        let snapshot = ring.snapshot();
+        assert_eq!(ring.push_key(2, AREA, None, screen("c")), None);
+        assert_eq!((ring.oldest(), ring.newest()), (Some(1), Some(2)));
+        drop(snapshot);
+        assert_eq!(ring.push_key(3, AREA, None, screen("d")), Some(3));
+    }
+
+    #[test]
+    fn a_restored_cell_holds_one_grapheme_cluster() {
+        let view = CellView {
+            x: 0,
+            y: 0,
+            symbol: "e\u{301}x",
+            fg: 0,
+            bg: 0,
+            ul: 0,
+            modifier: 0,
+        };
+        assert_eq!(restore(view).symbol(), "e\u{301}");
+    }
+
+    #[test]
+    fn symbols_stored_on_the_heap_count_toward_the_budget() {
+        let long: &'static str =
+            "e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}";
+        assert!(long.len() > INLINE_SYMBOL);
+        let mut ring = FrameRing::new(64 << 20);
+        ring.push_key(0, AREA, None, vec![Cell::new(long); 8])
+            .unwrap();
+        let reserved = Group::reserved_bytes(AREA);
+        assert_eq!(ring.held, reserved + 8 * long.len());
+        let group = ring.open_delta(AREA).unwrap();
+        assert!(group.push_cell(0, 0, &Cell::new(long)));
+        ring.close_delta(1, None).unwrap();
+        assert_eq!(ring.held, reserved + 9 * long.len());
+        assert_eq!(counted(&ring), ring.held);
+    }
+
+    #[test]
+    fn a_frame_the_ring_cannot_hold_is_reported_and_no_delta_builds_on_it() {
+        let small = (2, 1);
+        let mut builder = RingBuilder::new(Group::reserved_bytes(small) * 3);
+        let cell = |x| CellView {
+            x,
+            y: 0,
+            symbol: "a",
+            fg: 0,
+            bg: 0,
+            ul: 0,
+            modifier: 0,
+        };
+        assert_eq!(builder.push_key(0, small, None, [cell(0)]), Some(1));
+        assert_eq!(builder.push_key(1, (40, 40), None, [cell(0)]), None);
+        assert_eq!(builder.push_delta(2, None, [cell(1)]), None);
+        assert_eq!(builder.push_key(3, small, None, [cell(1)]), Some(2));
+        assert_eq!(builder.push_delta(4, None, [cell(0)]), Some(3));
+        let mut ring = FrameRing::with_budget(1);
+        assert_eq!(ring.push_key(0, AREA, None, screen("k")), None);
+        assert_eq!(ring.newest(), None);
     }
 
     #[test]
