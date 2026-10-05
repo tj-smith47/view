@@ -930,10 +930,17 @@ Replay brings back what you typed. A timer, a language server reply or a
 key that waited on `timeoutlen` can land differently the second time. The
 frames after the branch point stay in the recording and cannot be branched
 from. `b` is refused while view reads piped input. Keys you press while the
-fresh editor starts are typed after the replay.
+fresh editor starts are typed after the replay. If the fresh editor cannot
+start, view restarts the editor and offers the unsaved text back from its
+swap files. Under `--remote` the swap files are on the other machine, so the
+confirm says the unsaved text is lost if the branch fails.
 
-After `b`, the frame stays on screen while view checks the disk. Only `q`
-and `<Esc>` act then, and both return to the live screen with no confirm.
+Once the input log reaches its share of `[dvr] max_mb`, view says so once,
+and frames painted after that point cannot be branched from.
+
+After `b`, the frame stays on screen while view checks the disk, and the bar
+says so. A clip still being written is finished first. Only `q` and `<Esc>`
+act then, and both return to the live screen with no confirm.
 The confirm then opens over the frame, and the bar drops its keys. `y`
 branches. `n` and `<Esc>` return to the live screen.
 

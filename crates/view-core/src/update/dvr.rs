@@ -19,6 +19,11 @@ const BRANCH_PIPED: &str = "view: DVR cannot branch while the editor reads piped
 /// What `:View dvr play` answers with no path.
 const PLAY_NO_PATH: &str = "view: DVR play needs a clip: :View dvr play PATH";
 
+/// What the input log says once it fills, since a branch replays the log
+/// and so cannot start from a frame painted after it stopped.
+const LOG_FULL: &str =
+    "view: DVR input log is full, so a branch reaches no later frame: raise [dvr] max_mb";
+
 /// Every key the scrub answers, and what it does. `docs/keymaps.md`
 /// carries the rendered table. Test-only: the scrub matches on the keys
 /// themselves.
@@ -146,6 +151,18 @@ fn branch(model: &mut Model, at: u64) -> Vec<Effect> {
     model.engine.record_native_notice(text, false)
 }
 
+/// Logs `msg`, and tells the person once when the log fills on it.
+pub(super) fn record(model: &mut Model, msg: &Msg) -> Vec<Effect> {
+    let was_full = model.dvr.overflowed_at().is_some();
+    model.dvr.record(msg);
+    if was_full || model.dvr.overflowed_at().is_none() {
+        return Vec::new();
+    }
+    model
+        .engine
+        .record_native_notice(LOG_FULL.to_owned(), false)
+}
+
 /// Raises the confirm a pending branch waits on, or the notice a reply
 /// from the DVR's file work carries.
 pub(super) fn on_io(model: &mut Model, reply: &DvrIoReply) -> Vec<Effect> {
@@ -163,13 +180,19 @@ pub(super) fn on_io(model: &mut Model, reply: &DvrIoReply) -> Vec<Effect> {
     } = reply
     {
         if let Some(at) = model.dvr.take_asked() {
+            let unsaved = unsaved_files(&model.buffers);
             let mut state = PromptState::dvr_branch_prompt(
                 at,
-                &unsaved_files(&model.buffers),
+                &unsaved,
                 changed,
                 model.dvr.restarts_before(at),
                 *unverifiable,
             );
+            // a remote engine's swap files are out of view's reach, so a
+            // branch that fails has nothing to offer back
+            if model.remote.is_some() && !unsaved.is_empty() {
+                state.add_sentence("If the branch fails, the unsaved text is lost.");
+            }
             for sentence in agent_waits(model) {
                 state.add_sentence(sentence);
             }
@@ -591,6 +614,46 @@ mod tests {
             .matches(words)
             .count()
             == 1
+    }
+
+    #[test]
+    fn a_remote_branch_confirm_says_unsaved_text_is_lost_if_it_fails() {
+        let confirm = |remote: Option<&str>| {
+            let mut m = recorded();
+            m.remote = remote.map(str::to_owned);
+            let doc = crate::model::BufferEntry::new(1, "doc.txt".into(), true, true);
+            let _ = update(
+                &mut m,
+                Msg::BufferList {
+                    buffers: vec![doc.with_path("/w/doc.txt".into())],
+                },
+            );
+            branch_back(&mut m, 2);
+            checked(&mut m, &[], false);
+            prompt_text(&m).unwrap()
+        };
+        let lost = "If the branch fails, the unsaved text is lost.";
+        assert!(confirm(Some("host")).contains(lost));
+        assert!(!confirm(None).contains(lost), "a local swap is kept");
+    }
+
+    #[test]
+    fn a_full_input_log_says_so_once() {
+        let mut m = Model::with_term_size(80, 24);
+        m.engine.mode.current = "normal".to_owned();
+        m.dvr.enable(8 * 64);
+        m.dvr.note_frame(3, 1);
+        let mut keys = 0;
+        while m.dvr.overflowed_at().is_none() {
+            let _ = update(&mut m, key("<C-x>"));
+            keys += 1;
+            assert!(keys < 1000, "the log never filled");
+        }
+        assert!(told_once(&m, "input log is full"));
+        for _ in 0..5 {
+            let _ = update(&mut m, key("<C-x>"));
+        }
+        assert!(told_once(&m, "input log is full"), "once per fill");
     }
 
     #[test]

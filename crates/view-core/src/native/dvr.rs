@@ -471,7 +471,8 @@ impl Dvr {
     }
 
     /// Whether a branch waits on its disk check.
-    pub(crate) fn is_asking(&self) -> bool {
+    #[must_use]
+    pub fn is_asking(&self) -> bool {
         self.asked.is_some()
     }
 

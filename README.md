@@ -101,7 +101,7 @@ as they are by default.
 
 **Rewind the session.** Turn it on with `[dvr] enabled = true`, then
 `<leader>fv` scrubs back through what the screen showed. Branch the editor
-from any moment, export a clip, and play it back.
+from any moment still in the recording, export a clip, and play it back.
 
 **Fast where you feel it.** Launch, keypress and scroll are measured with
 your config loaded. See [Performance](#performance).

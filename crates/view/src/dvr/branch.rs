@@ -1,5 +1,7 @@
 //! Replaces the editor with one brought to a recorded frame.
 
+use std::path::PathBuf;
+
 use view_core::model::Model;
 use view_core::msg::Msg;
 use view_core::native::dvr::BranchPlan;
@@ -35,15 +37,50 @@ pub(crate) fn replace(
         let _ = bound.2.run(effect);
     }
     // the abandoned timeline's swap files go with it: `qa!` deletes them,
-    // and the replacement would otherwise offer to recover each one
+    // and the replacement would otherwise offer to recover each one. A copy
+    // waits for the replacement, so the restart after a failed one offers
+    // the unsaved text back
+    let kept = keep_swaps(engine);
     let _ = engine.wait_exit();
     let fresh = replace_engine(engine, respawn, model, channels, bound, &[]);
     if fresh.is_ok() {
         model.dvr.branched(plan.at_frame, plan.replay);
+        for (_, copy) in kept {
+            let _ = std::fs::remove_file(copy);
+        }
     } else {
         model.dvr.branch_failed();
+        for (swap, copy) in kept {
+            let _ = std::fs::rename(copy, swap);
+        }
     }
     fresh
+}
+
+/// The swap file of every loaded buffer with unsaved changes, as an
+/// absolute path per line.
+const CHANGED_SWAPS: &str = "join(map(filter(getbufinfo({'bufloaded': 1}), \
+    'v:val.changed && swapname(v:val.bufnr) != \"\"'), 'fnamemodify(swapname(v:val.bufnr), \":p\")'), \"\\n\")";
+
+/// Writes the swap file of every buffer with unsaved changes and copies
+/// each beside itself. Returns each swap with its copy. A remote engine's
+/// swaps are on its own host, out of reach, so none is kept.
+fn keep_swaps(engine: &Engine) -> Vec<(PathBuf, PathBuf)> {
+    if engine.is_remote() || engine.handle.command("silent! preserve").is_err() {
+        return Vec::new();
+    }
+    let listed = engine.handle.eval_str(CHANGED_SWAPS).unwrap_or_default();
+    listed
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let swap = PathBuf::from(line);
+            let mut copy = swap.clone().into_os_string();
+            copy.push(".view-branch");
+            (swap, PathBuf::from(copy))
+        })
+        .filter(|(swap, copy)| std::fs::copy(swap, copy).is_ok())
+        .collect()
 }
 
 /// The messages a branch's replay folds now: none while the replacement's
@@ -544,6 +581,73 @@ mod tests {
         let own = eval(&fresh.engine, "fnamemodify(swapname('%'), ':t')");
         let left = crate::dvr::io::listed(&swaps);
         assert_eq!(left, [own], "only the replacement's own swap is left");
+    }
+
+    #[test]
+    fn a_branch_that_cannot_start_leaves_unsaved_text_to_recover() {
+        let scratch = view_test_support::ScratchDir::new("dvr-branch-keep").unwrap();
+        let file = scratch.path().join("doc.txt");
+        std::fs::write(&file, "on disk\n").unwrap();
+        let swaps = scratch.path().join("swap");
+        std::fs::create_dir_all(&swaps).unwrap();
+        let bare = || {
+            EngineConfig::default()
+                .with_arg("--clean")
+                .with_arg("--cmd")
+                .with_arg(format!("lua vim.o.directory = [[{}//]]", swaps.display()))
+                .with_env("XDG_STATE_HOME", scratch.path().join("state"))
+        };
+        let tries = std::cell::Cell::new(0);
+        let respawn = |_: &[String]| {
+            tries.set(tries.get() + 1);
+            match tries.get() {
+                1 => bare().with_nvim_bin("/nonexistent/nvim"),
+                _ => bare(),
+            }
+        };
+        let mut rig = Rig::new();
+        let (mut engine, pump, route, ai_route, executor) = rig.launch(bare().with_arg(&file));
+        let at = rig.frames;
+        let mut edit = keys(&["c", "c"]);
+        edit.extend(chars("unsaved"));
+        edit.push("<Esc>".to_owned());
+        typed(&mut rig, &executor, &edit);
+        rig.settle(&engine, &pump, &executor, "the session edits", |_, e| {
+            line(e, 1) == "unsaved"
+        });
+
+        let failed = rig.start_branch(&mut engine, &respawn, (&route, &ai_route, &executor), at);
+        assert!(matches!(failed, Err(AttachFailure::Spawn(_))));
+        let left = crate::dvr::io::listed(&swaps);
+        assert_eq!(
+            left.len(),
+            1,
+            "the swap is back under its own name: {left:?}"
+        );
+        assert!(!left[0].ends_with(".view-branch"), "{left:?}");
+
+        // the restart the loop runs after a failed branch
+        let back = crate::recovery::restart_engine(
+            &mut engine,
+            &respawn,
+            &mut rig.model,
+            &rig.channels,
+            (&route, &ai_route, &executor),
+        )
+        .expect("an engine comes back");
+        let back = rig.cut_over(back);
+        rig.settle(
+            &back.engine,
+            &back.pump,
+            &back.executor,
+            "the restarted engine answers",
+            |_, e| answers(e),
+        );
+        back.engine
+            .handle
+            .command(&format!("silent recover {}", file.display()))
+            .unwrap();
+        assert_eq!(line(&back.engine, 1), "unsaved", "the text comes back");
     }
 
     #[test]

@@ -38,7 +38,7 @@ pub(crate) struct DvrLoop {
     /// The recorded frame on screen, the size it was painted at, whether
     /// its bar said something waits and whether the branch confirm was
     /// painted over it, so a pass that changed none of them writes nothing.
-    painted: Option<(u64, (u16, u16), bool, bool)>,
+    painted: Option<(u64, (u16, u16), bool, Legend)>,
     /// The thread doing the file work, `None` when the host refused it.
     io: Option<BackgroundWriter<IoJob, Infallible>>,
     /// Jobs a full queue handed back, sent again in order on the next poll.
@@ -311,13 +311,14 @@ impl DvrLoop {
         // closes the scrub repaints everything
         let _ = model.take_paint_damage();
         let waits = waiting(model);
-        let confirming = model.branch_confirm_focused();
-        let shown = (
-            seq,
-            (model.term_width, model.term_height),
-            waits,
-            confirming,
-        );
+        let legend = if model.branch_confirm_focused() {
+            Legend::Confirm
+        } else if model.dvr.is_asking() {
+            Legend::Checking
+        } else {
+            Legend::Keys
+        };
+        let shown = (seq, (model.term_width, model.term_height), waits, legend);
         if self.painted == Some(shown) {
             return Some(None);
         }
@@ -338,7 +339,7 @@ impl DvrLoop {
             .dvr
             .clip()
             .map(|path| (path, model.dvr.clip_left_out()));
-        let bar = self.bar(seq, waits, clip, confirming);
+        let bar = self.bar(seq, waits, clip, legend);
         Some(Some((seq, bar)))
     }
 
@@ -374,13 +375,7 @@ impl DvrLoop {
     /// names one, how far back the frame is and how far back the frames
     /// reach, the way out and the keys, then how many of the clip's oldest
     /// frames were left out.
-    fn bar(
-        &self,
-        seq: u64,
-        waiting: bool,
-        clip: Option<(&str, usize)>,
-        confirming: bool,
-    ) -> String {
+    fn bar(&self, seq: u64, waiting: bool, clip: Option<(&str, usize)>, legend: Legend) -> String {
         let secs = |s| self.ring.age(s).unwrap_or_default().as_secs_f64();
         let age = secs(seq);
         let reach = secs(self.ring.oldest().unwrap_or(seq));
@@ -398,15 +393,32 @@ impl DvrLoop {
             }
             None => ("DVR".to_owned(), SCRUB_HINT, String::new()),
         };
-        if confirming {
+        let hint = match legend {
             // the confirm over the frame names its own keys
-            return format!("{head}  -{age:.1}s of {reach:.1}s{flag}{cut}");
-        }
+            Legend::Confirm => return format!("{head}  -{age:.1}s of {reach:.1}s{flag}{cut}"),
+            Legend::Checking => CHECKING,
+            Legend::Keys => hint,
+        };
         // the flag and the legend go ahead of the count, since a narrow
         // terminal cuts the bar's end
         format!("{head}  -{age:.1}s of {reach:.1}s{flag}  {hint}{cut}")
     }
 }
+
+/// What the scrub bar ends with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Legend {
+    /// The keys the scrub answers.
+    Keys,
+    /// A branch waits on its disk check, which an export queued ahead of it
+    /// can hold up, and only closing acts meanwhile.
+    Checking,
+    /// The branch confirm is painted over the frame and names its own keys.
+    Confirm,
+}
+
+/// The bar's legend while a branch waits on its disk check.
+const CHECKING: &str = "checking files on disk before the branch  q cancel";
 
 /// A loop dropped without [`DvrLoop::finish`], on an error or a panic,
 /// cancels the clip in flight and removes its part file without waiting.
@@ -595,7 +607,7 @@ mod tests {
         assert_eq!(model.dvr.scrub_frame(), Some(6));
         assert_eq!(press(&mut model, &mut dvr, "h"), Some(5));
         assert_eq!(
-            dvr.bar(5, false, None, false),
+            dvr.bar(5, false, None, Legend::Keys),
             "DVR  -0.4s of 2.0s  q close  h/l frame  H/L 1s  g/G ends  b branch  e export"
         );
         assert_eq!(press(&mut model, &mut dvr, "H"), Some(2));
@@ -1061,6 +1073,34 @@ mod tests {
     }
 
     #[test]
+    fn the_bar_says_a_branch_waits_on_its_disk_check() {
+        let mut model = Model::with_term_size(80, 24);
+        let mut dvr = recorded(&mut model);
+        // a file thread that answers nothing, as one busy with an export
+        let writer =
+            BackgroundWriter::start("dvr-io-test", 4, |_: IoJob| Ok::<(), Infallible>(())).unwrap();
+        dvr.io = Some(writer);
+        open_scrub(&mut model, &mut dvr);
+        let _ = press(&mut model, &mut dvr, "h");
+        let _ = press(&mut model, &mut dvr, "b");
+        assert!(model.dvr.is_asking());
+        assert_eq!(
+            dvr.scrub_pass(&mut model),
+            Some(Some((5, format!("DVR  -0.4s of 2.0s  {CHECKING}"))))
+        );
+        let checked = DvrIoReply::DiskChecked {
+            changed: Vec::new(),
+            unverifiable: false,
+        };
+        let _ = update(&mut model, Msg::DvrIo(checked));
+        assert_eq!(
+            dvr.scrub_pass(&mut model),
+            Some(Some((5, "DVR  -0.4s of 2.0s".to_owned()))),
+            "the confirm names its own keys"
+        );
+    }
+
+    #[test]
     fn a_disk_check_with_no_file_thread_is_answered_unverifiable() {
         let mut model = Model::with_term_size(80, 24);
         let mut dvr = recorded(&mut model);
@@ -1253,7 +1293,7 @@ mod tests {
         assert_eq!(dvr.ring.newest(), Some(6), "the recording is back");
         open_scrub(&mut model, &mut dvr);
         assert_eq!(model.dvr.scrub_frame(), Some(6));
-        assert!(dvr.bar(6, false, None, false).starts_with("DVR  "));
+        assert!(dvr.bar(6, false, None, Legend::Keys).starts_with("DVR  "));
     }
 
     #[test]
@@ -1460,7 +1500,12 @@ mod tests {
     fn a_cut_clips_bar_keeps_its_close_key_on_an_80_column_terminal() {
         let mut model = Model::with_term_size(80, 24);
         let dvr = recorded(&mut model);
-        let bar = dvr.bar(6, false, Some(("/w/view-dvr-1759700000.vdvr", 40)), false);
+        let bar = dvr.bar(
+            6,
+            false,
+            Some(("/w/view-dvr-1759700000.vdvr", 40)),
+            Legend::Keys,
+        );
         let shown: String = bar.chars().take(80).collect();
         assert!(shown.contains("q close"), "{shown}");
         assert!(bar.contains("40 oldest frames"), "{bar}");
@@ -1471,11 +1516,11 @@ mod tests {
         let mut model = Model::with_term_size(80, 24);
         let dvr = recorded(&mut model);
         assert_eq!(
-            dvr.bar(6, false, Some(("/w/clips/a.vdvr", 0)), false),
+            dvr.bar(6, false, Some(("/w/clips/a.vdvr", 0)), Legend::Keys),
             "CLIP a.vdvr  -0.0s of 2.0s  q close  h/l frame  H/L 1s  g/G ends"
         );
         assert!(dvr
-            .bar(6, false, None, false)
+            .bar(6, false, None, Legend::Keys)
             .ends_with("g/G ends  b branch  e export"));
     }
 

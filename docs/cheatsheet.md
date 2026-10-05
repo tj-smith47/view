@@ -6,7 +6,7 @@ that in its place.
 
 Each leader key is also a `:View` command, shown beside it. `:View` followed by
 Tab lists the commands. `:map <Space>` lists the keys view registered.
-`<Space>fk` opens a log that shows each key as you fire it. `view --print-caps`
+`<Space>fk` opens a log of each mapping you fire. `view --print-caps`
 prints what view found out about your terminal and every setting it resolved,
 then exits.
 
@@ -293,7 +293,7 @@ Needs `[dvr] enabled = true` in `view.toml`.
 | Key or command | What it does |
 | --- | --- |
 | `<Space>fv` (`:View dvr scrub`) | Freezes the screen on the last frame and opens the scrub bar. |
-| `:View dvr close` | Closes the scrub and returns to the live screen. |
+| `q` or `<Esc>` (`:View dvr close`) | Closes the scrub and returns to the live screen. |
 | `:View dvr export` | Writes the recording to `view-dvr-<seconds>.vdvr` in the directory view started in, on the machine view runs on, including under `--remote`. Add a path to write there. The clip holds the screen as it was shown and nothing you typed. |
 | `:View dvr play PATH` | Opens a saved clip in the scrub. `b` and `e` close the clip. `q` returns to your session. |
 
