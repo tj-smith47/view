@@ -727,16 +727,26 @@ pub(super) fn resize_windowed_tree(model: &mut Model) -> Vec<Effect> {
     if !model.tree_is_windowed() {
         return Vec::new();
     }
-    let Some(win) = model.engine.grids().native_window(NativeSurface::Tree) else {
-        return Vec::new();
-    };
-    let columns = model.engine.grids().global().size().0;
-    let cells = crate::native::geometry::share(columns, stepped).max(1);
-    vec![Effect::Rpc(RpcCall::SetWindowSize {
+    window_size_call(model, NativeSurface::Tree, stepped)
+        .into_iter()
+        .collect()
+}
+
+/// The call that sizes `surface`'s window to `pct` of the grid nvim lays
+/// its windows in, along the axis its anchor sizes: columns for a left or
+/// right edge, rows for a top or bottom one. `None` while it has no
+/// window.
+pub(super) fn window_size_call(model: &Model, surface: NativeSurface, pct: u16) -> Option<Effect> {
+    let win = model.engine.grids().native_window(surface)?;
+    let anchor = model.surfaces.layout(surface).anchor;
+    let vertical = WinSplit::for_anchor(anchor).is_vertical();
+    let (columns, rows) = model.engine.grids().global().size();
+    let cells = crate::native::geometry::share(if vertical { columns } else { rows }, pct).max(1);
+    Some(Effect::Rpc(RpcCall::SetWindowSize {
         win: win.0,
-        width: Some(cells),
-        height: None,
-    })]
+        width: vertical.then_some(cells),
+        height: (!vertical).then_some(cells),
+    }))
 }
 
 /// [`resize_windowed_tree`], for the agent panel: carries the share
@@ -755,16 +765,9 @@ pub(super) fn resize_windowed_agent(model: &mut Model) -> Vec<Effect> {
     if !model.agent_is_windowed() {
         return Vec::new();
     }
-    let Some(win) = model.engine.grids().native_window(NativeSurface::Agent) else {
-        return Vec::new();
-    };
-    let columns = model.engine.grids().global().size().0;
-    let cells = crate::native::geometry::share(columns, stepped).max(1);
-    vec![Effect::Rpc(RpcCall::SetWindowSize {
-        win: win.0,
-        width: Some(cells),
-        height: None,
-    })]
+    window_size_call(model, NativeSurface::Agent, stepped)
+        .into_iter()
+        .collect()
 }
 
 /// [`resize_windowed_tree`]/[`resize_windowed_agent`], for the notification
@@ -806,22 +809,9 @@ pub(super) fn resize_windowed_stream_to(model: &mut Model, pct: u16) -> Vec<Effe
         crate::native::geometry::SurfaceLayout::new(layout.placement, layout.anchor, stepped),
     );
     sync_stacked_siblings(model, NativeSurface::Notifications, layout.anchor, stepped);
-    let Some(win) = model
-        .engine
-        .grids()
-        .native_window(NativeSurface::Notifications)
-    else {
-        return Vec::new();
-    };
-    let (columns, rows) = model.engine.grids().global().size();
-    let vertical = WinSplit::for_anchor(layout.anchor).is_vertical();
-    let cells =
-        crate::native::geometry::share(if vertical { columns } else { rows }, stepped).max(1);
-    vec![Effect::Rpc(RpcCall::SetWindowSize {
-        win: win.0,
-        width: vertical.then_some(cells),
-        height: (!vertical).then_some(cells),
-    })]
+    window_size_call(model, NativeSurface::Notifications, stepped)
+        .into_iter()
+        .collect()
 }
 
 /// Closes the window the tree sits in and drops its state.

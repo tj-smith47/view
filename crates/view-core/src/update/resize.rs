@@ -69,6 +69,36 @@ pub(super) fn set_sidebar_share(
     }
 }
 
+/// Sizes each windowed sidebar again from its share of the grid nvim has
+/// just laid its windows in, for the sidebars whose axis `columns` or
+/// `rows` says changed. nvim keeps a sidebar's window at its cells across a
+/// terminal resize, so a sidebar sized once kept them on every later size.
+pub(super) fn reshare_windowed_sidebars(model: &Model, columns: bool, rows: bool) -> Vec<Effect> {
+    let mut sized: Vec<crate::native::geometry::Anchor> = Vec::new();
+    let mut effects = Vec::new();
+    for surface in [
+        NativeSurface::Tree,
+        NativeSurface::Agent,
+        NativeSurface::Notifications,
+    ] {
+        let layout = model.surfaces.layout(surface);
+        let vertical = crate::msg::WinSplit::for_anchor(layout.anchor).is_vertical();
+        // sidebars stacked on one edge share one column or row, which one
+        // request sizes
+        if !model.surfaces.windowed(surface)
+            || !(if vertical { columns } else { rows })
+            || sized.contains(&layout.anchor)
+        {
+            continue;
+        }
+        if let Some(call) = super::surfaces::window_size_call(model, surface, layout.size) {
+            sized.push(layout.anchor);
+            effects.push(call);
+        }
+    }
+    effects
+}
+
 /// What resize mode resizes from where the keyboard is: `Some(None)` for
 /// nvim's current window, the sidebar for a focused one, and `None` where
 /// the keyboard is in anything else.

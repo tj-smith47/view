@@ -208,10 +208,10 @@ fn settle_on_a_frame_boundary(session: &mut PtySession) {
 }
 
 /// What is wrong with the frames a resize painted, or `None` where the last
-/// one agrees and every one before it that disagrees was painted for the
-/// old layout, before nvim moved its windows. A frame that shows the new
-/// slots shows them over the grids sized for them, however many frames
-/// view paints before nvim answers.
+/// one agrees and reads as the new layout, and every one before it that
+/// disagrees was painted for the old layout, before nvim moved its windows.
+/// A frame that shows the new slots shows them over the grids sized for
+/// them, however many frames view paints before nvim answers.
 fn judge(screens: &[Painted]) -> Option<String> {
     let Some(last) = screens.last() else {
         return Some("no frame was painted".to_string());
@@ -222,6 +222,14 @@ fn judge(screens: &[Painted]) -> Option<String> {
              it left:\n{}",
             screens.len(),
             last.at,
+            last.screen
+        ));
+    }
+    if !last.new_layout {
+        return Some(format!(
+            "the last of {} frames does not read as the new layout; the \
+             screen it left:\n{}",
+            screens.len(),
             last.screen
         ));
     }
@@ -547,7 +555,9 @@ fn panel_beside_the_tiles(gaps: bool) {
                 &mut replayed,
                 (cols, rows),
                 |_, _| {},
-                wrapped,
+                // the tiles reach their new slots a round trip after the
+                // panel, which view sizes itself, so the mark can show first
+                |screen| wrapped(screen) && beside_the_panel(screen, cols, rows),
                 (apart, beside_the_panel),
             );
             if let Some(why) = judge(&screens) {
@@ -562,6 +572,112 @@ fn panel_beside_the_tiles(gaps: bool) {
              wrapped its first line at its frame under the handler's mark; \
              {:?}; screen:\n{}",
             session.with_screen(|screen| wraps_beside_the_panel(screen, cols, rows)),
+            session.screen()
+        );
+    }
+}
+
+/// The sidebar a windowed scenario opens: the agent panel docked right or
+/// the tree docked left, each in a window of its own in nvim's layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sidebar {
+    Agent,
+    Tree,
+}
+
+/// The frame `sidebar` stands in: the rightmost for the agent panel, the
+/// leftmost for the tree.
+fn sidebar_frame(sidebar: Sidebar, screen: &vt100::Screen, cols: u16, rows: u16) -> Option<Frame> {
+    let frames = frames(screen, cols, rows);
+    match sidebar {
+        Sidebar::Agent => frames.into_iter().max_by_key(|frame| frame.left),
+        Sidebar::Tree => frames.into_iter().min_by_key(|frame| frame.left),
+    }
+}
+
+/// The columns `frame` spans, its edges included.
+fn span(frame: Frame) -> u16 {
+    frame.right - frame.left + 1
+}
+
+/// A vsplit beside a gapped windowed `sidebar`, shrunk and grown back: the
+/// sidebar spans the same share of the columns nvim lays its windows in at
+/// every size as it did at launch, to the cell its share rounds to.
+fn windowed_sidebar_keeps_its_share(sidebar: Sidebar) {
+    let paths = common::ScratchPaths::new(&format!("tiles-resize-windowed-{sidebar:?}"));
+    std::fs::write(&paths.scratch, "####\n").unwrap();
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.cwd(paths.scratch.parent().unwrap());
+    cmd.args(["--panes", "tiles"]);
+    cmd.arg(paths.scratch.file_name().unwrap());
+    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+    let config = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("view/view.toml");
+    let stub = common::built_bin("view-ai", "view-ai-stub-agent", &["test-support"]);
+    let resume = paths.isolated_home.join("resume");
+    let (surface, open) = match sidebar {
+        Sidebar::Agent => ("agent", "\x1b:View ai open\r"),
+        Sidebar::Tree => ("tree", "\x1b:View tree\r"),
+    };
+    std::fs::write(
+        config,
+        format!(
+            "[ui]\ngaps = true\n\n[ai]\nagent = [{:?}, {:?}]\n\n\
+             [ui.surfaces.{surface}]\nplacement = \"windowed\"\n",
+            stub.to_string_lossy(),
+            resume.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, POLICY).unwrap();
+    assert!(
+        session.wait_for("####", BUDGET),
+        "windowed {surface}: view never showed the file; screen:\n{}",
+        session.screen()
+    );
+    session.send(b"\x1b:vsplit\r").unwrap();
+    session.send(open.as_bytes()).unwrap();
+    if sidebar == Sidebar::Agent {
+        assert!(
+            session.wait_for("Trust ", BUDGET),
+            "windowed agent: a fresh workspace raised no trust prompt; screen:\n{}",
+            session.screen()
+        );
+        session.send(b"y").unwrap();
+    }
+    // a launch notice is a frame of its own standing over a tile
+    let settled = |screen: &vt100::Screen| {
+        let frames = frames(screen, COLS, ROWS);
+        frames.len() == 3 && frames.iter().all(|frame| frame.top == frames[0].top)
+    };
+    let mut dismissed = 0;
+    while !session.wait_for_screen(host_deadline(Duration::from_millis(500)), settled) {
+        assert!(
+            dismissed < 8,
+            "windowed {surface}: the tiles and the sidebar never settled; screen:\n{}",
+            session.screen()
+        );
+        session.send(b"\x1b:View notifications dismiss\r").unwrap();
+        dismissed += 1;
+    }
+    let launch = session
+        .with_screen(|screen| sidebar_frame(sidebar, screen, COLS, ROWS))
+        .map(span)
+        .unwrap();
+    // nvim lays its windows out in the columns the gap ring leaves
+    let laid = |cols: u16| u32::from(cols - 2);
+    for (cols, rows) in [SHRUNK, (COLS, ROWS)] {
+        let want = u32::from(launch) * laid(cols) / laid(COLS);
+        let shared = |screen: &vt100::Screen| {
+            sidebar_frame(sidebar, screen, cols, rows)
+                .is_some_and(|frame| u32::from(span(frame)).abs_diff(want) <= 1)
+        };
+        session.resize(cols, rows).unwrap();
+        assert!(
+            session.wait_for_screen(BUDGET, shared),
+            "windowed {surface}: at {cols}x{rows} the sidebar never spanned \
+             the {want} columns its launch share of {launch} rounds to; \
+             frames {:?}; screen:\n{}",
+            session.with_screen(|screen| frames(screen, cols, rows)),
             session.screen()
         );
     }
@@ -933,8 +1049,24 @@ fn a_frame_of_new_slots_over_old_grids_fails() {
     assert!(judge(&screens).is_some(), "new slots over old grids passed");
 }
 
+/// A resize whose last frame agrees but does not read as the new layout
+/// fails, so a [`Layout`] that never matches a live frame cannot pass every
+/// disagreeing frame before it.
+#[test]
+fn a_last_frame_that_does_not_read_as_the_new_layout_fails() {
+    let short = ["╭──╮╭──╮", "│##││##│", "╰──╯╰──╯"];
+    let screens = replayed_frames(&[CUT, short]);
+    let last = screens.last().unwrap();
+    assert_eq!(last.why, None, "the short frame read as disagreeing");
+    assert!(!last.new_layout, "the short frame read as the new layout");
+    assert!(
+        judge(&screens).is_some(),
+        "a last frame of another layout passed"
+    );
+}
+
 /// Both looks in one session after another, then the panel and the tree
-/// beside the tiles, one live session at a time.
+/// beside the tiles, floating and windowed, one live session at a time.
 #[test]
 fn a_tile_frame_stays_on_its_text_while_nvim_redraws_a_resize() {
     wrapped_text_stays_inside_its_frame(true);
@@ -944,4 +1076,6 @@ fn a_tile_frame_stays_on_its_text_while_nvim_redraws_a_resize() {
     panel_beside_the_tiles(true);
     panel_beside_the_tiles(false);
     tree_beside_the_tiles();
+    windowed_sidebar_keeps_its_share(Sidebar::Agent);
+    windowed_sidebar_keeps_its_share(Sidebar::Tree);
 }

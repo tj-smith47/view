@@ -25,17 +25,27 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             width,
             height,
         } => {
+            let before = model.engine.grids().global().size();
             // clamp untrusted wire dimensions: a desynced or malformed
             // grid_resize must not allocate unboundedly, and a plain `as
             // u16` cast would silently truncate 65536 to 0
-            cells(
+            let mut effects = cells(
                 model,
                 grid,
                 GridOp::Resize {
                     width: clamp_dim(width),
                     height: clamp_dim(height),
                 },
-            )
+            );
+            if GridId(grid) == crate::grid::registry::GLOBAL_GRID {
+                let after = model.engine.grids().global().size();
+                effects.extend(super::resize::reshare_windowed_sidebars(
+                    model,
+                    before.0 != after.0,
+                    before.1 != after.1,
+                ));
+            }
+            effects
         }
         UiEvent::GridLine {
             grid,

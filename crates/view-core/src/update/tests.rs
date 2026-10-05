@@ -19215,6 +19215,71 @@ fn resizing_a_windowed_sidebar_sets_the_nvim_window_width() {
     );
 }
 
+/// A terminal resize sizes each windowed sidebar again from its own share
+/// once nvim has taken the new size. nvim keeps a sidebar's width in cells
+/// across a resize, so one sized at launch kept those cells on a narrower
+/// screen and squeezed the tiles beside it.
+#[test]
+fn a_terminal_resize_sizes_each_windowed_sidebar_from_its_share() {
+    use crate::native::geometry::NativeSurface;
+    for (mut m, surface, win) in [
+        (focused_windowed_agent(), NativeSurface::Agent, AGENT_WIN),
+        (focused_windowed_tree(), NativeSurface::Tree, TREE_WIN),
+        (
+            focused_windowed_notifications(),
+            NativeSurface::Notifications,
+            NOTIFICATIONS_WIN,
+        ),
+    ] {
+        let resized = update(
+            &mut m,
+            Msg::Resized {
+                width: 50,
+                height: 20,
+            },
+        );
+        assert_eq!(
+            window_widths(&resized),
+            [],
+            "{surface:?}: sized before nvim took the new size"
+        );
+        let taken = update(
+            &mut m,
+            Msg::Redraw(vec![
+                UiEvent::GridResize {
+                    grid: 1,
+                    width: 50,
+                    height: 20,
+                },
+                UiEvent::Flush,
+            ]),
+        );
+        let pct = m.surfaces.layout(surface).size;
+        let cells = crate::native::geometry::share(50, pct).max(1);
+        assert_eq!(
+            window_widths(&taken),
+            [(win.0, Some(cells), None)],
+            "{surface:?}: the new size reached no sidebar window"
+        );
+        let taller = update(
+            &mut m,
+            Msg::Redraw(vec![
+                UiEvent::GridResize {
+                    grid: 1,
+                    width: 50,
+                    height: 22,
+                },
+                UiEvent::Flush,
+            ]),
+        );
+        assert_eq!(
+            window_widths(&taller),
+            [],
+            "{surface:?}: a height change resized a side sidebar's width"
+        );
+    }
+}
+
 /// The percent `[ui.surfaces.agent]` would read back after a restart moves
 /// with the resize key, so a panel closed and reopened -- or a session
 /// restarted -- comes back at the width the user actually left it.
