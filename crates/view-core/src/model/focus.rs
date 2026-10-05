@@ -276,4 +276,26 @@ impl Model {
             permission.note_shown();
         }
     }
+
+    /// Whether the focused overlay is the DVR branch confirm.
+    #[must_use]
+    pub fn branch_confirm_focused(&self) -> bool {
+        matches!(
+            self.focused_overlay().map(|overlay| &overlay.kind),
+            Some(OverlayKind::Prompt(prompt)) if prompt.dvr_branch_at().is_some()
+        )
+    }
+
+    /// Records that a recorded frame carrying the DVR branch confirm
+    /// reached the terminal, which lets that confirm read keys. Every other
+    /// question waits for a live frame.
+    pub fn note_recorded_frame_painted(&mut self) {
+        if let Some(OverlayKind::Prompt(prompt)) =
+            self.focused_overlay_mut().map(|overlay| &mut overlay.kind)
+        {
+            if prompt.dvr_branch_at().is_some() {
+                prompt.note_shown();
+            }
+        }
+    }
 }

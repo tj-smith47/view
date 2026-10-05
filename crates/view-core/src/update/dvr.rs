@@ -113,27 +113,31 @@ fn export(model: &mut Model, path: &str) -> Vec<Effect> {
     on_io(model, &DvrIoReply::Refused(ExportRefusal::NoFrame))
 }
 
-/// Closes the scrub and asks to branch from frame `at`, the frame it
-/// showed, raising the confirm once the disk check answers, or says why
-/// that frame cannot be reproduced.
+/// Asks to branch from frame `at`, the frame the scrub shows, which stays
+/// on screen under the confirm raised once the disk check answers. A
+/// refusal closes the scrub with a notice saying why that frame cannot be
+/// reproduced.
 fn branch(model: &mut Model, at: u64) -> Vec<Effect> {
     if let Some(refused) = refuse_in_clip(model, "branch") {
         return refused;
     }
-    model.dvr.close_scrub();
     model.dirty = true;
     if model.stdin_relay {
+        model.dvr.close_scrub();
         return model
             .engine
             .record_native_notice(BRANCH_PIPED.to_owned(), false);
     }
-    let text = match model.dvr.ask_branch(at) {
-        Ok(()) => return Vec::new(),
-        Err(BranchRefusal::Dead) => format!(
+    let Err(refusal) = model.dvr.ask_branch(at) else {
+        return Vec::new();
+    };
+    model.dvr.close_scrub();
+    let text = match refusal {
+        BranchRefusal::Dead => format!(
             "view: DVR cannot branch from frame {at}: a later branch left it \
              behind"
         ),
-        Err(BranchRefusal::PastLog(full)) => format!(
+        BranchRefusal::PastLog(full) => format!(
             "view: DVR cannot branch from frame {at}: the input log filled at \
              frame {full}; raise [dvr] max_mb"
         ),
@@ -166,7 +170,9 @@ pub(super) fn on_io(model: &mut Model, reply: &DvrIoReply) -> Vec<Effect> {
                 *unverifiable,
             );
             // beneath a prompt the engine waits on, which keeps its answer
+            // and is the question the live screen has to show
             if let Some(OverlayKind::Prompt(_)) = model.focused_overlay().map(|ov| &ov.kind) {
+                model.dvr.close_scrub();
                 model.insert_overlay_beneath_top(state.overlay_box(), OverlayKind::Prompt(state));
             } else {
                 model.push_overlay(state.overlay_box(), OverlayKind::Prompt(state));
@@ -201,9 +207,13 @@ pub(super) fn close_view_surfaces(model: &mut Model) -> Vec<Effect> {
 }
 
 /// Takes every key, paste and click while the scrub is open, so none
-/// reaches the engine. `None` on the live screen and for any other message.
+/// reaches the engine. `None` on the live screen, while the branch confirm
+/// takes the keys over the frame it names, and for any other message.
 pub(super) fn scrub_input(model: &mut Model, msg: &Msg) -> Option<Vec<Effect>> {
     let shown = model.dvr.scrub_frame()?;
+    if model.branch_confirm_focused() {
+        return None;
+    }
     match msg {
         Msg::Key(key) => Some(scrub_key(model, &key.notation, shown)),
         Msg::Paste(_) | Msg::Mouse(_) => Some(Vec::new()),
@@ -212,8 +222,12 @@ pub(super) fn scrub_input(model: &mut Model, msg: &Msg) -> Option<Vec<Effect>> {
 }
 
 /// Moves the scrub cursor off frame `shown`, closes the scrub, exports the
-/// recording or branches from `shown`. Any other key does nothing.
+/// recording or branches from `shown`. Any other key does nothing, and
+/// while a branch waits on its disk check only closing acts.
 fn scrub_key(model: &mut Model, notation: &str, shown: u64) -> Vec<Effect> {
+    if model.dvr.is_asking() && !matches!(notation, "q" | "<Esc>") {
+        return Vec::new();
+    }
     let step = match notation {
         "h" => ScrubStep::Frames(-1),
         "l" => ScrubStep::Frames(1),
@@ -370,10 +384,10 @@ mod tests {
             let _ = update(&mut m, invoke_msg("scrub"));
             assert_eq!(m.dvr.take_step(), Some(ScrubStep::Newest));
             let _ = update(&mut m, key(notation));
-            let closed = m.dvr.scrub_frame().is_none();
+            let ended = m.dvr.scrub_frame().is_none() || m.dvr.is_asking();
             assert!(
-                closed != m.dvr.take_step().is_some(),
-                "{notation} neither moved nor closed the scrub"
+                ended != m.dvr.take_step().is_some(),
+                "{notation} neither moved, closed nor branched from the scrub"
             );
         }
         let mut m = recorded();
@@ -642,6 +656,50 @@ mod tests {
             remote.dvr.inputs().count(),
             logged,
             "a later replay would type the answer into the engine"
+        );
+    }
+
+    #[test]
+    fn the_chosen_frame_stays_on_screen_under_the_branch_confirm() {
+        for (answer, branches) in [("y", true), ("n", false), ("<Esc>", false)] {
+            let mut m = recorded();
+            branch_back(&mut m, 2);
+            let at = m.dvr.scrub_frame();
+            assert_eq!(at, Some(7), "{answer}: b keeps the frame it was pressed on");
+            let _ = update(&mut m, key("h"));
+            assert_eq!(
+                m.dvr.scrub_frame(),
+                at,
+                "{answer}: the frame holds for the check"
+            );
+            checked(&mut m, &[], false);
+            assert!(prompt_text(&m).is_some(), "{answer}");
+            assert_eq!(m.dvr.scrub_frame(), at, "{answer}: and under the confirm");
+            m.note_recorded_frame_painted();
+            let _ = update(&mut m, key(answer));
+            assert!(
+                prompt_text(&m).is_none(),
+                "{answer}: the key answers the confirm"
+            );
+            assert!(
+                m.dvr.scrub_frame().is_none(),
+                "{answer}: the answer closes it"
+            );
+            assert_eq!(m.dvr.is_branching(), branches, "{answer}");
+        }
+    }
+
+    #[test]
+    fn a_confirm_under_a_prompt_the_engine_waits_on_closes_the_scrub() {
+        let mut m = recorded();
+        branch_back(&mut m, 2);
+        let engine =
+            PromptState::external_write_conflict_prompt("/w/a.rs".into(), "Reload?".into());
+        m.push_overlay(engine.overlay_box(), OverlayKind::Prompt(engine));
+        checked(&mut m, &[], false);
+        assert!(
+            m.dvr.scrub_frame().is_none(),
+            "the live prompt is the one on screen"
         );
     }
 

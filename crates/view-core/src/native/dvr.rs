@@ -454,6 +454,11 @@ impl Dvr {
         self.asked.take()
     }
 
+    /// Whether a branch waits on its disk check.
+    pub(crate) fn is_asking(&self) -> bool {
+        self.asked.is_some()
+    }
+
     /// How many engine restarts happened before frame `at`, which a replay
     /// into one engine does not reproduce.
     #[must_use]

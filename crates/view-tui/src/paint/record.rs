@@ -332,6 +332,35 @@ pub(crate) fn paint_bar(shadow: &mut Shadow, model: &Model, text: &str) {
     paint_text_row(text, style, row, 0, &mut shadow.back);
 }
 
+/// Paints the DVR branch confirm over the recorded frame in the shadow's
+/// `back`, where it is the focused overlay. Every other question stays on
+/// the live screen.
+pub(crate) fn paint_branch_confirm(shadow: &mut Shadow, model: &Model) {
+    if !model.branch_confirm_focused() {
+        return;
+    }
+    let surface = view_surface::render(model);
+    let Some(layer) = surface
+        .layers
+        .iter()
+        .rev()
+        .find(|layer| matches!(layer.kind, view_surface::LayerKind::Prompt(_)))
+    else {
+        return;
+    };
+    let area = super::clip_to_frame(layer.rect, shadow.back.area);
+    let theme = Theme::from_hl(model.engine.painted_hl());
+    super::paint_native_overlay(
+        layer,
+        None,
+        &theme,
+        model.engine.painted_hl(),
+        area,
+        &Damage::full(),
+        &mut shadow.back,
+    );
+}
+
 /// A screen shaped like a working session for the recording tests: a
 /// tabline, a file tree beside the editor, numbered code lines, a cursor
 /// line, a status line and an empty command line.

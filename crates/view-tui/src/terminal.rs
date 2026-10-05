@@ -1177,6 +1177,7 @@ impl Term {
         }
         crate::paint::record::load(&mut self.shadow, ring, seq);
         crate::paint::record::paint_bar(&mut self.shadow, model, bar);
+        crate::paint::record::paint_branch_confirm(&mut self.shadow, model);
         if self.cursor_shown != Some(false) {
             crossterm::queue!(sink, crossterm::cursor::Hide)?;
             self.cursor_shown = Some(false);
@@ -2006,6 +2007,38 @@ pub(crate) mod tests {
         );
         assert!(!term.queue_recorded(&model, &ring, seq + 1, "x").unwrap());
         assert!(term.frame_buf.borrow().is_empty());
+    }
+
+    /// The branch confirm is drawn over the recorded frame it names, and no
+    /// other question is.
+    #[test]
+    fn a_recorded_frame_carries_the_branch_confirm_and_no_other_question() {
+        use view_core::model::OverlayKind;
+        use view_core::native::prompt::PromptState;
+        let mut model = probe_model(TermCaps::default());
+        let surface = view_surface::render(&model);
+        let mut term = Term::frame_probe(model.caps);
+        let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+        let mut ring = FrameRing::new(64 << 20);
+        let seq = term
+            .record_frame(&mut ring, std::time::Duration::ZERO)
+            .unwrap();
+        let shown = |term: &mut Term, model: &Model| {
+            assert!(term.queue_recorded(model, &ring, seq, "DVR").unwrap());
+            let bytes = std::mem::take(&mut *term.frame_buf.borrow_mut());
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        let other = PromptState::external_write_conflict_prompt("/w/a.rs".into(), "Reload".into());
+        model.push_overlay(other.overlay_box(), OverlayKind::Prompt(other));
+        assert!(!shown(&mut term, &model).contains("Reload"));
+        let _ = model.pop_focused_overlay();
+        let confirm = PromptState::dvr_branch_prompt(seq, &[], &[], 0, false);
+        model.push_overlay(confirm.overlay_box(), OverlayKind::Prompt(confirm));
+        let painted = shown(&mut term, &model);
+        assert!(
+            painted.contains("Confirm") && painted.contains("Branch"),
+            "{painted:?}"
+        );
     }
 
     /// The frame after a full repaint is stored as a delta on it, and the

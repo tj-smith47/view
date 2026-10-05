@@ -35,10 +35,10 @@ pub(crate) struct DvrLoop {
     ring: FrameRing,
     started: Instant,
     refused_told: bool,
-    /// The recorded frame on screen, the size it was painted at and whether
-    /// its bar said something waits, so a pass that changed none of them
-    /// writes nothing.
-    painted: Option<(u64, (u16, u16), bool)>,
+    /// The recorded frame on screen, the size it was painted at, whether
+    /// its bar said something waits and whether the branch confirm was
+    /// painted over it, so a pass that changed none of them writes nothing.
+    painted: Option<(u64, (u16, u16), bool, bool)>,
     /// The thread doing the file work, `None` when the host refused it.
     io: Option<BackgroundWriter<IoJob, Infallible>>,
     /// Jobs a full queue handed back, sent again in order on the next poll.
@@ -290,7 +290,8 @@ impl DvrLoop {
     ///
     /// The pass clears `dirty` and marks no question seen: the terminal
     /// shows a recorded frame, so a prompt that opened meanwhile reads keys
-    /// only once a live frame carrying it is painted.
+    /// only once a frame carrying it is painted. The branch confirm is the
+    /// one question a recorded frame carries.
     fn scrub_pass(&mut self, model: &mut Model) -> Option<Option<(u64, String)>> {
         let Some(seq) = model.dvr.scrub_frame() else {
             self.painted = None;
@@ -301,7 +302,13 @@ impl DvrLoop {
         // closes the scrub repaints everything
         let _ = model.take_paint_damage();
         let waits = waiting(model);
-        let shown = (seq, (model.term_width, model.term_height), waits);
+        let confirming = model.branch_confirm_focused();
+        let shown = (
+            seq,
+            (model.term_width, model.term_height),
+            waits,
+            confirming,
+        );
         if self.painted == Some(shown) {
             return Some(None);
         }
@@ -318,7 +325,8 @@ impl DvrLoop {
             });
         }
         self.painted = Some(shown);
-        Some(Some((seq, self.bar(seq, waits, model.dvr.clip()))))
+        let bar = self.bar(seq, waits, model.dvr.clip(), confirming);
+        Some(Some((seq, bar)))
     }
 
     /// Records the frame the live paint just wrote. Returns the notice owed
@@ -352,7 +360,7 @@ impl DvrLoop {
     /// The scrub bar for frame `seq`: the clip's file name when `clip`
     /// names one, how far back the frame is and how far back the frames
     /// reach, then the way out and the keys.
-    fn bar(&self, seq: u64, waiting: bool, clip: Option<&str>) -> String {
+    fn bar(&self, seq: u64, waiting: bool, clip: Option<&str>, confirming: bool) -> String {
         let secs = |s| self.ring.age(s).unwrap_or_default().as_secs_f64();
         let age = secs(seq);
         let reach = secs(self.ring.oldest().unwrap_or(seq));
@@ -366,6 +374,10 @@ impl DvrLoop {
             }
             None => ("DVR".to_owned(), SCRUB_HINT),
         };
+        if confirming {
+            // the confirm over the frame names its own keys
+            return format!("{head}  -{age:.1}s of {reach:.1}s{flag}");
+        }
         // the flag goes ahead of the legend, since a narrow terminal cuts
         // the bar's end
         format!("{head}  -{age:.1}s of {reach:.1}s{flag}  {hint}")
@@ -405,7 +417,8 @@ impl Painted {
 /// [`crate::runtime::frame_reached_terminal`]. A recorded frame does not
 /// carry the live screen, so a question that opened under the scrub reads
 /// keys once a live frame showing it is painted, and `recorded` sees the
-/// model read-only.
+/// model read-only. The branch confirm is painted over the recorded frame,
+/// and reads keys once that frame is written.
 pub(crate) fn paint_pass<T>(
     model: &mut Model,
     dvr: Option<&mut DvrLoop>,
@@ -417,7 +430,11 @@ pub(crate) fn paint_pass<T>(
         match dvr.scrub_pass(model) {
             Some(None) => return Ok(Painted::Recorded(false)),
             Some(Some((seq, bar))) => {
-                return recorded(target, model, &dvr.ring, seq, &bar).map(Painted::Recorded);
+                let wrote = recorded(target, model, &dvr.ring, seq, &bar)?;
+                if wrote {
+                    model.note_recorded_frame_painted();
+                }
+                return Ok(Painted::Recorded(wrote));
             }
             None => {}
         }
@@ -434,10 +451,12 @@ const WAITING: &str = "  ! waiting: q to answer";
 /// has not seen while the scrub covers it.
 fn waiting(model: &Model) -> bool {
     model.ai_panel().pending_permission.is_some()
-        || model
-            .overlays()
-            .iter()
-            .any(|o| matches!(o.kind, OverlayKind::Prompt(_) | OverlayKind::EngineBusy(_)))
+        || model.overlays().iter().any(|o| match &o.kind {
+            // the branch confirm is painted over the recorded frame
+            OverlayKind::Prompt(p) => p.dvr_branch_at().is_none(),
+            OverlayKind::EngineBusy(_) => true,
+            _ => false,
+        })
 }
 
 #[cfg(test)]
@@ -495,7 +514,7 @@ mod tests {
         assert_eq!(model.dvr.scrub_frame(), Some(6));
         assert_eq!(press(&mut model, &mut dvr, "h"), Some(5));
         assert_eq!(
-            dvr.bar(5, false, None),
+            dvr.bar(5, false, None, false),
             "DVR  -0.4s of 2.0s  q close  h/l frame  H/L 1s  g/G ends  b branch  e export"
         );
         assert_eq!(press(&mut model, &mut dvr, "H"), Some(2));
@@ -600,6 +619,45 @@ mod tests {
         assert_eq!(pass(&mut model, &mut dvr, &mut bar), Painted::Live(true));
         let answer = update(&mut model, key("l"));
         assert!(answers_l(&answer), "{answer:?}");
+    }
+
+    #[test]
+    fn the_branch_confirm_is_painted_over_the_frame_it_names_and_answered_there() {
+        let mut model = Model::with_term_size(80, 24);
+        let mut dvr = recorded(&mut model);
+        open_scrub(&mut model, &mut dvr);
+        let _ = press(&mut model, &mut dvr, "h");
+        let _ = press(&mut model, &mut dvr, "b");
+        let checked = DvrIoReply::DiskChecked {
+            changed: Vec::new(),
+            unverifiable: false,
+        };
+        let _ = update(&mut model, Msg::DvrIo(checked));
+        assert!(model.branch_confirm_focused());
+        let _ = update(&mut model, key("y"));
+        assert!(
+            !model.dvr.is_branching(),
+            "a key before the confirm is painted"
+        );
+        let mut painted = None;
+        let pass = paint_pass(
+            &mut model,
+            Some(&mut dvr),
+            &mut painted,
+            |_, _| Ok(true),
+            |painted, _, _, seq, bar| {
+                *painted = Some((seq, bar.to_owned()));
+                Ok(true)
+            },
+        )
+        .unwrap();
+        assert_eq!(pass, Painted::Recorded(true));
+        let (seq, bar) = painted.unwrap();
+        assert_eq!(seq, 5, "the frame b was pressed on");
+        assert_eq!(bar, "DVR  -0.4s of 2.0s", "the confirm names its own keys");
+        let _ = update(&mut model, key("y"));
+        assert!(model.dvr.is_branching());
+        assert!(model.dvr.scrub_frame().is_none());
     }
 
     #[test]
@@ -1069,7 +1127,7 @@ mod tests {
         assert_eq!(dvr.ring.newest(), Some(6), "the recording is back");
         open_scrub(&mut model, &mut dvr);
         assert_eq!(model.dvr.scrub_frame(), Some(6));
-        assert!(dvr.bar(6, false, None).starts_with("DVR  "));
+        assert!(dvr.bar(6, false, None, false).starts_with("DVR  "));
     }
 
     #[test]
@@ -1258,11 +1316,11 @@ mod tests {
         let mut model = Model::with_term_size(80, 24);
         let dvr = recorded(&mut model);
         assert_eq!(
-            dvr.bar(6, false, Some("/w/clips/a.vdvr")),
+            dvr.bar(6, false, Some("/w/clips/a.vdvr"), false),
             "CLIP a.vdvr  -0.0s of 2.0s  q close  h/l frame  H/L 1s  g/G ends"
         );
         assert!(dvr
-            .bar(6, false, None)
+            .bar(6, false, None, false)
             .ends_with("g/G ends  b branch  e export"));
     }
 

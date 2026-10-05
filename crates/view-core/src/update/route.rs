@@ -326,6 +326,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                 if let Some(at) = p.dvr_branch_at() {
                     let go = p.accepted_is_default(&notation);
                     model.pop_focused_overlay();
+                    model.dvr.close_scrub();
                     model.dirty = true;
                     if go {
                         model.dvr.confirm_branch(at);
