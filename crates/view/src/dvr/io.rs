@@ -17,7 +17,7 @@ use view_core::native::dvr::{DvrIoReply, Marker};
 use view_proc::writer::BackgroundWriter;
 use view_tui::dvr::{FrameRing, RingSnapshot};
 
-use super::clip::{self, Inputs};
+use super::clip;
 use crate::wake::LoopSender;
 
 /// The jobs queued ahead of the one the thread is doing.
@@ -47,8 +47,6 @@ pub(crate) struct Export {
     pub(crate) path: PathBuf,
     /// The frames, shared with the ring until the clip is written.
     pub(crate) frames: RingSnapshot,
-    /// The input log's records.
-    pub(crate) inputs: Inputs,
     /// The marks on the timeline.
     pub(crate) markers: Vec<(u64, Marker)>,
     /// The frame ranges a branch abandoned.
@@ -161,11 +159,9 @@ fn read_clip(path: &Path, max_bytes: usize) -> Result<(FrameRing, usize), String
         .map_err(|e| format!("{shown}: {e}"))?;
     crate::vlog::log_with("dvr", || {
         format!(
-            "play {shown} dropped={} left_out={} inputs={} dropped_inputs={} marks={} dead={}",
+            "play {shown} dropped={} left_out={} marks={} dead={}",
             clip.dropped,
             clip.left_out,
-            clip.inputs.len(),
-            clip.dropped_inputs,
             clip.markers.len(),
             clip.dead.len()
         )
@@ -200,6 +196,17 @@ pub(crate) fn part_path(path: &Path) -> PathBuf {
         .file_name()
         .map_or_else(|| "clip".into(), |n| n.to_string_lossy().into_owned());
     path.with_file_name(format!(".{name}.{}.part", std::process::id()))
+}
+
+/// Creates `part` for writing, refused when it exists. On unix its owner
+/// alone may read it, since a clip holds whatever the screen showed, and
+/// the published name is a link to the same file.
+fn create_private(part: &Path) -> io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(part)
 }
 
 /// Writes the clip `export` describes to a file that must not exist yet.
@@ -370,7 +377,6 @@ fn write_paced(
     let Export {
         path,
         frames,
-        inputs,
         markers,
         dead,
         held,
@@ -394,7 +400,7 @@ fn write_paced(
             } else {
                 // a part under this pid is one a killed process left, and
                 // the person is told its name
-                File::create_new(&part).map_err(|e| match e.kind() {
+                create_private(&part).map_err(|e| match e.kind() {
                     io::ErrorKind::AlreadyExists => {
                         io::Error::other(format!("{} already exists", part.display()))
                     }
@@ -410,7 +416,7 @@ fn write_paced(
                     file,
                     cancel: &cancel,
                 });
-                let cut = clip::encode(&mut out, &frames, &inputs, &markers, &dead)?;
+                let cut = clip::encode(&mut out, &frames, &markers, &dead)?;
                 out.into_inner()
                     .map_err(io::IntoInnerError::into_error)?
                     .file
@@ -541,7 +547,6 @@ mod tests {
         IoJob::Export(Export {
             path,
             frames: ring.snapshot().unwrap(),
-            inputs: Inputs::default(),
             markers: Vec::new(),
             dead: Vec::new(),
             held: Arc::clone(held),
@@ -569,7 +574,7 @@ mod tests {
     fn clip_bytes(ring: &mut FrameRing) -> Vec<u8> {
         let mut out = Vec::new();
         let frames = ring.snapshot().unwrap();
-        clip::encode(&mut out, &frames, &Inputs::default(), &[], &[]).unwrap();
+        clip::encode(&mut out, &frames, &[], &[]).unwrap();
         out
     }
 
@@ -613,6 +618,18 @@ mod tests {
         assert!(reason.ends_with(&held), "{reason}");
         assert_eq!(std::fs::read(&path).unwrap(), want, "the first clip, whole");
         assert_eq!(left_in(&dir), ["a.vdvr"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_published_clip_is_read_by_its_owner_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = ScratchDir::new("dvr-export-mode").unwrap();
+        let path = dir.join("a.vdvr");
+        let reply = write(job(&mut one_frame(), &path));
+        assert!(matches!(reply, DvrIoReply::Exported { .. }), "{reply:?}");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
     }
 
     /// Two processes write two part names, and the one that links second

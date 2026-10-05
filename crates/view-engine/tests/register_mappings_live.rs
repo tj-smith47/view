@@ -10,7 +10,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::borrow::Cow;
-use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
@@ -141,8 +140,9 @@ fn a_submitted_line_is_reported_after_the_invocations_it_made() {
         .handle
         .command("nnoremap Q <Cmd>View cmd map<CR> | nnoremap K :View typed map<CR>")
         .unwrap();
-    let refused = ":View dvr export $VIEW_LINE_RAN_NEVER_SET/x<CR>";
-    let refused_ran = "ran View dvr export $VIEW_LINE_RAN_NEVER_SET/x";
+    // `:View` takes no bang, so nvim refuses the line before it runs
+    let refused = ":View! tree open<CR>";
+    let refused_ran = "ran View! tree open";
     for (keys, want) in [
         (
             ":View tree open<CR>",
@@ -428,11 +428,12 @@ fn next_invoke(rx: &mpsc::Receiver<Msg>) -> (String, String) {
     }
 }
 
-/// The path `:View dvr export` is given is the one a person typed: `~` is
-/// the home directory, a relative path starts at nvim's current directory,
-/// and a run of blanks stays in the name.
+/// The path `:View dvr export` and `:View dvr play` are given reaches view
+/// as typed, since it names a file on view's machine and the engine may
+/// run on another: no `~`, variable or directory of the engine's is read
+/// into it, and a run of blanks stays in the name.
 #[test]
-fn an_export_path_reaches_view_as_typed_and_absolute() {
+fn an_export_path_reaches_view_as_typed() {
     let (engine, channel, rx, _pump, _cutover) = spawn_attached();
     engine.handle.register_mappings(&[], channel).unwrap();
     let _ = next_claims(&rx);
@@ -441,26 +442,23 @@ fn an_export_path_reaches_view_as_typed_and_absolute() {
         .handle
         .eval_str(&format!("execute('cd {}')", dir.path().display()))
         .unwrap();
-    let home = engine.handle.eval_str("expand('~')").unwrap();
-    let cwd = engine.handle.eval_str("getcwd()").unwrap();
     let paths = [
-        ("View dvr export ~/x.vdvr", Path::new(&home).join("x.vdvr")),
-        (
-            "View dvr  export   a  b.vdvr",
-            Path::new(&cwd).join("a  b.vdvr"),
-        ),
-        ("View dvr play c.vdvr", Path::new(&cwd).join("c.vdvr")),
+        ("View dvr export ~/x.vdvr", "export ~/x.vdvr"),
+        ("View dvr  export   a  b.vdvr", "export   a  b.vdvr"),
+        ("View dvr play c.vdvr", "play c.vdvr"),
+        ("View dvr export $HOME/e.vdvr", "export $HOME/e.vdvr"),
+        (r"View dvr play a\ b.vdvr", r"play a\ b.vdvr"),
     ];
     for (typed, want) in paths {
         engine
             .handle
             .eval_str(&format!("execute('{typed}')"))
             .unwrap();
-        let (feature, verb) = next_invoke(&rx);
-        assert_eq!(feature, "dvr", "{typed}");
-        let word = typed.split_whitespace().nth(2).unwrap();
-        let got = verb.strip_prefix(&format!("{word} ")).unwrap_or_default();
-        assert_eq!(Path::new(got), want, "{typed}: {verb}");
+        assert_eq!(
+            next_invoke(&rx),
+            ("dvr".to_owned(), want.to_owned()),
+            "{typed}"
+        );
     }
     for (typed, want) in [
         ("View dvr export", "export"),
@@ -473,124 +471,6 @@ fn an_export_path_reaches_view_as_typed_and_absolute() {
         let feature = typed.split_whitespace().nth(1).unwrap().to_owned();
         assert_eq!(next_invoke(&rx), (feature, want.to_owned()), "{typed}");
     }
-}
-
-/// `:View dvr export` reads its path the way `:w` reads a file name: an
-/// escaped blank, an escaped trailing blank, an escaped backslash before a
-/// blank, an escaped `$`, an unclosed `${`, an environment variable, `~`
-/// and a relative name after `:cd` each name the file `:w` writes. `HOME`
-/// is pointed at a scratch directory, so nothing is written outside it.
-#[test]
-fn an_export_path_names_the_file_w_writes() {
-    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
-    engine.handle.register_mappings(&[], channel).unwrap();
-    let _ = next_claims(&rx);
-    let dir = view_test_support::ScratchDir::new("export-like-w").unwrap();
-    let home = dir.join("home");
-    let cwd = dir.join("cwd");
-    std::fs::create_dir_all(&home).unwrap();
-    // a backslash is a separator on Windows, where `a\\ b` names ` b` in `a`
-    std::fs::create_dir_all(cwd.join("a")).unwrap();
-    // a single-quoted Vimscript string keeps a Windows path's backslashes
-    for setup in [
-        format!("execute('let $HOME = ''{}''')", home.display()),
-        format!("execute('cd {}')", cwd.display()),
-    ] {
-        engine.handle.eval_str(&setup).unwrap();
-    }
-    let mut typed_paths = vec![
-        r"a\ b.vdvr",
-        r"t\ ",
-        r"a\\ b",
-        "a${VIEW_UNSET_EXPORT.vdvr",
-        "$HOME/e.vdvr",
-        "~/t.vdvr",
-        "rel.vdvr",
-    ];
-    // a leading backslash names the drive root on Windows, outside the
-    // scratch directory
-    if cfg!(unix) {
-        typed_paths.push(r"\$VIEW_UNSET_EXPORT.vdvr");
-    }
-    for typed in typed_paths {
-        engine
-            .handle
-            .eval_str(&format!("execute('View dvr export {typed}')"))
-            .unwrap();
-        let (_, verb) = next_invoke(&rx);
-        let exported = verb.strip_prefix("export ").unwrap().to_owned();
-        assert!(!Path::new(&exported).exists(), "{typed}");
-        engine
-            .handle
-            .eval_str(&format!("execute('silent write {typed}')"))
-            .unwrap();
-        assert!(
-            Path::new(&exported).is_file(),
-            "{typed}: :w wrote elsewhere than {exported}"
-        );
-    }
-}
-
-/// A path naming an environment variable that is not set is refused with a
-/// message naming it, and nothing reaches view, so no clip is written. A
-/// name nvim reads as a variable is refused whether the expansion drops it
-/// or leaves it as typed, and a name nvim never reads as a variable is no
-/// refusal.
-#[test]
-fn an_export_path_naming_an_unset_variable_is_refused() {
-    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
-    engine.handle.register_mappings(&[], channel).unwrap();
-    let _ = next_claims(&rx);
-    let dir = view_test_support::ScratchDir::new("export-unset").unwrap();
-    engine
-        .handle
-        .eval_str(&format!("execute('cd {}')", dir.path().display()))
-        .unwrap();
-    let cwd = engine.handle.eval_str("getcwd()").unwrap();
-    let refuses_as = |verb: &str, typed: &str, name: &str| {
-        let said = engine
-            .handle
-            .eval_str(&format!("execute('View dvr {verb} {typed}')"))
-            .unwrap();
-        assert!(
-            said.contains(&format!("view: DVR cannot {verb}: ${name} is not set")),
-            "{typed}: {said:?}"
-        );
-        // an export sent ahead of this one would be the next invoke
-        engine
-            .handle
-            .eval_str("execute('View ui panes tiles')")
-            .unwrap();
-        assert_eq!(
-            next_invoke(&rx),
-            ("ui".to_owned(), "panes tiles".to_owned()),
-            "{typed}"
-        );
-    };
-    let refuses = |typed: &str, name: &str| refuses_as("export", typed, name);
-    refuses_as("play", "$VIEW_UNSET_EXPORT/a.vdvr", "VIEW_UNSET_EXPORT");
-    refuses("$VIEW_UNSET_EXPORT/a.vdvr", "VIEW_UNSET_EXPORT");
-    // a unix shell that finds no file for the expansion leaves the name as
-    // typed, which is what Windows does with every unset name
-    refuses("$VIEW_UNSET_EXPORT", "VIEW_UNSET_EXPORT");
-    // nvim reads `${NAME}` as a variable on unix alone; on Windows the
-    // braces are file name characters and `:w` writes the path as typed
-    if cfg!(unix) {
-        refuses("${VIEW_UNSET_EXPORT}/a.vdvr", "VIEW_UNSET_EXPORT");
-    } else {
-        engine
-            .handle
-            .eval_str("execute('View dvr export ${VIEW_UNSET_EXPORT}/a.vdvr')")
-            .unwrap();
-        let (_, verb) = next_invoke(&rx);
-        let want = Path::new(&cwd).join("${VIEW_UNSET_EXPORT}").join("a.vdvr");
-        let got = Path::new(verb.strip_prefix("export ").unwrap());
-        assert_eq!(got, want, "{verb}");
-    }
-    // with `x` set, nvim reads `$$x` as a dollar and `$x` on every platform
-    refuses("$$x", "x");
-    let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
-    assert!(left.is_empty(), "{left:?}");
 }
 
 /// A key that invokes view answers with the keys nvim matches for it, the

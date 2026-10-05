@@ -168,7 +168,8 @@ desktop_modifier = "auto"   # "auto" | "super" | "alt"
 auto_restart = true        # false: surface a dead engine and wait for the modal's own Restart
 
 # [dvr] records the session for rewind. It is off until you turn it on, and
-# the recording lives in memory within the bound below.
+# the recording lives in memory within the bound below. An exported clip
+# holds the screen as it was shown and nothing you typed.
 
 [dvr]
 enabled = false   # true: record this session's painted frames and input for rewind

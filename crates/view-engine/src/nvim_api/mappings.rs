@@ -425,16 +425,9 @@ return {
 /// over the channel alone still gets the command.
 ///
 /// The verb is the argument text after the feature word, every blank in it
-/// kept. A verb that takes a path gets it read the way `:w` reads its file
-/// name: it is expanded by `expandcmd()` with `%`, `#` and `<` escaped so
-/// they stay as typed, and nvim makes the result absolute, `~` and the
-/// current directory included. A path naming an environment variable that
-/// is not set is refused with a message naming it, since `:w` would drop
-/// the variable from the path or keep it as typed. nvim decides what is a
-/// variable: an unset name counts where `expandcmd()` puts its value in
-/// the path once it is set. `$$x` is refused as `$x is not set` on every
-/// platform, since nvim reads `$x` there once `x` is set. A refusal writes
-/// nothing.
+/// kept and nothing in it expanded. A path a verb takes names a file on
+/// the machine view runs on, so view reads it; the engine may run on
+/// another host.
 ///
 /// Every `:` line submitted with `<CR>` is reported back as a `line_ran`
 /// bridge notification carrying the line's first
@@ -451,35 +444,9 @@ return {
 /// own clearing of `view_line_ran` leave in place.
 pub(crate) const REGISTER_COMMAND_CHUNK: &str = "\
 local channel, entries, command = ...
-local takes_path = { ['dvr export'] = true, ['dvr play'] = true }
-local function unset_variable(path, typed)
-  for name in path:gmatch('%${?([%w_]+)') do
-    if vim.env[name] == nil then
-      local was = vim.uv.os_getenv(name)
-      vim.env[name] = '\\30'
-      local ok, set = pcall(vim.fn.expandcmd, typed)
-      vim.env[name] = was
-      if ok and set:find('\\30', 1, true) then
-        return name
-      end
-    end
-  end
-end
 vim.api.nvim_create_user_command(command, function(opts)
   local feature = opts.fargs[1] or ''
   local verb = (opts.args:gsub('^%s*%S+%s*', '', 1))
-  local word, path = verb:match('^(%S+)%s+(.+)$')
-  if word and takes_path[feature .. ' ' .. word] then
-    local typed = vim.fn.escape(path, '%#<')
-    local name = unset_variable(path, typed)
-    if name then
-      vim.api.nvim_echo({ { 'view: DVR cannot ' .. word .. ': $' .. name ..
-        ' is not set', 'ErrorMsg' } }, true, {})
-      return
-    end
-    path = vim.fn.expandcmd(typed)
-    verb = word .. ' ' .. vim.fn.fnamemodify(path, ':p')
-  end
   vim.rpcnotify(channel, 'view_invoke', feature, verb)
 end, {
   nargs = '*',

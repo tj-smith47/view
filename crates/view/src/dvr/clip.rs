@@ -1,43 +1,40 @@
 //! The `.vdvr` clip file: a fixed header, then tagged records carrying the
-//! recording's frames, inputs, marks and abandoned ranges, then an end
-//! record. Every integer is little-endian.
+//! recording's frames, marks and abandoned ranges, then an end record.
+//! Every integer is little-endian. A clip holds the screen as it was shown
+//! and nothing typed: no input record is written, and the reader skips one
+//! an earlier build wrote without reading it.
 //!
 //! ```text
 //! header   magic b"VIEWDVR\0", version u16 = 1, flags u16 (bit 0: inputs
-//!          present), reserved u32 = 0
+//!          present, never set), reserved u32 = 0
 //! record   tag u8, len u32, len payload bytes; an unknown tag is skipped
 //! 0x01     keyframe: seq u64, at_us u64, w u16, h u16, cursor, then w*h
 //!          cells row by row
 //! 0x02     delta: seq u64, at_us u64, cursor, scroll_on u8, top u16,
 //!          bottom u16, left u16, right u16, by i16, n u32, then n times
 //!          x u16, y u16, cell
-//! 0x03     input: after_frame u64, kind u8 (0 key, 1 paste, 2 mouse,
-//!          3 resize), body: key and paste text to the end; mouse row u16,
-//!          col u16, then button, action and modifier each as len u8 and
-//!          text; resize width u16, height u16
+//! 0x03     input: an earlier build's typed input, skipped unread
 //! 0x04     marker: frame u64, kind u8 (0 engine restart, 1 branch,
 //!          2 invoke)
 //! 0x05     dead: first u64, last u64
-//! 0xFF     end: frames u64, inputs u64, always last
+//! 0xFF     end: frames u64, input records u64, always last
 //! cursor   x u16, y u16, on u8
 //! cell     sym_len u8, sym, fg u32, bg u32, ul u32, modifier u16
 //! ```
 //!
-//! A symbol or mouse field longer than [`CLIP_FIELD_MAX`] bytes is cut at
-//! the last character boundary that fits, and the encoder counts the
-//! symbols it cut.
+//! A symbol longer than [`CLIP_FIELD_MAX`] bytes is cut at the last
+//! character boundary that fits, and the encoder counts the symbols it cut.
 
 use std::io::{self, Write};
 use std::ops::RangeInclusive;
 
-use view_core::native::dvr::{InputKind, Marker, RecordedInput, CLIP_FIELD_MAX};
+use view_core::native::dvr::{Marker, CLIP_FIELD_MAX};
 use view_tui::dvr::{CellView, FrameView, RingSnapshot, Scroll};
 
 pub(super) mod read;
 
 const MAGIC: &[u8; 8] = b"VIEWDVR\0";
 const VERSION: u16 = 1;
-const FLAG_INPUTS: u16 = 1;
 
 const KEYFRAME: u8 = 0x01;
 const DELTA: u8 = 0x02;
@@ -46,48 +43,7 @@ const MARKER: u8 = 0x04;
 const DEAD: u8 = 0x05;
 const END: u8 = 0xFF;
 
-/// The recording's input log as the clip's input records, copied once on
-/// the loop so the log stays free to grow while the clip is written.
-#[derive(Debug, Default)]
-pub(crate) struct Inputs {
-    records: Vec<u8>,
-    count: u64,
-}
-
-impl Inputs {
-    /// The input records for `log`, in fold order.
-    pub(crate) fn new<'a>(log: impl Iterator<Item = RecordedInput<'a>>) -> Self {
-        let mut inputs = Self::default();
-        let mut payload = Vec::new();
-        for input in log {
-            payload.clear();
-            payload.extend_from_slice(&input.after_frame.to_le_bytes());
-            let kind = match input.kind {
-                InputKind::Key => 0,
-                InputKind::Paste => 1,
-                InputKind::Mouse => 2,
-                InputKind::Resized => 3,
-                _ => continue,
-            };
-            payload.push(kind);
-            if input.kind == InputKind::Mouse {
-                let (head, tail) = input.body.split_at(input.body.len().min(4));
-                payload.extend_from_slice(head);
-                for field in tail.split(|b| *b == 0) {
-                    let _ = put_short(&mut payload, &String::from_utf8_lossy(field));
-                }
-            } else {
-                payload.extend_from_slice(input.body);
-            }
-            if put_record(&mut inputs.records, INPUT, &payload).is_ok() {
-                inputs.count += 1;
-            }
-        }
-        inputs
-    }
-}
-
-/// Writes the clip of `frames`, `inputs`, `markers` and `dead` to `w`.
+/// Writes the clip of `frames`, `markers` and `dead` to `w`.
 /// Returns how many symbols were cut to fit.
 ///
 /// # Errors
@@ -96,14 +52,12 @@ impl Inputs {
 pub(crate) fn encode(
     w: &mut impl Write,
     frames: &RingSnapshot,
-    inputs: &Inputs,
     markers: &[(u64, Marker)],
     dead: &[RangeInclusive<u64>],
 ) -> io::Result<usize> {
-    let flags = if inputs.count > 0 { FLAG_INPUTS } else { 0 };
     w.write_all(MAGIC)?;
     w.write_all(&VERSION.to_le_bytes())?;
-    w.write_all(&flags.to_le_bytes())?;
+    w.write_all(&0u16.to_le_bytes())?;
     w.write_all(&0u32.to_le_bytes())?;
     let mut cut = 0;
     let mut count = 0u64;
@@ -114,7 +68,6 @@ pub(crate) fn encode(
         w.write_all(&record)?;
         count += 1;
     }
-    w.write_all(&inputs.records)?;
     for &(frame, marker) in markers {
         let kind: u8 = match marker {
             Marker::EngineRestart => 0,
@@ -134,7 +87,7 @@ pub(crate) fn encode(
         w.write_all(&record)?;
     }
     record.clear();
-    let payload = [count.to_le_bytes(), inputs.count.to_le_bytes()].concat();
+    let payload = [count.to_le_bytes(), 0u64.to_le_bytes()].concat();
     put_record(&mut record, END, &payload)?;
     w.write_all(&record)?;
     Ok(cut)
@@ -326,15 +279,14 @@ mod tests {
 
     fn encoded(ring: &mut FrameRing, model: &Model) -> (Vec<u8>, usize) {
         let frames = ring.snapshot().unwrap();
-        let inputs = Inputs::new(model.dvr.inputs());
         let mut out = Vec::new();
         let dead = [RangeInclusive::new(2, 3)];
-        let cut = encode(&mut out, &frames, &inputs, model.dvr.markers(), &dead).unwrap();
+        let cut = encode(&mut out, &frames, model.dvr.markers(), &dead).unwrap();
         (out, cut)
     }
 
     #[test]
-    fn clip_round_trips_frames_inputs_and_markers() {
+    fn clip_round_trips_frames_and_markers_and_holds_nothing_typed() {
         let mut ring = ring();
         let model = logged();
         let (bytes, cut) = encoded(&mut ring, &model);
@@ -347,24 +299,18 @@ mod tests {
             seen(&ring.snapshot().unwrap())
         );
         assert_eq!(seen(&ring.snapshot().unwrap()).len(), 3);
-        let want: Vec<_> = model
-            .dvr
-            .inputs()
-            .map(|i| i.after_frame)
-            .zip(model.dvr.replay_until(u64::MAX))
-            .map(|(at, msg)| format!("{at} {msg:?}"))
-            .collect();
-        let got: Vec<_> = clip
-            .inputs
-            .iter()
-            .map(|(at, msg)| format!("{at} {msg:?}"))
-            .collect();
-        assert_eq!(got, want);
-        assert_eq!(got.len(), 4);
+        assert_eq!(model.dvr.inputs().count(), 4, "the recording logged");
+        assert!(records(&bytes).iter().all(|(_, tag, _)| *tag != INPUT));
+        assert_eq!(&bytes[10..12], [0, 0], "no input flag");
+        for typed in [&b"<C-x>"[..], b"pasted", b"left", b"press"] {
+            assert!(!bytes.windows(typed.len()).any(|w| w == typed));
+        }
+        let end = &bytes[bytes.len() - 8..];
+        assert_eq!(end, 0u64.to_le_bytes(), "the end record counts none");
         assert_eq!(clip.markers, model.dvr.markers());
         assert_eq!(clip.markers.len(), 2);
         assert_eq!(clip.dead, [RangeInclusive::new(2, 3)]);
-        assert_eq!((clip.dropped, clip.dropped_inputs), (0, 0));
+        assert_eq!(clip.dropped, 0);
     }
 
     /// Splices a record of `tag` carrying `payload` in after the header.
@@ -451,7 +397,7 @@ mod tests {
         out
     }
 
-    /// A model whose inputs, marks and abandoned range all name frames
+    /// A model whose marks and abandoned range all name frames
     /// `first` and `last`.
     fn logged_over(first: u64, last: u64) -> Model {
         let mut model = Model::with_term_size(80, 24);
@@ -464,23 +410,22 @@ mod tests {
         model
     }
 
-    /// The clip of `ring`, with inputs, a mark and an abandoned range on its
+    /// The clip of `ring`, with a mark and an abandoned range on its
     /// first and last frames, and the frames it was taken from.
     fn clip_of(ring: &mut FrameRing) -> (Vec<u8>, Vec<String>) {
         let frames = ring.snapshot().unwrap();
         let seqs: Vec<u64> = frames.frames().map(|f| f.seq).collect();
         let (first, last) = (seqs[0], seqs[seqs.len() - 1]);
         let model = logged_over(first, last);
-        let inputs = Inputs::new(model.dvr.inputs());
         let mut bytes = Vec::new();
         let dead = [std::ops::RangeInclusive::new(first, last)];
-        encode(&mut bytes, &frames, &inputs, model.dvr.markers(), &dead).unwrap();
+        encode(&mut bytes, &frames, model.dvr.markers(), &dead).unwrap();
         (bytes, seen(&frames))
     }
 
     /// Asserts that `clip` reads back the frames `taken` lists, less those
     /// `dropped` names, under the numbers they were recorded with, and that
-    /// every input, mark and abandoned range names a frame the clip holds.
+    /// every mark and abandoned range names a frame the clip holds.
     fn agrees_on_seq(taken: Vec<String>, clip: read::Clip, dropped: &[u64]) {
         let mut back = clip.ring;
         let want: Vec<_> = taken
@@ -489,12 +434,6 @@ mod tests {
             .collect();
         assert_eq!(seen(&back.snapshot().unwrap()), want);
         let held = |seq: u64| back.age(seq).is_some();
-        assert_eq!(clip.inputs.len(), 2);
-        assert!(
-            clip.inputs.iter().all(|(at, _)| held(*at)),
-            "{:?}",
-            clip.inputs
-        );
         assert!(!clip.markers.is_empty());
         assert!(
             clip.markers.iter().all(|(at, _)| held(*at)),
@@ -677,23 +616,43 @@ mod tests {
     }
 
     #[test]
-    fn inputs_past_the_input_share_and_of_an_unknown_kind_are_dropped() {
-        let mut builder = RingBuilder::new(MAX);
-        builder
-            .push_key(0, (2, 1), None, [cell(0, 0, "a")])
-            .unwrap();
-        let mut ring = builder.finish();
+    fn an_input_record_an_earlier_build_wrote_is_skipped_unread() {
+        let mut ring = ring();
         let (bytes, _) = encoded(&mut ring, &logged());
-        let later = [&7u64.to_le_bytes()[..], &[4, 1, 2, 3]].concat();
-        let mut spliced = with_record(&bytes, INPUT, &later);
-        // the end record of the newer build counts the input it wrote
+        let key = [&7u64.to_le_bytes()[..], &[0], b"secret"].concat();
+        let mut spliced = with_record(&bytes, INPUT, &key);
+        // a record whose body would not read as an input at all
+        spliced = with_record(&spliced, INPUT, &[0xFF; 3]);
         let end = spliced.len() - 8;
-        spliced[end..].copy_from_slice(&5u64.to_le_bytes());
+        spliced[end..].copy_from_slice(&2u64.to_le_bytes());
         let clip = decode(&mut spliced.as_slice(), MAX).unwrap();
-        assert_eq!((clip.inputs.len(), clip.dropped_inputs), (4, 1));
-        // a bound whose input share holds the key and the paste alone
-        let tight = decode(&mut bytes.as_slice(), 400).unwrap();
-        assert_eq!((tight.inputs.len(), tight.dropped_inputs), (2, 2));
+        let mut back = clip.ring;
+        assert_eq!(
+            seen(&back.snapshot().unwrap()),
+            seen(&ring.snapshot().unwrap())
+        );
+        // an input record cut short is a clip cut short
+        let cut = [&bytes[..16], &[INPUT], &9u32.to_le_bytes(), &[0; 4]].concat();
+        assert!(matches!(
+            decode(&mut cut.as_slice(), MAX),
+            Err(ClipError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn a_frame_numbered_past_the_last_a_ring_counts_is_refused() {
+        let mut payload = [u64::MAX.to_le_bytes(), 0u64.to_le_bytes()].concat();
+        payload.extend_from_slice(&1u16.to_le_bytes());
+        payload.extend_from_slice(&1u16.to_le_bytes());
+        payload.extend_from_slice(&[0; 5]);
+        payload.extend_from_slice(&[0; 15]);
+        let bytes = clip_from(&[(KEYFRAME, payload)], 1);
+        assert!(matches!(
+            decode(&mut bytes.as_slice(), MAX),
+            Err(ClipError::Malformed(
+                "a frame number past the last one a ring counts"
+            ))
+        ));
     }
 
     /// A ring painted through the terminal: typing, a scroll, a wide
@@ -762,7 +721,7 @@ mod tests {
         assert!((2..300).contains(&keys), "{keys} keyframes in 300 frames");
         assert!(frames.frames().any(|f| f.scroll.is_some()), "a shift");
         let mut bytes = Vec::new();
-        let cut = encode(&mut bytes, &frames, &Inputs::default(), &[], &[]).unwrap();
+        let cut = encode(&mut bytes, &frames, &[], &[]).unwrap();
         assert!(cut > 0, "the 300-byte cluster reached the clip");
         let want = seen_as(&frames, clipped);
         drop(frames);

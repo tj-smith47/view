@@ -294,7 +294,7 @@ Needs `[dvr] enabled = true` in `view.toml`.
 | --- | --- |
 | `<Space>fv` (`:View dvr scrub`) | Freezes the screen on the last frame and opens the scrub bar. |
 | `:View dvr close` | Closes the scrub and returns to the live screen. |
-| `:View dvr export` | Writes the recording to `view-dvr-<seconds>.vdvr` in the directory view started in. Add a path to write there. |
+| `:View dvr export` | Writes the recording to `view-dvr-<seconds>.vdvr` in the directory view started in, on the machine view runs on, including under `--remote`. Add a path to write there. The clip holds the screen as it was shown and nothing you typed. |
 | `:View dvr play PATH` | Opens a saved clip in the scrub. `b` and `e` close the clip. `q` returns to your session. |
 
 While you are scrubbing:

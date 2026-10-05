@@ -381,9 +381,7 @@ fn a_key_typed_behind_a_refused_view_command_acts_in_the_file() {
     let (_paths, _tree, mut session) =
         editing_old_with("picker-keys-refused-command", &[("VIEW_AI_AGENT", "none")]);
     let hook = line_report_hook(&mut session, "before");
-    session
-        .send(b"\x1b:View dvr export $VIEW_KEYS_NEVER_SET/x\rdd")
-        .unwrap();
+    session.send(b"\x1b:View! tree open\rdd").unwrap();
     assert!(
         session.wait_for_screen(budget(), |screen| {
             let text = screen.contents();
@@ -403,7 +401,7 @@ fn a_key_typed_behind_a_refused_view_command_acts_in_the_file() {
         session.screen()
     );
     session
-        .send(b":echo 'said=' . (execute('messages') =~# 'NEVER_SET is not set')\r")
+        .send(b":echo 'said=' . (execute('messages') =~# 'E477')\r")
         .unwrap();
     assert!(
         session.wait_for("said=1", budget()),

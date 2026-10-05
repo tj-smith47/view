@@ -161,16 +161,26 @@ impl DvrLoop {
                 },
                 DvrRequest::DiskCheck => self.unsent.push_back(IoJob::DiskCheck),
                 DvrRequest::Export(path) => {
-                    if let Err(why) = self.export(model, path) {
-                        let reply = Msg::DvrIo(DvrIoReply::Refused(why));
-                        effects.extend(view_core::update::update(model, reply));
+                    let reply = match path.map(|typed| local_path(&typed, &model.cwd)) {
+                        Some(Err(name)) => Some(unset("export", &name)),
+                        Some(Ok(path)) => self.export(model, Some(path)).err(),
+                        None => self.export(model, None).err(),
+                    };
+                    if let Some(reply) = reply {
+                        effects.extend(view_core::update::update(model, Msg::DvrIo(reply)));
                     }
                 }
                 DvrRequest::Branch(plan) => self.branch = Some(plan),
-                DvrRequest::Play(path) => self.unsent.push_back(IoJob::Play {
-                    path: model.cwd.join(path),
-                    max_bytes: model.dvr.max_bytes(),
-                }),
+                DvrRequest::Play(typed) => match local_path(&typed, &model.cwd) {
+                    Ok(path) => self.unsent.push_back(IoJob::Play {
+                        path,
+                        max_bytes: model.dvr.max_bytes(),
+                    }),
+                    Err(name) => {
+                        let reply = Msg::DvrIo(unset("play", &name));
+                        effects.extend(view_core::update::update(model, reply));
+                    }
+                },
                 _ => {}
             }
         }
@@ -236,11 +246,15 @@ impl DvrLoop {
         owed
     }
 
-    /// Queues the export of the recording to `path`, which nvim made
-    /// absolute, or to a derived name in the directory view was started in.
-    /// The ring's groups are shared with the job, its open group copied,
-    /// and the input log copied once.
-    fn export(&mut self, model: &Model, path: Option<String>) -> Result<(), ExportRefusal> {
+    /// Queues the export of the recording to `path`, a local path
+    /// [`local_path`] read, or to a derived name in the directory view was
+    /// started in. The ring's groups are shared with the job and its open
+    /// group copied.
+    fn export(&mut self, model: &Model, path: Option<PathBuf>) -> Result<(), DvrIoReply> {
+        self.queue_export(model, path).map_err(DvrIoReply::Refused)
+    }
+
+    fn queue_export(&mut self, model: &Model, path: Option<PathBuf>) -> Result<(), ExportRefusal> {
         if Arc::strong_count(&self.exporting) > 1 {
             return Err(ExportRefusal::Busy);
         }
@@ -251,23 +265,18 @@ impl DvrLoop {
             return Err(ExportRefusal::NoFrame);
         }
         let frames = self.ring.snapshot().ok_or(ExportRefusal::OverBudget)?;
-        let name = path.map_or_else(
-            || {
-                let secs = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                PathBuf::from(format!("view-dvr-{secs}.vdvr"))
-            },
-            PathBuf::from,
-        );
-        let path = model.cwd.join(name);
+        let path = path.unwrap_or_else(|| {
+            let secs = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            model.cwd.join(format!("view-dvr-{secs}.vdvr"))
+        });
         let cancel = Arc::new(AtomicBool::new(false));
         let (done_tx, done) = std::sync::mpsc::sync_channel(1);
         let job = IoJob::Export(Export {
             path: path.clone(),
             frames,
-            inputs: clip::Inputs::new(model.dvr.inputs()),
             markers: model.dvr.markers().to_vec(),
             dead: model.dvr.dead().to_vec(),
             held: Arc::clone(&self.exporting),
@@ -458,6 +467,62 @@ pub(crate) fn paint_pass<T>(
     let wrote = live(target, model)?;
     crate::runtime::frame_reached_terminal(model);
     Ok(Painted::Live(wrote))
+}
+
+/// The file on this machine that `typed`, a path given to `:View dvr
+/// export` or `play`, names: `~` at its start is the home directory,
+/// `$NAME` and `${NAME}` are environment variables, a backslash keeps the
+/// character after it on unix, where it is no separator, and a relative
+/// path starts at `cwd`. The engine may run on another host, so nothing of
+/// its own is read. `Err` names a variable that is not set.
+fn local_path(typed: &str, cwd: &std::path::Path) -> Result<PathBuf, String> {
+    expand_path(typed, cwd, std::env::home_dir().as_deref(), |name| {
+        std::env::var(name).ok()
+    })
+}
+
+fn expand_path(
+    typed: &str,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+    var: impl Fn(&str) -> Option<String>,
+) -> Result<PathBuf, String> {
+    let mut out = String::new();
+    let mut chars = typed.chars().peekable();
+    let name_char = |c: &char| c.is_ascii_alphanumeric() || *c == '_';
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if cfg!(unix) => out.extend(chars.next()),
+            '$' if chars.peek() == Some(&'{') && chars.clone().any(|c| c == '}') => {
+                let _ = chars.next();
+                let name: String = chars.by_ref().take_while(|c| *c != '}').collect();
+                out.push_str(&var(&name).ok_or(name)?);
+            }
+            '$' if chars.peek().is_some_and(name_char) => {
+                let mut name = String::new();
+                while let Some(c) = chars.next_if(name_char) {
+                    name.push(c);
+                }
+                out.push_str(&var(&name).ok_or(name)?);
+            }
+            c => out.push(c),
+        }
+    }
+    let path = match (out.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+            home.join(rest.trim_start_matches(['/', '\\']))
+        }
+        _ => PathBuf::from(out),
+    };
+    Ok(cwd.join(path))
+}
+
+/// The reply a path naming the unset variable `name` gets from `verb`.
+fn unset(verb: &'static str, name: &str) -> DvrIoReply {
+    DvrIoReply::Failed {
+        verb,
+        reason: format!("${name} is not set"),
+    }
 }
 
 /// What the bar adds while something on the live screen waits for an answer.
@@ -1100,7 +1165,10 @@ mod tests {
         let written = std::fs::read(dir.join("a.vdvr")).unwrap();
         assert_eq!(&written[..10], b"VIEWDVR\0\x01\x00");
         let clip = clip::read::decode(&mut written.as_slice(), MAX).unwrap();
-        assert_eq!(clip.inputs.len(), 3, "the clip holds the log as queued");
+        assert!(
+            clip.ring.frame_count() > 0,
+            "the clip holds the frames queued"
+        );
     }
 
     /// A ring of `frames` frames painted a second apart.
@@ -1119,7 +1187,7 @@ mod tests {
         let mut ring = clip_ring(frames);
         let mut bytes = Vec::new();
         let snapshot = ring.snapshot().unwrap();
-        clip::encode(&mut bytes, &snapshot, &clip::Inputs::default(), &[], &[]).unwrap();
+        clip::encode(&mut bytes, &snapshot, &[], &[]).unwrap();
         std::fs::write(path, bytes).unwrap();
     }
 
@@ -1475,5 +1543,56 @@ mod tests {
         assert_eq!(Arc::strong_count(&dvr.exporting), 1, "a read is no export");
         assert_eq!(dvr.finish_within(Duration::MAX), None);
         drop(gate);
+    }
+
+    #[test]
+    fn a_typed_path_is_expanded_on_this_machine() {
+        let cwd = std::path::Path::new("/start");
+        let home = std::path::Path::new("/home/me");
+        let var = |name: &str| (name == "D").then(|| "/d".to_owned());
+        let expand = |typed: &str| expand_path(typed, cwd, Some(home), var);
+        for (typed, want) in [
+            ("a.vdvr", "/start/a.vdvr"),
+            ("sub/a.vdvr", "/start/sub/a.vdvr"),
+            ("~/a.vdvr", "/home/me/a.vdvr"),
+            ("~", "/home/me"),
+            ("~x/a.vdvr", "/start/~x/a.vdvr"),
+            ("$D/a.vdvr", "/d/a.vdvr"),
+            ("${D}a.vdvr", "/da.vdvr"),
+            ("/abs/a.vdvr", "/abs/a.vdvr"),
+            ("cost$", "/start/cost$"),
+        ] {
+            assert_eq!(expand(typed), Ok(PathBuf::from(want)), "{typed}");
+        }
+        #[cfg(unix)]
+        assert_eq!(expand(r"a\ b\$D"), Ok(PathBuf::from("/start/a b$D")));
+        assert_eq!(expand("$NOPE/a.vdvr"), Err("NOPE".to_owned()));
+        assert_eq!(expand("${NOPE}"), Err("NOPE".to_owned()));
+    }
+
+    #[test]
+    fn a_relative_path_is_played_from_the_directory_view_started_in() {
+        let dir = view_test_support::ScratchDir::new("dvr-play-relative").unwrap();
+        write_clip(&dir.join("a.vdvr"), 3);
+        let mut model = Model::with_term_size(80, 24);
+        model.cwd = dir.path().to_path_buf();
+        let (mut dvr, rx) = wired(&mut model);
+        open_scrub(&mut model, &mut dvr);
+        play(&mut model, &mut dvr, &rx, std::path::Path::new("a.vdvr"));
+        assert_eq!(told(&model, "play failed"), 0);
+        assert!(dvr.live.is_some(), "the clip is open");
+    }
+
+    #[test]
+    fn a_path_naming_an_unset_variable_is_refused_by_its_name() {
+        let mut model = Model::with_term_size(80, 24);
+        let (mut dvr, _rx) = wired(&mut model);
+        for verb_line in [
+            "export $VIEW_DVR_TEST_UNSET/a.vdvr",
+            "play ${VIEW_DVR_TEST_UNSET}",
+        ] {
+            verb(&mut model, &mut dvr, verb_line);
+        }
+        assert_eq!(told(&model, "$VIEW_DVR_TEST_UNSET is not set"), 2);
     }
 }

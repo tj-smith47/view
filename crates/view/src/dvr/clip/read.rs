@@ -1,12 +1,11 @@
-//! Reads a `.vdvr` clip back into a ring of frames, its inputs rebuilt as
-//! the messages they were recorded from.
+//! Reads a `.vdvr` clip back into a ring of frames, with its marks and the
+//! ranges a branch abandoned.
 
 use std::fmt;
 use std::io::{self, Read};
 use std::ops::RangeInclusive;
 
-use view_core::msg::{Key, MouseInput, Msg};
-use view_core::native::dvr::{input_log_bytes, Marker};
+use view_core::native::dvr::Marker;
 use view_tui::dvr::{CellView, FrameRing, RingBuilder, Scroll};
 
 use super::{DEAD, DELTA, END, INPUT, KEYFRAME, MAGIC, MARKER, VERSION};
@@ -16,8 +15,6 @@ use super::{DEAD, DELTA, END, INPUT, KEYFRAME, MAGIC, MARKER, VERSION};
 pub(crate) struct Clip {
     /// The clip's frames.
     pub(crate) ring: FrameRing,
-    /// The recorded inputs, each with the frame it followed, in fold order.
-    pub(crate) inputs: Vec<(u64, Msg)>,
     /// The marks on the clip's frames.
     pub(crate) markers: Vec<(u64, Marker)>,
     /// The frame ranges a branch abandoned.
@@ -26,9 +23,6 @@ pub(crate) struct Clip {
     pub(crate) dropped: usize,
     /// The oldest frames the ring let go of to hold the newer ones.
     pub(crate) left_out: usize,
-    /// The inputs past the input log's share of the recording bound, and
-    /// those of a kind this build does not know.
-    pub(crate) dropped_inputs: usize,
 }
 
 /// The marks, and apart from them the abandoned ranges, a clip is read with
@@ -80,8 +74,7 @@ impl From<io::Error> for ClipError {
 
 /// Reads a clip from `r` into a ring holding a recording bound of
 /// `max_bytes`. A record longer than that bound is refused before it is
-/// read, and the inputs past the input log's share of it are dropped and
-/// counted.
+/// read, and an input record is skipped unread.
 ///
 /// # Errors
 ///
@@ -103,14 +96,12 @@ pub(crate) fn decode(r: &mut impl Read, max_bytes: usize) -> Result<Clip, ClipEr
     let mut builder = RingBuilder::new(max_bytes);
     let mut clip = Clip {
         ring: FrameRing::new(0),
-        inputs: Vec::new(),
         markers: Vec::new(),
         dead: Vec::new(),
         dropped: 0,
         left_out: 0,
-        dropped_inputs: 0,
     };
-    let (mut frames, mut inputs_read, mut input_bytes) = (0u64, 0u64, 0usize);
+    let (mut frames, mut inputs_read) = (0u64, 0u64);
     let mut last_seq = None;
     let mut payload = Vec::new();
     loop {
@@ -123,6 +114,14 @@ pub(crate) fn decode(r: &mut impl Read, max_bytes: usize) -> Result<Clip, ClipEr
                 "a record is larger than the recording bound",
             ));
         }
+        if tag == INPUT {
+            inputs_read += 1;
+            let skipped = io::copy(&mut r.by_ref().take(u64::from(len)), &mut io::sink())?;
+            if skipped != u64::from(len) {
+                return Err(ClipError::Truncated);
+            }
+            continue;
+        }
         payload.clear();
         let read = r.by_ref().take(u64::from(len)).read_to_end(&mut payload)?;
         if u32::try_from(read).ok() != Some(len) {
@@ -132,6 +131,11 @@ pub(crate) fn decode(r: &mut impl Read, max_bytes: usize) -> Result<Clip, ClipEr
         match tag {
             KEYFRAME | DELTA => {
                 let seq = body.u64()?;
+                if seq.checked_add(1).is_none() {
+                    return Err(ClipError::Malformed(
+                        "a frame number past the last one a ring counts",
+                    ));
+                }
                 let follows = last_seq.map_or(seq > 0, |last: u64| {
                     seq > last && (tag == KEYFRAME || last.checked_add(1) == Some(seq))
                 });
@@ -143,16 +147,6 @@ pub(crate) fn decode(r: &mut impl Read, max_bytes: usize) -> Result<Clip, ClipEr
                 builder.seat(seq);
                 if read_frame(&mut builder, tag, &mut body)?.is_none() {
                     clip.dropped += 1;
-                }
-            }
-            INPUT => {
-                inputs_read += 1;
-                let after = body.u64()?;
-                input_bytes = input_bytes.saturating_add(payload.len());
-                let kept = input_bytes <= input_log_bytes(max_bytes);
-                match read_input(&mut body)?.filter(|_| kept) {
-                    Some(msg) => clip.inputs.push((after, msg)),
-                    None => clip.dropped_inputs += 1,
                 }
             }
             MARKER if clip.markers.len() >= MARKS_MAX => return Err(too_many_marks()),
@@ -238,37 +232,6 @@ fn read_frame(
     Ok(builder.push_delta(at_us, cursor, scroll, cells.iter().copied()))
 }
 
-/// The input in `body`, rebuilt as the message it was recorded from.
-/// `None` for an input kind this build does not know.
-fn read_input(body: &mut Bytes<'_>) -> Result<Option<Msg>, ClipError> {
-    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
-    Ok(Some(match body.u8()? {
-        0 => Msg::Key(Key {
-            notation: text(body.rest()),
-        }),
-        1 => Msg::Paste(text(body.rest())),
-        2 => {
-            let (row, col) = (body.u16()?, body.u16()?);
-            let mut field = || -> Result<String, ClipError> {
-                let len = body.u8()?;
-                Ok(text(body.take(usize::from(len))?))
-            };
-            Msg::Mouse(MouseInput {
-                button: field()?,
-                action: field()?,
-                modifier: field()?,
-                row,
-                col,
-            })
-        }
-        3 => Msg::Resized {
-            width: body.u16()?,
-            height: body.u16()?,
-        },
-        _ => return Ok(None),
-    }))
-}
-
 /// A record's payload, read from the front.
 struct Bytes<'a>(&'a [u8]);
 
@@ -280,10 +243,6 @@ impl<'a> Bytes<'a> {
             .ok_or(ClipError::Malformed("a record ends inside a field"))?;
         self.0 = rest;
         Ok(head)
-    }
-
-    fn rest(&mut self) -> &'a [u8] {
-        std::mem::take(&mut self.0)
     }
 
     fn array<const N: usize>(&mut self) -> Result<[u8; N], ClipError> {
