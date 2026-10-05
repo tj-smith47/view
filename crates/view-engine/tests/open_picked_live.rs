@@ -441,6 +441,173 @@ fn with_only_sidebars_on_screen_a_choice_opens_in_a_new_window() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The name of the buffer `win` shows.
+fn buffer_in(engine: &Engine, win: WinHandle) -> String {
+    engine
+        .handle
+        .request(
+            "nvim_eval",
+            vec![Value::from(format!("bufname(winbufnr({}))", win.0))],
+        )
+        .unwrap()
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Builds, left of and above the ordinary window the engine starts in, a
+/// `nofile` sidebar a plugin could have docked, a help window, a terminal,
+/// a `winfixbuf` window and a `nofile` window view claims, entering each in
+/// turn, so every one of them comes before the ordinary window in layout
+/// order and has been entered after it. Returns the ordinary window, the
+/// four special ones and the claimed one, the cursor in the claimed one.
+fn special_windows(engine: &Engine) -> (WinHandle, Vec<WinHandle>, WinHandle) {
+    let ordinary = current_window(engine);
+    engine.handle.command("file ordinary").unwrap();
+    let mut special = Vec::new();
+    for build in [
+        "topleft vnew | setlocal buftype=nofile winfixwidth | file plugintree",
+        "topleft help",
+        "topleft new | terminal",
+        "topleft vnew | file fixed | setlocal winfixbuf",
+        "topleft vnew | setlocal buftype=nofile | file claimed",
+    ] {
+        engine.handle.command(build).unwrap();
+        special.push(current_window(engine));
+    }
+    let claimed = special.pop().unwrap();
+    (ordinary, special, claimed)
+}
+
+/// Chosen from a window view claims, a file opens in the one ordinary
+/// window, whatever comes before it in the layout: a sidebar a plugin
+/// docked, a help window, a terminal and a `winfixbuf` window each keep
+/// their buffer.
+#[test]
+fn a_file_chosen_from_a_claimed_window_skips_every_special_window() {
+    let root = scratch_root("special");
+    let path = root.join("chosen.txt");
+    std::fs::write(&path, "chosen\n").unwrap();
+    let (engine, rx) = spawn_routed();
+    let (ordinary, special, claimed) = special_windows(&engine);
+    let before: Vec<String> = special.iter().map(|w| buffer_in(&engine, *w)).collect();
+    let picked = Picked::File {
+        path: path.to_string_lossy().into_owned(),
+        line: None,
+    };
+    engine
+        .handle
+        .open_picked(&picked, OpenIn::Current, &[claimed], 0)
+        .unwrap();
+    assert!(answered(&engine, &rx, 0), "the open was never answered");
+    assert_eq!(current_window(&engine), ordinary, "{:?}", state(&engine));
+    assert!(same_file(&state(&engine).0, &path));
+    let after: Vec<String> = special.iter().map(|w| buffer_in(&engine, *w)).collect();
+    assert_eq!(after, before, "a special window lost its buffer");
+    assert_eq!(buffer_in(&engine, claimed), "claimed");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// With no ordinary window left, a file chosen from a claimed window opens
+/// in a new window, and every other window keeps its buffer.
+#[test]
+fn with_only_special_windows_left_a_choice_opens_in_a_new_window() {
+    let root = scratch_root("special-only");
+    let path = root.join("chosen.txt");
+    std::fs::write(&path, "chosen\n").unwrap();
+    let (engine, rx) = spawn_routed();
+    let (ordinary, special, claimed) = special_windows(&engine);
+    engine
+        .handle
+        .command(&format!("call nvim_win_close({}, v:true)", ordinary.0))
+        .unwrap();
+    let windows = state(&engine).2;
+    let before: Vec<String> = special.iter().map(|w| buffer_in(&engine, *w)).collect();
+    let picked = Picked::File {
+        path: path.to_string_lossy().into_owned(),
+        line: None,
+    };
+    engine
+        .handle
+        .open_picked(&picked, OpenIn::Current, &[claimed], 0)
+        .unwrap();
+    assert!(answered(&engine, &rx, 0), "the open was never answered");
+    let (current, _, now, _) = state(&engine);
+    assert_eq!(now, windows + 1, "one new window");
+    assert!(same_file(&current, &path), "{current}");
+    let opened = current_window(&engine);
+    assert!(!special.contains(&opened) && opened != claimed);
+    let after: Vec<String> = special.iter().map(|w| buffer_in(&engine, *w)).collect();
+    assert_eq!(after, before, "a special window lost its buffer");
+    assert_eq!(buffer_in(&engine, claimed), "claimed");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Chosen while the cursor is in a float view does not claim, a file opens
+/// in that float, as `:edit` there would.
+#[test]
+fn a_file_chosen_from_an_unclaimed_float_opens_in_the_float() {
+    let root = scratch_root("float");
+    let path = root.join("chosen.txt");
+    std::fs::write(&path, "chosen\n").unwrap();
+    let (engine, rx) = spawn_routed();
+    let ordinary = current_window(&engine);
+    engine
+        .handle
+        .command(
+            "call nvim_open_win(nvim_create_buf(v:true, v:false), v:true, \
+             {'relative': 'editor', 'row': 2, 'col': 2, \
+             'width': 20, 'height': 5})",
+        )
+        .unwrap();
+    let float = current_window(&engine);
+    assert_ne!(float, ordinary);
+    let picked = Picked::File {
+        path: path.to_string_lossy().into_owned(),
+        line: None,
+    };
+    engine
+        .handle
+        .open_picked(&picked, OpenIn::Current, &[], 0)
+        .unwrap();
+    assert!(answered(&engine, &rx, 0), "the open was never answered");
+    assert_eq!(current_window(&engine), float);
+    assert!(same_file(&state(&engine).0, &path));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Chosen from a sidebar entered from another sidebar, a file opens in the
+/// ordinary window the cursor was in last, which comes after another
+/// ordinary window in the layout.
+#[test]
+fn a_file_chosen_from_a_sidebar_opens_in_the_window_last_edited_in() {
+    let root = scratch_root("recent");
+    let path = root.join("chosen.txt");
+    std::fs::write(&path, "chosen\n").unwrap();
+    let (engine, rx) = spawn_routed();
+    let last = current_window(&engine);
+    engine.handle.command("vsplit | wincmd l").unwrap();
+    assert_eq!(
+        current_window(&engine),
+        last,
+        "vsplit puts the new window left"
+    );
+    let agent = sidebar(&engine, NativeSurface::Agent, WinSplit::Right);
+    let tree = sidebar(&engine, NativeSurface::Tree, WinSplit::Left);
+    let picked = Picked::File {
+        path: path.to_string_lossy().into_owned(),
+        line: None,
+    };
+    engine
+        .handle
+        .open_picked(&picked, OpenIn::Current, &[agent, tree], 0)
+        .unwrap();
+    assert!(answered(&engine, &rx, 0), "the open was never answered");
+    assert_eq!(current_window(&engine), last);
+    assert!(same_file(&state(&engine).0, &path));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// An operator left pending when the open lands is dropped, so the keys
 /// typed behind the open start a command of their own.
 #[test]

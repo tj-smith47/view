@@ -434,6 +434,55 @@ fn a_file_chosen_from_a_docked_tree_entered_from_the_docked_agent_opens_in_the_f
     );
 }
 
+/// With a `nofile` `winfixwidth` window docked at the far left, standing
+/// in for a plugin's own file tree, a file chosen in the docked tree
+/// entered from the docked agent panel opens in the file window, the keys
+/// typed in the same write act there, and the plugin's window keeps its
+/// buffer.
+#[test]
+fn a_file_chosen_from_a_docked_tree_skips_a_plugin_sidebar_before_the_file_window() {
+    let (_paths, _tree, mut session) =
+        agent_docked_with("docked-tree-beside-plugin-tree", &[TREE_WINDOWED]);
+    session
+        .send(
+            b"\x1b:topleft 12vnew | setlocal buftype=nofile winfixwidth \
+              | file plugintree | wincmd p\r\
+              :echo 'plugin=' . bufwinnr('plugintree') . '/' . bufname('%')\r",
+        )
+        .unwrap();
+    assert!(
+        session.wait_for(&format!("plugin=1/{OLD}"), budget()),
+        "the stand-in sidebar never docked left of {OLD}; screen:\n{}",
+        session.screen()
+    );
+    session.send(b":View ai open | View tree\r").unwrap();
+    assert!(
+        session.wait_for(NEW, budget()),
+        "the tree never listed {NEW}; screen:\n{}",
+        session.screen()
+    );
+    session.send(b"j\rdd").unwrap();
+    assert!(
+        lines_are(&mut session, "o1,o2,o3|n2,n3"),
+        "the keys behind the open acted elsewhere; screen:\n{}",
+        session.screen()
+    );
+    session
+        .send(
+            format!(
+                ":echo 'wins=' . bufwinnr('{OLD}') . '/' . (bufwinnr('{NEW}') > 0) \
+                 . '/' . (bufwinnr('plugintree') > 0)\r"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    assert!(
+        session.wait_for("wins=-1/1/1", budget()),
+        "{NEW} did not replace {OLD} in its window; screen:\n{}",
+        session.screen()
+    );
+}
+
 /// The same keystrokes from the file tree, placed as `env` says.
 fn typed_ahead_from_the_tree(label: &str, env: &[(&str, &str)]) {
     let (_paths, _tree, mut session) = tree_open(label, env);

@@ -128,6 +128,12 @@ end
 /// already handed back would write the globals over the person's own
 /// window-local look.
 ///
+/// Every window the cursor leaves from the first open on is kept in
+/// `_G.view_recent_wins`, latest first and at most 16, starting with the
+/// window the open ran from. nvim's own `#` names one window back, so a
+/// file chosen from a sidebar entered from another sidebar reads this list
+/// to find the window last edited in.
+///
 /// The window is made with `:split`. `nvim_open_win` allocates a second
 /// grid under `ext_multigrid` and leaves it behind, and view then holds one
 /// more grid than nvim has windows.
@@ -183,6 +189,22 @@ if vim.fn.getcmdwintype() ~= '' then
 end
 local win_before = vim.api.nvim_get_current_win()
 local prev_before = vim.fn.win_getid(vim.fn.winnr('#'))
+local function left(gone)
+  local kept = { gone }
+  for _, other in ipairs(_G.view_recent_wins or {}) do
+    if other ~= gone and #kept < 16 and vim.api.nvim_win_is_valid(other) then
+      kept[#kept + 1] = other
+    end
+  end
+  _G.view_recent_wins = kept
+end
+left(win_before)
+vim.api.nvim_create_autocmd('WinLeave', {
+  group = vim.api.nvim_create_augroup('view_recent_windows', { clear = true }),
+  callback = function()
+    left(vim.api.nvim_get_current_win())
+  end,
+})
 local ei = vim.o.eventignore
 -- `enter == false` is a ring step carrying an already-open surface to
 -- `windowed`, a surface nobody asked to visit: the split, and the

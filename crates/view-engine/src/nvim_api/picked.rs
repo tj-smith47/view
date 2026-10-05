@@ -12,12 +12,16 @@ use view_core::native::picker::Picked;
 ///
 /// A sidebar is a window `claimed` names or one `g:view_native_windows`
 /// records. The record holds a sidebar whose window view has not yet
-/// claimed, and `claimed` holds one whose record a person cleared. From a
-/// sidebar or a float, the open enters an ordinary window first: the one
-/// entered before the current window, else the first in the layout. With
-/// none left, the file opens in a new window split off beside the sidebar,
-/// on the side away from the screen's edge, and a refused open makes no
-/// window.
+/// claimed, and `claimed` holds one whose record a person cleared. From any
+/// other window, a float or a plugin's sidebar included, the open runs
+/// there, as `:edit` would. From a sidebar it enters an ordinary window
+/// first: one on this tab that is docked, no sidebar, shows a buffer with
+/// an empty `buftype` and has neither `winfixbuf` nor `previewwindow` set.
+/// The ordinary window the cursor left last is taken, from the list the
+/// sidebar open keeps (`_G.view_recent_wins`), then `#`, then the first in
+/// the layout. With none left, the file opens in a new window split off
+/// beside the sidebar, on the side away from the screen's edge, and a
+/// refused open makes no window.
 ///
 /// A file reaches `nvim_cmd` as an argument with filename magic off, so a
 /// space, `%`, `#`, `\` or a leading `+` in its name is no command syntax
@@ -55,18 +59,28 @@ end
 local function docked(win)
   return vim.api.nvim_win_get_config(win).relative == ''
 end
+local tab = vim.api.nvim_get_current_tabpage()
 local function ordinary(win)
-  return not sidebar[win] and docked(win)
+  if sidebar[win] or not vim.api.nvim_win_is_valid(win)
+      or vim.api.nvim_win_get_tabpage(win) ~= tab or not docked(win) then
+    return false
+  end
+  local buf = vim.api.nvim_win_get_buf(win)
+  return vim.bo[buf].buftype == '' and not vim.wo[win].winfixbuf
+    and not vim.wo[win].previewwindow
 end
 local beside = nil
-if not ordinary(here()) then
-  local before = vim.fn.win_getid(vim.fn.winnr('#'))
-  local into = before ~= 0 and ordinary(before) and before or nil
-  local fallback = nil
-  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if into == nil and ordinary(win) then
+if sidebar[here()] then
+  local into, fallback = nil, nil
+  local layout = vim.api.nvim_tabpage_list_wins(0)
+  local candidates = vim.list_extend({}, _G.view_recent_wins or {})
+  candidates[#candidates + 1] = vim.fn.win_getid(vim.fn.winnr('#'))
+  for _, win in ipairs(vim.list_extend(candidates, layout)) do
+    if into == nil and win ~= 0 and ordinary(win) then
       into = win
     end
+  end
+  for _, win in ipairs(layout) do
     fallback = fallback or docked(win) and win or nil
   end
   if into ~= nil then
@@ -146,7 +160,7 @@ impl super::EngineHandle {
     /// a file by its path, the cursor on its line when it has one, and a
     /// listed buffer by its handle. A choice made while the cursor is in
     /// one of the `claimed` windows, or in a window nvim's record of view's
-    /// own windows names, opens in an ordinary window.
+    /// own windows names, opens in the ordinary window last edited in.
     ///
     /// Async: nvim's answer is routed as `Msg::PickedOpened` carrying
     /// `generation` and the window the cursor ended in, whatever the open

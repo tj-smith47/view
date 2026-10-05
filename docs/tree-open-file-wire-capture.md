@@ -51,18 +51,28 @@ end
 local function docked(win)
   return vim.api.nvim_win_get_config(win).relative == ''
 end
+local tab = vim.api.nvim_get_current_tabpage()
 local function ordinary(win)
-  return not sidebar[win] and docked(win)
+  if sidebar[win] or not vim.api.nvim_win_is_valid(win)
+      or vim.api.nvim_win_get_tabpage(win) ~= tab or not docked(win) then
+    return false
+  end
+  local buf = vim.api.nvim_win_get_buf(win)
+  return vim.bo[buf].buftype == '' and not vim.wo[win].winfixbuf
+    and not vim.wo[win].previewwindow
 end
 local beside = nil
-if not ordinary(here()) then
-  local before = vim.fn.win_getid(vim.fn.winnr('#'))
-  local into = before ~= 0 and ordinary(before) and before or nil
-  local fallback = nil
-  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if into == nil and ordinary(win) then
+if sidebar[here()] then
+  local into, fallback = nil, nil
+  local layout = vim.api.nvim_tabpage_list_wins(0)
+  local candidates = vim.list_extend({}, _G.view_recent_wins or {})
+  candidates[#candidates + 1] = vim.fn.win_getid(vim.fn.winnr('#'))
+  for _, win in ipairs(vim.list_extend(candidates, layout)) do
+    if into == nil and win ~= 0 and ordinary(win) then
       into = win
     end
+  end
+  for _, win in ipairs(layout) do
     fallback = fallback or docked(win) and win or nil
   end
   if into ~= nil then
