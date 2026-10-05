@@ -32,7 +32,7 @@ use crate::recovery::{
     reconnects, restart_engine, step, EngineSession, LoopChannels, LoopState, ReconnectSchedule,
 };
 use crate::speculate::{
-    expire_speculation, note_engine_call, reconcile_speculation, SpeculationClock,
+    expire_speculation, note_engine_call, note_key_arrival, reconcile_speculation, SpeculationClock,
 };
 use std::sync::mpsc;
 use std::time::{Instant, SystemTime};
@@ -173,6 +173,11 @@ pub(crate) fn dispatch<E: EngineOps>(
     } else {
         Vec::new()
     };
+    // the typed-ahead hold reads how long nvim has had to answer the keys
+    // before this one, and the fold below cannot read a clock
+    if matches!(msg, Msg::Key(_)) {
+        note_key_arrival(model, follow_ups.speculate);
+    }
     // a key that could begin one the takeover left unregistered waits for
     // nvim's reply to the registration that carries it: nvim puts
     // `nvim_input` into typeahead as it reads it and runs a registration
@@ -1710,6 +1715,26 @@ mod tests {
             body.contains("expire_speculation(&mut model"),
             "the loop no longer takes back a guess nothing refuted, so a \
              palette nvim never opened stays on screen until the session ends"
+        );
+    }
+
+    /// A key reaches the hold with the time it arrived, ahead of the fold
+    /// that reads it. Deleting the call compiles and leaves every unit test
+    /// green, because the hold it settles is crate-private to `view-core`,
+    /// so the walk is over the source.
+    #[test]
+    fn a_key_reaches_the_hold_stamped_before_its_fold() {
+        let source = include_str!("runtime.rs");
+        let (_, rest) = source
+            .split_once("pub(crate) fn dispatch<")
+            .expect("the dispatch this walk is about");
+        let (body, _) = rest.split_once("\n}").expect("the dispatch's own end");
+        let arrival = body.find("note_key_arrival(model");
+        let fold = body.find("effects.extend(update(model, msg))");
+        assert!(
+            arrival.is_some() && fold.is_some() && arrival < fold,
+            "a key no longer settles the typed-ahead hold as it arrives, so a \
+             view key typed on a local link holds the query behind it"
         );
     }
 

@@ -28,7 +28,8 @@ use view_core::events::UiEvent;
 use view_core::model::Model;
 use view_core::msg::{Effect, RpcCall};
 use view_core::native::speculate::{
-    cmdline_expiry_left, fold_engine_call, fold_expiry, fold_redraw, SpecStamp, SPECULATION_MAX_AGE,
+    cmdline_expiry_left, fold_engine_call, fold_expiry, fold_key_arrival, fold_redraw, SpecStamp,
+    SPECULATION_MAX_AGE,
 };
 
 /// The fixed origin every [`SpecStamp`] in one session is measured from.
@@ -155,6 +156,12 @@ pub(crate) fn note_engine_call(model: &mut Model, call: &RpcCall, clock: Specula
     if PREDICTS {
         fold_engine_call(model, call, clock.now());
     }
+}
+
+/// Folds a key arriving from the terminal, ahead of the `update` that
+/// reads it.
+pub(crate) fn note_key_arrival(model: &mut Model, clock: SpeculationClock) {
+    fold_key_arrival(model, clock.now());
 }
 
 /// The loop's per-pass age check on what speculation is still holding.

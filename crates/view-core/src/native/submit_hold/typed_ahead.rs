@@ -19,9 +19,9 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use super::{canonical, Folded, SubmitHold, LEAVES_NORMAL, LEAVES_NORMAL_AFTER, OWES_AFTER};
+use super::{canonical, notation_char, Folded, SubmitHold, LEAVES_NORMAL, OWES_AFTER};
 use crate::model::Model;
-use crate::native::speculate::{SpecStamp, CMDLINE_LITERAL_KEYS};
+use crate::native::speculate::{is_cmdline_mode, SpecStamp, CMDLINE_LITERAL_KEYS};
 
 /// Whether `notation` completes one of the invoking keys, typed in normal
 /// mode, where those keys are mapped.
@@ -34,26 +34,24 @@ use crate::native::speculate::{SpecStamp, CMDLINE_LITERAL_KEYS};
 /// the engine's own `literal_pending` is written only once a key is sent,
 /// after every key one update folds.
 ///
-/// The mode is read the same way. `o<Space>e` typed inside one round trip
-/// reaches nvim in insert mode, where it is text, while the mode view last
-/// read still says normal. A sequence whose first key went out behind a
-/// key that leaves normal mode, with no mode reported or key answered
-/// since, completes nothing. A key inside one of the user's own mapped
-/// sequences, the `a` of `<leader>a`, is that mapping's: it leaves no mode
-/// by itself, and the key after it may start a sequence. A rhs that does
-/// leave normal mode is reported, and the hold it lets arm ends on that
-/// report.
-///
-/// Both readings are set aside for a first key folded under an error's
-/// doubt. A hold missed sends the query into the buffer as commands, and
-/// one armed in error ends on a mode report out of normal mode or on its
-/// bound.
+/// Both readings are set aside for a first key that went out unsettled:
+/// behind a key that may change what nvim reads next, before an answer has
+/// arrived since the newest key and that key is a round trip old. Every key
+/// does, apart from a character typed while view reads insert, replace or a
+/// command line, so typed prose never arms. A hold missed sends the query
+/// into the buffer as commands, and one armed in error ends on a settled
+/// mode report out of normal mode or on its bound.
 pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
-    let normal = model.engine.mode.current == "normal";
+    let mode = model.engine.mode.current.as_str();
+    let normal = mode == "normal";
+    let text = notation_char(notation).is_some()
+        && (matches!(mode, "insert" | "replace") || is_cmdline_mode(mode));
     let hold = &mut model.submit_hold;
     let argument_of = hold.argument_of.take();
-    if let Some(sent) = &mut hold.doubt {
-        *sent = true;
+    let prior = hold.unsettled;
+    if !text {
+        hold.unsettled = true;
+        hold.sent = None;
     }
     let longest = hold
         .invoke_keys
@@ -62,26 +60,21 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         .max()
         .unwrap_or(0);
     // keys typed on a tracked `:` line are its text, whatever mode nvim
-    // last reported: a line view sends itself opens with no `:` folded
-    // here to mark the mode unsure
-    if !normal || longest == 0 || hold.typed.is_some() {
+    // last reported
+    if !normal && !prior || longest == 0 || hold.typed.is_some() {
         hold.recent.clear();
         return false;
     }
     let key = canonical(notation);
     hold.argument_of = owed_after(argument_of, notation);
-    hold.replace_owed |= key == "r" && argument_of.is_none_or(|of| of == "g");
-    let mode_unsure = hold.mode_unsure;
-    let leaves = leaves_normal(argument_of, &key);
     // nvim matches a mapping before it reads a key as an argument, so where
     // the keys up to the one owing an argument begin one of the user's
     // mappings, this key may be that mapping's. Where the mapping then fails
     // to match, nvim reads the keys as builtin commands, and this key was
     // the argument after all, so the doubt covers both readings
     let owing_begins_mapping = argument_of.is_some() && in_user_keys(&hold.recent, &hold.user_keys);
-    if owing_begins_mapping && hold.doubt.is_none() {
-        hold.doubt = Some(true);
-        hold.doubt_sent = None;
+    if owing_begins_mapping {
+        hold.doubt = true;
     }
     let argument = argument_of.is_some() && !owing_begins_mapping;
     while hold.recent.len() >= longest.max(hold.user_longest) {
@@ -90,17 +83,15 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
     hold.recent.push_back(Folded {
         key,
         argument,
-        mode_unsure,
-        doubt: hold.doubt.is_some(),
+        unsettled: prior || owing_begins_mapping,
     });
-    hold.mode_unsure |= leaves && !in_user_keys(&hold.recent, &hold.user_keys);
     let recent = &hold.recent;
     let complete = hold.invoke_keys.iter().any(|invocation| {
         let keys = &invocation.keys;
         recent.len().checked_sub(keys.len()).is_some_and(|start| {
             recent
                 .get(start)
-                .is_some_and(|first| first.doubt || (!first.argument && !first.mode_unsure))
+                .is_some_and(|first| first.unsettled || !first.argument)
                 && recent
                     .range(start..)
                     .map(|folded| &folded.key)
@@ -108,42 +99,35 @@ pub(super) fn completes_invoke(model: &mut Model, notation: &str) -> bool {
         })
     });
     if complete {
-        // the keys inside the sequence were the mapping's, and left no
-        // mode behind them
+        // the keys inside the sequence were the mapping's
         hold.recent.clear();
         hold.argument_of = None;
-        hold.mode_unsure = false;
     }
     complete
 }
 
-/// Ends a doubt on an answer to a key sent after the error or the mapping
-/// key that raised it, once nothing is owed. A mode report counts as an
-/// answer. One that answers a key sent before the error leaves the doubt
-/// standing, because the error erased what that key owes.
-///
-/// The answering batch, arriving at `now`, has to be one that can answer a
-/// key typed since the doubt was raised. One sooner than `shortest`, the
-/// shortest round trip read, after the first such key answers a key sent
-/// before it. Nothing is owed once the newest key neither was read as
-/// an argument nor takes one and stays in normal mode: nvim and view then
-/// agree, whichever way either read the keys before it. A `"` or an `f`
-/// read as no argument may still owe one, since nvim holds a key that
-/// takes an argument until it has it.
-pub(super) fn settle_doubt(hold: &mut SubmitHold, now: SpecStamp, shortest: Duration) {
-    let answers_sent = hold
-        .doubt_sent
-        .is_none_or(|sent| now.age_since(sent) >= shortest);
+/// Settles the hold at `now`, on a batch or a key arriving, once a batch
+/// answering a key has arrived since the newest key sent while it was
+/// unsettled and that key is at least `floor` old. A batch sooner may
+/// answer a key sent before that one, and with no round trip read yet any
+/// batch may. Under a doubt it also waits until
+/// nothing is owed: until the newest key neither was read as an argument
+/// nor takes one and stays in normal mode, since nvim holds a key that
+/// takes an argument until it has it. Without one, view's reading of an
+/// argument is nvim's once nvim has answered.
+pub(super) fn settle(hold: &mut SubmitHold, now: SpecStamp, floor: Option<Duration>) {
     let owes = |key: &str| CMDLINE_LITERAL_KEYS.contains(&key) && !LEAVES_NORMAL.contains(&key);
-    if hold.doubt == Some(true)
-        && answers_sent
-        && hold.argument_of.is_none()
-        && !hold
+    let owed = hold.argument_of.is_some()
+        || hold
             .recent
             .back()
-            .is_some_and(|newest| newest.argument || owes(newest.key.as_str()))
-    {
-        hold.doubt = None;
+            .is_some_and(|newest| newest.argument || owes(newest.key.as_str()));
+    let answered = hold.sent.is_some_and(|sent| {
+        hold.answered >= Some(sent) && floor.is_some_and(|floor| now.age_since(sent) >= floor)
+    });
+    if answered && !(hold.doubt && owed) {
+        hold.unsettled = false;
+        hold.doubt = false;
     }
 }
 
@@ -178,13 +162,4 @@ pub(crate) fn owed_after(of: Option<&str>, notation: &str) -> Option<&'static st
         .into_iter()
         .find(|(first, second, _)| *first == of && *second == key)
         .map(|(_, _, owing)| owing)
-}
-
-/// Whether `key`, typed as the argument of `before` or of nothing, leaves
-/// normal mode.
-pub(super) fn leaves_normal(before: Option<&str>, key: &str) -> bool {
-    match before {
-        None => LEAVES_NORMAL.contains(&key),
-        Some(before) => LEAVES_NORMAL_AFTER.contains(&(before, key)),
-    }
 }

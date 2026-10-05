@@ -18,9 +18,44 @@ use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime};
 
-use super::canonical;
-use super::typed_ahead::leaves_normal;
+use super::{canonical, LEAVES_NORMAL};
 use crate::model::Model;
+
+/// The keys that leave normal mode as the argument of the key before
+/// them: `gi`, `gv` and `gn` enter insert and visual, and the `g` and `z`
+/// operators (nvim's default `gc` and the `zy` yank among them) wait for a
+/// motion.
+const LEAVES_NORMAL_AFTER: [(&str, &str); 20] = [
+    ("g", "n"),
+    ("g", "N"),
+    ("g", "c"),
+    ("g", "i"),
+    ("g", "I"),
+    ("g", "v"),
+    ("g", "h"),
+    ("g", "H"),
+    ("g", "<C-h>"),
+    ("g", "R"),
+    ("g", "Q"),
+    ("g", "u"),
+    ("g", "U"),
+    ("g", "~"),
+    ("g", "?"),
+    ("g", "q"),
+    ("g", "w"),
+    ("g", "@"),
+    ("z", "f"),
+    ("z", "y"),
+];
+
+/// Whether `key`, typed as the argument of `before` or of nothing, leaves
+/// normal mode.
+fn leaves_normal(before: Option<&str>, key: &str) -> bool {
+    match before {
+        None => LEAVES_NORMAL.contains(&key),
+        Some(before) => LEAVES_NORMAL_AFTER.contains(&(before, key)),
+    }
+}
 
 /// One key sent to nvim in normal mode, as the log reads it.
 #[derive(Debug, Clone)]
@@ -341,6 +376,10 @@ impl UserRun {
         if let Some((pending, at)) = self.pending.take() {
             let start = len - run;
             self.fire(recent, start, pending, at);
+            // nvim ran the mapping, so it reads the key after it fresh
+            if let Some(after) = recent.get_mut(start + pending) {
+                after.argument = false;
+            }
             self.refold(recent, start + pending);
             return;
         }
@@ -1022,5 +1061,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The user's `gr` beside a longer `grn`: `<Space>` parts from `grn`,
+    /// so nvim runs `gr` and reads `<Space>` as a command of its own. The
+    /// log names `gr` and the `<Space>ff` invocation after it.
+    #[test]
+    fn a_key_after_a_mapping_its_own_key_ran_is_no_argument() {
+        let mut log = Matcher::default();
+        let view = ["<Space>ff".to_string()];
+        log.learn_view(view.iter());
+        log.learn_user(&mappings(&[&["g", "r"], &["g", "r", "n"]]), None);
+        for (key, at) in ["g", "r", " ", "f", "f"].into_iter().zip(0..) {
+            let now = AT + Duration::from_millis(at * 10);
+            log.read(key, true, now, Duration::from_millis(5), Duration::ZERO);
+        }
+        let fired: Vec<_> = log.take_fired().into_iter().map(|(keys, _)| keys).collect();
+        assert_eq!(fired, keys(&["g", "r"]));
+        let invoked = ["<Space>", "f", "f"].map(canonical);
+        assert_eq!(log.take_invoked().as_deref(), Some(&invoked[..]));
     }
 }

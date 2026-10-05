@@ -21715,6 +21715,9 @@ enum Step {
     Key(&'static str, u64),
     /// nvim answers with a cursor move and no change of mode.
     Answer,
+    /// nvim answers with its echo of the pending command alone, the way it
+    /// answers a key that waits for its argument.
+    Echo,
     /// nvim answers with an error message alone.
     Error,
     /// nvim reports this mode.
@@ -21730,17 +21733,37 @@ const fn k(key: &'static str) -> Step {
     Step::Key(key, 10)
 }
 
-/// `events` as a batch nvim sent in answer to the latest key, and the
-/// effects of applying it.
-fn engine_batch(m: &mut Model, events: Vec<UiEvent>) -> Vec<Effect> {
-    let stamp = SpecStamp::new(Duration::ZERO);
-    m.engine.key_unanswered = Some(stamp);
+/// `f <Space> f f m` typed over a local link: nvim echoes each `f` waiting
+/// for its argument, moves the cursor for each jump, and `m` waits for its
+/// mark as the last key.
+const ANSWERED_JUMP: [Step; 9] = [
+    k("f"),
+    Step::Echo,
+    k(" "),
+    Step::Answer,
+    k("f"),
+    Step::Echo,
+    k("f"),
+    Step::Answer,
+    k("m"),
+];
+
+/// `events` as a batch nvim sent in answer to the latest key, arriving `at`
+/// milliseconds into the session, and the effects of applying it.
+fn engine_batch_at(m: &mut Model, events: Vec<UiEvent>, at: u64) -> Vec<Effect> {
+    let stamp = SpecStamp::new(Duration::from_millis(at));
     let _ = crate::native::speculate::fold_redraw(m, &events, stamp);
     update(m, Msg::Redraw(events))
 }
 
+/// `events` as a batch nvim sent in answer to the latest key, and the
+/// effects of applying it.
+fn engine_batch(m: &mut Model, events: Vec<UiEvent>) -> Vec<Effect> {
+    engine_batch_at(m, events, 0)
+}
+
 /// Applies `step` to `m` at `at` milliseconds into the session, and the
-/// effects it had.
+/// effects it had. A batch from nvim arrives at `at`.
 fn apply_step(m: &mut Model, step: Step, at: u64) -> Vec<Effect> {
     let grid = m.engine.grids().cursor_local().0 .0;
     match step {
@@ -21748,7 +21771,7 @@ fn apply_step(m: &mut Model, step: Step, at: u64) -> Vec<Effect> {
             m.set_now(std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(at));
             update(m, self::key(key))
         }
-        Step::Answer => engine_batch(
+        Step::Answer => engine_batch_at(
             m,
             vec![
                 UiEvent::GridCursorGoto {
@@ -21758,8 +21781,19 @@ fn apply_step(m: &mut Model, step: Step, at: u64) -> Vec<Effect> {
                 },
                 UiEvent::Flush,
             ],
+            at,
         ),
-        Step::Error => engine_batch(
+        Step::Echo => engine_batch_at(
+            m,
+            vec![
+                UiEvent::MsgShowcmd {
+                    content: Vec::new(),
+                },
+                UiEvent::Flush,
+            ],
+            at,
+        ),
+        Step::Error => engine_batch_at(
             m,
             vec![
                 UiEvent::MsgShow {
@@ -21769,8 +21803,9 @@ fn apply_step(m: &mut Model, step: Step, at: u64) -> Vec<Effect> {
                 },
                 UiEvent::Flush,
             ],
+            at,
         ),
-        Step::Mode(mode) => engine_batch(
+        Step::Mode(mode) => engine_batch_at(
             m,
             vec![
                 UiEvent::ModeChange {
@@ -21779,6 +21814,7 @@ fn apply_step(m: &mut Model, step: Step, at: u64) -> Vec<Effect> {
                 },
                 UiEvent::Flush,
             ],
+            at,
         ),
         Step::Click | Step::Paste => {
             let msg = match step {
@@ -21816,20 +21852,27 @@ fn bound_armed(effects: &[Effect], armed: Option<u64>) -> Option<u64> {
 type Trace = Vec<(bool, Vec<String>)>;
 
 /// The [`Trace`] of `steps`, then the same for each bound running out
-/// while a hold stands. nvim answers each key with no mode change where
-/// `answer` is set, and the key log forgets everything it read after each
-/// step where `forget` is.
+/// while a hold stands. Each key goes to nvim at its own time, as
+/// [`apply_stamped`] sends it, and every batch arrives 5 ms after the
+/// latest key, past the round trips [`hold_model`] reads and before the
+/// next key. nvim answers each key with no mode change where `answer` is
+/// set, and the key log forgets everything it read after each step where
+/// `forget` is.
 fn hold_trace(m: &mut Model, steps: &[Step], answer: bool, forget: bool) -> Trace {
     let mut armed = None;
     let mut at = 0;
     let mut trace = Vec::new();
     for step in steps {
-        if let Step::Key(_, gap) = step {
-            at += gap;
-        }
-        let mut effects = apply_step(m, *step, at);
+        let mut effects = match step {
+            Step::Key(_, gap) => {
+                at += gap;
+                apply_stamped(m, *step, at)
+            }
+            Step::Answer | Step::Echo | Step::Error | Step::Mode(_) => apply_step(m, *step, at + 5),
+            Step::Click | Step::Paste => apply_step(m, *step, at),
+        };
         if answer && matches!(step, Step::Key(..)) {
-            effects.extend(apply_step(m, Step::Answer, at));
+            effects.extend(apply_step(m, Step::Answer, at + 5));
         }
         if forget {
             m.submit_hold.forget_log();
@@ -21853,7 +21896,7 @@ fn hold_model(user: bool, log: bool) -> Model {
     let mut m = started_model();
     m.engine.mode.current = "normal".to_string();
     claim_invocations(&mut m, &[("picker", "<Space>ff"), ("tree", "<Space>e")]);
-    round_trips(&mut m, 4, 40);
+    round_trips(&mut m, 4, 5);
     if user {
         user_mappings(
             &mut m,
@@ -21900,10 +21943,14 @@ fn the_hold_decides_the_same_with_or_without_the_key_log() {
 /// The user's own mappings only ever add a hold. Across
 /// [`hold_population`], answered or not, every step held with no mappings
 /// read is held with them, and the same keys reach nvim in the same order.
+/// `g r`, echoed by nvim, then view's key adds one: with the user's `grn`
+/// read, `r` may begin that mapping and the key after it may be a command.
 #[test]
 fn the_users_mappings_only_ever_add_a_hold() {
     let mut added = 0;
-    for steps in &hold_population() {
+    let mut population = hold_population();
+    population.push(vec![k("g"), k("r"), Step::Echo, k(" "), k("f"), k("f")]);
+    for steps in &population {
         for answer in [false, true] {
             let with = hold_trace(&mut hold_model(true, false), steps, answer, false);
             let without = hold_trace(&mut hold_model(false, false), steps, answer, false);
@@ -21917,24 +21964,27 @@ fn the_users_mappings_only_ever_add_a_hold() {
             assert_eq!(sent(&with), sent(&without), "answer {answer}: {steps:?}");
         }
     }
-    assert!(
-        added > 0,
-        "the population holds a leave key inside a mapping"
-    );
+    assert!(added > 0, "no key a user mapping may begin added a hold");
 }
 
-/// nvim answering a key with no mode change only ever adds a hold: across
-/// [`hold_population`], every key held with no answer is held with one.
-/// An answer ends the doubt an error raises, which takes away the holds the
-/// doubt alone armed, so a sequence carrying an error is left out.
+/// Silence from nvim never removes a hold: across [`hold_population`],
+/// with the user's mappings read or not and errors included, every step
+/// held where nvim answers each key is held where it answers none, and the
+/// same keys reach it in the same order.
 #[test]
-fn an_answer_from_nvim_only_ever_adds_a_hold() {
-    let erred = |steps: &&Vec<Step>| steps.iter().any(|step| matches!(step, Step::Error));
-    for steps in hold_population().iter().filter(|steps| !erred(steps)) {
-        let with = hold_trace(&mut hold_model(false, false), steps, true, false);
-        let without = hold_trace(&mut hold_model(false, false), steps, false, false);
-        for (at, (answered, unanswered)) in with.iter().zip(&without).enumerate() {
-            assert!(answered.0 || !unanswered.0, "step {at} of {steps:?}");
+fn silence_from_nvim_never_removes_a_hold() {
+    let flat =
+        |trace: &[(bool, Vec<String>)]| trace.iter().flat_map(|t| t.1.clone()).collect::<Vec<_>>();
+    for steps in &hold_population() {
+        for user in [false, true] {
+            let answered = hold_trace(&mut hold_model(user, false), steps, true, false);
+            let silent = hold_trace(&mut hold_model(user, false), steps, false, false);
+            let case = format!("user {user}: {steps:?}");
+            let pairs = answered.iter().zip(&silent).take(steps.len());
+            for (at, (answered, silent)) in pairs.enumerate() {
+                assert!(silent.0 || !answered.0, "step {at}, {case}");
+            }
+            assert_eq!(flat(&answered), flat(&silent), "{case}");
         }
     }
 }
@@ -21972,25 +22022,70 @@ fn an_error_from_nvim_never_removes_a_hold() {
     }
 }
 
-/// Where no error from nvim stands in a sequence, the hold decides as
-/// recorded. The traces of every such sequence of [`hold_population`],
-/// answered or not and with the user's mappings read or not, hash to one
-/// value. It records the decisions after a paste, inside a prefix of the
-/// user's mappings and after the second key of a builtin of three keys, as
-/// nvim reads them.
-#[test]
-fn the_hold_decides_as_recorded_where_nvim_sends_no_error() {
-    let mut hash = crate::hash::FNV_OFFSET;
+/// Whether input was held after each step of every sequence of
+/// [`hold_population`], with each of nvim answering every key or not and
+/// the user's mappings read or not: one line of `0` and `1` per trace, in
+/// population order.
+fn hold_population_held() -> String {
+    let mut lines = String::new();
     for steps in hold_population() {
-        if steps.iter().any(|step| matches!(step, Step::Error)) {
-            continue;
-        }
         for (answer, user) in [(false, false), (false, true), (true, false), (true, true)] {
             let trace = hold_trace(&mut hold_model(user, false), &steps, answer, false);
-            hash = crate::hash::fnv1a_extend(hash, format!("{trace:?}").as_bytes());
+            let typed: Vec<&str> = steps
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Key(key, _) => Some(*key),
+                    _ => None,
+                })
+                .collect();
+            let sent: Vec<&str> = trace
+                .iter()
+                .flat_map(|t| &t.1)
+                .map(String::as_str)
+                .collect();
+            assert_eq!(sent, typed, "answer {answer}, user {user}: {steps:?}");
+            lines.extend(
+                trace
+                    .iter()
+                    .take(steps.len())
+                    .map(|t| if t.0 { '1' } else { '0' }),
+            );
+            lines.push('\n');
         }
     }
-    assert_eq!(hash, 0x522c_1743_bdba_9889, "{hash:#x}");
+    lines
+}
+
+/// The hold only ever holds more than it was recorded holding: every step
+/// of [`hold_population`] held in `hold_population_held.txt` is held now,
+/// and every key typed reaches nvim once, in the order it was typed.
+/// `VIEW_RECORD_HOLD` names a file the current decisions are written to.
+#[test]
+fn the_hold_only_ever_holds_more_than_recorded() {
+    let now = hold_population_held();
+    if let Some(path) = std::env::var_os("VIEW_RECORD_HOLD") {
+        std::fs::write(path, &now).unwrap();
+        return;
+    }
+    let recorded = include_str!("hold_population_held.txt");
+    let population = hold_population();
+    let traces = population
+        .iter()
+        .flat_map(|steps| std::iter::repeat_n(steps, 4));
+    let lines = recorded.lines().zip(now.lines()).zip(traces).enumerate();
+    let mut checked = 0;
+    for (at, ((was, is), steps)) in lines {
+        let (answer, user) = (at % 4 >= 2, at % 2 == 1);
+        for (step, (w, i)) in was.chars().zip(is.chars()).enumerate() {
+            assert!(
+                w == '0' || i == '1',
+                "step {step}, answer {answer}, user {user}: {steps:?}"
+            );
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, recorded.lines().count());
+    assert_eq!(checked, now.lines().count());
 }
 
 /// An error answering a key sent before `f` leaves `f` waiting for its
@@ -22296,11 +22391,11 @@ fn a_paste_or_a_mapping_prefix_before_views_key_arms_the_hold() {
 
 /// A click reaches nvim as the argument of the key before it that owes
 /// one, so the `f` after it waits for view's first key as its target and
-/// nvim runs no mapping on it.
+/// nvim runs no mapping on it, each key answered over a local link.
 #[test]
 fn a_click_after_a_key_owing_an_argument_is_that_argument() {
     let mut steps = vec![k("\""), Step::Click, Step::Answer];
-    steps.extend(["f", " ", "f", "f", "m"].map(k));
+    steps.extend(ANSWERED_JUMP);
     let trace = hold_trace(&mut hold_model(true, false), &steps, false, false);
     assert!(trace.iter().all(|t| !t.0), "{trace:?}");
 }
@@ -22323,7 +22418,8 @@ fn a_paste_leaves_a_mapping_prefix_waiting_and_a_click_ends_it() {
 /// one an error raises. View's key after `g r`, an answer and `j` arms the
 /// hold, which releases when the picker opens and hands it the query with
 /// no bound run out. The answer to `j`, which owes nothing, ends the doubt,
-/// and view's key typed as `f`'s argument after it arms nothing.
+/// and view's key typed as `f`'s argument after it over a local link arms
+/// nothing.
 #[test]
 fn a_doubt_a_mapping_prefix_raises_ends_as_one_an_error_raises() {
     let prefix = [k("g"), k("r"), Step::Answer, k("j")];
@@ -22346,28 +22442,20 @@ fn a_doubt_a_mapping_prefix_raises_ends_as_one_an_error_raises() {
     assert_eq!(query.as_deref(), Some("main"));
 
     let mut steps = prefix.to_vec();
-    steps.extend([Step::Answer, k("f"), k(" "), k("f"), k("f"), k("m")]);
+    steps.push(Step::Answer);
+    steps.extend(ANSWERED_JUMP);
     let trace = hold_trace(&mut hold_model(true, false), &steps, false, false);
     assert!(trace.iter().all(|t| !t.0), "{trace:?}");
 }
 
-/// Applies `step` at `at` milliseconds as the host does: every call a key
-/// sends nvim is folded with the stamp `at`, and an answer is a batch
-/// stamped `at`, so the hold reads a round trip off the two stamps.
+/// Applies `step` at `at` milliseconds as the host does: a key arrives at
+/// the stamp `at` before it is folded, every call it sends nvim is folded
+/// with that stamp, and an answer is a batch stamped `at`, so the hold
+/// reads a round trip off the two stamps.
 fn apply_stamped(m: &mut Model, step: Step, at: u64) -> Vec<Effect> {
     let stamp = SpecStamp::new(Duration::from_millis(at));
-    if let Step::Answer = step {
-        let grid = m.engine.grids().cursor_local().0 .0;
-        let events = vec![
-            UiEvent::GridCursorGoto {
-                grid,
-                row: 0,
-                col: 0,
-            },
-            UiEvent::Flush,
-        ];
-        let _ = crate::native::speculate::fold_redraw(m, &events, stamp);
-        return update(m, Msg::Redraw(events));
+    if let Step::Key(..) = step {
+        crate::native::speculate::fold_key_arrival(m, stamp);
     }
     let effects = apply_step(m, step, at);
     if let Step::Key(..) = step {
@@ -22392,14 +22480,15 @@ fn sent_stamped(m: &mut Model, steps: &[(Step, u64)]) -> Vec<String> {
 }
 
 /// The doubt a key read inside one of the user's mappings raises is
-/// answered only by a batch a shortest round trip after the first key sent
-/// since it was raised, whatever an earlier doubt stamped. After a first
-/// doubt from `g r` ends, a second `g r j` answered sooner than that
-/// leaves the doubt standing, and view's key behind `"` arms the hold. An
-/// answer a round trip after the second `r` ends it, and the same keys
-/// arm nothing.
+/// answered only by a batch a round trip after the newest key sent since
+/// it was raised, whatever an earlier doubt stamped. After a first doubt
+/// from `g r j` ends, a second `g r j` answered sooner than that, with `"`
+/// typed right behind the answer, leaves the doubt standing, and view's key
+/// behind `"` arms the hold, however promptly nvim answers the keys behind
+/// it. An answer a round trip after the second `j` ends it, and the same
+/// keys arm nothing.
 #[test]
-fn a_doubt_a_mapping_prefix_raises_is_answered_a_round_trip_after_its_first_key() {
+fn a_doubt_a_mapping_prefix_raises_is_answered_a_round_trip_after_its_newest_key() {
     for (gap, holds) in [(1, true), (40, false)] {
         let mut m = hold_model(true, false);
         round_trips(&mut m, 40, 40);
@@ -22407,14 +22496,23 @@ fn a_doubt_a_mapping_prefix_raises_is_answered_a_round_trip_after_its_first_key(
             (k("g"), 0),
             (k("r"), 1),
             (k("j"), 2),
-            (Step::Answer, 100),
+            (Step::Answer, 42),
             (k("g"), 1000),
             (k("r"), 1001),
             (k("j"), 1002),
-            (Step::Answer, 1001 + gap),
+            (Step::Answer, 1002 + gap),
+            (k("\""), 1003 + gap),
+            (Step::Echo, 1053 + gap),
         ];
         let behind = ["\"", " ", "f", "f", "m", "a", "i", "n"];
-        steps.extend(behind.into_iter().zip(1100..).map(|(key, at)| (k(key), at)));
+        // each key of `<Space> f f` answered 50 ms after it, the rest at
+        // speed
+        let replies = [Step::Echo, Step::Echo, Step::Answer];
+        let answered = behind[1..4].iter().zip(replies).zip((1100..).step_by(60));
+        for ((key, reply), at) in answered {
+            steps.extend([(k(key), at), (reply, at + 50)]);
+        }
+        steps.extend(behind[4..].iter().zip(1340..).map(|(key, at)| (k(key), at)));
         let sent = sent_stamped(&mut m, &steps);
         assert_eq!(m.submit_hold.is_holding(), holds, "{gap} ms: {sent:?}");
         let keys = if holds { &behind[..4] } else { &behind[..] };
@@ -22453,8 +22551,9 @@ fn a_colon_behind_an_argument_that_is_itself_a_literal_key_opens_a_line() {
 
 /// With no user mapping read, every builtin of three keys reads its third
 /// key as its argument. `g ' [` jumps to a mark, so view's key typed next
-/// arms the hold, and in `g ' <Space> f f` the `<Space>` is the mark and
-/// nothing arms. The same holds for each of [`OWES_AFTER`].
+/// arms the hold, and in `g ' <Space> f f`, typed over a local link, the
+/// `<Space>` is the mark and nothing arms. The same holds for each of
+/// [`OWES_AFTER`].
 ///
 /// [`OWES_AFTER`]: crate::native::submit_hold::OWES_AFTER
 #[test]
@@ -22467,10 +22566,156 @@ fn a_three_key_builtin_reads_its_third_key_as_its_argument() {
         let early: Vec<_> = trace[6..steps.len()].iter().flat_map(|t| &t.1).collect();
         assert!(early.is_empty(), "{first}{second}: query sent: {trace:?}");
 
-        let steps = [first, second, " ", "f", "f", "m"].map(k);
+        let steps = [
+            k(first),
+            Step::Echo,
+            k(second),
+            Step::Echo,
+            k(" "),
+            Step::Answer,
+            k("f"),
+            Step::Echo,
+            k("f"),
+            Step::Answer,
+            k("m"),
+        ];
         let trace = hold_trace(&mut hold_model(false, false), &steps, false, false);
         assert!(trace.iter().all(|t| !t.0), "{first}{second}: {trace:?}");
     }
+}
+
+/// Whether input was held after each of `steps`, applied by
+/// [`apply_stamped`] at the milliseconds beside each, in `mode`, with every
+/// round trip read at `trip` milliseconds.
+fn held_stamped(mode: &str, trip: u64, steps: &[(Step, u64)]) -> Vec<bool> {
+    let mut m = hold_model(false, false);
+    m.engine.mode.current = mode.to_string();
+    round_trips(&mut m, trip, trip);
+    steps
+        .iter()
+        .map(|(step, at)| {
+            let _ = apply_stamped(&mut m, *step, *at);
+            m.submit_hold.is_holding()
+        })
+        .collect()
+}
+
+/// `keys` pressed `gap` milliseconds apart from `start`.
+fn keys_from(keys: &[&'static str], start: u64, gap: u64) -> Vec<(Step, u64)> {
+    keys.iter()
+        .zip((start..).step_by(usize::try_from(gap).unwrap_or(1)))
+        .map(|(key, at)| (k(key), at))
+        .collect()
+}
+
+/// Over a 140 ms link, view's key typed before the error refusing `i`
+/// came back arms the hold.
+#[test]
+fn a_view_key_sent_before_an_error_came_back_arms() {
+    let mut steps = keys_from(&["i", " ", "f", "f"], 0, 10);
+    steps.extend([(Step::Error, 140), (k("m"), 150)]);
+    let held = held_stamped("normal", 140, &steps);
+    assert_eq!(held, [false, false, false, true, true, true]);
+}
+
+/// View's key typed right behind an operator's motion, `dw<Space>ff`,
+/// arms the hold while nvim has answered nothing.
+#[test]
+fn a_view_key_behind_an_operator_motion_arms() {
+    let held = held_stamped("normal", 140, &keys_from(&["d", "w", " ", "f", "f"], 0, 10));
+    assert_eq!(held, [false, false, false, false, true]);
+}
+
+/// `:w<CR>` with only the command line reported, then view's key: nvim
+/// reads `<Space>ff` in normal mode and the hold arms.
+#[test]
+fn a_view_key_after_a_submitted_line_arms() {
+    let mut steps = keys_from(&[":", "w"], 0, 80);
+    steps.push((Step::Mode("cmdline_normal"), 150));
+    steps.extend(keys_from(&["<CR>", " ", "f", "f"], 160, 80));
+    let held = held_stamped("normal", 140, &steps);
+    assert_eq!(held.last(), Some(&true), "{held:?}");
+}
+
+/// `<Esc>` typed in insert mode, then view's key before nvim reports
+/// normal mode: the hold arms.
+#[test]
+fn a_view_key_after_leaving_insert_arms() {
+    let held = held_stamped("insert", 140, &keys_from(&["<Esc>", " ", "f", "f"], 0, 10));
+    assert_eq!(held, [false, false, false, true]);
+}
+
+/// `v<Esc>`, then `rx` read apart by nvim and view's key behind it: the
+/// replace report arriving after the hold armed ends nothing, since it
+/// can answer the keys of the hold's own run.
+#[test]
+fn a_replace_report_in_flight_ends_no_hold() {
+    let mut steps = vec![(k("v"), 0), (k("<Esc>"), 0), (k("r"), 100), (k("x"), 120)];
+    steps.extend([(Step::Mode("visual"), 140), (Step::Mode("normal"), 140)]);
+    steps.extend(keys_from(&[" ", "f", "f"], 150, 10));
+    steps.extend([(Step::Mode("replace"), 240), (k("m"), 250)]);
+    let held = held_stamped("normal", 140, &steps);
+    assert_eq!(held[8..], [true, true, true], "{held:?}");
+}
+
+/// `<Esc>` in insert mode, then `rx` and view's key before nvim reports
+/// normal mode: the hold arms.
+#[test]
+fn a_replace_after_insert_arms() {
+    let keys = ["<Esc>", "r", "x", " ", "f", "f"];
+    let held = held_stamped("insert", 140, &keys_from(&keys, 0, 10));
+    assert_eq!(held.last(), Some(&true), "{held:?}");
+}
+
+/// `gn` whose pattern matches nothing draws nothing, so view's key typed
+/// any time after it arms the hold.
+#[test]
+fn a_view_key_after_an_unmatched_gn_arms() {
+    let mut steps = keys_from(&["g", "n"], 0, 10);
+    steps.extend(keys_from(&[" ", "f", "f"], 500, 10));
+    let held = held_stamped("normal", 140, &steps);
+    assert_eq!(held.last(), Some(&true), "{held:?}");
+}
+
+/// A `gr` the user maps where view has not read the mapping: nvim runs it,
+/// and its cursor move a round trip later says no key waits on an
+/// argument, so view's key typed next arms the hold.
+#[test]
+fn a_view_key_after_an_unread_user_mapping_that_moved_the_cursor_arms() {
+    let mut steps = keys_from(&["g", "r"], 0, 10);
+    steps.push((Step::Answer, 200));
+    steps.extend(keys_from(&[" ", "f", "f"], 500, 10));
+    let held = held_stamped("normal", 140, &steps);
+    assert_eq!(held.last(), Some(&true), "{held:?}");
+}
+
+/// Prose typed in insert mode over a slow link, `the end` with `<Space>e`
+/// one of view's keys, arms nothing.
+#[test]
+fn typed_prose_never_arms() {
+    let keys = ["t", "h", "e", " ", "e", "n", "d"];
+    let held = held_stamped("insert", 140, &keys_from(&keys, 0, 10));
+    assert!(held.iter().all(|held| !held), "{held:?}");
+}
+
+/// `A<Space>e` typed inside one round trip arms the hold, and the insert
+/// report a round trip after the last key ends it.
+#[test]
+fn a_settled_mode_report_ends_a_false_hold() {
+    let mut steps = keys_from(&["A", " ", "e"], 0, 10);
+    steps.push((Step::Mode("insert"), 170));
+    let held = held_stamped("normal", 140, &steps);
+    assert_eq!(held, [false, false, true, false]);
+}
+
+/// On a local link `o` is answered before view's key is typed, so
+/// `o<Space>e` is text and nothing arms.
+#[test]
+fn a_local_answered_key_settles() {
+    let mut steps = vec![(k("o"), 0), (Step::Mode("insert"), 2)];
+    steps.extend(keys_from(&[" ", "e"], 50, 10));
+    let held = held_stamped("normal", 1, &steps);
+    assert!(held.iter().all(|held| !held), "{held:?}");
 }
 
 /// `r` reports replace mode once nvim reads it, and `gr` once the key
@@ -22513,15 +22758,14 @@ fn a_click_ends_the_mapping_views_first_key_began() {
 
 /// The doubt an error raises ends on an answer to a key typed after the
 /// error, a mode report included, once no argument is owed. After it,
-/// view's key typed as `f`'s argument arms nothing.
+/// view's key typed as `f`'s argument over a local link arms nothing.
 #[test]
 fn the_doubt_an_error_raises_ends_on_a_fact_from_nvim() {
     let jump = [" ", "f", "f", "m"].map(k);
     for settled in [&[k("j"), Step::Mode("normal")][..], &[k("j"), Step::Answer]] {
         let mut steps = vec![k("i"), Step::Error];
         steps.extend_from_slice(settled);
-        steps.push(k("f"));
-        steps.extend(jump);
+        steps.extend(ANSWERED_JUMP);
         let trace = hold_trace(&mut hold_model(false, false), &steps, false, false);
         assert!(trace.iter().all(|t| !t.0), "{settled:?}: {trace:?}");
     }
@@ -22541,7 +22785,8 @@ fn the_doubt_an_error_raises_ends_on_a_fact_from_nvim() {
 /// A doubt a mode report left standing, `"` owing its register, still
 /// ends on a fact from nvim once nothing is owed: the answer to a later
 /// plain key or a mode report after it. Until then `j` is the register,
-/// and view's key typed as `f`'s argument arms the hold.
+/// and view's key typed as `f`'s argument arms the hold, however promptly
+/// nvim answers the keys around it.
 #[test]
 fn a_doubt_left_owing_ends_once_a_later_key_owes_nothing() {
     let owing = [
@@ -22552,7 +22797,7 @@ fn a_doubt_left_owing_ends_once_a_later_key_owes_nothing() {
         k("\""),
         Step::Mode("normal"),
     ];
-    let probe = ["f", " ", "f", "f", "m"].map(k);
+    let probe = ANSWERED_JUMP;
     for (after, holds) in [
         (&[k("j"), Step::Mode("normal")][..], true),
         (&[k("j"), k("j"), Step::Answer], false),
@@ -22609,9 +22854,16 @@ fn a_mode_report_ahead_of_an_error_in_one_batch_keeps_the_doubt() {
 /// A mode report with no key sent since the error leaves the doubt
 /// standing, in the error's own flush or a later one, and view's key typed
 /// as `f`'s argument arms the hold. A mode report after a key sent since
-/// the error ends it, and the same key arms nothing.
+/// the error ends it, and the same key arms nothing. nvim answers every
+/// key after the error as it would over a local link.
 #[test]
 fn a_mode_report_ends_the_doubt_only_after_a_key_sent_since_the_error() {
+    let jump_from = |start: u64| -> Vec<(Step, u64)> {
+        ANSWERED_JUMP
+            .into_iter()
+            .zip((start..).step_by(5))
+            .collect()
+    };
     let error = UiEvent::MsgShow {
         kind: "emsg".to_string(),
         content: vec![(0, "E21: Cannot make changes".to_string())],
@@ -22628,23 +22880,19 @@ fn a_mode_report_ends_the_doubt_only_after_a_key_sent_since_the_error() {
     ];
     for batches in [&own[..], &later] {
         let mut m = hold_model(false, false);
-        let _ = update(&mut m, self::key("i"));
+        let _ = apply_stamped(&mut m, k("i"), 0);
         for batch in batches {
-            let _ = engine_batch(&mut m, batch.clone());
+            let _ = engine_batch_at(&mut m, batch.clone(), 5);
         }
-        for key in ["f", " ", "f", "f"] {
-            let _ = update(&mut m, self::key(key));
-        }
+        let _ = sent_stamped(&mut m, &jump_from(10));
         assert!(m.submit_hold.is_holding(), "{batches:?}");
     }
     let mut m = hold_model(false, false);
-    let _ = update(&mut m, self::key("i"));
-    let _ = engine_batch(&mut m, vec![error, UiEvent::Flush]);
-    let _ = update(&mut m, self::key("j"));
-    let _ = engine_batch(&mut m, vec![mode, UiEvent::Flush]);
-    for key in ["f", " ", "f", "f", "m"] {
-        let _ = update(&mut m, self::key(key));
-    }
+    let _ = apply_stamped(&mut m, k("i"), 0);
+    let _ = engine_batch_at(&mut m, vec![error, UiEvent::Flush], 5);
+    let _ = apply_stamped(&mut m, k("j"), 10);
+    let _ = engine_batch_at(&mut m, vec![mode, UiEvent::Flush], 15);
+    let _ = sent_stamped(&mut m, &jump_from(20));
     assert!(!m.submit_hold.is_holding(), "j answered by a mode report");
 }
 
@@ -22683,9 +22931,16 @@ fn an_answer_to_a_key_sent_before_the_error_keeps_the_doubt() {
             row: 0,
             col: 0,
         };
-        batch(&mut m, vec![answer, UiEvent::Flush], trip * 2 + after);
-        for key in ["f", " ", "f", "f"] {
-            let _ = update(&mut m, self::key(key));
+        let flushed = |event: &UiEvent| vec![event.clone(), UiEvent::Flush];
+        batch(&mut m, flushed(&answer), trip * 2 + after);
+        // each key answered past the slowest round trip read so far
+        let echo = UiEvent::MsgShowcmd {
+            content: Vec::new(),
+        };
+        let tail = [("f", &echo), (" ", &answer), ("f", &echo), ("f", &answer)];
+        for ((key, reply), sent) in tail.into_iter().zip((10..).step_by(8)) {
+            send(&mut m, key, trip * sent);
+            batch(&mut m, flushed(reply), trip * (sent + 4));
         }
         assert_eq!(m.submit_hold.is_holding(), holds, "{after:?} after j");
     }
@@ -22768,16 +23023,27 @@ fn the_hold_decides_what_it_was_recorded_deciding() {
         (steps, rows)
     };
     let mut jump = vec![k("i"), Step::Error, k("j"), Step::Answer];
-    jump.extend(["f", " ", "f", "f", "m"].map(k));
+    jump.extend(ANSWERED_JUMP);
     let mut jumped = typed(&["i"]);
     jumped.extend([row(false, &[]), row(false, &["j"]), row(false, &[])]);
-    jumped.extend(typed(&["f", " ", "f", "f", "m"]));
-    let yanked = ["z", "y", " ", "f", "f", "m", "a", "i", "n"];
+    for key in ["f", " ", "f", "f"] {
+        jumped.extend([row(false, &[key]), row(false, &[])]);
+    }
+    jumped.push(row(false, &["m"]));
+    // `zy` waits for its motion, which nvim reports, and `<Space>` is that
+    // motion
+    let after_yank = ["f", "f", "m", "a", "i", "n"];
+    let mut yank = vec![k("z"), k("y"), Step::Mode("operator")];
+    yank.extend([k(" "), Step::Mode("normal")]);
+    yank.extend(after_yank.map(k));
+    let mut yanked = typed(&["z", "y"]);
+    yanked.extend([row(false, &[]), row(false, &[" "]), row(false, &[])]);
+    yanked.extend(typed(&after_yank));
     let traced = [
         errored(&["o", "i"], &["f", "m", " ", "f"]),
         errored(&["d", "i"], &["f", "m", "t", " ", "f"]),
         (jump, jumped),
-        (yanked.map(k).to_vec(), typed(&yanked)),
+        (yank, yanked),
     ];
     for (steps, want) in traced {
         let trace = hold_trace(&mut hold_model(true, true), &steps, false, false);
@@ -22795,9 +23061,10 @@ fn the_hold_decides_what_it_was_recorded_deciding() {
             ],
         ),
         (
-            &[k("i"), k(" "), k("e"), k("m")],
+            &[k("i"), Step::Mode("insert"), k(" "), k("e"), k("m")],
             vec![
                 row(false, &["i"]),
+                row(false, &[]),
                 row(false, &[" "]),
                 row(false, &["e"]),
                 row(false, &["m"]),

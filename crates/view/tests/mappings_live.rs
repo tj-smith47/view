@@ -23,7 +23,8 @@ use view_core::native::keys::lhs_keys;
 use view_core::native::mappings::{MappingClaim, MappingOwner};
 use view_core::native::registry;
 use view_core::native::speculate::{
-    fold_engine_call, fold_redraw, is_cmdline_mode, SpecStamp, CMDLINE_LITERAL_KEYS,
+    fold_engine_call, fold_key_arrival, fold_redraw, is_cmdline_mode, SpecStamp,
+    CMDLINE_LITERAL_KEYS,
 };
 use view_core::native::surfaces::Taken;
 use view_core::update::update;
@@ -44,6 +45,10 @@ const ARRIVAL: Duration = Duration::from_secs(10);
 /// the fed keys, so anything still in flight would have been written ahead
 /// of the barrier's own reply.
 const SILENCE: Duration = Duration::from_millis(300);
+
+/// The shortest gap between two keys a person types: faster than anyone
+/// types, and slower than a local nvim answers.
+const PACE: Duration = Duration::from_millis(40);
 
 /// The fixture's leader. Not the default backslash: a test that passed
 /// because view happened to register the same physical keys nvim's default
@@ -593,6 +598,23 @@ fn kind(msg: &Msg) -> String {
     format!("Redraw{events:?}")
 }
 
+/// The moment now, on the one clock every key and batch of the process is
+/// stamped with, as the host stamps them.
+fn stamp() -> SpecStamp {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    SpecStamp::new(ORIGIN.get_or_init(std::time::Instant::now).elapsed())
+}
+
+/// Folds every call `effects` send nvim into `model`, stamped now, as the
+/// host does as it sends them.
+fn fold_calls(model: &mut Model, effects: &[Effect]) {
+    for effect in effects {
+        if let Effect::Rpc(call) = effect {
+            fold_engine_call(model, call, stamp());
+        }
+    }
+}
+
 /// Applies every one of `msgs` to `model`, handing `send` the effects of
 /// each, and returns the first answer `done` gives.
 fn applied<T>(
@@ -606,10 +628,12 @@ fn applied<T>(
         // the runtime reads every batch for the keys nvim answered before
         // the update applies it
         if let Msg::Redraw(events) = &msg {
-            let stamp = SpecStamp::new(Duration::ZERO);
-            send(&fold_redraw(model, events, stamp));
+            let effects = fold_redraw(model, events, stamp());
+            fold_calls(model, &effects);
+            send(&effects);
         }
         let effects = update(model, msg.clone());
+        fold_calls(model, &effects);
         send(&effects);
         found = found.or_else(|| done(model, &msg));
     }
@@ -670,6 +694,7 @@ fn type_into(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String>
     let mut sent = Vec::new();
     for key in keys {
         let effects = press_into(model, key);
+        fold_calls(model, &effects);
         send(session, &effects);
         sent.extend(inputs(&effects));
     }
@@ -680,17 +705,21 @@ fn type_into(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String>
 /// input. nvim reads all of them before it draws again, so no answer to
 /// an early key arrives after a later one went out.
 fn type_at_once(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String> {
-    let sent: Vec<String> = keys
-        .iter()
-        .flat_map(|key| inputs(&press_into(model, key)))
-        .collect();
+    let mut sent = Vec::new();
+    for key in keys {
+        let effects = press_into(model, key);
+        fold_calls(model, &effects);
+        sent.extend(inputs(&effects));
+    }
     session.engine.handle.input(&sent.concat()).unwrap();
     sent
 }
 
-/// Presses `key` in `model`, stamped now, and its effects.
+/// Presses `key` in `model`, stamped now and arriving as the runtime folds
+/// a key, and its effects.
 fn press_into(model: &mut Model, key: &str) -> Vec<Effect> {
     model.set_now(std::time::SystemTime::now());
+    fold_key_arrival(model, stamp());
     update(
         model,
         Msg::Key(Key {
@@ -1123,12 +1152,57 @@ fn paste_into(session: &Session, model: &mut Model, text: &str) {
     let effects = update(model, Msg::Paste(text.to_string()));
     for effect in &effects {
         if let Effect::Rpc(call) = effect {
-            fold_engine_call(model, call, SpecStamp::new(Duration::ZERO));
+            fold_engine_call(model, call, stamp());
             if let RpcCall::Paste { text } = call {
                 session.engine.handle.paste(text).unwrap();
             }
         }
     }
+}
+
+/// Types `keys` into `model`, each one only once nvim has drawn its answer
+/// to the one before and a person's pace has passed since it went out, the
+/// way a person types over a local link.
+fn type_answered(session: &Session, model: &mut Model, keys: &[&str]) -> Vec<String> {
+    let mut sent = Vec::new();
+    for key in keys {
+        let at = std::time::Instant::now();
+        sent.extend(type_into(session, model, &[key]));
+        pump(session, model, ARRIVAL, |_, msg| {
+            matches!(msg, Msg::Redraw(events) if answers_a_key(events)).then_some(())
+        })
+        .unwrap_or_else(|| panic!("nvim answers {key}"));
+        // a link slower than a person types is no local link, so the pace
+        // stretches to the slowest trip view has read
+        let trips = model.engine.key_round_trips.iter().flatten();
+        let pace = trips.copied().fold(PACE, Duration::max);
+        std::thread::sleep(pace.saturating_sub(at.elapsed()));
+    }
+    sent
+}
+
+/// Over a local link, with nvim answering each key before the next, the
+/// motions before `o` and the text typed after it hold nothing, view's
+/// keys spelled in that text included, and the text reaches the buffer,
+/// round after round.
+#[test]
+fn keys_answered_one_by_one_on_a_local_link_hold_nothing() {
+    let session = Session::start_with(
+        "answered-one-by-one",
+        "vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'foo bar' })\n",
+    );
+    let mut model = registered_model(&session);
+    let text = ["o", ",", "f", "f", "m", "a", "i", "n", "<Esc>"];
+    for round in 0..30 {
+        // the cursor starts each round on a line's first or last column
+        let motions = if round == 0 { ["l", "h"] } else { ["h", "l"] };
+        for key in motions.into_iter().chain(text) {
+            let _ = type_answered(&session, &mut model, &[key]);
+            assert!(!model.submit_hold.is_holding(), "round {round}: {key}");
+        }
+    }
+    let lines = session.eval("getline(2, '$')");
+    assert_eq!(lines, format!("[{}]", vec![r#"",ffmain""#; 30].join(", ")));
 }
 
 /// A user's mapping whose last key would enter insert mode on its own,
@@ -1319,10 +1393,41 @@ fn keys_typed_ahead_after_a_mark_jump_of_three_keys_reach_the_picker() {
     assert_eq!(query.as_deref(), Some("main"));
 }
 
-/// `"`, a paste, then view's key and a query typed at once: nvim runs the
-/// paste once `"` has its register, which is the `,` typed after it, so
-/// view's key runs nothing. Nothing is held, every key reaches nvim as it
-/// is typed, and the picker never opens.
+/// With nvim in insert mode or on a command line, the key that leaves it,
+/// then view's key and a query, typed at once: the query waits for view's
+/// invocation and reaches the picker, and the buffer is unchanged.
+#[test]
+fn keys_typed_ahead_after_leaving_insert_reach_the_picker() {
+    let leads: [(&str, &[&str]); 2] = [("i", &["<Esc>"]), (":", &["n", "o", "h", "<CR>"])];
+    for (enter, lead) in leads {
+        let session = Session::start_with(
+            "typed-ahead-leaving-insert",
+            "vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'foo' })\n",
+        );
+        let mut model = registered_model(&session);
+        let _ = type_into(&session, &mut model, &[enter]);
+        pump(&session, &mut model, ARRIVAL, |model, _| {
+            (model.engine.mode.current != "normal").then_some(())
+        })
+        .unwrap_or_else(|| panic!("nvim reports the mode {enter} enters"));
+        let query = [",", "f", "f", "m", "a", "i", "n"];
+        let keys: Vec<&str> = lead.iter().copied().chain(query).collect();
+        let sent = type_at_once(&session, &mut model, &keys);
+        pump(&session, &mut model, ARRIVAL, |_, msg| {
+            matches!(msg, Msg::FeatureInvoke { .. }).then_some(())
+        })
+        .unwrap_or_else(|| panic!("nvim runs view's <leader>ff after {lead:?}"));
+        assert_eq!(sent, keys[..lead.len() + 3], "{lead:?}");
+        assert_eq!(session.eval("join(getline(1, '$'), '|')"), "foo");
+        let picker = model.picker_mut().map(|picker| picker.query().to_string());
+        assert_eq!(picker.as_deref(), Some("main"), "{lead:?}");
+    }
+}
+
+/// `"` answered by nvim, then a paste, then view's key and a query typed at
+/// once: nvim runs the paste once `"` has its register, which is the `,`
+/// typed after it, so view's key runs nothing. Nothing is held, every key
+/// reaches nvim as it is typed, and the picker never opens.
 #[test]
 fn views_key_typed_after_a_paste_behind_a_register_key_is_that_register() {
     let session = Session::start_with(
@@ -1330,7 +1435,7 @@ fn views_key_typed_after_a_paste_behind_a_register_key_is_that_register() {
         "vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'foo' })\n",
     );
     let mut model = registered_model(&session);
-    let mut sent = type_into(&session, &mut model, &["\""]);
+    let mut sent = type_answered(&session, &mut model, &["\""]);
     paste_into(&session, &mut model, "xyz");
     let keys = [",", "f", "f", "m", "a", "i", "n"];
     sent.extend(type_into(&session, &mut model, &keys));

@@ -825,6 +825,21 @@ fn covers_column(col_start: u64, cells: &[GridCell], col: u16) -> bool {
     col >= col_start && col < col_start.saturating_add(width)
 }
 
+/// The slowest of the recent key round trips, which a batch must arrive at
+/// least that long after a key to be read as answering it, or `None`
+/// before nvim has answered a key.
+fn slowest_trip(model: &Model) -> Option<Duration> {
+    model.engine.key_round_trips.iter().flatten().max().copied()
+}
+
+/// Folds a key arriving from the terminal at `now`, ahead of the `update`
+/// that reads it, so the typed-ahead hold reads the keys before it as
+/// settled once nvim has had the time to answer them.
+pub fn fold_key_arrival(model: &mut Model, now: SpecStamp) {
+    let floor = slowest_trip(model);
+    model.submit_hold.note_key_arriving(now, floor);
+}
+
 /// Folds one call the host is sending the engine into what speculation may
 /// still claim, marking the frame when that changed what is pending.
 ///
@@ -998,9 +1013,8 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
         model.submit_hold.note_refused();
     }
     if answers_input {
-        let trips = model.engine.key_round_trips.iter().flatten();
-        let shortest = trips.min().copied().unwrap_or_default();
-        model.submit_hold.note_input_answered(now, shortest);
+        let floor = slowest_trip(model);
+        model.submit_hold.note_input_answered(now, floor, settled);
         if let Some(sent) = model.engine.key_unanswered.take() {
             // the one write site, so the read in `cmdline_backstop` is the
             // only place the window's shape is known
