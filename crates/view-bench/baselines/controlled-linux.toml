@@ -9,10 +9,12 @@ key_to_rpc_p99_us = 70.865
 p99_ms = 0.430603
 
 [dvr_input.minimal]
-key_to_rpc_p99_us = 56.807
+key_to_rpc_p99_us = 47.539
 
 [dvr_scroll.minimal]
-staleness_p99_ms = 1.427
+ratio_p50 = 1.7698672099157888
+ratio_p99 = 1.6491087957030521
+staleness_p99_ms = 1.400596
 
 [input_path.minimal]
 key_to_rpc_p99_us = 66.427
