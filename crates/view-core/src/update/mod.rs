@@ -209,7 +209,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // replayed after the command has run, so the focus it set routes them.
     // A replayed `:View` submit arms a fresh hold, which the rest are then
     // kept behind in order
-    if releases {
+    if releases || crate::native::submit_hold::released_by_open(model) {
         for held in model.submit_hold.take_held() {
             effects.extend(update(model, held));
         }
@@ -924,7 +924,11 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // reads this message at the same dispatch
         Msg::ChordHoldExpired { .. } => Vec::new(),
         // `update` releases the hold around this dispatch
-        Msg::SubmitHoldExpired { .. } | Msg::PickedOpened { .. } => Vec::new(),
+        Msg::SubmitHoldExpired { .. } => Vec::new(),
+        Msg::PickedOpened { generation } => {
+            model.submit_hold.note_open_answered(generation);
+            Vec::new()
+        }
         // The key-dispatch-path arm: one event per keystroke in an attached
         // buffer, folded into the open review's hunks and nothing else. The
         // work is O(open hunks) and allocation-free for an edit outside

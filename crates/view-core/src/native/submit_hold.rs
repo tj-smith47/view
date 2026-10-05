@@ -41,8 +41,9 @@ pub(crate) use user_run::canonical_typed;
 use commands::names_view;
 
 use crate::events::UiEvent;
-use crate::model::{CmdlineState, Model};
+use crate::model::{CmdlineState, Focus, Model};
 use crate::msg::{Effect, Msg};
+use crate::native::geometry::NativeSurface;
 use crate::native::keys::{canonical, key_tokens, modified, notation_char, Modified};
 use crate::native::speculate::SpecStamp;
 
@@ -85,7 +86,15 @@ enum Armed {
     /// An open the picker or the tree asked nvim for. A key typed behind
     /// it goes to nvim as `nvim_input`, which nvim reads ahead of the
     /// open, so it waits for nvim's answer.
-    Open,
+    Open {
+        /// The docked surface whose window held nvim's cursor when the
+        /// open was asked for. The open leaves that window, and a key
+        /// released while view still reads the cursor there would reach
+        /// the surface, so the keys also wait for the cursor to leave it.
+        from: Option<NativeSurface>,
+        /// Whether nvim has answered the open.
+        answered: bool,
+    },
 }
 
 /// What view knows of a `:` command line it has sent the engine.
@@ -901,17 +910,14 @@ impl SubmitHold {
     /// mode, by the batch's own report or else by `mode`, the last one.
     /// That says the sequence ran no mapping. A report before then may
     /// answer a key sent ahead of the sequence. A hold an open armed ends
-    /// on nvim's answer to that open or on its bound.
+    /// on its bound here, and otherwise as [`released_by_open`] states.
     fn ended_by(&self, msg: &Msg, mode: &str) -> bool {
         let Some((armed, _)) = &self.held else {
             return false;
         };
         match msg {
-            Msg::FeatureInvoke { .. } => *armed != Armed::Open,
+            Msg::FeatureInvoke { .. } => !matches!(armed, Armed::Open { .. }),
             Msg::SubmitHoldExpired { generation } => *generation == self.generation,
-            Msg::PickedOpened { generation } => {
-                *armed == Armed::Open && *generation == self.generation
-            }
             Msg::Redraw(events) => {
                 let mut reported = events
                     .iter()
@@ -942,6 +948,13 @@ impl SubmitHold {
             .zip(self.sent)
             .is_some_and(|(reported, sent)| reported >= sent);
         !self.unsettled && out && reported_since
+    }
+
+    /// Notes nvim's answer to the open carrying `generation`.
+    pub(crate) fn note_open_answered(&mut self, generation: u64) {
+        if let Some((Armed::Open { answered, .. }, _)) = &mut self.held {
+            *answered |= generation == self.generation;
+        }
     }
 
     /// Notes a batch reporting a mode, arriving at `now`.
@@ -1402,11 +1415,34 @@ pub fn released_by_input(model: &Model) -> bool {
         && hold.settled_out_of_normal(model.engine.mode.current != "normal")
 }
 
+/// Whether the hold an open armed ends with the message just applied: nvim
+/// has answered the open, and the cursor has left the docked surface the
+/// open was asked from. nvim sends its answer and the redraw that moves
+/// the cursor on two paths, and the keys are routed by where view last
+/// read the cursor, so either can arrive last.
+#[must_use]
+pub(crate) fn released_by_open(model: &Model) -> bool {
+    let Some((Armed::Open { from, answered }, _)) = model.submit_hold.held else {
+        return false;
+    };
+    answered && from.is_none_or(|from| model.focus() != Focus::Pane(from))
+}
+
 /// Holds the input that follows an open of a picked file or buffer until
 /// nvim answers the open, on [`arm`]'s bound. Returns the generation the
 /// open carries to nvim and the effect arming the bound.
 pub(crate) fn hold_for_open(model: &mut Model) -> (u64, Vec<Effect>) {
-    let effects = arm(model, Armed::Open);
+    let from = match model.focus() {
+        Focus::Pane(surface) => Some(surface),
+        _ => None,
+    };
+    let effects = arm(
+        model,
+        Armed::Open {
+            from,
+            answered: false,
+        },
+    );
     (model.submit_hold.generation, effects)
 }
 

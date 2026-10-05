@@ -28,8 +28,9 @@ use view_core::native::picker::Picked;
 /// An operator the person left pending is dropped, so the keys typed
 /// behind the open start a command of their own. The line is held to the
 /// buffer's last, since the file can have shrunk since a grep match was
-/// read off disk. The screen is drawn before the reply, so a key replayed
-/// on the reply is routed by the window the open left focused.
+/// read off disk. The screen is drawn before the reply. nvim reports the
+/// window the cursor moved to only after the reply, so the keys held behind
+/// an open from a docked sidebar also wait for that report.
 pub(super) const OPEN_PICKED_CHUNK: &str = "\
 local path, how, line, buffer, previous = ...
 if previous then

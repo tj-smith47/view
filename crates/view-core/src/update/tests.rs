@@ -17633,6 +17633,60 @@ fn a_file_opened_from_the_windowed_tree_holds_the_keys_behind_it() {
     assert_eq!(sent_inputs(&released), ["x"], "{released:?}");
 }
 
+/// nvim's answer to an open from a windowed sidebar can arrive ahead of the
+/// redraw that moves the cursor out of the sidebar, and the keys behind
+/// the open wait for that redraw, for each sidebar kind and each way the
+/// open is asked for: the tree's own `<CR>` and a picker over the sidebar.
+#[test]
+fn keys_behind_an_open_from_a_windowed_sidebar_wait_for_the_cursor_to_leave_it() {
+    let picker_over = |m: &mut Model| {
+        let _ = update(
+            m,
+            Msg::FeatureInvoke {
+                generation: None,
+                feature: "picker".to_string(),
+                verb: "files".to_string(),
+            },
+        );
+        let generation = m.picker_mut().expect("the picker opens").generation();
+        let _ = update(
+            m,
+            Msg::PickerResults {
+                generation,
+                items: vec![crate::native::picker::PickerItem::new("a.rs")],
+            },
+        );
+    };
+    let cases = [
+        ("tree", focused_windowed_tree as fn() -> Model, false),
+        ("tree, picker", focused_windowed_tree, true),
+        (
+            "notifications, picker",
+            focused_windowed_notifications,
+            true,
+        ),
+        ("agent, picker", focused_windowed_agent, true),
+    ];
+    for (name, start, picker) in cases {
+        let mut m = start();
+        if picker {
+            picker_over(&mut m);
+        }
+        let generation = update(&mut m, key("<CR>"))
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Rpc(RpcCall::OpenPicked { generation, .. }) => Some(*generation),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name}: no open"));
+        assert!(sent_inputs(&update(&mut m, key("x"))).is_empty(), "{name}");
+        let answered = update(&mut m, Msg::PickedOpened { generation });
+        assert!(sent_inputs(&answered).is_empty(), "{name}: {answered:?}");
+        let released = update(&mut m, cursor_to(2));
+        assert_eq!(sent_inputs(&released), ["x"], "{name}: {released:?}");
+    }
+}
+
 /// The tree drawn over the editor closes on `<CR>` and opens the file in
 /// the window beneath it, with the same hold.
 #[test]

@@ -186,11 +186,12 @@ pub(crate) fn dispatch<E: EngineOps>(
     // behind it, a resize included, so nvim sees the order the terminal
     // produced. Only what goes to nvim waits, so a modal answered while the
     // engine is down is still answered
-    // the pass that ends a `:View` hold replays input, which waits here like
-    // the input it is. The registration hold is asked first, so a batch
-    // reads nothing for an error while nothing here waits
-    let holding = follow_ups.native.holds_input()
-        && (is_held_kind(&msg) || view_core::native::submit_hold::releases(model, &msg));
+    // the pass that ends a `:View` hold or an open's hold replays input,
+    // which waits here like the input it is. An open's hold can end on the
+    // batch that moves the cursor, read only once the batch is applied, so
+    // any pass while a hold stands is asked
+    let holding =
+        follow_ups.native.holds_input() && (is_held_kind(&msg) || model.submit_hold.is_holding());
     follow_ups.native.note_vim_enter(&msg);
     let mut flow = Flow::Continue;
     // ahead of the fold's own effects: what a guess this batch took back

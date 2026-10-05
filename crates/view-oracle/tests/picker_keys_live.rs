@@ -32,6 +32,15 @@ impl Drop for Tree {
 /// Spawns `view` with its working directory at a fresh tree holding
 /// `files`, each written with its contents.
 fn spawn_in(label: &str, files: &[(&str, &str)]) -> (common::ScratchPaths, Tree, PtySession) {
+    spawn_with(label, files, &[])
+}
+
+/// [`spawn_in`] with `env` set on the process.
+fn spawn_with(
+    label: &str,
+    files: &[(&str, &str)],
+    env: &[(&str, &str)],
+) -> (common::ScratchPaths, Tree, PtySession) {
     let paths = common::ScratchPaths::new(label);
     let tree = Tree(
         paths
@@ -45,6 +54,9 @@ fn spawn_in(label: &str, files: &[(&str, &str)]) -> (common::ScratchPaths, Tree,
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
     cmd.cwd(&tree.0);
     common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
     let mut session = PtySession::spawn_configured_with(cmd, COLS, ROWS, QueryPolicy::AnswerDa1)
         .expect("PtySession::spawn_configured_with against target/debug/view");
     assert!(
@@ -188,10 +200,19 @@ fn enter_on_a_grep_match_lands_on_its_line() {
 const OLD: &str = "pkold.txt";
 const NEW: &str = "pknew.txt";
 
+/// The setting that docks a sidebar as a window beside the file.
+const TREE_WINDOWED: (&str, &str) = ("VIEW_UI_SURFACES_TREE_PLACEMENT", "windowed");
+const AGENT_WINDOWED: (&str, &str) = ("VIEW_UI_SURFACES_AGENT_PLACEMENT", "windowed");
+
 /// A session editing [`OLD`], with [`NEW`] beside it to be chosen.
 fn editing_old(label: &str) -> (common::ScratchPaths, Tree, PtySession) {
+    editing_old_with(label, &[])
+}
+
+/// [`editing_old`] with `env` set on the process.
+fn editing_old_with(label: &str, env: &[(&str, &str)]) -> (common::ScratchPaths, Tree, PtySession) {
     let (paths, tree, mut session) =
-        spawn_in(label, &[(OLD, "o1\no2\no3\n"), (NEW, "n1\nn2\nn3\n")]);
+        spawn_with(label, &[(OLD, "o1\no2\no3\n"), (NEW, "n1\nn2\nn3\n")], env);
     session.send(format!(":edit {OLD}\r").as_bytes()).unwrap();
     assert!(
         session.wait_for("o3", budget()),
@@ -220,22 +241,66 @@ fn lines_are(session: &mut PtySession, want: &str) -> bool {
 #[test]
 fn a_key_typed_right_after_choosing_from_the_picker_acts_in_that_file() {
     let (_paths, _tree, mut session) = editing_old("picker-keys-typed-ahead");
-    let shown = session.screen().matches(OLD).count();
+    typed_ahead_from_the_picker(&mut session);
+}
+
+/// The same keystrokes from a picker opened while the docked tree has the
+/// keyboard.
+#[test]
+fn a_key_typed_right_after_choosing_from_the_picker_over_a_docked_tree_acts_in_that_file() {
+    let (_paths, _tree, mut session) = tree_open("picker-over-docked-tree", &[TREE_WINDOWED]);
+    typed_ahead_from_the_picker(&mut session);
+}
+
+/// The same keystrokes from a picker opened while the docked agent panel
+/// has the keyboard.
+#[test]
+fn a_key_typed_right_after_choosing_from_the_picker_over_a_docked_agent_acts_in_that_file() {
+    let (_paths, _tree, mut session) =
+        editing_old_with("picker-over-docked-agent", &[AGENT_WINDOWED]);
+    session.send(b"\x1b:View ai open\r").unwrap();
+    assert!(
+        session.wait_for("agent", budget()),
+        "the agent panel never opened; screen:\n{}",
+        session.screen()
+    );
+    typed_ahead_from_the_picker(&mut session);
+}
+
+/// Chooses [`NEW`] in the files picker with `dd` in the same keystrokes as
+/// the `<CR>`, and checks the `dd` deleted the chosen file's first line and
+/// left the file open before it alone.
+fn typed_ahead_from_the_picker(session: &mut PtySession) {
+    query_new(session);
+    session.send(b"\rdd").unwrap();
+    assert!(
+        lines_are(session, "o1,o2,o3|n2,n3"),
+        "the keys behind the open acted elsewhere; screen:\n{}",
+        session.screen()
+    );
+}
+
+/// Opens the files picker, types a query only [`NEW`] matches, and waits
+/// for the picker to list it alone.
+fn query_new(session: &mut PtySession) {
     session.send(b"\x1b:View picker files\r").unwrap();
     session.send(b"pknew").unwrap();
-    // the unfiltered list goes once the query's answer replaces it
+    // the unfiltered list goes once the query's answer replaces it, and a
+    // name outside the picker's frame (a sidebar, the status line) has no
+    // border to its left
+    let listed = |text: &str, name: &str| {
+        text.lines().any(|row| {
+            row.find('│')
+                .zip(row.find(name))
+                .is_some_and(|(bar, at)| bar < at)
+        })
+    };
     assert!(
         session.wait_for_screen(budget(), |screen| {
             let text = screen.contents();
-            text.contains(NEW) && text.matches(OLD).count() == shown
+            listed(&text, NEW) && !listed(&text, OLD)
         }),
-        "the picker never listed {NEW}; screen:\n{}",
-        session.screen()
-    );
-    session.send(b"\rdd").unwrap();
-    assert!(
-        lines_are(&mut session, "o1,o2,o3|n2,n3"),
-        "the keys behind the open acted elsewhere; screen:\n{}",
+        "the picker never listed {NEW} alone; screen:\n{}",
         session.screen()
     );
 }
@@ -245,17 +310,7 @@ fn a_key_typed_right_after_choosing_from_the_picker_acts_in_that_file() {
 #[test]
 fn a_file_deleted_after_it_was_listed_says_so_when_chosen() {
     let (_paths, tree, mut session) = editing_old("picker-keys-deleted");
-    let shown = session.screen().matches(OLD).count();
-    session.send(b"\x1b:View picker files\r").unwrap();
-    session.send(b"pknew").unwrap();
-    assert!(
-        session.wait_for_screen(budget(), |screen| {
-            let text = screen.contents();
-            text.contains(NEW) && text.matches(OLD).count() == shown
-        }),
-        "the picker never listed {NEW}; screen:\n{}",
-        session.screen()
-    );
+    query_new(&mut session);
     std::fs::remove_file(tree.0.join(NEW)).unwrap();
     session.send(b"\r").unwrap();
     assert!(
@@ -271,21 +326,61 @@ fn a_file_deleted_after_it_was_listed_says_so_when_chosen() {
     );
 }
 
-/// The same keystrokes from the file tree.
-#[test]
-fn a_key_typed_right_after_choosing_from_the_tree_acts_in_that_file() {
-    let (_paths, _tree, mut session) = editing_old("tree-typed-ahead");
+/// A session editing [`OLD`] with the file tree open on it, placed as
+/// `env` says.
+fn tree_open(label: &str, env: &[(&str, &str)]) -> (common::ScratchPaths, Tree, PtySession) {
+    let (paths, tree, mut session) = editing_old_with(label, env);
     session.send(b"\x1b:View tree\r").unwrap();
     assert!(
         session.wait_for(NEW, budget()),
         "the tree never listed {NEW}; screen:\n{}",
         session.screen()
     );
+    (paths, tree, session)
+}
+
+/// The same keystrokes from the file tree, placed as `env` says.
+fn typed_ahead_from_the_tree(label: &str, env: &[(&str, &str)]) {
+    let (_paths, _tree, mut session) = tree_open(label, env);
     // the tree lists the two files by name, the chosen one second
     session.send(b"j\rdd").unwrap();
     assert!(
         lines_are(&mut session, "o1,o2,o3|n2,n3"),
         "the keys behind the open acted elsewhere; screen:\n{}",
+        session.screen()
+    );
+}
+
+#[test]
+fn a_key_typed_right_after_choosing_from_the_tree_acts_in_that_file() {
+    typed_ahead_from_the_tree("tree-typed-ahead", &[]);
+}
+
+#[test]
+fn a_key_typed_right_after_choosing_from_a_docked_tree_acts_in_that_file() {
+    typed_ahead_from_the_tree("tree-docked-typed-ahead", &[TREE_WINDOWED]);
+}
+
+/// Keys typed behind a file a docked tree can no longer open act in the
+/// window the tree was opened from, and the tree raises no prompt.
+#[test]
+fn a_key_typed_behind_a_refused_open_from_a_docked_tree_acts_in_the_file() {
+    let (_paths, tree, mut session) = tree_open("tree-docked-refused", &[TREE_WINDOWED]);
+    std::fs::remove_file(tree.0.join(NEW)).unwrap();
+    session.send(b"j\rdd").unwrap();
+    assert!(
+        session.wait_for("exists", budget()),
+        "choosing a deleted file said nothing; screen:\n{}",
+        session.screen()
+    );
+    assert!(
+        lines_are(&mut session, "o2,o3|"),
+        "the keys behind the refused open acted elsewhere; screen:\n{}",
+        session.screen()
+    );
+    assert!(
+        !session.screen().contains("Delete "),
+        "the tree took the keys; screen:\n{}",
         session.screen()
     );
 }
