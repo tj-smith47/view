@@ -161,7 +161,7 @@ pub(super) fn on_window_cursor(
 /// edge rows lie outside the window's own grid, so without the damage the
 /// frame is painted with every edge row clipped out and the segments keep
 /// the reading they had.
-fn damage_frame_edges(model: &mut Model, win: WinHandle) {
+pub(super) fn damage_frame_edges(model: &mut Model, win: WinHandle) {
     damage_edges(model, win, 0..2);
 }
 

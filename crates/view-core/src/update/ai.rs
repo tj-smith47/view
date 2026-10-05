@@ -215,9 +215,19 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             let panel = model.ai_panel_mut();
             panel.session_id = Some(session_id);
             panel.ever_ready = true;
+            let renamed = panel.agent_name != agent;
             panel.agent_name = agent;
             panel.local_error = None;
             model.dirty = true;
+            // a windowed panel's tile title reads the agent's name, and
+            // nvim redraws nothing on the frame edge it stands on
+            let window = model
+                .engine
+                .grids()
+                .native_window(crate::native::geometry::NativeSurface::Agent);
+            if let Some(win) = window.filter(|_| renamed) {
+                super::bridge::damage_frame_edges(model, win);
+            }
         }
         // A proposal opens the panel's own diff review. Its hunks are
         // computed here, synchronously, from the whole-file pair the wire

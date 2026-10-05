@@ -643,6 +643,19 @@ fn windowed_sidebar_keeps_its_share(sidebar: Sidebar) {
             session.screen()
         );
         session.send(b"y").unwrap();
+        let trusted = |screen: &vt100::Screen| !screen.contents().contains("Trust ");
+        assert!(
+            session.wait_for_screen(BUDGET, trusted),
+            "windowed agent: the trust prompt stayed up; screen:\n{}",
+            session.screen()
+        );
+        session.send(b"hi").unwrap();
+        assert!(
+            session.wait_for("> hi", BUDGET),
+            "windowed agent: the prompt never took the text; screen:\n{}",
+            session.screen()
+        );
+        session.send(b"\r").unwrap();
     }
     // a launch notice is a frame of its own standing over a tile
     let settled = |screen: &vt100::Screen| {
@@ -658,6 +671,17 @@ fn windowed_sidebar_keeps_its_share(sidebar: Sidebar) {
         );
         session.send(b"\x1b:View notifications dismiss\r").unwrap();
         dismissed += 1;
+    }
+    // the prompt typed above starts the session, and the stub names itself
+    // once it is up, after the panel's tile was titled with the configured
+    // command
+    if sidebar == Sidebar::Agent {
+        assert!(
+            session.wait_for("agent: Stub", BUDGET),
+            "windowed agent: the tile kept its first title after the agent \
+             named itself; screen:\n{}",
+            session.screen()
+        );
     }
     let launch = session
         .with_screen(|screen| sidebar_frame(sidebar, screen, COLS, ROWS))

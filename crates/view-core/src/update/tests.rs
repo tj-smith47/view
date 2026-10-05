@@ -18338,6 +18338,53 @@ fn a_flush_whose_cursor_grid_is_the_agent_pane_focuses_the_agent() {
     );
 }
 
+/// The agent naming itself retitles a windowed panel's tile, so the frame
+/// that follows repaints both of its edge rows. nvim sends nothing for an
+/// edge row, and a frame clipped to the rows nvim did send leaves the
+/// configured name standing in the title.
+#[test]
+fn the_agent_naming_itself_repaints_the_windowed_panel_title_row() {
+    let mut m = focused_windowed_agent();
+    m.look = crate::model::Look::new(crate::model::Panes::Tiles, true);
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 1,
+                width: 80,
+                height: 24,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    let slot = m
+        .engine
+        .grids()
+        .window_filled(AGENT_WIN)
+        .expect("placed agent window");
+    let [top, bottom] = m.look.edge_rows(slot);
+    let ready = |name: &str| {
+        Msg::Ai(crate::native::ai_event::AiEvent::SessionReady {
+            session_id: "s-1".to_string(),
+            agent: Some(name.to_string()),
+        })
+    };
+    let _ = m.take_paint_damage();
+    let _ = update(&mut m, ready("Stub"));
+    let rows = m.take_paint_damage().rows;
+    for (edge, row) in [("title", top), ("bottom", bottom)] {
+        assert!(
+            rows.contains(&row),
+            "the panel's {edge} row {row} was left undamaged: {rows:?}"
+        );
+    }
+    let _ = update(&mut m, ready("Stub"));
+    assert!(
+        m.take_paint_damage().rows.is_empty(),
+        "the same name repainted the frame edges"
+    );
+}
+
 #[test]
 fn esc_in_the_windowed_agent_panel_focuses_the_previous_window() {
     let mut m = focused_windowed_agent();
