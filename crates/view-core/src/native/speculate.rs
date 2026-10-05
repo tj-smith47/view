@@ -1059,13 +1059,15 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
 /// that never comes is the condition [`SPECULATION_MAX_AGE`] and
 /// [`cmdline_backstop`] exist for, for the predicted glyphs and for the
 /// speculated palette alike. A command-line end view counted is aged here
-/// too, since the hide it waits for may never come.
+/// too, since the hide it waits for may never come, and so is a timed-out
+/// line nvim may never report.
 pub fn fold_expiry(model: &mut Model, now: SpecStamp) {
     let backstop = cmdline_backstop(model);
     expire_cmdline_speculation(model, now, backstop);
     model
         .submit_hold
         .age_line_ends(now, backstop, &model.engine.mode.current);
+    model.submit_hold.age_unreported(now, backstop);
     // the pending list is read before anything else so a steady-state pass
     // costs one null check and one length compare: expiring an empty list is
     // a no-op, and a session outside a typing burst takes that pass forever

@@ -246,8 +246,8 @@ fn arriving_within(
 /// until the key is given. Where it waits at a prompt (`input()`, a
 /// `confirm()` dialog, an `:s///c` question) nvim shows the prompt, which
 /// releases the keys behind the line, and a line waiting at a `confirm()`
-/// or `:s///c` question is reported there. A `getchar()` shows nothing and reports
-/// nothing, and the keys behind it wait for the hold's bound.
+/// or `:s///c` question is reported there. A `getchar()` shows nothing and
+/// reports nothing, and the keys behind it wait for the hold's bound.
 #[test]
 fn a_line_waiting_for_a_key_is_reported_once_it_has_run() {
     let (engine, channel, rx, pump, _cutover) = spawn_attached();

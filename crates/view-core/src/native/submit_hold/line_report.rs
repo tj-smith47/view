@@ -1,18 +1,21 @@
 //! The line a `<CR>` submits, and what nvim tells view about it after: the
 //! report that the line has run, and a prompt the line stopped at.
 
+use std::time::Duration;
+
 use super::{in_flight, Armed, Line, State, SubmitHold, Typed, WordEnd};
 use crate::events::UiEvent;
 use crate::model::Model;
 use crate::msg::Msg;
+use crate::native::speculate::SpecStamp;
 
 /// How many characters of a submitted line nvim's report carries and a
 /// command hold compares. A line longer than this is matched on these
 /// alone, and a pasted line of any length costs one bounded message.
 pub const LINE_REPORT_CHARS: usize = 256;
 
-/// How many lines whose hold ended at its bound unreported are kept, so
-/// that their late reports are told apart from the line a hold waits for.
+/// How many lines whose hold ended unreported are kept, so that their
+/// late reports are told apart from the line a hold waits for.
 const TIMED_OUT_KEPT: usize = 4;
 
 /// The modes nvim reads a `:` in as text, opening no command line.
@@ -48,29 +51,51 @@ impl SubmitHold {
     /// Notes nvim's report of `line`, which spends the oldest timed-out
     /// line it is the report of.
     pub(crate) fn note_line_reported(&mut self, line: &str) {
-        if let Some(at) = self.timed_out.iter().position(|old| same_line(old, line)) {
+        if let Some(at) = self
+            .timed_out
+            .iter()
+            .position(|(old, _)| same_line(old, line))
+        {
             self.timed_out.remove(at);
         }
+    }
+
+    /// Forgets every timed-out line the host's age check at `now` has seen
+    /// for `bound` with no report, so a line nvim never reports is told
+    /// apart for one bound and no longer. A line is stamped on the first
+    /// check after it timed out.
+    pub(crate) fn age_unreported(&mut self, now: SpecStamp, bound: Duration) {
+        self.timed_out.retain_mut(|(_, seen)| {
+            let since = *seen.get_or_insert(now);
+            now.age_since(since) < bound
+        });
     }
 }
 
 /// Whether `msg` is the bound of a hold a `:View` line armed, which nvim
-/// has not reported by then, and keeps that line so its late report ends
-/// no newer hold. The line may still be running (`:make`, `:!cmd`), or a
-/// config cleared view's autocmd group (`:autocmd! view_line_ran`) and the
-/// report with it, so the bound puts the registration back, which a
-/// running line does not notice.
+/// has not reported by then.
+///
+/// The line is kept so its late report ends no newer hold, and so is a
+/// line whose hold `msg` ends at a prompt, which nvim may report once the
+/// prompt is answered. A line still running at its bound (`:make`,
+/// `:!cmd`) reports later, and one whose report a config cleared
+/// (`:autocmd! view_line_ran`) never does, so the bound puts the
+/// registration back, which a running line does not notice.
 #[must_use]
 pub fn note_line_bound(model: &mut Model, msg: &Msg) -> bool {
     let hold = &mut model.submit_hold;
-    let bounds = matches!(msg, Msg::SubmitHoldExpired { generation } if *generation == hold.generation)
-        && matches!(hold.held, Some((Armed::Command, _)));
-    if bounds {
+    if !matches!(hold.held, Some((Armed::Command, _))) {
+        return false;
+    }
+    let bounds =
+        matches!(msg, Msg::SubmitHoldExpired { generation } if *generation == hold.generation);
+    let prompted = matches!(msg, Msg::Redraw(events) if events.iter().any(shows_a_prompt));
+    if bounds || prompted {
         if hold.timed_out.len() == TIMED_OUT_KEPT {
             hold.timed_out.pop_front();
         }
         hold.timed_out
-            .push_back(std::mem::take(&mut hold.armed_line));
+            .push_back((std::mem::take(&mut hold.armed_line), None));
     }
     bounds
 }
