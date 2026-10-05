@@ -200,9 +200,12 @@ fn enter_on_a_grep_match_lands_on_its_line() {
 const OLD: &str = "pkold.txt";
 const NEW: &str = "pknew.txt";
 
-/// The setting that docks a sidebar as a window beside the file.
+/// The setting that docks the file tree as a window beside the file.
 const TREE_WINDOWED: (&str, &str) = ("VIEW_UI_SURFACES_TREE_PLACEMENT", "windowed");
+/// The setting that docks the agent panel as a window beside the file.
 const AGENT_WINDOWED: (&str, &str) = ("VIEW_UI_SURFACES_AGENT_PLACEMENT", "windowed");
+/// The command line that opens the files picker from wherever the cursor is.
+const PICKER: &[u8] = b"\x1b:View picker files\r";
 
 /// A session editing [`OLD`], with [`NEW`] beside it to be chosen.
 fn editing_old(label: &str) -> (common::ScratchPaths, Tree, PtySession) {
@@ -241,37 +244,65 @@ fn lines_are(session: &mut PtySession, want: &str) -> bool {
 #[test]
 fn a_key_typed_right_after_choosing_from_the_picker_acts_in_that_file() {
     let (_paths, _tree, mut session) = editing_old("picker-keys-typed-ahead");
-    typed_ahead_from_the_picker(&mut session);
+    typed_ahead_from_the_picker(&mut session, PICKER);
 }
 
-/// The same keystrokes from a picker opened while the docked tree has the
-/// keyboard.
+/// The same keystrokes from a picker opened by its key typed in the docked
+/// tree, so the cursor is in the tree's window when the file is chosen.
 #[test]
 fn a_key_typed_right_after_choosing_from_the_picker_over_a_docked_tree_acts_in_that_file() {
     let (_paths, _tree, mut session) = tree_open("picker-over-docked-tree", &[TREE_WINDOWED]);
-    typed_ahead_from_the_picker(&mut session);
+    // no config sets a leader here, so it is nvim's own backslash
+    typed_ahead_from_the_picker(&mut session, b"\\ff");
 }
 
-/// The same keystrokes from a picker opened while the docked agent panel
-/// has the keyboard.
+/// The same keystrokes from a picker opened as the docked agent panel is
+/// entered, so the cursor is in the panel's window when the file is
+/// chosen. The panel types every key it is sent, so the picker's own key
+/// cannot be typed there.
 #[test]
 fn a_key_typed_right_after_choosing_from_the_picker_over_a_docked_agent_acts_in_that_file() {
-    let (_paths, _tree, mut session) =
-        editing_old_with("picker-over-docked-agent", &[AGENT_WINDOWED]);
-    session.send(b"\x1b:View ai open\r").unwrap();
-    assert!(
-        session.wait_for("agent", budget()),
-        "the agent panel never opened; screen:\n{}",
-        session.screen()
-    );
-    typed_ahead_from_the_picker(&mut session);
+    let (_paths, _tree, mut session) = agent_docked("picker-over-docked-agent");
+    typed_ahead_from_the_picker(&mut session, b"\x1b:View ai open | View picker files\r");
 }
 
-/// Chooses [`NEW`] in the files picker with `dd` in the same keystrokes as
-/// the `<CR>`, and checks the `dd` deleted the chosen file's first line and
-/// left the file open before it alone.
-fn typed_ahead_from_the_picker(session: &mut PtySession) {
-    query_new(session);
+/// A session editing [`OLD`] with the docked agent panel opened, trusted
+/// and left, so the next `:View ai open` enters its window.
+fn agent_docked(label: &str) -> (common::ScratchPaths, Tree, PtySession) {
+    // an agent no build provides, so a stray prompt launches nothing
+    let (paths, tree, mut session) =
+        editing_old_with(label, &[AGENT_WINDOWED, ("VIEW_AI_AGENT", "none")]);
+    session.send(b"\x1b:View ai open\r").unwrap();
+    assert!(
+        session.wait_for("Trust ", budget()),
+        "the agent panel raised no trust prompt; screen:\n{}",
+        session.screen()
+    );
+    // the ruler reads the panel's empty buffer while the cursor is in its
+    // window, and the file's first line once it is back
+    session.send(b"y").unwrap();
+    assert!(
+        session.wait_for("0,0-1", budget()),
+        "the trusted panel never took the cursor; screen:\n{}",
+        session.screen()
+    );
+    session.send(b"\x1b").unwrap();
+    assert!(
+        session.wait_for_screen(budget(), |screen| {
+            let text = screen.contents();
+            !text.contains("0,0-1") && text.contains(OLD)
+        }),
+        "the panel kept the cursor; screen:\n{}",
+        session.screen()
+    );
+    (paths, tree, session)
+}
+
+/// Chooses [`NEW`] in the files picker `open` opens, with `dd` in the same
+/// keystrokes as the `<CR>`, and checks the `dd` deleted the chosen file's
+/// first line and left the file open before it alone.
+fn typed_ahead_from_the_picker(session: &mut PtySession, open: &[u8]) {
+    query_new(session, open);
     session.send(b"\rdd").unwrap();
     assert!(
         lines_are(session, "o1,o2,o3|n2,n3"),
@@ -280,10 +311,17 @@ fn typed_ahead_from_the_picker(session: &mut PtySession) {
     );
 }
 
-/// Opens the files picker, types a query only [`NEW`] matches, and waits
-/// for the picker to list it alone.
-fn query_new(session: &mut PtySession) {
-    session.send(b"\x1b:View picker files\r").unwrap();
+/// Opens the files picker with `open`, types a query only [`NEW`] matches,
+/// and waits for the picker to list it alone.
+fn query_new(session: &mut PtySession, open: &[u8]) {
+    session.send(open).unwrap();
+    // keys typed behind a command line that runs two `:View` commands go
+    // out once the first has run, ahead of the picker the second opens
+    assert!(
+        session.wait_for("╭ Files", budget()),
+        "the picker never opened; screen:\n{}",
+        session.screen()
+    );
     session.send(b"pknew").unwrap();
     // the unfiltered list goes once the query's answer replaces it, and a
     // name outside the picker's frame (a sidebar, the status line) has no
@@ -291,8 +329,7 @@ fn query_new(session: &mut PtySession) {
     let listed = |text: &str, name: &str| {
         text.lines().any(|row| {
             row.find('│')
-                .zip(row.find(name))
-                .is_some_and(|(bar, at)| bar < at)
+                .is_some_and(|bar| row.match_indices(name).any(|(at, _)| bar < at))
         })
     };
     assert!(
@@ -310,7 +347,7 @@ fn query_new(session: &mut PtySession) {
 #[test]
 fn a_file_deleted_after_it_was_listed_says_so_when_chosen() {
     let (_paths, tree, mut session) = editing_old("picker-keys-deleted");
-    query_new(&mut session);
+    query_new(&mut session, PICKER);
     std::fs::remove_file(tree.0.join(NEW)).unwrap();
     session.send(b"\r").unwrap();
     assert!(
@@ -337,6 +374,31 @@ fn tree_open(label: &str, env: &[(&str, &str)]) -> (common::ScratchPaths, Tree, 
         session.screen()
     );
     (paths, tree, session)
+}
+
+/// A file chosen in the tree drawn over the docked agent panel, entered as
+/// the tree opens, takes the place of the file open before it and leaves
+/// the panel's window alone.
+#[test]
+fn a_file_chosen_from_the_tree_over_a_docked_agent_opens_beside_the_panel() {
+    let (_paths, _tree, mut session) = agent_docked("tree-over-docked-agent");
+    session.send(b"\x1b:View ai open | View tree\r").unwrap();
+    assert!(
+        session.wait_for(NEW, budget()),
+        "the tree never listed {NEW}; screen:\n{}",
+        session.screen()
+    );
+    session
+        .send(
+            format!("j\r:echo 'wins=' . bufwinnr('{OLD}') . '/' . (bufwinnr('{NEW}') > 0)\r")
+                .as_bytes(),
+        )
+        .unwrap();
+    assert!(
+        session.wait_for("wins=-1/1", budget()),
+        "{NEW} did not replace {OLD} in its window; screen:\n{}",
+        session.screen()
+    );
 }
 
 /// The same keystrokes from the file tree, placed as `env` says.

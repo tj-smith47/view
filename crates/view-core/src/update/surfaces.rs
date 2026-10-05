@@ -1384,21 +1384,17 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Option<Vec<Effect>>
             let Some(path) = to_open else {
                 return Some(Vec::new());
             };
-            // the cursor sits in the tree's own window, and `:edit` opens
-            // in the window it runs in, so the file would land inside the
-            // sidebar
-            let windowed = model.tree_is_windowed();
-            if !windowed {
+            if !model.tree_is_windowed() {
                 model.pop_focused_overlay();
             }
-            let (generation, mut effects) = hold_for_open(model);
+            let (generation, previous_window, mut effects) = hold_for_open(model);
             effects.push(Effect::Rpc(RpcCall::OpenPicked {
                 target: Picked::File {
                     path: path_to_wire(&path),
                     line: None,
                 },
                 how: OpenIn::Current,
-                previous_window: windowed,
+                previous_window,
                 generation,
             }));
             effects

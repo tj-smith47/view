@@ -170,13 +170,24 @@ fn spawn_routed() -> (Engine, mpsc::Receiver<view_core::msg::Msg>) {
     (engine, rx)
 }
 
-/// Waits for nvim's answer to the open tagged `generation`.
-fn answered(rx: &mpsc::Receiver<view_core::msg::Msg>, generation: u64) -> bool {
+/// Waits for nvim's answer to the open tagged `generation`, and checks it
+/// names the window the cursor is in.
+fn answered(engine: &Engine, rx: &mpsc::Receiver<view_core::msg::Msg>, generation: u64) -> bool {
     let deadline = common::rpc_poll_deadline();
     while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
         match rx.recv_timeout(left) {
-            Ok(view_core::msg::Msg::PickedOpened { generation: g }) if g == generation => {
-                return true
+            Ok(view_core::msg::Msg::PickedOpened {
+                generation: g,
+                window,
+            }) if g == generation => {
+                let current = engine
+                    .handle
+                    .request("nvim_eval", vec![Value::from("win_getid()")])
+                    .unwrap()
+                    .as_u64()
+                    .map(view_core::events::WinHandle);
+                assert_eq!(window, current, "the answer names another window");
+                return true;
             }
             Ok(_) => {}
             Err(_) => return false,
@@ -224,7 +235,7 @@ fn an_open_that_cannot_happen_is_answered_and_says_why() {
         .open_picked(&deleted, OpenIn::Current, false, 1)
         .unwrap();
     assert!(
-        answered(&rx, 1),
+        answered(&engine, &rx, 1),
         "the deleted file's open was never answered"
     );
     assert!(same_file(&state(&engine).0, &kept), "a deleted file opened");
@@ -244,7 +255,7 @@ fn an_open_that_cannot_happen_is_answered_and_says_why() {
         .open_picked(&wiped, OpenIn::Vertical, false, 2)
         .unwrap();
     assert!(
-        answered(&rx, 2),
+        answered(&engine, &rx, 2),
         "the closed buffer's open was never answered"
     );
     assert_eq!(state(&engine).2, 1, "a closed buffer opened a split");
@@ -260,7 +271,10 @@ fn an_open_that_cannot_happen_is_answered_and_says_why() {
         .handle
         .open_picked(&refused, OpenIn::Current, false, 3)
         .unwrap();
-    assert!(answered(&rx, 3), "the refused open was never answered");
+    assert!(
+        answered(&engine, &rx, 3),
+        "the refused open was never answered"
+    );
     assert!(
         same_file(&state(&engine).0, &kept),
         "the refused open moved"
@@ -277,7 +291,7 @@ fn a_file_chosen_from_a_sidebar_opens_in_the_window_before_it() {
     let root = scratch_root("previous");
     let path = root.join("chosen.txt");
     std::fs::write(&path, "chosen\n").unwrap();
-    let engine = spawn();
+    let (engine, rx) = spawn_routed();
     engine
         .handle
         .command("vsplit | enew | file sidebar")
@@ -290,6 +304,7 @@ fn a_file_chosen_from_a_sidebar_opens_in_the_window_before_it() {
         .handle
         .open_picked(&picked, OpenIn::Current, true, 0)
         .unwrap();
+    assert!(answered(&engine, &rx, 0), "the open was never answered");
     assert!(same_file(&state(&engine).0, &path));
     let sidebar = engine
         .handle

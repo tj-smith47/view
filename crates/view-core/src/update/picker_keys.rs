@@ -1,7 +1,7 @@
 //! The keys the focused picker answers: moving the selection, opening the
 //! selected result, closing, and every character edited into the query.
 
-use crate::model::{Focus, Model, OverlayKind};
+use crate::model::{Model, OverlayKind};
 use crate::msg::{Effect, OpenIn, RpcCall};
 use crate::native::submit_hold::hold_for_open;
 
@@ -104,10 +104,7 @@ pub(super) fn picker_key(model: &mut Model, notation: &str) -> Vec<Effect> {
             };
             model.pop_focused_overlay();
             model.dirty = true;
-            // the cursor sits in a sidebar's own window, and the file
-            // belongs in the window entered before it
-            let previous_window = matches!(model.focus(), Focus::Pane(_));
-            let (generation, mut effects) = hold_for_open(model);
+            let (generation, previous_window, mut effects) = hold_for_open(model);
             effects.push(Effect::Rpc(RpcCall::OpenPicked {
                 target,
                 how,

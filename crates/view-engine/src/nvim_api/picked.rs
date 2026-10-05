@@ -29,10 +29,13 @@ use view_core::native::picker::Picked;
 /// behind the open start a command of their own. The line is held to the
 /// buffer's last, since the file can have shrunk since a grep match was
 /// read off disk. The screen is drawn before the reply. nvim reports the
-/// window the cursor moved to only after the reply, so the keys held behind
-/// an open from a docked sidebar also wait for that report.
+/// window the cursor moved to only after the reply.
+///
+/// Returns the handle of the window the cursor is in once the open has
+/// run, whether it opened anything or not.
 pub(super) const OPEN_PICKED_CHUNK: &str = "\
 local path, how, line, buffer, previous = ...
+local here = vim.api.nvim_get_current_win
 if previous then
   pcall(vim.cmd, 'wincmd p')
 end
@@ -47,14 +50,14 @@ if buffer > 0 then
   if not vim.api.nvim_buf_is_valid(buffer)
       or not vim.bo[buffer].buflisted then
     say('That buffer has been closed')
-    return
+    return here()
   end
   local split = { vsplit = 'vertical sbuffer ', split = 'sbuffer ',
     tabedit = 'tab sbuffer ' }
   ok, err = pcall(vim.cmd, (split[how] or 'buffer ') .. buffer)
 elseif not vim.uv.fs_stat(path) then
   say(path .. ' no longer exists')
-  return
+  return here()
 else
   ok, err = pcall(vim.api.nvim_cmd, {
     cmd = how, args = { path }, magic = { file = false, bar = false },
@@ -62,13 +65,14 @@ else
 end
 if not ok then
   say(tostring(err):match('E%d+:.*') or tostring(err))
-  return
+  return here()
 end
 if line > 0 then
   local last = vim.api.nvim_buf_line_count(0)
   vim.api.nvim_win_set_cursor(0, { math.min(line, last), 0 })
 end
-vim.cmd.redraw()";
+vim.cmd.redraw()
+return here()";
 
 /// The ex command [`OPEN_PICKED_CHUNK`] opens a file with for `how`.
 fn command(how: OpenIn) -> &'static str {
@@ -87,7 +91,8 @@ impl super::EngineHandle {
     /// had focused before the current one is entered first.
     ///
     /// Async: nvim's answer is routed as `Msg::PickedOpened` carrying
-    /// `generation`, whatever the open did. nvim reads `nvim_input` ahead
+    /// `generation` and the window the cursor ended in, whatever the open
+    /// did. nvim reads `nvim_input` ahead
     /// of a queued request, so input sent before that answer can run
     /// before the open.
     ///

@@ -925,8 +925,22 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::ChordHoldExpired { .. } => Vec::new(),
         // `update` releases the hold around this dispatch
         Msg::SubmitHoldExpired { .. } => Vec::new(),
-        Msg::PickedOpened { generation } => {
-            model.submit_hold.note_open_answered(generation);
+        Msg::PickedOpened { generation, window } => {
+            // an answer naming no window is read as landing where view
+            // reads the cursor now, which releases the keys at once
+            let lands_in = match window {
+                Some(win) => model
+                    .engine
+                    .grids()
+                    .native_window_claims()
+                    .into_iter()
+                    .find_map(|(claimed, surface)| (claimed == win).then_some(surface)),
+                None => match model.focus() {
+                    Focus::Pane(surface) => Some(surface),
+                    _ => None,
+                },
+            };
+            model.submit_hold.note_open_answered(generation, lands_in);
             Vec::new()
         }
         // The key-dispatch-path arm: one event per keystroke in an attached

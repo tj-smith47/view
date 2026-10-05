@@ -6190,6 +6190,97 @@ mod tests {
         }
     }
 
+    /// A key held behind an open goes out on nvim's answer, a message that
+    /// is no input, and still waits behind the input the launch hold holds,
+    /// so nvim reads the keys in the order they were typed.
+    #[test]
+    fn keys_an_answer_replays_wait_behind_input_the_launch_hold_holds() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        let mut native = NativeSession::desktop(7, None);
+        let _ = native.follow_up(&mut model, crate::native::Stage::VimEnter);
+        assert!(native.holds_input());
+        let mut bridge = ThemeBridge::new(None, None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let key = |notation: &str| {
+            Msg::Key(view_core::msg::Key {
+                notation: notation.to_string(),
+            })
+        };
+        let send = |model: &mut Model, follow_ups: &mut FollowUps<'_>, msg| {
+            let _ = dispatch(model, &executor, follow_ups, msg);
+        };
+        send(
+            &mut model,
+            &mut follow_ups,
+            Msg::FeatureInvoke {
+                generation: None,
+                feature: "picker".to_string(),
+                verb: "files".to_string(),
+            },
+        );
+        let generation = model.picker_mut().expect("the picker opens").generation();
+        send(
+            &mut model,
+            &mut follow_ups,
+            Msg::PickerResults {
+                generation,
+                items: vec![view_core::native::picker::PickerItem::new("a.rs")],
+            },
+        );
+        send(&mut model, &mut follow_ups, key("<CR>"));
+        let open = ops
+            .calls
+            .borrow()
+            .iter()
+            .find_map(|call| {
+                call.strip_prefix("open_picked(")?
+                    .trim_end_matches(')')
+                    .rsplit(',')
+                    .next()?
+                    .parse::<u64>()
+                    .ok()
+            })
+            .expect("the open reaches nvim");
+        follow_ups.native.hold_input(Effect::Rpc(RpcCall::Input {
+            notation: "\\".to_string(),
+        }));
+        send(&mut model, &mut follow_ups, key("x"));
+        send(
+            &mut model,
+            &mut follow_ups,
+            Msg::PickedOpened {
+                generation: open,
+                window: None,
+            },
+        );
+        assert!(
+            !ops.calls.borrow().iter().any(|call| call == "input(x)"),
+            "the replayed key overtook the held one: {:?}",
+            ops.calls.borrow()
+        );
+        for _ in 0..2 {
+            let _ = follow_ups
+                .native
+                .follow_up(&mut model, crate::native::Stage::Claims);
+        }
+        let released: Vec<String> = follow_ups
+            .native
+            .release_input()
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::Rpc(RpcCall::Input { notation }) => Some(notation),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(released, ["\\", "x"]);
+    }
+
     /// A registration reply stamped by a replaced connection never reaches
     /// the dispatch, where it would count against the replacement's own
     /// registrations and release held input early. One stamped by the

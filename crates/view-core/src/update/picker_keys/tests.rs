@@ -116,10 +116,17 @@ fn keys_typed_behind_an_open_wait_for_its_answer() {
         &mut m,
         Msg::PickedOpened {
             generation: generation.wrapping_sub(1),
+            window: None,
         },
     );
     assert!(inputs(&stale).is_empty(), "{stale:?}");
-    let released = update(&mut m, Msg::PickedOpened { generation });
+    let released = update(
+        &mut m,
+        Msg::PickedOpened {
+            generation,
+            window: None,
+        },
+    );
     assert_eq!(inputs(&released), ["d", "d"], "{released:?}");
     assert_eq!(inputs(&press(&mut m, "j")), ["j"]);
 }

@@ -17629,8 +17629,72 @@ fn a_file_opened_from_the_windowed_tree_holds_the_keys_behind_it() {
     assert!(sent_inputs(&update(&mut m, key("x"))).is_empty());
     // nvim draws the screen the open left before it answers
     let _ = update(&mut m, cursor_to(2));
-    let released = update(&mut m, Msg::PickedOpened { generation });
+    let released = update(&mut m, opened_in(generation, EDITOR_WIN));
     assert_eq!(sent_inputs(&released), ["x"], "{released:?}");
+}
+
+/// The handle of the ordinary window a test's open lands in: no surface
+/// claims it.
+const EDITOR_WIN: crate::events::WinHandle = crate::events::WinHandle(1000);
+
+/// nvim's answer to the open carrying `generation`, the cursor left in
+/// `window`.
+fn opened_in(generation: u64, window: crate::events::WinHandle) -> Msg {
+    Msg::PickedOpened {
+        generation,
+        window: Some(window),
+    }
+}
+
+/// An open that leaves the cursor in the docked sidebar it was asked from
+/// releases the keys behind it on nvim's answer: a float tree over a
+/// focused docked sidebar, and a docked tree whose window the cursor is
+/// back in (an autocmd returned it, or `wincmd p` found no window to enter).
+#[test]
+fn keys_behind_an_open_that_leaves_the_cursor_in_its_sidebar_go_on_the_answer() {
+    let float_tree_over = |start: fn() -> Model| {
+        let mut m = start();
+        let _ = update(&mut m, tree_toggle());
+        let scan = m.tree_mut().expect("the tree").generation();
+        let _ = update(
+            &mut m,
+            Msg::TreeScanResult {
+                generation: scan,
+                entries: vec![crate::native::tree::TreeEntry::new("a.rs".into(), false, 0)],
+            },
+        );
+        m
+    };
+    let cases: [(&str, Model, crate::events::WinHandle); 4] = [
+        (
+            "float tree over the stream",
+            float_tree_over(focused_windowed_notifications),
+            NOTIFICATIONS_WIN,
+        ),
+        (
+            "float tree over the agent",
+            float_tree_over(focused_windowed_agent),
+            AGENT_WIN,
+        ),
+        (
+            "docked tree, cursor returned",
+            focused_windowed_tree(),
+            TREE_WIN,
+        ),
+        (
+            "docked tree, no window before",
+            focused_windowed_tree(),
+            TREE_WIN,
+        ),
+    ];
+    for (name, mut m, window) in cases {
+        let (_, previous_window, generation) = tree_open(&update(&mut m, key("<CR>")));
+        assert!(previous_window, "{name}: the file opens inside the sidebar");
+        let _ = update(&mut m, key("x"));
+        assert!(m.submit_hold.is_holding(), "{name}");
+        let _ = update(&mut m, opened_in(generation, window));
+        assert!(!m.submit_hold.is_holding(), "{name}: held to the bound");
+    }
 }
 
 /// nvim's answer to an open from a windowed sidebar can arrive ahead of the
@@ -17680,7 +17744,7 @@ fn keys_behind_an_open_from_a_windowed_sidebar_wait_for_the_cursor_to_leave_it()
             })
             .unwrap_or_else(|| panic!("{name}: no open"));
         assert!(sent_inputs(&update(&mut m, key("x"))).is_empty(), "{name}");
-        let answered = update(&mut m, Msg::PickedOpened { generation });
+        let answered = update(&mut m, opened_in(generation, EDITOR_WIN));
         assert!(sent_inputs(&answered).is_empty(), "{name}: {answered:?}");
         let released = update(&mut m, cursor_to(2));
         assert_eq!(sent_inputs(&released), ["x"], "{name}: {released:?}");

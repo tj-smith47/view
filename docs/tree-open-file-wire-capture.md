@@ -39,6 +39,7 @@ verbatim `OPEN_PICKED_CHUNK`:
 
 ```lua
 local path, how, line, buffer, previous = ...
+local here = vim.api.nvim_get_current_win
 if previous then
   pcall(vim.cmd, 'wincmd p')
 end
@@ -53,14 +54,14 @@ if buffer > 0 then
   if not vim.api.nvim_buf_is_valid(buffer)
       or not vim.bo[buffer].buflisted then
     say('That buffer has been closed')
-    return
+    return here()
   end
   local split = { vsplit = 'vertical sbuffer ', split = 'sbuffer ',
     tabedit = 'tab sbuffer ' }
   ok, err = pcall(vim.cmd, (split[how] or 'buffer ') .. buffer)
 elseif not vim.uv.fs_stat(path) then
   say(path .. ' no longer exists')
-  return
+  return here()
 else
   ok, err = pcall(vim.api.nvim_cmd, {
     cmd = how, args = { path }, magic = { file = false, bar = false },
@@ -68,13 +69,14 @@ else
 end
 if not ok then
   say(tostring(err):match('E%d+:.*') or tostring(err))
-  return
+  return here()
 end
 if line > 0 then
   local last = vim.api.nvim_buf_line_count(0)
   vim.api.nvim_win_set_cursor(0, { math.min(line, last), 0 })
 end
 vim.cmd.redraw()
+return here()
 ```
 
 ## 1. Hostile filenames through the shipped chunk

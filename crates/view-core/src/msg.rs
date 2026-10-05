@@ -588,6 +588,9 @@ pub enum Msg {
     /// the call's own, echoed back.
     PickedOpened {
         generation: u64,
+        /// The window nvim's cursor is in once the open has run, opened or
+        /// refused; `None` where the answer carried no handle.
+        window: Option<crate::events::WinHandle>,
     },
     /// nvim's `'timeoutlen'` elapsed on the keys a surface of view's own
     /// holds while they spell the start of a mapped sequence

@@ -87,13 +87,10 @@ enum Armed {
     /// it goes to nvim as `nvim_input`, which nvim reads ahead of the
     /// open, so it waits for nvim's answer.
     Open {
-        /// The docked surface whose window held nvim's cursor when the
-        /// open was asked for. The open leaves that window, and a key
-        /// released while view still reads the cursor there would reach
-        /// the surface, so the keys also wait for the cursor to leave it.
-        from: Option<NativeSurface>,
-        /// Whether nvim has answered the open.
-        answered: bool,
+        /// `None` until nvim answers the open. Then the docked surface
+        /// whose window the cursor is in once the open has run, `None`
+        /// within it for any other window.
+        answered: Option<Option<NativeSurface>>,
     },
 }
 
@@ -950,10 +947,13 @@ impl SubmitHold {
         !self.unsettled && out && reported_since
     }
 
-    /// Notes nvim's answer to the open carrying `generation`.
-    pub(crate) fn note_open_answered(&mut self, generation: u64) {
-        if let Some((Armed::Open { answered, .. }, _)) = &mut self.held {
-            *answered |= generation == self.generation;
+    /// Notes nvim's answer to the open carrying `generation`, which left
+    /// the cursor in `lands_in`'s window, `None` for an ordinary one.
+    pub(crate) fn note_open_answered(&mut self, generation: u64, lands_in: Option<NativeSurface>) {
+        if let Some((Armed::Open { answered }, _)) = &mut self.held {
+            if generation == self.generation {
+                *answered = Some(lands_in);
+            }
         }
     }
 
@@ -1416,34 +1416,39 @@ pub fn released_by_input(model: &Model) -> bool {
 }
 
 /// Whether the hold an open armed ends with the message just applied: nvim
-/// has answered the open, and the cursor has left the docked surface the
-/// open was asked from. nvim sends its answer and the redraw that moves
-/// the cursor on two paths, and the keys are routed by where view last
-/// read the cursor, so either can arrive last.
+/// has answered the open, and view's focus agrees with the window the
+/// answer says the cursor is in. nvim reports the cursor's new window on
+/// the flush after its answer, and the keys are routed by where view last
+/// read the cursor, so either can arrive last. An overlay holding the
+/// keyboard takes the keys wherever the cursor is.
 #[must_use]
 pub(crate) fn released_by_open(model: &Model) -> bool {
-    let Some((Armed::Open { from, answered }, _)) = model.submit_hold.held else {
+    let Some((
+        Armed::Open {
+            answered: Some(lands_in),
+        },
+        _,
+    )) = model.submit_hold.held
+    else {
         return false;
     };
-    answered && from.is_none_or(|from| model.focus() != Focus::Pane(from))
+    match model.focus() {
+        Focus::Pane(surface) => lands_in == Some(surface),
+        Focus::Engine => lands_in.is_none(),
+        Focus::Native(_) => true,
+    }
 }
 
 /// Holds the input that follows an open of a picked file or buffer until
 /// nvim answers the open, on [`arm`]'s bound. Returns the generation the
-/// open carries to nvim and the effect arming the bound.
-pub(crate) fn hold_for_open(model: &mut Model) -> (u64, Vec<Effect>) {
-    let from = match model.focus() {
-        Focus::Pane(surface) => Some(surface),
-        _ => None,
-    };
-    let effects = arm(
-        model,
-        Armed::Open {
-            from,
-            answered: false,
-        },
-    );
-    (model.submit_hold.generation, effects)
+/// open carries to nvim, whether the open enters the window before the
+/// current one first, and the effect arming the bound. The window is
+/// entered when the cursor sits in a docked surface's window, where the
+/// file does not belong.
+pub(crate) fn hold_for_open(model: &mut Model) -> (u64, bool, Vec<Effect>) {
+    let previous_window = matches!(model.focus(), Focus::Pane(_));
+    let effects = arm(model, Armed::Open { answered: None });
+    (model.submit_hold.generation, previous_window, effects)
 }
 
 /// Starts a hold, bounded by the link's own backstop so a command that

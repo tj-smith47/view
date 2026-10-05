@@ -1032,7 +1032,11 @@ impl EngineHandle {
                             }
                             Some(Waiter::Opened { generation }) => {
                                 if let Some(pump) = &reader_pump {
-                                    let _ = pump.route_msg(Msg::PickedOpened { generation });
+                                    let window = (error == Value::Nil)
+                                        .then(|| crate::nvim_api::native_window::decode_native_window_reply(&result))
+                                        .flatten();
+                                    let _ =
+                                        pump.route_msg(Msg::PickedOpened { generation, window });
                                 }
                             }
                             None => {}
