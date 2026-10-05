@@ -51,6 +51,7 @@ pub const MEASURED_BUILD: &[(&str, Option<&str>)] = &[
     ("echo_path", Some(TAPS_NOSPEC_VIEW_BIN)),
     ("echo_speculated", Some(TAPS_VIEW_BIN)),
     ("input_path", Some(TAPS_VIEW_BIN)),
+    ("dvr_input", Some(TAPS_VIEW_BIN)),
     ("output_path", Some(TAPS_NOSPEC_VIEW_BIN)),
     // the same two boundaries, with an agent turn streaming underneath
     ("ai_session_active", Some(TAPS_VIEW_BIN)),
@@ -60,6 +61,9 @@ pub const MEASURED_BUILD: &[(&str, Option<&str>)] = &[
     ("first_paint", Some(VIEW_BIN)),
     ("startup", Some(VIEW_BIN)),
     ("scroll", Some(VIEW_BIN)),
+    // the shipped build with the recording on, so its staleness reads
+    // against the same build `scroll` measures
+    ("dvr_scroll", Some(VIEW_BIN)),
     ("memory", Some(VIEW_BIN)),
     ("remote_memory", Some(VIEW_BIN)),
     ("flood", Some(VIEW_BIN)),
@@ -145,6 +149,7 @@ mod tests {
             vec![
                 "echo_speculated",
                 "input_path",
+                "dvr_input",
                 "ai_session_active",
                 "ai_composer"
             ]

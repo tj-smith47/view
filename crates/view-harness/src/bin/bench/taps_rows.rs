@@ -83,9 +83,9 @@ pub(crate) fn run_taps_row(
     let (pipe, spec, cwd) = taps_side(fixture, world, editor, agent.as_deref())?;
     let deadline = settle_deadline(fixture);
     let (outcome, metric_key, unit) = match scenario {
-        "input_path" => (
+        "input_path" | "dvr_input" => (
             taps::run_input_path(&spec, &pipe, protocol, deadline)
-                .with_context(|| format!("input_path/{fixture} run failed"))?,
+                .with_context(|| format!("{scenario}/{fixture} run failed"))?,
             "key_to_rpc_p99_us",
             "us",
         ),

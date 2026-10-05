@@ -190,6 +190,9 @@ const DIAGNOSTIC_MATRIX: &[(&str, &str)] = &[
     ("echo_path", "minimal"),
     ("echo_path", "heavy"),
     ("memory", "heavy"),
+    // the recording's cost under the input path and the scroll moment
+    ("dvr_input", "minimal"),
+    ("dvr_scroll", "minimal"),
 ];
 
 /// What one matrix row handed back: the metrics it stands behind, and the
@@ -304,6 +307,10 @@ struct Cli {
     /// Run every cell of the matrix
     #[arg(long)]
     all: bool,
+    /// Print every matrix cell and every on-demand diagnostic cell, then
+    /// exit without measuring
+    #[arg(long, exclusive = true)]
+    list: bool,
     /// Machine class the numbers belong to (e.g. dev-linux); baselines
     /// are stored and gated per class. The name must carry exactly one of
     /// linux, macos or windows as a hyphen-delimited segment, and it must
@@ -313,7 +320,7 @@ struct Cli {
     /// "controlled-" name prefix opts the class into tail-metric gating
     /// (ratio_p99, paired-delta p99); any other name records tails without
     /// gating them
-    #[arg(long)]
+    #[arg(long, required_unless_present = "list", default_value = "")]
     class: String,
     /// Record measured values into baselines/<class>.toml
     #[arg(long, conflicts_with = "gate")]
@@ -323,8 +330,8 @@ struct Cli {
     #[arg(long)]
     gate: bool,
     /// Path to the release view binary. Scope: the rows that measure the
-    /// shipped build (first_paint, startup, scroll, memory, remote_memory,
-    /// flood, picker, supervision). The rows that measure a bench arm take
+    /// shipped build (first_paint, startup, scroll, dvr_scroll, memory,
+    /// remote_memory, flood, picker, supervision). The rows that measure a bench arm take
     /// the flag naming that arm, and a run that passes this flag while one
     /// of them is selected without its own flag is refused, since this one
     /// would go unread for that row. Every one of these flags is refused
@@ -335,7 +342,7 @@ struct Cli {
     #[arg(long)]
     nvim_bin: Option<PathBuf>,
     /// Path to the bench-taps build of view. Scope: echo_speculated,
-    /// input_path, ai_session_active, ai_composer
+    /// input_path, dvr_input, ai_session_active, ai_composer
     #[cfg(unix)]
     #[arg(long)]
     taps_view_bin: Option<PathBuf>,
@@ -788,6 +795,7 @@ fn platform_block(scenario: &str) -> Option<&'static str> {
     if matches!(
         scenario,
         "input_path"
+            | "dvr_input"
             | "output_path"
             | "echo_path"
             | "echo_speculated"
@@ -963,6 +971,10 @@ fn resolve_view_bin(cli: &Cli) -> Result<PathBuf> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.list {
+        rows::print_cells();
+        return Ok(());
+    }
 
     // Drop-based cleanup is skipped when a run is killed by a signal, so
     // stale scratch worlds from interrupted runs would otherwise pile up
@@ -2233,6 +2245,16 @@ mod tests {
                  bails at `unknown scenario` instead of measuring anything"
             );
         }
+    }
+
+    /// `--list` stands alone, and every other run still names its class:
+    /// the empty default exists only so the listing parses.
+    #[test]
+    fn list_needs_no_class_and_a_run_still_does() {
+        use clap::Parser as _;
+        assert!(Cli::try_parse_from(["bench", "--list"]).is_ok_and(|cli| cli.list));
+        assert!(Cli::try_parse_from(["bench", "--all"]).is_err());
+        assert!(Cli::try_parse_from(["bench", "--list", "--all"]).is_err());
     }
 
     /// Every scenario the table names has to be one the matrix can select,

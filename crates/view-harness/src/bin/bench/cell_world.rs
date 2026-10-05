@@ -14,6 +14,8 @@ use super::*;
 /// files, and sockets, removed on drop.
 pub(crate) struct CellWorld {
     pub(crate) hermetic_dir: PathBuf,
+    /// Whether every side resolved from here records the session.
+    dvr: bool,
 }
 
 impl Drop for CellWorld {
@@ -39,7 +41,10 @@ impl CellWorld {
         let hermetic_dir = scratch_root().join(format!("view-bench-{id}"));
         std::fs::create_dir_all(&hermetic_dir)
             .with_context(|| format!("creating {}", hermetic_dir.display()))?;
-        let world = Self { hermetic_dir };
+        let world = Self {
+            hermetic_dir,
+            dvr: false,
+        };
 
         let fixture_dir = fixture_source_dir(fixture)?;
         if !fixture_dir.join("nvim").join("init.lua").exists() {
@@ -49,6 +54,13 @@ impl CellWorld {
             );
         }
         Ok(world)
+    }
+
+    /// Turns the session recording on for every side resolved after this,
+    /// by appending `[dvr] enabled = true` to that side's copy of the
+    /// fixture's `view.toml`.
+    pub(crate) fn enable_dvr(&mut self) {
+        self.dvr = true;
     }
 
     /// Resolves one side's hermetic environment: a private copy of the
@@ -72,6 +84,9 @@ impl CellWorld {
         let xdg_config_home = side_dir.join("xdg_config_home");
         copy_dir_recursive(&fixture_dir, &xdg_config_home)
             .with_context(|| format!("copying fixture {fixture:?} for the {side_tag} side"))?;
+        if self.dvr {
+            append_dvr_table(&xdg_config_home.join("view"))?;
+        }
 
         let lockfile_path = fixture_dir.join("nvim").join("lazy-lock.json");
         let xdg_data_home = if lockfile_path.exists() {
@@ -176,6 +191,21 @@ pub(crate) fn settle_deadline(fixture: &str) -> Duration {
     }
 }
 
+/// Appends `[dvr] enabled = true` to the `view.toml` under `view_dir`,
+/// creating both when the fixture configured no view.
+fn append_dvr_table(view_dir: &Path) -> Result<()> {
+    use std::io::Write as _;
+    std::fs::create_dir_all(view_dir)
+        .with_context(|| format!("creating {}", view_dir.display()))?;
+    let config = view_dir.join("view.toml");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config)
+        .and_then(|mut file| file.write_all(b"\n[dvr]\nenabled = true\n"))
+        .with_context(|| format!("appending [dvr] to {}", config.display()))
+}
+
 /// Builds the view-side spawn spec against one resolved side setup; the
 /// engine binary is always passed explicitly so both halves of a pair
 /// exercise the same pin-verified nvim.
@@ -254,5 +284,39 @@ mod tests {
             "the fifth argument is the driver's progress path: {written}"
         );
         assert_eq!(agent.len(), 6, "the path lands in the fixture's fifth slot");
+    }
+
+    /// The DVR rows measure a recording session only while the config the
+    /// view side reads, parsed the way view parses it, turns the recording
+    /// on; a table view refuses leaves every default in place, recording
+    /// off, and the row measures the plain path under the DVR's name.
+    #[test]
+    fn a_dvr_cell_hands_the_view_side_a_config_that_records() {
+        for fixture in DIAGNOSTIC_MATRIX
+            .iter()
+            .filter(|(scenario, _)| scenario.starts_with("dvr_"))
+            .map(|(_, fixture)| *fixture)
+        {
+            let mut world = CellWorld::create(fixture).unwrap();
+            world.enable_dvr();
+            let side = world.side(fixture, "view").unwrap();
+            let config = side
+                .cwd
+                .join("xdg_config_home")
+                .join("view")
+                .join("view.toml");
+            let written = std::fs::read_to_string(&config).unwrap();
+            let table: toml::Value = written.parse().unwrap();
+            assert_eq!(
+                table.get("dvr").and_then(|dvr| dvr.get("enabled")),
+                Some(&toml::Value::Boolean(true)),
+                "{fixture}: no `[dvr] enabled = true` in {written}"
+            );
+            let loaded = view_native::config::ViewConfig::load(Some(&config)).unwrap();
+            assert!(
+                loaded.dvr.enabled,
+                "{fixture}: view reads the recording off"
+            );
+        }
     }
 }

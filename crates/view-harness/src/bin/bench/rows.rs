@@ -7,6 +7,23 @@
 
 use super::*;
 
+/// Prints the cells `--all` runs, then the diagnostic cells only a named
+/// `--scenario`/`--fixture` pair runs.
+pub(super) fn print_cells() {
+    for (heading, cells) in [
+        ("matrix (--all)", MATRIX),
+        (
+            "diagnostics (on demand, refused under --record/--gate/--campaign)",
+            DIAGNOSTIC_MATRIX,
+        ),
+    ] {
+        println!("{heading}:");
+        for (scenario, fixture) in cells {
+            println!("  {scenario}/{fixture}");
+        }
+    }
+}
+
 /// Runs one matrix cell and returns the metrics the baseline records for
 /// it, refusing any metric name the gate policy has not classified.
 ///
@@ -26,8 +43,12 @@ pub(super) fn run_cell(
     // either measures or fails, so measure_cell keeps the simpler contract
     let outcome = match scenario.as_str() {
         #[cfg(unix)]
-        "input_path" | "output_path" | "ai_session_active" | "ai_streaming" | "ai_composer" => {
-            let world = CellWorld::create(fixture)?;
+        "input_path" | "dvr_input" | "output_path" | "ai_session_active" | "ai_streaming"
+        | "ai_composer" => {
+            let mut world = CellWorld::create(fixture)?;
+            if scenario == "dvr_input" {
+                world.enable_dvr();
+            }
             taps_rows::run_taps_row(cell, &world, bins, protocol, controlled)?
         }
         // dispatched here for the same reason the two rows above are: it
@@ -60,7 +81,10 @@ fn measure_cell(
     // has no reader at all and `-D warnings` fails the build there
     #[cfg(unix)]
     let nvim_bin = bins.nvim.as_path();
-    let world = CellWorld::create(fixture)?;
+    let mut world = CellWorld::create(fixture)?;
+    if scenario == "dvr_scroll" {
+        world.enable_dvr();
+    }
     match scenario {
         #[cfg(unix)]
         "echo_path" => taps_rows::run_echo_path_row(fixture, &world, bins, protocol, controlled),
@@ -181,7 +205,7 @@ fn measure_cell(
             metrics.insert("view_p99_ms".to_string(), outcome.gated_view_p99_ms);
             Ok(metrics)
         }
-        "scroll" => {
+        "scroll" | "dvr_scroll" => {
             let mut pair = paired_specs(&world, fixture, bins)?;
             for spec in [&mut pair.view, &mut pair.nvim] {
                 // the scratch file's pinned position is the LAST argument
@@ -201,7 +225,7 @@ fn measure_cell(
                 protocol,
                 settle_deadline(fixture),
             )
-            .with_context(|| format!("scroll/{fixture} run failed"))?;
+            .with_context(|| format!("{scenario}/{fixture} run failed"))?;
             for summary in &outcome.trials {
                 println!(
                     "{}",
