@@ -395,6 +395,32 @@ code change).
   behind it drew inside 0.6%; today's three draws span 15.61 to 17.79. The
   factor needs re-characterizing against the level the cell now holds.
 
+**S5.1 typed-ahead hold, a picker query typed right behind another key**
+(2026-10-01 to 2026-10-05, about 30 h over 16 review rounds, last commits
+11712e2e and 58b5c5ac).
+
+- *What remains.* Three findings of the last review
+  (`task-s5.1-hold-rule-b-review.md`, each with a timed sequence and a fix).
+  A fresh session on a slow link, before any round trip is read, lets a
+  burst shrink the settle floor and a query reaches the buffer
+  (`submit_hold.rs:757`). After one slow answer (a 300 ms save), a word typed
+  inside that floor behind a claimed view key waits for the bound on a local
+  link (`update/mod.rs:188-195`). The same wait follows `<CR>`, `<BS>`,
+  `<Tab>` or an arrow in insert mode, because the release needs a mode
+  report those keys never cause (`submit_hold.rs:931-936`). An insert-mode
+  mapping such as `jk` typed behind a non-text key settles early, which the
+  module doc lists as a limit.
+- *What was measured.* The recorded population holds on 178,204 steps and
+  no step holds less than before the rule. The live binary run four copies
+  at once passed 7 rounds of 8; the eighth failed in key registration.
+  `keys_typed_ahead_after_a_refused_insert_reach_the_picker` failed once
+  under gate load and never alone; its cause is unknown and its failure
+  message now prints the state it needs.
+- *Next lever.* The review's three fixes as written: time the first batch
+  from the oldest key in flight, schedule a wake at the newest key plus the
+  floor, and require the mode report only after a key that can leave the
+  current mode. Each has its test sequence in the review.
+
 ## Execution discipline (binding from S1 on)
 
 - **One streak per session.** The harness list carries only the active
