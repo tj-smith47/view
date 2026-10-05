@@ -442,10 +442,13 @@ return {
 /// characters, sent once the line has returned to nvim's main loop: after
 /// every invocation it made, after any `:sleep`, `vim.wait`, `input()` or
 /// `getchar()` it ran, and for a line that failed, ran nothing or left
-/// nvim in insert or terminal mode. Under a UI that draws nvim's own
-/// messages, a line that ends at a hit-enter or more prompt is reported
-/// at the prompt. A line left with `<Esc>` and a mapping's `<Cmd>` send
-/// none.
+/// nvim in insert or terminal mode. A line waiting at a `confirm()` or
+/// `:s///c` question is reported at the question. Where an attached UI
+/// draws nvim's own messages, a line that stops at a hit-enter or more
+/// prompt is reported at that prompt too. A line left with `<Esc>` and a
+/// mapping's `<Cmd>` send none. The per-line hooks live in the
+/// `view_line_hooks` group, which a bare `:autocmd!` and this chunk's
+/// own clearing of `view_line_ran` leave in place.
 pub(crate) const REGISTER_COMMAND_CHUNK: &str = "\
 local channel, entries, command = ...
 local takes_path = { ['dvr export'] = true, ['dvr play'] = true }
@@ -529,9 +532,14 @@ vim.api.nvim_create_autocmd('CmdlineLeave', {
         pcall(vim.api.nvim_del_autocmd, hook)
       end
     end
+    -- a group of their own, which a bare `:autocmd!` in a sourced config
+    -- and the registration's own clearing both leave alone
+    local group = vim.api.nvim_create_augroup('view_line_hooks',
+      { clear = false })
     -- `:sleep` and `vim.wait` run events inside the line and are never
     -- safe; an `input()` the line waits in is safe in command-line mode
     hooks[1] = vim.api.nvim_create_autocmd('SafeState', {
+      group = group,
       callback = function()
         if vim.fn.mode() ~= 'c' then
           report()
@@ -539,7 +547,10 @@ vim.api.nvim_create_autocmd('CmdlineLeave', {
       end,
     })
     -- terminal mode is never safe
-    hooks[2] = vim.api.nvim_create_autocmd('TermEnter', { callback = report })
+    hooks[2] = vim.api.nvim_create_autocmd('TermEnter', {
+      group = group,
+      callback = report,
+    })
     local prompts = false
     for _, ui in ipairs(vim.api.nvim_list_uis()) do
       prompts = prompts or not ui.ext_messages
@@ -551,7 +562,8 @@ vim.api.nvim_create_autocmd('CmdlineLeave', {
     -- and only a libuv callback sees it
     local waiting = vim.uv.new_prepare()
     waiting:start(function()
-      if sent or vim.api.nvim_get_mode().blocking then
+      local mode = vim.api.nvim_get_mode().mode
+      if sent or mode == 'r' or mode == 'rm' then
         waiting:stop()
         waiting:close()
         send()

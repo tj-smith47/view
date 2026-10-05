@@ -1,17 +1,15 @@
-//! Input held behind a submitted `:` command line, or a key nvim maps to a
-//! view invocation, until view has run the invocation.
+//! Input held behind a submitted `:View` command line, or a key nvim maps
+//! to a view invocation, until view has run the invocation.
 //!
 //! nvim runs `:View ai open` or `<leader>ai` and only then tells view
 //! about it, while the keys typed behind them are already on their way.
 //! Routed as they arrive, they reach nvim as normal-mode commands in the
 //! buffer the panel was opened from. Holding them until the invocation's
-//! notification comes back lets the focus it sets decide where they go.
-//!
-//! Any line can reach a view command (a user command wrapping `:View`, a
-//! function it calls), so every submitted line holds the keys behind it
-//! until nvim reports that line has returned to its main loop, which
-//! follows every invocation the line made. Keys typed behind a line that
-//! runs nothing of view's wait for that one report.
+//! notification comes back lets the focus it sets decide where they go. A
+//! submitted line holds them until nvim reports the whole line has run,
+//! which follows every invocation the line made, or until nvim shows a
+//! prompt the line stopped at, which the keys then answer. Keys behind a
+//! line that names no view command go to nvim at once.
 //!
 //! Over a slow link a query typed ahead still reaches the buffer when an
 //! answer to an earlier key arrives later than the slowest of the recent
@@ -34,13 +32,19 @@
 //! newest key that unsettled it went out. A key that changes nothing nvim
 //! reports, `<Left>` in insert mode, leaves such a hold to its bound.
 
+pub mod commands;
+mod line_report;
 mod typed_ahead;
 mod user_run;
 
 use std::time::Duration;
 
+pub use line_report::{note_line_bound, shows_a_prompt, LINE_REPORT_CHARS};
 pub(crate) use typed_ahead::owed_after;
 pub(crate) use user_run::canonical_typed;
+
+use commands::names_view;
+use line_report::{same_line, submitted_line, TYPES_TEXT};
 
 use crate::events::UiEvent;
 use crate::model::{CmdlineState, Focus, Model};
@@ -78,24 +82,11 @@ pub const OWES_AFTER: [(&str, &str, &str); 6] = [
     ("<C-w>", "<C-g>", "<C-w><C-g>"),
 ];
 
-/// How many characters of a submitted line nvim's report carries and a
-/// command hold compares. A line longer than this is matched on these
-/// alone, and a pasted line of any length costs one bounded message.
-pub const LINE_REPORT_CHARS: usize = 256;
-
-/// Whether nvim's report of `reported` is the report of `armed`, compared
-/// on the characters the report carries.
-fn same_line(armed: &str, reported: &str) -> bool {
-    armed
-        .chars()
-        .take(LINE_REPORT_CHARS)
-        .eq(reported.chars().take(LINE_REPORT_CHARS))
-}
-
 /// What armed a standing hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Armed {
-    /// A submitted `:` command line, until nvim reports it has run.
+    /// A submitted `:View` command line, until nvim reports it has run or
+    /// shows a prompt it stopped at.
     Command,
     /// A key sequence nvim maps to a view invocation.
     Sequence,
@@ -316,7 +307,7 @@ fn is_keyword(c: char) -> bool {
 }
 
 /// The command line being typed and the input held behind a submitted
-/// `:` line or a key that invokes view.
+/// `:View` or a key that invokes view.
 #[derive(Debug, Clone, Default)]
 pub struct SubmitHold {
     typed: Option<Typed>,
@@ -334,9 +325,15 @@ pub struct SubmitHold {
     /// the command-line backstop.
     ended_at: Option<SpecStamp>,
     held: Option<(Armed, Vec<Msg>)>,
-    /// The line a command hold waits for nvim to report, `None` where view
-    /// does not know its text and any report ends the hold.
-    armed_line: Option<String>,
+    /// The line a command hold waits for nvim to report.
+    armed_line: String,
+    /// Whether nvim had not shown that line open by its `<CR>`, so its `:`
+    /// may be one nvim read as text in insert mode.
+    armed_unshown: bool,
+    /// The newest lines whose hold ended at its bound with no report, at
+    /// most [`TIMED_OUT_KEPT`], oldest first. A report of one of them is
+    /// that line's, whatever hold stands when it arrives.
+    timed_out: std::collections::VecDeque<String>,
     generation: u64,
     /// Every key sequence nvim runs a view invocation on.
     invoke_keys: Vec<Invocation>,
@@ -483,7 +480,7 @@ impl SubmitHold {
     }
 
     /// Learns the user's command-line mappings and abbreviations, which
-    /// can make a line text that no typed key spelled. A lhs holding a
+    /// can make a line `:View` that no typed key spelled. A lhs holding a
     /// key that types no character never matches typed text and is left
     /// out.
     pub fn learn_cmdline_maps(&mut self, maps: &[CmdlineMap]) {
@@ -721,8 +718,8 @@ impl SubmitHold {
     }
 
     /// Ends the tracked line when the key just typed into it completed a
-    /// mapping or an abbreviation whose rhs submits it, and returns the
-    /// line submitted.
+    /// mapping or an abbreviation whose rhs submits it, and returns that
+    /// line where it names a view command.
     fn submit_by_mapping(&mut self) -> Option<String> {
         let Some(Typed::Known(text)) = &self.typed else {
             return None;
@@ -739,7 +736,7 @@ impl SubmitHold {
             return None;
         }
         self.end_line(None);
-        Some(line.text)
+        names_view(&line.text).then_some(line.text)
     }
 
     /// Notes that nvim reported `mode`, which answers every key that left
@@ -922,42 +919,56 @@ impl SubmitHold {
 
     /// Whether `msg` ends a standing hold: nvim's report that the line the
     /// hold waits for has run, which follows every invocation the line
-    /// made, a key sequence's own notification, the bound this hold armed,
-    /// or, for a hold a key sequence armed, a batch arriving once the hold
-    /// is settled while nvim is out of normal mode, by the batch's own
-    /// report or else by `mode`, the last one. That says the sequence ran
-    /// no mapping, and a report before then may answer a key sent ahead of
-    /// the sequence. A hold an open armed ends on its bound here, and
+    /// made, a prompt that line stopped at, a key sequence's own
+    /// notification, the bound this hold armed, or, for a hold a key
+    /// sequence armed, a batch arriving once the hold is settled while nvim
+    /// is out of normal mode, by the batch's own report or else by `mode`,
+    /// the last one. That says the sequence ran no mapping, and a report
+    /// before then may answer a key sent ahead of the sequence. A command
+    /// hold whose line nvim never showed ends the same way on a mode a `:`
+    /// types text in. A hold an open armed ends on its bound here, and
     /// otherwise as [`released_by_open`] states.
+    ///
+    /// A report of another text ends a command hold too where it names a
+    /// view command, since nvim's text of a line can differ from view's
+    /// (an `<expr>` abbreviation, a completion), unless it is the late
+    /// report of a line whose hold ended at its bound. A report naming no
+    /// view command is a line submitted before this one that armed none.
     fn ended_by(&self, msg: &Msg, mode: &str) -> bool {
         let Some((armed, _)) = &self.held else {
             return false;
         };
         match msg {
             Msg::FeatureInvoke { .. } => *armed == Armed::Sequence,
-            // a line submitted before this one can report after the bound
-            // released the keys that submitted this one
             Msg::CommandLineRan { line } => {
                 *armed == Armed::Command
-                    && self
-                        .armed_line
-                        .as_deref()
-                        .is_none_or(|armed| same_line(armed, line))
+                    && !self.timed_out.iter().any(|old| same_line(old, line))
+                    && (same_line(&self.armed_line, line) || names_view(line))
             }
             Msg::SubmitHoldExpired { generation } => *generation == self.generation,
             Msg::Redraw(events) => {
-                let mut reported = events
-                    .iter()
-                    .filter_map(|event| match event {
-                        UiEvent::ModeChange { mode, .. } => Some(mode.as_str()),
-                        _ => None,
-                    })
-                    .peekable();
-                let out = match reported.peek() {
-                    Some(_) => reported.any(|mode| mode != "normal"),
-                    None => mode != "normal",
+                let reads = |out: &dyn Fn(&str) -> bool| {
+                    let mut reported = events
+                        .iter()
+                        .filter_map(|event| match event {
+                            UiEvent::ModeChange { mode, .. } => Some(mode.as_str()),
+                            _ => None,
+                        })
+                        .peekable();
+                    match reported.peek() {
+                        Some(_) => reported.any(out),
+                        None => out(mode),
+                    }
                 };
-                *armed == Armed::Sequence && self.settled_out_of_normal(out)
+                match armed {
+                    Armed::Sequence => self.settled_out_of_normal(reads(&|m| m != "normal")),
+                    Armed::Command => {
+                        events.iter().any(shows_a_prompt)
+                            || self.armed_unshown
+                                && self.settled_out_of_normal(reads(&|m| TYPES_TEXT.contains(&m)))
+                    }
+                    Armed::Open { .. } => false,
+                }
             }
             _ => false,
         }
@@ -1306,13 +1317,16 @@ fn fold_line(model: &mut Model, notation: &str) -> Vec<Effect> {
         let states = std::mem::take(&mut hold.states);
         let typed = hold.end_line(None);
         let line = submitted_line(model, opened, typed.as_ref(), &states);
-        return arm_line(model, line);
+        if let Some(line) = line.filter(|line| names_view(line)) {
+            return arm_line(model, line, opened);
+        }
     } else if typed.edit(notation) {
         hold.end_line(None);
     } else {
         hold.note_edited();
+        let opened = hold.line_opened();
         if let Some(line) = hold.submit_by_mapping() {
-            return arm_line(model, Some(line));
+            return arm_line(model, line, opened);
         }
     }
     Vec::new()
@@ -1375,47 +1389,6 @@ pub(crate) fn may_open(model: &Model) -> bool {
                 .contains(&model.engine.mode.current.as_str()))
 }
 
-/// The line a `<CR>` submits, read from the engine's last `cmdline_show`
-/// of it, and from the keys view sent where the engine has shown none or
-/// is showing a text those keys gave the line on the way (`states`), since
-/// the keys after it are still in flight. `None` where view knows neither.
-///
-/// A `cnoremap` or a `cabbrev` can give a line a text its keys never
-/// spelled. The engine's line shows a mapping's text once nvim has read
-/// its keys, and the user's command-line mappings and abbreviations expand
-/// the keys it has not read yet. An abbreviation that ends the line is
-/// expanded by the `<CR>` itself, after nvim's last show of the line.
-fn submitted_line(
-    model: &Model,
-    opened: bool,
-    typed: Option<&Typed>,
-    states: &[State],
-) -> Option<String> {
-    let hold = &model.submit_hold;
-    let shown = model
-        .engine
-        .cmdline
-        .as_ref()
-        .filter(|line| line.firstc == ":")
-        .map(|line| {
-            line.content
-                .iter()
-                .map(|(_, s)| s.as_str())
-                .collect::<String>()
-        });
-    let from_shown = |shown: &str| {
-        hold.expand_abbreviation(Line::typed(shown), WordEnd::Submit)
-            .text
-    };
-    match (typed, shown) {
-        (Some(Typed::Known(_)), Some(shown)) if opened && !in_flight(states, &shown) => {
-            Some(from_shown(&shown))
-        }
-        (Some(Typed::Known(text)), _) => Some(hold.expand_typed(text, true).text),
-        (_, shown) => shown.map(|shown| from_shown(&shown)),
-    }
-}
-
 /// Whether `msg` ends the standing hold: nvim's report that the line has
 /// run, the command's own notification, the bound it armed, or a mode
 /// that says a key sequence ran no mapping. nvim reports a line it refuses
@@ -1429,26 +1402,19 @@ pub fn releases(model: &Model, msg: &Msg) -> bool {
     model.submit_hold.ended_by(msg, &model.engine.mode.current)
 }
 
-/// Whether `msg` is the bound of a hold a `:` line armed, which nvim
-/// never reported. A config that cleared view's autocmd group
-/// (`:autocmd! view_line_ran`) took the report with it, so the bound
-/// puts the registration back and only this one line waits for it.
-#[must_use]
-pub fn bounds_a_line(model: &Model, msg: &Msg) -> bool {
-    let hold = &model.submit_hold;
-    matches!(msg, Msg::SubmitHoldExpired { generation } if *generation == hold.generation)
-        && matches!(hold.held, Some((Armed::Command, _)))
-}
-
-/// Whether input arriving now ends the standing hold a key sequence armed:
-/// the input's arrival settled the hold while the mode nvim last reported,
-/// since the key that unsettled it, is out of normal mode, so the sequence
-/// ran no mapping.
+/// Whether input arriving now ends the standing hold: the input's arrival
+/// settled the hold while the mode nvim last reported, since the key that
+/// unsettled it, is out of normal mode, so the sequence ran no mapping, or
+/// is one a `:` types text in, so a line nvim never showed was text.
 #[must_use]
 pub fn released_by_input(model: &Model) -> bool {
     let hold = &model.submit_hold;
-    matches!(hold.held, Some((Armed::Sequence, _)))
-        && hold.settled_out_of_normal(model.engine.mode.current != "normal")
+    let mode = model.engine.mode.current.as_str();
+    hold.settled_out_of_normal(match hold.held {
+        Some((Armed::Sequence, _)) => mode != "normal",
+        Some((Armed::Command, _)) => hold.armed_unshown && TYPES_TEXT.contains(&mode),
+        _ => false,
+    })
 }
 
 /// Whether the hold an open armed ends with the message just applied: nvim
@@ -1485,11 +1451,13 @@ pub(crate) fn hold_for_open(model: &mut Model) -> (u64, Vec<Effect>) {
     (model.submit_hold.generation, effects)
 }
 
-/// Holds the input behind a submitted `:` line until nvim reports `line`
-/// has run, or any line where view does not know its text.
-fn arm_line(model: &mut Model, line: Option<String>) -> Vec<Effect> {
+/// Holds the input behind a submitted `:View` line until nvim reports
+/// `line` has run, where nvim had shown it open by its `<CR>` (`opened`)
+/// or not.
+fn arm_line(model: &mut Model, line: String, opened: bool) -> Vec<Effect> {
     let effects = arm(model, Armed::Command);
     model.submit_hold.armed_line = line;
+    model.submit_hold.armed_unshown = !opened;
     effects
 }
 
@@ -1568,18 +1536,17 @@ mod tests {
     }
 
     /// The line the command hold standing on `model` waits for nvim to
-    /// report, `?` where view does not know its text.
+    /// report, `None` where no command hold stands.
     fn waits_for(model: &Model) -> Option<String> {
         let hold = &model.submit_hold;
-        matches!(hold.held, Some((Armed::Command, _)))
-            .then(|| hold.armed_line.clone().unwrap_or_else(|| "?".to_string()))
+        matches!(hold.held, Some((Armed::Command, _))).then(|| hold.armed_line.clone())
     }
 
     /// A `cnoremap` that turns the typed line into `View ai open` arms the
     /// hold on what the engine shows, and an engine line still showing a
     /// text the keys typed gave the line on the way defers to them.
     #[test]
-    fn a_line_the_engine_shows_is_the_line_the_hold_waits_for() {
+    fn a_line_the_engine_shows_as_view_holds_whatever_keys_spelled_it() {
         let mut model = normal_mode();
         let _ = type_keys(&mut model, &[":"]);
         show_line(&mut model, "");
@@ -1599,8 +1566,8 @@ mod tests {
         show_line(&mut model, "");
         let _ = type_keys(&mut model, &["V", "i"]);
         show_line(&mut model, "Vi");
-        let _ = type_keys(&mut model, &["m", "<CR>"]);
-        assert_eq!(waits_for(&model).as_deref(), Some("Vim"));
+        let sent = type_keys(&mut model, &["m", "<CR>"]);
+        assert!(!arms(&sent), "{sent:?}");
 
         // a typo corrected faster than nvim shows it: the shown `Vx` is a
         // text the keys gave the line, so the typed `View` decides
@@ -1617,11 +1584,11 @@ mod tests {
         show_line(&mut model, "");
         let _ = type_keys(&mut model, &["V", "i"]);
         show_line(&mut model, "Vi");
-        let _ = type_keys(
+        let sent = type_keys(
             &mut model,
             &["<BS>", "<BS>", "e", "<Space>", "f", "o", "o", "<CR>"],
         );
-        assert_eq!(waits_for(&model).as_deref(), Some("e foo"));
+        assert!(!arms(&sent), "{sent:?}");
     }
 
     fn cmdline_maps(model: &mut Model, maps: &[(&str, &str, bool, bool, bool)]) {
@@ -1670,34 +1637,32 @@ mod tests {
     }
 
     /// A rhs ending in `<CR>` submits the line at the key that completes
-    /// the lhs: the hold waits for that line and holds the keys behind it,
-    /// and no line is left tracked for a later `<CR>` to read.
+    /// the lhs: a `:View` there arms the hold, waits for that line and
+    /// holds the keys behind it, and any other command leaves no line
+    /// tracked for a later `<CR>` to read.
     #[test]
     fn a_mapping_whose_rhs_submits_ends_the_line_at_its_last_key() {
-        for (lhs, rhs, line) in [
-            ("vv", "View ai open<CR>", "View ai open"),
-            ("ww", "w<CR>", "w"),
-        ] {
-            for abbr in [false, true] {
-                let mut model = normal_mode();
-                cmdline_maps(&mut model, &[(lhs, rhs, abbr, true, false)]);
-                let mut keys = vec![":"];
-                keys.extend(lhs.split("").filter(|key| !key.is_empty()));
-                if abbr {
-                    keys.push("<Space>");
-                }
-                let sent = type_keys(&mut model, &keys);
-                assert!(arms(&sent), "{lhs} abbr {abbr}: {sent:?}");
-                assert_eq!(
-                    waits_for(&model).as_deref(),
-                    Some(line),
-                    "{lhs} abbr {abbr}"
-                );
-                let held = type_keys(&mut model, &["j"]);
-                assert!(held.is_empty(), "{lhs} abbr {abbr}: {held:?}");
-                assert!(!model.submit_hold.types_a_line(), "{lhs} abbr {abbr}");
-            }
+        for abbr in [false, true] {
+            let mut model = normal_mode();
+            cmdline_maps(&mut model, &[("vv", "View ai open<CR>", abbr, true, false)]);
+            let keys: &[&str] = if abbr {
+                &[":", "v", "v", "<Space>"]
+            } else {
+                &[":", "v", "v"]
+            };
+            let sent = type_keys(&mut model, keys);
+            assert!(arms(&sent), "abbr {abbr}: {sent:?}");
+            assert_eq!(waits_for(&model).as_deref(), Some("View ai open"));
+            let held = type_keys(&mut model, &["j"]);
+            assert!(held.is_empty(), "abbr {abbr}: {held:?}");
+            assert!(!model.submit_hold.types_a_line(), "abbr {abbr}");
         }
+
+        let mut model = normal_mode();
+        cmdline_maps(&mut model, &[("ww", "w<CR>", false, true, false)]);
+        let sent = type_keys(&mut model, &[":", "w", "w"]);
+        assert!(!arms(&sent), "{sent:?}");
+        assert!(!model.submit_hold.types_a_line());
     }
 
     /// Mappings apply wherever their lhs is typed, as nvim reads the keys
@@ -1714,10 +1679,11 @@ mod tests {
         );
         let _ = type_keys(&mut model, &[":", "<Space>", "v", "v", "<CR>"]);
         assert_eq!(waits_for(&model).as_deref(), Some(" View ai open"));
+        // `:View` takes no range, so nvim refuses the line
         let mut model = normal_mode();
         cmdline_maps(&mut model, &[("vv", "View ai open", false, true, false)]);
-        let _ = type_keys(&mut model, &[":", "%", "v", "v", "<CR>"]);
-        assert_eq!(waits_for(&model).as_deref(), Some("%View ai open"));
+        let sent = type_keys(&mut model, &[":", "%", "v", "v", "<CR>"]);
+        assert!(!arms(&sent), "{sent:?}");
     }
 
     /// nvim maps the keys typed after a `noremap` rhs again.
@@ -1752,7 +1718,7 @@ mod tests {
     /// An abbreviation's rhs is mapped again, and a `noreabbrev`'s is not.
     #[test]
     fn an_abbreviation_rhs_is_mapped_unless_noreabbrev() {
-        for (noremap, line) in [(false, "View ai open"), (true, "vv")] {
+        for (noremap, line) in [(false, Some("View ai open")), (true, None)] {
             let mut model = normal_mode();
             cmdline_maps(
                 &mut model,
@@ -1762,11 +1728,7 @@ mod tests {
                 ],
             );
             let _ = type_keys(&mut model, &[":", "v", "o", "<CR>"]);
-            assert_eq!(
-                waits_for(&model).as_deref(),
-                Some(line),
-                "noremap {noremap}"
-            );
+            assert_eq!(waits_for(&model).as_deref(), line, "noremap {noremap}");
         }
     }
 
@@ -1926,7 +1888,7 @@ mod tests {
             assert!(model.submit_hold.line_opened(), "case {at}");
             EXPANSIONS.with(|count| count.set(0));
             let sent = type_keys(&mut model, &["<CR>"]);
-            assert!(arms(&sent), "case {at}: {sent:?}");
+            assert!(!arms(&sent), "case {at}: {sent:?}");
             let expansions = EXPANSIONS.with(std::cell::Cell::get);
             assert_eq!(expansions, expected, "case {at}");
         }
@@ -2087,8 +2049,8 @@ mod tests {
         let _ = type_keys(&mut model, &["e", "<Space>", "f"]);
         show_line(&mut model, "View ai open");
         assert!(model.submit_hold.line_opened());
-        let _ = type_keys(&mut model, &["<CR>"]);
-        assert_eq!(waits_for(&model).as_deref(), Some("e f"));
+        let sent = type_keys(&mut model, &["<CR>"]);
+        assert!(!arms(&sent), "{sent:?}");
     }
 
     /// `cabbrev vo View ai open`: nvim expands the word at the `<CR>`,
@@ -2133,7 +2095,7 @@ mod tests {
         }
 
         // a remapped rhs is mapped again, and a `noremap` one is not
-        for (noremap, line) in [(false, "View ai open"), (true, "vv")] {
+        for (noremap, line) in [(false, Some("View ai open")), (true, None)] {
             let mut model = normal_mode();
             cmdline_maps(
                 &mut model,
@@ -2143,38 +2105,35 @@ mod tests {
                 ],
             );
             let _ = type_keys(&mut model, &[":", "z", "z", "<CR>"]);
-            assert_eq!(
-                waits_for(&model).as_deref(),
-                Some(line),
-                "noremap {noremap}"
-            );
+            assert_eq!(waits_for(&model).as_deref(), line, "noremap {noremap}");
         }
     }
 
     /// An `<expr>` mapping or abbreviation computes its text inside nvim,
-    /// so the keys typed are the line the hold waits for.
+    /// so the keys typed decide, and `ww` names no command view runs. The
+    /// expression `View` reads as `:View` if it is taken for text.
     #[test]
     fn an_expr_command_line_mapping_leaves_the_typed_keys_deciding() {
         for abbr in [false, true] {
             let mut model = normal_mode();
             cmdline_maps(&mut model, &[("ww", "View", abbr, false, true)]);
-            let _ = type_keys(&mut model, &[":", "w", "w", "<CR>"]);
-            assert_eq!(waits_for(&model).as_deref(), Some("ww"), "abbr {abbr}");
+            let sent = type_keys(&mut model, &[":", "w", "w", "<CR>"]);
+            assert!(!arms(&sent), "abbr {abbr}: {sent:?}");
         }
     }
 
-    /// An abbreviation to another command is expanded to that command,
-    /// even where its own word is a prefix of `View`.
+    /// An abbreviation to another command arms nothing, even where its own
+    /// word is a prefix of `View` nvim would otherwise run as `:View`.
     #[test]
-    fn an_abbreviation_for_another_command_waits_for_that_command() {
+    fn an_abbreviation_for_another_command_arms_nothing() {
         for (lhs, keys) in [
             ("ve", &[":", "v", "e", "<CR>"][..]),
             ("V", &[":", "V", "<CR>"]),
         ] {
             let mut model = normal_mode();
             cmdline_maps(&mut model, &[(lhs, "vsplit", true, false, false)]);
-            let _ = type_keys(&mut model, keys);
-            assert_eq!(waits_for(&model).as_deref(), Some("vsplit"), "{lhs}");
+            let sent = type_keys(&mut model, keys);
+            assert!(!arms(&sent), "{lhs}: {sent:?}");
         }
     }
 
@@ -2232,38 +2191,32 @@ mod tests {
         assert!(model.submit_hold.is_holding());
     }
 
-    /// Any command line holds the keys behind it until nvim reports it,
-    /// since a user command (`:command! T View picker files`) or a function
-    /// can run `:View` where the line names nothing of view's.
+    /// Any other command line holds nothing, an `<expr>` abbreviation
+    /// nvim expands to another command included.
     #[test]
-    fn keys_behind_any_line_wait_for_its_report() {
-        for (keys, line) in [(&[":", "e", "d", "i", "t"][..], "edit"), (&[":", "T"], "T")] {
-            let mut model = normal_mode();
-            let mut typed = keys.to_vec();
-            typed.extend(["<CR>", "a", "b", "c"]);
-            let sent = type_keys(&mut model, &typed);
-            assert_eq!(inputs(&sent).len(), keys.len() + 1, "{line}: {sent:?}");
-            assert!(model.submit_hold.is_holding(), "{line}");
-            let replayed = crate::update::update(&mut model, line_ran(line));
-            assert_eq!(inputs(&replayed), ["a", "b", "c"], "{line}");
-        }
+    fn keys_behind_another_command_go_straight_on() {
+        let mut model = normal_mode();
+        let sent = type_keys(&mut model, &[":", "e", "d", "i", "t", "<CR>", "j"]);
+        assert_eq!(inputs(&sent).len(), 7, "{sent:?}");
+        assert!(!model.submit_hold.is_holding());
+
+        let mut model = normal_mode();
+        cmdline_maps(&mut model, &[("W", "'w'", true, false, true)]);
+        let sent = type_keys(&mut model, &[":", "W", "<CR>", "j"]);
+        assert_eq!(inputs(&sent).len(), 4, "{sent:?}");
+        assert!(!model.submit_hold.is_holding());
     }
 
-    /// A report of an earlier line, arriving after the bound released the
-    /// keys that submitted a later one, leaves the later line's hold
-    /// standing: only the report of the line a hold armed on ends it.
+    /// The report of an earlier line that armed nothing, arriving once a
+    /// later `:View` line has armed, leaves that hold standing: a report
+    /// naming no view command ends no hold.
     #[test]
     fn a_report_ends_only_the_hold_of_the_line_it_reports() {
         let mut model = normal_mode();
-        let _ = type_keys(&mut model, &[":", "w", "<CR>"]);
-        let generation = model.submit_hold.generation;
-        let mut keys = vec![":", "V", "i", "e", "w", "<CR>"];
-        let _ = type_keys(&mut model, &keys);
-        let released = crate::update::update(&mut model, Msg::SubmitHoldExpired { generation });
-        assert_eq!(waits_for(&model).as_deref(), Some("View"), "{released:?}");
-        keys = vec!["a", "b"];
-        let held = type_keys(&mut model, &keys);
-        assert!(inputs(&held).is_empty(), "{held:?}");
+        let keys = [":", "w", "<CR>", ":", "V", "i", "e", "w", "<CR>", "a", "b"];
+        let sent = type_keys(&mut model, &keys);
+        assert_eq!(inputs(&sent).len(), 9, "{sent:?}");
+        assert_eq!(waits_for(&model).as_deref(), Some("View"));
         let early = crate::update::update(&mut model, line_ran("w"));
         assert!(inputs(&early).is_empty(), "{early:?}");
         assert!(model.submit_hold.is_holding());
@@ -2271,9 +2224,115 @@ mod tests {
         assert_eq!(inputs(&replayed), ["a", "b"]);
     }
 
-    /// The bound of a hold a `:` line armed registers the command again,
-    /// so a config that cleared nvim's autocmds costs one line its pause.
-    /// A report, a stale bound and the bound of an open's hold send none.
+    /// nvim's text of a `:View` line can differ from view's, where an
+    /// `<expr>` abbreviation expands inside nvim. Its report, naming a view
+    /// command, still ends the hold with no wait for the bound.
+    #[test]
+    fn a_line_nvim_expanded_releases_on_its_report() {
+        let mut model = normal_mode();
+        cmdline_maps(&mut model, &[("fi", "'files'", true, false, true)]);
+        submit(&mut model, "View picker fi");
+        assert_eq!(waits_for(&model).as_deref(), Some("View picker fi"));
+        let sent = crate::update::update(&mut model, line_ran("View picker files"));
+        assert_eq!(inputs(&sent), ["x"]);
+    }
+
+    /// The late report of a line whose hold ended at its bound leaves a
+    /// newer line's hold standing, whether the two lines differ or share
+    /// one text, and the newer line's own report then ends it.
+    #[test]
+    fn a_late_report_of_a_timed_out_line_leaves_the_newer_hold_standing() {
+        for (first, second) in [("View one", "View two"), ("View one", "View one")] {
+            let mut model = normal_mode();
+            submit(&mut model, first);
+            let generation = model.submit_hold.generation;
+            let bound = crate::update::update(&mut model, Msg::SubmitHoldExpired { generation });
+            assert_eq!(inputs(&bound), ["x"], "{second}");
+            submit(&mut model, second);
+            let late = crate::update::update(&mut model, line_ran(first));
+            assert!(inputs(&late).is_empty(), "{second}: {late:?}");
+            assert!(model.submit_hold.is_holding(), "{second}");
+            let own = crate::update::update(&mut model, line_ran(second));
+            assert_eq!(inputs(&own), ["x"], "{second}");
+        }
+    }
+
+    /// A `:View` line that stops at a prompt (`input()`, a `confirm()`
+    /// dialog, an `:s///c` question) releases the keys behind it when nvim
+    /// shows the prompt, since they are its answer. The line's own show
+    /// and a message that asks nothing release nothing.
+    #[test]
+    fn a_prompt_the_line_stops_at_releases_the_keys_behind_it() {
+        let line = |firstc: &str, prompt: &str| UiEvent::CmdlineShow {
+            content: Vec::new(),
+            pos: 0,
+            firstc: firstc.to_string(),
+            prompt: prompt.to_string(),
+            indent: 0,
+            level: 1,
+        };
+        let question = |kind: &str| UiEvent::MsgShow {
+            kind: kind.to_string(),
+            content: vec![(0, "?".to_string())],
+            replace_last: false,
+        };
+        for (shows, releases) in [
+            (line(":", ""), false),
+            (line("", "name: "), true),
+            (question("confirm"), true),
+            (question("confirm_sub"), true),
+            (question("echo"), false),
+        ] {
+            let mut model = normal_mode();
+            submit(&mut model, "call input('name: ') | View picker files");
+            let sent = crate::update::update(&mut model, Msg::Redraw(vec![shows.clone()]));
+            assert_eq!(inputs(&sent) == ["x"], releases, "{shows:?}: {sent:?}");
+        }
+    }
+
+    /// `A` and then `:View tree<CR>` typed before nvim answers the `A`:
+    /// nvim reads the `:` as text in insert mode and shows no line, so its
+    /// report of insert mode, once it answers the `<CR>`, releases the key
+    /// behind it. A line nvim showed open stays held.
+    #[test]
+    fn a_colon_nvim_reads_as_text_holds_nothing_past_its_answer() {
+        for shown in [false, true] {
+            let mut model = normal_mode();
+            let _ = type_answered(&mut model, &[("j", None)]);
+            let mut at = 100;
+            for key in ["A", ":", "V", "i", "e", "w", "<Space>", "t", "r", "e", "e"] {
+                let _ = send_at(&mut model, key, at);
+                at += 1;
+            }
+            if shown {
+                show_line(&mut model, "View tree");
+            }
+            let _ = send_at(&mut model, "<CR>", at);
+            assert!(model.submit_hold.is_holding(), "shown {shown}");
+            let held = send_at(&mut model, "x", at + 1);
+            assert!(inputs(&held).is_empty(), "shown {shown}: {held:?}");
+            let answered = answer_at(&mut model, Some("insert"), at + 20);
+            let want: &[&str] = if shown { &[] } else { &["x"] };
+            assert_eq!(inputs(&answered), want, "shown {shown}");
+        }
+        // an answer too soon to settle the hold leaves its release to the
+        // next key's arrival
+        let mut model = normal_mode();
+        let _ = type_answered(&mut model, &[("j", None)]);
+        let mut at = 100;
+        for key in ["A", ":", "V", "i", "e", "w", "<CR>"] {
+            let _ = send_at(&mut model, key, at);
+            at += 1;
+        }
+        let _ = answer_at(&mut model, Some("insert"), at - 1);
+        assert!(model.submit_hold.is_holding());
+        assert_eq!(inputs(&send_at(&mut model, "x", at + 20)), ["x"]);
+    }
+
+    /// The bound of a hold a `:View` line armed registers the command
+    /// again, so a config that cleared nvim's autocmds costs one line its
+    /// pause. A report, a stale bound and the bound of an open's hold send
+    /// none.
     #[test]
     fn the_bound_of_a_line_registers_the_command_again() {
         let registers = |effects: &[Effect]| {
@@ -2281,8 +2340,9 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Effect::Rpc(crate::msg::RpcCall::RegisterCommand)))
         };
+        let view_j = [":", "V", "i", "e", "w", "<CR>", "j"];
         let mut model = normal_mode();
-        let _ = type_keys(&mut model, &[":", "w", "<CR>", "j"]);
+        let _ = type_keys(&mut model, &view_j);
         let generation = model.submit_hold.generation;
         let stale = crate::update::update(
             &mut model,
@@ -2296,9 +2356,9 @@ mod tests {
         assert_eq!(inputs(&bound), ["j"]);
 
         let mut model = normal_mode();
-        let _ = type_keys(&mut model, &[":", "w", "<CR>", "j"]);
+        let _ = type_keys(&mut model, &view_j);
         let generation = model.submit_hold.generation;
-        let reported = crate::update::update(&mut model, line_ran("w"));
+        let reported = crate::update::update(&mut model, line_ran("View"));
         assert!(!registers(&reported), "{reported:?}");
         let late = crate::update::update(&mut model, Msg::SubmitHoldExpired { generation });
         assert!(!registers(&late), "{late:?}");

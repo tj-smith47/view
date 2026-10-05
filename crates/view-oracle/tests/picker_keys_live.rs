@@ -343,14 +343,44 @@ fn query_new(session: &mut PtySession, open: &[u8]) {
     );
 }
 
+/// The id of the autocmd that reports each `:` line, read through a
+/// message carrying `tag` so an earlier answer on screen is never read.
+/// The marker is joined in nvim, so the typed line never carries it.
+fn line_report_hook(session: &mut PtySession, tag: &str) -> String {
+    session
+        .send(
+            format!(
+                ":echo 'hook' . '{tag}=' . luaeval(\"vim.api.nvim_get_autocmds(\
+                 {{ group = 'view_line_ran' }})[1].id\") . '='\r"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let marker = format!("hook{tag}=");
+    assert!(
+        session.wait_for_screen(budget(), |screen| {
+            let text = screen.contents();
+            text.split(&marker)
+                .nth(1)
+                .is_some_and(|rest| rest.contains('='))
+        }),
+        "the report hook was never read; screen:\n{}",
+        session.screen()
+    );
+    let text = session.screen();
+    let rest = text.split(&marker).nth(1).unwrap_or_default();
+    rest.split('=').next().unwrap_or_default().to_string()
+}
+
 /// Keys typed in the same write as a view command that refuses act in the
-/// file once the line has run, well inside the bound that releases them
-/// when no report comes, and the refusal is kept in nvim's messages.
+/// file once the line has run, released by its report and never by the
+/// bound, which registers the report again, and the refusal is kept in
+/// nvim's messages.
 #[test]
 fn a_key_typed_behind_a_refused_view_command_acts_in_the_file() {
     let (_paths, _tree, mut session) =
         editing_old_with("picker-keys-refused-command", &[("VIEW_AI_AGENT", "none")]);
-    let sent = std::time::Instant::now();
+    let hook = line_report_hook(&mut session, "before");
     session
         .send(b"\x1b:View dvr export $VIEW_KEYS_NEVER_SET/x\rdd")
         .unwrap();
@@ -362,10 +392,10 @@ fn a_key_typed_behind_a_refused_view_command_acts_in_the_file() {
         "the keys behind the refused command never deleted a line; screen:\n{}",
         session.screen()
     );
-    let took = sent.elapsed();
-    assert!(
-        took < view_core::native::speculate::CMDLINE_SPECULATION_BACKSTOP_MIN,
-        "the keys waited {took:?}, as long as a line nothing reports"
+    assert_eq!(
+        line_report_hook(&mut session, "after"),
+        hook,
+        "the keys behind the refused command waited for the bound"
     );
     assert!(
         lines_are(&mut session, "o2,o3|"),
@@ -389,16 +419,6 @@ fn a_query_typed_behind_a_line_that_sleeps_before_the_picker_reaches_it() {
     let (_paths, _tree, mut session) =
         editing_old_with("picker-keys-sleep-line", &[("VIEW_AI_AGENT", "none")]);
     query_new(&mut session, b"\x1b:sleep 10m | View picker files\r");
-}
-
-/// A query typed in the same write as a user command that opens the
-/// picker reaches the picker.
-#[test]
-fn a_query_typed_behind_a_user_command_opening_the_picker_reaches_it() {
-    let (_paths, _tree, mut session) =
-        editing_old_with("picker-keys-user-command", &[("VIEW_AI_AGENT", "none")]);
-    session.send(b":command! T View picker files\r").unwrap();
-    query_new(&mut session, b"\x1b:T\r");
 }
 
 /// A file deleted after the picker listed it says so on screen when

@@ -53,14 +53,24 @@ fn spawn_attached() -> (
     view_engine::damage::DamagePump,
     view_engine::damage::SinkCutover,
 ) {
+    spawn_attached_with(view_engine::UI_EXT_OPTIONS)
+}
+
+/// [`spawn_attached`] with a UI attached under `options`.
+fn spawn_attached_with(
+    options: &[&str],
+) -> (
+    Engine,
+    u64,
+    mpsc::Receiver<Msg>,
+    view_engine::damage::DamagePump,
+    view_engine::damage::SinkCutover,
+) {
     let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let channel = engine.api_info.channel_id;
     let (tx, rx) = mpsc::sync_channel(256);
     let (pump, cutover) = engine.start_pump(tx);
-    engine
-        .handle
-        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
-        .unwrap();
+    engine.handle.ui_attach(80, 24, options).unwrap();
     engine.handle.register_bridge(channel).unwrap();
     (engine, channel, rx, pump, cutover)
 }
@@ -198,9 +208,18 @@ fn a_submitted_line_is_reported_after_the_invocations_it_made() {
     }
 }
 
-/// The invocations and finished command lines `rx` delivers within
-/// `quiet`, in the order they arrive.
-fn arriving_within(rx: &mpsc::Receiver<Msg>, quiet: Duration) -> Vec<String> {
+/// The invocations, finished command lines and shown prompts `rx` and
+/// `pump` deliver within `quiet`, in the order they arrive. A prompt is
+/// one [`shows_a_prompt`](view_core::native::submit_hold::shows_a_prompt)
+/// reads as one, which is what ends the hold on the keys behind a line.
+fn arriving_within(
+    rx: &mpsc::Receiver<Msg>,
+    pump: &view_engine::damage::DamagePump,
+    quiet: Duration,
+) -> Vec<String> {
+    // a RedrawReady arrives only once the damage before it is drained, and
+    // the helpers before this one leave it undrained
+    let _ = pump.take_damage();
     let until = std::time::Instant::now() + quiet;
     let mut seen = Vec::new();
     while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
@@ -209,6 +228,13 @@ fn arriving_within(rx: &mpsc::Receiver<Msg>, quiet: Duration) -> Vec<String> {
                 seen.push(format!("invoke {feature} {verb}"));
             }
             Ok(Msg::CommandLineRan { line }) => seen.push(format!("ran {line}")),
+            Ok(Msg::RedrawReady) => {
+                let events = pump.take_damage();
+                let prompts = events
+                    .iter()
+                    .filter(|event| view_core::native::submit_hold::shows_a_prompt(event));
+                seen.extend(prompts.map(|event| format!("prompt {event:?}")));
+            }
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
         }
@@ -216,41 +242,139 @@ fn arriving_within(rx: &mpsc::Receiver<Msg>, quiet: Duration) -> Vec<String> {
     seen
 }
 
-/// A line that waits for a key partway through, in a nested command line
-/// (`input()`) or for one key (`getchar()`), reports nothing while it
-/// waits, and is reported once the key is given and the line has run.
+/// A line that waits for a key partway through runs nothing past the wait
+/// until the key is given. Where it waits at a prompt (`input()`, a
+/// `confirm()` dialog, an `:s///c` question) nvim shows the prompt, which
+/// releases the keys behind the line, and a line waiting at a `confirm()`
+/// or `:s///c` question is reported there. A `getchar()` shows nothing and reports
+/// nothing, and the keys behind it wait for the hold's bound.
 #[test]
 fn a_line_waiting_for_a_key_is_reported_once_it_has_run() {
+    let (engine, channel, rx, pump, _cutover) = spawn_attached();
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_claims(&rx);
+    engine
+        .handle
+        .command("call setline(1, ['a', 'b'])")
+        .unwrap();
+    let input = ":call input('q') | View after input<CR>";
+    let confirm = ":call confirm('q?', \"&Yes\\n&No\") | View after confirm<CR>";
+    let sub = ":%s/^/x/c | View after sub<CR>";
+    let getchar = ":call getchar() | View after getchar<CR>";
+    let ran = |line: &str| format!("ran {}", &line[1..line.len() - 4]);
+    for (line, answer, prompted, waiting, after) in [
+        (
+            input,
+            "y<CR>",
+            true,
+            vec![],
+            vec!["invoke after input".to_string(), ran(input)],
+        ),
+        (
+            confirm,
+            "y",
+            true,
+            vec![ran(confirm)],
+            vec!["invoke after confirm".to_string()],
+        ),
+        (
+            sub,
+            "yy",
+            true,
+            vec![ran(sub)],
+            vec!["invoke after sub".to_string()],
+        ),
+        (
+            getchar,
+            "z",
+            false,
+            vec![],
+            vec!["invoke after getchar".to_string(), ran(getchar)],
+        ),
+    ] {
+        let plain = |seen: Vec<String>| {
+            let shown = seen.iter().any(|seen| seen.starts_with("prompt "));
+            let rest: Vec<String> = seen
+                .into_iter()
+                .filter(|seen| !seen.starts_with("prompt "))
+                .collect();
+            (shown, rest)
+        };
+        engine.handle.input(line).unwrap();
+        assert_eq!(
+            plain(arriving_within(&rx, &pump, Duration::from_millis(300))),
+            (prompted, waiting),
+            "while waiting for a key: {line}"
+        );
+        engine.handle.input(answer).unwrap();
+        let settled = view_test_support::host_deadline(TICK);
+        assert_eq!(
+            plain(arriving_within(&rx, &pump, settled)).1,
+            after,
+            "{line}"
+        );
+    }
+}
+
+/// A bare `:autocmd!` the line itself runs clears the default group and
+/// leaves the line's own report hooks, which live in a group of their
+/// own.
+#[test]
+fn a_bare_autocmd_clear_leaves_the_lines_report() {
     let (engine, channel, rx, _pump, _cutover) = spawn_attached();
     engine.handle.register_mappings(&[], channel).unwrap();
     let _ = next_claims(&rx);
-    for (line, answer, want) in [
-        (
-            ":call input('q') | View after input<CR>",
-            "y<CR>",
-            vec![
-                "invoke after input",
-                "ran call input('q') | View after input",
-            ],
-        ),
-        (
-            ":call getchar() | View after getchar<CR>",
-            "z",
-            vec![
-                "invoke after getchar",
-                "ran call getchar() | View after getchar",
-            ],
-        ),
-    ] {
-        engine.handle.input(line).unwrap();
-        assert_eq!(
-            arriving_within(&rx, Duration::from_millis(300)),
-            Vec::<String>::new(),
-            "reported while waiting for a key: {line}"
-        );
-        engine.handle.input(answer).unwrap();
-        assert_eq!(until_line_ran(&rx), want, "{line}");
-    }
+    engine
+        .handle
+        .input(":exe 'autocmd!' | View after clear<CR>")
+        .unwrap();
+    assert_eq!(
+        until_line_ran(&rx),
+        vec![
+            "invoke after clear",
+            "ran exe 'autocmd!' | View after clear"
+        ]
+    );
+}
+
+/// Under a UI that draws nvim's own messages, a line that ends at a
+/// hit-enter prompt is reported at the prompt, and a line waiting in
+/// `getchar()` is reported only once it has run.
+#[test]
+fn a_hit_enter_prompt_reports_its_line_under_a_ui_drawing_messages() {
+    let (engine, channel, rx, pump, _cutover) = spawn_attached_with(&[]);
+    engine.handle.register_mappings(&[], channel).unwrap();
+    let _ = next_claims(&rx);
+    let echo = ":echo \"a\\nb\" | View after echo<CR>";
+    engine.handle.input(echo).unwrap();
+    assert_eq!(
+        until_line_ran(&rx),
+        vec!["invoke after echo", "ran echo \"a\\nb\" | View after echo"]
+    );
+    let mode = engine.handle.request("nvim_get_mode", vec![]).unwrap();
+    assert!(
+        format!("{mode}").contains("\"mode\": \"r\""),
+        "{echo}: {mode}"
+    );
+    engine.handle.input("<CR>").unwrap();
+
+    engine
+        .handle
+        .input(":call getchar() | View after getchar<CR>")
+        .unwrap();
+    assert_eq!(
+        arriving_within(&rx, &pump, Duration::from_millis(300)),
+        Vec::<String>::new(),
+        "reported while waiting in getchar()"
+    );
+    engine.handle.input("z").unwrap();
+    assert_eq!(
+        until_line_ran(&rx),
+        vec![
+            "invoke after getchar",
+            "ran call getchar() | View after getchar"
+        ]
+    );
 }
 
 /// Clearing view's autocmd group removes the report, and registering the
@@ -259,7 +383,7 @@ fn a_line_waiting_for_a_key_is_reported_once_it_has_run() {
 /// arrives, and it names that line.
 #[test]
 fn registering_the_command_again_restores_the_report() {
-    let (engine, channel, rx, _pump, _cutover) = spawn_attached();
+    let (engine, channel, rx, pump, _cutover) = spawn_attached();
     engine.handle.register_mappings(&[], channel).unwrap();
     let _ = next_claims(&rx);
     engine
@@ -267,7 +391,7 @@ fn registering_the_command_again_restores_the_report() {
         .input(":autocmd! view_line_ran<CR>:View one x<CR>")
         .unwrap();
     assert_eq!(
-        arriving_within(&rx, Duration::from_millis(300)),
+        arriving_within(&rx, &pump, Duration::from_millis(300)),
         vec!["invoke one x", "ran autocmd! view_line_ran"],
         "a line was reported with the group cleared"
     );

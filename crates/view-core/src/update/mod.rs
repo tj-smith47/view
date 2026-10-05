@@ -205,13 +205,13 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         model.dvr.record(&msg);
     }
     let releases = crate::native::submit_hold::releases(model, &msg);
-    if crate::native::submit_hold::bounds_a_line(model, &msg) {
+    if crate::native::submit_hold::note_line_bound(model, &msg) {
         effects.push(Effect::Rpc(RpcCall::RegisterCommand));
     }
     effects.extend(update_one(model, msg));
-    // replayed after the command has run, so the focus it set routes them.
-    // A replayed `:View` submit arms a fresh hold, which the rest are then
-    // kept behind in order
+    // replayed after the command has run, so the focus it set routes them,
+    // or once it stops at a prompt they answer. A replayed `:View` submit
+    // arms a fresh hold, which the rest are then kept behind in order
     if releases || crate::native::submit_hold::released_by_open(model, cursor_in_messages) {
         for held in model.submit_hold.take_held() {
             effects.extend(update(model, held));
@@ -874,7 +874,10 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.record_colon_mapped(mapped);
             Vec::new()
         }
-        Msg::CommandLineRan { .. } => Vec::new(),
+        Msg::CommandLineRan { line } => {
+            model.submit_hold.note_line_reported(&line);
+            Vec::new()
+        }
         Msg::UserMappingsRead {
             keys,
             timeoutlen,
