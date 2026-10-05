@@ -8,6 +8,12 @@ key_to_rpc_p99_us = 70.865
 [ai_streaming.minimal]
 p99_ms = 0.430603
 
+[dvr_input.minimal]
+key_to_rpc_p99_us = 56.807
+
+[dvr_scroll.minimal]
+staleness_p99_ms = 1.427
+
 [input_path.minimal]
 key_to_rpc_p99_us = 66.427
 

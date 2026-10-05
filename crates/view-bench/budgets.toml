@@ -113,6 +113,32 @@ decomposes = "echo.view_p99_ms"
 config = "fixture"
 fixtures = ["minimal"]
 
+# The two DVR rows hold the input path and the scroll moment to the bars
+# their recording-off counterparts carry, with every painted frame and key
+# recorded. Both cells are matrix-scoped to controlled-linux
+# (bin/bench.rs's CLASS_SCOPED), the class that recorded them.
+[[budget]]
+spec_row = "view input path with DVR recording: key decoded -> RPC write"
+scenario = "dvr_input"
+metric = "key_to_rpc_p99_us"
+max = 100.0
+classes = ["controlled-linux"]
+kind = "diagnostic"
+decomposes = "echo.view_p99_ms"
+config = "fixture"
+fixtures = ["minimal"]
+
+[[budget]]
+spec_row = "scroll staleness with DVR recording"
+scenario = "dvr_scroll"
+metric = "staleness_p99_ms"
+max = 16.0
+classes = ["controlled-linux"]
+kind = "diagnostic"
+decomposes = "scroll.staleness_p99_ms"
+config = "fixture"
+fixtures = ["minimal"]
+
 [[budget]]
 spec_row = "Keypress -> cell change end-to-end, steady typing"
 scenario = "echo"

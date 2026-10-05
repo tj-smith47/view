@@ -10,6 +10,15 @@ use super::*;
 /// Prints the cells `--all` runs, then the diagnostic cells only a named
 /// `--scenario`/`--fixture` pair runs.
 pub(super) fn print_cells() {
+    for line in cell_listing() {
+        println!("{line}");
+    }
+}
+
+/// The lines `--list` prints. A matrix cell scoped to some classes names
+/// them, since `--all` on any other class skips it.
+pub(super) fn cell_listing() -> Vec<String> {
+    let mut lines = Vec::new();
     for (heading, cells) in [
         ("matrix (--all)", MATRIX),
         (
@@ -17,11 +26,18 @@ pub(super) fn print_cells() {
             DIAGNOSTIC_MATRIX,
         ),
     ] {
-        println!("{heading}:");
+        lines.push(format!("{heading}:"));
         for (scenario, fixture) in cells {
-            println!("  {scenario}/{fixture}");
+            match CLASS_SCOPED.iter().find(|(name, _)| name == scenario) {
+                Some((_, classes)) => lines.push(format!(
+                    "  {scenario}/{fixture} (only on {})",
+                    classes.join(", ")
+                )),
+                None => lines.push(format!("  {scenario}/{fixture}")),
+            }
         }
     }
+    lines
 }
 
 /// The refusal a `--list` run owes when other flags stand beside it, naming

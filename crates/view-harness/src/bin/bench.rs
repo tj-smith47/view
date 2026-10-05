@@ -136,6 +136,9 @@ const MATRIX: &[(&str, &str)] = &[
     // matrix whose per-keystroke fold is bounded by what the composer
     // remembers rather than by arithmetic
     ("ai_composer", "heavy"),
+    // the recording's cost under the input path and the scroll moment
+    ("dvr_input", "minimal"),
+    ("dvr_scroll", "minimal"),
 ];
 
 /// Cells measured only on the classes named here, and skipped elsewhere.
@@ -161,6 +164,9 @@ const MATRIX: &[(&str, &str)] = &[
 /// one, and its subject -- what a keystroke costs against a prompt the
 /// wrap is not exact over -- is a per-platform number like every other
 /// absolute here.
+///
+/// The two DVR rows run on `controlled-linux` alone, the class their spec
+/// section 3.1 budget rows name and the only one that has recorded them.
 const CLASS_SCOPED: &[(&str, &[&str])] = &[
     ("ai_session_active", &["dev-linux", "controlled-linux"]),
     ("ai_streaming", &["dev-linux", "controlled-linux"]),
@@ -168,6 +174,8 @@ const CLASS_SCOPED: &[(&str, &[&str])] = &[
         "ai_composer",
         &["dev-macos", "dev-linux", "controlled-linux"],
     ),
+    ("dvr_input", &["controlled-linux"]),
+    ("dvr_scroll", &["controlled-linux"]),
 ];
 
 /// Cells that decompose a gated row instead of being one. They are
@@ -190,9 +198,6 @@ const DIAGNOSTIC_MATRIX: &[(&str, &str)] = &[
     ("echo_path", "minimal"),
     ("echo_path", "heavy"),
     ("memory", "heavy"),
-    // the recording's cost under the input path and the scroll moment
-    ("dvr_input", "minimal"),
-    ("dvr_scroll", "minimal"),
 ];
 
 /// What one matrix row handed back: the metrics it stands behind, and the
@@ -2270,6 +2275,35 @@ mod tests {
             refusal(&["bench", "--list", "--class", "dev-linux", "--all"]).as_deref(),
             Some("--list prints the cells and measures none, so --all, --class would go unread")
         );
+    }
+
+    /// A seated DVR row is listed with the matrix and names the one class
+    /// that runs it, and every scoped cell names its classes the same way.
+    #[test]
+    fn the_listing_names_the_classes_a_scoped_cell_runs_on() {
+        let lines = rows::cell_listing();
+        let diagnostics = lines
+            .iter()
+            .position(|line| line.starts_with("diagnostics"))
+            .expect("the listing has a diagnostics heading");
+        for row in ["dvr_input/minimal", "dvr_scroll/minimal"] {
+            let at = lines
+                .iter()
+                .position(|line| line == &format!("  {row} (only on controlled-linux)"));
+            assert!(
+                at.is_some_and(|at| at < diagnostics),
+                "{row} is not listed as a controlled-linux matrix cell"
+            );
+        }
+        for (scenario, classes) in CLASS_SCOPED {
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.starts_with(&format!("  {scenario}/"))
+                        && line.ends_with(&format!("(only on {})", classes.join(", ")))),
+                "{scenario} is listed without the classes that run it"
+            );
+        }
     }
 
     /// Every scenario the table names has to be one the matrix can select,
