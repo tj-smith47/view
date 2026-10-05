@@ -1309,6 +1309,22 @@ mod tests {
         );
     }
 
+    /// Makes a named pipe at `path`, answering the error the volume gives.
+    #[cfg(unix)]
+    fn mkfifo(path: &std::path::Path) -> std::io::Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+        // SAFETY: `path` is a NUL-terminated buffer that outlives the
+        // call, which retains nothing.
+        #[allow(unsafe_code)]
+        let made = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+        if made == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
     /// A named pipe is refused without being opened, so the file thread
     /// goes on to the export queued behind it.
     #[cfg(unix)]
@@ -1317,16 +1333,12 @@ mod tests {
         let _watchdog = view_test_support::watchdog();
         let dir = view_test_support::ScratchDir::new("dvr-play-fifo").unwrap();
         let fifo = dir.join("p.vdvr");
-        let made = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .output()
-            .unwrap();
-        if !made.status.success() {
-            eprintln!(
-                "skipped: this volume refuses a named pipe ({})",
-                String::from_utf8_lossy(&made.stderr).trim()
-            );
-            return;
+        match mkfifo(&fifo) {
+            Err(e) if io::lacks_the_operation(&e) => {
+                eprintln!("skipped: this volume refuses a named pipe ({e})");
+                return;
+            }
+            made => made.unwrap(),
         }
         let mut model = Model::with_term_size(80, 24);
         let (mut dvr, rx) = wired(&mut model);

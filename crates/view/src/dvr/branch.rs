@@ -509,6 +509,9 @@ mod tests {
             "1",
             "the replay edited what is on disk"
         );
+        let own = eval(&fresh.engine, "fnamemodify(swapname('%'), ':t')");
+        let left = crate::dvr::io::listed(&swaps);
+        assert_eq!(left, [own], "only the replacement's own swap is left");
     }
 
     #[test]

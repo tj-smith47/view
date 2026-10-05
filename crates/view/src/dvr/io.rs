@@ -249,7 +249,7 @@ fn publish(
 ) -> io::Result<()> {
     match link(part, path) {
         Ok(()) => {}
-        Err(e) if lacks_hard_links(&e) => rename_noreplace(part, path)?,
+        Err(e) if lacks_the_operation(&e) => rename_noreplace(part, path)?,
         Err(e) => return Err(e),
     }
     // a power loss can otherwise take the new name back
@@ -259,24 +259,20 @@ fn publish(
     Ok(())
 }
 
-/// Whether a failed hard link says the filesystem has none: Linux answers
-/// EPERM on vfat and exFAT and EOPNOTSUPP elsewhere, and macOS answers
-/// ENOTSUP on FAT and exFAT.
-fn lacks_hard_links(e: &io::Error) -> bool {
+/// Whether a failed hard link, symlink or named pipe says the filesystem
+/// has no such thing: Linux answers EPERM on vfat and exFAT and EOPNOTSUPP
+/// elsewhere, and macOS answers ENOTSUP on FAT and exFAT.
+pub(super) fn lacks_the_operation(e: &io::Error) -> bool {
     // Windows FAT answers ERROR_INVALID_FUNCTION and a share
     // ERROR_NOT_SUPPORTED, which std maps to no kind of its own
     let windows = cfg!(windows) && matches!(e.raw_os_error(), Some(1 | 50));
-    // std gives macOS's ENOTSUP no kind; only its EOPNOTSUPP is Unsupported
+    // std gives macOS's ENOTSUP no kind, and puts EACCES, which a volume
+    // that has the operation answers too, under EPERM's kind
     #[cfg(unix)]
-    let notsup = e.raw_os_error() == Some(libc::ENOTSUP);
+    let refused = matches!(e.raw_os_error(), Some(libc::ENOTSUP | libc::EPERM));
     #[cfg(not(unix))]
-    let notsup = false;
-    windows
-        || notsup
-        || matches!(
-            e.kind(),
-            io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
-        )
+    let refused = e.kind() == io::ErrorKind::PermissionDenied;
+    windows || refused || e.kind() == io::ErrorKind::Unsupported
 }
 
 /// Renames `part` to `path` in one step that fails on an existing name.
@@ -620,7 +616,7 @@ mod tests {
         std::fs::write(&other, &want).unwrap();
         let probe = dir.join("probe");
         match std::fs::hard_link(&other, &probe) {
-            Err(e) if lacks_hard_links(&e) => {
+            Err(e) if lacks_the_operation(&e) => {
                 eprintln!("skipped: this volume refuses a hard link ({e})");
                 return;
             }
@@ -698,21 +694,27 @@ mod tests {
         assert!(left_in(&dir).is_empty(), "{:?}", left_in(&dir));
     }
 
-    /// A link refused for want of hard links is told from every other
+    /// A link refused for want of the operation is told from every other
     /// failure by the raw code each host answers with.
     #[test]
     fn a_filesystem_without_hard_links_is_told_by_its_raw_error() {
         #[cfg(unix)]
-        assert!(lacks_hard_links(&io::Error::from_raw_os_error(
-            libc::ENOTSUP
-        )));
+        for code in [libc::ENOTSUP, libc::EPERM] {
+            let e = io::Error::from_raw_os_error(code);
+            assert!(lacks_the_operation(&e), "{code}");
+        }
         #[cfg(windows)]
         for code in [1, 50] {
             let e = io::Error::from_raw_os_error(code);
-            assert!(lacks_hard_links(&e), "{code}");
+            assert!(lacks_the_operation(&e), "{code}");
         }
         let full = io::Error::from(io::ErrorKind::StorageFull);
-        assert!(!lacks_hard_links(&full));
+        assert!(!lacks_the_operation(&full));
+        #[cfg(unix)]
+        for code in [libc::EACCES, libc::ENOSPC, libc::EROFS, libc::ENOENT] {
+            let e = io::Error::from_raw_os_error(code);
+            assert!(!lacks_the_operation(&e), "{code}");
+        }
     }
 
     /// A filesystem refusing the no-replace flag, by any of the codes
@@ -744,9 +746,12 @@ mod tests {
         let dir = ScratchDir::new("dvr-export-dangling").unwrap();
         let (part, path) = (dir.join("p"), dir.join("b.vdvr"));
         std::fs::write(&part, b"clip").unwrap();
-        if let Err(e) = std::os::unix::fs::symlink("nowhere", &path) {
-            eprintln!("skipped: this volume refuses a symlink ({e})");
-            return;
+        match std::os::unix::fs::symlink("nowhere", &path) {
+            Err(e) if lacks_the_operation(&e) => {
+                eprintln!("skipped: this volume refuses a symlink ({e})");
+                return;
+            }
+            made => made.unwrap(),
         }
         let noreplace = rename_noreplace(&part, &path).map_err(|e| e.kind());
         let checked = rename_checked(&part, &path).map_err(|e| e.kind());
