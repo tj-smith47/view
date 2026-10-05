@@ -14,6 +14,18 @@ use std::time::{Duration, Instant};
 
 use view_engine::process::EngineConfig;
 
+/// Opens `path` in the current window the way the file tree's `<CR>` does.
+pub fn open_file(
+    handle: &view_engine::handle::EngineHandle,
+    path: &str,
+) -> Result<(), view_engine::handle::EngineError> {
+    let file = view_core::native::picker::Picked::File {
+        path: path.to_owned(),
+        line: None,
+    };
+    handle.open_picked(&file, view_core::msg::OpenIn::Current, false, 0)
+}
+
 /// How long a live engine in these tests gets to answer one RPC round trip.
 ///
 /// Derived rather than picked: the base is the engine's own default

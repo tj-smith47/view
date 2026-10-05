@@ -2355,7 +2355,7 @@ pub enum OverlayKind {
     /// has no simultaneous multi-pane focus model, only a single topmost
     /// focus target, so a tree open beside an active engine buffer is one
     /// stack entry the same way a picker is, not a second pane. Opening a
-    /// file from the tree issues `RpcCall::OpenFile` and pops this overlay,
+    /// file from the tree issues `RpcCall::OpenPicked` and pops this overlay,
     /// the same "acting on a row closes the picker" shape a picker's own
     /// selection has. See [`crate::native::tree::TreeState`].
     Tree(crate::native::tree::TreeState),

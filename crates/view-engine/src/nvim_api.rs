@@ -1569,30 +1569,6 @@ if next(vim.fn.win_findbuf(buf)) == nil and vim.fn.buflisted(buf) == 0 then
   pcall(vim.api.nvim_buf_delete, buf, {})
 end";
 
-/// Opens `path` as `:edit` would, taking it as its single positional
-/// vararg. Constant, like every other chunk here: no caller data is
-/// interpolated into the source itself.
-///
-/// `path` reaches nvim as a parsed argument with filename magic switched
-/// off, rather than as text an ex command re-parses: a space, `%`, `#` or a
-/// leading `+` in a filename is command syntax to `:edit`. The two halves
-/// carry different characters -- the argument list is what keeps the space
-/// and the leading `+` out of command parsing, and `magic.file = false` is
-/// what stops `%`, `#` and `\` from expanding as filename magic on top of
-/// it -- each half measured separately in
-/// `docs/tree-open-file-wire-capture.md`, including the magic-left-on
-/// negative control.
-///
-/// Escaping the text was the other way to get there and it does not
-/// survive the platform: `fnameescape` escapes `\` because `\` is a
-/// metacharacter on Unix, and on Windows `\` is the path separator, so
-/// every Windows path arrived doubled and opened nothing at all.
-const OPEN_FILE_CHUNK: &str = "\
-local path = ...
-vim.api.nvim_cmd({
-  cmd = 'edit', args = { path }, magic = { file = false, bar = false },
-}, {})";
-
 /// Renames a file on disk and, when a buffer is open for the old path,
 /// retargets that buffer onto the new one in the same call -- verified live
 /// against the pinned engine, see `docs/tree-rename-wire-capture.md` for the
@@ -3956,25 +3932,6 @@ impl EngineHandle {
         )
     }
 
-    /// Opens `path` via [`OPEN_FILE_CHUNK`], reusing an already-loaded
-    /// buffer for it the same way `:edit` would rather than duplicating it.
-    /// Fire-and-forget: the tree overlay that issued this closes on the
-    /// same keypress, so nothing waits on a reply.
-    ///
-    /// # Errors
-    ///
-    /// Returns `EngineError::Closed` if the connection is already closed or
-    /// the writer thread has already exited.
-    pub fn open_file(&self, path: &str) -> Result<(), EngineError> {
-        self.notify(
-            "nvim_exec_lua",
-            vec![
-                Value::from(OPEN_FILE_CHUNK),
-                Value::Array(vec![Value::from(path)]),
-            ],
-        )
-    }
-
     /// Issues [`READ_FLOAT_ROWS_CHUNK`] as an async request correlated on
     /// `win`, reading the lines a withheld float was drawing. Async by
     /// construction, like
@@ -4529,7 +4486,7 @@ mod tests {
             ("BUFFER_LIST_CHUNK", BUFFER_LIST_CHUNK),
             ("CHECKTIME_CHUNK", CHECKTIME_CHUNK),
             ("HOLD_NOTIFY_CHUNK", HOLD_NOTIFY_CHUNK),
-            ("OPEN_FILE_CHUNK", OPEN_FILE_CHUNK),
+            ("OPEN_PICKED_CHUNK", picked::OPEN_PICKED_CHUNK),
             ("PREVIEW_WINDOW_CHUNK", PREVIEW_WINDOW_CHUNK),
             ("NOTIFY_SINK_CHUNK", NOTIFY_SINK_CHUNK),
             ("RENAME_CHUNK", RENAME_CHUNK),

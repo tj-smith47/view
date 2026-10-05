@@ -82,6 +82,10 @@ enum Armed {
     Command,
     /// A key sequence nvim maps to a view invocation.
     Sequence,
+    /// An open the picker or the tree asked nvim for. A key typed behind
+    /// it goes to nvim as `nvim_input`, which nvim reads ahead of the
+    /// open, so it waits for nvim's answer.
+    Open,
 }
 
 /// What view knows of a `:` command line it has sent the engine.
@@ -896,14 +900,18 @@ impl SubmitHold {
     /// batch arriving once the hold is settled while nvim is out of normal
     /// mode, by the batch's own report or else by `mode`, the last one.
     /// That says the sequence ran no mapping. A report before then may
-    /// answer a key sent ahead of the sequence.
+    /// answer a key sent ahead of the sequence. A hold an open armed ends
+    /// on nvim's answer to that open or on its bound.
     fn ended_by(&self, msg: &Msg, mode: &str) -> bool {
         let Some((armed, _)) = &self.held else {
             return false;
         };
         match msg {
-            Msg::FeatureInvoke { .. } => true,
+            Msg::FeatureInvoke { .. } => *armed != Armed::Open,
             Msg::SubmitHoldExpired { generation } => *generation == self.generation,
+            Msg::PickedOpened { generation } => {
+                *armed == Armed::Open && *generation == self.generation
+            }
             Msg::Redraw(events) => {
                 let mut reported = events
                     .iter()
@@ -1392,6 +1400,14 @@ pub fn released_by_input(model: &Model) -> bool {
     let hold = &model.submit_hold;
     matches!(hold.held, Some((Armed::Sequence, _)))
         && hold.settled_out_of_normal(model.engine.mode.current != "normal")
+}
+
+/// Holds the input that follows an open of a picked file or buffer until
+/// nvim answers the open, on [`arm`]'s bound. Returns the generation the
+/// open carries to nvim and the effect arming the bound.
+pub(crate) fn hold_for_open(model: &mut Model) -> (u64, Vec<Effect>) {
+    let effects = arm(model, Armed::Open);
+    (model.submit_hold.generation, effects)
 }
 
 /// Starts a hold, bounded by the link's own backstop so a command that

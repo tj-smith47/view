@@ -65,22 +65,10 @@ fn listed_order<'a>(screen: &str, names: &[&'a str]) -> Vec<&'a str> {
     found.into_iter().map(|(_, name)| name).collect()
 }
 
-/// Waits for the picker to close and the statusline to name `tail`. An
-/// `:echo` typed straight behind `<CR>` left nothing on screen in four of
-/// thirteen runs while the right file opened, so the query waits for the
-/// open to show first.
-fn opened(session: &mut PtySession, tail: &str) -> bool {
-    let statusline = format!("{tail} text");
-    session.wait_for_screen(budget(), |screen| {
-        let text = screen.contents();
-        !text.contains('╭') && text.contains(&statusline)
-    })
-}
-
 /// Asks nvim for the current buffer's tail and line, and waits for the
-/// answer `want` on screen. No `<Esc>` leads the command: the picker is
-/// closed, and an `<Esc>` close behind `<CR>` is read as the `Alt` prefix
-/// of `:`.
+/// answer `want` on screen. Sent straight behind the key that opened it,
+/// so the question is typed into whatever that open left. No `<Esc>` leads
+/// the command: an `<Esc>` behind `<CR>` is read as the `Alt` prefix of `:`.
 fn current_is(session: &mut PtySession, want: &str) -> bool {
     session
         .send(b":echo 'at=' . expand('%:t') . '@' . line('.')\r")
@@ -118,12 +106,6 @@ fn down_then_enter_opens_the_second_result() {
     session.send(b"\x1b[B").unwrap();
     session.send(b"\r").unwrap();
     assert!(
-        opened(&mut session, order[1]),
-        "{} never opened; screen:\n{}",
-        order[1],
-        session.screen()
-    );
-    assert!(
         current_is(&mut session, &format!("{}@1", order[1])),
         "the second result, {}, is not the current buffer; screen:\n{}",
         order[1],
@@ -131,29 +113,19 @@ fn down_then_enter_opens_the_second_result() {
     );
 }
 
-/// The buffer the `tabs`th tab shows once a `<C-t>` open has made it.
-/// nvim can take keys typed behind the open ahead of the open itself, so
-/// the question is asked again until the new tab answers it.
+/// Opens the selected row in a new tab and asks, in the same keystrokes,
+/// which buffer the `tabs`th tab shows.
 fn buffer_in_new_tab(session: &mut PtySession, tabs: u64) -> Option<u64> {
-    assert!(
-        session.wait_for_screen(budget(), |screen| !screen.contents().contains('╭')),
-        "the picker never closed; screen:\n{}",
-        session.screen()
-    );
+    session
+        .send(b"\x14:echo 'pk=' . tabpagenr('$') . '/' . bufnr('%') . '.'\r")
+        .unwrap();
     let want = format!("pk={tabs}/");
-    let deadline = std::time::Instant::now() + budget();
-    while std::time::Instant::now() < deadline {
-        session
-            .send(b":echo 'pk=' . tabpagenr('$') . '/' . bufnr('%') . '.'\r")
-            .unwrap();
-        let ask = view_test_support::host_deadline(Duration::from_secs(2));
-        if session.wait_for(&want, ask) {
-            let screen = session.screen();
-            let at = screen.find(&want)? + want.len();
-            return screen[at..].split('.').next()?.parse().ok();
-        }
+    if !session.wait_for(&want, budget()) {
+        return None;
     }
-    None
+    let screen = session.screen();
+    let at = screen.find(&want)? + want.len();
+    screen[at..].split('.').next()?.parse().ok()
 }
 
 #[test]
@@ -181,7 +153,6 @@ fn each_of_two_unnamed_buffers_opens_the_one_chosen() {
         for _ in 0..downs {
             session.send(b"\x1b[B").unwrap();
         }
-        session.send(b"\x14").unwrap();
         let buffer = buffer_in_new_tab(&mut session, tabs);
         assert!(
             buffer.is_some(),
@@ -208,13 +179,113 @@ fn enter_on_a_grep_match_lands_on_its_line() {
     );
     session.send(b"\r").unwrap();
     assert!(
-        opened(&mut session, "pkgrep.txt"),
-        "pkgrep.txt never opened; screen:\n{}",
+        current_is(&mut session, "pkgrep.txt@3"),
+        "the match did not open on its line; screen:\n{}",
+        session.screen()
+    );
+}
+
+const OLD: &str = "pkold.txt";
+const NEW: &str = "pknew.txt";
+
+/// A session editing [`OLD`], with [`NEW`] beside it to be chosen.
+fn editing_old(label: &str) -> (common::ScratchPaths, Tree, PtySession) {
+    let (paths, tree, mut session) =
+        spawn_in(label, &[(OLD, "o1\no2\no3\n"), (NEW, "n1\nn2\nn3\n")]);
+    session.send(format!(":edit {OLD}\r").as_bytes()).unwrap();
+    assert!(
+        session.wait_for("o3", budget()),
+        "{OLD} never opened; screen:\n{}",
+        session.screen()
+    );
+    (paths, tree, session)
+}
+
+/// Asks nvim for both files' lines and waits for the answer `want`.
+fn lines_are(session: &mut PtySession, want: &str) -> bool {
+    session
+        .send(
+            format!(
+                ":echo 'ls=' . join(getbufline('{OLD}', 1, '$'), ',') . '|' \
+                 . join(getbufline('{NEW}', 1, '$'), ',')\r"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    session.wait_for(&format!("ls={want}"), budget())
+}
+
+/// `dd` typed in the same keystrokes as the `<CR>` choosing a file deletes
+/// the chosen file's first line and leaves the file open before it alone.
+#[test]
+fn a_key_typed_right_after_choosing_from_the_picker_acts_in_that_file() {
+    let (_paths, _tree, mut session) = editing_old("picker-keys-typed-ahead");
+    let shown = session.screen().matches(OLD).count();
+    session.send(b"\x1b:View picker files\r").unwrap();
+    session.send(b"pknew").unwrap();
+    // the unfiltered list goes once the query's answer replaces it
+    assert!(
+        session.wait_for_screen(budget(), |screen| {
+            let text = screen.contents();
+            text.contains(NEW) && text.matches(OLD).count() == shown
+        }),
+        "the picker never listed {NEW}; screen:\n{}",
+        session.screen()
+    );
+    session.send(b"\rdd").unwrap();
+    assert!(
+        lines_are(&mut session, "o1,o2,o3|n2,n3"),
+        "the keys behind the open acted elsewhere; screen:\n{}",
+        session.screen()
+    );
+}
+
+/// A file deleted after the picker listed it says so on screen when
+/// chosen, and the file open before it stays.
+#[test]
+fn a_file_deleted_after_it_was_listed_says_so_when_chosen() {
+    let (_paths, tree, mut session) = editing_old("picker-keys-deleted");
+    let shown = session.screen().matches(OLD).count();
+    session.send(b"\x1b:View picker files\r").unwrap();
+    session.send(b"pknew").unwrap();
+    assert!(
+        session.wait_for_screen(budget(), |screen| {
+            let text = screen.contents();
+            text.contains(NEW) && text.matches(OLD).count() == shown
+        }),
+        "the picker never listed {NEW}; screen:\n{}",
+        session.screen()
+    );
+    std::fs::remove_file(tree.0.join(NEW)).unwrap();
+    session.send(b"\r").unwrap();
+    assert!(
+        // the toast wraps the full path, so its last word is the one read
+        session.wait_for("exists", budget()),
+        "choosing a deleted file said nothing; screen:\n{}",
         session.screen()
     );
     assert!(
-        current_is(&mut session, "pkgrep.txt@3"),
-        "the match did not open on its line; screen:\n{}",
+        current_is(&mut session, &format!("{OLD}@1")),
+        "the deleted file's open moved; screen:\n{}",
+        session.screen()
+    );
+}
+
+/// The same keystrokes from the file tree.
+#[test]
+fn a_key_typed_right_after_choosing_from_the_tree_acts_in_that_file() {
+    let (_paths, _tree, mut session) = editing_old("tree-typed-ahead");
+    session.send(b"\x1b:View tree\r").unwrap();
+    assert!(
+        session.wait_for(NEW, budget()),
+        "the tree never listed {NEW}; screen:\n{}",
+        session.screen()
+    );
+    // the tree lists the two files by name, the chosen one second
+    session.send(b"j\rdd").unwrap();
+    assert!(
+        lines_are(&mut session, "o1,o2,o3|n2,n3"),
+        "the keys behind the open acted elsewhere; screen:\n{}",
         session.screen()
     );
 }

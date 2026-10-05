@@ -7,10 +7,12 @@
 
 use crate::grid::registry::{Pane, PaneKind};
 use crate::model::{Focus, Model, OverlayKind};
-use crate::msg::{Effect, RegisterType, RpcCall, WinSplit};
+use crate::msg::{Effect, OpenIn, RegisterType, RpcCall, WinSplit};
 use crate::native::geometry::{Anchor, NativeSurface, OverlayBox};
 use crate::native::keys::{Action, Resolved};
 use crate::native::palette::MessageHistoryState;
+use crate::native::picker::Picked;
+use crate::native::submit_hold::hold_for_open;
 
 use super::path_to_wire;
 use super::route::take_binding;
@@ -1379,22 +1381,27 @@ pub(super) fn tree_key(model: &mut Model, notation: &str) -> Option<Vec<Effect>>
                 }
             });
             model.dirty = true;
-            match to_open {
-                Some(path) => {
-                    let open = Effect::Rpc(RpcCall::OpenFile {
-                        path: path_to_wire(&path),
-                    });
-                    // the cursor sits in the tree's own window, and `:edit`
-                    // opens in the window it runs in, so the file would
-                    // land inside the sidebar
-                    if model.tree_is_windowed() {
-                        return Some(vec![Effect::Rpc(RpcCall::FocusPreviousWindow), open]);
-                    }
-                    model.pop_focused_overlay();
-                    vec![open]
-                }
-                None => Vec::new(),
+            let Some(path) = to_open else {
+                return Some(Vec::new());
+            };
+            // the cursor sits in the tree's own window, and `:edit` opens
+            // in the window it runs in, so the file would land inside the
+            // sidebar
+            let windowed = model.tree_is_windowed();
+            if !windowed {
+                model.pop_focused_overlay();
             }
+            let (generation, mut effects) = hold_for_open(model);
+            effects.push(Effect::Rpc(RpcCall::OpenPicked {
+                target: Picked::File {
+                    path: path_to_wire(&path),
+                    line: None,
+                },
+                how: OpenIn::Current,
+                previous_window: windowed,
+                generation,
+            }));
+            effects
         }
         // opens the blocked-engine Prompt overlay through
         // the entry's own RpcCall (`vim.fn.input` primed

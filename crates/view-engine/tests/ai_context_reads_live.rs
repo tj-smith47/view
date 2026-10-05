@@ -8,6 +8,8 @@
 //! assertions mirror.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::path::PathBuf;
 
 use view_core::native::ai_context::DiagnosticSeverity;
@@ -72,10 +74,7 @@ fn read_current_buffer_text_reads_modified_content_over_a_named_buffer() {
     std::fs::write(&path, "on disk\n").expect("seed on-disk file");
     let path_str = path.to_string_lossy().into_owned();
 
-    engine
-        .handle
-        .open_file(&path_str)
-        .expect("open the seeded file");
+    common::open_file(&engine.handle, &path_str).expect("open the seeded file");
     set_lines(&engine, &["unsaved edit"]);
 
     let read = engine

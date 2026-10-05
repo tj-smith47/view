@@ -924,7 +924,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // reads this message at the same dispatch
         Msg::ChordHoldExpired { .. } => Vec::new(),
         // `update` releases the hold around this dispatch
-        Msg::SubmitHoldExpired { .. } => Vec::new(),
+        Msg::SubmitHoldExpired { .. } | Msg::PickedOpened { .. } => Vec::new(),
         // The key-dispatch-path arm: one event per keystroke in an attached
         // buffer, folded into the open review's hunks and nothing else. The
         // work is O(open hunks) and allocation-free for an edit outside

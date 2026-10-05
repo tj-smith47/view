@@ -17591,6 +17591,70 @@ fn focused_windowed_tree() -> Model {
     m
 }
 
+/// The open `<CR>` sends from the tree, and the generation its answer
+/// carries.
+fn tree_open(effects: &[Effect]) -> (String, bool, u64) {
+    match effects {
+        [Effect::ScheduleSubmitHold {
+            generation: held, ..
+        }, Effect::Rpc(RpcCall::OpenPicked {
+            target: crate::native::picker::Picked::File { path, line: None },
+            how: crate::msg::OpenIn::Current,
+            previous_window,
+            generation,
+        })] if held == generation => (path.clone(), *previous_window, *generation),
+        other => panic!("expected the tree's open, got {other:?}"),
+    }
+}
+
+/// The keys `effects` sends nvim, in order.
+fn sent_inputs(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Rpc(RpcCall::Input { notation }) => Some(notation.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `<CR>` on a file in the windowed tree opens it in the window entered
+/// before the tree, and a key typed behind it waits for nvim's answer.
+#[test]
+fn a_file_opened_from_the_windowed_tree_holds_the_keys_behind_it() {
+    let mut m = focused_windowed_tree();
+    let (path, previous_window, generation) = tree_open(&update(&mut m, key("<CR>")));
+    assert!(path.ends_with("a.rs"), "{path}");
+    assert!(previous_window);
+    assert!(sent_inputs(&update(&mut m, key("x"))).is_empty());
+    // nvim draws the screen the open left before it answers
+    let _ = update(&mut m, cursor_to(2));
+    let released = update(&mut m, Msg::PickedOpened { generation });
+    assert_eq!(sent_inputs(&released), ["x"], "{released:?}");
+}
+
+/// The tree drawn over the editor closes on `<CR>` and opens the file in
+/// the window beneath it, with the same hold.
+#[test]
+fn a_file_opened_from_the_tree_overlay_closes_it_and_holds_the_keys_behind_it() {
+    let (mut m, _) = model_with_open_tree();
+    let scan = m.tree_mut().expect("the tree").generation();
+    let _ = update(
+        &mut m,
+        Msg::TreeScanResult {
+            generation: scan,
+            entries: vec![crate::native::tree::TreeEntry::new("a.rs".into(), false, 0)],
+        },
+    );
+    let (path, previous_window, generation) = tree_open(&update(&mut m, key("<CR>")));
+    assert!(path.ends_with("a.rs"), "{path}");
+    assert!(!previous_window);
+    assert!(m.tree_mut().is_none(), "the tree overlay stayed open");
+    assert!(sent_inputs(&update(&mut m, key("x"))).is_empty());
+    let released = update(&mut m, Msg::SubmitHoldExpired { generation });
+    assert_eq!(sent_inputs(&released), ["x"], "{released:?}");
+}
+
 #[test]
 fn a_windowed_tree_edge_drag_moves_its_share_and_its_window() {
     let mut m = focused_windowed_tree();

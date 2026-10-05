@@ -583,6 +583,12 @@ pub enum Msg {
     SubmitHoldExpired {
         generation: u64,
     },
+    /// nvim answered an open [`RpcCall::OpenPicked`] asked for, so the
+    /// input held behind it goes to the file it opened. `generation` is
+    /// the call's own, echoed back.
+    PickedOpened {
+        generation: u64,
+    },
     /// nvim's `'timeoutlen'` elapsed on the keys a surface of view's own
     /// holds while they spell the start of a mapped sequence
     /// ([`Effect::ScheduleSequenceExpiry`]), so they go where nvim would
@@ -1741,7 +1747,7 @@ pub enum Effect {
     /// never RPC: an as-yet-nonexistent path names no buffer for nvim to
     /// own, so there is nothing for the engine to be authoritative over
     /// until the file is opened afterward (an ordinary
-    /// `RpcCall::OpenFile`). `generation` is `TreeState::generation` at the
+    /// `RpcCall::OpenPicked`). `generation` is `TreeState::generation` at the
     /// moment `update()` emitted this, carried through to the reply
     /// (`Msg::TreeCreateFileResult`) on the same terms `RpcCall::RenameFile`
     /// carries it to `Msg::TreeRenameReply`: not compared against the
@@ -2463,21 +2469,19 @@ pub enum RpcCall {
     CloseFloat {
         win: u64,
     },
-    /// Opens `path` as nvim would for `:edit`: an existing buffer for it is
-    /// reused rather than duplicated, and a path with no buffer yet gets
-    /// one, either way leaving nvim as the sole owner of the resulting
-    /// buffer's identity and text. Fire-and-forget: the tree overlay closes
-    /// on the same keypress that issues this, so nothing here needs a
-    /// reply to act on.
-    OpenFile {
-        path: String,
-    },
-    /// Opens the picker result `target` in the window `how` names, the
-    /// cursor on its line when it has one. Fire-and-forget on
-    /// [`Self::OpenFile`]'s terms: the picker closes on the same keypress.
+    /// Opens `target`, a file the picker or the tree chose or a listed
+    /// buffer, in the window `how` names, the cursor on its line when it
+    /// has one. With `previous_window`, the window nvim had focused before
+    /// the current one is entered first, so a file chosen from a sidebar
+    /// opens beside it.
+    ///
+    /// Async: nvim's answer comes back as [`Msg::PickedOpened`] carrying
+    /// `generation`, the hold the input typed behind the open waits on.
     OpenPicked {
         target: crate::native::picker::Picked,
         how: OpenIn,
+        previous_window: bool,
+        generation: u64,
     },
     /// Opens a window for one of view's own surfaces: a scratch buffer no
     /// one can type into, split off the current window at `split`, `size`

@@ -1,11 +1,13 @@
-//! Live-nvim proof that `EngineHandle::open_file` opens hostile-character
-//! filenames correctly rather than having them misparsed as ex-command
-//! syntax. See `docs/tree-open-file-wire-capture.md` for the wire capture
-//! this test mirrors: a space, a leading `+`, a bare `%`, and a bare `#`
-//! each have special meaning to nvim's command-line parser, and an
-//! unescaped `:edit` genuinely fails on at least one of them (`E499` on a
-//! bare `%`) rather than silently opening the wrong file.
+//! Live-nvim proof that the file tree's open, `EngineHandle::open_picked`,
+//! opens hostile-character filenames correctly rather than having them
+//! misparsed as ex-command syntax. See `docs/tree-open-file-wire-capture.md`
+//! for the wire capture this test mirrors: a space, a leading `+`, a bare
+//! `%`, and a bare `#` each have special meaning to nvim's command-line
+//! parser, and an unescaped `:edit` genuinely fails on at least one of them
+//! (`E499` on a bare `%`) rather than silently opening the wrong file.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod common;
 
 use std::sync::mpsc;
 
@@ -60,16 +62,11 @@ fn open_file_opens_hostile_character_filenames_without_misparsing_them() {
         std::fs::write(&path, format!("hello from {case}")).expect("write case file");
         let path_str = path.to_string_lossy().into_owned();
 
-        engine
-            .handle
-            .open_file(&path_str)
-            .expect("issue open_file notify");
+        common::open_file(&engine.handle, &path_str).expect("issue the open");
 
-        // `open_file` is fire-and-forget (`notify`, no reply): the
-        // follow-up `nvim_eval` below travels the same ordered RPC stream,
-        // so by the time nvim replies to it the preceding notify has
-        // already been dispatched and its synchronous `:edit` has already
-        // run -- there is nothing async on nvim's side here to race.
+        // the follow-up `nvim_eval` below travels the same ordered RPC
+        // stream, so by the time nvim replies to it the open's synchronous
+        // `:edit` has already run
         let current_name = engine
             .handle
             .request("nvim_eval", vec![rmpv::Value::from("expand('%:p')")])

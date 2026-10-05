@@ -316,9 +316,7 @@ fn an_already_open_file_resolves_to_the_buffer_already_holding_it() {
     let (tx, rx) = mpsc::sync_channel(64);
     let (_pump, _cutover) = engine.start_pump(tx);
 
-    engine
-        .handle
-        .open_file(&path.to_string_lossy())
+    common::open_file(&engine.handle, &path.to_string_lossy())
         .expect("open the file the way the user would");
     let open_buf = engine
         .handle
@@ -417,9 +415,7 @@ fn a_directory_with_an_existing_buffer_is_still_refused() {
     let (tx, rx) = mpsc::sync_channel(64);
     let (_pump, _cutover) = engine.start_pump(tx);
 
-    engine
-        .handle
-        .open_file(&root.to_string_lossy())
+    common::open_file(&engine.handle, &root.to_string_lossy())
         .expect("open the directory the way :edit would, leaving a buffer behind");
 
     engine
@@ -594,9 +590,7 @@ fn an_edited_file_is_listed_in_the_picker_buffer_list() {
     let (tx, rx) = mpsc::sync_channel(64);
     let (_pump, _cutover) = engine.start_pump(tx);
 
-    engine
-        .handle
-        .open_file(&path.to_string_lossy())
+    common::open_file(&engine.handle, &path.to_string_lossy())
         .expect("open the file the way the user would");
     engine
         .handle
@@ -931,9 +925,7 @@ fn an_already_open_buffer_survives_release_even_after_its_window_moves_on() {
     let (tx, rx) = mpsc::sync_channel(64);
     let (_pump, _cutover) = engine.start_pump(tx);
 
-    engine
-        .handle
-        .open_file(&path.to_string_lossy())
+    common::open_file(&engine.handle, &path.to_string_lossy())
         .expect("open the file the way the user would, before any load_hidden call");
     let user_buf = engine
         .handle
@@ -988,11 +980,11 @@ fn an_already_open_buffer_survives_release_even_after_its_window_moves_on() {
 /// The `owned` gate's own protection zone, distinct from
 /// `an_already_open_buffer_survives_release_even_after_its_window_moves_on`
 /// above: that test's fixture is `buflisted=1` (opened through
-/// `OPEN_FILE_CHUNK`), so `RELEASE_HIDDEN_CHUNK`'s own `buflisted` check
+/// `OPEN_PICKED_CHUNK`), so `RELEASE_HIDDEN_CHUNK`'s own `buflisted` check
 /// alone already refuses the delete, whether or not the engine-side `owned`
 /// gate exists. This one instead builds a buffer directly through
 /// `bufadd`+`bufload` -- unlisted, hidden, never opened through this
-/// connection's own `open_file` -- so nothing in Lua would refuse the
+/// connection's own `open_picked` -- so nothing in Lua would refuse the
 /// delete on its own; only the engine's `owned` gate (never set for a
 /// `load_hidden` reply that resolved onto a buffer it did not create) is
 /// what keeps `RELEASE_HIDDEN_CHUNK` from ever being sent for it at all.
@@ -1079,9 +1071,7 @@ fn a_buffer_this_connection_created_survives_release_once_the_user_adopts_it() {
     assert!(created, "a never-opened path must create its buffer");
     let buf = buf.expect("the load resolves to a handle");
 
-    engine
-        .handle
-        .open_file(&path.to_string_lossy())
+    common::open_file(&engine.handle, &path.to_string_lossy())
         .expect("the user opens the same path, adopting this connection's own buffer");
     let opened_buf = engine
         .handle

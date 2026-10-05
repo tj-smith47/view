@@ -1,5 +1,6 @@
 //! Turning the notifications and replies a connection carries back into
-//! the `view-core` types the runtime loop routes.
+//! the `view-core` types the runtime loop routes, and the values view
+//! answers nvim's own requests with into the wire's.
 //!
 //! Split out of `handle.rs` rather than living beside the reader thread
 //! that calls them: driving the connection is one concern, and decoding
@@ -14,12 +15,58 @@ use std::sync::Mutex;
 use std::time::Duration;
 use view_core::events::WinHandle;
 use view_core::model::{BufferEntry, TileKind, WindowStatus};
-use view_core::msg::{DeleteConfirmOutcome, EngineRequest, Msg, RegisterType, ReplyToken};
+use view_core::msg::{
+    DeleteConfirmOutcome, EngineRequest, Msg, RegisterType, ReplyToken, ReplyValue,
+};
 use view_core::native::mappings::{MappingClaim, MappingOwner};
 use view_core::native::submit_hold::CmdlineMap;
 use view_core::native::surfaces::{FloatAnchor, FloatSighting};
 
-use super::{saturate_u32, AttachedBuf};
+use super::AttachedBuf;
+
+// `ReplyValue` is `#[non_exhaustive]` from view-core (rmpv-free by design,
+// per the crate dependency direction `scripts/audit-deps.sh` enforces), so
+// the wildcard arm is required for a future variant to compile against, not
+// reachable with today's variants.
+pub(super) fn reply_value_to_wire(value: &ReplyValue) -> Value {
+    match value {
+        ReplyValue::Nil => Value::Nil,
+        // The `[lines, regtype]` pair form, not a bare list: the wire
+        // capture (`docs/clipboard-provider-wire-capture.md`) confirmed
+        // nvim's `paste` closure accepts this shape and it is the only one
+        // that lets a linewise `"+p` restore the register type a bare list
+        // would silently collapse to charwise.
+        ReplyValue::ClipboardLines { lines, regtype } => Value::Array(vec![
+            Value::Array(lines.iter().map(|l| Value::from(l.as_str())).collect()),
+            Value::from(regtype.as_nvim_str()),
+        ]),
+        #[allow(unreachable_patterns)]
+        other => {
+            // A future `ReplyValue` variant view-core adds compiles
+            // against this wildcard (see the arm's own doc comment above)
+            // without anything forcing this function to be updated for
+            // it -- fail loud where that omission is cheap to catch, and
+            // fall back to the already-safe `Nil` reply in release rather
+            // than crash a running engine over an encoding gap.
+            debug_assert!(
+                false,
+                "reply_value_to_wire has no wire encoding for {other:?}; add one"
+            );
+            Value::Nil
+        }
+    }
+}
+
+/// Saturates a wire `u64` count into `u32`, clamping to `u32::MAX` instead
+/// of truncating, matching `view_core::events::saturate_u16`'s convention
+/// for every other untrusted wire integer this crate decodes.
+///
+/// `pub(crate)`, not private: `nvim_api.rs`'s own reply decoders (cursor,
+/// diagnostics, quickfix) share this same untrusted-wire-integer conversion
+/// rather than duplicating it.
+pub(crate) fn saturate_u32(v: u64) -> u32 {
+    u32::try_from(v).unwrap_or(u32::MAX)
+}
 
 /// Decodes a `view_invoke` notification's `(feature, verb)` positional
 /// params, which the pump routes as a [`Msg::FeatureInvoke`] tagged with its

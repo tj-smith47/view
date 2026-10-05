@@ -1,9 +1,9 @@
 # Wire capture: file-tree open-file
 
 Captured live against the pinned engine: every value below reflects an actual
-run of the pinned binary. Source of truth for the `nvim_exec_lua` call
-`EngineHandle::open_file` issues to open a tree entry's file, the seam `<CR>`
-on a selected tree file routes through.
+run of the pinned binary. Source of truth for the file branch of the
+`nvim_exec_lua` request `EngineHandle::open_picked` issues when `<CR>` opens a
+file chosen in the file tree or the picker.
 
 An earlier revision of this capture recorded the previous chunk shape,
 `vim.cmd.edit(vim.fn.fnameescape(path))`, and concluded `fnameescape` was
@@ -28,20 +28,53 @@ Matches `.engine-pin` (`v0.12.4`) exactly.
 
 `nvim --clean -l <script>.lua` runs a Lua script directly inside an embedded,
 headless nvim instance, with the same hermetic `HOME`/`XDG_*` isolation
-`EngineConfig::isolated()` uses. `open_file` is fire-and-forget
-(`EngineHandle::notify`, no reply); there is no reply shape to capture, only
-that the chunk actually opens the intended file: nvim misparsing the path as
-ex-command syntax is the failure this guards against, so the capture drives the
-chunk against every hostile-character case `OPEN_FILE_CHUNK`'s doc names and
+`EngineConfig::isolated()` uses. The reply carries no value, so what is
+captured is the buffer the open leaves: nvim misparsing the path as ex-command
+syntax is the failure this guards against, so the capture drives the
+`nvim_cmd` call against every hostile-character case the chunk's doc names and
 observes the resulting buffer.
 
-The Lua chunk under test, verbatim `OPEN_FILE_CHUNK`:
+The cases below ran that call alone, with `cmd = 'edit'`. The shipped chunk,
+verbatim `OPEN_PICKED_CHUNK`:
 
 ```lua
-local path = ...
-vim.api.nvim_cmd({
-  cmd = 'edit', args = { path }, magic = { file = false, bar = false },
-}, {})
+local path, how, line, buffer, previous = ...
+if previous then
+  pcall(vim.cmd, 'wincmd p')
+end
+if vim.api.nvim_get_mode().mode:sub(1, 2) == 'no' then
+  vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'ni', false)
+end
+local function say(text)
+  vim.api.nvim_echo({ { text } }, true, { err = true })
+end
+local ok, err = true, nil
+if buffer > 0 then
+  if not vim.api.nvim_buf_is_valid(buffer)
+      or not vim.bo[buffer].buflisted then
+    say('That buffer has been closed')
+    return
+  end
+  local split = { vsplit = 'vertical sbuffer ', split = 'sbuffer ',
+    tabedit = 'tab sbuffer ' }
+  ok, err = pcall(vim.cmd, (split[how] or 'buffer ') .. buffer)
+elseif not vim.uv.fs_stat(path) then
+  say(path .. ' no longer exists')
+  return
+else
+  ok, err = pcall(vim.api.nvim_cmd, {
+    cmd = how, args = { path }, magic = { file = false, bar = false },
+  }, {})
+end
+if not ok then
+  say(tostring(err):match('E%d+:.*') or tostring(err))
+  return
+end
+if line > 0 then
+  local last = vim.api.nvim_buf_line_count(0)
+  vim.api.nvim_win_set_cursor(0, { math.min(line, last), 0 })
+end
+vim.cmd.redraw()
 ```
 
 ## 1. Hostile filenames through the shipped chunk
@@ -106,11 +139,10 @@ Two findings the implementation's doc depends on:
 
 ## Conclusions for the implementation
 
-- `EngineHandle::open_file(&self, path: &str)` issues `nvim_exec_lua` with the
-  chunk above as a fire-and-forget `notify` (matching `RegisterMappings`'s
-  calling convention: no generation to correlate, no reply awaited), reusing an
-  already-open buffer for `path` the same way an ordinary `:edit` would: it
-  duplicates nothing.
+- `EngineHandle::open_picked` issues `nvim_exec_lua` with the chunk above as a
+  request, reusing an already-open buffer for `path` the same way an ordinary
+  `:edit` would: it duplicates nothing. Its answer releases the keys typed
+  behind the open, which wait for it.
 - Both halves of the chunk are load-bearing and neither subsumes the other:
   dropping the args-list shape re-exposes the space/`+` class, dropping
   `magic.file = false` re-exposes the silent `%`/`#`/`\` class. The capture
@@ -118,7 +150,7 @@ Two findings the implementation's doc depends on:
 - `fnameescape` must not return: it escapes `\` and therefore breaks every
   Windows path, the bug that retired the previous chunk shape.
 - Live-verified in `crates/view-engine/tests/open_file_live.rs`, which drives
-  `EngineHandle::open_file` itself, the real method and no reimplemented chunk,
-  for each hostile case above that the host filesystem can represent (`|` and
-  `\` cannot exist in Windows filenames, so those two fixtures are unix-only)
-  and asserts the resulting buffer's name and content.
+  `EngineHandle::open_picked` itself, the real method and no reimplemented
+  chunk, for each hostile case above that the host filesystem can represent
+  (`|` and `\` cannot exist in Windows filenames, so those two fixtures are
+  unix-only) and asserts the resulting buffer's name and content.

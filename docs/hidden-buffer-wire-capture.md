@@ -139,7 +139,7 @@ unlisted buffer nvim will hand back to whatever next names this path (a
 earlier reading of this case that assumed it mirrored case 7's modified-buffer
 refusal. Re-captured against the same pinned engine, in the exact shape
 `release_hidden` actually faces; a buffer opened normally via `:edit` (this
-crate's own `OPEN_FILE_CHUNK`, distinct from a bare `nvim_win_set_buf`), the
+crate's own `OPEN_PICKED_CHUNK`, distinct from a bare `nvim_win_set_buf`), the
 sole window showing it, ui-attached:
 
 ```

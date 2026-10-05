@@ -1032,13 +1032,12 @@ mod tests {
         fn select_buffer(&self, _buf: u64) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
-        fn open_file(&self, _path: &str) -> Result<(), view_engine::handle::EngineError> {
-            Ok(())
-        }
         fn open_picked(
             &self,
             _target: &view_core::native::picker::Picked,
             _how: view_core::msg::OpenIn,
+            _previous_window: bool,
+            _generation: u64,
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }

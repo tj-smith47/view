@@ -3,6 +3,7 @@
 
 use crate::model::{Model, OverlayKind};
 use crate::msg::{Effect, OpenIn, RpcCall};
+use crate::native::submit_hold::hold_for_open;
 
 use super::route::picker_query;
 use super::surfaces::picker_preview_request;
@@ -73,10 +74,15 @@ pub(super) fn picker_key(model: &mut Model, notation: &str) -> Vec<Effect> {
             };
             model.pop_focused_overlay();
             model.dirty = true;
-            vec![
-                Effect::Rpc(RpcCall::OpenPicked { target, how }),
-                Effect::PickerClose,
-            ]
+            let (generation, mut effects) = hold_for_open(model);
+            effects.push(Effect::Rpc(RpcCall::OpenPicked {
+                target,
+                how,
+                previous_window: false,
+                generation,
+            }));
+            effects.push(Effect::PickerClose);
+            effects
         }
     }
 }

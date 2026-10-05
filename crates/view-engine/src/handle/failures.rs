@@ -98,6 +98,7 @@ mod tests {
                 paths: Vec::new(),
                 forced: false,
             }),
+            Waiter::Opened { generation: 1 },
         ]
     }
 
@@ -124,6 +125,7 @@ mod tests {
             Waiter::DeleteConfirm { .. } => 16,
             Waiter::AiFs { .. } => 17,
             Waiter::Checktime(_) => 18,
+            Waiter::Opened { .. } => 19,
         }
     }
 

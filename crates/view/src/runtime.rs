@@ -2438,24 +2438,35 @@ mod tests {
     }
 
     #[test]
-    fn open_file_effect_maps_to_engine_ops_open_file() {
+    fn open_picked_effect_maps_to_engine_ops_open_picked() {
         let ops = FakeOps::default();
         let executor = Executor::new(&ops);
-        let flow = executor.run(Effect::Rpc(RpcCall::OpenFile {
-            path: "src/main.rs".into(),
-        }));
+        let flow = executor.run(Effect::Rpc(open_main_rs()));
         assert!(matches!(flow, Flow::Continue));
-        assert_eq!(ops.calls.borrow()[0], "open_file(src/main.rs)");
+        assert_eq!(
+            ops.calls.borrow()[0],
+            "open_picked(File { path: \"src/main.rs\", line: None },Current,true,7)"
+        );
+    }
+
+    fn open_main_rs() -> RpcCall {
+        RpcCall::OpenPicked {
+            target: view_core::native::picker::Picked::File {
+                path: "src/main.rs".into(),
+                line: None,
+            },
+            how: view_core::msg::OpenIn::Current,
+            previous_window: true,
+            generation: 7,
+        }
     }
 
     #[test]
-    fn open_file_write_failure_returns_engine_lost() {
+    fn open_picked_write_failure_returns_engine_lost() {
         let ops = FakeOps::default();
         *ops.fail_next.borrow_mut() = true;
         let executor = Executor::new(&ops);
-        let flow = executor.run(Effect::Rpc(RpcCall::OpenFile {
-            path: "src/main.rs".into(),
-        }));
+        let flow = executor.run(Effect::Rpc(open_main_rs()));
         assert!(matches!(flow, Flow::EngineLost));
     }
 

@@ -13,13 +13,14 @@ use view_core::msg::{DeleteConfirmOutcome, EngineRequest, Msg, ReplyToken, Reply
 mod decode;
 mod failures;
 
+pub(crate) use decode::saturate_u32;
 use decode::{
     decode_accent_probe_reply, decode_bridge_event, decode_buf_lines_event,
     decode_buffer_list_reply, decode_clipboard_get, decode_clipboard_set,
     decode_delete_confirm_reply, decode_feature_invoke, decode_float_rows_reply,
     decode_hl_probe_reply, decode_leader, decode_mapping_report, decode_preview_reply,
     decode_prompt_reply, decode_rename_reply, decode_swap_recovery_reply, decode_takeover_reply,
-    takeover_error_text, SwapRecoveryReading, TakeoverReading,
+    reply_value_to_wire, takeover_error_text, SwapRecoveryReading, TakeoverReading,
 };
 
 /// Errors produced by [`EngineHandle`] operations.
@@ -85,7 +86,7 @@ pub struct EngineNotification {
 /// section, or a probe registered between the drain and the flag flip could
 /// survive as a leaked map entry no future `Response` will ever remove.
 #[derive(Debug)]
-enum Waiter {
+pub(crate) enum Waiter {
     /// A synchronous [`EngineHandle::request`]/`request_timeout` caller
     /// blocked on `rx.recv()`.
     Reply(mpsc::Sender<Result<Value, EngineError>>),
@@ -241,6 +242,8 @@ enum Waiter {
     /// own (see `nvim_api::decode_checktime_reply`'s own doc).
     ///
     Checktime(CheckTimeCall),
+    /// An open of a chosen file or buffer, answered as `Msg::PickedOpened`.
+    Opened { generation: u64 },
 }
 
 /// The set of in-flight request waiters plus a `closed` flag, guarded by a
@@ -1025,6 +1028,11 @@ impl EngineHandle {
                                         path,
                                         outcome,
                                     });
+                                }
+                            }
+                            Some(Waiter::Opened { generation }) => {
+                                if let Some(pump) = &reader_pump {
+                                    let _ = pump.route_msg(Msg::PickedOpened { generation });
                                 }
                             }
                             None => {}
@@ -2055,7 +2063,7 @@ impl EngineHandle {
     /// request, without a synchronous receiver for anything to block on.
     /// Shared by every async request wrapper; how the eventual `Response` is
     /// decoded and where it is routed is the `waiter`'s to say.
-    fn request_async(
+    pub(crate) fn request_async(
         &self,
         method: &str,
         params: Vec<Value>,
@@ -2082,17 +2090,6 @@ impl EngineHandle {
         }
         Ok(())
     }
-}
-
-/// Saturates a wire `u64` count into `u32`, clamping to `u32::MAX` instead
-/// of truncating, matching `view_core::events::saturate_u16`'s convention
-/// for every other untrusted wire integer this crate decodes.
-///
-/// `pub(crate)`, not private: `nvim_api.rs`'s own reply decoders (cursor,
-/// diagnostics, quickfix) share this same untrusted-wire-integer conversion
-/// rather than duplicating it.
-pub(crate) fn saturate_u32(v: u64) -> u32 {
-    u32::try_from(v).unwrap_or(u32::MAX)
 }
 
 /// Publishes that the reader thread is done with the stream and wakes
@@ -2142,39 +2139,6 @@ fn close_and_drain(pending: &Pending, settled: &Condvar) {
     }
     drop(p);
     settled.notify_all();
-}
-
-// `ReplyValue` is `#[non_exhaustive]` from view-core (rmpv-free by design,
-// per the crate dependency direction `scripts/audit-deps.sh` enforces), so
-// the wildcard arm is required for a future variant to compile against, not
-// reachable with today's variants.
-fn reply_value_to_wire(value: &ReplyValue) -> Value {
-    match value {
-        ReplyValue::Nil => Value::Nil,
-        // The `[lines, regtype]` pair form, not a bare list: the wire
-        // capture (`docs/clipboard-provider-wire-capture.md`) confirmed
-        // nvim's `paste` closure accepts this shape and it is the only one
-        // that lets a linewise `"+p` restore the register type a bare list
-        // would silently collapse to charwise.
-        ReplyValue::ClipboardLines { lines, regtype } => Value::Array(vec![
-            Value::Array(lines.iter().map(|l| Value::from(l.as_str())).collect()),
-            Value::from(regtype.as_nvim_str()),
-        ]),
-        #[allow(unreachable_patterns)]
-        other => {
-            // A future `ReplyValue` variant view-core adds compiles
-            // against this wildcard (see the arm's own doc comment above)
-            // without anything forcing this function to be updated for
-            // it -- fail loud where that omission is cheap to catch, and
-            // fall back to the already-safe `Nil` reply in release rather
-            // than crash a running engine over an encoding gap.
-            debug_assert!(
-                false,
-                "reply_value_to_wire has no wire encoding for {other:?}; add one"
-            );
-            Value::Nil
-        }
-    }
 }
 
 fn encode_message(msg: &RpcMessage) -> Result<Vec<u8>, EngineError> {

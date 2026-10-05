@@ -1,6 +1,10 @@
-//! Live-nvim check of `EngineHandle::open_picked_target`: each window a
-//! picker key names, a grep match's line, and listed buffers by handle.
+//! Live-nvim check of `EngineHandle::open_picked`: each window a picker key
+//! names, a grep match's line, listed buffers by handle, the window a
+//! sidebar was entered from, and the message an open that cannot happen
+//! leaves.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod common;
 
 use std::sync::mpsc;
 
@@ -77,7 +81,7 @@ fn a_file_opens_at_its_line_in_each_window_a_key_names() {
             path: name.clone(),
             line: Some(3),
         };
-        engine.handle.open_picked_target(&picked, how).unwrap();
+        engine.handle.open_picked(&picked, how, false, 0).unwrap();
         let (current, line, wins, tabpages) = state(&engine);
         assert!(same_file(&current, &path), "{how:?}: {current}");
         assert_eq!(line, 3, "{how:?}");
@@ -98,7 +102,7 @@ fn a_line_past_the_end_lands_on_the_last_line() {
     };
     engine
         .handle
-        .open_picked_target(&picked, OpenIn::Current)
+        .open_picked(&picked, OpenIn::Current, false, 0)
         .unwrap();
     assert_eq!(state(&engine).1, 2);
     let _ = std::fs::remove_dir_all(&root);
@@ -129,7 +133,7 @@ fn a_listed_buffer_and_each_of_two_unnamed_ones_open_by_handle() {
         (OpenIn::Tab, 1, 2),
     ] {
         let engine = spawn();
-        engine.handle.open_file(&name).unwrap();
+        common::open_file(&engine.handle, &name).unwrap();
         let listed = current_buffer(&engine);
         // an empty unnamed buffer is the one `:enew` reuses, so each holds
         // a line before the next is made
@@ -140,10 +144,10 @@ fn a_listed_buffer_and_each_of_two_unnamed_ones_open_by_handle() {
         engine.handle.command("call setline(1, 'two')").unwrap();
         let second = current_buffer(&engine);
         assert!(listed != first && first != second, "{how:?}");
-        engine.handle.open_file(&name).unwrap();
+        common::open_file(&engine.handle, &name).unwrap();
 
         let picked = Picked::Buffer { handle: second };
-        engine.handle.open_picked_target(&picked, how).unwrap();
+        engine.handle.open_picked(&picked, how, false, 0).unwrap();
         assert_eq!(current_buffer(&engine), second, "{how:?}: the second");
         let (_, _, wins, tabpages) = state(&engine);
         assert_eq!((wins, tabpages), (windows, tabs), "{how:?}");
@@ -151,9 +155,186 @@ fn a_listed_buffer_and_each_of_two_unnamed_ones_open_by_handle() {
         let picked = Picked::Buffer { handle: listed };
         engine
             .handle
-            .open_picked_target(&picked, OpenIn::Current)
+            .open_picked(&picked, OpenIn::Current, false, 0)
             .unwrap();
         assert!(same_file(&state(&engine).0, &path), "{how:?}: the file");
     }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An engine whose routed messages the test reads.
+fn spawn_routed() -> (Engine, mpsc::Receiver<view_core::msg::Msg>) {
+    let mut engine = Engine::spawn(EngineConfig::isolated()).expect("spawn engine");
+    let (tx, rx) = mpsc::sync_channel(256);
+    let (_pump, _cutover) = engine.start_pump(tx);
+    (engine, rx)
+}
+
+/// Waits for nvim's answer to the open tagged `generation`.
+fn answered(rx: &mpsc::Receiver<view_core::msg::Msg>, generation: u64) -> bool {
+    let deadline = common::rpc_poll_deadline();
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(view_core::msg::Msg::PickedOpened { generation: g }) if g == generation => {
+                return true
+            }
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// nvim's message history, one line per message.
+fn messages(engine: &Engine) -> String {
+    engine
+        .handle
+        .request("nvim_exec2", vec![Value::from("messages"), opts_output()])
+        .expect("read the message history")
+        .as_map()
+        .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("output")))
+        .and_then(|(_, v)| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+fn opts_output() -> Value {
+    Value::Map(vec![(Value::from("output"), Value::from(true))])
+}
+
+/// Every open is answered, and one that cannot happen leaves the person a
+/// message saying why: a file deleted since it was listed, a buffer closed
+/// since, and an open nvim refuses over unsaved changes.
+#[test]
+fn an_open_that_cannot_happen_is_answered_and_says_why() {
+    let root = scratch_root("refused");
+    let kept = root.join("kept.txt");
+    let other = root.join("other.txt");
+    std::fs::write(&kept, "kept\n").unwrap();
+    std::fs::write(&other, "other\n").unwrap();
+    let gone = root.join("gone.txt").to_string_lossy().into_owned();
+    let (engine, rx) = spawn_routed();
+    common::open_file(&engine.handle, &kept.to_string_lossy()).unwrap();
+
+    let deleted = Picked::File {
+        path: gone.clone(),
+        line: None,
+    };
+    engine
+        .handle
+        .open_picked(&deleted, OpenIn::Current, false, 1)
+        .unwrap();
+    assert!(
+        answered(&rx, 1),
+        "the deleted file's open was never answered"
+    );
+    assert!(same_file(&state(&engine).0, &kept), "a deleted file opened");
+    let said = messages(&engine);
+    assert!(said.contains(&format!("{gone} no longer exists")), "{said}");
+
+    engine.handle.command("enew").unwrap();
+    let closed = current_buffer(&engine);
+    engine.handle.command("buffer #").unwrap();
+    engine
+        .handle
+        .command(&format!("bwipeout {closed}"))
+        .unwrap();
+    let wiped = Picked::Buffer { handle: closed };
+    engine
+        .handle
+        .open_picked(&wiped, OpenIn::Vertical, false, 2)
+        .unwrap();
+    assert!(
+        answered(&rx, 2),
+        "the closed buffer's open was never answered"
+    );
+    assert_eq!(state(&engine).2, 1, "a closed buffer opened a split");
+    assert!(messages(&engine).contains("That buffer has been closed"));
+
+    engine.handle.command("set nohidden").unwrap();
+    engine.handle.command("call setline(1, 'edited')").unwrap();
+    let refused = Picked::File {
+        path: other.to_string_lossy().into_owned(),
+        line: None,
+    };
+    engine
+        .handle
+        .open_picked(&refused, OpenIn::Current, false, 3)
+        .unwrap();
+    assert!(answered(&rx, 3), "the refused open was never answered");
+    assert!(
+        same_file(&state(&engine).0, &kept),
+        "the refused open moved"
+    );
+    let said = messages(&engine);
+    assert!(said.contains("E37: No write since last change"), "{said}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Chosen from a sidebar's window, a file opens in the window entered
+/// before it, and the sidebar keeps its own buffer.
+#[test]
+fn a_file_chosen_from_a_sidebar_opens_in_the_window_before_it() {
+    let root = scratch_root("previous");
+    let path = root.join("chosen.txt");
+    std::fs::write(&path, "chosen\n").unwrap();
+    let engine = spawn();
+    engine
+        .handle
+        .command("vsplit | enew | file sidebar")
+        .unwrap();
+    let picked = Picked::File {
+        path: path.to_string_lossy().into_owned(),
+        line: None,
+    };
+    engine
+        .handle
+        .open_picked(&picked, OpenIn::Current, true, 0)
+        .unwrap();
+    assert!(same_file(&state(&engine).0, &path));
+    let sidebar = engine
+        .handle
+        .request("nvim_eval", vec![Value::from("bufwinnr('sidebar')")])
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    assert!(sidebar > 0, "the sidebar lost its buffer");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An operator left pending when the open lands is dropped, so the keys
+/// typed behind the open start a command of their own.
+#[test]
+fn an_operator_left_pending_is_dropped_by_the_open() {
+    let root = scratch_root("pending");
+    let path = root.join("chosen.txt");
+    std::fs::write(&path, "one\ntwo\n").unwrap();
+    // nvim reads no typed key before a UI attaches
+    let (engine, _rx) = spawn_routed();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS_MULTIGRID)
+        .unwrap();
+    engine.handle.input("d").unwrap();
+    let mode = |engine: &Engine| {
+        engine
+            .handle
+            .request("nvim_eval", vec![Value::from("mode(1)")])
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // nvim reads the typed key on a later turn of its loop than this request
+    let deadline = common::rpc_poll_deadline();
+    while mode(&engine) != "no" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the operator never went pending"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    common::open_file(&engine.handle, &path.to_string_lossy()).unwrap();
+    assert!(same_file(&state(&engine).0, &path));
+    assert_eq!(mode(&engine), "n");
     let _ = std::fs::remove_dir_all(&root);
 }

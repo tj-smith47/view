@@ -58,14 +58,76 @@ fn picker_open(m: &Model) -> bool {
 }
 
 /// The target and window of the one `OpenPicked` in `effects`, which has to
-/// be followed by the `PickerClose` `<Esc>` sends.
+/// arm the hold its answer ends and be followed by the `PickerClose` `<Esc>`
+/// sends.
 fn opened(effects: &[Effect]) -> (Picked, OpenIn) {
     match effects {
-        [Effect::Rpc(RpcCall::OpenPicked { target, how }), Effect::PickerClose] => {
+        [Effect::ScheduleSubmitHold {
+            generation: held, ..
+        }, Effect::Rpc(RpcCall::OpenPicked {
+            target,
+            how,
+            previous_window: false,
+            generation,
+        }), Effect::PickerClose]
+            if held == generation =>
+        {
             (target.clone(), *how)
         }
         other => panic!("expected an open and a close, got {other:?}"),
     }
+}
+
+/// The generation the open in `effects` carries to nvim.
+fn open_generation(effects: &[Effect]) -> u64 {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Rpc(RpcCall::OpenPicked { generation, .. }) => Some(*generation),
+            _ => None,
+        })
+        .expect("an open")
+}
+
+/// The keys `effects` sends nvim, in order.
+fn inputs(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Rpc(RpcCall::Input { notation }) => Some(notation.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Keys typed behind an open wait for nvim's answer to it, then go out in
+/// the order they were typed. nvim reads a key it is sent ahead of the open.
+#[test]
+fn keys_typed_behind_an_open_wait_for_its_answer() {
+    let mut m = files();
+    let generation = open_generation(&press(&mut m, "<CR>"));
+    assert!(press(&mut m, "d").is_empty());
+    assert!(press(&mut m, "d").is_empty());
+    let stale = update(
+        &mut m,
+        Msg::PickedOpened {
+            generation: generation.wrapping_sub(1),
+        },
+    );
+    assert!(inputs(&stale).is_empty(), "{stale:?}");
+    let released = update(&mut m, Msg::PickedOpened { generation });
+    assert_eq!(inputs(&released), ["d", "d"], "{released:?}");
+    assert_eq!(inputs(&press(&mut m, "j")), ["j"]);
+}
+
+/// An open nvim never answers lets its keys go on the hold's bound.
+#[test]
+fn keys_typed_behind_an_unanswered_open_go_on_the_bound() {
+    let mut m = files();
+    let generation = open_generation(&press(&mut m, "<CR>"));
+    assert!(press(&mut m, "x").is_empty());
+    let released = update(&mut m, Msg::SubmitHoldExpired { generation });
+    assert_eq!(inputs(&released), ["x"], "{released:?}");
 }
 
 fn preview_paths(effects: &[Effect]) -> Vec<String> {

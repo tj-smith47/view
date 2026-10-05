@@ -184,17 +184,16 @@ pub trait EngineOps {
     /// Switches nvim to a buffer, for a click on a pill buffer;
     /// fire-and-forget, no reply (see `RpcCall::SelectBuffer`).
     fn select_buffer(&self, buf: u64) -> Result<(), EngineError>;
-    /// Opens `path` as `:edit` would, reusing an already-loaded buffer
-    /// rather than duplicating it; fire-and-forget, no reply (see
-    /// `RpcCall::OpenFile`).
-    fn open_file(&self, path: &str) -> Result<(), EngineError>;
-    /// Opens a picker result in the window `how` names: a file by path, at
-    /// its line, or a buffer by handle; fire-and-forget, no reply (see
-    /// `RpcCall::OpenPicked`).
+    /// Opens a file or buffer the picker or the tree chose in the window
+    /// `how` names, after entering the previous window when
+    /// `previous_window`; nvim's answer comes back as `Msg::PickedOpened`
+    /// tagged `generation` (see `RpcCall::OpenPicked`).
     fn open_picked(
         &self,
         target: &view_core::native::picker::Picked,
         how: OpenIn,
+        previous_window: bool,
+        generation: u64,
     ) -> Result<(), EngineError>;
     /// Renames `old_path` to `new_path`, retargeting any open buffer along
     /// with it, tagged `generation`; never blocks, and never itself returns
@@ -489,15 +488,14 @@ impl EngineOps for EngineHandle {
     fn select_buffer(&self, buf: u64) -> Result<(), EngineError> {
         self.select_buffer(buf)
     }
-    fn open_file(&self, path: &str) -> Result<(), EngineError> {
-        self.open_file(path)
-    }
     fn open_picked(
         &self,
         target: &view_core::native::picker::Picked,
         how: OpenIn,
+        previous_window: bool,
+        generation: u64,
     ) -> Result<(), EngineError> {
-        self.open_picked_target(target, how)
+        self.open_picked(target, how, previous_window, generation)
     }
     fn rename_file(
         &self,
@@ -747,15 +745,14 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     fn select_buffer(&self, buf: u64) -> Result<(), EngineError> {
         (**self).select_buffer(buf)
     }
-    fn open_file(&self, path: &str) -> Result<(), EngineError> {
-        (**self).open_file(path)
-    }
     fn open_picked(
         &self,
         target: &view_core::native::picker::Picked,
         how: OpenIn,
+        previous_window: bool,
+        generation: u64,
     ) -> Result<(), EngineError> {
-        (**self).open_picked(target, how)
+        (**self).open_picked(target, how, previous_window, generation)
     }
     fn rename_file(
         &self,
@@ -1008,15 +1005,14 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     fn select_buffer(&self, buf: u64) -> Result<(), EngineError> {
         (**self).select_buffer(buf)
     }
-    fn open_file(&self, path: &str) -> Result<(), EngineError> {
-        (**self).open_file(path)
-    }
     fn open_picked(
         &self,
         target: &view_core::native::picker::Picked,
         how: OpenIn,
+        previous_window: bool,
+        generation: u64,
     ) -> Result<(), EngineError> {
-        (**self).open_picked(target, how)
+        (**self).open_picked(target, how, previous_window, generation)
     }
     fn rename_file(
         &self,
@@ -1332,15 +1328,16 @@ impl EngineOps for FakeOps {
     fn select_buffer(&self, buf: u64) -> Result<(), EngineError> {
         self.record(format!("select_buffer({buf})"))
     }
-    fn open_file(&self, path: &str) -> Result<(), EngineError> {
-        self.record(format!("open_file({path})"))
-    }
     fn open_picked(
         &self,
         target: &view_core::native::picker::Picked,
         how: OpenIn,
+        previous_window: bool,
+        generation: u64,
     ) -> Result<(), EngineError> {
-        self.record(format!("open_picked({target:?},{how:?})"))
+        self.record(format!(
+            "open_picked({target:?},{how:?},{previous_window},{generation})"
+        ))
     }
     fn rename_file(
         &self,
@@ -1648,13 +1645,12 @@ impl EngineOps for SlowOps {
     fn select_buffer(&self, _buf: u64) -> Result<(), EngineError> {
         Ok(())
     }
-    fn open_file(&self, _path: &str) -> Result<(), EngineError> {
-        Ok(())
-    }
     fn open_picked(
         &self,
         _target: &view_core::native::picker::Picked,
         _how: OpenIn,
+        _previous_window: bool,
+        _generation: u64,
     ) -> Result<(), EngineError> {
         Ok(())
     }

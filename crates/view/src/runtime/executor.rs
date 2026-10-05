@@ -425,8 +425,14 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::SetUiExt { surface, on } => self.ops.set_ui_ext(surface.as_str(), on),
                     RpcCall::SelectTab { tab } => self.ops.select_tab(tab),
                     RpcCall::SelectBuffer { buf } => self.ops.select_buffer(buf),
-                    RpcCall::OpenFile { path } => self.ops.open_file(&path),
-                    RpcCall::OpenPicked { target, how } => self.ops.open_picked(&target, how),
+                    RpcCall::OpenPicked {
+                        target,
+                        how,
+                        previous_window,
+                        generation,
+                    } => self
+                        .ops
+                        .open_picked(&target, how, previous_window, generation),
                     RpcCall::RenameFile {
                         old_path,
                         new_path,
